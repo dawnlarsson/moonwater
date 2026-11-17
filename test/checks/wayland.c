@@ -567,7 +567,7 @@ static const struct wayland_host fake_host = {
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
     fake_locks, fake_pointer_hold, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push,
     fake_clip_clear, fake_dmabuf_ready, fake_random, 0, 0, // no row_layers (test_layers gives one) and no row_busy (test_row_busy)
-    fake_reserve, fake_commit, fake_unreserve};
+    fake_reserve, fake_commit, fake_unreserve, 0, 0}; // no bridge to X (test_bridge gives one)
 
 /* ---- a client that builds its requests from the table ---- */
 
@@ -5263,6 +5263,255 @@ static void test_clipboard(void)
 }
 
 /*
+        ---- the bridge to X: what the shim gives the window manager of Xwayland (xwm.c) and takes from it ----
+
+        An X copy's types past text offered with the selection (and alone, with no text), a receive of one handed to the X side; the
+        Wayland source that is the selection, its types and its send, for an X client's conversion; a Wayland drag over an X window (a
+        client with no data device) offered to the X side, its status, drop, send and finish; Escape over it; and an X drag over a
+        Wayland window: its types and actions offered, its answer, drop, receive and finish, and its leave.
+*/
+static struct
+{
+        long receives, client, which, fd_ok, accept, end_ok, row, x, y;
+        long drags[5];
+        char mime[64];
+} fx;
+
+static void fake_xreceive(void *context, long client, long which, const char *mime, long fd)
+{
+        (void)context;
+        fx.receives++;
+        fx.client = client, fx.which = which;
+        snprintf(fx.mime, sizeof fx.mime, "%s", mime);
+        fx.fd_ok = fcntl((int)fd, F_GETFD) >= 0;
+        fake_close(NULL, fd);
+}
+
+static long fake_xdrag(void *context, long what, long row, long x, long y)
+{
+        (void)context;
+        if (what >= 1 && what <= 4)
+                fx.drags[what]++;
+        if (what == WAYLAND_XDRAG_OVER)
+                fx.row = row, fx.x = x, fx.y = y;
+        if (what == WAYLAND_XDRAG_END)
+                fx.end_ok = x;
+        return what == WAYLAND_XDRAG_OVER ? fx.accept : 0;
+}
+
+static long wl_offered(struct wlc *c, const char *type)
+{
+        long n = 0;
+
+        for (long at = 0; at < c->events; at++)
+                n += c->ev[at].iface == WLI_wl_data_offer && c->ev[at].opcode == WLE_wl_data_offer_offer && !strcmp(c->ev[at].text[0], type);
+        return n;
+}
+
+static void test_bridge(void)
+{
+        struct wayland_host host = fake_host;
+        struct clipc a;
+        struct session xs;
+        struct wl_event_seen *e, *chosen;
+        unsigned long serial, source, offer;
+        char text[64];
+        long xrow = -1, before, write_end;
+        int reader;
+
+        host.xreceive = fake_xreceive;
+        host.xdrag = fake_xdrag;
+        memset(&fx, 0, sizeof fx);
+        wl_reset();
+        wayland_start(&host);
+        clip_open(&a);
+        wayland_keyboard_to(a.row);
+        wlc_pump(a.s.c);
+
+        /* an X copy's types past text, offered with its text; a receive of one is the X side's */
+        wlc_forget(a.s.c);
+        wayland_selection_foreign(0, "image/png\0text/uri-list\0text/plain\0", 35);
+        clip_other(0, "copied in X");
+        wlc_pump(a.s.c);
+        offer = clip_offer_of(a.s.c, 0, &chosen);
+        WLCHECK(offer && chosen && chosen->u[0] == offer && wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer) == 5 &&
+                    wl_offered(a.s.c, "image/png") == 1 && wl_offered(a.s.c, "text/uri-list") == 1 && wl_offered(a.s.c, "text/plain") == 1,
+                "an X copy is offered as its three text types and its two others (its own text/plain is the compositor's text) (%ld types)",
+                wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer));
+        WLCHECK(clip_paste(&a, 0, offer, "image/png", text, sizeof text) == 0 && fx.receives == 1 && fx.which == 0 && fx.client == a.s.c->slot &&
+                    !strcmp(fx.mime, "image/png") && fx.fd_ok,
+                "a receive of its image/png is handed to the X side with the client, the selection and an open descriptor");
+        before = fx.receives;
+        WLCHECK(clip_paste(&a, 0, offer, "image/jpeg", text, sizeof text) == 0 && fx.receives == before, "a type that is neither text nor X's is nothing");
+        WLCHECK(clip_paste(&a, 0, offer, "text/plain;charset=utf-8", text, sizeof text) == 11 && !strcmp(text, "copied in X"),
+                "its text is the compositor's, as any copy's");
+        wlc_forget(a.s.c);
+        wayland_selection_foreign(0, "image/png\0", 10);
+        fake.clip_size[0] = 0;
+        wayland_selection_changed(0);
+        wlc_pump(a.s.c);
+        offer = clip_offer_of(a.s.c, 0, &chosen);
+        WLCHECK(offer && wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer) == 1 && wl_offered(a.s.c, "image/png") == 1,
+                "an X copy with no text is offered as its own types alone");
+        wlc_forget(a.s.c);
+        wayland_selection_foreign(0, 0, 0);
+        wayland_selection_changed(0);
+        wlc_pump(a.s.c);
+        offer = clip_offer_of(a.s.c, 0, &chosen);
+        WLCHECK(!offer && chosen && chosen->u[0] == 0, "and none at all once X's types are let go of, with no text");
+
+        /* the Wayland source that is the selection: its types whole, and its send, for an X client */
+        serial = clip_serial(&a);
+        source = clip_source(&a, 0, "text/plain;charset=utf-8");
+        wlc_send(a.s.c, source, WLQ_wl_data_source_offer, "image/png");
+        clip_set(&a, 0, source, serial);
+        clip_finish(&a, 0, "with a picture");
+        {
+                const char *types = 0;
+                long bytes = wayland_selection_types(0, &types);
+
+                WLCHECK(bytes == 35 && types && !strcmp(types, "text/plain;charset=utf-8") && !strcmp(types + 25, "image/png"),
+                        "the source that is the selection has its types, each whole with its null, for X's TARGETS (%ld bytes)", bytes);
+                write_end = wl_pipe(&reader);
+                wlc_forget(a.s.c);
+                WLCHECK(wayland_selection_send(0, "image/png", write_end) == 1, "an X client's conversion of image/png is the source's send");
+                wlc_pump(a.s.c);
+                e = wlc_take(a.s.c, WLI_wl_data_source, WLE_wl_data_source_send);
+                WLCHECK(e && e->fd_count == 1 && !strcmp(e->text[0], "image/png"), "with the type and the descriptor");
+                close(reader);
+                clip_other(0, "another");
+                WLCHECK(wayland_selection_types(0, &types) == 0, "a source that is no longer the selection has no types for X");
+                write_end = wl_pipe(&reader);
+                WLCHECK(wayland_selection_send(0, "image/png", write_end) == 0, "and sends nothing (the descriptor stays the caller's)");
+                fake_close(NULL, write_end);
+                close(reader);
+        }
+
+        /* a Wayland drag over an X window: a client with a window and no data device, as Xwayland is */
+        session_open(&xs);
+        session_window(&xs, 0xff204060);
+        for (long row = 0; row < FAKE_ROWS; row++)
+                if (fake.row[row].used && wayland_row_owner(row) == xs.c->slot)
+                        xrow = row;
+        source = clip_source(&a, 0, "application/x-moonwater-test");
+        wlc_send(a.s.c, source, WLQ_wl_data_source_set_actions, 3L);
+        wayland_pointer_to(a.row, 10, 10);
+        wayland_pointer_button(a.row, 272, 1);
+        wlc_pump(a.s.c);
+        wlc_send(a.s.c, a.device, WLQ_wl_data_device_start_drag, source, a.s.surface, 0UL, (long)wayland.client[a.s.c->slot]->press_serial);
+        wlc_pump(a.s.c);
+        wlc_forget(a.s.c);
+        fx.accept = 1;
+        wayland_drag_motion(xrow, 20, 30);
+        wlc_pump(a.s.c);
+        WLCHECK(xrow >= 0 && fx.drags[WAYLAND_XDRAG_OVER] == 1 && fx.row == xrow && fx.x == 20 && fx.y == 30 && wayland.drag.xtarget == xrow &&
+                    wlc_count(a.s.c, WLI_wl_data_device, WLE_wl_data_device_leave) == 1,
+                "a drag over an X window is offered to the X side at the place, and the window it was over is left");
+        {
+                const char *types = 0;
+                unsigned int actions = 0;
+                long bytes = wayland_drag_x_types(&types, &actions);
+
+                WLCHECK(bytes == 29 && types && !strcmp(types, "application/x-moonwater-test") && actions == 3,
+                        "the drag's types are whole, each with its null (the last letter was lost), and its actions (%ld bytes)", bytes);
+        }
+        wlc_forget(a.s.c);
+        wayland_drag_x_status(1, 1);
+        wlc_pump(a.s.c);
+        e = wlc_take(a.s.c, WLI_wl_data_source, WLE_wl_data_source_target);
+        WLCHECK(e && !strcmp(e->text[0], "application/x-moonwater-test") && wlc_count(a.s.c, WLI_wl_data_source, WLE_wl_data_source_action) == 1,
+                "what the X window takes is the source's target (its first type) and action");
+        wayland_drag_motion(xrow, 25, 30);
+        WLCHECK(fx.drags[WAYLAND_XDRAG_OVER] == 2 && fx.x == 25, "a motion over it is the X side's");
+        wlc_forget(a.s.c);
+        wayland_pointer_button(a.row, 272, 0);
+        wlc_pump(a.s.c);
+        WLCHECK(fx.drags[WAYLAND_XDRAG_DROP] == 1 && wlc_count(a.s.c, WLI_wl_data_source, WLE_wl_data_source_dnd_drop_performed) == 1 && !wayland_dragging(),
+                "let go over it: the X side drops, the source is told the drop was performed");
+        write_end = wl_pipe(&reader);
+        wlc_forget(a.s.c);
+        WLCHECK(wayland_drag_x_send("application/x-moonwater-test", write_end) == 1, "the X window's conversion is the source's send");
+        wlc_pump(a.s.c);
+        e = wlc_take(a.s.c, WLI_wl_data_source, WLE_wl_data_source_send);
+        WLCHECK(e && e->fd_count == 1 && !strcmp(e->text[0], "application/x-moonwater-test"), "with the type and the descriptor");
+        close(reader);
+        wlc_forget(a.s.c);
+        wayland_drag_x_finished(1);
+        wlc_pump(a.s.c);
+        WLCHECK(wlc_count(a.s.c, WLI_wl_data_source, WLE_wl_data_source_dnd_finished) == 1 && fx.drags[WAYLAND_XDRAG_END] == 1 && fx.end_ok == 1 &&
+                    !wayland.drag.live,
+                "the X window's finish is the source's dnd_finished, and the X side is told the drag ended finished");
+        wlc_send(a.s.c, source, WLQ_wl_data_source_destroy);
+
+        /* Escape over the X window: it is left, and the source cancelled */
+        source = clip_source(&a, 0, "text/plain");
+        wayland_pointer_button(a.row, 272, 1);
+        wlc_pump(a.s.c);
+        wlc_send(a.s.c, a.device, WLQ_wl_data_device_start_drag, source, a.s.surface, 0UL, (long)wayland.client[a.s.c->slot]->press_serial);
+        wlc_pump(a.s.c);
+        wayland_drag_motion(xrow, 5, 5);
+        wlc_forget(a.s.c);
+        before = fx.drags[WAYLAND_XDRAG_LEAVE];
+        wayland_drag_cancel();
+        wlc_pump(a.s.c);
+        WLCHECK(fx.drags[WAYLAND_XDRAG_LEAVE] == before + 1 && clip_cancelled(a.s.c, 0) == 1 && fx.end_ok == 0 && !wayland.drag.live,
+                "Escape over an X window: the X side told the drag left it, the source cancelled, the end not finished");
+        wayland_pointer_button(a.row, 272, 0);
+        wlc_send(a.s.c, source, WLQ_wl_data_source_destroy);
+
+        /* an X drag over a Wayland window */
+        WLCHECK(wayland_drag_x_begin("text/plain;charset=utf-8\0image/png\0", 35, 3) == 1 && !wayland_dragging(),
+                "an X drag begins, and the pointer stays the X client's (its button and motion are Xwayland's)");
+        WLCHECK(wayland_drag_x_begin("text/plain\0", 11, 1) == 0, "and no other drag begins while it is");
+        wlc_forget(a.s.c);
+        wayland_drag_x_motion(a.row, 12, 14);
+        wlc_pump(a.s.c);
+        e = wlc_take(a.s.c, WLI_wl_data_device, WLE_wl_data_device_enter);
+        offer = e ? e->u[4] : 0;
+        WLCHECK(e && offer && wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer) == 2 && wl_offered(a.s.c, "image/png") == 1 &&
+                    wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_source_actions) == 1,
+                "the Wayland window under it is entered with an offer of the X source's types and actions");
+        {
+                unsigned long action = 7;
+
+                WLCHECK(wayland_drag_x_answer(&action) == 0 && action == 0, "nothing taken before the target says");
+                wlc_send(a.s.c, offer, WLQ_wl_data_offer_accept, e ? e->u[0] : 0UL, "text/plain;charset=utf-8");
+                wlc_send(a.s.c, offer, WLQ_wl_data_offer_set_actions, 1L, 1L);
+                wlc_pump(a.s.c);
+                WLCHECK(wayland_drag_x_answer(&action) == 1 && action == 1, "what the target takes (a type, copy) is the X source's status");
+        }
+        wlc_forget(a.s.c);
+        wayland_drag_x_drop();
+        wlc_pump(a.s.c);
+        WLCHECK(wlc_count(a.s.c, WLI_wl_data_device, WLE_wl_data_device_drop) == 1, "the X source's drop is the target's");
+        write_end = wl_pipe(&reader);
+        before = fx.receives;
+        wlc_send(a.s.c, offer, WLQ_wl_data_offer_receive, "image/png", write_end);
+        WLCHECK(fx.receives == before + 1 && fx.which == 2 && !strcmp(fx.mime, "image/png") && fx.fd_ok && fx.client == a.s.c->slot,
+                "the target's receive is the X side's, for the drag, with the type and an open descriptor");
+        close(reader);
+        before = fx.drags[WAYLAND_XDRAG_END];
+        wlc_send(a.s.c, offer, WLQ_wl_data_offer_finish);
+        wlc_pump(a.s.c);
+        WLCHECK(fx.drags[WAYLAND_XDRAG_END] == before + 1 && fx.end_ok == 1 && !wayland.drag.live, "the target's finish ends the X drag, finished");
+        wlc_send(a.s.c, offer, WLQ_wl_data_offer_destroy);
+        wayland_drag_x_begin("text/plain\0", 11, 1);
+        wayland_drag_x_motion(a.row, 3, 3);
+        wlc_pump(a.s.c);
+        wlc_forget(a.s.c);
+        wayland_drag_x_leave();
+        wlc_pump(a.s.c);
+        WLCHECK(wlc_count(a.s.c, WLI_wl_data_device, WLE_wl_data_device_leave) == 1 && !wayland.drag.live && fx.end_ok == 0,
+                "an X drag that leaves: the Wayland window left, the end not finished");
+        WLCHECK(a.s.c->errors == 0 && xs.c->errors == 0, "no error of these (%s)", a.s.c->error_text);
+        wlc_end(a.s.c);
+        wlc_end(xs.c);
+        leak_check("bridge");
+        WLCHECK(fds_balanced(), "every descriptor of the bridge rows was closed (%ld %ld)", fake.fds_open, fake.fds_closed);
+        wayland_stop();
+}
+
+/*
         Copies, pastes, focus changes and the compositor's own copies in random order between two clients, with offers kept
         and let go and sources destroyed where they stand: nothing may fail, no event be malformed, and everything (descriptors
         too) come back.
@@ -8568,6 +8817,7 @@ int main(int argc, char **argv)
         test_logical_space();
         test_tree_fuzz(rounds);
         test_clipboard();
+        test_bridge();
         test_clip_fuzz(rounds);
         test_fuzz(rounds);
         test_raw(rounds);

@@ -43,6 +43,7 @@ struct compositor_wl_transfer
         positive deadline;
         thread *worker;
         int finished, cancel;
+        int nudge; // a pump's: the loop asks for a knock after its next move
 };
 struct compositor_wl_syncobj
 {
@@ -82,6 +83,8 @@ static int compositor_wl_room(unsigned char **at, long *room, long unit, long mo
 #define COMPOSITOR_WL_CHUNK 4096                 // PIPE_BUF: a write of this much to a pipe that poll said is ready does not wait
 #define COMPOSITOR_WL_PULL 1
 #define COMPOSITOR_WL_PUSH 2
+#define COMPOSITOR_WL_PUMP 3
+#define COMPOSITOR_WL_PUMP_NS 10000000000ull      // a pump that moves nothing for this long ends
 #define COMPOSITOR_WL_DMABUF_SYNC 0x40086200u         // DMA_BUF_IOCTL_SYNC
 #define COMPOSITOR_WL_DMABUF_WAIT_NS 2000000ull       // how long a dma-buf's writer is waited for (bounded so a slow client never stalls a frame)
 #define COMPOSITOR_WL_DMABUF_SLOW_NS 2000000000ull    // after one that did not finish in time, a client's are not waited for this long
@@ -4034,10 +4037,18 @@ static long compositor_wl_transfer_place(long client)
         out of time or is cancelled (badly); a paste written to the client's descriptor a page at a time until all of it is (well)
         or the reader goes, fails, is out of time or is cancelled (badly).
 */
+static void compositor_wl_pump_run(long at);
+
 static void compositor_wl_transfer_run(address_any context)
 {
         long at = (long)context;
         unsigned char bytes[65536];
+
+        if (compositor_wl.transfer[at].state == COMPOSITOR_WL_PUMP)
+        {
+                compositor_wl_pump_run(at);
+                return;
+        }
         int pull = compositor_wl.transfer[at].state == COMPOSITOR_WL_PULL, result = 1;
         int fd = pull ? compositor_wl.transfer[at].in : compositor_wl.transfer[at].out, from = compositor_wl.transfer[at].in;
         int keep = compositor_wl.transfer[at].keep;
@@ -4097,6 +4108,72 @@ static void compositor_wl_transfer_run(address_any context)
         compositor_call(syscall(write), (positive)compositor_wl.wake, (positive)&one, sizeof one, 0, 0, 0);
 }
 
+/*
+        A pump (the window manager of Xwayland's, xwm.c): what comes out of in (a pipe) written to out a page at a time as out takes it,
+        until in ends (well), out goes or fails, nothing moves for COMPOSITOR_WL_PUMP_NS, or the loop cancels it (badly). One end of each
+        is a pipe of the window manager's own, which it reads or writes on the loop without waiting; the other is a client's, which only
+        this thread touches (a pipe's lock is its holder's to keep, b0e0b1ce). When the loop asked (nudge), the move after is knocked on
+        the eventfd, so the window manager takes the next piece then and not at the next thing that wakes the loop.
+*/
+static void compositor_wl_pump_run(long at)
+{
+        unsigned char bytes[COMPOSITOR_WL_CHUNK];
+        int in = compositor_wl.transfer[at].in, out = compositor_wl.transfer[at].out, result = 1;
+        long have = 0, put = 0;
+        unsigned long one = 1;
+        positive deadline = clock_monotonic_nanoseconds() + COMPOSITOR_WL_PUMP_NS;
+
+        for (;;)
+        {
+                struct compositor_poll watch = {have ? out : in, have ? COMPOSITOR_POLLOUT : COMPOSITOR_POLLIN, 0};
+                positive now = clock_monotonic_nanoseconds(), wait[2] = {0, 0};
+                long n;
+                int moved = 0;
+
+                if (__atomic_load_n(&compositor_wl.transfer[at].cancel, __ATOMIC_ACQUIRE) || now >= deadline)
+                        break;
+                wait[1] = deadline - now < COMPOSITOR_WL_SLICE_NS ? deadline - now : COMPOSITOR_WL_SLICE_NS;
+                compositor_call(syscall(ppoll), (positive)&watch, 1, (positive)wait, 0, 0, 0);
+                if (!have)
+                {
+                        if (!(watch.returned & (COMPOSITOR_POLLIN | COMPOSITOR_POLLHUP | COMPOSITOR_POLLERR)))
+                                continue;
+                        n = compositor_call(syscall(read), (positive)in, (positive)bytes, sizeof bytes, 0, 0, 0);
+                        if (n == -11) // EAGAIN
+                                continue;
+                        if (n == 0)
+                                result = 2;
+                        if (n <= 0)
+                                break;
+                        have = n, put = 0, moved = 1;
+                }
+                else
+                {
+                        if (watch.returned & (COMPOSITOR_POLLHUP | COMPOSITOR_POLLERR))
+                                break;
+                        if (!(watch.returned & COMPOSITOR_POLLOUT))
+                                continue;
+                        // At most PIPE_BUF to a pipe that poll said takes a page: the write does not wait.
+                        n = compositor_call(syscall(write), (positive)out, (positive)(bytes + put), (positive)(have - put), 0, 0, 0);
+                        if (n == -11)
+                                continue;
+                        if (n <= 0)
+                                break;
+                        put += n, moved = 1;
+                        if (put == have)
+                                have = 0;
+                }
+                if (moved)
+                {
+                        deadline = clock_monotonic_nanoseconds() + COMPOSITOR_WL_PUMP_NS;
+                        if (__atomic_exchange_n(&compositor_wl.transfer[at].nudge, 0, __ATOMIC_ACQ_REL))
+                                compositor_call(syscall(write), (positive)compositor_wl.wake, (positive)&one, sizeof one, 0, 0, 0);
+                }
+        }
+        __atomic_store_n(&compositor_wl.transfer[at].finished, result, __ATOMIC_RELEASE);
+        compositor_call(syscall(write), (positive)compositor_wl.wake, (positive)&one, sizeof one, 0, 0, 0);
+}
+
 // A transfer whose place is filled in, given its thread; false (and the place let go) when no thread can be had.
 static int compositor_wl_transfer_start(long at)
 {
@@ -4107,6 +4184,37 @@ static int compositor_wl_transfer_start(long at)
                 return 1;
         compositor_wl_transfer_free(at);
         return 0;
+}
+
+/* A pump begun from in to out (xwm.c), which it takes whatever comes: they are closed with the pump, or now when it cannot be had.
+   Its place in the table, or -1. */
+static long compositor_wl_pump(int in, int out)
+{
+        long slot = compositor_wl.wake >= 0 ? compositor_wl_transfer_place(-1) : -1;
+
+        if (slot < 0)
+        {
+                system_close(in);
+                system_close(out);
+                return -1;
+        }
+        compositor_wl.transfer[slot].state = COMPOSITOR_WL_PUMP;
+        compositor_wl.transfer[slot].which = 0;
+        compositor_wl.transfer[slot].client = -1;
+        compositor_wl.transfer[slot].row = -1;
+        compositor_wl.transfer[slot].in = in;
+        compositor_wl.transfer[slot].out = out;
+        compositor_wl.transfer[slot].keep = -1;
+        compositor_wl.transfer[slot].total = compositor_wl.transfer[slot].limit = 0;
+        compositor_wl.transfer[slot].nudge = 0;
+        return compositor_wl_transfer_start(slot) ? slot : -1;
+}
+
+// The pump is to knock after its next move (the window manager waits for room in its pipe, or for bytes in it).
+static void compositor_wl_pump_nudge(long at)
+{
+        if (at >= 0 && at < compositor_wl.transfers && compositor_wl.transfer[at].state == COMPOSITOR_WL_PUMP)
+                __atomic_store_n(&compositor_wl.transfer[at].nudge, 1, __ATOMIC_RELEASE);
 }
 
 // A transfer the loop no longer wants: its thread is told to stop, and the loop lets it go when it has (no client's any more).
@@ -4276,11 +4384,33 @@ static void compositor_wl_clip_clear(void *context, long client, long which)
                 compositor_clip_clear((unsigned int)which);
 }
 
-// What the clipboard changed: the shim offers it to the client that has the keys.
+// What the clipboard changed: the window manager of Xwayland is told first (its X side, xwm.c), then the shim offers it to the client
+// that has the keys.
+static void compositor_xwm_selection_changed(unsigned int which);
+
 static void compositor_wl_selection(unsigned int which)
 {
+        compositor_xwm_selection_changed(which);
         if (compositor_wl.started)
                 wayland_selection_changed((long)which);
+}
+
+// A receive the X side answers (xwm.c: a type of an X copy's past text, or an X drag's).
+static void compositor_xwm_receive(long client, long which, const char *mime, long fd);
+
+static void compositor_wl_xreceive(void *context, long client, long which, const char *mime, long fd)
+{
+        (void)context;
+        compositor_xwm_receive(client, which, mime, fd);
+}
+
+// A Wayland drag over an X window, or the end of a drag across the bridge (xwm.c).
+static long compositor_xwm_xdrag(long what, long row, long x, long y);
+
+static long compositor_wl_xdrag(void *context, long what, long row, long x, long y)
+{
+        (void)context;
+        return compositor_xwm_xdrag(what, row, x, y);
 }
 
 // A client gone: what it was in the middle of is ended, its copies read to the end by nobody.
@@ -4407,6 +4537,8 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_reserve,
     compositor_wl_commit,
     compositor_wl_unreserve,
+    compositor_wl_xreceive,
+    compositor_wl_xdrag,
 };
 
 /* The window manager of Xwayland (xwm.c): its socket, its connection and its window table, all in fixed storage. */

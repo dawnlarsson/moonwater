@@ -366,7 +366,20 @@ struct wayland_host
         void *(*reserve)(void *context, long *bytes);
         int (*commit)(void *context, void *at, long bytes);
         void (*unreserve)(void *context, void *at, long bytes);
+        // The bridge to X (the window manager of Xwayland, xwm.c), optional. xreceive: a receive the X side answers, of a type an X copy
+        // offers past text (which 0 the clipboard, 1 the primary selection) or of a drag an X window makes (which 2), for the client of
+        // that slot; the descriptor is the host's from then on.
+        void (*xreceive)(void *context, long client, long which, const char *mime, long fd);
+        // xdrag: a Wayland drag over a row whose client has no data device (an X window) is offered to the X side: WAYLAND_XDRAG_OVER at
+        // (x, y) of the row, answered 1 when the row is a target the X side takes (and it says what it takes with wayland_drag_x_status),
+        // WAYLAND_XDRAG_LEAVE, WAYLAND_XDRAG_DROP; and WAYLAND_XDRAG_END (x: 1 finished, 0 not) when a drag of the X side's ends, or a
+        // Wayland one that was over an X window.
+        long (*xdrag)(void *context, long what, long row, long x, long y);
 };
+#define WAYLAND_XDRAG_OVER 1
+#define WAYLAND_XDRAG_LEAVE 2
+#define WAYLAND_XDRAG_DROP 3
+#define WAYLAND_XDRAG_END 4
 
 #define WAYLAND_LAYERS 8        // the most subsurfaces a window is handed to the host with as layers (row_layers)
 #define WAYLAND_LAYERS_KEPT 1
@@ -836,8 +849,19 @@ static struct
                 long client, source, origin;
                 long target, surface, offer;
                 unsigned int action;
+                // The X side (the window manager of Xwayland's): the row of the X window a Wayland source's drag is over (-1 none) and
+                // whether it takes a type there; or, xsource, a drag an X window makes, with its types (each with its null) and actions.
+                long xtarget;
+                int x_accepted, xsource, x_seen; // x_seen: the drag has been over an X window (its end is told the X side)
+                unsigned int x_actions;
+                struct wayland_table x_types;
+                long x_bytes;
         } drag;
         unsigned long selection_serial[2];
+        // What an X copy offers past text, as the window manager of Xwayland read it (wayland_selection_foreign): each type with its
+        // null, offered with the selection while the selection is that copy's, a receive of one handed to the host (xreceive).
+        struct wayland_table x_types[2];
+        long x_types_bytes[2];
         struct wayland_dmabuf_info dmabuf; // what the compositor takes as dma-bufs, none when count is 0
         long dmabufs;                      // the buffers made of them, all clients
         struct wayland_syncobj_host syncobj;
@@ -6833,6 +6857,25 @@ static const char *wayland_mime_choice(unsigned int mimes)
         return 0;
 }
 
+// Whether a type (length without its null) is one an X copy offers past its text for selection which.
+static int wayland_foreign_type(long which, const unsigned char *text, long length)
+{
+        for (long at = 0; which >= 0 && which < 2 && at < wayland.x_types_bytes[which];)
+        {
+                const unsigned char *type = wayland.x_types[which].at + at;
+                long n = 0, same = 1;
+
+                while (at + n < wayland.x_types_bytes[which] && type[n])
+                        n++;
+                for (long k = 0; same && k < n && k < length; k++)
+                        same = type[k] == text[k];
+                if (same && n == length && n)
+                        return 1;
+                at += n + 1;
+        }
+        return 0;
+}
+
 /* The slots of a client's devices for a selection that are still there. */
 static long wayland_devices(struct wayland_client *c, long which, long **slots)
 {
@@ -6882,7 +6925,9 @@ static void wayland_selection_to(struct wayland_client *c, long slot, long which
         struct wayland_event e;
         long index = -1, offer = -1;
 
-        if (wayland.host->clip_size(wayland.host->context, which) > 0)
+        long text = wayland.host->clip_size(wayland.host->context, which) > 0;
+
+        if (text || wayland.x_types_bytes[which] > 0)
         {
                 for (long at = 0; at < c->offer_table.count && index < 0; at++)
                         if (!c->offers[at].live)
@@ -6904,11 +6949,27 @@ static void wayland_selection_to(struct wayland_client *c, long slot, long which
                 e = wayland_begin(c, device, which ? WLE_zwp_primary_selection_device_v1_data_offer : WLE_wl_data_device_data_offer);
                 wayland_word(&e, id);
                 wayland_end(&e);
-                for (long at = 0; at < WAYLAND_MIME_COUNT; at++)
+                for (long at = 0; text && at < WAYLAND_MIME_COUNT; at++)
                 {
                         e = wayland_begin(c, id, which ? WLE_zwp_primary_selection_offer_v1_offer : WLE_wl_data_offer_offer);
                         wayland_string(&e, wayland_mimes[at].name);
                         wayland_end(&e);
+                }
+                // An X copy's types past its text, as the X client named them.
+                for (long at = 0; at < wayland.x_types_bytes[which];)
+                {
+                        const char *type = (const char *)wayland.x_types[which].at + at;
+                        long length = 0;
+
+                        while (at + length < wayland.x_types_bytes[which] && type[length])
+                                length++;
+                        if (length && !wayland_mime_bit((const unsigned char *)type, length))
+                        {
+                                e = wayland_begin(c, id, which ? WLE_zwp_primary_selection_offer_v1_offer : WLE_wl_data_offer_offer);
+                                wayland_string(&e, type);
+                                wayland_end(&e);
+                        }
+                        at += length + 1;
                 }
         }
         else
@@ -7105,14 +7166,91 @@ static int wayland_receive(struct wayland_client *c, struct wayland_object *self
 {
         struct wayland_offer *offer = &c->offers[self->link];
 
-        if (wayland_mime_bit(a[0].text, a[0].length) && offer->serial == wayland.selection_serial[offer->which] &&
-            wayland.keyboard_row >= 0 && wayland.row_client[wayland.keyboard_row] == c->slot)
+        int current = offer->serial == wayland.selection_serial[offer->which] && wayland.keyboard_row >= 0 &&
+                      wayland.row_client[wayland.keyboard_row] == c->slot;
+
+        if (current && wayland_mime_bit(a[0].text, a[0].length))
         {
                 wayland.host->clip_push(wayland.host->context, wayland.keyboard_row, offer->which, a[1].fd);
                 wayland.fds--;
                 a[1].fd = -1;
         }
+        else if (current && a[0].text && wayland.host->xreceive && wayland_foreign_type(offer->which, a[0].text, a[0].length))
+        {
+                wayland.host->xreceive(wayland.host->context, c->slot, offer->which, (const char *)a[0].text, a[1].fd);
+                wayland.fds--;
+                a[1].fd = -1;
+        }
         return WAYLAND_OK;
+}
+
+/*
+        The X side of a selection (the window manager of Xwayland's). wayland_selection_foreign: the types an X client's copy offers past
+        its text (each with its null, bytes in all; none for 0), offered with the selection from the next offer on. wayland_selection_types:
+        the types of the Wayland source that is the selection now (each with its null), for an X client that asks for one of them, and
+        wayland_selection_send that source's send of one, with the descriptor it writes to (the shim's from then on: 1 when it is sent).
+*/
+WAYLAND_API void wayland_selection_foreign(long which, const char *types, long bytes)
+{
+        if (which < 0 || which > 1)
+                return;
+        wayland.x_types_bytes[which] = 0;
+        if (!types || bytes <= 0)
+        {
+                wayland_table_drop(&wayland.x_types[which]);
+                return;
+        }
+        wayland.x_types[which].unit = 1;
+        if (!wayland_table_reach(&wayland.x_types[which], bytes + 1))
+                return;
+        for (long at = 0; at < bytes; at++)
+                wayland.x_types[which].at[at] = (unsigned char)types[at];
+        wayland.x_types[which].at[bytes] = 0;
+        wayland.x_types_bytes[which] = bytes;
+}
+
+static struct wayland_source *wayland_selection_source(long which, struct wayland_client **client)
+{
+        struct wayland_client *c;
+        long index;
+
+        if (which < 0 || which > 1 || wayland.selection_owner[which] <= 0 || wayland.selection_owner[which] > wayland.client_slots)
+                return 0;
+        c = wayland.client[wayland.selection_owner[which] - 1];
+        index = wayland.selection_source[which];
+        if (!c || index < 0 || index >= c->source_table.count || !c->sources[index].live || c->sources[index].state != 2)
+                return 0;
+        *client = c;
+        return &c->sources[index];
+}
+
+WAYLAND_API long wayland_selection_types(long which, const char **types)
+{
+        struct wayland_client *c = 0;
+        struct wayland_source *source = wayland_selection_source(which, &c);
+
+        if (!source || !source->mime_bytes)
+                return 0;
+        *types = (const char *)source->mime_table.at;
+        return source->mime_bytes;
+}
+
+WAYLAND_API int wayland_selection_send(long which, const char *mime, long fd)
+{
+        struct wayland_client *c = 0;
+        struct wayland_source *source = wayland_selection_source(which, &c);
+        struct wayland_event e;
+
+        if (!source || !mime || fd < 0 || c->out_fd_count >= WAYLAND_OUT_FDS || wayland_slot_of(c, source->id) < 0)
+                return 0;
+        e = wayland_begin(c, source->id, which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send);
+        wayland_string(&e, mime);
+        c->out_fd_owned[c->out_fd_count] = 1;
+        c->out_fds[c->out_fd_count] = fd;
+        c->out_fd_at[c->out_fd_count++] = e.start;
+        wayland.fds++;
+        wayland_end(&e);
+        return 1;
 }
 
 
@@ -7126,9 +7264,14 @@ static int wayland_receive(struct wayland_client *c, struct wayland_object *self
         source's send as it is (no byte passes through the compositor), and its finish is the source's dnd_finished. Let go
         anywhere else, Escape, the source or either client gone: the source is told cancelled and the target left. A drag with no
         source is the client's own: only its own surfaces are entered, and nothing is carried. XDND between X windows is the X server's
-        own and works (the stress bench's x-dnd); between an X window and a Wayland one nothing crosses: Xwayland has no data device
-        (it binds no wl_data_device_manager), so a drag over its surface enters nothing, and an X drag over a Wayland surface finds no
-        XdndAware window. The bridge is the window manager's (xwm.c), as Mutter's and wlroots' are, and it has none yet.
+        own (the stress bench's x-dnd). Xwayland has no data device (it binds no wl_data_device_manager), so between an X window and a
+        Wayland one the window manager of Xwayland is the bridge (xwm.c), as Mutter's and wlroots' are: a Wayland drag over an X window
+        is offered to it (host->xdrag), which is the XDND source to that window and says what it takes (wayland_drag_x_status) and when
+        it is done (wayland_drag_x_finished), the X window's conversion the source's send (wayland_drag_x_send); and an X drag over a
+        Wayland window is a drag of the X side's (wayland_drag_x_begin, xsource): its types and actions offered to the Wayland target,
+        its motion the X source's positions, its drop the X source's, and the target's receive handed to the X side (host->xreceive).
+        The pointer stays the X client's then (its button and motion are Xwayland's: the X source drives the drag), so Escape is the
+        X source's to take.
 */
 #define WAYLAND_DRAG_ACTIONS 7u
 #define WAYLAND_DRAG_ANSWER_MS 1000
@@ -7139,14 +7282,15 @@ static void wayland_source_type(struct wayland_client *c, long index, const unsi
 {
         struct wayland_source *source = &c->sources[index];
 
-        if (!text || length <= 1)
+        if (!text || length < 1)
                 return;
+        // A string's length is its bytes without the null: the type is kept whole, then its null (its last byte was the null's place).
         source->mime_table.unit = 1;
-        if (!wayland_table_reach(&source->mime_table, source->mime_bytes + length))
+        if (!wayland_table_reach(&source->mime_table, source->mime_bytes + length + 1))
                 return;
-        for (long at = 0; at < length; at++)
-                source->mime_table.at[source->mime_bytes + at] = at + 1 < length ? text[at] : 0;
-        source->mime_bytes += length;
+        for (long at = 0; at <= length; at++)
+                source->mime_table.at[source->mime_bytes + at] = at < length ? text[at] : 0;
+        source->mime_bytes += length + 1;
 }
 
 static struct wayland_client *wayland_drag_client(void)
@@ -7192,6 +7336,24 @@ static void wayland_drag_tell_source(long op, long version, long word, int has_w
         wayland_end(&e);
 }
 
+static long wayland_xdrag(long what, long row, long x, long y)
+{
+        return wayland.host && wayland.host->xdrag ? wayland.host->xdrag(wayland.host->context, what, row, x, y) : 0;
+}
+
+// The X window a Wayland drag was over left: the X side told, and the source that it takes no type there.
+static void wayland_drag_xleave(void)
+{
+        if (wayland.drag.xtarget < 0)
+                return;
+        wayland_xdrag(WAYLAND_XDRAG_LEAVE, wayland.drag.xtarget, 0, 0);
+        wayland.drag.xtarget = -1;
+        if (wayland.drag.x_accepted)
+                wayland_drag_tell_source(WLE_wl_data_source_target, 1, 0, 1);
+        wayland.drag.x_accepted = 0;
+        wayland.drag.action = 0;
+}
+
 // The action a drag comes to: what the source and the target both take, the target's preferred one if it is among them, else the
 // first of copy, move and ask; 0 for none. Told to both when it changes.
 static void wayland_drag_actions(void)
@@ -7204,7 +7366,7 @@ static void wayland_drag_actions(void)
 
         if (!o)
                 return;
-        both = (source ? source->actions : WAYLAND_DRAG_ACTIONS) & o->actions;
+        both = (source ? source->actions : wayland.drag.xsource ? wayland.drag.x_actions : WAYLAND_DRAG_ACTIONS) & o->actions;
         action = (both & o->preferred) ? o->preferred : (both & 1u) ? 1u : (both & 2u) ? 2u : (both & 4u) ? 4u : 0;
         if (action == wayland.drag.action)
                 return;
@@ -7260,16 +7422,26 @@ static void wayland_drag_leave(void)
 */
 static void wayland_drag_end(int how)
 {
+        int x_end = wayland.drag.xsource || wayland.drag.xtarget >= 0 || wayland.drag.x_seen;
+
         if (!wayland.drag.live)
                 return;
         if (!wayland.drag.dropped && wayland_drag_target())
                 wayland_drag_leave();
+        if (!wayland.drag.dropped)
+                wayland_drag_xleave();
         if (how == 0)
                 wayland_drag_tell_source(WLE_wl_data_source_cancelled, 1, 0, 0);
         else if (how == 2)
                 wayland_drag_tell_source(WLE_wl_data_source_dnd_finished, 3, 0, 0);
         wayland.drag.live = wayland.drag.dropped = wayland.drag.released = 0;
         wayland.drag.client = wayland.drag.source = wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
+        if (wayland.drag.xsource)
+                wayland_table_drop(&wayland.drag.x_types);
+        wayland.drag.xtarget = -1, wayland.drag.x_accepted = 0, wayland.drag.xsource = 0, wayland.drag.x_seen = 0, wayland.drag.x_bytes = 0;
+        // The X side is told last, the drag none by then: it may start another from what it is told.
+        if (x_end)
+                wayland_xdrag(WAYLAND_XDRAG_END, -1, how == 2, 0);
 }
 
 // The drag over (x, y) of row (-1: no window of a client): the surface there entered with an offer of its own, or moved over.
@@ -7281,15 +7453,34 @@ static void wayland_drag_over(long row, long x, long y)
         long sx = 0, sy = 0, device;
         struct wayland_event e;
 
-        if (!c || wayland.drag.dropped)
+        if ((!c && !wayland.drag.xsource) || wayland.drag.dropped)
                 return;
         if (root)
                 is = wayland_pick(t, root, x, y, &sx, &sy);
         // A drag with no source is its own client's alone.
-        if (is && wayland.drag.source < 0 && t != c)
+        if (is && wayland.drag.source < 0 && !wayland.drag.xsource && t != c)
                 is = 0;
+        // A window whose client has no data device: an X window, whose drag the window manager of Xwayland takes when it is a target.
         if (is && (device = wayland_drag_device(t)) < 0)
+        {
+                if (source && wayland.host->xdrag)
+                {
+                        if (wayland.drag.xtarget == row)
+                        {
+                                wayland_xdrag(WAYLAND_XDRAG_OVER, row, x, y);
+                                return;
+                        }
+                        if (wayland_drag_target())
+                                wayland_drag_leave();
+                        wayland_drag_xleave();
+                        if (wayland_xdrag(WAYLAND_XDRAG_OVER, row, x, y) == 1)
+                                wayland.drag.xtarget = row, wayland.drag.x_accepted = 0, wayland.drag.action = 0, wayland.drag.x_seen = 1;
+                        return;
+                }
                 is = 0;
+        }
+        if (!is || wayland.drag.xtarget != row)
+                wayland_drag_xleave();
         if (is && wayland.drag.target == t->slot && wayland.drag.surface == wayland_surface_index(t, is))
         {
                 e = wayland_begin(t, t->objects[wayland_drag_device(t)].id, WLE_wl_data_device_motion);
@@ -7308,7 +7499,10 @@ static void wayland_drag_over(long row, long x, long y)
                 long index = -1, offer = -1;
                 unsigned long id = 0;
 
-                if (source)
+                const unsigned char *types = source ? source->mime_table.at : wayland.drag.x_types.at;
+                long type_bytes = source ? source->mime_bytes : wayland.drag.x_bytes;
+
+                if (source || wayland.drag.xsource)
                 {
                         for (long at = 0; at < t->offer_table.count && index < 0; at++)
                                 if (!t->offers[at].live)
@@ -7330,12 +7524,12 @@ static void wayland_drag_over(long row, long x, long y)
                         e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_data_offer);
                         wayland_word(&e, id);
                         wayland_end(&e);
-                        for (long at = 0; at < source->mime_bytes;)
+                        for (long at = 0; at < type_bytes;)
                         {
-                                const char *type = (const char *)source->mime_table.at + at;
+                                const char *type = (const char *)types + at;
                                 long length = 1;
 
-                                while (type[length - 1])
+                                while (at + length < type_bytes && type[length - 1])
                                         length++;
                                 e = wayland_begin(t, id, WLE_wl_data_offer_offer);
                                 wayland_string(&e, type);
@@ -7345,7 +7539,7 @@ static void wayland_drag_over(long row, long x, long y)
                         if (t->objects[offer].version >= 3)
                         {
                                 e = wayland_begin(t, id, WLE_wl_data_offer_source_actions);
-                                wayland_word(&e, source->actions);
+                                wayland_word(&e, source ? source->actions : wayland.drag.x_actions);
                                 wayland_end(&e);
                         }
                 }
@@ -7428,8 +7622,10 @@ static void wayland_drag_release(void)
 {
         struct wayland_client *t = wayland_drag_target();
 
-        if (t && wayland.drag.source >= 0 && wayland.drag.offer >= 0 && wayland.drag.offer < t->offer_table.count &&
-            !t->offers[wayland.drag.offer].accepted && !wayland.drag.released)
+        if (((t && (wayland.drag.source >= 0 || wayland.drag.xsource) && wayland.drag.offer >= 0 && wayland.drag.offer < t->offer_table.count &&
+              !t->offers[wayland.drag.offer].accepted) ||
+             (wayland.drag.xtarget >= 0 && !wayland.drag.x_accepted)) &&
+            !wayland.drag.released)
         {
                 wayland.drag.released = 1;
                 wayland.drag.released_at = wayland.host->now(wayland.host->context);
@@ -7445,7 +7641,24 @@ static void wayland_drag_decide(void)
         long device = t ? wayland_drag_device(t) : -1, slot = o ? wayland_slot_of(t, o->id) : -1;
         int v3 = slot >= 0 && t->objects[slot].version >= 3;
 
-        if (wayland.drag.source < 0 && t && device >= 0)
+        // Over an X window: dropped when it takes a type (and an action, for a source of version 3), the X side told to drop.
+        if (wayland.drag.xtarget >= 0)
+        {
+                struct wayland_client *sc = wayland_drag_client();
+                struct wayland_source *source = wayland_drag_source();
+                long source_slot = source ? wayland_slot_of(sc, source->id) : -1;
+
+                if (!wayland.drag.x_accepted || (source_slot >= 0 && sc->objects[source_slot].version >= 3 && !wayland.drag.action))
+                {
+                        wayland_drag_end(0);
+                        return;
+                }
+                wayland.drag.dropped = 1;
+                wayland_xdrag(WAYLAND_XDRAG_DROP, wayland.drag.xtarget, 0, 0);
+                wayland_drag_tell_source(WLE_wl_data_source_dnd_drop_performed, 3, 0, 0);
+                return;
+        }
+        if (wayland.drag.source < 0 && !wayland.drag.xsource && t && device >= 0)
         {
                 // A drag of the client's own, with nothing carried: dropped, and over.
                 struct wayland_event e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_drop);
@@ -7477,6 +7690,15 @@ static int wayland_drag_receive(struct wayland_client *c, struct wayland_object 
         long slot = source ? wayland_slot_of(source_client, source->id) : -1;
         struct wayland_event e;
 
+        // An X drag's: the X side converts its selection into the descriptor.
+        if (wayland.drag.live && wayland.drag.xsource && wayland.drag.target == c->slot && wayland.drag.offer == self->link && a[0].text &&
+            a[0].length > 0 && wayland.host->xreceive)
+        {
+                wayland.host->xreceive(wayland.host->context, c->slot, 2, (const char *)a[0].text, a[1].fd);
+                wayland.fds--;
+                a[1].fd = -1;
+                return WAYLAND_OK;
+        }
         if (!wayland.drag.live || wayland.drag.target != c->slot || wayland.drag.offer != self->link || slot < 0 || !a[0].text ||
             a[0].length <= 1 || source_client->out_fd_count >= WAYLAND_OUT_FDS)
                 return WAYLAND_OK; // the descriptor is closed with the request's: the target reads an end
@@ -7508,7 +7730,142 @@ static void wayland_drag_offer_gone(struct wayland_client *c, long offer)
 // Whether a drag holds the pointer (the host sends its motion and its release here, and Escape cancels it).
 WAYLAND_API int wayland_dragging(void)
 {
-        return wayland.drag.live && !wayland.drag.dropped && !wayland.drag.released;
+        return wayland.drag.live && !wayland.drag.dropped && !wayland.drag.released && !wayland.drag.xsource;
+}
+
+/*
+        The X side of drag and drop (the window manager of Xwayland's, DRAG AND DROP in xwm.c).
+
+        A Wayland drag over an X window: wayland_drag_x_types is the source's types (each with its null) and actions; wayland_drag_x_status
+        what the X window takes there (a type, and the action as the drag's bits), told to the source; wayland_drag_x_send the source's
+        send of a type into the descriptor (the shim's from then on: 1 when sent); wayland_drag_x_finished the X window done with the drop.
+
+        A drag an X window makes, over the Wayland windows: wayland_drag_x_begin its types and actions (none while another drag is), then
+        wayland_drag_x_motion, wayland_drag_x_leave and wayland_drag_x_drop as the X source says them, and wayland_drag_x_answer what
+        the Wayland target takes (1 with the action, for the X source's status).
+*/
+WAYLAND_API long wayland_drag_x_types(const char **types, unsigned int *actions)
+{
+        struct wayland_source *source = wayland_drag_source();
+
+        if (!wayland.drag.live || !source || !source->mime_bytes)
+                return 0;
+        *types = (const char *)source->mime_table.at;
+        if (actions)
+                *actions = source->actions ? source->actions : 1u;
+        return source->mime_bytes;
+}
+
+WAYLAND_API void wayland_drag_x_status(long accepted, unsigned long action)
+{
+        struct wayland_client *sc = wayland_drag_client();
+        struct wayland_source *source = wayland_drag_source();
+
+        if (!wayland.drag.live || wayland.drag.xtarget < 0 || wayland.drag.dropped || !source)
+                return;
+        action = accepted ? action & (source->actions ? source->actions : WAYLAND_DRAG_ACTIONS) : 0;
+        action = action & 1u ? 1u : action & 2u ? 2u : action & 4u ? 4u : 0;
+        if (!!accepted != wayland.drag.x_accepted)
+        {
+                long slot = wayland_slot_of(sc, source->id);
+
+                wayland.drag.x_accepted = !!accepted;
+                if (slot >= 0)
+                {
+                        struct wayland_event e = wayland_begin(sc, source->id, WLE_wl_data_source_target);
+
+                        if (accepted && source->mime_bytes)
+                                wayland_string(&e, (const char *)source->mime_table.at);
+                        else
+                                wayland_word(&e, 0);
+                        wayland_end(&e);
+                }
+        }
+        if (action != wayland.drag.action)
+        {
+                wayland.drag.action = (unsigned int)action;
+                wayland_drag_tell_source(WLE_wl_data_source_action, 3, (long)action, 1);
+        }
+        if (wayland.drag.released)
+                wayland_drag_decide();
+}
+
+WAYLAND_API int wayland_drag_x_send(const char *mime, long fd)
+{
+        struct wayland_client *sc = wayland_drag_client();
+        struct wayland_source *source = wayland_drag_source();
+        struct wayland_event e;
+
+        if (!wayland.drag.live || (!wayland.drag.dropped && wayland.drag.xtarget < 0) || !source || !mime || fd < 0 || wayland_slot_of(sc, source->id) < 0 ||
+            sc->out_fd_count >= WAYLAND_OUT_FDS)
+                return 0;
+        e = wayland_begin(sc, source->id, WLE_wl_data_source_send);
+        wayland_string(&e, mime);
+        sc->out_fd_owned[sc->out_fd_count] = 1;
+        sc->out_fds[sc->out_fd_count] = fd;
+        sc->out_fd_at[sc->out_fd_count++] = e.start;
+        wayland.fds++;
+        wayland_end(&e);
+        return 1;
+}
+
+WAYLAND_API void wayland_drag_x_finished(long ok)
+{
+        if (wayland.drag.live && wayland.drag.dropped && !wayland.drag.xsource && wayland_drag_source())
+                wayland_drag_end(ok ? 2 : 0);
+}
+
+WAYLAND_API int wayland_drag_x_begin(const char *types, long bytes, unsigned long actions)
+{
+        if (!wayland.host || wayland.drag.live || !types || bytes <= 0)
+                return 0;
+        wayland.drag.x_types.unit = 1;
+        if (!wayland_table_reach(&wayland.drag.x_types, bytes + 1))
+                return 0;
+        for (long at = 0; at < bytes; at++)
+                wayland.drag.x_types.at[at] = (unsigned char)types[at];
+        wayland.drag.x_types.at[bytes] = 0;
+        wayland.drag.x_bytes = bytes;
+        wayland.drag.live = 1, wayland.drag.dropped = wayland.drag.released = 0, wayland.drag.xsource = 1;
+        wayland.drag.x_actions = (unsigned int)(actions & WAYLAND_DRAG_ACTIONS ? actions & WAYLAND_DRAG_ACTIONS : 1u);
+        wayland.drag.client = wayland.drag.source = wayland.drag.origin = -1;
+        wayland.drag.target = wayland.drag.surface = wayland.drag.offer = wayland.drag.xtarget = -1;
+        wayland.drag.action = 0;
+        return 1;
+}
+
+WAYLAND_API void wayland_drag_x_motion(long row, long x, long y)
+{
+        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.dropped && !wayland.drag.released)
+        {
+                wayland.pointer_x = x, wayland.pointer_y = y;
+                wayland_drag_over(row, x, y);
+        }
+}
+
+WAYLAND_API void wayland_drag_x_leave(void)
+{
+        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.dropped)
+                wayland_drag_end(0);
+}
+
+WAYLAND_API void wayland_drag_x_drop(void)
+{
+        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.dropped && !wayland.drag.released)
+                wayland_drag_release();
+}
+
+WAYLAND_API int wayland_drag_x_answer(unsigned long *action)
+{
+        struct wayland_client *t = wayland_drag_target();
+        struct wayland_offer *o = t && wayland.drag.offer >= 0 && wayland.drag.offer < t->offer_table.count ? &t->offers[wayland.drag.offer] : 0;
+        long slot = o ? wayland_slot_of(t, o->id) : -1;
+
+        *action = 0;
+        if (!wayland.drag.live || !wayland.drag.xsource || !o || !o->accepted)
+                return 0;
+        *action = wayland.drag.action ? wayland.drag.action : (slot >= 0 && t->objects[slot].version < 3 ? 1u : 0);
+        return *action != 0;
 }
 
 WAYLAND_API void wayland_drag_cancel(void)
@@ -9630,6 +9987,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
                 clear[at] = 0;
         wayland.pointer_row = wayland.pointer_surface = wayland.keyboard_row = -1;
         wayland.drag.client = wayland.drag.source = wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
+        wayland.drag.xtarget = -1;
         wayland.cursor_client = wayland.cursor_surface = -1;
         wayland.xwayland_uid = -1;
         wayland.host = host;
@@ -9847,6 +10205,13 @@ WAYLAND_API void wayland_stop(void)
                 wayland_drop(slot);
         wayland_table_drop(&wayland.token_table);
         wayland.token = 0, wayland.tokens = 0;
+        for (long which = 0; which < 2; which++)
+        {
+                wayland_table_drop(&wayland.x_types[which]);
+                wayland.x_types_bytes[which] = 0;
+        }
+        wayland_table_drop(&wayland.drag.x_types);
+        wayland.drag.x_bytes = 0;
         wayland_zero(&wayland.syncobj, sizeof wayland.syncobj);
         wayland.syncobj_ok = 0;
         wayland.drm_node[0] = 0;
