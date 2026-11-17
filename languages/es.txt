@@ -313,7 +313,6 @@ ui_field_full	fe02	no cabe más
 =Charge limit (20 to 100, or off)	c92d	Límite de carga (20 a 100, o off)
 =Clipboard	99b1	Portapapeles
 =Clipboard history (copies kept)	7423	Historial del portapapeles (copias guardadas)
-=Clipboard limit (MiB)	a505	Límite del portapapeles (MiB)
 =Clock	80fd	Reloj
 =Clock format	70d0	Formato de hora
 =Connect over	2789	Conectar por

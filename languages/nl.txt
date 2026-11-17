@@ -313,7 +313,6 @@ ui_field_full	fe02	meer past er niet in
 =Charge limit (20 to 100, or off)	c92d	Laadlimiet (20 tot 100, of off)
 =Clipboard	99b1	Klembord
 =Clipboard history (copies kept)	7423	Klembordgeschiedenis (bewaarde kopieën)
-=Clipboard limit (MiB)	a505	Klembordlimiet (MiB)
 =Clock	80fd	Klok
 =Clock format	70d0	Tijdnotatie
 =Connect over	2789	Verbinden via

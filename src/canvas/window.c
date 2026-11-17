@@ -1060,16 +1060,19 @@ struct windows
         /*
                 The clipboard, an OS service the compositor holds (.github/SECURITY.md says what it guards). Two
                 selections, CLIPBOARD (copy and paste) and PRIMARY (what was last selected, pasted with the middle
-                button), each text/plain;charset=utf-8: valid UTF-8, no NUL, at most clip_limit bytes. A copy is a sealed memfd
-                the copying program makes and names in its row (clip_offer_*), which the compositor opens through
-                /proc/PID/fd and keeps -- no byte is copied, the copy outlives the window, and nothing the program
-                does after can change it -- and a paste is that memfd opened again by the program the compositor
-                lets read it: the window with the keys, right after a key or a button press of its own, and nothing
-                else. The compositor's are clip_*: its pid, whether the service is on, each selection's count of
-                changes, length and the row that copied it (-1 for none, or the command line), and the limit.
+                button), each a copy of any types (windows_clip_build's format: text among them is UTF-8 with no NUL), as
+                large as the kernel lets a memfd be. A copy is a sealed memfd the copying program makes and names in its row
+                (clip_offer_*), which the compositor opens through /proc/PID/fd and keeps -- no byte is copied, the copy
+                outlives the window, and nothing the program does after can change it -- and a paste is that memfd opened
+                again by the program the compositor lets read it: the window with the keys, right after a key or a button
+                press of its own, and nothing else. A Wayland client's copy and an X client's are read into one of these by
+                the compositor, so every kind of client copies to and pastes from the same two. The compositor's are clip_*:
+                its pid, whether the service is on, each selection's count of changes, size and the row that copied it (-1
+                for none, or the command line).
         */
-        unsigned int clip_pid, clip_on, clip_limit;
-        unsigned int clip_serial[2], clip_length[2];
+        unsigned int clip_pid, clip_on;
+        unsigned int clip_serial[2];
+        unsigned long clip_length[2];
         int clip_owner[2];
         // `moonwater clipboard set` (root): its pid and memfd, the selection, a count up, and the compositor's answer.
         unsigned int cli_pid, cli_fd, cli_which, cli_serial, cli_answer, cli_clear;
@@ -1078,8 +1081,9 @@ struct windows
         int clip_offer_fd[WINDOWS];
         unsigned int clip_offer_which[WINDOWS], clip_offer_serial[WINDOWS];
         unsigned int clip_ask_which[WINDOWS], clip_ask_serial[WINDOWS];
-        // The compositor's answers: the offer it took (or refused, the serial with WINDOWS_CLIP_NO), the paste it gave.
-        unsigned int clip_offer_answer[WINDOWS], clip_given_serial[WINDOWS], clip_given_length[WINDOWS];
+        // The compositor's answers: the offer it took (or refused, the serial with WINDOWS_CLIP_NO), the paste it gave (its copy's size).
+        unsigned int clip_offer_answer[WINDOWS], clip_given_serial[WINDOWS];
+        unsigned long clip_given_length[WINDOWS];
 
         /*
                 A popup: a menu or a list a window opens, which is a row of its own (so it may reach past its window's
@@ -1265,7 +1269,7 @@ struct windows
         unsigned int capacity;
 };
 
-#define WINDOWS_ABI 6u // 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+#define WINDOWS_ABI 7u // 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
 
 // Whether a table's layout is the one this program was built against.
 static inline int windows_abi_ok(unsigned int abi)
@@ -1299,7 +1303,6 @@ static inline unsigned int windows_rows(const struct windows *table)
 #define WINDOWS_CLIP_NO 0x80000000u
 // The compositor keeps each selection's memfd at this descriptor and the next: numbers nothing else is given.
 #define WINDOWS_CLIP_FD 900
-#define WINDOWS_CLIP_LIMIT (16u << 20)
 #define WINDOWS_CLIP_DOOR "/run/moonwater/clip"
 // popup_flags: the anchor is a point a context menu opens at (else a rectangle a menu drops from: below it, or to its
 // right for a submenu).
@@ -2986,6 +2989,7 @@ _Static_assert(offset_of(struct window_cell, flags) == 6, "window cell ABI");
 #define WINDOW_SYS_MADVISE 28
 #define WINDOW_SYS_MEMFD 319
 #define WINDOW_SYS_FCNTL 72
+#define WINDOW_SYS_PREAD 17
 #else
 // arm64 and riscv share the asm-generic numbering.
 #define WINDOW_SYS_OPENAT 56
@@ -3001,6 +3005,7 @@ _Static_assert(offset_of(struct window_cell, flags) == 6, "window cell ABI");
 #define WINDOW_SYS_MADVISE 233
 #define WINDOW_SYS_MEMFD 279
 #define WINDOW_SYS_FCNTL 25
+#define WINDOW_SYS_PREAD 67
 #endif
 
 /*
@@ -4765,56 +4770,291 @@ static void windows_leave(struct window_row *own)
 }
 
 /*
-        The clipboard from a program's side. A copy: the text into a memfd sealed against any change, named in the row,
-        and a knock; the memfd is held until the compositor says it took it (windows_clip_done) or the next copy of the
-        selection. A paste: asked for with a knock, and read once the compositor says READY, from its own memfd through
-        /proc/PID/fd -- the length it said, at most the limit, and refused unless it is UTF-8 with no NUL, whatever the
-        compositor checked before.
+        The clipboard from a program's side. A copy is one memfd of every type it holds, sealed against any change (the format below),
+        named in the row with a knock; the memfd is held until the compositor says it took it (windows_clip_done) or the next copy of
+        the selection. A paste: asked for with a knock, and read once the compositor says READY, from its own memfd through
+        /proc/PID/fd: the size it said, the index whole, and its text UTF-8 with no NUL, whatever the compositor checked before.
+
+        The format, the one every kind of client's copy is held in (a program's here, a Wayland client's and an X client's read into one
+        by the compositor): the bytes of each type one after another, then the index, a record a type (its offset and its length, 8 bytes
+        each, its name's length, 2, then the name and a NUL), then the index's offset (8), the count of types (4) and WINDOWS_CLIP_MAGIC
+        (8). A name is printable ASCII; text is the type WINDOWS_CLIP_TEXT, UTF-8 with no NUL, and is offered under each name text goes by
+        (windows_clip_offered).
 */
 #define WINDOWS_MFD_CLOEXEC 1u
 #define WINDOWS_MFD_SEALING 2u
 #define WINDOWS_F_ADD_SEALS 1033
 #define WINDOWS_F_GET_SEALS 1034
 #define WINDOWS_SEALS 15 // SEAL, SHRINK, GROW and WRITE
+#define WINDOWS_CLIP_MAGIC 0x317650494c43574dull // "MWCLIPv1"
+#define WINDOWS_CLIP_TRAILER 20
+#define WINDOWS_CLIP_TEXT "text/plain;charset=utf-8"
+#define WINDOWS_CLIP_URIS "text/uri-list"
+#define WINDOWS_CLIP_PNG "image/png"
+
+struct windows_clip_type
+{
+        unsigned long offset, length; // where its bytes are in the copy
+        const char *name;             // its name, NUL ended, in the copy's mapping (or the part's)
+        unsigned long name_length;
+};
+
+// A type a program offers: its name and its bytes.
+struct windows_clip_part
+{
+        const char *name;
+        const void *bytes;
+        unsigned long length;
+};
 
 static long windows_clip_held[2] = {-1, -1};
 
-// A memfd holding bytes, sealed so neither its size nor its bytes can change again: the descriptor, or a negative errno.
-static long windows_clip_memfd(const void *bytes, unsigned long length)
+static unsigned long windows_clip_word(const unsigned char *at, unsigned int bytes)
 {
-        long fd = window_call(WINDOW_SYS_MEMFD, (long)"moonwater-copy", WINDOWS_MFD_CLOEXEC | WINDOWS_MFD_SEALING, 0, 0, 0, 0);
-        unsigned long done = 0;
+        unsigned long value = 0;
 
-        if (fd < 0)
-                return fd;
-        while (done < length)
+        while (bytes--)
+                value = value << 8 | at[bytes];
+        return value;
+}
+
+static int windows_clip_same(const char *a, unsigned long a_length, const char *b)
+{
+        unsigned long at = 0;
+
+        for (; at < a_length && b[at]; at++)
         {
-                long wrote = window_call(WINDOW_SYS_WRITE, fd, (long)((const char *)bytes + done), (long)(length - done), 0, 0, 0);
+                unsigned char x = (unsigned char)a[at], y = (unsigned char)b[at];
+
+                if ((x >= 'A' && x <= 'Z' ? x + 32 : x) != (y >= 'A' && y <= 'Z' ? y + 32 : y))
+                        return 0;
+        }
+        return at == a_length && !b[at];
+}
+
+/*
+        Whether a name is one text goes by: 1 for the Wayland ones (text/plain;charset=utf-8, UTF8_STRING, text/plain), 2 for X's own
+        (TEXT, and STRING, which is Latin-1), 0 for any other. Either case.
+*/
+static int windows_clip_alias(const char *name, unsigned long length)
+{
+        static const char *const names[5] = {WINDOWS_CLIP_TEXT, "UTF8_STRING", "text/plain", "TEXT", "STRING"};
+
+        for (int at = 0; at < 5; at++)
+                if (windows_clip_same(name, length, names[at]))
+                        return at < 3 ? 1 : 2;
+        return 0;
+}
+
+// Whether bytes are text a selection may hold: UTF-8, every sequence whole and shortest, no surrogate, no NUL.
+static int windows_clip_text(const unsigned char *bytes, unsigned long length)
+{
+        if (!length)
+                return 1;
+        return !memory_first_of((address_any)bytes, 0, (positive)length) &&
+               memory_utf8_valid_span((address_any)bytes, (positive)length).x == (positive)length;
+}
+
+/*
+        The next type of a copy mapped whole at file (size bytes) after *cursor (0 for the first): 1 with it in type, 0 past the last or
+        when the copy is not one (a trailer, index or name that does not hold together, a type outside the bytes). Every type is read
+        through here, so a copy is checked as it is read.
+*/
+static int windows_clip_next(const unsigned char *file, unsigned long size, unsigned long *cursor, struct windows_clip_type *type)
+{
+        unsigned long index, until, at;
+
+        if (!file || size < WINDOWS_CLIP_TRAILER || windows_clip_word(file + size - 8, 8) != WINDOWS_CLIP_MAGIC)
+                return 0;
+        index = windows_clip_word(file + size - WINDOWS_CLIP_TRAILER, 8);
+        until = size - WINDOWS_CLIP_TRAILER;
+        at = *cursor ? *cursor : index;
+        if (index > until || at < index || at + 19 > until)
+                return 0;
+        type->offset = windows_clip_word(file + at, 8);
+        type->length = windows_clip_word(file + at + 8, 8);
+        type->name_length = windows_clip_word(file + at + 16, 2);
+        type->name = (const char *)file + at + 18;
+        if (!type->name_length || type->offset > index || type->length > index - type->offset || type->name_length > until - at - 19 ||
+            type->name[type->name_length])
+                return 0;
+        for (unsigned long k = 0; k < type->name_length; k++)
+                if ((unsigned char)type->name[k] < 0x20 || (unsigned char)type->name[k] > 0x7e)
+                        return 0;
+        *cursor = at + 19 + type->name_length;
+        return 1;
+}
+
+/*
+        Whether a mapped copy holds together: its count of types is the records its index has, ending where the trailer starts, at least
+        one, and its text (when it has some) UTF-8 with no NUL.
+*/
+static int windows_clip_valid(const unsigned char *file, unsigned long size)
+{
+        struct windows_clip_type type;
+        unsigned long cursor = 0, count = 0;
+
+        if (!file || size < WINDOWS_CLIP_TRAILER || windows_clip_word(file + size - 8, 8) != WINDOWS_CLIP_MAGIC)
+                return 0;
+        while (windows_clip_next(file, size, &cursor, &type))
+        {
+                count++;
+                if (windows_clip_same(type.name, type.name_length, WINDOWS_CLIP_TEXT) && !windows_clip_text(file + type.offset, type.length))
+                        return 0;
+        }
+        return count && count == windows_clip_word(file + size - 12, 4) && cursor == size - WINDOWS_CLIP_TRAILER;
+}
+
+// The type of a copy a name asks for: the name's own, or, for a name text goes by, the text. 1 when there is one.
+static int windows_clip_find(const unsigned char *file, unsigned long size, const char *name, unsigned long length, struct windows_clip_type *type)
+{
+        unsigned long cursor = 0;
+        const char *want = windows_clip_alias(name, length) ? WINDOWS_CLIP_TEXT : 0;
+
+        while (windows_clip_next(file, size, &cursor, type))
+                if (want ? windows_clip_same(type->name, type->name_length, want)
+                         : type->name_length == length && !memory_compare(type->name, name, (positive)length))
+                        return 1;
+        // A copy with no text whose own type is named so (an X client's STRING alone) is that type.
+        cursor = 0;
+        while (want && windows_clip_next(file, size, &cursor, type))
+                if (type->name_length == length && !memory_compare(type->name, name, (positive)length))
+                        return 1;
+        return 0;
+}
+
+/*
+        The nth name a copy is offered under: its types, then, when it has text, each name text goes by that it does not hold itself
+        (the Wayland ones, and X's too when x is set). 0 past the last. *length is the name's.
+*/
+static const char *windows_clip_offered(const unsigned char *file, unsigned long size, unsigned long nth, int x, unsigned long *length)
+{
+        static const char *const names[4] = {"UTF8_STRING", "text/plain", "TEXT", "STRING"};
+        struct windows_clip_type type;
+        unsigned long cursor = 0;
+        int text = 0, held;
+
+        while (windows_clip_next(file, size, &cursor, &type))
+        {
+                text |= windows_clip_same(type.name, type.name_length, WINDOWS_CLIP_TEXT);
+                if (!nth--)
+                {
+                        *length = type.name_length;
+                        return type.name;
+                }
+        }
+        for (int at = 0; text && at < (x ? 4 : 2); at++)
+        {
+                unsigned long n = string_length((string_address)names[at]);
+
+                held = 0, cursor = 0;
+                while (!held && windows_clip_next(file, size, &cursor, &type))
+                        held = type.name_length == n && !memory_compare(type.name, names[at], (positive)n);
+                if (!held && !nth--)
+                {
+                        *length = n;
+                        return names[at];
+                }
+        }
+        return 0;
+}
+
+// count bytes to a descriptor at its offset, every one: 1, or 0 when the kernel would not take them.
+static int windows_clip_put(long fd, const void *bytes, unsigned long count)
+{
+        for (unsigned long done = 0; done < count;)
+        {
+                long wrote = window_call(WINDOW_SYS_WRITE, fd, (long)((const char *)bytes + done), (long)(count - done), 0, 0, 0);
 
                 if (wrote <= 0)
-                {
-                        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
-                        return wrote < 0 ? wrote : -5;
-                }
+                        return 0;
                 done += (unsigned long)wrote;
         }
-        if (window_call(WINDOW_SYS_FCNTL, fd, WINDOWS_F_ADD_SEALS, WINDOWS_SEALS, 0, 0, 0) < 0)
+        return 1;
+}
+
+// A type's record of an index, written where index is: 1, or 0.
+static int windows_clip_record(long index, unsigned long offset, unsigned long length, const char *name, unsigned long name_length)
+{
+        unsigned char head[18];
+
+        if (!name_length || name_length > 0xffff)
+                return 0;
+        for (int at = 0; at < 8; at++)
+                head[at] = (unsigned char)(offset >> 8 * at), head[8 + at] = (unsigned char)(length >> 8 * at);
+        head[16] = (unsigned char)name_length, head[17] = (unsigned char)(name_length >> 8);
+        return windows_clip_put(index, head, 18) && windows_clip_put(index, name, name_length) && windows_clip_put(index, "", 1);
+}
+
+/*
+        A copy made whole: the index (a memfd of count records, from its start) written after the bytes of keep, which end at until, then
+        the trailer, and keep sealed. 1, or 0 when the kernel would not.
+*/
+static int windows_clip_seal(long keep, long index, unsigned long until, unsigned long count)
+{
+        unsigned char bytes[4096], trailer[WINDOWS_CLIP_TRAILER];
+        unsigned long size = (unsigned long)window_call(WINDOW_SYS_LSEEK, index, 0, 2, 0, 0, 0);
+
+        if (window_call(WINDOW_SYS_LSEEK, keep, (long)until, 0, 0, 0, 0) != (long)until || (long)size < 0)
+                return 0;
+        for (unsigned long at = 0; at < size;)
+        {
+                long got = window_call(WINDOW_SYS_PREAD, index, (long)bytes, (long)(size - at > sizeof bytes ? sizeof bytes : size - at), (long)at, 0, 0);
+
+                if (got <= 0 || !windows_clip_put(keep, bytes, (unsigned long)got))
+                        return 0;
+                at += (unsigned long)got;
+        }
+        for (int at = 0; at < 8; at++)
+                trailer[at] = (unsigned char)(until >> 8 * at), trailer[12 + at] = (unsigned char)(WINDOWS_CLIP_MAGIC >> 8 * at);
+        for (int at = 0; at < 4; at++)
+                trailer[8 + at] = (unsigned char)(count >> 8 * at);
+        return windows_clip_put(keep, trailer, sizeof trailer) && window_call(WINDOW_SYS_FCNTL, keep, WINDOWS_F_ADD_SEALS, WINDOWS_SEALS, 0, 0, 0) >= 0;
+}
+
+// A copy of the parts a program offers, as a sealed memfd: the descriptor, or a negative errno.
+static long windows_clip_build(const struct windows_clip_part *parts, unsigned long count)
+{
+        long fd = window_call(WINDOW_SYS_MEMFD, (long)"moonwater-copy", WINDOWS_MFD_CLOEXEC | WINDOWS_MFD_SEALING, 0, 0, 0, 0);
+        long index = fd < 0 ? fd : window_call(WINDOW_SYS_MEMFD, (long)"moonwater-index", WINDOWS_MFD_CLOEXEC, 0, 0, 0, 0);
+        unsigned long until = 0;
+        int ok = index >= 0 && count;
+
+        for (unsigned long at = 0; ok && at < count; at++)
+        {
+                ok = windows_clip_put(fd, parts[at].bytes, parts[at].length) &&
+                     windows_clip_record(index, until, parts[at].length, parts[at].name, string_length((string_address)parts[at].name));
+                until += parts[at].length;
+        }
+        ok = ok && windows_clip_seal(fd, index, until, count);
+        if (index >= 0)
+                window_call(WINDOW_SYS_CLOSE, index, 0, 0, 0, 0, 0);
+        if (!ok && fd >= 0)
         {
                 window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
-                return -1;
+                return -5;
         }
         return fd;
 }
 
-static long windows_clip_offer(const struct window_row *own, unsigned int which, const void *bytes, unsigned long length)
+// A copy of one text.
+static long windows_clip_memfd(const void *bytes, unsigned long length)
+{
+        struct windows_clip_part part = {WINDOWS_CLIP_TEXT, bytes, length};
+
+        return windows_clip_build(&part, 1);
+}
+
+// The parts a program offers as a selection: made into a copy, named in the row, and knocked for.
+static long windows_clip_offer_parts(const struct window_row *own, unsigned int which, const struct windows_clip_part *parts, unsigned long count)
 {
         struct windows *table = own->table;
         long fd;
 
         which &= 1u;
-        if (!length || length > WINDOWS_CLIP_LIMIT)
+        if (!count)
                 return -22;
-        fd = windows_clip_memfd(bytes, length);
+        fd = windows_clip_build(parts, count);
         if (fd < 0)
                 return fd;
         if (windows_clip_held[which] >= 0)
@@ -4825,6 +5065,13 @@ static long windows_clip_offer(const struct window_row *own, unsigned int which,
         __atomic_add_fetch(&table->clip_offer_serial[own->row], 1, __ATOMIC_RELEASE);
         windows_knock(own);
         return 0;
+}
+
+static long windows_clip_offer(const struct window_row *own, unsigned int which, const void *bytes, unsigned long length)
+{
+        struct windows_clip_part part = {WINDOWS_CLIP_TEXT, bytes, length};
+
+        return length ? windows_clip_offer_parts(own, which, &part, 1) : -22;
 }
 
 // The copy of which the compositor answered for: the memfd it opened for itself is let go here.
@@ -4841,15 +5088,6 @@ static void windows_clip_ask(const struct window_row *own, unsigned int which)
         own->table->clip_ask_which[own->row] = which & 1u;
         __atomic_add_fetch(&own->table->clip_ask_serial[own->row], 1, __ATOMIC_RELEASE);
         windows_knock(own);
-}
-
-// Whether bytes are text a selection may hold: UTF-8, every sequence whole and shortest, no surrogate, no NUL.
-static int windows_clip_text(const unsigned char *bytes, unsigned long length)
-{
-        if (!length)
-                return 1;
-        return !memory_first_of((address_any)bytes, 0, (positive)length) &&
-               memory_utf8_valid_span((address_any)bytes, (positive)length).x == (positive)length;
 }
 
 // "/proc/PID/fd/NUMBER" into path (48 bytes).
@@ -4877,57 +5115,79 @@ static void windows_proc_fd(char *path, unsigned int pid, unsigned int number)
 }
 
 /*
-        A selection's text read from the compositor's memfd of it: into a mapping of its own (unmapped with munmap of
-        *length + 1), the length it says checked against the file's, at most the limit, UTF-8 with no NUL. The length,
-        or a negative errno. want is what the compositor said the length is.
+        A selection's copy as the compositor holds it, mapped whole and read-only from its memfd through /proc (unmapped with munmap of
+        want): the size the compositor said, and a copy that holds together. Its address, or 0.
 */
-static long windows_clip_fetch(unsigned int pid, unsigned int which, unsigned long want, unsigned char **bytes,
-                               unsigned long *length)
+static const unsigned char *windows_clip_map(unsigned int pid, unsigned int which, unsigned long want)
 {
         char path[48];
-        unsigned long got = 0;
-        long fd, mapped, size;
+        long fd, mapped;
 
-        *bytes = 0;
-        *length = 0;
-        if (!pid || !want || want > WINDOWS_CLIP_LIMIT)
-                return -2;
+        if (!pid || !want)
+                return 0;
         windows_proc_fd(path, pid, WINDOWS_CLIP_FD + (which & 1u));
         fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0); // O_RDONLY | O_CLOEXEC
         if (fd < 0)
-                return fd;
-        size = window_call(WINDOW_SYS_LSEEK, fd, 0, 2, 0, 0, 0);
-        window_call(WINDOW_SYS_LSEEK, fd, 0, 0, 0, 0, 0);
-        mapped = size == (long)want ? window_call(WINDOW_SYS_MMAP, 0, (long)want + 1, 3, 0x22, -1, 0) : -22;
-        if (mapped < 0 && mapped > -4096)
-        {
-                window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
-                return mapped;
-        }
-        while (got < want)
-        {
-                long read = window_call(WINDOW_SYS_READ, fd, mapped + (long)got, (long)(want - got), 0, 0, 0);
-
-                if (read <= 0)
-                        break;
-                got += (unsigned long)read;
-        }
+                return 0;
+        mapped = window_call(WINDOW_SYS_LSEEK, fd, 0, 2, 0, 0, 0) == (long)want ? window_call(WINDOW_SYS_MMAP, 0, (long)want, 1, 1, fd, 0) : -22;
         window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
-        if (got != want || !windows_clip_text((const unsigned char *)mapped, got))
+        if (mapped < 0 && mapped > -4096)
+                return 0;
+        if (!windows_clip_valid((const unsigned char *)mapped, want))
         {
-                window_call(WINDOW_SYS_MUNMAP, mapped, (long)want + 1, 0, 0, 0, 0);
-                return -74; // EBADMSG
+                window_call(WINDOW_SYS_MUNMAP, mapped, (long)want, 0, 0, 0, 0);
+                return 0;
         }
-        *bytes = (unsigned char *)mapped;
-        *length = got;
-        return (long)got;
+        return (const unsigned char *)mapped;
 }
 
-// The paste the compositor said is READY for this window.
+/*
+        A type of a selection read from the compositor's copy (text for name 0) into a mapping of its own (unmapped with munmap of
+        *length + 1, windows_clip_free): its length, or a negative errno. want is what the compositor said the copy's size is.
+*/
+static long windows_clip_fetch_type(unsigned int pid, unsigned int which, unsigned long want, const char *name, unsigned char **bytes,
+                                    unsigned long *length)
+{
+        const unsigned char *file = windows_clip_map(pid, which, want);
+        struct windows_clip_type type;
+        long mapped;
+
+        *bytes = 0;
+        *length = 0;
+        if (!file)
+                return -2;
+        name = name ? name : WINDOWS_CLIP_TEXT;
+        if (!windows_clip_find(file, want, name, string_length((string_address)name), &type))
+        {
+                window_call(WINDOW_SYS_MUNMAP, (long)file, (long)want, 0, 0, 0, 0);
+                return -61; // ENODATA
+        }
+        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)type.length + 1, 3, 0x22, -1, 0);
+        if (!(mapped < 0 && mapped > -4096))
+                memory_copy((address_any)mapped, (address_any)(file + type.offset), (positive)type.length);
+        window_call(WINDOW_SYS_MUNMAP, (long)file, (long)want, 0, 0, 0, 0);
+        if (mapped < 0 && mapped > -4096)
+                return mapped;
+        *bytes = (unsigned char *)mapped;
+        *length = type.length;
+        return (long)type.length;
+}
+
+static long windows_clip_fetch(unsigned int pid, unsigned int which, unsigned long want, unsigned char **bytes, unsigned long *length)
+{
+        return windows_clip_fetch_type(pid, which, want, 0, bytes, length);
+}
+
+// The paste the compositor said is READY for this window: its text, or the type name names.
+static long windows_clip_read_type(const struct window_row *own, unsigned int which, const char *name, unsigned char **bytes, unsigned long *length)
+{
+        return windows_clip_fetch_type(__atomic_load_n(&own->table->clip_pid, __ATOMIC_ACQUIRE), which,
+                                       __atomic_load_n(&own->table->clip_given_length[own->row], __ATOMIC_ACQUIRE), name, bytes, length);
+}
+
 static long windows_clip_read(const struct window_row *own, unsigned int which, unsigned char **bytes, unsigned long *length)
 {
-        return windows_clip_fetch(__atomic_load_n(&own->table->clip_pid, __ATOMIC_ACQUIRE), which,
-                                  __atomic_load_n(&own->table->clip_given_length[own->row], __ATOMIC_ACQUIRE), bytes, length);
+        return windows_clip_read_type(own, which, 0, bytes, length);
 }
 
 static void windows_clip_free(unsigned char *bytes, unsigned long length)

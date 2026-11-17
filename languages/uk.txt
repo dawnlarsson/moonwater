@@ -313,7 +313,6 @@ ui_field_full	fe02	більше не вміщається
 =Charge limit (20 to 100, or off)	c92d	Межа заряджання (від 20 до 100 або off)
 =Clipboard	99b1	Буфер обміну
 =Clipboard history (copies kept)	7423	Історія буфера обміну (збережених копій)
-=Clipboard limit (MiB)	a505	Ліміт буфера обміну (MiB)
 =Clock	80fd	Годинник
 =Clock format	70d0	Формат часу
 =Connect over	2789	З'єднання через

@@ -313,7 +313,6 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Charge limit (20 to 100, or off)	c92d	Şarj sınırı (20 ile 100 arası veya off)
 =Clipboard	99b1	Pano
 =Clipboard history (copies kept)	7423	Pano geçmişi (saklanan kopyalar)
-=Clipboard limit (MiB)	a505	Pano sınırı (MiB)
 =Clock	80fd	Saat
 =Clock format	70d0	Saat biçimi
 =Connect over	2789	Bağlantı yolu

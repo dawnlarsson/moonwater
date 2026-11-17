@@ -314,7 +314,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Charge limit (20 to 100, or off)	c92d	حد شارژ (20 تا 100 یا off)
 =Clipboard	99b1	کلیپ‌بورد
 =Clipboard history (copies kept)	7423	تاریخچه کلیپ‌بورد (کپی‌های نگه‌داشته‌شده)
-=Clipboard limit (MiB)	a505	حد کلیپ‌بورد (MiB)
 =Clock	80fd	ساعت
 =Clock format	70d0	قالب زمان
 =Connect over	2789	اتصال از طریق

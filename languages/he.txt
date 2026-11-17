@@ -314,7 +314,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Charge limit (20 to 100, or off)	c92d	מגבלת טעינה (20 עד 100, או off)
 =Clipboard	99b1	לוח גזירים
 =Clipboard history (copies kept)	7423	היסטוריית לוח הגזירים (עותקים שנשמרו)
-=Clipboard limit (MiB)	a505	מגבלת לוח הגזירים (MiB)
 =Clock	80fd	שעון
 =Clock format	70d0	תבנית שעה
 =Connect over	2789	חיבור דרך

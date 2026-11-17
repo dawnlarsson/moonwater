@@ -324,12 +324,14 @@ struct wayland_host
         void (*repeat)(void *context, long *rate, long *delay);
         long (*seat)(void *context);
         long (*locks)(void *context);
-        // The clipboard, which the compositor holds as text (which is WAYLAND_CLIP_*). clip_size is the bytes of the selection, 0
-        // for none (and while the service is off). clip_pull is a descriptor for a client's source to write its text to, whose other
-        // end the host reads on its own, makes the selection of and says so (wayland_selection_changed, then wayland_clip_pulled), or -1
-        // for a copy it will not take; the descriptor is the shim's from then on, closed once it is sent (wayland_sent) or its client
-        // is gone, so an abort never closes a number still waiting in the queue. clip_abort ends a pull. clip_push writes the selection to a descriptor a client gave for the
-        // window row, and takes the descriptor whatever comes of it. clip_clear empties the selection when the client holds it.
+        // The clipboard, which the compositor holds as a copy of any types (which is WAYLAND_CLIP_*). clip_type is the nth type a
+        // selection is offered as (0 past the last, or for none and while the service is off). clip_pull begins the read of a client's
+        // source (1, or 0 for a copy it will not take): the host asks for each type it wants (wayland_clip_type, wayland_clip_send with
+        // a descriptor whose other end it reads on its own), makes the selection of what came and says so (wayland_selection_changed,
+        // then wayland_clip_pulled); a descriptor sent is the shim's, closed once it is sent (wayland_sent) or its client is gone, so an
+        // abort never closes a number still waiting in the queue. clip_abort ends a pull. clip_push writes a type of the selection to a
+        // descriptor a client gave for the window row, and takes the descriptor whatever comes of it. clip_clear empties the selection
+        // when the client holds it.
         // dma-bufs. dmabuf_info is what is taken (0 for nothing, which keeps zwp_linux_dmabuf_v1 from being offered), dmabuf_table the
         // file of format and modifier pairs the feedback names (the host's: the shim never closes it, -1 for none), dmabuf_map a
         // descriptor that is a dma-buf of at least size bytes, mapped read-only (0 for a refusal; the descriptor stays the caller's).
@@ -339,10 +341,10 @@ struct wayland_host
         long (*dmabuf_info)(void *context, struct wayland_dmabuf_info *info);
         long (*dmabuf_table)(void *context, long *size);
         void *(*dmabuf_map)(void *context, long fd, long size);
-        long (*clip_size)(void *context, long which);
+        const char *(*clip_type)(void *context, long which, long nth);
         long (*clip_pull)(void *context, long client, long which);
         void (*clip_abort)(void *context, long client, long which);
-        void (*clip_push)(void *context, long row, long which, long fd);
+        void (*clip_push)(void *context, long row, long which, const char *mime, long fd);
         void (*clip_clear)(void *context, long client, long which);
         // Whether a dma-buf has no writer now (its GPU is done), asked and never waited for; a host with none says every buffer is ready.
         int (*dmabuf_ready)(void *context, long fd);
@@ -366,9 +368,8 @@ struct wayland_host
         void *(*reserve)(void *context, long *bytes);
         int (*commit)(void *context, void *at, long bytes);
         void (*unreserve)(void *context, void *at, long bytes);
-        // The bridge to X (the window manager of Xwayland, xwm.c), optional. xreceive: a receive the X side answers, of a type an X copy
-        // offers past text (which 0 the clipboard, 1 the primary selection) or of a drag an X window makes (which 2), for the client of
-        // that slot; the descriptor is the host's from then on.
+        // The bridge to X (the window manager of Xwayland, xwm.c), optional. xreceive: a receive the X side answers, of a type of a drag
+        // an X window makes (which 2), for the client of that slot; the descriptor is the host's from then on.
         void (*xreceive)(void *context, long client, long which, const char *mime, long fd);
         // xdrag: a Wayland drag over a row whose client has no data device (an X window) is offered to the X side: WAYLAND_XDRAG_OVER at
         // (x, y) of the row, answered 1 when the row is a target the X side takes (and it says what it takes with wayland_drag_x_status),
@@ -640,14 +641,13 @@ struct wayland_region
 };
 
 /*
-        A data source, or a primary selection source, a client made: the types it offers (text only is taken: bit 0 the UTF-8
-        type, 1 UTF8_STRING, 2 plain text), which selection it is for, and where it is: 0 made, 1 asked for and being read by the
-        host, 2 the selection, 3 let go (cancelled, or used up).
+        A data source, or a primary selection source, a client made: which selection it is for, and where it is: 0 made, 1 asked for
+        and being read by the host, 2 the selection, 3 let go (cancelled, or used up), 4 a drag's.
 */
 struct wayland_source
 {
         unsigned int id;
-        unsigned char live, which, mimes, state;
+        unsigned char live, which, state;
         unsigned int actions;            // what a drag of it may be (wl_data_source.set_actions, version 3)
         struct wayland_table mime_table; // every type it offered, each with its null, as a drag's offer carries them
         long mime_bytes;
@@ -741,7 +741,7 @@ struct wayland_client
         unsigned int input_serial[WAYLAND_INPUT_SERIALS]; // the serials of the last input this client was sent
         unsigned char input_next;
         long server_hint, server_live; // where the next of the server's own ids is looked for, and how many are in use
-        unsigned char pending[2];   // the source being read for each selection, as its index and one, or 0
+        long pending[2];            // the source being read for each selection, as its index and one, or 0
         struct wayland_source *sources; // a table that grows (source_table), as many as the client makes
         struct wayland_offer *offers; // a table that grows (offer_table), as many as the client makes
         struct wayland_params *params; // a table that grows (params_table), as many as the client makes
@@ -858,10 +858,6 @@ static struct
                 long x_bytes;
         } drag;
         unsigned long selection_serial[2];
-        // What an X copy offers past text, as the window manager of Xwayland read it (wayland_selection_foreign): each type with its
-        // null, offered with the selection while the selection is that copy's, a receive of one handed to the host (xreceive).
-        struct wayland_table x_types[2];
-        long x_types_bytes[2];
         struct wayland_dmabuf_info dmabuf; // what the compositor takes as dma-bufs, none when count is 0
         long dmabufs;                      // the buffers made of them, all clients
         struct wayland_syncobj_host syncobj;
@@ -6805,76 +6801,17 @@ static int wayland_seat_object_request(struct wayland_client *c, struct wayland_
 /* ---- the clipboard ---- */
 
 /*
-        A client's copy and paste are the compositor's: it holds one text for each selection (the clipboard and the primary
-        selection), whoever made it, and what a client is shown of it is made from that text. A client's copy (set_selection
-        with a source) is read once, into the compositor's: the host gives the shim a descriptor to hand the source in a send
-        event and reads what comes, and the text is the selection when the source has ended it, so it outlives its source and
-        its client, as a copy made in any window of the compositor does. A paste is an offer of text made to the client that
-        has the keys, when it gets them and when the text changes, and a receive on an offer that is still the selection's is the
-        host writing the text to the descriptor the client gave. Nothing but text is held, so a source that offers no text is
-        cancelled; a copy is taken only for a client the person has just touched, and a paste is given only to the window that
-        has the keys with the person's key or button just on it (the host's rule, as for a program of the compositor's).
-        Dragging is not done: a drag that starts is cancelled.
+        A client's copy and paste are the compositor's: it holds one copy for each selection (the clipboard and the primary
+        selection), of every type its maker offered, whoever made it (a Wayland client, an X client, a program of the compositor's),
+        and what a client is shown of it is the types the host names (clip_type). A client's copy (set_selection with a source) is
+        read once, into the compositor's: the host asks for each type the source offers in turn (wayland_clip_type, then
+        wayland_clip_send with a descriptor of its own for the source's send event) and reads what comes, and the copy is the
+        selection when the source has given every one, so it outlives its source and its client. A paste is an offer of the copy's
+        types made to the client that has the keys, when it gets them and when the copy changes, and a receive on an offer that is
+        still the selection's is the host writing that type to the descriptor the client gave. A copy is taken only for a client the
+        person has just touched, and a paste is given only to the window that has the keys with the person's key or button just on
+        it (the host's rule, as for a program of the compositor's).
 */
-static const struct
-{
-        const char *name;
-        unsigned char bit;
-} wayland_mimes[] = {{"text/plain;charset=utf-8", 1}, {"UTF8_STRING", 2}, {"text/plain", 4}};
-#define WAYLAND_MIME_COUNT 3
-
-// The bit of a type that is text we take (either case), or 0.
-static long wayland_mime_bit(const unsigned char *text, long length)
-{
-        for (long at = 0; at < WAYLAND_MIME_COUNT; at++)
-        {
-                long same = 1, n = 0;
-
-                for (; wayland_mimes[at].name[n]; n++)
-                {
-                        unsigned char a = n < length ? text[n] : 0, b = (unsigned char)wayland_mimes[at].name[n];
-
-                        a = a >= 'A' && a <= 'Z' ? (unsigned char)(a + 32) : a;
-                        b = b >= 'A' && b <= 'Z' ? (unsigned char)(b + 32) : b;
-                        if (a != b)
-                        {
-                                same = 0;
-                                break;
-                        }
-                }
-                if (same && n == length)
-                        return wayland_mimes[at].bit;
-        }
-        return 0;
-}
-
-// The type to ask a source for, of those it offers: the UTF-8 one first.
-static const char *wayland_mime_choice(unsigned int mimes)
-{
-        for (long at = 0; at < WAYLAND_MIME_COUNT; at++)
-                if (mimes & wayland_mimes[at].bit)
-                        return wayland_mimes[at].name;
-        return 0;
-}
-
-// Whether a type (length without its null) is one an X copy offers past its text for selection which.
-static int wayland_foreign_type(long which, const unsigned char *text, long length)
-{
-        for (long at = 0; which >= 0 && which < 2 && at < wayland.x_types_bytes[which];)
-        {
-                const unsigned char *type = wayland.x_types[which].at + at;
-                long n = 0, same = 1;
-
-                while (at + n < wayland.x_types_bytes[which] && type[n])
-                        n++;
-                for (long k = 0; same && k < n && k < length; k++)
-                        same = type[k] == text[k];
-                if (same && n == length && n)
-                        return 1;
-                at += n + 1;
-        }
-        return 0;
-}
 
 /* The slots of a client's devices for a selection that are still there. */
 static long wayland_devices(struct wayland_client *c, long which, long **slots)
@@ -6915,9 +6852,8 @@ static unsigned long wayland_server_id(struct wayland_client *c)
 }
 
 /*
-        The text the compositor holds for a selection, to one of a client's devices: a new offer of it with its types, then the
-        selection naming the offer; or the selection with none when there is nothing, or no room for an offer (a client that
-        keeps sixteen and lets none go is not offered more).
+        The copy the compositor holds for a selection, to one of a client's devices: a new offer of it with its types, then the
+        selection naming the offer; or the selection with none when there is nothing, or no room for an offer.
 */
 static void wayland_selection_to(struct wayland_client *c, long slot, long which)
 {
@@ -6925,9 +6861,7 @@ static void wayland_selection_to(struct wayland_client *c, long slot, long which
         struct wayland_event e;
         long index = -1, offer = -1;
 
-        long text = wayland.host->clip_size(wayland.host->context, which) > 0;
-
-        if (text || wayland.x_types_bytes[which] > 0)
+        if (wayland.host->clip_type(wayland.host->context, which, 0))
         {
                 for (long at = 0; at < c->offer_table.count && index < 0; at++)
                         if (!c->offers[at].live)
@@ -6941,6 +6875,8 @@ static void wayland_selection_to(struct wayland_client *c, long slot, long which
         }
         if (offer >= 0)
         {
+                const char *type;
+
                 c->offers[index].id = (unsigned int)id;
                 c->offers[index].live = 1;
                 c->offers[index].which = (unsigned char)which;
@@ -6949,27 +6885,11 @@ static void wayland_selection_to(struct wayland_client *c, long slot, long which
                 e = wayland_begin(c, device, which ? WLE_zwp_primary_selection_device_v1_data_offer : WLE_wl_data_device_data_offer);
                 wayland_word(&e, id);
                 wayland_end(&e);
-                for (long at = 0; text && at < WAYLAND_MIME_COUNT; at++)
+                for (long nth = 0; (type = wayland.host->clip_type(wayland.host->context, which, nth)); nth++)
                 {
                         e = wayland_begin(c, id, which ? WLE_zwp_primary_selection_offer_v1_offer : WLE_wl_data_offer_offer);
-                        wayland_string(&e, wayland_mimes[at].name);
+                        wayland_string(&e, type);
                         wayland_end(&e);
-                }
-                // An X copy's types past its text, as the X client named them.
-                for (long at = 0; at < wayland.x_types_bytes[which];)
-                {
-                        const char *type = (const char *)wayland.x_types[which].at + at;
-                        long length = 0;
-
-                        while (at + length < wayland.x_types_bytes[which] && type[length])
-                                length++;
-                        if (length && !wayland_mime_bit((const unsigned char *)type, length))
-                        {
-                                e = wayland_begin(c, id, which ? WLE_zwp_primary_selection_offer_v1_offer : WLE_wl_data_offer_offer);
-                                wayland_string(&e, type);
-                                wayland_end(&e);
-                        }
-                        at += length + 1;
                 }
         }
         else
@@ -6991,7 +6911,7 @@ static void wayland_selections_to(struct wayland_client *c)
         }
 }
 
-// A source told it is not wanted: its copy is not taken, or the text is another's now. It is let go but for its object.
+// A source told it is not wanted: its copy is not taken, or the copy is another's now. It is let go but for its object.
 static void wayland_source_cancel(struct wayland_client *c, long index)
 {
         struct wayland_source *source = &c->sources[index];
@@ -7028,8 +6948,8 @@ static void wayland_source_drop(struct wayland_client *c, long index)
 }
 
 /*
-        The compositor's text for a selection is new (or gone): the source of a client that was the selection is told it is not,
-        the count that tells an old offer from a current one moves, and the client that has the keys is offered the new text.
+        The compositor's copy for a selection is new (or gone): the source of a client that was the selection is told it is not,
+        the count that tells an old offer from a current one moves, and the client that has the keys is offered the new copy.
 */
 WAYLAND_API void wayland_selection_changed(long which)
 {
@@ -7051,27 +6971,85 @@ WAYLAND_API void wayland_selection_changed(long which)
                 wayland_selection_to(c, slots[at], which);
 }
 
+// The source being read for a selection of a client, or 0.
+static struct wayland_source *wayland_clip_pending(long client, long which, struct wayland_client **owner)
+{
+        struct wayland_client *c = client >= 0 && client < wayland.client_slots && wayland.host ? wayland.client[client] : 0;
+        long index = c && which >= 0 && which < 2 ? c->pending[which] - 1 : -1;
+
+        if (index < 0 || index >= c->source_table.count || !c->sources[index].live || c->sources[index].state != 1)
+                return 0;
+        *owner = c;
+        return &c->sources[index];
+}
+
+/*
+        The host's reading of a client's copy: wayland_clip_type is the nth type the source being read offered (0 past the last, or
+        when no source is being read), each NUL ended; wayland_clip_send asks the source for it into the descriptor fd, which is the
+        shim's from then on (1 when the send is queued; 0, and fd closed, when the source is gone or the client's queue is full).
+*/
+WAYLAND_API const char *wayland_clip_type(long client, long which, long nth)
+{
+        struct wayland_client *c = 0;
+        struct wayland_source *source = wayland_clip_pending(client, which, &c);
+
+        for (long at = 0; source && at < source->mime_bytes;)
+        {
+                const char *type = (const char *)source->mime_table.at + at;
+                long length = 0;
+
+                while (at + length < source->mime_bytes && type[length])
+                        length++;
+                if (!nth--)
+                        return type;
+                at += length + 1;
+        }
+        return 0;
+}
+
+WAYLAND_API int wayland_clip_send(long client, long which, long nth, long fd)
+{
+        struct wayland_client *c = 0;
+        struct wayland_source *source = wayland_clip_pending(client, which, &c);
+        const char *type = wayland_clip_type(client, which, nth);
+        struct wayland_event e;
+
+        if (!source || !type || c->out_fd_count >= WAYLAND_OUT_FDS || wayland_slot_of(c, source->id) < 0)
+        {
+                if (fd >= 0 && wayland.host->close)
+                        wayland.host->close(wayland.host->context, fd);
+                return 0;
+        }
+        e = wayland_begin(c, source->id, which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send);
+        wayland_string(&e, type);
+        c->out_fd_owned[c->out_fd_count] = 1;
+        c->out_fds[c->out_fd_count] = fd;
+        c->out_fd_at[c->out_fd_count++] = e.start;
+        wayland.fds++;
+        wayland_end(&e);
+        return 1;
+}
+
 /*
         The host has read a client's source to its end (ok), or could not: the source is the selection, or is cancelled. The
-        host says it after it has made the text the selection, so the text's change has been told by then.
+        host says it after it has made the copy the selection, so the copy's change has been told by then.
 */
 WAYLAND_API void wayland_clip_pulled(long client, long which, long ok)
 {
-        struct wayland_client *c = client >= 0 && client < wayland.client_slots && wayland.host ? wayland.client[client] : 0;
+        struct wayland_client *c = 0;
+        struct wayland_source *source = wayland_clip_pending(client, which, &c);
         long index;
 
-        if (!c || which < 0 || which > 1 || !c->pending[which])
+        if (!source)
                 return;
         index = c->pending[which] - 1;
         c->pending[which] = 0;
-        if (!c->sources[index].live || c->sources[index].state != 1)
-                return;
         if (!ok)
         {
                 wayland_source_cancel(c, index);
                 return;
         }
-        c->sources[index].state = 2;
+        source->state = 2;
         wayland.selection_owner[which] = c->slot + 1;
         wayland.selection_source[which] = index;
 }
@@ -7089,7 +7067,6 @@ static int wayland_source_new(struct wayland_client *c, struct wayland_object *s
         c->sources[index].id = c->objects[slot].id;
         c->sources[index].live = 1;
         c->sources[index].which = (unsigned char)which;
-        c->sources[index].mimes = 0;
         c->sources[index].state = 0;
         c->objects[slot].link = (int)index;
         return WAYLAND_OK;
@@ -7106,17 +7083,16 @@ static int wayland_device_new(struct wayland_client *c, struct wayland_object *s
 }
 
 /*
-        set_selection: a source (or none) and the serial of an input event of this client's. None clears the text when this
+        set_selection: a source (or none) and the serial of an input event of this client's. None clears the copy when this
         client's source is the selection. A source is used once; one made from an event the client was not sent, one that offers
-        no text, one the host will not take (no gesture of the person's, the service off, no room) is cancelled and nothing else
-        happens. Otherwise the host is given the source to read, and it is the selection when it has been.
+        no type, one the host will not take (no gesture of the person's, the service off) is cancelled and nothing else happens.
+        Otherwise the host is given the source to read (clip_pull, which asks for its types with wayland_clip_send), and it is the
+        selection when it has been.
 */
 static int wayland_set_selection(struct wayland_client *c, struct wayland_object *self, long which, const struct wayland_arg *a)
 {
-        long index = a[0].slot >= 0 ? c->objects[a[0].slot].link : -1, fd;
+        long index = a[0].slot >= 0 ? c->objects[a[0].slot].link : -1;
         struct wayland_source *source;
-        struct wayland_event e;
-        const char *mime;
 
         if (index < 0)
         {
@@ -7130,8 +7106,7 @@ static int wayland_set_selection(struct wayland_client *c, struct wayland_object
                 return WAYLAND_OK;
         if (source->state != 0)
                 return wayland_fail(c, self->id, WLN_wl_data_device_error_used_source, "the source was used before");
-        mime = wayland_mime_choice(source->mimes);
-        if (!wayland_input_serial_ok(c, a[1].u) || !mime || c->out_fd_count >= WAYLAND_OUT_FDS)
+        if (!wayland_input_serial_ok(c, a[1].u) || !source->mime_bytes)
         {
                 wayland_source_cancel(c, index);
                 return WAYLAND_OK;
@@ -7142,26 +7117,17 @@ static int wayland_set_selection(struct wayland_client *c, struct wayland_object
                 wayland_source_cancel(c, c->pending[which] - 1);
                 c->pending[which] = 0;
         }
-        fd = wayland.host->clip_pull(wayland.host->context, c->slot, which);
-        if (fd < 0)
-        {
-                wayland_source_cancel(c, index);
-                return WAYLAND_OK;
-        }
         source->state = 1;
-        c->pending[which] = (unsigned char)(index + 1);
-        e = wayland_begin(c, source->id, which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send);
-        wayland_string(&e, mime);
-        // The shim's from here (0976821d): the host that ends the copy before this is sent has nothing to close.
-        c->out_fd_owned[c->out_fd_count] = 1;
-        c->out_fds[c->out_fd_count] = fd;
-        c->out_fd_at[c->out_fd_count++] = e.start;
-        wayland.fds++;
-        wayland_end(&e);
+        c->pending[which] = index + 1;
+        if (!wayland.host->clip_pull(wayland.host->context, c->slot, which) && c->pending[which] == index + 1)
+        {
+                c->pending[which] = 0;
+                wayland_source_cancel(c, index);
+        }
         return WAYLAND_OK;
 }
 
-// receive: the text of an offer that is still the selection's, written to the descriptor, for the client that has the keys.
+// receive: a type of an offer that is still the selection's, written to the descriptor by the host, for the client that has the keys.
 static int wayland_receive(struct wayland_client *c, struct wayland_object *self, struct wayland_arg *a)
 {
         struct wayland_offer *offer = &c->offers[self->link];
@@ -7169,88 +7135,13 @@ static int wayland_receive(struct wayland_client *c, struct wayland_object *self
         int current = offer->serial == wayland.selection_serial[offer->which] && wayland.keyboard_row >= 0 &&
                       wayland.row_client[wayland.keyboard_row] == c->slot;
 
-        if (current && wayland_mime_bit(a[0].text, a[0].length))
+        if (current && a[0].text && a[0].length > 0)
         {
-                wayland.host->clip_push(wayland.host->context, wayland.keyboard_row, offer->which, a[1].fd);
-                wayland.fds--;
-                a[1].fd = -1;
-        }
-        else if (current && a[0].text && wayland.host->xreceive && wayland_foreign_type(offer->which, a[0].text, a[0].length))
-        {
-                wayland.host->xreceive(wayland.host->context, c->slot, offer->which, (const char *)a[0].text, a[1].fd);
+                wayland.host->clip_push(wayland.host->context, wayland.keyboard_row, offer->which, (const char *)a[0].text, a[1].fd);
                 wayland.fds--;
                 a[1].fd = -1;
         }
         return WAYLAND_OK;
-}
-
-/*
-        The X side of a selection (the window manager of Xwayland's). wayland_selection_foreign: the types an X client's copy offers past
-        its text (each with its null, bytes in all; none for 0), offered with the selection from the next offer on. wayland_selection_types:
-        the types of the Wayland source that is the selection now (each with its null), for an X client that asks for one of them, and
-        wayland_selection_send that source's send of one, with the descriptor it writes to (the shim's from then on: 1 when it is sent).
-*/
-WAYLAND_API void wayland_selection_foreign(long which, const char *types, long bytes)
-{
-        if (which < 0 || which > 1)
-                return;
-        wayland.x_types_bytes[which] = 0;
-        if (!types || bytes <= 0)
-        {
-                wayland_table_drop(&wayland.x_types[which]);
-                return;
-        }
-        wayland.x_types[which].unit = 1;
-        if (!wayland_table_reach(&wayland.x_types[which], bytes + 1))
-                return;
-        for (long at = 0; at < bytes; at++)
-                wayland.x_types[which].at[at] = (unsigned char)types[at];
-        wayland.x_types[which].at[bytes] = 0;
-        wayland.x_types_bytes[which] = bytes;
-}
-
-static struct wayland_source *wayland_selection_source(long which, struct wayland_client **client)
-{
-        struct wayland_client *c;
-        long index;
-
-        if (which < 0 || which > 1 || wayland.selection_owner[which] <= 0 || wayland.selection_owner[which] > wayland.client_slots)
-                return 0;
-        c = wayland.client[wayland.selection_owner[which] - 1];
-        index = wayland.selection_source[which];
-        if (!c || index < 0 || index >= c->source_table.count || !c->sources[index].live || c->sources[index].state != 2)
-                return 0;
-        *client = c;
-        return &c->sources[index];
-}
-
-WAYLAND_API long wayland_selection_types(long which, const char **types)
-{
-        struct wayland_client *c = 0;
-        struct wayland_source *source = wayland_selection_source(which, &c);
-
-        if (!source || !source->mime_bytes)
-                return 0;
-        *types = (const char *)source->mime_table.at;
-        return source->mime_bytes;
-}
-
-WAYLAND_API int wayland_selection_send(long which, const char *mime, long fd)
-{
-        struct wayland_client *c = 0;
-        struct wayland_source *source = wayland_selection_source(which, &c);
-        struct wayland_event e;
-
-        if (!source || !mime || fd < 0 || c->out_fd_count >= WAYLAND_OUT_FDS || wayland_slot_of(c, source->id) < 0)
-                return 0;
-        e = wayland_begin(c, source->id, which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send);
-        wayland_string(&e, mime);
-        c->out_fd_owned[c->out_fd_count] = 1;
-        c->out_fds[c->out_fd_count] = fd;
-        c->out_fd_at[c->out_fd_count++] = e.start;
-        wayland.fds++;
-        wayland_end(&e);
-        return 1;
 }
 
 
@@ -7899,10 +7790,7 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
         case WLI_wl_data_source:
         case WLI_zwp_primary_selection_source_v1:
                 if (op == WLQ_wl_data_source_offer && c->sources[self->link].state == 0)
-                {
-                        c->sources[self->link].mimes |= (unsigned char)wayland_mime_bit(a[0].text, a[0].length);
                         wayland_source_type(c, self->link, a[0].text, a[0].length);
-                }
                 else if (op == WLQ_wl_data_source_set_actions && !(a[0].u & ~7UL))
                         c->sources[self->link].actions = (unsigned int)a[0].u;
                 else if (op == WLQ_wl_data_source_destroy)
@@ -9972,7 +9860,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         if (wayland.host || !host || !host->alloc || !host->release || !host->map || !host->remap || !host->unmap ||
             !host->close || !host->row_open || !host->row_close || !host->row_picture || !host->row_title || !host->row_do ||
             !host->row_facts || !host->screens || !host->now || !host->keymap || !host->repeat || !host->seat || !host->locks ||
-            !host->clip_size || !host->clip_pull || !host->clip_abort || !host->clip_push || !host->clip_clear || !host->dmabuf_info ||
+            !host->clip_type || !host->clip_pull || !host->clip_abort || !host->clip_push || !host->clip_clear || !host->dmabuf_info ||
             !host->dmabuf_table || !host->dmabuf_map || !host->pointer_hold || !host->random)
                 return -1;
         // The rows of a shim started before are let go of by the host they were made by.
@@ -10205,11 +10093,6 @@ WAYLAND_API void wayland_stop(void)
                 wayland_drop(slot);
         wayland_table_drop(&wayland.token_table);
         wayland.token = 0, wayland.tokens = 0;
-        for (long which = 0; which < 2; which++)
-        {
-                wayland_table_drop(&wayland.x_types[which]);
-                wayland.x_types_bytes[which] = 0;
-        }
         wayland_table_drop(&wayland.drag.x_types);
         wayland.drag.x_bytes = 0;
         wayland_zero(&wayland.syncobj, sizeof wayland.syncobj);

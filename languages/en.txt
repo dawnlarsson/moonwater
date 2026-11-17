@@ -313,7 +313,6 @@ ui_field_full	fe02	that is as much as it holds
 =Charge limit (20 to 100, or off)	c92d	Charge limit (20 to 100, or off)
 =Clipboard	99b1	Clipboard
 =Clipboard history (copies kept)	7423	Clipboard history (copies kept)
-=Clipboard limit (MiB)	a505	Clipboard limit (MiB)
 =Clock	80fd	Clock
 =Clock format	70d0	Clock format
 =Connect over	2789	Connect over

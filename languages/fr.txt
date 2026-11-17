@@ -313,7 +313,6 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Charge limit (20 to 100, or off)	c92d	Limite de charge (20 à 100, ou off)
 =Clipboard	99b1	Presse-papiers
 =Clipboard history (copies kept)	7423	Historique du presse-papiers (copies gardées)
-=Clipboard limit (MiB)	a505	Limite du presse-papiers (MiB)
 =Clock	80fd	Horloge
 =Clock format	70d0	Format de l'heure
 =Connect over	2789	Connexion par

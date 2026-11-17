@@ -82,6 +82,9 @@ static struct fake_host_state
         struct wayland_screen extra[4]; // the screens after the first, as a check has set them: a width of 0 is the default one
         // the clipboard the compositor holds: the bytes of each selection, and what the shim asked of it
         long clip_size[2], pull_refuse, pulls, aborts, pushes, clears, pull_client, pull_which, push_row, push_which;
+        char clip_types[2][256];  // the selection's types past its text, each with its NUL, as the host names them (clip_type)
+        long clip_types_bytes[2];
+        char push_mime[64];       // the type the last paste asked for
         int pull_wfd, pull_rfd;
         char clip_text[2][64];
         // dma-bufs: whether the fake takes any, how many pictures were read through a descriptor, whether the next is skipped
@@ -434,30 +437,41 @@ static void fake_pull_close(void)
         fake.pull_wfd = fake.pull_rfd = 0;
 }
 
-static long fake_clip_size(void *context, long which)
+/* The names a selection is offered as: the three text types while it has text, then its other types. */
+static const char *fake_clip_type(void *context, long which, long nth)
 {
+        static const char *const text[3] = {"text/plain;charset=utf-8", "UTF8_STRING", "text/plain"};
+
         (void)context;
-        return fake.clip_size[which];
+        if (fake.clip_size[which] > 0 && nth < 3)
+                return text[nth];
+        nth -= fake.clip_size[which] > 0 ? 3 : 0;
+        for (long at = 0; at < fake.clip_types_bytes[which]; at += (long)strlen(fake.clip_types[which] + at) + 1)
+                if (!nth--)
+                        return fake.clip_types[which] + at;
+        return 0;
 }
 
-/* A source to read: a pipe whose write end goes to the client and is the shim's to close (counted open here, closed by fake_close). */
+/* A source to read: its first type asked for into a pipe whose write end goes to the client and is the shim's to close (counted open
+   here, closed by fake_close); the next is the check's to ask for (wayland_clip_send). */
 static long fake_clip_pull(void *context, long client, long which)
 {
         int fds[2];
 
         (void)context;
         if (fake.pull_refuse)
-                return -1;
+                return 0;
         fake_pull_close();
         if (pipe(fds) < 0)
-                return -1;
+                return 0;
         fake.pull_rfd = fds[0];
         fake.pull_wfd = fds[1];
         fake.fds_open++;
         fake.pulls++;
         fake.pull_client = client;
         fake.pull_which = which;
-        return fds[1];
+        wayland_clip_send(client, which, 0, fds[1]);
+        return 1;
 }
 
 static void fake_clip_abort(void *context, long client, long which)
@@ -469,14 +483,23 @@ static void fake_clip_abort(void *context, long client, long which)
 }
 
 /* The text written to the client's descriptor, which is closed here as the compositor closes it. */
-static void fake_clip_push(void *context, long row, long which, long fd)
+static void fake_clip_push(void *context, long row, long which, const char *mime, long fd)
 {
+        const char *type;
+        long held = 0;
+
         (void)context;
-        fake.pushes++;
-        fake.push_row = row;
-        fake.push_which = which;
-        if (write((int)fd, fake.clip_text[which], strlen(fake.clip_text[which])) < 0)
-                fake.pushes += 1000;
+        for (long nth = 0; (type = fake_clip_type(0, which, nth)); nth++)
+                held |= !strcmp(type, mime);
+        snprintf(fake.push_mime, sizeof fake.push_mime, "%s", mime);
+        if (held)
+        {
+                fake.pushes++;
+                fake.push_row = row;
+                fake.push_which = which;
+                if (write((int)fd, fake.clip_text[which], strlen(fake.clip_text[which])) < 0)
+                        fake.pushes += 1000;
+        }
         fake_close(NULL, fd);
 }
 
@@ -486,6 +509,7 @@ static void fake_clip_clear(void *context, long client, long which)
         (void)client;
         fake.clears++;
         fake.clip_size[which] = 0;
+        fake.clip_types_bytes[which] = 0;
 }
 
 /* A GPU that says what fake.pattern says each time it is asked, and done after it. */
@@ -565,7 +589,7 @@ static void fake_pointer_hold(void *context, long row, long mode)
 static const struct wayland_host fake_host = {
     0, fake_alloc, fake_release, fake_map, fake_remap, fake_unmap, fake_close, fake_row_open, fake_row_close,
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
-    fake_locks, fake_pointer_hold, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_size, fake_clip_pull, fake_clip_abort, fake_clip_push,
+    fake_locks, fake_pointer_hold, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_type, fake_clip_pull, fake_clip_abort, fake_clip_push,
     fake_clip_clear, fake_dmabuf_ready, fake_random, 0, 0, // no row_layers (test_layers gives one) and no row_busy (test_row_busy)
     fake_reserve, fake_commit, fake_unreserve, 0, 0}; // no bridge to X (test_bridge gives one)
 
@@ -4935,8 +4959,8 @@ static void test_clipboard(void)
                 "a paste on the offer is the text, written to the descriptor for the window with the keys");
         WLCHECK(clip_paste(&a, 0, offer, "UTF8_STRING", text, sizeof text) == 5 && fake.pushes == 2, "in the other text type too");
         pulls = fake.pushes;
-        WLCHECK(clip_paste(&a, 0, offer, "image/png", text, sizeof text) == 0 && fake.pushes == pulls,
-                "a type that is not text is nothing, and the descriptor is closed");
+        WLCHECK(clip_paste(&a, 0, offer, "image/png", text, sizeof text) == 0 && fake.pushes == pulls && !strcmp(fake.push_mime, "image/png"),
+                "a type the copy has not is asked of the host, which writes nothing and closes the descriptor");
         WLCHECK(ca->errors == 0, "no error of these (%s)", ca->error_text);
 
         /* B gets the keys: it is offered the text; A, which no longer has them, is given nothing for its old offer */
@@ -4979,7 +5003,18 @@ static void test_clipboard(void)
         wlc_forget(cb);
         clip_set(&b, 0, source, serial);
         wlc_pump(cb);
-        WLCHECK(clip_cancelled(cb, 0) == 1 && fake.pulls == pulls, "a source with no text is cancelled");
+        e = wlc_take(cb, WLI_wl_data_source, WLE_wl_data_source_send);
+        WLCHECK(clip_cancelled(cb, 0) == 0 && fake.pulls == pulls + 1 && e && e->fd_count == 1 && !strcmp(e->text[0], "image/png"),
+                "a source with no text is read as any other: asked for its image/png");
+        wayland_clip_pulled(cb->slot, 0, 0);
+        wlc_pump(cb);
+        WLCHECK(clip_cancelled(cb, 0) == 1, "and cancelled when the host could not take it");
+        pulls = fake.pulls;
+        source = clip_source(&b, 0, 0);
+        wlc_forget(cb);
+        clip_set(&b, 0, source, serial);
+        wlc_pump(cb);
+        WLCHECK(clip_cancelled(cb, 0) == 1 && fake.pulls == pulls, "a source with no type at all is cancelled");
         source = clip_source(&b, 0, "text/plain");
         fake.pull_refuse = 1;
         wlc_forget(cb);
@@ -5328,64 +5363,65 @@ static void test_bridge(void)
         wayland_keyboard_to(a.row);
         wlc_pump(a.s.c);
 
-        /* an X copy's types past text, offered with its text; a receive of one is the X side's */
+        /* a copy of any types (an X client's, read into the compositor's): offered as its text and its other types, each pasted by the host */
         wlc_forget(a.s.c);
-        wayland_selection_foreign(0, "image/png\0text/uri-list\0text/plain\0", 35);
+        memcpy(fake.clip_types[0], "image/png\0text/uri-list\0", 24);
+        fake.clip_types_bytes[0] = 24;
         clip_other(0, "copied in X");
         wlc_pump(a.s.c);
         offer = clip_offer_of(a.s.c, 0, &chosen);
         WLCHECK(offer && chosen && chosen->u[0] == offer && wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer) == 5 &&
                     wl_offered(a.s.c, "image/png") == 1 && wl_offered(a.s.c, "text/uri-list") == 1 && wl_offered(a.s.c, "text/plain") == 1,
-                "an X copy is offered as its three text types and its two others (its own text/plain is the compositor's text) (%ld types)",
-                wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer));
-        WLCHECK(clip_paste(&a, 0, offer, "image/png", text, sizeof text) == 0 && fx.receives == 1 && fx.which == 0 && fx.client == a.s.c->slot &&
-                    !strcmp(fx.mime, "image/png") && fx.fd_ok,
-                "a receive of its image/png is handed to the X side with the client, the selection and an open descriptor");
-        before = fx.receives;
-        WLCHECK(clip_paste(&a, 0, offer, "image/jpeg", text, sizeof text) == 0 && fx.receives == before, "a type that is neither text nor X's is nothing");
+                "a copy is offered as its three text types and its two others (%ld types)", wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer));
+        before = fake.pushes;
+        WLCHECK(clip_paste(&a, 0, offer, "image/png", text, sizeof text) == 11 && fake.pushes == before + 1 && !strcmp(fake.push_mime, "image/png") &&
+                    fake.push_row == a.row && fx.receives == 0,
+                "a receive of its image/png is the host's paste of that type, for the window with the keys (none of it the X side's)");
+        before = fake.pushes;
+        WLCHECK(clip_paste(&a, 0, offer, "image/jpeg", text, sizeof text) == 0 && fake.pushes == before, "a type the copy has not is nothing");
         WLCHECK(clip_paste(&a, 0, offer, "text/plain;charset=utf-8", text, sizeof text) == 11 && !strcmp(text, "copied in X"),
                 "its text is the compositor's, as any copy's");
         wlc_forget(a.s.c);
-        wayland_selection_foreign(0, "image/png\0", 10);
         fake.clip_size[0] = 0;
         wayland_selection_changed(0);
         wlc_pump(a.s.c);
         offer = clip_offer_of(a.s.c, 0, &chosen);
-        WLCHECK(offer && wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer) == 1 && wl_offered(a.s.c, "image/png") == 1,
-                "an X copy with no text is offered as its own types alone");
+        WLCHECK(offer && wlc_count(a.s.c, WLI_wl_data_offer, WLE_wl_data_offer_offer) == 2 && wl_offered(a.s.c, "image/png") == 1,
+                "a copy with no text is offered as its own types alone");
         wlc_forget(a.s.c);
-        wayland_selection_foreign(0, 0, 0);
+        fake.clip_types_bytes[0] = 0;
         wayland_selection_changed(0);
         wlc_pump(a.s.c);
         offer = clip_offer_of(a.s.c, 0, &chosen);
-        WLCHECK(!offer && chosen && chosen->u[0] == 0, "and none at all once X's types are let go of, with no text");
+        WLCHECK(!offer && chosen && chosen->u[0] == 0, "and none at all once there is no copy");
 
-        /* the Wayland source that is the selection: its types whole, and its send, for an X client */
+        /* a Wayland source read into the compositor's copy a type at a time: each type it offered, whole, asked for in turn */
         serial = clip_serial(&a);
         source = clip_source(&a, 0, "text/plain;charset=utf-8");
         wlc_send(a.s.c, source, WLQ_wl_data_source_offer, "image/png");
+        wlc_forget(a.s.c);
         clip_set(&a, 0, source, serial);
+        wlc_pump(a.s.c);
+        e = wlc_take(a.s.c, WLI_wl_data_source, WLE_wl_data_source_send);
+        WLCHECK(e && !strcmp(e->text[0], "text/plain;charset=utf-8") && wayland_clip_type(a.s.c->slot, 0, 0) &&
+                    !strcmp(wayland_clip_type(a.s.c->slot, 0, 0), "text/plain;charset=utf-8") && wayland_clip_type(a.s.c->slot, 0, 1) &&
+                    !strcmp(wayland_clip_type(a.s.c->slot, 0, 1), "image/png") && !wayland_clip_type(a.s.c->slot, 0, 2),
+                "the source being read has its types, each whole, for the host to ask for in turn");
+        write_end = wl_pipe(&reader);
+        wlc_forget(a.s.c);
+        WLCHECK(wayland_clip_send(a.s.c->slot, 0, 1, write_end) == 1, "the host asks for its image/png");
+        wlc_pump(a.s.c);
+        e = wlc_take(a.s.c, WLI_wl_data_source, WLE_wl_data_source_send);
+        WLCHECK(e && e->fd_count == 1 && !strcmp(e->text[0], "image/png"), "with the type and the descriptor");
+        close(reader);
         clip_finish(&a, 0, "with a picture");
-        {
-                const char *types = 0;
-                long bytes = wayland_selection_types(0, &types);
-
-                WLCHECK(bytes == 35 && types && !strcmp(types, "text/plain;charset=utf-8") && !strcmp(types + 25, "image/png"),
-                        "the source that is the selection has its types, each whole with its null, for X's TARGETS (%ld bytes)", bytes);
-                write_end = wl_pipe(&reader);
-                wlc_forget(a.s.c);
-                WLCHECK(wayland_selection_send(0, "image/png", write_end) == 1, "an X client's conversion of image/png is the source's send");
-                wlc_pump(a.s.c);
-                e = wlc_take(a.s.c, WLI_wl_data_source, WLE_wl_data_source_send);
-                WLCHECK(e && e->fd_count == 1 && !strcmp(e->text[0], "image/png"), "with the type and the descriptor");
-                close(reader);
-                clip_other(0, "another");
-                WLCHECK(wayland_selection_types(0, &types) == 0, "a source that is no longer the selection has no types for X");
-                write_end = wl_pipe(&reader);
-                WLCHECK(wayland_selection_send(0, "image/png", write_end) == 0, "and sends nothing (the descriptor stays the caller's)");
-                fake_close(NULL, write_end);
-                close(reader);
-        }
+        WLCHECK(!wayland_clip_type(a.s.c->slot, 0, 0), "a source read whole has no types left to ask for");
+        write_end = wl_pipe(&reader);
+        before = fake.fds_closed;
+        WLCHECK(wayland_clip_send(a.s.c->slot, 0, 1, write_end) == 0 && fake.fds_closed == before + 1,
+                "and a send asked of it is refused, its descriptor closed");
+        close(reader);
+        clip_other(0, "another");
 
         /* a Wayland drag over an X window: a client with a window and no data device, as Xwayland is */
         session_open(&xs);

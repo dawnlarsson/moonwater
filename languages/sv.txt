@@ -313,7 +313,6 @@ ui_field_full	fe02	mer ryms inte
 =Charge limit (20 to 100, or off)	c92d	Laddningsgräns (20 till 100, eller off)
 =Clipboard	99b1	Urklipp
 =Clipboard history (copies kept)	7423	Urklippshistorik (sparade kopior)
-=Clipboard limit (MiB)	a505	Urklippsgräns (MiB)
 =Clock	80fd	Klocka
 =Clock format	70d0	Tidsformat
 =Connect over	2789	Anslut via

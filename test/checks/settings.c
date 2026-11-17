@@ -1778,8 +1778,6 @@ static fn check_settings(string_address regular, string_address bold)
 "  canvas clipboard [on|off]         copy and paste between windows; off empties the clipboard [on]\n"
 "  canvas clipboard history [N|default]\n"
 "                                    copies the compositor keeps in memory, never on a disk, 0 to 32 [0]\n"
-"  canvas clipboard limit [MIB|default]\n"
-"                                    the most one copy may be, 1 to 16 MiB [16]\n"
 "  canvas gpu [on|off]               draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [off]\n"
 "  canvas identify                   show the number of each screen for three seconds\n"
 "  canvas motion [full|reduced]      reduced: the windows Canvas draws change at once, with no spring, stretch or ripple [full]\n"
@@ -6159,7 +6157,7 @@ static fn check_settings_groups(void)
             {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Text size (percent, or default)", "Canvas"},
             {"Resize border width (pixels, or default)", "Canvas"},
             {"Open windows where they were last put", "Canvas"},
-            {"Clipboard", "Canvas"}, {"GPU rendering (alpha)", "Canvas"}, {"Clipboard history (copies kept)", "Canvas"}, {"Clipboard limit (MiB)", "Canvas"},
+            {"Clipboard", "Canvas"}, {"GPU rendering (alpha)", "Canvas"}, {"Clipboard history (copies kept)", "Canvas"},
             {"Screen", "Display"}, {"Screen modes", "Display"}, {"Brightness", "Display"}};
         const int count = (int)(sizeof(names) / sizeof(names[0]));
         b32 order = settings_groups() == count + 1, family = true, by_name = true, listed = true, apart = true, found = true,

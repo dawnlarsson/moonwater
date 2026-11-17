@@ -2900,7 +2900,8 @@ static void compositor_close(int row)
 /*
         The two selections are the compositor's, held as the memfds programs made them in: a copy is a sealed memfd a
         window names in its row, opened here through /proc/PID/fd (the compositor is root, as every window is), checked
-        -- sealed against growing, shrinking and writing, at most the limit, UTF-8 with no NUL -- and kept at the
+        -- sealed against growing, shrinking and writing, a copy that holds together whatever its types and size, its text
+        UTF-8 with no NUL (windows_clip_valid) -- and kept at the
         descriptor WINDOWS_CLIP_FD + which, a number nothing else is given. A paste is that descriptor opened again by
         the window the compositor answers READY to, which is only the window with the keys (or a popup of it), and only
         within COMPOSITOR_CLIP_GESTURE_NS of a key or a button of the person's on it: a window in the background, or
@@ -2923,7 +2924,22 @@ static struct
         unsigned int history_most, history_count;
         int history[COMPOSITOR_CLIP_HISTORY];
         int blank; // /dev/null, which holds a selection's number while there is no selection (compositor_clip_reserve)
+        const unsigned char *map[2]; // each selection's copy mapped whole and read-only while it is held: its types are read there
 } compositor_clip = {.door = -1, .fd = {-1, -1}, .blank = -1};
+
+// A selection's mapping let go, and the new one's made (0 for none: its types are then none).
+static void compositor_clip_mapped(unsigned int which, unsigned long size)
+{
+        long mapped;
+
+        if (compositor_clip.map[which])
+                compositor_call(syscall(munmap), (positive)compositor_clip.map[which], (positive)compositor.table->clip_length[which], 0, 0, 0, 0);
+        compositor_clip.map[which] = 0;
+        if (!size || compositor_clip.fd[which] < 0)
+                return;
+        mapped = compositor_call(syscall(mmap), 0, (positive)size, 1, 1, (positive)compositor_clip.fd[which], 0);
+        compositor_clip.map[which] = mapped < 0 && mapped > -4096 ? 0 : (const unsigned char *)mapped;
+}
 
 /*
         The selections' two numbers, WINDOWS_CLIP_FD and the next, are held from the start and for the session, by /dev/null
@@ -2986,6 +3002,7 @@ static void compositor_clip_clear(unsigned int which)
             (compositor_clip.blank < 0 ||
              compositor_call(syscall(dup3), (positive)compositor_clip.blank, (positive)compositor_clip.fd[which], O_CLOEXEC, 0, 0, 0) < 0))
                 system_close(compositor_clip.fd[which]);
+        compositor_clip_mapped(which, 0);
         compositor_clip.fd[which] = -1;
         compositor.table->clip_length[which] = 0;
         compositor.table->clip_owner[which] = -1;
@@ -3008,7 +3025,7 @@ static void compositor_clip_wipe(void)
         compositor_clip.history_count = 0;
 }
 
-// The settings: on or off, how many copies the history keeps (none by default), the limit in MiB (16 by default).
+// The settings: on or off, and how many copies the history keeps (none by default).
 #ifndef SHELL_NO_GPU
 // GPU rendering as the setting has it (alpha: off unless the file says on): what the compose path asks before it uses src/canvas/gpu.c.
 static int compositor_gpu = 0;
@@ -3052,10 +3069,6 @@ static void compositor_clip_settings(void)
                                                value <= COMPOSITOR_CLIP_HISTORY
                                            ? (unsigned int)value
                                            : 0;
-        compositor_word(SETTING_CLIPBOARD_LIMIT_PATH, word, sizeof(word));
-        compositor.table->clip_limit = compositor_setting_kept(SETTING_CLIPBOARD_LIMIT_PATH, word, &value) && value >= 1 && value <= 16
-                                           ? (unsigned int)value << 20
-                                           : WINDOWS_CLIP_LIMIT;
         if (!compositor.table->clip_on)
                 compositor_clip_wipe();
         while (compositor_clip.history_count > compositor_clip.history_most)
@@ -3063,10 +3076,10 @@ static void compositor_clip_settings(void)
 }
 
 /*
-        A memfd another process holds, opened and checked: its descriptor here and its length, or -1. Sealed against
-        every change of its bytes and size, no longer than the limit, and text a selection may hold.
+        A memfd another process holds, opened and checked: its descriptor here and its size, or -1. Sealed against
+        every change of its bytes and size, and a copy that holds together (windows_clip_valid), however large.
 */
-static int compositor_clip_open(unsigned int pid, int fd, unsigned int address_to length)
+static int compositor_clip_open(unsigned int pid, int fd, unsigned long address_to length)
 {
         char path[48];
         unsigned char info[256];
@@ -3104,14 +3117,13 @@ static int compositor_clip_open(unsigned int pid, int fd, unsigned int address_t
                 return -1;
         seals = compositor_call(syscall(fcntl), (positive)opened, WINDOWS_F_GET_SEALS, 0, 0, 0, 0);
         size = compositor_call(syscall(lseek), (positive)opened, 0, 2, 0, 0, 0);
-        if (seals < 0 || (seals & COMPOSITOR_CLIP_SEALS) != COMPOSITOR_CLIP_SEALS || size <= 0 ||
-            (unsigned long)size > compositor.table->clip_limit)
+        if (seals < 0 || (seals & COMPOSITOR_CLIP_SEALS) != COMPOSITOR_CLIP_SEALS || size <= 0)
         {
                 system_close((bipolar)opened);
                 return -1;
         }
         mapped = compositor_call(syscall(mmap), 0, (positive)size, 1, 2, (positive)opened, 0);
-        text = !(mapped < 0 && mapped > -4096) && windows_clip_text((const unsigned char *)mapped, (unsigned long)size);
+        text = !(mapped < 0 && mapped > -4096) && windows_clip_valid((const unsigned char *)mapped, (unsigned long)size);
         if (!(mapped < 0 && mapped > -4096))
                 compositor_call(syscall(munmap), (positive)mapped, (positive)size, 0, 0, 0, 0);
         if (!text)
@@ -3119,12 +3131,12 @@ static int compositor_clip_open(unsigned int pid, int fd, unsigned int address_t
                 system_close((bipolar)opened);
                 return -1;
         }
-        *length = (unsigned int)size;
+        *length = (unsigned long)size;
         return (int)opened;
 }
 
 // A checked memfd made selection which, owned by owner (a row, or -2 for the command line); watchers are told.
-static void compositor_clip_keep(unsigned int which, int opened, unsigned int length, int owner)
+static void compositor_clip_keep(unsigned int which, int opened, unsigned long length, int owner)
 {
         // The copy before it goes to the history, when one is kept: a descriptor of its own, newest first.
         if (which == WINDOWS_CLIP_CLIPBOARD && compositor_clip.fd[which] >= 0 && compositor_clip.history_most)
@@ -3145,7 +3157,9 @@ static void compositor_clip_keep(unsigned int which, int opened, unsigned int le
         // dup3 puts it at the selection's number, letting go of what was there in the same call.
         compositor_call(syscall(dup3), (positive)opened, WINDOWS_CLIP_FD + which, O_CLOEXEC, 0, 0, 0);
         system_close(opened);
+        compositor_clip_mapped(which, 0);
         compositor_clip.fd[which] = WINDOWS_CLIP_FD + (int)which;
+        compositor_clip_mapped(which, length);
         compositor.table->clip_length[which] = length;
         compositor.table->clip_owner[which] = owner;
         __atomic_add_fetch(&compositor.table->clip_serial[which], 1, __ATOMIC_RELEASE);
@@ -3206,7 +3220,8 @@ static void compositor_clip_door(int row)
         now = clock_monotonic_nanoseconds();
         if (offer != compositor_clip.offer_seen[row])
         {
-                unsigned int which = table->clip_offer_which[row] & 1u, length = 0;
+                unsigned int which = table->clip_offer_which[row] & 1u;
+                unsigned long length = 0;
                 int opened = -1;
 
                 compositor_clip.offer_seen[row] = offer;
@@ -3252,7 +3267,7 @@ static void compositor_clip_cli_read(void)
         serial = __atomic_load_n(&table->cli_serial, __ATOMIC_ACQUIRE);
         if (serial != compositor_clip.cli_seen)
         {
-                unsigned int length = 0;
+                unsigned long length = 0;
                 int opened = table->clip_on ? compositor_clip_open(table->cli_pid, (int)table->cli_fd, &length) : -1;
 
                 compositor_clip.cli_seen = serial;

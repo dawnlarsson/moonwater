@@ -313,7 +313,6 @@ ui_field_full	fe02	больше не помещается
 =Charge limit (20 to 100, or off)	c92d	Предел зарядки (от 20 до 100 или off)
 =Clipboard	99b1	Буфер обмена
 =Clipboard history (copies kept)	7423	История буфера обмена (хранимых копий)
-=Clipboard limit (MiB)	a505	Предел буфера обмена (MiB)
 =Clock	80fd	Часы
 =Clock format	70d0	Формат времени
 =Connect over	2789	Соединение через

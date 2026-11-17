@@ -878,17 +878,23 @@ The compositor (`src/canvas/compositor/manage.c`, `compositor_clip_*`) holds two
 selections: CLIPBOARD (copy and paste) and PRIMARY (the last selection, pasted
 with the middle button). Programs reach them through the window table
 (`src/canvas/window.c`, `windows_clip_*`); scripts through
-`moonwater clipboard`. The setting `moonwater canvas clipboard on|off`,
-`... history N` and `... limit MIB` govern it.
+`moonwater clipboard`; Wayland and X clients through the compositor's own data
+devices and the window manager of Xwayland, into the same two selections. The
+settings `moonwater canvas clipboard on|off` and `... history N` govern it.
 
 ### What it holds and where
 
-- Text only: `text/plain;charset=utf-8`, valid UTF-8 (shortest forms, no
-  surrogates), no NUL, at most the limit (16 MiB by default, 1 to 16).
-  Anything else is declined at the copy.
+- A copy of any types (`windows_clip_build`'s format: each type's bytes, then
+  an index of names, offsets and lengths, then a trailer), as large as the
+  kernel lets a memfd be: there is no limit of the clipboard's own. Its text is
+  the type `text/plain;charset=utf-8`, valid UTF-8 (shortest forms, no
+  surrogates), no NUL; a name is printable ASCII. A copy whose index does not
+  hold together, or whose text is not text, is declined at the copy.
 - A copy is a memfd the copying program makes and **seals** against growing,
-  shrinking and writing. The compositor opens it through `/proc/PID/fd`, checks
-  the seals, the size and the text, and keeps it at descriptor 900 (CLIPBOARD)
+  shrinking and writing (a Wayland or X client's is read into one the
+  compositor makes, every type its source offers, so it outlives the source).
+  The compositor opens it through `/proc/PID/fd`, checks
+  the seals and the index, and keeps it at descriptor 900 (CLIPBOARD)
   or 901 (PRIMARY), numbers nothing else is given. No byte is copied; the
   copying program cannot change the text after it was taken; the copy outlives
   the window that made it.
@@ -935,9 +941,11 @@ that the clipboard changed, never what it holds.
    (the shell's prompt) the text goes into the line being typed and nothing
    runs until Enter. Checked against a model of the filter and with the attack
    string; letting ESC through turns 4172 checks red.
-4. **Malformed or huge data.** A copy of invalid UTF-8, a NUL that truncates
-   the text for a C reader, or a gigabyte. Stopped at the compositor (and again
-   by the reader, `windows_clip_read`): checked, bounded, declined.
+4. **Malformed data.** A copy of invalid UTF-8, a NUL that truncates the text
+   for a C reader, an index that points past the bytes. Stopped at the
+   compositor (and again by the reader, `windows_clip_map`): checked, declined.
+   A copy's size is the kernel's to refuse (a memfd it cannot grow), never the
+   clipboard's.
 5. **Output of the command line.** `moonwater clipboard get` and `watch` print
    copied text, which is anybody's. To a terminal, C0 and C1 controls, DEL and
    the bidirectional controls (U+202A to U+202E, U+2066 to U+2069, U+200E,
@@ -954,10 +962,8 @@ that the clipboard changed, never what it holds.
 
 ### What is not done
 
-- Bowl programs (a desktop in a bowl, Wayland or X clients) have no access:
-  they run their own compositor and its clipboard. A bridge to a Wayland data
-  device is a decision for later.
-- Only text. No images, no rich text, no files.
+- Bowl programs (a desktop in a bowl) have no access: they run their own
+  compositor and its clipboard.
 - The terminal does not answer OSC 52 (a program setting the clipboard by an
   escape sequence); that would let anything printed to the terminal write the
   clipboard.

@@ -314,7 +314,6 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Charge limit (20 to 100, or off)	c92d	چارج کی حد (20 سے 100 یا off)
 =Clipboard	99b1	کلپ بورڈ
 =Clipboard history (copies kept)	7423	کلپ بورڈ کی تاریخ (محفوظ کی گئی کاپیاں)
-=Clipboard limit (MiB)	a505	کلپ بورڈ کی حد (MiB)
 =Clock	80fd	گھڑی
 =Clock format	70d0	وقت کی شکل
 =Connect over	2789	رابطے کا ذریعہ

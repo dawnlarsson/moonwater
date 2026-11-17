@@ -314,7 +314,6 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Charge limit (20 to 100, or off)	c92d	حد الشحن (من 20 إلى 100 أو off)
 =Clipboard	99b1	الحافظة
 =Clipboard history (copies kept)	7423	سجل الحافظة (النسخ المحفوظة)
-=Clipboard limit (MiB)	a505	حد الحافظة (MiB)
 =Clock	80fd	الساعة
 =Clock format	70d0	تنسيق الوقت
 =Connect over	2789	الاتصال عبر

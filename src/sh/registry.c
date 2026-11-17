@@ -138,7 +138,6 @@
 #define SETTING_CLIPBOARD_PATH "/root/canvas.clipboard"
 #define SETTING_GPU_PATH "/root/canvas.gpu"
 #define SETTING_CLIPBOARD_HISTORY_PATH "/root/canvas.clipboard.history"
-#define SETTING_CLIPBOARD_LIMIT_PATH "/root/canvas.clipboard.limit"
 // The sound server's (src/audio/service.c reads the first three again twice a second and writes the volume and the mute back when
 // a program changes them; the machine script reads the last when it starts the server).
 #define SETTING_AUDIO_VOLUME_PATH "/root/audio.volume"
@@ -404,11 +403,6 @@ static const struct settings_row settings_rows[] = {
                       .standard = "0", .unit = "copies", .low = 0, .high = 32,
                       .usage = "canvas clipboard history [N|default]",
                       .help = "copies the compositor keeps in memory, never on a disk, 0 to 32 [0]"),
-    SETTING_PLAIN_ROW(null, "Clipboard limit (MiB)", SETTINGS_SLIDER, 0, ("canvas", "clipboard", "limit"), "limit ", null,
-                      .type = SETTING_NUMBER, .path = SETTING_CLIPBOARD_LIMIT_PATH,
-                      .standard = "16", .unit = "MiB", .low = 1, .high = 16,
-                      .usage = "canvas clipboard limit [MIB|default]",
-                      .help = "the most one copy may be, 1 to 16 MiB [16]"),
     //  The Display group: the map above these rows (settings.c) shows the screens; the rows are for the screen chosen on it.
     //  The rotation and refresh are the table's, and each change is `canvas display NAME ...` run with the screen's name.
     {"Display", "Screen", SETTINGS_CHOICE, 0, 0, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,

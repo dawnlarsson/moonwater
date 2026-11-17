@@ -664,8 +664,8 @@ static b32 host_window(string_address address_to arguments, positive count)
         root's alone -- a script's door to what a person copied is a door to their passwords, and the table it goes
         through is root's. Alone it says what each selection holds (its length and who copied it, never the text); get
         writes the text (exactly, to a file or a pipe; to a terminal with its controls escaped); set copies TEXT, or
-        standard input, as a sealed memfd the compositor takes, and refuses what is over the limit rather than cutting
-        it; clear empties both and the history (canvas clipboard history N, which nothing reads back yet); watch says a
+        standard input, however long, as a copy of one text the compositor takes; clear empties both and the history
+        (canvas clipboard history N, which nothing reads back yet); watch says a
         line each time something is copied. What is printed to a terminal is escaped: C0 and C1 controls, DEL and the
         bidirectional overrides are \xNN or \u{N}, so copied text cannot move the cursor, retitle the window or reorder
         the line it is read on, and a line of watch is at most CLIP_LINE characters.
@@ -751,6 +751,20 @@ static b32 host_clip_cleared(const struct windows address_to table, unsigned int
         return !__atomic_load_n(&table->cli_clear, __ATOMIC_ACQUIRE);
 }
 
+// How many types a selection's copy has (0 for none, or a copy that cannot be read).
+static positive host_clip_types(const struct windows address_to table, unsigned int which)
+{
+        const p8 address_to file = windows_clip_map(table->clip_pid, which, table->clip_length[which]);
+        struct windows_clip_type type;
+        positive count = 0, cursor = 0;
+
+        while (file && windows_clip_next(file, table->clip_length[which], (unsigned long address_to)&cursor, &type))
+                count++;
+        if (file)
+                window_call(WINDOW_SYS_MUNMAP, (long)file, (long)table->clip_length[which], 0, 0, 0, 0);
+        return count;
+}
+
 // Who copied a selection: a window's title, the command line, or nobody now.
 static fn host_clip_owner(const struct windows address_to table, unsigned int which)
 {
@@ -812,13 +826,12 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
                                 string_format(log, "empty\n");
                         else
                         {
-                                string_format(log, "%p bytes, copied by ", (positive)table->clip_length[each]);
+                                string_format(log, "%p bytes of %p types, copied by ", (positive)table->clip_length[each], host_clip_types(table, each));
                                 host_clip_owner(table, each);
                                 string_format(log, "\n");
                         }
                 }
-                host_say(log, "  service %s, limit %p MiB\n", table->clip_on ? (string_address) "on" : (string_address) "off",
-                         (positive)(table->clip_limit >> 20));
+                host_say(log, "  service %s\n", table->clip_on ? (string_address) "on" : (string_address) "off");
         }
         else if (string_equals(verb, "get"))
         {
@@ -843,41 +856,38 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
         }
         else if (string_equals(verb, "set"))
         {
-                static p8 input[WINDOWS_CLIP_LIMIT + 1];
+                static p8 input[65536];
                 positive length = 0;
-                long fd;
+                long fd = window_call(WINDOW_SYS_MEMFD, (long)"moonwater-copy", WINDOWS_MFD_CLOEXEC | WINDOWS_MFD_SEALING, 0, 0, 0, 0), index = -1, text;
                 unsigned int serial;
+                int kept = fd >= 0; // 1 while the copy is whole, 0 when the memory was not there, 2 for no text
 
-                if (at < count)
-                        for (positive word = at; word < count; word++)
-                        {
-                                positive size = string_length(arguments[word]);
-
-                                // Words past the limit refuse the copy below, never copy a cut text.
-                                if (length + size + 1 > table->clip_limit)
-                                {
-                                        length = table->clip_limit + 1;
-                                        break;
-                                }
-                                if (word > at)
-                                        input[length++] = ' ';
-                                memory_copy(input + length, arguments[word], size);
-                                length += size;
-                        }
-                else
+                // The words, or standard input, into the copy's memfd as they come: as long as the memory holds.
+                for (positive word = at; kept && word < count; word++)
                 {
-                        bipolar got;
-
-                        while (length <= table->clip_limit && (got = system_read_once(0, input + length, sizeof(input) - length)) > 0)
-                                length += (positive)got;
+                        kept = (word == at || windows_clip_put(fd, " ", 1)) && windows_clip_put(fd, arguments[word], string_length(arguments[word]));
+                        length += string_length(arguments[word]) + (word > at);
                 }
-                if (!length)
-                        status = host_refuse("nothing to copy\n");
-                else if (length > table->clip_limit)
-                        status = host_refuse("more than the clipboard's limit of %p MiB\n", (positive)(table->clip_limit >> 20));
-                else if (!windows_clip_text(input, length))
+                for (bipolar got; kept && at >= count && (got = system_read_once(0, input, sizeof(input))) > 0; length += (positive)got)
+                        kept = windows_clip_put(fd, input, (positive)got);
+                text = kept && length ? window_call(WINDOW_SYS_MMAP, 0, (long)length, 1, 1, fd, 0) : -22;
+                if (!(text < 0 && text > -4096))
+                {
+                        kept = windows_clip_text((const p8 address_to)text, length) ? kept : 2;
+                        window_call(WINDOW_SYS_MUNMAP, text, (long)length, 0, 0, 0, 0);
+                }
+                if (kept == 1)
+                        index = window_call(WINDOW_SYS_MEMFD, (long)"moonwater-index", WINDOWS_MFD_CLOEXEC, 0, 0, 0, 0);
+                if (kept == 1 && length && !(index >= 0 && windows_clip_record(index, 0, length, WINDOWS_CLIP_TEXT, sizeof(WINDOWS_CLIP_TEXT) - 1) &&
+                                                 windows_clip_seal(fd, index, length, 1)))
+                        kept = 0;
+                if (index >= 0)
+                        window_call(WINDOW_SYS_CLOSE, index, 0, 0, 0, 0, 0);
+                if (kept == 2)
                         status = host_refuse("not text a clipboard holds: UTF-8 with no NUL\n");
-                else if ((fd = windows_clip_memfd(input, length)) < 0)
+                else if (kept && !length)
+                        status = host_refuse("nothing to copy\n");
+                else if (!kept)
                         status = host_refuse("no memory for the copy\n");
                 else
                 {
@@ -891,8 +901,9 @@ static b32 host_clipboard(string_address address_to arguments, positive count)
                                 status = host_refuse("the compositor refused it: the clipboard is off (moonwater canvas clipboard)\n");
                         else
                                 host_say(log, host_label "%p bytes copied to the %s\n", length, names[which]);
-                        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
                 }
+                if (fd >= 0)
+                        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
         }
         else if (string_equals(verb, "clear"))
         {

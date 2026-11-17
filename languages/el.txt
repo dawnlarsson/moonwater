@@ -313,7 +313,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Charge limit (20 to 100, or off)	c92d	Όριο φόρτισης (20 έως 100 ή off)
 =Clipboard	99b1	Πρόχειρο
 =Clipboard history (copies kept)	7423	Ιστορικό προχείρου (αντίγραφα που κρατούνται)
-=Clipboard limit (MiB)	a505	Όριο προχείρου (MiB)
 =Clock	80fd	Ρολόι
 =Clock format	70d0	Μορφή ώρας
 =Connect over	2789	Σύνδεση μέσω

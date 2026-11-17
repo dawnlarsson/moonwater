@@ -1871,6 +1871,139 @@ static positive te_paste_model(const p8 address_to text, positive length, p8 add
         return out;
 }
 
+// A copy made of raw bytes and an index of the records given (each an offset, a length and a name), sealed: to try what is refused.
+static long te_clip_raw(const p8 address_to bytes, positive length, const struct windows_clip_type address_to types, positive count, positive count_said)
+{
+        long fd = window_call(WINDOW_SYS_MEMFD, (long)"raw", WINDOWS_MFD_CLOEXEC | WINDOWS_MFD_SEALING, 0, 0, 0, 0);
+        long index = window_call(WINDOW_SYS_MEMFD, (long)"raw-index", WINDOWS_MFD_CLOEXEC, 0, 0, 0, 0);
+
+        windows_clip_put(fd, bytes, length);
+        for (positive at = 0; at < count; at++)
+                windows_clip_record(index, types[at].offset, types[at].length, types[at].name, types[at].name_length);
+        windows_clip_seal(fd, index, length, count_said);
+        window_call(WINDOW_SYS_CLOSE, index, 0, 0, 0, 0, 0);
+        return fd;
+}
+
+/*
+        A copy of any types, the format every kind of client's copy is held in: a program's of text, a picture and a list of files taken
+        and read back a type at a time, each name text goes by read as the text, the names it is offered under (the Wayland ones, X's
+        too), one far past the 16 MiB a copy once was at most taken whole, and copies that do not hold together declined.
+*/
+static fn te_clip_types(void)
+{
+        static const p8 png[] = "\x89PNG\r\n\x1a\n-not-text-\0-", uris[] = "file:///root/a.txt\r\nfile:///root/b.png\r\n", text[] = "two files";
+        struct windows_clip_part parts[3] = {{WINDOWS_CLIP_TEXT, text, sizeof(text) - 1}, {WINDOWS_CLIP_PNG, png, sizeof(png) - 1},
+                                             {WINDOWS_CLIP_URIS, uris, sizeof(uris) - 1}};
+        struct window_row own = {windows_scratch_table(&te_clip_table_scratch), 1, -1, -1, 0, 0, 0, 0, 0};
+        unsigned int which;
+        p8 address_to bytes;
+        unsigned long length;
+        const char address_to names[8];
+        positive offered = 0;
+
+        compositor_clip_gesture(0);
+        te_clip_offer(0, WINDOWS_CLIP_CLIPBOARD, windows_clip_build(parts, 3));
+        te_check(te_clip_event(0, &which) == WINDOWS_CLIP_TAKEN, "a copy of text, a picture and files is taken", 0);
+        compositor_clip_gesture(1);
+        te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
+        te_check(te_clip_event(1, &which) == WINDOWS_CLIP_READY, "and given to the window with the keys", 0);
+        te_check(windows_clip_read_type(&own, WINDOWS_CLIP_CLIPBOARD, WINDOWS_CLIP_PNG, &bytes, &length) == sizeof(png) - 1 &&
+                     !memory_compare(bytes, png, length),
+                 "its picture is read back whole, NUL and all", length);
+        windows_clip_free(bytes, length);
+        te_check(windows_clip_read_type(&own, WINDOWS_CLIP_CLIPBOARD, WINDOWS_CLIP_URIS, &bytes, &length) == sizeof(uris) - 1 &&
+                     !memory_compare(bytes, uris, length),
+                 "its files as text/uri-list", length);
+        windows_clip_free(bytes, length);
+        te_check(windows_clip_read_type(&own, WINDOWS_CLIP_CLIPBOARD, "UTF8_STRING", &bytes, &length) == sizeof(text) - 1 &&
+                     !memory_compare(bytes, text, length),
+                 "a name text goes by is its text", length);
+        windows_clip_free(bytes, length);
+        te_check(windows_clip_read_type(&own, WINDOWS_CLIP_CLIPBOARD, "image/jpeg", &bytes, &length) < 0 && !bytes, "a type it has not is nothing", 0);
+        for (positive nth = 0; nth < 8; nth++)
+        {
+                unsigned long n;
+
+                names[nth] = windows_clip_offered(compositor_clip.map[0], compositor.table->clip_length[0], nth, 1, &n);
+                offered += names[nth] != null;
+        }
+        te_check(offered == 7 && string_equals((string_address)names[1], WINDOWS_CLIP_PNG) && string_equals((string_address)names[3], "UTF8_STRING") &&
+                     string_equals((string_address)names[6], "STRING"),
+                 "it is offered as its three types, then UTF8_STRING, text/plain, TEXT and STRING to X", offered);
+        offered = 0;
+        for (positive nth = 0; nth < 8; nth++)
+        {
+                unsigned long n;
+
+                offered += windows_clip_offered(compositor_clip.map[0], compositor.table->clip_length[0], nth, 0, &n) != null;
+        }
+        te_check(offered == 5, "and as its three types with UTF8_STRING and text/plain to Wayland", offered);
+
+        // Far past 16 MiB: taken whole, its last byte read back.
+        {
+                positive size = 20u << 20;
+                long mapped = window_call(WINDOW_SYS_MMAP, 0, (long)size, 3, 0x22, -1, 0);
+                struct windows_clip_part big = {"application/octet-stream", (const void address_to)mapped, size};
+
+                ((p8 address_to)mapped)[size - 1] = 0x5a;
+                compositor_clip_gesture(0);
+                te_clip_offer(0, WINDOWS_CLIP_CLIPBOARD, windows_clip_build(&big, 1));
+                window_call(WINDOW_SYS_MUNMAP, mapped, (long)size, 0, 0, 0, 0);
+                te_check(te_clip_event(0, &which) == WINDOWS_CLIP_TAKEN && compositor.table->clip_length[0] > size, "a copy of 20 MiB is taken", 0);
+                compositor_clip_gesture(1);
+                te_clip_ask(1, WINDOWS_CLIP_CLIPBOARD);
+                te_check(te_clip_event(1, &which) == WINDOWS_CLIP_READY &&
+                             windows_clip_read_type(&own, WINDOWS_CLIP_CLIPBOARD, "application/octet-stream", &bytes, &length) == (long)size &&
+                             bytes[size - 1] == 0x5a,
+                         "and read back whole", length);
+                windows_clip_free(bytes, length);
+        }
+
+        // Copies that do not hold together.
+        {
+                static const p8 raw[] = "abcdefgh", bad_text[] = "a\xff";
+                struct windows_clip_type past = {4, 8, "x/y", 3}, fine = {0, 8, "x/y", 3}, blank = {0, 8, "x/\x01", 3}, texted = {0, 2, WINDOWS_CLIP_TEXT, 24};
+                struct
+                {
+                        const p8 address_to bytes;
+                        positive length;
+                        const struct windows_clip_type address_to type;
+                        positive count, said;
+                        const char address_to what;
+                } cases[] = {
+                    {raw, 8, &past, 1, 1, "a type past the copy's bytes is declined"},
+                    {raw, 8, &fine, 1, 2, "an index whose count is not its records is declined"},
+                    {raw, 8, &fine, 0, 0, "a copy of no type is declined"},
+                    {raw, 8, &blank, 1, 1, "a name with a control in it is declined"},
+                    {bad_text, 2, &texted, 1, 1, "text that is no UTF-8 is declined"},
+                };
+
+                for (p32 c = 0; c < sizeof(cases) / sizeof(cases[0]); c++)
+                {
+                        unsigned int before = compositor.table->clip_serial[0];
+                        long fd = te_clip_raw(cases[c].bytes, cases[c].length, cases[c].type, cases[c].count, cases[c].said);
+
+                        compositor_clip_gesture(3);
+                        te_clip_offer(3, WINDOWS_CLIP_CLIPBOARD, fd);
+                        te_check(te_clip_event(3, &which) == WINDOWS_CLIP_DECLINED && compositor.table->clip_serial[0] == before, cases[c].what, c);
+                        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+                }
+                {
+                        long fd = te_clip_raw(raw, 8, &fine, 1, 1);
+
+                        compositor_clip_gesture(3);
+                        te_clip_offer(3, WINDOWS_CLIP_CLIPBOARD, fd);
+                        te_check(te_clip_event(3, &which) == WINDOWS_CLIP_TAKEN, "and one made by hand that does is taken", 0);
+                        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+                }
+        }
+        // The copy of the first rows again, for what follows.
+        compositor_clip_gesture(0);
+        te_clip_offer(0, WINDOWS_CLIP_CLIPBOARD, windows_clip_memfd("hello, clipboard \xe2\x9c\x93", sizeof("hello, clipboard \xe2\x9c\x93") - 1));
+        te_clip_event(0, &which);
+}
+
 static fn te_clipboard(positive rounds)
 {
         unsigned int me = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0), which;
@@ -1882,7 +2015,6 @@ static fn te_clipboard(positive rounds)
         compositor.table = windows_scratch_table(&te_clip_table_scratch);
         windows_scratch_table(&te_clip_table_scratch)->clip_pid = me;
         windows_scratch_table(&te_clip_table_scratch)->clip_on = 1;
-        windows_scratch_table(&te_clip_table_scratch)->clip_limit = 4096;
         windows_scratch_table(&te_clip_table_scratch)->clip_owner[0] = windows_scratch_table(&te_clip_table_scratch)->clip_owner[1] = -1;
         for (unsigned int row = 0; row < 4; row++)
                 windows_scratch_table(&te_clip_table_scratch)->pid[row] = me;
@@ -1891,7 +2023,7 @@ static fn te_clipboard(positive rounds)
         // Taken after a gesture, read back by the row with the keys.
         compositor_clip_gesture(0);
         te_clip_offer(0, WINDOWS_CLIP_CLIPBOARD, windows_clip_memfd(hello, sizeof(hello) - 1));
-        te_check(te_clip_event(0, &which) == WINDOWS_CLIP_TAKEN && windows_scratch_table(&te_clip_table_scratch)->clip_length[0] == sizeof(hello) - 1 &&
+        te_check(te_clip_event(0, &which) == WINDOWS_CLIP_TAKEN && windows_scratch_table(&te_clip_table_scratch)->clip_length[0] > sizeof(hello) - 1 &&
                      windows_scratch_table(&te_clip_table_scratch)->clip_owner[0] == 0,
                  "a copy after a gesture is taken", windows_scratch_table(&te_clip_table_scratch)->clip_length[0]);
         compositor_clip_gesture(1);
@@ -1922,7 +2054,6 @@ static fn te_clipboard(positive rounds)
         // Declined copies.
         {
                 static const p8 nul[] = "a\0b", bad[] = "a\xff", overlong[] = "a\xc0\xaf";
-                static p8 large[5000];
                 struct
                 {
                         const p8 address_to bytes;
@@ -1932,10 +2063,9 @@ static fn te_clipboard(positive rounds)
                 } cases[] = {
                     {hello, 5, false, true, "an unsealed memfd is declined"},  {nul, 3, true, true, "a NUL is declined"},
                     {bad, 2, true, true, "a byte that is not UTF-8 is declined"}, {overlong, 3, true, true, "an overlong form is declined"},
-                    {large, sizeof(large), true, true, "past the limit is declined"}, {hello, 5, true, false, "a copy with no gesture is declined"},
+                    {hello, 5, true, false, "a copy with no gesture is declined"},
                 };
 
-                memory_fill(large, 'x', sizeof(large));
                 for (p32 c = 0; c < sizeof(cases) / sizeof(cases[0]); c++)
                 {
                         unsigned int before = windows_scratch_table(&te_clip_table_scratch)->clip_serial[0];
@@ -1950,6 +2080,7 @@ static fn te_clipboard(positive rounds)
                         window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
                 }
         }
+        te_clip_types();
         /*
                 A copy that names a descriptor which is no file to read: a FIFO its program holds open for reading with no
                 writer, which the compositor's open for reading (through /proc) waits on for ever, and the desktop with it. (An
@@ -1996,7 +2127,7 @@ static fn te_clipboard(positive rounds)
         }
         // A window gone leaves its copy, owned by nobody; off empties everything and refuses.
         compositor_clip_leave(0);
-        te_check(windows_scratch_table(&te_clip_table_scratch)->clip_owner[0] == -1 && windows_scratch_table(&te_clip_table_scratch)->clip_length[0] == sizeof(hello) - 1, "a copy outlives its window", 0);
+        te_check(windows_scratch_table(&te_clip_table_scratch)->clip_owner[0] == -1 && windows_scratch_table(&te_clip_table_scratch)->clip_length[0] > sizeof(hello) - 1, "a copy outlives its window", 0);
         windows_scratch_table(&te_clip_table_scratch)->clip_on = 0;
         compositor_clip_wipe();
         compositor_clip_gesture(1);

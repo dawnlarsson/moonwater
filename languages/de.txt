@@ -313,7 +313,6 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Charge limit (20 to 100, or off)	c92d	Ladegrenze (20 bis 100 oder off)
 =Clipboard	99b1	Zwischenablage
 =Clipboard history (copies kept)	7423	Verlauf der Zwischenablage (gemerkte Kopien)
-=Clipboard limit (MiB)	a505	Grenze der Zwischenablage (MiB)
 =Clock	80fd	Uhr
 =Clock format	70d0	Uhrzeitformat
 =Connect over	2789	Verbindung über
