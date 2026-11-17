@@ -755,6 +755,48 @@ static b32 host_canvas_record(string_address address_to arguments, positive coun
         return 0;
 }
 
+/*
+        moonwater canvas shot: the screen as the compositor last composed it, whichever of the card or the processor did, written by the
+        compositor at its next look (src/canvas/record.h) to /run/moonwater/record/frame-SEQ-shot.ppm (the owner's alone: it is the screen).
+        This asks for it, waits up to five seconds for the file and says where it is.
+*/
+static bool host_canvas_shot_newest(string_address directory, string_address name, address_any context)
+{
+        p8 address_to newest = context;
+        positive length = string_length(name);
+
+        (void)directory;
+        //      The frame's number has no leading zeros: a longer name is a later frame.
+        if (length > 9 && length < 96 && string_equals(name + length - 9, "-shot.ppm") &&
+            (length > string_length((string_address)newest) ||
+             (length == string_length((string_address)newest) && string_compare(name, (string_address)newest) > 0)))
+                string_copy_bounded(newest, name, 96);
+        return true;
+}
+
+static b32 host_canvas_shot(positive count)
+{
+        p8 before[96] = "", after[96] = "";
+
+        return_if(count != 3, host_usage());
+        host_need_root();
+        host_each_entry((string_address)HOST_RECORD_DIR, host_canvas_shot_newest, before);
+        if (host_write_file((string_address)HOST_RECORD_DIR "/shot", (p8 address_to) "1\n", 2, 0644, false) < 0)
+                return host_refuse("the desktop is not running: the compositor's record is not there (%s)\n", (string_address)HOST_RECORD_DIR);
+        for (positive wait = 0; wait < 50; wait++)
+        {
+                host_pause(100000000);
+                string_copy(after, before);
+                host_each_entry((string_address)HOST_RECORD_DIR, host_canvas_shot_newest, after);
+                if (!string_equals((string_address)after, (string_address)before))
+                {
+                        host_say(log, "%s/%s\n", (string_address)HOST_RECORD_DIR, (string_address)after);
+                        return 0;
+                }
+        }
+        return host_refuse("the compositor wrote no shot in five seconds (it writes one at a present: nothing on the screen moved)\n");
+}
+
 static b32 host_canvas(string_address address_to arguments, positive count)
 {
         struct canvas_control control;
@@ -776,6 +818,8 @@ static b32 host_canvas(string_address address_to arguments, positive count)
                 return host_canvas_identify(count);
         if (count >= 3 && string_equals(arguments[2], "record"))
                 return host_canvas_record(arguments, count);
+        if (count >= 3 && string_equals(arguments[2], "shot"))
+                return host_canvas_shot(count);
 
         return_if(count > 3, host_usage());
 

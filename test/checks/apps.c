@@ -9023,7 +9023,7 @@ static void record_rows(void)
 
         // A frame file is the screen's pixels, so it is the owner's alone. The directory is /run/moonwater/record, which only a privileged run makes:
         // where it can be written the mode is checked, and where it cannot it is said so.
-        compositor_record_write_ppm(large, 2, 2, 4294967u, "check");
+        compositor_record_write_ppm(large, 2, 2, 2, 4294967u, "check");
         if (system_stat_at(AT_FDCWD, (string_address)path, 0, 0x7ffu, st) != 0)
                 string_format(log, "  record: %s is not writable here: the frame file's mode is not checked\n", (string_address)COMPOSITOR_RECORD_DIR);
         else

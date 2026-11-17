@@ -374,7 +374,8 @@ static unsigned int compositor_record_number(char *to, unsigned int at, unsigned
 }
 
 // frame-SEQ-CLASS.ppm: the frame as a binary PPM (P6), its pixels' red, green and blue; written a row at a time, in chunks.
-static void compositor_record_write_ppm(const unsigned int *pixels, unsigned int width, unsigned int height, unsigned int seq, const char *cls)
+static void compositor_record_write_ppm(const unsigned int *pixels, unsigned int width, unsigned int height, unsigned long pitch, unsigned int seq,
+                                        const char *cls)
 {
         char path[160], head[64];
         unsigned char chunk[768];
@@ -404,7 +405,7 @@ static void compositor_record_write_ppm(const unsigned int *pixels, unsigned int
 
                         while (count < 256 && x < width)
                         {
-                                unsigned int pixel = pixels[y * width + x++];
+                                unsigned int pixel = pixels[y * pitch + x++];
 
                                 chunk[3 * count] = (unsigned char)(pixel >> 16);
                                 chunk[3 * count + 1] = (unsigned char)(pixel >> 8);
@@ -455,13 +456,13 @@ static void compositor_record_classify(struct compositor_record_shot *s, const s
 
                         compositor_record_classed[c]++;
                         if (kept)
-                                compositor_record_write_ppm(s->pixels, width, height, s->seq, compositor_record_class_name[c]),
+                                compositor_record_write_ppm(s->pixels, width, height, width, s->seq, compositor_record_class_name[c]),
                                     compositor_record_class_written[c]++;
                         // A tear is kept with the frames either side of it, so the splice can be read against them.
                         if (kept && c == COMPOSITOR_RECORD_TEAR)
                         {
-                                compositor_record_write_ppm(p->pixels, width, height, p->seq, "tear-before");
-                                compositor_record_write_ppm(n->pixels, width, height, n->seq, "tear-after");
+                                compositor_record_write_ppm(p->pixels, width, height, width, p->seq, "tear-before");
+                                compositor_record_write_ppm(n->pixels, width, height, width, n->seq, "tear-after");
                         }
                         if (compositor_record_event_count < COMPOSITOR_RECORD_EVENTS)
                         {
@@ -647,6 +648,8 @@ static void compositor_record_report(void)
 */
 #define COMPOSITOR_RECORD_SETTLE_NS 50000000ll
 static long long compositor_record_seen, compositor_record_read_at;
+// moonwater canvas shot asked for the screen as it is: the next present writes it (frame-SEQ-shot.ppm), whatever the card or the processor composed.
+static int compositor_record_shot_wanted;
 
 static int compositor_record_look_wanted(long long mtime, long long seen, long long read_at)
 {
@@ -683,6 +686,13 @@ static void compositor_record_look(unsigned long long now)
         compositor_record_seen = mtime, compositor_record_read_at = (long long)real.tv_sec * 1000000000ll + real.tv_nsec;
         if (!mtime)
                 compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR, 0755, 0, 0, 0);
+        handle = (long)system_open_at(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/shot", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        if (handle >= 0)
+        {
+                system_close(handle);
+                compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)COMPOSITOR_RECORD_DIR "/shot", 0, 0, 0, 0);
+                compositor_record_shot_wanted = 1;
+        }
         handle = (long)system_open_at(AT_FDCWD, (string_address)COMPOSITOR_RECORD_DIR "/start", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
         if (handle >= 0)
         {
@@ -720,6 +730,12 @@ static void compositor_record_present(unsigned long long began, unsigned long lo
                 compositor_record_look(ended);
         if (compositor_record_until && compositor_record_mark.damaged)
                 compositor_record_capture(ended);
+        if (compositor_record_shot_wanted && compositor.scanout)
+        {
+                compositor_record_shot_wanted = 0;
+                compositor_record_write_ppm(compositor.scanout, compositor.width, compositor.height, compositor.scanout_pitch / 4,
+                                            (unsigned int)compositor_records_all, "shot");
+        }
         if (compositor_record_until && ended >= compositor_record_until)
         {
                 compositor_record_until = 0;
