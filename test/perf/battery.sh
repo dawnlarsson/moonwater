@@ -18,6 +18,9 @@ for d in /proc/[0-9]*; do
 done
 sleep 2
 rm -rf /tmp/cperf-auto
+# What is typed into the omnibox stays on the machine: no search suggestions asked of the search engine as the keys go in.
+mkdir -p /tmp/cperf-auto/Default
+printf '{"search":{"suggest_enabled":false},"alternate_error_pages":{"enabled":false},"safebrowsing":{"enabled":false}}' > /tmp/cperf-auto/Default/Preferences
 (chrome --remote-debugging-port=9222 --user-data-dir=/tmp/cperf-auto --no-first-run --no-default-browser-check about:blank > "$out/chrome.log" 2>&1 < /dev/null &)
 sleep 8
 : > /tmp/cperf/battery.run
