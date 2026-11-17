@@ -630,6 +630,11 @@ static int compositor_lent(int row)
         (void)row;
         return 0;
 }
+static int compositor_lent_swap(int row)
+{
+        (void)row;
+        return 0;
+}
 static unsigned int compositor_lent_fb(int row)
 {
         (void)row;
