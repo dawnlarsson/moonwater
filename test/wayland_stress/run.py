@@ -823,7 +823,7 @@ def soak(args, comp):
 
 
 X_CASES = ["x-many-windows", "x-windows-2000", "x-override-stacking", "x-grab-then-killed", "x-property-flood", "x-transient-chain", "x-selection-race",
-           "x-argb-overlay-toggle"]
+           "x-argb-overlay-toggle", "x-dnd"]
 
 
 def x_alive(args, comp, xs):
@@ -836,6 +836,8 @@ def x_edge(args, comp, xs):
     """The X edge cases (x-stress -m CASE), each judged as wl-edge's are, and Xwayland killed and started again."""
     out = {}
     env = {"DISPLAY": comp.display}
+    if comp.fifo:
+        env["STRESS_FIFO"] = comp.fifo  # the X cases that need a hand (x-dnd) write the compositor's -i device, as wl-edge does
     for name in X_CASES:
         if args.edge and name not in args.edge:
             continue

@@ -4,6 +4,7 @@
 
             x-stress -m anim [-t SECONDS] [-w W] [-h H]
             x-stress -m overlay [-t SECONDS] [-w W] [-h H]
+            x-stress -m x-CASE (the X edge cases; x-dnd needs STRESS_FIFO, the compositor's -i device)
 
         anim draws a frame into one of two pixmaps and shows it with the Present extension (PresentPixmap, what Mesa's
         DRI3 and Present loader does for a vsynced GL swap), the next frame at the CompleteNotify of the last, and says
@@ -22,6 +23,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <math.h>
@@ -339,6 +341,170 @@ static Window x_window(Display *dpy, int x, int y, int w, int h, unsigned long c
         return win;
 }
 
+/*
+        x-dnd: XDND (version 5) between two X windows of this client, through the compositor's pointer: the hand is put on the source (A) by
+        the motions STRESS_FIFO is written (an evdev pair of the compositor's -i device, as wl-edge writes), the button pressed, moved
+        right over the target (B, XdndAware) and let go. The source owns XdndSelection and sends XdndEnter, XdndPosition and XdndDrop to
+        whatever X window with XdndAware is under the pointer as the X server has it; the target answers XdndStatus, converts the
+        selection at the drop and says XdndFinished. The detail says how far it went: the hand on A, the X window under it at the end of
+        the motion (B, root, other), entered, accepted, dropped, the text read, finished.
+*/
+static int x_fifo = -1;
+static void x_inject(int type, int code, int value)
+{
+        struct
+        {
+                int64_t sec, usec;
+                uint16_t type, code;
+                int32_t value;
+        } e[2];
+        uint64_t t = now_ns();
+        memset(e, 0, sizeof(e));
+        e[0].sec = (int64_t)(t / 1000000000ull), e[0].usec = (int64_t)(t % 1000000000ull / 1000);
+        e[0].type = (uint16_t)type, e[0].code = (uint16_t)code, e[0].value = value;
+        e[1].sec = e[0].sec, e[1].usec = e[0].usec;
+        if (x_fifo >= 0 && write(x_fifo, e, sizeof(e)) < 0)
+                return;
+}
+
+static void x_client_message(Display *dpy, Window to, Atom type, long l0, long l1, long l2, long l3, long l4)
+{
+        XEvent e = {0};
+        e.xclient.type = ClientMessage, e.xclient.window = to, e.xclient.message_type = type, e.xclient.format = 32;
+        e.xclient.data.l[0] = l0, e.xclient.data.l[1] = l1, e.xclient.data.l[2] = l2, e.xclient.data.l[3] = l3, e.xclient.data.l[4] = l4;
+        XSendEvent(dpy, to, False, NoEventMask, &e);
+}
+
+static int x_dnd(Display *dpy, char *detail, size_t room)
+{
+        const char *fifo = getenv("STRESS_FIFO");
+        Atom aware = XInternAtom(dpy, "XdndAware", False), enter = XInternAtom(dpy, "XdndEnter", False), position = XInternAtom(dpy, "XdndPosition", False);
+        Atom status = XInternAtom(dpy, "XdndStatus", False), leave = XInternAtom(dpy, "XdndLeave", False), drop = XInternAtom(dpy, "XdndDrop", False);
+        Atom finished = XInternAtom(dpy, "XdndFinished", False), selection = XInternAtom(dpy, "XdndSelection", False);
+        Atom copy = XInternAtom(dpy, "XdndActionCopy", False), utf8 = XInternAtom(dpy, "UTF8_STRING", False), prop = XInternAtom(dpy, "XSTRESS_DND", False);
+        Window root = DefaultRootWindow(dpy), a, b, over = None, rr, child;
+        long version = 5;
+        int ax, ay, bx, by, rx = 0, ry = 0, wx, wy, on_a = 0, entered = 0, accepted = 0, dropped = 0, done = 0, text_ok = 0;
+        unsigned int mask;
+
+        if (!fifo || (x_fifo = open(fifo, O_WRONLY | O_NONBLOCK)) < 0)
+        {
+                snprintf(detail, room, "no_STRESS_FIFO");
+                return 3;
+        }
+        // Override-redirect, so each is where it was made: the window manager places a normal window as it likes (both at one place here).
+        a = x_window(dpy, 100, 200, 300, 200, 0x406080u, 1);
+        b = x_window(dpy, 520, 200, 300, 200, 0x608040u, 1);
+        XSelectInput(dpy, a, ButtonPressMask | ButtonReleaseMask | PointerMotionMask);
+        XSelectInput(dpy, b, PointerMotionMask);
+        XChangeProperty(dpy, b, aware, XA_ATOM, 32, PropModeReplace, (unsigned char *)&version, 1);
+        XSync(dpy, False);
+        usleep(600000);
+        XTranslateCoordinates(dpy, a, root, 0, 0, &ax, &ay, &child);
+        XTranslateCoordinates(dpy, b, root, 0, 0, &bx, &by, &child);
+        // The hand to the top left, then along the diagonal until the X server has it over A.
+        for (int i = 0; i < 40; i++)
+                x_inject(2, 0, -100), x_inject(2, 1, -100);
+        for (int i = 0; i < 400 && !on_a; i++)
+        {
+                x_inject(2, 0, 6), x_inject(2, 1, 6);
+                usleep(4000);
+                XQueryPointer(dpy, root, &rr, &child, &rx, &ry, &wx, &wy, &mask);
+                on_a = child == a && rx > ax + 20 && ry > ay + 20;
+        }
+        if (!on_a)
+        {
+                snprintf(detail, room, "the_hand_never_reached_the_source_(a_at_%d,%d_b_at_%d,%d_pointer_%d,%d_under_%s)", ax, ay, bx, by, rx, ry,
+                         child == b ? "B" : child == None ? "none" : "other");
+                return 0;
+        }
+        x_inject(1, 272, 1);
+        usleep(60000);
+        XSetSelectionOwner(dpy, selection, a, CurrentTime);
+        for (int i = 0; i < 200 && !(accepted && over == b && rx > bx + 40); i++)
+        {
+                x_inject(2, 0, 6);
+                usleep(5000);
+                XQueryPointer(dpy, root, &rr, &child, &rx, &ry, &wx, &wy, &mask);
+                if (child != over)
+                {
+                        if (over != None && entered)
+                                x_client_message(dpy, over, leave, (long)a, 0, 0, 0, 0), entered = 0, accepted = 0;
+                        over = child;
+                        Atom type;
+                        int format;
+                        unsigned long count, after;
+                        unsigned char *data = NULL;
+                        if (over != None && XGetWindowProperty(dpy, over, aware, 0, 1, False, XA_ATOM, &type, &format, &count, &after, &data) == Success &&
+                            count == 1)
+                                x_client_message(dpy, over, enter, (long)a, 5L << 24, (long)utf8, 0, 0), entered = 1;
+                        if (data)
+                                XFree(data);
+                }
+                if (entered)
+                        x_client_message(dpy, over, position, (long)a, 0, (long)rx << 16 | ry, CurrentTime, (long)copy);
+                XFlush(dpy);
+                while (XPending(dpy))
+                {
+                        XEvent e;
+                        XNextEvent(dpy, &e);
+                        if (e.type == ClientMessage && e.xclient.window == b && (Atom)e.xclient.message_type == position)
+                                x_client_message(dpy, (Window)e.xclient.data.l[0], status, (long)b, 1, 0, 0, (long)copy);
+                        else if (e.type == ClientMessage && e.xclient.window == a && (Atom)e.xclient.message_type == status)
+                                accepted = e.xclient.data.l[1] & 1;
+                }
+        }
+        x_inject(1, 272, 0);
+        if (entered && accepted)
+                x_client_message(dpy, over, drop, (long)a, 0, CurrentTime, 0, 0), dropped = 1;
+        else if (entered)
+                x_client_message(dpy, over, leave, (long)a, 0, 0, 0, 0);
+        XFlush(dpy);
+        for (uint64_t end = now_ns() + 2000000000ull; dropped && !done && now_ns() < end;)
+        {
+                if (!XPending(dpy))
+                {
+                        usleep(2000);
+                        continue;
+                }
+                XEvent e;
+                XNextEvent(dpy, &e);
+                if (e.type == ClientMessage && e.xclient.window == b && (Atom)e.xclient.message_type == drop)
+                        XConvertSelection(dpy, selection, utf8, prop, b, CurrentTime);
+                else if (e.type == SelectionRequest)
+                {
+                        XSelectionEvent n = {0};
+                        static const char text[] = "dragged text";
+                        XChangeProperty(dpy, e.xselectionrequest.requestor, e.xselectionrequest.property, utf8, 8, PropModeReplace, (const unsigned char *)text,
+                                        (int)strlen(text));
+                        n.type = SelectionNotify, n.requestor = e.xselectionrequest.requestor, n.selection = e.xselectionrequest.selection;
+                        n.target = e.xselectionrequest.target, n.property = e.xselectionrequest.property, n.time = e.xselectionrequest.time;
+                        XSendEvent(dpy, n.requestor, False, NoEventMask, (XEvent *)&n);
+                }
+                else if (e.type == SelectionNotify && e.xselection.requestor == b)
+                {
+                        Atom type;
+                        int format;
+                        unsigned long count, after;
+                        unsigned char *data = NULL;
+                        if (e.xselection.property != None &&
+                            XGetWindowProperty(dpy, b, prop, 0, 64, True, AnyPropertyType, &type, &format, &count, &after, &data) == Success && data)
+                                text_ok = count == 12 && !memcmp(data, "dragged text", 12);
+                        if (data)
+                                XFree(data);
+                        x_client_message(dpy, (Window)a, finished, (long)b, 1, (long)copy, 0, 0);
+                }
+                else if (e.type == ClientMessage && e.xclient.window == a && (Atom)e.xclient.message_type == finished)
+                        done = 1;
+                else if (e.type == ClientMessage && e.xclient.window == b && (Atom)e.xclient.message_type == position)
+                        x_client_message(dpy, (Window)e.xclient.data.l[0], status, (long)b, 1, 0, 0, (long)copy);
+                XFlush(dpy);
+        }
+        snprintf(detail, room, "a_at=%d,%d_b_at=%d,%d_pointer=%d,%d_under=%s_entered=%d_accepted=%d_dropped=%d_text=%d_finished=%d", ax, ay, bx, by, rx, ry,
+                 over == b ? "B" : over == a ? "A" : over == None ? "none" : "other", entered, accepted, dropped, text_ok, done);
+        return text_ok && done ? 1 : 0;
+}
+
 static int run_xcase(Display *dpy, const char *name)
 {
         char detail[160] = "-";
@@ -458,6 +624,21 @@ static int run_xcase(Display *dpy, const char *name)
                 XDestroyWindow(dpy, w[1]);
                 XSync(dpy, False);
                 usleep(300000);
+        }
+        else if (!strcmp(name, "x-dnd"))
+        {
+                int got = x_dnd(dpy, detail, sizeof(detail));
+
+                if (got == 3)
+                {
+                        printf("CASE %s outcome=skip ms=-1 detail=%s\n", name, detail);
+                        return 0;
+                }
+                if (!got)
+                {
+                        printf("CASE %s outcome=fail ms=%.3f detail=%s\n", name, (double)(now_ns() - x_t0) / 1e6, detail);
+                        return 0;
+                }
         }
         else if (!strcmp(name, "x-selection-race"))
         {

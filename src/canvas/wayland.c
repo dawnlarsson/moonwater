@@ -7079,7 +7079,10 @@ static int wayland_receive(struct wayland_client *c, struct wayland_object *self
         version 3): the target is told drop and the source dnd_drop_performed, and the target's receive hands its descriptor to the
         source's send as it is (no byte passes through the compositor), and its finish is the source's dnd_finished. Let go
         anywhere else, Escape, the source or either client gone: the source is told cancelled and the target left. A drag with no
-        source is the client's own: only its own surfaces are entered, and nothing is carried. Xwayland bridges XDND to this itself.
+        source is the client's own: only its own surfaces are entered, and nothing is carried. XDND between X windows is the X server's
+        own and works (the stress bench's x-dnd); between an X window and a Wayland one nothing crosses: Xwayland has no data device
+        (it binds no wl_data_device_manager), so a drag over its surface enters nothing, and an X drag over a Wayland surface finds no
+        XdndAware window. The bridge is the window manager's (xwm.c), as Mutter's and wlroots' are, and it has none yet.
 */
 #define WAYLAND_DRAG_ACTIONS 7u
 #define WAYLAND_DRAG_ANSWER_MS 1000
