@@ -40,9 +40,18 @@ CONFIG_MOONWATER_CANVAS=y
 # one: a device with nothing to say answers the controller's poll with a NAK
 # in hardware and the CPU hears of it only when a report arrives, so an idle
 # machine sleeps as it did and what is paid is the controller's polling
-# while a device is plugged in. jspoll is left to the device (a gamepad's
-# reports are not a pointer's). A machine that would rather have the device's
-# own interval says `#> cmdline -usbhid.mousepoll=1 -usbhid.kbpoll=1`.
+# while a device is plugged in. usbhid.jspoll=1 does the same for a pad or a
+# joystick that usbhid drives (a DualSense, a DualShock 4, a Switch Pro
+# Controller, an 8BitDo or any HID gamepad on its cable: Xbox pads are xpad's
+# and keep their own): a DualShock 4 or a DualSense asks for 4 ms or 5, so a press
+# waited up to that for the next poll and half of it on the average, and is heard
+# within one now. Those two report every poll whatever they do (their
+# motion sensors are in every report), so it is a thousand reports a second
+# while it is plugged in where it was 250: the kernel's handlers and a reader
+# of the pad hear each, and nothing else does (the compositor does not open a
+# pad, window_input_game). A machine that would rather have the device's own
+# interval says `#> cmdline -usbhid.mousepoll=1 -usbhid.kbpoll=1
+# -usbhid.jspoll=1`.
 #
 # The command line for the image is every profile's `#> cmdline` words, in the
 # order the profiles are composed (build.c writes the one CONFIG_CMDLINE from
@@ -84,7 +93,7 @@ CONFIG_CMDLINE_BOOL=y
 # above 4 GiB; with SWIOTLB_DYNAMIC, in the any profile, a device that runs
 # the pool dry gets another made for it.
 #
-#> cmdline drm_client_lib.active= usbhid.mousepoll=1 usbhid.kbpoll=1 intel_pstate=active amd_pstate=active intel_pstate.hwp_dynamic_boost=1 thash_entries=4096 uhash_entries=1024 mhash_entries=4096 mphash_entries=4096 swiotlb=1024
+#> cmdline drm_client_lib.active= usbhid.mousepoll=1 usbhid.kbpoll=1 usbhid.jspoll=1 intel_pstate=active amd_pstate=active intel_pstate.hwp_dynamic_boost=1 thash_entries=4096 uhash_entries=1024 mhash_entries=4096 mphash_entries=4096 swiotlb=1024
 
 #
 # Core modesetting
