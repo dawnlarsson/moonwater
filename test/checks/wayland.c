@@ -2183,6 +2183,28 @@ static void test_pacing(void)
                 "and is made at its time, which is the commit's, in nanoseconds");
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         WLCHECK(wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 0, "and it is for that commit only");
+        // With the vblank the next latch shows at known (wayland_target), a commit for that vblank is made now, to be shown at it, and one
+        // for the vblank after it waits until a refresh before that.
+        wayland_target(6000000000ul, 6957000ul);
+        wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 6ul, 0ul);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && !wayland_stalled(c->slot) && wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 6000000000ul,
+                "a commit for the vblank the next latch shows at is made at once, though the clock has not reached it");
+        wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 6ul, 500000ul);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(!wayland_stalled(c->slot), "and so is one for a time within an eighth of a refresh after it");
+        wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 6ul, 6957000ul);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        {
+                long fd;
+
+                WLCHECK(wayland_stalled(c->slot) && wayland_stall_due(c->slot, &fd) == 6000, "one for the vblank after waits, until that next latch (%ld)",
+                        wayland_stall_due(c->slot, &fd));
+        }
+        wayland_target(6006957000ul, 6957000ul);
+        WLCHECK(wayland_resume(c->slot) == 0 && !wayland_stalled(c->slot) && wayland_row_hint(0, WAYLAND_HINT_TIMESTAMP) == 6006957000ul,
+                "and is made when the next latch shows at its vblank");
+        wayland_target(0ul, 0ul);
         wlc_send(c, timer, WLQ_wp_commit_timer_v1_set_timestamp, 0ul, 5ul, 1000000000ul);
         WLCHECK(c->errors == 1 && c->error_code == WLN_wp_commit_timer_v1_error_invalid_timestamp,
                 "a second of nanoseconds or more is invalid_timestamp");
@@ -2293,6 +2315,19 @@ static void test_barrier(void)
         WLCHECK(wayland_resume(c->slot) == 0 && c->errors == 0 && !wayland_stalled(c->slot) && wayland_row_hint(0, WAYLAND_HINT_FIFO) == 1,
                 "the next frame clears the barrier, and the held commit is made");
         WLCHECK(!wayland_frame_wanted(), "and no frame is wanted after it");
+
+        // A barrier set while a latched frame is composed is the next frame's: that frame's end does not clear it, the next latch does.
+        wayland_latch();
+        wlc_send(c, fifo, WLQ_wp_fifo_v1_set_barrier);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_send(c, fifo, WLQ_wp_fifo_v1_wait_barrier);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && wayland_stalled(c->slot), "a barrier set while a frame is in flight holds the commit that waits for it");
+        wayland_frame();
+        WLCHECK(wayland_resume(c->slot) == 1 && wayland_stalled(c->slot), "the end of the frame that did not latch it does not clear it");
+        wayland_latch();
+        WLCHECK(wayland_resume(c->slot) == 0 && !wayland_stalled(c->slot), "the next latch does, and the held commit is made");
+        wayland_frame();
 
         plain = wlc_id(c, WLI_wl_surface, 6);
         wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, plain);
@@ -2864,13 +2899,13 @@ static void test_presentation(void)
         WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 0,
                 "a feedback waits for the frame its commit is drawn in, and a timer's frame answers none");
         wlc_forget(c);
-        wayland_presented(5000000123ul, 16666667ul, 7, 0ul);
+        wayland_presented(5000000123ul, 16666667ul, 7, 0ul, -1L);
         wlc_pump(c);
         a = event_at(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented, 0);
         WLCHECK(a >= 0 && c->ev[a].u[0] == 0 && c->ev[a].u[1] == 5 && c->ev[a].u[2] == 123 && c->ev[a].u[3] == 16666667 &&
                     c->ev[a].u[4] == 0 && c->ev[a].u[5] == 7 && c->ev[a].u[6] == 0,
                 "a drawn frame presents it: the seconds split in two, the nanoseconds, the period, the count, no flags");
-        wayland_presented(6000000000ul, 16666667ul, 8, 7ul);
+        wayland_presented(6000000000ul, 16666667ul, 8, 7ul, -1L);
         wlc_pump(c);
         WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 1,
                 "the object is let go by its event: a later frame answers no one");
@@ -2887,11 +2922,67 @@ static void test_presentation(void)
         WLCHECK(!wayland_frame_wanted(), "a window put away with a feedback waiting asks for no frame");
         fake.row[0].states &= ~(long)WAYLAND_STATE_SUSPENDED;
         wlc_forget(c);
-        wayland_presented_idle(7000000000ul, 16666667ul, 9);
+        wayland_presented_idle(7000000000ul, 16666667ul, 9, 0ul);
         wlc_pump(c);
         a = event_at(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented, 0);
         WLCHECK(a >= 0 && c->ev[a].u[1] == 7 && c->ev[a].u[2] == 0 && c->ev[a].u[6] == 0 && !wayland_frame_wanted(),
                 "an idle frame presents the feedback at its time, with no flags, and nothing waits after it");
+
+        /* a present latches what was committed before it began (wayland_latch): a commit made while that frame is composed or its flip is on
+           its way is the next frame's, its feedback answered by the next flip and its callback by the next frame's end */
+        {
+                unsigned long first = wlc_id(c, WLI_wp_presentation_feedback, 1), second, cb_first = wlc_id(c, WLI_wl_callback, 1), cb_second;
+
+                wlc_forget(c);
+                wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, first);
+                wlc_send(c, s.surface, WLQ_wl_surface_frame, cb_first);
+                wlc_send(c, s.surface, WLQ_wl_surface_commit);
+                wayland_latch();
+                second = wlc_id(c, WLI_wp_presentation_feedback, 1);
+                cb_second = wlc_id(c, WLI_wl_callback, 1);
+                wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, second);
+                wlc_send(c, s.surface, WLQ_wl_surface_frame, cb_second);
+                wlc_send(c, s.surface, WLQ_wl_surface_commit);
+                wlc_pump(c);
+                WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 0,
+                        "a commit made while a frame is in flight does not discard the feedback that frame latched");
+                WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1, "the latch answers the callback taken before it, at once");
+                wayland_frame();
+                wlc_pump(c);
+                WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 1 && wayland_frame_wanted(),
+                        "the frame's end answers none taken after the latch, and a frame is wanted for them");
+                wayland_presented(8000000000ul, 6957000ul, 20, 7ul, 0L);
+                wlc_pump(c);
+                a = event_at(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented, 0);
+                WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 1 && a >= 0 && c->ev[a].u[5] == 20 &&
+                            c->ev[a].u[6] == 15,
+                        "its flip presents the feedback it latched, the row shown from its client's buffer flagged zero copy (0x%lx), and not the later one",
+                        a >= 0 ? (unsigned long)c->ev[a].u[6] : 0ul);
+                wayland_latch();
+                wayland_frame();
+                wayland_presented(8006957000ul, 6957000ul, 21, 7ul, -1L);
+                wlc_pump(c);
+                a = event_at(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented, a + 1);
+                WLCHECK(wlc_count(c, WLI_wl_callback, WLE_wl_callback_done) == 2 && a >= 0 && c->ev[a].u[5] == 21 && c->ev[a].u[6] == 7 &&
+                            !wayland_frame_wanted(),
+                        "the next frame answers the later commit's callback and feedback, at its own flip, with no zero copy");
+                (void)second, (void)cb_second;
+        }
+
+        /* a commit that replaces one no frame latched yet discards that one's feedback: its content was never shown */
+        wlc_forget(c);
+        wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, wlc_id(c, WLI_wp_presentation_feedback, 1));
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_send(c, presentation, WLQ_wp_presentation_feedback, s.surface, wlc_id(c, WLI_wp_presentation_feedback, 1));
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_discarded) == 1,
+                "a commit replacing one that no frame latched discards that one's feedback");
+        wayland_latch();
+        wayland_presented(9000000000ul, 6957000ul, 30, 7ul, -1L);
+        wlc_pump(c);
+        WLCHECK(wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 1 && !wayland_frame_wanted(),
+                "and the frame presents the one that replaced it");
 
         /* more than the surface holds in itself: kept, none discarded (the list grows past them) */
         wlc_forget(c);
@@ -8130,7 +8221,7 @@ static void test_lent(void)
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         WLCHECK(fake.lends == 2, "a commit whose damage is the whole buffer is a whole picture, read where it is and not copied (%ld)", fake.lends);
         WLCHECK(releases_of(c, s.buffer) == 0 && releases_of(c, second) == 0, "the buffer it replaced is not released before a frame shows the new one");
-        wayland_presented_idle(1000000000ul, 16666667ul, 1);
+        wayland_presented_idle(1000000000ul, 16666667ul, 1, 0ul);
         wlc_pump(c);
         WLCHECK(releases_of(c, s.buffer) == 0, "nor by a frame's time in which nothing was drawn");
         // The frame drawn releases it, before the frame's callbacks and before its flip lands: a client with two buffers has one to draw in.
@@ -8138,14 +8229,14 @@ static void test_lent(void)
         wlc_pump(c);
         WLCHECK(releases_of(c, s.buffer) == 1 && releases_of(c, second) == 0, "the frame drawn releases it, before its flip has landed (%ld)",
                 releases_of(c, s.buffer));
-        wayland_presented(1000000000ul, 16666667ul, 1, 0ul);
+        wayland_presented(1000000000ul, 16666667ul, 1, 0ul, -1L);
         wlc_pump(c);
         WLCHECK(releases_of(c, s.buffer) == 1 && releases_of(c, second) == 0, "once (%ld)", releases_of(c, s.buffer));
         wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
         wlc_send(c, s.surface, WLQ_wl_surface_damage, -5L, -5L, 0x7fffffffL, 0x7fffffffL);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         WLCHECK(fake.lends == 3, "damage of everything, as toolkits say it (a rectangle past every edge), is whole too (%ld)", fake.lends);
-        wayland_presented(2000000000ul, 16666667ul, 2, 0ul);
+        wayland_presented(2000000000ul, 16666667ul, 2, 0ul, -1L);
         wlc_pump(c);
         // damage of a part is not whole: copied, and the buffer released by the commit
         wlc_forget(c);
@@ -8177,14 +8268,14 @@ static void test_lent(void)
         // back to `second` as the picture, for the rows below
         wlc_send(c, s.surface, WLQ_wl_surface_attach, second, 0L, 0L);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        wayland_presented(3000000000ul, 16666667ul, 3, 0ul);
+        wayland_presented(3000000000ul, 16666667ul, 3, 0ul, -1L);
         wlc_pump(c);
         fake.lends = 3;
 
         // a window put away is in no frame: the buffer its picture replaced comes back at the next frame's time, drawn or not
         wlc_send(c, s.surface, WLQ_wl_surface_attach, s.buffer, 0L, 0L);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
-        wayland_presented(4000000000ul, 16666667ul, 4, 0ul);
+        wayland_presented(4000000000ul, 16666667ul, 4, 0ul, -1L);
         wlc_pump(c);
         fake.row[0].states |= WAYLAND_STATE_SUSPENDED;
         wlc_forget(c);
@@ -8192,7 +8283,7 @@ static void test_lent(void)
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         WLCHECK(fake.lends == 5 && releases_of(c, s.buffer) == 0, "a window put away that draws: its new picture is lent, the one before is held (%ld)", fake.lends);
         WLCHECK(wayland_frame_wanted(), "and a frame's time is asked for, to let it go in");
-        wayland_presented_idle(5000000000ul, 16666667ul, 5);
+        wayland_presented_idle(5000000000ul, 16666667ul, 5, 0ul);
         wlc_pump(c);
         WLCHECK(releases_of(c, s.buffer) == 1, "which releases it though the window is in no frame: a client with two buffers has one again (%ld)",
                 releases_of(c, s.buffer));
@@ -8205,19 +8296,19 @@ static void test_lent(void)
 
                 dmabuf_commit(&s, one, 32, 24);
                 wayland_drawn();
-                wayland_presented(6000000000ul, 16666667ul, 6, 0ul);
+                wayland_presented(6000000000ul, 16666667ul, 6, 0ul, -1L);
                 wlc_forget(c);
                 dmabuf_commit(&s, two, 32, 24);
                 wayland_drawn();
                 wlc_pump(c);
                 WLCHECK(c->errors == 0 && fake.lends >= 7 && releases_of(c, one) == 0, "a dma-buf a lent picture replaced is not released by the frame drawn (%ld, %s)",
                         releases_of(c, one), c->error_text);
-                wayland_presented(7000000000ul, 16666667ul, 7, 0ul);
+                wayland_presented(7000000000ul, 16666667ul, 7, 0ul, -1L);
                 wlc_pump(c);
                 WLCHECK(releases_of(c, one) == 1, "the frame presented releases it (%ld)", releases_of(c, one));
                 dmabuf_commit(&s, s.buffer, 32, 24);
                 wayland_drawn();
-                wayland_presented(8000000000ul, 16666667ul, 8, 0ul);
+                wayland_presented(8000000000ul, 16666667ul, 8, 0ul, -1L);
                 wlc_pump(c);
         }
 
@@ -8252,7 +8343,7 @@ static void test_lent(void)
                 wlc_pump(c);
                 wayland_drawn();
                 wayland_frame();
-                wayland_presented(9000000000ul, 16666667ul, 9, 0ul);
+                wayland_presented(9000000000ul, 16666667ul, 9, 0ul, -1L);
                 wlc_pump(c);
                 wayland_stats_get(&after);
                 WLCHECK(fake.allocs == allocs && fake.maps == maps && fake.unmaps == unmaps && fake.fds_closed == closed && fake.releases == releases &&
@@ -8956,7 +9047,7 @@ static void test_presented_discard_row(void)
         wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 32L, 24L);
         wlc_send(c, s.surface, WLQ_wl_surface_commit);
         wayland_frame();
-        wayland_presented(6000000000ul, 16666667ul, 9, 0ul);
+        wayland_presented(6000000000ul, 16666667ul, 9, 0ul, -1L);
         wlc_pump(c);
         WLCHECK(c->errors == 0 && wlc_count(c, WLI_wp_presentation_feedback, WLE_wp_presentation_feedback_presented) == 0,
                 "the window shown again presents no feedback of the frame that was let go (%s)", c->error_text);

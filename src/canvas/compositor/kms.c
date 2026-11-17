@@ -71,6 +71,28 @@ static unsigned int compositor_said(char *line, unsigned int at, const char *tex
 */
 #define COMPOSITOR_MODE_INTERLACED 48u // DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN
 
+/*
+        A mode's refresh period in nanoseconds, as its timings make it: htotal by vtotal pixels at clock kHz (twice the fields of
+        an interlaced mode, half of a doubled one and of one scanned vscan times), rounded to the nearest; 1e9 / vrefresh when the
+        timings are not there. The vrefresh the kernel gives is a whole number of Hz, and its period was every frame's and every
+        presentation feedback's refresh: box's 144 Hz mode measures 6957 us a vblank, the whole number said 6944, and a client
+        that steps from presented + refresh was 13 us a frame early, a frame of drift every 530 frames.
+*/
+static positive compositor_mode_period(const struct compositor_mode *mode, positive refresh)
+{
+        positive pixels = (positive)mode->htotal * (positive)mode->vtotal * 1000000ull, clock = mode->clock;
+
+        if (mode->flags & 16u)
+                clock *= 2;
+        if (mode->flags & 32u)
+                pixels *= 2;
+        if (mode->vscan > 1)
+                pixels *= mode->vscan;
+        if (!clock || !pixels || pixels / clock < 1000000ull || pixels / clock > 1000000000ull / 24)
+                return 1000000000ull / refresh;
+        return (pixels + clock / 2) / clock;
+}
+
 static unsigned int compositor_fastest_at(const struct compositor_mode *modes, unsigned int count, unsigned int width,
                                           unsigned int height)
 {
@@ -1086,7 +1108,11 @@ static b32 compositor_space_take(int first)
                         most_w = screens[at][2] > most_w ? screens[at][2] : most_w;
                         most_h = screens[at][3] > most_h ? screens[at][3] : most_h;
                         // Frames go out at the fastest screen's rate.
-                        period = !period || 1000000000ull / refresh < period ? 1000000000ull / refresh : period;
+                        {
+                                positive own = compositor_mode_period(&found.mode[n], refresh);
+
+                                period = !period || own < period ? own : period;
+                        }
                 }
                 int scale_was = compositor.scale;
 

@@ -3447,12 +3447,16 @@ static b32 compositor_main()
                                 compositor_late_begin(lead, stamp);
                                 compositor.presented = compositor_late.aim ? stamp : compositor_frame_dated(compositor.presented, compositor.period, stamp);
                                 compositor_card.looped = 1; // the loop's present: its jobs may go without a wait (compositor_card)
+#ifdef CONFIG_MOONWATER_WAYLAND
+                                // What the clients committed is this frame's; what they commit from here is the next one's (wayland_latch).
+                                compositor_wl_latch();
+#endif
                                 compositor_present();
                                 compositor_card.looped = 0;
                                 after_present = clock_monotonic_nanoseconds();
 #ifdef CONFIG_MOONWATER_WAYLAND
-                                // The frame is on its way to the screen: the presentation feedbacks its commits took are answered. A frame the card
-                                // still draws answers them, and its callbacks, when its jobs are done (compositor_card_done).
+                                // The frame is on its way to the screen: the presentation feedbacks its commits took are answered at its flip. A
+                                // frame the card still draws is answered when its jobs are done (compositor_card_done).
                                 if (!compositor_card.on)
                                         compositor_wl_presented();
 #endif

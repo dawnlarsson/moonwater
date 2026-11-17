@@ -161,6 +161,11 @@ static struct
         unsigned long presents;         // the frames drawn and flipped, numbered for wp_presentation's sequence
         int presenting_waiting;         // a drawn frame's feedbacks wait for its flip to complete (compositor_wl_flip_presented)
         positive presenting_since;      // when they began to wait: a flip that never completes is answered by the clock two frames on
+        positive latched_at;            // when the last present began (compositor_wl_latch): a flip issued since is that frame's
+        long zero_row;                  // the row that frame showed straight from its client's buffer (zero copy), -1 for none
+        int landed;                     // that frame's flip landed before its jobs were seen done: its stamp, kept for compositor_wl_presented
+        unsigned int landed_seq;
+        positive landed_when;
         unsigned long render;           // the render node clients allocate on (a dev_t), 0 when there is none
         int render_hw;
         int syncobj_ok;
@@ -5397,6 +5402,7 @@ static void compositor_wl_start(void)
         }
         wayland_syncobj_host(&compositor_wl_syncobj);
         compositor_wl.started = 1;
+        compositor_wl.zero_row = -1;
         compositor_xwm_start();
         // The X server's protocols go to the user the window manager's socket takes (compositor_xwm_accept), and to no other.
         wayland_xwayland_user(compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0));
@@ -5640,10 +5646,13 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
         return compositor_xwm_poll(wanted, count, base);
 }
 
+static void compositor_wl_target(void); // the vblank a commit for a time is held against, said to the shim (below)
+
 static void compositor_wl_pass(const struct compositor_poll *wanted)
 {
         if (!compositor_wl.started)
                 return;
+        compositor_wl_target();
         // The commits that waited for their GPU, made when it is done, before what else the clients sent this pass.
         for (long slot = 0; slot < compositor_wl.slots; slot++)
                 if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
@@ -5931,9 +5940,108 @@ static void compositor_wl_wake(void)
         compositor_wl_flush_all();
 }
 
+/*
+        The refresh the card's vblanks keep, measured: the time between two stamped flips over the vblanks between them, from a first one
+        kept for COMPOSITOR_WL_SPAN_MOST and at least COMPOSITOR_WL_SPAN_LEAST back, so a stamp's jitter (a microsecond or two) is spread
+        over hundreds of vblanks (box: 2 ns at 144 Hz over 4 s). A measure more than 2% off the mode's period is no measure of it (a mode set
+        between, a screen that dropped out), and the mode's is said instead. The mode's period is what its timings say, and the card's
+        clock is not that: box's ASUS at 1920x1080 144 Hz (325.08 MHz, 2056 by 1098) is 6944.4 us by its timings and the vblanks come
+        every 6957 us, 13 us a frame, a frame of drift in 535 for a client that steps from presented times by the refresh it is told.
+*/
+#define COMPOSITOR_WL_SPAN_LEAST 250000000ull
+#define COMPOSITOR_WL_SPAN_MOST 8000000000ull
+static struct
+{
+        positive first, next, period, mode; // the first stamp kept and the one that takes over from it, the period measured, the mode's it is of
+        unsigned int first_seq, next_seq;
+} compositor_wl_vblanks;
+
+static void compositor_wl_vblank_stamp(positive when, unsigned int seq)
+{
+        positive span;
+
+        if (compositor_wl_vblanks.mode != compositor.period || !compositor_wl_vblanks.first || when <= compositor_wl_vblanks.first ||
+            seq <= compositor_wl_vblanks.first_seq || seq - compositor_wl_vblanks.first_seq > 1000000u)
+        {
+                compositor_wl_vblanks.first = compositor_wl_vblanks.next = when;
+                compositor_wl_vblanks.first_seq = compositor_wl_vblanks.next_seq = seq;
+                compositor_wl_vblanks.mode = compositor.period;
+                compositor_wl_vblanks.period = 0;
+                return;
+        }
+        span = when - compositor_wl_vblanks.first;
+        if (span >= COMPOSITOR_WL_SPAN_LEAST)
+        {
+                positive vblanks = seq - compositor_wl_vblanks.first_seq, period = (span + vblanks / 2) / vblanks;
+
+                compositor_wl_vblanks.period = period * 50 > compositor.period * 49 && period * 50 < compositor.period * 51 ? period : 0;
+        }
+        // Half the longest span on, the stamp then is the next first: the measure keeps to the card as it drifts, never from fewer vblanks.
+        if (when - compositor_wl_vblanks.next >= COMPOSITOR_WL_SPAN_MOST / 2)
+        {
+                compositor_wl_vblanks.first = compositor_wl_vblanks.next, compositor_wl_vblanks.first_seq = compositor_wl_vblanks.next_seq;
+                compositor_wl_vblanks.next = when, compositor_wl_vblanks.next_seq = seq;
+        }
+}
+
+/*
+        The refresh a presentation feedback says and the shim steps vblanks by: the card's, measured (above), else the mode's period
+        (compositor_mode_period). A screen whose refresh is not constant (VRR) is to say 0 here, as the protocol asks.
+*/
+static positive compositor_wl_refresh(void)
+{
+        return compositor_wl_vblanks.period && compositor_wl_vblanks.mode == compositor.period ? compositor_wl_vblanks.period : compositor.period;
+}
+
+/*
+        The first vblank after now, from the last stamped flip (its time and count) stepped by the period, with its count in seq; 0 when
+        no card stamped a flip within the last second (a headless compositor, a screen idle that long: the step from so far back drifts).
+*/
+#define COMPOSITOR_WL_VBLANK_AGE 1000000000ull
+static positive compositor_wl_vblank_next(positive now, unsigned long *seq)
+{
+        positive period = compositor_wl_refresh(), last = compositor.flip_when, steps;
+
+        if (!period || !last || now < last || now - last > COMPOSITOR_WL_VBLANK_AGE)
+                return 0;
+        steps = (now - last) / period + 1;
+        *seq = (unsigned long)compositor.flip_seq + steps;
+        return last + steps * period;
+}
+
+/*
+        What a commit for a time (wp_commit_timing) is held against: the vblank the next present will be shown at, the first after now, or
+        the one after that while a present is on its way (its jobs on the card or its flip pending), since that present has latched.
+*/
+static void compositor_wl_target(void)
+{
+        unsigned long seq;
+        positive next = compositor_wl_vblank_next(clock_monotonic_nanoseconds(), &seq);
+
+        if (next && (compositor.flip_pending || compositor_card.on))
+                next += compositor_wl_refresh();
+        wayland_target((unsigned long)next, next ? (unsigned long)compositor_wl_refresh() : 0ul);
+}
+
+/*
+        A present begins: the shim latches what the clients committed (wayland_latch), answers the frame callbacks, and what comes from
+        now on is the next frame's.
+*/
+static void compositor_wl_latch(void)
+{
+        if (!compositor_wl.started)
+                return;
+        wayland_latch();
+        compositor_wl.latched_at = clock_monotonic_nanoseconds();
+        compositor_wl.landed = 0;
+        // The callbacks the latch answered go now, before the frame is composed: the clients draw while it is.
+        compositor_wl_flush_all();
+}
+
 /* Resume clients whose frame-barrier hold cleared when wayland_frame() advanced the frame count. */
 static void compositor_wl_resume_stalled(void)
 {
+        compositor_wl_target();
         for (long slot = 0; slot < compositor_wl.slots; slot++)
                 if (compositor_wl.fd[slot] >= 0 && wayland_stalled(slot))
                 {
@@ -5943,7 +6051,10 @@ static void compositor_wl_resume_stalled(void)
                 }
 }
 
-/* A frame was drawn: the callbacks that waited for it are answered, and sent. */
+/*
+        A frame was drawn: the buffers its pictures replaced are given back, and the clients whose commits waited for a barrier it cleared
+        go on. Its callbacks went at its latch (compositor_wl_latch); a frame no latch began (a present outside the loop's) answers them here.
+*/
 static void compositor_wl_frame(void)
 {
         int busy_row;
@@ -5968,7 +6079,22 @@ static void compositor_wl_idle(void)
                 return;
         wayland_frame();
         if (!compositor.flip_pending)
-                wayland_presented_idle((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor.period, compositor_wl.presents++);
+        {
+                // At the vblank after now, the first that can show what was committed since the last: the card's grid, not the loop's
+                // clock (a timer's time, anywhere in the refresh), so a client stepping from presented times keeps to the screen's.
+                positive now = clock_monotonic_nanoseconds();
+                unsigned long seq;
+                positive vblank = compositor_wl_vblank_next(now, &seq);
+
+                if (vblank)
+                {
+                        if (seq >= compositor_wl.presents)
+                                compositor_wl.presents = seq + 1;
+                        wayland_presented_idle((unsigned long)vblank, (unsigned long)compositor_wl_refresh(), seq, WLN_wp_presentation_feedback_kind_vsync);
+                }
+                else
+                        wayland_presented_idle((unsigned long)now, (unsigned long)compositor_wl_refresh(), compositor_wl.presents++, 0ul);
+        }
         compositor_wl_resume_stalled();
         compositor_wl_flush_all();
 }
@@ -6017,12 +6143,39 @@ static void compositor_wl_touch_report(unsigned int at, int dropped)
         A frame was drawn and flipped: the presentation feedbacks its commits took are answered with the time of the flip, which is
         the compositor's clock as the flip is issued (no vblank event is read here, so the shim claims none), and the period.
 */
+static void compositor_wl_answer_stamp(positive when, unsigned int seq)
+{
+        // The count is the card's while it gives one, and the shim's own goes on from it: a frame answered by the clock after
+        // one the card stamped (an idle tick, a flip whose stamp did not come) has a count above it, where the two counted
+        // apart and a client saw the count go back.
+        if ((unsigned long)seq >= compositor_wl.presents)
+                compositor_wl.presents = (unsigned long)seq + 1;
+        wayland_presented((unsigned long)when, (unsigned long)compositor_wl_refresh(), seq,
+                          WLN_wp_presentation_feedback_kind_vsync | WLN_wp_presentation_feedback_kind_hw_clock |
+                              WLN_wp_presentation_feedback_kind_hw_completion,
+                          compositor_wl.zero_row);
+}
+
 static void compositor_wl_presented(void)
 {
         positive now = clock_monotonic_nanoseconds();
 
         if (!compositor_wl.started)
                 return;
+        // The row shown straight from its client's own buffer, which only the card's scanout reads (zero copy).
+        compositor_wl.zero_row = compositor.direct_row >= 0 && compositor_lent(compositor.direct_row) ? compositor.direct_row
+                                 : compositor.plane_row >= 0 && compositor_lent(compositor.plane_row) ? compositor.plane_row
+                                                                                                      : -1;
+        // The frame's flip landed while its jobs were still on the card's books (its event read before the end of its fence, in the same
+        // turn of the loop): it is answered with the card's stamp of it, where it was answered by the clock, flagless, as a frame that
+        // had no flip.
+        if (compositor_wl.landed)
+        {
+                compositor_wl.landed = 0;
+                compositor_wl.presenting_waiting = 0;
+                compositor_wl_answer_stamp(compositor_wl.landed_when, compositor_wl.landed_seq);
+                return;
+        }
         // A frame whose flip is in flight waits for the card's completion (the time the card stamps it with). A flip that does not
         // complete is answered by the clock once two frames have gone by, so no feedback waits for ever.
         if (compositor.flip_pending && !compositor_wl.presenting_waiting)
@@ -6036,7 +6189,7 @@ static void compositor_wl_presented(void)
         compositor_wl.presenting_waiting = 0;
         // Not sent here: the frame's callbacks follow in the same pass (compositor_wl_frame), and one write carries the feedbacks, the
         // releases and the callbacks to a client, where each had a write of its own.
-        wayland_presented((unsigned long)now, (unsigned long)compositor.period, compositor_wl.presents++, 0);
+        wayland_presented((unsigned long)now, (unsigned long)compositor_wl_refresh(), compositor_wl.presents++, 0ul, -1);
 }
 
 /*
@@ -6046,20 +6199,27 @@ static void compositor_wl_presented(void)
 */
 static void compositor_wl_flip_presented(void)
 {
-        if (!compositor_wl.started || !compositor_wl.presenting_waiting)
+        if (!compositor_wl.started)
                 return;
+        if (compositor.flip_stamped && compositor.flip_when)
+                compositor_wl_vblank_stamp(compositor.flip_when, compositor.flip_seq);
+        if (!compositor_wl.presenting_waiting)
+        {
+                // A flip of the frame latched last that landed before its jobs were seen done: its stamp waits for them.
+                if (compositor.flip_stamped && compositor.flip_when && compositor_wl.latched_at && compositor.flip_issued >= compositor_wl.latched_at)
+                {
+                        compositor_wl.landed = 1;
+                        compositor_wl.landed_when = compositor.flip_when;
+                        compositor_wl.landed_seq = compositor.flip_seq;
+                }
+                return;
+        }
         compositor_wl.presenting_waiting = 0;
         if (compositor.flip_stamped && compositor.flip_when)
-        {
-                // The count is the card's while it gives one, and the shim's own goes on from it: a frame answered by the clock after
-                // one the card stamped (an idle tick, a flip whose stamp did not come) has a count above it, where the two counted
-                // apart and a client saw the count go back.
-                if ((unsigned long)compositor.flip_seq >= compositor_wl.presents)
-                        compositor_wl.presents = (unsigned long)compositor.flip_seq + 1;
-                wayland_presented((unsigned long)compositor.flip_when, (unsigned long)compositor.period, compositor.flip_seq, 7);
-        }
+                compositor_wl_answer_stamp(compositor.flip_when, compositor.flip_seq);
         else
-                wayland_presented((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor.period, compositor_wl.presents++, 0);
+                wayland_presented((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor_wl_refresh(), compositor_wl.presents++, 0ul,
+                                  compositor_wl.zero_row);
         compositor_wl_flush_all();
 }
 

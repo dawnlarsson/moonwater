@@ -504,6 +504,9 @@ struct wayland_surface
         struct wayland_idlist feedbacks;
         unsigned int presenting[WAYLAND_PRESENTATIONS];
         struct wayland_idlist presentings;
+        // Of the feedbacks taken, the first so many are the frame in flight's: the commits taken before the present that latched them
+        // began (wayland_latch). The rest came while it was composed or flipped, and wait for the next frame's flip.
+        long presentings_framed;
         // What is shown. scale is the buffer scale, and scale120 what a unit of the surface is in pixels, in 120ths (wp_fractional_scale's
         // unit): 120 times the buffer scale, or, where a viewport gives the surface a size, the buffer's pixels over that size.
         long scale, scale120, transform;
@@ -526,7 +529,7 @@ struct wayland_surface
         // wp_fifo (a commit waits for the barrier: the next frame latched) and wp_commit_timing (the time the commit is for, in
         // nanoseconds on the monotonic clock, 0 for none): pending, and as the commit took them.
         unsigned char pending_fifo, fifo_wait;
-        // wp_fifo's set_barrier: pending, and as the commit set it, with the frame count it was set on (it clears at the next frame drawn).
+        // wp_fifo's set_barrier: pending, and as the commit set it, with the latch count it was set on (it clears at the next latch).
         unsigned char pending_barrier, barrier;
         long barrier_frame;
         unsigned long pending_timestamp, timestamp;
@@ -900,7 +903,14 @@ static struct
                                                   // dx, dy, the unaccelerated two, the last report's microsecond
         long input_at;                         // the shim's ms of the last input event the compositor gave it (wayland_input_seen): the idle clock
         long bells, icons;                     // xdg_system_bell rings and xdg-toplevel-icon sets with an icon, over every client (counted; nothing is drawn yet)
-        long frames;                           // frames drawn (wayland_frame): a fifo barrier clears at the next one after its commit
+        long frames;                           // frames drawn (wayland_frame)
+        // Latches: a present began (wayland_latch) or a frame's time went by with nothing drawn (wayland_frame): a fifo barrier clears at
+        // the next one after its commit. framing: the feedbacks of a latched frame wait for its flip (wayland_presented); calling: its
+        // callbacks wait for its end (wayland_frame).
+        long latches;
+        int framing, calling;
+        // The vblank the next latch is shown at and the refresh period, nanoseconds on the monotonic clock (wayland_target), 0 unknown.
+        unsigned long target, target_period;
         struct wayland_touch touch[WAYLAND_TOUCHES]; // the fingers down, over every client
         // xdg-activation tokens, pending or given out: a table that grows (tokens is its length); a given one lasts WAYLAND_TOKEN_MS, a
         // pending one until it is committed or destroyed, or its client goes.
@@ -1095,6 +1105,21 @@ static void wayland_idlist_drop(struct wayland_idlist *l)
 {
         wayland_table_drop(&l->table);
         l->more = 0, l->count = 0;
+}
+
+// The first k ids of a list gone, the rest moved up in their order.
+static void wayland_idlist_shift(unsigned int *own, long n, struct wayland_idlist *l, long k)
+{
+        for (long at = k; at < l->count; at++)
+        {
+                unsigned int id = wayland_idlist_at(own, n, l, at);
+
+                if (at - k < n)
+                        own[at - k] = id;
+                else
+                        l->more[at - k - n] = id;
+        }
+        l->count -= k;
 }
 
 #define WAYLAND_CALLBACK_AT(s, at) wayland_idlist_at((s)->callback, WAYLAND_CALLBACKS, &(s)->callbacks, (at))
@@ -2446,7 +2471,7 @@ static void wayland_presenting_drop(struct wayland_client *c, struct wayland_sur
                 wayland_feedback_discard(c, WAYLAND_PRESENTING_AT(o, at));
         if (o->presentings.count)
                 c->presenting_surfaces--;
-        o->presentings.count = 0;
+        o->presentings.count = o->presentings_framed = 0;
 }
 
 static void wayland_presentings_discard(struct wayland_client *c, struct wayland_surface *s)
@@ -2464,10 +2489,25 @@ static void wayland_presentings_discard(struct wayland_client *c, struct wayland
 /*
         A commit takes the feedbacks requested since the last one: they are answered by the frame it is drawn in, or, when
         the surface has no window to draw it in (shown 0), discarded now. A feedback the memory has no room for is discarded, the one it
-        cannot hold, which is the protocol's answer to a feedback that is not presented.
+        cannot hold, which is the protocol's answer to a feedback that is not presented. The feedbacks of an earlier commit no frame
+        has latched yet are discarded: this commit's content replaces that one's before it was ever shown (the protocol's discarded),
+        where both were answered presented at the same refresh, and a client counting its frames by them counted one that never was.
+        Those a latched frame took stay for its flip.
 */
 static void wayland_feedback_take(struct wayland_client *c, struct wayland_surface *s, int shown)
 {
+        long keep = wayland.framing && s->presentings_framed < s->presentings.count ? s->presentings_framed : s->presentings.count;
+
+        if (shown && !wayland.framing)
+                keep = 0;
+        if (shown && keep < s->presentings.count)
+        {
+                for (long at = keep; at < s->presentings.count; at++)
+                        wayland_feedback_discard(c, WAYLAND_PRESENTING_AT(s, at));
+                s->presentings.count = keep;
+                if (!keep)
+                        c->presenting_surfaces--;
+        }
         for (long at = 0; at < s->feedbacks.count; at++)
         {
                 if (shown && wayland_idlist_put(s->presenting, WAYLAND_PRESENTATIONS, &s->presentings, WAYLAND_FEEDBACK_AT(s, at)))
@@ -3647,6 +3687,7 @@ static void wayland_surface_drop(struct wayland_client *c, struct wayland_surfac
                 c->waiting--;
                 s->readies.count = 0;
         }
+        s->presentings_framed = 0;
         if (s->live && s->role == WAYLAND_ROLE_SUBSURFACE)
         {
                 c->subsurfaces--;
@@ -4510,9 +4551,50 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
 }
 
 /*
-        Whether a commit of s is held now, for wp_fifo or wp_commit_timing: its barrier is set by an earlier commit and no frame has been drawn
-        since that commit (wayland_frame moves the count on), or its time is later than the host's now. A window that is not shown holds
-        nothing, since no frame would come to clear the barrier, and a synchronized subsurface is held by its parent's commit, not its own.
+        wp_commit_timing: whether a commit for the time stamp (ns) waits. The next latch shows what it takes at the vblank the host
+        said (wayland_target), and a commit for a time no later than that vblank (an eighth of a refresh to spare, for the clocks'
+        rounding and a crystal's drift) is made now, to be shown then: "as close as possible to, but not before". Held until the
+        host's clock reached the time, the commit was latched by the first present after it and shown a refresh later: a Vulkan
+        client that asked for the vblank its last presented time and the refresh predict was shown at the one after, every frame.
+        With no vblank known (a headless compositor, a card that stamps none) it is the host's clock as before.
+*/
+static int wayland_timing_held(unsigned long stamp)
+{
+        if (!stamp)
+                return 0;
+        if (wayland.target && wayland.target_period)
+                return stamp > wayland.target + wayland.target_period / 8;
+        return (unsigned long)wayland.host->now(wayland.host->context) * 1000000ul < stamp;
+}
+
+// When a commit timing holds is next worth asking of, on the host's ms: a refresh before the first vblank it may be shown at.
+static long wayland_timing_wake(unsigned long stamp)
+{
+        if (wayland.target && wayland.target_period && stamp > wayland.target + wayland.target_period / 8)
+        {
+                unsigned long p = wayland.target_period, ahead = stamp - wayland.target_period / 8 - wayland.target;
+                unsigned long shown = wayland.target + (ahead + p - 1) / p * p;
+
+                return (long)((shown - p) / 1000000ul);
+        }
+        return (long)(stamp / 1000000ul);
+}
+
+/*
+        The host says the vblank the next latch will be shown at (when, nanoseconds on the monotonic clock) and the refresh period,
+        before it hands the clients' requests in: what a commit for a time is held against (wayland_timing_held). 0 for none known.
+*/
+WAYLAND_API void wayland_target(unsigned long when, unsigned long period)
+{
+        wayland.target = when;
+        wayland.target_period = period;
+}
+
+/*
+        Whether a commit of s is held now, for wp_fifo or wp_commit_timing: its barrier is set by an earlier commit and no frame has latched
+        since that commit (wayland_latch, or wayland_frame for a frame's time with nothing drawn, moves the count on), or it is for a time
+        after the vblank the next latch is shown at. A window that is not shown holds nothing, since no frame would come to clear the
+        barrier, and a synchronized subsurface is held by its parent's commit, not its own.
 */
 static int wayland_hold_wanted(struct wayland_client *c, struct wayland_surface *s)
 {
@@ -4532,9 +4614,9 @@ static int wayland_hold_wanted(struct wayland_client *c, struct wayland_surface 
         }
         if (!root || root->row < 0 || (s->role == WAYLAND_ROLE_SUBSURFACE && s->sub_sync))
                 return 0;
-        if (s->pending_fifo && s->barrier && s->barrier_frame == wayland.frames)
+        if (s->pending_fifo && s->barrier && s->barrier_frame == wayland.latches)
                 return 1;
-        return s->pending_timestamp && (unsigned long)wayland.host->now(wayland.host->context) * 1000000ul < s->pending_timestamp;
+        return wayland_timing_held(s->pending_timestamp);
 }
 
 /*
@@ -4547,7 +4629,7 @@ static void wayland_commit_take(struct wayland_client *c, struct wayland_surface
         if (s->pending_barrier)
         {
                 s->barrier = 1;
-                s->barrier_frame = wayland.frames;
+                s->barrier_frame = wayland.latches;
                 s->pending_barrier = 0;
         }
         if (s->pending_opaque_set)
@@ -4650,12 +4732,12 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         // not held (the commit before it may have set one, and the frame that clears it is the next one drawn).
         if (wayland_hold_wanted(c, s))
         {
-                int fifo_hold = s->pending_fifo && s->barrier && s->barrier_frame == wayland.frames;
+                int fifo_hold = s->pending_fifo && s->barrier && s->barrier_frame == wayland.latches;
 
                 c->hold = 1;
                 c->hold_surface = wayland_surface_index(c, s);
                 c->hold_at = s->xwait && s->xsurface && !s->xadopted ? s->xwait
-                             : (!fifo_hold && s->pending_timestamp) ? (long)(s->pending_timestamp / 1000000ul)
+                             : (!fifo_hold && s->pending_timestamp) ? wayland_timing_wake(s->pending_timestamp)
                                                                     : 0;
                 c->stalled_fd = -1;
                 c->stalled_sync_handle = -1;
@@ -4913,7 +4995,7 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
                         wayland_feedback_discard(c, WAYLAND_PRESENTING_AT(s, at));
                 if (s->presentings.count)
                         c->presenting_surfaces--;
-                s->feedbacks.count = s->presentings.count = 0;
+                s->feedbacks.count = s->presentings.count = s->presentings_framed = 0;
                 // A role object that outlives its surface is inert; the window goes with the surface.
                 wayland_surface_drop(c, s);
                 return WAYLAND_OK;
@@ -10951,6 +11033,8 @@ WAYLAND_API void wayland_row_wake(long row)
         A frame is on the screen: the callbacks that waited for one are answered, for every window that is shown and
         not put away. A window put away is not told of frames, and is told of the next the moment it is shown.
 */
+static void wayland_callbacks_due(long now);
+
 WAYLAND_API void wayland_frame(void)
 {
         long now;
@@ -10962,8 +11046,6 @@ WAYLAND_API void wayland_frame(void)
         for (long row = 0; row < wayland.row_made; row++)
         {
                 struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
-                struct wayland_surface *s = c && c->waiting ? &c->surfaces[wayland.row_surface[row]] : 0;
-                struct wayland_facts facts;
 
                 // The size a hand's resize came to in the frame that ended, said now (wayland_row_wake kept it back).
                 if (c && c->surfaces[wayland.row_surface[row]].live && c->surfaces[wayland.row_surface[row]].configure_late)
@@ -10971,7 +11053,25 @@ WAYLAND_API void wayland_frame(void)
                         c->surfaces[wayland.row_surface[row]].configure_late = 0;
                         wayland_configure_owed(c, &c->surfaces[wayland.row_surface[row]]);
                 }
+        }
+        // The callbacks were answered when the frame latched (wayland_latch), and those taken since are the next frame's. A frame's time
+        // with nothing latched (no present began) answers them all, and is a latch of its own for the fifo barriers.
+        if (!wayland.calling)
+        {
+                wayland.latches++;
+                wayland_callbacks_due(now);
+        }
+        wayland.calling = 0;
+}
 
+/* The callbacks every window shown has waiting, answered at the host's ms now: a window put away is told of no frame. */
+static void wayland_callbacks_due(long now)
+{
+        for (long row = 0; row < wayland.row_made; row++)
+        {
+                struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
+                struct wayland_surface *s = c && c->waiting ? &c->surfaces[wayland.row_surface[row]] : 0;
+                struct wayland_facts facts;
                 int any = s && s->live && s->readies.count;
 
                 if (c && c->subsurfaces)
@@ -10996,6 +11096,36 @@ WAYLAND_API void wayland_frame(void)
 }
 
 /*
+        A present begins: what the clients have committed is what it latches. The frame callbacks waiting are answered now, as the
+        content they were asked with is taken: the client draws its next picture while this one is composed and flipped, which is the
+        most time it can be given (the present's whole time on the card, 3 ms of box's 6.9 ms refresh, more than it had). The feedbacks
+        taken so far are this frame's (presentings_framed), answered at its flip; what is committed from now until then is the next
+        frame's, its callbacks answered at the next latch, and a fifo barrier set before now is cleared (the content that set it is
+        latched). Before this, the frame's end (wayland_frame) and its flip (wayland_presented) answered whatever was there when they
+        came: a commit made while the card composed or the flip was on its way was told presented at that flip, a refresh before it was
+        shown, its frame callback came before any frame had it, and a barrier it set was cleared by a frame that never latched it, so
+        the next FIFO commit replaced it unshown.
+*/
+WAYLAND_API void wayland_latch(void)
+{
+        if (!wayland.host)
+                return;
+        wayland.latches++;
+        wayland.framing = wayland.calling = 1;
+        for (long slot = 0; slot < wayland.client_slots; slot++)
+        {
+                struct wayland_client *c = wayland.client[slot];
+
+                // A client with no feedback taken has none framed either (each count is kept at or under its list's).
+                if (!c || !c->presenting_surfaces)
+                        continue;
+                for (long at = 0; at < c->surface_table.count; at++)
+                        c->surfaces[at].presentings_framed = c->surfaces[at].presentings.count;
+        }
+        wayland_callbacks_due(wayland.host->now(wayland.host->context));
+}
+
+/*
         The feedbacks one surface's commits took, answered: presented at when (nanoseconds on the monotonic clock, split as the
         protocol has it into seconds and nanoseconds), refreshing every refresh nanoseconds, the frame's count seq. Each object is
         destroyed by its event, so it is let go with it.
@@ -11004,8 +11134,10 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
                                      unsigned long seq, unsigned long flags)
 {
         unsigned long seconds = when / 1000000000ul, nanoseconds = when % 1000000000ul;
+        // A frame flipped answers what it latched (wayland_latch); a frame's time that latched nothing answers all.
+        long k = wayland.framing && s->presentings_framed < s->presentings.count ? s->presentings_framed : s->presentings.count;
 
-        for (long at = 0; at < s->presentings.count; at++)
+        for (long at = 0; at < k; at++)
         {
                 long slot = wayland_find(c, WAYLAND_PRESENTING_AT(s, at), WLI_wp_presentation_feedback);
 
@@ -11021,9 +11153,10 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
                         wayland_object_delete(c, slot);
                 }
         }
-        if (s->presentings.count)
+        if (k && k == s->presentings.count)
                 c->presenting_surfaces--;
-        s->presentings.count = 0;
+        wayland_idlist_shift(s->presenting, WAYLAND_PRESENTATIONS, &s->presentings, k);
+        s->presentings_framed = 0;
 }
 
 /*
@@ -11053,7 +11186,7 @@ static void wayland_window_gone(struct wayland_client *c, struct wayland_surface
         lent picture was replaced by, since the frame that shows the new picture is the one drawn; an idle frame does not. Either lets go of
         the buffers of subsurfaces that went (wayland_gone_drawn): the host was told when they went, and a frame has gone by since.
 */
-static void wayland_presented_rows(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags, int drawn)
+static void wayland_presented_rows(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags, int drawn, long zero_row)
 {
         for (long row = 0; row < wayland.row_made; row++)
         {
@@ -11075,7 +11208,8 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                 // The frame that shows the picture a lent buffer was replaced by is drawn: the buffer is the client's again.
                 if (drawn)
                         wayland_window_gone(c, s, 1);
-                wayland_presentings_done(c, s, when, refresh, seq, flags);
+                // The window the card scanned out of its own buffer is presented with no copy (zero_copy), its subsurfaces were not shown so.
+                wayland_presentings_done(c, s, when, refresh, seq, row == zero_row ? flags | WLN_wp_presentation_feedback_kind_zero_copy : flags);
                 if (c->subsurfaces)
                 for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
                 {
@@ -11087,6 +11221,7 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
         for (long slot = 0; slot < wayland.client_slots; slot++)
                 if (wayland.client[slot] && wayland.client[slot]->gone.count)
                         wayland_gone_drawn(wayland.client[slot], 1);
+        wayland.framing = 0;
 }
 
 /*
@@ -11129,13 +11264,13 @@ WAYLAND_API void wayland_drawn_composed(int busy_row)
 /*
         A frame was drawn and flipped to the screen (wayland_presented's when, refresh and seq, as above): the feedbacks its
         commits took are answered, for every window that is shown and not put away. Called only for a frame that was drawn, so
-        a timer's frame with nothing new answers none.
+        a timer's frame with nothing new answers none. zero_row is the row the card showed straight from its client's buffer, -1 for none.
 */
-WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags)
+WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags, long zero_row)
 {
         if (!wayland.host)
                 return;
-        wayland_presented_rows(when, refresh, seq, flags, 1);
+        wayland_presented_rows(when, refresh, seq, flags, 1, zero_row);
 }
 
 /*
@@ -11144,11 +11279,12 @@ WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, un
         draws nothing waits for a frame that is never drawn, and a client that waits for its feedback (Chromium's video, which submits
         its next frame when the last one is presented) stops.
 */
-WAYLAND_API void wayland_presented_idle(unsigned long when, unsigned long refresh, unsigned long seq)
+WAYLAND_API void wayland_presented_idle(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags)
 {
         if (!wayland.host)
                 return;
-        wayland_presented_rows(when, refresh, seq, 0, 0);
+        wayland.framing = 0;
+        wayland_presented_rows(when, refresh, seq, flags, 0, -1);
 }
 
 /* Whether a window that is shown has a feedback waiting for the next frame (wayland_presented_idle answers it). */
