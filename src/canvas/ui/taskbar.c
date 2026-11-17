@@ -2459,6 +2459,9 @@ static struct
         struct ui_popmenu menu;
         int open, x, y, width, height; // where it is in the space, and its size, device pixels
         b32 dirty;                     // drawn again at the next present
+        int row;                       // a tab's menu: the row of the window it is for, and the process the row had when it was opened (0 when none)
+        unsigned int pid;
+        char stop[96];                 // its Force stop's words, with the windows it takes when it takes more than one
 } taskbar_menu;
 
 // The kit's ui the menu is drawn with: the band's faces and engine, the band's scale, the theme's surface for its ground.
@@ -2474,13 +2477,44 @@ static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_
         ui_inks(ui, compositor_tab_target(0) & 0xffffffu);
 }
 
+// The menu made, sized and put beside the slot at x, y (width w, height h) of the band being drawn, on the screen's side of the band
+// and held inside the screen: false with no room for it.
+static int taskbar_menu_place(const struct taskbar_view *view, int x, int y, int w, int h)
+{
+        int gap;
+
+        taskbar_menu.width = taskbar_menu.height = 1;
+        taskbar_menu_ui(view, null);
+        ui_popmenu_size(&taskbar_menu.ui, &taskbar_menu.menu, view->height / 2);
+        taskbar_menu.width = taskbar_menu.menu.width, taskbar_menu.height = taskbar_menu.menu.height;
+        if (taskbar_menu.width <= 0 || taskbar_menu.height <= 0)
+                return 0;
+        // Beside the slot on the screen's side of the band, its middle on the slot's, held inside the screen.
+        gap = taskbar_scaled(view->scale) * 6 / 100;
+        taskbar_menu.x = x + w / 2 - taskbar_menu.width / 2, taskbar_menu.y = y + h / 2 - taskbar_menu.height / 2;
+        if (view->position == TASKBAR_BOTTOM)
+                taskbar_menu.y = y - gap - taskbar_menu.height;
+        else if (view->position == TASKBAR_TOP)
+                taskbar_menu.y = y + h + gap;
+        else if (view->position == TASKBAR_LEFT)
+                taskbar_menu.x = x + w + gap;
+        else
+                taskbar_menu.x = x - gap - taskbar_menu.width;
+        taskbar_menu.x = taskbar_menu.x + taskbar_menu.width > view->x + view->width ? view->x + view->width - taskbar_menu.width : taskbar_menu.x;
+        taskbar_menu.y = taskbar_menu.y + taskbar_menu.height > view->y + view->height ? view->y + view->height - taskbar_menu.height : taskbar_menu.y;
+        taskbar_menu.x = taskbar_menu.x < view->x ? view->x : taskbar_menu.x, taskbar_menu.y = taskbar_menu.y < view->y ? view->y : taskbar_menu.y;
+        taskbar_menu.open = 1, taskbar_menu.dirty = 1;
+        return 1;
+}
+
 // The menu made and placed beside the moon of the band being drawn: false with no moon or no face to write it with.
 static int taskbar_menu_open(const struct taskbar_view *view)
 {
-        int x, y, w, h, gap;
+        int x, y, w, h;
 
         if (!view->engine || !view->face || !taskbar_anchor(view, TASKBAR_LAUNCHER, &x, &y, &w, &h))
                 return 0;
+        taskbar_menu.row = -1, taskbar_menu.pid = 0;
         memory_zero(&taskbar_menu.menu, sizeof(taskbar_menu.menu));
         taskbar_menu.menu.hot = -1;
         if (taskbar.clock_12h)
@@ -2498,28 +2532,7 @@ static int taskbar_menu_open(const struct taskbar_view *view)
         ui_popmenu_add(&taskbar_menu.menu, WORDS(tray_settings), null, 0, TASKBAR_MENU_SETTINGS);
         ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
         ui_popmenu_add(&taskbar_menu.menu, taskbar.clock_12h ? WORDS(tray_clock_24h) : WORDS(tray_clock_12h), null, 0, TASKBAR_MENU_CLOCK);
-        taskbar_menu.width = taskbar_menu.height = 1;
-        taskbar_menu_ui(view, null);
-        ui_popmenu_size(&taskbar_menu.ui, &taskbar_menu.menu, view->height / 2);
-        taskbar_menu.width = taskbar_menu.menu.width, taskbar_menu.height = taskbar_menu.menu.height;
-        if (taskbar_menu.width <= 0 || taskbar_menu.height <= 0)
-                return 0;
-        // Beside the moon on the screen's side of the band, its middle on the moon's, held inside the screen.
-        gap = taskbar_scaled(view->scale) * 6 / 100;
-        taskbar_menu.x = x + w / 2 - taskbar_menu.width / 2, taskbar_menu.y = y + h / 2 - taskbar_menu.height / 2;
-        if (view->position == TASKBAR_BOTTOM)
-                taskbar_menu.y = y - gap - taskbar_menu.height;
-        else if (view->position == TASKBAR_TOP)
-                taskbar_menu.y = y + h + gap;
-        else if (view->position == TASKBAR_LEFT)
-                taskbar_menu.x = x + w + gap;
-        else
-                taskbar_menu.x = x - gap - taskbar_menu.width;
-        taskbar_menu.x = taskbar_menu.x + taskbar_menu.width > view->x + view->width ? view->x + view->width - taskbar_menu.width : taskbar_menu.x;
-        taskbar_menu.y = taskbar_menu.y + taskbar_menu.height > view->y + view->height ? view->y + view->height - taskbar_menu.height : taskbar_menu.y;
-        taskbar_menu.x = taskbar_menu.x < view->x ? view->x : taskbar_menu.x, taskbar_menu.y = taskbar_menu.y < view->y ? view->y : taskbar_menu.y;
-        taskbar_menu.open = 1, taskbar_menu.dirty = 1;
-        return 1;
+        return taskbar_menu_place(view, x, y, w, h);
 }
 
 // The menu drawn into pixels (its width a row), with the faces of view.
@@ -2562,6 +2575,343 @@ static int taskbar_menu_redraw(void)
 static void taskbar_menu_shut(void)
 {
         taskbar_menu.open = 0;
+}
+
+/*
+        A program's processes, which Force stop ends. A window is a row of the table with the pid of the process that owns it, and the
+        program is more than that one process: a wrapper that started it, the helpers it forked, the other windows it has. So the walk
+        goes up from the row's process to the root of its program and ends everything under that root.
+
+        Every process is of one of three kinds, by name (the comm the kernel keeps) and number. A system process is one the machine
+        lives by and Force stop never ends: pid 1 and the kernel's, the compositor itself, the machine process (moonwater), the sound
+        server, the session bus, the X server and a bowl's runner. A desktop process is one of the kit's own programs (the terminal,
+        Settings, the launcher and the rest). Any other is plain. The walk up stops below the first system or desktop process it
+        meets, so it never reaches the server a client talks to, the machine script or the terminal that started it; and where it meets
+        a desktop one that is the terminal, the root is one step down the way it came, not the shell that is the terminal's session
+        (the program started from a shell is the program, and the shell with its other jobs stays). A row whose own process is a system
+        one has no Force stop.
+
+        What is under the root is stopped before anything is ended: every member is sent SIGSTOP, the table of /proc is read again, and
+        what the stopped ones forked in the meantime is stopped too, until a pass finds none new; then every member is sent SIGKILL. A
+        stopped process forks nothing and a child is not given to pid 1 while its parent is alive, so none escapes the walk. The walks
+        are over a table of a pid, its parent and its kind (taskbar_proc), which taskbar_proc_read makes from /proc (taskbar_proc_root:
+        a check's own directory) and the checks make by hand.
+*/
+#define TASKBAR_PROC_MOST 8192
+#define TASKBAR_PROC_PLAIN 0u
+#define TASKBAR_PROC_DESKTOP 1u
+#define TASKBAR_PROC_SYSTEM 2u
+#define TASKBAR_SIGKILL 9u
+#define TASKBAR_SIGSTOP 19u
+
+struct taskbar_proc
+{
+        int pid, ppid;
+        unsigned int kind;
+};
+
+static const char *taskbar_proc_root = "/proc";
+static struct taskbar_proc taskbar_procs[TASKBAR_PROC_MOST];
+static int taskbar_stop_members[TASKBAR_PROC_MOST];
+
+// A signal sent to a process: what the walk sends through (a check's own, which sends none, takes its place).
+static void taskbar_signal_send(int pid, unsigned int signal)
+{
+        if (pid > 2)
+                compositor_call(syscall(kill), (positive)pid, signal, 0, 0, 0, 0);
+}
+
+static void (*taskbar_signal)(int pid, unsigned int signal) = taskbar_signal_send;
+
+// The kind of a process by its name, and by its number: pid 1, the kernel's two (pid 2 is kthreadd, whose threads have it for their parent)
+// and self, this process.
+static unsigned int taskbar_proc_kind(int self, int pid, const char *comm)
+{
+        static const char *const system[] = {"init", "moonwater", "compositor", "audio", "sessionbus", "bowl", "osk", "kthreadd", null};
+        static const char *const desktop[] = {"terminal", "settings", "launcher", "klog", "mixer", "notices", "files", "gallery", "editor", "identify", null};
+
+        if (pid <= 2 || pid == self)
+                return TASKBAR_PROC_SYSTEM;
+        for (int at = 0; system[at]; at++)
+                if (string_equals((string_address)comm, (string_address)system[at]))
+                        return TASKBAR_PROC_SYSTEM;
+        // The X server (the name has a capital) and the wrapper it is started through (a lower case one) are the one.
+        {
+                static const char x[] = "xwayland";
+                int same = 1;
+
+                for (int at = 0; same && x[at]; at++)
+                        same = (comm[at] | 32) == x[at];
+                if (same)
+                        return TASKBAR_PROC_SYSTEM;
+        }
+        for (int at = 0; desktop[at]; at++)
+                if (string_equals((string_address)comm, (string_address)desktop[at]))
+                        return TASKBAR_PROC_DESKTOP;
+        return TASKBAR_PROC_PLAIN;
+}
+
+// A process's entry in the table, or -1.
+static int taskbar_proc_at(const struct taskbar_proc *t, int n, int pid)
+{
+        for (int at = 0; at < n; at++)
+                if (t[at].pid == pid)
+                        return at;
+        return -1;
+}
+
+/*
+        The root of the program the process pid is of: the highest process above it (or it) that is no system or desktop one and has none
+        for a parent but at the top, one step lower where its parent is a desktop one and it is not pid itself. 0 for a pid that is not in
+        the table or a process that is a system one, and so has no Force stop.
+*/
+static int taskbar_stop_root(const struct taskbar_proc *t, int n, int pid)
+{
+        int at = taskbar_proc_at(t, n, pid), below = at, steps = 0;
+
+        if (at < 0 || t[at].kind == TASKBAR_PROC_SYSTEM)
+                return 0;
+        // A chain is no longer than the table is, and one that loops (a table made by hand) ends there.
+        while (steps++ < n)
+        {
+                int up = taskbar_proc_at(t, n, t[at].ppid);
+
+                if (up < 0 || t[up].kind == TASKBAR_PROC_SYSTEM)
+                        break;
+                if (t[up].kind == TASKBAR_PROC_DESKTOP)
+                {
+                        at = below != at ? below : at;
+                        break;
+                }
+                below = at, at = up;
+        }
+        return t[at].pid;
+}
+
+// Whether a pid is one of members.
+static int taskbar_stop_has(const int *members, int count, unsigned int pid)
+{
+        for (int each = 0; each < count; each++)
+                if ((unsigned int)members[each] == pid)
+                        return 1;
+        return 0;
+}
+
+/*
+        What is under a root: the root and every process whose parent is one of them, the system ones left out (and what is under them), in
+        members, as many as fit. Answers how many.
+*/
+static int taskbar_stop_tree(const struct taskbar_proc *t, int n, int root, int *members, int most)
+{
+        int count = 0, grown = 1;
+
+        if (taskbar_proc_at(t, n, root) < 0 || t[taskbar_proc_at(t, n, root)].kind == TASKBAR_PROC_SYSTEM)
+                return 0;
+        members[count++] = root;
+        while (grown)
+        {
+                grown = 0;
+                for (int at = 0; at < n && count < most; at++)
+                {
+                        if (t[at].kind != TASKBAR_PROC_SYSTEM && taskbar_stop_has(members, count, (unsigned int)t[at].ppid) &&
+                            !taskbar_stop_has(members, count, (unsigned int)t[at].pid))
+                                members[count++] = t[at].pid, grown = 1;
+                }
+        }
+        return count;
+}
+
+/*
+        The table of /proc: each process's number, its parent's and its kind, from its stat file (pid (comm) state ppid ...: the name is
+        what is between the first parenthesis and the last, and may hold blanks). How many were read, or -1 when there are more than the table
+        holds (a walk over part of the processes could miss a child, so there is none).
+*/
+static int taskbar_proc_read(struct taskbar_proc *into, int most)
+{
+        char path[96], buffer[4096], text[512];
+        bipolar handle;
+        int count = 0, self = (int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+
+        string_copy_bounded((p8 *)path, (string_address)taskbar_proc_root, sizeof(path));
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        if (handle < 0)
+                return 0;
+        for (;;)
+        {
+                bipolar got = system_read_directory(handle, buffer, sizeof(buffer));
+
+                if (got <= 0)
+                        break;
+                for (positive at = 0; at < (positive)got;)
+                {
+                        const struct linux_dirent64 address_to record = (const struct linux_dirent64 address_to)(buffer + at);
+                        int pid = 0, ok = record->d_name[0] >= '0' && record->d_name[0] <= '9';
+                        positive length;
+                        bipolar file, size;
+
+                        if (record->d_reclen <= 19 || at + record->d_reclen > (positive)got)
+                                break;
+                        at += record->d_reclen;
+                        for (int digit = 0; ok && record->d_name[digit]; digit++)
+                        {
+                                ok = record->d_name[digit] >= '0' && record->d_name[digit] <= '9' && digit < 9;
+                                pid = pid * 10 + record->d_name[digit] - '0';
+                        }
+                        if (!ok || !pid)
+                                continue;
+                        string_copy_bounded((p8 *)path, (string_address)taskbar_proc_root, sizeof(path));
+                        length = string_length((string_address)path);
+                        path[length++] = '/';
+                        length += positive_into_string((p8 *)path + length, (positive)pid);
+                        string_copy_bounded((p8 *)path + length, (string_address) "/stat", sizeof(path) - length);
+                        file = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+                        if (file < 0)
+                                continue;
+                        size = system_read_once(file, text, sizeof(text) - 1);
+                        system_close(file);
+                        if (size > 0)
+                        {
+                                char comm[24];
+                                int open = -1, close = -1, ppid = 0, comm_length;
+
+                                text[size] = 0;
+                                for (int each = 0; text[each]; each++)
+                                {
+                                        open = open < 0 && text[each] == '(' ? each : open;
+                                        close = text[each] == ')' ? each : close;
+                                }
+                                if (open < 0 || close < open || !text[close + 1] || !text[close + 2] || !text[close + 3])
+                                        continue;
+                                comm_length = close - open - 1 < (int)sizeof(comm) - 1 ? close - open - 1 : (int)sizeof(comm) - 1;
+                                memory_copy(comm, text + open + 1, (unsigned long)comm_length);
+                                comm[comm_length] = 0;
+                                for (int each = close + 4; text[each] >= '0' && text[each] <= '9' && each < close + 14; each++)
+                                        ppid = ppid * 10 + text[each] - '0';
+                                if (count >= most)
+                                {
+                                        system_close(handle);
+                                        return -1;
+                                }
+                                into[count].pid = pid, into[count].ppid = ppid, into[count].kind = taskbar_proc_kind(self, pid, comm);
+                                count++;
+                        }
+                }
+        }
+        system_close(handle);
+        return count;
+}
+
+// A row's window may be stopped: its program's root and what is under it, from a table just read. 0 when it may not (no pid, the pid of the
+// compositor or a system process, a table too large to walk, a pid that is gone). Else the members, in taskbar_stop_members, and how many.
+static int taskbar_stop_plan(unsigned int pid, int *root)
+{
+        int n;
+
+        *root = 0;
+        if (pid <= 2 || pid > 0x7fffffffu)
+                return 0;
+        n = taskbar_proc_read(taskbar_procs, TASKBAR_PROC_MOST);
+        if (n <= 0)
+                return 0;
+        *root = taskbar_stop_root(taskbar_procs, n, (int)pid);
+        return *root ? taskbar_stop_tree(taskbar_procs, n, *root, taskbar_stop_members, TASKBAR_PROC_MOST) : 0;
+}
+
+// How many windows (rows that show, and are no popup of one) are of the plan's members now.
+static int taskbar_stop_rows(int count)
+{
+        int windows = 0;
+
+        for (int row = 0; compositor.table && row < COMPOSITOR_ROWS; row++)
+                if (compositor.showing[row] && compositor_popup_parent[row] < 0)
+                        windows += taskbar_stop_has(taskbar_stop_members, count, __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE));
+        return windows;
+}
+
+// Every process of the program the row's pid is of ended: all stopped first (until a pass finds no more that are new), then all sent SIGKILL.
+// How many were ended; 0 for none (the plan said no, or a pass could not read the table).
+static int taskbar_stop_run(unsigned int pid)
+{
+        static int stopped[TASKBAR_PROC_MOST];
+        int count = 0, root;
+
+        for (int pass = 0; pass < 8; pass++)
+        {
+                int members = taskbar_stop_plan(pid, &root), fresh = 0;
+
+                if (!members)
+                        break;
+                for (int at = 0; at < members; at++)
+                {
+                        if (!taskbar_stop_has(stopped, count, (unsigned int)taskbar_stop_members[at]) && count < TASKBAR_PROC_MOST)
+                        {
+                                stopped[count++] = taskbar_stop_members[at], fresh++;
+                                taskbar_signal(taskbar_stop_members[at], TASKBAR_SIGSTOP);
+                        }
+                }
+                if (!fresh)
+                        break;
+        }
+        for (int at = 0; at < count; at++)
+                taskbar_signal(stopped[at], TASKBAR_SIGKILL);
+        return count;
+}
+
+/*
+        A tab's menu: a right press on a tab (a finger's long press is one) opens the kit's menu beside it, the moon's way. Exit asks the
+        tab's window to close exactly as its close button and a middle press on the tab do (compositor_close: the program hears it and may
+        ask to save), and Force stop ends the program's processes (above), which takes every window of the program with them: its words say
+        how many windows are in the program when there is more than one. Force stop is not in the menu of a row that has no process to
+        stop. The row and its pid are kept when the menu opens, and what is chosen is done to that window only if the row still has that
+        pid: a row is let go of when its program goes and may be taken by another.
+*/
+static int taskbar_tab_row_is(int row, unsigned int pid)
+{
+        return row >= 0 && row < COMPOSITOR_ROWS && compositor.table && compositor.showing[row] &&
+               __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE) == pid;
+}
+
+// The menu of a tab, beside the tab (taskbar_menu_place): false with no such tab or no face.
+static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab)
+{
+        int x, y, w, h, row, root, members, windows;
+        unsigned int pid;
+
+        // While the band is arranged a press is the arrangement's, and a tab has no menu.
+        if (taskbar.editing || !view->engine || !view->face || !view->rows || tab < 0 || tab >= (int)view->count ||
+            !taskbar_anchor(view, tab, &x, &y, &w, &h))
+                return 0;
+        row = (int)view->rows[tab];
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.table)
+                return 0;
+        pid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE);
+        taskbar_menu.row = row, taskbar_menu.pid = pid;
+        memory_zero(&taskbar_menu.menu, sizeof(taskbar_menu.menu));
+        taskbar_menu.menu.hot = -1;
+        ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_exit), null, 0, TASKBAR_MENU_EXIT);
+        members = taskbar_stop_plan(pid, &root);
+        if (members)
+        {
+                windows = taskbar_stop_rows(members);
+                if (windows > 1)
+                        language_format(taskbar_menu.stop, sizeof(taskbar_menu.stop), WORDS(taskbar_tab_stop_windows), (long)windows);
+                ui_popmenu_add(&taskbar_menu.menu, windows > 1 ? taskbar_menu.stop : WORDS(taskbar_tab_stop), null, 0, TASKBAR_MENU_STOP);
+        }
+        return taskbar_menu_place(view, x, y, w, h);
+}
+
+// What a chosen item of a tab's menu does, to the window it was opened for if that window is still there and still the program's it was.
+static void taskbar_tab_chose(int id)
+{
+        int row = taskbar_menu.row;
+        unsigned int pid = taskbar_menu.pid;
+
+        if (!taskbar_tab_row_is(row, pid))
+                return;
+        if (id == TASKBAR_MENU_EXIT)
+                compositor_close(row);
+        else if (id == TASKBAR_MENU_STOP)
+                taskbar_stop_run(pid);
 }
 
 // The clock format the menu's clock item turns to (`time format`'s word), and the band's clock turned to it.

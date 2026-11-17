@@ -242,6 +242,9 @@ settings_type_passphrase	ca95	הקלד את הסיסמה: Enter מתחבר, Esca
 settings_unknown	9fb9	לא ידוע
 settings_verb_hint	05aa	פעולה [ארגומנטים]
 settings_virtual_refused	4202	התקן וירטואלי אינו יכול להפעיל את זה: השתמשו במקלדת או בעכבר המחוברים למחשב, או ב-moonwater ssh במסוף root
+taskbar_tab_exit	44a5	יציאה
+taskbar_tab_stop	3684	עצירה כפויה
+taskbar_tab_stop_windows	3c5f	עצירה כפויה (%d חלונות)
 terminal_exited_press_to_close	a8cf	הסתיים בקוד יציאה %d, הקש על מקש כלשהו לסגירה
 terminal_press_to_close	080d	הקש על מקש כלשהו לסגירה
 tray_am	0d13	לפנה״צ

@@ -241,6 +241,9 @@ settings_type_passphrase	ca95	digite a senha: Enter conecta, Escape deixa
 settings_unknown	9fb9	desconhecido
 settings_verb_hint	05aa	VERBO [ARGUMENTOS]
 settings_virtual_refused	4202	um dispositivo virtual não pode ativar isto: use um teclado ou rato ligado à máquina, ou moonwater ssh num terminal root
+taskbar_tab_exit	44a5	Sair
+taskbar_tab_stop	3684	Forçar parada
+taskbar_tab_stop_windows	3c5f	Forçar parada (%d janelas)
 terminal_exited_press_to_close	a8cf	terminou com status %d, pressione uma tecla para fechar
 terminal_press_to_close	080d	pressione uma tecla para fechar
 tray_am	0d13	AM

@@ -241,6 +241,9 @@ settings_type_passphrase	ca95	введіть пароль: Enter підключ�
 settings_unknown	9fb9	невідомо
 settings_verb_hint	05aa	ДІЄСЛОВО [АРГУМЕНТИ]
 settings_virtual_refused	4202	віртуальний пристрій не може це ввімкнути: клавіатура чи миша машини, або moonwater ssh у терміналі root
+taskbar_tab_exit	44a5	Вихід
+taskbar_tab_stop	3684	Примусово зупинити
+taskbar_tab_stop_windows	3c5f	Примусово зупинити (вікон: %d)
 terminal_exited_press_to_close	a8cf	завершено зі статусом %d, натисніть будь-яку клавішу, щоб закрити
 terminal_press_to_close	080d	натисніть будь-яку клавішу, щоб закрити
 tray_am	0d13	дп

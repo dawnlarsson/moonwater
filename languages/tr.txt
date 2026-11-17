@@ -241,6 +241,9 @@ settings_type_passphrase	ca95	parolayı yazın: Enter bağlanır, Escape bırak�
 settings_unknown	9fb9	bilinmiyor
 settings_verb_hint	05aa	FİİL [ARGÜMANLAR]
 settings_virtual_refused	4202	sanal bir aygıt bunu açamaz: makineye takılı bir klavye veya fare kullanın ya da bir root terminalinde moonwater ssh
+taskbar_tab_exit	44a5	Çık
+taskbar_tab_stop	3684	Zorla durdur
+taskbar_tab_stop_windows	3c5f	Zorla durdur (%d pencere)
 terminal_exited_press_to_close	a8cf	%d durumuyla çıktı, kapatmak için bir tuşa basın
 terminal_press_to_close	080d	kapatmak için bir tuşa basın
 tray_am	0d13	ÖÖ

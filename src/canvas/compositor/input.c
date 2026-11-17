@@ -1161,20 +1161,29 @@ static int compositor_asked_shape(int row)
         return shape < CP_SHAPES ? (int)shape : CP_ARROW;
 }
 
-// The band whose moon is at a point, or -1: the moon grows while the pointer is over it (taskbar_moon_hover).
-static int compositor_moon_band(int x, int y)
+// The band whose moon is at a point, or -1: the moon grows while the pointer is over it (taskbar_moon_hover). With tabs, a tab of a band is
+// found too, as a finger reaches it, and *slot says what is at the point (the moon's, or the tab's number).
+static int compositor_slot_band(int x, int y, int tabs, int *slot)
 {
-        int found = -1;
+        int found = -1, reach = tabs && compositor.touching ? COMPOSITOR_FINGER_TARGET * compositor.scale / 100 : 0;
 
         for (compositor.band_at = 0; compositor.table && compositor.band_at < compositor_bands() && found < 0; compositor.band_at++)
         {
                 struct taskbar_view view = compositor_band_view();
+                int hit = taskbar_hit_reach(&view, x, y, reach);
 
-                if (taskbar_hit_reach(&view, x, y, 0) == TASKBAR_LAUNCHER)
-                        found = compositor.band_at;
+                if (hit == TASKBAR_LAUNCHER || (tabs && hit >= 0))
+                        found = compositor.band_at, *slot = hit;
         }
         compositor.band_at = 0;
         return found;
+}
+
+static int compositor_moon_band(int x, int y)
+{
+        int slot;
+
+        return compositor_slot_band(x, y, 0, &slot);
 }
 
 /*
@@ -1234,10 +1243,10 @@ static void compositor_menu_close(void)
         compositor_damage(rect[0], rect[1], rect[2], rect[3]);
 }
 
-// The moon's menu opened beside the moon of the band at x, y.
+// The moon's menu opened beside the moon of the band at x, y, or the menu of the tab there.
 static void compositor_menu_open(int x, int y)
 {
-        int band = compositor_moon_band(x, y);
+        int slot = TASKBAR_HIT_NONE, band = compositor_slot_band(x, y, 1, &slot);
         struct taskbar_view view;
 
         compositor_menu_close();
@@ -1246,7 +1255,7 @@ static void compositor_menu_open(int x, int y)
         compositor.band_at = band;
         view = compositor_band_view();
         compositor_menu.band = band, compositor_menu.drawn = 0;
-        if (taskbar_menu_open(&view))
+        if (slot == TASKBAR_LAUNCHER ? taskbar_menu_open(&view) : taskbar_tab_menu_open(&view, slot))
         {
                 int rect[4];
 
@@ -1272,6 +1281,8 @@ static void compositor_menu_chose(int id)
                 taskbar_clock_turn();
                 compositor_tabs_changed();
         }
+        else if (id >= TASKBAR_MENU_EXIT)
+                taskbar_tab_chose(id);
 }
 
 /*
@@ -1968,13 +1979,16 @@ static void compositor_button(unsigned int code, int down)
                 return;
         }
 
-        // A press on a window's tab brings the window up, and a middle press asks it to go. The tray takes none.
+        // A press on a window's tab brings the window up, a middle press asks it to go, and a right press (a finger's long press) opens its menu.
+        // The tray takes none.
         if (tab >= 0)
         {
                 if (code == COMPOSITOR_BTN_MIDDLE)
                         compositor_close(compositor.listed[tab]);
                 else if (code == COMPOSITOR_BTN_LEFT)
                         compositor_reveal(compositor.listed[tab]);
+                else if (code == COMPOSITOR_BTN_RIGHT)
+                        compositor_menu_open(compositor.pointer_x, compositor.pointer_y);
                 return;
         }
 
