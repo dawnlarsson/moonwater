@@ -5622,6 +5622,47 @@ static b32 build_languages(string_address image)
         return 0;
 }
 
+/*
+        The diagnostics an x86 image carries: /usr/lib/moonwater/diag/.
+
+        intel-probe (src/diag/intel-probe.c) is the Intel GPU's compute
+        self-test through the i915 render node, one freestanding file with no
+        library, and intel-matrix runs it over every shape and control, held
+        to the exit each must give (its exit is 1 for anything unexpected).
+        They are here so a machine of the family can be asked whether its GPU
+        computes right without anything copied to it first. x86 only: i915 is
+        x86's. A build for another machine, or one that drops them, clears
+        what the last build put there, as the fonts are.
+*/
+static b32 build_diagnostics(string_address image)
+{
+        string_address arch = build_key_one("arch", null);
+        string_address where = build_join(image, "/usr/lib/moonwater/diag", null);
+        string_address probe = build_join(where, "/intel-probe", null);
+
+        //      An empty image_root would make this the host's own /usr.
+        return_if(!*image, build_die("diagnostics: image_root is empty"));
+
+        if (build_tool("rm", "-rf", where, null))
+                return build_die("clearing the diagnostics");
+
+        if (!arch || !word_is(build_arch_name(arch) ? build_arch_name(arch) : arch, "x64"))
+                return 0;
+
+        if (build_tool("mkdir", "-p", where, null))
+                return build_die("making the diagnostics directory");
+
+        if (build_run(build_compiler(), "-ffreestanding", "-nostdlib", "-static", "-fno-builtin",
+                      "-fno-stack-protector", "-O2", "-w", "-o", probe, "src/diag/intel-probe.c", null))
+                return build_die("compiling src/diag/intel-probe.c");
+
+        if (build_tool("cp", "src/diag/intel-matrix", where, null) ||
+            build_tool("chmod", "0755", probe, build_join(where, "/intel-matrix", null), null))
+                return build_die("installing the diagnostics");
+
+        return 0;
+}
+
 static b32 build_userspace()
 {
         string_address image = build_setting_get("image_root");
@@ -5817,7 +5858,7 @@ static b32 build_userspace()
         if (applet && build_tool_links(image, applet, false))
                 return 1;
 
-        return build_fonts(image) || build_languages(image);
+        return build_fonts(image) || build_languages(image) || build_diagnostics(image);
 }
 
 static b32 build_local(string_address address_to profiles, positive count,

@@ -191,7 +191,10 @@ CONFIG_DRM_I915=y
 # reaches the card in the compositor's shared memory. Without it the GEM userptr ioctl is refused. It selects MMU_NOTIFIER.
 CONFIG_DRM_I915_USERPTR=y
 CONFIG_DRM_I915_FORCE_PROBE=""
-CONFIG_DRM_I915_CAPTURE_ERROR=n
+# What the GPU held when it hung, kept for root at /sys/class/drm/cardN/error (the ring, the batch, the registers):
+# without it a hang left only the kernel's one line, and an Intel compute fault could not be read
+# (/usr/lib/moonwater/diag/intel-matrix keeps it beside its results). Taken only at a hang; uncompressed, so no zlib.
+CONFIG_DRM_I915_CAPTURE_ERROR=y
 CONFIG_DRM_I915_COMPRESS_ERROR=n
 CONFIG_INTEL_GTT=y
 CONFIG_AGP=y

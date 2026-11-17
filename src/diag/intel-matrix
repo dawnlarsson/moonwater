@@ -1,0 +1,136 @@
+#!/bin/sh
+#
+#       src/diag/intel-matrix: the Intel GPU probe's matrix, as the image
+#       carries it (/usr/lib/moonwater/diag/intel-matrix, beside intel-probe).
+#
+#               intel-matrix [DIRECTORY]
+#
+#       Every row runs intel-probe once (or a few times) and is held to the
+#       exit it must give: 0 for a row that must pass, 1 for the one known
+#       limit (a walker whose last group has one lane and no --padmask, w=17:
+#       documented, expected to fail), 2 for the arguments the probe must
+#       refuse. A row that exits otherwise is unexpected, and the matrix exits
+#       1 when there is any (0 when none; 2 when this is no i915 machine).
+#
+#       The command set is chosen from the facts: kern 9 runs as it is; 7 and
+#       75 (Ivy Bridge, Haswell) with --allow-gen7, and without the kalt and
+#       mocs rows, which are gen9's; any other generation is facts only, since
+#       its compute path has never run on a machine.
+#
+#       Everything said goes to DIRECTORY/matrix.txt (/tmp/intel-matrix-SECONDS
+#       by default) as well as out, the kernel's i915 lines with it; after the
+#       fault row and at the end the i915 error state, when the kernel has one
+#       (/sys/class/drm/card*/error, CONFIG_DRM_I915_CAPTURE_ERROR), is kept
+#       there as error-ROW-cardN.txt, so a hang is read from what the GPU
+#       held and not only from the kernel's one line.
+#
+#       Root: the render node and the error state are root's.
+#
+#       Dawn Larsson - Apache-2.0 license
+#       github.com/dawnlarsson/moonwater
+#
+P=${INTEL_PROBE:-/usr/lib/moonwater/diag/intel-probe}
+out=${1:-/tmp/intel-matrix-$(cut -d. -f1 /proc/uptime)}
+mkdir -p "$out" || exit 2
+log=$out/matrix.txt
+: > "$log"
+unexpected=0
+rows=0
+
+say() {
+        echo "$*" | tee -a "$log"
+}
+
+# The error state of every card that has one, kept under the row's name. Reading it does not clear it; the next hang
+# replaces it.
+errors() {
+        for e in /sys/class/drm/card[0-9]*/error; do
+                [ -r "$e" ] || continue
+                head -c 64 "$e" 2> /dev/null | grep -q 'No error state collected' && continue
+                card=${e%/error}
+                cp "$e" "$out/error-$1-${card##*/}.txt" 2> /dev/null &&
+                        say "    i915 error state kept: $out/error-$1-${card##*/}.txt"
+        done
+}
+
+# row NAME WANT ARGUMENTS...: one probe run held to the exit it must give.
+row() {
+        name=$1
+        want=$2
+        shift 2
+        rows=$((rows + 1))
+        say "### $name"
+        "$P" $G "$@" >> "$log" 2>&1
+        got=$?
+        if [ "$got" = "$want" ]; then
+                say "    exit $got, as it must"
+        else
+                say "    UNEXPECTED: exit $got, where $want was wanted"
+                unexpected=$((unexpected + 1))
+        fi
+}
+
+[ -x "$P" ] || { say "no probe at $P"; exit 2; }
+
+say "### facts"
+"$P" --facts > "$out/facts.txt" 2>&1
+facts=$?
+grep -E 'device|topology|RESULT' "$out/facts.txt" | tee -a "$log"
+if [ "$facts" != 0 ]; then
+        say "not an i915 machine, or no render node (exit $facts): nothing more is run"
+        exit 2
+fi
+
+kern=$(sed -n 's/.*class \([0-9][0-9]*\):.*/\1/p' "$out/facts.txt" | head -1)
+G=
+case $kern in
+9) ;;
+7 | 75) G=--allow-gen7 ;;
+*)
+        say "kern ${kern:-unknown}: this generation's compute path has never run on a machine, so the matrix is facts only"
+        exit 0
+        ;;
+esac
+say "kern $kern${G:+, $G}"
+
+row "chain: step a, userptr, walker" 0 --walker --guard
+row "baseline 256x16 x20 guarded" 0 --b-only --repeat 20 --guard
+row "control: no walker, nothing may be written" 0 --b-only --control --guard
+row "colour 0x3c" 0 --b-only --colour 0x3c --guard
+row "colour 0xff" 0 --b-only --colour 0xff --guard
+row "shape 250x16 partial right mask" 0 --b-only --w 250 --h 16 --guard
+row "shape 256x1" 0 --b-only --w 256 --h 1 --guard
+row "shape 16x1" 0 --b-only --w 16 --h 1 --guard
+row "shape 1x1" 0 --b-only --w 1 --h 1 --guard
+row "shape 512x32" 0 --b-only --w 512 --h 32 --guard
+row "shape 1000x64" 0 --b-only --w 1000 --h 64 --guard
+row "shape 4096x16" 0 --b-only --w 4096 --h 16 --guard
+row "shape 4096x256 (1 MiB)" 0 --b-only --w 4096 --h 256 --guard
+row "pitch 512 for 256x16" 0 --b-only --w 256 --h 16 --pitch 512 --guard
+row "rgba 256x16" 0 --b-only --rgba --w 256 --h 16 --guard
+if [ "$kern" = 9 ]; then
+        row "kalt dword 29 = 0x20000a40" 0 --b-only --kalt --guard
+        row "mocs 0" 0 --b-only --mocs 0 --guard
+fi
+row "positive control: bad batch length (must be refused)" 0 --b-only --badlen
+row "positive control: EU fault (must be seen)" 0 --b-only --fault
+errors fault
+sleep 3
+row "recovery after fault" 0 --b-only --repeat 5 --guard
+row "known limit, expected to fail: one-lane right mask, w=17" 1 --b-only --w 17 --h 16 --guard
+row "one-lane right mask with --padmask: w=1" 0 --b-only --w 1 --h 16 --padmask
+row "one-lane right mask with --padmask: w=17" 0 --b-only --w 17 --h 16 --padmask --guard
+row "one-lane right mask with --padmask: w=33" 0 --b-only --w 33 --h 16 --padmask --guard
+row "one-lane right mask with --padmask: 1x16384" 0 --b-only --w 1 --h 16384 --padmask --guard
+for w in 2 3 15 31; do
+        row "odd width $w (2 to 16 lanes in the last group)" 0 --b-only --w $w --h 16 --guard
+done
+row "refused: colour 300" 2 --b-only --colour 300
+row "refused: base 0x1001" 2 --b-only --base 0x1001
+row "refused: repeat 0" 2 --b-only --repeat 0
+
+say "### kernel log, i915 lines"
+dmesg 2> /dev/null | grep -E 'i915' | tail -8 | tee -a "$log"
+errors end
+say "### $rows rows, $unexpected unexpected (kern $kern); everything is in $log"
+[ "$unexpected" = 0 ]
