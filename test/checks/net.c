@@ -2493,7 +2493,7 @@ static fn link_choice(void)
 }
 
 /* The wired links, as `moonwater wired` lists them: Ethernet that is not
-   loopback and not wireless, in the order met, a handful at most. */
+   loopback and not wireless, in the order met, every one of them. */
 static fn wired_listing(void)
 {
         netlink_wired wired = {0};
@@ -2515,7 +2515,7 @@ static fn wired_listing(void)
               link_feed(netlink_wired_seen, &wired, &bridge) && wired.count == 1 &&
                   wired.link[0].index == 5 && wired.link[0].flags == 0 &&
                   !string_compare_max(wired.link[0].name, "br0", 4));
-        for (positive at = 0; at < NETLINK_WIRED_MOST + 3; at++)
+        for (positive at = 0; at < 19; at++)
         {
                 p8 name[IFNAME_SIZE] = "eth";
 
@@ -2525,13 +2525,13 @@ static fn wired_listing(void)
                 spec.index = 10 + (p32)at;
                 link_feed(netlink_wired_seen, &wired, &spec);
         }
-        check("at most a handful are listed",
-              wired.count == NETLINK_WIRED_MOST);
+        check("every link is listed: the bridge and nineteen Ethernet links",
+              wired.count == 20);
         check("in the order met, with their flags",
               wired.link[1].index == 10 && wired.link[1].flags == IFF_RUNNING &&
                   !string_compare_max(wired.link[1].name, "etha", 5) &&
-                  wired.link[NETLINK_WIRED_MOST - 1].index ==
-                      10 + NETLINK_WIRED_MOST - 2);
+                  wired.link[19].index == 10 + 18);
+        netlink_wired_forget(&wired);
 }
 
 /*
@@ -23725,6 +23725,46 @@ static fn net_group(string_address name, net_group_body body)
 
 #define net_group(body) net_group(#body, body)
 
+/*
+        The wired list records every Ethernet link the kernel lists, the
+        seventeenth as much as the first: a machine with more than sixteen
+        (a bridge's ports, a dock's) has each of them taken down by wired off.
+        Seventeen RTM_NEWLINK messages, the seventeenth at the highest index,
+        are seventeen links recorded, and the last one keeps its own name.
+*/
+static fn wired_limits(void)
+{
+        netlink_wired wired = {0};
+        p8 name[] = "eth00";
+
+        for (positive at = 0; at < 17; at++)
+        {
+                netlink_buffer message = {0};
+                netlink_link address_to body;
+
+                name[3] = (p8)('0' + at / 10);
+                name[4] = (p8)('0' + at % 10);
+                if (!netlink_begin(address_of message, RTM_NEWLINK, NLM_REQUEST, 1,
+                                   sizeof(netlink_link)))
+                        break;
+                body = (netlink_link address_to)netlink_body(address_of message);
+                body->kind = NETLINK_LINK_ETHER;
+                body->index = (p32)at + 2;
+                body->flags = IFF_UP | IFF_RUNNING;
+                netlink_attribute_add(address_of message, IFLA_IFNAME, name, 6);
+                (void)netlink_wired_seen((netlink_header address_to)message.bytes,
+                                         address_of wired);
+                netlink_forget(address_of message);
+        }
+
+        check("seventeen Ethernet links are all recorded", wired.count == 17);
+        if (wired.count == 17)
+                check("the seventeenth link keeps its index and its name",
+                      wired.link[16].index == 18 &&
+                          !memory_compare(wired.link[16].name, "eth16", 6));
+        netlink_wired_forget(&wired);
+}
+
 b32 main(void)
 {
         net_group(arithmetic);
@@ -23885,6 +23925,7 @@ b32 main(void)
         //      fold wifi: new groups below this line
         //
         //      fold host-net: new groups below this line
+        net_group(wired_limits);
         //
         //      fold waterlink: new groups below this line
         //

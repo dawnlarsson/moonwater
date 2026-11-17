@@ -557,9 +557,6 @@ static positive discovery_nat_classify(p8 answered, const p8 address_to first,
 
 /* ---- what is here: the interfaces and their addresses ---- */
 
-#define DISCOVERY_INTERFACES 16
-#define DISCOVERY_ADDRESSES 64
-
 typedef struct
 {
         b32 index;
@@ -576,12 +573,21 @@ typedef struct
         p8 address[16];
 } discovery_local;
 
+/*
+        What the kernel lists, held in tables that grow with it: a machine with
+        any number of interfaces and addresses has every one. The tables are
+        storage of this read (discovery_here_forget lets them go); a caller
+        that reads a discovery_here zeroes it first, as discovery_here_read_some
+        does.
+*/
 typedef struct
 {
-        discovery_interface interface[DISCOVERY_INTERFACES];
+        discovery_interface address_to interface;
         positive interfaces;
-        discovery_local own[DISCOVERY_ADDRESSES];
+        positive interface_room;
+        discovery_local address_to own;
         positive owns;
+        positive own_room;
 } discovery_here;
 
 static discovery_interface address_to discovery_interface_of(
@@ -594,37 +600,36 @@ static discovery_interface address_to discovery_interface_of(
 }
 
 #if !defined(MACOS)
-static p8 discovery_link_seen(netlink_header address_to header,
+static bool discovery_link_seen(netlink_header address_to header,
                                address_any context)
 {
         discovery_here address_to here = context;
-        netlink_link address_to link = null;
-        string_address name;
+        netlink_link_entry entry;
         p8 driver[16] = {0};
         positive size = 0;
         p8 address_to kind;
         discovery_interface address_to into;
 
-        if (header->type != RTM_NEWLINK ||
-            here->interfaces >= DISCOVERY_INTERFACES)
-                return true;
-        name = netlink_link_name(header, address_of link);
-        if (!name || !link || string_length(name) >= 16)
+        if (header->type != RTM_NEWLINK || !netlink_link_read(header, address_of entry) ||
+            string_length(entry.name) >= 16)
                 return true;
         kind = netlink_link_driver(header, address_of size);
         if (kind && size && size < sizeof driver)
                 memory_copy(driver, kind, size);
+        if (!array_store_reserve(here->interface, here->interface_room, here->interfaces,
+                                 here->interfaces + 1, 16))
+                return false;
         into = here->interface + here->interfaces++;
-        into->index = (b32)link->index;
-        into->flags = link->flags;
-        string_copy_bounded((string_address)into->name, name, sizeof into->name);
+        into->index = (b32)entry.link->index;
+        into->flags = entry.link->flags;
+        string_copy_bounded((string_address)into->name, entry.name, sizeof into->name);
         into->kind = (p8)discovery_interface_kind(
-            name, link->kind, netlink_link_is_wireless(header, name),
+            entry.name, entry.link->kind, entry.wireless,
             driver[0] ? (string_address)driver : null);
         return true;
 }
 
-static p8 discovery_address_seen(netlink_header address_to header,
+static bool discovery_address_seen(netlink_header address_to header,
                                   address_any context)
 {
         discovery_here address_to here = context;
@@ -634,8 +639,7 @@ static p8 discovery_address_seen(netlink_header address_to header,
         p8 address_to host;
         discovery_local address_to into;
 
-        if (header->type != RTM_NEWADDR || !body ||
-            here->owns >= DISCOVERY_ADDRESSES)
+        if (header->type != RTM_NEWADDR || !body)
                 return true;
         host = netlink_find(header, sizeof(netlink_address), IFA_LOCAL,
                             address_of size);
@@ -644,6 +648,9 @@ static p8 discovery_address_seen(netlink_header address_to header,
                                     address_of size);
         if (!host)
                 return true;
+        if (!array_store_reserve(here->own, here->own_room, here->owns,
+                                 here->owns + 1, 16))
+                return false;
         into = here->own + here->owns;
         if (body->family == AF_INET && size == 4)
         {
@@ -668,26 +675,54 @@ static p8 discovery_address_seen(netlink_header address_to header,
         family (AF_UNSPEC for both). Each dump is net.c's, asked again while
         the kernel says its table changed under it (netlink_dump_again), as
         the lease's own walks are. */
+#if !defined(MACOS)
+/*
+        A dump asked again while the kernel says its table changed under it.
+        Before each try the table being filled is put back to none; the tables
+        themselves are kept, so a retry never loses one it grew.
+*/
+static bipolar discovery_dump_again(b32 handle, p16 type, positive body, p8 family,
+                                    discovery_here address_to here, p8 links)
+{
+        bipolar status = NETLINK_DUMP_CHANGED;
+
+        for (positive tries = 0; tries < NETLINK_DUMP_TRIES &&
+                                 status == NETLINK_DUMP_CHANGED; tries++)
+        {
+                if (links)
+                        here->interfaces = 0;
+                else
+                        here->owns = 0;
+                status = netlink_dump(handle, type, body, family,
+                                      links ? discovery_link_seen : discovery_address_seen,
+                                      here);
+        }
+        return status;
+}
+#endif
+
+/* Let go of the tables a read made. */
+static fn discovery_here_forget(discovery_here address_to here)
+{
+        array_store_release(here->interface, here->interface_room, here->interfaces);
+        array_store_release(here->own, here->own_room, here->owns);
+}
+
 static fn discovery_here_read_some(discovery_here address_to here, p8 links,
                                    p8 family)
 {
         memory_zero(here, sizeof(address_to here));
 #if !defined(MACOS)
-        discovery_here first;
         bipolar handle = netlink_open_groups(0);
 
         if (handle < 0)
                 return;
-        memory_zero(address_of first, sizeof first);
         if (links)
-                (void)netlink_dump_again((b32)handle, RTM_GETLINK,
-                                         sizeof(netlink_link), AF_UNSPEC,
-                                         discovery_link_seen, here,
-                                         address_of first, sizeof first);
-        first = address_to here;
-        (void)netlink_dump_again((b32)handle, RTM_GETADDR, sizeof(netlink_address),
-                                 family, discovery_address_seen, here,
-                                 address_of first, sizeof first);
+                (void)discovery_dump_again((b32)handle, RTM_GETLINK,
+                                           sizeof(netlink_link), AF_UNSPEC,
+                                           here, true);
+        (void)discovery_dump_again((b32)handle, RTM_GETADDR, sizeof(netlink_address),
+                                   family, here, false);
         system_close((b32)handle);
 #else
         (void)links;
@@ -1103,7 +1138,13 @@ static fn discovery_stun_wait(bipolar handle, discovery_found address_to found,
                         return;
                 limit.tv_sec = (b64)((until - now) / 1000000000ull);
                 limit.tv_nsec = (b64)((until - now) % 1000000000ull);
-                if (descriptor_wait_readable(handle, address_of limit, null) <= 0)
+                bipolar ready = descriptor_wait_readable(handle, address_of limit, null);
+
+                //      Only an interrupted wait is tried again; any other failure (a
+                //      descriptor that is not one, say) ends the wait at once.
+                if (ready < 0 && ready != NETWORK_INTERRUPTED)
+                        return;
+                if (ready <= 0)
                         continue;
                 got = socket_receive((b32)handle, answer, sizeof answer, MSG_DONTWAIT,
                                      null, null);
@@ -2514,6 +2555,7 @@ static fn discovery_interfaces_each(discovery_interface_visitor visit,
 
         discovery_here_read_some(address_of here, false, AF_INET);
         discovery_interfaces_visit(address_of here, visit, context);
+        discovery_here_forget(address_of here);
 #endif
 }
 

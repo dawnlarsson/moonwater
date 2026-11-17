@@ -1171,12 +1171,39 @@ static bipolar netlink_link_flag_up(b32 handle, p32 index, bool up)
 #define netlink_link_up(handle, index) netlink_link_flag_up(handle, index, true)
 
 /*
-        The wired links: Ethernet framing, not loopback and not a wireless
-        station. Sixteen is more than a machine has; one past that is not
-        listed.
+        One RTM_NEWLINK as the link it names: its body, its name and whether
+        it is a wireless station. Every reader of the link list takes its link
+        here, so the parse is one: the wired walk below and discovery.c's. Each
+        keeps its own filter and its own store. False when the message names
+        no link.
 */
-#define NETLINK_WIRED_MOST 16
+typedef struct
+{
+        netlink_link address_to link;
+        string_address name;
+        bool wireless;
+} netlink_link_entry;
 
+static bool netlink_link_read(netlink_header address_to header,
+                              netlink_link_entry address_to entry)
+{
+        netlink_link address_to link = null;
+        string_address name = netlink_link_name(header, address_of link);
+
+        if (!name || !link)
+                return false;
+        entry->link = link;
+        entry->name = name;
+        entry->wireless = netlink_link_is_wireless(header, name);
+        return true;
+}
+
+/*
+        The wired links: Ethernet framing, not loopback and not a wireless
+        station. The list grows with the links the kernel lists, so none is
+        left out for want of room; only an allocation that fails stops it,
+        and netlink_wired_list says so.
+*/
 typedef struct
 {
         p32 index;
@@ -1186,34 +1213,64 @@ typedef struct
 
 typedef struct
 {
-        netlink_wired_link link[NETLINK_WIRED_MOST];
+        netlink_wired_link address_to link;
+        positive room;
         positive count;
+        bool failed;
 } netlink_wired;
 
 static bool netlink_wired_seen(netlink_header address_to header, address_any context)
 {
         netlink_wired address_to wired = (netlink_wired address_to)context;
-        netlink_link address_to link;
-        string_address name = netlink_link_name(header, address_of link);
+        netlink_link_entry entry;
 
-        if (!name || (link->flags & IFF_LOOPBACK) || link->kind != NETLINK_LINK_ETHER ||
-            netlink_link_is_wireless(header, name) || wired->count == NETLINK_WIRED_MOST)
+        if (!netlink_link_read(header, address_of entry) ||
+            (entry.link->flags & IFF_LOOPBACK) ||
+            entry.link->kind != NETLINK_LINK_ETHER || entry.wireless)
                 return true;
+        if (!array_store_reserve(wired->link, wired->room, wired->count,
+                                 wired->count + 1, 16))
+        {
+                wired->failed = true;
+                return false;
+        }
 
-        wired->link[wired->count].index = link->index;
-        wired->link[wired->count].flags = link->flags;
-        string_copy_max_end(wired->link[wired->count].name, name, IFNAME_SIZE - 1);
+        wired->link[wired->count].index = entry.link->index;
+        wired->link[wired->count].flags = entry.link->flags;
+        string_copy_max_end(wired->link[wired->count].name, entry.name, IFNAME_SIZE - 1);
         wired->count++;
         return true;
 }
 
+/*
+        The wired links of the kernel's list, asked again while the kernel
+        says the list changed under it. Each try starts the count over and keeps
+        the storage it has grown; a copy of the whole struct would hand back a
+        stale pointer. Negative when the list is not whole: a failed dump, or
+        an allocation that failed on the way.
+*/
 static bipolar netlink_wired_list(b32 handle, netlink_wired address_to wired)
 {
-        netlink_wired first = {.count = 0};
+        bipolar status = NETLINK_DUMP_CHANGED;
 
-        return netlink_dump_again(handle, RTM_GETLINK, sizeof(netlink_link),
-                                  AF_UNSPEC, netlink_wired_seen, wired,
-                                  address_of first, sizeof first);
+        wired->failed = false;
+        for (positive tries = 0; tries < NETLINK_DUMP_TRIES &&
+                                 status == NETLINK_DUMP_CHANGED; tries++)
+        {
+                wired->count = 0;
+                status = netlink_dump(handle, RTM_GETLINK, sizeof(netlink_link),
+                                      AF_UNSPEC, netlink_wired_seen, wired);
+        }
+        if (status >= 0 && wired->failed)
+                return -ENOMEM;
+        return status;
+}
+
+/* Let go of the links a walk made: the list is the kernel's word for one walk. */
+static fn netlink_wired_forget(netlink_wired address_to wired)
+{
+        array_store_release(wired->link, wired->room, wired->count);
+        wired->failed = false;
 }
 
 /*

@@ -3304,10 +3304,11 @@ static b32 radio_wifi_remove(string_address ssid)
 */
 static b32 radio_wired_set(bool on)
 {
-        netlink_wired wired;
+        netlink_wired wired = {0};
         bipolar handle;
         bipolar failed;
         bipolar flagged = 0;
+        positive links;
 
         if (host_save(NET_WIRED_POWER, NET_WIRED_POWER, on ? "on" : "off"))
                 return 1;
@@ -3330,17 +3331,19 @@ static b32 radio_wired_set(bool on)
                         }
         socket_close((b32)handle);
         radio_net_wake();
+        links = wired.count;
+        netlink_wired_forget(address_of wired);
 
         return_if(failed < 0, host_fail("wired", failed));
         return_if(flagged < 0, host_fail("wired", flagged));
         host_say(log, host_label "wired %s%s\n", on ? "on" : "off",
-                 wired.count ? "" : " (this machine has no wired link)");
+                 links ? "" : " (this machine has no wired link)");
         return 0;
 }
 
 static b32 radio_wired_status(void)
 {
-        netlink_wired wired;
+        netlink_wired wired = {0};
         bipolar handle = netlink_open_groups(0);
         bipolar failed = handle < 0 ? handle : netlink_wired_list((b32)handle, address_of wired);
 
@@ -3355,6 +3358,7 @@ static b32 radio_wired_status(void)
                                       (wired.link[at].flags & IFF_RUNNING) ? "carrier"
                                                                            : "no carrier");
         log_flush();
+        netlink_wired_forget(address_of wired);
         return failed < 0 ? host_fail("wired", failed) : 0;
 }
 

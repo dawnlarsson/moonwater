@@ -6170,12 +6170,96 @@ static fn stream_carrier(void)
         }
 }
 
+/*
+        discovery.c's tables grow with the kernel's list: a machine with
+        seventeen interfaces has all of them in what discovery keeps, and the
+        seventeenth interface's leased address is kept with it. The messages
+        are the kernel's own RTM_NEWLINK and RTM_NEWADDR, read by the readers
+        the walk uses, so nothing here is a model of them.
+*/
+static fn discovery_growth_rows(void)
+{
+        discovery_here here;
+        p8 name[] = "eth00";
+        p8 host[4] = {10, 0, 17, 5};
+        netlink_buffer address = {0};
+        netlink_address address_to body;
+        netlink_wired wired = {0};
+        p64 start;
+        p64 elapsed;
+
+        memory_zero(address_of here, sizeof here);
+        for (positive at = 0; at < 17; at++)
+        {
+                netlink_buffer link = {0};
+                netlink_link address_to lbody;
+
+                name[3] = (p8)('0' + at / 10);
+                name[4] = (p8)('0' + at % 10);
+                if (!netlink_begin(address_of link, RTM_NEWLINK, NLM_REQUEST, 1,
+                                   sizeof(netlink_link)))
+                        break;
+                lbody = (netlink_link address_to)netlink_body(address_of link);
+                lbody->kind = NETLINK_LINK_ETHER;
+                lbody->index = (p32)at + 2;
+                lbody->flags = IFF_UP | IFF_RUNNING;
+                netlink_attribute_add(address_of link, IFLA_IFNAME, name, 6);
+                (void)discovery_link_seen((netlink_header address_to)link.bytes,
+                                          address_of here);
+                (void)netlink_wired_seen((netlink_header address_to)link.bytes,
+                                         address_of wired);
+                netlink_forget(address_of link);
+        }
+        check("seventeen interfaces are all kept", here.interfaces == 17);
+        check("the wired walk keeps the same seventeen Ethernet links",
+              wired.count == 17);
+
+        netlink_begin(address_of address, RTM_NEWADDR, NLM_REQUEST, 1,
+                      sizeof(netlink_address));
+        body = (netlink_address address_to)netlink_body(address_of address);
+        body->family = AF_INET;
+        body->prefix = 24;
+        body->index = 18;
+        netlink_attribute_add(address_of address, IFA_LOCAL, host, 4);
+        (void)discovery_address_seen((netlink_header address_to)address.bytes,
+                                     address_of here);
+        check("the seventeenth interface's address is kept", here.owns == 1);
+        check("its interface is found, so the report shows it",
+              here.owns == 1 && discovery_interface_of(address_of here,
+                                                       here.own[0].index) != null);
+        netlink_forget(address_of address);
+
+        //      A closed descriptor fails at once (poll reports it invalid, -9):
+        //      the wait returns with that and does not sleep to its deadline.
+        {
+                discovery_found found;
+                p8 transaction[2][12] = {{0}};
+                bipolar closed = socket_new(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+
+                if (closed >= 0)
+                        socket_close((b32)closed);
+                memory_zero(address_of found, sizeof found);
+                start = clock_monotonic_nanoseconds();
+                discovery_stun_wait(closed, address_of found, 1, transaction,
+                                    start + 3000000000ull);
+                elapsed = clock_monotonic_nanoseconds() - start;
+                check("a wait on a closed descriptor returns at once",
+                      closed >= 0 && elapsed < 1000000000ull);
+        }
+        discovery_here_forget(address_of here);
+}
+
 b32 main(void)
 {
         if (program_argument_count() > 1)
         {
                 string_address mode = program_argument_list()[1];
 
+                if (string_equals(mode, "discovery-grow"))
+                {
+                        discovery_growth_rows();
+                        return test_report(null);
+                }
                 if (string_equals(mode, "pair"))
                         return pair_vectors(64);
                 if (string_equals(mode, "mdns-announce") ||
