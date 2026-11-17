@@ -236,10 +236,13 @@ settings_item_saved	3ffd	сохранено: Enter снова спросит п�
 settings_joined	1050	подключено
 settings_kept	4759	запомнено
 settings_map_drag	125f	Отпустите, чтобы разместить экран
-settings_map_hint	9efb	Перетащите экран, чтобы переместить его.
+settings_map_fit	797e	Показать все экраны
+settings_map_hint	0257	Перетащите экран, чтобы переместить его. Перетащите сетку, чтобы сдвинуть вид, прокрутите для масштаба.
 settings_map_keys	54c9	Стрелки выбирают экран. Shift и стрелка перемещают его. Enter определяет. Вниз — выйти.
 settings_map_none	1b29	Экран не подключён.
 settings_map_one	7ff2	Подключён только один экран.
+settings_map_primary	8448	%1$d × %2$d, основной
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	Вверх и Вниз выбирают, Enter задаёт, Escape оставляет
 settings_metrics	7e10	Карта: %1$d мкс ср., %2$d мкс макс.; процессор: %3$d мкс, %4$d мкс макс.; карты %5$d; пробуждений %6$d; %7$d кадр/с, %8$d списков/с
 settings_mode_largest	c7c4	Наибольшее изображение

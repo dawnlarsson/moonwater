@@ -237,10 +237,13 @@ settings_item_saved	3ffd	محفوظ: Enter دوبارہ پاس ورڈ مانگت
 settings_joined	1050	منسلک
 settings_kept	4759	رکھا گیا
 settings_map_drag	125f	اسکرین رکھنے کے لیے چھوڑ دیں
-settings_map_hint	9efb	کسی اسکرین کو منتقل کرنے کے لیے اسے گھسیٹیں۔
+settings_map_fit	797e	تمام اسکرینیں دکھائیں
+settings_map_hint	0257	کسی اسکرین کو منتقل کرنے کے لیے اسے گھسیٹیں۔ منظر ہٹانے کے لیے گرڈ کو گھسیٹیں، زوم کے لیے اسکرول کریں۔
 settings_map_keys	54c9	تیر کی کلیدیں: اسکرین کا انتخاب۔ Shift اور تیر: منتقلی۔ Enter: شناخت۔ نیچے: باہر۔
 settings_map_none	1b29	کوئی اسکرین منسلک نہیں۔
 settings_map_one	7ff2	صرف ایک اسکرین منسلک ہے۔
+settings_map_primary	8448	%1$d × %2$d، بنیادی
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	اوپر اور نیچے منتخب کرتے ہیں، Enter لاگو کرتا ہے، Escape باہر نکلتا ہے
 settings_metrics	7e10	کارڈ: اوسط %1$d µs، زیادہ %2$d µs؛ پروسیسر: %3$d µs، زیادہ %4$d µs؛ میپ %5$d؛ جاگنا %6$d؛ %7$d فریم/س، %8$d فہرست/س
 settings_mode_largest	c7c4	سب سے بڑی تصویر

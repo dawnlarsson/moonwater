@@ -2813,6 +2813,50 @@ static int windows_displays_set(char *into, unsigned int room, const char *text,
 }
 
 /*
+        The displays file (text, NUL-ended) with the lines of the count screens named first, in the order named, and every other
+        line after them as it was. The compositor lays the screens the file places in the order of their lines (windows_arrange_pinned
+        puts them after the screens the arrangement names), so a desk written whole, every screen's place in the order the screens
+        are laid, keeps that order and its primary. A named screen with no line has none here; a later line of a screen named is
+        dropped, as the reader takes only the first. Answers the bytes written into (NUL-ended), or -1 when they do not fit.
+*/
+static int windows_displays_lead(char *into, unsigned int room, const char *text, const char (*names)[WINDOWS_OUTPUT_NAME], unsigned int count)
+{
+        unsigned int at = 0;
+
+        if (!room)
+                return -1;
+        into[0] = 0;
+        for (unsigned int pass = 0; pass <= count; pass++)
+        {
+                unsigned int start = 0, taken = 0;
+
+                while (text[start])
+                {
+                        unsigned int stop = start, word, word_end, which = 0;
+
+                        while (text[stop] && text[stop] != '\n')
+                                stop++;
+                        word = start;
+                        while (word < stop && (text[word] == ' ' || text[word] == '\t'))
+                                word++;
+                        word_end = word;
+                        while (word_end < stop && text[word_end] != ' ' && text[word_end] != '\t')
+                                word_end++;
+                        while (which < count && !(word_end > word && windows_name_is(names[which], text + word, word_end - word)))
+                                which++;
+                        if (pass < count ? which == pass && !taken : which == count)
+                        {
+                                if (!windows_put(into, room, &at, text + start, stop - start) || !windows_put(into, room, &at, "\n", 1))
+                                        return -1;
+                                taken = 1;
+                        }
+                        start = stop + (text[stop] == '\n');
+                }
+        }
+        return (int)at;
+}
+
+/*
         The arrangement the compositor lays, with each display's place put in
         it. The arrangement's words stay as they are, except that a placed
         display's word (NAME@X,Y) takes the display's place where the

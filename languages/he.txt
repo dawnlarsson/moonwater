@@ -237,10 +237,13 @@ settings_item_saved	3ffd	שמורה: Enter מבקש שוב את הסיסמה, De
 settings_joined	1050	מחוברת
 settings_kept	4759	שמור
 settings_map_drag	125f	שחרר כדי למקם את המסך
-settings_map_hint	9efb	גרור מסך כדי להזיז אותו.
+settings_map_fit	797e	הצג את כל המסכים
+settings_map_hint	0257	גרור מסך כדי להזיז אותו. גרור את הרשת כדי להזיז את התצוגה, גלול כדי להגדיל.
 settings_map_keys	54c9	החצים בוחרים מסך. Shift וחץ מזיזים אותו. Enter מזהה. חץ למטה יוצא.
 settings_map_none	1b29	אין מסך מחובר.
 settings_map_one	7ff2	מחובר מסך אחד בלבד.
+settings_map_primary	8448	%1$d × %2$d, ראשי
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	חץ למעלה וחץ למטה בוחרים, Enter קובע, Escape יוצא
 settings_metrics	7e10	כרטיס: ממוצע %1$d µs, מקסימום %2$d µs; מעבד: %3$d µs, מקסימום %4$d µs; מיפויים %5$d; התעוררות %6$d; %7$d פריימים/ש, %8$d רשימות/ש
 settings_mode_largest	c7c4	התמונה הגדולה ביותר

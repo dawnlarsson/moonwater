@@ -236,10 +236,13 @@ settings_item_saved	3ffd	kayıtlı: Enter parolayı yeniden sorar, Delete unuttu
 settings_joined	1050	bağlı
 settings_kept	4759	saklı
 settings_map_drag	125f	Ekranı yerleştirmek için bırakın
-settings_map_hint	9efb	Bir ekranı taşımak için sürükleyin.
+settings_map_fit	797e	Tüm ekranları göster
+settings_map_hint	0257	Bir ekranı taşımak için sürükleyin. Görünümü kaydırmak için ızgarayı sürükleyin, yakınlaştırmak için kaydırın.
 settings_map_keys	54c9	Oklar bir ekran seçer. Shift ve bir ok onu taşır. Enter tanımlar. Aşağı çıkar.
 settings_map_none	1b29	Bağlı bir ekran yok.
 settings_map_one	7ff2	Yalnızca bir ekran bağlı.
+settings_map_primary	8448	%1$d × %2$d, birincil
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	Yukarı ve Aşağı seçer, Enter ayarlar, Escape bırakır
 settings_metrics	7e10	Kart: ortalama %1$d µs, en kötü %2$d µs; işlemci: %3$d µs, en kötü %4$d µs; eşlemeler %5$d; uyanmalar %6$d; saniyede %7$d sunum, saniyede %8$d liste
 settings_mode_largest	c7c4	En büyük görüntü

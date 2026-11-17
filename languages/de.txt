@@ -236,10 +236,13 @@ settings_item_saved	3ffd	gespeichert: Enter fragt das Passwort erneut, Delete ve
 settings_joined	1050	verbunden
 settings_kept	4759	gemerkt
 settings_map_drag	125f	Loslassen, um den Bildschirm zu platzieren
-settings_map_hint	9efb	Einen Bildschirm ziehen, um ihn zu verschieben.
+settings_map_fit	797e	Alle Bildschirme zeigen
+settings_map_hint	0257	Einen Bildschirm ziehen, um ihn zu verschieben. Das Raster ziehen, um die Ansicht zu bewegen, scrollen zum Zoomen.
 settings_map_keys	54c9	Pfeile wählen einen Bildschirm. Shift und ein Pfeil verschiebt ihn. Enter identifiziert. Ab verlässt.
 settings_map_none	1b29	Es ist kein Bildschirm angeschlossen.
 settings_map_one	7ff2	Es ist nur ein Bildschirm angeschlossen.
+settings_map_primary	8448	%1$d × %2$d, Hauptbildschirm
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	Auf und Ab wählen, Enter übernimmt, Escape lässt es
 settings_metrics	7e10	Karte: %1$d µs im Mittel, %2$d µs im Schlimmsten; Prozessor: %3$d µs, %4$d µs im Schlimmsten; Abbildungen %5$d; Aufwecken %6$d; %7$d Bilder/s, %8$d Listen/s
 settings_mode_largest	c7c4	Größtes Bild

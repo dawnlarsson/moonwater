@@ -457,7 +457,7 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
         return locale_canvas_arrange_status();
 }
 
-#define LOCALE_CANVAS_DISPLAY_USAGE "display is NAME rotation DEGREES, NAME refresh HZ|preferred, NAME scale PERCENT or NAME place X Y\n"
+#define LOCALE_CANVAS_DISPLAY_USAGE "display is NAME rotation DEGREES, NAME refresh HZ|preferred, NAME scale PERCENT or NAME place X Y [NAME place X Y]...\n"
 #define LOCALE_CANVAS_DISPLAYS SETTING_CANVAS_DISPLAYS_PATH
 
 /*
@@ -467,15 +467,21 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
         pixels, as canvas arrange's places are. NAME is the connector's (Virtual-1, HDMI-A-1, eDP-1). Only that field of
         that screen changes, and every other line of the file is kept as it is (windows_displays_set). The words are
         judged before root is asked for, as canvas arrange's are; the file is read and written under the settings lock.
+
+        Places may be several, NAME place X Y for each screen, each name once: the desk written whole in one write, so the
+        compositor never lays half of it (Settings' map of the screens sends every screen's place this way). Their lines are
+        put first in the file in the order named (windows_displays_lead), which is the order the compositor lays placed
+        screens in, so a desk named in its laid order keeps that order and its primary.
 */
 static b32 locale_canvas_display(string_address address_to arguments, positive count)
 {
         struct windows_display change;
-        char name[WINDOWS_OUTPUT_NAME], out[4096];
+        char name[WINDOWS_OUTPUT_NAME], out[4096], placed[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
         p8 text[4096];
         unsigned int field;
         bool rotation, refresh, scale, place;
-        int value = 0, x = 0, y = 0, made;
+        int value = 0, made, xs[WINDOWS_OUTPUTS], ys[WINDOWS_OUTPUTS];
+        positive places = 0;
         bipolar got, failed;
 
         if (count < 4)
@@ -483,12 +489,28 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
         rotation = count == 6 && string_equals(arguments[4], "rotation");
         refresh = count == 6 && string_equals(arguments[4], "refresh");
         scale = count == 6 && string_equals(arguments[4], "scale");
-        place = count == 7 && string_equals(arguments[4], "place");
+        place = count >= 7 && (count - 3) % 4 == 0 && (count - 3) / 4 <= WINDOWS_OUTPUTS;
+        for (positive at = 4; place && at < count; at += 4)
+                place = string_equals(arguments[at], "place");
         if (!rotation && !refresh && !scale && !place)
                 return host_refuse(LOCALE_CANVAS_DISPLAY_USAGE);
-        if (!windows_display_name((const char *)arguments[3], string_length(arguments[3]), name))
-                return host_refuse("\"%s\" is not a screen's name: letters, digits and dashes, 1 to %p bytes "
-                                   "(Virtual-1, HDMI-A-1, eDP-1)\n", arguments[3], (positive)(WINDOWS_OUTPUT_NAME - 1));
+        for (positive at = 3; at < count && (at == 3 || place); at += 4)
+        {
+                if (!windows_display_name((const char *)arguments[at], string_length(arguments[at]), place ? placed[places] : name))
+                        return host_refuse("\"%s\" is not a screen's name: letters, digits and dashes, 1 to %p bytes "
+                                           "(Virtual-1, HDMI-A-1, eDP-1)\n", arguments[at], (positive)(WINDOWS_OUTPUT_NAME - 1));
+                if (!place)
+                        break;
+                if (!windows_display_value(WINDOWS_DISPLAY_X, (const char *)arguments[at + 2], string_length(arguments[at + 2]), &xs[places]) ||
+                    !windows_display_value(WINDOWS_DISPLAY_Y, (const char *)arguments[at + 3], string_length(arguments[at + 3]), &ys[places]))
+                        return host_refuse("place is two whole numbers of pixels, X and Y, from -%p to %p, not %s %s\n",
+                                           (positive)WINDOWS_PLACE_MOST, (positive)WINDOWS_PLACE_MOST,
+                                           arguments[at + 2], arguments[at + 3]);
+                for (positive other = 0; other < places; other++)
+                        if (string_equals((string_address)placed[other], (string_address)placed[places]))
+                                return host_refuse("%s is placed twice: name each screen once\n", (string_address)placed[places]);
+                places++;
+        }
 
         memory_zero(address_of change, sizeof(change));
         if (rotation)
@@ -517,15 +539,7 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
                 field = WINDOWS_DISPLAY_SCALE;
         }
         else
-        {
-                if (!windows_display_value(WINDOWS_DISPLAY_X, (const char *)arguments[5], string_length(arguments[5]), &x) ||
-                    !windows_display_value(WINDOWS_DISPLAY_Y, (const char *)arguments[6], string_length(arguments[6]), &y))
-                        return host_refuse("place is two whole numbers of pixels, X and Y, from -%p to %p, not %s %s\n",
-                                           (positive)WINDOWS_PLACE_MOST, (positive)WINDOWS_PLACE_MOST,
-                                           arguments[5], arguments[6]);
-                change.x = x, change.y = y;
                 field = WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y;
-        }
         if (!bowl_is_root())
                 return host_refuse("setting how a screen is drawn needs root (CAP_SYS_ADMIN)\n");
 
@@ -551,7 +565,17 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
                 return host_refuse(LOCALE_CANVAS_DISPLAYS " is too long to change here, so it is not changed\n");
         }
 
-        made = windows_displays_set(out, sizeof(out), (const char *)text, name, field, &change);
+        // A place is each screen's in turn, then their lines first in the order named; any other field is the one screen's.
+        made = place ? 0 : windows_displays_set(out, sizeof(out), (const char *)text, name, field, &change);
+        for (positive at = 0; place && made >= 0 && at <= places; at++)
+        {
+                if (at < places)
+                        change.x = xs[at], change.y = ys[at];
+                made = at < places ? windows_displays_set(out, sizeof(out), (const char *)text, placed[at], field, &change)
+                                   : windows_displays_lead(out, sizeof(out), (const char *)text, (const char (*)[WINDOWS_OUTPUT_NAME])placed, (unsigned int)places);
+                if (made >= 0 && at < places)
+                        memory_copy(text, out, (positive)made + 1);
+        }
         if (made < 0)
         {
                 host_release();
@@ -583,8 +607,9 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
                 host_say(log, host_label "%s is drawn at %p percent, saved to " LOCALE_CANVAS_DISPLAYS "\n",
                          (string_address)name, (positive)change.scale);
         else
-                host_say(log, host_label "%s is placed at %b,%b, saved to " LOCALE_CANVAS_DISPLAYS "\n",
-                         (string_address)name, (bipolar)x, (bipolar)y);
+                for (positive at = 0; at < places; at++)
+                        host_say(log, host_label "%s is placed at %b,%b, saved to " LOCALE_CANVAS_DISPLAYS "\n",
+                                 (string_address)placed[at], (bipolar)xs[at], (bipolar)ys[at]);
         return 0;
 }
 

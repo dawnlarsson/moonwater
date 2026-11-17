@@ -236,10 +236,13 @@ settings_item_saved	3ffd	αποθηκευμένο: το Enter ζητά ξανά 
 settings_joined	1050	συνδεδεμένο
 settings_kept	4759	κρατημένο
 settings_map_drag	125f	Αφήστε για να τοποθετηθεί η οθόνη
-settings_map_hint	9efb	Σύρετε μια οθόνη για να τη μετακινήσετε.
+settings_map_fit	797e	Εμφάνιση όλων των οθονών
+settings_map_hint	0257	Σύρετε μια οθόνη για να τη μετακινήσετε. Σύρετε το πλέγμα για μετατόπιση, κυλήστε για ζουμ.
 settings_map_keys	54c9	Τα βέλη επιλέγουν οθόνη. Το Shift και ένα βέλος τη μετακινούν. Το Enter την αναγνωρίζει. Το Κάτω βγαίνει.
 settings_map_none	1b29	Δεν είναι συνδεδεμένη καμία οθόνη.
 settings_map_one	7ff2	Είναι συνδεδεμένη μόνο μία οθόνη.
+settings_map_primary	8448	%1$d × %2$d, κύρια
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	Πάνω και Κάτω επιλέγουν, το Enter ορίζει, το Escape αφήνει
 settings_metrics	7e10	Κάρτα: %1$d µs μέσος, %2$d µs μέγ.· επεξ.: %3$d µs, %4$d µs μέγ.· χάρτες %5$d· %6$d αφυπνίσεις· %7$d καρέ/δλ, %8$d λίστες/δλ
 settings_mode_largest	c7c4	Μεγαλύτερη εικόνα

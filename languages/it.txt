@@ -236,10 +236,13 @@ settings_item_saved	3ffd	salvata: Enter chiede di nuovo la password, Delete la d
 settings_joined	1050	connesso
 settings_kept	4759	conservato
 settings_map_drag	125f	Rilascia per posizionare lo schermo
-settings_map_hint	9efb	Trascina uno schermo per spostarlo.
+settings_map_fit	797e	Mostra tutti gli schermi
+settings_map_hint	0257	Trascina uno schermo per spostarlo. Trascina la griglia per spostare la vista, scorri per lo zoom.
 settings_map_keys	54c9	Le frecce scelgono uno schermo. Shift e una freccia lo spostano. Enter lo identifica. Giù esce.
 settings_map_none	1b29	Nessuno schermo è collegato.
 settings_map_one	7ff2	È collegato un solo schermo.
+settings_map_primary	8448	%1$d × %2$d, principale
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	Su e Giù scelgono, Enter imposta, Escape lascia
 settings_metrics	7e10	Scheda: %1$d µs in media, %2$d µs nel peggiore; processore: %3$d µs, %4$d µs nel peggiore; mappe %5$d; risvegli %6$d; %7$d presentazioni/s, %8$d liste/s
 settings_mode_largest	c7c4	Immagine più grande

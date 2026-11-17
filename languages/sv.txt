@@ -236,10 +236,13 @@ settings_item_saved	3ffd	sparad: Enter frågar efter lösenordet igen, Delete gl
 settings_joined	1050	ansluten
 settings_kept	4759	sparad
 settings_map_drag	125f	Släpp för att placera skärmen
-settings_map_hint	9efb	Dra en skärm för att flytta den.
+settings_map_fit	797e	Visa alla skärmar
+settings_map_hint	0257	Dra en skärm för att flytta den. Dra rutnätet för att panorera, rulla för att zooma.
 settings_map_keys	54c9	Piltangenterna väljer en skärm. Shift och en pil flyttar den. Enter identifierar. Ned lämnar.
 settings_map_none	1b29	Ingen skärm är ansluten.
 settings_map_one	7ff2	Bara en skärm är ansluten.
+settings_map_primary	8448	%1$d × %2$d, primär
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	Upp och Ned väljer, Enter ställer in, Escape lämnar
 settings_metrics	7e10	Kort: %1$d µs i snitt, %2$d µs värst; processor: %3$d µs, %4$d µs värst; mappningar %5$d; uppvakningar %6$d; %7$d bildrutor per sekund, %8$d listor per sekund
 settings_mode_largest	c7c4	Största bilden

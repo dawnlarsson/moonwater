@@ -236,10 +236,13 @@ settings_item_saved	3ffd	zapisano: Enter ponownie prosi o hasło, Delete zapomin
 settings_joined	1050	połączono
 settings_kept	4759	zapamiętane
 settings_map_drag	125f	Puść, aby umieścić ekran
-settings_map_hint	9efb	Przeciągnij ekran, aby go przesunąć.
+settings_map_fit	797e	Pokaż wszystkie ekrany
+settings_map_hint	0257	Przeciągnij ekran, aby go przesunąć. Przeciągnij siatkę, aby przesunąć widok, przewiń, aby powiększyć.
 settings_map_keys	54c9	Strzałki wybierają ekran. Shift i strzałka przesuwa go. Enter identyfikuje. Dół wychodzi.
 settings_map_none	1b29	Nie podłączono żadnego ekranu.
 settings_map_one	7ff2	Podłączono tylko jeden ekran.
+settings_map_primary	8448	%1$d × %2$d, główny
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	Góra i Dół wybierają, Enter ustawia, Escape zostawia
 settings_metrics	7e10	Karta: %1$d µs średnio, %2$d µs najgorzej; procesor: %3$d µs, %4$d µs najgorzej; mapowania %5$d; wybudzenia %6$d; %7$d prezentacji/s, %8$d list/s
 settings_mode_largest	c7c4	Największy obraz

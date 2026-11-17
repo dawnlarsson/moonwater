@@ -164,7 +164,7 @@
 #define SETTINGS_TYPED 256   // what is typed in a field: a value, or the words of a command
 #define SETTINGS_SAID 24576  // what a verb says: the whole of moonwater help is about fifteen thousand
 #define SETTINGS_STATUS 160
-#define SETTINGS_WORDS 24
+#define SETTINGS_WORDS 40   // the words of a command run: the desk of the screens map is four a screen (NAME place X Y)
 #define SETTINGS_WAIT_NS 20000000000ll
 #define SETTINGS_FILTER 64   // what the filter holds, in bytes: its field holds no more
 #define SETTINGS_GENERATED 128 // rows of All commands, at most: help's main page is 123, and the kit's list holds 320 in all (ui.c)
@@ -697,20 +697,31 @@ struct settings_generic
         unsigned char verb;           // the bytes of the command that are its verb, which are not typed
 };
 
-// The map of the screens above the Display rows (settings_map_*): the screen the rows are for, a drag of one screen (applied
-// on release), and the identify button. The positions are the window's device pixels, where the page's frame has them (settings_map_above).
+/*
+        The map of the screens above the Display rows (settings_map_*): the kit's graph (ui_graph) of the desk, a node for each screen
+        the table lists, in its order, at its place and size in the desk's pixels; the screen the rows are for; the places last sent and
+        not yet in the table; the screens as the map last showed them, by name, so the camera keeps still when the table moves them all;
+        and the two buttons across the panel's top. The panel is the window's device pixels, where the page's frame has it.
+*/
 struct settings_map
 {
-        int display;                            // the table's index of the screen the rows are for, -1 none chosen
-        int drag;                               // the table's index of the screen being dragged, -1 none
-        int grab_x, grab_y;                     // where on the screen the drag took hold, in table pixels
-        int target_x, target_y;                 // where a screen dragged now would be let go at, snapped
-        b32 keys;                               // the keyboard is on the map (Up from the first Display row): its arrows choose and move a screen
-        b32 nudged;                             // a screen was last sent by a key to nudge_x, nudge_y, the table not caught up with it yet
-        int nudge_at, nudge_x, nudge_y;         // the screen that was sent, and where it was sent to
-        struct ui_rect panel;                   // the panel
-        struct ui_rect field;                   // the screens' area, under the panel's top strip
-        struct ui_control identify;             // the button on the strip
+        int display;                     // the table's index of the screen the rows are for, -1 none chosen
+        b32 keys;                        // the keyboard is on the map (Up from the first Display row): its arrows choose and move a screen
+        struct ui_graph graph;
+        struct ui_graph_node node[WINDOWS_OUTPUTS];
+        char number[WINDOWS_OUTPUTS][4], size[WINDOWS_OUTPUTS][32]; // each screen's number, and its size (and that it is the primary)
+        // The layout last sent (settings_map_place), each screen's place in the table's order: shown until the table has it, or
+        // SETTINGS_MAP_HOLD_NS have passed (a place refused never comes).
+        b32 sent;
+        positive sent_at;
+        unsigned int sent_count;
+        int sent_x[WINDOWS_OUTPUTS], sent_y[WINDOWS_OUTPUTS];
+        // The screens as the map last showed them: their names and places.
+        unsigned int shown;
+        char shown_name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+        int shown_x[WINDOWS_OUTPUTS], shown_y[WINDOWS_OUTPUTS];
+        struct ui_rect panel;            // the panel, and the graph's
+        struct ui_control identify, fit; // the buttons across its top
 };
 
 static struct
@@ -1557,23 +1568,12 @@ static b32 settings_matches(int row)
 
 /* ---- the map of the screens, above the Display rows ---- */
 
-// A screen as the map draws it: the table's rectangle (device pixels, before any turn) and its turn in degrees.
-struct settings_screen
-{
-        int x, y, width, height;
-        unsigned int turn;
-};
-
-// The map's view of the screens: a table point (x, y) is at ox + (x - bx) * f / 1000 in device pixels.
-struct settings_map_view
-{
-        long bx, by, f, ox, oy;
-};
-
-#define SETTINGS_MAP_STRIP 36     // logical pixels: the top strip of the panel, where the identify button sits
-#define SETTINGS_MAP_PANEL 150    // logical pixels: the panel the screens are drawn in
-#define SETTINGS_MAP_BUTTON_W 168 // logical pixels: the identify button
+#define SETTINGS_MAP_STRIP 36     // logical pixels: the strip across the panel's top, where its buttons sit over the grid
+#define SETTINGS_MAP_PANEL 150    // logical pixels: the panel the screens are drawn in, at its least (the window's least height has it)
+#define SETTINGS_MAP_TALL 360     // logical pixels: the most it grows to, two fifths of a taller window
+#define SETTINGS_MAP_BUTTON_W 168 // logical pixels: the identify button, and the one that shows every screen
 #define SETTINGS_MAP_BUTTON_H 28
+#define SETTINGS_MAP_HOLD_NS 4000000000ull // how long a layout sent is shown while the table has not caught up with it
 #define SETTINGS_SHOWN 64 // bytes of a screen's label or a rate's, shown in a row
 
 static char settings_shown_screen[SETTINGS_SHOWN], settings_shown_rate[SETTINGS_SHOWN];
@@ -1586,151 +1586,6 @@ static int settings_output_row(unsigned char output)
                 if (settings_rows[at].output == output)
                         return (int)at;
         return -1;
-}
-
-static long settings_map_abs(long value)
-{
-        return value < 0 ? -value : value;
-}
-
-// A screen's size once its turn is taken: a quarter turn swaps its width and height.
-static void settings_map_turned(const struct settings_screen address_to s, int address_to width, int address_to height)
-{
-        b32 quarter = s->turn == 90 || s->turn == 270;
-
-        *width = quarter ? s->height : s->width;
-        *height = quarter ? s->width : s->height;
-}
-
-// The table's rectangle of every screen: the field is drawn to fit it.
-static void settings_map_bounds(const struct settings_screen address_to screens, unsigned int count, long address_to x0,
-                            long address_to y0, long address_to x1, long address_to y1)
-{
-        *x0 = *y0 = 0;
-        *x1 = *y1 = 1;
-        for (unsigned int at = 0; at < count; at++)
-        {
-                int width, height;
-
-                settings_map_turned(&screens[at], &width, &height);
-                if (at == 0 || screens[at].x < *x0)
-                        *x0 = screens[at].x;
-                if (at == 0 || screens[at].y < *y0)
-                        *y0 = screens[at].y;
-                if (at == 0 || screens[at].x + width > *x1)
-                        *x1 = screens[at].x + width;
-                if (at == 0 || screens[at].y + height > *y1)
-                        *y1 = screens[at].y + height;
-        }
-}
-
-/*
-        The field's view: the screens' bounding box scaled to the largest
-        thousandths that fit fw by fh, centred in it. Integer arithmetic only,
-        so a checks lane can state the exact rectangles.
-*/
-static void settings_map_view_of(const struct settings_screen address_to screens, unsigned int count, int fx, int fy, int fw,
-                             int fh, struct settings_map_view address_to view)
-{
-        long x0, y0, x1, y1, bw, bh, by_width, by_height, f, across, down;
-
-        settings_map_bounds(screens, count, &x0, &y0, &x1, &y1);
-        bw = x1 - x0 > 0 ? x1 - x0 : 1;
-        bh = y1 - y0 > 0 ? y1 - y0 : 1;
-        across = (long)fw * 1000 / bw;
-        down = (long)fh * 1000 / bh;
-        f = across < down ? across : down;
-        f = f < 1 ? 1 : f;
-        by_width = bw * f / 1000;
-        by_height = bh * f / 1000;
-        view->bx = x0;
-        view->by = y0;
-        view->f = f;
-        view->ox = fx + ((long)fw - by_width) / 2;
-        view->oy = fy + ((long)fh - by_height) / 2;
-}
-
-static int settings_map_field_x(const struct settings_map_view address_to view, long x)
-{
-        return (int)(view->ox + (x - view->bx) * view->f / 1000);
-}
-
-static int settings_map_field_y(const struct settings_map_view address_to view, long y)
-{
-        return (int)(view->oy + (y - view->by) * view->f / 1000);
-}
-
-static long settings_map_table_x(const struct settings_map_view address_to view, long px)
-{
-        return view->bx + (px - view->ox) * 1000 / view->f;
-}
-
-static long settings_map_table_y(const struct settings_map_view address_to view, long py)
-{
-        return view->by + (py - view->oy) * 1000 / view->f;
-}
-
-// A screen's rectangle on the field, in device pixels; a screen is never less than a pixel.
-static void settings_map_tile(const struct settings_map_view address_to view, const struct settings_screen address_to s, int address_to x,
-                          int address_to y, int address_to width, int address_to height)
-{
-        int w, h;
-
-        settings_map_turned(s, &w, &h);
-        *x = settings_map_field_x(view, s->x);
-        *y = settings_map_field_y(view, s->y);
-        *width = (int)((long)w * view->f / 1000);
-        *height = (int)((long)h * view->f / 1000);
-        *width = *width < 1 ? 1 : *width;
-        *height = *height < 1 ? 1 : *height;
-}
-
-/*
-        The snap of a screen dragged to (x, y): where a side of it lies within
-        margin of the side of a neighbour it overlaps, it is pulled to that
-        side, nearest first; left, right, above and below each. A corner
-        touches both sides at once. Answers whether it moved.
-*/
-static b32 settings_map_snap(const struct settings_screen address_to screens, unsigned int count, unsigned int index, int address_to x,
-                         int address_to y, int margin)
-{
-        int width, height, best_x = *x, best_y = *y;
-        long dist_x = margin + 1, dist_y = margin + 1;
-        b32 moved = false;
-
-        settings_map_turned(&screens[index], &width, &height);
-        for (unsigned int at = 0; at < count; at++)
-        {
-                int other_w, other_h;
-                long d;
-
-                if (at == index)
-                        continue;
-                settings_map_turned(&screens[at], &other_w, &other_h);
-                if (*y < screens[at].y + other_h && *y + height > screens[at].y)
-                {
-                        d = settings_map_abs(*x - (screens[at].x + other_w));
-                        if (d <= margin && d < dist_x)
-                                dist_x = d, best_x = screens[at].x + other_w;
-                        d = settings_map_abs(*x + width - screens[at].x);
-                        if (d <= margin && d < dist_x)
-                                dist_x = d, best_x = screens[at].x - width;
-                }
-                if (*x < screens[at].x + other_w && *x + width > screens[at].x)
-                {
-                        d = settings_map_abs(*y - (screens[at].y + other_h));
-                        if (d <= margin && d < dist_y)
-                                dist_y = d, best_y = screens[at].y + other_h;
-                        d = settings_map_abs(*y + height - screens[at].y);
-                        if (d <= margin && d < dist_y)
-                                dist_y = d, best_y = screens[at].y - height;
-                }
-        }
-        if (best_x != *x || best_y != *y)
-                moved = true;
-        *x = best_x;
-        *y = best_y;
-        return moved;
 }
 
 // Appends text at at (and a null after it), as far as room allows: its length.
@@ -1759,23 +1614,91 @@ static positive settings_map_number(char address_to into, positive room, positiv
         return at;
 }
 
-// The screens the table lists, as the map draws them and numbers them: how many, 0 when it lists none or too many.
-static unsigned int settings_map_load(struct settings_screen address_to screens, unsigned int address_to number)
+/*
+        The table moved the screens the map showed (a layout sent came back with the desk's top left at 0, 0 again, or a command
+        moved them): the move most of the screens it showed share, by name, is the plane's own, and the camera moves with it
+        (ui_graph_shift), so the screens stay where they are on the map and only one that really moved is seen to. With no move
+        more common than none, nothing is done.
+*/
+static fn settings_map_follow(unsigned int count)
 {
         struct windows address_to table = settings.own.table;
-        unsigned int count;
+        int dx[WINDOWS_OUTPUTS], dy[WINDOWS_OUTPUTS];
+        unsigned int moves = 0, most = 0, still = 0;
+        int best = -1;
 
+        for (unsigned int at = 0; at < count; at++)
+                for (unsigned int was = 0; was < settings.map.shown; was++)
+                        if (string_equals((string_address)settings.map.shown_name[was], (string_address)table->output_name[at]))
+                        {
+                                dx[moves] = settings.map.node[at].x - settings.map.shown_x[was];
+                                dy[moves++] = settings.map.node[at].y - settings.map.shown_y[was];
+                                break;
+                        }
+        for (unsigned int at = 0; at < moves; at++)
+        {
+                unsigned int same = 0;
+
+                for (unsigned int other = 0; other < moves; other++)
+                        same += dx[other] == dx[at] && dy[other] == dy[at];
+                if (!dx[at] && !dy[at])
+                        still = same;
+                else if (same > most)
+                        most = same, best = (int)at;
+        }
+        if (best >= 0 && most > still)
+                ui_graph_shift(&settings.map.graph, dx[best], dy[best]);
+        settings.map.shown = count;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                memory_copy(settings.map.shown_name[at], table->output_name[at], WINDOWS_OUTPUT_NAME);
+                settings.map.shown_x[at] = settings.map.node[at].x, settings.map.shown_y[at] = settings.map.node[at].y;
+        }
+}
+
+/*
+        The screens the table lists, as the map's nodes, numbered as the dropdown numbers them: how many, 0 when it lists none or too
+        many. A node is a screen's rectangle on the desk (the table's, its turn taken), its number in the middle and its name and size
+        under it, the primary marked. While a layout sent has not reached the table, the nodes are where it put them.
+*/
+static unsigned int settings_map_load(unsigned int address_to number)
+{
+        struct windows address_to table = settings.own.table;
+        struct ui_graph address_to g = &settings.map.graph;
+        unsigned int count;
+        b32 caught = true;
+
+        g->node = settings.map.node, g->nodes = 0;
         if (!table || !(count = __atomic_load_n(&table->outputs, __ATOMIC_ACQUIRE)) || count > WINDOWS_OUTPUTS)
                 return 0;
         windows_screen_numbers(table, number);
         for (unsigned int at = 0; at < count; at++)
         {
+                struct ui_graph_node address_to n = &settings.map.node[at];
                 int x, y, width, height;
 
                 windows_output(table, at, &x, &y, &width, &height);
-                screens[at].x = x, screens[at].y = y, screens[at].width = width, screens[at].height = height;
-                screens[at].turn = table->output_turn[at];
+                caught = caught && settings.map.sent && settings.map.sent_x[at] == x && settings.map.sent_y[at] == y;
+                n->x = x, n->y = y, n->w = width, n->h = height;
+                n->flags = count > 1 && !at ? UI_GRAPH_MARKED : 0;
+                settings_map_number(settings.map.number[at], sizeof(settings.map.number[at]), 0, (long)number[at]);
+                language_format(settings.map.size[at], sizeof(settings.map.size[at]), n->flags ? WORDS(settings_map_primary) : WORDS(settings_map_size),
+                                (long)width, (long)height);
+                n->label = settings.map.number[at];
+                n->line[0] = table->output_model[at][0] ? table->output_model[at] : table->output_name[at];
+                n->line[1] = settings.map.size[at];
         }
+        if (settings.map.sent && (caught || settings.map.sent_count != count || (positive)ui_kit.now - settings.map.sent_at > SETTINGS_MAP_HOLD_NS))
+                settings.map.sent = false;
+        for (unsigned int at = 0; settings.map.sent && at < count; at++)
+                settings.map.node[at].x = settings.map.sent_x[at], settings.map.node[at].y = settings.map.sent_y[at];
+        g->nodes = (int)count;
+        g->chosen = settings.map.display < (int)count ? settings.map.display : -1;
+        g->keys = settings.map.keys;
+        // A screen plugged in or taken out is a new desk: the next picture frames it (the camera moves for nothing else).
+        if (count != settings.map.shown)
+                g->homed = 0;
+        settings_map_follow(count);
         return count;
 }
 
@@ -1792,9 +1715,8 @@ static int settings_map_numbered(const unsigned int address_to number, unsigned 
 // or -1 when the table lists no screen.
 static int settings_map_chosen(void)
 {
-        struct settings_screen screens[WINDOWS_OUTPUTS];
         unsigned int number[WINDOWS_OUTPUTS] = {0};
-        unsigned int count = settings_map_load(screens, number);
+        unsigned int count = settings_map_load(number);
 
         if (!count)
                 return -1;
@@ -1934,98 +1856,71 @@ static const char address_to settings_row_text(int row, int chosen)
         return shown;
 }
 
-// The screen under (px, py) on the map, the one on top (the last drawn), or -1.
-static int settings_map_at(int px, int py, const struct settings_screen address_to screens, unsigned int count)
+// The map's graph in its panel: where the page's frame put it, the strip across its top left clear by a frame of the screens. The
+// screens are where they are on the desk, left is left whichever way the window reads: the graph is not turned over.
+static fn settings_map_frame(void)
 {
-        struct settings_map_view view;
+        struct ui_graph address_to g = &settings.map.graph;
 
-        settings_map_view_of(screens, count, settings.map.field.x, settings.map.field.y, settings.map.field.w, settings.map.field.h, &view);
-        for (int at = (int)count - 1; at >= 0; at--)
-        {
-                int x, y, width, height;
-
-                settings_map_tile(&view, &screens[at], &x, &y, &width, &height);
-                if (px >= x && px < x + width && py >= y && py < y + height)
-                        return at;
-        }
-        return -1;
+        g->x = settings.map.panel.x, g->y = settings.map.panel.y, g->w = settings.map.panel.w, g->h = settings.map.panel.h;
+        g->top = ui_px(&settings.ui, SETTINGS_MAP_STRIP + UI_GAP2);
+        g->rules = UI_GRAPH_SIDES | UI_GRAPH_APART | UI_GRAPH_TOUCH;
+        g->grid = g->nodes ? 10 : -1; // with no screen the panel is its ground alone, which says nothing is there
+        g->least = UI_GRAPH_ONE / 1024, g->most = UI_GRAPH_ONE;
 }
 
-// The caption under the map, which says what the map does now: how to move a screen, that a drag is let go to place it, that
-// the keys choose and move a screen while the map has them, or that there is nothing to move (no screen, or one screen,
+// The caption under the map, which says what the map does now: how to move a screen and the view, that a drag is let go to place
+// it, that the keys choose and move a screen while the map has them, or that there is nothing to move (no screen, or one screen,
 // which has nothing to be moved against).
 static const char address_to settings_map_hint(unsigned int count)
 {
-        return settings.map.drag >= 0 ? WORDS(settings_map_drag)
+        return settings.map.graph.held >= 0 && settings.map.graph.moving ? WORDS(settings_map_drag)
                : settings.map.keys && count > 1 ? WORDS(settings_map_keys)
                : !count               ? WORDS(settings_map_none)
                : count == 1           ? WORDS(settings_map_one) : WORDS(settings_map_hint);
 }
 
+// The panel's height, logical pixels: two fifths of the window's, no less than the least window has room for and no more than SETTINGS_MAP_TALL.
+static int settings_map_tall(void)
+{
+        int tall = settings.ui.scale > 0 ? settings.height * 100 / settings.ui.scale * 2 / 5 : 0;
+
+        return tall < SETTINGS_MAP_PANEL ? SETTINGS_MAP_PANEL : tall > SETTINGS_MAP_TALL ? SETTINGS_MAP_TALL : tall;
+}
+
 /*
-        The map above the rows, declared in the page's frame while it is shown: the panel (its rectangle is the map's, which paints
-        it and takes a press in it), across its top the strip with the identify button at its end, under the strip the screens' area,
-        and under the panel the caption (settings_map_hint), which with no screen says why the panel is empty.
+        The map above the rows, declared in the page's frame while it is shown: the panel (its rectangle is the map's graph, which paints
+        it flush to its edges and takes a press in it, settings_map_tall high), across its top the strip with its buttons at its end over
+        the grid (the one that shows every screen, and identify), and under the panel the caption (settings_map_hint), which with no screen
+        says why the panel is empty.
 */
 static fn settings_map_above(void)
 {
-        struct settings_screen screens[WINDOWS_OUTPUTS];
         unsigned int number[WINDOWS_OUTPUTS] = {0};
-        struct ui_control address_to c = &settings.map.identify;
+        struct ui_control address_to identify = &settings.map.identify, address_to fit = &settings.map.fit;
 
         if (!settings_map_on())
                 return;
-        c->kind = UI_BUTTON, c->variant = UI_BUTTON_OUTLINED, c->label = (string_address)WORDS(settings_identify_screens);
-        ui_col(.host = &settings.map.panel, .class = "map", .h = SETTINGS_MAP_PANEL)
-        {
+        identify->kind = fit->kind = UI_BUTTON, identify->variant = fit->variant = UI_BUTTON_DEFAULT;
+        identify->label = (string_address)WORDS(settings_identify_screens), fit->label = (string_address)WORDS(settings_map_fit);
+        ui_col(.host = &settings.map.panel, .class = "map", .h = settings_map_tall())
                 ui_row(.class = "foot", .h = SETTINGS_MAP_STRIP)
-                        ui_control(c, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
-                ui_host(&settings.map.field, .grow = 1);
-        }
-        ui_text(settings_map_hint(settings_map_load(screens, number)), .class = "caption");
+                {
+                        ui_control(fit, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
+                        ui_control(identify, .w = SETTINGS_MAP_BUTTON_W, .h = SETTINGS_MAP_BUTTON_H, .shrink = 1);
+                }
+        ui_text(settings_map_hint(settings_map_load(number)), .class = "caption");
 }
 
-// The panel, its screens drawn to fit it (a drag shows the screen where it would be let go) and each one's number. The button and the
-// caption are the frame's, drawn over these.
+// The panel: the kit's graph of the screens (ui_graph_draw), each one's number, name and size. The buttons and the caption are the
+// frame's, drawn over it.
 static void settings_map_draw(struct ui address_to ui)
 {
-        struct settings_screen screens[WINDOWS_OUTPUTS];
         unsigned int number[WINDOWS_OUTPUTS] = {0};
-        unsigned int count = settings_map_load(screens, number);
-        int radius = ui_px(ui, UI_RADIUS), pad = ui_px(ui, UI_INSET), line = ui_px(ui, ui_types[UI_LABEL_MEDIUM].line);
-        const struct ui_rect address_to panel = &settings.map.panel, address_to field = &settings.map.field;
 
-        ui_round(ui, panel->x, panel->y, panel->w, panel->h, radius, ui_role(UI_SURFACE_LOW) | 0xff000000u);
-        // The screens are where they are on the desk, left is left whichever way the window reads: the field is not turned over.
-        UI_KEEP(field->x, field->y, field->w, field->h);
-        for (unsigned int at = 0; count && at < count; at++)
-        {
-                struct settings_map_view view;
-                struct settings_screen moved;
-                int x, y, width, height;
-                char text[SETTINGS_SHOWN];
-
-                settings_map_view_of(screens, count, field->x, field->y, field->w, field->h, &view);
-                moved = screens[at];
-                if (settings.map.drag == (int)at)
-                        moved.x = settings.map.target_x, moved.y = settings.map.target_y;
-                settings_map_tile(&view, &moved, &x, &y, &width, &height);
-                ui_round(ui, x, y, width, height, radius, ui_role(UI_SURFACE_HIGHEST) | 0xff000000u);
-                if ((int)at == settings.map.display)
-                        ui_fill(ui, x, y, width, height, (ui_role(UI_PRIMARY) & 0x00ffffffu) | 0x40000000u);
-                // The chosen screen is outlined while the keys are on the map (the focus), in the primary colour: the kit's focus outline,
-                // the list row's, round at the tile's corners.
-                if ((int)at == settings.map.display && settings.map.keys)
-                        ui_kit_outline(ui, &(struct ui_box){x * 256, y * 256, (x + width) * 256, (y + height) * 256, radius * 256, radius * 256},
-                                       ui_q8(ui, 2), ui_role(UI_PRIMARY));
-                settings_map_number(text, sizeof(text), 0, (long)number[at]);
-                ui_kit_text(ui, x + (width - ui_kit_measure(ui, (string_address)text, UI_TITLE_LARGE)) / 2,
-                            ui_kit_baseline(ui, y + (height - ui_px(ui, ui_types[UI_TITLE_LARGE].line)) / 2, UI_TITLE_LARGE), (string_address)text,
-                            UI_TITLE_LARGE, ui_role(UI_ON_SURFACE), 0);
-                if (height >= 3 * line)
-                        ui_kit_text_flipped(ui, x + pad, ui_kit_baseline(ui, y + height - pad - line, UI_LABEL_MEDIUM),
-                                            (string_address)settings.own.table->output_name[at], UI_LABEL_MEDIUM, ui_role(UI_ON_SURFACE_VARIANT), 0, x, width);
-        }
+        settings_map_load(number);
+        settings_map_frame();
+        ui_graph_draw(ui, &settings.map.graph);
 }
 
 static fn settings_describe(int id, struct ui_row address_to row);
@@ -2085,7 +1980,8 @@ static fn settings_layout(void)
                 settings.list.damaged = settings_changed;
                 settings.list.hover = settings.list.down = -1;
                 settings.list.wrap = true; // a label, a value or a note too long for its row's room goes onto more lines, and the row with it
-                settings.map.display = settings.map.drag = -1;
+                settings.map.display = -1;
+                ui_graph_start(&settings.map.graph);
                 for (positive k = 0; k < sizeof(settings_accents) / sizeof(settings_accents[0]); k++)
                 {
                         if (k)
@@ -5423,60 +5319,94 @@ static fn settings_card_key(const struct window_event address_to event)
 }
 
 // A key: false when it closes the window.
-// A screen written where it is put: the Rotation row's verb with its name and place (canvas display NAME place X Y), which a
-// drag's release and a key's step both send. Nothing is sent when the row or the screen is not there.
-static void settings_map_place_change(int at, int x, int y)
+/*
+        The desk with screen at moved to x, y (the desk's pixels), its top left put at 0, 0 as the compositor puts it: each screen's
+        place in the table's order (sent_x, sent_y), and as the words of the Rotation row's verb, every screen's name and place in that
+        order (NAME place X Y NAME place X Y ...), into value. Answers the words' length, 0 when they do not fit or there is no such screen.
+*/
+static positive settings_map_layout(int at, int x, int y, char address_to value, positive room)
+{
+        int low_x = x, low_y = y, count = settings.map.graph.nodes;
+        const struct ui_graph_node address_to node = settings.map.node;
+        positive length = 0;
+
+        if (at < 0 || !settings.own.table || at >= count || !room)
+                return 0;
+        for (int k = 0; k < count; k++)
+        {
+                low_x = k != at && node[k].x < low_x ? node[k].x : low_x;
+                low_y = k != at && node[k].y < low_y ? node[k].y : low_y;
+        }
+        for (int k = 0; k < count; k++)
+        {
+                settings.map.sent_x[k] = (k == at ? x : node[k].x) - low_x, settings.map.sent_y[k] = (k == at ? y : node[k].y) - low_y;
+                length = settings_map_add(value, room, length, k ? " " : "");
+                length = settings_map_add(value, room, length, settings.own.table->output_name[k]);
+                length = settings_map_add(value, room, length, " place ");
+                length = settings_map_number(value, room, length, settings.map.sent_x[k]);
+                length = settings_map_add(value, room, length, " ");
+                length = settings_map_number(value, room, length, settings.map.sent_y[k]);
+        }
+        return length + 1 < room ? length : 0;
+}
+
+/*
+        A screen let go at x, y (a drag's release, a key's step): the desk written whole (settings_map_layout), so a screen no hand
+        moved stays where it is beside the others, and the order the compositor lays them in, the primary first, is kept (the verb
+        puts their lines first in that order). The layout is shown until the table has it, and the moved screen is taken as shown
+        where it was let go, so the move of the rest (the desk's new top left) is the camera's (settings_map_follow). Nothing is sent
+        when the row is not there or the words do not fit.
+*/
+static void settings_map_place(int at, int x, int y)
 {
         int row = settings_output_row(SETTINGS_OUT_TURN);
         char value[SETTINGS_TYPED];
-        positive length;
 
-        if (row < 0 || at < 0 || !settings.own.table || at >= (int)settings_map_count())
+        if (row < 0 || !settings_map_layout(at, x, y, value, sizeof(value)))
                 return;
-        length = settings_map_add(value, sizeof(value), 0, settings.own.table->output_name[at]);
-        length = settings_map_add(value, sizeof(value), length, " place ");
-        length = settings_map_number(value, sizeof(value), length, x);
-        length = settings_map_add(value, sizeof(value), length, " ");
-        settings_map_number(value, sizeof(value), length, y);
+        settings.map.sent = true, settings.map.sent_at = (positive)ui_kit.now, settings.map.sent_count = (unsigned int)settings.map.graph.nodes;
+        if (at < (int)settings.map.shown)
+                settings.map.shown_x[at] = x, settings.map.shown_y[at] = y;
         settings_change(row, value);
 }
 
-// The step a Shift and an arrow takes a screen by, in table pixels.
+// The step a Shift and an arrow takes a screen by, in the desk's pixels.
 #define SETTINGS_MAP_STEP 10
 
 /*
-        Where the chosen screen goes for a key's step (dx, dy steps of SETTINGS_MAP_STEP), snapped to a neighbour's edge as a
-        drag is, and answered as x and y. It starts from where it was last sent while the table has not caught up with that
-        (so a held key takes a step each time, not the same one); a screen sent to where the table already has it is no longer
-        held. Answers whether it moved.
+        Where the chosen screen goes for a key's step (dx, dy steps of SETTINGS_MAP_STEP), kept apart from the others and against one
+        of them as a drag is (ui_graph_settle, not pulled: a step is the person's to make), and answered as x and y. It starts from
+        where the map shows it, which is where it was last sent while the table has not caught up with that (so a held key takes a
+        step each time, not the same one). A lone screen has nothing to move against. Answers whether it moved.
 */
 static b32 settings_map_stepped(int dx, int dy, int *x, int *y)
 {
-        struct settings_screen screens[WINDOWS_OUTPUTS];
-        unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(screens, number);
-        int at = settings.map.display, base_x, base_y;
+        unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(number);
+        int at = settings.map.display;
 
-        if (!count || at < 0 || at >= (int)count)
+        if (count < 2 || at < 0 || at >= (int)count)
                 return false;
-        if (settings.map.nudged && (settings.map.nudge_at != at || (screens[at].x == settings.map.nudge_x && screens[at].y == settings.map.nudge_y)))
-                settings.map.nudged = false;
-        base_x = settings.map.nudged ? settings.map.nudge_x : screens[at].x;
-        base_y = settings.map.nudged ? settings.map.nudge_y : screens[at].y;
-        *x = base_x + dx * SETTINGS_MAP_STEP, *y = base_y + dy * SETTINGS_MAP_STEP;
-        settings_map_snap(screens, count, (unsigned int)at, x, y, COMPOSITOR_SNAP * (int)settings.own.table->scale / 100);
-        if (*x == base_x && *y == base_y)
-                return false;
-        settings.map.nudged = true, settings.map.nudge_at = at, settings.map.nudge_x = *x, settings.map.nudge_y = *y;
-        return true;
+        *x = settings.map.node[at].x + dx * SETTINGS_MAP_STEP, *y = settings.map.node[at].y + dy * SETTINGS_MAP_STEP;
+        settings_map_frame();
+        ui_graph_settle(&settings.ui, &settings.map.graph, at, x, y, false);
+        return *x != settings.map.node[at].x || *y != settings.map.node[at].y;
 }
 
-// The map's keys, while it has them: the arrows choose a screen by its number (Left and Up the one before, Right the one
-// after, clamped), Shift with an arrow moves the chosen screen a step, Enter identifies the screens, and Down leaves the map
-// for the rows. Answers whether it took the key; any other key leaves the map and goes on to the rows, as Tab and Escape do.
+// The map's panel is to be drawn again, and only it (the kit's graph moved, or its camera).
+static fn settings_map_damage(void)
+{
+        ui_page_damage(&settings.page, settings.map.panel.y, settings.map.panel.y + settings.map.panel.h);
+}
+
+/*
+        The map's keys, while it has them: the arrows choose a screen by its number (Left and Up the one before, Right the one after,
+        clamped), Shift with an arrow moves the chosen screen a step, Enter identifies the screens, Down leaves the map for the rows,
+        and the graph's own keys work its view (ui_graph_key: Home and F show every screen, + and - zoom, Space held pans with a press).
+        Answers whether it took the key; any other key leaves the map and goes on to the rows, as Tab and Escape do.
+*/
 static b32 settings_map_key(const struct window_event address_to event)
 {
-        struct settings_screen screens[WINDOWS_OUTPUTS];
-        unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(screens, number);
+        unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(number), did;
         int at = settings.map.display, dx = 0, dy = 0, x, y, wanted;
         b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
 
@@ -5499,13 +5429,19 @@ static b32 settings_map_key(const struct window_event address_to event)
                 settings_change(SETTINGS_JOB_IDENTIFY, "");
                 return true;
         default:
+                settings_map_frame();
+                did = ui_graph_key(&settings.ui, &settings.map.graph, event);
+                if (did & UI_GRAPH_DRAW)
+                        settings_map_damage();
+                if (did & UI_GRAPH_TAKEN)
+                        return true;
                 settings.map.keys = false;
                 return false;
         }
         if (shift)
         {
                 if (settings_map_stepped(dx, dy, &x, &y))
-                        settings_map_place_change(at, x, y);
+                        settings_map_place(at, x, y);
                 ui_page_redraw(&settings.page);
                 return true;
         }
@@ -5533,8 +5469,12 @@ static fn settings_copy_keys(void);
 
 static b32 settings_key(const struct window_event address_to event)
 {
+        // A key let go is no one's but the map's, whose Space held makes a press pan (ui_graph_key).
         if (!(event->flags & WINDOW_KEY_DOWN))
+        {
+                ui_graph_key(&settings.ui, &settings.map.graph, event);
                 return true;
+        }
         // A choice's menu has every key, and so has a row's copies: its popup has them while it is open, and a key that comes here is the menu's too.
         if (settings.page.menu_row >= 0 || (settings.copy_open && settings.popup.open && !settings.popup.field))
         {
@@ -5592,6 +5532,14 @@ static b32 settings_key(const struct window_event address_to event)
                         return true;
                 }
         }
+        // The map has the keys while it has the focus (settings_map_key), before a letter starts a filter (F is its view's); what it
+        // does not take goes on to the rows below.
+        if (settings.map.keys)
+        {
+                if (settings_map_on() && settings.page.pane && settings_map_key(event))
+                        return true;
+                settings.map.keys = false;
+        }
         // A key between a confirm and its next press drops it: Enter or Space fires a command's, Delete a forget's.
         if (settings.confirm.what < 0 ? event->a != UI_KEY_DELETE
                                       : event->a != UI_KEY_ENTER && event->a != UI_KEY_ENTER_PAD && event->a != UI_KEY_SPACE)
@@ -5622,13 +5570,6 @@ static b32 settings_key(const struct window_event address_to event)
                         return true;
         }
 
-        // The map has the keys while it has the focus (settings_map_key); what it does not take goes on to the rows below.
-        if (settings.map.keys)
-        {
-                if (settings_map_on() && settings.page.pane && settings_map_key(event))
-                        return true;
-                settings.map.keys = false;
-        }
         if (event->a == UI_KEY_ESCAPE)
                 return settings_stop();
         // Up from the first row of the Display group goes up to the map above it, which has the keys then.
@@ -6110,69 +6051,52 @@ static fn settings_field_menu(void)
 /* ---- the pointer and a finger: the kit's page (ui_page_pointer) ---- */
 
 
-// The map's drag: the screen taken moves with the pointer, snapped to a neighbour's edge within the compositor's snap band
-// (COMPOSITOR_SNAP, in device pixels as the compositor draws it), and where it is let go is written on release.
-static void settings_map_drag_to(int x, int y)
+/*
+        The map's share of a window's event, while it is shown: a press on a button across the panel's top runs it (identify, or every
+        screen shown again), and the rest is the kit's graph (ui_graph_event): a press on a screen chooses it for the rows and takes it,
+        its drag shows where it would land, apart from the others and against one, and its release writes the desk (settings_map_place);
+        a press on the grid, the middle button and a trackpad pan the view, and the wheel zooms it. A finger does the same, and a drag
+        that starts on the map never scrolls the page under it; a pen is a pointer. Answers whether the event was the map's: a motion is
+        only while the map has the hand, so the rows keep their hover.
+*/
+static b32 settings_map_event(const struct window_event address_to event)
 {
-        struct settings_screen screens[WINDOWS_OUTPUTS];
-        unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(screens, number);
-        struct settings_map_view view;
-        int tx, ty;
-
-        if (!count || settings.map.drag < 0 || settings.map.drag >= (int)count)
-                return;
-        settings_map_view_of(screens, count, settings.map.field.x, settings.map.field.y, settings.map.field.w, settings.map.field.h, &view);
-        tx = (int)(settings_map_table_x(&view, x) - settings.map.grab_x);
-        ty = (int)(settings_map_table_y(&view, y) - settings.map.grab_y);
-        settings_map_snap(screens, count, (unsigned int)settings.map.drag, &tx, &ty, COMPOSITOR_SNAP * (int)settings.own.table->scale / 100);
-        settings.map.target_x = tx, settings.map.target_y = ty;
-        ui_page_redraw(&settings.page);
-}
-
-// A press in the map's panel: the button runs canvas identify, and a screen is chosen and taken to drag. True when the
-// press was the map's, which it is anywhere in the panel.
-static b32 settings_map_press(int x, int y)
-{
-        struct settings_screen screens[WINDOWS_OUTPUTS];
-        unsigned int number[WINDOWS_OUTPUTS] = {0}, count;
+        struct ui_graph address_to g = &settings.map.graph;
+        unsigned int number[WINDOWS_OUTPUTS] = {0}, did;
+        int x = ui_kit.pointer_x, y = ui_kit.pointer_y;
         const struct ui_rect address_to panel = &settings.map.panel;
-        struct settings_map_view view;
-        int at;
+        b32 inside = x >= panel->x && x < panel->x + panel->w && y >= panel->y && y < panel->y + panel->h, had = g->held >= 0 || g->panning;
 
-        if (x < panel->x || x >= panel->x + panel->w || y < panel->y || y >= panel->y + panel->h)
-                return false;
-        settings.map.keys = false; // a pointer has the map now, and its focus with it
-        // ui_control_hit answers 0 for a hit on a button and -1 for a miss, so the test is that it hits, not that it answers.
-        if (ui_control_hit(&settings.ui, &settings.map.identify, x, y) >= 0)
+        settings_map_load(number);
+        settings_map_frame();
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && inside)
         {
-                settings_change(SETTINGS_JOB_IDENTIFY, "");
-                return true;
+                settings.map.keys = g->keys = false; // a pointer has the map now, and its focus with it
+                // ui_control_hit answers 0 for a hit on a button and -1 for a miss, so the test is that it hits, not that it answers.
+                if (event->a == UI_POINTER_LEFT && ui_control_hit(&settings.ui, &settings.map.identify, x, y) >= 0)
+                {
+                        settings_change(SETTINGS_JOB_IDENTIFY, "");
+                        return true;
+                }
+                if (event->a == UI_POINTER_LEFT && ui_control_hit(&settings.ui, &settings.map.fit, x, y) >= 0)
+                {
+                        ui_graph_home(&settings.ui, g);
+                        settings_map_damage();
+                        return true;
+                }
         }
-        count = settings_map_load(screens, number);
-        if ((at = count ? settings_map_at(x, y, screens, count) : -1) >= 0)
-        {
-                settings_map_view_of(screens, count, settings.map.field.x, settings.map.field.y, settings.map.field.w, settings.map.field.h, &view);
-                settings.map.display = settings.map.drag = at, settings.map.nudged = false;
-                settings.map.grab_x = (int)(settings_map_table_x(&view, x) - screens[at].x);
-                settings.map.grab_y = (int)(settings_map_table_y(&view, y) - screens[at].y);
-                settings.map.target_x = screens[at].x, settings.map.target_y = screens[at].y;
-        }
-        ui_page_redraw(&settings.page);
-        return true;
-}
-
-// A drag let go: a screen that moved is written where it was dropped, as the Rotation row's verb with its name and the
-// place; nothing is written for a drag back to where it was.
-static void settings_map_release(void)
-{
-        struct settings_screen screens[WINDOWS_OUTPUTS];
-        unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(screens, number);
-        int at = settings.map.drag;
-
-        settings.map.drag = -1, settings.map.nudged = false;
-        if (count && at >= 0 && at < (int)count && (settings.map.target_x != screens[at].x || settings.map.target_y != screens[at].y))
-                settings_map_place_change(at, settings.map.target_x, settings.map.target_y);
-        ui_page_redraw(&settings.page);
+        did = ui_graph_event(&settings.ui, g, event);
+        if (did & UI_GRAPH_CHOSE)
+                settings.map.display = g->chosen;
+        if (did & UI_GRAPH_DROP)
+                settings_map_place(g->dropped, g->at_x, g->at_y);
+        // A screen chosen changes the rows, and a drag begun or let go the caption: the page; else only the panel.
+        if ((did & (UI_GRAPH_CHOSE | UI_GRAPH_DROP)) || (event->type == WINDOW_EVENT_BUTTON && (did & UI_GRAPH_TAKEN)) ||
+            ((did & UI_GRAPH_DRAG) && !had))
+                ui_page_redraw(&settings.page);
+        else if (did & UI_GRAPH_DRAW)
+                settings_map_damage();
+        return event->type == WINDOW_EVENT_MOTION ? had : (did & UI_GRAPH_TAKEN) != 0;
 }
 
 static fn settings_press_at(void);
@@ -6207,29 +6131,14 @@ static b32 settings_event_take(const struct window_event address_to event)
                         ui_page_redraw(&settings.page);
                 return keep;
         }
-        /*
-                The map of the screens (above the Display rows): a press in its panel, the drag of a screen it took, and its
-                release. A finger does the same on the map, a tap choosing a screen and a drag moving it, and a drag that starts
-                on the map never scrolls the page under it; a pen is a pointer, and is a mouse here.
-        */
-        if (settings_map_on() && settings.page.menu_row < 0)
+        // The map of the screens (above the Display rows) takes its share first (settings_map_event); a map not shown holds no hand.
+        if (settings_map_on() && settings.page.menu_row < 0 && event->type != WINDOW_EVENT_KEY)
         {
-                if (event->type == WINDOW_EVENT_MOTION && settings.map.drag >= 0)
-                {
-                        settings_map_drag_to(ui_kit.pointer_x, ui_kit.pointer_y);
+                if (settings_map_event(event))
                         return true;
-                }
-                if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
-                {
-                        if ((event->flags & WINDOW_KEY_DOWN) && settings_map_press(ui_kit.pointer_x, ui_kit.pointer_y))
-                                return true;
-                        if (!(event->flags & WINDOW_KEY_DOWN) && settings.map.drag >= 0)
-                        {
-                                settings_map_release();
-                                return true;
-                        }
-                }
         }
+        else if (!settings_map_on())
+                ui_graph_let_go(&settings.map.graph);
         // A press anywhere else is the pointer's, and the keys leave the map for it.
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
                 settings.map.keys = false;

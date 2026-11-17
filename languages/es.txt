@@ -236,10 +236,13 @@ settings_item_saved	3ffd	guardada: Enter vuelve a pedir su contraseña, Delete l
 settings_joined	1050	conectado
 settings_kept	4759	guardado
 settings_map_drag	125f	Suelte para colocar la pantalla
-settings_map_hint	9efb	Arrastre una pantalla para moverla.
+settings_map_fit	797e	Mostrar todas las pantallas
+settings_map_hint	0257	Arrastre una pantalla para moverla. Arrastre la cuadrícula para desplazar la vista y use la rueda para hacer zoom.
 settings_map_keys	54c9	Las flechas eligen una pantalla. Shift y una flecha la mueve. Enter la identifica. Abajo sale.
 settings_map_none	1b29	No hay ninguna pantalla conectada.
 settings_map_one	7ff2	Solo hay una pantalla conectada.
+settings_map_primary	8448	%1$d × %2$d, principal
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	Arriba y Abajo eligen, Enter lo aplica, Escape lo deja
 settings_metrics	7e10	Tarjeta: %1$d µs de media, %2$d µs en el peor caso; procesador: %3$d µs, %4$d µs en el peor caso; mapas %5$d; despertares %6$d; %7$d presentaciones por segundo, %8$d listas por segundo
 settings_mode_largest	c7c4	Imagen más grande

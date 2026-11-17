@@ -329,6 +329,70 @@ static void fold_frames(void)
         }
 }
 
+/*
+        The Display group's map of the screens (the kit's graph), drawn as the window draws it (display-map-*.ppm): a desk of three
+        screens, one of them turned on its side and the first the primary, light and dark, at 150 percent and in a window read from
+        the right (the screens stay where they are on the desk), and a screen in hand part way through a drag: the ghost where the
+        hand has it, the screen where it would land, against its neighbour and lined up with it.
+*/
+static void display_frames(void)
+{
+        static const struct
+        {
+                string_address name;
+                int scale;
+                b32 dark, drag;
+                unsigned int language_code;
+        } shots[] = {
+                {"display-map-light", 100, false, false, 0},
+                {"display-map-dark", 100, true, false, 0},
+                {"display-map-150", 150, false, false, 0},
+                {"display-map-rtl", 100, false, false, ('a' | 'r' << 8)},
+                {"display-map-drag", 100, false, true, 0},
+                {"display-map-drag-dark", 100, true, true, 0},
+        };
+
+        for (positive at = 0; at < sizeof(shots) / sizeof(shots[0]); at++)
+        {
+                struct windows address_to table;
+                struct window_event event;
+                unsigned int number[WINDOWS_OUTPUTS] = {0};
+                int screen_row, x, y, x1, y1;
+
+                fold_setup(shots[at].scale, shots[at].dark, shots[at].language_code);
+                table = windows_scratch_table(&fold_table_scratch);
+                table->outputs = 3, table->scale = 100;
+                table->output_x[0] = 1080, table->output_y[0] = 240, table->output_w[0] = 2560, table->output_h[0] = 1440;
+                table->output_x[1] = 3640, table->output_y[1] = 600, table->output_w[1] = 1920, table->output_h[1] = 1080;
+                table->output_x[2] = 0, table->output_y[2] = 0, table->output_w[2] = 1080, table->output_h[2] = 1920, table->output_turn[2] = 90;
+                memory_copy(table->output_name[0], "DP-1", 5), memory_copy(table->output_model[0], "Dell U2720Q", 12);
+                memory_copy(table->output_name[1], "HDMI-A-1", 9), memory_copy(table->output_name[2], "DP-2", 5);
+                screen_row = settings_output_row(SETTINGS_OUT_SCREEN);
+                settings_group_choose(settings_group_of(screen_row));
+                settings.map.display = 0, settings.map.keys = false, settings.map.sent = false, settings.map.shown = 0;
+                ui_graph_start(&settings.map.graph);
+                settings.list.focus = screen_row;
+                settings_rebuild();
+                settings_draw_rows(frames_pixels, 0, 0);
+                if (shots[at].drag)
+                {
+                        // Screen 1 (the right one) taken by its middle and dragged up and left, over the primary.
+                        settings_map_load(number);
+                        settings_map_frame();
+                        ui_graph_box(&settings.map.graph, 1, settings.map.node[1].x, settings.map.node[1].y, &x, &y, &x1, &y1);
+                        event = (struct window_event){WINDOW_EVENT_MOTION, 0, (x + x1) / 2, (y + y1) / 2};
+                        settings_event_at(&event);
+                        event = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+                        settings_event_at(&event);
+                        event = (struct window_event){WINDOW_EVENT_MOTION, 0, (x + x1) / 2 - (x1 - x) / 3, (y + y1) / 2 - (y1 - y) / 2 - 3};
+                        settings_event_at(&event);
+                }
+                fold_shot(shots[at].name);
+                ui_graph_let_go(&settings.map.graph);
+        }
+        language_take(0);
+}
+
 b32 main()
 {
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
@@ -779,6 +843,7 @@ b32 main()
         }
         fold_checks();
         fold_frames();
+        display_frames();
         // The launcher, dark, with ls typed: the kit's field, and the kit's list under it with the pointer over its third row.
         {
                 static char names[6][LAUNCHER_NAME];
@@ -4900,7 +4965,7 @@ static fn settings_board_check(void)
 static fn settings_display_check(void)
 {
         char label[96];
-        int modes = lcheck_row("Screen modes"), drag = settings.map.drag, keys = settings.map.keys;
+        int modes = lcheck_row("Screen modes"), held = settings.map.graph.held, moving = settings.map.graph.moving, keys = settings.map.keys;
         positive wrong = 0;
 
         language_take(0);
@@ -4920,16 +4985,16 @@ static fn settings_display_check(void)
                  !!string_compare_max((string_address)settings_turn_label(0), (string_address) "Normal", 32) ||
                  !!string_compare_max((string_address)settings_label_of(modes, "largest"), (string_address) "Biggest picture", 32) ||
                  !!string_compare_max((string_address)settings_label_of(modes, "preferred"), (string_address) "Recommended", 32);
-        settings.map.drag = -1, settings.map.keys = 0;
+        settings.map.graph.held = -1, settings.map.keys = 0;
         wrong += !!string_compare_max((string_address)settings_map_hint(0), (string_address) "No screen is connected.", 64) ||
                  !!string_compare_max((string_address)settings_map_hint(1), (string_address) "Only one screen is connected.", 64) ||
-                 !!string_compare_max((string_address)settings_map_hint(2), (string_address) "Drag a screen to move it.", 64);
+                 !!string_compare_max((string_address)settings_map_hint(2), (string_address) "Drag a screen to move it. Drag the grid to pan, scroll to zoom.", 128);
         settings.map.keys = 1;
         wrong += !!string_compare_max((string_address)settings_map_hint(2), (string_address) "Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves.", 96);
-        settings.map.drag = 0;
+        settings.map.graph.held = 0, settings.map.graph.moving = 1;
         wrong += !!string_compare_max((string_address)settings_map_hint(2), (string_address) "Let go to place the screen", 64);
         check("settings display: a screen, a scale, a rate, a turn, the modes' words and the map's caption are the English they were", !wrong && modes >= 0);
-        settings.map.drag = -1, settings.map.keys = 0;
+        settings.map.graph.held = -1, settings.map.keys = 0;
         language_take('d' | 'e' << 8);
         settings_screen_label(2, "DP-1", "Dell U2720Q", label, sizeof(label));
         wrong = !!string_compare_max((string_address)label, (string_address) "Bildschirm 2: Dell U2720Q [DP-1]", 64);
@@ -4938,7 +5003,7 @@ static fn settings_display_check(void)
         settings_rate_label(60, 1, label, sizeof(label));
         wrong += !!string_compare_max((string_address)label, (string_address) "60 Hz (empfohlen)", 64);
         wrong += !!string_compare_max((string_address)settings_turn_label(90), (string_address) "Nach rechts gedreht", 32) ||
-                 !!string_compare_max((string_address)settings_map_hint(2), (string_address) "Einen Bildschirm ziehen, um ihn zu verschieben.", 64);
+                 !!string_compare_max((string_address)settings_map_hint(2), (string_address) "Einen Bildschirm ziehen, um ihn zu verschieben. Das Raster ziehen, um die Ansicht zu bewegen, scrollen zum Zoomen.", 160);
         {
                 char back[SETTINGS_VALUE];
 
@@ -4964,7 +5029,7 @@ static fn settings_display_check(void)
                 }
                 check("settings display: in every language a scale, a rate and a screen keep their numbers and names", !broken);
         }
-        settings.map.drag = drag, settings.map.keys = keys;
+        settings.map.graph.held = held, settings.map.graph.moving = moving, settings.map.keys = keys;
         language_take(0);
 }
 #endif

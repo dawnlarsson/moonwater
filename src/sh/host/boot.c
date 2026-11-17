@@ -693,7 +693,7 @@ static b32 host_canvas_on(void)
 static b32 host_canvas_identify(positive count);
 
 /* moonwater canvas [scale [N|auto]|modes [largest|preferred]|arrange [NAME[@X,Y|@off]...|default]|
-   display NAME rotation DEGREES|refresh HZ|preferred|place X Y|
+   display NAME rotation DEGREES|refresh HZ|preferred|place X Y [NAME place X Y]...|
    identify|background [COLOUR|default]|cursor [size [PERCENT|default]|look [light|dark|auto]]] */
 /*
         moonwater canvas record [SECONDS] and moonwater canvas record report: the compositor's present record (src/canvas/record.h). A recording

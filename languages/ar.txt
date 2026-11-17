@@ -237,10 +237,13 @@ settings_item_saved	3ffd	محفوظة: Enter يطلب كلمة المرور من
 settings_joined	1050	متصلة
 settings_kept	4759	محفوظ
 settings_map_drag	125f	أفلت لوضع الشاشة
-settings_map_hint	9efb	اسحب شاشة لتحريكها.
+settings_map_fit	797e	إظهار كل الشاشات
+settings_map_hint	0257	اسحب شاشة لتحريكها. اسحب الشبكة لتحريك العرض، ومرّر للتكبير.
 settings_map_keys	54c9	الأسهم تختار شاشة. Shift مع سهم يحركها. Enter يعرفها. السهم لأسفل يخرج.
 settings_map_none	1b29	لا توجد شاشة متصلة.
 settings_map_one	7ff2	شاشة واحدة فقط متصلة.
+settings_map_primary	8448	%1$d × %2$d، الرئيسية
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	الأسهم لأعلى ولأسفل للاختيار، Enter للتعيين، Escape للخروج
 settings_metrics	7e10	البطاقة: متوسط %1$d µs، أعلى %2$d µs؛ المعالج: %3$d µs، أعلى %4$d µs؛ الخرائط %5$d؛ الإيقاظ %6$d؛ %7$d إطار/ث، %8$d قائمة/ث
 settings_mode_largest	c7c4	أكبر صورة

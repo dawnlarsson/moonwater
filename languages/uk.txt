@@ -236,10 +236,13 @@ settings_item_saved	3ffd	збережено: Enter знову запитає п�
 settings_joined	1050	підключено
 settings_kept	4759	запам'ятовано
 settings_map_drag	125f	Відпустіть, щоб розмістити екран
-settings_map_hint	9efb	Перетягніть екран, щоб перемістити його.
+settings_map_fit	797e	Показати всі екрани
+settings_map_hint	0257	Перетягніть екран, щоб перемістити його. Перетягніть сітку, щоб зсунути вигляд, прокрутіть для масштабу.
 settings_map_keys	54c9	Стрілки вибирають екран. Shift і стрілка переміщують його. Enter визначає. Вниз — вийти.
 settings_map_none	1b29	Екран не підключено.
 settings_map_one	7ff2	Підключено лише один екран.
+settings_map_primary	8448	%1$d × %2$d, основний
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	Вгору й Вниз вибирають, Enter задає, Escape залишає
 settings_metrics	7e10	Карта: %1$d мкс сер., %2$d мкс макс.; процесор: %3$d мкс, %4$d мкс макс.; мапи %5$d; пробуджень %6$d; %7$d кадр/с, %8$d списків/с
 settings_mode_largest	c7c4	Найбільше зображення

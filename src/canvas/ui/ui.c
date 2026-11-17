@@ -8027,10 +8027,13 @@ LANGUAGE_ID(settings_item_saved, "saved: Enter types its passphrase again, Delet
 LANGUAGE_ID(settings_joined, "joined") \
 LANGUAGE_ID(settings_kept, "kept") \
 LANGUAGE_ID(settings_map_drag, "Let go to place the screen") \
-LANGUAGE_ID(settings_map_hint, "Drag a screen to move it.") \
+LANGUAGE_ID(settings_map_fit, "Show all screens") \
+LANGUAGE_ID(settings_map_hint, "Drag a screen to move it. Drag the grid to pan, scroll to zoom.") \
 LANGUAGE_ID(settings_map_keys, "Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves.") \
 LANGUAGE_ID(settings_map_none, "No screen is connected.") \
 LANGUAGE_ID(settings_map_one, "Only one screen is connected.") \
+LANGUAGE_ID(settings_map_primary, "%1$d × %2$d, primary") \
+LANGUAGE_ID(settings_map_size, "%1$d × %2$d") \
 LANGUAGE_ID(settings_menu_keys, "Up and Down choose, Enter sets it, Escape leaves it") \
 LANGUAGE_ID(settings_metrics, "Card %1$d µs mean, %2$d µs worst; processor %3$d µs, %4$d µs worst; maps %5$d; wakes %6$d; %7$d presents a second, %8$d list frames a second") \
 LANGUAGE_ID(settings_mode_largest, "Biggest picture") \

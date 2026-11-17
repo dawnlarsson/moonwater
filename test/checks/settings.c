@@ -2172,7 +2172,7 @@ static fn check_settings(string_address regular, string_address bold)
                 count = settings_generic_words(desktop, "off", more, SETTINGS_WORDS);
                 check("settings: a row's verb comes before what is typed", count == 3 && string_equals(more[1], (string_address) "desktop") &&
                                                                               string_equals(more[2], (string_address) "off"));
-                count = settings_generic_words(any, "a b c d e f g h i j k l m n o p q r s t u v w x y z", more, SETTINGS_WORDS);
+                count = settings_generic_words(any, "a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd ee ff gg hh ii jj kk ll mm nn", more, SETTINGS_WORDS);
                 check("settings: more words than a command takes are none", count == 0);
                 count = settings_generic_words(any, "name 'a \"b' \"it's\"", more, SETTINGS_WORDS);
                 check("settings: the other quote is a letter inside a pair", count == 4 && string_equals(more[2], (string_address) "a \"b") &&
@@ -4415,41 +4415,29 @@ static fn display_map_place(void)
         ui_view_end(settings.page.view);
 }
 
+// The map's screens as the window has them now (its nodes, its graph in the panel, a camera on them), and where screen k is drawn.
+static fn display_map_screen(int k, int address_to x, int address_to y, int address_to w, int address_to h)
+{
+        unsigned int number[WINDOWS_OUTPUTS] = {0};
+        int x1, y1;
+
+        settings_map_load(number);
+        settings_map_frame();
+        if (!settings.map.graph.homed)
+                ui_graph_home(&settings.ui, &settings.map.graph);
+        ui_graph_box(&settings.map.graph, k, settings.map.node[k].x, settings.map.node[k].y, x, y, &x1, &y1);
+        *w = x1 - *x, *h = y1 - *y;
+}
+
 static fn check_display_section(void)
 {
-        struct settings_screen screens[3];
-        struct settings_map_view view;
         unsigned int number[WINDOWS_OUTPUTS] = {0};
         struct windows address_to saved = settings.own.table;
         static struct windows *table_scratch;
         struct windows *const table_at = windows_scratch_table(&table_scratch);
-        int x, y, width, height, bx, by, bw, bh, screen_row, turn_row, refresh_row, modes_row;
+        int screen_row, turn_row, refresh_row, modes_row;
         char text[SETTINGS_VALUE];
-        b32 snapped, typed = false, window = false;
-
-        memory_zero(screens, sizeof(screens));
-        screens[0].width = 1920, screens[0].height = 1080;
-        screens[1].x = 1920, screens[1].width = 1920, screens[1].height = 1080;
-
-        // The map's view: 800 by 400 at 10, 20 holds two 1920 by 1080 screens side by side at 208 thousandths, centred.
-        settings_map_view_of(screens, 2, 10, 20, 800, 400, &view);
-        check("display section: the map scales two screens side by side to the largest fit", view.f == 208);
-        settings_map_tile(&view, &screens[0], &x, &y, &width, &height);
-        check("display section: the first screen is drawn 399 by 224 at the map's place", x == 11 && y == 108 && width == 399 && height == 224);
-        settings_map_tile(&view, &screens[1], &bx, &by, &bw, &bh);
-        check("display section: the second screen is drawn a screen's width to the right of the first", bx - x == 399 && by == y && bw == 399 && bh == 224);
-        check("display section: a point of the map maps back to within two device pixels of the table",
-              settings_map_abs(settings_map_table_x(&view, settings_map_field_x(&view, 1920)) - 1920) <= 2 &&
-                  settings_map_abs(settings_map_table_y(&view, settings_map_field_y(&view, 540)) - 540) <= 2);
-
-        // A drop 4 table pixels from a neighbour's right edge snaps to it, within the compositor's band at scale 1.
-        screens[2].width = 1280, screens[2].height = 720;
-        x = 1920 + 1920 - COMPOSITOR_SNAP / 2, y = 50;
-        snapped = settings_map_snap(screens, 3, 2, &x, &y, COMPOSITOR_SNAP * 1);
-        check("display section: a drop inside the compositor's snap band snaps to a neighbour's edge", snapped && x == 3840 && y == 50);
-        x = 5000, y = 2000;
-        snapped = settings_map_snap(screens, 3, 2, &x, &y, COMPOSITOR_SNAP * 1);
-        check("display section: a drop beside no neighbour does not move", !snapped && x == 5000 && y == 2000);
+        b32 typed = false, window = false;
 
         // The dropdowns, from a fake table: three screens, the second at the left (number 1), with 144 Hz first (recommended).
         windows_scratch_zero(table_at);
@@ -4485,6 +4473,21 @@ static fn check_display_section(void)
                   string_equals((string_address)text, (string_address) "Turned left"));
         check("display section: a screen turned by Moonwater says so under its rotation",
               settings_map_chosen() == 1 && table_at->output_software[1] == 1);
+        // The map's nodes are the table's screens as the desk has them (a turned screen's rectangle is already turned there), each with
+        // its number in the middle, its name and its size under it, and the primary (the table's first) marked with its size.
+        {
+                unsigned int count = settings_map_load(number);
+
+                check("display section: the map's screens are the table's rectangles, numbered as the dropdown numbers them",
+                      count == 3 && settings.map.graph.nodes == 3 && settings.map.node[1].x == 0 && settings.map.node[1].w == 1920 &&
+                          settings.map.node[1].h == 1080 && settings.map.node[2].x == 3840 && settings.map.node[2].w == 1280 &&
+                          string_equals((string_address)settings.map.node[1].label, (string_address) "1") &&
+                          string_equals((string_address)settings.map.node[2].line[0], (string_address) "HDMI-A-1"));
+                check("display section: a screen says its size under its name, and the primary is marked and says so",
+                      (settings.map.node[0].flags & UI_GRAPH_MARKED) && !(settings.map.node[2].flags & UI_GRAPH_MARKED) &&
+                          string_equals((string_address)settings.map.node[2].line[1], (string_address) "1280 \xc3\x97 720") &&
+                          string_equals((string_address)settings.map.node[0].line[1], (string_address) "1920 \xc3\x97 1080, primary"));
+        }
 
         // The refresh dropdown lists only the rates the screen lists, the first marked recommended, and shows the one it is at.
         check("display section: the refresh dropdown lists only the screen's three rates, the first recommended",
@@ -4599,7 +4602,7 @@ static fn check_display_section(void)
         settings.ui.scale = 100;
         check("display section: the map is on for the Display group and off for another", settings_map_on() && settings.page.chosen == settings_group_of(screen_row));
         display_map_place();
-        check("display section: the map's panel is placed at the top of the page", settings.map.panel.y == 100 && settings.map.panel.h > 0 && settings.map.field.h > 0);
+        check("display section: the map's panel is placed at the top of the page", settings.map.panel.y == 100 && settings.map.panel.h > 0 && settings.map.panel.w > 0);
         // The Screen dropdown counts the screens in the same reading order as identify does: a 2 by 2 arrangement, listed bottom
         // right first, is Screen 1 top left, Screen 2 top right, Screen 3 bottom left and Screen 4 bottom right.
         windows_scratch_zero(table_at);
@@ -4620,47 +4623,121 @@ static fn check_display_section(void)
         check("display section: the map's numbers and the dropdown's are the same screens (Screen 2 is DP-2, top right)",
               windows_screen_numbers(table_at, number) == 4 && number[2] == 2 && number[1] == 3 && number[3] == 1 && number[0] == 4);
 
-        // A finger on the map, on the bottom left screen (table index 1): the press chooses it and starts its drag, a move
-        // drags it, and no press of the page starts (no row is pressed, and the finger is not the page's), so a drag never
-        // scrolls the list under it. The release is not sent here: it would run a verb.
+        // A finger on the map, on the bottom left screen (table index 1): the press chooses it and takes it, a move drags it, and no press
+        // of the page starts (no row is pressed, and the finger is not the page's), so a drag never scrolls the list under it. Where it
+        // would land is never over another screen, and the desk stays in one piece. The release is taken back (WINDOW_KEY_CANCEL): a
+        // release would write the desk, which runs a verb.
         {
-                struct settings_screen grid[WINDOWS_OUTPUTS];
-                unsigned int grid_number[WINDOWS_OUTPUTS] = {0}, grid_count = settings_map_load(grid, grid_number);
-                struct settings_map_view grid_view;
                 struct window_event touch;
-                int tx, ty, tw, th;
+                int tx, ty, tw, th, nx, ny, nw, nh;
                 b32 taken;
                 bipolar child_before;
 
-                settings_map_view_of(grid, grid_count, settings.map.field.x, settings.map.field.y, settings.map.field.w, settings.map.field.h, &grid_view);
-                settings_map_tile(&grid_view, &grid[1], &tx, &ty, &tw, &th);
                 gallery.on = 0, settings.page.menu_row = -1, ui_field_close(&settings.edit), (void)0, settings.page.card = false, settings_filter_clear();
-                settings.map.display = settings.map.drag = -1, settings.list.down = -1;
+                settings.map.display = -1, settings.map.keys = false, settings.list.down = -1, settings.map.sent = false;
+                ui_graph_start(&settings.map.graph);
+                display_map_screen(1, &tx, &ty, &tw, &th);
+                check("display section: the map frames the four screens in its panel, under its buttons",
+                      settings.map.graph.homed && tx >= settings.map.panel.x && ty >= settings.map.panel.y + settings.map.graph.top &&
+                          ty + th <= settings.map.panel.y + settings.map.panel.h && tw > 20 && th > 10);
                 touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2, ty + th / 2};
                 settings_event_at(&touch);
                 touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                 taken = settings_event_at(&touch);
-                check("display section: a finger's press on a screen of the map is the map's: it chooses the screen and starts its drag",
-                      taken && settings.map.display == 1 && settings.map.drag == 1);
+                check("display section: a finger's press on a screen of the map is the map's: it chooses the screen and takes it",
+                      taken && settings.map.display == 1 && settings.map.graph.held == 1);
                 check("display section: a finger's press on the map starts no press of the page, so a drag there never scrolls",
                       settings.list.down < 0);
-                touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2 + 200, ty + th / 2};
+                touch = (struct window_event){WINDOW_EVENT_MOTION, WINDOW_KEY_TOUCH, tx + tw / 2 + tw * 3, ty + th / 2};
                 settings_event_at(&touch);
-                check("display section: a finger dragged on the map moves the screen it took, to the place it is over",
-                      settings.map.drag == 1 && settings.map.target_x != grid[1].x && settings.list.down < 0);
-                settings.map.display = settings.map.drag = -1;
+                check("display section: a finger dragged on the map moves the screen it took, never over another and against one, the desk in one piece",
+                      settings.map.graph.moving && settings.map.graph.at_x != settings.map.node[1].x && settings.list.down < 0 &&
+                          ui_graph_clear(&settings.map.graph, 1, settings.map.graph.at_x, settings.map.graph.at_y) &&
+                          ui_graph_held(&settings.map.graph, 1, settings.map.graph.at_x, settings.map.graph.at_y));
+                check("display section: while a screen is dragged the caption says to let it go", string_equals((string_address)settings_map_hint(4), (string_address) "Let go to place the screen"));
+                child_before = settings.child;
+                touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL, UI_POINTER_LEFT, 0};
+                settings_event_at(&touch);
+                check("display section: a drag taken back writes nothing", settings.map.graph.held < 0 && settings.child == child_before && !settings.map.sent);
 
-                // A mouse on the top right screen (table index 2): the same press chooses and takes it, and a press on a screen
-                // is no press of the identify button (which would run the verb, a child process; none is started).
-                settings_map_tile(&grid_view, &grid[2], &tx, &ty, &tw, &th);
+                // A mouse on the top right screen (table index 2): the same press chooses and takes it, and a press on a screen is no press
+                // of the identify button (which would run the verb, a child process; none is started).
+                display_map_screen(2, &tx, &ty, &tw, &th);
                 touch = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2, ty + th / 2};
                 settings_event_at(&touch);
-                child_before = settings.child;
                 touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                 taken = settings_event_at(&touch);
-                check("display section: a mouse's press on a screen of the map chooses it and starts its drag, and runs no verb",
-                      taken && settings.map.display == 2 && settings.map.drag == 2 && settings.child == child_before);
-                settings.map.display = settings.map.drag = -1;
+                check("display section: a mouse's press on a screen of the map chooses it and takes it, and runs no verb",
+                      taken && settings.map.display == 2 && settings.map.graph.held == 2 && settings.child == child_before);
+                touch = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+                settings_event_at(&touch);
+                check("display section: a press let go where it went down writes nothing", settings.map.graph.held < 0 && !settings.map.sent);
+
+                // The ground: a press on the grid beside the screens pans the view, every screen with it, and the wheel zooms it about the
+                // pointer; the button that shows every screen frames them again where they were.
+                touch = (struct window_event){WINDOW_EVENT_MOTION, 0, settings.map.panel.x + 4, settings.map.panel.y + settings.map.panel.h - 4};
+                settings_event_at(&touch);
+                touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+                settings_event_at(&touch);
+                touch = (struct window_event){WINDOW_EVENT_MOTION, 0, settings.map.panel.x + 34, settings.map.panel.y + settings.map.panel.h - 14};
+                taken = settings_event_at(&touch);
+                display_map_screen(2, &nx, &ny, &nw, &nh);
+                check("display section: a press on the grid pans the view, the screens with it", taken && settings.map.graph.panning == 1 &&
+                      nx == tx + 30 && ny == ty - 10 && nw == tw && settings.map.graph.held < 0);
+                touch = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+                settings_event_at(&touch);
+                touch = (struct window_event){WINDOW_EVENT_WHEEL, 0, 120, 0};
+                settings_event_at(&touch);
+                display_map_screen(2, &nx, &ny, &nw, &nh);
+                check("display section: the wheel over the map zooms it", nw > tw && !settings.map.graph.panning);
+                {
+                        const struct ui_control address_to fit = &settings.map.fit;
+                        int bx = 0, by = 0, bw = 0, bh = 0;
+
+                        ui_control_row(fit, &bx, &by, &bw, &bh);
+                        touch = (struct window_event){WINDOW_EVENT_MOTION, 0, bx + bw / 2, by + bh / 2};
+                        settings_event_at(&touch);
+                        touch = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+                        settings_event_at(&touch);
+                        touch = (struct window_event){WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+                        settings_event_at(&touch);
+                        display_map_screen(2, &nx, &ny, &nw, &nh);
+                        check("display section: Show all screens frames every screen again", bw > 0 && nx == tx + 0 && nw == tw && ny == ty);
+                }
+                settings.map.display = -1;
+        }
+
+        // The desk written whole when a screen is let go: every screen's name and place in the table's order, the desk's top left at 0, 0
+        // (the top left screen put to the left of the others moves them all right), and what the map shows meanwhile is that layout,
+        // seen where it was: the camera moves with the desk's new top left, so the screens that did not move stay where they are.
+        {
+                char words[SETTINGS_TYPED];
+                int tx, ty, tw, th, nx, ny, nw, nh;
+                positive length;
+
+                display_map_screen(0, &tx, &ty, &tw, &th);
+                length = settings_map_layout(3, -1920, 1080, words, sizeof(words));
+                check("display section: a screen let go writes every screen's place, in the table's order, the desk's top left at 0, 0",
+                      length && string_equals((string_address)words, (string_address) "DP-4 place 3840 1080 DP-3 place 1920 1080 DP-2 place 3840 0 DP-1 place 0 1080") &&
+                          settings.map.sent_x[3] == 0 && settings.map.sent_y[3] == 1080 && settings.map.sent_x[0] == 3840);
+                // What settings_map_place keeps of it (the verb itself is not run here).
+                settings.map.sent = true, settings.map.sent_at = (positive)ui_kit.now, settings.map.sent_count = 4;
+                settings.map.shown_x[3] = -1920, settings.map.shown_y[3] = 1080;
+                display_map_screen(0, &nx, &ny, &nw, &nh);
+                check("display section: while the table has not caught up the map shows the layout sent, the screens that did not move where they were",
+                      settings.map.sent && settings.map.node[0].x == 3840 && nx == tx && ny == ty && nw == tw);
+                for (int k = 0; k < 4; k++)
+                        table_at->output_x[k] = settings.map.sent_x[k], table_at->output_y[k] = settings.map.sent_y[k];
+                display_map_screen(0, &nx, &ny, &nw, &nh);
+                check("display section: once the table has the layout it is the table's, and nothing on the map moves", !settings.map.sent && nx == tx && ny == ty);
+                // A command that moves the whole desk (every screen by as much) moves nothing on the map either.
+                for (int k = 0; k < 4; k++)
+                        table_at->output_x[k] -= 1920;
+                display_map_screen(0, &nx, &ny, &nw, &nh);
+                check("display section: a desk the table moves whole stays still on the map", nx == tx && ny == ty);
+                table_at->output_x[0] = 1920, table_at->output_y[0] = 1080, table_at->output_x[1] = 0, table_at->output_y[1] = 1080;
+                table_at->output_x[2] = 1920, table_at->output_y[2] = 0, table_at->output_x[3] = 0, table_at->output_y[3] = 0;
+                display_map_screen(0, &nx, &ny, &nw, &nh);
         }
 
         // The empty states, read plainly: no screen, one screen (its rows are words, not menus), one rate, and no rate at all.
@@ -4690,11 +4767,8 @@ static fn check_display_section(void)
         }
 
         // The map's drag at a HiDPI scale (the kit at 2, the table at 2): the press chooses the screen and a motion drags it, as
-        // at scale 1. The panel, the screens and the snap are device pixels, the button's box logical.
+        // at scale 1. The panel and the screens are device pixels, the button's box logical.
         {
-                struct settings_screen grid[WINDOWS_OUTPUTS];
-                unsigned int grid_number[WINDOWS_OUTPUTS] = {0}, grid_count;
-                struct settings_map_view grid_view;
                 struct window_event event;
                 int tx, ty, tw, th, before_x, before_y;
 
@@ -4708,23 +4782,23 @@ static fn check_display_section(void)
                 memory_copy(table_at->output_name[2], "DP-2", 5), memory_copy(table_at->output_name[3], "DP-1", 5);
                 settings.ui.scale = 200;
                 display_map_place();
-                grid_count = settings_map_load(grid, grid_number);
-                settings_map_view_of(grid, grid_count, settings.map.field.x, settings.map.field.y, settings.map.field.w, settings.map.field.h, &grid_view);
-                settings_map_tile(&grid_view, &grid[2], &tx, &ty, &tw, &th);
+                ui_graph_start(&settings.map.graph);
+                display_map_screen(2, &tx, &ty, &tw, &th);
                 settings.popup.open = 0, ui_field_close(&settings.edit), (void)0, settings.page.card = false, settings_filter_clear(), (void)0, settings.map.keys = false;
-                settings.map.display = settings.map.drag = -1, settings.map.nudged = false;
+                settings.map.display = -1, settings.map.sent = false;
                 event = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2, ty + th / 2};
                 settings_event_at(&event);
                 event = (struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
                 settings_event_at(&event);
-                check("display section: at scale 2 a press on a screen of the map chooses it and starts its drag",
-                      settings.map.display == 2 && settings.map.drag == 2);
-                before_x = settings.map.target_x, before_y = settings.map.target_y;
-                event = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2 + 300, ty + th / 2 + 40};
+                check("display section: at scale 2 a press on a screen of the map chooses it and takes it",
+                      settings.map.display == 2 && settings.map.graph.held == 2);
+                before_x = settings.map.graph.at_x, before_y = settings.map.graph.at_y;
+                event = (struct window_event){WINDOW_EVENT_MOTION, 0, tx + tw / 2 + tw * 2, ty + th / 2 + 40};
                 settings_event_at(&event);
-                check("display section: at scale 2 a motion over the map drags the screen it took, its target moves",
-                      settings.map.drag == 2 && (settings.map.target_x != before_x || settings.map.target_y != before_y));
-                settings.map.display = settings.map.drag = -1;
+                check("display section: at scale 2 a motion over the map drags the screen it took, where it would land moves",
+                      settings.map.graph.held == 2 && settings.map.graph.moving && (settings.map.graph.at_x != before_x || settings.map.graph.at_y != before_y));
+                ui_graph_let_go(&settings.map.graph);
+                settings.map.display = -1;
                 settings.ui.scale = 100, table_at->scale = 100;
                 display_map_place();
         }
@@ -4743,7 +4817,8 @@ static fn check_display_section(void)
                 table_at->output_x[3] = 0, table_at->output_y[3] = 0, table_at->output_w[3] = 1920, table_at->output_h[3] = 1080;
                 memory_copy(table_at->output_name[0], "DP-4", 5), memory_copy(table_at->output_name[1], "DP-3", 5);
                 memory_copy(table_at->output_name[2], "DP-2", 5), memory_copy(table_at->output_name[3], "DP-1", 5);
-                settings.map.display = 0, settings.map.keys = false, settings.map.nudged = false, settings.map.drag = -1;
+                settings.map.display = 0, settings.map.keys = false, settings.map.sent = false;
+                ui_graph_let_go(&settings.map.graph);
                 settings.page.pane = 1, settings.list.focus = screen_row, ui_field_close(&settings.edit), (void)0, settings.page.card = false;
                 settings_filter_clear(), (void)0, settings.page.menu_row = -1;
                 key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_UP, 0};
@@ -4768,26 +4843,79 @@ static fn check_display_section(void)
                 settings_key(&key);
                 check("display section: Tab from the rows goes on to the column, as it does elsewhere", settings.page.pane == 0 && !settings.map.keys);
                 settings.page.pane = 1;
+                // The graph's keys on the map: F shows every screen again, and Space held makes a press pan.
+                settings.map.keys = true;
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 33, 'f'};
+                settings.map.graph.zoom = settings.map.graph.least;
+                settings_key(&key);
+                check("display section: F on the map shows every screen again, and the map keeps the keys", settings.map.keys && settings.map.graph.zoom > settings.map.graph.least);
+                key = (struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_SPACE, ' '};
+                settings_key(&key);
+                check("display section: Space held on the map makes a press pan", settings.map.keys && settings.map.graph.space);
+                key = (struct window_event){WINDOW_EVENT_KEY, 0, UI_KEY_SPACE, ' '};
+                settings_key(&key);
+                check("display section: and let go it no longer does", !settings.map.graph.space);
+                settings.map.keys = false;
         }
 
-        // A Shift and an arrow moves the chosen screen a step, from where it was sent while the table has not caught up, and from
-        // the table once it has: a single screen, with no neighbour to snap to.
+        // A Shift and an arrow moves the chosen screen a step, from where it was sent while the table has not caught up, and from the
+        // table once it has: two screens side by side, the right one chosen, stepped along the other's side and never off it.
         {
                 int x, y;
+                char words[SETTINGS_TYPED];
 
                 windows_scratch_zero(table_at);
-                table_at->outputs = 1, table_at->output_width = 1920, table_at->output_height = 1080, table_at->scale = 100;
-                table_at->output_x[0] = 5000, table_at->output_y[0] = 5000, table_at->output_w[0] = 1920, table_at->output_h[0] = 1080;
-                memory_copy(table_at->output_name[0], "DP-1", 5);
-                settings.map.display = 0, settings.map.keys = true, settings.map.nudged = false;
-                check("display section: a Shift and an arrow steps the chosen screen by a step", settings_map_stepped(1, 0, &x, &y) && x == 5010 && y == 5000);
-                check("display section: a held key steps from where the screen was sent, not from the table again", settings_map_stepped(1, 0, &x, &y) && x == 5020 && y == 5000);
-                table_at->output_x[0] = 5020;
-                check("display section: once the table has the place a key sent, the next step is from the table", settings_map_stepped(0, 1, &x, &y) && x == 5020 && y == 5010);
-                table_at->output_x[0] = 5000, table_at->output_y[0] = 5000, settings.map.nudged = false;
+                table_at->outputs = 2, table_at->output_width = 1920, table_at->output_height = 1080, table_at->scale = 100;
+                table_at->output_w[0] = 1920, table_at->output_h[0] = 1080;
+                table_at->output_x[1] = 1920, table_at->output_w[1] = 1920, table_at->output_h[1] = 1080;
+                memory_copy(table_at->output_name[0], "DP-1", 5), memory_copy(table_at->output_name[1], "DP-2", 5);
+                settings.map.display = 1, settings.map.keys = true, settings.map.sent = false;
+                check("display section: a Shift and an arrow steps the chosen screen by a step along its neighbour", settings_map_stepped(0, -1, &x, &y) && x == 1920 && y == -10);
+                // As settings_map_place keeps it: the desk's top left is 0, 0, so the other screen is ten lower.
+                check("display section: the step is written as the whole desk", settings_map_layout(1, x, y, words, sizeof(words)) &&
+                      string_equals((string_address)words, (string_address) "DP-1 place 0 10 DP-2 place 1920 0"));
+                settings.map.sent = true, settings.map.sent_at = (positive)ui_kit.now, settings.map.sent_count = 2;
+                check("display section: a held key steps from where the screen was sent, not from the table again",
+                      settings_map_stepped(0, -1, &x, &y) && x == 1920 && y == -10 && settings.map.node[0].y == 10);
+                table_at->output_y[0] = 10;
+                check("display section: once the table has the place a key sent, the next step is from the table",
+                      settings_map_stepped(0, 1, &x, &y) && !settings.map.sent && x == 1920 && y == 10);
+                check("display section: a step off the desk is no move: the screen stays against its neighbour", !settings_map_stepped(1, 0, &x, &y));
                 check("display section: a step that moves nothing is no move", !settings_map_stepped(0, 0, &x, &y));
+                table_at->outputs = 1;
+                check("display section: a lone screen has nothing to step against", !settings_map_stepped(1, 0, &x, &y));
                 settings.map.keys = false;
                 check("display section: with one screen the caption says so, though the keys are on the map", string_equals((string_address)settings_map_hint(1), (string_address) "Only one screen is connected."));
+        }
+
+        /*
+                The desk written whole (canvas display NAME place X Y ...): its screens' lines go first in the order named (a screen
+                with no line has none, a later line of a screen named goes), every other line after them as it was, and the compositor
+                lays the placed screens in that order, so the first named is the first laid, the primary. A file that does not fit is
+                refused.
+        */
+        {
+                static const char names[3][WINDOWS_OUTPUT_NAME] = {"Virtual-2", "eDP-1", "HDMI-A-1"}, pair[2][WINDOWS_OUTPUT_NAME] = {"DP-1", "DP-2"};
+                static const char file[] = "HDMI-A-1 rotation=90\n\nVirtual-2 rotation=90 x=5 y=6\nbad_name x=1 y=2\nVirtual-2 rotation=0\n";
+                struct windows_display list[WINDOWS_DISPLAYS];
+                char led[256], pinned[128], few[10];
+                unsigned int listed;
+                int made;
+
+                made = windows_displays_lead(led, sizeof(led), file, names, 3);
+                check("display section: a desk written whole puts its screens' lines first in the order named, the rest after them as they were",
+                      made > 0 && made == (int)string_length((string_address)led) &&
+                          string_equals((string_address)led, (string_address) "Virtual-2 rotation=90 x=5 y=6\nHDMI-A-1 rotation=90\n\nbad_name x=1 y=2\n"));
+                check("display section: a file the lines do not fit in is refused", windows_displays_lead(few, sizeof(few), file, names, 3) == -1);
+                listed = windows_displays_read("DP-2 x=1920 y=0\nDP-1 x=0 y=0\n", list, WINDOWS_DISPLAYS);
+                made = (int)windows_arrange_pinned("", pair, 2, list, listed, pinned, sizeof(pinned));
+                check("display section: the compositor lays placed screens in the order of their lines",
+                      made > 0 && string_equals((string_address)pinned, (string_address) "DP-2@1920,0 DP-1@0,0"));
+                made = windows_displays_lead(led, sizeof(led), "DP-2 x=1920 y=0\nDP-1 x=0 y=0\n", pair, 2);
+                listed = windows_displays_read(led, list, WINDOWS_DISPLAYS);
+                check("display section: so a desk written in its laid order is laid in that order, the first named the primary",
+                      made > 0 && windows_arrange_pinned("", pair, 2, list, listed, pinned, sizeof(pinned)) > 0 &&
+                          string_equals((string_address)pinned, (string_address) "DP-1@0,0 DP-2@1920,0"));
         }
 
         // A screen's scale, in the displays file: one of the six presets in percent, 100 the default (not written), judged the
@@ -4887,7 +5015,8 @@ static fn check_display_section(void)
                 check("display section: a block shorter than an EDID names nothing", compositor_edid_name(edid, 64, named, sizeof(named)) == 0);
         }
 
-        settings.page.pane = 0, settings.map.keys = false, settings.map.nudged = false;
+        settings.page.pane = 0, settings.map.keys = false, settings.map.sent = false;
+        ui_graph_start(&settings.map.graph);
         settings.own.table = saved;
         settings.map.display = -1;
 }

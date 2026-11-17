@@ -235,10 +235,13 @@ settings_item_saved	3ffd	saved: Enter types its passphrase again, Delete forgets
 settings_joined	1050	joined
 settings_kept	4759	kept
 settings_map_drag	125f	Let go to place the screen
-settings_map_hint	9efb	Drag a screen to move it.
+settings_map_fit	797e	Show all screens
+settings_map_hint	0257	Drag a screen to move it. Drag the grid to pan, scroll to zoom.
 settings_map_keys	54c9	Arrows choose a screen. Shift and an arrow moves it. Enter identifies. Down leaves.
 settings_map_none	1b29	No screen is connected.
 settings_map_one	7ff2	Only one screen is connected.
+settings_map_primary	8448	%1$d × %2$d, primary
+settings_map_size	e00a	%1$d × %2$d
 settings_menu_keys	5546	Up and Down choose, Enter sets it, Escape leaves it
 settings_metrics	7e10	Card %1$d µs mean, %2$d µs worst; processor %3$d µs, %4$d µs worst; maps %5$d; wakes %6$d; %7$d presents a second, %8$d list frames a second
 settings_mode_largest	c7c4	Biggest picture
