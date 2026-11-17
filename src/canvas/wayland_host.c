@@ -30,8 +30,53 @@
 #define COMPOSITOR_WL_SIGBUS 7
 #define COMPOSITOR_WL_SIGPIPE 13
 #define COMPOSITOR_WL_SIGALRM 14
-#define COMPOSITOR_WL_TRANSFERS 16               // copies being read and pastes being written, all clients together
-#define COMPOSITOR_WL_TRANSFERS_PER_CLIENT 4
+// Copies being read and pastes being written, all clients together, and the syncobjs clients have imported: tables that grow a doubling
+// at a time in a reservation of this many (address space only), where 16 transfers (4 a client) and 128 syncobjs were the most and one
+// more was refused.
+#define COMPOSITOR_WL_TRANSFERS_MOST (1l << 20)
+#define COMPOSITOR_WL_SYNCOBJS_MOST (1l << 20)
+struct compositor_wl_transfer
+{
+        unsigned char state, which;
+        int client, row, in, out, keep;
+        unsigned long total, limit;
+        positive deadline;
+        thread *worker;
+        int finished, cancel;
+};
+struct compositor_wl_syncobj
+{
+        int used;
+        unsigned int handle;
+        int eventfd, armed;
+        unsigned long long armed_point;
+};
+
+// Room for want elements of unit bytes in a reservation of most of them (made at the first need, committed a doubling at a time): 1, or
+// 0 when the address space or the memory is not there.
+static int compositor_wl_room(unsigned char **at, long *room, long unit, long most, long want)
+{
+        long grown;
+
+        if (want <= *room)
+                return 1;
+        if (want > most)
+                return 0;
+        if (!*at)
+        {
+                long got = compositor_call(syscall(mmap), 0, (positive)(unit * most), 0, 0x4022, (positive)-1, 0); // PROT_NONE, private, anonymous, no reserve
+
+                if (got < 0 && got > -4096)
+                        return 0;
+                *at = (unsigned char *)got;
+        }
+        grown = *room ? *room * 2 : 64;
+        grown = grown < want ? want : grown > most ? most : grown;
+        if (compositor_call(syscall(mprotect), (positive)*at, (positive)((unit * grown + 4095) & ~4095L), 3, 0, 0, 0) != 0)
+                return 0;
+        *room = grown;
+        return 1;
+}
 #define COMPOSITOR_WL_PULL_NS 3000000000ull      // a copy's source has this long to write its text and end
 #define COMPOSITOR_WL_PUSH_NS 5000000000ull      // a paste's reader has this long to take the text
 #define COMPOSITOR_WL_CHUNK 4096                 // PIPE_BUF: a write of this much to a pipe that poll said is ready does not wait
@@ -84,17 +129,11 @@ static struct
         // (in, a descriptor of its own for the file, so a newer copy cannot change it half way) written to the client's (out).
         // Each is read and written by a thread of its own (worker), which says how it ended in finished (1 badly, 2 well) and
         // stops when the loop sets cancel; total is a paste's length, limit the most a copy may be.
-        struct
-        {
-                unsigned char state, which;
-                int client, row, in, out, keep;
-                unsigned long total, limit;
-                positive deadline;
-                thread *worker;
-                int finished, cancel;
-        } transfer[COMPOSITOR_WL_TRANSFERS];
+        struct compositor_wl_transfer *transfer;
+        long transfers;
+        unsigned char *transfer_at; // the reservation (compositor_wl_room), and the elements committed in it
+        long transfer_room;
         int wake;                       // the eventfd a transfer's thread knocks on when it has ended
-#define COMPOSITOR_WL_SYNCOBJS 128
         int hold_row, hold;             // the window that holds the pointer, and how: 0 free, 1 locked, 2 confined
         int dmabuf_table;               // the file of format and modifier pairs the feedback names, rebuilt when changed
         long dmabuf_table_size;
@@ -114,13 +153,10 @@ static struct
         int syncobj_ok;
         int syncobj_drm_fd;
         char render_path[64];
-        struct
-        {
-                int used;
-                unsigned int handle;
-                int eventfd, armed;
-                unsigned long long armed_point;
-        } syncobj[COMPOSITOR_WL_SYNCOBJS];
+        struct compositor_wl_syncobj *syncobj;
+        long syncobjs;
+        unsigned char *syncobj_at;
+        long syncobj_room;
         positive *slow_until; // a client's dma-bufs are not waited for until this (compositor_wl_slow)
         // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut: a table that grows and never moves (the
         // handler reads it as it is), with an index by each mapping's start (open addressing, a power of two of buckets, each a slot and
@@ -3697,7 +3733,7 @@ static void compositor_wl_syncobj_drop_handle(long slot)
                 unsigned int handle, pad;
         } arg;
 
-        if (slot < 0 || slot >= COMPOSITOR_WL_SYNCOBJS || !compositor_wl.syncobj[slot].used)
+        if (slot < 0 || slot >= compositor_wl.syncobjs || !compositor_wl.syncobj[slot].used)
                 return;
         if (compositor_wl.syncobj_drm_fd >= 0 && compositor_wl.syncobj[slot].handle)
         {
@@ -3751,11 +3787,19 @@ static long compositor_wl_syncobj_import(void *context, long fd)
         (void)context;
         if (fd < 0 || compositor_wl.syncobj_drm_fd < 0)
                 return -1;
-        for (long i = 0; i < COMPOSITOR_WL_SYNCOBJS && slot < 0; i++)
+        for (long i = 0; i < compositor_wl.syncobjs && slot < 0; i++)
                 if (!compositor_wl.syncobj[i].used)
                         slot = i;
+        // None free: the table one longer (-1 when the memory is not there).
         if (slot < 0)
-                return -1;
+        {
+                if (!compositor_wl_room(&compositor_wl.syncobj_at, &compositor_wl.syncobj_room, (long)sizeof(struct compositor_wl_syncobj),
+                                        COMPOSITOR_WL_SYNCOBJS_MOST, compositor_wl.syncobjs + 1))
+                        return -1;
+                compositor_wl.syncobj = (struct compositor_wl_syncobj *)compositor_wl.syncobj_at;
+                slot = compositor_wl.syncobjs++;
+                compositor_wl.syncobj[slot].used = 0, compositor_wl.syncobj[slot].eventfd = -1;
+        }
         memory_zero(&arg, sizeof arg);
         arg.fd = (int)fd;
         if (compositor_call(syscall(ioctl), (positive)compositor_wl.syncobj_drm_fd, COMPOSITOR_WL_SYNCOBJ_FD_TO_HANDLE, (positive)&arg, 0, 0, 0) < 0 ||
@@ -3788,7 +3832,7 @@ static int compositor_wl_syncobj_ready(void *context, long slot, unsigned long l
         } wait_arg;
 
         (void)context;
-        if (slot < 0 || slot >= COMPOSITOR_WL_SYNCOBJS || !compositor_wl.syncobj[slot].used || compositor_wl.syncobj_drm_fd < 0)
+        if (slot < 0 || slot >= compositor_wl.syncobjs || !compositor_wl.syncobj[slot].used || compositor_wl.syncobj_drm_fd < 0)
                 return 1;
         handle = compositor_wl.syncobj[slot].handle;
         memory_zero(&wait_arg, sizeof wait_arg);
@@ -3813,7 +3857,7 @@ static void compositor_wl_syncobj_signal(void *context, long slot, unsigned long
         } sig_arg;
 
         (void)context;
-        if (slot < 0 || slot >= COMPOSITOR_WL_SYNCOBJS || !compositor_wl.syncobj[slot].used || compositor_wl.syncobj_drm_fd < 0)
+        if (slot < 0 || slot >= compositor_wl.syncobjs || !compositor_wl.syncobj[slot].used || compositor_wl.syncobj_drm_fd < 0)
                 return;
         handle = compositor_wl.syncobj[slot].handle;
         memory_zero(&sig_arg, sizeof sig_arg);
@@ -3836,7 +3880,7 @@ static long compositor_wl_syncobj_eventfd(void *context, long slot, unsigned lon
         } arg;
 
         (void)context;
-        if (slot < 0 || slot >= COMPOSITOR_WL_SYNCOBJS || !compositor_wl.syncobj[slot].used || compositor_wl.syncobj_drm_fd < 0)
+        if (slot < 0 || slot >= compositor_wl.syncobjs || !compositor_wl.syncobj[slot].used || compositor_wl.syncobj_drm_fd < 0)
                 return -1;
         if (compositor_wl.syncobj[slot].eventfd < 0)
         {
@@ -3964,19 +4008,23 @@ static long compositor_wl_clip_size(void *context, long which)
         return table && which >= 0 && which < 2 && table->clip_on && compositor_clip.fd[which] >= 0 ? (long)table->clip_length[which] : 0;
 }
 
-// The transfers a client has, and a free place for another (-1 when it has its share or there is none).
+// A free place for another transfer: one let go, else the table one longer (-1 when the memory is not there).
 static long compositor_wl_transfer_place(long client)
 {
-        long slot = -1, held = 0;
+        long slot;
 
-        for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
-        {
+        (void)client;
+        for (long at = 0; at < compositor_wl.transfers; at++)
                 if (!compositor_wl.transfer[at].state)
-                        slot = slot < 0 ? at : slot;
-                else if (compositor_wl.transfer[at].client == client)
-                        held++;
-        }
-        return held >= COMPOSITOR_WL_TRANSFERS_PER_CLIENT ? -1 : slot;
+                        return at;
+        if (!compositor_wl_room(&compositor_wl.transfer_at, &compositor_wl.transfer_room, (long)sizeof(struct compositor_wl_transfer),
+                                COMPOSITOR_WL_TRANSFERS_MOST, compositor_wl.transfers + 1))
+                return -1;
+        compositor_wl.transfer = (struct compositor_wl_transfer *)compositor_wl.transfer_at;
+        slot = compositor_wl.transfers++;
+        memory_zero(&compositor_wl.transfer[slot], sizeof(compositor_wl.transfer[slot]));
+        compositor_wl.transfer[slot].in = compositor_wl.transfer[slot].out = compositor_wl.transfer[slot].keep = -1;
+        return slot;
 }
 
 #define COMPOSITOR_WL_SLICE_NS 50000000ull // how long a transfer's thread waits at a time before it looks at its deadline and cancel
@@ -4076,7 +4124,7 @@ static void compositor_wl_transfers_done(void)
         unsigned long knocks = 0;
 
         compositor_call(syscall(read), (positive)compositor_wl.wake, (positive)&knocks, sizeof knocks, 0, 0, 0);
-        for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
+        for (long at = 0; at < compositor_wl.transfers; at++)
         {
                 int finished = compositor_wl.transfer[at].worker ? __atomic_load_n(&compositor_wl.transfer[at].finished, __ATOMIC_ACQUIRE) : 0;
 
@@ -4143,7 +4191,7 @@ static long compositor_wl_clip_pull(void *context, long client, long which)
 static void compositor_wl_clip_abort(void *context, long client, long which)
 {
         (void)context;
-        for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
+        for (long at = 0; at < compositor_wl.transfers; at++)
                 if (compositor_wl.transfer[at].state == COMPOSITOR_WL_PULL && compositor_wl.transfer[at].client == client &&
                     compositor_wl.transfer[at].which == which)
                         compositor_wl_transfer_cancel(at);
@@ -4238,7 +4286,7 @@ static void compositor_wl_selection(unsigned int which)
 // A client gone: what it was in the middle of is ended, its copies read to the end by nobody.
 static void compositor_wl_transfers_drop(long client)
 {
-        for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
+        for (long at = 0; at < compositor_wl.transfers; at++)
                 if (compositor_wl.transfer[at].state && compositor_wl.transfer[at].client == client)
                         compositor_wl_transfer_cancel(at);
 }
@@ -4426,7 +4474,7 @@ static void compositor_wl_start(void)
         compositor_xwm_start();
         // The X server's protocols go to the user the window manager's socket takes (compositor_xwm_accept), and to no other.
         wayland_xwayland_user(compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0));
-        for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
+        for (long at = 0; at < compositor_wl.transfers; at++)
                 compositor_wl.transfer[at].in = compositor_wl.transfer[at].out = compositor_wl.transfer[at].keep = -1;
         // EFD_CLOEXEC | EFD_NONBLOCK: what the transfers' threads knock on; with none, no copy or paste is taken.
         compositor_wl.wake = (int)compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0);
@@ -5084,7 +5132,7 @@ static void compositor_wl_stop(void)
                         compositor_wl_drop(slot);
         wayland_stop();
         // A transfer whose thread still runs keeps its descriptors (and the eventfd stays) until the process ends.
-        for (long at = 0; at < COMPOSITOR_WL_TRANSFERS; at++)
+        for (long at = 0; at < compositor_wl.transfers; at++)
                 if (compositor_wl.transfer[at].state && !compositor_wl.transfer[at].worker)
                         compositor_wl_transfer_free(at);
                 else if (compositor_wl.transfer[at].state)
@@ -5094,7 +5142,7 @@ static void compositor_wl_stop(void)
         compositor_wl.dmabuf_table = 0;
         compositor_wl.dmabuf_table_size = 0;
         compositor_wl.dmabuf_entry_count = 0;
-        for (long at = 0; at < COMPOSITOR_WL_SYNCOBJS; at++)
+        for (long at = 0; at < compositor_wl.syncobjs; at++)
                 if (compositor_wl.syncobj[at].used)
                 {
                         compositor_wl_syncobj_drop_handle(at);
