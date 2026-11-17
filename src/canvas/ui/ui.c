@@ -12191,41 +12191,33 @@ static b32 ui_scene_end(struct ui address_to ui, struct ui_draw_list address_to 
         return 1;
 }
 
-/*
-        A box filled with a colour, cut to clip when there is one (a ripple to its
-        button): over the picture, in the rows the ui may write. A row in the box's
-        straight middle is its one span, laid on without the cover line: the same
-        pixels, without a pass over them for each. Any other row is its lines' spans
-        (ui_box_spans): the pixels at its edges each their sum, and those every line
-        covers whole one run of one tone.
-*/
-static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to box, unsigned int argb, const struct ui_box address_to clip)
+// The columns a painter covers: a box's (cut to clip, and to the window), first and last exclusive; false when there are none. The one
+// prologue of the kit's painters (ui_kit_fill, ui_kit_ring, ui_kit_shadow); a span wider than UI_KIT_LINE is drawn in chunks of it.
+static b32 ui_kit_columns(const struct ui address_to ui, const struct ui_box address_to box, const struct ui_box address_to clip, b32 address_to first,
+                       b32 address_to last)
 {
-        b32 first = box->x0 >> 8, last = (box->x1 + 255) >> 8, top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8, rx = box->rx, ry = box->ry;
+        *first = box->x0 >> 8, *last = (box->x1 + 255) >> 8;
+        *first = *first < 0 ? 0 : *first;
+        *last = *last > ui->width ? ui->width : *last;
+        if (clip)
+        {
+                *first = *first < clip->x0 >> 8 ? clip->x0 >> 8 : *first;
+                *last = *last > (clip->x1 + 255) >> 8 ? (clip->x1 + 255) >> 8 : *last;
+        }
+        return *last > *first;
+}
+
+// The columns [first, last) of a box filled (a chunk of ui_kit_fill, at most UI_KIT_LINE wide).
+static fn ui_kit_fill_cols(struct ui address_to ui, const struct ui_box address_to box, unsigned int argb, const struct ui_box address_to clip,
+                           b32 first, b32 last)
+{
+        b32 top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8, rx = box->rx, ry = box->ry;
         b32 cut_rx = 0, cut_ry = 0;
         unsigned int whole = argb >> 24 == 255 ? argb | 0xff000000u : ui_premultiplied(argb, UI_FULL);
 
-        if (!(argb >> 24))
-                return;
-        if (ui->scene)
-        {
-                ui_scene_box(ui, box, argb, false, 0, clip);
-                return;
-        }
         ui_box_radii(box, &rx, &ry);
         if (clip)
                 cut_rx = clip->rx, cut_ry = clip->ry, ui_box_radii(clip, &cut_rx, &cut_ry);
-        first = first < 0 ? 0 : first;
-        last = last > ui->width ? ui->width : last;
-        if (clip)
-        {
-                first = first < clip->x0 >> 8 ? clip->x0 >> 8 : first;
-                last = last > (clip->x1 + 255) >> 8 ? (clip->x1 + 255) >> 8 : last;
-        }
-        if (last - first > UI_KIT_LINE)
-                last = first + UI_KIT_LINE;
-        if (last <= first)
-                return;
         for (b32 y = top; y < bottom; y++)
         {
                 unsigned int address_to row;
@@ -12278,6 +12270,33 @@ static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to bo
         }
 }
 
+/*
+        A box filled with a colour, cut to clip when there is one (a ripple to its
+        button): over the picture, in the rows the ui may write. A row in the box's
+        straight middle is its one span, laid on without the cover line: the same
+        pixels, without a pass over them for each. Any other row is its lines' spans
+        (ui_box_spans): the pixels at its edges each their sum, and those every line
+        covers whole one run of one tone.
+*/
+// The span of a box in chunks of UI_KIT_LINE, each drawn by ui_kit_fill_cols: the chunks advance the first column, and the scratch lines
+// serve each chunk in turn.
+static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to box, unsigned int argb, const struct ui_box address_to clip)
+{
+        b32 first, last;
+
+        if (!(argb >> 24))
+                return;
+        if (ui->scene)
+        {
+                ui_scene_box(ui, box, argb, false, 0, clip);
+                return;
+        }
+        if (!ui_kit_columns(ui, box, clip, &first, &last))
+                return;
+        for (b32 at = first; at < last; at += UI_KIT_LINE)
+                ui_kit_fill_cols(ui, box, argb, clip, at, at + UI_KIT_LINE < last ? at + UI_KIT_LINE : last);
+}
+
 
 // A box laid down in the coordinates a control works in (as if the window read from the left), turned over the control's middle
 // (sum: its left and right edges added, device 256ths) when it reads from the right; the box that clips it turned with it.
@@ -12296,27 +12315,17 @@ static fn ui_kit_fill_in(struct ui address_to ui, struct ui_box box, unsigned in
 }
 
 // A ring: the box less the box inset by thickness (256ths), in one colour (an outline, a hairline).
-static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to box, b32 thickness, unsigned int argb)
+// The columns [first, last) of a ring drawn (a chunk of ui_kit_ring, at most UI_KIT_LINE wide).
+static fn ui_kit_ring_cols(struct ui address_to ui, const struct ui_box address_to box, b32 thickness, unsigned int argb, b32 first, b32 last)
 {
         struct ui_box inner = *box;
-        b32 first = box->x0 >> 8, last = (box->x1 + 255) >> 8, top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8;
-
+        b32 top = box->y0 >> 8, bottom = (box->y1 + 255) >> 8;
         b32 ry, inner_ry;
-
-        if (ui->scene)
-        {
-                ui_scene_box(ui, box, argb, true, thickness, 0);
-                return;
-        }
 
         inner.x0 += thickness, inner.y0 += thickness, inner.x1 -= thickness, inner.y1 -= thickness;
         inner.rx = inner.rx > thickness ? inner.rx - thickness : 0;
         inner.ry = inner.ry > thickness ? inner.ry - thickness : 0;
         ry = ui_box_ry(box), inner_ry = ui_box_ry(&inner);
-        first = first < 0 ? 0 : first;
-        last = last > ui->width ? ui->width : last;
-        if (last - first > UI_KIT_LINE)
-                last = first + UI_KIT_LINE;
         for (b32 y = top; y < bottom && last > first; y++)
         {
                 unsigned int address_to row;
@@ -12388,6 +12397,22 @@ static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to bo
         }
 }
 
+// A ring: the box less the box inset by thickness (256ths), in one colour, drawn in chunks of UI_KIT_LINE columns.
+static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to box, b32 thickness, unsigned int argb)
+{
+        b32 first, last;
+
+        if (ui->scene)
+        {
+                ui_scene_box(ui, box, argb, true, thickness, 0);
+                return;
+        }
+        if (!ui_kit_columns(ui, box, null, &first, &last))
+                return;
+        for (b32 at = first; at < last; at += UI_KIT_LINE)
+                ui_kit_ring_cols(ui, box, thickness, argb, at, at + UI_KIT_LINE < last ? at + UI_KIT_LINE : last);
+}
+
 // A Gaussian's share left of x sigmas, x from -4 to 4 in sixteenths, 0 to 65535: a blurred edge.
 static const unsigned short ui_edge[129] = {
         2, 3, 3, 5, 6, 7, 9, 12, 15, 19, 24, 30, 38, 47, 58, 72, 88, 108, 132, 161, 195, 236, 284, 341, 407, 485, 575, 680,
@@ -12438,26 +12463,10 @@ static fn ui_kit_outline(struct ui address_to ui, const struct ui_box address_to
         afresh at no more than a multiply a pixel. Drawn outside the box only,
         as CSS draws an outer shadow: the box's own pixels are its face's.
 */
-static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to box, b32 dx, b32 dy, b32 blur, b32 spread,
-                        unsigned int argb)
+// The columns [first, last) of a shadow (a chunk of ui_kit_shadow, at most UI_KIT_LINE wide), the shape s the box moved and grown.
+static fn ui_kit_shadow_cols(struct ui address_to ui, const struct ui_box address_to box, struct ui_box s, b32 sigma, b32 top, b32 bottom,
+                             unsigned int argb, b32 first, b32 last)
 {
-        struct ui_box s = *box;
-        b32 sigma = blur / 2, reach = blur + 256;
-
-        if (!UI_KIT_SHADOWS)
-                return;
-        b32 first, last, top, bottom;
-
-        if (!(argb >> 24))
-                return;
-        s.x0 += dx - spread, s.x1 += dx + spread, s.y0 += dy - spread, s.y1 += dy + spread;
-        s.rx = s.rx + spread > 0 ? s.rx + spread : 0;
-        s.ry = s.ry + spread > 0 ? s.ry + spread : 0;
-        first = (s.x0 - reach) >> 8, last = (s.x1 + reach + 255) >> 8, top = (s.y0 - reach) >> 8, bottom = (s.y1 + reach + 255) >> 8;
-        first = first < 0 ? 0 : first;
-        last = last > ui->width ? ui->width : last;
-        if (last - first > UI_KIT_LINE)
-                last = first + UI_KIT_LINE;
         // The horizontal blur is the same on every row: worked out once, into the clip line, and given back zeroed.
         for (b32 x = 0; x < last - first; x++)
         {
@@ -12494,6 +12503,28 @@ static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to 
                 }
         }
         memory_zero(ui_kit_clip, (positive)(last > first ? last - first : 0) * sizeof(ui_kit_clip[0]));
+}
+
+// A shadow of a box, moved by dx and dy and grown by spread, blurred over blur (256ths): drawn in chunks of UI_KIT_LINE columns.
+static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to box, b32 dx, b32 dy, b32 blur, b32 spread,
+                        unsigned int argb)
+{
+        struct ui_box s = *box;
+        b32 sigma = blur / 2, reach = blur + 256;
+        b32 first, last, top, bottom;
+
+        if (!UI_KIT_SHADOWS)
+                return;
+        if (!(argb >> 24))
+                return;
+        s.x0 += dx - spread, s.x1 += dx + spread, s.y0 += dy - spread, s.y1 += dy + spread;
+        s.rx = s.rx + spread > 0 ? s.rx + spread : 0;
+        s.ry = s.ry + spread > 0 ? s.ry + spread : 0;
+        first = (s.x0 - reach) >> 8, last = (s.x1 + reach + 255) >> 8, top = (s.y0 - reach) >> 8, bottom = (s.y1 + reach + 255) >> 8;
+        first = first < 0 ? 0 : first;
+        last = last > ui->width ? ui->width : last;
+        for (b32 at = first; at < last; at += UI_KIT_LINE)
+                ui_kit_shadow_cols(ui, box, s, sigma, top, bottom, argb, at, at + UI_KIT_LINE < last ? at + UI_KIT_LINE : last);
 }
 
 /* ---- end of the kit's shapes ---- */
@@ -21780,7 +21811,7 @@ static unsigned int ui_icon_tone(const char *name)
 {
         unsigned int hash = 2166136261u, hue, x;
 
-        for (unsigned int at = 0; name && name[at] && at < 256; at++)
+        for (unsigned int at = 0; name && name[at]; at++)
                 hash = (hash ^ (unsigned char)name[at]) * 16777619u;
         // Around the wheel at half the colour's strength: chroma 100 about a lightness of 90, so the least of a colour is 40 and the most 140: white on any of them is over three to one.
         hue = hash % 360u, x = 100u * (60u - (hue % 120u > 60u ? hue % 120u - 60u : 60u - hue % 120u)) / 60u;
@@ -24812,6 +24843,20 @@ static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to 
                 return true;
         }
         return false;
+}
+
+// Lets go of a page's press where the rows under it have moved (a row came in, went out or changed place): the press targets a place of the
+// list, which now holds another row, so it is let go unclicked (its release is no click), and the list's rows show nothing pressed.
+static fn ui_page_let_go(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l)
+{
+        if (!p->press.down)
+                return;
+        if (p->press.drags)
+                ui_press_lift(&p->press, true);
+        else
+                ui_press_end(&p->press, true);
+        ui_list_let_go(ui, l);
+        ui_page_changed(p);
 }
 
 /*

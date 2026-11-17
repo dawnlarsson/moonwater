@@ -211,7 +211,43 @@ static fn settings_show(int row)
         shape from UI_TARGET away; a list thrown goes on, slower and slower, and stops, and one let go still goes
         nowhere.
 */
+/*
+        The kit's spans past a chunk (ui.c's UI_KIT_LINE): a fill 9000 device pixels wide is drawn in every pixel of both its rows, not cut
+        where a chunk ends; and a name's tone (ui_icon_tone) is told apart by what lies past its 256th byte.
+*/
+#define CHECK_WIDE_SPAN 9000
+static unsigned int check_wide_pixels[2 * (CHECK_WIDE_SPAN + 100)];
+
 #if MOONWATER_UI_ANY && defined(UI_TARGET)
+static void check_kit_wide_span(void)
+{
+        struct ui ui;
+        struct ui_box box;
+        unsigned int argb = 0xff336699u;
+        int drawn = 0;
+
+        memory_zero(check_wide_pixels, sizeof(check_wide_pixels));
+        memory_zero(&ui, sizeof(ui));
+        ui.scale = 100, ui.top = 0, ui.bottom = 2, ui.pixels = check_wide_pixels, ui.pitch = CHECK_WIDE_SPAN + 100;
+        ui.width = CHECK_WIDE_SPAN + 100, ui.height = 2;
+        box.x0 = 0, box.y0 = 0, box.x1 = CHECK_WIDE_SPAN * 256, box.y1 = 2 * 256, box.rx = 0, box.ry = 0;
+        ui_kit_fill(&ui, &box, argb, null);
+        for (int x = 0; x < CHECK_WIDE_SPAN; x++)
+                drawn += check_wide_pixels[x] == argb && check_wide_pixels[CHECK_WIDE_SPAN + 100 + x] == argb;
+        check("kit spans: a fill 9000 device pixels wide is drawn in full, every pixel of both its rows, past the chunk's 8192", drawn == CHECK_WIDE_SPAN);
+}
+
+static void check_icon_tone_tail(void)
+{
+        char long_a[301], long_b[301];
+
+        memory_fill(long_a, 'q', 300), memory_fill(long_b, 'q', 300);
+        long_a[300] = long_b[300] = 0;
+        long_a[299] = 'x', long_b[299] = 'y';
+        check("icons: two names 300 bytes long that agree in their first 256 get two tones, the tail is in the tone",
+              ui_icon_tone(long_a) != ui_icon_tone(long_b));
+}
+
 static void check_ui_press(void)
 {
         struct ui ui = {0};
@@ -6568,6 +6604,82 @@ static fn check_settings_clicks(void)
         ui_page_redraw(&settings.page);
 }
 
+/*
+        The settings window's rows held to what a change and a press know of them: a row changed while a verb runs waits, and nine
+        rows wait in turn (none is refused, and a second change to a waiting row replaces its value); a board's lines past the
+        ones the window keeps say how many are not shown on the last line; and a press held on a row goes when the list under it
+        gains a row, so its release clicks nothing (a device that comes in while the press is down).
+*/
+static fn check_settings_queue_rows(void)
+{
+        int rows[9], found = 0, waiting = 0;
+        b32 in_order = true;
+
+        settings.child = 1; // a verb runs: each change waits for it, and none starts
+        settings.queued = 0;
+        for (int row = 0; row < SETTINGS_ROWS && found < 9; row++)
+                if (!settings_rows[row].deliberate)
+                        rows[found++] = row;
+        for (int k = 0; k < found; k++)
+                settings_change(rows[k], "x");
+        waiting = settings.queued;
+        for (int k = 0; k < found && k < settings.queued; k++)
+                in_order &= settings.queue[k].row == rows[k];
+        check("settings queue: nine rows changed while a verb runs all wait, in order, and none is refused", found == 9 && waiting == 9 && in_order);
+        settings_change(rows[0], "y");
+        check("settings queue: a second change to a row that waits replaces its value and takes no place",
+              settings.queued == 9 && settings.queue[0].row == rows[0] && string_equals((string_address)settings.queue[0].value, (string_address) "y"));
+        settings.child = 0;
+        settings.queued = 0;
+}
+
+static fn check_settings_board_lines(void)
+{
+        int saved = settings_sub_count, count = 0;
+        char expect[SETTINGS_SUB_TEXT];
+
+        settings_sub_count = 0, settings_sub_owner = 0;
+        for (int k = 0; k < 90; k++)
+                count = settings_sub_put(0, false, null, "a line", count);
+        language_format(expect, sizeof(expect), WORDS(settings_not_shown), 11L);
+        check("settings board: 90 lines fill the window's 80 and the last says that 11 are not shown (79 kept, 11 left out)",
+              settings_sub_count == SETTINGS_SUBS && string_equals((string_address)settings_sub[SETTINGS_SUBS - 1].text, (string_address)expect));
+        settings_sub_count = saved;
+}
+
+static fn check_settings_layout_press(void)
+{
+        const int list = 0;
+        static struct settings_item kept_items[SETTINGS_LIST_ROWS];
+        int kept_count = settings.item_count[list];
+
+        memory_copy(kept_items, settings_large->item[list], sizeof(kept_items));
+        settings.item_count[list] = 5;
+        for (int at = 0; at < 5; at++)
+                string_copy_bounded((string_address)settings_large->item[list][at].label, (string_address) "device", sizeof(settings_large->item[list][at].label));
+        settings_rebuild();
+        ui_press_begin(&settings.page.press, 10, 10, 3, false);
+        // A device comes in at the top while the press on position 3 is held: the rows move down one.
+        for (int at = settings.item_count[list]; at > 0; at--)
+                settings_large->item[list][at] = settings_large->item[list][at - 1];
+        string_copy_bounded((string_address)settings_large->item[list][0].label, (string_address) "new device", sizeof(settings_large->item[list][0].label));
+        settings.item_count[list]++;
+        settings_rebuild();
+        check("settings list: a row that comes in under a held press lets the press go, so its release clicks nothing (the new row is not clicked)",
+              !settings.page.press.down && ui_press_release(&settings.page.press, false, 3) == -1);
+        memory_copy(settings_large->item[list], kept_items, sizeof(kept_items));
+        settings.item_count[list] = kept_count;
+        ui_press_end(&settings.page.press, true);
+        settings_rebuild();
+}
+
+static fn check_settings_rows_moved(void)
+{
+        check_settings_queue_rows();
+        check_settings_board_lines();
+        check_settings_layout_press();
+}
+
 static fn check_settings_seam(void)
 {
         struct ui address_to ui = &settings.ui;
@@ -7124,6 +7236,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings_frames_pass();
         check_settings_search();
         check_settings_seam();
+        check_settings_rows_moved();
         check_settings_clicks();
 
         settings_frames_scenario((string_address) "Canvas, Space and Down every 33 ms, answered at 25", false, false,

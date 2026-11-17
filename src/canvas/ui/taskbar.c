@@ -1887,6 +1887,22 @@ static unsigned int address_to taskbar_moon_kept(int size, unsigned int look, b3
         return kept.frames + frame * (positive)step;
 }
 
+// The arrangement ring of a slot or the moon: a thin ring of ink (its alpha in the top byte of alpha) a little in from the slot's edges,
+// on the glass of the ground it is over (the items' and the moon's rings differ in ink and alpha only).
+static void taskbar_edit_ring(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n,
+                              unsigned int ground, unsigned int ink, unsigned int alpha)
+{
+        int s = taskbar_scaled(view->scale);
+        struct ui grip;
+        struct ui_box ring = taskbar_face(t, n, 0, 0);
+        b32 in = (b32)(s / 100 > 1 ? s / 100 : 1) * 256 * 2;
+
+        taskbar_glass_ui(&grip, view, t, ground);
+        ring.x0 += in, ring.y0 += in, ring.x1 -= in, ring.y1 -= in;
+        ring.rx = ring.ry = ((ring.x1 - ring.x0 < ring.y1 - ring.y0 ? ring.x1 - ring.x0 : ring.y1 - ring.y0) / 2);
+        ui_kit_ring(&grip, &ring, (b32)(s * 256 / 100 > 256 ? s * 256 / 100 : 256), (ink & 0xffffffu) | alpha);
+}
+
 static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, int hours, int minutes, int lit)
 {
         struct ui ui;
@@ -2160,33 +2176,15 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                         }
                         ink = which >= 0 ? taskbar_ink_on(ground, mark) : window_contrast(ground);
                 }
+                // Arranging: each item that can be moved ringed, a thin line of its ink a little in from its edges.
                 if (taskbar.editing && (which >= 0 || taskbar_item_of(which) >= 0))
-                {
-                        // Arranging: each item that can be moved ringed, a thin line of its ink a little in from its edges.
-                        struct ui grip;
-                        struct ui_box ring = taskbar_face(t, n, 0, 0);
-                        b32 in = (b32)(s / 100 > 1 ? s / 100 : 1) * 256 * 2;
-
-                        taskbar_glass_ui(&grip, view, t, ground);
-                        ring.x0 += in, ring.y0 += in, ring.x1 -= in, ring.y1 -= in;
-                        ring.rx = ring.ry = ((ring.x1 - ring.x0 < ring.y1 - ring.y0 ? ring.x1 - ring.x0 : ring.y1 - ring.y0) / 2);
-                        ui_kit_ring(&grip, &ring, (b32)(s * 256 / 100 > 256 ? s * 256 / 100 : 256), (ink & 0xffffffu) | 0x66000000u);
-                }
+                        taskbar_edit_ring(view, t, n, ground, ink, 0x66000000u);
                 switch (which)
                 {
                 case TASKBAR_LAUNCHER: // the moon, the clock on it; ringed over it while the band is arranged
                         taskbar_moon(view, t, n, time_ok ? broken.tm_hour : -1, time_ok ? broken.tm_min : -1, view->launcher_lit);
                         if (taskbar.editing)
-                        {
-                                struct ui grip;
-                                struct ui_box ring = taskbar_face(t, n, 0, 0);
-                                b32 in = (b32)(s / 100 > 1 ? s / 100 : 1) * 256 * 2;
-
-                                taskbar_glass_ui(&grip, view, t, ground);
-                                ring.x0 += in, ring.y0 += in, ring.x1 -= in, ring.y1 -= in;
-                                ring.rx = ring.ry = ((ring.x1 - ring.x0 < ring.y1 - ring.y0 ? ring.x1 - ring.x0 : ring.y1 - ring.y0) / 2);
-                                ui_kit_ring(&grip, &ring, (b32)(s * 256 / 100 > 256 ? s * 256 / 100 : 256), (window_contrast(ground) & 0xffffffu) | 0x99000000u);
-                        }
+                                taskbar_edit_ring(view, t, n, ground, window_contrast(ground), 0x99000000u);
                         break;
                 case TASKBAR_TRAY:
                 case TASKBAR_TRAY_BEFORE:

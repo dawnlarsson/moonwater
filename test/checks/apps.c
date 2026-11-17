@@ -9462,6 +9462,8 @@ b32 main()
 #endif
 #if MOONWATER_UI_ANY && defined(UI_TARGET)
         check_ui_press();
+        check_kit_wide_span();
+        check_icon_tone_tail();
 #endif
         check_compositor_dismiss();
         check_compositor_close_over_control();

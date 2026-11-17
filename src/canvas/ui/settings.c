@@ -179,7 +179,6 @@
 // The size the window opens at, logical pixels; every other size in it is the kit's (ui.c, the page).
 #define SETTINGS_WIDTH 700
 #define SETTINGS_HEIGHT 520
-#define SETTINGS_QUEUE 8 // changes that may wait for the verb running
 #define SETTINGS_NAME_ROW 0 // the machine's name, the first row: a name is letters, digits and hyphens, under 32
 #define SETTINGS_NAME_MOST 31
 
@@ -795,8 +794,8 @@ static struct
         b32 job_sets;
         char job_value[SETTINGS_TYPED];
         positive unread[SETTINGS_UNREAD_WORDS]; // rows to ask, a bit each
-        struct settings_change queue[SETTINGS_QUEUE]; // changes to make once the verb running is done, in order
-        positive queued;
+        struct settings_change address_to queue; // changes to make once the verb running is done, in order (grown in memory)
+        positive queue_room, queued;
         b32 told;         // the first reading is said in the machine's log
 
         struct settings_map map;
@@ -883,7 +882,7 @@ struct settings_sub
 #define SETTINGS_PART_FREE -1      // the row of the free room the host lists, all of it
 #define SETTINGS_PART_MORE -2      // the row of the partitions the host did not show
 static struct settings_sub settings_sub[SETTINGS_SUBS];
-static int settings_sub_count, settings_sub_owner;
+static int settings_sub_count, settings_sub_owner, settings_sub_cut; // settings_sub_cut: the lines past the last kept (settings_sub_put)
 static struct windows_issues settings_board;
 static unsigned char settings_expanded[SETTINGS_ALL]; // each row's expander: 1 when the lines under it show (the GPU's, or a row with an issue)
 // Each row's fold: how far its lines are open, Q30 (0 shut, UI_ONE open), moved by its own spring from where it was when it was turned, so
@@ -1073,8 +1072,18 @@ static int settings_sub_put(int section, b32 detail, const char address_to words
 {
         struct settings_sub address_to sub;
 
-        if (settings_sub_count >= SETTINGS_SUBS || count >= UI_LIST_MOST - 1)
+        if (count >= UI_LIST_MOST - 1)
                 return count;
+        if (settings_sub_count >= SETTINGS_SUBS)
+        {
+                // The window keeps SETTINGS_SUBS lines: the last one is given up for a note saying how many are not shown, that one included.
+                sub = &settings_sub[SETTINGS_SUBS - 1];
+                settings_sub_cut++;
+                sub->section = section, sub->detail = false, sub->words = null, sub->code = 0, sub->action = SETTINGS_SUB_COPY;
+                sub->owner = settings_sub_owner, sub->part = 0;
+                language_format(sub->text, sizeof(sub->text), WORDS(settings_not_shown), (long)(settings_sub_cut + 1));
+                return count;
+        }
         sub = &settings_sub[settings_sub_count];
         sub->section = section, sub->detail = detail, sub->words = words, sub->code = 0, sub->action = SETTINGS_SUB_COPY, sub->owner = settings_sub_owner;
         sub->part = 0;
@@ -2325,6 +2334,38 @@ static fn settings_try_changed(int row)
 }
 
 /*
+        The layout the press was taken on: each place of the list (a row's id) and every feed list's labels, which name the rows (a row
+        that comes in, goes out or moves is another label in another place). A press holds a place of the list, so when the layout changes
+        under it, settings_layout_check lets it go: its release clicks nothing.
+*/
+static positive settings_layout_seen;
+
+static positive settings_layout_key(void)
+{
+        positive key = 1469598103934665603ull;
+
+        for (int at = 0; at < settings.list.count; at++)
+                key = (key ^ (positive)settings.list.id[at]) * 1099511628211ull;
+        for (int list = 0; list < SETTINGS_LISTS; list++)
+        {
+                key = (key ^ (positive)settings.item_count[list]) * 1099511628211ull;
+                for (int at = 0; at < settings.item_count[list]; at++)
+                        for (positive k = 0; k < sizeof(settings_large->item[list][at].label) && settings_large->item[list][at].label[k]; k++)
+                                key = (key ^ (unsigned char)settings_large->item[list][at].label[k]) * 1099511628211ull;
+        }
+        return key;
+}
+
+static fn settings_layout_check(void)
+{
+        positive key = settings_layout_key();
+
+        if (key != settings_layout_seen && settings.page.press.down)
+                ui_page_let_go(&settings.ui, &settings.page, &settings.list);
+        settings_layout_seen = key;
+}
+
+/*
         The rows that match the filter, laid out; the focus stays on its row
         when that still shows, and else goes to the first. The view stays
         where it is, which is what a list read again must not move.
@@ -2337,7 +2378,7 @@ static fn settings_rebuild(void)
         // What is typed lists the rows that mention it, in every group; with none typed, the rows of the group chosen.
         // Every id written is a place of the kit's list (UI_LIST_MOST): the lines under the rows take what the rows leave, and a row past
         // that is not listed.
-        settings_sub_count = 0;
+        settings_sub_count = 0, settings_sub_cut = 0;
         for (positive row = 0; row < settings_rows_count(); row++)
                 if (count < UI_LIST_MOST && (settings_filter_length() ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen))
                 {
@@ -2377,6 +2418,7 @@ static fn settings_rebuild(void)
         if (settings_pos(settings.list.focus) < 0 && count)
                 settings.list.focus = settings.list.id[0];
         settings_layout();
+        settings_layout_check();
         ui_page_redraw(&settings.page);
 }
 
@@ -3065,7 +3107,9 @@ static fn settings_change(int row, const char address_to value)
 
         if (at == settings.queued)
         {
-                if (settings.queued == SETTINGS_QUEUE)
+                // A row that waits takes its change in its own entry (above), so the queue holds one entry per row and per command: it grows with
+                // them, and only the kernel refuses a change it cannot hold.
+                if (!array_store_reserve(settings.queue, settings.queue_room, settings.queued, settings.queued + 1, 8))
                 {
                         settings_say((string_address)WORDS(settings_busy));
                         return;
@@ -3945,6 +3989,7 @@ static fn settings_feed_read(b32 killed, b32 failed)
                 settings_feed_links();
         else
                 settings_feed_devices();
+        settings_layout_check();
         if (settings_list_sum(list) == before && !changed)
                 return;
 
