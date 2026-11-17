@@ -863,8 +863,26 @@ static bool radio_wifi_why(p8 address_to why, positive room)
         radio_card card;
         radio_said said;
         p8 rfkill = 0;
+        bool interface = radio_has_interface();
 
         why[0] = end;
+        //      The hardware first: a machine with no radio is told so, and not to switch on what it does not have.
+        memory_fill(address_of card, 0, sizeof(card));
+        if (!interface)
+        {
+                host_each_entry((string_address) "/sys/bus/pci/devices", radio_pci_visit,
+                                address_of card);
+                if (!card.found)
+                        host_each_entry((string_address) "/sys/bus/usb/devices", radio_usb_visit,
+                                        address_of card);
+                if (!card.found)
+                {
+                        radio_line(why, room, (string_address) "no wireless hardware found", null,
+                                   null, null, null);
+                        return true;
+                }
+        }
+
         if (radio_kept(NET_WIFI_POWER) == 0)
         {
                 radio_line(why, room, (string_address) "switched off (moonwater wifi on)",
@@ -881,25 +899,12 @@ static bool radio_wifi_why(p8 address_to why, positive room)
                 return true;
         }
 
-        if (radio_has_interface())
+        if (interface)
         {
                 if (rfkill == 1)
                         radio_line(why, room, (string_address) "blocked by rfkill (soft)",
                                    null, null, null, null);
                 return rfkill == 1;
-        }
-
-        memory_fill(address_of card, 0, sizeof(card));
-        host_each_entry((string_address) "/sys/bus/pci/devices", radio_pci_visit,
-                        address_of card);
-        if (!card.found)
-                host_each_entry((string_address) "/sys/bus/usb/devices", radio_usb_visit,
-                                address_of card);
-        if (!card.found)
-        {
-                radio_line(why, room, (string_address) "no wireless hardware found", null,
-                           null, null, null);
-                return true;
         }
 
         radio_kernel_said(card.address, address_of said);

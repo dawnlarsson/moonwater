@@ -386,6 +386,7 @@ static const struct iss_kernel_line iss_kernel_lines[] = {
     {3, "wmi_bus wmi_bus-PNP0C14:03: [Firmware Bug]: WQBC data block query control method not found", 0, 0}, // the board's firmware, said even at error
     {6, "PCI: Using host bridge windows from ACPI; if necessary, use \"pci=nocrs\" and report a bug", 0, 0},
     {4, "ACPI BIOS Error (bug): Could not resolve symbol [_SB.PCI0.GPP8.PEGP._DSM], AE_NOT_FOUND", 0, 0},
+    {3, "ACPI Error: Aborting method \\_SB.PCI0.SAT0.SPT0._SDD due to previous error (AE_NOT_FOUND) (20260408/psparse-543)", 0, 0},
     {4, "RDSEED32 is broken. Disabling the corresponding CPUID bit.", 0, 0},
     {6, "virt/tdx: TDX not supported by the host platform", 0, 0},
     {4, "kauditd_printk_skb: 225 callbacks suppressed", 0, 0},

@@ -1790,6 +1790,7 @@ static const char *const kernel_notice_key[KERNEL_NOTICE_CLASSES] = {
 static const char *const kernel_notice_quiet[] = {
     "LTTPR count is nonzero", // the amdgpu driver's DisplayPort repeater message, every mode set on a machine with no repeater
     "ACPI BIOS Error",        // firmware's own tables, on most boards
+    "due to previous error",  // ACPI's method aborted after that firmware error: the same fault said a second time (intel2's _SDD, at every boot)
     "Direct firmware load",   // an optional blob that is not there
     "[Firmware Bug]",         // the kernel's own label for a board's firmware being wrong, which it works around (a WMI block that is not there, a table's
                               // entry): the board's maker's to fix and not the user's, on most boards
