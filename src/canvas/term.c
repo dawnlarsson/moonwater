@@ -818,20 +818,87 @@ static fn SPARE emit_character(unsigned int character)
 /* One CSI parameter machine serves both terminal output and editor input.
    The final byte is deliberately not stored: it is the caller's action, while
    digits, separators and the private marker are the reusable transition. */
-#define TERMINAL_PARAMETERS 32
+/* The parameters a sequence has, as many as it is given: value (each parameter)
+   and joined (nonzero when ':' joined it to the one before it) grow in memory
+   together with them (terminal_parameters_room), as the lines and the history
+   do, so no count is capped. value and joined are read as arrays by the
+   editor's input too, which is why they are not one struct array. Until a
+   parameter is kept they point at one zero slot each, which is never grown
+   from, so a reader of value[0] with no parameter reads 0. A refusal by the
+   kernel drops the rest of the sequence. */
 typedef struct
 {
-        unsigned int value[TERMINAL_PARAMETERS];
+        unsigned int *value;
+        p8 *joined;
+        positive room;      // the slots value owns: 0 while it is the zero slot below
+        positive flag_room; // the slots joined owns: 0 while it is the zero slot below
         unsigned int count;
-        unsigned int colon; // bit n: value[n] was joined to the one before by ':'
         p8 marker;
-        p8 full;            // a separator past the last slot: the rest is dropped
+        p8 full;            // the kernel refused the store: the rest are dropped
 } terminal_parameters;
 
-#define terminal_parameters_reset(sequence)                                 \
-        ((sequence)->count = 0, (sequence)->marker = 0,                     \
-         (sequence)->value[0] = 0, (sequence)->colon = 0,                   \
-         (sequence)->full = 0)
+static unsigned int terminal_value_none[1];
+static p8 terminal_joined_none[1];
+
+// Starts a sequence with no parameter. A sequence that was never reset has no store at all, so it is given the zero slots first.
+static void terminal_parameters_reset(terminal_parameters address_to sequence)
+{
+        if (!sequence->value)
+        {
+                sequence->value = terminal_value_none;
+                sequence->joined = terminal_joined_none;
+        }
+        sequence->count = 0;
+        sequence->marker = 0;
+        sequence->full = 0;
+        sequence->value[0] = 0;
+        sequence->joined[0] = 0;
+}
+
+// Room for slots parameters in both stores, each grown in memory with the ones it has kept: 0 when the kernel refuses one, and the sequence
+// is full from then on.
+static b32 terminal_parameters_room(terminal_parameters address_to sequence,
+                                    positive slots)
+{
+        unsigned int address_to values = sequence->room ? sequence->value : null;
+        p8 address_to flags = sequence->flag_room ? sequence->joined : null;
+        positive room = sequence->room, flag_room = sequence->flag_room;
+
+        if (slots > room)
+        {
+                if (!array_store_reserve(values, room, sequence->room, slots, 16))
+                {
+                        sequence->full = 1;
+                        return false;
+                }
+                sequence->value = values;
+                sequence->room = room;
+        }
+        if (slots > flag_room)
+        {
+                if (!array_store_reserve(flags, flag_room, sequence->flag_room, slots, 16))
+                {
+                        sequence->full = 1;
+                        return false;
+                }
+                sequence->joined = flags;
+                sequence->flag_room = flag_room;
+        }
+        return true;
+}
+
+// The first parameter of a sequence that has none: a store grown in memory is not zeroed, so its first slot is.
+static b32 terminal_parameters_first(terminal_parameters address_to sequence)
+{
+        if (sequence->count)
+                return true;
+        if (!terminal_parameters_room(sequence, 1))
+                return false;
+        sequence->value[0] = 0;
+        sequence->joined[0] = 0;
+        sequence->count = 1;
+        return true;
+}
 
 static inline INLINE p8 terminal_parameters_take(
     terminal_parameters address_to sequence, unsigned int byte)
@@ -844,8 +911,8 @@ static inline INLINE p8 terminal_parameters_take(
                 if (sequence->full)
                         return false;
 
-                if (!sequence->count)
-                        sequence->count = 1;
+                if (!terminal_parameters_first(sequence))
+                        return false;
 
                 value = address_of sequence->value[sequence->count - 1];
 
@@ -863,19 +930,17 @@ static inline INLINE p8 terminal_parameters_take(
 
         if (byte == ';' || byte == ':')
         {
-                if (!sequence->count)
-                        sequence->count = 1;
+                if (sequence->full)
+                        return false;
 
-                // Past the last slot the rest are dropped, where they used
-                // to run their digits on into the last one's.
-                if (sequence->count == TERMINAL_PARAMETERS)
-                        sequence->full = 1;
-                else if (!sequence->full)
-                {
-                        if (byte == ':')
-                                sequence->colon |= 1u << sequence->count;
-                        sequence->value[sequence->count++] = 0;
-                }
+                if (!terminal_parameters_first(sequence))
+                        return false;
+
+                if (!terminal_parameters_room(sequence, sequence->count + 1))
+                        return false;
+                sequence->joined[sequence->count] = byte == ':';
+                sequence->value[sequence->count] = 0;
+                sequence->count++;
 
                 return false;
         }
@@ -889,7 +954,7 @@ static inline INLINE p8 terminal_parameters_take(
         return byte >= '@' && byte <= '~';
 }
 
-static terminal_parameters terminal_csi;
+static terminal_parameters terminal_csi = {terminal_value_none, terminal_joined_none, 0, 0, 0, 0, 0};
 static b32 in_escape, in_csi, in_string, escape_intermediate;
 
 // A string sequence ends at ST, and ST is two bytes with an ESC in front.
@@ -1336,7 +1401,7 @@ static unsigned int sgr_joined(unsigned int at)
         unsigned int n = 0;
 
         while (at + n + 1 < terminal_csi.count &&
-               (terminal_csi.colon >> (at + n + 1) & 1))
+               terminal_csi.joined[at + n + 1])
                 n++;
 
         return n;
@@ -1742,15 +1807,20 @@ static fn soft_reset()
         cursor_saved = (struct cursor_state){0, 0, 7, 0, 0, false};
 }
 
+static fn escape_discard();
+
 /*
         RIS: DECSTR's resets, on the primary screen, with the tab stops back
         and the page blank. Leaving the alternate screen comes first: it puts
-        back the cursor the shell had, and a reset is the cursor at home.
+        back the cursor the shell had, and a reset is the cursor at home. A
+        sequence or character the session before ended in is dropped, not
+        finished by this session's first byte.
 */
 static fn full_reset()
 {
         alternate_leave(false);
         soft_reset();
+        escape_discard();
         row = 0;
         column = 0;
         cursor_shape = 0;
@@ -2243,6 +2313,17 @@ static fn utf8_flush()
 
         terminal_utf8.left = 0;
         put(0xfffd);
+}
+
+/*
+        The parser's state dropped with no output: a character or a sequence the far end ended in, which the next session's first byte does not
+        finish. utf8_flush is the one that shows the replacement for the character.
+*/
+static fn escape_discard()
+{
+        terminal_utf8.left = 0;
+        in_escape = in_csi = in_string = escape_intermediate = false;
+        string_escape = false;
 }
 
 /*
@@ -2832,7 +2913,7 @@ static positive text_run(const p8 address_to bytes, positive count)
         consume()'s tests and stored its digit before the next byte could be
         looked at, and a dashboard is mostly such sequences. When the read has
         the whole of one it is taken here in one pass, through the same
-        parameter machine -- the colon mask, the slots running out, digits
+        parameter machine -- the joined flags, the slots growing, digits
         saturating at ~0u, the marker kept apart, the last intermediate in
         csi_intermediate -- and csi_final() is its dispatch as it is
         consume()'s.
@@ -2846,7 +2927,7 @@ static positive text_run(const p8 address_to bytes, positive count)
 */
 static positive csi_parse(const p8 address_to bytes, positive count)
 {
-        unsigned int slots = 0, colon = 0, value = 0;
+        unsigned int slots = 0, value = 0;
         p8 marker = 0, full = 0, intermediate = 0;
         positive at;
 
@@ -2855,7 +2936,7 @@ static positive csi_parse(const p8 address_to bytes, positive count)
 
         /*
                 terminal_parameters_take's transitions, with the count, the
-                colon mask, the marker and the number being read in registers
+                joined flags, the marker and the number being read in registers
                 rather than stored and loaded again for every byte. A slot is
                 written as it is left and the last one at the final, which
                 leaves the array as a byte at a time leaves it.
@@ -2872,7 +2953,14 @@ static positive csi_parse(const p8 address_to bytes, positive count)
                                 continue;
 
                         if (!slots)
+                        {
+                                if (!terminal_parameters_room(&terminal_csi, 1))
+                                {
+                                        full = 1;
+                                        continue;
+                                }
                                 slots = 1;
+                        }
 
                         for (;;)
                         {
@@ -2898,19 +2986,26 @@ static positive csi_parse(const p8 address_to bytes, positive count)
                 if (c == ';' || c == ':')
                 {
                         if (!slots)
-                                slots = 1;
-
-                        if (slots == TERMINAL_PARAMETERS)
-                                full = 1;
-                        else if (!full)
                         {
-                                terminal_csi.value[slots - 1] = value;
+                                if (!terminal_parameters_room(&terminal_csi, 1))
+                                {
+                                        full = 1;
+                                        continue;
+                                }
+                                slots = 1;
+                        }
 
-                                if (c == ':')
-                                        colon |= 1u << slots;
-
-                                slots++;
-                                value = 0;
+                        if (!full)
+                        {
+                                if (!terminal_parameters_room(&terminal_csi, slots + 1))
+                                        full = 1;
+                                else
+                                {
+                                        terminal_csi.value[slots - 1] = value;
+                                        terminal_csi.joined[slots] = c == ':';
+                                        slots++;
+                                        value = 0;
+                                }
                         }
 
                         continue;
@@ -2933,10 +3028,12 @@ static positive csi_parse(const p8 address_to bytes, positive count)
         if (at == count)
                 return 0;
 
-        // With no parameter at all, value[0] is still 0, as a reset leaves it.
-        terminal_csi.value[slots ? slots - 1 : 0] = value;
+        // With no parameter at all, slot[0] is still 0, as a reset leaves it.
+        if (terminal_parameters_room(&terminal_csi, slots ? slots : 1))
+                terminal_csi.value[slots ? slots - 1 : 0] = value;
+        else
+                full = 1;
         terminal_csi.count = slots;
-        terminal_csi.colon = colon;
         terminal_csi.marker = marker;
         terminal_csi.full = full;
 

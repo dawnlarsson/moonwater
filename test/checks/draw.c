@@ -732,8 +732,131 @@ static void iss_rows_identity(void)
               windows_app_id_read(windows_scratch_table(&iss_table_scratch), 5, word) == WINDOWS_APP_ID - 1 && windows_icon_read(windows_scratch_table(&iss_table_scratch), 9, idn_icon) == 8);
 }
 
+/*
+        The audio board's table (windows_board_at, which windows_board_map maps WINDOWS_TABLE with): a table is mapped from its
+        path and kept while the file is the one it was mapped from, by its inode and its size, so a table the compositor
+        unlinked and made again is mapped again and the board's writes reach the new one; a table of another ABI, or a file
+        shorter than a table, is no table (null). Every row here makes its own file at IBOARD_PATH and removes it. The path ends in
+        the process's pid: the lane runs the three architectures' checks at once, and a path they shared was unlinked and made
+        again by one while another was between its own make and its read.
+*/
+static char iss_board_path[48] = "/tmp/moonwater-board-check-";
+#define IBOARD_PATH iss_board_path
+
+// Ends iss_board_path in this process's pid, in decimal.
+static void iss_board_name(void)
+{
+        unsigned int pid = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0);
+        char digits[10];
+        int count = 0, at = 0;
+
+        while (iss_board_path[at])
+                at++;
+        do
+                digits[count++] = (char)('0' + pid % 10), pid /= 10;
+        while (pid);
+        while (count)
+                iss_board_path[at++] = digits[--count];
+        iss_board_path[at] = 0;
+}
+
+// Makes IBOARD_PATH a new file of bytes long (sparse: its last byte written), its header's abi set to abi. 1 when it is made.
+static int iss_board_make(unsigned int abi, long bytes)
+{
+        long file = window_call(WINDOW_SYS_OPENAT, -100, (long)IBOARD_PATH, 0x80242, 0600, 0, 0); // O_CLOEXEC | O_TRUNC | O_CREAT | O_RDWR
+        char last = 0;
+        long mapped;
+        struct windows *table;
+
+        if (file < 0)
+                return 0;
+        if (window_call(WINDOW_SYS_LSEEK, file, bytes - 1, 0, 0, 0, 0) != bytes - 1 || window_call(WINDOW_SYS_WRITE, file, (long)&last, 1, 0, 0, 0) != 1)
+        {
+                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+                return 0;
+        }
+        mapped = window_call(WINDOW_SYS_MMAP, 0, bytes, 3, 1, file, 0);
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        if (mapped < 0 && mapped > -4096)
+                return 0;
+        table = (struct windows *)mapped;
+        __atomic_store_n(&table->abi, abi, __ATOMIC_RELEASE);
+        window_call(WINDOW_SYS_MUNMAP, mapped, bytes, 0, 0, 0, 0);
+        return 1;
+}
+
+// Removes IBOARD_PATH (a file that is not there is no matter).
+static void iss_board_unlink(void)
+{
+        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)IBOARD_PATH, 0);
+}
+
+// The 4-byte word at offset of IBOARD_PATH, read from the file and not through a mapping; ~0u when it cannot be read.
+static unsigned int iss_board_word(long offset)
+{
+        long file = window_call(WINDOW_SYS_OPENAT, -100, (long)IBOARD_PATH, 0x80000, 0, 0, 0); // O_RDONLY | O_CLOEXEC
+        unsigned int word = ~0u;
+        long got;
+
+        if (file < 0)
+                return ~0u;
+        got = window_call(WINDOW_SYS_PREAD, file, (long)&word, 4, offset, 0, 0);
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        return got == 4 ? word : ~0u;
+}
+
+// Cuts or grows IBOARD_PATH in place to bytes long (ftruncate): 1 when it took.
+static int iss_board_size(long bytes)
+{
+        long file = window_call(WINDOW_SYS_OPENAT, -100, (long)IBOARD_PATH, 0x80002, 0, 0, 0); // O_CLOEXEC | O_RDWR
+        long done;
+
+        if (file < 0)
+                return 0;
+        done = window_call(WINDOW_SYS_FTRUNCATE, file, bytes, 0, 0, 0, 0);
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        return done == 0;
+}
+
+static void iss_rows_board(void)
+{
+        struct windows *first, *again;
+        long bytes = sizeof(struct windows);
+        long rows_at = (long)offset_of(struct windows, rows); // the table is past 4 GiB, so the offset is a long
+
+        iss_board_name();
+        iss_board_unlink();
+        check("board: a table file of the layout is made", iss_board_make(WINDOWS_ABI, bytes));
+        first = windows_board_at(IBOARD_PATH);
+        check("board: the table is mapped for the audio board's writes", first != 0);
+        check("board: a call with the file unchanged gives the same table", windows_board_at(IBOARD_PATH) == first);
+
+        // The compositor unlinks its table and makes it again at its start: the next board write must reach the new one.
+        iss_board_unlink();
+        check("board: the table is made again, as a new file", iss_board_make(WINDOWS_ABI, bytes));
+        again = windows_board_at(IBOARD_PATH);
+        check("board: the table made again is mapped", again != 0);
+        if (again)
+                again->rows = 0x5a5a;
+        check("board: a write through the board's table reaches the file the compositor made", again && iss_board_word(rows_at) == 0x5a5a);
+
+        // A table of another layout is no table: null, though the file is there and as long as a table.
+        iss_board_unlink();
+        check("board: a table of another ABI is made", iss_board_make(WINDOWS_ABI + 1, bytes));
+        check("board: a table of another ABI maps to null", windows_board_at(IBOARD_PATH) == 0);
+
+        // A table cut shorter than a table, in place, is no table either: the size is looked at on each call, as the inode is.
+        iss_board_unlink();
+        check("board: a table is made for the size row", iss_board_make(WINDOWS_ABI, bytes));
+        check("board: the table is mapped before it is cut", windows_board_at(IBOARD_PATH) != 0);
+        check("board: the file is cut to half a table", iss_board_size(bytes / 2));
+        check("board: a file shorter than a table is no table, though it was mapped", windows_board_at(IBOARD_PATH) == 0);
+        iss_board_unlink();
+}
+
 b32 main(void)
 {
+        iss_rows_board();
         iss_rows_identity();
         iss_rows_dismiss();
         iss_rows_basic();

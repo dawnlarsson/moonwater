@@ -3051,6 +3051,8 @@ _Static_assert(offset_of(struct window_cell, flags) == 6, "window cell ABI");
 #define WINDOW_SYS_MEMFD 319
 #define WINDOW_SYS_FCNTL 72
 #define WINDOW_SYS_PREAD 17
+#define WINDOW_SYS_FSTAT 5
+#define WINDOW_SYS_FTRUNCATE 77
 #else
 // arm64 and riscv share the asm-generic numbering.
 #define WINDOW_SYS_OPENAT 56
@@ -3067,6 +3069,8 @@ _Static_assert(offset_of(struct window_cell, flags) == 6, "window cell ABI");
 #define WINDOW_SYS_MEMFD 279
 #define WINDOW_SYS_FCNTL 25
 #define WINDOW_SYS_PREAD 67
+#define WINDOW_SYS_FSTAT 80
+#define WINDOW_SYS_FTRUNCATE 46
 #endif
 
 /*
@@ -4534,29 +4538,88 @@ static int windows_rows_ask(const struct windows *table, unsigned int had)
 }
 
 /*
-        The table for a program that is not a window and only writes the board (the audio service): mapped read-write from the table's file, once,
-        and kept. The table is root's (WINDOWS_MODE), so only a root process raises an issue; a process that cannot map it gets none (null), and its
-        issues are simply not shown.
+        A table's file, open as the descriptor file, mapped read-write and shared at the file's length, which is what size gets: the mapping, or a
+        negative errno (-22 for a file shorter than a table). The descriptor is closed either way; the mapping keeps the file.
+*/
+static long windows_table_map(long file, long *size)
+{
+        long mapped;
+
+        *size = window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0);
+        // PROT_READ | PROT_WRITE, MAP_SHARED
+        mapped = *size >= (long)sizeof(struct windows) ? window_call(WINDOW_SYS_MMAP, 0, *size, 3, 1, file, 0) : -22;
+        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        return mapped;
+}
+
+/*
+        The table for a program that is not a window and only writes the board (the audio service): mapped read-write from the table's file, and
+        kept while the file is the one it was mapped from, by its inode and its length. The compositor unlinks the table and makes it again at each
+        start, so each call looks at the file: a table that is new, or grown or cut, is mapped again (the old mapping given back), and a table of
+        another layout (windows_abi_ok) is no table. The table is root's (WINDOWS_MODE), so only a root process raises an issue; a process that
+        cannot map it gets none (null), and its issues are simply not shown.
 */
 static struct windows *windows_board_cache;
+static unsigned long windows_board_inode;
+static long windows_board_bytes;
+
+// Gives back the board's mapping, if it has one, and forgets it.
+static void windows_board_forget(void)
+{
+        if (windows_board_cache)
+                window_call(WINDOW_SYS_MUNMAP, (long)windows_board_cache, windows_board_bytes, 0, 0, 0, 0);
+        windows_board_cache = null;
+        windows_board_inode = 0;
+        windows_board_bytes = 0;
+}
+
+static struct windows *windows_board_at(const char *path)
+{
+        // st_ino is at 8 and st_size at 48 in the struct stat of x86_64 and of the asm-generic layout arm64 and riscv64 share.
+        unsigned long stat[18];
+        long file = window_call(WINDOW_SYS_OPENAT, -100, (long)path, WINDOW_OPEN_FLAGS, 0, 0, 0);
+        struct windows *table;
+        long size, mapped;
+
+        if (file < 0)
+        {
+                windows_board_forget();
+                return null;
+        }
+        if (window_call(WINDOW_SYS_FSTAT, file, (long)stat, 0, 0, 0, 0) < 0)
+        {
+                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+                windows_board_forget();
+                return null;
+        }
+        if (windows_board_cache && stat[1] == windows_board_inode && (long)stat[6] == windows_board_bytes)
+        {
+                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+                return windows_board_cache;
+        }
+        mapped = windows_table_map(file, &size);
+        if (mapped < 0 && mapped > -4096)
+        {
+                windows_board_forget();
+                return null;
+        }
+        table = (struct windows *)mapped;
+        if (!windows_abi_ok(__atomic_load_n(&table->abi, __ATOMIC_ACQUIRE)))
+        {
+                window_call(WINDOW_SYS_MUNMAP, mapped, size, 0, 0, 0, 0);
+                windows_board_forget();
+                return null;
+        }
+        windows_board_forget();
+        windows_board_cache = table;
+        windows_board_inode = stat[1];
+        windows_board_bytes = size;
+        return table;
+}
 
 static struct windows *windows_board_map(void)
 {
-        long file, size, mapped;
-
-        if (windows_board_cache)
-                return windows_board_cache;
-        file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, WINDOW_OPEN_FLAGS, 0, 0, 0);
-        if (file < 0)
-                return null;
-        size = window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0);
-        // PROT_READ | PROT_WRITE, MAP_SHARED
-        mapped = size >= (long)sizeof(struct windows) ? window_call(WINDOW_SYS_MMAP, 0, size, 3, 1, file, 0) : -22;
-        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-        if (mapped < 0 && mapped > -4096)
-                return null;
-        windows_board_cache = (struct windows *)mapped;
-        return windows_board_cache;
+        return windows_board_at(WINDOWS_TABLE);
 }
 
 static long windows_take(struct window_row *own)
@@ -4579,10 +4642,7 @@ static long windows_take(struct window_row *own)
         if (file < 0)
                 return file;
 
-        size = window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0);
-        // PROT_READ | PROT_WRITE, MAP_SHARED
-        mapped = size >= (long)sizeof(struct windows) ? window_call(WINDOW_SYS_MMAP, 0, size, 3, 1, file, 0) : -22;
-        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
+        mapped = windows_table_map(file, &size);
         if (mapped < 0 && mapped > -4096)
                 return mapped;
 

@@ -8996,6 +8996,38 @@ static void terminal_theme_check(void)
 }
 
 /*
+        The emulator's parameter store and its UTF-8 and escape state at a session's start. A CSI takes every parameter it is given, not the first 32 (an SGR
+        of 40 attributes whose last is red ink turns the ink red); and a pty that ended inside a sequence or a partial character leaves nothing for the next
+        session's first output (its first byte is the byte it is, not a U+FFFD and not a swallowed final).
+*/
+static void check_term_parameters(void)
+{
+        char bytes[160];
+        positive length = 0;
+
+        full_reset();
+        bytes[length++] = 0x1b, bytes[length++] = '[';
+        for (unsigned int at = 0; at < 39; at++)
+                bytes[length++] = '0', bytes[length++] = ';';
+        bytes[length++] = '3', bytes[length++] = '1', bytes[length++] = 'm', bytes[length++] = 'R';
+        term_bytes((const p8 address_to)bytes, length);
+        check("term params: an SGR of 40 parameters ends with its last one applied: red ink on the R after 39 resets", row_cells(0)[0].character == 'R' && row_cells(0)[0].ink == 1);
+
+        full_reset();
+        term_bytes((const p8 address_to) "\xe2\x82", 2);
+        full_reset();
+        term_bytes((const p8 address_to) "a", 1);
+        check("term params: a pty that ended mid-character leaves no U+FFFD: the next session's first byte is the a", row_cells(0)[0].character == 'a');
+
+        full_reset();
+        term_bytes((const p8 address_to) "\x1b[31", 4);
+        full_reset();
+        term_bytes((const p8 address_to) "xy", 2);
+        check("term params: a pty that ended inside a CSI does not swallow the next session's first byte as its final", row_cells(0)[0].character == 'x' && row_cells(0)[1].character == 'y');
+        full_reset();
+}
+
+/*
         The present record's frames (record.h): a recording whose screen changes size between two of its frames copies the second at its new size. The block
         was made for the first size, so the copy ran past its end (a 128 by 64 frame into a block of 64 by 32: three 8 KiB frames, then the ring). The block is
         made again for the new size and the recording's frames start over.
@@ -9359,6 +9391,7 @@ b32 main()
         check_terminal_select_speed();
         check_terminal_select_stale();
         check_edge_steps();
+        check_term_parameters();
         check_kit_zoom_key();
         check_kit_clip_chord();
         check_kit_select_rule();

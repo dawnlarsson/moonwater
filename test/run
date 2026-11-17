@@ -11985,7 +11985,7 @@ group sequences
 #       intermediates, answers, and the text around them.
 cuts 'colon colours'  '232,0'  8 2 '\e[38:2::10:20:30mX\e[m' attr 0,0
 cuts 'semicolon colours' '196,21' 8 2 '\e[1;38;5;196;48;5;21mX' attr 0,0
-cuts 'past the last slot' '15,0' 8 2 '\e[1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;31mX' attr 0,0
+cuts 'forty parameters, the last in force' '9,0' 8 2 '\e[1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;31mX' attr 0,0
 cuts 'saturating count' '0,8'  8 2 '\e[99999999999999Cx' cursor
 cuts 'control inside' '[abc x]|0,5' 8 2 'abc\e[2\bCx' row 0 cursor
 cuts 'cancel inside'  '[X]|0,1' 8 2 '\e[3;3\x18X' row 0 cursor

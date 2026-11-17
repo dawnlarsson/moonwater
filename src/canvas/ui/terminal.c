@@ -3746,6 +3746,10 @@ static void terminal_end(void)
         b32 drew = terminal.reading ? klog_drain(terminal.master, &terminal.gone, TERMINAL_BUDGET)
                                     : term_drain(terminal.master, &terminal.gone, TERMINAL_BUDGET);
 
+        // A character the far end stopped in is one U+FFFD on the screen that is left, and a sequence it stopped in is dropped: the
+        // next session starts with neither (full_reset drops them too, for a terminal that starts a new shell).
+        utf8_flush();
+        escape_discard();
         if (drew || touched_bottom > touched_top)
         {
                 cursor_show();
