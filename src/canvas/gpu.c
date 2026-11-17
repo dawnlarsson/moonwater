@@ -58,7 +58,9 @@ static b32 gpu_imports_room(unsigned int want)
         GPU_IMPORT_ARRAYS(GPU_IMPORT_POINT)
 #undef GPU_IMPORT_POINT
         gpu_submit_bos = (p64 address_to)(gpu_import_at_room + at);
-        if (want <= gpu_import_room)
+        //      Room 0 is a reservation with nothing committed yet, not a table that has room for no import: the submit's list of
+        //      buffers is in it too, and a job before the first import (gpu_start's self-test) wrote it through memory not mapped.
+        if (want <= gpu_import_room && gpu_import_room)
                 return true;
         if (want > GPU_IMPORTS_MOST)
                 return false;

@@ -116,6 +116,20 @@ static int gpu_model_valu(const struct gpu_model_insn address_to in, const struc
                 case GM_KEY(GM_VOP3, 0x36f): d = (a << (b & 31)) | c; break;
                 case GM_KEY(GM_VOP3, 0x346): d = (a << (b & 31)) + c; break;
                 case GM_KEY(GM_VOP3, 0x14e): d = (p32)(((p64)a << 32 | b) >> (c & 31)); break;
+                case GM_KEY(GM_VOP3, 0x344): // v_perm_b32: each byte of d is the byte of {a, b} (a the high word) c's byte names; 8 to 11 the sign of byte 1, 3, 5 or 7 as 0 or ff, 12 zero, 13 and on ff
+                {
+                        p64 both = (p64)a << 32 | b;
+
+                        d = 0;
+                        for (unsigned int at = 0; at < 4; at++)
+                        {
+                                unsigned int sel = (c >> (8 * at)) & 255, byte;
+
+                                byte = sel < 8 ? (unsigned int)(both >> (8 * sel)) & 255 : sel < 12 ? ((both >> (8 * (2 * (sel - 8) + 1) + 7)) & 1 ? 255u : 0u) : sel == 12 ? 0u : 255u;
+                                d |= (p32)byte << (8 * at);
+                        }
+                        break;
+                }
                 case GM_KEY(GM_VOP3, 0x148): d = c & 31 ? (a >> (b & 31)) & ((1u << (c & 31)) - 1) : 0; break;
                 case GM_KEY(GM_VOP3, 0x169): d = a * b; break;
                 case GM_KEY(GM_VOP3B, 0x176):

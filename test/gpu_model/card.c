@@ -40,10 +40,13 @@ static long gpu_model_control(int fd, unsigned int request, void address_to a)
 
 #define GPU_MODEL_CARD_WORDS 4096 // the words of each kernel the card counts the runs of
 
+// The imports the model gives memory to: gpu.c's table grows to GPU_IMPORTS_MOST, and the model's rows import no more than these.
+#define GPU_MODEL_IMPORTS 64
+
 static struct
 {
-        struct gpu_model_region region[1 + GPU_IMPORTS + GPU_MAPS];
-        p8 address_to import_host[GPU_IMPORTS]; // the memory behind each import, as the row that made it says (none: the job may not reach it)
+        struct gpu_model_region region[1 + GPU_MODEL_IMPORTS + GPU_MAPS];
+        p8 address_to import_host[GPU_MODEL_IMPORTS]; // the memory behind each import, as the row that made it says (none: the job may not reach it)
         p32 sh[0x400];                          // the SH registers the packets set, by their offsets (0x20c COMPUTE_PGM_LO ...)
         unsigned int jobs, faults;
         p32 hits[GPU_KERNELS][GPU_MODEL_CARD_WORDS]; // each kernel's code words' runs, every job since the reset
@@ -83,7 +86,7 @@ static unsigned int gpu_model_card_regions(const p64 address_to bos, unsigned in
                         if (gpu_maps[i].handle == bos[k] && gpu_maps[i].from && count < sizeof(gpu_model_card.region) / sizeof(gpu_model_card.region[0]))
                                 r[count++] = (struct gpu_model_region){gpu_maps[i].va, gpu_maps[i].bytes, (p8 address_to)gpu_maps[i].from,
                                                                        GPU_MODEL_READ | (gpu_maps[i].written ? GPU_MODEL_WRITE : 0)};
-                for (unsigned int i = 0; i < gpu.imports; i++)
+                for (unsigned int i = 0; i < gpu.imports && i < GPU_MODEL_IMPORTS; i++)
                         if (gpu.imported[i] == bos[k] && gpu_model_card.import_host[i] && count < sizeof(gpu_model_card.region) / sizeof(gpu_model_card.region[0]))
                                 r[count++] = (struct gpu_model_region){gpu.imported_va[i], gpu.imported_bytes[i], gpu_model_card.import_host[i], GPU_MODEL_READ | GPU_MODEL_WRITE};
         }
