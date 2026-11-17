@@ -4647,6 +4647,20 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         return WAYLAND_DEAD;
                 if (sync_st > 0)
                         return WAYLAND_STALL;
+                // Its dma-buf's writer done as the root's is (below): a subsurface's buffer read while its GPU still drew in it was a
+                // popup, a bubble or a video's layer laid with the zeros of a fresh buffer, or half of its frame.
+                if (sub_buf >= 0)
+                {
+                        struct wayland_pool *held = &c->pools[c->buffers[c->objects[sub_buf].link].pool];
+
+                        if (held->dmabuf && wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, held->fd))
+                        {
+                                c->stalled_fd = held->fd;
+                                c->stalled_sync_handle = -1;
+                                c->budget_surface = -1;
+                                return WAYLAND_STALL;
+                        }
+                }
                 if (sub_buf >= 0)
                         wayland_syncobj_take(c, s, &c->buffers[c->objects[sub_buf].link]);
                 wayland_commit_take(c, s);
