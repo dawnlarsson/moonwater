@@ -70,7 +70,7 @@
 #define WAYLAND_ARGS 12
 #define WAYLAND_FDS 28          // descriptors a client may have sent and not yet had used
 #define WAYLAND_OUT 65536       // a client's output queue
-#define WAYLAND_OUT_FDS 8
+#define WAYLAND_OUT_FDS 8       // descriptors one send carries (the host's control message takes that many); the queue holds any number, sent in turn
 #define WAYLAND_EVENT 1024      // the most one event can take
 #define WAYLAND_DAMAGE 8
 #define WAYLAND_CALLBACKS 32     // frame callbacks a surface holds in itself; past them a list that grows (struct wayland_idlist)
@@ -730,6 +730,12 @@ struct wayland_feedback
         unsigned char need;
 };
 
+// A descriptor the output queue holds: its number, the offset of the event it goes with, and whether it is the shim's own (closed once sent).
+struct wayland_outfd
+{
+        long fd, at, owned;
+};
+
 struct wayland_client
 {
         long live, dead, slot, pid, uid;
@@ -748,8 +754,8 @@ struct wayland_client
         struct wayland_table sub_bits; // live subsurface slots, a bit each, 64 to a word (unsigned long long)
         long out_length;
         unsigned char out[WAYLAND_OUT];
-        long out_fds[WAYLAND_OUT_FDS], out_fd_at[WAYLAND_OUT_FDS], out_fd_count;
-        unsigned char out_fd_owned[WAYLAND_OUT_FDS]; // the shim's own (a copy's pipe), closed once sent; the others are the host's
+        struct wayland_table out_fd_table; // the output queue: a struct wayland_outfd each, grown in memory (wayland_out_fd_room); no count of them is a cap
+        long out_fd_count;
         long in_fds[WAYLAND_FDS], in_fd_count;
         unsigned long serial;
         long pool_bytes;
@@ -1037,6 +1043,28 @@ static void wayland_table_drop(struct wayland_table *t)
         t->count = t->usable = t->reserved = t->bytes = t->frees = t->committed = t->stack_committed = t->stack = 0;
 }
 
+// The output queue's room for one more descriptor (1, or 0 when the memory for it is not there), and the one put there.
+static int wayland_out_fd_room(struct wayland_client *c)
+{
+        c->out_fd_table.unit = sizeof(struct wayland_outfd);
+        return wayland_table_reach(&c->out_fd_table, c->out_fd_count + 1);
+}
+
+static void wayland_out_fd_put(struct wayland_client *c, long fd, long owned, long at)
+{
+        struct wayland_outfd *f = (struct wayland_outfd *)c->out_fd_table.at + c->out_fd_count++;
+
+        f->fd = fd;
+        f->owned = owned;
+        f->at = at;
+}
+
+// The descriptors one send carries: the first WAYLAND_OUT_FDS of the queue (the host's control message takes that many).
+static long wayland_out_fd_batch(const struct wayland_client *c)
+{
+        return c->out_fd_count < WAYLAND_OUT_FDS ? c->out_fd_count : WAYLAND_OUT_FDS;
+}
+
 // An id put at the end of a surface's list (in its array of n, else the list's table, grown): 1, or 0 when the memory is not there.
 static int wayland_idlist_put(unsigned int *own, long n, struct wayland_idlist *l, unsigned int id)
 {
@@ -1229,6 +1257,7 @@ static void wayland_tables_drop(struct wayland_client *c)
                 wayland_ids_drop(&c->seat_ids[k]);
         wayland_ids_drop(&c->device_ids[0]), wayland_ids_drop(&c->device_ids[1]), wayland_ids_drop(&c->relative_ids);
         wayland_ids_drop(&c->gone);
+        wayland_table_drop(&c->out_fd_table);
         wayland_table_drop(&c->source_table);
         wayland_table_drop(&c->offer_table);
         wayland_table_drop(&c->params_table);
@@ -6634,13 +6663,11 @@ static void wayland_keyboard_keymap(struct wayland_client *c, long slot)
         long size = 0, fd = wayland.host->keymap(wayland.host->context, &size);
 
         e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_keymap);
-        if (fd >= 0 && size > 0 && size <= WAYLAND_KEYMAP_MAX && c->out_fd_count < WAYLAND_OUT_FDS)
+        if (fd >= 0 && size > 0 && size <= WAYLAND_KEYMAP_MAX && wayland_out_fd_room(c))
         {
                 wayland_word(&e, WLN_wl_keyboard_keymap_format_xkb_v1);
                 wayland_word(&e, (unsigned long)size);
-                c->out_fd_owned[c->out_fd_count] = 0;
-                c->out_fds[c->out_fd_count] = fd;
-                c->out_fd_at[c->out_fd_count++] = e.start;
+                wayland_out_fd_put(c, fd, 0, e.start);
         }
         else
         {
@@ -7182,7 +7209,7 @@ WAYLAND_API int wayland_clip_send(long client, long which, long nth, long fd)
         const char *type = wayland_clip_type(client, which, nth);
         struct wayland_event e;
 
-        if (!source || !type || c->out_fd_count >= WAYLAND_OUT_FDS || wayland_slot_of(c, source->id) < 0)
+        if (!source || !type || !wayland_out_fd_room(c) || wayland_slot_of(c, source->id) < 0)
         {
                 if (fd >= 0 && wayland.host->close)
                         wayland.host->close(wayland.host->context, fd);
@@ -7190,9 +7217,7 @@ WAYLAND_API int wayland_clip_send(long client, long which, long nth, long fd)
         }
         e = wayland_begin(c, source->id, which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send);
         wayland_string(&e, type);
-        c->out_fd_owned[c->out_fd_count] = 1;
-        c->out_fds[c->out_fd_count] = fd;
-        c->out_fd_at[c->out_fd_count++] = e.start;
+        wayland_out_fd_put(c, fd, 1, e.start);
         wayland.fds++;
         wayland_end(&e);
         return 1;
@@ -7767,13 +7792,11 @@ static int wayland_drag_receive(struct wayland_client *c, struct wayland_object 
                 return WAYLAND_OK;
         }
         if (!wayland.drag.live || wayland.drag.target != c->slot || wayland.drag.offer != self->link || slot < 0 || !a[0].text ||
-            a[0].length <= 1 || source_client->out_fd_count >= WAYLAND_OUT_FDS)
+            a[0].length <= 1 || !wayland_out_fd_room(source_client))
                 return WAYLAND_OK; // the descriptor is closed with the request's: the target reads an end
         e = wayland_begin(source_client, source->id, WLE_wl_data_source_send);
         wayland_string(&e, (const char *)a[0].text);
-        source_client->out_fd_owned[source_client->out_fd_count] = 1;
-        source_client->out_fds[source_client->out_fd_count] = a[1].fd;
-        source_client->out_fd_at[source_client->out_fd_count++] = e.start;
+        wayland_out_fd_put(source_client, a[1].fd, 1, e.start);
         a[1].fd = -1; // the source's now, counted as the shim's until it is sent
         wayland_end(&e);
         return WAYLAND_OK;
@@ -7873,13 +7896,11 @@ WAYLAND_API int wayland_drag_x_send(const char *mime, long fd)
         struct wayland_event e;
 
         if (!wayland.drag.live || (!wayland.drag.dropped && wayland.drag.xtarget < 0) || !source || !mime || fd < 0 || wayland_slot_of(sc, source->id) < 0 ||
-            sc->out_fd_count >= WAYLAND_OUT_FDS)
+            !wayland_out_fd_room(sc))
                 return 0;
         e = wayland_begin(sc, source->id, WLE_wl_data_source_send);
         wayland_string(&e, mime);
-        sc->out_fd_owned[sc->out_fd_count] = 1;
-        sc->out_fds[sc->out_fd_count] = fd;
-        sc->out_fd_at[sc->out_fd_count++] = e.start;
+        wayland_out_fd_put(sc, fd, 1, e.start);
         wayland.fds++;
         wayland_end(&e);
         return 1;
@@ -8380,16 +8401,14 @@ static void wayland_feedback_send(struct wayland_client *c, long slot)
 
         if (fd < 0 || size <= 0)
                 return;
-        if (c->out_fd_count >= WAYLAND_OUT_FDS)
+        if (!wayland_out_fd_room(c))
         {
                 wayland_feedback_queue(c, id);
                 return;
         }
         e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_format_table);
         wayland_word(&e, (unsigned long)size);
-        c->out_fd_owned[c->out_fd_count] = 0;
-        c->out_fds[c->out_fd_count] = fd;
-        c->out_fd_at[c->out_fd_count++] = e.start;
+        wayland_out_fd_put(c, fd, 0, e.start);
         wayland_end(&e);
         e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_main_device);
         wayland_device_array(&e, info->device);
@@ -8431,7 +8450,7 @@ static void wayland_feedback_flush(struct wayland_client *c)
 
                 if (!c->feedback[at].need)
                         continue;
-                if (c->out_fd_count >= WAYLAND_OUT_FDS)
+                if (!wayland_out_fd_room(c))
                 {
                         more = 1;
                         break;
@@ -10230,13 +10249,36 @@ WAYLAND_API long wayland_connect(long pid, long uid)
 */
 static void wayland_out_fds_let_go(struct wayland_client *c)
 {
+        struct wayland_outfd *f = (struct wayland_outfd *)c->out_fd_table.at;
+
         for (long at = 0; at < c->out_fd_count; at++)
-                if (c->out_fd_owned[at])
+                if (f[at].owned)
                 {
-                        wayland.host->close(wayland.host->context, c->out_fds[at]);
+                        wayland.host->close(wayland.host->context, f[at].fd);
                         wayland.fds--;
                 }
         c->out_fd_count = 0;
+}
+
+// The descriptors a send of count bytes carried (the batch wayland_out gave, when any byte went): the shim's own are closed, and the
+// rest move to the front, their offsets less the bytes gone.
+static void wayland_out_fds_sent(struct wayland_client *c, long count)
+{
+        struct wayland_outfd *f = (struct wayland_outfd *)c->out_fd_table.at;
+        long sent = wayland_out_fd_batch(c), kept = 0;
+
+        for (long at = 0; at < sent; at++)
+                if (f[at].owned)
+                {
+                        wayland.host->close(wayland.host->context, f[at].fd);
+                        wayland.fds--;
+                }
+        for (long at = sent; at < c->out_fd_count; at++, kept++)
+        {
+                f[kept] = f[at];
+                f[kept].at -= count;
+        }
+        c->out_fd_count = kept;
 }
 
 /*
@@ -10590,6 +10632,9 @@ WAYLAND_API int wayland_resume(long slot)
         What waits to be sent to a client: its bytes, and the descriptors that go with them (the first byte's ancillary
         data). wayland_sent takes what was written off, from the front; a send that wrote any bytes sent the descriptors.
 */
+// What wayland_out hands the host: the batch's descriptors, copied in order.
+static long wayland_out_fd_view[WAYLAND_OUT_FDS];
+
 WAYLAND_API long wayland_out(long slot, const unsigned char **bytes, const long **fds, long *fd_count)
 {
         struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
@@ -10600,9 +10645,12 @@ WAYLAND_API long wayland_out(long slot, const unsigned char **bytes, const long 
         if (!c)
                 return 0;
         *bytes = c->out;
-        *fds = c->out_fds;
-        *fd_count = c->out_fd_count;
-        return c->out_length;
+        *fd_count = wayland_out_fd_batch(c);
+        for (long at = 0; at < *fd_count; at++)
+                wayland_out_fd_view[at] = ((struct wayland_outfd *)c->out_fd_table.at)[at].fd;
+        *fds = wayland_out_fd_view;
+        // The descriptors past the batch wait for the next send: the bytes of this one end where the first of them begins.
+        return *fd_count < c->out_fd_count ? ((struct wayland_outfd *)c->out_fd_table.at)[*fd_count].at : c->out_length;
 }
 
 WAYLAND_API void wayland_sent(long slot, long count)
@@ -10614,7 +10662,7 @@ WAYLAND_API void wayland_sent(long slot, long count)
         for (long at = count; at < c->out_length; at++)
                 c->out[at - count] = c->out[at];
         c->out_length -= count;
-        wayland_out_fds_let_go(c);
+        wayland_out_fds_sent(c, count);
         wayland_feedback_flush(c);
         if (!c->out_length && !c->dead && !c->feedback_pending)
                 wayland_out_clear(slot);

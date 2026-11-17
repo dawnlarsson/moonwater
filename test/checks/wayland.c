@@ -775,12 +775,19 @@ static int wlc_send(struct wlc *c, unsigned long object, long op, ...)
         return wlc_raw(c, b, n, fds, fd_count);
 }
 
+/* A client whose socket is not read: the pump is held, and what the shim queues stays queued. */
+static int wlc_hold;
+
 /* The events the shim has queued, read by the table: every one must be a known object's event, in its version, whole. */
 static int wlc_pump(struct wlc *c)
 {
         const unsigned char *bytes;
         const long *fds;
-        long fd_count, length = wayland_out(c->slot, &bytes, &fds, &fd_count), at = 0;
+        long fd_count, length, at = 0;
+
+        if (wlc_hold)
+                return 0;
+        length = wayland_out(c->slot, &bytes, &fds, &fd_count);
 
         while (at < length)
         {
@@ -3865,6 +3872,32 @@ static void test_seat(void)
                 "a change of the key repeat is told to a keyboard as it is (40 a second after 180 ms), with no keymap");
         wlc_end(c);
         fake.rate = fake.delay = 0;
+
+        /* a client with nine descriptors queued (its socket not read) binds a tenth keyboard: it is sent the xkb keymap with
+           its descriptor, and all ten keymaps and their descriptors go out once the socket is read */
+        session_open(&t.s);
+        c = t.s.c;
+        wlc_hold = 1;
+        for (long k = 0; k < 10; k++)
+        {
+                unsigned long keyboard = wlc_id(c, WLI_wl_keyboard, 9);
+
+                wlc_send(c, t.s.seat, WLQ_wl_seat_get_keyboard, keyboard);
+        }
+        wlc_hold = 0;
+        for (long pass = 0; pass < 4; pass++)
+                wlc_pump(c);
+        {
+                long xkb = 0;
+
+                for (long at = 0; at < c->events; at++)
+                        xkb += c->ev[at].iface == WLI_wl_keyboard && c->ev[at].opcode == WLE_wl_keyboard_keymap &&
+                               c->ev[at].u[0] == WLN_wl_keyboard_keymap_format_xkb_v1;
+                WLCHECK(xkb == 10 && c->fds_seen == 10 && c->malformed == 0,
+                        "a client with nine descriptors queued is sent the xkb keymap when it binds a tenth keyboard (%ld of 10 xkb, %ld descriptors sent)",
+                        xkb, c->fds_seen);
+        }
+        wlc_end(c);
 
         /* version 3 knows no repeat_info, and the shim does not send what the version has not got */
         session_open(&t.s);
