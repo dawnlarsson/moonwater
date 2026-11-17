@@ -1437,7 +1437,7 @@ def main():
     args = ap.parse_args()
     args.only = [s for s in args.only.split(",") if s]
     args.edge = [s for s in args.edge.split(",") if s]
-    args.moonwater_options = args.moonwater_options.split()
+    args.moonwater_options = args.moonwater_options.replace(",", " ").split()  # "-s,2": a word of run.sh's, its commas blanks
     os.makedirs(args.work, exist_ok=True)
     kinds = {"moonwater": Moonwater, "weston": Weston, "kwin": KWin, "mutter": Mutter}
     names = [n for n in args.compositors.split(",") if n in kinds]

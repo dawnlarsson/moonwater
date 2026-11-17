@@ -24,6 +24,8 @@ while [ $# -gt 0 ]; do
         --real) real=1 ;;
         --out) out=$2; shift ;;
         --seconds | --only | --compositors | --baseline | --edge | --soak) pass="$pass $1 $2"; shift ;;
+        --moonwater-options) pass="$pass --moonwater-options=$2"; shift ;;
+        --moonwater-options=*) pass="$pass $1" ;;
         --inside) inside=1 ;;
         *) echo "usage: sh test/wayland_stress/run.sh [--real] [--out FILE] [--seconds S] [--only a,b] [--compositors a,b] [--baseline OLD.json]" >&2; exit 2 ;;
         esac
