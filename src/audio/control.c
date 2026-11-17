@@ -585,7 +585,11 @@ static long ctl_socket_now(void *context)
         return at[0] * 1000 + at[1] / 1000000;
 }
 
-// Waits until the socket may be read (readable) or written, at most timeout_ms: 1 when it may, 0 when not in time, -1 when it is broken.
+// A wait a signal ended: it is not an answer, and the caller waits on for what is left of its budget.
+#define CTL_INTERRUPTED (-2)
+
+// Waits until the socket may be read (readable) or written, at most timeout_ms: 1 when it may, 0 when not in time, -1 when it is broken,
+// CTL_INTERRUPTED when a signal ended the wait.
 static long ctl_wait(int fd, int readable, long timeout_ms)
 {
         short want = (short)(readable ? 1 : 4); // POLLIN, POLLOUT
@@ -594,18 +598,26 @@ static long ctl_wait(int fd, int readable, long timeout_ms)
         long got = ctl_call(syscall(ppoll), (positive)&watch, 1, (positive)span, 0, 0, 0);
 
         if (got < 0)
-                return got == -4 ? 0 : -1; // EINTR is a wait that did not come to anything
+                return got == -4 ? CTL_INTERRUPTED : -1; // EINTR
         if (got == 0)
                 return 0;
         return (watch.returned & want) ? 1 : -1;
 }
 
-// Waits until the socket may be read (readable) or written, for what is left of the budget that ends at until: 1 when it may, else 0 or -1.
+// Waits until the socket may be read (readable) or written, until the budget that ends at until is spent: 1 when it may, 0 when the
+// budget is spent, -1 when it is broken. A signal does not end the wait: it goes on for what is left.
 static long ctl_wait_until(struct ctl_socket *s, int readable, long until)
 {
-        long left = until - ctl_socket_now(s);
+        for (;;)
+        {
+                long left = until - ctl_socket_now(s), got;
 
-        return left > 0 ? ctl_wait(s->fd, readable, left) : 0;
+                if (left <= 0)
+                        return 0;
+                got = ctl_wait(s->fd, readable, left);
+                if (got != CTL_INTERRUPTED)
+                        return got;
+        }
 }
 
 // Moves all count bytes on the connection within timeout_ms in total, or fails (a negative number): sent when sending is 1,
@@ -626,6 +638,8 @@ static long ctl_socket_move(void *context, const unsigned char *bytes, long coun
                                 return -1;
                         continue;
                 }
+                if (got == -4) // EINTR: the call is made again
+                        continue;
                 if (got <= 0)
                         return -1;
                 done += got;
@@ -657,23 +671,36 @@ static void ctl_disconnect(struct ctl *c)
 // A connection to the server at path, the handshake done. 0, or CTL_FAILED (no socket there, nobody listening, no answer).
 static long ctl_connect(struct ctl *c, const char *path)
 {
-        unsigned char address[110];
-        long length = 0, fd;
+        unsigned char address[2 + 108]; // a sockaddr_un: its family, and sun_path of 108 bytes with the zero after the path
+        long length = 0, fd, until;
 
+        while (path[length])
+                length++;
+        if (length > 107) // a path that does not fit is refused, not cut to the length that does
+                return CTL_FAILED;
         memory_zero(address, sizeof(address));
         address[0] = 1; // AF_UNIX
-        while (path[length] && length < 100)
-        {
-                address[2 + length] = (unsigned char)path[length];
-                length++;
-        }
+        for (long at = 0; at < length; at++)
+                address[2 + at] = (unsigned char)path[at];
         fd = ctl_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0); // SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC
         if (fd < 0)
                 return CTL_FAILED;
-        if (ctl_call(syscall(connect), (positive)fd, (positive)address, (positive)(2 + length + 1), 0, 0, 0) < 0)
+        // A listener whose backlog is full answers EAGAIN: the connect is made again within the budget, a little apart, as the server
+        // drains its queue. EINTR is made again the same way; any other answer is no server.
+        until = ctl_socket_now(0) + CTL_TIMEOUT_MS;
+        for (;;)
         {
-                ctl_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
-                return CTL_FAILED;
+                long got = ctl_call(syscall(connect), (positive)fd, (positive)address, (positive)(2 + length + 1), 0, 0, 0);
+                long nap[2] = {0, 2000000};
+
+                if (got >= 0)
+                        break;
+                if ((got != -11 && got != -4) || ctl_socket_now(0) >= until)
+                {
+                        ctl_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+                        return CTL_FAILED;
+                }
+                ctl_call(syscall(nanosleep), (positive)nap, 0, 0, 0, 0, 0);
         }
         ctl_disconnect(c); // a connection made again replaces the one it had, and does not leak its socket
         c->socket.fd = (int)fd;

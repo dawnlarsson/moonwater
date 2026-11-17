@@ -3735,6 +3735,7 @@ int main(void)
 #ifndef memory_first_of
 #define memory_first_of(block, value, size) memchr((block), (value), (size))
 #endif
+typedef void *address_any;
 #ifndef string_length
 #define string_length(text) strlen((const char *)(text))
 #endif
@@ -3876,6 +3877,19 @@ static void pt_changed(void *context, int what, long sink)
 }
 
 static struct pulse pt_engine;
+
+/* The engine's growable tables (its clients, streams and records) stay in the host's memory for the engine's life: a table is one
+   block and its bytes, held while it has slots, and every other block must be given back. */
+static long pt_table_blocks(void)
+{
+        return (pt_engine.client_slots > 0) + (pt_engine.stream_slots > 0) + (pt_engine.record_slots > 0);
+}
+
+static long pt_table_bytes(void)
+{
+        return (long)(pt_engine.client_slots * sizeof(struct pulse_client *) + pt_engine.stream_slots * sizeof(struct pulse_stream) +
+               pt_engine.record_slots * sizeof(struct pulse_record));
+}
 
 static void pt_reset(void)
 {
@@ -4416,7 +4430,7 @@ static void pt_test_handshake(void)
         PTCHECK(pulse_client_late(&pt_engine, slot, pt_clock + PULSE_AUTH_USEC + 1000), "late after the time");
         pulse_client_close(&pt_engine, slot);
         PTCHECK(pt_engine.clients_made == pt_engine.clients_dropped, "all clients gone");
-        PTCHECK(pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes, "every block given back");
+        PTCHECK(pt_allocs == pt_releases + pt_table_blocks() && pt_alloc_bytes == pt_release_bytes + pt_table_bytes(), "every block given back");
 }
 
 static void pt_test_info(void)
@@ -4599,7 +4613,7 @@ static void pt_test_info(void)
                 }
                 pulse_client_close(&pt_engine, slot);
         }
-        PTCHECK(pt_allocs == pt_releases, "every block given back");
+        PTCHECK(pt_allocs == pt_releases + pt_table_blocks(), "every block given back");
 }
 
 // What one stream's data comes out of the mixer as.
@@ -4845,7 +4859,7 @@ static void pt_test_stream(void)
                 pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
         PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_engine.ring_total == 0, "the stream is freed: %lu made, %lu freed, %lu ring bytes", pt_engine.streams_made, pt_engine.streams_freed,
                 pt_engine.ring_total);
-        PTCHECK(pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes, "every block given back");
+        PTCHECK(pt_allocs == pt_releases + pt_table_blocks() && pt_alloc_bytes == pt_release_bytes + pt_table_bytes(), "every block given back");
         (void)index;
 }
 
@@ -4956,7 +4970,7 @@ static void pt_test_restart(void)
         pulse_client_close(&pt_engine, slot);
         for (int block = 0; block < 4; block++)
                 pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 64);
-        PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases, "all given back");
+        PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases + pt_table_blocks(), "all given back");
 }
 
 // Cork, flush, trigger, prebuf, a stream that is muted and one at no volume, the rate, the name.
@@ -5119,7 +5133,7 @@ static void pt_test_control(void)
         pulse_client_close(&pt_engine, slot);
         for (int block = 0; block < 4; block++)
                 pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
-        PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases, "all given back");
+        PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases + pt_table_blocks(), "all given back");
 }
 
 // Volumes down to the bits: a stream at an eighth of the amplitude (50%), a sink at the same, both, a mute, and the balance of a pair.
@@ -5233,7 +5247,7 @@ static void pt_test_volume(void)
         pulse_client_close(&pt_engine, root);
         for (int block = 0; block < 4; block++)
                 pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
-        PTCHECK(pt_allocs == pt_releases, "all given back");
+        PTCHECK(pt_allocs == pt_releases + pt_table_blocks(), "all given back");
 }
 
 // A flush while the stream plays: the last frames fade out, nothing is said to be an underflow, and it waits for its start again.
@@ -5437,17 +5451,17 @@ static void pt_test_policy(void)
         PTCHECK(pt_expect_ack(39), "root kills B's stream");
         pt_collect(user_b);
         PTCHECK(pt_count(PULSE_COMMAND_PLAYBACK_STREAM_KILLED) == 1, "and B is told");
-        // The ninth client of one user is refused; root has no such cap.
+        // No count of one user's clients is refused: the ninth is accepted, and so are twenty-four of them (the table grows).
         {
-                long made[PULSE_PER_USER + 2], refused = 0;
+                long made[24], refused = 0;
 
-                for (int i = 0; i < PULSE_PER_USER + 2; i++)
+                for (int i = 0; i < 24; i++)
                 {
                         made[i] = pulse_client_open(&pt_engine, 2000, 100 + i);
                         refused += made[i] < 0;
                 }
-                PTCHECK(refused >= 2, "a user holds at most %d clients (%ld refused)", PULSE_PER_USER, refused);
-                for (int i = 0; i < PULSE_PER_USER + 2; i++)
+                PTCHECK(refused == 0 && made[8] >= 0, "a user holds any number of clients: the ninth is accepted (%ld refused)", refused);
+                for (int i = 0; i < 24; i++)
                         if (made[i] >= 0)
                                 pulse_client_close(&pt_engine, made[i]);
         }
@@ -5463,7 +5477,7 @@ static void pt_test_policy(void)
                         pulse_sink_mix(&pt_engine, 1, out, AUDIO_FORMAT_S16LE, 2, 256);
                 }
         }
-        PTCHECK(pt_engine.clients_made == pt_engine.clients_dropped && pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases, "all given back");
+        PTCHECK(pt_engine.clients_made == pt_engine.clients_dropped && pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases + pt_table_blocks(), "all given back");
 }
 
 // Subscription events: what is told to whom, in what form.
@@ -5552,17 +5566,16 @@ static void pt_test_caps(void)
         pt_reset();
         pulse_sink_add(&pt_engine, "null", "Null", 48000);
         slot = pt_connect(0, 1, 35, "Caps");
-        // The seventeenth stream of a client.
-        for (int i = 0; i < PULSE_STREAMS_PER_CLIENT + 1; i++)
+        // The seventeenth stream of a client is accepted: no count of a client's streams is refused.
+        for (int i = 0; i < 17; i++)
         {
                 int result = pt_create(slot, 35, 100 + (unsigned long)i, 1000, 0, 0, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0);
 
                 if (result == 0)
                         made++;
-                else
-                        PTCHECK(pt_expect_error(100 + (unsigned long)i, PULSE_ERR_TOOLARGE), "the stream past the cap is refused with TOOLARGE");
+                PTCHECK(result == 0, "stream %d of a client is accepted (%d)", i + 1, result);
         }
-        PTCHECK(made == PULSE_STREAMS_PER_CLIENT, "%d streams of a client (%d)", PULSE_STREAMS_PER_CLIENT, made);
+        PTCHECK(made == 17, "17 streams of a client (%d)", made);
         pulse_client_close(&pt_engine, slot);
         // Silly attributes are held to the ring.
         slot = pt_connect(0, 1, 35, "Caps");
@@ -5599,13 +5612,13 @@ static void pt_test_caps(void)
         pulse_client_close(&pt_engine, slot);
         // The rings are capped altogether: many clients, each a stream of the most.
         {
-                long clients[PULSE_CLIENTS];
+                long clients[32];
                 int refused = 0;
 
                 made = 0;
-                for (int i = 0; i < PULSE_CLIENTS; i++)
+                for (int i = 0; i < 32; i++)
                         clients[i] = pt_connect(0, 1, 35, "Big");
-                for (int i = 0; i < PULSE_CLIENTS; i++)
+                for (int i = 0; i < 32; i++)
                         if (clients[i] >= 0)
                                 for (int k = 0; k < 3; k++)
                                 {
@@ -5615,8 +5628,8 @@ static void pt_test_caps(void)
                                         refused += result == -1;
                                 }
                 PTCHECK(pt_engine.ring_total <= PULSE_RING_TOTAL && refused > 0, "rings %lu of %lu, %d streams, %d refused", pt_engine.ring_total, PULSE_RING_TOTAL, made, refused);
-                PTCHECK(made <= PULSE_STREAMS, "no more streams than the table");
-                for (int i = 0; i < PULSE_CLIENTS; i++)
+                PTCHECK(made > 0 && pt_engine.stream_slots >= made, "the table holds the streams it made (%d)", made);
+                for (int i = 0; i < 32; i++)
                         if (clients[i] >= 0)
                                 pulse_client_close(&pt_engine, clients[i]);
         }
@@ -5642,7 +5655,7 @@ static void pt_test_caps(void)
                 PTCHECK(dead, "and a client that never reads is ended when it fills");
         }
         pulse_client_close(&pt_engine, slot);
-        PTCHECK(pt_engine.clients_made == pt_engine.clients_dropped && pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes &&
+        PTCHECK(pt_engine.clients_made == pt_engine.clients_dropped && pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases + pt_table_blocks() && pt_alloc_bytes == pt_release_bytes + pt_table_bytes() &&
                     pt_engine.ring_total == 0,
                 "all given back: %lu/%lu clients, %lu/%lu streams, %ld/%ld blocks, rings %lu", pt_engine.clients_dropped, pt_engine.clients_made, pt_engine.streams_freed, pt_engine.streams_made, pt_releases,
                 pt_allocs, pt_engine.ring_total);
@@ -6333,20 +6346,20 @@ static void pt_test_record_policy(void)
                 pulse_client_close(&pt_engine, root);
         }
         pulse_client_close(&pt_engine, other);
-        // The caps: a client's, and all of them.
+        // No count of a client's record streams is refused, nor of all of them: the table grows.
         {
                 long clients[5];
 
                 for (int c = 0; c < 5; c++)
                         clients[c] = pt_connect(0, 20 + c, 35, "Many");
                 a = pt_rec_args();
-                for (int i = 0; i < PULSE_RECORDS_PER_CLIENT; i++)
+                for (int i = 0; i < 8; i++)
                         PTCHECK(pt_rec_create(clients[0], 35, (unsigned long)(40 + i), &a) == 0, "stream %d of a client", i);
-                PTCHECK(pt_rec_create(clients[0], 35, 49, &a) == PULSE_ERR_TOOLARGE, "the ninth of one client is too many");
+                PTCHECK(pt_rec_create(clients[0], 35, 49, &a) == 0, "the ninth of one client is accepted");
                 for (int c = 1; c < 4; c++)
-                        for (int i = 0; i < PULSE_RECORDS_PER_CLIENT; i++)
+                        for (int i = 0; i < 8; i++)
                                 PTCHECK(pt_rec_create(clients[c], 35, (unsigned long)(50 + i), &a) == 0, "stream %d of client %d", i, c);
-                PTCHECK(pt_rec_create(clients[4], 35, 60, &a) == PULSE_ERR_TOOLARGE, "and the table is full for another client: %d of them", PULSE_RECORDS);
+                PTCHECK(pt_rec_create(clients[4], 35, 60, &a) == 0, "and another client's record is accepted past them (%ld slots)", pt_engine.record_slots);
                 for (int c = 0; c < 5; c++)
                         pulse_client_close(&pt_engine, clients[c]);
                 PTCHECK(pt_engine.records_made == pt_engine.records_freed, "all freed: %lu made, %lu freed", pt_engine.records_made, pt_engine.records_freed);
@@ -6398,7 +6411,7 @@ static void pt_test_record_policy(void)
                 pulse_client_close(&pt_engine, listener);
                 pulse_client_close(&pt_engine, watcher);
         }
-        PTCHECK(pt_engine.records_made == pt_engine.records_freed && pt_allocs == pt_releases, "all given back");
+        PTCHECK(pt_engine.records_made == pt_engine.records_freed && pt_allocs == pt_releases + pt_table_blocks(), "all given back");
         for (int t = 0; t < AUDIO_TABLES; t++)
                 PTCHECK(audio_tables[t].users == 0, "table %d is not kept", t);
 }
@@ -8021,10 +8034,10 @@ static void pt_test_samples(void)
                 PTCHECK(n >= 1 && what[n - 1] == (PULSE_FACILITY_SAMPLE_CACHE | PULSE_EVENT_REMOVE) && where[n - 1] == 0, "version %u: and announced", versions[v]);
                 PTCHECK(pt_play(slot, versions[v], 29, PULSE_INVALID, 0, PULSE_INVALID, "bell") == -100 - PULSE_ERR_NOENTITY, "version %u: it cannot be played after", versions[v]);
                 PTCHECK(pt_remove_sample(slot, 30, "bell") == PULSE_ERR_NOENTITY, "version %u: nor taken out twice", versions[v]);
-                PTCHECK(pt_engine.sample_total == 0 && pt_allocs == pt_releases + 2, "version %u: the cache holds nothing (the two clients are still here)", versions[v]);
+                PTCHECK(pt_engine.sample_total == 0 && pt_allocs == pt_releases + pt_table_blocks() + 2, "version %u: the cache holds nothing (the two clients are still here)", versions[v]);
                 pulse_client_close(&pt_engine, slot);
                 pulse_client_close(&pt_engine, watcher);
-                PTCHECK(pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes, "version %u: every block given back", versions[v]);
+                PTCHECK(pt_allocs == pt_releases + pt_table_blocks() && pt_alloc_bytes == pt_release_bytes + pt_table_bytes(), "version %u: every block given back", versions[v]);
         }
 }
 
@@ -8244,10 +8257,10 @@ static void pt_test_samples_play(void)
                 pulse_client_close(&pt_engine, who);
         }
         pulse_client_close(&pt_engine, slot);
-        PTCHECK(pt_allocs == pt_releases + 2 && pt_engine.sample_total == sizeof(sound), "every block given back but the sound left in the cache and the client who will take it out");
+        PTCHECK(pt_allocs == pt_releases + pt_table_blocks() + 2 && pt_engine.sample_total == sizeof(sound), "every block given back but the sound left in the cache and the client who will take it out");
         PTCHECK(pt_remove_sample(root_for_samples, 70, "remembered") == 0 && pt_engine.sample_total == 0, "taken out");
         pulse_client_close(&pt_engine, root_for_samples);
-        PTCHECK(pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes, "every block given back");
+        PTCHECK(pt_allocs == pt_releases + pt_table_blocks() && pt_alloc_bytes == pt_release_bytes + pt_table_bytes(), "every block given back");
         for (int t = 0; t < AUDIO_TABLES; t++)
                 PTCHECK(audio_tables[t].users == 0, "table %d is not kept", t);
 }
@@ -8365,7 +8378,7 @@ static void pt_test_samples_policy(void)
         pt_collect(other);
         PTCHECK(pt_expect_error(45, PULSE_ERR_NOENTITY) && pt_engine.upload_total == 8192, "nor given up by it");
         pulse_client_close(&pt_engine, user);
-        PTCHECK(pt_engine.upload_total == 0 && pt_allocs == pt_releases + 2, "a client that goes in the middle of two uploads gives them back");
+        PTCHECK(pt_engine.upload_total == 0 && pt_allocs == pt_releases + pt_table_blocks() + 2, "a client that goes in the middle of two uploads gives them back");
         user = pt_connect(1000, 156, 35, "User");
         PTCHECK(pt_upload(user, 35, 43, "big", AUDIO_FORMAT_S16LE, 2, 48000, 3 << 20, &channel, &asked) == 0 && pt_upload_send(user, 44, channel, big, 3 << 20, 60000) == 0, "a user may hold 3 MiB");
         PTCHECK(pt_upload(user, 35, 45, "more", AUDIO_FORMAT_S16LE, 2, 48000, 2 << 20, &channel, &asked) == PULSE_ERR_TOOLARGE, "and not 5");
@@ -8403,18 +8416,18 @@ static void pt_test_samples_policy(void)
         {
                 int made = 0, refused = 0;
 
-                for (int i = 0; i < PULSE_STREAMS_PER_CLIENT + 4; i++)
+                for (int i = 0; i < 20; i++)
                 {
                         long r = pt_play(other, 35, (unsigned long)(70 + i), PULSE_INVALID, 0, PULSE_INVALID, "root1");
 
                         made += r >= 0;
                         refused += r == -100 - PULSE_ERR_TOOLARGE;
                 }
-                PTCHECK(made == PULSE_STREAMS_PER_CLIENT && refused == 4, "a client has %d at once: %d made, %d refused", PULSE_STREAMS_PER_CLIENT, made, refused);
+                PTCHECK(made == 20 && refused == 0, "a client has 20 at once: %d made, %d refused", made, refused);
         }
         // Everything out: the cache's memory and every stream given back (the streams of samples belong to no program, so they are ended here).
         pulse_client_close(&pt_engine, other);
-        for (int i = 0; i < PULSE_STREAMS; i++)
+        for (int i = 0; i < pt_engine.stream_slots; i++)
                 if (pt_engine.stream[i].used && !pt_engine.stream[i].dying)
                         pulse_stream_end(&pt_engine, pt_engine.stream + i);
         pt_remove_sample(root, 90, "root1");
@@ -8446,7 +8459,7 @@ static void pt_test_samples_policy(void)
         }
         pulse_client_close(&pt_engine, user);
         pulse_client_close(&pt_engine, root);
-        PTCHECK(pt_engine.sample_total == 0 && pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes, "every block given back");
+        PTCHECK(pt_engine.sample_total == 0 && pt_allocs == pt_releases + pt_table_blocks() && pt_alloc_bytes == pt_release_bytes + pt_table_bytes(), "every block given back");
 }
 
 /* ---- a recorded session, and what is done to it ---- */
@@ -8751,7 +8764,7 @@ static void pt_test_session(void)
                 pulse_client_close(&pt_engine, slot);
                 for (int block = 0; block < 4; block++)
                         pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 256);
-                PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases && pt_engine.ring_total == 0, "given back");
+                PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases + pt_table_blocks() && pt_engine.ring_total == 0, "given back");
         }
 }
 
@@ -8773,14 +8786,19 @@ static void pt_test_fuzz(void)
         pt_sig(fl, fr, 0, AUDIO_BLOCK);
         for (int round = 0; round < 6000; round++)
         {
-                long slot = pulse_client_open(&pt_engine, round % 3 == 0 ? 0 : 1000 + round % 5, 100 + round);
-                long length;
+                long slot = -1, open_now = 0, length;
                 int mode = round % 4;
 
+                // The engine takes any number of clients now, so the fuzz keeps the population it kept when the table had 32 slots:
+                // at that many it frees a few at random before it opens another.
+                for (long i = 0; i < pt_engine.client_slots; i++)
+                        open_now += pt_engine.client[i] != 0;
+                if (open_now < 32)
+                        slot = pulse_client_open(&pt_engine, round % 3 == 0 ? 0 : 1000 + round % 5, 100 + round);
                 if (slot < 0)
                 {
                         // Full: free a few at random.
-                        for (long i = 0; i < PULSE_CLIENTS; i++)
+                        for (long i = 0; i < pt_engine.client_slots; i++)
                                 if (pt_engine.client[i] && pt_rand() % 3 == 0)
                                         pulse_client_close(&pt_engine, i);
                         continue;
@@ -8840,7 +8858,7 @@ static void pt_test_fuzz(void)
                                 }
                         }
                 }
-                for (int i = 0; i < PULSE_STREAMS; i++)
+                for (int i = 0; i < pt_engine.stream_slots; i++)
                         streams_seen += pt_engine.stream[i].used;
                 {
                         const unsigned char *bytes;
@@ -8860,7 +8878,7 @@ static void pt_test_fuzz(void)
                         pulse_capture_allow(&pt_engine, round % 1000 == 999);
         }
         pulse_capture_allow(&pt_engine, 1);
-        for (long i = 0; i < PULSE_CLIENTS; i++)
+        for (long i = 0; i < pt_engine.client_slots; i++)
                 if (pt_engine.client[i])
                         pulse_client_close(&pt_engine, i);
         // What the cache keeps outlives the programs that put it there; the sounds are taken out here, as a server that ended would.
@@ -8873,7 +8891,7 @@ static void pt_test_fuzz(void)
                 pulse_sink_mix(&pt_engine, 1, out, AUDIO_FORMAT_S16LE, 2, 512);
         }
         // The streams that play a sound have no program to end them: they are ended with what they play.
-        for (int i = 0; i < PULSE_STREAMS; i++)
+        for (int i = 0; i < pt_engine.stream_slots; i++)
                 if (pt_engine.stream[i].used && !pt_engine.stream[i].dying)
                         pulse_stream_end(&pt_engine, pt_engine.stream + i);
         for (int block = 0; block < 4; block++)
@@ -8887,7 +8905,7 @@ static void pt_test_fuzz(void)
         PTCHECK(pt_engine.sample_total == 0 && pt_engine.upload_total == 0, "the cache is empty: %lu and %lu bytes", pt_engine.sample_total, pt_engine.upload_total);
         PTCHECK(pt_engine.clients_made == pt_engine.clients_dropped, "clients: %lu made, %lu dropped", pt_engine.clients_made, pt_engine.clients_dropped);
         PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_engine.ring_total == 0, "streams: %lu made, %lu freed, %lu ring bytes", pt_engine.streams_made, pt_engine.streams_freed, pt_engine.ring_total);
-        PTCHECK(pt_allocs == pt_releases && pt_alloc_bytes == pt_release_bytes, "blocks: %ld made, %ld given back", pt_allocs, pt_releases);
+        PTCHECK(pt_allocs == pt_releases + pt_table_blocks() && pt_alloc_bytes == pt_release_bytes + pt_table_bytes(), "blocks: %ld made, %ld given back", pt_allocs, pt_releases);
         for (int t = 0; t < AUDIO_TABLES; t++)
                 PTCHECK(audio_tables[t].users == 0, "table %d kept", t);
         printf("  fuzz: %ld rounds, %ld clients, %ld ended by the engine, %lu protocol errors, %ld streams seen, %lu made\n", rounds, pt_fuzz_clients, dead, pt_engine.protocol_errors, streams_seen, pt_engine.streams_made);
@@ -8977,7 +8995,7 @@ static long pt_ctl_join(long uid)
 
 static struct pulse_stream *pt_stream_of(unsigned long index)
 {
-        for (int i = 0; i < PULSE_STREAMS; i++)
+        for (int i = 0; i < pt_engine.stream_slots; i++)
                 if (pt_engine.stream[i].used && pt_engine.stream[i].index == index)
                         return pt_engine.stream + i;
         return 0;
@@ -9235,7 +9253,7 @@ static void pt_test_list_bounds(void)
 {
         static unsigned char before[sizeof(pt_engine.record_a)];
         static struct pt_w w;
-        unsigned long channels[PULSE_STREAMS_PER_CLIENT], index, missing, channel;
+        unsigned long channels[16], index, missing, channel;
         long slot, made = 0;
         int answered = 0;
 
@@ -9243,7 +9261,7 @@ static void pt_test_list_bounds(void)
         pulse_sink_add(&pt_engine, "null", "Null", 48000);
         slot = pt_connect(1000, 4300, 35, "lister");
         PTCHECK(slot >= 0, "a client that lists its streams connects");
-        for (int i = 0; slot >= 0 && i < PULSE_STREAMS_PER_CLIENT; i++)
+        for (int i = 0; slot >= 0 && i < 16; i++)
         {
                 if (pt_create(slot, 35, 100 + i, 0, 0, 0, &channel, &index, &missing, 1, AUDIO_VOLUME_NORM, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) != 0)
                         break;
@@ -9255,7 +9273,7 @@ static void pt_test_list_bounds(void)
                 pt_command(slot, PULSE_COMMAND_UPDATE_PLAYBACK_STREAM_PROPLIST, 200 + i, &w);
                 pt_collect(slot);
         }
-        PTCHECK(made == PULSE_STREAMS_PER_CLIENT, "%ld streams with full property lists are made", made);
+        PTCHECK(made == 16, "%ld streams with full property lists are made", made);
         pt_collect(slot);
         // Sixteen such streams make a list of about 160 KB: more than the 128 KB scratch it is built in. The writer is bounded, so
         // nothing lands past the scratch (the mixer's record buffers are kept as they were), and the list is refused as too
@@ -10076,8 +10094,7 @@ static void sv_start(void)
         host.remember = audio_host_remember;
         host.changed = audio_host_changed;
         pulse_open(&audio_service.pulse, &host);
-        for (long at = 0; at < PULSE_CLIENTS; at++)
-                audio_service.fd[at] = -1;
+        audio_slots_fit();
         audio_service.listen = audio_service.signals = audio_service.timer = audio_service.file = -1;
         audio_service.card = audio_service.device = -1;
         audio_service.sink = -1;
@@ -10464,7 +10481,8 @@ static void sv_bench_streams(int streams)
                 pulse_props_set(&c->props, "native-protocol.version", (const unsigned char *)"32", 2);
                 pulse_props_set(&c->props, "module-stream-restore.id", (const unsigned char *)"sink-input-by-application-name:Bench program", 43);
                 pulse_props_set(&c->props, "media.role", (const unsigned char *)"music", 5);
-                s = audio_service.pulse.stream + i;
+                s = pulse_stream_free_slot(&audio_service.pulse);
+                audio_slots_fit();
                 s->used = 1;
                 s->client = slot;
                 s->index = (unsigned long)i + 1;
@@ -10648,11 +10666,11 @@ static void sv_test_text(void)
 {
         char to[16];
 
-        audio_copy_text(to, 8, "abcdefghijkl");
+        pulse_copy(to, 8, "abcdefghijkl");
         SVCHECK(strcmp(to, "abcdefg") == 0 && to[7] == 0, "a copy is cut at room - 1 and ends in a zero byte (%s)", to);
-        audio_copy_text(to, 16, "short");
+        pulse_copy(to, 16, "short");
         SVCHECK(strcmp(to, "short") == 0, "a copy that fits is whole (%s)", to);
-        audio_copy_text(to, 0, "not written");
+        pulse_copy(to, 0, "not written");
         SVCHECK(strcmp(to, "short") == 0, "a copy into no room writes nothing");
         SVCHECK(audio_text_equal("ab", "ab") == 1 && audio_text_equal("", "") == 1, "equal texts are equal");
         SVCHECK(audio_text_equal("ab", "abc") == 0 && audio_text_equal("abc", "ab") == 0, "a prefix is not equal");
@@ -10695,6 +10713,7 @@ static void sv_test_clients(void)
         {
                 pipe(fds[k]);
                 slots[k] = pulse_client_open(&audio_service.pulse, 1000 + k, 2000 + k);
+                audio_slots_fit();
                 audio_service.fd[slots[k]] = fds[k][0];
         }
         audio_live_relist();
@@ -10715,7 +10734,7 @@ static void sv_test_clients(void)
 /* the 32-slot pass that the list replaced, as it was (for the bench) */
 static void sv_old_clients_pass(positive now)
 {
-        for (long slot = 0; slot < PULSE_CLIENTS; slot++)
+        for (long slot = 0; slot < audio_service.pulse.client_slots; slot++)
                 if (audio_service.fd[slot] >= 0)
                 {
                         if (pulse_client_late(&audio_service.pulse, slot, (long)(now / 1000)) || !audio_client_write(slot, now))
@@ -10745,6 +10764,7 @@ static void sv_bench_clients(int cpu)
 
                         pipe(fds[k]);
                         slot = pulse_client_open(&audio_service.pulse, 1000 + k, 2000 + k);
+                        audio_slots_fit();
                         audio_service.fd[slot] = fds[k][0];
                 }
                 audio_live_relist();
@@ -10874,7 +10894,7 @@ static void sv_bench_text(int cpu)
         for (int i = 0; i < PASSES; i++)
         {
                 samples[i] = sv_now();
-                audio_copy_text(to, sizeof to, name);
+                pulse_copy(to, sizeof to, name);
                 samples[i] = sv_now() - samples[i];
         }
         qsort(samples, PASSES, sizeof samples[0], sv_cmp_ull);
@@ -10963,6 +10983,7 @@ int main(int argc, char **argv)
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -10985,6 +11006,7 @@ static long system_call_6(positive number, positive a, positive b, positive c, p
 #define string_length(text) strlen((const char *)(text))
 #define memory_first_of(block, value, size) memchr((block), (value), (size))
 #define memory_zero(to, size) memset((to), 0, (size))
+#define memory_copy_apart(to, from, size) memcpy((to), (from), (size))
 
 #include "../../src/audio/control.c"
 
@@ -11332,13 +11354,157 @@ static long cck_fake_receive(void *context, unsigned char *bytes, long count, lo
 static void cck_test_no_clock(void)
 {
         static struct ctl c;
+        static char longpath[200];
 
+        // A path that does not fit sun_path (108 bytes with its zero) is refused, not cut to the part that does.
+        memset(longpath, 'a', sizeof(longpath) - 1);
+        longpath[sizeof(longpath) - 1] = 0;
+        CCKCHECK(ctl_connect(&c, longpath) == CTL_FAILED, "a path past sun_path is refused, not cut");
         memset(&c, 0, sizeof(c));
         c.transport = (struct ctl_transport){0, cck_fake_send, cck_fake_receive, 0};
         c.open = 1;
         CCKCHECK(ctl_set_sink_volume(&c, "null", 0x8000) == 0, "a transport with no clock takes a volume");
         CCKCHECK(ctl_set_sink_mute(&c, "null", 1) == 0, "and a mute, with no clock");
         CCKCHECK(ctl_set_input_mute(&c, 3, 0) == 0, "and a stream's mute");
+}
+
+static volatile sig_atomic_t cck_alarms;
+
+static void cck_on_alarm(int sig)
+{
+        (void)sig;
+        cck_alarms++;
+}
+
+// A signal that lands while a send waits on a full socket ends the wait, not the command: the send is made again for what is left
+// of its budget, and goes through once the peer has read.
+static void cck_test_signal_send(void)
+{
+        static unsigned char block[4096];
+        struct ctl_socket s;
+        struct sigaction action, before;
+        struct itimerval timer;
+        int pair[2], flags;
+        long filled = 0;
+        unsigned char sink[4096];
+        long drained = 0;
+        int status = 1, sent;
+        pid_t pid;
+
+        memset(block, 'x', sizeof(block));
+        memset(&s, 0, sizeof(s));
+        CCKCHECK(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, pair) == 0, "a socket pair for a send that waits");
+        for (;;)
+        {
+                ssize_t put = write(pair[0], block, sizeof(block));
+
+                if (put <= 0)
+                        break;
+                filled += put;
+        }
+        pid = fork();
+        if (pid == 0)
+        {
+                long want = filled + 1000;
+
+                close(pair[0]);
+                flags = fcntl(pair[1], F_GETFL);
+                fcntl(pair[1], F_SETFL, flags & ~O_NONBLOCK);
+                usleep(150000); // the send waits on the full socket until this reads
+                while (drained < want)
+                {
+                        ssize_t got = read(pair[1], sink, sizeof(sink));
+
+                        if (got < 0 && errno == EINTR)
+                                continue;
+                        if (got <= 0)
+                                break;
+                        drained += got;
+                }
+                _exit(drained >= want ? 0 : 1);
+        }
+        close(pair[1]);
+        s.fd = pair[0];
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = cck_on_alarm; // no SA_RESTART: the poll that waits is ended by it
+        sigemptyset(&action.sa_mask);
+        sigaction(SIGALRM, &action, &before);
+        memset(&timer, 0, sizeof(timer));
+        timer.it_value.tv_usec = 50000;
+        setitimer(ITIMER_REAL, &timer, 0);
+        sent = (int)ctl_socket_send(&s, block, 1000, 2000);
+        memset(&timer, 0, sizeof(timer));
+        setitimer(ITIMER_REAL, &timer, 0);
+        sigaction(SIGALRM, &before, 0);
+        CCKCHECK(sent == 0 && cck_alarms >= 1, "a signal during a blocked send does not fail it: sent %d, signalled %d times", sent, (int)cck_alarms);
+        if (pid > 0)
+        {
+                waitpid(pid, &status, 0);
+                CCKCHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the peer read everything that was sent");
+        }
+        close(pair[0]);
+}
+
+// A listener whose backlog is full refuses a connect that does not block with EAGAIN: the connect is made again within its budget, and
+// it succeeds once the server has taken a connection off its queue.
+static void cck_test_full_backlog(const char *dir)
+{
+        char path[108];
+        struct sockaddr_un address;
+        struct ctl c;
+        int listener, queued = 0, client[16];
+        pid_t pid;
+        int status = 1;
+
+        snprintf(path, sizeof(path), "%s/full", dir);
+        unlink(path);
+        memset(&address, 0, sizeof(address));
+        address.sun_family = AF_UNIX;
+        snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
+        memset(&c, 0, sizeof(c));
+        listener = socket(AF_UNIX, SOCK_STREAM, 0);
+        CCKCHECK(listener >= 0 && bind(listener, (struct sockaddr *)&address, sizeof(address)) == 0 && listen(listener, 1) == 0, "a listener with a backlog of one");
+        for (int i = 0; i < 16; i++)
+        {
+                int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+
+                if (fd < 0)
+                        break;
+                if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0)
+                {
+                        close(fd);
+                        break;
+                }
+                client[queued++] = fd;
+        }
+        CCKCHECK(queued >= 1 && queued < 16, "the queue fills (%d connections taken before it refused one)", queued);
+        pid = fork();
+        if (pid == 0)
+        {
+                static struct cck_log log;
+
+                usleep(100000); // the queue is full until the server takes one off it
+                for (int i = 0; i < queued; i++)
+                {
+                        int fd = accept(listener, 0, 0);
+
+                        if (fd < 0)
+                                _exit(1);
+                        close(fd); // the connections made by hand say nothing: they are let go
+                }
+                cck_serve(listener, CCK_NORMAL, &log); // the connection that waited, and the handshake it is answered with
+                _exit(0);
+        }
+        CCKCHECK(ctl_connect(&c, path) == 0, "a connect to a full backlog succeeds once the server drains it");
+        ctl_disconnect(&c);
+        if (pid > 0)
+        {
+                waitpid(pid, &status, 0);
+                CCKCHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the server took every connection");
+        }
+        for (int i = 0; i < queued; i++)
+                close(client[i]);
+        close(listener);
 }
 
 // The rest of the client, referenced here so that a build with -Werror finds no unused function: each of them is checked
@@ -11363,6 +11529,8 @@ int main(void)
         if (!cck_rest[0])
                 return 1;
         cck_test_no_clock();
+        cck_test_signal_send();
+        cck_test_full_backlog(dir);
         cck_test_two_connections(dir);
         cck_test_normal(dir);
         cck_test_held(dir, CCK_DRIBBLE, "d");

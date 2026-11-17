@@ -7381,6 +7381,31 @@ static fn stream_failures(void)
                 link_session_close(s);
         }
 
+        //      The signals a pair blocks are unblocked when it closes: with
+        //      SIGINT ignored, a SIGINT raised after the pair is discarded at
+        //      once, where one still blocked would wait pending in the mask.
+        {
+                p64 ignore[4] = {1, 0, 0, 0};
+                p64 old[4] = {0, 0, 0, 0};
+                p64 pending[1] = {0};
+                bipolar signals;
+
+                (void)system_call_4(syscall(rt_sigaction), 2, (positive)ignore,
+                                    (positive)old, 8);
+                signals = link_signals_open(0);
+                check("a signal pair opens", signals >= 0);
+                link_signals_close(signals);
+                (void)system_call_2(syscall(kill),
+                                    (positive)system_call(syscall(getpid)), 2);
+                (void)system_call_2(syscall(rt_sigpending),
+                                    (positive)pending, 8);
+                check("after the pair closes, a SIGINT is not left pending in a "
+                      "blocked mask",
+                      !(pending[0] & (1ul << (2 - 1))));
+                (void)system_call_4(syscall(rt_sigaction), 2, (positive)old, 0,
+                                    8);
+        }
+
         //      A push whose disk refuses: a descriptor that cannot be
         //      written, on the staging file's inode.
         (void)wls_write("/root/refused", "before", 6, 0644);

@@ -3702,10 +3702,23 @@ static fn link_signal_catch(int number)
         (void)sigaction(number, address_of action, null);
 }
 
+//      The signals the pipe catches, and the dispositions the process had for
+//      them before the first pair caught them: the close puts each back, as it
+//      was, so a command run in-process leaves the host's own handlers.
+static const int link_signal_set[6] = {SIGHUP, SIGINT, SIGTERM, SIGCHLD, SIGPIPE, SIGWINCH};
+static struct sigaction link_signal_before[6];
+static int link_signal_saved;
+
 static bipolar link_signals_open(p8 resize)
 {
         int ends[2];
 
+        if (!link_signal_saved)
+        {
+                for (int at = 0; at < 6; at++)
+                        (void)sigaction(link_signal_set[at], null, address_of link_signal_before[at]);
+                link_signal_saved = 1;
+        }
         if (link_signal_pipe_read < 0)
         {
                 if (pipe(ends) < 0)
@@ -3738,15 +3751,12 @@ static fn link_signals_close(bipolar handle)
         if (handle < 0 || reader < 0 || handle != reader)
                 return;
         //      The writer goes first, so a handler that runs now writes nothing;
-        //      then the dispositions go back to the defaults, and the pipe.
+        //      then the dispositions the process had go back, and the pipe.
         link_signal_pipe_write = -1;
         link_signal_pipe_read = -1;
-        (void)signal(SIGHUP, SIG_DFL);
-        (void)signal(SIGINT, SIG_DFL);
-        (void)signal(SIGTERM, SIG_DFL);
-        (void)signal(SIGCHLD, SIG_DFL);
-        (void)signal(SIGPIPE, SIG_DFL);
-        (void)signal(SIGWINCH, SIG_DFL);
+        for (int at = 0; at < 6 && link_signal_saved; at++)
+                (void)sigaction(link_signal_set[at], address_of link_signal_before[at], null);
+        link_signal_saved = 0;
         system_close(reader);
         if (writer >= 0)
                 system_close(writer);
@@ -3768,21 +3778,44 @@ static fn link_signals_take(bipolar handle, b32 address_to last)
         } while (got == (bipolar)sizeof information);
 }
 #else
+//      The mask the process had before the first pair blocked its signals, and
+//      how many pairs are open: the last close puts that mask back, so a
+//      pair that ends (a command run in-process) leaves nothing blocked and a
+//      SIGINT after it is delivered, not queued.
+static positive link_signals_mask_before;
+static positive link_signals_open_count;
+
 static bipolar link_signals_open(p8 resize)
 {
         positive blocked = 1ul << (1 - 1) | 1ul << (2 - 1) | 1ul << (15 - 1) |
                            1ul << (17 - 1) | 1ul << (13 - 1) |
                            (resize ? 1ul << (28 - 1) : 0);
+        bipolar handle;
 
-        (void)system_signal_mask(0, address_of blocked, null, 8);
-        return system_call_4(syscall(signalfd4), (positive)(bipolar)-1,
-                             (positive)address_of blocked, 8,
-                             O_CLOEXEC | O_NONBLOCK);
+        if (link_signals_open_count)
+                (void)system_signal_mask(0, address_of blocked, null, 8);
+        else
+                (void)system_signal_mask(0, address_of blocked,
+                                         address_of link_signals_mask_before, 8);
+        handle = system_call_4(syscall(signalfd4), (positive)(bipolar)-1,
+                               (positive)address_of blocked, 8,
+                               O_CLOEXEC | O_NONBLOCK);
+        if (handle >= 0)
+                link_signals_open_count++;
+        else if (!link_signals_open_count)
+                (void)system_signal_mask(2, address_of link_signals_mask_before,
+                                         null, 8);
+        return handle;
 }
 
 static fn link_signals_close(bipolar handle)
 {
+        if (handle < 0)
+                return;
         system_close(handle);
+        if (link_signals_open_count && --link_signals_open_count == 0)
+                (void)system_signal_mask(2, address_of link_signals_mask_before,
+                                         null, 8);
 }
 
 static fn link_signals_take(bipolar handle, b32 address_to last)
