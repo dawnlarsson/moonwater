@@ -1072,20 +1072,22 @@ extern b32 address_to system_poll_error(void) __asm__("___error");
 /* The milliseconds a wait of limit is, rounded up to the whole millisecond:
    -22 for a timespec that is not one (a negative second or nanosecond, or
    nanoseconds of a second or more), judged before any arithmetic, and a
-   limit past 2000000 seconds, or past what poll's int takes, is 0x7fffffff. */
+   limit past 2000000 seconds, or past what poll's int takes, is 0x7fffffff.
+   The fields are read as the signed values a timespec holds, so a negative
+   second is one the library's unsigned words carry as a high bit. */
 static inline INLINE bipolar system_poll_milliseconds(timespec address_to limit)
 {
-        if (limit->tv_sec < 0 || limit->tv_nsec < 0 ||
-            limit->tv_nsec >= 1000000000)
+        bipolar seconds = (bipolar)limit->tv_sec;
+        bipolar nanoseconds = (bipolar)limit->tv_nsec;
+
+        if (seconds < 0 || nanoseconds < 0 || nanoseconds >= 1000000000)
                 return -22;
-        if (limit->tv_sec > 2000000)
+        if (seconds > 2000000)
                 return 0x7fffffff;
 
-        p64 milliseconds = (p64)limit->tv_sec * 1000 +
-                           (p64)(limit->tv_nsec / 1000000) +
-                           (limit->tv_nsec % 1000000 != 0);
-        return milliseconds > 0x7fffffffull ? 0x7fffffff
-                                            : (bipolar)milliseconds;
+        bipolar milliseconds = seconds * 1000 + nanoseconds / 1000000 +
+                               (nanoseconds % 1000000 != 0);
+        return milliseconds > 0x7fffffff ? 0x7fffffff : milliseconds;
 }
 
 /* Wait for the descriptors for as long as limit says (null waits for ever).

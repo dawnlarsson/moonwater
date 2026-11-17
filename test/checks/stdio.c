@@ -1638,14 +1638,22 @@ static p8 pushback_spill_holds(void)
    ahead is not served, and the stream says it failed. */
 static p8 failed_reopen_reads_nothing(void)
 {
+        b32 descriptor = (b32)system_call_2(syscall(memfd_create),
+                                            (positive)"reopen-failure", 1);
         FILE address_to file;
         p8 okay;
 
-        lay_down("abc");
-        file = pick_up();
-        if (!file)
+        if (descriptor < 0)
                 return false;
-        okay = fgetc(file) == 'a';
+        file = fdopen(descriptor, "w+");
+        if (!file)
+        {
+                close(descriptor);
+                return false;
+        }
+        okay = fwrite("abc", 1, 3, file) == 3 && fflush(file) == 0;
+        rewind(file);
+        okay &= fgetc(file) == 'a';
         okay &= freopen("/nonexistent/moonwater-check", "r", file) == null &&
                 ferror(file);
         okay &= fgetc(file) == EOF;
