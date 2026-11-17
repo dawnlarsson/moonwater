@@ -242,8 +242,10 @@ settings_unknown	9fb9	sconosciuto
 settings_verb_hint	05aa	VERBO [ARGOMENTI]
 settings_virtual_refused	4202	un dispositivo virtuale non può attivarlo: usare una tastiera o un mouse collegati alla macchina, oppure moonwater ssh in un terminale root
 taskbar_tab_exit	44a5	Esci
+taskbar_tab_pin	d57f	Blocca sulla barra delle applicazioni
 taskbar_tab_stop	3684	Forza arresto
 taskbar_tab_stop_windows	3c5f	Forza arresto (%d finestre)
+taskbar_tab_unpin	6771	Sblocca dalla barra delle applicazioni
 terminal_exited_press_to_close	a8cf	terminato con stato %d, premere un tasto per chiudere
 terminal_press_to_close	080d	premere un tasto per chiudere
 tray_am	0d13	AM
@@ -437,6 +439,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Taskbar hides for fullscreen	f2f8	La barra delle applicazioni si nasconde a schermo intero
 =Taskbar launcher button	dd4d	Pulsante dell'avviatore nella barra delle applicazioni
 =Taskbar padding (pixels)	a3a0	Spaziatura della barra delle applicazioni (pixel)
+=Taskbar pinned programs (or none)	3732	Programmi bloccati sulla barra delle applicazioni (o nessuno)
 =Taskbar position	81b8	Posizione della barra delle applicazioni
 =Taskbar scale (percent)	810b	Scala della barra delle applicazioni (percentuale)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Area di notifica della barra (testo con {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

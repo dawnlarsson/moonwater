@@ -242,8 +242,10 @@ settings_unknown	9fb9	bilinmiyor
 settings_verb_hint	05aa	FİİL [ARGÜMANLAR]
 settings_virtual_refused	4202	sanal bir aygıt bunu açamaz: makineye takılı bir klavye veya fare kullanın ya da bir root terminalinde moonwater ssh
 taskbar_tab_exit	44a5	Çık
+taskbar_tab_pin	d57f	Görev çubuğuna sabitle
 taskbar_tab_stop	3684	Zorla durdur
 taskbar_tab_stop_windows	3c5f	Zorla durdur (%d pencere)
+taskbar_tab_unpin	6771	Görev çubuğundan kaldır
 terminal_exited_press_to_close	a8cf	%d durumuyla çıktı, kapatmak için bir tuşa basın
 terminal_press_to_close	080d	kapatmak için bir tuşa basın
 tray_am	0d13	ÖÖ
@@ -437,6 +439,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Taskbar hides for fullscreen	f2f8	Tam ekranda görev çubuğu gizlenir
 =Taskbar launcher button	dd4d	Görev çubuğunda başlatıcı düğmesi
 =Taskbar padding (pixels)	a3a0	Görev çubuğu boşluğu (piksel)
+=Taskbar pinned programs (or none)	3732	Görev çubuğuna sabitlenen programlar (veya yok)
 =Taskbar position	81b8	Görev çubuğu konumu
 =Taskbar scale (percent)	810b	Görev çubuğu ölçeği (yüzde)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Görev çubuğu bildirim alanı ({names} içeren metin: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

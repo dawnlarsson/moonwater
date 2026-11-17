@@ -243,8 +243,10 @@ settings_unknown	9fb9	غير معروف
 settings_verb_hint	05aa	الفعل [الوسائط]
 settings_virtual_refused	4202	لا يمكن لجهاز افتراضي تشغيل هذا: استخدم لوحة مفاتيح أو فأرة موصولة بالجهاز، أو moonwater ssh في طرفية الجذر
 taskbar_tab_exit	44a5	خروج
+taskbar_tab_pin	d57f	تثبيت في شريط المهام
 taskbar_tab_stop	3684	إيقاف إجباري
 taskbar_tab_stop_windows	3c5f	إيقاف إجباري (%d من النوافذ)
+taskbar_tab_unpin	6771	إلغاء التثبيت من شريط المهام
 terminal_exited_press_to_close	a8cf	انتهى برمز الخروج %d، اضغط أي مفتاح للإغلاق
 terminal_press_to_close	080d	اضغط أي مفتاح للإغلاق
 tray_am	0d13	ص
@@ -438,6 +440,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Taskbar hides for fullscreen	f2f8	يختفي شريط المهام في ملء الشاشة
 =Taskbar launcher button	dd4d	زر المشغل في شريط المهام
 =Taskbar padding (pixels)	a3a0	المسافات في شريط المهام (بكسل)
+=Taskbar pinned programs (or none)	3732	البرامج المثبتة في شريط المهام (أو لا شيء)
 =Taskbar position	81b8	موضع شريط المهام
 =Taskbar scale (percent)	810b	مقياس شريط المهام (نسبة مئوية)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	منطقة الإعلام في شريط المهام (نص مع {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

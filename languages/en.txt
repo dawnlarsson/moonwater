@@ -242,8 +242,10 @@ settings_unknown	9fb9	unknown
 settings_verb_hint	05aa	VERB [ARGUMENTS]
 settings_virtual_refused	4202	a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal
 taskbar_tab_exit	44a5	Exit
+taskbar_tab_pin	d57f	Pin to taskbar
 taskbar_tab_stop	3684	Force stop
 taskbar_tab_stop_windows	3c5f	Force stop (%d windows)
+taskbar_tab_unpin	6771	Unpin from taskbar
 terminal_exited_press_to_close	a8cf	exited with status %d, press a key to close
 terminal_press_to_close	080d	press a key to close
 tray_am	0d13	AM
@@ -437,6 +439,7 @@ ui_field_full	fe02	that is as much as it holds
 =Taskbar hides for fullscreen	f2f8	Taskbar hides for fullscreen
 =Taskbar launcher button	dd4d	Taskbar launcher button
 =Taskbar padding (pixels)	a3a0	Taskbar padding (pixels)
+=Taskbar pinned programs (or none)	3732	Taskbar pinned programs (or none)
 =Taskbar position	81b8	Taskbar position
 =Taskbar scale (percent)	810b	Taskbar scale (percent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

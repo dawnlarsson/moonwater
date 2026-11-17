@@ -9582,6 +9582,7 @@ b32 main()
         check_moon_bench();
         check_taskbar_edit();
         check_taskbar_tab_menu();
+        check_taskbar_pins();
         check_wallpaper_turn();
         check_icons();
         check_taskbar_identity();

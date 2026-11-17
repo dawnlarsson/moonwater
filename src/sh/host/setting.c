@@ -650,12 +650,75 @@ static b32 locale_taskbar_tray(string_address address_to arguments, positive cou
         return locale_taskbar_tray_status();
 }
 
-// moonwater taskbar: the plain rows (position, display, text), and tray, which is a line of text.
+/*
+        moonwater taskbar pinned [LINE|none]: the programs kept on the taskbar (setting_pins_valid says what a line is), which the taskbar's
+        menu on a task writes with its Pin to taskbar and Unpin from taskbar. Several words are joined by single blanks, so a line may be
+        typed as it is or quoted whole. It is judged whole before root is asked for, and kept in /root as a line, which the compositor,
+        which watches /root, takes at once. Bare it says what is kept: the line, or none.
+*/
+static b32 locale_taskbar_pinned_status(void)
+{
+        p8 text[SETTING_PINS_MOST + 16];
+        bipolar got = host_read_state(SETTING_TASKBAR_PINNED_PATH, text, sizeof(text) - 1);
+
+        text[got > 0 ? got : 0] = end;
+        while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == '\r'))
+                text[--got] = end;
+        if (got < 0 && got != -ENOENT && !bowl_is_root())
+        {
+                host_say(log, host_label "pinned " LOCALE_NEEDS_ROOT "\n");
+                return 0;
+        }
+        host_say(log, host_label "pinned %s\n",
+                 text[0] && !string_equals((string_address)text, "none") && setting_pins_valid((const char *)text, null) ? (string_address)text
+                                                                                                                      : (string_address) "none");
+        return 0;
+}
+
+static b32 locale_taskbar_pinned(string_address address_to arguments, positive count)
+{
+        p8 text[SETTING_PINS_MOST + 16];
+        positive at = 0, bad;
+        bipolar failed;
+
+        if (count == 3)
+                return locale_taskbar_pinned_status();
+        for (positive word = 3; word < count; word++)
+        {
+                positive length = string_length(arguments[word]);
+
+                if (at + length + 2 > sizeof(text) - 8)
+                        return host_refuse("pinned is at most %p bytes of text\n", (positive)SETTING_PINS_MOST);
+                if (word > 3)
+                        text[at++] = ' ';
+                memory_copy(text + at, arguments[word], length);
+                at += length;
+        }
+        text[at] = end;
+        if (string_equals((string_address)text, "default"))
+                string_copy((string_address)text, (string_address) "none"), at = 4;
+        if (!string_equals((string_address)text, "none") && !setting_pins_valid((const char *)text, &bad))
+                return host_refuse("pinned is a line of at most %p bytes with at most %p programs, each an app_id, the executable it ran as and the words it "
+                                   "is started with (the first of them a path from /), a program ended by a lone ; and a word in single quotes where it "
+                                   "has more than letters, digits and _ . / : = @ + , -; it goes wrong at byte %p\n",
+                                   (positive)SETTING_PINS_MOST, (positive)SETTING_PINS_ENTRIES, bad);
+        if (!bowl_is_root())
+                return host_refuse("setting how Canvas draws needs root (CAP_SYS_ADMIN)\n");
+        text[at++] = '\n';
+        failed = host_write_file(SETTING_TASKBAR_PINNED_PATH, text, at, 0644, true);
+        if (failed < 0)
+                return host_fail("taskbar pinned", failed);
+        return locale_taskbar_pinned_status();
+}
+
+// moonwater taskbar: the plain rows (position, display, text), and tray and pinned, which are a line of text.
 static b32 host_setting_verb(string_address address_to arguments, positive count);
 static b32 host_taskbar(string_address address_to arguments, positive count)
 {
         if (count >= 3 && string_equals(arguments[2], "tray"))
                 return locale_taskbar_tray(arguments, count);
+        if (count >= 3 && string_equals(arguments[2], "pinned"))
+                return locale_taskbar_pinned(arguments, count);
         return host_setting_verb(arguments, count);
 }
 

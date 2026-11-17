@@ -326,6 +326,32 @@ function desktop_notices {
   desktop_run /notices "$@" -f "$desktop_text"
 }
 
+# A program pinned to the taskbar, started by the compositor's saying pin_start_N (a press on its task): its words are in
+# /run/moonwater/pin.N, one a line, left by the compositor in a file made new for the start. They are read, the file removed, and
+# the words started as they are, each one argument and none of them read by the shell again: the program's own start (a kit program is
+# its path alone, and gets the faces it draws in as the functions above give them) or the program's words, from the desktop.
+function desktop_pin {
+  case $1 in
+  '' | *[!0-9]*) return ;;
+  esac
+  desktop_pin_file=/run/moonwater/pin.$1
+  [ -f "$desktop_pin_file" ] && [ ! -L "$desktop_pin_file" ] || return
+  set --
+  while IFS= read -r desktop_pin_word; do
+    set -- "$@" "$desktop_pin_word"
+  done < "$desktop_pin_file"
+  rm -f "$desktop_pin_file"
+  case $1 in
+  '') return ;;
+  /terminal) [ $# -eq 1 ] && desktop_asked desktop_terminal ;;
+  /settings) [ $# -eq 1 ] && desktop_asked desktop_settings ;;
+  /klog) [ $# -eq 1 ] && desktop_asked desktop_log ;;
+  /mixer) [ $# -eq 1 ] && desktop_asked desktop_mixer ;;
+  /notices) [ $# -eq 1 ] && desktop_asked desktop_notices ;;
+  /*) desktop_asked desktop_run "$@" ;;
+  esac
+}
+
 # The key_ functions, for the compositor to listen for, and the FIFO it names a
 # pressed one on; the listener runs what it names.
 function desktop_keys_list {
@@ -348,6 +374,7 @@ function desktop_keys_answer {
       volume_button) desktop_asked desktop_mixer -q -a ;;
       mic_button) desktop_asked desktop_mixer -q -a -i ;;
       notices_button) desktop_asked desktop_notices -a ;;
+      pin_start_*) desktop_pin "${desktop_pressed#pin_start_}" ;;
       esac
     done < /run/moonwater/keys.fire
   done

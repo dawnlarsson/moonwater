@@ -2037,6 +2037,399 @@ static void check_taskbar_tab_menu(void)
 }
 
 /*
+        The programs pinned to the taskbar. The line that keeps them: a word with blanks, a quote, a semicolon or nothing in it is written
+        in quotes and read back as it was; a line with a fault (an app_id with a slash, an entry of fewer than three words, a first word
+        that is not a path, an unclosed quote, a byte below a blank, a lone ; where an entry is not, more entries or bytes than the line
+        holds) is none. A program is pinned from a process of its window by what the system says of it: a kit program as its path, a native
+        program by its command line with its executable for a first word that is no path, a bowl's by its exposed launcher or not at all, and a
+        command line with a byte below a blank or one that was cut not at all. Then the tasks: a pinned program with no window is a task
+        after the windows' that is drawn as one put away, with its app_id's last part for its title, gone while a window says the app_id; its
+        menu has Unpin alone; Pin to taskbar and Unpin from taskbar are in a window's, keep the line in the file the verb keeps it in, and
+        are read back from it; and a press on a task with no window starts the program: its words a line each in a new file, once in a while.
+*/
+static void tab_make_file(const char *path, const char *bytes, unsigned long length)
+{
+    bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+
+    if (handle >= 0)
+        system_write_all((b32)handle, bytes, length), system_close(handle);
+}
+
+static void tab_make_dir(const char *path)
+{
+    system_call_3(syscall(mkdirat), (positive)AT_FDCWD, (positive)path, 0700);
+}
+
+static void tab_make_link(const char *target, const char *path)
+{
+    system_call_3(syscall(symlinkat), (positive)target, (positive)AT_FDCWD, (positive)path);
+}
+
+static void tab_remove_tree(const char *path)
+{
+    char child[256];
+    bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+    char buffer[2048];
+
+    if (handle >= 0)
+    {
+        for (bipolar got = system_read_directory(handle, buffer, sizeof(buffer)); got > 0; got = system_read_directory(handle, buffer, sizeof(buffer)))
+            for (positive at = 0; at < (positive)got;)
+            {
+                const struct linux_dirent64 address_to record = (const struct linux_dirent64 address_to)(buffer + at);
+
+                at += record->d_reclen;
+                if (record->d_name[0] == '.' && (!record->d_name[1] || (record->d_name[1] == '.' && !record->d_name[2])))
+                    continue;
+                string_copy((string_address)child, (string_address)path), string_append_bounded((string_address)child, (string_address) "/", sizeof(child));
+                string_append_bounded((string_address)child, (string_address)record->d_name, sizeof(child));
+                tab_remove_tree(child);
+            }
+        system_close(handle);
+    }
+    system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0x200);
+    system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+}
+
+// A fake process of the table: its stat (named, a parent), the executable it ran as, its command line (the bytes, as many) and its mount view.
+static void tab_fake_process(const char *root, int pid, const char *comm, int ppid, const char *exe, const char *cmdline, unsigned long length, const char *view)
+{
+    char dir[200], path[240];
+    unsigned long at;
+
+    tab_signal_write(root, pid, comm, ppid);
+    string_copy((string_address)dir, (string_address)root), at = string_length((string_address)dir);
+    dir[at++] = '/', at += positive_into_string((p8 *)dir + at, (positive)pid), dir[at] = 0;
+    string_copy((string_address)path, (string_address)dir), string_append_bounded((string_address)path, (string_address) "/exe", sizeof(path));
+    if (exe)
+        tab_make_link(exe, path);
+    string_copy((string_address)path, (string_address)dir), string_append_bounded((string_address)path, (string_address) "/cmdline", sizeof(path));
+    if (cmdline)
+        tab_make_file(path, cmdline, length);
+    string_copy((string_address)path, (string_address)dir), string_append_bounded((string_address)path, (string_address) "/ns", sizeof(path));
+    tab_make_dir(path);
+    string_append_bounded((string_address)path, (string_address) "/mnt", sizeof(path));
+    if (view)
+        tab_make_link(view, path);
+}
+
+static bool tab_words_are(const struct taskbar_pin *pin, int count, const char *const *words)
+{
+    bool same = pin->count == count;
+
+    for (int at = 0; same && at < count; at++)
+        same = string_equals((string_address)taskbar_pin_word(pin, at), (string_address)words[at]);
+    return same;
+}
+
+static void check_taskbar_pins(void)
+{
+    static unsigned int screen[GLASS_SIDE * GLASS_SIDE];
+    static const char *const good[] = {"a /b /c", "a /b /c x ; d /e /f 'g h'", "app.id-2+x /x /y 'it'\\''s' ;", "a /b /c ''", "a /b /c    x",
+                                       "org.mozilla.firefox /usr/lib/firefox/firefox /usr/lib/firefox/firefox --new-window --class=a_b,c@d%e"};
+    static const char *const bad[] = {";", "a /b", "a b /c", "a /b c", "a/b /x /y", "a /b /c 'unclosed", "a /b /c x;y", "a /b /c ;; d /e /f", "a /b /c 'x\001y'",
+                                      "a /b /c \"x\"", "; a /b /c", "a /b /c ; ; d /e /f", ".. /b /c ~", "a /b /c \\n", "a /b /c ('x')"};
+    static const char *const words[] = {"x y", "it's", "", ";", "--a=b", "un\303\257", "'", "a'b'c", "$(rm)", "\\"};
+    char line[SETTING_PINS_MOST + 64], word[SETTING_PINS_WORD], root[96], path[200], second[96];
+    positive at = 0, bad_at = 0;
+    bool grammar = true, refused = true, quoted = true, long_ok, many_ok = true;
+    struct taskbar_pin pin, other;
+    struct windows address_to table;
+    struct taskbar_view view;
+    int x, y, w, h, tab, ghost, pids = 0;
+
+    for (unsigned int each = 0; each < sizeof(good) / sizeof(good[0]); each++)
+        grammar &= setting_pins_valid(good[each], null);
+    for (unsigned int each = 0; each < sizeof(bad) / sizeof(bad[0]); each++)
+        refused &= !setting_pins_valid(bad[each], &bad_at);
+    // Each word written is read back as it was, alone and among others.
+    line[0] = 0;
+    for (unsigned int each = 0; each < sizeof(words) / sizeof(words[0]); each++)
+        quoted &= setting_pins_quote(line, &at, sizeof(line), words[each]);
+    {
+        positive from = 0;
+
+        for (unsigned int each = 0; each < sizeof(words) / sizeof(words[0]); each++)
+            quoted &= setting_pins_next(line, &from, word, sizeof(word)) == SETTING_PINS_WORD_NEXT && string_equals((string_address)word, (string_address)words[each]);
+        quoted &= setting_pins_next(line, &from, word, sizeof(word)) == SETTING_PINS_END;
+    }
+    // A line of bytes: 2048 are the most, and 16 programs; a seventeenth or the 2049th byte is none.
+    string_copy((string_address)line, (string_address) "a /b /c");
+    for (int each = 0; each < 20; each++)
+    {
+        positive stop = string_length((string_address)line);
+
+        if (stop + 20 >= sizeof(line))
+            break;
+        string_copy((string_address)line + stop, (string_address) " ; a /b /c");
+        many_ok &= setting_pins_valid(line, null) == (each + 2 <= SETTING_PINS_ENTRIES);
+    }
+    string_copy((string_address)line, (string_address) "a /b /c ");
+    for (at = 8; at < SETTING_PINS_MOST + 1; at++)
+        line[at] = 'x';
+    line[SETTING_PINS_MOST + 1] = 0;
+    long_ok = !setting_pins_valid(line, &bad_at) && bad_at == SETTING_PINS_MOST;
+    check("taskbar pinned: lines of programs are lines", grammar);
+    check("taskbar pinned: a line with an app_id with a slash, an entry of two words, a word that is no path, an unclosed quote, a byte below a blank or a stray ; is none", refused);
+    check("taskbar pinned: a word with blanks, a quote, a semicolon, nothing or a backslash is written in quotes and read back as it was", quoted);
+    check("taskbar pinned: at most 16 programs and 2048 bytes", many_ok && long_ok);
+
+    // The programs as a line says them, and the line they make: the same, the title the last part of the app_id.
+    taskbar_pins_set("org.mozilla.firefox /usr/lib/firefox/firefox /usr/lib/firefox/firefox --new-window 'a b' ; settings /settings /settings");
+    check("taskbar pinned: a line is two programs, their words and their titles", taskbar_pins.count == 2 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "org.mozilla.firefox") &&
+          string_equals((string_address)taskbar_pins.pin[0].title, (string_address) "firefox") && taskbar_pins.pin[0].count == 5 &&
+          string_equals((string_address)taskbar_pin_word(&taskbar_pins.pin[0], 3), (string_address) "--new-window") &&
+          string_equals((string_address)taskbar_pin_word(&taskbar_pins.pin[0], 4), (string_address) "a b") && string_equals((string_address)taskbar_pins.pin[1].title, (string_address) "settings"));
+    taskbar_pins_line(line, sizeof(line), null, null);
+    check("taskbar pinned: the line they make is the line they came from", string_equals((string_address)line, (string_address) "org.mozilla.firefox /usr/lib/firefox/firefox /usr/lib/firefox/firefox --new-window 'a b' ; settings /settings /settings"));
+    taskbar_pins_set("a /b /c ; a b");
+    check("taskbar pinned: a line with a fault is none of them, and so is none", !taskbar_pins.count);
+    taskbar_pins_set("none");
+    check("taskbar pinned: none is none", !taskbar_pins.count);
+
+    // The fake system: /proc, the settings and /run under a directory of the check's own.
+    string_copy((string_address)root, (string_address) "/tmp/moonwater-check-pins-");
+    positive_into_string((p8 *)root + string_length((string_address)root), (positive)system_call(syscall(getpid)));
+    tab_remove_tree(root);
+    tab_make_dir(root);
+    for (int each = 0; each < 5; each++)
+    {
+        static const char *const names[5] = {"/proc", "/root", "/run", "/bin", "/proc/self"};
+
+        string_copy((string_address)path, (string_address)root), string_append_bounded((string_address)path, (string_address)names[each], sizeof(path));
+        tab_make_dir(path);
+    }
+    string_copy((string_address)second, (string_address)root), string_append_bounded((string_address)second, (string_address) "/proc", sizeof(second));
+    {
+        static char proc_root[112], run_root[112], bowl_bin[112], settings_root[112];
+        char own[64];
+        long got = (long)compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive) "/proc/self/ns/mnt", (positive)own, sizeof(own) - 1, 0, 0);
+
+        own[got > 0 ? got : 0] = 0;
+        string_copy((string_address)proc_root, (string_address)second);
+        string_copy((string_address)run_root, (string_address)root), string_append_bounded((string_address)run_root, (string_address) "/run", sizeof(run_root));
+        string_copy((string_address)bowl_bin, (string_address)root), string_append_bounded((string_address)bowl_bin, (string_address) "/bin/", sizeof(bowl_bin));
+        string_copy((string_address)settings_root, (string_address)root);
+        taskbar_proc_root = proc_root, taskbar_run_root = run_root, taskbar_bowl_bin = bowl_bin, compositor_settings_root = settings_root;
+        // Processes: 61 a program as it was started (a bare name, arguments with a blank and a quote), 62 a kit program, 63 and 64 a bowl's,
+        // 65 with a newline in an argument, 66 started by a relative path, 67 whose command line is longer than is read, 68 with none.
+        tab_fake_process(proc_root, 61, "firefox", 40, "/usr/lib/firefox/firefox", "firefox\0--new-window\0a b\0it's\0", 30, own);
+        tab_fake_process(proc_root, 62, "settings", 1, "/settings", "/settings\0-f\0/x.ttf\0", 20, own);
+        tab_fake_process(proc_root, 63, "bowlapp", 40, "/usr/bin/bowlapp", "bowlapp\0--x\0", 12, "mnt:[1]");
+        tab_fake_process(proc_root, 64, "lostapp", 40, "/usr/bin/lostapp", "/usr/bin/lostapp\0", 17, "mnt:[1]");
+        tab_fake_process(proc_root, 65, "newline", 40, "/usr/bin/newline", "newline\0a\nb\0", 12, own);
+        tab_fake_process(proc_root, 66, "tool", 40, "/opt/tool/tool", "./tool\0go\0", 10, own);
+        tab_fake_process(proc_root, 68, "none", 40, "/usr/bin/none", null, 0, own);
+        {
+            static char big[2400];
+
+            for (int each = 0; each < 2200; each++)
+                big[each] = each % 8 == 7 ? 0 : 'a';
+            tab_fake_process(proc_root, 67, "huge", 40, "/usr/bin/huge", big, 2200, own);
+        }
+        string_copy((string_address)path, (string_address)bowl_bin), string_append_bounded((string_address)path, (string_address) "bowlapp", sizeof(path));
+        tab_make_file(path, "#!/bowl @/bowls/arch /usr/bin/bowlapp\n", 38);
+    }
+    taskbar_pins_set("none");
+    string_copy((string_address)compositor.app_id[5], (string_address) "firefox"), string_copy((string_address)compositor.app_id[6], (string_address) "settings");
+    string_copy((string_address)compositor.app_id[7], (string_address) "bowlapp"), string_copy((string_address)compositor.app_id[8], (string_address) "lostapp");
+    string_copy((string_address)compositor.app_id[9], (string_address) "newline"), string_copy((string_address)compositor.app_id[10], (string_address) "tool");
+    string_copy((string_address)compositor.app_id[11], (string_address) "huge"), string_copy((string_address)compositor.app_id[12], (string_address) "none");
+    string_copy((string_address)compositor.app_id[13], (string_address) "a/b");
+    {
+        static const char *const native[] = {"firefox", "/usr/lib/firefox/firefox", "/usr/lib/firefox/firefox", "--new-window", "a b", "it's"};
+        static const char *const kit[] = {"settings", "/settings", "/settings"};
+        const char *bowl[4] = {"bowlapp", "/usr/bin/bowlapp", "", "--x"};
+        static const char *const relative[] = {"tool", "/opt/tool/tool", "/opt/tool/tool", "go"};
+        char launcher[200];
+
+        string_copy((string_address)launcher, (string_address)taskbar_bowl_bin), string_append_bounded((string_address)launcher, (string_address) "bowlapp", sizeof(launcher));
+        bowl[2] = launcher;
+        check("taskbar pinned: a program is pinned by its app_id, its executable and its command line, the first word its executable's when it was a bare name",
+              taskbar_pin_capture(5, 61, &pin) && tab_words_are(&pin, 6, native) && string_equals((string_address)pin.title, (string_address) "firefox"));
+        check("taskbar pinned: a kit program is pinned as its path alone", taskbar_pin_capture(6, 62, &pin) && tab_words_are(&pin, 3, kit));
+        check("taskbar pinned: a program of another mount view is pinned by the launcher its bowl exposed, and by none when it has none",
+              taskbar_pin_capture(7, 63, &pin) && tab_words_are(&pin, 4, bowl) && !taskbar_pin_capture(8, 64, &other));
+        check("taskbar pinned: a command line with a byte below a blank, one that is cut, one that is not there and an app_id that is none are not pinned",
+              !taskbar_pin_capture(9, 65, &other) && !taskbar_pin_capture(11, 67, &other) && !taskbar_pin_capture(12, 68, &other) && !taskbar_pin_capture(13, 61, &other));
+        check("taskbar pinned: a program started by a relative path is pinned by its executable", taskbar_pin_capture(10, 66, &pin) && tab_words_are(&pin, 4, relative));
+    }
+
+    // The menu on the fixture of the tray's, with one window (61, firefox).
+    compositor_zero();
+    taskbar_classic();
+    compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
+    compositor.resize = compositor.press = compositor.keys_to = COMPOSITOR_NONE;
+    compositor.width = compositor.height = GLASS_SIDE;
+    compositor.scale = 100;
+    compositor.card = -1;
+    compositor.scanout = screen;
+    compositor.scanout_pitch = GLASS_SIDE * 4;
+    compositor.face = band_face, compositor.engine = &band_engine;
+    if (!glass_table_map())
+    {
+        check("taskbar pinned: the table is mapped", false);
+        taskbar_standard();
+        return;
+    }
+    table = compositor.table;
+    // One window, the band is no wider than a pinned program's task is to have room beside it.
+    table->x[1] = 80;
+    table->y[1] = 20;
+    table->width[1] = 50;
+    table->height[1] = 60;
+    glass_paint(1, 0, 0, 50, 60, 0x404041u, true);
+    windows_app_id_set(table, 1, "firefox");
+    table->pid[1] = 61;
+    compositor_identity_take(1);
+    compositor_present();
+    compositor_focus(1);
+    taskbar_signal = tab_signal_note;
+    tab_signal_write(taskbar_proc_root, 40, "moonwater", 1), tab_signal_write(taskbar_proc_root, 1, "init", 0);
+
+    view = compositor_band_view();
+    tab = -1;
+    for (unsigned int each = 0; each < view.count; each++)
+        tab = compositor.listed[each] == 1 ? (int)each : tab;
+    // A right press on firefox's tab: Exit, Force stop, and Pin to taskbar.
+    if (tab >= 0 && taskbar_slot(&view, tab, &x, &y, &w, &h))
+    {
+        compositor.pointer_x = x + w / 2, compositor.pointer_y = y + h / 2;
+        compositor_pointer_clamp();
+        compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+        compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+    }
+    check("taskbar pinned: a window's menu has Pin to taskbar after Exit and Force stop", taskbar_menu.open && taskbar_menu.menu.count == 4 &&
+          taskbar_menu.menu.items[0].id == TASKBAR_MENU_EXIT && taskbar_menu.menu.items[1].id == TASKBAR_MENU_STOP && taskbar_menu.menu.items[3].id == TASKBAR_MENU_PIN &&
+          string_equals((string_address)taskbar_menu.menu.items[3].label, (string_address) "Pin to taskbar"));
+    if (taskbar_menu.open)
+        compositor_menu_chose(TASKBAR_MENU_PIN);
+    {
+        char kept[SETTING_PINS_MOST + 16];
+        bipolar got;
+
+        taskbar_pins_path(path, sizeof(path));
+        got = file_slurp_regular_at(AT_FDCWD, (string_address)path, (p8 *)kept, sizeof(kept) - 1, 0);
+        kept[got > 0 ? got : 0] = 0;
+        check("taskbar pinned: Pin to taskbar keeps the program in the file of the verb, as the line it is, and as the pinned program",
+              got > 0 && string_equals((string_address)kept, (string_address) "firefox /usr/lib/firefox/firefox /usr/lib/firefox/firefox --new-window 'a b' 'it'\\''s'\n") &&
+              taskbar_pins.count == 1 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "firefox"));
+    }
+    // With its window there the program has no task of its own; its window's menu says Unpin from taskbar.
+    view = compositor_band_view();
+    ghost = view.count;
+    if (tab >= 0 && taskbar_slot(&view, tab, &x, &y, &w, &h))
+    {
+        compositor.pointer_x = x + w / 2, compositor.pointer_y = y + h / 2;
+        compositor_pointer_clamp();
+        compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+        compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+    }
+    check("taskbar pinned: a pinned program with a window has no task of its own, and its window's menu says Unpin from taskbar",
+          ghost == 1 && taskbar_menu.open && taskbar_menu.menu.count == 4 && taskbar_menu.menu.items[3].id == TASKBAR_MENU_UNPIN &&
+              string_equals((string_address)taskbar_menu.menu.items[3].label, (string_address) "Unpin from taskbar"));
+    compositor_menu_close();
+
+    // The window gone (another program in its row): the pinned program is a task after the windows', drawn as one put away.
+    windows_app_id_set(table, 1, "other");
+    compositor_identity_take(1);
+    view = compositor_band_view();
+    check("taskbar pinned: with no window of its app_id a pinned program is a task after the windows', away, titled by its program",
+          view.count == 2 && compositor.listed[1] == TASKBAR_GHOST && (view.marks[1] & COMPOSITOR_TAB_AWAY) && string_equals((string_address)view.titles[1], (string_address) "firefox") &&
+              string_equals((string_address)view.apps[1], (string_address) "firefox") && taskbar_pin_of_tab(1) == 0);
+    ghost = taskbar_slot(&view, 1, &x, &y, &w, &h);
+    check("taskbar pinned: that task has its place in the band", ghost);
+    if (ghost)
+    {
+        compositor.pointer_x = x + w / 2, compositor.pointer_y = y + h / 2;
+        compositor_pointer_clamp();
+        compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+        compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+    }
+    check("taskbar pinned: its menu has Unpin from taskbar alone", ghost && taskbar_menu.open && taskbar_menu.menu.count == 1 &&
+          taskbar_menu.menu.items[0].id == TASKBAR_MENU_UNPIN);
+    compositor_menu_close();
+
+    // A left press on it starts the program: its words a line each in a file new to the run directory, and not again at once.
+    if (ghost)
+    {
+        char started[200], buffer[1024], content[400];
+        bipolar handle, got;
+        int files = 0, again = 0;
+
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        content[0] = 0;
+        handle = system_open_at(AT_FDCWD, (string_address)taskbar_run_root, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        got = handle >= 0 ? system_read_directory(handle, buffer, sizeof(buffer)) : 0;
+        for (positive each = 0; got > 0 && each < (positive)got;)
+        {
+            const struct linux_dirent64 address_to record = (const struct linux_dirent64 address_to)(buffer + each);
+
+            each += record->d_reclen;
+            if (!string_compare_max((string_address)record->d_name, (string_address) "pin.", 4))
+            {
+                bipolar length;
+
+                files++;
+                string_copy((string_address)started, (string_address)taskbar_run_root), string_append_bounded((string_address)started, (string_address) "/", sizeof(started));
+                string_append_bounded((string_address)started, (string_address)record->d_name, sizeof(started));
+                length = file_slurp_regular_at(AT_FDCWD, (string_address)started, (p8 *)content, sizeof(content) - 1, 0);
+                content[length > 0 ? length : 0] = 0;
+                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)started, 0);
+            }
+        }
+        if (handle >= 0)
+            system_close(handle);
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        handle = system_open_at(AT_FDCWD, (string_address)taskbar_run_root, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        got = handle >= 0 ? system_read_directory(handle, buffer, sizeof(buffer)) : 0;
+        for (positive each = 0; got > 0 && each < (positive)got;)
+        {
+            const struct linux_dirent64 address_to record = (const struct linux_dirent64 address_to)(buffer + each);
+
+            each += record->d_reclen;
+            again += !string_compare_max((string_address)record->d_name, (string_address) "pin.", 4);
+        }
+        if (handle >= 0)
+            system_close(handle);
+        check("taskbar pinned: a left press on the task of a pinned program that has no window leaves its words, a line each, in a new file, and once", files == 1 &&
+              string_equals((string_address)content, (string_address) "/usr/lib/firefox/firefox\n--new-window\na b\nit's\n") && !again);
+    }
+
+    // Unpin from the task, and the file says none; and the file read as the settings are (the pinned programs are what it says).
+    if (ghost)
+    {
+        compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+        compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+        if (taskbar_menu.open)
+            compositor_menu_chose(TASKBAR_MENU_UNPIN);
+    }
+    {
+        char kept[64];
+        bipolar got;
+
+        taskbar_pins_path(path, sizeof(path));
+        got = file_slurp_regular_at(AT_FDCWD, (string_address)path, (p8 *)kept, sizeof(kept) - 1, 0);
+        kept[got > 0 ? got : 0] = 0;
+        check("taskbar pinned: Unpin from taskbar takes the program from the line, which says none, and the task goes", !taskbar_pins.count &&
+              string_equals((string_address)kept, (string_address) "none\n") && compositor_band_view().count == 1);
+    }
+    tab_make_file(path, "settings /settings /settings\n", 29);
+    taskbar_settings_set("bottom", "primary", "");
+    check("taskbar pinned: the settings read the file, so the verb and the menu agree", taskbar_pins.count == 1 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "settings"));
+    // A window that is no program's own (pid 1, the machine's) is not pinned from.
+    (void)pids;
+    taskbar_pins_set("none");
+
+    tab_remove_tree(root);
+    taskbar_proc_root = "/proc", taskbar_run_root = "/run/moonwater", taskbar_bowl_bin = "/bowls/bin/", compositor_settings_root = "";
+    taskbar_signal = taskbar_signal_send;
+    taskbar_standard();
+}
+
+/*
         The panel's launcher button pressed. With the button on, a left press on it asks the script for the launcher (launcher_button)
         and writes the rectangle it opens beside, the panel's edge and the screen in the window table first; a press of another button
         does nothing; a press while the launcher is up puts it away and asks for no other; and the button is lit while the launcher is

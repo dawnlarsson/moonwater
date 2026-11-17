@@ -242,8 +242,10 @@ settings_unknown	9fb9	desconocido
 settings_verb_hint	05aa	VERBO [ARGUMENTOS]
 settings_virtual_refused	4202	un dispositivo virtual no puede activar esto: use un teclado o ratón conectado a la máquina, o moonwater ssh en un terminal de root
 taskbar_tab_exit	44a5	Salir
+taskbar_tab_pin	d57f	Anclar a la barra de tareas
 taskbar_tab_stop	3684	Forzar detención
 taskbar_tab_stop_windows	3c5f	Forzar detención (%d ventanas)
+taskbar_tab_unpin	6771	Desanclar de la barra de tareas
 terminal_exited_press_to_close	a8cf	terminó con estado %d, pulse una tecla para cerrar
 terminal_press_to_close	080d	pulse una tecla para cerrar
 tray_am	0d13	a. m.
@@ -437,6 +439,7 @@ ui_field_full	fe02	no cabe más
 =Taskbar hides for fullscreen	f2f8	La barra de tareas se oculta en pantalla completa
 =Taskbar launcher button	dd4d	Botón del lanzador en la barra de tareas
 =Taskbar padding (pixels)	a3a0	Espaciado de la barra de tareas (píxeles)
+=Taskbar pinned programs (or none)	3732	Programas fijados a la barra de tareas (o ninguno)
 =Taskbar position	81b8	Posición de la barra de tareas
 =Taskbar scale (percent)	810b	Escala de la barra de tareas (porcentaje)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Bandeja de la barra de tareas (texto con {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

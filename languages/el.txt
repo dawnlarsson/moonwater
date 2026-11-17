@@ -242,8 +242,10 @@ settings_unknown	9fb9	άγνωστο
 settings_verb_hint	05aa	ΡΗΜΑ [ΟΡΙΣΜΑΤΑ]
 settings_virtual_refused	4202	εικονική συσκευή δεν μπορεί να το ανοίξει: πληκτρολόγιο ή ποντίκι του υπολογιστή, ή moonwater ssh σε τερματικό root
 taskbar_tab_exit	44a5	Έξοδος
+taskbar_tab_pin	d57f	Καρφίτσωμα στη γραμμή εργασιών
 taskbar_tab_stop	3684	Αναγκαστική διακοπή
 taskbar_tab_stop_windows	3c5f	Αναγκαστική διακοπή (%d παράθυρα)
+taskbar_tab_unpin	6771	Ξεκαρφίτσωμα από τη γραμμή εργασιών
 terminal_exited_press_to_close	a8cf	τερματίστηκε με κατάσταση %d, πατήστε ένα πλήκτρο για κλείσιμο
 terminal_press_to_close	080d	πατήστε ένα πλήκτρο για κλείσιμο
 tray_am	0d13	πμ
@@ -437,6 +439,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Taskbar hides for fullscreen	f2f8	Η γραμμή εργασιών κρύβεται σε πλήρη οθόνη
 =Taskbar launcher button	dd4d	Κουμπί εκκινητή στη γραμμή εργασιών
 =Taskbar padding (pixels)	a3a0	Διαστήματα της γραμμής εργασιών (εικονοστοιχεία)
+=Taskbar pinned programs (or none)	3732	Προγράμματα καρφιτσωμένα στη γραμμή εργασιών (ή κανένα)
 =Taskbar position	81b8	Θέση της γραμμής εργασιών
 =Taskbar scale (percent)	810b	Κλίμακα της γραμμής εργασιών (ποσοστό)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Περιοχή ειδοποιήσεων της γραμμής εργασιών (κείμενο με {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

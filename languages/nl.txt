@@ -242,8 +242,10 @@ settings_unknown	9fb9	onbekend
 settings_verb_hint	05aa	WERKWOORD [ARGUMENTEN]
 settings_virtual_refused	4202	een virtueel apparaat kan dit niet aanzetten: gebruik een toetsenbord of muis die op de machine is aangesloten, of moonwater ssh in een root-terminal
 taskbar_tab_exit	44a5	Afsluiten
+taskbar_tab_pin	d57f	Aan taakbalk vastmaken
 taskbar_tab_stop	3684	Geforceerd stoppen
 taskbar_tab_stop_windows	3c5f	Geforceerd stoppen (%d vensters)
+taskbar_tab_unpin	6771	Van taakbalk losmaken
 terminal_exited_press_to_close	a8cf	beëindigd met status %d, druk op een toets om te sluiten
 terminal_press_to_close	080d	druk op een toets om te sluiten
 tray_am	0d13	a.m.
@@ -437,6 +439,7 @@ ui_field_full	fe02	meer past er niet in
 =Taskbar hides for fullscreen	f2f8	Taakbalk verbergt zich bij volledig scherm
 =Taskbar launcher button	dd4d	Starterknop op de taakbalk
 =Taskbar padding (pixels)	a3a0	Tussenruimte van de taakbalk (pixels)
+=Taskbar pinned programs (or none)	3732	Aan de taakbalk vastgemaakte programma's (of geen)
 =Taskbar position	81b8	Positie van de taakbalk
 =Taskbar scale (percent)	810b	Schaal van de taakbalk (procent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Systeemvak van de taakbalk (tekst met {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

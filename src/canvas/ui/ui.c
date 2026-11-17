@@ -1392,6 +1392,8 @@ static int taskbar_moon_glow_was(int band, int shown);
 static int taskbar_menu_open(const struct taskbar_view *view);
 static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab);
 static void taskbar_tab_chose(int id);
+static unsigned int taskbar_pins_tabs(struct taskbar_view *view, unsigned int room, unsigned char *marks, unsigned char *lengths, unsigned int *rows);
+static void taskbar_pin_start(int tab, positive now);
 static void taskbar_menu_draw(const struct taskbar_view *view, unsigned int *pixels);
 static int taskbar_menu_hand(unsigned int type, unsigned int flags, int a, int b, int x, int y);
 static void taskbar_edit_set(int on);
@@ -1402,6 +1404,9 @@ static int taskbar_edit_drop(const struct taskbar_view *view, int which, int px,
 #define TASKBAR_MENU_CLOCK 3    // the other clock format
 #define TASKBAR_MENU_EXIT 4     // a tab's menu: Exit, the window asked to close as its close button does
 #define TASKBAR_MENU_STOP 5     // Force stop: the program's processes ended
+#define TASKBAR_MENU_PIN 6      // Pin to taskbar: the window's program kept on the taskbar
+#define TASKBAR_MENU_UNPIN 7    // Unpin from taskbar
+#define TASKBAR_GHOST 0xffffffffu // the row a view gives the task of a pinned program that has no window (taskbar_pins_tabs)
 #define TASKBAR_EDIT_ROWS 8     // the rows the arrangement keeps
 static int taskbar_menu_rect(int rect[4]);
 static int taskbar_menu_redraw(void);
@@ -8034,8 +8039,10 @@ LANGUAGE_ID(settings_used_of, "%1$s / %2$s") \
 LANGUAGE_ID(settings_verb_hint, "VERB [ARGUMENTS]") \
 LANGUAGE_ID(settings_virtual_refused, "a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal") \
 LANGUAGE_ID(taskbar_tab_exit, "Exit") \
+LANGUAGE_ID(taskbar_tab_pin, "Pin to taskbar") \
 LANGUAGE_ID(taskbar_tab_stop, "Force stop") \
 LANGUAGE_ID(taskbar_tab_stop_windows, "Force stop (%d windows)") \
+LANGUAGE_ID(taskbar_tab_unpin, "Unpin from taskbar") \
 LANGUAGE_ID(terminal_exited_press_to_close, "exited with status %d, press a key to close") \
 LANGUAGE_ID(terminal_press_to_close, "press a key to close") \
 LANGUAGE_ID(tray_am, "AM") \

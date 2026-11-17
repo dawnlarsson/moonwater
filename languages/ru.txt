@@ -242,8 +242,10 @@ settings_unknown	9fb9	неизвестно
 settings_verb_hint	05aa	ГЛАГОЛ [АРГУМЕНТЫ]
 settings_virtual_refused	4202	виртуальное устройство не может это включить: клавиатура или мышь машины, или moonwater ssh в терминале root
 taskbar_tab_exit	44a5	Выход
+taskbar_tab_pin	d57f	Закрепить на панели задач
 taskbar_tab_stop	3684	Принудительно остановить
 taskbar_tab_stop_windows	3c5f	Принудительно остановить (окон: %d)
+taskbar_tab_unpin	6771	Открепить от панели задач
 terminal_exited_press_to_close	a8cf	завершено со статусом %d, нажмите любую клавишу, чтобы закрыть
 terminal_press_to_close	080d	нажмите любую клавишу, чтобы закрыть
 tray_am	0d13	ДП
@@ -437,6 +439,7 @@ ui_field_full	fe02	больше не помещается
 =Taskbar hides for fullscreen	f2f8	Панель задач скрывается в полноэкранном режиме
 =Taskbar launcher button	dd4d	Кнопка запуска на панели задач
 =Taskbar padding (pixels)	a3a0	Отступы панели задач (пиксели)
+=Taskbar pinned programs (or none)	3732	Программы, закреплённые на панели задач (или нет)
 =Taskbar position	81b8	Положение панели задач
 =Taskbar scale (percent)	810b	Масштаб панели задач (проценты)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область уведомлений панели задач (текст с {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

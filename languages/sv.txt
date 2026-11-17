@@ -242,8 +242,10 @@ settings_unknown	9fb9	okänt
 settings_verb_hint	05aa	VERB [ARGUMENT]
 settings_virtual_refused	4202	en virtuell enhet kan inte slå på detta: använd ett tangentbord eller en mus som är ansluten till datorn, eller moonwater ssh i en root-terminal
 taskbar_tab_exit	44a5	Avsluta
+taskbar_tab_pin	d57f	Fäst i aktivitetsfältet
 taskbar_tab_stop	3684	Tvinga stopp
 taskbar_tab_stop_windows	3c5f	Tvinga stopp (%d fönster)
+taskbar_tab_unpin	6771	Lossa från aktivitetsfältet
 terminal_exited_press_to_close	a8cf	avslutades med status %d, tryck på en tangent för att stänga
 terminal_press_to_close	080d	tryck på en tangent för att stänga
 tray_am	0d13	fm
@@ -437,6 +439,7 @@ ui_field_full	fe02	mer ryms inte
 =Taskbar hides for fullscreen	f2f8	Aktivitetsfältet döljs i helskärm
 =Taskbar launcher button	dd4d	Startarknapp i aktivitetsfältet
 =Taskbar padding (pixels)	a3a0	Aktivitetsfältets avstånd (pixlar)
+=Taskbar pinned programs (or none)	3732	Program fästa i aktivitetsfältet (eller inga)
 =Taskbar position	81b8	Aktivitetsfältets plats
 =Taskbar scale (percent)	810b	Aktivitetsfältets skala (procent)
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Aktivitetsfältets systemfält (text med {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)

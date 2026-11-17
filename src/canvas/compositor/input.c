@@ -1983,6 +1983,15 @@ static void compositor_button(unsigned int code, int down)
         // The tray takes none.
         if (tab >= 0)
         {
+                // A pinned program with no window (taskbar_pins_tabs) has no row to bring up or ask to go: a left press starts it.
+                if (compositor.listed[tab] == TASKBAR_GHOST)
+                {
+                        if (code == COMPOSITOR_BTN_LEFT)
+                                taskbar_pin_start(tab, clock_monotonic_nanoseconds());
+                        else if (code == COMPOSITOR_BTN_RIGHT)
+                                compositor_menu_open(compositor.pointer_x, compositor.pointer_y);
+                        return;
+                }
                 if (code == COMPOSITOR_BTN_MIDDLE)
                         compositor_close(compositor.listed[tab]);
                 else if (code == COMPOSITOR_BTN_LEFT)

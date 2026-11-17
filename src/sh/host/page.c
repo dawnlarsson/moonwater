@@ -1452,6 +1452,8 @@ static string_address host_wipe_keep[128] = {
     HOST_WIPE_KEEP(SETTING_CANVAS_DISPLAYS_PATH),
     //  The tray's format, whose row is a special one (locale_taskbar_tray), so the table's plain rows do not name it.
     HOST_WIPE_KEEP(SETTING_TASKBAR_TRAY_PATH),
+    //  The programs pinned to the taskbar, whose row is a special one too (locale_taskbar_pinned).
+    HOST_WIPE_KEEP(SETTING_TASKBAR_PINNED_PATH),
     //  The sound card and the microphone, whose rows are special ones (locale_audio_pick); the rest of the Sound rows are plain.
     HOST_WIPE_KEEP(SETTING_AUDIO_DEVICE_PATH),
     HOST_WIPE_KEEP(SETTING_AUDIO_SOURCE_PATH),

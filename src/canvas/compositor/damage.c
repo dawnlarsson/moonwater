@@ -1100,6 +1100,9 @@ static struct taskbar_view compositor_taskbar_view(void)
                 view.icons[at] = compositor.icon_seq[row] ? compositor.icon[row] : null;
                 view.icon_seqs[at] = compositor.icon_seq[row];
         }
+        // The pinned programs that have no window follow the windows, as many as the arrays have room for.
+        view.count += taskbar_pins_tabs(&view, COMPOSITOR_ROWS > (int)view.count ? (unsigned int)COMPOSITOR_ROWS - view.count : 0, compositor.marks,
+                                        compositor.lengths, compositor.listed);
         return view;
 }
 

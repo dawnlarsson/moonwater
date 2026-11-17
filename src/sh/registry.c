@@ -173,6 +173,12 @@
 #define SETTING_TASKBAR_TRAY_DATE_DMY "  {date.day}.{date.month}.{date.year}"
 #define SETTING_TASKBAR_TRAY_DATE_MDY "  {date.month}/{date.day}/{date.year}"
 #define SETTING_TRAY_MOST 96 // bytes of a format
+// The programs pinned to the taskbar (`taskbar pinned`): one line, which setting_pins_valid says what is in it.
+#define SETTING_TASKBAR_PINNED_PATH "/root/taskbar.pinned"
+#define SETTING_PINS_MOST 2048 // bytes of the line
+#define SETTING_PINS_ENTRIES 16 // programs it names
+#define SETTING_PINS_WORDS 32   // words of an entry: its app_id, its executable and the words the program is started with
+#define SETTING_PINS_WORD 512   // bytes of a word
 #define SETTING_THEME_PATH "/root/canvas.theme"
 // The theme `auto` is light from this hour of the local clock to the other, and dark outside them: the compositor's windows
 // and the session bus's color-scheme (src/dbus/service.c) take it from here, so that a program of a bowl turns with them.
@@ -758,6 +764,11 @@ static const struct settings_row settings_rows[] = {
      .usage = "taskbar tray [FORMAT|default]",
      .help = "what the tray shows: text with {battery} {battery.percent} {battery.state} {time.24h.hour} {time.24h.min} {time.12h.hour} {time.ampm} {date.year} {date.month} {date.day} {date.weekday} {date.monthname} {cpu.load} {mem.used} {temp} {host} in it; {{ and }} are the braces [the battery, then the clock]",
      .path = SETTING_TASKBAR_TRAY_PATH},
+    //  A special row (host.c locale_taskbar_pinned) whose file the compositor watches: the whole line is the programs pinned.
+    {null, "Taskbar pinned programs (or none)", SETTINGS_FIELD, 0, SETTINGS_LINE, {"taskbar", "pinned"}, "pinned ", null, {"taskbar", "pinned"}, null, 0,
+     .usage = "taskbar pinned [LINE|none]",
+     .help = "the programs pinned to the taskbar, shown as a task while they are not running and started by a press on it: entries of an app_id, the executable and the words it starts with, each ended by a lone ;, a word in single quotes unless it is letters, digits and _ . / : = @ + , - [none]",
+     .path = SETTING_TASKBAR_PINNED_PATH},
     {"Time", "Set the clock from the network", SETTINGS_SWITCH, 0, 0, {"ntp"}, "ntp ", null, {"ntp"}, null, 0,
      .usage = "ntp [on|off]", .help = "set the clock from the network [on]"},
     {null, "Time zone", SETTINGS_FIELD, 0, 0, {"timezone"}, "timezone ", null, {"timezone"}, null, 0,
@@ -1414,6 +1425,180 @@ wrong:
         if (bad)
                 *bad = at;
         return false;
+}
+
+/*
+        The taskbar's pinned programs: a line of entries, each an app_id, the executable the program ran as when it was pinned (for the
+        record) and the words it is started with (argv, the first an absolute path), the entries ended by a lone ;, as in
+            org.mozilla.firefox /usr/lib/firefox/firefox /bowls/bin/firefox --new-window ; settings /settings /settings
+        A word is made of parts that touch: a run of letters, digits and _ . / : = @ % + , -, a piece in single quotes (any bytes but a quote,
+        none below a blank or the delete one), and \' for a quote; so a line is read as a shell reads single quotes, though nothing here is
+        run by one. setting_pins_next takes the next word of a line, or the separator, or finds the fault; setting_pins_valid judges a line
+        whole (at most SETTING_PINS_MOST bytes and SETTING_PINS_ENTRIES entries, an entry of 3 to SETTING_PINS_WORDS words whose app_id is
+        letters, digits and _ . + - up to WINDOWS_APP_ID - 1 and whose executable and first word are absolute); setting_pins_quote writes
+        a word in the form that reads back as it is.
+*/
+#define SETTING_PINS_END 0
+#define SETTING_PINS_WORD_NEXT 1
+#define SETTING_PINS_SEPARATOR 2
+#define SETTING_PINS_BAD 3
+
+static bool setting_pins_bare(unsigned char byte)
+{
+    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '_' || byte == '.' ||
+           byte == '/' || byte == ':' || byte == '=' || byte == '@' || byte == '%' || byte == '+' || byte == ',' || byte == '-';
+}
+
+// The next word of line from *at into word (room bytes, a null after it) and where it ends in *at: SETTING_PINS_WORD_NEXT, or SETTING_PINS_SEPARATOR
+// for a lone ;, SETTING_PINS_END at the end of the line, SETTING_PINS_BAD for what is none of that (*at is then at the fault).
+static int setting_pins_next(const char *line, positive *at, char *word, positive room)
+{
+    positive used = 0;
+    bool any = false;
+
+    while (line[*at] == ' ')
+        (*at)++;
+    if (!line[*at])
+        return SETTING_PINS_END;
+    if (line[*at] == ';' && (line[*at + 1] == ' ' || !line[*at + 1]))
+        return (*at)++, SETTING_PINS_SEPARATOR;
+    while (line[*at] && line[*at] != ' ')
+    {
+        unsigned char byte = (unsigned char)line[*at];
+
+        if (byte == '\'')
+        {
+            (*at)++;
+            while (line[*at] && line[*at] != '\'')
+            {
+                if ((unsigned char)line[*at] < 0x20 || (unsigned char)line[*at] == 0x7f || used + 1 >= room)
+                    return SETTING_PINS_BAD;
+                word[used++] = line[(*at)++];
+            }
+            if (!line[*at])
+                return SETTING_PINS_BAD;
+            (*at)++;
+        }
+        else if (byte == '\\' && line[*at + 1] == '\'')
+        {
+            if (used + 1 >= room)
+                return SETTING_PINS_BAD;
+            word[used++] = '\'', *at += 2;
+        }
+        else if (setting_pins_bare(byte) && used + 1 < room)
+            word[used++] = (char)byte, (*at)++;
+        else
+            return SETTING_PINS_BAD;
+        any = true;
+    }
+    word[used] = 0;
+    return any ? SETTING_PINS_WORD_NEXT : SETTING_PINS_BAD;
+}
+
+// Whether line is what `taskbar pinned` keeps. When it is not and bad is given, bad is where the fault starts.
+static bool setting_pins_valid(const char *line, positive *bad)
+{
+    char word[SETTING_PINS_WORD];
+    positive at = 0, length = 0, words = 0, entries = 0, here;
+    int kind;
+
+    while (line[length])
+        length++;
+    if (bad)
+        *bad = 0;
+    if (length > SETTING_PINS_MOST)
+        return bad ? (*bad = SETTING_PINS_MOST, false) : false;
+    for (;;)
+    {
+        here = at;
+        kind = setting_pins_next(line, &at, word, sizeof(word));
+        if (kind == SETTING_PINS_BAD)
+            goto wrong;
+        if (kind == SETTING_PINS_WORD_NEXT)
+        {
+            if (words == 0)
+                for (positive each = 0; word[each] || !each; each++)
+                {
+                    unsigned char byte = (unsigned char)word[each];
+
+                    if (!(setting_pins_bare(byte) && byte != '/' && byte != ':' && byte != '=' && byte != '@' && byte != '%' && byte != ',') || each > 62)
+                        goto wrong;
+                }
+            else if ((words == 1 || words == 2) && word[0] != '/')
+                goto wrong;
+            if (++words > SETTING_PINS_WORDS)
+                goto wrong;
+            continue;
+        }
+        // The end of an entry: a separator, or the end of the line. An entry has its app_id, its executable and a first word at least.
+        if (words)
+        {
+            if (words < 3 || ++entries > SETTING_PINS_ENTRIES)
+                goto wrong;
+            words = 0;
+        }
+        else if (kind == SETTING_PINS_SEPARATOR)
+            goto wrong;
+        if (kind == SETTING_PINS_END)
+            return true;
+    }
+wrong:
+    if (bad)
+        *bad = here;
+    return false;
+}
+
+// Word appended to into (at its end *at, room bytes in all) in the form setting_pins_next reads back as it is: bare where it can be,
+// else in single quotes with a quote written \'. False, with into as it was, for a word with a byte below a blank or the delete one, or no room.
+static bool setting_pins_quote(char *into, positive *at, positive room, const char *word)
+{
+    positive used = *at;
+    bool bare = word[0] != 0;
+
+    for (positive each = 0; word[each]; each++)
+    {
+        unsigned char byte = (unsigned char)word[each];
+
+        if (byte < 0x20 || byte == 0x7f)
+            return false;
+        bare &= setting_pins_bare(byte);
+    }
+    if (used)
+    {
+        if (used + 1 >= room)
+            return false;
+        into[used++] = ' ';
+    }
+    if (bare)
+    {
+        for (positive each = 0; word[each]; each++)
+        {
+            if (used + 1 >= room)
+                return false;
+            into[used++] = word[each];
+        }
+    }
+    else
+    {
+        if (used + 1 >= room)
+            return false;
+        into[used++] = '\'';
+        for (positive each = 0; word[each]; each++)
+        {
+            positive need = word[each] == '\'' ? 4 : 1;
+
+            if (used + need + 2 > room)
+                return false;
+            if (word[each] == '\'')
+                into[used++] = '\'', into[used++] = '\\', into[used++] = '\'', into[used++] = '\'';
+            else
+                into[used++] = word[each];
+        }
+        into[used++] = '\'';
+    }
+    into[used] = 0;
+    *at = used;
+    return true;
 }
 
 #endif // MOONWATER_SETTINGS_REGISTRY
