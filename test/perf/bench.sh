@@ -64,7 +64,7 @@ stage_keys() {
 	if [ "$m" = box ]; then path=card; else path=processor; fi
 	sh "$HERE/bench-keys.sh" "$m" "$g" "$KEYS" "$GAP" > "$OUT/raw/keys-$m-$g.tsv" 2> "$OUT/raw/keys-$m-$g.err"
 	rc=$?
-	[ $rc -eq 0 ] || { say "keys $m $g: exit $rc (see $OUT/raw/keys-$m-$g.err)"; return; }
+	if [ $rc -ne 0 ] || ! grep -q "[0-9]" "$OUT/raw/keys-$m-$g.tsv"; then say "keys $m $g: no result (exit $rc, see $OUT/raw/keys-$m-$g.err)"; put "$m" "$g" "$path" textarea error no_result 1; return; fi
 	python3 -I -c '
 import subprocess, sys
 hdr = subprocess.run(["sh", sys.argv[2], "--header"], capture_output=True, text=True).stdout.rstrip("\n").split("\t")
@@ -94,7 +94,7 @@ stage_stale() {
 		printf '%s\n' "$res" > "$OUT/raw/stale-$m-$g-$i.jsonl"
 		printf 'before %s\nafter %s\n' "$before" "$after" > "$OUT/raw/ticks-$m-$g-$i.txt"
 		sc="consent-round$i"
-		if [ -z "$res" ]; then say "stale $m $g round $i: no result"; continue; fi
+		if [ -z "$res" ]; then say "stale $m $g round $i: no result"; put "$m" "$g" "$path" "consent-round$i" error no_result 1; continue; fi
 		px=$(printf '%s\n' "$res" | python3 -I -c 'import json, sys; print(json.loads(sys.stdin.read().strip().split("\n")[-1])["stale_px"])' 2>/dev/null)
 		[ -n "$px" ] && put "$m" "$g" "$path" "$sc" stale_px "$px"
 		# ticks lines read "compositor N chromium M": fields 2 and 4
@@ -120,7 +120,7 @@ stage_resize() {
 	printf '%s\n' "$res" > "$OUT/raw/resize-$m-$g.jsonl"
 	on "$m" "moonwater canvas gpu on" > /dev/null
 	drop "$m"
-	[ -n "$res" ] || { say "resize $m $g: no result"; return; }
+	[ -n "$res" ] || { say "resize $m $g: no result"; put "$m" "$g" "$path" resize error no_result 1; return; }
 	printf '%s\n' "$res" | python3 -I -c '
 import json, sys
 j = json.loads(sys.stdin.read().strip().split("\n")[-1])
