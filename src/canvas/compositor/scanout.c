@@ -240,6 +240,7 @@ static struct
         struct compositor_card_step step[COMPOSITOR_CARD_STEPS];
         unsigned int records, pitch, width, height; // the scene's records and the picture they are drawn into (pitch in pixels)
         positive out, began, last;  // the picture's address for the card, when the present began, and the last job submitted
+        positive handed;            // when the loop's part of the present was over, its jobs handed to the card (compositor_present)
         int fence;                  // the sync_file the loop polls, plus one (0: none), and the job it is of
         positive fence_of;
         unsigned short clip[COMPOSITOR_DAMAGE][4]; // the present's rectangles, as the screens are told them

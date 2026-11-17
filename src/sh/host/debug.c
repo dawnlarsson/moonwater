@@ -715,6 +715,15 @@ static b32 host_debug(string_address address_to arguments, positive count)
         //      the card's wakes and jobs, and the rates each second.
         host_say(log, "  metrics         the card's present: %p us mean, %p us worst; the processor's: %p us mean, %p us worst (the last 128 each)\n",
                  (positive)table->metric_card_mean, (positive)table->metric_card_worst, (positive)table->metric_processor_mean, (positive)table->metric_processor_worst);
+        if (table->metric_card_split)
+                host_say(log, "  metrics         the card's present taken apart: the loop %p us mean (%p worst), handed to the fence %p us (%p), the fence to the loop %p us (%p); %p presents\n",
+                         (positive)table->metric_card_hand_mean, (positive)table->metric_card_hand_worst, (positive)table->metric_card_job_mean,
+                         (positive)table->metric_card_job_worst, (positive)table->metric_card_seen_mean, (positive)table->metric_card_seen_worst,
+                         (positive)table->metric_card_split);
+        if (table->metric_clocks_level)
+                host_say(log, "  clocks          input holds the card at level %p (%s now); %p asks of the driver, the last took %p us; last refusal error %p\n",
+                         (positive)table->metric_clocks_level, table->metric_clocks_held ? (string_address) "held" : (string_address) "let go",
+                         (positive)table->metric_clocks_asks, (positive)table->metric_clocks_took, (positive)table->metric_clocks_error);
         host_say(log, "  metrics         maps held %p (lookups that found one %p, that did not %p); clock wakes %p; jobs %p, %p us mean wait\n",
                  (positive)table->metric_maps, (positive)table->metric_map_hits, (positive)table->metric_map_misses, (positive)table->metric_wakes,
                  (positive)table->metric_jobs, (positive)table->metric_job_mean);

@@ -38,6 +38,13 @@ static unsigned int compositor_metric_card_at, compositor_metric_card_count, com
 static unsigned long long compositor_metric_presents, compositor_metric_since, compositor_metric_presents_then, compositor_metric_lists_then;
 static unsigned int compositor_metric_presents_second, compositor_metric_lists_second;
 /*
+        The card's present taken apart, for each one whose last job's sync_file said when it signalled (the kernel's stamp of its fence, SYNC_IOC_FILE_INFO):
+        the loop's part (from the present's start to its jobs handed to the card), the card's (from there to the fence: the driver's scheduler, the card waking
+        and its clock, the jobs' own run) and the loop's again (from the fence to the turn that saw it done), in rings of the last WINDOWS_METRIC_RUN.
+*/
+static unsigned long long compositor_metric_hand[WINDOWS_METRIC_RUN], compositor_metric_job[WINDOWS_METRIC_RUN], compositor_metric_seen[WINDOWS_METRIC_RUN];
+static unsigned int compositor_metric_split_at, compositor_metric_split_count;
+/*
         The present's timing, a second at a time (moonwater debug's presents line): the presents made late in their period and those of them that missed
         their vblank (compositor_late's counts at the last mark), the loop's longest time inside one present since the mark (compositor_present), and the
         flips committed while a job of the card still ran, with the most jobs in flight at one of them since the mark (the card's present without a wait),
@@ -61,11 +68,21 @@ static void compositor_metric_publish(void)
         table->metric_card_mean = mean, table->metric_card_worst = worst;
         windows_metric_stats(compositor_metric_processor, compositor_metric_processor_count, &mean, &worst);
         table->metric_processor_mean = mean, table->metric_processor_worst = worst;
+        windows_metric_stats(compositor_metric_hand, compositor_metric_split_count, &mean, &worst);
+        table->metric_card_hand_mean = mean, table->metric_card_hand_worst = worst;
+        windows_metric_stats(compositor_metric_job, compositor_metric_split_count, &mean, &worst);
+        table->metric_card_job_mean = mean, table->metric_card_job_worst = worst;
+        windows_metric_stats(compositor_metric_seen, compositor_metric_split_count, &mean, &worst);
+        table->metric_card_seen_mean = mean, table->metric_card_seen_worst = worst;
+        table->metric_card_split = compositor_metric_split_count;
 #ifdef MOONWATER_GPU_C
         table->metric_maps = gpu_map_count, table->metric_map_hits = gpu_map_hits, table->metric_map_misses = gpu_map_misses;
         // The compositor's own memory the dma-buf route refused, mapped by userptr instead, and the errno of the last refusal (gpu.c's).
         table->metric_maps_own_user = gpu_maps_own_user, table->metric_maps_own_errno = gpu_maps_own_errno;
         table->metric_wakes = gpu_wakes, table->metric_jobs = gpu_jobs;
+        table->metric_clocks_level = compositor_gpu_clocks.level, table->metric_clocks_held = compositor_gpu_clocks.held;
+        table->metric_clocks_asks = gpu_clocks_state.asks, table->metric_clocks_took = (unsigned int)(gpu_clocks_state.took / 1000);
+        table->metric_clocks_error = gpu_clocks_state.error;
         table->metric_job_mean = gpu_jobs ? (unsigned int)(gpu_job_ns / gpu_jobs / 1000) : 0;
         waited = gpu_job_ns;
         // The card's jobs since the start by kind (gpu.c's GPU_JOB_KIND: a scene, a present's or a list's; a copy of a client's damage; a picture
@@ -441,10 +458,51 @@ static void compositor_card_abandon(void)
 #endif
 }
 
+// When a sync_file's one fence signalled, on the monotonic clock (the kernel's stamp of it, SYNC_IOC_FILE_INFO with room for one fence): 0 when it has
+// not, or the file holds more than one, or the kernel will not say.
+static positive compositor_fence_signalled(int fd)
+{
+        struct
+        {
+                char object[32], driver[32];
+                int status;
+                unsigned int flags;
+                unsigned long long stamp;
+        } fence = {0};
+        struct
+        {
+                char name[32];
+                int status;
+                unsigned int flags, count, pad;
+                unsigned long long fences;
+        } info = {0};
+
+        info.count = 1, info.fences = (unsigned long long)address_of fence;
+        if (fd < 0 || system_control(fd, 0xc0383e04u, address_of info) != 0 || info.count != 1 || fence.status != 1)
+                return 0;
+        return fence.stamp;
+}
+
+// The card's present taken apart (compositor_metric_hand, _job, _seen) at its end, seen at `now`: nothing when its last job's fence did not say when it
+// signalled, or says a time out of the present's span.
+static void compositor_card_split(positive now)
+{
+        positive signalled = compositor_card.fence && compositor_card.fence_of == compositor_card.last ? compositor_fence_signalled(compositor_card.fence - 1) : 0;
+
+        if (!signalled || compositor_card.handed < compositor_card.began || signalled < compositor_card.handed || now < signalled)
+                return;
+        compositor_metric_hand[compositor_metric_split_at] = compositor_card.handed - compositor_card.began;
+        compositor_metric_job[compositor_metric_split_at] = signalled - compositor_card.handed;
+        compositor_metric_seen[compositor_metric_split_at] = now - signalled;
+        compositor_metric_split_at = (compositor_metric_split_at + 1) % WINDOWS_METRIC_RUN, compositor_metric_split_count++;
+}
+
 // The present's jobs are done: its end (compositor_present_tell, the flip a fenced commit made already left as it is), its time as the card's present,
 // and what its clients are told of the frame, held till now: no job reads their pictures any more.
 static void compositor_card_done(void)
 {
+        if (!compositor_card.failed)
+                compositor_card_split(clock_monotonic_nanoseconds());
         compositor_card_fence_close();
         compositor_card.on = 0;
         if (compositor_card.failed)
@@ -656,7 +714,7 @@ static void compositor_present(void)
         compositor_metric_loop_most = ended - began > compositor_metric_loop_most ? ended - began : compositor_metric_loop_most;
         // A present whose jobs are on the card is timed when they are done (compositor_card_done): its time is the card's too, which the lead is measured on.
         if (compositor_card.on && !jobs_before)
-                compositor_card_began(began);
+                compositor_card_began(began), compositor_card.handed = ended;
         else if (!compositor_card.on)
                 compositor_metric_note(ended - began);
         path = compositor_present_on_card ? COMPOSITOR_RECORD_CARD : compositor.plane_row >= 0 ? COMPOSITOR_RECORD_PLANE : COMPOSITOR_RECORD_PROCESSOR;

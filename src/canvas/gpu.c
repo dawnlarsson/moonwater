@@ -412,6 +412,9 @@ struct gpu_backend
         unsigned int (*fault)(struct gpu_vm_fault *fault);
         // 10. a job's fence as a sync_file: a descriptor that polls readable once the job is done (one of a job done long ago is readable at once)
         unsigned int (*fence)(positive sequence, int *fd);
+        // 11. the card's clocks held at a level while a context of their own on the descriptor fd lives (0: as the driver has them), that context made in
+        // *ctx when it is 0; null for a driver that has no such hold
+        unsigned int (*clocks)(int fd, unsigned int level, unsigned int *ctx);
         // The chip's kernel set (0 for none: a card of that chip is not one the path takes, and the processor draws), what a refused submit's errno is
         // (the mapping above), the card's address space for that chip (0, or the errno of a space too small for the path), and the chip in words for the
         // notices (into's end, as gpu_text_put answers it).
@@ -602,10 +605,29 @@ static unsigned int gpu_amd_fence(positive sequence, int *fd)
         return e;
 }
 
+/*
+        AMDGPU_CTX_OP_SET_STABLE_PSTATE (6; 5 is GET) on a context made for it alone (never one a job runs on): the flags are the level, AMDGPU_CTX_STABLE_PSTATE_NONE 0
+        (the driver's own choice, "auto"), STANDARD 1, MIN_SCLK 2, MIN_MCLK 3, PEAK 4 (power_dpm_force_performance_level's profile_* levels: each ungates the
+        graphics block, so it is not powered off between jobs, GFXOFF, and holds its clocks). The kernel holds the level for that context alone (one context of
+        the whole device at a time: another's is EBUSY) and puts the level back as it found it when the context is freed, which closing the descriptor does: a
+        compositor that dies leaves no clock held.
+*/
+static unsigned int gpu_amd_clocks(int fd, unsigned int level, unsigned int *ctx)
+{
+        unsigned int made[4] = {1, 0, 0, 0}, in[4] = {6, level, 0, 0}, e = *ctx ? 0 : gpu_raw(fd, GPU_IO(3u, 2, 16), made); // ALLOC_CTX, then SET_STABLE_PSTATE
+
+        if (e)
+                return e;
+        if (!*ctx)
+                *ctx = made[0];
+        in[2] = *ctx;
+        return gpu_raw(fd, GPU_IO(3u, 2, 16), in);
+}
+
 static const struct gpu_backend gpu_amd = {
     .driver = "amdgpu", .identify = gpu_amd_identify, .buffer = gpu_amd_buffer, .context = gpu_amd_context, .user = gpu_amd_user, .bind = gpu_amd_bind,
     .unbind = gpu_amd_unbind, .submit = gpu_amd_submit, .wait = gpu_amd_wait, .fault = gpu_amd_fault, .fence = gpu_amd_fence, .set = gpu_amd_set,
-    .classify = gpu_amd_classify, .window = gpu_amd_window, .describe = gpu_amd_describe, .lanes = 64, .packets = GPU_AMD_PACKETS};
+    .classify = gpu_amd_classify, .window = gpu_amd_window, .describe = gpu_amd_describe, .lanes = 64, .packets = GPU_AMD_PACKETS, .clocks = gpu_amd_clocks};
 
 /*
         i915: Ivy Bridge (2012) to Raptor Lake, graphics versions 7 to 12, on the render node. Every request is the uAPI of include/uapi/drm/i915_drm.h, the
@@ -3049,6 +3071,41 @@ static void gpu_wake(void)
         ops = (unsigned int address_to)((p8 address_to)gpu.at + ops_at);
         ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = 64, ops[4] = 4, ops[5] = 0, ops[6] = ops[7] = 0;
         gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4);
+}
+
+/*
+        The card's clocks held while a person's input arrives (the compositor's policy, compositor_gpu_clocks): gpu_clocks(fd, epoch, level) asks the
+        driver of the descriptor fd, the card of that epoch (gpu_epoch), for the level (gpu_backend->clocks; 0 lets go), on a context of its own made at
+        the first ask on that descriptor (a card started again has a new one, and the old context went with the old descriptor, its level with it).
+        Answers 0 when the level is held as asked (or let go of), else the errno; a driver with no hold answers ENOSYS. It is the driver's power
+        firmware that answers, in milliseconds (2.4 to 2.8 ms measured on the box), so the compositor asks it on a thread of its own
+        (compositor_gpu_clocks_run), never on the loop: the descriptor and the epoch are the ask's, not read here, and this state is that thread's.
+        gpu_clocks_state.took is the last ask's time (ns).
+*/
+static struct
+{
+        unsigned int ctx, epoch, level, asks, refused, error;
+        positive took;
+} gpu_clocks_state;
+
+static unsigned int gpu_clocks(int fd, unsigned int epoch, unsigned int level)
+{
+        positive began = clock_monotonic_nanoseconds();
+        unsigned int e;
+
+        if (fd < 0 || !gpu_backend->clocks)
+                return 38;
+        if (gpu_clocks_state.epoch != epoch)
+                gpu_clocks_state.ctx = 0, gpu_clocks_state.level = 0, gpu_clocks_state.epoch = epoch;
+        if (gpu_clocks_state.level == level)
+                return 0;
+        e = gpu_backend->clocks(fd, level, &gpu_clocks_state.ctx);
+        gpu_clocks_state.took = clock_monotonic_nanoseconds() - began, gpu_clocks_state.asks++;
+        if (e)
+                gpu_clocks_state.refused++, gpu_clocks_state.error = e;
+        else
+                gpu_clocks_state.level = level;
+        return e;
 }
 
 static unsigned int gpu_test_overv(unsigned int dst, unsigned int src)

@@ -2987,6 +2987,13 @@ static b32 compositor_main()
                 if (wait >= 0)
                         system_close(wait);
         }
+        // The card's clocks held while input arrives (compositor_gpu_clocks), unless the owner's file /run/moonwater/gpu-clocks-off is there.
+        {
+                bipolar off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-clocks-off", FILE_READ | O_CLOEXEC);
+
+                if (off >= 0)
+                        compositor_gpu_clocks.level = 0, system_close(off);
+        }
         // A window's list drawn by a job of the card the loop does not wait for, where the owner asks for it (/run/moonwater/lists-nowait); waited for in
         // place otherwise, as it was.
         {
@@ -3280,6 +3287,12 @@ static b32 compositor_main()
                         if (frame)
                                 until = !until || frame < until ? frame : until;
                 }
+                {
+                        positive frame = compositor_gpu_clocks_at();
+
+                        if (frame)
+                                until = !until || frame < until ? frame : until;
+                }
 #endif
 
                 // A timespec: a wait past a second in its nanoseconds is EINVAL, and the loop would spin on it.
@@ -3298,6 +3311,7 @@ static b32 compositor_main()
                 compositor_hold_drop(now);
 #ifdef MOONWATER_GPU_C
                 compositor_gpu_late_tick(now);
+                compositor_gpu_clocks_tick(now);
 #endif
 
                 if (awaited < 0)
@@ -3333,6 +3347,10 @@ static b32 compositor_main()
                                 compositor_wl_wake();
                                 break;
                         }
+#endif
+#ifdef MOONWATER_GPU_C
+                // And once it is, the card is kept awake for what answers it (compositor_gpu_clocks).
+                compositor_gpu_input_turn(now);
 #endif
 
                 // The settings' watch after the devices: it may open and close them, and the answers above are the list's as it was polled.

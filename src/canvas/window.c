@@ -1327,6 +1327,14 @@ struct windows
         */
         unsigned int client_layers_refused[12];
         unsigned int client_layers_laid, client_layers_gathered[2];
+        // The card's presents taken apart, the mean and the worst of the last WINDOWS_METRIC_RUN whose last job's fence said when it signalled (microseconds):
+        // the loop's part, to the jobs handed to the card; the card's, from there to the fence; and from the fence to the loop's turn that saw it; and how many
+        // presents were taken apart since the start.
+        unsigned int metric_card_hand_mean, metric_card_hand_worst, metric_card_job_mean, metric_card_job_worst, metric_card_seen_mean, metric_card_seen_worst;
+        unsigned int metric_card_split;
+        // The card's clocks held while input arrives (compositor_gpu_clocks): the level input holds (0: none), whether it is held now, the asks of the driver
+        // since the start, the last ask's time in microseconds, and the errno of the last one refused (0: none).
+        unsigned int metric_clocks_level, metric_clocks_held, metric_clocks_asks, metric_clocks_took, metric_clocks_error;
         // The program's: the least size its window can be laid out at, logical pixels at the scale it is drawn at (0: none). The compositor
         // makes the window no smaller than it whatever the hand, a divider, a tile or a snap asks (compositor_least); WINDOW_MIN_WIDTH by
         // WINDOW_MIN_HEIGHT holds for every window whatever it says.

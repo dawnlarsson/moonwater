@@ -1296,12 +1296,136 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         return 1;
 }
 
-// An input event on a card that composes: the card's idle clock is woken if it has been idle a while (gpu_wake); nothing when the setting is off
-// or the GPU never started.
+/*
+        The card's clocks while a person's input arrives. A card that composes sleeps between jobs: on the box's Radeon (Granite Ridge, family 149) the
+        driver powers the graphics block off when it is idle (GFXOFF) and runs it at 600 MHz, and the first job after a pause pays for its waking, in
+        the client's drawing of the frame that answers a key as much as in the present that composes it. So a key, a move, a wheel or a finger holds the
+        card at compositor_gpu_clocks.level (gpu_clocks: the driver's hold, on a context of its own, which the kernel lets go of if the compositor dies)
+        until COMPOSITOR_GPU_CLOCKS_HOLD after the last of them; at rest the driver chooses again, as before. The level is
+        AMDGPU_CTX_STABLE_PSTATE_MIN_SCLK: the block kept awake at its lowest clock, which at rest measured as the driver's own choice does (10.6 W
+        against 10.7 W for the package), where the peak clock cost 14 W more. The driver takes milliseconds to answer, so the asks go to a thread
+        of their own (compositor_gpu_clocks_run, started at the first; with none to be had, asked in place), and the loop only says what it wants:
+        once the turn's input is forwarded and written to the clients' sockets (compositor_gpu_input_turn), so that nothing of it ever waits, and
+        the block wakes while the client reads the input; the hold ends at its time (compositor_gpu_clocks_at, compositor_gpu_clocks_tick). Where the
+        driver has no hold or refuses it (another context holds the device's level: EBUSY), the card's idle clock is woken by a tiny job instead, as
+        it was (gpu_wake), after the forward too, and the hold is not asked again on that card. Nothing is held with canvas gpu off, a card not up or
+        dead, or the owner's file /run/moonwater/gpu-clocks-off (looked for at the start).
+*/
+#define COMPOSITOR_GPU_CLOCKS_HOLD 500000000ull
+#define COMPOSITOR_GPU_CLOCKS_LEVEL 2u
+static struct
+{
+        unsigned int level;  // the level input holds (0: none, the owner's file)
+        b32 held, refused;   // the level is asked held; the driver refused it on the card of epoch (not asked again until the card starts again)
+        b32 input;           // input came this turn: the hold (or the wake) is asked once it is forwarded
+        unsigned int epoch;  // the card the hold, or the refusal, is of (gpu_epoch)
+        positive until;      // when the hold ends
+        b32 asked;           // the asks the loop made (bumped with each; the thread's word), and the last the thread answered, with its errno
+        b32 answered, error;
+        unsigned int want, want_epoch; // the last ask: the level, and the card's descriptor and epoch
+        int want_fd;
+        b32 started, inline_asks; // the thread was tried; the asks are made in place (no thread to be had, or the checks)
+} compositor_gpu_clocks = {COMPOSITOR_GPU_CLOCKS_LEVEL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0};
+
+// The thread the driver is asked on: it sleeps on the loop's ask count, and answers each newest ask in turn (an ask overtaken while the driver was
+// answering the one before is not made: only the newest level matters).
+static void compositor_gpu_clocks_answer(void)
+{
+        b32 asked = __atomic_load_n(&compositor_gpu_clocks.asked, __ATOMIC_ACQUIRE);
+        unsigned int e = gpu_clocks(compositor_gpu_clocks.want_fd, compositor_gpu_clocks.want_epoch, compositor_gpu_clocks.want);
+
+        __atomic_store_n(&compositor_gpu_clocks.error, e, __ATOMIC_RELAXED);
+        __atomic_store_n(&compositor_gpu_clocks.answered, asked, __ATOMIC_RELEASE);
+}
+
+static fn compositor_gpu_clocks_run(address_any context)
+{
+        (void)context;
+        for (;;)
+        {
+                b32 asked = __atomic_load_n(&compositor_gpu_clocks.asked, __ATOMIC_ACQUIRE);
+
+                if (asked == __atomic_load_n(&compositor_gpu_clocks.answered, __ATOMIC_ACQUIRE))
+                        thread_wait(&compositor_gpu_clocks.asked, asked);
+                else
+                        compositor_gpu_clocks_answer();
+        }
+}
+
+// The loop's ask of a level (0: let go) of the card as it is now: handed to the thread, or made in place where there is none.
+static void compositor_gpu_clocks_ask(unsigned int level)
+{
+        // The ask's words are written before its count, which the thread reads them after (a seqlock of one writer: an ask the loop makes while the
+        // thread reads the one before is answered next, the count having moved).
+        compositor_gpu_clocks.want = level, compositor_gpu_clocks.want_fd = gpu.fd, compositor_gpu_clocks.want_epoch = gpu_epoch;
+        __atomic_store_n(&compositor_gpu_clocks.asked, compositor_gpu_clocks.asked + 1, __ATOMIC_RELEASE);
+        if (!compositor_gpu_clocks.started && !compositor_gpu_clocks.inline_asks)
+        {
+                compositor_gpu_clocks.started = 1;
+                compositor_gpu_clocks.inline_asks = thread_start(compositor_gpu_clocks_run, null) == null;
+        }
+        if (compositor_gpu_clocks.inline_asks)
+                compositor_gpu_clocks_answer();
+        else
+                thread_wake(&compositor_gpu_clocks.asked, 1);
+}
+
+// Whether the card composes in earnest: on, up and not dead.
+static b32 compositor_gpu_awake_wanted(void)
+{
+        return compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead;
+}
+
+// An input event on a card that composes (input.c, as a device's reports are read): noted for the turn's end.
 static void compositor_gpu_wake(void)
 {
-        if (compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead)
-                gpu_wake();
+        compositor_gpu_clocks.input = 1;
+}
+
+// The turn's input forwarded: the hold asked, or held on for another COMPOSITOR_GPU_CLOCKS_HOLD; a card with no hold, or one that refused it, has
+// its idle clock woken (gpu_wake: a tiny job, only when it has been idle a while). A refusal is known once the thread has answered the ask.
+static void compositor_gpu_input_turn(positive now)
+{
+        b32 answered = __atomic_load_n(&compositor_gpu_clocks.answered, __ATOMIC_ACQUIRE);
+
+        if (compositor_gpu_clocks.held && answered == compositor_gpu_clocks.asked && __atomic_load_n(&compositor_gpu_clocks.error, __ATOMIC_RELAXED))
+                compositor_gpu_clocks.held = 0, compositor_gpu_clocks.refused = 1;
+        if (!compositor_gpu_clocks.input)
+                return;
+        compositor_gpu_clocks.input = 0;
+        if (!compositor_gpu_awake_wanted())
+                return;
+        if (compositor_gpu_clocks.refused && compositor_gpu_clocks.epoch != gpu_epoch)
+                compositor_gpu_clocks.refused = 0; // a card started again: asked again
+        if (compositor_gpu_clocks.level && !compositor_gpu_clocks.refused)
+        {
+                compositor_gpu_clocks.until = now + COMPOSITOR_GPU_CLOCKS_HOLD;
+                if (compositor_gpu_clocks.held && compositor_gpu_clocks.epoch == gpu_epoch)
+                        return;
+                compositor_gpu_clocks.held = 1, compositor_gpu_clocks.epoch = gpu_epoch;
+                compositor_gpu_clocks_ask(compositor_gpu_clocks.level);
+                if (!compositor_gpu_clocks.inline_asks || !compositor_gpu_clocks.error)
+                        return;
+                compositor_gpu_clocks.held = 0, compositor_gpu_clocks.refused = 1;
+        }
+        gpu_wake();
+}
+
+// When the loop is to let the hold go (0: nothing held).
+static positive compositor_gpu_clocks_at(void)
+{
+        return compositor_gpu_clocks.held ? compositor_gpu_clocks.until : 0;
+}
+
+// The hold let go of at its end, or as soon as the card does not compose (canvas gpu off, a card dead). A card started again since the hold has a
+// new descriptor: the old context went with the old one, and its level with it, so nothing is asked.
+static void compositor_gpu_clocks_tick(positive now)
+{
+        if (!compositor_gpu_clocks.held || (now < compositor_gpu_clocks.until && compositor_gpu_awake_wanted()))
+                return;
+        compositor_gpu_clocks.held = 0;
+        if (compositor_gpu_clocks.epoch == gpu_epoch)
+                compositor_gpu_clocks_ask(0);
 }
 
 // A screen Canvas turns, the damage of it (x0, y0, x1, y1 of the screen) turned from the scanout into the screen's own buffer by the GPU (windows_rotate_u32's turn:

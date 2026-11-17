@@ -4318,7 +4318,7 @@ static void compositor_input_read_device(unsigned int at)
                 if (got <= 0)
                         break;
 #ifdef MOONWATER_GPU_C
-                // The first input after a pause wakes the card's idle clock (gpu_wake: a tiny job, only when the card has been idle a while)
+                // Input keeps the card awake for what answers it, asked once the turn's input is forwarded (compositor_gpu_input_turn)
                 if (!compositor.wakeonly[at])
                         compositor_gpu_wake();
 #endif

@@ -161,6 +161,9 @@ static struct
         positive va[GPU_KERNEL_HANDLES];         // the last of them
         unsigned int closes, refused; // the handles closed, and the closes of a handle that was not there
         unsigned int contexts;
+        // AMDGPU_CTX_OP_SET_STABLE_PSTATE (gpu_amd_clocks): the asks, the level and the context of the last, and the errno the rows have it refused with.
+        unsigned int pstate_asks, pstate_level, pstate_ctx;
+        long pstate_error;
         unsigned int interrupts, waits; // the waits a signal ends before one is answered (EINTR), and the waits asked
         char unique[40];              // the display node's bus as GET_UNIQUE says it
         unsigned int unique_length;
@@ -369,9 +372,14 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
                         gpu_kernel.mapped[h]--;
                 return 0;
         }
-        case 0xc0106442u: // DRM_IOCTL_AMDGPU_CTX: 1 a context made, 2 one freed
+        case 0xc0106442u: // DRM_IOCTL_AMDGPU_CTX: 1 a context made, 2 one freed, 6 a context's stable power state set
                 if (gpu_kernel.no_context)
                         return -19;
+                if (words[0] == 6)
+                {
+                        gpu_kernel.pstate_asks++, gpu_kernel.pstate_level = words[1], gpu_kernel.pstate_ctx = words[2];
+                        return -gpu_kernel.pstate_error;
+                }
                 if (words[0] == 1)
                         words[0] = 2 + ++gpu_kernel.contexts;
                 return 0;

@@ -2293,6 +2293,97 @@ static void gpu_flight_rows(void)
 }
 
 /*
+        The card's clocks while input arrives (compositor_gpu_clocks, gpu_clocks): input noted as a device is read is asked of the driver once the turn's
+        input is forwarded, on a context of its own (never the jobs' one), at the minimum-clock level (2), once while held; the hold ends at its time, or
+        at once when the card stops composing, with the level let go (0); a card started again (a new descriptor: gpu_epoch) is asked again on a new
+        context; a refusal (EBUSY: another context holds the device's level) is not asked again on that card, and the owner's file (level 0) asks nothing.
+        And a descriptor that is no sync_file has no signal time (compositor_fence_signalled).
+*/
+static void gpu_clocks_rows(void)
+{
+        unsigned char kept_gpu[sizeof(gpu)], kept_state[sizeof(compositor_gpu_state)], kept_clocks[sizeof(compositor_gpu_clocks)], kept_cs[sizeof(gpu_clocks_state)];
+        int kept_on = compositor_gpu, efd;
+        unsigned int kept_epoch = gpu_epoch, asks, ctx;
+        positive t = 1000000000000ull, kept_last = gpu_last_job;
+
+        memory_copy(kept_gpu, &gpu, sizeof(gpu)), memory_copy(kept_state, &compositor_gpu_state, sizeof(compositor_gpu_state));
+        memory_copy(kept_clocks, &compositor_gpu_clocks, sizeof(compositor_gpu_clocks)), memory_copy(kept_cs, &gpu_clocks_state, sizeof(gpu_clocks_state));
+        memory_zero(&gpu_kernel, sizeof(gpu_kernel));
+        memory_zero(&gpu_clocks_state, sizeof(gpu_clocks_state));
+        gpu_kernel.on = 1;
+        gpu.fd = GPU_KERNEL_FD, gpu.ctx = 1, gpu.at = 0, gpu_last_job = 0; // no wake job can run (gpu_wake wants a buffer and a job before it)
+        compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0;
+        compositor_gpu_clocks.level = COMPOSITOR_GPU_CLOCKS_LEVEL, compositor_gpu_clocks.held = 0, compositor_gpu_clocks.refused = 0, compositor_gpu_clocks.input = 0;
+        compositor_gpu_clocks.inline_asks = 1; // asked in place: the rows read each answer at once (the thread answers the same words)
+
+        compositor_gpu_input_turn(t);
+        check("gpu clocks: a turn with no input asks the driver nothing", gpu_kernel.pstate_asks == 0 && !compositor_gpu_clocks.held && compositor_gpu_clocks_at() == 0);
+        compositor_gpu_wake();
+        check("gpu clocks: input read is only noted: nothing is asked before the turn's input is forwarded", gpu_kernel.pstate_asks == 0 && compositor_gpu_clocks.input);
+        compositor_gpu_input_turn(t);
+        ctx = gpu_kernel.pstate_ctx;
+        check("gpu clocks: the turn's end asks the minimum-clock level on a context made for it, not the jobs' one, and holds it for half a second",
+              gpu_kernel.pstate_asks == 1 && gpu_kernel.pstate_level == 2 && gpu_kernel.contexts == 1 && ctx != 0 && ctx != gpu.ctx && compositor_gpu_clocks.held &&
+                      compositor_gpu_clocks_at() == t + COMPOSITOR_GPU_CLOCKS_HOLD && !compositor_gpu_clocks.input);
+        compositor_gpu_wake(), compositor_gpu_input_turn(t + 300000000ull);
+        check("gpu clocks: input while it is held asks nothing again and holds it on from the newest input",
+              gpu_kernel.pstate_asks == 1 && compositor_gpu_clocks_at() == t + 300000000ull + COMPOSITOR_GPU_CLOCKS_HOLD);
+        compositor_gpu_clocks_tick(t + 300000000ull + COMPOSITOR_GPU_CLOCKS_HOLD - 1);
+        check("gpu clocks: before the hold's end the loop's tick lets nothing go", gpu_kernel.pstate_asks == 1 && compositor_gpu_clocks.held);
+        compositor_gpu_clocks_tick(t + 300000000ull + COMPOSITOR_GPU_CLOCKS_HOLD);
+        check("gpu clocks: at the hold's end the level is let go (0, the driver's own choice) on the same context, and the loop has no time to wake for",
+              gpu_kernel.pstate_asks == 2 && gpu_kernel.pstate_level == 0 && gpu_kernel.pstate_ctx == ctx && !compositor_gpu_clocks.held && compositor_gpu_clocks_at() == 0);
+        compositor_gpu_clocks_tick(t + 2 * COMPOSITOR_GPU_CLOCKS_HOLD);
+        check("gpu clocks: let go once, never again", gpu_kernel.pstate_asks == 2);
+
+        // canvas gpu off while it is held: let go at the next tick, and no input asks while it is off.
+        compositor_gpu_wake(), compositor_gpu_input_turn(t + 2000000000ull);
+        compositor_gpu = 0;
+        compositor_gpu_clocks_tick(t + 2000000001ull);
+        asks = gpu_kernel.pstate_asks;
+        compositor_gpu_wake(), compositor_gpu_input_turn(t + 2000000002ull);
+        check("gpu clocks: the card set off while held lets the level go at once, and input with it off asks nothing",
+              asks == 4 && gpu_kernel.pstate_level == 0 && !compositor_gpu_clocks.held && gpu_kernel.pstate_asks == 4);
+        compositor_gpu = 1;
+
+        // A card started again: a new descriptor (the old context went with the old one), so the next input asks on a new context.
+        compositor_gpu_wake(), compositor_gpu_input_turn(t + 3000000000ull);
+        gpu_epoch++;
+        compositor_gpu_wake(), compositor_gpu_input_turn(t + 3100000000ull);
+        check("gpu clocks: a card started again while held is asked again, on a context made on the new descriptor",
+              gpu_kernel.pstate_asks == 6 && gpu_kernel.contexts == 2 && gpu_kernel.pstate_ctx != ctx && gpu_kernel.pstate_level == 2 && compositor_gpu_clocks.held);
+        compositor_gpu_clocks_tick(t + 4000000000ull);
+
+        // Refused (EBUSY: another context holds the device's level): not held, not asked again on this card; asked again on a card started again.
+        gpu_kernel.pstate_error = 16;
+        asks = gpu_kernel.pstate_asks;
+        compositor_gpu_wake(), compositor_gpu_input_turn(t + 5000000000ull);
+        compositor_gpu_wake(), compositor_gpu_input_turn(t + 5100000000ull);
+        check("gpu clocks: a refusal holds nothing and is not asked again on that card", gpu_kernel.pstate_asks == asks + 1 && !compositor_gpu_clocks.held &&
+              compositor_gpu_clocks.refused && compositor_gpu_clocks_at() == 0 && gpu_clocks_state.error == 16);
+        gpu_kernel.pstate_error = 0, gpu_epoch++;
+        compositor_gpu_wake(), compositor_gpu_input_turn(t + 5200000000ull);
+        check("gpu clocks: on a card started again the refused level is asked again", gpu_kernel.pstate_asks == asks + 2 && compositor_gpu_clocks.held);
+        compositor_gpu_clocks_tick(t + 6000000000ull);
+
+        // The owner's file: no level, nothing asked.
+        compositor_gpu_clocks.level = 0;
+        asks = gpu_kernel.pstate_asks;
+        compositor_gpu_wake(), compositor_gpu_input_turn(t + 7000000000ull);
+        check("gpu clocks: with the owner's file (level 0) input asks the driver nothing", gpu_kernel.pstate_asks == asks && !compositor_gpu_clocks.held);
+
+        efd = (int)system_call_2(syscall(eventfd2), 0, 0x80000);
+        check("gpu clocks: a descriptor that is no sync_file says no signal time", compositor_fence_signalled(efd) == 0 && compositor_fence_signalled(-1) == 0);
+        if (efd >= 0)
+                system_close(efd);
+
+        memory_copy(&gpu, kept_gpu, sizeof(gpu)), memory_copy(&compositor_gpu_state, kept_state, sizeof(compositor_gpu_state));
+        memory_copy(&compositor_gpu_clocks, kept_clocks, sizeof(compositor_gpu_clocks)), memory_copy(&gpu_clocks_state, kept_cs, sizeof(gpu_clocks_state));
+        compositor_gpu = kept_on, gpu_epoch = kept_epoch, gpu_last_job = kept_last;
+        memory_zero(&gpu_kernel, sizeof(gpu_kernel));
+}
+
+/*
         The imports, the lost card and the maps of a job still running, against the fake kernel (gpu_kernel: no card). The kernel answers a dma-buf it has
         imported with the handle that import has and counts nothing, so a handle closed for a buffer the table holds takes the buffer and its map from the
         holder: the rows ask the kernel whether the handle is still there and mapped after each way a held buffer is asked for again.
@@ -4558,6 +4649,7 @@ b32 main(void)
         gpu_vmfault_rows();
         gpu_flight_rows();
         gpu_import_rows();
+        gpu_clocks_rows();
         gpu_engine_and_render_regressions();
         gpu_late_rows();
         gpu_async_rows();
