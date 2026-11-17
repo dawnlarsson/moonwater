@@ -13,8 +13,6 @@
 */
 
 #define TAR_BLOCK 512
-#define TAR_SPARSE_MAX ((positive)1 << 22)
-#define TAR_PSP_MAX 16384
 #define TAR_PATH 4096
 #define TAR_NAME 100
 #define TAR_PREFIX 155
@@ -457,10 +455,42 @@ static bool tar_safe_path(string_address path, positive strip, bool absolute,
 #define TAR_PACK_BZIP2 5
 #define TAR_PACK_COMPRESS 6
 
+/*
+        A name, a link target or the text of a record, held at whatever
+        length the archive gives it: the buffer grows to the length it is
+        given, and nothing but the allocator refuses one.  text is null until
+        something is held, and is always a string once it is.
+*/
 typedef struct
 {
-        p8 path[TAR_PATH];
-        p8 link[TAR_PATH];
+        p8 address_to text;
+        positive room;
+} tar_text;
+
+static bool tar_text_hold(tar_text address_to into, positive length)
+{
+        return shell_array_room(into->text, into->room, length + 1);
+}
+
+static bool tar_text_copy(tar_text address_to into, string_address text,
+                          positive length)
+{
+        if (!tar_text_hold(into, length))
+                return false;
+        memory_copy(into->text, text, length);
+        into->text[length] = end;
+        return true;
+}
+
+static bool tar_text_string(tar_text address_to into, string_address text)
+{
+        return tar_text_copy(into, text, string_length(text));
+}
+
+typedef struct
+{
+        tar_text path;
+        tar_text link;
         p64 size;
         p32 user;
         p32 group;
@@ -476,7 +506,7 @@ typedef struct
         bool has_time;
         /* GNU.sparse.name, the member's real name when its path record
            spells the GNUSparseFile copy; it wins whatever the record order. */
-        p8 sparse_name[TAR_PATH];
+        tar_text sparse_name;
         bool has_sparse_name;
 } tar_pax_state;
 
@@ -492,7 +522,8 @@ typedef struct
         p64 bytes;
 } tar_psp_span;
 
-static tar_psp_span tar_psp[TAR_PSP_MAX];
+static tar_psp_span address_to tar_psp;
+static positive tar_psp_room;
 static positive tar_psp_used;
 static p64 tar_psp_real;
 static p64 tar_psp_offset;
@@ -540,7 +571,7 @@ static bool tar_pax_attr_add(p8 kind, string_address name, positive name_length,
 
 static fn tar_psp_add(p64 offset, p64 bytes)
 {
-        if (tar_psp_used >= TAR_PSP_MAX)
+        if (!shell_array_room(tar_psp, tar_psp_room, tar_psp_used + 1))
         {
                 tar_psp_bad = true;
                 return;
@@ -570,8 +601,6 @@ static fn tar_pax_clear(tar_pax_state address_to state)
         state->has_sparse_name = false;
         state->uname[0] = end;
         state->gname[0] = end;
-        state->path[0] = end;
-        state->link[0] = end;
 }
 
 /* A pax id is plain decimal.  One that is not, or that does not fit, is
@@ -673,20 +702,14 @@ static bool tar_pax_apply(tar_pax_state address_to state,
 
                 if (key == 4 && !memory_compare(mark + 1, "path", 4))
                 {
-                        if (value >= TAR_PATH)
+                        if (!tar_text_copy(address_of state->path, equal + 1, value))
                                 return false;
-
-                        memory_copy(state->path, equal + 1, value);
-                        state->path[value] = end;
                         state->has_path = true;
                 }
                 else if (key == 8 && !memory_compare(mark + 1, "linkpath", 8))
                 {
-                        if (value >= TAR_PATH)
+                        if (!tar_text_copy(address_of state->link, equal + 1, value))
                                 return false;
-
-                        memory_copy(state->link, equal + 1, value);
-                        state->link[value] = end;
                         state->has_link = true;
                 }
                 else if (key == 4 && !memory_compare(mark + 1, "size", 4))
@@ -771,10 +794,8 @@ static bool tar_pax_apply(tar_pax_state address_to state,
 
                         if (name_length == 4 && !memory_compare(name, "name", 4))
                         {
-                                if (value >= TAR_PATH)
+                                if (!tar_text_copy(address_of state->sparse_name, equal + 1, value))
                                         return false;
-                                memory_copy(state->sparse_name, equal + 1, value);
-                                state->sparse_name[value] = end;
                                 state->has_sparse_name = true;
                         }
                         else if ((name_length == 8 && !memory_compare(name, "realsize", 8)) ||
@@ -915,67 +936,62 @@ static bool tar_spell_directory(string_address name, p8 address_to into,
         the same name here as there.  long_name is the long name this member
         was given, or null when it had none.
 */
-static bool tar_member_name(p8 address_to block, p8 address_to into,
+static bool tar_member_name(p8 address_to block, tar_text address_to into,
                             string_address long_name)
 {
         tar_pax_state address_to state =
             tar_pax_local.has_path ? address_of tar_pax_local
                                    : address_of tar_pax_global;
         if (tar_pax_local.has_sparse_name)
-        {
-                string_copy_max_end(into, tar_pax_local.sparse_name, TAR_PATH - 1);
-                return into[0] != end;
-        }
+                return tar_text_string(into, tar_pax_local.sparse_name.text) &&
+                       into->text[0] != end;
         if (state->has_path)
-        {
-                string_copy_max_end(into, state->path, TAR_PATH - 1);
-                return into[0] != end;
-        }
+                return tar_text_string(into, state->path.text) &&
+                       into->text[0] != end;
 
         if (long_name)
-        {
-                string_copy_max_end(into, long_name, TAR_PATH - 1);
-                return true;
-        }
+                return tar_text_string(into, long_name);
 
-        /* GNU old format stores atime/sparse maps where ustar keeps prefix. */
+        //      The header's own fields hold at most a prefix and a name, so
+        //      room for both is all this needs, whatever the archive's pax
+        //      records said.  GNU old format stores atime and sparse maps
+        //      where ustar keeps the prefix.
+        if (!tar_text_hold(into, TAR_PREFIX + TAR_NAME))
+                return false;
         if (!tar_header_prefixed(block))
         {
-                tar_field_text(block, TAR_NAME, into, TAR_PATH);
-                return into[0] != end;
+                tar_field_text(block, TAR_NAME, into->text, into->room);
+                return into->text[0] != end;
         }
 
-        return tar_join_name(block + 345, block, into, TAR_PATH);
+        return tar_join_name(block + 345, block, into->text, into->room);
 }
 
 /* A link target ranks the same three ways, for the same reason. */
-static bool tar_member_link(p8 address_to block, p8 address_to into,
+static bool tar_member_link(p8 address_to block, tar_text address_to into,
                             string_address long_link)
 {
         tar_pax_state address_to state =
             tar_pax_local.has_link ? address_of tar_pax_local
                                    : address_of tar_pax_global;
         if (state->has_link)
-        {
-                string_copy_max_end(into, state->link, TAR_PATH - 1);
-                return true;
-        }
+                return tar_text_string(into, state->link.text);
 
         if (long_link)
-        {
-                string_copy_max_end(into, long_link, TAR_PATH - 1);
-                return true;
-        }
+                return tar_text_string(into, long_link);
+
+        if (!tar_text_hold(into, TAR_NAME))
+                return false;
 
         //      Most members link to nothing, and the field says so by being
         //      empty from its first byte.
         if (!block[157])
         {
-                into[0] = end;
+                into->text[0] = end;
                 return true;
         }
 
-        tar_field_text(block + 157, TAR_NAME, into, TAR_PATH);
+        tar_field_text(block + 157, TAR_NAME, into->text, into->room);
         return true;
 }
 
@@ -1037,8 +1053,8 @@ static const tar_codec tar_codecs[] = {
 };
 
 static p8 tar_block[TAR_BLOCK];
-static p8 tar_name[TAR_PATH];
-static p8 tar_link[TAR_PATH];
+static tar_text tar_name;
+static tar_text tar_link;
 static b32 tar_status;
 /* A usage error prints its own hint and no exiting line. */
 static bool tar_usage_exit;
@@ -2065,7 +2081,7 @@ typedef struct
 
 /* The kernel's ACL attribute as libacl's long text form. */
 static bool tar_acl_text(p8 address_to binary, positive length,
-                         p8 address_to into, positive room, positive address_to used)
+                         tar_text address_to into, positive address_to used)
 {
         positive at = 0;
         positive have = 0;
@@ -2106,19 +2122,22 @@ static bool tar_acl_text(p8 address_to binary, positive length,
                 }
                 positive need = part + string_length((string_address)who) + 5;
 
-                if (have + need > room)
+                //      Every named entry is held, however many there are: a
+                //      list of a thousand is a text of a thousand lines.
+                if (!tar_text_hold(into, have + need))
                         return false;
-                memory_copy(into + have, tag, part);
+                p8 address_to out = into->text;
+                memory_copy(out + have, tag, part);
                 have += part;
-                memory_copy(into + have, who, string_length((string_address)who));
+                memory_copy(out + have, who, string_length((string_address)who));
                 have += string_length((string_address)who);
-                into[have++] = ':';
+                out[have++] = ':';
                 word[0] = item.perm & 4 ? 'r' : '-';
                 word[1] = item.perm & 2 ? 'w' : '-';
                 word[2] = item.perm & 1 ? 'x' : '-';
-                memory_copy(into + have, word, 3);
+                memory_copy(out + have, word, 3);
                 have += 3;
-                into[have++] = '\n';
+                out[have++] = '\n';
                 at++;
         }
         /* The numeric form libacl writes has no newline after the last entry. */
@@ -2128,33 +2147,44 @@ static bool tar_acl_text(p8 address_to binary, positive length,
         return at != 0;
 }
 
-/* The access ACL a mode alone gives. */
-static positive tar_acl_from_mode(positive mode, p8 address_to into)
+/* The access ACL a mode alone gives: three entries of at most seven bytes
+   and their permissions, a newline each. */
+static bool tar_acl_from_mode(positive mode, tar_text address_to into,
+                              positive address_to used)
 {
         static const p8 names[3][8] = {"user::", "group::", "other::"};
         positive have = 0;
 
+        if (!tar_text_hold(into, 3 * (7 + 3 + 1)))
+                return false;
+        p8 address_to out = into->text;
         for (positive at = 0; at < 3; at++)
         {
                 positive bits = (mode >> (6 - 3 * at)) & 7;
                 positive length = string_length((string_address)names[at]);
 
-                memory_copy(into + have, names[at], length);
+                memory_copy(out + have, names[at], length);
                 have += length;
-                into[have++] = bits & 4 ? 'r' : '-';
-                into[have++] = bits & 2 ? 'w' : '-';
-                into[have++] = bits & 1 ? 'x' : '-';
-                into[have++] = '\n';
+                out[have++] = bits & 4 ? 'r' : '-';
+                out[have++] = bits & 2 ? 'w' : '-';
+                out[have++] = bits & 1 ? 'x' : '-';
+                out[have++] = '\n';
         }
-        return tar_numeric_owner ? have - 1 : have;
+        address_to used = tar_numeric_owner ? have - 1 : have;
+        return true;
 }
+
+/* The entries an ACL's text gives, and the attribute made of them, each held
+   at the length the text needs. */
+static tar_acl_entry address_to tar_acl_items;
+static positive tar_acl_items_room;
+static tar_text tar_acl_bin;
 
 /* Text back to the kernel's attribute; false for anything libacl would
    refuse to read. */
 static bool tar_acl_binary(string_address text, positive length,
-                           p8 address_to into, positive room, positive address_to used)
+                           tar_text address_to into, positive address_to used)
 {
-        tar_acl_entry items[64];
         positive count = 0;
         positive at = 0;
 
@@ -2197,7 +2227,7 @@ static bool tar_acl_binary(string_address text, positive length,
                                         from = walk + 1;
                                 }
                 }
-                if (fields < 3 || count >= array_count(items))
+                if (fields < 3)
                         return false;
                 tar_acl_entry item;
                 bool user = size[0] && (part[0][0] == 'u');
@@ -2254,10 +2284,13 @@ static bool tar_acl_binary(string_address text, positive length,
                                 default: return false;
                                 }
                 }
-                items[count++] = item;
+                if (!shell_array_room(tar_acl_items, tar_acl_items_room, count + 1))
+                        return false;
+                tar_acl_items[count++] = item;
         }
-        if (4 + count * 8 > room)
+        if (!count)
                 return false;
+        tar_acl_entry address_to items = tar_acl_items;
         for (positive one = 1; one < count; one++)
         {
                 tar_acl_entry keep = items[one];
@@ -2272,11 +2305,13 @@ static bool tar_acl_binary(string_address text, positive length,
                 }
                 items[back] = keep;
         }
-        into[0] = 2;
-        into[1] = into[2] = into[3] = 0;
-        memory_copy(into + 4, items, count * 8);
+        if (!tar_text_hold(into, 4 + count * 8))
+                return false;
+        into->text[0] = 2;
+        into->text[1] = into->text[2] = into->text[3] = 0;
+        memory_copy(into->text + 4, items, count * 8);
         address_to used = 4 + count * 8;
-        return count != 0;
+        return true;
 }
 
 /* Set what a member carried on the object fd names. */
@@ -2345,18 +2380,17 @@ static fn tar_attrs_apply(bipolar fd, string_address path, positive at,
                 }
                 else if (tar_opt_acls)
                 {
-                        p8 binary[4 + 64 * 8];
                         positive have = 0;
 
-                        if (!tar_acl_binary((string_address)value, value_length, binary,
-                                            sizeof(binary), address_of have))
+                        if (!tar_acl_binary((string_address)value, value_length,
+                                            address_of tar_acl_bin, address_of have))
                                 failed = -ERROR_INVALID;
                         else
                                 failed = system_call_5(
                                     syscall(fsetxattr), (positive)fd,
                                     (positive)(kind == 2 ? "system.posix_acl_access"
                                                          : "system.posix_acl_default"),
-                                    (positive)binary, have, 0);
+                                    (positive)tar_acl_bin.text, have, 0);
                         if (failed < 0 && failed != -EPERM && failed != -EOPNOTSUPP)
                                 string_format(log_error,
                                               "tar: tar_acl_set_file_at: Cannot set POSIX ACLs for file '%s': %s\n",
@@ -3231,8 +3265,7 @@ static bool tar_sparse_add(p64 offset, p64 bytes)
         if (offset > (p64)-1 - bytes)
                 return false;
 
-        if (tar_sparse_used >= TAR_SPARSE_MAX ||
-            !shell_array_room(tar_sparse, tar_sparse_room, tar_sparse_used + 1))
+        if (!shell_array_room(tar_sparse, tar_sparse_room, tar_sparse_used + 1))
                 return false;
 
         if (tar_sparse_used &&
@@ -3365,8 +3398,6 @@ static bool tar_pax_sparse_take(bipolar archive, p64 address_to size)
                                 if (first)
                                 {
                                         wanted = accumulated;
-                                        if (wanted > TAR_SPARSE_MAX)
-                                                return false;
                                         first = false;
                                 }
                                 else if (!half)
@@ -3658,18 +3689,14 @@ static bool tar_put_file(bipolar archive, bipolar in, p64 size,
         return tar_write_padding(archive, size);
 }
 
+/*      The payload's bytes go into into, which the caller has sized to hold
+        size of them and an end.  A failed read has said why, and the payload
+        is not taken past it. */
 static bool tar_read_payload(bipolar handle, p64 size, p8 address_to into,
-                             positive room, bool seekable)
+                             bool seekable)
 {
         p64 left = size;
         p8 address_to dst = into;
-
-        if (size >= room)
-        {
-                tar_refuse("member name is too long");
-                tar_skip(handle, tar_padded(size), seekable);
-                return false;
-        }
 
         while (left)
         {
@@ -4972,13 +4999,11 @@ static fn tar_read_members(tar_members address_to run)
         positive const count = run->count;
         p8 address_to block;
         p8 header_copy[TAR_BLOCK];
-        p8 long_name[TAR_PATH];
-        p8 long_link[TAR_PATH];
+        tar_text long_name = {null, 0};
+        tar_text long_link = {null, 0};
         bool have_long_name = false;
         bool have_long_link = false;
-
-        long_name[0] = end;
-        long_link[0] = end;
+        bool long_refused = false;
 
         while ((block = tar_next_block(handle, true)))
         {
@@ -5077,28 +5102,36 @@ static fn tar_read_members(tar_members address_to run)
                 if (!tar_field_value(block + 116, 8, address_of group))
                         group = 0;
 
-                /*      A record whose name we could not hold stops the
-                        archive, the way a pax header we could not read
-                        already does.  Carrying on would extract the member
-                        the record was written for under whatever its own
-                        header field happened to say, which is a name the
-                        archive never asked for; tar_read_payload has said
-                        why by the time it answers false. */
-                if (type == 'L')
+                /*      A long name's record is read whole, so the name it
+                        gives is the one its member gets.  One that cannot be
+                        held is read past and says so; the member it was
+                        written for is then passed over with its data (below),
+                        since the header's own name is not the one the archive
+                        asked for.  Only a size that cannot be skipped stops
+                        the archive. */
+                if (type == 'L' || type == 'K')
                 {
-                        if (!tar_read_payload(handle, size, long_name,
-                                              TAR_PATH, seekable))
-                                break;
-                        have_long_name = true;
-                        continue;
-                }
+                        tar_text address_to held = type == 'L'
+                            ? address_of long_name : address_of long_link;
 
-                if (type == 'K')
-                {
-                        if (!tar_read_payload(handle, size, long_link,
-                                              TAR_PATH, seekable))
+                        if (!tar_size_fits(size))
+                        {
+                                tar_refuse("member name is too long");
                                 break;
-                        have_long_link = true;
+                        }
+                        if (!tar_text_hold(held, (positive)size))
+                        {
+                                tar_refuse("member name is too long");
+                                tar_skip(handle, tar_padded(size), seekable);
+                                long_refused = true;
+                                continue;
+                        }
+                        if (!tar_read_payload(handle, size, held->text, seekable))
+                                continue;
+                        if (type == 'L')
+                                have_long_name = true;
+                        else
+                                have_long_link = true;
                         continue;
                 }
 
@@ -5107,8 +5140,7 @@ static fn tar_read_members(tar_members address_to run)
                         if (size >= TAR_PAX_LIMIT ||
                             !shell_array_room(tar_pax_body, tar_pax_body_room,
                                               (positive)size + 1) ||
-                            !tar_read_payload(handle, size, tar_pax_body,
-                                              (positive)size + 1, seekable))
+                            !tar_read_payload(handle, size, tar_pax_body, seekable))
                         {
                                 tar_refuse("invalid extended header");
                                 break;
@@ -5164,29 +5196,45 @@ static fn tar_read_members(tar_members address_to run)
                         break;
                 }
 
-                if (!tar_member_name(block, tar_name,
-                                     have_long_name ? long_name : null))
+                /*      The member a long name could not be held for is
+                        passed over with its data, as GNU's name is not the
+                        header's to take; the archive reads on past it. */
+                if (long_refused)
+                {
+                        long_refused = false;
+                        have_long_name = false;
+                        have_long_link = false;
+                        tar_skip(handle, tar_padded(size), seekable);
+                        tar_pax_clear(address_of tar_pax_local);
+                        continue;
+                }
+
+                if (!tar_member_name(block, address_of tar_name,
+                                     have_long_name ? long_name.text : null))
                 {
                         tar_refuse("member name is too long");
                         break;
                 }
 
-                tar_member_link(block, tar_link,
-                                have_long_link ? long_link : null);
+                if (!tar_member_link(block, address_of tar_link,
+                                     have_long_link ? long_link.text : null))
+                {
+                        tar_refuse("member name is too long");
+                        break;
+                }
 
                 /*      A regular member with no data whose name ends in a
                         slash is a directory: V7 writes its directories so, and
                         GNU lists, compares and makes them as directories. */
                 if ((type == '0' || !type) && !size && !tar_sparse_active &&
-                    tar_name[0] && tar_name[string_length(tar_name) - 1] == '/')
+                    tar_name.text[0] &&
+                    tar_name.text[string_length(tar_name.text) - 1] == '/')
                         type = '5';
 
                 have_long_name = false;
                 have_long_link = false;
-                long_name[0] = end;
-                long_link[0] = end;
 
-                if (!tar_wanted(tar_name, options->first, count))
+                if (!tar_wanted(tar_name.text, options->first, count))
                 {
                         tar_skip(handle, tar_padded(size), seekable);
                         tar_pax_clear(address_of tar_pax_local);
@@ -5228,7 +5276,7 @@ static fn tar_read_members(tar_members address_to run)
                         without its leading slashes and parent steps. */
                 if (options->mode == TAR_LIST || options->mode == TAR_DIFF)
                 {
-                        string_address target = tar_link;
+                        string_address target = tar_link.text;
                         bool diff = options->mode == TAR_DIFF;
 
                         if (type == '1')
@@ -5246,14 +5294,14 @@ static fn tar_read_members(tar_members address_to run)
                                 tar_long_line(block, type, mode,
                                               tar_sparse_active ? tar_sparse_real : size,
                                               user, group, user_name, group_name,
-                                              major, minor, stamp, tar_name,
+                                              major, minor, stamp, tar_name.text,
                                               target, options->numeric);
                         else if (!diff || options->verbose)
-                                tar_name_line(tar_listing, tar_name);
+                                tar_name_line(tar_listing, tar_name.text);
                         /*      A comparison then looks at the file GNU's
                                 name for it names. */
                         if (diff)
-                                tar_diff_member(handle, block, type, tar_name, tar_link,
+                                tar_diff_member(handle, block, type, tar_name.text, tar_link.text,
                                                 size, mode, user, group, major, minor,
                                                 stamp, nanoseconds,
                                                 tar_pax_local.has_time,
@@ -5264,7 +5312,7 @@ static fn tar_read_members(tar_members address_to run)
                         continue;
                 }
 
-                if (!tar_safe_path(tar_name, options->strip, options->absolute, false,
+                if (!tar_safe_path(tar_name.text, options->strip, options->absolute, false,
                                    kept, TAR_PATH, address_of escaped))
                 {
                         /*      A name that reduces to nothing is the
@@ -5277,9 +5325,14 @@ static fn tar_read_members(tar_members address_to run)
                         if (escaped)
                         {
                                 string_format(log_error, "tar: %w: member name is unsafe\n",
-                                              writer_terminal_name, tar_name);
+                                              writer_terminal_name, tar_name.text);
                                 tar_status = 2;
                         }
+                        //      A name no path can hold, which the kernel
+                        //      refuses to make anyway, is said so; it is not
+                        //      passed over as a root would be.
+                        else if (!options->strip && string_length(tar_name.text) >= TAR_PATH)
+                                tar_refuse("member name is too long");
 
                         tar_skip(handle, tar_padded(size), seekable);
                         tar_pax_clear(address_of tar_pax_local);
@@ -5288,7 +5341,7 @@ static fn tar_read_members(tar_members address_to run)
 
                 if (type == '1')
                 {
-                        if (!tar_safe_path(tar_link, options->strip,
+                        if (!tar_safe_path(tar_link.text, options->strip,
                                            options->absolute, true, kept_link,
                                            TAR_PATH, null))
                         {
@@ -5298,8 +5351,18 @@ static fn tar_read_members(tar_members address_to run)
                                 continue;
                         }
                 }
+                else if (type == '2' && string_length(tar_link.text) >= TAR_PATH)
+                {
+                        //      A symbolic link's target that a path cannot
+                        //      hold is refused, not cut short: the link made
+                        //      would point somewhere the archive did not.
+                        tar_refuse("link target is too long");
+                        tar_skip(handle, tar_padded(size), seekable);
+                        tar_pax_clear(address_of tar_pax_local);
+                        continue;
+                }
                 else
-                        string_copy_max_end(kept_link, tar_link, TAR_PATH - 1);
+                        string_copy_max_end(kept_link, tar_link.text, TAR_PATH - 1);
 
                 /*      The reference names a member exactly as the archive
                         spells it, so a directory written with its trailing
@@ -5307,9 +5370,9 @@ static fn tar_read_members(tar_members address_to run)
                         The slash is not on kept, which is the path every
                         openat and every remembered directory is keyed by. */
                 {
-                        positive length = string_length(tar_name);
+                        positive length = string_length(tar_name.text);
                         bool trailing = length &&
-                                        tar_name[length - 1] == '/';
+                                        tar_name.text[length - 1] == '/';
 
                         if (!trailing ||
                             !tar_spell_directory(kept, shown, sizeof(shown)))
@@ -5899,9 +5962,29 @@ static bool tar_map_text(void)
    header being built. */
 static bipolar tar_attr_fd = -1;
 
+/* The access and default ACLs read from the object, each held whole, and
+   the text they are made into. */
+static tar_text tar_acl_access;
+static tar_text tar_acl_default;
+static tar_text tar_acl_out;
+
+/*      An extended attribute's value, held whole in into: the kernel is asked
+        its size first, with no buffer, and the value is then read into a
+        buffer that size.  Its length, or -1 when the attribute is not there or
+        the kernel refuses it. */
+static bipolar tar_attr_held(bipolar fd, string_address name, tar_text address_to into)
+{
+        bipolar size = system_call_4(syscall(fgetxattr), (positive)fd,
+                                     (positive)name, 0, 0);
+
+        if (size < 0 || !tar_text_hold(into, (positive)size))
+                return -1;
+        return system_call_4(syscall(fgetxattr), (positive)fd, (positive)name,
+                             (positive)into->text, (positive)size);
+}
+
 static bool tar_x_attributes(bipolar fd, bool directory, positive mode)
 {
-        p8 text[16384];
         bipolar names;
         positive have = 0;
 
@@ -5909,33 +5992,31 @@ static bool tar_x_attributes(bipolar fd, bool directory, positive mode)
                 return true;
         if (tar_opt_acls)
         {
-                bipolar access = system_call_4(syscall(fgetxattr), (positive)fd,
-                                               (positive)"system.posix_acl_access",
-                                               (positive)tar_attr_value,
-                                               sizeof(tar_attr_value));
+                bipolar access = tar_attr_held(fd, "system.posix_acl_access",
+                                               address_of tar_acl_access);
                 bipolar fallback = directory
-                    ? system_call_4(syscall(fgetxattr), (positive)fd,
-                                    (positive)"system.posix_acl_default",
-                                    (positive)(tar_attr_value + 8192), 8192)
+                    ? tar_attr_held(fd, "system.posix_acl_default",
+                                    address_of tar_acl_default)
                     : -1;
 
-                if (access > 8192)
-                        access = -1;
                 if (access > 0 || fallback > 0)
                 {
                         if (access > 0)
                         {
-                                if (tar_acl_text(tar_attr_value, (positive)access, text,
-                                                 sizeof(text), address_of have))
-                                        tar_x_add("SCHILY.acl.access", (string_address)text, have);
+                                if (tar_acl_text(tar_acl_access.text, (positive)access,
+                                                 address_of tar_acl_out, address_of have))
+                                        tar_x_add("SCHILY.acl.access",
+                                                  (string_address)tar_acl_out.text, have);
                         }
-                        else
-                                tar_x_add("SCHILY.acl.access", (string_address)text,
-                                          tar_acl_from_mode(mode, text));
+                        else if (tar_acl_from_mode(mode, address_of tar_acl_out,
+                                                   address_of have))
+                                tar_x_add("SCHILY.acl.access",
+                                          (string_address)tar_acl_out.text, have);
                         if (fallback > 0 &&
-                            tar_acl_text(tar_attr_value + 8192, (positive)fallback, text,
-                                         sizeof(text), address_of have))
-                                tar_x_add("SCHILY.acl.default", (string_address)text, have);
+                            tar_acl_text(tar_acl_default.text, (positive)fallback,
+                                         address_of tar_acl_out, address_of have))
+                                tar_x_add("SCHILY.acl.default",
+                                          (string_address)tar_acl_out.text, have);
                 }
         }
         if (!tar_opt_xattrs)
@@ -6382,7 +6463,7 @@ static bool tar_archived_current(string_address name, p64 time)
 static bipolar tar_scan_end(bipolar handle)
 {
         p8 block[TAR_BLOCK];
-        p8 long_name[TAR_PATH];
+        tar_text long_name = {null, 0};
         bool have_long = false;
         p64 offset = 0;
 
@@ -6413,11 +6494,13 @@ static bipolar tar_scan_end(bipolar handle)
                 offset += TAR_BLOCK;
                 positive data = (positive)((size + TAR_BLOCK - 1) / TAR_BLOCK * TAR_BLOCK);
 
-                if (type == 'L' && size < TAR_PATH)
+                if (type == 'L')
                 {
-                        if (system_read_retry((positive)handle, long_name, (positive)size) != (bipolar)size)
+                        if (!tar_size_fits(size) ||
+                            !tar_text_hold(address_of long_name, (positive)size) ||
+                            system_read_retry((positive)handle, long_name.text, (positive)size) != (bipolar)size)
                                 return -1;
-                        long_name[size] = end;
+                        long_name.text[size] = end;
                         have_long = true;
                         if (system_seek(handle, (bipolar)(data - size), FILE_SEEK_CUR) < 0)
                                 return -1;
@@ -6451,17 +6534,17 @@ static bipolar tar_scan_end(bipolar handle)
                 if (tar_updating)
                 {
                         p8 name[TAR_PATH];
+                        string_address listed = (string_address)name;
 
-                        // A name the extraction would refuse is not listed.
-                        if (type == 'L')
-                                return -1;
+                        //      The name the archive gives is the one noted,
+                        //      whatever its length: a long name is held whole.
                         if (have_long)
-                                string_copy_bounded((char address_to)name, (string_address)long_name, sizeof(name));
+                                listed = (string_address)long_name.text;
                         else if (!tar_header_prefixed(block))
                                 tar_field_text(block, TAR_NAME, name, sizeof(name));
                         else if (!tar_join_name(block + 345, block, name, sizeof(name)))
                                 name[0] = end;
-                        if (!tar_archived_note((string_address)name, time))
+                        if (!tar_archived_note(listed, time))
                                 return -1;
                 }
                 have_long = false;

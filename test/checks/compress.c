@@ -12,6 +12,13 @@
 #ifdef CHECK_tar
 #include "../../src/lib.util.c"
 #include "../../src/moonwater/spark.c"
+/*      shell.c's growth for the tar.c this build reads, which does not
+        include shell.c: a store that moves by memory_reserve, as shell_room
+        moves a table that is not carved from the shell's pool. */
+#define shell_array_room(array, room, want)                                  \
+        ((want) <= (room) || memory_reserve((address_any address_to)address_of (array), \
+                                            address_of (room), (room), (want), \
+                                            sizeof((array)[0]), 64))
 #define TAR_PARSE_ONLY
 #include "../../src/sh/tar.c"
 #undef TAR_PARSE_ONLY
@@ -408,14 +415,14 @@ static fn pax_records(void)
                 if (well && string_equals(keys[key], "path"))
                         check("pax path values are kept",
                               tar_pax_local.has_path &&
-                                  !memory_compare(tar_pax_local.path,
+                                  !memory_compare(tar_pax_local.path.text,
                                                   values[value].bytes,
                                                   values[value].n) &&
-                                  tar_pax_local.path[values[value].n] == 0);
+                                  tar_pax_local.path.text[values[value].n] == 0);
                 if (well && string_equals(keys[key], "linkpath"))
                         check("pax linkpath values are kept",
                               tar_pax_local.has_link &&
-                                  !memory_compare(tar_pax_local.link,
+                                  !memory_compare(tar_pax_local.link.text,
                                                   values[value].bytes,
                                                   values[value].n));
                 if (well && size_key && values[value].n)
@@ -484,7 +491,7 @@ static fn pax_records(void)
 static fn name_precedence(void)
 {
         p8 block[TAR_BLOCK];
-        p8 into[TAR_PATH];
+        tar_text into = {null, 0};
         p8 given[TAR_PATH];
         positive shape;
 
@@ -511,36 +518,26 @@ static fn name_precedence(void)
                 tar_pax_clear(address_of tar_pax_global);
                 if (by_local)
                 {
-                        string_copy_max_end(tar_pax_local.path,
-                                            (string_address) "local",
-                                            TAR_PATH - 1);
-                        string_copy_max_end(tar_pax_local.link,
-                                            (string_address) "local",
-                                            TAR_PATH - 1);
+                        tar_text_string(address_of tar_pax_local.path, (string_address) "local");
+                        tar_text_string(address_of tar_pax_local.link, (string_address) "local");
                         tar_pax_local.has_path = true;
                         tar_pax_local.has_link = true;
                 }
                 if (by_global)
                 {
-                        string_copy_max_end(tar_pax_global.path,
-                                            (string_address) "global",
-                                            TAR_PATH - 1);
-                        string_copy_max_end(tar_pax_global.link,
-                                            (string_address) "global",
-                                            TAR_PATH - 1);
+                        tar_text_string(address_of tar_pax_global.path, (string_address) "global");
+                        tar_text_string(address_of tar_pax_global.link, (string_address) "global");
                         tar_pax_global.has_path = true;
                         tar_pax_global.has_link = true;
                 }
 
-                into[0] = end;
                 check("a pax path outranks a GNU long name, which outranks the header",
-                      tar_member_name(block, into, by_long ? given : null) &&
-                          string_equals(into, want));
+                      tar_member_name(block, address_of into, by_long ? given : null) &&
+                          string_equals(into.text, want));
 
-                into[0] = end;
                 check("a pax linkpath ranks the same three ways",
-                      tar_member_link(block, into, by_long ? given : null) &&
-                          string_equals(into, want));
+                      tar_member_link(block, address_of into, by_long ? given : null) &&
+                          string_equals(into.text, want));
         }
 
         tar_pax_clear(address_of tar_pax_local);
@@ -644,6 +641,62 @@ static fn digit_words(void)
         check("word_bytes_reversed reverses the eight bytes", reversed);
 }
 
+/*
+        Names and sparse maps the archive gives at any length.  A pax path of
+        4200 bytes is a name GNU reads whole, so its record applies, and a GNU
+        0.1 map of 20000 extents is kept whole: nothing caps a count an
+        archive makes, only the memory it has (the record was refused at 4096
+        bytes, and the map's extents were dropped past 16384).
+*/
+static fn long_values(void)
+{
+        static p8 record[1 << 19];
+        static p8 map[1 << 19];
+        p8 value[4200];
+        positive used = 0;
+        positive length = 0;
+        positive at;
+
+        memory_fill(value, 'p', sizeof(value));
+        tar_pax_clear(address_of tar_pax_local);
+        check("a pax path of 4200 bytes is a record that applies",
+              tar_pax_record(record, sizeof(record), address_of used, "path",
+                            value, sizeof(value)) &&
+                  tar_pax_apply(address_of tar_pax_local, record, used) &&
+                  tar_pax_local.has_path);
+        check("a pax path of 4200 bytes is kept whole, and ended",
+              !memory_compare(tar_pax_local.path.text, value, sizeof(value)) &&
+                  tar_pax_local.path.text[sizeof(value)] == end);
+
+        used = 0;
+        tar_pax_clear(address_of tar_pax_local);
+        check("a pax linkpath of 4200 bytes is a record that applies",
+              tar_pax_record(record, sizeof(record), address_of used, "linkpath",
+                            value, sizeof(value)) &&
+                  tar_pax_apply(address_of tar_pax_local, record, used) &&
+                  tar_pax_local.has_link);
+
+        for (at = 0; at < 20000; at++)
+        {
+                if (at)
+                        map[length++] = ',';
+                length += positive_into(map + length, at * 4096);
+                map[length++] = ',';
+                length += positive_into(map + length, 4);
+        }
+        used = 0;
+        tar_pax_clear(address_of tar_pax_local);
+        check("a GNU 0.1 map of 20000 extents is kept whole",
+              tar_pax_record(record, sizeof(record), address_of used,
+                            "GNU.sparse.map", map, length) &&
+                  tar_pax_apply(address_of tar_pax_local, record, used) &&
+                  !tar_psp_bad && tar_psp_used == 20000 && tar_psp_kind == 1);
+        check("a GNU 0.1 map of 20000 extents keeps its last extent",
+              tar_psp_used == 20000 && tar_psp[19999].offset == (p64)19999 * 4096 &&
+                  tar_psp[19999].bytes == 4);
+        tar_pax_clear(address_of tar_pax_local);
+}
+
 b32 main(void)
 {
         checksums();
@@ -654,6 +707,7 @@ b32 main(void)
         name_precedence();
         name_spelling();
         digit_words();
+        long_values();
         return test_report(null);
 }
 #endif /* CHECK_tar */
