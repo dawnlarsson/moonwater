@@ -61,9 +61,6 @@ static p8 awk_utf8_known;
 
 static bool awk_wide(string_address text, positive length)
 {
-        if (!awk_utf8_known)
-                awk_utf8_known = text_locale_utf8() ? 2 : 1;
-
         return awk_utf8_known == 2 && memory_ascii_span(text, length) != length;
 }
 
@@ -2959,9 +2956,6 @@ static awk_text address_to awk_sprintf(string_address format, positive length,
 
                                 // In a UTF-8 locale a value that is a
                                 // character is written as its sequence.
-                                if (!awk_utf8_known)
-                                        awk_utf8_known = text_locale_utf8() ? 2 : 1;
-
                                 if (awk_utf8_known == 2 && decimal_is_finite(value) &&
                                     value >= 128.0 && value < 1114112.0)
                                 {
@@ -7475,6 +7469,7 @@ static fn awk_stack_measure()
 static fn awk_start()
 {
         awk_write_failed = false;
+        awk_utf8_known = text_locale_utf8() ? 2 : 1;
         awk_stack_measure();
         awk_infinity = awk_from_bits((positive)0x7ff0000000000000ull);
         // The sign bit is set because that is the one the machine's own log
