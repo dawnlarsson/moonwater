@@ -649,7 +649,7 @@ static struct
         int ready;                     // the rows were read
 } compositor_wall_rows = {1, 1, 45, 1, 0};
 
-#define COMPOSITOR_WALL_SCREENS 8
+#define COMPOSITOR_WALL_SCREENS WINDOWS_OUTPUTS
 
 static struct compositor_wall_job
 {

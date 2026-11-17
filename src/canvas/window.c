@@ -654,8 +654,10 @@ struct windows_issue
 #define WINDOWS_APP_ID 64       // a window's app_id, its null with it
 #define WINDOWS_ICON 32         // a window's icon is this many pixels each way
 #define WINDOWS_ICON_MOST 1024u // the largest picture an icon is made from, each way
-// The screens one desktop spans, at most, and a screen's connector name with its null.
-#define WINDOWS_OUTPUTS 8
+// The screens one desktop spans, at most: as many as a card can drive at once, its CRTCs, which the kernel numbers in 32-bit masks (an
+// encoder's possible_crtcs, a plane's possible_crtcs: drm_crtc_init_with_planes refuses a 33rd), where it was 8. And a screen's
+// connector name with its null.
+#define WINDOWS_OUTPUTS 32
 #define WINDOWS_OUTPUT_NAME 16
 #define WINDOWS_OUTPUT_MODEL 16 // the monitor's name from its EDID, the descriptor's 13 bytes and a null
 #define WINDOWS_OUTPUT_HZ 8 // the refresh rates one screen lists at its size, at most
@@ -789,7 +791,7 @@ static inline int window_pinch_y(int b)
 // The most a number of a placement can be either way: wider than any desktop, and far inside WINDOW_COORD_MAX.
 #define WINDOW_PLACE_MOST 16384
 // The screens a placement can name, from 1 as it is typed.
-#define WINDOW_PLACE_SCREENS 8u
+#define WINDOW_PLACE_SCREENS ((unsigned int)WINDOWS_OUTPUTS)
 // A name, its null included.
 #define WINDOWS_NAME 16
 // The variable, the words a placement has at most, and the room of its text.
@@ -1263,7 +1265,7 @@ struct windows
         unsigned int capacity;
 };
 
-#define WINDOWS_ABI 5u // 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+#define WINDOWS_ABI 6u // 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
 
 // Whether a table's layout is the one this program was built against.
 static inline int windows_abi_ok(unsigned int abi)

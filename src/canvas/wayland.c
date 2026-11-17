@@ -84,7 +84,7 @@
 #define WAYLAND_SERVER_IDS 0x01000000UL // the server's own ids, from 0xff000000 (the protocol's range): its index grows with what it makes
 #define WAYLAND_ID_GAP 4096     // how far past the next id a client's new one may be (libwayland's servers allow none; a gap costs index, not more)
 #define WAYLAND_SERVER_BASE 0xff000000UL
-#define WAYLAND_SCREENS 8
+#define WAYLAND_SCREENS 32 // the screens a card drives at once (its CRTCs: the kernel's 32-bit masks), as window.c's WINDOWS_OUTPUTS
 #define WAYLAND_GLOBALS_MAX 40
 #define WAYLAND_TOUCHES 10      // fingers down at once over every client (wl_touch's points)
 #define WAYLAND_TOKEN_MS 10000  // how long a given token may be used (its serial must still be a recent input of its client)
@@ -559,7 +559,7 @@ struct wayland_surface
         unsigned char told;
         unsigned int decoration_id;      // its zxdg_toplevel_decoration_v1, or 0
         unsigned char want_maximized, want_fullscreen, grab;
-        unsigned char entered;           // the screens it was told it is on, a bit each
+        unsigned int entered;            // the screens it was told it is on, a bit each (WAYLAND_SCREENS of them)
         unsigned int syncobj_id;
         unsigned char pending_sync_acq_set, pending_sync_rel_set;
         unsigned short pending_sync_acq_slot, pending_sync_rel_slot;
@@ -4043,7 +4043,7 @@ static long wayland_screen_at(long x, long y)
 /* A surface shown on a screen is told so, by each wl_output of its client that is that screen: enter once, leave when it goes. */
 static void wayland_surface_screens(struct wayland_client *c, struct wayland_surface *s, long screen)
 {
-        unsigned char now = screen >= 0 && screen < 8 ? (unsigned char)(1u << screen) : 0;
+        unsigned int now = screen >= 0 && screen < WAYLAND_SCREENS ? 1u << screen : 0;
 
         if (now == s->entered)
                 return;
@@ -4052,7 +4052,7 @@ static void wayland_surface_screens(struct wayland_client *c, struct wayland_sur
                 struct wayland_object *o = &c->objects[at];
                 struct wayland_event e;
 
-                if (o->iface != WLI_wl_output || o->aux >= 8)
+                if (o->iface != WLI_wl_output || o->aux >= WAYLAND_SCREENS)
                         continue;
                 if ((s->entered & (1u << o->aux)) && !(now & (1u << o->aux)))
                 {
@@ -10137,7 +10137,7 @@ WAYLAND_API void wayland_screens_changed(void)
 
                 //      A screen went: the surfaces on it leave it, and what the client bound of it is told nothing more (its number is
                 //      nobody's: a screen that comes with it later is another global, and these are not it).
-                for (long screen = wayland.screens; c && screen < was && screen < 8; screen++)
+                for (long screen = wayland.screens; c && screen < was && screen < WAYLAND_SCREENS; screen++)
                 {
                         for (long at = 0; at < c->surface_table.count; at++)
                         {
@@ -10153,7 +10153,7 @@ WAYLAND_API void wayland_screens_changed(void)
                                                 wayland_word(&e, c->objects[object].id);
                                                 wayland_end(&e);
                                         }
-                                surface->entered &= (unsigned char)~(1u << screen);
+                                surface->entered &= ~(1u << screen);
                         }
                         for (long object = 0; object < c->object_table.count; object++)
                                 if ((c->objects[object].iface == WLI_wl_output || c->objects[object].iface == WLI_zxdg_output_v1) &&

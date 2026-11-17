@@ -176,12 +176,36 @@ static unsigned int compositor_display_degrees(const char *name)
         card's master, probes the connector again, which is what a hotplug
         is to be answered by.
 */
-#define COMPOSITOR_CONNECTORS 16
+/*
+        The card's connectors are as many as it says (a dock's MST ports add theirs), read into a list that grows (compositor_connector_ids,
+        a doubling at a time); its CRTCs are WINDOWS_OUTPUTS at most, the kernel's own bound. Where a card of more than 16 of either had no
+        screen at all.
+*/
+static unsigned int *compositor_connector_ids;
+static long compositor_connector_room;
+
+// Room for want connector ids: the list, or 0 when the memory is not there.
+static unsigned int *compositor_connectors_room(long want)
+{
+        long room = compositor_connector_room ? compositor_connector_room : 64, got;
+
+        if (want <= compositor_connector_room)
+                return compositor_connector_ids;
+        while (room < want)
+                room *= 2;
+        got = compositor_call(syscall(mmap), 0, (positive)(room * (long)sizeof(unsigned int)), 3, 0x22, (positive)-1, 0);
+        if (got < 0 && got > -4096)
+                return 0;
+        if (compositor_connector_ids)
+                compositor_call(syscall(munmap), (positive)compositor_connector_ids, (positive)(compositor_connector_room * (long)sizeof(unsigned int)), 0, 0, 0, 0);
+        compositor_connector_ids = (unsigned int *)got, compositor_connector_room = room;
+        return compositor_connector_ids;
+}
 
 struct compositor_connected
 {
         unsigned int count, crtc_count, max_width, max_height;
-        unsigned int crtcs[COMPOSITOR_CONNECTORS];
+        unsigned int crtcs[WINDOWS_OUTPUTS];
         unsigned int connector[WINDOWS_OUTPUTS], crtc[WINDOWS_OUTPUTS], possible[WINDOWS_OUTPUTS];
         int current[WINDOWS_OUTPUTS];
         struct compositor_mode mode[WINDOWS_OUTPUTS];
@@ -355,13 +379,14 @@ static int compositor_list_kept;
 static b32 compositor_connected_read(struct compositor_connected *found)
 {
         struct compositor_card_res resources = {0};
-        unsigned int connectors[COMPOSITOR_CONNECTORS], taken = 0, kept = 0;
+        unsigned int *connectors, taken = 0, kept = 0;
 
         memory_zero(found, sizeof(*found));
         if (system_control(compositor.card, COMPOSITOR_GETRESOURCES, address_of resources) != 0 ||
-            resources.connector_count > COMPOSITOR_CONNECTORS || resources.crtc_count > COMPOSITOR_CONNECTORS ||
-            !resources.crtc_count)
+            !resources.crtc_count || !(connectors = compositor_connectors_room((long)resources.connector_count + 1)))
                 return -COMPOSITOR_EINVAL;
+        // A card with more CRTCs than the kernel numbers drives the first WINDOWS_OUTPUTS of them.
+        resources.crtc_count = resources.crtc_count > WINDOWS_OUTPUTS ? WINDOWS_OUTPUTS : resources.crtc_count;
         resources.connectors = (unsigned long)connectors;
         resources.crtcs = (unsigned long)found->crtcs;
         resources.fb_count = resources.encoder_count = 0;

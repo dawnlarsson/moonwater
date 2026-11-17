@@ -7503,7 +7503,7 @@ static void test_outputs(void)
         wayland_screens_changed();
         wlc_pump(c);
         count = output_names(c, 0, names, 4);
-        WLCHECK(count == 1 && names[0] == 73, "a screen that comes in its place is another global: 73, and not the 65 that was removed");
+        WLCHECK(count == 1 && names[0] == 65 + WAYLAND_SCREENS, "a screen that comes in its place is another global: 65 and a turn of the screens, and not the 65 that was removed");
         wlc_forget(c);
         fake.screen.scale = 125;
         wayland_screens_changed();
@@ -7513,6 +7513,21 @@ static void test_outputs(void)
         wlc_forget(c);
         wlc_send(c, w.s.registry, WLQ_wl_registry_bind, 65L, "wl_output", 4L, wlc_id(c, WLI_wl_output, 4));
         WLCHECK(refused_with(c, WLN_wl_display_error_invalid_object), "and the name that was removed binds nothing");
+        wlc_end(c);
+        /* twenty screens (past the eight there were): a client is offered twenty outputs */
+        wayland_stop();
+        wl_reset();
+        wayland_start(&fake_host);
+        fake.screens = 20;
+        wayland_screens_changed();
+        session_open(&s);
+        c = s.c;
+        {
+                long many[32];
+
+                count = output_names(c, 0, many, 32);
+                WLCHECK(count == 20 && many[19] == 64 + 19, "a client is offered twenty outputs for twenty screens (%ld)", count);
+        }
         wlc_end(c);
         /* a client made after sees the screens there are, and two that go and come again are two new globals */
         wayland_stop();
@@ -7535,7 +7550,7 @@ static void test_outputs(void)
         wayland_screens_changed();
         wlc_pump(c);
         count = output_names(c, 0, names, 4);
-        WLCHECK(count == 2 && names[0] == 73 && names[1] == 74, "and two that come are 73 and 74");
+        WLCHECK(count == 2 && names[0] == 65 + WAYLAND_SCREENS && names[1] == 66 + WAYLAND_SCREENS, "and two that come are 65 and 66, a turn of the screens on");
         third = wlc_id(c, WLI_wl_output, 4);
         (void)third;
         wlc_end(c);
