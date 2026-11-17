@@ -1204,6 +1204,8 @@ static struct
         int hold;                   // /dev/cpu_dma_latency, open with a zero in it while a person is at the machine, or -1
         positive hold_until;
         unsigned long holds;        // how many times it was taken
+        int game;                   // /dev/cpu_dma_latency, open while a fullscreen window is on top (compositor_game_watch), or -1
+        unsigned long games;        // how many times it was taken; ~0 when the machine has no such file or the owner said no
         struct { positive total, count, worst; } latency[3]; // pointer to plane, pointer to frame, key to window
         unsigned char wakeonly[COMPOSITOR_INPUTS]; // a power button or a lid: it wakes the loop and says nothing it uses
         int cycle;           // an Alt-Tab is under way: the place in the stack of the window it is on, from 1
@@ -2922,7 +2924,7 @@ static b32 compositor_main()
                 return 1;
         }
         compositor.watch = compositor.uevents = -1;
-        compositor.hold = -1;
+        compositor.hold = compositor.game = -1;
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = compositor.told_row = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = compositor.preview_row = COMPOSITOR_NONE;
         compositor.mark_row = compositor.mark_with = compositor.shared_row = COMPOSITOR_NONE;
@@ -2977,6 +2979,13 @@ static b32 compositor_main()
                 compositor_late.early = early >= 0;
                 if (early >= 0)
                         system_close(early);
+        }
+        // No game's hold of the processor's idle states, where the owner says so (compositor_game_watch).
+        {
+                bipolar off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/game-hold-off", FILE_READ | O_CLOEXEC);
+
+                if (off >= 0)
+                        compositor.games = ~0ul, system_close(off);
         }
 #ifdef MOONWATER_GPU_C
         // The card's present without a wait, unless the owner asks for every job waited for in place, as it was (/run/moonwater/present-wait).
@@ -3309,6 +3318,7 @@ static b32 compositor_main()
                 compositor_wake_check(now);
                 compositor_wake_pass(now);
                 compositor_hold_drop(now);
+                compositor_game_watch();
 #ifdef MOONWATER_GPU_C
                 compositor_gpu_late_tick(now);
                 compositor_gpu_clocks_tick(now);

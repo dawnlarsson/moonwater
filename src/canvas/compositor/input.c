@@ -67,6 +67,56 @@ static void compositor_hold_drop(positive now)
 }
 
 /*
+        A game's hold: while a fullscreen window is the top one on a screen (a game, as a person plays it: compositor_fullscreen_up), the
+        processor is held out of its idle states as the input hold holds it (a zero in /dev/cpu_dma_latency), and on a battery that is
+        discharging out of the deep ones only (a microsecond: the shallowest halt, C1). The input hold covers a game played with the keys
+        and the mouse only while they move; a pad's reports never reach the compositor, and a game waiting on the card has every core
+        asleep. Measured on the box (Ryzen 9950X) with tools/gameload, a thread sleeping to a 144 Hz deadline and then working 359 us of
+        a multiply chain at full clock: with the machine otherwise idle it woke 345 us late at the median and 550-680 us at worst (the
+        package's deep states: ACPI says 18 us for C2, it takes 335), and ran its work in 551 us; held at 1 us, 10 us late and 640 us;
+        at 0, 10 us late and 359 us. Beside eight busy threads (a game's workers) it woke in 10 us at every request and worked 550, 627
+        and 386 us (none, 1, 0), while the eight did 11022, 11003 and 10892 steps a microsecond: the poll costs the busy threads 1
+        percent. What it costs is power: 84 W for the package with the machine idle against 26 W at 1 and 14 W with no request, 103-108
+        W against 48-77 W under four to eight busy threads. The file held open is the request, so a compositor that ends lets go of it
+        with its descriptors. Off, for the machine's owner: /run/moonwater/game-hold-off at the start.
+*/
+
+static void compositor_game_watch(void)
+{
+        int game = compositor.games != ~0ul && compositor_fullscreen_up();
+        static const char *const batteries[] = {"/sys/class/power_supply/BAT0/status", "/sys/class/power_supply/BAT1/status",
+                                                 "/sys/class/power_supply/battery/status"};
+        int us = 0;
+
+        if (game == (compositor.game >= 0))
+                return;
+        if (!game)
+        {
+                system_close(compositor.game);
+                compositor.game = -1;
+                return;
+        }
+        compositor.game = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC);
+        if (compositor.game < 0)
+        {
+                compositor.game = -1;
+                compositor.games = ~0ul; // not there on this machine: not asked for again
+                return;
+        }
+        // The battery as it is when the hold is taken (a laptop's names; a desktop has none): a cable put in or out during the game
+        // counts from the next take.
+        for (unsigned int at = 0; at < sizeof(batteries) / sizeof(batteries[0]); at++)
+        {
+                char status[16];
+
+                compositor_word(batteries[at], status, sizeof(status));
+                us |= string_equals((string_address)status, (string_address) "Discharging");
+        }
+        system_write_once(compositor.game, &us, sizeof(us));
+        compositor.games++;
+}
+
+/*
         The desktop's keys, which are the machine script's: a function there
         named key_ and a chord -- modifiers and a key joined by _, as
         key_ctrl_shift_t -- is run when the chord is pressed. The script
