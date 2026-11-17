@@ -520,7 +520,10 @@ AUDIO_API long audio_pcm_open_fill(struct audio_pcm *pcm, long card, long device
         sw.tstamp_type = 1;
         if (stream == AUDIO_ALSA_PLAYBACK)
         {
-                sw.avail_min = (unsigned long)(pcm->buffer - pcm->target + pcm->period);
+                // Woken when a period has been played, less a quarter: the card's interrupt comes at the end of a period, and the
+                // position the driver reads then can be a few frames short of it, so a wake asked for at exactly a period was missed
+                // and came a period later with the card down to one period (HDA, box and hasty-tail: 56 and 70 percent of wakes).
+                sw.avail_min = (unsigned long)(pcm->buffer - pcm->target + pcm->period - pcm->period / 4);
                 sw.start_threshold = (unsigned long)pcm->target;
         }
         else

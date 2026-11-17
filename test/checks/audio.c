@@ -2933,25 +2933,25 @@ static void al_test_negotiation(void)
         {
                 int model;
                 long rate, period_at_48000;
-                long format, channels, rate_got, period, buffer, target, avail_min;
+                long format, channels, rate_got, period, buffer, target, avail_min; // avail_min: a period played, less a quarter
                 int opens;
         } cases[] = {
             // hda: 32 bits, a pair, 48000, a period of 256 and a buffer of four
-            {0, 48000, 256, AUDIO_FORMAT_S32LE, 2, 48000, 256, 1024, 768, 512, 1},
-            {0, 44100, 256, AUDIO_FORMAT_S32LE, 2, 44100, 235, 940, 705, 470, 1},
-            {0, 192000, 256, AUDIO_FORMAT_S32LE, 2, 192000, 1024, 4096, 3072, 2048, 1},
+            {0, 48000, 256, AUDIO_FORMAT_S32LE, 2, 48000, 256, 1024, 768, 448, 1},
+            {0, 44100, 256, AUDIO_FORMAT_S32LE, 2, 44100, 235, 940, 705, 412, 1},
+            {0, 192000, 256, AUDIO_FORMAT_S32LE, 2, 192000, 1024, 4096, 3072, 1792, 1},
             // a rate the card has not got: the first of the usual that it takes
-            {0, 22050, 256, AUDIO_FORMAT_S32LE, 2, 48000, 256, 1024, 768, 512, 1},
+            {0, 22050, 256, AUDIO_FORMAT_S32LE, 2, 48000, 256, 1024, 768, 448, 1},
             // usb: 24 bits in three bytes, and a period on the millisecond: 256 is not on it, 288 is the least above
-            {1, 48000, 256, AUDIO_FORMAT_S24LE, 2, 48000, 288, 1152, 864, 576, 1},
+            {1, 48000, 256, AUDIO_FORMAT_S24LE, 2, 48000, 288, 1152, 864, 504, 1},
             // hdmi: a pair of eight channels, 32 bits
-            {2, 48000, 256, AUDIO_FORMAT_S32LE, 2, 48000, 256, 1024, 768, 512, 1},
+            {2, 48000, 256, AUDIO_FORMAT_S32LE, 2, 48000, 256, 1024, 768, 448, 1},
             // a card of six channels only, at 96000 only: the pair goes to the first two
-            {3, 48000, 256, AUDIO_FORMAT_S16LE, 6, 96000, 512, 2048, 1536, 1024, 1},
+            {3, 48000, 256, AUDIO_FORMAT_S16LE, 6, 96000, 512, 2048, 1536, 896, 1},
             // a buffer no larger than two periods
-            {6, 48000, 256, AUDIO_FORMAT_S16LE, 2, 48000, 256, 512, 512, 256, 1},
+            {6, 48000, 256, AUDIO_FORMAT_S16LE, 2, 48000, 256, 512, 512, 192, 1},
             // a card that takes only floats
-            {7, 48000, 256, AUDIO_FORMAT_F32LE, 2, 48000, 256, 1024, 768, 512, 1},
+            {7, 48000, 256, AUDIO_FORMAT_F32LE, 2, 48000, 256, 1024, 768, 448, 1},
         };
 
         for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++)
@@ -2991,7 +2991,7 @@ static void al_test_negotiation(void)
                 audio_pcm_close(&pcm);
                 ALCHECK(al_opens == al_closes && pcm.fd == -1, "%s: every open is closed", al_models[cases[c].model].name);
         }
-        // A fill of two periods: the target is two periods and the wake is when one has played; a fill of one is taken as two.
+        // A fill of two periods: the target is two periods and the wake is when one has played, less a quarter; a fill of one is taken as two.
         {
                 struct audio_pcm pcm;
                 long result;
@@ -3001,7 +3001,7 @@ static void al_test_negotiation(void)
                 al_model_of_card[0] = 0;
                 result = audio_pcm_open_fill(&pcm, 0, 0, AUDIO_ALSA_PLAYBACK, 48000, 64, -1, 2);
                 ALCHECK(result == 0 && pcm.target == 2 * pcm.period && al_fds[0].start_threshold == pcm.target &&
-                                al_fds[0].avail_min == pcm.buffer - pcm.target + pcm.period,
+                                al_fds[0].avail_min == pcm.buffer - pcm.target + pcm.period - pcm.period / 4,
                         "a fill of two periods: target %ld, period %ld, buffer %ld, avail_min %ld", pcm.target, pcm.period, pcm.buffer, al_fds[0].avail_min);
                 if (result == 0)
                         audio_pcm_close(&pcm);
@@ -3822,6 +3822,17 @@ static long pt_now(void *context)
         return pt_clock;
 }
 
+static long pt_card_us; // what the host says the card holds for a stream (host.latency): 0, a clock, unless a check sets it
+static long pt_card_asked; // and the latency the last stream asked it about
+
+static long pt_latency(void *context, long sink, long asked_us)
+{
+        (void)context;
+        (void)sink;
+        pt_card_asked = asked_us;
+        return pt_card_us;
+}
+
 static void pt_real(void *context, long *seconds, long *microseconds)
 {
         (void)context;
@@ -3893,9 +3904,10 @@ static long pt_table_bytes(void)
 
 static void pt_reset(void)
 {
-        struct pulse_host host = {0, pt_alloc, pt_release, pt_now, pt_real, pt_recall, pt_remember, pt_changed};
+        struct pulse_host host = {0, pt_alloc, pt_release, pt_now, pt_real, pt_recall, pt_remember, pt_changed, pt_latency};
 
         pulse_open(&pt_engine, &host);
+        pt_card_us = pt_card_asked = 0;
         pt_allocs = pt_releases = pt_alloc_bytes = pt_release_bytes = 0;
         pt_alloc_fail_after = -1;
         pt_clock = 1000000;
@@ -4630,6 +4642,7 @@ static void pt_make_source(void)
 
 // A stereo 16-bit stream at 48000 with the buffer attributes given; the channel and the sink input's index, or -1.
 static int pt_next_no_move; // the no-move bool of the next stream pt_create makes (version 12 on)
+static int pt_next_fixed;   // the next stream does not adjust its latency (ADJUST_LATENCY off, version 13 on)
 
 static int pt_create(long slot, unsigned version, unsigned long tag, unsigned long tlength, unsigned long prebuf, unsigned long minreq, unsigned long *channel, unsigned long *index,
                      unsigned long *missing, int corked, unsigned long volume, int volume_set, long format, int channels, unsigned long rate, const char *sink)
@@ -4658,7 +4671,7 @@ static int pt_create(long slot, unsigned version, unsigned long tag, unsigned lo
         if (version >= 13)
         {
                 pt_bool(&w, 0);
-                pt_bool(&w, 1);
+                pt_bool(&w, !pt_next_fixed);
                 pt_props(&w, "media.name", "Playback Stream", "media.role", "music");
         }
         if (version >= 14)
@@ -4970,6 +4983,120 @@ static void pt_test_restart(void)
         pulse_client_close(&pt_engine, slot);
         for (int block = 0; block < 4; block++)
                 pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 64);
+        PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases + pt_table_blocks(), "all given back");
+}
+
+// The buffer attributes a program is given, as PulseAudio gives them, with the card's share (host.latency) taken off what a stream that
+// adjusts its latency keeps queued; the configured latency it is told; and the latency it reads, fresh at the moment it asks.
+static void pt_create_attributes(unsigned long tag, unsigned long *tlength, unsigned long *prebuf, unsigned long *minreq, long long *configured)
+{
+        const struct pt_frame *f = pt_find(PULSE_COMMAND_REPLY);
+        struct pt_r r;
+
+        *tlength = *prebuf = *minreq = 0;
+        *configured = -1;
+        if (!f || f->tag != tag)
+                return;
+        r = pt_reply_reader(f);
+        pt_ru32(&r);
+        pt_ru32(&r);
+        pt_ru32(&r);
+        pt_ru32(&r);
+        *tlength = pt_ru32(&r);
+        *prebuf = pt_ru32(&r);
+        *minreq = pt_ru32(&r);
+        {
+                int format, channels, positions[8], suspended;
+                unsigned long rate;
+
+                pt_rspec(&r, &format, &channels, &rate);
+                pt_rmap(&r, positions);
+                pt_ru32(&r);
+                pt_rstr(&r);
+                suspended = pt_rbool(&r);
+                (void)suspended;
+        }
+        *configured = pt_r64(&r, 'U');
+        if (r.bad)
+                *configured = -2;
+}
+
+static long long pt_playback_latency(long slot, unsigned long channel, unsigned long tag)
+{
+        struct pt_w w = {{0}, 0};
+        const struct pt_frame *f;
+        struct pt_r r;
+
+        pt_u32(&w, channel);
+        pt_byte(&w, 'T');
+        pt_be32(&w, 1);
+        pt_be32(&w, 2);
+        pt_command(slot, PULSE_COMMAND_GET_PLAYBACK_LATENCY, tag, &w);
+        pt_collect(slot);
+        f = pt_find(PULSE_COMMAND_REPLY);
+        if (!f || f->tag != tag)
+                return -1;
+        r = pt_reply_reader(f);
+        return pt_r64(&r, 'U');
+}
+
+static void pt_test_latency(void)
+{
+        long slot;
+        unsigned long channel, index, missing, tlength, prebuf, minreq;
+        long long configured, latency;
+
+        pt_make_source();
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        slot = pt_connect(1000, 99, 35, "Latency");
+        pt_card_us = 8000; // a card kept 384 frames ahead: 1536 bytes of a stereo 16-bit stream at 48000
+        // SDL at 1024 frames: tlength 4096, the rest the server's. minreq a quarter (1024); the card's 1536 off, but not under the card's
+        // and two minreq (3584, 18.7 ms): 26.7 ms in all where it was 29.3; prebuf the whole tlength.
+        PTCHECK(pt_create(slot, 35, 20, 4096, PULSE_INVALID, PULSE_INVALID, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "an SDL stream");
+        pt_create_attributes(20, &tlength, &prebuf, &minreq, &configured);
+        PTCHECK(tlength == 3584 && minreq == 1024 && prebuf == 3584 && missing == 3584 && configured == 8000 && pt_card_asked == 21333,
+                "SDL's latency is its own: tlength %lu minreq %lu prebuf %lu missing %lu, the card's %lld us (asked about %ld us)", tlength, minreq, prebuf, missing, configured, pt_card_asked);
+        // Chromium: tlength three buffers of 1024 frames, minreq half of one. 64 ms in all: 56 queued and the card's 8.
+        PTCHECK(pt_create(slot, 35, 21, 12288, PULSE_INVALID, 2048, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a Chromium stream");
+        pt_create_attributes(21, &tlength, &prebuf, &minreq, &configured);
+        PTCHECK(tlength == 12288 - 1536 && minreq == 2048 && prebuf == 12288 - 1536 && configured == 8000, "Chromium's: tlength %lu minreq %lu prebuf %lu", tlength, minreq, prebuf);
+        // A default stream: 200 ms, a request of 20 ms (not a quarter, 50 ms).
+        PTCHECK(pt_create(slot, 35, 22, PULSE_INVALID, PULSE_INVALID, PULSE_INVALID, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a default stream");
+        pt_create_attributes(22, &tlength, &prebuf, &minreq, &configured);
+        PTCHECK(tlength == 38400 - 1536 && minreq == 3840, "the default: tlength %lu minreq %lu", tlength, minreq);
+        // A stream that does not adjust keeps what it asked for, and is told the card's share all the same.
+        pt_next_fixed = 1;
+        PTCHECK(pt_create(slot, 35, 23, 12288, 12288, 2048, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a fixed stream");
+        pt_next_fixed = 0;
+        pt_create_attributes(23, &tlength, &prebuf, &minreq, &configured);
+        PTCHECK(tlength == 12288 && minreq == 2048 && prebuf == 12288 && configured == 8000, "not adjusted: tlength %lu minreq %lu prebuf %lu", tlength, minreq, prebuf);
+        // A tiny latency is not cut below the card's and two requests.
+        PTCHECK(pt_create(slot, 35, 24, 1024, PULSE_INVALID, PULSE_INVALID, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a tiny stream");
+        pt_create_attributes(24, &tlength, &prebuf, &minreq, &configured);
+        PTCHECK(tlength == 1536 + 2 * 256 && minreq == 256, "tiny: tlength %lu minreq %lu", tlength, minreq);
+        // The latency a program reads is what the card holds now: what it held at the host's look, less the time since.
+        pulse_sink_delay(&pt_engine, 0, 384);
+        latency = pt_playback_latency(slot, channel, 30);
+        PTCHECK(latency == 8000, "the card's 384 frames, just read: %lld us", latency);
+        pt_clock += 3000;
+        latency = pt_playback_latency(slot, channel, 31);
+        PTCHECK(latency == 5000, "3 ms later the card has played 3 ms of it: %lld us", latency);
+        pt_clock += 9000;
+        latency = pt_playback_latency(slot, channel, 32);
+        PTCHECK(latency == 0, "and none is left when the look is older than what it held: %lld us", latency);
+        // With no card (the clock: host.latency 0) nothing is taken off.
+        pt_card_us = 0;
+        PTCHECK(pt_create(slot, 35, 25, 4096, PULSE_INVALID, PULSE_INVALID, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a stream on the clock");
+        pt_create_attributes(25, &tlength, &prebuf, &minreq, &configured);
+        PTCHECK(tlength == 4096 && configured == 0, "on the clock: tlength %lu, told %lld us", tlength, configured);
+        pulse_client_close(&pt_engine, slot);
+        {
+                static unsigned char out[AUDIO_BLOCK * 4];
+
+                for (int block = 0; block < 4; block++)
+                        pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 64);
+        }
         PTCHECK(pt_engine.streams_made == pt_engine.streams_freed && pt_allocs == pt_releases + pt_table_blocks(), "all given back");
 }
 
@@ -9899,6 +10026,7 @@ int main(void)
         pt_test_stream();
         pt_test_requests();
         pt_test_restart();
+        pt_test_latency();
         pt_test_control();
         pt_test_volume();
         pt_test_dying();

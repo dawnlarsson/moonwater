@@ -223,6 +223,9 @@ struct pulse_host
         void (*remember)(void *context, const char *name, unsigned long volume, int mute);
         // Something the host keeps (the master volume, the mute, the default sink) changed, or a stream began or ended.
         void (*changed)(void *context, int what, long sink);
+        // The microseconds of sound the output of a sink holds (its card's target) for a stream that asks for asked_us in all: what
+        // a stream that adjusts its latency leaves to the card. 0 or no host function: the sink holds nothing of its own (a clock).
+        long (*latency)(void *context, long sink, long asked_us);
 };
 
 #define PULSE_CHANGED_SINK_VOLUME 1
@@ -258,6 +261,8 @@ struct pulse_stream
         unsigned long volume[PULSE_CHANNEL_MAX];
         int muted, corked, trigger, underrun, adjust_latency, variable_rate, early_requests, no_move, owner_set;
         unsigned long maxlength, tlength, prebuf, minreq;
+        unsigned long asked;            // the latency the program asked for in all (its tlength before the card's share is taken off), in bytes
+        long sink_us;                   // the card's share of it: the configured latency of the sink the program is told
         unsigned long outstanding;      // bytes asked of the program and not yet written
         int drain_pending, drained, flushing;
         unsigned long drain_tag;
@@ -297,6 +302,7 @@ struct pulse_sink
         unsigned long volume[2];
         int muted;
         long delay_frames;              // what the card holds, as the host last read it
+        long delay_at;                  // and when (the host's clock, microseconds)
         unsigned long long played;      // frames mixed
         struct audio_sink mix;
 };
@@ -577,6 +583,19 @@ static int pulse_equal(const char *a, const char *b)
 static long pulse_delay_us(long frames, long rate)
 {
         return frames * 1000000l / (rate ? rate : 1);
+}
+
+// The microseconds a sink's card holds now: what it held when the host last looked, less the time since, which the card has played.
+// Answered as it was read, a latency was up to a period late (2.7 ms: the card is looked at once a period), and the position a program
+// takes from it went back and forth by that much.
+static long pulse_sink_latency_us(struct pulse *p, long slot)
+{
+        struct pulse_sink *k = p->sink + slot;
+        long held = pulse_delay_us(k->delay_frames, k->rate), since = p->host.now ? p->host.now(p->host.context) - k->delay_at : 0;
+
+        if (since <= 0)
+                return held;
+        return held > since ? held - since : 0;
 }
 
 /*
@@ -1674,7 +1693,7 @@ static void pulse_fill_sink(struct pulse *p, struct wire_w *w, struct pulse_clie
         static const signed char stereo[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT};
         char monitor[PULSE_NAME + 16];
         struct pulse_props props = {0};
-        long latency = pulse_delay_us(s->delay_frames, s->rate);
+        long latency = pulse_sink_latency_us(p, slot);
 
         pulse_copy(monitor, sizeof(monitor), s->name);
         pulse_copy(monitor + wire_len(monitor), (long)sizeof(monitor) - wire_len(monitor), ".monitor");
@@ -1787,7 +1806,7 @@ static void pulse_fill_client(struct pulse *p, struct wire_w *w, struct pulse_cl
 static void pulse_fill_input(struct pulse *p, struct wire_w *w, struct pulse_client *c, struct pulse_stream *s)
 {
         char name[PULSE_VALUE + 1];
-        long latency = pulse_delay_us(p->sink[s->sink].delay_frames, p->sink[s->sink].rate);
+        long latency = pulse_sink_latency_us(p, s->sink);
         unsigned long volume[PULSE_CHANNEL_MAX];
         long n = s->map_channels;
 
@@ -1917,12 +1936,70 @@ static struct pulse_stream *pulse_stream_free_slot(struct pulse *p)
 }
 
 /*
+        The buffer attributes of a playback stream, as PulseAudio sets them (protocol-native.c, fix_playback_buffer_attr), from what
+        the program asked (PULSE_INVALID: the server's choice) and within the ring it has (maxlength):
+
+        - tlength, what the server keeps queued: by default 200 ms; at least 64 frames, at most maxlength.
+        - minreq, the least it asks for: by default a quarter of tlength and never more than 20 ms; a frame less than tlength at most.
+        - With ADJUST_LATENCY (and not EARLY_REQUESTS) tlength is the latency the program wants in all, the card's share included:
+          the card's (host.latency) is taken off it, keeping at least the card's and two minreq (the room to answer a request
+          while the card is refilled). SDL, Chromium and every libpulse program that asks for a latency set the flag, and were
+          played the card's 5 to 8 ms later than they asked (SDL at 1024 frames 29.3 ms for 21.3, Chromium 72 ms for 64).
+        - prebuf, what must be queued before the stream plays: by default, and at most, tlength. PulseAudio's is tlength less
+          minreq and a frame; here a stream that starts takes the card's share at once, and a program that is late to its
+          requests (16 busy loops on the four cores of hasty-tail, SDL at 512 frames) underran 57 to 107 times in 5 s with
+          PulseAudio's and once with the whole tlength.
+
+        The card's share is kept to be told to the program (the configured latency of its sink).
+*/
+static void pulse_playback_attributes(struct pulse *p, struct pulse_stream *s, unsigned long tlength, unsigned long prebuf, unsigned long minreq, int adjust, int early)
+{
+        unsigned long frame = s->voice.frame, rate = (unsigned long)s->rate, cap = (unsigned long)s->rate / 50 * frame, card;
+
+        if (tlength == PULSE_INVALID || tlength == 0)
+                tlength = rate / 5 * frame;
+        if (tlength > s->maxlength)
+                tlength = s->maxlength;
+        if (tlength < frame * 64)
+                tlength = frame * 64;
+        tlength -= tlength % frame;
+        if (minreq == PULSE_INVALID || minreq == 0)
+                minreq = tlength / 4 < cap ? tlength / 4 : cap;
+        if (minreq + frame > tlength)
+                minreq = tlength - frame;
+        minreq -= minreq % frame;
+        if (minreq < frame)
+                minreq = frame;
+        s->asked = tlength;
+        s->sink_us = p->host.latency ? p->host.latency(p->host.context, s->sink, (long)(tlength / frame * 1000000ul / rate)) : 0;
+        if (s->sink_us < 0)
+                s->sink_us = 0;
+        if (adjust && !early && s->sink_us)
+        {
+                card = (unsigned long)s->sink_us * rate / 1000000ul * frame;
+                tlength = tlength > card ? tlength - card : 0;
+                if (tlength < card + 2 * minreq)
+                        tlength = card + 2 * minreq;
+                if (tlength > s->maxlength)
+                        tlength = s->maxlength;
+                tlength -= tlength % frame;
+        }
+        if (prebuf == PULSE_INVALID || prebuf > tlength)
+                prebuf = tlength;
+        prebuf -= prebuf % frame;
+        s->tlength = tlength;
+        s->prebuf = prebuf;
+        s->minreq = minreq;
+        s->adjust_latency = adjust;
+        s->early_requests = early;
+}
+
+/*
         Makes a playback stream for a client, from CREATE_PLAYBACK_STREAM's fields. Answers the stream or 0 with an error
-        code in *error. The buffer attributes are the program's where it gave them, else the server's: a target of 200 ms,
-        a request for a quarter of it, start playing when the target is there.
+        code in *error. The buffer attributes are the program's where it gave them, else the server's (pulse_playback_attributes).
 */
 static struct pulse_stream *pulse_stream_make(struct pulse *p, long slot, long format, long channels, long rate, const signed char *map, long map_channels, long sink,
-                                              unsigned long maxlength, unsigned long tlength, unsigned long prebuf, unsigned long minreq, int *error)
+                                              unsigned long maxlength, unsigned long tlength, unsigned long prebuf, unsigned long minreq, int adjust, int early, int *error)
 {
         struct pulse_client *c = p->client[slot];
         struct pulse_stream *s = 0;
@@ -1953,20 +2030,6 @@ static struct pulse_stream *pulse_stream_make(struct pulse *p, long slot, long f
         if (maxlength > PULSE_RING_MAX)
                 maxlength = PULSE_RING_MAX;
         maxlength -= maxlength % frame;
-        if (tlength > maxlength)
-                tlength = maxlength;
-        if (prebuf == PULSE_INVALID)
-                prebuf = tlength;
-        if (prebuf > tlength)
-                prebuf = tlength;
-        prebuf -= prebuf % frame;
-        if (minreq == PULSE_INVALID || minreq == 0)
-                minreq = tlength / 4;
-        if (minreq > tlength)
-                minreq = tlength;
-        minreq -= minreq % frame;
-        if (minreq < frame)
-                minreq = frame;
         ring = maxlength;
         if (p->ring_total + ring > PULSE_RING_TOTAL)
         {
@@ -2001,9 +2064,7 @@ static struct pulse_stream *pulse_stream_make(struct pulse *p, long slot, long f
         for (long i = 0; i < channels; i++)
                 s->map[i] = map[i];
         s->maxlength = maxlength;
-        s->tlength = tlength;
-        s->prebuf = prebuf;
-        s->minreq = minreq;
+        pulse_playback_attributes(p, s, tlength, prebuf, minreq, adjust, early);
         s->underrun = 1;
         s->uid = c->uid;
         s->pid = c->pid;
@@ -2142,14 +2203,12 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
                 sink = p->default_sink;
         if (sink < 0)
                 return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-        s = pulse_stream_make(p, slot, format, channels, rate, map, map_channels, sink, maxlength, tlength, prebuf, minreq, &error);
+        s = pulse_stream_make(p, slot, format, channels, rate, map, map_channels, sink, maxlength, tlength, prebuf, minreq, adjust, early, &error);
         if (!s)
                 return pulse_error(p, c, tag, (unsigned long)error);
         s->props = props;
         s->corked = corked;
         s->muted = muted;
-        s->adjust_latency = adjust;
-        s->early_requests = early;
         s->variable_rate = variable;
         s->no_move = no_move;
         s->owner_set = sink_name && sink_name[0] ? 1 : sink_index != PULSE_INVALID;
@@ -2196,7 +2255,7 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
                 wire_w_bool(&w, 0);
         }
         if (c->version >= 13)
-                pulse_w_64(&w, 'U', 20000);
+                pulse_w_64(&w, 'U', s->sink_us);
         if (c->version >= 21)
                 pulse_w_format_info(&w);
         s->outstanding = s->tlength;
@@ -3235,8 +3294,7 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
                 if (p->host.real)
                         p->host.real(p->host.context, &now_sec, &now_usec);
-                latency = pulse_delay_us(p->sink[s->sink].delay_frames, p->sink[s->sink].rate) +
-                          (long)((unsigned long)audio_voice_delay(&s->voice) * 1000000ul / (unsigned long)s->rate);
+                latency = pulse_sink_latency_us(p, s->sink) + (long)((unsigned long)audio_voice_delay(&s->voice) * 1000000ul / (unsigned long)s->rate);
                 pulse_reply_begin(p, &w, tag);
                 pulse_w_64(&w, 'U', latency);
                 pulse_w_64(&w, 'U', 0);
@@ -3295,42 +3353,15 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                         return PULSE_DEAD;
                 if (!s)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                {
-                        unsigned long frame = s->voice.frame;
-
-                        (void)maxlength;
-                        if (tlength == PULSE_INVALID || tlength == 0)
-                                tlength = s->tlength;
-                        if (tlength > s->maxlength / 2 + s->maxlength / 2)
-                                tlength = s->maxlength;
-                        if (tlength < frame * 64)
-                                tlength = frame * 64;
-                        tlength -= tlength % frame;
-                        if (prebuf == PULSE_INVALID)
-                                prebuf = tlength;
-                        if (prebuf > tlength)
-                                prebuf = tlength;
-                        prebuf -= prebuf % frame;
-                        if (minreq == PULSE_INVALID || minreq == 0)
-                                minreq = tlength / 4;
-                        if (minreq > tlength)
-                                minreq = tlength;
-                        minreq -= minreq % frame;
-                        if (minreq < frame)
-                                minreq = frame;
-                        s->tlength = tlength;
-                        s->prebuf = prebuf;
-                        s->minreq = minreq;
-                        s->adjust_latency = adjust;
-                        s->early_requests = early;
-                }
+                (void)maxlength; // the ring is the stream's, made with it
+                pulse_playback_attributes(p, s, tlength, prebuf, minreq, adjust, early);
                 pulse_reply_begin(p, &w, tag);
                 wire_w_u32(&w, s->maxlength);
                 wire_w_u32(&w, s->tlength);
                 wire_w_u32(&w, s->prebuf);
                 wire_w_u32(&w, s->minreq);
                 if (c->version >= 13)
-                        pulse_w_64(&w, 'U', 20000);
+                        pulse_w_64(&w, 'U', s->sink_us);
                 return pulse_reply_end(c, &w);
         }
         case PULSE_COMMAND_UPDATE_PLAYBACK_STREAM_PROPLIST:
@@ -4288,6 +4319,7 @@ AUDIO_API void pulse_tick(struct pulse *p)
 AUDIO_API void pulse_sink_delay(struct pulse *p, long slot, long frames)
 {
         p->sink[slot].delay_frames = frames;
+        p->sink[slot].delay_at = p->host.now ? p->host.now(p->host.context) : 0;
 }
 
 #endif // AUDIO_PULSE_INCLUDED

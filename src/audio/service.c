@@ -117,6 +117,7 @@ static struct
         {
                 unsigned long wakes, slips;
                 unsigned long pass[16], late[16];
+                unsigned long held[32];         // what the card held at a wake, in eighths of a period (the last bucket: four periods or more)
                 positive worst_pass, worst_late, due;
                 long min_fill, target;
         } stats;
@@ -248,6 +249,22 @@ static long audio_host_now(void *context)
 {
         (void)context;
         return (long)(clock_monotonic_nanoseconds() / 1000);
+}
+
+// The microseconds the card holds for a stream that asks for asked_us in all (pulse_playback_attributes takes them off what a stream
+// that adjusts its latency keeps queued): the target of the card that plays, or of the one a stream that asks for so little would
+// open; nothing on the clock, which holds nothing.
+static long audio_host_latency(void *context, long sink, long asked_us)
+{
+        int low = asked_us <= AUDIO_LOW_MS * 1000;
+
+        (void)context;
+        (void)sink;
+        if (audio_service.no_card || (audio_service.pcm.fd < 0 && !audio_service.suspended))
+                return 0;
+        if (audio_service.pcm.fd >= 0 && audio_service.played_rate)
+                return (long)((positive)audio_service.pcm.target * 1000000ull / (positive)audio_service.pcm.rate); // the output keeps the periods of what plays
+        return low ? AUDIO_PERIOD_LOW * AUDIO_FILL_LOW * 1000000l / 48000 : AUDIO_PERIOD * AUDIO_FILL * 1000000l / 48000;
 }
 
 static void audio_host_real(void *context, long *seconds, long *microseconds)
@@ -581,8 +598,8 @@ static long audio_rate_target(int takes, long stream, long fallback)
         return takes && stream > 0 ? stream : fallback;
 }
 
-// The first playback stream that plays now: its rate (0 when none plays), and in *low whether its buffer (tlength) is no more than
-// AUDIO_LOW_MS, which asks the output for the low-latency periods.
+// The first playback stream that plays now: its rate (0 when none plays), and in *low whether the latency it asked for (its tlength
+// before the card's share is taken off) is no more than AUDIO_LOW_MS, which asks the output for the low-latency periods.
 static long audio_playing_stream(int *low)
 {
         struct pulse *p = &audio_service.pulse;
@@ -595,7 +612,7 @@ static long audio_playing_stream(int *low)
 
                 if (!s->used || s->dying || s->corked)
                         continue;
-                frames = s->voice.frame ? (long)(s->tlength / s->voice.frame) : 0;
+                frames = s->voice.frame ? (long)(s->asked / s->voice.frame) : 0;
                 *low = frames > 0 && (long long)frames * 1000 <= (long long)s->rate * AUDIO_LOW_MS;
                 return s->rate;
         }
@@ -1345,6 +1362,11 @@ static void audio_stats_say(const char *why)
                                 string_format(log, " %s=%p", names[at], (positive)counts[at]);
                 string_format(log, "\n");
         }
+        string_format(log, "audio:   held at a wake (eighths of a period):");
+        for (int at = 0; at < 32; at++)
+                if (audio_service.stats.held[at])
+                        string_format(log, " %p=%p", (positive)at, (positive)audio_service.stats.held[at]);
+        string_format(log, "\n");
         if (audio_service.capture.opens)
         {
                 string_format(log, "audio: capture: %p opens (the longest %p us), %p wakes, the worst pass %p us, %p overruns, %p frames\n", (positive)audio_service.capture.opens,
@@ -1647,14 +1669,21 @@ static void audio_card_pass(void)
         // A wake that came more than half a period after it was due: the card had played a period and a half or more since the last refill.
         if (audio_service.stats.wakes > 8 && fill + pcm->period + pcm->period / 2 < pcm->target)
                 audio_service.stats.slips++;
+        if (audio_service.stats.wakes > 8)
+        {
+                long eighths = fill * 8 / pcm->period;
+
+                audio_service.stats.held[eighths > 31 ? 31 : eighths]++;
+        }
         if (want > 0)
                 audio_produce(want);
         {
                 long delay = audio_pcm_delay(pcm);
                 positive took = clock_monotonic_nanoseconds() - began;
 
+                // What was mixed and not yet taken by the card plays after what it holds.
                 if (delay >= 0)
-                        pulse_sink_delay(&audio_service.pulse, audio_service.sink, delay);
+                        pulse_sink_delay(&audio_service.pulse, audio_service.sink, delay + audio_service.block_left);
                 audio_bucket(audio_service.stats.pass, took);
                 if (took > audio_service.stats.worst_pass)
                         audio_service.stats.worst_pass = took;
@@ -2317,6 +2346,7 @@ static void audio_start(void)
         host.alloc = audio_host_alloc;
         host.release = audio_host_release;
         host.now = audio_host_now;
+        host.latency = audio_host_latency;
         host.real = audio_host_real;
         host.recall = audio_host_recall;
         host.remember = audio_host_remember;
