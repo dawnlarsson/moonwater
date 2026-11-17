@@ -77,8 +77,9 @@
 #define WAYLAND_PRESENTATIONS 4  // presentation feedbacks a surface holds in itself for its next commits; past them likewise
 #define WAYLAND_SERIALS 8       // configures sent and not yet acknowledged
 #define WAYLAND_TEXT 128        // a title or an app id, its NUL included
-#define WAYLAND_POOL_BYTES (1L << 30)
-#define WAYLAND_POOL_TOTAL (1L << 31) // what one client may have mapped
+// A pool's size is the protocol's int, so 2 GiB less a byte at most; what a client has mapped is the address space's and the file's,
+// whose memory is the client's: a map the kernel refuses is the one refusal. Where a pool was held to 1 GiB and a client to 2 GiB.
+#define WAYLAND_POOL_BYTES 0x7fffffffL
 #define WAYLAND_DIMENSION 16384
 #define WAYLAND_SERVER_IDS 0x01000000UL // the server's own ids, from 0xff000000 (the protocol's range): its index grows with what it makes
 #define WAYLAND_ID_GAP 4096     // how far past the next id a client's new one may be (libwayland's servers allow none; a gap costs index, not more)
@@ -4777,7 +4778,7 @@ static int wayland_shm_request(struct wayland_client *c, struct wayland_object *
         long size = a[2].i, pool = -1;
         void *at;
 
-        if (size < 1 || size > WAYLAND_POOL_BYTES || c->pool_bytes + size > WAYLAND_POOL_TOTAL)
+        if (size < 1 || size > WAYLAND_POOL_BYTES)
                 return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_stride, "the pool's size is out of range");
         pool = wayland_client_take(c, &c->pool_table);
         if (pool < 0)
@@ -4822,8 +4823,8 @@ static int wayland_pool_request(struct wayland_client *c, struct wayland_object 
                 long size = a[0].i;
                 void *at;
 
-                if (size < p->size || size > WAYLAND_POOL_BYTES || c->pool_bytes - p->size + size > WAYLAND_POOL_TOTAL)
-                        return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_fd, "the pool can only grow, within its cap");
+                if (size < p->size || size > WAYLAND_POOL_BYTES)
+                        return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_fd, "the pool can only grow");
                 at = wayland.host->remap(wayland.host->context, p->at, p->size, size);
                 if (!at)
                         return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_fd, "the pool cannot grow");
@@ -8116,7 +8117,7 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
         for (long entry = 0; entry < wayland.dmabuf.count; entry++)
                 found |= wayland.dmabuf.entry[entry].format == format &&
                          (modifier == WAYLAND_MODIFIER_INVALID || wayland.dmabuf.entry[entry].modifier == modifier);
-        if (!found || (flags & ~1UL) || need > WAYLAND_POOL_BYTES || c->pool_bytes + need > WAYLAND_POOL_TOTAL)
+        if (!found || (flags & ~1UL) || need < 1)
                 return -2;
         pool = wayland_client_take(c, &c->pool_table);
         buffer = pool >= 0 ? wayland_client_take(c, &c->buffer_table) : -1;

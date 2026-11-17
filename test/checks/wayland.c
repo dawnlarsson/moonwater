@@ -1615,8 +1615,32 @@ static void test_shm(void)
         wlc_end(c);
         FRESH();
         fd = wl_file(4096, 0);
-        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, (long)WAYLAND_POOL_BYTES + 1);
-        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_stride), "a pool past the cap");
+        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, s.pool, fd, -1L);
+        WLCHECK(refused_with(c, WLN_wl_shm_error_invalid_stride), "a pool of a negative size");
+        wlc_end(c);
+        /* pools past the 1 GiB one was held to, and past the 2 GiB a client was: three of 1.5 GiB (sparse files), each mapped */
+        FRESH();
+        {
+                unsigned long pools[3];
+
+                for (int at = 0; at < 3; at++)
+                {
+                        char name[] = "/tmp/wlcheckXXXXXX";
+                        int big = mkstemp(name);
+
+                        unlink(name);
+                        if (big < 0 || ftruncate(big, 0x60000000L) < 0)
+                                abort();
+                        fake.fds_open++;
+                        pools[at] = wlc_id(c, WLI_wl_shm_pool, 1);
+                        wlc_send(c, s.shm, WLQ_wl_shm_create_pool, pools[at], (long)big, 0x60000000L);
+                }
+                wlc_pump(c);
+                WLCHECK(c->errors == 0 && wayland.client[c->slot] && wayland.client[c->slot]->pool_bytes == 3 * 0x60000000L,
+                        "three pools of 1.5 GiB are each mapped, 4.5 GiB for one client");
+                for (int at = 0; at < 3; at++)
+                        wlc_send(c, pools[at], WLQ_wl_shm_pool_destroy);
+        }
         wlc_end(c);
         FRESH();
         fd = wl_file(4096, 0);
