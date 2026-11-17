@@ -61,8 +61,6 @@ GENERATORS = {
     ('src/lib.util.c', 'ERROR_ENTRY'): ('{}',),
     ('src/lib.util.c', 'ERROR_ID'): ('{}',),
     ('src/lib.util.c', 'var_list_entry'): ('{}',),
-    ('src/lib.util.c', 'var_list_entry'): ('{}',),
-    ('src/lib.util.c', 'var_list_entry'): ('{}',),
     ('src/lib.util.c', 'MATH_CLASSIFIER'):
         ('{}_magnitude_bits', '{}_is_nan', '{}_is_infinite', '{}_is_finite',
          '{}_is_normal', '{}_sign_bit', '{}_class'),
