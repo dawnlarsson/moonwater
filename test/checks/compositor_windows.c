@@ -5164,6 +5164,51 @@ static void check_compositor_wheel(void)
 }
 
 /*
+        A game's device is no pointer (window_input_game): a pad (BTN_SOUTH), a joystick (BTN_TRIGGER), one with trigger-happy
+        buttons alone and an accelerometer (a DualSense's motion sensors) are; a mouse, a touchpad, a pen tablet and a touch screen
+        are not, nor a pad's buttons on a device that is also a mouse or marked a pointer.
+*/
+static void check_window_input_game(void)
+{
+    p8 keys[96];
+    b32 all;
+
+#define CHECK_KEYS_WITH(...)                                                                    \
+    do                                                                                          \
+    {                                                                                           \
+        static const unsigned short codes[] = {__VA_ARGS__};                                    \
+        memory_zero(keys, sizeof keys);                                                         \
+        for (unsigned int at = 0; at < sizeof(codes) / sizeof(codes[0]); at++)                  \
+            keys[codes[at] / 8] |= (p8)(1u << (codes[at] % 8));                                 \
+    } while (0)
+    CHECK_KEYS_WITH(0x130, 0x131, 0x133, 0x134, 0x13c, 0x13d, 0x13e);
+    all = window_input_game(keys, 0) == 1;
+    CHECK_KEYS_WITH(0x120, 0x121);
+    all &= window_input_game(keys, 0) == 1;
+    CHECK_KEYS_WITH(0x2c0, 0x2c1);
+    all &= window_input_game(keys, 0) == 1;
+    CHECK_KEYS_WITH(0);
+    all &= window_input_game(keys, 0x40) == 1;
+    check("game: a pad, a joystick, trigger-happy buttons and an accelerometer are a game's devices", all);
+    CHECK_KEYS_WITH(0x110, 0x111, 0x112);
+    all = window_input_game(keys, 0) == 0;
+    CHECK_KEYS_WITH(0x110, 0x145, 0x14a);
+    all &= window_input_game(keys, 1) == 0;
+    CHECK_KEYS_WITH(0x140, 0x14a, 0x14b);
+    all &= window_input_game(keys, 0) == 0;
+    CHECK_KEYS_WITH(0x14a);
+    all &= window_input_game(keys, 2) == 0;
+    CHECK_KEYS_WITH(0x130, 0x110);
+    all &= window_input_game(keys, 0) == 0;
+    CHECK_KEYS_WITH(0x130);
+    all &= window_input_game(keys, 1) == 0;
+    CHECK_KEYS_WITH(30, 31);
+    all &= window_input_game(keys, 0) == 0;
+    check("game: a mouse, a touchpad, a pen, a touch screen, a keyboard and pad buttons on a pointer are not", all);
+#undef CHECK_KEYS_WITH
+}
+
+/*
         Where an input device hangs, as compositor_input_path_physical reads the link /sys/dev/char/MAJOR:MINOR resolves to: the
         machine's own under a real bus, and not under devices/virtual (uinput's, and uhid's, Bluetooth LE through bluez among them),
         nor a path that is not under devices at all or could not be read. A descriptor that is no input device's is not the machine's.

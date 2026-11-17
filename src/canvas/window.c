@@ -687,6 +687,32 @@ struct windows_issue
 #define WINDOWS_INPUT_DIRECT 8192u   // INPUT_PROP_DIRECT: a touch screen or a pen on one
 
 /*
+        A game's device, which is the game's to read and no pointer (keys: the EV_KEY bits, EVIOCGBIT's 96 bytes; properties:
+        EVIOCGPROP's first word): a pad or a joystick, which has a button of the joystick or gamepad ranges (BTN_JOYSTICK 0x120 to
+        BTN_THUMBR 0x13e) or a trigger-happy one past them (0x2c0 to 0x2e7) and no mouse button (BTN_LEFT 0x110), touch (BTN_TOUCH
+        0x14a) or pen (BTN_TOOL_PEN 0x140), nor INPUT_PROP_POINTER or DIRECT; and an accelerometer (INPUT_PROP_ACCELEROMETER): a
+        DualSense's, a DualShock 4's, a Joy-Con's or a Steam Deck's motion sensors, or a laptop's. Each has ABS_X and ABS_Y and was
+        taken for a tablet by the compositor, so a stick's tilt or a pad held at an angle put the pointer at that place on the screen,
+        a hundred and more times a second. The compositor does not open one (a pad's reports, up to a thousand a second, wake no turn
+        of it while a game reads them), and a bowl the input grants name is given these and no other (bowl_pad_event).
+*/
+static inline int window_input_game(const unsigned char *keys, unsigned int properties)
+{
+        int buttons = 0;
+
+        if (properties & 0x40)
+                return 1;
+        if (properties & 3)
+                return 0;
+        for (unsigned int code = 0x120; code <= 0x13e; code++)
+                buttons |= keys[code / 8] >> (code % 8) & 1;
+        for (unsigned int code = 0x2c0; code <= 0x2e7; code++)
+                buttons |= keys[code / 8] >> (code % 8) & 1;
+        return buttons && !(keys[0x110 / 8] >> (0x110 % 8) & 1) && !(keys[0x14a / 8] >> (0x14a % 8) & 1) &&
+               !(keys[0x140 / 8] >> (0x140 % 8) & 1);
+}
+
+/*
         The mode of the table, its memfd and the doors: owner only, 0600.
 
         The table is one mapping of every window's buffers and input rings:

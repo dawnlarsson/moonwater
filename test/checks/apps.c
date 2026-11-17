@@ -9523,6 +9523,7 @@ b32 main()
         check_compositor_table_taken();
         check_compositor_cursor_probe();
         check_compositor_input_origin();
+        check_window_input_game();
         check_compositor_doors_held();
         check_compositor_asked();
         check_compositor_tiling();

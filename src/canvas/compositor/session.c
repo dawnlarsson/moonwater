@@ -1115,10 +1115,10 @@ static void compositor_input_add(unsigned int number)
                        (keys[COMPOSITOR_KEY_A / 8] >> (COMPOSITOR_KEY_A % 8) & 1);
         int mouse = (kinds >> COMPOSITOR_EV_REL & 1) && (relative & 3) == 3;
         int tablet = (kinds >> COMPOSITOR_EV_ABS & 1) && (absolute & 3) == 3;
+        unsigned int properties = 0;
         // A power button and a lid are not typed on, and a machine may be woken by either.
         int wakes = ((kinds >> COMPOSITOR_EV_KEY & 1) && (keys[COMPOSITOR_KEY_POWER / 8] >> (COMPOSITOR_KEY_POWER % 8) & 1)) ||
                     (kinds >> COMPOSITOR_EV_SW & 1);
-        unsigned int properties = 0;
         /*
                 A screen fingers touch: INPUT_PROP_DIRECT, slots (ABS_MT_POSITION_X and Y) or a place and BTN_TOUCH, and
                 no pen, whose screen is a tablet's as it always was. A virtual machine's (QEMU's virtio-multitouch) has
@@ -1129,6 +1129,9 @@ static void compositor_input_add(unsigned int number)
         int touchscreen;
 
         system_control(handle, COMPOSITOR_EVIOCGPROP(4), address_of properties);
+        // A pad, a joystick or an accelerometer has ABS_X and ABS_Y and is no tablet: the game reads it, and it is not opened here.
+        if (window_input_game(keys, properties))
+                tablet = 0;
         touchscreen = (properties & 2) && !(keys[COMPOSITOR_BTN_TOOL_PEN / 8] >> (COMPOSITOR_BTN_TOOL_PEN % 8) & 1) &&
                       (slotted || (tablet && (keys[COMPOSITOR_BTN_TOUCH / 8] >> (COMPOSITOR_BTN_TOUCH % 8) & 1)));
 
