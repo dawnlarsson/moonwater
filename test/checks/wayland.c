@@ -2338,6 +2338,22 @@ static void test_activation(void)
         before = fake.row[0].did_count;
         wlc_send(c, activation, WLQ_xdg_activation_v1_activate, "0123456789abcdef0123456789abcdef", s.surface);
         WLCHECK(fake.row[0].did_count == before && c->errors == 0, "an unknown token is nothing, and no error");
+
+        /* tokens taken past the sixteen there were, and the four one client could hold, uncommitted: each is had, and the last given out */
+        {
+                unsigned long many = 0;
+
+                for (int at = 0; at < 40; at++)
+                {
+                        many = wlc_id(c, WLI_xdg_activation_token_v1, 1);
+                        wlc_send(c, activation, WLQ_xdg_activation_v1_get_activation_token, many);
+                }
+                wlc_forget(c);
+                wlc_send(c, many, WLQ_xdg_activation_token_v1_commit);
+                wlc_pump(c);
+                WLCHECK(c->errors == 0 && wlc_count(c, WLI_xdg_activation_token_v1, WLE_xdg_activation_token_v1_done) == 1,
+                        "forty tokens held by one client are no error, and the fortieth is given out at its commit");
+        }
         wlc_end(c);
         leak_check("activation");
         wayland_stop();

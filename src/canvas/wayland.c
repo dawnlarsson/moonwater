@@ -86,8 +86,6 @@
 #define WAYLAND_SCREENS 8
 #define WAYLAND_GLOBALS_MAX 40
 #define WAYLAND_TOUCHES 10      // fingers down at once over every client (wl_touch's points)
-#define WAYLAND_TOKENS 16       // xdg-activation tokens pending or given out, over every client
-#define WAYLAND_TOKENS_PER_CLIENT 4 // of those, the most one client may hold: a client that never commits its tokens cannot take them all
 #define WAYLAND_TOKEN_MS 10000  // how long a given token may be used (its serial must still be a recent input of its client)
 #define WAYLAND_KEYMAP_MAX (1L << 20)
 #define WAYLAND_INPUT_SERIALS 8 // serials of input events a client may name to set a selection
@@ -849,7 +847,11 @@ static struct
         long bells, icons;                     // xdg_system_bell rings and xdg-toplevel-icon sets with an icon, over every client (counted; nothing is drawn yet)
         long frames;                           // frames drawn (wayland_frame): a fifo barrier clears at the next one after its commit
         struct wayland_touch touch[WAYLAND_TOUCHES]; // the fingers down, over every client
-        struct wayland_token token[WAYLAND_TOKENS];  // xdg-activation tokens, pending or given out
+        // xdg-activation tokens, pending or given out: a table that grows (tokens is its length); a given one lasts WAYLAND_TOKEN_MS, a
+        // pending one until it is committed or destroyed, or its client goes.
+        struct wayland_token *token;
+        long tokens;
+        struct wayland_table token_table;
         long pinch_x, pinch_y;                       // the focal point the last pinch update was at
         unsigned long synth_code;                    // the key whose press held a Shift the shim sent for it (wayland_key_shift), 0 for none
         long xwayland_uid;                           // the one user whose clients are offered the X server's protocols (wayland_xwayland_user), -1 for none
@@ -8808,13 +8810,19 @@ static int wayland_token_free(void)
 {
         long now = wayland.host->now(wayland.host->context);
 
-        for (int at = 0; at < WAYLAND_TOKENS; at++)
+        for (long at = 0; at < wayland.tokens; at++)
                 if (wayland.token[at].live && wayland.token[at].committed && now - wayland.token[at].when >= WAYLAND_TOKEN_MS)
                         wayland.token[at].live = 0;
-        for (int at = 0; at < WAYLAND_TOKENS; at++)
+        for (long at = 0; at < wayland.tokens; at++)
                 if (!wayland.token[at].live)
-                        return at;
-        return -1;
+                        return (int)at;
+        // None free: the table grown by one (-1 when the memory is not there).
+        wayland.token_table.unit = sizeof(struct wayland_token);
+        if (wayland.tokens >= 0x7fffffffL || !wayland_table_reach(&wayland.token_table, wayland.tokens + 1))
+                return -1;
+        wayland.token = (struct wayland_token *)wayland.token_table.at;
+        wayland.token[wayland.tokens].live = 0;
+        return (int)wayland.tokens++;
 }
 
 static int wayland_token_make(struct wayland_token *t)
@@ -8835,15 +8843,26 @@ static int wayland_token_make(struct wayland_token *t)
 
 static void wayland_token_forget(long slot)
 {
-        for (int at = 0; at < WAYLAND_TOKENS; at++)
+        long live = 0;
+
+        for (long at = 0; at < wayland.tokens; at++)
+        {
                 if (wayland.token[at].live && wayland.token[at].client == slot)
                         wayland.token[at].live = 0;
+                live += wayland.token[at].live;
+        }
+        // The last token gone with its client: the table let go too, as the rows' tables go with the last window.
+        if (!live && wayland.tokens)
+        {
+                wayland_table_drop(&wayland.token_table);
+                wayland.token = 0, wayland.tokens = 0;
+        }
 }
 
 static int wayland_activation_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         int at = self->link;
-        struct wayland_token *t = at >= 0 && at < WAYLAND_TOKENS && wayland.token[at].live && wayland.token[at].client == c->slot
+        struct wayland_token *t = at >= 0 && at < wayland.tokens && wayland.token[at].live && wayland.token[at].client == c->slot
                                       ? &wayland.token[at] : 0;
 
         if (self->iface == WLI_xdg_activation_v1)
@@ -8854,17 +8873,8 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
                 if (op == WLQ_xdg_activation_v1_get_activation_token)
                 {
                         at = wayland_token_free();
-                        if (at >= 0)
-                        {
-                                long held = 0;
-
-                                for (int each = 0; each < WAYLAND_TOKENS; each++)
-                                        held += wayland.token[each].live && wayland.token[each].client == c->slot;
-                                if (held >= WAYLAND_TOKENS_PER_CLIENT)
-                                        at = -1;
-                        }
                         if (at < 0)
-                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "this client holds its share of activation tokens, or every token is in use");
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for an activation token");
                         wayland.token[at].live = 1;
                         wayland.token[at].committed = 0;
                         wayland.token[at].client = c->slot;
@@ -8878,11 +8888,11 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
                 s = wayland_surface_of(c, a[1].slot);
                 if (!s)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-                for (at = 0; at < WAYLAND_TOKENS; at++)
+                for (at = 0; at < wayland.tokens; at++)
                         if (wayland.token[at].live && wayland.token[at].committed &&
                             wayland_name_is(a[0].text, a[0].length, wayland.token[at].text))
                                 break;
-                if (at == WAYLAND_TOKENS)
+                if (at == wayland.tokens)
                         return WAYLAND_OK;
                 {
                         struct wayland_token *given = &wayland.token[at];
@@ -9834,6 +9844,8 @@ WAYLAND_API void wayland_stop(void)
                 return;
         for (long slot = 0; slot < wayland.client_slots; slot++)
                 wayland_drop(slot);
+        wayland_table_drop(&wayland.token_table);
+        wayland.token = 0, wayland.tokens = 0;
         wayland_zero(&wayland.syncobj, sizeof wayland.syncobj);
         wayland.syncobj_ok = 0;
         wayland.drm_node[0] = 0;
