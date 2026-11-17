@@ -29109,7 +29109,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                                 doc_seal(&t->doc);
                                 ui_select_start(s, at, clicks, false);
                         }
-                        else if (clicks == 1 && !t->masked && doc_any_selected(&t->doc) && t->doc.selection_count == 1 &&
+                        else if (clicks == 1 && !t->masked && t->mode != UI_TEXT_FIELD && doc_any_selected(&t->doc) && t->doc.selection_count == 1 &&
                                  at >= doc_sel_start(&t->doc.selections[0]) && at < doc_sel_end(&t->doc.selections[0]))
                         {
                                 // A press in the selection: it may be dragged out (ui_text_drag), and is a click if it is not.
@@ -29179,7 +29179,8 @@ static p32 ui_field_event(struct ui address_to ui, struct ui_text address_to t, 
         if (event->type == WINDOW_EVENT_MOTION && !t->sel.dragging && x >= t->well_left && x < t->well_right && y >= t->well_top &&
             y < t->well_bottom)
                 ui_kit_shape = WINDOW_POINTER_TEXT;
-        if (event->type == WINDOW_EVENT_WHEEL || (event->type == WINDOW_EVENT_MOTION && !t->sel.dragging))
+        // The motion of a press in its selection is the field's too: it may become a drag of its text (ui_text_drag).
+        if (event->type == WINDOW_EVENT_WHEEL || (event->type == WINDOW_EVENT_MOTION && !t->sel.dragging && !t->drag.armed))
                 return 0;
         if (event->type == WINDOW_EVENT_BUTTON)
         {
@@ -29188,7 +29189,7 @@ static p32 ui_field_event(struct ui address_to ui, struct ui_text address_to t, 
                 // the app goes on with it, to the row or the button it is on.
                 if ((event->flags & WINDOW_KEY_DOWN) && !ui_text_reach(ui, t, x, y))
                         return t->focused ? (t->masked || t->cancels ? UI_TEXT_CANCEL : UI_TEXT_COMMIT) : 0;
-                if (!(event->flags & WINDOW_KEY_DOWN) && !t->sel.dragging)
+                if (!(event->flags & WINDOW_KEY_DOWN) && !t->sel.dragging && !t->drag.armed)
                         return 0;
                 ending = !(event->flags & WINDOW_KEY_DOWN);
         }

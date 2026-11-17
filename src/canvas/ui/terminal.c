@@ -3144,6 +3144,35 @@ static b32 terminal_select_key(const struct window_event address_to event, b32 a
         return false;
 }
 
+/*
+        A drag over the terminal (the kit's ui_drop): text, or files as their list, taken as a copy, and dropped as a paste is (term_paste's
+        filter: no sequence of a dropped text runs, and a program in bracketed paste is given it between the markers).
+*/
+static struct ui_drop terminal_drop;
+
+static b32 terminal_drop_event(b32 master, const struct window_event address_to event)
+{
+        static const char address_to const names[4] = {WINDOWS_CLIP_TEXT, "text/plain", "UTF8_STRING", WINDOWS_CLIP_URIS};
+        int what = ui_drop_event(&terminal_drop, event);
+        p8 address_to bytes;
+        unsigned long length;
+
+        if (what == UI_DROP_OVER)
+                ui_drop_pick(&terminal.own, &terminal_drop, names, 4, WINDOWS_DRAG_COPY, WINDOWS_DRAG_COPY);
+        if (what != UI_DROP_READY)
+                return true;
+        if (!ui_drop_read(&terminal.own, &terminal_drop, &bytes, &length))
+        {
+                ui_drop_done(&terminal.own, &terminal_drop, false);
+                return true;
+        }
+        cursor_hide();
+        term_paste(bytes, length);
+        windows_clip_free(bytes, length);
+        ui_drop_done(&terminal.own, &terminal_drop, true);
+        return term_send(master);
+}
+
 // The clipboard's answer: a paste that may be read is pasted, the terminal's own (a block turned, a cursor hidden as a key's paste is).
 static b32 terminal_clip_event(b32 master, const struct window_event address_to event)
 {
@@ -3328,6 +3357,9 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
         case WINDOW_EVENT_CLIP:
                 return terminal_clip_event(master, event);
+
+        case WINDOW_EVENT_DRAG:
+                return terminal_drop_event(master, event);
 
         case WINDOW_EVENT_WHEEL:
         {
