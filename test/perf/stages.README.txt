@@ -1,0 +1,3 @@
+Stage scripts (round 2, ember's interface): test/perf/stages/NAME.sh MACHINE GPU PATH prints long-form rows
+(machine gpu path scenario metric value) on stdout. bench.sh runs each after the built-in stages, for each machine and gpu state;
+stderr goes to raw/. A stage with no tools on a machine prints a skip row (put-style) and exits 0.

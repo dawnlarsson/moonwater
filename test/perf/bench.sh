@@ -141,6 +141,7 @@ prepare() {
 	on "$1" "test -x /bowls/arch/usr/bin/python3 && echo have" | grep -q have
 }
 
+# Stage scripts (round 2): test/perf/stages/NAME.sh MACHINE GPU PATH, long-form rows on stdout (ember's interface); see the README.
 # Plug-in cases (round 2): every test/perf/bench-cases/NAME.sh defines case_NAME MACHINE GPU PATH; see bench-cases/README.txt.
 run_cases() {
 	for f in "$HERE"/bench-cases/*.sh; do
@@ -161,6 +162,11 @@ for m in $MACHINES; do
 		stage_resize "$m" "$g"
 		if [ "$m" = box ]; then cpath=card; else cpath=processor; fi
 		run_cases "$m" "$g" "$cpath"
+		# Stage scripts (ember's interface, round 2): test/perf/stages/NAME.sh MACHINE GPU PATH prints long-form rows on stdout.
+		for f in "$HERE"/stages/*.sh; do
+			[ -e "$f" ] || continue
+			sh "$f" "$m" "$g" "$cpath" >> "$LONG" 2>> "$OUT/raw/stage-$(basename "$f" .sh)-$m-$g.err" || say "stage $(basename "$f" .sh) $m $g: exit $?"
+		done
 	done
 	# Chromium of the throwaway profile closed, and the card's canvas gpu on, as the machine was found.
 	on "$m" 'for d in /proc/[0-9]*; do grep -q cperf-auto $d/cmdline 2>/dev/null && kill ${d#/proc/} 2>/dev/null; done; moonwater canvas gpu on' > /dev/null
