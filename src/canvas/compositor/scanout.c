@@ -161,6 +161,7 @@ static void compositor_row_reclaim(int row)
         rows_del(&compositor.reclaim, row);
         if (!compositor.table || __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE))
                 return;
+        gpu_forget((const void *)((char *)compositor.table + compositor.pixels + (positive)row * 2 * compositor.buffer), 2 * compositor.buffer); // as at the release
         compositor_call(syscall(madvise), (positive)compositor.table + compositor.pixels + (positive)row * 2 * compositor.buffer,
                         2 * compositor.buffer, 9, 0, 0, 0);
 }

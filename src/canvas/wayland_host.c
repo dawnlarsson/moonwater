@@ -116,6 +116,7 @@ static struct
         struct
         {
                 unsigned char open, touched, full, which;
+                unsigned char last; // the table's buffer the last picture was laid in whole, plus one (0: none yet)
                 int x1, y1, x2, y2;
         } *laying;
         // The rectangles a commit changed of each window, in the window's pixels, beside the one box the table has room for: what
@@ -957,6 +958,7 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
                         continue;
                 windows_reset_row(table, (unsigned int)row);
                 compositor_wl.laying[row].open = 0;
+                compositor_wl.laying[row].last = 0; // a new window: nothing of its picture is laid yet
                 compositor_wl.cursor_asked[row] = 0;
                 // A client draws its own frame, and keeps the whole of its picture, the top included.
                 table->glass[row] = WINDOW_NO_CLOSE | WINDOW_NO_GRAB;
@@ -1000,6 +1002,7 @@ static void compositor_wl_row_close(void *context, int row)
         if (row >= 0 && row < COMPOSITOR_ROWS)
         {
                 compositor_wl.laying[row].open = 0;
+                compositor_wl.laying[row].last = 0;
                 compositor_wl.cursor_asked[row] = 0;
                 compositor_wl.row_blend[row] = 0;
                 compositor_wl_unlend(row);
@@ -1377,6 +1380,7 @@ static void compositor_wl_seed(int row, unsigned int which)
                 compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
         }
         compositor_wl_layers_put(row, to, (unsigned long)compositor_stride());
+        compositor_wl.laying[row].last = (unsigned char)((which & 1u) + 1); // the picture is whole in this buffer now
         compositor_wl_unlend(row);
 }
 
@@ -2701,7 +2705,25 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 compositor_wl.parts[row].count = 0;
                 compositor_wl.laying[row].full = (unsigned char)pinned;
                 compositor_wl.laying[row].which = (unsigned char)(shown ^ (unsigned int)pinned);
-                if (pinned && !covers)
+                // The buffer laid into holds the last picture whole before this commit's damage goes on it: where it is not the one
+                // the last picture was laid in (the window not yet shown, so laid as buffer 0 whatever its front; a picture lent and
+                // let go of; the card's pin moving it to the other), that one is copied into it first. Without it, the buffer held
+                // the frames laid in it alone, a browser's page showed in patches of older frames and the wallpaper through the
+                // blank of its first, and the screen kept it, on the card's path and the processor's alike.
+                if (!compositor_lent(row) && !covers && compositor_wl.laying[row].last &&
+                    (unsigned int)(compositor_wl.laying[row].last - 1) != compositor_wl.laying[row].which && table->width[row] && table->height[row])
+                {
+                        unsigned int from = (unsigned int)(compositor_wl.laying[row].last - 1) & 1u;
+                        unsigned long cw = table->width[row] < (unsigned int)width ? table->width[row] : (unsigned long)width;
+                        unsigned long ch = table->height[row] < (unsigned int)height ? table->height[row] : (unsigned long)height;
+
+                        memory_copy_rect_u32((unsigned int *)((char *)table + compositor.pixels +
+                                                              ((unsigned long)row * 2 + compositor_wl.laying[row].which) * compositor.buffer),
+                                             pitch,
+                                             (const unsigned int *)((char *)table + compositor.pixels + ((unsigned long)row * 2 + from) * compositor.buffer),
+                                             pitch, cw, ch);
+                }
+                else if (pinned && !covers)
                         memory_copy_rect_u32((unsigned int *)((char *)table + compositor.pixels +
                                                               ((unsigned long)row * 2 + compositor_wl.laying[row].which) * compositor.buffer),
                                              pitch,
@@ -2866,6 +2888,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         table->width[row] = (unsigned int)width;
         table->height[row] = (unsigned int)height;
         table->buffer_index[row] = compositor_wl.laying[row].which;
+        compositor_wl.laying[row].last = (unsigned char)(compositor_wl.laying[row].which + 1);
         table->damage_x[row] = compositor_wl.laying[row].full ? 0 : compositor_wl.laying[row].x1;
         table->damage_y[row] = compositor_wl.laying[row].full ? 0 : compositor_wl.laying[row].y1;
         table->damage_width[row] = compositor_wl.laying[row].full ? 0 : compositor_wl.laying[row].x2 - compositor_wl.laying[row].x1;

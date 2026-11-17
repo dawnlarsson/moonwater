@@ -2668,12 +2668,18 @@ static void compositor_leave(int row)
         table->want_width[row] = table->want_height[row] = 0;
         table->shown[row] = 0;
 
-        // MADV_REMOVE: the pages of its two buffers, deferred while the card still shows or pins the row's pages.
+        // MADV_REMOVE: the pages of its two buffers, deferred while the card still shows or pins the row's pages. The card's maps of them go
+        // first (gpu_forget): a map holds the pages it was made over, and the next window of the row was written by the processor into new
+        // pages while the card read the old ones, older frames of the last window and blank ones (a browser's page in patches of what it
+        // showed before, and the wallpaper through it, until the card was started again).
         if (rows_has(&compositor.dropping, row) || compositor_gpu_pins[row])
                 rows_add(&compositor.reclaim, row);
         else
+        {
+                gpu_forget((const void *)((char *)compositor.table + compositor.pixels + row * 2 * compositor.buffer), 2 * compositor.buffer);
                 compositor_call(syscall(madvise), (positive)compositor.table + compositor.pixels + row * 2 * compositor.buffer,
                                 2 * compositor.buffer, 9, 0, 0, 0);
+        }
 
         compositor.osk_pan[row] = 0;
         compositor.osk_height[row] = 0;
