@@ -8468,7 +8468,7 @@ static string_address bowl_desktop_alpine[] = {
     "breeze-icons", "kde-gtk-config", "xdg-desktop-portal-kde",
     "qt6-qtwayland", "xwayland", "dbus", "elogind", "polkit-elogind",
     "pipewire", "pipewire-pulse", "wireplumber", "mesa-dri-gallium",
-    "mesa-va-gallium", "mesa-vdpau-gallium", "mesa-egl", "mesa-gbm",
+    "mesa-va-gallium", "mesa-egl", "mesa-gbm",
     "mesa-vulkan-ati", "mesa-vulkan-intel", "mesa-vulkan-swrast",
     "mesa-vulkan-layers", "vulkan-loader", "intel-media-driver",
     "libva-intel-driver", "systemsettings", "font-noto", "font-dejavu",
@@ -8580,7 +8580,7 @@ static string_address bowl_desktop_session[] = {
 */
 #define BOWL_GRAPHICS_ALPINE_PACKAGES                                       \
     "mesa-egl", "mesa-gl", "mesa-gles", "mesa-gbm", "mesa-dri-gallium",     \
-    "mesa-va-gallium", "mesa-vdpau-gallium", "mesa-vulkan-ati",             \
+    "mesa-va-gallium", "mesa-vulkan-ati",                                   \
     "mesa-vulkan-intel", "mesa-vulkan-swrast", "mesa-vulkan-layers",        \
     "vulkan-loader", "intel-media-driver", "libva-intel-driver",            \
     "alsa-lib", "libpulse", "fontconfig", "font-dejavu"
@@ -8597,14 +8597,13 @@ static string_address bowl_graphics_debian[] = {
 static string_address bowl_graphics_arch[] = {
     "mesa", "libglvnd", "vulkan-icd-loader", "vulkan-radeon", "vulkan-intel",
     "vulkan-virtio", "vulkan-swrast", "vulkan-mesa-layers",
-    "libva-mesa-driver", "mesa-vdpau", "intel-media-driver",
+    "intel-media-driver",
     "libva-intel-driver", "alsa-lib", "libpulse", "fontconfig",
     "ttf-dejavu", null};
 static string_address bowl_graphics_fedora[] = {
-    "mesa-libEGL", "mesa-libGL", "mesa-libGLES", "mesa-libgbm",
-    "mesa-dri-drivers", "mesa-va-drivers", "mesa-vdpau-drivers",
-    "mesa-vulkan-drivers", "vulkan-loader", "libva", "intel-media-driver",
-    "libva-intel-driver", "alsa-lib", "pulseaudio-libs", "fontconfig",
+    "mesa-libEGL", "mesa-libGL", "libglvnd-gles", "mesa-libgbm",
+    "mesa-dri-drivers", "mesa-vulkan-drivers", "vulkan-loader", "libva",
+    "alsa-lib", "pulseaudio-libs", "fontconfig",
     "dejavu-sans-fonts", null};
 
 static const struct bowl_component bowl_graphics_components[] = {
@@ -8766,15 +8765,15 @@ static string_address bowl_chrome_names[] = {
 static string_address bowl_steam_arch[] = {
     // Steam itself; its dependencies are pacman's.
     "steam",
-    // The GPU: Mesa's GL, VA-API/VDPAU and the Vulkan loader, with the Radeon,
-    // Intel, VirtIO and software Vulkan drivers and Mesa layers, in 64 and 32 bits.
+    // The GPU: Mesa's GL and VA-API (mesa and lib32-mesa are the VA-API drivers too; Mesa has no
+    // VDPAU since 25.2) and the Vulkan loader, with the Radeon, Intel, VirtIO and software Vulkan
+    // drivers and Mesa layers, in 64 and 32 bits.
     "mesa", "lib32-mesa", "libglvnd", "lib32-libglvnd",
     "vulkan-icd-loader", "lib32-vulkan-icd-loader", "vulkan-radeon",
     "lib32-vulkan-radeon", "vulkan-intel", "lib32-vulkan-intel",
     "vulkan-virtio", "lib32-vulkan-virtio", "vulkan-swrast",
     "lib32-vulkan-swrast", "vulkan-mesa-layers", "lib32-vulkan-mesa-layers",
-    "libva-mesa-driver", "lib32-libva-mesa-driver", "mesa-vdpau",
-    "lib32-mesa-vdpau", "intel-media-driver", "libva-intel-driver",
+    "intel-media-driver", "libva-intel-driver",
     "lib32-libva-intel-driver",
     // Sound: the PulseAudio client and ALSA's plugin for it, to Moonwater's
     // sound server, in 64 and 32 bits.
