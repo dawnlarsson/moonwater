@@ -56,7 +56,6 @@ static const p8 bowl_usage_text[] = bowl_label
 #define BOWL_PATH_LIMIT 4096
 #define BOWL_SHEBANG_LIMIT 256
 #define BOWL_ACCESS_EXECUTE 1
-#define BOWL_WRAP_ARGV 96
 
 struct bowl_mount_point
 {
@@ -930,7 +929,10 @@ static bool bowl_fill_command(string_address name, p8 address_to into,
 static p8 bowl_wrap_root[BOWL_PATH_LIMIT];
 static p8 bowl_wrap_program[BOWL_PATH_LIMIT];
 static p8 bowl_wrap_absolute[BOWL_PATH_LIMIT];
-static string_address bowl_wrap_vector[BOWL_WRAP_ARGV];
+/*      Grown with the argument count (array_store_reserve), so no count is
+        capped: a refusal here is only the memory of the process. */
+static string_address address_to bowl_wrap_vector;
+static positive bowl_wrap_room;
 
 static bool bowl_guest_absolute(string_address path, string_address cwd,
                                 p8 address_to into, positive room)
@@ -986,7 +988,8 @@ static bool bowl_wrap_command(string_address path, string_address cwd,
 
         old = address_to argv;
         count = address_to argc;
-        if (!old || count + 2 >= BOWL_WRAP_ARGV)
+        if (!old || !array_store_reserve(bowl_wrap_vector, bowl_wrap_room, 0,
+                                         count + 3, 16))
                 return false;
 
         bowl_wrap_vector[0] = BOWL_PROGRAM;
@@ -1808,15 +1811,37 @@ static bool bowl_view_program(string_address root, bipolar handle,
         package name stays one: it is a suffix, an existing file and an
         argument, all three.
 */
-#define BOWL_INPUTS 16
 #define BOWL_INPUT_DIRECTORY "/tmp/.bowl-in"
 #define BOWL_INPUT_ROOM 512
 #define BOWL_OPEN_TREE_CLONE 1
 #define BOWL_MOVE_MOUNT_EMPTY 4
-static bipolar bowl_input_handle[BOWL_INPUTS];
-static p8 bowl_input_target[BOWL_INPUTS][BOWL_INPUT_ROOM];
+
+/*      A package file taken: the handle of its mount, and the path it is
+        bound at inside the view, which is a buffer of its own so that the
+        table of entries can grow without moving a path. */
+struct bowl_input
+{
+        bipolar handle;
+        p8 address_to target;
+};
+static struct bowl_input address_to bowl_input_entry;
+static positive bowl_input_room;
 static positive bowl_input_count;
-static string_address bowl_input_vector[BOWL_WRAP_ARGV];
+static string_address address_to bowl_input_vector;
+static positive bowl_input_vector_room;
+static bool bowl_inputs_refused;
+
+/*      Said when the memory for an input is not there: the input is not
+        bound, and the command does not start. */
+static void bowl_input_refuse(string_address name)
+{
+        bowl_inputs_refused = true;
+        if (!bowl_quiet)
+        {
+                string_format(log, bowl_label "%s: no memory to bind it\n", name);
+                log_flush();
+        }
+}
 
 static bool bowl_input_package(string_address name)
 {
@@ -1848,19 +1873,27 @@ static string_address address_to bowl_inputs_take(
                 return arguments;
         while (arguments[count])
                 count++;
-        if (count < 2 || count + 1 >= BOWL_WRAP_ARGV ||
+        if (count < 2 ||
             system_call_2(syscall(getcwd), (positive)cwd, sizeof(cwd)) < 0)
                 return arguments;
+        if (!array_store_reserve(bowl_input_vector, bowl_input_vector_room, 0,
+                                 count + 1, 16))
+        {
+                bowl_input_refuse("the arguments");
+                return arguments;
+        }
 
         memory_copy(bowl_input_vector, arguments,
                     (count + 1) * sizeof(*arguments));
-        for (positive at = 1; at < count && bowl_input_count < BOWL_INPUTS; at++)
+        for (positive at = 1; at < count; at++)
         {
                 string_address name = arguments[at];
                 string_address base;
                 file_facts facts;
                 positive length;
                 positive made = 0;
+                p8 address_to buffer = null;
+                positive buffer_room = 0;
                 bipolar handle;
 
                 if (!bowl_input_package(name) ||
@@ -1875,6 +1908,13 @@ static string_address address_to bowl_inputs_take(
                 length = string_length(base);
                 if (length + sizeof(BOWL_INPUT_DIRECTORY) + 24 >= BOWL_INPUT_ROOM)
                         continue;
+                if (!array_store_reserve(bowl_input_entry, bowl_input_room,
+                                         bowl_input_count, bowl_input_count + 1,
+                                         16))
+                {
+                        bowl_input_refuse(name);
+                        break;
+                }
                 handle = system_open_at(AT_FDCWD, full, FILE_READ | O_CLOEXEC);
                 if (handle < 0)
                         continue;
@@ -1891,18 +1931,22 @@ static string_address address_to bowl_inputs_take(
                                 continue;
                         handle = tree;
                 }
+                if (!array_store_reserve(buffer, buffer_room, 0,
+                                         BOWL_INPUT_ROOM, 1))
+                {
+                        system_close(handle);
+                        bowl_input_refuse(name);
+                        break;
+                }
 
-                memory_copy(bowl_input_target[bowl_input_count],
-                            BOWL_INPUT_DIRECTORY "/", sizeof(BOWL_INPUT_DIRECTORY));
+                memory_copy(buffer, BOWL_INPUT_DIRECTORY "/", sizeof(BOWL_INPUT_DIRECTORY));
                 made = sizeof(BOWL_INPUT_DIRECTORY);
-                made += positive_into_string(
-                    bowl_input_target[bowl_input_count] + made,
-                    bowl_input_count);
-                bowl_input_target[bowl_input_count][made++] = '/';
-                memory_copy(bowl_input_target[bowl_input_count] + made, base,
-                            length + 1);
-                bowl_input_handle[bowl_input_count] = handle;
-                bowl_input_vector[at] = bowl_input_target[bowl_input_count];
+                made += positive_into_string(buffer + made, bowl_input_count);
+                buffer[made++] = '/';
+                memory_copy(buffer + made, base, length + 1);
+                bowl_input_entry[bowl_input_count].handle = handle;
+                bowl_input_entry[bowl_input_count].target = buffer;
+                bowl_input_vector[at] = buffer;
                 bowl_input_count++;
         }
         return bowl_input_vector;
@@ -1914,36 +1958,36 @@ static bipolar bowl_inputs_mount(void)
         for (positive at = 0; at < bowl_input_count; at++)
         {
                 p8 directory[BOWL_INPUT_ROOM];
-                positive length = string_length(bowl_input_target[at]);
+                positive length = string_length(bowl_input_entry[at].target);
                 bipolar failed;
                 bipolar made;
 
-                while (length && bowl_input_target[at][length - 1] != '/')
+                while (length && bowl_input_entry[at].target[length - 1] != '/')
                         length--;
-                memory_copy(directory, bowl_input_target[at], length - 1);
+                memory_copy(directory, bowl_input_entry[at].target, length - 1);
                 directory[length - 1] = end;
                 failed = bowl_mkdir_parents(directory);
                 if (failed < 0)
                         return failed;
 
-                made = system_open_at_mode(AT_FDCWD, bowl_input_target[at],
+                made = system_open_at_mode(AT_FDCWD, bowl_input_entry[at].target,
                                            FILE_WRITE | O_CLOEXEC | O_NOFOLLOW,
                                            0444);
                 if (made < 0)
                         return made;
                 system_close(made);
 
-                bowl_doing("bind", bowl_input_target[at]);
+                bowl_doing("bind", bowl_input_entry[at].target);
                 failed = system_call_5(syscall(move_mount),
-                                       (positive)bowl_input_handle[at],
+                                       (positive)bowl_input_entry[at].handle,
                                        (positive)"", AT_FDCWD,
-                                       (positive)bowl_input_target[at],
+                                       (positive)bowl_input_entry[at].target,
                                        BOWL_MOVE_MOUNT_EMPTY);
                 if (failed)
                         return failed;
-                failed = system_mount(0, bowl_input_target[at], 0,
+                failed = system_mount(0, bowl_input_entry[at].target, 0,
                                       MS_BIND | MS_REMOUNT | MS_RDONLY |
-                                          bowl_mount_kept(bowl_input_target[at]), 0);
+                                          bowl_mount_kept(bowl_input_entry[at].target), 0);
                 if (failed)
                         return failed;
         }
@@ -10960,6 +11004,8 @@ static b32 bowl_main()
 
                 command_arguments = bowl_inputs_take(command_arguments);
 
+                if (bowl_inputs_refused)
+                        return 1;
                 if (failed)
                         return failed;
         }

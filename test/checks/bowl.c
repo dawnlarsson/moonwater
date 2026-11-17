@@ -3912,6 +3912,74 @@ static fn ssh_rows(void)
         }
 }
 
+/* Growth in memory: no count of a command's arguments is capped. A guest
+   program run with a hundred arguments still goes through the wrapper, and
+   seventeen package files are each bound into the view, none passed through
+   as a host path. */
+static bool grow_file(string_address path, string_address text, positive length)
+{
+        bipolar handle = system_open_at_mode(AT_FDCWD, path,
+                                             O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC,
+                                             0644);
+
+        if (handle < 0)
+                return false;
+        {
+                bool wrote = system_write_all((positive)handle, text, length) == length;
+
+                system_close(handle);
+                return wrote;
+        }
+}
+
+static fn grow_rows(void)
+{
+        static string_address const input_names[] = {
+            BOWL_ROOT_PREFIX "growin/pkg01.deb", BOWL_ROOT_PREFIX "growin/pkg02.deb",
+            BOWL_ROOT_PREFIX "growin/pkg03.deb", BOWL_ROOT_PREFIX "growin/pkg04.deb",
+            BOWL_ROOT_PREFIX "growin/pkg05.deb", BOWL_ROOT_PREFIX "growin/pkg06.deb",
+            BOWL_ROOT_PREFIX "growin/pkg07.deb", BOWL_ROOT_PREFIX "growin/pkg08.deb",
+            BOWL_ROOT_PREFIX "growin/pkg09.deb", BOWL_ROOT_PREFIX "growin/pkg10.deb",
+            BOWL_ROOT_PREFIX "growin/pkg11.deb", BOWL_ROOT_PREFIX "growin/pkg12.deb",
+            BOWL_ROOT_PREFIX "growin/pkg13.deb", BOWL_ROOT_PREFIX "growin/pkg14.deb",
+            BOWL_ROOT_PREFIX "growin/pkg15.deb", BOWL_ROOT_PREFIX "growin/pkg16.deb",
+            BOWL_ROOT_PREFIX "growin/pkg17.deb"};
+        string_address wrap_argv[104];
+        string_address *wrap_av = wrap_argv;
+        positive wrap_count = 100;
+        string_address input_argv[19];
+        string_address *input_av;
+        positive bound = 0;
+        bool made = true, wrapped;
+
+        (void)bowl_mkdir_parents(BOWL_ROOT_PREFIX "growcheck/usr/bin");
+        (void)bowl_mkdir_parents(BOWL_ROOT_PREFIX "growin");
+        made = grow_file(BOWL_ROOT_PREFIX "growcheck/usr/bin/bigtool", "\177ELF\n", 5) && made;
+        for (positive at = 0; at < 17; at++)
+                made = grow_file(input_names[at], "deb\n", 4) && made;
+
+        wrap_argv[0] = "/usr/bin/bigtool";
+        for (positive at = 1; at < wrap_count; at++)
+                wrap_argv[at] = "arg";
+        wrap_argv[wrap_count] = null;
+        wrapped = bowl_wrap_command(BOWL_ROOT_PREFIX "growcheck/usr/bin/bigtool", "/",
+                                    &wrap_av, &wrap_count);
+        check("wrap: a guest program run with a hundred arguments goes through the wrapper, with every argument kept after its program",
+              wrapped && wrap_count == 102 && wrap_av[0] == BOWL_PROGRAM &&
+                  wrap_av[101] == wrap_argv[99] && wrap_av[102] == null);
+
+        input_argv[0] = "dpkg";
+        for (positive at = 0; at < 17; at++)
+                input_argv[at + 1] = input_names[at];
+        input_argv[18] = null;
+        input_av = bowl_inputs_take(input_argv);
+        for (positive at = 1; at <= 17; at++)
+                if (input_av[at] != input_argv[at])
+                        bound++;
+        check("inputs: seventeen package files are each bound into the view, none passed through as a host path",
+              made && bound == 17);
+}
+
 b32 main(void)
 {
         ssh_rows();
@@ -3948,6 +4016,7 @@ b32 main(void)
         nix();
         executable_in_root();
         bowl_hardened_and_limits_rows();
+        grow_rows();
         return test_report(null);
 }
 #endif /* CHECK_bowl */

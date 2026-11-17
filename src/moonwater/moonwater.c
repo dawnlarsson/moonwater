@@ -1378,8 +1378,6 @@ static void machine_script_commit(const char *text, unsigned int length,
 {
         unsigned int bits = 0, event;
 
-        if (length > MOONWATER_SCRIPT_BYTES)
-                length = MOONWATER_SCRIPT_BYTES;
         kfree(machine_script_held);
         machine_script_held = held;
         machine_script_text = text;
