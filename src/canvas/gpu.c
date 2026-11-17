@@ -22,7 +22,7 @@ static positive gpu_map_next = GPU_AMD_VA_MAPS; // where the next map or import 
 // that is packets at 0 and 256, arguments at 512 and 768, the kernels from 1024. A slot is not written while its job may run (gpu_slot_take).
 #define GPU_SLOTS 2
 #define GPU_AMD_PACKETS 256
-static struct { unsigned int packets, args, code; } gpu_layout = {GPU_AMD_PACKETS, GPU_SLOTS * GPU_AMD_PACKETS, 1024};
+static struct { unsigned int packets, args, state, code; } gpu_layout = {GPU_AMD_PACKETS, GPU_SLOTS * GPU_AMD_PACKETS, 0, 1024};
 #define GPU_PACKETS (gpu_layout.packets)
 
 // broken: the card is there and drew the self-test wrong; pending: the job last waited for and not seen done (its sequence on ctx), 0 for none
@@ -365,13 +365,17 @@ struct gpu_job
         unsigned int columns, rows; // the grid: columns of the driver's lanes (struct gpu_backend's lanes: amdgpu's wave of 64 pixels), rows of what the kernel takes a row to be
         unsigned int address_to packets_at; // the job's room for its command words (GPU_PACKETS bytes of the card's buffer: its slot's), and its card address
         positive packets;
+        unsigned int address_to state_at;   // the slot's room for state (struct gpu_backend's state bytes, 64-aligned; 0 for a driver with none), and its card
+        positive state;                     // address: the only place besides packets_at a batch may write
 };
 enum gpu_err
 {
         GPU_ERR_REFUSED, // the job refused: asked again up to three times, without the maps whose pages are gone (gpu_drop_unmapped)
         GPU_ERR_AGAIN,   // asked again at once (up to GPU_AGAIN times)
         GPU_ERR_LOST,    // the card lost its state: the caller starts it again (gpu_recover)
-        GPU_ERR_OURS     // our own job is wrong as it is (the same job is refused the same way again): refused at once, not asked again, and the card is not lost
+        GPU_ERR_OURS,    // our own job is wrong as it is (the same job is refused the same way again): refused at once, not asked again, and the card is not lost
+        GPU_ERR_PLACE    // an address the job pins is not ours to have (i915's ENOSPC: on Ivy Bridge and Haswell the display holds ranges of the one address space):
+                         // the job is refused, and the maps are placed elsewhere for the next (gpu_place_elsewhere); the card is not lost
 };
 struct gpu_vm_fault
 {
@@ -416,6 +420,8 @@ struct gpu_backend
         unsigned int (*window)(unsigned int family, positive *va, positive *maps, positive *top);
         unsigned int (*describe)(unsigned int family, unsigned int device, char *into, unsigned int at, unsigned int room);
         unsigned int lanes, packets; // a column of the grid in pixels (amdgpu's wave64: 64); a slot's room for its command words, in bytes (a multiple of 256)
+        unsigned int state; // a slot's room for the state its command words point at, in bytes (a multiple of 64; 0 for none): i915's binding table, surface
+                            // states and interface descriptor, which the chip's batch writes there (struct gpu_job's state) and nowhere else
 };
 
 // The top of the card's address space as the last DEV_INFO said it (virtual_address_max, struct drm_amdgpu_info_device at byte 152), 0 for not said.
@@ -789,7 +795,7 @@ static unsigned int gpu_i915_describe(unsigned int family, unsigned int device, 
 static enum gpu_err gpu_i915_classify(unsigned int error)
 {
         return error == 11 || error == 4 ? GPU_ERR_AGAIN : error == 5 || error == 19 ? GPU_ERR_LOST
-               : error == 22 || error == 28 || error == 2 || error == 95 ? GPU_ERR_OURS : GPU_ERR_REFUSED;
+               : error == 28 ? GPU_ERR_PLACE : error == 22 || error == 2 || error == 95 ? GPU_ERR_OURS : GPU_ERR_REFUSED;
 }
 
 // The reservations, taken once: the table of bound ranges and room for the object list of a submit of as many objects. False when the memory is not there.
@@ -1036,7 +1042,8 @@ static unsigned int gpu_i915_fence(positive sequence, int *fd)
 static const struct gpu_backend gpu_i915_row = {
     .driver = "i915", .identify = gpu_i915_identify, .buffer = gpu_i915_buffer, .context = gpu_i915_context, .user = gpu_i915_user, .bind = gpu_i915_bind,
     .unbind = gpu_i915_unbind, .submit = gpu_i915_submit, .wait = gpu_i915_wait, .fault = gpu_i915_fault, .fence = gpu_i915_fence, .set = gpu_i915_set,
-    .classify = gpu_i915_classify, .window = gpu_i915_window, .describe = gpu_i915_describe, .lanes = 16, .packets = 1024}; // (a SIMD16 thread a column)
+    .classify = gpu_i915_classify, .window = gpu_i915_window, .describe = gpu_i915_describe, .lanes = 16, .packets = 1024, // (a SIMD16 thread a column)
+    .state = 512}; // a slot's binding table, surface states, interface descriptor (Gen7: about 256 bytes, Gen8 on: 288), with room
 
 // The drivers, in the order a node of each is taken when the display's own device is none of them.
 static const struct gpu_backend *const gpu_backends[] = {&gpu_amd, &gpu_i915_row};
@@ -1419,16 +1426,21 @@ static b32 gpu_start(positive bytes)
 
                         gpu_set = gpu_backend->set(gpu.family);
                         e = gpu_backend->window(gpu.family, &va, &maps, &top);
-                        code = (GPU_SLOTS * room + 256 * GPU_SLOTS + 255) & ~255u;
+                        // The slots' state (struct gpu_backend's state) after their arguments, 64-aligned; the kernels after it.
+                        unsigned int state = (GPU_SLOTS * room + 256 * GPU_SLOTS + 63) & ~63u;
+
+                        code = (state + GPU_SLOTS * gpu_backend->state + 255) & ~255u;
                         code = code < 1024 ? 1024 : code;
-                        if (!e && (!gpu_set || gpu_set->count > GPU_KERNELS || (room & 255) || va + size > maps || maps >= top || top > GPU_VA_RECORD))
+                        if (!e && (!gpu_set || gpu_set->count > GPU_KERNELS || (room & 255) || (gpu_backend->state & 63) || va + size > maps || maps >= top ||
+                                   top > GPU_VA_RECORD))
                                 e = 22;
                         for (unsigned int i = 0, reach = code; !e && i < gpu_set->count; i++)
                                 if ((reach = (reach + gpu_set->kernels[i].size - 4 * gpu_set->skip + 255) & ~255u) > GPU_BASES_AT)
                                         e = 28; // the kernels end before the bases begin
                         if (!e)
                                 gpu_window.va = va, gpu_window.maps = maps, gpu_window.top = top, gpu_map_next = maps,
-                                gpu_layout.packets = room, gpu_layout.args = GPU_SLOTS * room, gpu_layout.code = code;
+                                gpu_layout.packets = room, gpu_layout.args = GPU_SLOTS * room, gpu_layout.state = gpu_backend->state ? state : 0,
+                                gpu_layout.code = code;
                         if (e && !gpu_req_step(GPU_REQ_CONTEXT, true, e))
                                 break;
                 }
@@ -2616,6 +2628,20 @@ static b32 gpu_map_named(unsigned int i)
 
 #define GPU_AGAIN 32 // the submits a job is asked again after EAGAIN (gpu_submit)
 static unsigned int gpu_jobs_ours; // the jobs refused as our own (GPU_ERR_OURS), which are never asked again
+static unsigned int gpu_jobs_placed; // the jobs refused for an address the card would not pin there (GPU_ERR_PLACE)
+static void gpu_forget(const void *addr, positive bytes);
+#define GPU_PLACE_STEP (256ull << 20)
+
+// After a refusal of a place (GPU_ERR_PLACE): every map let go of (gpu_forget: made again at its next use, at a new address; its span kept until the card is
+// idle, so nothing new is put there meanwhile), and the next places looked for GPU_PLACE_STEP further on. The job's records hold the old addresses, so the job
+// itself is not asked again: the processor draws it, and the next present's maps are elsewhere.
+static void gpu_place_elsewhere(void)
+{
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if (gpu_maps[i].to > gpu_maps[i].from)
+                        gpu_forget((const void *)gpu_maps[i].from, gpu_maps[i].to - gpu_maps[i].from);
+        gpu_map_next = gpu_map_next + GPU_PLACE_STEP < GPU_VA_END ? gpu_map_next + GPU_PLACE_STEP : GPU_VA_MAPS;
+}
 /*
         The kernel run over the w by rows pixels of the arguments of the slot the job was built in (gpu_slot, which the caller took with gpu_slot_take and wrote:
         GPU_ARGS), submitted and not waited for: its sequence, for gpu_done, gpu_fence_fd and gpu_wait_job; 0 when the submit was refused (gpu_last_error its
@@ -2627,7 +2653,9 @@ static positive gpu_submit(void)
         const unsigned int which = GPU_KERNEL_OF(GPU_ARGS->op), lanes = gpu_backend->lanes;
         const struct gpu_job job = {gpu_set && which < gpu_set->count ? gpu_set->kernels[which].words : 0, GPU_VA + gpu_kernel_at[which < GPU_KERNELS ? which : 0],
                                     GPU_VA + GPU_ARGS_AT(gpu_slot), (GPU_ARGS->w + lanes - 1) / lanes, GPU_ARGS->rows,
-                                    (unsigned int address_to)((p8 address_to)gpu.at + GPU_PACKETS * gpu_slot), GPU_VA + GPU_PACKETS * gpu_slot};
+                                    (unsigned int address_to)((p8 address_to)gpu.at + GPU_PACKETS * gpu_slot), GPU_VA + GPU_PACKETS * gpu_slot,
+                                    gpu_backend->state ? (unsigned int address_to)((p8 address_to)gpu.at + gpu_layout.state + gpu_backend->state * gpu_slot) : 0,
+                                    gpu_backend->state ? GPU_VA + gpu_layout.state + gpu_backend->state * gpu_slot : 0};
         p64 *bos = gpu_imports_room(gpu.imports) ? gpu_submit_bos : 0;
         positive sequence = 0, began = clock_monotonic_nanoseconds(), kept = gpu_job_began;
         unsigned int named, tries = 0, again = 0;
@@ -2676,6 +2704,13 @@ static positive gpu_submit(void)
                 }
                 // Our own job, wrong as it is (i915's EINVAL: a batch or an object it will not take): the same words are refused the same way again, so it is
                 // not asked again and the card is not lost; the processor draws, and the refusal is counted as any refused job is (three in a row cool the card).
+                if (kind == GPU_ERR_PLACE)
+                {
+                        gpu_jobs_placed++, gpu_job_error = gpu_last_error, gpu_fault_note(false);
+                        gpu_place_elsewhere();
+                        gpu_job_began = kept, gpu_submit_took = clock_monotonic_nanoseconds() - began;
+                        return 0;
+                }
                 if (kind == GPU_ERR_OURS)
                 {
                         gpu_jobs_ours++, gpu_job_error = gpu_last_error, gpu_fault_note(false);
