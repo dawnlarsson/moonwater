@@ -374,9 +374,9 @@ two pages; the C asks it.
 | `usb lock` | kernel | lower-only | no new USB device is let in |
 | `usb allow` | kernel | deliberate | |
 | `log` | kernel | any | text, to the kernel's log |
-| `display off`, `display on` | desktop | any | |
-| `open` | desktop | any | word: an app's name or a program's path, as the launcher opens it; then none or more words, its arguments (`do open mixer -q -a`) |
-| `notify` | desktop | any | text, as a notice |
+| `display off`, `display on` | desktop | any | every screen out (DPMS) and lit again: the runner makes and removes `/run/moonwater/display-off`, which the compositor watches; a key or button pressed, a move or a touch lights them again |
+| `open` | desktop | any | word: an app's name or a program's path, as the launcher opens it; then none or more words, its arguments (`do open mixer -q -a`); one asked before the compositor is up is held, and done when it is |
+| `notify` | desktop | any | text, as a notice: on the notices board under `rules`, as a program's notification is, and in the kernel's log |
 
 ### Switches
 
@@ -467,10 +467,17 @@ the table before it stays.
 - **Cues**: an `emit` chain is cut at depth 4 when it runs, and the
   compiler refuses a rule that emits its own cue with no condition.
 
-**Safe mode** (`moonwater.safe=1`, or two boots that never loaded a
-table) loads the image's own table and ignores the person's files. Today
-`moonwater.safe=1` is what is read; the two-boot count, and a table the
-build embeds so safe mode needs no file at all, are not done yet.
+**Safe mode** loads the image's own rules and ignores the person's
+files: `moonwater.safe=1` on the kernel's command line, or two loads in a
+row that did not stand a minute. Every load counts itself in
+`/root/rules/.boots` before the kernel has it, the runner's at its start
+and `moonwater rover load`'s alike, and the runner puts the count back to
+0 once the table it has has been live for a minute, so a person's rule
+that stops or wedges the machine soon after it loads twice is not loaded a
+third time. The image's rules are carried in the program itself (compiled
+from `src/rover/examples`), so safe mode reads no file at all; a set with
+the person's files that does not compile as a whole is tried again as the
+image's alone.
 
 **The floor**: the power key and Ctrl-Alt-Delete always work. With no
 table loaded, or with a table whose rule for them is refused or turned
@@ -485,9 +492,12 @@ only through their own events, which keep the floor.
 
 ### Files
 
-The image's rules are `/lib/moonwater/rules/*.rover` and the person's are
+The image's rules are the program's own, the same files as
+`/lib/moonwater/rules/*.rover` holds to read and copy, and the person's are
 `/root/rules/*.rover`. A file in `/root/rules` replaces the image's file
-of the same name, and an empty one masks it. A `run` script is
+of the same name, and an empty one masks it; one that may not be read or
+does not compile is said with its line, and the image's of its name
+stands. A `run` script is
 `/root/rules/scripts/NAME`, else the image's of that name. Files under
 `/root/rules` are read only if they are regular, owned by root, not
 writable by group or others, and at most 64 KiB, as the machine script is
@@ -563,16 +573,21 @@ reader that finds another sequence was overtaken. `read` on `/dev/spark`
 answers the head and blocks until it moves; `poll` says readable when it
 has moved past what the descriptor read.
 
-**The consumer**, until the runner exists, is the machine process: its
-wait (`MOONWATER_IOCTL_MACHINE`, WAIT) also answers `MOONWATER_ROVER`
-(255) when the ring has records a userspace owner acts on, and the
-process then reads them. A hit's actions that are not the kernel's, and
-the runner's rules of an event record (evaluated there with the kernel's
-page mapped), go to the machine script's `moonwater_rover RULE ACTION
-ARG ...` when it defines one; `emit cue` runs the runner's cue rules in
-place, to depth four; a runner rule's kernel primitive is asked through
-DO. Today's spark bindings and the machine script run beside all of it,
-unchanged.
+**The consumer** is the runner (`src/rover/runner.c`), the machine
+process: its wait (`MOONWATER_IOCTL_MACHINE`, WAIT) also answers
+`MOONWATER_ROVER` (255) when the ring has records a userspace owner acts
+on, and the runner reads them to the head. A kernel rule's hit has its
+actions that are not the kernel's done there (its kernel primitives the
+kernel already queued), and an event record is asked of the runner's
+rules, which read a copy of the kernel's page (taken whole between two
+even sequences, the boot words and the zone kept over it). The page is
+looked at every turn of the runner's loop too, so a runner's `when` rule
+over a kernel state hears its change at the next wake. A record of
+another load than the runner's is a table loaded by hand (`moonwater
+rover load`): the runner compiles the same files and takes that table,
+its services kept by name. A runner rule's kernel primitive is asked
+through DO. The image's spark bindings run beside it for an event no
+rule takes.
 
 **Measured** in an x86_64 guest under QEMU's TCG on the Mac (no KVM on
 box, no x86 virtualisation on Apple silicon), so every figure is

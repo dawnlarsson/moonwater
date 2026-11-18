@@ -162,6 +162,7 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
         {"monitor_source", "programs/monitor.sh"},
         {"font_source", "fonts"},
         {"language_source", "languages"},
+        {"rules_source", "src/rover/examples"},
         {"patch_script", "kernel/patch/apply"},
         {"replace_script", "kernel/replace/apply"},
         {"firmware_script", "kernel/firmware/apply"},
@@ -5885,6 +5886,37 @@ static b32 build_languages(string_address image)
 }
 
 /*
+        The image's rules: src/rover/examples/*.rover as /lib/moonwater/rules/,
+        and the scripts they run as /lib/moonwater/rules/scripts/. An image
+        that carries them runs them: the machine process is rover's runner
+        (src/rover/runner.c), which reads these and the person's /root/rules,
+        and safe mode reads these alone. A build clears what the last one put
+        there, as the fonts are.
+*/
+static b32 build_rules(string_address image)
+{
+        string_address source = build_setting_get("rules_source");
+        string_address where = build_join(image, "/lib/moonwater/rules", null);
+        string_address scripts = build_join(where, "/scripts", null);
+
+        //      An empty image_root would make this the host's own /lib.
+        return_if(!*image, build_die("rules: image_root is empty"));
+
+        if (build_tool("rm", "-rf", where, null))
+                return build_die("clearing the rules");
+        if (build_tool("mkdir", "-p", scripts, null))
+                return build_die("making the rules directory");
+        if (build_tool("find", source, "-maxdepth", "1", "-name", "*.rover", "-exec", "cp", "{}", where, ";", null))
+                return build_die(build_join("installing the rules of ", source, null));
+        if (build_tool("find", build_join(source, "/scripts", null), "-maxdepth", "1", "-type", "f", "-exec", "cp", "{}",
+                       scripts, ";", null))
+                return build_die(build_join("installing the rules' scripts of ", source, null));
+        if (build_tool("chmod", "-R", "go-w", where, null))
+                return build_die("making the rules root's alone");
+        return 0;
+}
+
+/*
         The diagnostics an x86 image carries: /usr/lib/moonwater/diag/.
 
         intel-probe (src/diag/intel-probe.c) is the Intel GPU's compute
@@ -6120,7 +6152,7 @@ static b32 build_userspace()
         if (applet && build_tool_links(image, applet, false))
                 return 1;
 
-        return build_fonts(image) || build_languages(image) || build_diagnostics(image);
+        return build_fonts(image) || build_languages(image) || build_rules(image) || build_diagnostics(image);
 }
 
 static b32 build_local(string_address address_to profiles, positive count,

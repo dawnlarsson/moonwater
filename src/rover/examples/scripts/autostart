@@ -1,0 +1,12 @@
+#!/bin/sh
+# The programs of moonwater desktop autostart, in its order, as a person asked for them (desktop_autostart).
+words=$(moonwater desktop autostart 2> /dev/null)
+case $words in
+*"autostart "*) words=${words#*autostart } ;;
+*) exit 0 ;;
+esac
+for program in $words; do
+  case $program in
+  /*) MOONWATER_ASKED=1 "$program" < /dev/null > /dev/null 2>&1 & ;;
+  esac
+done

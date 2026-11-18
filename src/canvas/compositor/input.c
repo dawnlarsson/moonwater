@@ -4840,6 +4840,11 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                 const struct compositor_report_event *event = &events[i];
                 positive now = event->stamp;
 
+                // A key or a button pressed, a move or a touch: a person, who has the screens lit again (a release is not, so the
+                // chord that put them out does not light them; a switch, EV_SW, is none of these).
+                if (compositor.dark && ((event->type == 1 && event->value == 1) || event->type == 2 || event->type == 3))
+                        compositor_dark_woken();
+
                 // The events this one posts carry its own stamp (the device's), not the time the loop reads them at.
                 compositor_stamp_now = now;
                 // A locked pointer's counts and the end of their report are all a slingshot turn may hold (EV_MSC, 4, a scan code, says

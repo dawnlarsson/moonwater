@@ -54,6 +54,8 @@
         only looked for (it is there or it is not), and none a setting a person keeps (those are under /root). Who looks, and when; whoever
         adds a switch file adds its row here:
 
+            display-off       kms.c, compositor_dark_look, at its every change (inotify): every screen put out (DPMS) while it is there; the
+                              rules' display off makes it and display on removes it, and a person's key, press, move or touch does too
             present-early     compositor.c's start, once: every present by the old rule, early in its period (compositor_late.early)
             present-wait      compositor.c's start, once: every job of the card's present waited for in place (compositor_card.nowait 0)
             vrr-capable       compositor.c's start, once: the screen taken as able to run at variable refresh whatever its connector
@@ -934,6 +936,7 @@ static void compositor_pointer_shown(void);
 #define COMPOSITOR_IN_CLOSE_WRITE 0x8u
 #define COMPOSITOR_IN_CREATE 0x100u
 #define COMPOSITOR_IN_MOVED_TO 0x80u
+#define COMPOSITOR_IN_DELETE 0x200u
 #define COMPOSITOR_NONBLOCK 0x800
 #define COMPOSITOR_CLOEXEC 0x80000
 // No row: no window has the keys, is under the pointer, is held.
@@ -992,6 +995,7 @@ static struct
         struct compositor_output output[WINDOWS_OUTPUTS];
         int screen[WINDOWS_OUTPUTS][4];
         unsigned int outputs, layout;
+        int dark; // the screens put out by a display off: /run/moonwater/display-off is there (compositor_dark)
         /*
                 What every window's buffer is made for, for the session: stride the pixels a row of it (the
                 widest screen connected when the compositor started) and most_w by most_h the largest a window

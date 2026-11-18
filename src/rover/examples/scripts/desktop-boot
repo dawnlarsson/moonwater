@@ -1,0 +1,3 @@
+#!/bin/sh
+# Canvas on: the desktop's choice carried out (off is the text console), as moonwater_canvas_on did.
+exec moonwater desktop boot

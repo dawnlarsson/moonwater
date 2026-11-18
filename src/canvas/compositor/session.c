@@ -1269,6 +1269,11 @@ static void compositor_inputs_open(void)
                 compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive) "/root",
                                 COMPOSITOR_IN_CLOSE_WRITE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_CREATE,
                                 0, 0, 0);
+        // display off and on, by the rules: /run/moonwater/display-off made and removed; a compositor starts lit.
+        (void)system_remove_at(AT_FDCWD, (string_address)COMPOSITOR_DARK_FILE, 0);
+        if (compositor.watch >= 0)
+                compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive) "/run/moonwater",
+                                COMPOSITOR_IN_CREATE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_DELETE, 0, 0, 0);
 
         for (unsigned int number = 0; number < COMPOSITOR_DEVICES; number++)
                 compositor_input_add(number);
@@ -1314,6 +1319,8 @@ static void compositor_inputs_watch(void)
                                                   (string_address)SETTING_CANVAS_DISPLAYS_PATH + sizeof("/root/") - 1))
                                         compositor_space_retake();
                         }
+                        else if (string_equals((string_address)name, (string_address)COMPOSITOR_DARK_FILE + sizeof("/run/moonwater/") - 1))
+                                compositor_dark_look();
                         else if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&
                                  !compositor.layout_given)
                                 compositor_layout_read();

@@ -1602,6 +1602,54 @@ static int compositor_vrr_set(int on)
 }
 
 /*
+        display off and on: every screen's connector set to DPMS off (3) or on (0), which the card does as its crtc
+        put out and lit again with what it showed. The rules say it (display off, display on) by the file
+        /run/moonwater/display-off, made and removed (compositor_dark_look); a key, a press or a move of the pointer
+        lights the screens again and removes the file, as any desktop's screen comes back.
+*/
+#define COMPOSITOR_DARK_FILE "/run/moonwater/display-off"
+static void compositor_dark(int dark)
+{
+        if (compositor.dark == dark)
+                return;
+        compositor.dark = dark;
+        for (unsigned int at = 0; at < compositor.outputs && at < WINDOWS_OUTPUTS; at++)
+        {
+                unsigned long value;
+                unsigned int prop = compositor_object_prop(compositor.output[at].connector, COMPOSITOR_OBJECT_CONNECTOR, "DPMS", &value);
+                struct
+                {
+                        unsigned long value;
+                        unsigned int prop, object, type, pad;
+                } set = {dark ? 3ul : 0ul, prop, compositor.output[at].connector, COMPOSITOR_OBJECT_CONNECTOR, 0};
+
+                if (prop)
+                        (void)system_control(compositor.card, COMPOSITOR_OBJ_SETPROPERTY, address_of set);
+        }
+        if (!dark)
+                compositor_damage_space();
+        compositor_kmsg(dark ? (string_address) "compositor: display off" : (string_address) "compositor: display on", 0,
+                        (string_address) "");
+}
+
+// Whether the file is there, looked at the start and at each change of it.
+static void compositor_dark_look(void)
+{
+        file_facts facts;
+
+        compositor_dark(file_look(AT_FDCWD, (string_address)COMPOSITOR_DARK_FILE, AT_SYMLINK_NOFOLLOW, address_of facts));
+}
+
+// A person at the machine: the screens lit again.
+static void compositor_dark_woken(void)
+{
+        if (!compositor.dark)
+                return;
+        (void)system_remove_at(AT_FDCWD, (string_address)COMPOSITOR_DARK_FILE, 0);
+        compositor_dark(0);
+}
+
+/*
         The screen's variable refresh as the policy and the presents want it, before each present and at a change of the setting: the properties
         read when the screen's crtc or connector is another than they were read for (and again after every take of the screens), and the crtc
         set only when what it has is not what is wanted, so a crtc another program left on is set off where it is not wanted. Off at once, for a

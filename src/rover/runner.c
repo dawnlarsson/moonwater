@@ -5,35 +5,35 @@
 
         It is the process PID 1 keeps as the machine (moonwater machine), and
         it is chosen over the script when the image carries rules
-        (/lib/moonwater/rules). It reads the image's rule files and the
-        person's (/root/rules), compiles them into one table, keeps the three
-        state pages, supervises the services, hears every event there is, and
-        does what the rules say:
+        (/lib/moonwater/rules). It compiles the image's rules and the
+        person's into one table (src/rover/load.c), hands it to the kernel
+        (ROVER_IOCTL), keeps the three state pages, supervises the services,
+        hears every event there is, and does what the rules say:
 
-            kernel events   the spark path the script was fed by (a WAIT thread, a pipe),
-                            until the kernel's own ring;
-            desktop events  the compositor's keys.fire lines and pin files, turned into
-                            chord and button events;
+            kernel events   the kernel's ring (src/moonwater/rules.c): a kernel rule's hit, whose
+                            actions that are not the kernel's are done here, and an event a runner's
+                            rule waits for; the machine's wait says when it has records;
+            kernel states   the kernel's page, mapped and copied, with the boot words over it;
+            desktop events  the compositor's keys.fire lines and pin files, turned into chord and
+                            button events;
             settings        the files the Settings rows keep, by inotify on /root;
             the boot        its verdict, once, when /run/moonwater/verdict appears;
             clocks          every DURATION and at CLOCK;
             services        their lives, as service up, down and failed.
 
-        Until the kernel evaluates its own rules, the runner asks every rule
-        of an event, wherever it is placed, and does a kernel primitive
-        through its verb. Everything it starts is a child of its own: a
-        service is watched by its pidfd, anything else is reaped by its pid.
+        A kernel rule runs in the kernel and nowhere else; a runner's rule's
+        kernel primitive is asked of the kernel (ROVER_OP_DO), as a kernel
+        rule's is queued there. Everything the runner starts is a child of
+        its own: a service is watched by its pidfd, anything else is reaped by
+        its pid.
 */
 
 #ifndef ROVER_RUNNER_INCLUDED
 #define ROVER_RUNNER_INCLUDED
 
 #define ROVER_IMAGE_RULES "/lib/moonwater/rules"
-#define ROVER_ROOT_RULES "/root/rules"
 #define ROVER_ROOT_SCRIPTS "/root/rules/scripts"
 #define ROVER_IMAGE_SCRIPTS "/lib/moonwater/rules/scripts"
-#define ROVER_BOOTS_FILE "/root/rules/.boots" // boots begun and not seen to load a table, a number
-#define ROVER_FILES_MOST 64u
 #define ROVER_KEYS_FILE "/run/moonwater/keys"
 #define ROVER_KEYS_FIRE "/run/moonwater/keys.fire"
 #define ROVER_VERDICT "/run/moonwater/verdict"
@@ -42,6 +42,14 @@
 #define ROVER_STOP_GRACE_NS 3000000000ull // TERM, then KILL after this
 #define ROVER_KEYS_MOST 32u
 #define ROVER_SECOND_NS 1000000000ull
+#define ROVER_DESKTOP_UP "/run/moonwater/windows" // the compositor's table: the desktop is up
+#define ROVER_HELD_MOST 8u
+
+struct rover_held
+{
+        p8 word[ROVER_ARGUMENTS + 1][ROVER_WORD_MOST + 2];
+        positive count;
+};
 
 struct rover_running
 {
@@ -58,7 +66,6 @@ struct rover_running
 
 static struct
 {
-        struct rover_build build;
         p64 table_words[ROVER_TABLE_MOST / 8];
         positive size;
         struct rover_table view;
@@ -70,19 +77,26 @@ static struct
         struct rover_event queue[ROVER_QUEUE_MOST]; // cues and the runner's own events, done after the one in hand
         p8 queue_text[ROVER_QUEUE_MOST][ROVER_WORD_MOST + 1];
         positive queued;
-        p8 source[ROVER_SOURCE_MOST + ROVER_FILES_MOST];
-        positive source_used;
+        const p8 address_to map; // the kernel's page, its ring's head and its records (ROVER_MAP_BYTES)
+        p64 tail;                // the next record to read
+        p32 table;               // the kernel's number for the load the runner has, 0 for none
+        p64 stood;               // monotonic: the load has stood a minute at this, and the count of loads goes to 0
+        p16 boot[16];            // the boot.NAME states, which the runner keeps over the kernel's page
+        positive boots;
         bipolar kernel_pipe[2];
         bipolar device;
         bipolar watch;
         bipolar fire;
-        bipolar latency; // /dev/cpu_dma_latency, held while a latency rule says
         p64 every_next[8];
         p64 every_period[8];
         positive everys;
         b64 minute; // the last minute an at was posted for
         bool verdict_seen;
-        bool safe;
+        p8 pin_text[1024];                       // the pinned program's words, the last pin pressed
+        string_address pin[ROVER_ARGUMENTS + 5];
+        positive pins;
+        struct rover_held held[ROVER_HELD_MOST]; // opens asked before the desktop was up
+        positive helds;
         struct { p8 name[48]; b64 chord; } keys[ROVER_KEYS_MOST];
         positive key_count;
 } rover_runner;
@@ -97,64 +111,7 @@ static b64 rover_runner_realtime(void)
         return now.tv_sec;
 }
 
-// ---- files -----------------------------------------------------------------
-
-//      A rule file of the person's: regular, root's, written by root alone, at most 64 KiB, not a link (as the machine
-//      script was read). The image's are the image's. Answers its length, or -1.
-static bipolar rover_runner_read(string_address path, bool trusted_owner, p8 address_to into, positive room)
-{
-        file_facts facts;
-        bipolar handle, got, used = 0;
-
-        if (!file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts) || (facts.mode & MODE_FORMAT) != MODE_FILE)
-                return -1;
-        if (trusted_owner && (facts.owner != 0 || (facts.mode & 0022)))
-                return -1;
-        handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
-        if (handle < 0)
-                return -1;
-        while ((got = system_read_retry((positive)handle, into + used, room - (positive)used)) > 0)
-                used += got;
-        system_close(handle);
-        return got < 0 || (positive)used >= room ? -1 : used;
-}
-
-//      The names of a directory's *.rover files, sorted, into names; how many.
-static positive rover_runner_names(string_address directory, p8 names[ROVER_FILES_MOST][64])
-{
-        p8 buffer[4096];
-        positive count = 0;
-        bipolar handle = system_open_at(AT_FDCWD, directory, FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW), got;
-
-        if (handle < 0)
-                return 0;
-        while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
-                for (bipolar at = 0; at < got;)
-                {
-                        p16 length = memory_load_unaligned(p16, buffer + at + 16);
-                        string_address name = (string_address)(buffer + at + 19);
-                        positive size = string_length(name);
-
-                        at += length;
-                        if (size < 7 || size > 62 || count == ROVER_FILES_MOST || name[0] == '.' ||
-                            memory_compare(name + size - 6, ".rover", 6))
-                                continue;
-                        memory_copy(names[count], name, size + 1);
-                        count++;
-                }
-        system_close(handle);
-        //      Sorted, so a table is the same whatever order the directory lists its files in.
-        for (positive at = 1; at < count; at++)
-                for (positive k = at; k > 0 && string_compare(names[k - 1], names[k]) > 0; k--)
-                {
-                        p8 swap[64];
-
-                        memory_copy(swap, names[k], 64);
-                        memory_copy(names[k], names[k - 1], 64);
-                        memory_copy(names[k - 1], swap, 64);
-                }
-        return count;
-}
+// ---- the table -------------------------------------------------------------
 
 static fn rover_runner_say(string_address first, string_address second, string_address third)
 {
@@ -164,111 +121,95 @@ static fn rover_runner_say(string_address first, string_address second, string_a
         host_kmsg(line);
 }
 
+static const p8 address_to rover_runner_pool_word(p32 at, positive address_to length);
+static fn rover_runner_child(bipolar pid);
+static fn rover_runner_find_everys(void);
+static fn rover_runner_keys(void);
+
 /*
-        The files of one directory into the source, each checked alone first so
-        a file that is not the language is said by its name and line and left
-        out; the rest are one table. A person's file replaces the image's of
-        its name, and an empty one masks it.
+        The table rover_load_all holds, taken: its view, its runs, its clocks
+        and its chords. A service of the table before keeps its life when the
+        new one has a service of its name; one it does not have is stopped.
+        table is the kernel's number for the load, 0 when the kernel has none.
 */
-static fn rover_runner_take(string_address directory, bool person, p8 seen[ROVER_FILES_MOST][64], positive address_to seens,
-                            p8 masked[ROVER_FILES_MOST][64], positive address_to maskeds)
+static bool rover_runner_adopt(p32 table)
 {
-        p8 names[ROVER_FILES_MOST][64];
-        positive count = rover_runner_names(directory, names);
-        static p8 one[ROVER_SOURCE_MOST + 1];
-
-        for (positive at = 0; at < count; at++)
-        {
-                p8 path[160];
-                bipolar length;
-                bool skip = false;
-
-                for (positive k = 0; k < *seens; k++)
-                        skip = skip || string_equals(seen[k], names[at]);
-                for (positive k = 0; k < *maskeds; k++)
-                        skip = skip || string_equals(masked[k], names[at]);
-                if (skip || !string_join(path, sizeof(path), directory, "/", (string_address)names[at]))
-                        continue;
-                length = rover_runner_read(path, person, one, sizeof(one));
-                if (length < 0)
-                {
-                        rover_runner_say(path, " is not read: not a regular file of root's alone, or larger than 64 KiB", null);
-                        continue;
-                }
-                if (person)
-                        memory_copy(seen[(*seens)++], names[at], 64);
-                if (!length)
-                {
-                        memory_copy(masked[(*maskeds)++], names[at], 64);
-                        continue;
-                }
-                if (!rover_compile(&rover_runner.build, one, (positive)length))
-                {
-                        p8 number[24];
-
-                        number[positive_into_string(number, rover_runner.build.line)] = 0;
-                        rover_runner_say(path, (string_address) ": ", (string_address)rover_runner.build.why);
-                        rover_runner_say(path, " is left out; its line ", (string_address)number);
-                        continue;
-                }
-                if (rover_runner.source_used + (positive)length + 1 > sizeof(rover_runner.source))
-                {
-                        rover_runner_say(path, " is left out: the rules are more than 64 KiB", null);
-                        continue;
-                }
-                memory_copy(rover_runner.source + rover_runner.source_used, one, (positive)length);
-                rover_runner.source_used += (positive)length;
-                rover_runner.source[rover_runner.source_used++] = '\n';
-        }
-}
-
-//      Whether this boot is to load the image's rules alone: moonwater.safe=1, or two boots that never loaded a table.
-static bool rover_runner_safe(void)
-{
-        p8 line[4096];
-        bipolar length = rover_runner_read("/proc/cmdline", false, line, sizeof(line));
-        p8 boots[16];
-
-        if (length > 0)
-        {
-                line[length] = 0;
-                if (string_search(line, "moonwater.safe=1"))
-                        return true;
-        }
-        return host_read_word(ROVER_BOOTS_FILE, boots, sizeof(boots)) >= 0 && string_to_positive(boots) >= 2;
-}
-
-static bool rover_runner_load(void)
-{
-        p8 seen[ROVER_FILES_MOST][64], masked[ROVER_FILES_MOST][64];
-        positive seens = 0, maskeds = 0;
+        static struct rover_running before[ROVER_SERVICES_MOST];
+        static p8 names[ROVER_SERVICES_MOST][ROVER_WORD_MOST + 1];
+        static bool kept[ROVER_SERVICES_MOST];
+        positive had = rover_runner.view.head ? rover_runner.view.head->services : 0;
         struct rover_refusal refusal;
+        struct rover_table view;
 
-        rover_runner.safe = rover_runner_safe();
-        rover_runner.source_used = 0;
-        if (!rover_runner.safe)
-                rover_runner_take(ROVER_ROOT_RULES, true, seen, &seens, masked, &maskeds);
-        else
-                rover_runner_say("safe mode: the image's rules alone", null, null);
-        rover_runner_take(ROVER_IMAGE_RULES, false, seen, &seens, masked, &maskeds);
-        rover_runner.build.merge = true;
-        bool made = rover_compile(&rover_runner.build, rover_runner.source, rover_runner.source_used);
-        rover_runner.build.merge = false;
-        if (!made)
-        {
-                rover_runner_say("the rules together are refused: ", (string_address)rover_runner.build.why, null);
-                return false;
-        }
-        rover_runner.size = rover_runner.build.size;
-        memory_copy(rover_runner.table_words, rover_built(&rover_runner.build), rover_runner.size);
-        if (!rover_check((const p8 address_to)rover_runner.table_words, rover_runner.size, &rover_runner.view, &refusal))
+        if (rover_load_all.size > sizeof(rover_runner.table_words) ||
+            !rover_check(rover_built(&rover_load_all), rover_load_all.size, &view, &refusal))
         {
                 rover_runner_say("the table is refused: ", (string_address)refusal.why, null);
                 return false;
         }
+        for (positive at = 0; at < had; at++)
+        {
+                positive length;
+                const p8 address_to name = rover_runner_pool_word(rover_runner.view.service[at].name, &length);
+
+                memory_copy(names[at], name, length);
+                names[at][length] = 0;
+                before[at] = rover_runner.service[at];
+                kept[at] = false;
+        }
+        rover_runner.size = rover_load_all.size;
+        memory_copy(rover_runner.table_words, rover_built(&rover_load_all), rover_runner.size);
+        (void)rover_check((const p8 address_to)rover_runner.table_words, rover_runner.size, &rover_runner.view, &refusal);
         memory_zero(rover_runner.runs, sizeof(rover_runner.runs));
-        (void)host_write_text(ROVER_BOOTS_FILE, "0\n");
+        for (positive at = 0; at < rover_runner.view.head->services; at++)
+        {
+                positive length;
+                const p8 address_to name = rover_runner_pool_word(rover_runner.view.service[at].name, &length);
+
+                memory_zero(&rover_runner.service[at], sizeof(rover_runner.service[at]));
+                rover_runner.service[at].pidfd = -1;
+                for (positive k = 0; k < had; k++)
+                        if (!kept[k] && rover_bytes_are(name, length, (const char address_to)names[k]))
+                        {
+                                rover_runner.service[at] = before[k];
+                                kept[k] = true;
+                        }
+        }
+        for (positive k = 0; k < had; k++)
+                if (!kept[k] && before[k].pid > 0)
+                {
+                        (void)system_call_2(syscall(kill), (positive)before[k].pid, 15);
+                        if (before[k].pidfd >= 0)
+                                system_close(before[k].pidfd);
+                        rover_runner_child(before[k].pid);
+                }
+        rover_runner.table = table;
+        rover_runner.stood = clock_monotonic_nanoseconds() + ROVER_STOOD_NS;
+        rover_runner_keys();
+        rover_runner_find_everys();
         return true;
+}
+
+/*
+        The rules at the start: compiled, handed to the kernel, taken. A set
+        that does not compile at all is tried again as the image's alone; a
+        table the kernel refuses is still the runner's, with no kernel rule
+        run (the kernel says why).
+*/
+static bool rover_runner_load(void)
+{
+        bipolar table = rover_load_now(rover_runner.device, true);
+
+        if (table == -22)
+        {
+                rover_load_forced_safe = true;
+                table = rover_load_now(rover_runner.device, true);
+        }
+        if (table == -22)
+                return false;
+        if (table < 0)
+                rover_runner_say("the kernel took no table: its rules are not run", null, null);
+        return rover_runner_adopt(table > 0 ? (p32)table : 0);
 }
 
 // ---- the pages -------------------------------------------------------------
@@ -303,8 +244,8 @@ static bool rover_runner_set_word(string_address name, const p8 address_to word,
         struct rover_word typed = {word, (p32)length, 0, {0}};
         b64 number = 0;
 
-        rover_runner.build.why_used = 0;
-        if (!state || !rover_literal(&rover_runner.build, &typed, state->type, &number))
+        rover_load_one.why_used = 0;
+        if (!state || !rover_literal(&rover_load_one, &typed, state->type, &number))
                 return false;
         rover_runner_put(state, number, word, length);
         return true;
@@ -355,65 +296,87 @@ static p64 rover_runner_settings(string_address changed)
         return bits;
 }
 
-//      The kernel's states the runner can read until the kernel keeps its own page.
-static fn rover_runner_kernel_states(void)
+//      boot.NAME from moonwater.NAME=VALUE on the kernel's command line, one word each, into the runner's kernel page:
+//      the kernel keeps them nowhere, so the copy of its page keeps them over it.
+static fn rover_runner_boot_states(void)
 {
-        struct canvas_control control;
         p8 line[4096];
-        bipolar length = rover_runner_read("/proc/cmdline", false, line, sizeof(line) - 1);
-        b32 east = (b32)clock_local_east(rover_runner_realtime());
+        bipolar handle = system_open_at(AT_FDCWD, "/proc/cmdline", FILE_READ | O_CLOEXEC);
+        bipolar length = handle < 0 ? 0 : system_read_retry((positive)handle, line, sizeof(line) - 1);
 
-        memory_copy(rover_runner_page(ROVER_PAGE_KERNEL) + ROVER_PAGE_ZONE, &east, 4);
-        memory_zero(&control, sizeof(control));
-        if (host_canvas_request(SPARK_CANVAS_STATUS, address_of control) >= 0)
-                rover_runner_set_word("canvas", control.running ? (const p8 address_to) "on" : (const p8 address_to) "off",
-                                      control.running ? 2 : 3);
-        //      boot.NAME from moonwater.NAME=VALUE, one word each.
-        if (length > 0)
+        if (handle >= 0)
+                system_close(handle);
+        line[length > 0 ? length : 0] = 0;
+        rover_runner.boots = 0;
+        for (positive at = 0; at < ROVER_STATES; at++)
         {
-                line[length] = 0;
-                for (positive at = 0; at < ROVER_STATES; at++)
-                {
-                        const char address_to name = rover_states[at].name;
-                        p8 key[64];
+                const char address_to name = rover_states[at].name;
+                p8 key[64];
+                string_address found;
+                positive size = 0;
 
-                        if (memory_compare(name, "boot.", 5) ||
-                            !string_join(key, sizeof(key), "moonwater.", (string_address)(name + 5), "="))
-                                continue;
-                        string_address found = string_search(line, key);
-                        if (!found)
-                                continue;
-                        found += string_length(key);
-                        positive size = 0;
-                        while (found[size] && found[size] != ' ' && found[size] != '\n')
-                                size++;
-                        rover_runner_put(&rover_states[at], 0, found, size);
-                }
+                if (memory_compare(name, "boot.", 5) || rover_states[at].page != ROVER_PAGE_KERNEL ||
+                    rover_runner.boots == array_count(rover_runner.boot))
+                        continue;
+                rover_runner.boot[rover_runner.boots++] = (p16)at;
+                if (!string_join(key, sizeof(key), "moonwater.", (string_address)(name + 5), "=") ||
+                    !(found = string_search(line, key)))
+                        continue;
+                found += string_length(key);
+                while (found[size] && found[size] != ' ' && found[size] != '\n')
+                        size++;
+                rover_runner_put(&rover_states[at], 0, found, size);
         }
 }
 
-//      What a kernel event says of the kernel's states, so a rule after it reads the machine as it is now.
-static p64 rover_runner_kernel_event(p16 id)
+/*
+        The kernel's state page, copied whole when its sequence is even and
+        the same after (the kernel writes it under its lock, odd while it
+        does), with the boot words and the zone kept over it. Answers the
+        states that changed since the last copy, as the reads mask has them.
+*/
+static p64 rover_runner_kernel_page(void)
 {
-        static const struct { p16 id; const char address_to state; const char address_to word; } says[] = {
-            {SPARK_BIND_LID_CLOSE, "lid", "closed"},   {SPARK_BIND_LID_OPEN, "lid", "open"},
-            {SPARK_BIND_DOCK_ON, "dock", "on"},        {SPARK_BIND_DOCK_OFF, "dock", "off"},
-            {SPARK_BIND_TABLET_ON, "tablet", "on"},    {SPARK_BIND_TABLET_OFF, "tablet", "off"},
-            {SPARK_BIND_HEADPHONE_ON, "headphone", "on"}, {SPARK_BIND_HEADPHONE_OFF, "headphone", "off"},
-            {SPARK_BIND_CANVAS_ON, "canvas", "on"},    {SPARK_BIND_CANVAS_OFF, "canvas", "off"},
-        };
+        static p64 fresh_words[ROVER_PAGE_BYTES / 8];
+        p8 address_to fresh = (p8 address_to)fresh_words, address_to mine = rover_runner_page(ROVER_PAGE_KERNEL);
+        const volatile p32 address_to sequence;
+        p64 changed = 0;
+        b32 east;
 
-        for (positive at = 0; at < array_count(says); at++)
-                if (says[at].id == id)
-                {
-                        const struct rover_state_row address_to state =
-                            rover_state_named((const p8 address_to)says[at].state, string_length((string_address)says[at].state));
+        if (!rover_runner.map)
+                return 0;
+        sequence = (const volatile p32 address_to)(rover_runner.map + 4);
+        for (positive tries = 0; tries < 16; tries++)
+        {
+                p32 before = *sequence;
 
-                        rover_runner_set_word((string_address)says[at].state, (const p8 address_to)says[at].word,
-                                              string_length((string_address)says[at].word));
-                        return state ? ROVER_READS_BIT((positive)(state - rover_states)) : 0;
-                }
-        return 0;
+                if (before & 1)
+                        continue;
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                memory_copy(fresh, (const void address_to)rover_runner.map, ROVER_PAGE_BYTES);
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                if (*sequence == before)
+                        break;
+        }
+        for (positive at = 0; at < rover_runner.boots; at++)
+        {
+                const struct rover_state_row address_to state = &rover_states[rover_runner.boot[at]];
+
+                memory_copy(fresh + state->offset, mine + state->offset, ROVER_WORD_SLOT);
+        }
+        east = (b32)clock_local_east(rover_runner_realtime());
+        memory_copy(fresh + ROVER_PAGE_ZONE, &east, 4);
+        for (positive at = 0; at < ROVER_STATES; at++)
+        {
+                const struct rover_state_row address_to state = &rover_states[at];
+
+                if (state->page == ROVER_PAGE_KERNEL &&
+                    memory_compare(fresh + state->offset, mine + state->offset,
+                                   rover_kind_is_word(rover_types[state->type].kind) ? ROVER_WORD_SLOT : 4))
+                        changed |= ROVER_READS_BIT(at);
+        }
+        memory_copy(mine, fresh, ROVER_PAGE_BYTES);
+        return changed;
 }
 
 // ---- children --------------------------------------------------------------
@@ -705,75 +668,74 @@ static fn rover_runner_program(string_address first, const struct rover_value ad
                 rover_runner_child(pid);
 }
 
+//      A primitive that is not the kernel's (those are asked of it, rover_runner_do).
 static fn rover_runner_primitive(p16 id, const struct rover_value address_to values, positive count)
 {
-        p8 path[160], word[32];
+        p8 path[160];
         string_address words[6] = {(string_address) "moonwater"};
 
         switch (id)
         {
-        case 1: // poweroff
-        case 2: // reboot
-                host_machine_end_run();
-                shell_stop(log, id == 1 ? REBOOT_POWER_OFF : REBOOT_RESTART);
+        case 12: // display off: the compositor puts every screen out (DPMS) while the file is there, and a person lights them
+                (void)host_write_file("/run/moonwater/display-off", (const p8 address_to) "", 0, 0644, false);
                 return;
-        case 3: // suspend
-                words[1] = "sleep";
-                rover_runner_verb(tune_sleep_verb, words, 2);
+        case 13: // display on
+                (void)system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)(string_address) "/run/moonwater/display-off", 0);
                 return;
-        case 4: // backlight PERCENT
-                words[1] = "brightness";
-                words[2] = rover_runner_word(&values[0], ROVER_TYPE_PERCENT, word);
-                rover_runner_verb(tune_brightness, words, 3);
-                return;
-        case 5: // latency DURATION: the processor's wake latency held, in microseconds, while the descriptor is open
+        case 15: // notify TEXT: a notice on the board, under rules, as a program's notification is; and said in the log
         {
-                p32 microseconds = (p32)(values[0].number / 1000);
+                struct windows *table = windows_board_map();
+                static p32 notices;
 
-                if (rover_runner.latency < 0)
-                        rover_runner.latency = system_open_at(AT_FDCWD, "/dev/cpu_dma_latency", FILE_WRITE | O_CLOEXEC);
-                if (rover_runner.latency >= 0)
-                        system_write_all((positive)rover_runner.latency, &microseconds, 4);
+                if (!table || !windows_issue_set(table, "rules", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_NOTIFICATION, ++notices, 1,
+                                                 (const char address_to)values[0].text))
+                        rover_runner_say("a notice the board did not take: ", (string_address)values[0].text, null);
+                else
+                        rover_runner_say("notice: ", (string_address)values[0].text, null);
                 return;
         }
-        case 6: // latency off
-                if (rover_runner.latency >= 0)
-                        system_close(rover_runner.latency);
-                rover_runner.latency = -1;
-                return;
-        case 7: // radio off WHICH
-                words[2] = "off";
-                if (values[0].number != 1)
-                {
-                        words[1] = "wifi";
-                        rover_runner_verb(host_wifi, words, 3);
-                }
-                if (values[0].number != 0)
-                {
-                        words[1] = "bluetooth";
-                        rover_runner_verb(host_bluetooth, words, 3);
-                }
-                return;
-        case 9: // usb lock
-                words[1] = "device";
-                words[2] = "lock";
-                rover_runner_verb(host_device, words, 3);
-                return;
-        case 11: // log TEXT
-        case 15: // notify TEXT: the notices board takes no text yet, so it is said where the log is read
-                rover_runner_say(id == 11 ? (string_address) "" : (string_address) "notice: ", (string_address)values[0].text, null);
-                return;
-        case 12: // display off
-        case 13: // display on
-                rover_runner_say("display off and on have no mechanism yet: nothing is done", null, null);
-                return;
         case 14: // open APP WORDS: a kit program by its name, or a program by its path, asked for by a person
+        {
+                file_facts facts;
+
                 if (values[0].length && values[0].text[0] == '/')
                         string_copy_max(path, (string_address)values[0].text, sizeof(path));
                 else if (!string_join(path, sizeof(path), "/", (string_address)values[0].text))
                         return;
+                //      A window wants the desktop: before the compositor's table is there the open is held, and done
+                //      when it is (rover_runner_held).
+                if (!file_look(AT_FDCWD, ROVER_DESKTOP_UP, 0, address_of facts))
+                {
+                        if (rover_runner.helds == ROVER_HELD_MOST)
+                        {
+                                rover_runner_say("an open is dropped: eight are held for the desktop already", null, null);
+                                return;
+                        }
+                        struct rover_held address_to held = &rover_runner.held[rover_runner.helds++];
+
+                        string_copy_max(held->word[0], (string_address)path, sizeof(held->word[0]));
+                        held->count = 1;
+                        for (positive at = 1; at < count && held->count < array_count(held->word); at++)
+                                string_copy_max(held->word[held->count++], (string_address)values[at].text, sizeof(held->word[0]));
+                        return;
+                }
+                //      The pinned program the last pin pressed names, opened with no words of the rule's: its own words.
+                if (count == 1 && rover_runner.pins > 1 && string_equals((string_address)values[0].text, rover_runner.pin[0]))
+                {
+                        string_address argv[ROVER_ARGUMENTS + 6];
+
+                        for (positive at = 0; at < rover_runner.pins; at++)
+                                argv[at] = rover_runner.pin[at];
+                        argv[rover_runner.pins] = null;
+                        rover_runner.pins = 0;
+                        bipolar pid = rover_runner_exec(argv, null, "MOONWATER_ASKED=1");
+                        if (pid > 0)
+                                rover_runner_child(pid);
+                        return;
+                }
                 rover_runner_program(path, values, count, 1, "MOONWATER_ASKED=1");
                 return;
+        }
         case 16: // start SERVICE
         case 17: // stop SERVICE
         case 18: // restart SERVICE
@@ -822,7 +784,8 @@ static fn rover_runner_set(p16 id, const struct rover_value address_to value)
         }
 }
 
-static fn rover_runner_do(const struct rover_event address_to event, const struct rover_hit address_to hit)
+//      A hit's actions. kernel_did: the hit is a kernel rule's, whose kernel primitives the kernel has done.
+static fn rover_runner_do(const struct rover_event address_to event, const struct rover_hit address_to hit, bool kernel_did)
 {
         for (positive at = 0; at < hit->count; at++)
         {
@@ -835,7 +798,23 @@ static fn rover_runner_do(const struct rover_event address_to event, const struc
                 switch (action->kind)
                 {
                 case ROVER_DO:
-                        rover_runner_primitive(action->id, values, count);
+                        if (action->runs != ROVER_KERNEL)
+                                rover_runner_primitive(action->id, values, count);
+                        else if (!kernel_did)
+                        {
+                                //      A kernel primitive: asked of the kernel, which queues it as a kernel rule's.
+                                struct rover_control request;
+
+                                memory_zero(&request, sizeof(request));
+                                request.op = ROVER_OP_DO;
+                                request.primitive = action->id;
+                                request.number = count ? values[0].number : 0;
+                                if (count && values[0].text)
+                                        memory_copy(request.text, values[0].text,
+                                                    values[0].length < ROVER_TEXT_ROOM - 1 ? values[0].length : ROVER_TEXT_ROOM - 1);
+                                if (rover_load_ask(rover_runner.device, &request) < 0)
+                                        rover_runner_say("the kernel refused a primitive asked of it", null, null);
+                        }
                         break;
                 case ROVER_SET:
                         rover_runner_set(action->id, &values[0]);
@@ -883,18 +862,21 @@ static fn rover_runner_do(const struct rover_event address_to event, const struc
         }
 }
 
-//      An event, asked of every rule of it wherever it is placed (the kernel's and the desktop's ask none yet), and then
-//      the when rules of what it changed.
+//      An event, asked of the runner's rules and the desktop's (the compositor asks none itself yet), and then the when
+//      rules of what it changed; the kernel's rules too when the kernel has no table.
 static fn rover_runner_fire(const struct rover_event address_to event, p64 changed)
 {
         struct rover_hit hits[16];
 
         for (p8 place = 0; place < ROVER_PLACES; place++)
         {
-                positive made = rover_fire(&rover_runner.view, rover_runner.runs, rover_runner.pages, event, place, hits, 16);
+                positive made;
 
+                if (place == ROVER_KERNEL && rover_runner.table)
+                        continue;
+                made = rover_fire(&rover_runner.view, rover_runner.runs, rover_runner.pages, event, place, hits, 16);
                 for (positive at = 0; at < made; at++)
-                        rover_runner_do(event, &hits[at]);
+                        rover_runner_do(event, &hits[at], false);
                 if (changed)
                 {
                         struct rover_event edge = *event;
@@ -904,7 +886,7 @@ static fn rover_runner_fire(const struct rover_event address_to event, p64 chang
                         made = rover_edges(&rover_runner.view, rover_runner.runs, rover_runner.pages, changed, &edge, place,
                                            hits, 16);
                         for (positive at = 0; at < made; at++)
-                                rover_runner_do(&edge, &hits[at]);
+                                rover_runner_do(&edge, &hits[at], false);
                 }
         }
 }
@@ -987,20 +969,36 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                 }
         if (length > 10 && !memory_compare(line, "pin_start_", 10))
         {
-                p8 slot_text[8], path[48], program[ROVER_WORD_MOST + 1];
+                p8 slot_text[8], path[48];
                 positive slot_length = length - 10 < 7 ? length - 10 : 7;
+                bipolar got;
 
                 memory_copy(slot_text, line + 10, slot_length);
                 slot_text[slot_length] = 0;
-                if (!string_join(path, sizeof(path), "/run/moonwater/pin.", (string_address)slot_text) ||
-                    host_read_word(path, program, sizeof(program)) < 0)
+                if (!string_join(path, sizeof(path), "/run/moonwater/pin.", (string_address)slot_text))
                         return;
-                //      The pin's words are a line each; the program is the first.
-                string_address newline = string_first_of(program, '\n');
-                if (newline)
-                        newline[0] = 0;
+                //      The pin's words, a line each, made new by the compositor: the program is the first, and the open
+                //      of it is given the rest (rover_runner_pinned).
+                bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+                got = handle < 0 ? -1 : system_read_retry((positive)handle, rover_runner.pin_text, sizeof(rover_runner.pin_text) - 1);
+                if (handle >= 0)
+                        system_close(handle);
                 (void)system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
-                rover_runner_post(71, program, string_length(program), 5);
+                if (got <= 0)
+                        return;
+                rover_runner.pin_text[got] = 0;
+                rover_runner.pins = 0;
+                for (p8 address_to word = rover_runner.pin_text; *word && rover_runner.pins < ROVER_ARGUMENTS + 4;)
+                {
+                        string_address newline = string_first_of(word, '\n');
+
+                        rover_runner.pin[rover_runner.pins++] = (string_address)word;
+                        if (!newline)
+                                break;
+                        newline[0] = 0;
+                        word = (p8 address_to)newline + 1;
+                }
+                rover_runner_post(71, rover_runner.pin_text, string_length(rover_runner.pin[0]), 5);
                 struct rover_event address_to event = &rover_runner.queue[rover_runner.queued - 1];
                 //      button's fields: name pin, the slot, the program.
                 event->count = 3;
@@ -1061,33 +1059,105 @@ static fn rover_runner_kernel_thread(address_any unused)
 }
 
 /*
-        What the kernel is to queue to the runner: a script of one empty
-        function a kernel event its rules hear, which is how the kernel's
-        scanner says an event is owned until the kernel has its own ring.
-        Events no rule hears keep their image lines: the power key powers off.
+        The kernel's ring, from the last record read: a kernel rule's hit has
+        its actions that are not the kernel's done here, and an event a
+        runner's rule waits for is asked of the runner's rules. A record of
+        another load than the runner's is a table loaded by hand (moonwater
+        rover load): the same files are compiled again here and taken, to
+        read it by. A ring that went past the reader is said, and read on
+        from what is still there.
 */
-static fn rover_runner_own(void)
+static fn rover_runner_ring(void)
 {
-        static p8 text[4096];
-        struct rover_text out = {text, 0, sizeof(text), false};
+        const volatile struct rover_ring address_to ring;
+        p64 head;
+        bool asked = false;
 
-        for (positive id = 1; id <= SPARK_BIND_EVENTS; id++)
+        if (!rover_runner.map)
+                return;
+        ring = (const volatile struct rover_ring address_to)(rover_runner.map + ROVER_MAP_RING);
+        head = ring->head;
+        if (head - rover_runner.tail > ROVER_RING_SLOTS)
         {
-                if (!(rover_runner.view.index[id].count & ROVER_SPAN_COUNT))
-                        continue;
-                rover_puts(&out, "function moonwater_");
-                for (const char address_to name = spark_bind_event_name[id - 1]; *name; name++)
-                        rover_put(&out, (const p8 address_to)(*name == ' ' ? "_" : name), 1);
-                rover_puts(&out, " {\n  :\n}\n");
+                rover_runner_say("the kernel's ring went past the runner: records are lost", null, null);
+                rover_runner.tail = head - ROVER_RING_SLOTS;
         }
-        memory_zero(address_of host_machine, sizeof(host_machine));
-        host_machine.length = out.used;
-        host_machine.address = (unsigned long)text;
-        if (host_machine_script(MOONWATER_SCRIPT_SET) < 0)
-                rover_runner_say("the kernel took no word of which events are the rules'", null, null);
+        for (; rover_runner.tail < head; rover_runner.tail++)
+        {
+                struct rover_record record;
+                struct rover_event event;
+
+                if (!rover_record_take(rover_runner.map, rover_runner.tail, &record))
+                        continue;
+                if (record.table != rover_runner.table && !asked)
+                {
+                        struct rover_control request;
+
+                        asked = true;
+                        memory_zero(&request, sizeof(request));
+                        request.op = ROVER_OP_STATUS;
+                        if (rover_load_ask(rover_runner.device, &request) >= 0 && request.table &&
+                            request.table != rover_runner.table && rover_load_compile(false) >= 0)
+                                (void)rover_runner_adopt(request.table);
+                }
+                if (record.table != rover_runner.table)
+                        continue;
+                rover_record_event(&record, &event);
+                if (record.kind == ROVER_RECORD_HIT && (record.flags & ROVER_RECORD_USER) &&
+                    record.rule < rover_runner.view.head->rules)
+                {
+                        struct rover_hit hit = {record.rule, record.action, record.count,
+                                                (p8)!!(record.flags & ROVER_RECORD_ELSE), 0};
+
+                        rover_runner_do(&event, &hit, true);
+                }
+                else if (record.kind == ROVER_RECORD_EVENT)
+                        rover_runner_fire(&event, 0);
+                rover_runner_drain();
+        }
 }
 
 // ---- the loop --------------------------------------------------------------
+
+/*
+        The kernel's script made one that owns no event, so every event the
+        rules do not take runs its image line (the kernel's floor: the power
+        key powers off), where the builtin script would have the kernel hand
+        it to this process. An empty one is the builtin again, so it is a
+        comment.
+*/
+static fn rover_runner_disown(void)
+{
+        static const p8 text[] = "# The rules are the runner's: no event is this script's.\n";
+
+        memory_zero(address_of host_machine, sizeof(host_machine));
+        host_machine.length = sizeof(text) - 1;
+        host_machine.address = (unsigned long)text;
+        if (host_machine_script(MOONWATER_SCRIPT_SET) < 0)
+                rover_runner_say("the kernel kept its script: the events it owns come to the runner", null, null);
+}
+
+//      The opens held for the desktop, done once its table is there.
+static fn rover_runner_held(void)
+{
+        file_facts facts;
+
+        if (!rover_runner.helds || !file_look(AT_FDCWD, ROVER_DESKTOP_UP, 0, address_of facts))
+                return;
+        for (positive at = 0; at < rover_runner.helds; at++)
+        {
+                string_address argv[ROVER_ARGUMENTS + 2];
+                positive used = 0;
+
+                for (; used < rover_runner.held[at].count; used++)
+                        argv[used] = (string_address)rover_runner.held[at].word[used];
+                argv[used] = null;
+                bipolar pid = rover_runner_exec(argv, null, "MOONWATER_ASKED=1");
+                if (pid > 0)
+                        rover_runner_child(pid);
+        }
+        rover_runner.helds = 0;
+}
 
 static fn rover_runner_clocks(p64 now)
 {
@@ -1213,27 +1283,21 @@ static b32 rover_runner_run(bipolar device)
         p64 last_keep = 0;
 
         rover_runner.device = device;
-        rover_runner.latency = -1;
         for (positive at = 0; at < ROVER_PAGES; at++)
                 rover_runner.pages[at] = rover_runner_page((p8)at);
-        //      A boot that begins is counted until it loads a table (rover_runner_load puts it back to 0).
-        {
-                p8 boots[16], count[24];
-                positive now = host_read_word(ROVER_BOOTS_FILE, boots, sizeof(boots)) >= 0 ? string_to_positive(boots) : 0;
-
-                count[positive_into_string(count, now + 1)] = '\n';
-                (void)host_write_file(ROVER_BOOTS_FILE, count, string_length_max(count, 23) + 1, 0600, false);
-        }
+        //      The kernel's page and ring, mapped before the load, so no record of the table is missed.
+        rover_runner.map = rover_load_map(device, ROVER_MAP_BYTES);
+        if (!rover_runner.map)
+                rover_runner_say("the kernel's page and ring cannot be mapped: no kernel event is heard", null, null);
+        else
+                rover_runner.tail = ((const volatile struct rover_ring address_to)(rover_runner.map + ROVER_MAP_RING))->head;
+        rover_runner_boot_states();
+        (void)rover_runner_kernel_page();
+        (void)rover_runner_settings(null);
         if (!rover_runner_load())
                 return HOST_MACHINE_FAILED;
         (void)host_write_text(HOST_MACHINE_SOURCED, "1\n");
-        rover_runner_own();
-        rover_runner_kernel_states();
-        (void)rover_runner_settings(null);
-        rover_runner_keys();
-        rover_runner_find_everys();
-        for (positive at = 0; at < ROVER_SERVICES_MOST; at++)
-                rover_runner.service[at].pidfd = -1;
+        rover_runner_disown();
 
         rover_runner.watch = system_call_2(syscall(inotify_init1), O_CLOEXEC | O_NONBLOCK, 0);
         if (rover_runner.watch >= 0)
@@ -1276,6 +1340,7 @@ static b32 rover_runner_run(bipolar device)
                 }
                 rover_runner_verdict();
                 rover_runner_services();
+                rover_runner_held();
                 rover_runner_clocks(now);
                 rover_runner_drain();
                 rover_runner_reap();
@@ -1299,22 +1364,41 @@ static b32 rover_runner_run(bipolar device)
                 {
                         p32 event;
 
-                        if (system_read_once(rover_runner.kernel_pipe[0], &event, 4) == 4)
+                        //      The machine's wait: 0 when the machine is stopping, MOONWATER_ROVER when the ring has records.
+                        if (system_read_once(rover_runner.kernel_pipe[0], &event, 4) == 4 && (event == ~0u || !event))
+                                break;
+                        //      A stop the kernel handed here all the same (a script it holds that owns one): done.
+                        if (event <= SPARK_BIND_EVENTS && spark_bind_is_stop(event))
                         {
-                                if (event == ~0u || !event)
-                                        break; // the wait refused, or the machine is stopping
-                                if (event <= SPARK_BIND_EVENTS)
-                                {
-                                        p64 changed = rover_runner_kernel_event((p16)event);
-                                        struct rover_event kernel;
-
-                                        memory_zero(&kernel, sizeof(kernel));
-                                        kernel.id = (p16)event;
-                                        kernel.when = clock_monotonic_nanoseconds();
-                                        kernel.realtime = rover_runner_realtime();
-                                        rover_runner_fire(&kernel, changed);
-                                }
+                                for (positive at = 0; at < rover_runner.view.head->services; at++)
+                                        rover_runner_stop(at);
+                                host_machine_end_run();
+                                host_machine_close(device);
+                                shell_stop(log, event == SPARK_BIND_POWEROFF ? REBOOT_POWER_OFF : REBOOT_RESTART);
+                                return HOST_MACHINE_STOPPED;
                         }
+                }
+                //      Every turn, whatever woke it: the kernel's page looked at (a runner's when rule over a kernel state
+                //      hears its change here) and the ring read to its head.
+                {
+                        p64 changed = rover_runner_kernel_page();
+
+                        rover_runner_ring();
+                        if (changed)
+                        {
+                                struct rover_event edge;
+
+                                memory_zero(&edge, sizeof(edge));
+                                edge.when = clock_monotonic_nanoseconds();
+                                edge.realtime = rover_runner_realtime();
+                                rover_runner_fire(&edge, changed);
+                        }
+                }
+                //      A load that stood a minute: the count of loads that did not is 0 again.
+                if (rover_runner.stood && now >= rover_runner.stood)
+                {
+                        rover_runner.stood = 0;
+                        rover_load_boots_put(0);
                 }
                 if (wait[1].returned & SYSTEM_POLL_READ)
                         rover_runner_fire_lines();

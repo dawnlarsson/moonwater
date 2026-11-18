@@ -1062,39 +1062,26 @@ static fn rover_check_evaluator(void)
         root, which is where .incbin finds them) and ended by a NUL. test/rover_schema.py --check refuses a file there
         this list does not name, so a new example is compiled the day it is added.
 */
-#define ROVER_EXAMPLE(name)                                                                                    \
-        __asm__(".pushsection .rodata\n.globl rover_example_" #name "\nrover_example_" #name                   \
-                ":\n.incbin \"src/rover/examples/" #name ".rover\"\n.byte 0\n.popsection\n");                   \
-        extern const char rover_example_##name[];
-
-ROVER_EXAMPLE(desktop)
-ROVER_EXAMPLE(session)
-ROVER_EXAMPLE(buttons)
-ROVER_EXAMPLE(chords)
-ROVER_EXAMPLE(power)
 
 static fn rover_check_examples(void)
 {
-        static const char address_to const examples[] = {rover_example_desktop, rover_example_session,
-                                                         rover_example_buttons, rover_example_chords,
-                                                         rover_example_power};
         bool all = true, canonical = true;
 
-        for (positive at = 0; at < array_count(examples); at++)
+        for (positive at = 0; at < array_count(rover_image); at++)
         {
-                if (!rover_compiled(examples[at]))
+                if (!rover_compiled(rover_image[at].text))
                 {
                         all = false;
                         continue;
                 }
-                if (!rover_same(rover_printed_of(), examples[at]))
+                if (!rover_same(rover_printed_of(), rover_image[at].text))
                         canonical = false;
         }
         check("every example compiles and passes the load-time check", all);
         check("every example is canonical: it prints back as itself", canonical);
 
         //      What they say, asked of them: the desktop's services and the rules on their events.
-        if (rover_compiled(rover_example_desktop))
+        if (rover_compiled(rover_image_desktop))
         {
                 check("the desktop example's four services, the compositor needing the bus",
                       rover_view.head->services == 4 && rover_view.service[3].need[0] == 1);
@@ -1108,7 +1095,7 @@ static fn rover_check_examples(void)
                 check("and is with it on", rover_service_wanted(&rover_view, 2, rover_pages));
                 memory_zero(rover_page_store, sizeof(rover_page_store));
         }
-        if (rover_compiled(rover_example_buttons))
+        if (rover_compiled(rover_image_buttons))
         {
                 struct rover_event press = rover_event_of("button", null);
 

@@ -2758,6 +2758,34 @@ static bool rover_assign(struct rover_build address_to build, p8 address_to addr
         return true;
 }
 
+// ---- the image's rules -----------------------------------------------------
+
+/*
+        The image's rule files, src/rover/examples, carried in the program
+        itself, so the image's table needs no file: safe mode loads these
+        alone, and /lib/moonwater/rules holds the same files to read and copy.
+        By name, the order a table is made in.
+*/
+#define ROVER_IMAGE(name)                                                                                      \
+        __asm__(".pushsection .rodata\n.globl rover_image_" #name "\nrover_image_" #name                       \
+                ":\n.incbin \"src/rover/examples/" #name ".rover\"\n.byte 0\n.popsection\n");                  \
+        extern const char rover_image_##name[];
+
+ROVER_IMAGE(buttons)
+ROVER_IMAGE(chords)
+ROVER_IMAGE(desktop)
+ROVER_IMAGE(power)
+ROVER_IMAGE(session)
+
+static const struct
+{
+        const char address_to name;
+        const char address_to text;
+} rover_image[] = {
+    {"buttons.rover", rover_image_buttons}, {"chords.rover", rover_image_chords}, {"desktop.rover", rover_image_desktop},
+    {"power.rover", rover_image_power},     {"session.rover", rover_image_session},
+};
+
 // ---- the verb --------------------------------------------------------------
 
 #ifdef MOONWATER_CLI_ROVER
