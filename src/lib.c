@@ -20844,6 +20844,8 @@ ASM_FUNC(positive_to_string)
     "1:  movzwl (%rdi,%rcx), %eax\n   mov %ax, (%r8,%rcx)\n   add $2, %rcx\n   cmp %rsi, %rcx\n   jb 1b\n   mov %rsi, %rax\n   mov %r8, %rdi\n   mov 8(%rsp), %r11\n"
     "test $2, %r11d\n   jz 3f\n   movb $0, (%rdi,%rax)\n"
     "3:\n   and $1, %r11d\n   add %r11, %rax\n   add $56, %rsp\n" ASM_RET
+#ifndef KERNEL_MODE
+    //       Only positive_into_string_9_12 comes here, and the kernel has none.
     "" ASM_LABEL(positive_into_twelve) ":\n"
     "push %r12\n   push %r13\n   movabs $0xABCC77118461CEFD, %rdx\n   mov %rsi, %rax\n   mul %rdx\n   shr $26, %rdx\n   mov %rdx, %r9\n"
     "imul $100000000, %rdx, %rax\n   mov %rsi, %rcx\n   sub %rax, %rcx\n"
@@ -20860,6 +20862,7 @@ ASM_FUNC(positive_to_string)
     "" ASM_LABEL(positive_into_twelve_lo) ":\n   movzwl (%r8,%rdx,2), %eax\n   mov %ax, (%rsi)\n   movzwl (%r8,%r10,2), %eax\n   mov %ax, 2(%rsi)\n"
     "movzwl (%r8,%r12,2), %eax\n   mov %ax, 4(%rsi)\n   movzwl (%r8,%r13,2), %eax\n   mov %ax, 6(%rsi)\n   lea 8(%rsi), %rax\n   sub %rdi, %rax\n"
     "pop %r13\n   pop %r12\n   jmp " ASM_LABEL(positive_into_done) "\n"
+#endif
     "" ASM_LABEL(positive_into_done) ":\n   test $2, %r11d\n   jz 4f\n   movb $0, (%rdi,%rax)\n"
     "4:  and $1, %r11d\n   add %r11, %rax\n" ASM_RET
     ASM_LOCAL_END(positive_into_core)
