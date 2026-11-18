@@ -93,8 +93,8 @@ _Static_assert(sizeof(struct latency_stats) == 112, "spark latency ABI");
         Off gives the display back: the input handler and the thread stop,
         the DRM clients are released, every console gets its keyboard back,
         and the kernel's framebuffer console takes each screen. On takes the
-        cards again and fires canvas on, and the machine script starts the
-        compositor on that event. It refuses while another program is master
+        cards again and fires canvas on, and the runner (src/rover/runner.c,
+        the machine process) starts the compositor on that event. It refuses while another program is master
         of a card, and names that program.
 
         The state below comes back whatever the request answers. Reading it
@@ -467,7 +467,7 @@ void canvas_rect_fill(u32 *at, unsigned long pitch, unsigned long width,
                       unsigned long height, u32 colour);
 
 /*
-        moonwater.desktop is the machine script's switch: it reads the word
+        moonwater.desktop is the runner's switch: it reads the word
         from /proc/cmdline and decides what to start (the compositor, a
         profile's session, or nothing). This is only here so that the kernel
         knows the word and does not warn about a parameter it has never heard
@@ -2693,9 +2693,9 @@ static COLD void canvas_probe(struct work_struct *work)
         the thread go, which gives every console its keyboard back; each
         card's client is released; and the kernel's own framebuffer console
         is set up on each card, which drm_client_lib.active= kept from ever
-        having one. The machine script ends the compositor on the event. On
+        having one. The runner ends the compositor on the event. On
         claims the cards again the way the boot does and fires canvas on, and
-        the machine script starts the compositor again.
+        the runner starts the compositor again.
 
         Lock order: canvas_control_lock, then a card's clientlist_mutex, then
         canvas_list_lock, then desktop.lock, then a card's master_mutex.
@@ -3946,7 +3946,7 @@ static long windows_table_get(void)
                 root terminal's picture and write keys into the root shell's
                 window, so it is handed only to root, as its file (0600) and
                 WINDOWS_IOCTL_TABLE_SET already are. The compositor and the
-                windows the machine script starts are root; a program that is
+                windows the runner starts are root; a program that is
                 not (a local user, or a bowl program on a real unprivileged
                 uid) is refused here as it is at the file.
         */

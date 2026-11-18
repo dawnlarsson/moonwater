@@ -117,14 +117,14 @@ static void compositor_game_watch(void)
 }
 
 /*
-        The desktop's keys, which are the machine script's: a function there
-        named key_ and a chord -- modifiers and a key joined by _, as
-        key_ctrl_shift_t -- is run when the chord is pressed. The script
-        writes its key_ functions' names to /run/moonwater/keys, a line each,
-        before it starts this program; a chord pressed is no window's key, and
-        its name is written, a line, to the FIFO /run/moonwater/keys.fire,
-        which the script reads and runs. Everything on the desktop is started
-        by the machine script and by nothing else; this process forks nothing.
+        The desktop's keys, which are the rules': a chord a rule hears --
+        modifiers and a key joined by _, as key_ctrl_shift_t -- is written by
+        the runner (src/rover/runner.c, the machine process) to
+        /run/moonwater/keys, a line each, before it starts this program; a
+        chord pressed is no window's key, and its name is written, a line, to
+        the FIFO /run/moonwater/keys.fire, which the runner reads and does the
+        rule's actions for. Everything on the desktop is started by the runner
+        and by nothing else; this process forks nothing.
         The keys are the physical ones, so a chord is the same key whatever
         the layout; the modifiers are ctrl (or control), shift, alt and super.
 */
@@ -179,7 +179,7 @@ static unsigned int compositor_key_word(const char *word, unsigned int length, u
         return ~0u;
 }
 
-// The chords the script bound, read once at the start: a line that is not one is left out, and said.
+// The chords the rules bound, read once at the start: a line that is not one is left out, and said.
 static void compositor_keys_read(void)
 {
         static char text[4096];
@@ -221,7 +221,7 @@ static void compositor_keys_read(void)
                         word = stop + 1;
                 }
 
-                // Named by the function, which is what the script's author looks for: there is no chord in it.
+                // Named by the function, which is what the rule's author looks for: there is no chord in it.
                 if (bad || !code || close - start >= sizeof(compositor_keys.chord[0]))
                 {
                         p8 name[48];
@@ -240,8 +240,8 @@ static void compositor_keys_read(void)
         }
 }
 
-// A name said to the script on the FIFO, a line: a chord pressed, or a thing done to the desktop that the script
-// starts a program for (tray_double, launcher_button). A script that does not listen hears nothing.
+// A name said to the runner on the FIFO, a line: a chord pressed, or a thing done to the desktop that the runner
+// starts a program for (tray_double, launcher_button). A runner that does not listen hears nothing.
 static void compositor_script_say(const char *name)
 {
         bipolar handle;
@@ -263,7 +263,7 @@ static void compositor_script_say(const char *name)
                 compositor_door_ask(COMPOSITOR_DOOR_MISC, COMPOSITOR_DOOR_LINES);
                 return;
         }
-        // Not through a link: the FIFO is the machine script's, and a link in its place would have this write into what it names.
+        // Not through a link: the FIFO is the runner's, and a link in its place would have this write into what it names.
         handle = system_open_at(AT_FDCWD, (string_address)compositor_keys_fire, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
         {
@@ -286,8 +286,8 @@ static void compositor_script_say(const char *name)
         mute, the sink by the name the page gives it) and as the settings do, /root/audio.volume and /root/audio.mute replaced whole,
         which keeps it across a restart and is all there is when the socket does not answer. What it shows of its own change it shows at once, as the
         number for a moment, and the page is not believed for a moment after, so the cell does not go back to the old value before
-        the server has the new. A left press on the cell is the script's (volume_button): the mixer is a program, and everything on
-        the desktop is started by the machine script.
+        the server has the new. A left press on the cell is the runner's (volume_button): the mixer is a program, and everything on
+        the desktop is started by the runner.
 */
 #define COMPOSITOR_VOLUME_STEP 5
 #define COMPOSITOR_VOLUME_WAIT_MS 20           // the most the desktop waits for the server's answer: a key is not to hold the compositor
@@ -342,9 +342,9 @@ static int compositor_volume_map(void)
 }
 
 /*
-        The volume cell pressed: the popup is started by the machine script (volume_button), which starts the mixer in its popup form
+        The volume cell pressed: the popup is started by the runner (volume_button), which starts the mixer in its popup form
         (-q -a) beside the cell, as the launcher is beside its button; the table holds the cell's rectangle, the edge its band is along
-        and its screen before the script is told. A popup that is up is put away by this very press (WINDOW_DISMISS), and the cell then
+        and its screen before the runner is told. A popup that is up is put away by this very press (WINDOW_DISMISS), and the cell then
         asks for none, so the cell opens it and closes it.
 */
 // The first window showing whose name is word (the table's name, whole), or COMPOSITOR_NONE.
@@ -371,7 +371,7 @@ static int compositor_quick_row(void)
 }
 
 // The table holds the rectangle of the band's cell at a point (which is the hit taskbar_hit_reach names, and taskbar_anchor anchors),
-// its edge and its screen, for the script to start the popup beside it. Nothing when no cell of that kind is there.
+// its edge and its screen, for the runner to start the popup beside it. Nothing when no cell of that kind is there.
 static void compositor_button_rect(int x, int y, int which)
 {
         struct windows *table = compositor.table;
@@ -443,7 +443,7 @@ static void compositor_volume_show(void)
                 compositor_tabs_changed();
 }
 
-// The notices dot pressed: the script is told (notices_button) and starts the notices popup beside the dot, which lists the board and starts
+// The notices dot pressed: the runner is told (notices_button) and starts the notices popup beside the dot, which lists the board and starts
 // Settings on its System notices page. A popup already up is put away by the press before this runs, so none is started twice.
 static void compositor_notices_open(int x, int y)
 {
@@ -657,8 +657,8 @@ static void compositor_volume_key(unsigned int code, int value)
 
 /*
         The tray, the clock and the battery, pressed twice quickly: the settings. A window of that name that is
-        up is brought up and given the keys; with none, the script is told (tray_double) and starts it, since
-        everything on the desktop is started by the machine script and by nothing else.
+        up is brought up and given the keys; with none, the runner is told (tray_double) and starts it, since
+        everything on the desktop is started by the runner and by nothing else.
 */
 static void compositor_settings_open(void)
 {
@@ -674,8 +674,8 @@ static void compositor_settings_open(void)
 }
 
 /*
-        The launcher button pressed with no launcher up: the script is told (launcher_button) and starts the launcher, since
-        everything on the desktop is started by the machine script and by nothing else. Before it says so the table holds the
+        The launcher button pressed with no launcher up: the runner is told (launcher_button) and starts the launcher, since
+        everything on the desktop is started by the runner and by nothing else. Before it says so the table holds the
         rectangle of the button that was pressed, the edge its band is along and its screen, which the launcher opens beside
         (window.c's button_x and the rest); the band is the one whose button the point is on.
 */
@@ -690,7 +690,7 @@ static void compositor_launcher_open(int x, int y)
         The logo key alone. A logo key (Super, either one) pressed with no other modifier held and let go with no other key and no
         button of the pointer pressed between is a tap, and a tap is a press on the launcher's tab: the launcher opens beside the tab,
         or is put away if it is up (compositor_logo_act). Held with another key it is the chord it always was (Super and an arrow,
-        Super and Space, a chord of the script's) and no tap, and so it is if it was pressed while another modifier was held. The
+        Super and Space, a chord of the rules') and no tap, and so it is if it was pressed while another modifier was held. The
         rule is this function and one byte of state, so it is checked with no keyboard: bit is the key's held bit (0 for a key that
         is no modifier), value its event (1 down, 0 up, 2 a repeat), others whether any modifier but the logo keys is held after it.
         Answers 1 for the release that ends a tap.
@@ -715,7 +715,7 @@ static int compositor_logo_tap(unsigned char *alone, unsigned int bit, int value
 }
 
 // A tap of the logo key: with the launcher up it is put away, as a press on the moon would put it; with none, and the launcher on (`taskbar
-// launcher on`), the script is asked for one beside the moon of the first band. Off, the moon is the clock's alone and the key does nothing.
+// launcher on`), the runner is asked for one beside the moon of the first band. Off, the moon is the clock's alone and the key does nothing.
 static void compositor_logo_act(void)
 {
         int up = compositor_launcher_row();
@@ -758,7 +758,7 @@ static unsigned int compositor_modifiers(void)
         and then, with the keys moved on by Alt-Tab, Alt going up would hold a
         modifier that never was), Alt-Tab and Alt-F9 with both edges of the
         key and whatever repeats, any other key typed while an Alt-Tab is under
-        way, the chords of the script's key_ functions, and Control-Alt-Backspace and the same with Shift,
+        way, the chords the rules bind, and Control-Alt-Backspace and the same with Shift,
         which Canvas hears for itself and acts on. The rest make characters, one event each, for the window that has
         the keys; with none, a key gives them to the topmost.
 */
@@ -775,8 +775,8 @@ static unsigned int compositor_modifiers(void)
                 filled          Down: back to its rectangle                     Left, Right: that half
 
         and any other press is nothing: Down never puts a window away, and Left or Right never takes it off its screen
-        (Super and Shift with Left or Right does that, compositor_screen_chord). A chord the machine script binds never gets
-        here (compositor_key runs the script's first), so a user's binding of the same keys takes them.
+        (Super and Shift with Left or Right does that, compositor_screen_chord). A chord a rule binds never gets
+        here (compositor_key sends the runner's first), so a user's binding of the same keys takes them.
 */
 static unsigned int compositor_chord_next(unsigned int how, unsigned int code)
 {
@@ -1041,7 +1041,7 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 return;
         }
 
-        // A chord the script bound is its own and no window's; a press says so, and not a repeat, so a key held
+        // A chord a rule bound is its own and no window's; a press says so, and not a repeat, so a key held
         // down does not fill the desktop with what it starts.
         for (unsigned int at = 0; at < compositor_keys.count; at++)
                 if (code == compositor_keys.code[at] &&
@@ -1049,12 +1049,12 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                         compositor_keys.modifiers[at])
                 {
                         if (value == 1)
-                                // A chord pressed: said to the script, which runs what it is bound to.
+                                // A chord pressed: said to the runner, which does what it is bound to.
                                 compositor_script_say(compositor_keys.chord[((unsigned int)(at))]);
                         return;
                 }
 
-        // Super alone with an arrow: the tiling chords, which the script's bindings above have had first say; and Super and
+        // Super alone with an arrow: the tiling chords, which the rules' bindings above have had first say; and Super and
         // Shift with Left or Right, a window to the next screen.
         if ((modifiers & (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) == WINDOW_KEY_SUPER &&
             (code == CK_KEY_LEFT || code == CK_KEY_RIGHT || code == CK_KEY_UP || code == CK_KEY_DOWN))
@@ -2055,7 +2055,7 @@ static void compositor_button(unsigned int code, int down)
                                            compositor.pointer_x, compositor.pointer_y, compositor.scale))
                 {
                 case TASKBAR_ACT_LAUNCHER:
-                        // with the launcher up the press puts it away, and with none it asks the script for one beside the button
+                        // with the launcher up the press puts it away, and with none it asks the runner for one beside the button
                         if (up >= 0)
                         {
                                 compositor_close(up);
@@ -4042,7 +4042,7 @@ static void compositor_swipe_hand(unsigned int at, positive now, const struct ui
 }
 
 // The launcher, opened by a swipe up: its rectangle is a panel's thickness along the bottom of its screen, beside the finger, as the launcher
-// button's is (window.c's button_*), and the script is told as it is told of the button.
+// button's is (window.c's button_*), and the runner is told as it is told of the button.
 static void compositor_swipe_launcher(int x, const int *rect, int number)
 {
         struct windows *table = compositor.table;
@@ -4528,7 +4528,7 @@ static void compositor_reader_put(unsigned int at, unsigned int generation, cons
 #ifdef CONFIG_MOONWATER_WAYLAND
 /*
         A key's report sent by the reader itself to the window that has the keys (compositor_wl_direct_key says when it may be: a client's
-        window, no modifier but Shift held, a key that is not a modifier, a lock, a volume key or a chord the script binds), and a note of it
+        window, no modifier but Shift held, a key that is not a modifier, a lock, a volume key or a chord a rule binds), and a note of it
         handed to the loop, which keeps it as its own send of the key (compositor_wl_key_noted). A release goes so only after a press that
         went so, to the same window; a repeat of such a press is no event (the client repeats the key at the rate it was told).
 */
@@ -4870,10 +4870,6 @@ static void compositor_input_read(unsigned int at)
         if (at < COMPOSITOR_INPUTS && compositor.inputs[at] < 0)
                 compositor_input_physical[at] = 0;
 }
-
-static int compositor_input_take(unsigned int at, const struct compositor_input_event *raw, bipolar got, int moved);
-static void compositor_input_gone(unsigned int at);
-static void compositor_input_end(unsigned int at, int moved);
 
 static void compositor_input_read_device(unsigned int at)
 {
