@@ -6440,7 +6440,8 @@ static void compositor_wl_read(long slot)
 {
         static unsigned char bytes[COMPOSITOR_WL_READ];
 
-        for (int reads = 0; reads < COMPOSITOR_WL_READS; reads++)
+        // A client whose events back up (it is not reading them) is not read until it has: every request may queue a reply.
+        for (int reads = 0; reads < COMPOSITOR_WL_READS && !wayland_out_backlog(slot); reads++)
         {
                 positive control[(sizeof(positive) * 3 + WAYLAND_FDS * sizeof(int) + 15) / sizeof(positive) + 2];
                 positive message[7], vector[2] = {(positive)bytes, sizeof bytes};
@@ -6582,7 +6583,9 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
                 const long *fds;
                 long fd_count;
                 // A client whose commit waits for its GPU is not read (a hangup is told all the same), and the loop wakes to ask.
-                short events = compositor_wl.fd[slot] >= 0 && wayland_stalled(slot) ? 0 : COMPOSITOR_POLLIN;
+                // Nor is one whose queue of events is past its high mark (wayland_out_backlog): it is polled for room, and read again
+                // once a send has taken it below.
+                short events = compositor_wl.fd[slot] >= 0 && (wayland_stalled(slot) || wayland_out_backlog(slot)) ? 0 : COMPOSITOR_POLLIN;
 
                 if (compositor_wl.fd[slot] >= 0 && wayland_out_dirty(slot) && wayland_out(slot, &bytes, &fds, &fd_count))
                         events |= COMPOSITOR_POLLOUT;

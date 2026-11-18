@@ -3354,11 +3354,14 @@ static void test_wire(void)
                         "a word put at offset %d is its four bytes, low first, and is read back", offset);
         }
         {
-                struct wayland_client one;
+                static struct wayland_client one;
+                static unsigned char queue[WAYLAND_OUT];
                 struct wayland_event e;
 
                 memset(&one, 0, sizeof one);
                 one.slot = -1;
+                one.out = queue;
+                one.out_room = sizeof queue;
                 e = wayland_begin(&one, 0x01020304UL, 0x0506);
                 wayland_word(&e, 0xa0b0c0d0UL);
                 wayland_end(&e);
@@ -3749,14 +3752,14 @@ static void test_caps(void)
                 leak_check("client slots");
         }
 
-        /* a client that never reads is dropped when its queue is full, and nothing blocks */
+        /* a client that never reads is dropped when its queue is full (grown to WAYLAND_OUT_MOST), and nothing blocks */
         session_open(&s);
         c = s.c;
         {
                 long rounds = 0;
                 unsigned char m[12];
 
-                while (!wayland_dead(c->slot) && rounds < 20000)
+                while (!wayland_dead(c->slot) && rounds < 400000)
                 {
                         /* a sync is answered with two events and gives its id back: the queue grows and no object does */
                         memset(m, 0, sizeof m);
@@ -3767,7 +3770,8 @@ static void test_caps(void)
                         rounds++;
                 }
                 WLCHECK(wayland_dead(c->slot) == 2 && c->errors == 0, "a client that does not read is dead, not waited for (after %ld)", rounds);
-                WLCHECK(rounds > 1000 && rounds < 20000, "after a queue's worth of answers (%ld)", rounds);
+                WLCHECK(rounds * 24 >= WAYLAND_OUT_MOST - WAYLAND_EVENT - 24 && rounds * 24 <= WAYLAND_OUT_MOST,
+                        "after a queue's worth of answers, the most a queue grows to (%ld)", rounds);
         }
         wlc_end(c);
         leak_check("caps");
@@ -7762,6 +7766,126 @@ static void scale_show(struct scale_window *w, long width, long height)
         wlc_send(w->s.c, w->s.surface, WLQ_wl_surface_commit);
 }
 
+/* ---- a client that reads nothing for a while: its queue grows, and it is all there when it reads ---- */
+
+// The events queued for a client, walked by their heads (none read off): how many there are of an object's opcode, and whether
+// every head is whole (a size of at least eight, a multiple of four, inside what is queued).
+static long backlog_count(long slot, unsigned long object, long opcode, long *events, int *whole)
+{
+        const unsigned char *bytes;
+        const long *fds;
+        long fd_count, length = wayland_out(slot, &bytes, &fds, &fd_count), found = 0, at = 0;
+
+        *events = 0;
+        *whole = 1;
+        while (at + 8 <= length)
+        {
+                long size = (long)(wayland_get(bytes + at + 4) >> 16);
+
+                if (size < 8 || size % 4 || at + size > length)
+                {
+                        *whole = 0;
+                        break;
+                }
+                if (wayland_get(bytes + at) == object && (long)(wayland_get(bytes + at + 4) & 0xffff) == opcode)
+                        found++;
+                ++*events;
+                at += size;
+        }
+        if (at != length)
+                *whole = 0;
+        return found;
+}
+
+// What is queued, taken off in sends of `step` bytes (a socket that takes a little at a time), every send's bytes the queue's front.
+static long backlog_drain(long slot, long step)
+{
+        const unsigned char *bytes;
+        const long *fds;
+        long fd_count, length, taken = 0;
+
+        while ((length = wayland_out(slot, &bytes, &fds, &fd_count)) > 0)
+        {
+                long take = length < step ? length : step;
+
+                wayland_sent(slot, take);
+                taken += take;
+        }
+        return taken;
+}
+
+static void test_backlog(void)
+{
+        struct gamec g;
+        struct wlc *c;
+        unsigned char sync[12 * 1365]; // one read of the host's (16384 bytes) of wl_display.sync, as near as whole ones go
+        unsigned long id;
+        long events, done, rounds = 0;
+        int whole;
+
+        wl_reset();
+        wayland_start(&fake_host);
+
+        /* replies to requests: a client that sends and does not read is queued all of them, past the 64 KiB a queue starts at */
+        game_open(&g);
+        c = g.k.s.c;
+        wlc_pump(c);
+        wlc_forget(c);
+        id = wlc_id(c, WLI_wl_callback, 1); // the callback's id, let go of by each reply and made again by the next sync
+        for (long at = 0; at < 1365; at++)
+        {
+                wayland_put(sync + 12 * at, 1);
+                wayland_put(sync + 12 * at + 4, (unsigned long)WLQ_wl_display_sync | 12ul << 16);
+                wayland_put(sync + 12 * at + 8, id);
+        }
+        wlc_hold = 1;
+        for (int read = 0; read < 8; read++)
+                wayland_feed(c->slot, sync, sizeof sync, 0, 0);
+        done = backlog_count(c->slot, id, WLE_wl_callback_done, &events, &whole);
+        WLCHECK(!wayland_dead(c->slot) && whole && done == 8 * 1365 && events == 2 * 8 * 1365 && !wayland_out_backlog(c->slot),
+                "a client that reads nothing is queued every reply to eight reads of syncs (%ld done of %ld events, %ld bytes)", done, events,
+                (long)(events * 12));
+        /* and a locked pointer's reports, the hand moving at 8 kHz while it does not read: 20,000 of them, 800 KB */
+        wayland_keyboard_to(g.k.row);
+        wayland_pointer_to(g.k.row, 5, 5);
+        {
+                unsigned long rel = wlc_id(c, WLI_zwp_relative_pointer_v1, 1);
+
+                wlc_send(c, g.k.s.relative, WLQ_zwp_relative_pointer_manager_v1_get_relative_pointer, rel, g.pointer);
+                game_lock(&g, 0, WLN_zwp_pointer_constraints_v1_lifetime_persistent);
+                for (long report = 0; report < 20000; report++)
+                        wayland_pointer_relative(g.k.row, 1, -1, 1, -1, 1000 + report);
+                done = backlog_count(c->slot, rel, WLE_zwp_relative_pointer_v1_relative_motion, &events, &whole);
+                WLCHECK(!wayland_dead(c->slot) && whole && done == 20000 && wayland_out_backlog(c->slot),
+                        "and every one of 20,000 reports of the hand, each in its frame, past the mark the host stops reading at (%ld)", done);
+        }
+        /* it reads: a little at a time, all of it in its order, the client alive, the mark passed back */
+        backlog_drain(c->slot, 4096 + 4);
+        wlc_hold = 0;
+        WLCHECK(!wayland_dead(c->slot) && !wayland_out_dirty(c->slot) && !wayland_out_backlog(c->slot) && c->errors == 0,
+                "a client that then reads takes it all and is kept, with no error, and the host reads it again");
+        /* the queue keeps what it grew to and starts from its front: a send of all of it after more reports leaves nothing */
+        wayland_pointer_relative(g.k.row, 1, -1, 1, -1, 99);
+        {
+                long found = backlog_count(c->slot, 0, -1, &events, &whole), taken = backlog_drain(c->slot, 1 << 20);
+
+                WLCHECK(found == 0 && whole && events == 2 && taken == 40, "after it, a report is its two events at the queue's front (%ld %ld)",
+                        events, taken);
+        }
+
+        /* a client that reads nothing at all: past WAYLAND_OUT_MOST it is ended (a full queue), and everything comes back */
+        wlc_hold = 1;
+        while (!wayland_dead(c->slot) && rounds++ < 1000000)
+                wayland_pointer_relative(g.k.row, 1, -1, 1, -1, 7);
+        WLCHECK(wayland_dead(c->slot) == 2 && rounds * 40 >= WAYLAND_OUT_MOST - WAYLAND_EVENT - 40 && rounds * 40 <= WAYLAND_OUT_MOST,
+                "a client that reads none of WAYLAND_OUT_MOST of its events is ended as a full queue is (after %ld reports, held %ld)", rounds,
+                fake.hold_mode);
+        wlc_hold = 0;
+        wlc_end(c);
+        leak_check("a backed-up queue");
+        wayland_stop();
+}
+
 static void test_scale(void)
 {
         struct scale_window w;
@@ -9389,6 +9513,7 @@ int main(int argc, char **argv)
         test_dmabuf_feedbacks();
         test_syncobj_viewporter_and_formats();
         test_games();
+        test_backlog();
         test_scale();
         test_fractional_damage();
         test_outputs();

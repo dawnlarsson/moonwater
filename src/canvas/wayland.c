@@ -69,7 +69,9 @@
 #define WAYLAND_MESSAGE 4096    // the largest message, header included, as in libwayland
 #define WAYLAND_ARGS 12
 #define WAYLAND_FDS 28          // descriptors a client may have sent and not yet had used
-#define WAYLAND_OUT 65536       // a client's output queue
+#define WAYLAND_OUT 65536       // a client's output queue as it is made; it grows (wayland_out_grow) to WAYLAND_OUT_MOST
+#define WAYLAND_OUT_MOST (4L << 20) // the most a queue grows to: a client that has read none of 4 MiB of its events is not reading
+#define WAYLAND_OUT_HIGH (1L << 20) // a queue past this is the host's word to read no more of the client until it has drained some
 #define WAYLAND_OUT_FDS 8       // descriptors one send carries (the host's control message takes that many); the queue holds any number, sent in turn
 #define WAYLAND_EVENT 1024      // the most one event can take
 #define WAYLAND_DAMAGE 8
@@ -761,8 +763,9 @@ struct wayland_client
         long presenting_surfaces;    // surfaces of the client holding presentation feedbacks for a frame (presentings above zero), exact: a client with none is passed over
         long subsurfaces;            // live surfaces whose role is a subsurface's, exact (counted where the role is given, and where the surface goes): none, and no child scan is made
         struct wayland_table sub_bits; // live subsurface slots, a bit each, 64 to a word (unsigned long long)
-        long out_length;
-        unsigned char out[WAYLAND_OUT];
+        long out_length, out_room;      // the bytes queued from out's start, and the bytes of out made (whole pages of out_table)
+        unsigned char *out;             // the output queue: out_table's memory, which never moves as it grows
+        struct wayland_table out_table; // a page of the queue each
         struct wayland_table out_fd_table; // the output queue: a struct wayland_outfd each, grown in memory (wayland_out_fd_room); no count of them is a cap
         long out_fd_count;
         long in_fds[WAYLAND_FDS], in_fd_count;
@@ -1065,6 +1068,30 @@ static void wayland_table_drop(struct wayland_table *t)
         t->count = t->usable = t->reserved = t->bytes = t->frees = t->committed = t->stack_committed = t->stack = 0;
 }
 
+/*
+        The output queue grown to hold one more event (WAYLAND_EVENT) past what it has: its table's pages made, up to
+        WAYLAND_OUT_MOST. 1 when there is the room, 0 when the queue is at its most or the memory is not there, which ends the client
+        as a full queue did. Where the queue was 64 KiB in the client's record and a client was ended, with no error, once one pass
+        of the host's reads had made more events than that: an unpaced client that sends many frames for one read of its socket,
+        or one that read nothing for a moment while the hand moved a pointer at 8 kHz (40 bytes a report).
+*/
+static __attribute__((noinline)) int wayland_out_grow(struct wayland_client *c)
+{
+        long want = (c->out_length + WAYLAND_EVENT + WAYLAND_TABLE_PAGE - 1) / WAYLAND_TABLE_PAGE;
+
+        if (want * WAYLAND_TABLE_PAGE > WAYLAND_OUT_MOST || !wayland_table_reach(&c->out_table, want))
+                return 0;
+        c->out = c->out_table.at;
+        c->out_room = c->out_table.usable * WAYLAND_TABLE_PAGE < WAYLAND_OUT_MOST ? c->out_table.usable * WAYLAND_TABLE_PAGE : WAYLAND_OUT_MOST;
+        return c->out_length + WAYLAND_EVENT <= c->out_room;
+}
+
+// Whether the queue has the room for one more event, grown for it when it has not.
+static inline int wayland_out_has(struct wayland_client *c)
+{
+        return c->out_length + WAYLAND_EVENT <= c->out_room || wayland_out_grow(c);
+}
+
 // The output queue's room for one more descriptor (1, or 0 when the memory for it is not there), and the one put there.
 static int wayland_out_fd_room(struct wayland_client *c)
 {
@@ -1268,6 +1295,7 @@ static void wayland_tables_init(struct wayland_client *c)
         c->timeline_table.unit = sizeof(struct wayland_sync_timeline);
         c->constraint_table.unit = sizeof(struct wayland_constraint);
         c->notify_table.unit = sizeof(struct wayland_notify);
+        c->out_table.unit = WAYLAND_TABLE_PAGE;
 }
 
 static void wayland_tables_drop(struct wayland_client *c)
@@ -1295,6 +1323,8 @@ static void wayland_tables_drop(struct wayland_client *c)
         wayland_ids_drop(&c->device_ids[0]), wayland_ids_drop(&c->device_ids[1]), wayland_ids_drop(&c->relative_ids);
         wayland_ids_drop(&c->gone);
         wayland_table_drop(&c->out_fd_table);
+        wayland_table_drop(&c->out_table);
+        c->out = 0, c->out_room = c->out_length = 0;
         wayland_table_drop(&c->source_table);
         wayland_table_drop(&c->offer_table);
         wayland_table_drop(&c->params_table);
@@ -1412,6 +1442,7 @@ static int wayland_subs_next(struct wayland_subs *it)
 */
 typedef unsigned int __attribute__((may_alias, aligned(1))) wayland_wire_word;
 typedef unsigned short __attribute__((may_alias, aligned(1))) wayland_wire_half;
+typedef unsigned long long __attribute__((may_alias, aligned(1))) wayland_wire_long;
 
 static inline unsigned long wayland_get(const unsigned char *at)
 {
@@ -1465,7 +1496,7 @@ static struct wayland_event wayland_begin(struct wayland_client *c, unsigned lon
 
         e.client = c;
         e.start = c->out_length;
-        e.ok = c->out_length + WAYLAND_EVENT <= WAYLAND_OUT && !c->dead;
+        e.ok = !c->dead && wayland_out_has(c);
         e.at = e.ok ? c->out + c->out_length : wayland_sink;
         if (!e.ok && !c->dead)
         {
@@ -1511,7 +1542,7 @@ static void wayland_words(struct wayland_event *e, const unsigned long *words, l
 */
 static void wayland_send(struct wayland_client *c, unsigned long object, long opcode, const unsigned int *words, long count)
 {
-        int ok = c->out_length + WAYLAND_EVENT <= WAYLAND_OUT && !c->dead;
+        int ok = !c->dead && wayland_out_has(c);
         long size;
 
         if (!ok && !c->dead)
@@ -1534,7 +1565,7 @@ static inline __attribute__((always_inline)) void wayland_emit(struct wayland_cl
 {
         unsigned char *at;
 
-        if (c->out_length + WAYLAND_EVENT > WAYLAND_OUT || c->dead)
+        if (c->dead || !wayland_out_has(c))
         {
                 wayland_send(c, object, opcode, words, count);
                 return;
@@ -1542,6 +1573,7 @@ static inline __attribute__((always_inline)) void wayland_emit(struct wayland_cl
         at = c->out + c->out_length;
         wayland_put(at, object);
         wayland_put(at + 4, (unsigned long)opcode | (unsigned long)(8 + 4 * count) << 16);
+#pragma GCC unroll 8
         for (long word = 0; word < count; word++)
                 wayland_put(at + 8 + 4 * word, words[word]);
         c->out_length += 8 + 4 * count;
@@ -10514,7 +10546,12 @@ WAYLAND_API long wayland_connect(long pid, long uid)
         wayland_tables_init(c);
         wayland.client[slot] = c;
         wayland.clients++;
-        if (wayland_object_new(c, 1, WLI_wl_display, 1) < 0)
+        // The queue's first WAYLAND_OUT, which most clients never pass.
+        c->out_length = WAYLAND_OUT - WAYLAND_EVENT;
+        if (!wayland_out_grow(c))
+                c->out = 0;
+        c->out_length = 0;
+        if (!c->out || wayland_object_new(c, 1, WLI_wl_display, 1) < 0)
         {
                 // No memory for the display's object: the connection is refused, and its tables given back.
                 wayland_tables_drop(c);
@@ -10953,8 +10990,16 @@ WAYLAND_API void wayland_sent(long slot, long count)
                         wayland_out_clear(slot);
                 return;
         }
-        for (long at = count; at < c->out_length; at++)
-                c->out[at - count] = c->out[at];
+        // What is left moved to the front, a word at a time forward (the place a word goes is below where it is read, and every word
+        // is read before one is written over it), then its last few bytes.
+        {
+                long at = count;
+
+                for (; at + 8 <= c->out_length; at += 8)
+                        *(wayland_wire_long *)(c->out + at - count) = *(const wayland_wire_long *)(c->out + at);
+                for (; at < c->out_length; at++)
+                        c->out[at - count] = c->out[at];
+        }
         c->out_length -= count;
         wayland_out_fds_sent(c, count);
         wayland_feedback_flush(c);
@@ -10973,6 +11018,16 @@ WAYLAND_API long wayland_heard(long *quiet)
 WAYLAND_API int wayland_out_dirty(long slot)
 {
         return slot >= 0 && slot < wayland.client_slots && (wayland.out_dirty[slot / 64] >> (slot % 64) & 1u);
+}
+
+/*
+        Whether a client's queue is past WAYLAND_OUT_HIGH: the host reads no more of it, and polls it for room and not for its
+        requests, until it has taken enough of its events (a reply to every request is queued, so reading on would only grow it).
+*/
+WAYLAND_API int wayland_out_backlog(long slot)
+{
+        return slot >= 0 && slot < wayland.client_slots && wayland.host && wayland.client[slot] &&
+               wayland.client[slot]->out_length > WAYLAND_OUT_HIGH;
 }
 
 WAYLAND_API long wayland_client_slots(void)
