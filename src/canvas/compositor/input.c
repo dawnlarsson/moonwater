@@ -117,6 +117,88 @@ static void compositor_game_watch(void)
 }
 
 /*
+        A game's threads, while its window is the fullscreen top one (compositor_fullscreen_top), asked for a short slice of the fair
+        scheduler (EEVDF's custom slice: sched_attr.sched_runtime of a SCHED_OTHER or SCHED_BATCH thread, honoured since 6.12): a thread woken with a slice shorter than what
+        runs on its core has the earlier deadline and takes the core at once, where with the default slice (2.8 ms on the box's 32 cores) it
+        waits for the running one's to end. Its share of the processor is its weight's as before (the nice is kept); only when it runs
+        changes. Measured on the box (Ryzen 9950X) with tools/gameload, a thread sleeping to a 144 Hz deadline and working 37 us, beside 32
+        threads spinning at nice 0, three rounds: wake late p99 1719-1887 us and at most 2585-2821 us with the default slice; 10-13 us and at
+        most 11-14 us at a 100 us slice (500 us: 10-158 and 11-444; nice -5: 11-852 and 1687-2394; nice -10: 11-178 and 396-1601), with the
+        machine idle 16 and 14 us; HL2 in d1_canals_01 (GPU-bound, 144 fps) beside the 32 spinners: frame p99.9 10.59 ms and at most 11.23
+        with the default slice, 9.86 and 10.32 at 100 us, 9.44 and 9.67 alone (one run each). The window's process is the table's pid of its row (an X window's is X-Resource's word on its client, not
+        what it says of itself), every thread of it is asked, and a thread it makes later is made with its maker's slice; when the window is
+        no longer the fullscreen top one, or another one is, its threads go back to the default (a runtime of 0) where they still have ours. A
+        thread at a real-time, idle or deadline policy, or that the kernel refuses, is left as it is. Off, for the machine's owner, with the
+        game's hold: /run/moonwater/game-hold-off.
+*/
+#define COMPOSITOR_GAME_SLICE_NS 100000ull
+struct compositor_sched_attr
+{
+        unsigned int size, policy;
+        unsigned long long flags;
+        int nice;
+        unsigned int priority;
+        unsigned long long runtime, deadline, period;
+        unsigned int util_min, util_max;
+};
+_Static_assert(sizeof(struct compositor_sched_attr) == 56, "sched_attr: SCHED_ATTR_SIZE_VER1");
+
+// Each thread of the process pid given the slice (0: the default again): the threads asked.
+static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long long slice)
+{
+        char path[40] = "/proc/";
+        p8 buffer[2048];
+        bipolar handle, got;
+        unsigned int asked = 0;
+        positive length = positive_into_string((string_address)path + 6, (positive)pid);
+
+        string_copy((string_address)path + 6 + length, (string_address) "/task");
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        if (handle < 0)
+                return 0;
+        while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
+                for (bipolar at = 0; at < got;)
+                {
+                        p16 size = memory_load_unaligned(p16, buffer + at + 16);
+                        string_address name = (string_address)(buffer + at + 19);
+                        struct compositor_sched_attr attr = {0};
+                        positive tid = 0;
+
+                        at += size;
+                        for (; *name >= '0' && *name <= '9'; name++)
+                                tid = tid * 10 + (positive)(*name - '0');
+                        if (!tid || *name)
+                                continue;
+                        if (compositor_call(syscall(sched_getattr), tid, (positive)&attr, sizeof(attr), 0, 0, 0) != 0 || attr.policy > 3 ||
+                            attr.policy == 1 || attr.policy == 2) // SCHED_OTHER 0, SCHED_BATCH 3; FIFO, RR (and IDLE 5, DEADLINE 6) are left
+                                continue;
+                        if ((attr.runtime == COMPOSITOR_GAME_SLICE_NS) == !!slice) // sched_getattr says the slice it has, ours or the default
+                                continue;
+                        attr.size = sizeof(attr), attr.flags = 0, attr.runtime = slice;
+                        if (compositor_call(syscall(sched_setattr), tid, (positive)&attr, 0, 0, 0, 0) == 0)
+                                asked++;
+                }
+        system_close(handle);
+        return asked;
+}
+
+// Each loop turn: the fullscreen top window's process given the slice, and the one before put back when it changes.
+static void compositor_game_slice(void)
+{
+        static unsigned int pid;
+        int row = compositor.games != ~0ul ? compositor_fullscreen_top() : -1;
+        unsigned int now = row >= 0 && compositor.table ? __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE) : 0;
+
+        if (now == pid)
+                return;
+        if (pid)
+                compositor_game_slice_of(pid, 0);
+        pid = now;
+        if (pid && pid != (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0))
+                compositor_game_slice_of(pid, COMPOSITOR_GAME_SLICE_NS);
+}
+
+/*
         The desktop's keys, which are the rules': a chord a rule hears --
         modifiers and a key joined by _, as key_ctrl_shift_t -- is written by
         the runner (src/rover/runner.c, the machine process) to

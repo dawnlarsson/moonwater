@@ -406,9 +406,10 @@ static void compositor_taskbar_damage(b64 before)
         Whether a fullscreen window is the top window of its screen, and the taskbar slides away for it (taskbar_slide_now): the first window
         of each screen from the top of the stack, a popup, an X window's menu or an overlay of no tab passed over (a menu of the fullscreen
         window's own shows over it, and the band stays away). Put away or under another window, it is not, and the band comes back; it slid
-        away for any fullscreen window shown, under a window over it too, and stayed away there.
+        away for any fullscreen window shown, under a window over it too, and stayed away there. compositor_fullscreen_top says which row it
+        is (-1: none), for the game's own scheduling (compositor_game_slice).
 */
-static int compositor_fullscreen_up(void)
+static int compositor_fullscreen_top(void)
 {
         unsigned int seen = 0;
 
@@ -424,9 +425,14 @@ static int compositor_fullscreen_up(void)
                         continue;
                 seen |= 1u << screen;
                 if (compositor.fullscreen[row])
-                        return 1;
+                        return row;
         }
-        return 0;
+        return -1;
+}
+
+static int compositor_fullscreen_up(void)
+{
+        return compositor_fullscreen_top() >= 0;
 }
 
 // The taskbar's place, asked on every pass of the loop before a frame is drawn, with the clock: away while `taskbar fullscreen on`
