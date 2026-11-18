@@ -215,7 +215,7 @@ static const char *const rules_state_name[RS_COUNT] = {
 };
 
 static p16 rules_offset[RS_COUNT];
-static p8 rules_state_bit[RS_COUNT];
+static p16 rules_state_bit[RS_COUNT]; // the state's number in the schema: its reads bit is ROVER_READS_BIT
 #define RULES_NOWHERE 0xffffu
 
 static void rules_states_find(void)
@@ -228,7 +228,7 @@ static void rules_states_find(void)
                             string_equals((string_address)rover_states[at].name, (string_address)rules_state_name[mine]))
                         {
                                 rules_offset[mine] = rover_states[at].offset;
-                                rules_state_bit[mine] = (p8)at;
+                                rules_state_bit[mine] = (p16)at;
                         }
         }
 }
@@ -258,7 +258,7 @@ static p64 rules_set_locked(positive which, b32 value)
         WRITE_ONCE(*slot, value);
         smp_wmb();
         WRITE_ONCE(*sequence, *sequence + 1);
-        return 1ull << rules_state_bit[which];
+        return ROVER_READS_BIT(rules_state_bit[which]);
 }
 
 /*
