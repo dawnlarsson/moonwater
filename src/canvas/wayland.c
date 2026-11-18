@@ -10127,7 +10127,7 @@ static const unsigned char wayland_kinds[256] = {
         refused for what the walk found wrong with its bytes, so the first thing wrong is still the thing said.
 */
 static int wayland_args(struct wayland_client *c, const struct wayland_object *self, const struct wl_message *msg,
-                        const unsigned char *at, long left, struct wayland_arg *a, long *begun)
+                        const unsigned char *at, long left, struct wayland_arg *a, long *begun, int *took_fd)
 {
         unsigned int records[WAYLAND_ARGS][4];
         unsigned long long walked = wire_arguments(msg->args, wayland_kinds, at, (unsigned long long)left, &records[0][0], WAYLAND_ARGS);
@@ -10159,6 +10159,7 @@ static int wayland_args(struct wayland_client *c, const struct wayland_object *s
                         if (c->in_fd_count < 1)
                                 return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a descriptor is missing");
                         arg->fd = c->in_fds[0];
+                        *took_fd = 1;
                         for (long more = 1; more < c->in_fd_count; more++)
                                 c->in_fds[more - 1] = c->in_fds[more];
                         c->in_fd_count--;
@@ -10236,8 +10237,8 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
         const struct wl_message *msg;
         struct wayland_object *o;
         struct wayland_arg a[WAYLAND_ARGS];
-        long begun;
-        int status;
+        long begun = 0;
+        int status, took_fd = 0;
 
         wayland.heard++;
         if (slot < 0)
@@ -10247,7 +10248,7 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
         if (op >= info->requests || info->request[op].since > o->version)
                 return wayland_fail(c, id, WAYLAND_INVALID_METHOD, "no such request");
         msg = &info->request[op];
-        status = wayland_args(c, o, msg, message + 8, size - 8, a, &begun);
+        status = wayland_args(c, o, msg, message + 8, size - 8, a, &begun, &took_fd);
         if (status >= 0)
         {
                 switch (o->iface)
@@ -10411,8 +10412,9 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                         break;
                 }
         }
-        // A descriptor a handler did not take is closed here, whatever became of the request.
-        for (n = 0; n < begun; n++)
+        // A descriptor a handler did not take is closed here, whatever became of the request (a request that took none has none to look
+        // for: every request walked its arguments for one).
+        for (n = 0; took_fd && n < begun; n++)
                 if (a[n].fd >= 0)
                 {
                         wayland.host->close(wayland.host->context, a[n].fd);
