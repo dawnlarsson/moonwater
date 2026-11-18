@@ -870,6 +870,22 @@ static fn rover_check_evaluator(void)
                           rover_bytes_are(values[3].text, values[3].length, "-i"));
         }
 
+        //      Boot's verdict: one runner event a boot, keyed on which.
+        check("rules on the verdict compile",
+              rover_compiled("rule installer\n\ton boot\n\tif $verdict != disk\n\tdo open installer\n\n"
+                             "rule home\n\ton boot disk\n\tif $disk ~ nvme*\n\tdo notify \"home\"\n"));
+        event = rover_event_of("boot", null);
+        event.count = 2;
+        event.field[0].number = 0; // live
+        check("a live boot opens the installer", rover_same(rover_fires(&event, ROVER_RUNNER), "installer:then"));
+        event.field[0].number = 2; // ask
+        check("so does a boot that asks", rover_same(rover_fires(&event, ROVER_RUNNER), "installer:then"));
+        event.field[0].number = 1; // disk
+        event.field[1].text = (const p8 address_to)"nvme0n1p2";
+        event.field[1].length = 9;
+        check("a disk's boot is the disk's rule's, by its name",
+              rover_same(rover_fires(&event, ROVER_RUNNER), "home:then"));
+
         //      The machine's switches: set NAME VALUE, the runner's, its value typed by the switch.
         check("the fifth text compiles", rover_compiled(rover_canonical[4]));
         event = rover_event_of("lid close", null);

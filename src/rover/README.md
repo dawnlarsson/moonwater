@@ -318,7 +318,7 @@ of events and primitives are kept forever: one is never given to another.
 | kernel (spark, ids 1–22) | `key power`, `key sleep`, `key reset`, `key ctrl-alt-delete`, `lid close`, `lid open`, `volume up`, `volume down`, `mute`, `brightness up`, `brightness down`, `canvas on`, `canvas off`, `micmute`, `rfkill`, `tablet on`, `tablet off`, `headphone on`, `headphone off`, `dock on`, `dock off`, `resume` |
 | desktop (the compositor, ids 64–) | `chord` (chord), `fullscreen on` and `fullscreen off` (app: word), `window opened` and `window closed` (app: word), `display added` and `display removed` (connector: word), `button` (name: `launcher`, `volume`, `mic`, `notices`, `tray-double` or `pin`; slot: int 0 to 63, a pin's place on the taskbar; app: word, a pin's program) |
 | rules (id 96) | `cue` (name: word), posted by `emit cue NAME` |
-| runner (ids 97–) | `service up`, `service down`, `service failed` (name: word); `setting` (name: word, a registry row's) |
+| runner (ids 97–) | `service up`, `service down`, `service failed` (name: word); `setting` (name: word, a registry row's); `boot` (verdict: `live`, `disk` or `ask`; disk: word, the disk's name), once a boot when boot has said what this session's `/root` is, which is what `moonwater_init` was handed as its `$1` |
 
 ### States
 

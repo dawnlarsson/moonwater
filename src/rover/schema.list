@@ -55,6 +55,11 @@ event 99 runner "service failed" name:word
 # A Settings row changed: its name as its state says it, without setting. (on setting canvas.gpu).
 event 100 runner setting name:word
 
+# Boot's verdict, once a boot, as moonwater_init's $1 was: live (nothing on a
+# disk is kept this session), disk and its name, or ask (a disk holds another
+# build).
+event 101 runner boot verdict:enum:live,disk,ask disk:word
+
 # Moonwater's mechanisms. RUNS is where the call is a direct one.
 primitive 1 kernel any poweroff
 primitive 2 kernel any reboot
