@@ -114,7 +114,8 @@ static void compositor_inputs_woke(positive now, unsigned int *gone, unsigned in
                 before++;
                 if (system_control(compositor.inputs[at], COMPOSITOR_EVIOCGVERSION, address_of version) == -COMPOSITOR_ENODEV)
                 {
-                        // Read to its end, which lets it go; where the reader reads the devices, let go of here (the reader is not raced for it).
+                        // Read to its end, which lets it go; where the reader reads the devices, let go of here (the reader reads its own duplicate
+                        // of it, compositor_reader.own, so the number this frees is never one the reader reads).
                         if (compositor_reader_running())
                                 compositor_input_gone(at);
                         else

@@ -4144,6 +4144,42 @@ static void under_ready_rows(void)
         compositor.under[1] = kept_under, compositor_under_bytes[1] = kept_bytes, compositor.width = kept_width, compositor.height = kept_height;
 }
 
+// The input thread reads its own duplicates of the devices (H-c5-1): a device the loop closes, whose number the kernel then gives to another file
+// (a client's socket), is still the device to the reader until the loop's change hands it the next one; and a device let go of is closed there.
+// Pipes stand for the devices: the loop's descriptor, closed, and a new pipe made at the same number.
+static void reader_own_rows(void)
+{
+        int loop_pipe[2], other[2], saved_on = compositor_reader.on, saved_set = compositor_reader.set, saved_input = compositor.inputs[0];
+        unsigned int saved_count = compositor.input_count, count = 0, generations[COMPOSITOR_INPUTS];
+        int watched[COMPOSITOR_INPUTS];
+        unsigned char byte = 0;
+        b32 own, same_file, unwatched;
+
+        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+                watched[at] = -1, generations[at] = 0;
+        compositor_call(syscall(pipe2), (positive)loop_pipe, 0x800 | 0x80000, 0, 0, 0, 0);
+        compositor_reader.set = (int)system_call_1(syscall(epoll_create1), 0x80000);
+        compositor_reader.on = 1, compositor.input_count = 1, compositor.inputs[0] = loop_pipe[0], compositor_reader.own[0] = 0;
+        compositor_reader_changed(0);
+        compositor_reader_sync(watched, generations, &count);
+        own = watched[0] >= 0 && watched[0] != loop_pipe[0] && compositor_reader.own[0] == 0;
+        // The loop lets the device go and a new file takes its number before the reader hears of it.
+        system_close(loop_pipe[0]);
+        compositor_call(syscall(pipe2), (positive)other, 0x800 | 0x80000, 0, 0, 0, 0);
+        compositor_call(syscall(write), (positive)other[1], (positive)"x", 1, 0, 0, 0);
+        compositor_call(syscall(write), (positive)loop_pipe[1], (positive)"d", 1, 0, 0, 0);
+        same_file = system_read_once(watched[0], &byte, 1) == 1 && byte == 'd';
+        compositor.inputs[0] = -1;
+        compositor_reader_changed(0);
+        compositor_reader_sync(watched, generations, &count);
+        unwatched = watched[0] < 0 && compositor_reader.own[0] == 0;
+        check("input reader: it reads a duplicate of the device the loop handed it, so the number the loop closed and another file took is not read, "
+              "and a device let go of is unwatched and closed",
+              own && same_file && unwatched);
+        system_close(loop_pipe[1]), system_close(other[0]), system_close(other[1]), system_close(compositor_reader.set);
+        compositor_reader.on = saved_on, compositor_reader.set = saved_set, compositor.inputs[0] = saved_input, compositor.input_count = saved_count;
+}
+
 // Display off (kms.c compositor_dark): while the screens are out the input thread sends nothing straight to a client (compositor_reader_direct), so
 // every key and locked motion reaches the loop, whose take lights them; and a mode set while they are out (compositor_dark_set) puts them out again,
 // where the early return on dark == dark left them lit with display-off in force.
@@ -5328,6 +5364,7 @@ b32 main(void)
         close_ask_rows();
         xwm_socket_rows();
         display_off_rows();
+        reader_own_rows();
         grab_protocol_rows();
         fullscreen_rows();
         gpu_i915_rows();

@@ -4437,14 +4437,29 @@ static struct
         unsigned int dropped;        // a record the ring had no room for, to be said as SYN_DROPPED
         int down[256];               // a key the reader sent pressed itself: the row it went to, and one (0: none)
         unsigned int generation[COMPOSITOR_INPUTS];
+        // Each device's descriptor of the reader's own, handed by the loop at each change (compositor_reader_changed): a duplicate of the loop's
+        // as its number and one, which the reader takes (0 left: nothing handed) and watches and closes, or COMPOSITOR_READER_UNWATCH for a device
+        // let go of. The reader reads only descriptors it holds, so a number the loop closed and the kernel gave to a client's socket is never one
+        // the reader reads.
+        int own[COMPOSITOR_INPUTS];
         struct compositor_reader_record ring[COMPOSITOR_READER_RING];
 } compositor_reader = {0, -1, -1, -1};
+#define COMPOSITOR_READER_UNWATCH -1
 
 // Device at was opened or let go of by the loop: the reader takes its set again (from any of the loop's changes to the devices).
 static void compositor_reader_changed(unsigned int at)
 {
         unsigned long long one = 1;
 
+        if (at < COMPOSITOR_INPUTS && compositor_reader.on)
+        {
+                int fd = at < compositor.input_count ? compositor.inputs[at] : -1;
+                int own = fd >= 0 ? (int)compositor_call(syscall(fcntl), (positive)fd, 1030, 0, 0, 0, 0) : -1; // F_DUPFD_CLOEXEC
+                int old = __atomic_exchange_n(&compositor_reader.own[at], own >= 0 ? own + 1 : COMPOSITOR_READER_UNWATCH, __ATOMIC_ACQ_REL);
+
+                if (old > 0)
+                        system_close(old - 1); // one the reader had not taken yet
+        }
         if (at < COMPOSITOR_INPUTS)
                 __atomic_add_fetch(&compositor_reader.generation[at], 1, __ATOMIC_RELEASE);
         __atomic_add_fetch(&compositor_reader.changes, 1, __ATOMIC_RELEASE);
@@ -4588,27 +4603,30 @@ static int compositor_reader_direct(unsigned int at, const struct compositor_inp
 #endif
 }
 
-// The reader's set taken again from the loop's devices: each slot's descriptor watched under its slot's number (epoll's word for it).
+// The reader's set taken again from the loop's devices: each slot's descriptor the loop handed (compositor_reader.own) taken and watched under its
+// slot's number (epoll's word for it), the one it replaces closed; a slot with nothing handed is as it was. The generation is read after the take,
+// so a record is never tagged older than the descriptor it was read from.
 static void compositor_reader_sync(int *watched, unsigned int *generations, unsigned int *count)
 {
         unsigned int devices = __atomic_load_n(&compositor.input_count, __ATOMIC_ACQUIRE);
 
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS && (at < devices || at < *count); at++)
         {
-                int fd = at < devices ? __atomic_load_n(&compositor.inputs[at], __ATOMIC_ACQUIRE) : -1;
-                unsigned int generation = __atomic_load_n(&compositor_reader.generation[at], __ATOMIC_ACQUIRE);
+                int fd = __atomic_exchange_n(&compositor_reader.own[at], 0, __ATOMIC_ACQ_REL) - 1;
 
-                if (fd == watched[at] && generation == generations[at])
-                        continue;
+                if (fd == -1)
+                        continue; // nothing handed: as it was
                 if (watched[at] >= 0)
-                        system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 2, (positive)watched[at], 0);
-                watched[at] = -1, generations[at] = generation;
+                        system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 2, (positive)watched[at], 0), system_close(watched[at]);
+                watched[at] = -1, generations[at] = __atomic_load_n(&compositor_reader.generation[at], __ATOMIC_ACQUIRE);
                 if (fd >= 0)
                 {
                         struct compositor_epoll_event in = {COMPOSITOR_POLLIN, at};
 
                         if (system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 1, (positive)fd, (positive)&in) == 0)
                                 watched[at] = fd;
+                        else
+                                system_close(fd);
                 }
         }
         *count = devices > *count ? devices : *count;
@@ -4674,6 +4692,7 @@ static fn compositor_reader_run(address_any context)
                                         struct compositor_input_event gone = {0, 0, COMPOSITOR_READER_GONE, 0, 0};
 
                                         system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 2, (positive)watched[at], 0);
+                                        system_close(watched[at]);
                                         watched[at] = -1;
                                         compositor_reader_put(at, generations[at], &gone), put++;
                                         break;
@@ -4718,10 +4737,21 @@ static int compositor_reader_start(void)
         if (compositor_reader.knock < 0 || compositor_reader.wake < 0 || compositor_reader.set < 0 ||
             system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 1, (positive)compositor_reader.wake, (positive)&wake) != 0)
                 goto none;
+        // The devices open now handed as each change hands one (compositor_reader_changed).
+        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+        {
+                int fd = at < compositor.input_count ? compositor.inputs[at] : -1;
+                int own = fd >= 0 ? (int)compositor_call(syscall(fcntl), (positive)fd, 1030, 0, 0, 0, 0) : -1; // F_DUPFD_CLOEXEC
+
+                compositor_reader.own[at] = own >= 0 ? own + 1 : 0;
+        }
         compositor_reader.on = 1;
         if (thread_start(compositor_reader_run, null))
                 return 1;
         compositor_reader.on = 0;
+        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+                if (compositor_reader.own[at] > 0)
+                        system_close(compositor_reader.own[at] - 1), compositor_reader.own[at] = 0;
 none:
         if (compositor_reader.knock >= 0)
                 system_close(compositor_reader.knock);
