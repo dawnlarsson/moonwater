@@ -25,8 +25,6 @@
 #define COMPOSITOR_WL_READ 16384        // one read; a client gets at most COMPOSITOR_WL_READS of them a pass
 #define COMPOSITOR_WL_READS 32
 #define COMPOSITOR_WL_ACCEPTS 4
-#define COMPOSITOR_POLLOUT 4
-#define COMPOSITOR_POLLERR 8
 #define COMPOSITOR_WL_SIGBUS 7
 #define COMPOSITOR_WL_SIGPIPE 13
 #define COMPOSITOR_WL_SIGALRM 14
@@ -96,8 +94,6 @@ static int compositor_wl_room(unsigned char **at, long *room, long unit, long mo
 #define COMPOSITOR_WL_DMABUF_WAIT_NS 2000000ull       // how long a dma-buf's writer is waited for (bounded so a slow client never stalls a frame)
 #define COMPOSITOR_WL_STRAIGHT_WAIT_NS 8000000ull     // and a straight picture's, before its owed read (compositor_wl_straight_pay): a frame or so
 #define COMPOSITOR_WL_DMABUF_SLOW_NS 2000000000ull    // after one that did not finish in time, a client's are not waited for this long
-#define COMPOSITOR_WL_FOURCC_ARGB8888 0x34325241u
-#define COMPOSITOR_WL_FOURCC_XRGB8888 0x34325258u
 
 
 static struct
@@ -2227,7 +2223,7 @@ static int compositor_wl_needs_xform_ordered(const struct wayland_picture *pictu
         unsigned int fourcc = picture->fourcc;
         int order = (swapped & 1) && compositor_wl_fourcc_swapped(fourcc);
 
-        if (fourcc && fourcc != COMPOSITOR_WL_FOURCC_ARGB8888 && fourcc != COMPOSITOR_WL_FOURCC_XRGB8888 && !order)
+        if (fourcc && fourcc != WAYLAND_FOURCC_ARGB8888 && fourcc != WAYLAND_FOURCC_XRGB8888 && !order)
                 return 1;
         if (picture->format != WLN_wl_shm_format_argb8888 && picture->format != WLN_wl_shm_format_xrgb8888 &&
             !(order && (unsigned long)picture->format == (unsigned long)fourcc))
@@ -3094,7 +3090,7 @@ static int compositor_wl_gatherable(const struct wayland_picture *picture, long 
         unsigned int fourcc = picture->fourcc;
         long turned_w = picture->transform & 1 ? picture->height : picture->width, turned_h = picture->transform & 1 ? picture->width : picture->height;
 
-        if (fourcc != COMPOSITOR_WL_FOURCC_ARGB8888 && fourcc != COMPOSITOR_WL_FOURCC_XRGB8888 && fourcc != WAYLAND_FOURCC_ABGR8888 &&
+        if (fourcc != WAYLAND_FOURCC_ARGB8888 && fourcc != WAYLAND_FOURCC_XRGB8888 && fourcc != WAYLAND_FOURCC_ABGR8888 &&
             fourcc != WAYLAND_FOURCC_XBGR8888)
                 return 0;
         if (picture->format != WLN_wl_shm_format_argb8888 && picture->format != WLN_wl_shm_format_xrgb8888 && (unsigned long)picture->format != fourcc)
@@ -3530,8 +3526,8 @@ static inline unsigned int compositor_wl_resolve_fourcc(const struct wayland_pic
 {
         if (picture->fourcc)
                 return picture->fourcc;
-        return picture->format == WLN_wl_shm_format_argb8888   ? COMPOSITOR_WL_FOURCC_ARGB8888
-               : picture->format == WLN_wl_shm_format_xrgb8888 ? COMPOSITOR_WL_FOURCC_XRGB8888
+        return picture->format == WLN_wl_shm_format_argb8888   ? WAYLAND_FOURCC_ARGB8888
+               : picture->format == WLN_wl_shm_format_xrgb8888 ? WAYLAND_FOURCC_XRGB8888
                                                                : (unsigned int)picture->format;
 }
 
@@ -3559,7 +3555,7 @@ static inline unsigned int compositor_wl_convert_pixel(unsigned int v, unsigned 
                 r = (v >> 2) & 0xffu;
                 a = fourcc == WAYLAND_FOURCC_XBGR2101010 ? 0xffu : ((v >> 30) * 85u);
                 return (a << 24) | (r << 16) | (g << 8) | b;
-        case COMPOSITOR_WL_FOURCC_XRGB8888:
+        case WAYLAND_FOURCC_XRGB8888:
                 return v | 0xff000000u;
         default:
                 return v;
@@ -3602,15 +3598,15 @@ static unsigned int compositor_wl_decode_pixel(const struct wayland_picture *pic
 
 static void compositor_wl_convert_row(unsigned int *dst, const unsigned int *src, long count, unsigned int fourcc, int blend)
 {
-        if (!blend || fourcc == COMPOSITOR_WL_FOURCC_XRGB8888 || fourcc == WAYLAND_FOURCC_XBGR8888 ||
+        if (!blend || fourcc == WAYLAND_FOURCC_XRGB8888 || fourcc == WAYLAND_FOURCC_XBGR8888 ||
             fourcc == WAYLAND_FOURCC_XRGB2101010 || fourcc == WAYLAND_FOURCC_XBGR2101010)
         {
                 switch (fourcc)
                 {
-                case COMPOSITOR_WL_FOURCC_ARGB8888:
+                case WAYLAND_FOURCC_ARGB8888:
                         memory_copy_apart(dst, src, (positive)count * 4);
                         return;
-                case COMPOSITOR_WL_FOURCC_XRGB8888:
+                case WAYLAND_FOURCC_XRGB8888:
                         memory_or_u32(dst, src, (positive)count, 0xff000000u);
                         return;
                 case WAYLAND_FOURCC_ABGR8888:
@@ -3625,7 +3621,7 @@ static void compositor_wl_convert_row(unsigned int *dst, const unsigned int *src
                         return;
                 }
         }
-        if (fourcc == COMPOSITOR_WL_FOURCC_ARGB8888)
+        if (fourcc == WAYLAND_FOURCC_ARGB8888)
         {
                 memory_over_u32_rect(dst, (positive)count, src, (positive)count, (positive)count, 1);
                 return;
@@ -3859,7 +3855,7 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
                 return 1;
         }
         // Scaled 32-bit RGB without transform/y_invert/crop/blend: route through lib.c's SIMD/asm memory_resample_u32_rect.
-        if ((fourcc == COMPOSITOR_WL_FOURCC_ARGB8888 || fourcc == COMPOSITOR_WL_FOURCC_XRGB8888 ||
+        if ((fourcc == WAYLAND_FOURCC_ARGB8888 || fourcc == WAYLAND_FOURCC_XRGB8888 ||
              fourcc == WAYLAND_FOURCC_ABGR8888 || fourcc == WAYLAND_FOURCC_XBGR8888) &&
             !(picture->transform & 7) && !picture->y_invert && !picture->blend &&
             sx256 == 0 && sy256 == 0 && sw256 == bw * 256 && sh256 == bh * 256 && picture->sync_fd < 0)
@@ -3879,7 +3875,7 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
                         for (positive ry = 0; ry < rh; ry++)
                                 memory_swizzle_rb_u32(dst_base + ry * pitch, dst_base + ry * pitch, rw, or_mask);
                 }
-                else if (fourcc == COMPOSITOR_WL_FOURCC_XRGB8888)
+                else if (fourcc == WAYLAND_FOURCC_XRGB8888)
                         for (positive ry = 0; ry < rh; ry++)
                                 memory_or_u32(dst_base + ry * pitch, dst_base + ry * pitch, rw, 0xff000000u);
                 if (compositor_wl_cut(picture->pixels))
@@ -4798,7 +4794,7 @@ static const struct
 {
         unsigned int format;
         unsigned long modifier;
-} compositor_wl_dmabuf_entry[2] = {{COMPOSITOR_WL_FOURCC_ARGB8888, 0}, {COMPOSITOR_WL_FOURCC_XRGB8888, 0}};
+} compositor_wl_dmabuf_entry[2] = {{WAYLAND_FOURCC_ARGB8888, 0}, {WAYLAND_FOURCC_XRGB8888, 0}};
 
 // A device number as the kernel's stat gives it (the C library's dev_t).
 static unsigned long compositor_wl_dev(unsigned long major, unsigned long minor)
@@ -5041,8 +5037,8 @@ static int compositor_wl_fourcc_wanted(unsigned int fourcc)
 {
         switch (fourcc)
         {
-        case COMPOSITOR_WL_FOURCC_ARGB8888:
-        case COMPOSITOR_WL_FOURCC_XRGB8888:
+        case WAYLAND_FOURCC_ARGB8888:
+        case WAYLAND_FOURCC_XRGB8888:
         case WAYLAND_FOURCC_ABGR8888:
         case WAYLAND_FOURCC_XBGR8888:
         case WAYLAND_FOURCC_ARGB2101010:
@@ -5155,7 +5151,7 @@ static void compositor_wl_dmabuf_tiled_pairs(struct wayland_dmabuf_info *info)
         {
                 unsigned int format = plane.entry[at].format;
 
-                if ((format == COMPOSITOR_WL_FOURCC_XRGB8888 || format == WAYLAND_FOURCC_XBGR8888) &&
+                if ((format == WAYLAND_FOURCC_XRGB8888 || format == WAYLAND_FOURCC_XBGR8888) &&
                     plane.entry[at].modifier && plane.entry[at].modifier != WAYLAND_MODIFIER_INVALID && compositor_wl_tiled_takes(plane.entry[at].modifier))
                         compositor_wl_dmabuf_add_pair(info, format, plane.entry[at].modifier);
         }
@@ -5165,7 +5161,7 @@ static void compositor_wl_dmabuf_tiled_pairs(struct wayland_dmabuf_info *info)
 static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info *info)
 {
         static const unsigned int base_formats[] = {
-            COMPOSITOR_WL_FOURCC_ARGB8888, COMPOSITOR_WL_FOURCC_XRGB8888,
+            WAYLAND_FOURCC_ARGB8888, WAYLAND_FOURCC_XRGB8888,
             WAYLAND_FOURCC_ABGR8888,       WAYLAND_FOURCC_XBGR8888,
             WAYLAND_FOURCC_ARGB2101010,    WAYLAND_FOURCC_XRGB2101010,
             WAYLAND_FOURCC_ABGR2101010,    WAYLAND_FOURCC_XBGR2101010,

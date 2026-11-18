@@ -809,6 +809,8 @@ struct compositor_poll
 };
 
 #define COMPOSITOR_POLLIN 1
+#define COMPOSITOR_POLLOUT 4
+#define COMPOSITOR_POLLERR 8
 #define COMPOSITOR_POLLHUP 16
 
 // The input devices read, and the evdev numbers the hotplug watch can name: as many as the kernel has, INPUT_MAX_CHAR_DEVICES (1024, the
