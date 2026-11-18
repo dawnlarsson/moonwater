@@ -1,7 +1,7 @@
 @language es
 @name Español
 @translated machine
-# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 action_copy	3664	Copiar
 action_cut	5863	Cortar
 action_paste	0288	Pegar
@@ -375,6 +375,7 @@ taskbar_tab_stop_windows	3c5f	Forzar detención (%d ventanas)
 taskbar_tab_unpin	6771	Desanclar de la barra de tareas
 terminal_exited_press_to_close	a8cf	terminó con estado %d, pulse una tecla para cerrar
 terminal_press_to_close	080d	pulse una tecla para cerrar
+text_copy_too_large	2d09	La selección es demasiado grande para copiarla: se copian 64 MiB como máximo
 tray_am	0d13	a. m.
 tray_charging	60c2	cargando
 tray_clock_12h	8ab5	Reloj de 12 horas

@@ -2,7 +2,7 @@
 @name اردو
 @translated machine
 @direction rtl
-# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 action_copy	3664	کاپی
 action_cut	5863	کٹ
 action_paste	0288	پیسٹ
@@ -376,6 +376,7 @@ taskbar_tab_stop_windows	3c5f	زبردستی بند کریں (%d ونڈوز)
 taskbar_tab_unpin	6771	ٹاسک بار سے ان پن کریں
 terminal_exited_press_to_close	a8cf	ایگزٹ کوڈ %d کے ساتھ ختم ہوا، بند کرنے کے لیے کوئی کلید دبائیں
 terminal_press_to_close	080d	بند کرنے کے لیے کوئی کلید دبائیں
+text_copy_too_large	2d09	انتخاب کاپی کرنے کے لیے بہت بڑا ہے: زیادہ سے زیادہ 64 MiB کاپی ہوتا ہے
 tray_am	0d13	ص
 tray_charging	60c2	چارج ہو رہی ہے
 tray_clock_12h	8ab5	12 گھنٹے کی گھڑی

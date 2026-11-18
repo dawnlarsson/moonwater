@@ -172,6 +172,7 @@ struct files_model
         p8 address_to back, address_to forward; // FILES_HISTORY paths each, the last the nearest
         p32 back_count, forward_count;
         p32 revision;            // counted up when what a view shows of it changed
+        p32 listed;              // counted up each time a listing is whole (read or kept): what is worked out of a listing is kept against it
         p32 reads;               // the readings of a folder begun, ever: a kept listing shown begins none
         bipolar seat;            // where a view has the rows of the folder shown (its scroll): kept with a listing and given back with it
         b32 restored;            // the folder shown came from a kept listing, as it was left, and was not read
@@ -580,7 +581,7 @@ static fn files_model_finish(struct files_model address_to m, bipolar error)
                 // The entries are other entries now: what was chosen of the old ones is not carried to them.
                 files_model_choose_none(m);
         }
-        m->state = FILES_READY, m->error = 0;
+        m->state = FILES_READY, m->error = 0, m->listed++;
         m->cursor = m->came[0] ? files_model_find(m, m->came) : FILES_NO;
         if (m->cursor == FILES_NO && m->shown.places)
                 m->cursor = 0;
@@ -788,7 +789,7 @@ static fn files_model_show(struct files_model address_to m, string_address path,
                     now.device_major == k->folder.device_major && now.device_minor == k->folder.device_minor)
                 {
                         files_keep_take(m, kept);
-                        m->state = FILES_READY, m->error = 0, m->restored = true, m->came[0] = end;
+                        m->state = FILES_READY, m->error = 0, m->restored = true, m->came[0] = end, m->listed++;
                         m->revision++;
                         return;
                 }
@@ -1582,13 +1583,17 @@ static b32 files_delete_begin(struct files_model address_to m, struct files_job 
 }
 
 // The name of the job's entry number `which`.
+// The which-th of a table of strings each with its end after it (a delete's names, a move's paths).
+static const p8 address_to files_nth(const p8 address_to table, p32 which)
+{
+        while (which--)
+                table += string_length((string_address)table) + 1;
+        return table;
+}
+
 static const p8 address_to files_job_name(const struct files_job address_to job, p32 which)
 {
-        const p8 address_to name = job->names;
-
-        while (which--)
-                name += string_length((string_address)name) + 1;
-        return name;
+        return files_nth(job->names, which);
 }
 
 // One thing of a delete: the next entry inside the innermost folder it is in removed or gone into, or that folder, empty, removed
@@ -2129,11 +2134,7 @@ static b32 files_move_begin(struct files_move address_to job, int how, bipolar i
 
 static const p8 address_to files_move_path(const struct files_move address_to job, p32 which)
 {
-        const p8 address_to path = job->paths;
-
-        while (which--)
-                path += string_length((string_address)path) + 1;
-        return path;
+        return files_nth(job->paths, which);
 }
 
 /*
@@ -2953,13 +2954,17 @@ static int files_bin_restore(const p8 address_to bin, const p8 address_to name, 
 #define FILES_GIT_INDEX_MOST (64u << 20) // an index larger than this is not read
 #define FILES_GIT_NAMES 131072u          // the names' table: twice the listing's most
 
-// Whether text matches a glob of * and ? (no classes), both length-bounded.
-static b32 files_git_glob(const p8 address_to glob, positive glob_length, const p8 address_to text, positive length)
+// Whether text matches a glob of * and ? (no classes), both length-bounded; each step of it counted off budget, and none matches once that
+// is spent (a hostile ignore file's patterns cost what the budget allows and no more).
+static b32 files_git_glob(const p8 address_to glob, positive glob_length, const p8 address_to text, positive length, positive address_to budget)
 {
         positive g = 0, t = 0, star = (positive)-1, mark = 0;
 
         while (t < length)
         {
+                if (!*budget)
+                        return false;
+                --*budget;
                 if (g < glob_length && (glob[g] == '?' || glob[g] == text[t]))
                         g++, t++;
                 else if (g < glob_length && glob[g] == '*')
@@ -2974,15 +2979,47 @@ static b32 files_git_glob(const p8 address_to glob, positive glob_length, const 
         return g == glob_length;
 }
 
-// Whether a .gitignore's text ignores name (a folder's when folder): rooted is true for the folder the file is in.
-static b32 files_git_ignores(const p8 address_to text, positive size, const p8 address_to name, positive length, b32 folder, b32 rooted)
-{
-        b32 ignored = false;
+/*
+        The ignore files' patterns, read once for a listing: a line that is a name alone goes into a table of names (the most lines are
+        those, and a name is then one lookup whatever the file's length); one with * or ? is kept for the glob, at most FILES_GIT_GLOBS of
+        them, and every glob of the listing's names against them shares one budget of steps (FILES_GIT_BUDGET).
+*/
+#define FILES_GIT_LITERALS 4096u      // the table of a name pattern: a power of two
+#define FILES_GIT_GLOBS 256           // the wildcard patterns kept
+#define FILES_GIT_BUDGET 4000000ul    // the glob steps a listing's marks may take
+#define FILES_GIT_IGNORE_MOST 16384   // the bytes of an ignore file read
 
+struct files_git_pattern
+{
+        const p8 address_to text;
+        p16 length;
+        p8 only_folders, rooted; // a / at its end; it is of the folder the file is in (the file is the folder shown's, or a / began it)
+};
+
+static struct
+{
+        struct files_git_pattern literal[FILES_GIT_LITERALS]; // by the name's hash, open addressed (length 0: none)
+        struct files_git_pattern glob[FILES_GIT_GLOBS];
+        int globs;
+} files_git_rules;
+
+static p32 files_git_hash(const p8 address_to text, positive length)
+{
+        p32 hash = 2166136261u;
+
+        for (positive k = 0; k < length; k++)
+                hash = (hash ^ text[k]) * 16777619u;
+        return hash;
+}
+
+// An ignore file's lines read into the rules: rooted says the folder shown is the folder the file is in.
+static fn files_git_rules_add(const p8 address_to text, positive size, b32 rooted)
+{
         for (positive at = 0; at < size;)
         {
                 positive start = at, stop;
-                b32 only_folders = false, anchored = false, inside = false;
+                b32 only_folders = false, anchored = false, inside = false, wild = false;
+                struct files_git_pattern pattern;
 
                 while (at < size && text[at] != '\n')
                         at++;
@@ -2996,25 +3033,71 @@ static b32 files_git_ignores(const p8 address_to text, positive size, const p8 a
                 if (stop > start && text[start] == '/')
                         anchored = true, start++;
                 for (positive k = start; k < stop; k++)
-                        inside |= text[k] == '/';
-                if (inside || stop == start || (anchored && !rooted) || (only_folders && !folder))
+                        inside |= text[k] == '/', wild |= text[k] == '*' || text[k] == '?';
+                if (inside || stop == start || stop - start > 255 || (anchored && !rooted))
                         continue;
-                if (files_git_glob(text + start, stop - start, name, length))
-                        ignored = true;
+                pattern = (struct files_git_pattern){text + start, (p16)(stop - start), (p8)only_folders, (p8)(rooted || anchored)};
+                if (wild && files_git_rules.globs < FILES_GIT_GLOBS)
+                        files_git_rules.glob[files_git_rules.globs++] = pattern;
+                else if (!wild)
+                {
+                        p32 hash = files_git_hash(pattern.text, pattern.length);
+
+                        for (p32 probe = 0; probe < FILES_GIT_LITERALS; probe++, hash++)
+                        {
+                                struct files_git_pattern address_to slot = &files_git_rules.literal[hash & (FILES_GIT_LITERALS - 1)];
+
+                                if (!slot->length)
+                                {
+                                        *slot = pattern;
+                                        break;
+                                }
+                                // The same name again: a folder-only one and one of every kind are one of every kind.
+                                if (slot->length == pattern.length && !memory_compare(slot->text, pattern.text, pattern.length))
+                                {
+                                        slot->only_folders &= pattern.only_folders;
+                                        break;
+                                }
+                        }
+                }
         }
-        return ignored;
+}
+
+// Whether the rules ignore name (a folder's when folder).
+static b32 files_git_ignored(const p8 address_to name, positive length, b32 folder, positive address_to budget)
+{
+        p32 hash = files_git_hash(name, length);
+
+        for (p32 probe = 0; probe < FILES_GIT_LITERALS; probe++, hash++)
+        {
+                const struct files_git_pattern address_to slot = &files_git_rules.literal[hash & (FILES_GIT_LITERALS - 1)];
+
+                if (!slot->length)
+                        break;
+                if (slot->length == length && !memory_compare(slot->text, name, length) && (folder || !slot->only_folders))
+                        return true;
+        }
+        for (int k = 0; k < files_git_rules.globs; k++)
+        {
+                const struct files_git_pattern address_to g = &files_git_rules.glob[k];
+
+                if ((folder || !g->only_folders) && files_git_glob(g->text, g->length, name, length, budget))
+                        return true;
+        }
+        return false;
 }
 
 /*
         The marks of the listing shown, by entry (state[k] for m->shown.entry[k], FILES_MOST of them): true where the folder is in a
-        work tree and its index was read, false (every mark FILES_GIT_NONE) else.
+        work tree and its index was read, false (every mark FILES_GIT_NONE) else. The index is read, not mapped (a file cut short while it
+        is read is a short read, not a fault), and one larger than FILES_GIT_INDEX_MOST is not read.
 */
 static b32 files_git_marks(const struct files_model address_to m, p8 address_to state)
 {
         static p32 table[FILES_GIT_NAMES];
-        static p8 root[FILES_PATH], ignore[2][16384];
+        static p8 root[FILES_PATH], ignore[2][FILES_GIT_IGNORE_MOST];
         p8 at_path[FILES_PATH];
-        positive length = string_length((string_address)m->path), rel, ignore_size[2] = {0, 0}, size = 0;
+        positive length = string_length((string_address)m->path), rel, ignore_size[2] = {0, 0}, size = 0, got = 0, budget = FILES_GIT_BUDGET;
         file_facts facts;
         bipolar handle;
         long mapped;
@@ -3048,16 +3131,28 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
         if ((handle = system_open_at(AT_FDCWD, (string_address)at_path, FILE_READ | O_CLOEXEC)) < 0)
                 return false;
         size = file_look_code(handle, (string_address) "", AT_EMPTY_PATH, &facts) == 0 ? (positive)facts.size : 0;
-        mapped = size >= 12 && size <= FILES_GIT_INDEX_MOST ? (long)system_call_6(syscall(mmap), 0, size, 1, 2, (positive)handle, 0) : -1;
-        system_close(handle);
+        mapped = size >= 12 && size <= FILES_GIT_INDEX_MOST ? (long)system_call_6(syscall(mmap), 0, size, 3, 0x22, (positive)-1, 0) : -1;
         if (mapped < 0 && mapped > -4096)
-                return false;
-        index = (const p8 address_to)mapped;
-        version = (p32)index[4] << 24 | (p32)index[5] << 16 | (p32)index[6] << 8 | index[7];
-        count = (p32)index[8] << 24 | (p32)index[9] << 16 | (p32)index[10] << 8 | index[11];
-        if (memory_compare(index, "DIRC", 4) || (version != 2 && version != 3))
+                mapped = -1;
+        // Read whole into memory of its own; what it holds past a short read is the zeros the mapping began with, and is not read.
+        while (mapped >= 0 && got < size)
         {
-                system_call_2(syscall(munmap), (positive)mapped, size);
+                bipolar part = (bipolar)system_read_once(handle, (p8 address_to)mapped + got, size - got);
+
+                if (part <= 0)
+                        break;
+                got += (positive)part;
+        }
+        system_close(handle);
+        if (mapped < 0)
+                return false;
+        size = got;
+        index = (const p8 address_to)mapped;
+        version = size >= 12 ? (p32)index[4] << 24 | (p32)index[5] << 16 | (p32)index[6] << 8 | index[7] : 0;
+        count = size >= 12 ? (p32)index[8] << 24 | (p32)index[9] << 16 | (p32)index[10] << 8 | index[11] : 0;
+        if (size < 12 || memory_compare(index, "DIRC", 4) || (version != 2 && version != 3))
+        {
+                system_call_2(syscall(munmap), (positive)mapped, facts.size);
                 return false;
         }
         // The listing's names in a table, each to its entry, so a path of the index finds its entry at once.
@@ -3065,10 +3160,8 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
         for (p32 k = 0; k < m->shown.count; k++)
         {
                 const struct files_entry address_to entry = &m->shown.entry[k];
-                p32 hash = 2166136261u;
+                p32 hash = files_git_hash(m->shown.names + entry->name, entry->length);
 
-                for (p16 c = 0; c < entry->length; c++)
-                        hash = (hash ^ m->shown.names[entry->name + c]) * 16777619u;
                 while (table[hash & (FILES_GIT_NAMES - 1)] != 0xffffffffu)
                         hash++;
                 table[hash & (FILES_GIT_NAMES - 1)] = k;
@@ -3078,52 +3171,48 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
         for (positive at = 12, k = 0; k < count && at + 62 < size; k++)
         {
                 p16 flags = (p16)(index[at + 60] << 8 | index[at + 61]);
-                positive fixed = 62 + (version >= 3 && (flags & 0x4000) ? 2 : 0), name_at = at + fixed, end_at = name_at, first;
-                p32 hash = 2166136261u, found;
+                positive fixed = 62 + (version >= 3 && (flags & 0x4000) ? 2 : 0), name_at = at + fixed, end_at = name_at, first, stop;
+                p32 hash, found;
 
                 while (end_at < size && index[end_at])
                         end_at++;
                 at = at + ((fixed + (end_at - name_at) + 8) & ~(positive)7);
-                // The path inside the work tree is the folder shown's (m->path from rel) and a /, then the name.
                 first = name_at;
                 if (!at_root)
                 {
-                        positive inside = length - (rel - 1); // m->path + rel - 1 is "/sub/dir": its bytes after the slash are inside - 1
+                        positive inside = length - (rel - 1); // the folder shown's path from its slash in the work tree: "/sub/dir"
 
                         if (end_at - name_at < inside || memory_compare(index + name_at, m->path + rel, inside - 1) || index[name_at + inside - 1] != '/')
                                 continue;
                         first = name_at + inside;
                 }
-                for (positive c = first; c < end_at && index[c] != '/'; c++)
-                        hash = (hash ^ index[c]) * 16777619u;
+                for (stop = first; stop < end_at && index[stop] != '/'; stop++)
+                        ;
+                hash = files_git_hash(index + first, stop - first);
+                while ((found = table[hash & (FILES_GIT_NAMES - 1)]) != 0xffffffffu)
                 {
-                        positive stop = first;
+                        const struct files_entry address_to entry = &m->shown.entry[found];
 
-                        while (stop < end_at && index[stop] != '/')
-                                stop++;
-                        while ((found = table[hash & (FILES_GIT_NAMES - 1)]) != 0xffffffffu)
+                        if (entry->length == stop - first && !memory_compare(m->shown.names + entry->name, index + first, stop - first))
                         {
-                                const struct files_entry address_to entry = &m->shown.entry[found];
-
-                                if (entry->length == stop - first && !memory_compare(m->shown.names + entry->name, index + first, stop - first))
-                                {
-                                        state[found] = FILES_GIT_TRACKED;
-                                        break;
-                                }
-                                hash++;
+                                state[found] = FILES_GIT_TRACKED;
+                                break;
                         }
+                        hash++;
                 }
         }
-        system_call_2(syscall(munmap), (positive)mapped, size);
-        // The ignore files: the work tree's root's and the folder shown's.
+        system_call_2(syscall(munmap), (positive)mapped, facts.size);
+        // The ignore files: the work tree's root's and the folder shown's, read once into the rules.
+        memory_zero(&files_git_rules, sizeof(files_git_rules));
         for (int which = 0; which < 2; which++)
         {
-                bipolar got;
+                bipolar read;
 
                 string_copy_bounded((string_address)at_path, (string_address)(which ? m->path : root), FILES_PATH);
                 string_append_bounded((string_address)at_path, (string_address)(string_length((string_address)at_path) > 1 ? "/.gitignore" : ".gitignore"), FILES_PATH);
-                got = file_slurp_once_at(AT_FDCWD, (string_address)at_path, ignore[which], sizeof(ignore[which]));
-                ignore_size[which] = got > 0 ? (positive)got : 0;
+                read = file_slurp_once_at(AT_FDCWD, (string_address)at_path, ignore[which], sizeof(ignore[which]));
+                ignore_size[which] = read > 0 ? (positive)read : 0;
+                files_git_rules_add(ignore[which], ignore_size[which], which ? true : at_root);
                 if (at_root)
                         break; // the folder shown is the root: one file
         }
@@ -3131,17 +3220,13 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
         {
                 const struct files_entry address_to entry = &m->shown.entry[k];
                 const p8 address_to name = m->shown.names + entry->name;
-                b32 folder = entry->kind == FILES_KIND_DIRECTORY;
 
                 if (entry->length == 4 && !memory_compare(name, ".git", 4))
                 {
                         state[k] = FILES_GIT_NONE;
                         continue;
                 }
-                if (state[k] != FILES_GIT_UNTRACKED)
-                        continue;
-                if (files_git_ignores(ignore[0], ignore_size[0], name, entry->length, folder, at_root) ||
-                    (!at_root && files_git_ignores(ignore[1], ignore_size[1], name, entry->length, folder, true)))
+                if (state[k] == FILES_GIT_UNTRACKED && files_git_ignored(name, entry->length, entry->kind == FILES_KIND_DIRECTORY, &budget))
                         state[k] = FILES_GIT_IGNORED;
         }
         return true;

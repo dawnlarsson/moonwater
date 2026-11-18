@@ -3335,16 +3335,6 @@ static fn files_draw(unsigned int address_to pixels)
         struct ui_list address_to l = &files.big->list;
 
         ui_begin(ui, pixels, files.own.table->stride, files.width, files.height);
-        // The git marks of a listing that is whole and is not the one they were worked out for.
-        {
-                const struct files_model address_to m = &files.big->model;
-                p64 key = (p64)m->shown.count * 1000003ull + m->shown.names_used + (p64)language_hash((const char address_to)m->path) * 7919ull;
-
-                if (m->state == FILES_READY && key != files.git_key)
-                        files.git = files_git_marks(m, files_git_state), files.git_key = key;
-                else if (m->state != FILES_READY)
-                        files.git_key = 0;
-        }
         files_layout();
         ui_side_place(ui, files.side_box.x, files.side_box.w);
         l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && !files.crumb_keys && !files.tree_keys;
@@ -3374,6 +3364,13 @@ static long files_tick(long timeout, long address_to other)
         b64 now = (b64)ui_kit.now, wait;
 
         (void)other;
+        // The git marks of a listing that is whole and is not the one they were worked out for, here and not in the picture: once a listing,
+        // by the count of listings made whole (files_model.listed), which a listing of the same names' lengths changes too.
+        if (m->state == FILES_READY && m->listed != files.git_key)
+        {
+                files.git = files_git_marks(m, files_git_state), files.git_key = m->listed;
+                files.dirty = true;
+        }
         // A drag over the window: held over a folder it opens it (a row's folder shown, a tree node's shown and opened in the tree), and
         // near a list's top or foot it scrolls that list, faster nearer the edge, a frame at a time.
         if (files.drop_over)

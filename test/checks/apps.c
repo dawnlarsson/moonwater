@@ -935,6 +935,7 @@ static fn drop_check(struct ui address_to wui);
 static fn band_check(struct ui address_to wui);
 static fn columns_check(struct ui address_to wui);
 static fn hold_check(struct ui address_to wui);
+static fn copy_cap_check(void);
 
 /*
         An error's underline in a code view is a wave one pixel tall at 100 percent, a row under the text. The line was the scale's
@@ -1167,6 +1168,26 @@ static fn hold_check(struct ui address_to wui)
         ground_held = (ui_list_hold_tick(wui, &l, l.hold.at + UI_CHOOSE_HOLD_NS) & UI_LIST_HELD) && l.hold.target == -1;
         ui_list_click(wui, &l, &release, 20, 100 + 8 * row);
         check("hold: on a list a press held on the ground past its rows turns with none, a band's", ground_held);
+}
+
+/*
+        A copy's cap: selections that hold more than KIT_COPY_MOST bytes between them are too large to copy, and doc_copy_text gives none of
+        them (it reserves nothing, so a multi-gigabyte selection is never put in memory), where ones under it are not too large.
+*/
+static fn copy_cap_check(void)
+{
+        static struct doc doc;
+        struct doc_selection sel[2] = {{0, KIT_COPY_MOST / 2, -1}, {KIT_COPY_MOST, KIT_COPY_MOST + KIT_COPY_MOST / 2 + 1, -1}};
+        p8 address_to text = (p8 address_to)1;
+        positive room = 1;
+        b32 small, large;
+
+        memory_zero(&doc, sizeof(doc));
+        doc.selections = sel, doc.selection_count = 1;
+        small = !doc_copy_too_large(&doc);
+        doc.selection_count = 2;
+        large = doc_copy_too_large(&doc) && doc_copy_text(&doc, &text, &room) == 0 && !text && !room;
+        check("copy: selections over 64 MiB between them are too large to copy and nothing of them is read or reserved; under it they copy", small && large);
 }
 
 /*
@@ -1624,6 +1645,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         band_check(&wui);
         columns_check(&wui);
         hold_check(&wui);
+        copy_cap_check();
         squiggle_check(&wui);
         ui_over_check();
 }

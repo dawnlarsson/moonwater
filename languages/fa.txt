@@ -2,7 +2,7 @@
 @name فارسی
 @translated machine
 @direction rtl
-# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 action_copy	3664	کپی
 action_cut	5863	برش
 action_paste	0288	چسباندن
@@ -376,6 +376,7 @@ taskbar_tab_stop_windows	3c5f	توقف اجباری (%d پنجره)
 taskbar_tab_unpin	6771	برداشتن سنجاق از نوار وظیفه
 terminal_exited_press_to_close	a8cf	با کد خروج %d پایان یافت؛ برای بستن یک کلید را فشار دهید
 terminal_press_to_close	080d	برای بستن یک کلید را فشار دهید
+text_copy_too_large	2d09	انتخاب برای کپی بیش از حد بزرگ است: حداکثر ۶۴ مبی‌بایت کپی می‌شود
 tray_am	0d13	ق.ظ
 tray_charging	60c2	در حال شارژ
 tray_clock_12h	8ab5	ساعت ۱۲ ساعته

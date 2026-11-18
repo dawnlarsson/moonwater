@@ -814,6 +814,9 @@ static b32 editor_event(const struct window_event address_to event)
                 editor_command(tab->view.command);
         if (asks & UI_TEXT_MENU)
                 editor_menu_open(tab->view.menu_x, tab->view.menu_y);
+        // A copy refused (a selection too large to copy): the status says why.
+        if ((asks & UI_TEXT_REFUSED) && tab->view.refused)
+                string_copy_bounded((string_address)editor.status, (string_address)tab->view.refused, sizeof(editor.status));
         if (asks)
                 editor.dirty = true;
         return true;

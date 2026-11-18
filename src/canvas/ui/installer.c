@@ -486,32 +486,32 @@ static fn installer_go(int step)
         installer.dirty = true;
 }
 
-static fn installer_pick_language(int at)
+// A code chosen into a choice of room bytes (the language's, the keyboard's): where it is another, it is taken, marked changed and applied
+// at once by its verb; the row is the list's lit one.
+static fn installer_pick_code(int at, char address_to choice, positive room, b32 address_to changed, const char address_to verb, const char address_to code)
 {
-        if (at < 0 || at >= (int)INSTALLER_LANGUAGES)
-                return;
-        if (!string_equals((string_address)installer.choice.language, (string_address)language_names[at].code))
+        if (!string_equals((string_address)choice, (string_address)code))
         {
-                string_copy_bounded((string_address)installer.choice.language, (string_address)language_names[at].code, sizeof(installer.choice.language));
-                installer.choice.language_changed = true;
-                installer_apply("language", installer.choice.language);
+                string_copy_bounded((string_address)choice, (string_address)code, room);
+                *changed = true;
+                installer_apply(verb, choice);
         }
         installer.big->list.focus = at;
         installer.dirty = true;
 }
 
+static fn installer_pick_language(int at)
+{
+        if (at >= 0 && at < (int)INSTALLER_LANGUAGES)
+                installer_pick_code(at, installer.choice.language, sizeof(installer.choice.language), &installer.choice.language_changed, "language",
+                                    language_names[at].code);
+}
+
 static fn installer_pick_layout(int at)
 {
-        if (at < 0 || at >= (int)INSTALLER_LAYOUTS)
-                return;
-        if (!string_equals((string_address)installer.choice.keyboard, (string_address)installer_layouts[at].code))
-        {
-                string_copy_bounded((string_address)installer.choice.keyboard, (string_address)installer_layouts[at].code, sizeof(installer.choice.keyboard));
-                installer.choice.keyboard_changed = true;
-                installer_apply("keyboard", installer.choice.keyboard);
-        }
-        installer.big->list.focus = at;
-        installer.dirty = true;
+        if (at >= 0 && at < (int)INSTALLER_LAYOUTS)
+                installer_pick_code(at, installer.choice.keyboard, sizeof(installer.choice.keyboard), &installer.choice.keyboard_changed, "keyboard",
+                                    installer_layouts[at].code);
 }
 
 // A network pressed: an open one, or one saved, is joined at once; another asks its passphrase first.

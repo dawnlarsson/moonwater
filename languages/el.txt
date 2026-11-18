@@ -1,7 +1,7 @@
 @language el
 @name Ελληνικά
 @translated machine
-# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 action_copy	3664	Αντιγραφή
 action_cut	5863	Αποκοπή
 action_paste	0288	Επικόλληση
@@ -375,6 +375,7 @@ taskbar_tab_stop_windows	3c5f	Αναγκαστική διακοπή (%d παρά
 taskbar_tab_unpin	6771	Ξεκαρφίτσωμα από τη γραμμή εργασιών
 terminal_exited_press_to_close	a8cf	τερματίστηκε με κατάσταση %d, πατήστε ένα πλήκτρο για κλείσιμο
 terminal_press_to_close	080d	πατήστε ένα πλήκτρο για κλείσιμο
+text_copy_too_large	2d09	Η επιλογή είναι πολύ μεγάλη για αντιγραφή: αντιγράφονται έως 64 MiB
 tray_am	0d13	πμ
 tray_charging	60c2	φορτίζει
 tray_clock_12h	8ab5	12ωρο ρολόι

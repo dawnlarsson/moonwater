@@ -4272,7 +4272,7 @@ static fn browser_asks(void)
                 static const char ignore[] = "# built\n*.o\nbuild/\n!keep.o\n";
                 const char address_to tracked[2] = {"kept.c", "sub/x"};
                 positive used = 12;
-                p8 path[FILES_PATH];
+                p8 path[FILES_PATH], at_path_check[FILES_PATH];
                 bipolar out;
                 b32 marked;
 
@@ -4309,6 +4309,43 @@ static fn browser_asks(void)
                          GIT_MARK("a.o") == FILES_GIT_IGNORED && GIT_MARK("build") == FILES_GIT_IGNORED && GIT_MARK(".git") == FILES_GIT_NONE &&
                          GIT_MARK(".gitignore") == FILES_GIT_UNTRACKED;
 #undef GIT_MARK
+                // A listing read again counts its listings up, so marks kept against one are worked out again even where the names swapped
+                // for others of the same lengths (kept.c gone and kepu.c new: the same count and the same bytes of names).
+                {
+                        p32 listed = m->listed;
+                        b32 fresh_marks;
+
+                        browser_path(path, (string_address) "gt/kept.c");
+                        browser_path(at_path_check, (string_address) "gt/kepu.c");
+                        system_call_5(syscall(renameat2), AT_FDCWD, (positive)path, AT_FDCWD, (positive)at_path_check, 0);
+                        files_model_reload(m);
+                        browser_read(m, 64);
+                        fresh_marks = m->listed != listed && files_git_marks(m, files_git_check_state) &&
+                                      files_git_check_state[m->shown.order[browser_at(m, "kepu.c")]] == FILES_GIT_UNTRACKED;
+                        check("browser: a listing read again counts listed up, and marks worked out again see a name swapped for one of its length untracked", fresh_marks);
+                }
+                // A hostile ignore file: sixteen KiB of wildcard lines that backtrack, and a name line after them; the marks come back, in the glob
+                // steps' budget, and the name line still ignores its name.
+                {
+                        static char hostile[FILES_GIT_IGNORE_MOST];
+                        positive used = 0;
+                        b32 bounded;
+
+                        while (used + 40 < sizeof(hostile) - 16)
+                        {
+                                memory_copy(hostile + used, "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b\n", 33);
+                                used += 33;
+                        }
+                        memory_copy(hostile + used, "new.c\n", 6), used += 6;
+                        browser_path(path, (string_address) "gt/.gitignore");
+                        out = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+                        if (out >= 0)
+                                system_write_once((b32)out, hostile, used), system_close(out);
+                        files_model_reload(m);
+                        browser_read(m, 64);
+                        bounded = files_git_marks(m, files_git_check_state) && files_git_check_state[m->shown.order[browser_at(m, "new.c")]] == FILES_GIT_IGNORED;
+                        check("browser: a hostile .gitignore of backtracking wildcard lines is read in the marks' budget, and its name lines still ignore", bounded);
+                }
                 browser_go(m, (string_address) "asks");
                 check("browser: in a work tree a name the index holds is tracked (a folder by what is under it), one a .gitignore matches ignored (a folder by a pattern with its /), any other untracked, .git none",
                       marked && !files_git_marks(m, files_git_check_state));

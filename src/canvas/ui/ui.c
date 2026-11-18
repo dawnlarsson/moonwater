@@ -5044,6 +5044,24 @@ static b32 doc_paste(struct doc address_to doc, const p8 address_to text, p64 le
 
 // The selected text of every selection, joined by the file's line end, into a buffer the caller releases with
 // array_store_release: its length, 0 and nothing kept when nothing is selected or there is no memory.
+#define KIT_COPY_MOST (64ul << 20) // the most a copy or a drag of text offers: a larger selection is refused, never put in memory whole
+
+// Whether the selections' text with their line ends between them is more than KIT_COPY_MOST: summed before any of it is read.
+static b32 doc_copy_too_large(const struct doc address_to doc)
+{
+        p64 total = 0, eol_length = doc_eol_length(doc);
+
+        for (positive s = 0; s < doc->selection_count; s++)
+        {
+                p64 start = doc_sel_start(&doc->selections[s]), finish = doc_sel_end(&doc->selections[s]);
+
+                total += (finish - start) + (total ? eol_length : 0);
+                if (total > KIT_COPY_MOST)
+                        return true;
+        }
+        return false;
+}
+
 static positive doc_copy_text(const struct doc address_to doc, p8 address_to address_to into, positive address_to room)
 {
         positive length = 0, eol_length = doc_eol_length(doc);
@@ -5051,6 +5069,9 @@ static positive doc_copy_text(const struct doc address_to doc, p8 address_to add
 
         *into = null;
         *room = 0;
+        // More than a copy offers is none: the caller says why (doc_copy_too_large).
+        if (doc_copy_too_large(doc))
+                return 0;
         for (positive s = 0; s < doc->selection_count; s++)
         {
                 p64 start = doc_sel_start(&doc->selections[s]), finish = doc_sel_end(&doc->selections[s]);
@@ -8352,6 +8373,7 @@ LANGUAGE_ID(taskbar_tab_stop_windows, "Force stop (%d windows)") \
 LANGUAGE_ID(taskbar_tab_unpin, "Unpin from taskbar") \
 LANGUAGE_ID(terminal_exited_press_to_close, "exited with status %d, press a key to close") \
 LANGUAGE_ID(terminal_press_to_close, "press a key to close") \
+LANGUAGE_ID(text_copy_too_large, "The selection is too large to copy: at most 64 MiB is copied") \
 LANGUAGE_ID(tray_am, "AM") \
 LANGUAGE_ID(tray_charging, "charging") \
 LANGUAGE_ID(tray_clock_12h, "12-hour clock") \
@@ -17517,41 +17539,12 @@ static fn ui_moon(struct ui address_to ui, int left, int top, int size, b64 phas
         }
 }
 
-// A pen's helpers for the moon in ink (ui_moon_paper): an ink laid over a pixel at a cover, a stroke, a point of the sphere onto the picture.
+// A pen's helper for the moon in ink (ui_moon_paper): an ink laid over a pixel at a cover.
 static inline unsigned int ui_moon_line_over(unsigned int pixel, unsigned int ink, decimal cover)
 {
         unsigned int amount = cover <= 0 ? 0 : cover >= 1 ? 256 : (unsigned int)(cover * 256);
 
         return amount ? (pixel & 0xff000000u) | window_mix(pixel, ink, amount) : pixel;
-}
-
-// A stroke from a to b, its ends cut square (so strokes laid end to end meet without a seam), wide from width a to width b, its alpha.
-static void ui_moon_segment(struct ui address_to ui, decimal ax, decimal ay, decimal bx, decimal by, decimal wa, decimal wb, decimal alpha, unsigned int ink,
-                            decimal cx, decimal cy, decimal r)
-{
-        decimal half = (wa > wb ? wa : wb) / 2, dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
-        int x0 = (int)((ax < bx ? ax : bx) - half - 1), x1 = (int)((ax > bx ? ax : bx) + half + 2);
-        int y0 = (int)((ay < by ? ay : by) - half - 1), y1 = (int)((ay > by ? ay : by) + half + 2);
-
-        if (len2 <= 0)
-                return;
-        x0 = x0 < 0 ? 0 : x0, y0 = y0 < ui->top ? ui->top : y0, x1 = x1 > ui->width ? ui->width : x1, y1 = y1 > ui->bottom ? ui->bottom : y1;
-        for (int y = y0; y < y1; y++)
-                for (int x = x0; x < x1; x++)
-                {
-                        decimal px = x + 0.5, py = y + 0.5, t = ((px - ax) * dx + (py - ay) * dy) / len2, qx, qy, d, w;
-
-                        if (t < 0 || t >= 1 || (px - cx) * (px - cx) + (py - cy) * (py - cy) > r * r)
-                                continue;
-                        qx = ax + t * dx - px, qy = ay + t * dy - py;
-                        d = square_root(qx * qx + qy * qy), w = (wa + (wb - wa) * t) / 2;
-                        if (d < w + 0.5)
-                        {
-                                unsigned int address_to at = ui->pixels + (long)y * (long)ui->pitch + x;
-
-                                *at = ui_moon_line_over(*at, ink, (w + 0.5 - d > 1 ? 1 : w + 0.5 - d) * (w * 2 < 1 ? w * 2 : 1) * alpha);
-                        }
-                }
 }
 
 // A point of the sphere, in the body's frame, onto the picture: false when it is on the far side.
@@ -29880,15 +29873,22 @@ static positive ui_uris_quoted(const p8 address_to bytes, positive length, p8 ad
 }
 
 // A selection's text to a selection of the clipboard; never a masked field's.
-static fn ui_text_copy(struct ui_text address_to t, unsigned int which)
+// The selection offered as a copy: false, with the widget's refused words saying why, where it is more than KIT_COPY_MOST.
+static b32 ui_text_copy(struct ui_text address_to t, unsigned int which)
 {
         p8 address_to text;
         positive room, length;
 
         if (t->masked)
-                return;
+                return true;
+        if (doc_copy_too_large(&t->doc))
+        {
+                t->refused = WORDS(text_copy_too_large);
+                return false;
+        }
         length = doc_copy_text(&t->doc, &text, &room);
         ui_clip_offer(t->own, which, text, room, length);
+        return true;
 }
 
 // The clipboard asked for a paste into the widget: its answer is the widget's, not another's of the same window.
@@ -30079,13 +30079,13 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
         switch (command)
         {
         case DOC_CMD_COPY:
-                ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD);
-                return UI_TEXT_MOVED;
+                return ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD) ? UI_TEXT_MOVED : UI_TEXT_MOVED | UI_TEXT_REFUSED;
         case DOC_CMD_CUT:
-                // A masked field's text is never copied out, and so never cut out.
+                // A masked field's text is never copied out, and so never cut out; nor is one too large to copy, which is left as it is.
                 if (t->read_only || t->masked)
                         return UI_TEXT_MOVED;
-                ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD);
+                if (!ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD))
+                        return UI_TEXT_MOVED | UI_TEXT_REFUSED;
                 doc_erase_selections(&t->doc);
                 break;
         case DOC_CMD_PASTE:
@@ -31439,6 +31439,9 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         positive room, length = doc_copy_text(&t->doc, &text, &room);
                         struct windows_clip_part part = {WINDOWS_CLIP_TEXT, text, length};
 
+                        // A selection too large to copy is no drag either: the press goes on as a press.
+                        if (!length && doc_copy_too_large(&t->doc))
+                                t->refused = WORDS(text_copy_too_large);
                         if (!length || !ui_drag_offer(t->own, &t->drag, &part, 1, WINDOWS_DRAG_COPY | (t->read_only ? 0 : WINDOWS_DRAG_MOVE)))
                                 t->drag.armed = false;
                         array_store_release(text, room, length);

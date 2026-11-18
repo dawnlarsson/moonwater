@@ -1,7 +1,7 @@
 @language uk
 @name Українська
 @translated machine
-# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 action_copy	3664	Копіювати
 action_cut	5863	Вирізати
 action_paste	0288	Вставити
@@ -375,6 +375,7 @@ taskbar_tab_stop_windows	3c5f	Примусово зупинити (вікон: %
 taskbar_tab_unpin	6771	Відкріпити від панелі завдань
 terminal_exited_press_to_close	a8cf	завершено зі статусом %d, натисніть будь-яку клавішу, щоб закрити
 terminal_press_to_close	080d	натисніть будь-яку клавішу, щоб закрити
+text_copy_too_large	2d09	Виділення завелике для копіювання: копіюється не більше 64 МіБ
 tray_am	0d13	дп
 tray_charging	60c2	заряджається
 tray_clock_12h	8ab5	12-годинний формат

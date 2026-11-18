@@ -1,7 +1,7 @@
 @language de
 @name Deutsch
 @translated machine
-# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 action_copy	3664	Kopieren
 action_cut	5863	Ausschneiden
 action_paste	0288	Einfügen
@@ -375,6 +375,7 @@ taskbar_tab_stop_windows	3c5f	Beenden erzwingen (%d Fenster)
 taskbar_tab_unpin	6771	Von Taskleiste lösen
 terminal_exited_press_to_close	a8cf	beendet mit Status %d, zum Schließen eine Taste drücken
 terminal_press_to_close	080d	zum Schließen eine Taste drücken
+text_copy_too_large	2d09	Die Auswahl ist zu groß zum Kopieren: höchstens 64 MiB werden kopiert
 tray_am	0d13	AM
 tray_charging	60c2	lädt
 tray_clock_12h	8ab5	12-Stunden-Uhr
