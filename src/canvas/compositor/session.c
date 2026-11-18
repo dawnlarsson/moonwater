@@ -1037,6 +1037,9 @@ static void compositor_touch_screen_open(unsigned int at, bipolar handle, int sl
 */
 static unsigned char compositor_input_physical[COMPOSITOR_INPUTS]; // the slots whose device was found to be the machine's own
 static int compositor_post_physical; // set by compositor_input_read alone, for the span of its own posts (compositor_post)
+// The turn's input was a locked pointer's counts and nothing else, and how many reports it sent: set by compositor_inputs_turn, cleared by any other
+// event a device says (compositor_input_read_device), counted where a locked report goes to its client (compositor_report): the loop's slingshot.
+static int compositor_sling_only, compositor_sling_sent;
 
 // Whether a device's sysfs path (the link /sys/dev/char/MAJOR:MINOR resolves to, "../../devices/...") is the machine's own.
 static int compositor_input_path_physical(const char *resolved)

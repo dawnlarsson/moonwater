@@ -2598,6 +2598,7 @@ static int compositor_report(positive now, positive stamp)
                 if (compositor_wl_locked())
                 {
                         compositor_wl_counts(dx, dy, dx, dy, now);
+                        compositor_sling_sent++;
                         return moved;
                 }
 #endif
@@ -4336,6 +4337,7 @@ static void compositor_input_read_device(unsigned int at)
                 // is let go of rather than read in a loop.
                 if (got < 0 && got != -COMPOSITOR_EAGAIN && got != -4)
                 {
+                        compositor_sling_only = 0;
                         system_close(compositor.inputs[at]);
                         compositor.inputs[at] = -1;
                         compositor.table->input_number[at] = -1;
@@ -4385,7 +4387,10 @@ static void compositor_input_read_device(unsigned int at)
 
                 // It woke the loop, and that was all it was for.
                 if (compositor.wakeonly[at])
+                {
+                        compositor_sling_only = 0;
                         continue;
+                }
 
                 // The whole records of what was read, each with its stamp worked out, in one pass (evdev_decode).
                 count = evdev_decode((const p8 *)raw, (positive)got, (p64 *)events, 64);
@@ -4396,6 +4401,13 @@ static void compositor_input_read_device(unsigned int at)
 
                         // The events this one posts carry its own stamp (the device's), not the time the loop reads them at.
                         compositor_stamp_now = now;
+                        // A locked pointer's counts and the end of their report are all a slingshot turn may hold (EV_MSC, 4, a scan code, says
+                        // nothing either); a touch screen's and a touchpad's are worked into gestures, a key, a button and a wheel are the
+                        // compositor's to look at (its keys, a click's focus, a stream).
+                        if (compositor.touchscreen[at] || compositor.touchpad[at] || !compositor_wl_locked() ||
+                            !((event->type == COMPOSITOR_EV_REL && event->code < 2) || (event->type == COMPOSITOR_EV_SYN && event->code == 0) ||
+                              event->type == 4u))
+                                compositor_sling_only = 0;
 #ifdef CONFIG_MOONWATER_WAYLAND
                         // The idle clock (ext-idle-notify) counts from the input a person gives: keys, buttons, motion, fingers.
                         if (event->type == COMPOSITOR_EV_KEY || event->type == COMPOSITOR_EV_REL || event->type == COMPOSITOR_EV_ABS)

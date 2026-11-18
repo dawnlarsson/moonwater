@@ -2781,6 +2781,7 @@ static void compositor_forward(void)
 // A turn's devices: each one the poll said has something is read, and what they said is forwarded at once (compositor_forward).
 static void compositor_inputs_turn(const struct compositor_poll *wanted)
 {
+        compositor_sling_only = 1, compositor_sling_sent = 0;
         for (unsigned int at = 0; at < compositor.input_count; at++)
                 if (wanted[at].returned)
                         compositor_input_read(at);
@@ -2903,6 +2904,45 @@ static void compositor_loop_wanted(struct compositor_poll *wanted, struct compos
 #endif
         slots->count = count;
 }
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+/*
+        The slingshot: a turn the input devices alone woke, whose input was a locked pointer's counts and nothing else (compositor_sling_only),
+        sent to the client that holds the pointer as they were read (compositor_wl_wake), goes back to the poll at once, with the list it
+        polled and the time it would have woken at: what the rest of a turn does (the doors, the clients, the card, the keeps of the moon,
+        the wallpaper, the band, the frame's times, the poll list made again) is nothing to such a turn, and the deadline it had was the
+        soonest of those already. Asked of a turn that is that and no more: every descriptor that answered is a device's, the devices are
+        the ones polled, no job of the card is awaited (its tick is every turn's), no flip is near being taken as lost, the pointer is not
+        growing after a shake, every client's output went out (a slot with bytes left wants POLLOUT, which the list it reuses may not
+        ask for), and the deadline is still ahead. Measured on hasty-tail (Ivy Bridge, processor compose) at 8000 reports a second to
+        a locked Wayland client: the loop's thread at 135 ms a second, 17 us a report, most of it the turn after the send.
+*/
+static b32 compositor_slingshot(const struct compositor_poll *wanted, const struct compositor_slots *slots, long awaited, positive now, positive until)
+{
+        long answered = 0;
+
+        if (!compositor_sling_only || !compositor_sling_sent || slots->fence_at || compositor.cursor.magnify || compositor.cursor.magnified ||
+            (until && now >= until) || slots->doors - slots->inputs != compositor.input_count ||
+            (compositor.flip_pending && (now < compositor.flip_issued || now - compositor.flip_issued >= COMPOSITOR_FLIP_LOST / 2)))
+                return 0;
+        for (unsigned int at = 0; at < slots->count; at++)
+                if (wanted[at].returned)
+                {
+                        if (at < slots->inputs || at >= slots->doors)
+                                return 0;
+                        answered++;
+                }
+        if (answered != awaited)
+                return 0;
+        for (unsigned int at = 0; at < compositor.input_count; at++)
+                if (wanted[slots->inputs + at].handle != compositor.inputs[at])
+                        return 0;
+        for (long slot = 0; compositor_wl.started && slot < compositor_wl.slots; slot++)
+                if (compositor_wl.fd[slot] >= 0 && wayland_out_dirty(slot))
+                        return 0;
+        return 1;
+}
+#endif
 
 static b32 compositor_main()
 {
@@ -3134,6 +3174,21 @@ static b32 compositor_main()
                 positive now = 0, until = 0;
                 b32 idle_turn = 0, held;
                 long awaited, wait[2];
+#ifdef CONFIG_MOONWATER_WAYLAND
+                static b32 sling, sling_held;
+                static positive sling_until;
+                static struct compositor_slots sling_slots;
+
+                // A slingshot turn (compositor_slingshot) polls again what it polled, until the time it had.
+                if (sling)
+                {
+                        sling = 0, slots = sling_slots, held = sling_held, until = sling_until;
+                        count = slots.count, inputs = slots.inputs, doors = slots.doors, done_at = slots.done_at, card_at = slots.card_at;
+                        fence_at = slots.fence_at, uevents_at = slots.uevents_at, clip_at = slots.clip_at, wayland_at = slots.wayland_at;
+                        now = clock_monotonic_nanoseconds();
+                        goto compositor_sling_poll;
+                }
+#endif
 
                 // The look at the screens the first take owes (compositor_space_first), once the loop has made its first turn and
                 // drawn its first frame: on the loop's thread, as every take of the screens is, so nothing else has the card (nor a
@@ -3306,6 +3361,9 @@ static b32 compositor_main()
                 }
 #endif
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_sling_poll:
+#endif
                 // A timespec: a wait past a second in its nanoseconds is EINVAL, and the loop would spin on it.
                 wait[0] = until > now ? (long)((until - now) / 1000000000ull) : 0;
                 wait[1] = until > now ? (long)((until - now) % 1000000000ull) : 0;
@@ -3313,6 +3371,39 @@ static b32 compositor_main()
                 awaited = compositor_call(syscall(ppoll), (positive)wanted, count,
                                           until ? (positive)wait : 0, 0, 0, 0);
                 now = clock_monotonic_nanoseconds();
+
+                // The devices first, before anything else the turn does, and what they said forwarded at once (compositor_inputs_turn): a
+                // settings file read again, a door's picture taken, a client's commit, the frame and the turn's ticks all come after it.
+                if (awaited > 0)
+                {
+                        unsigned int any = 0;
+
+                        compositor_inputs_turn(wanted + inputs);
+                        for (unsigned int at = 0; at < compositor.input_count && !any; at++)
+                                any = wanted[inputs + at].returned != 0;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                        // A Wayland client's share of that is written to its socket now (the enter, the keys, the motion: compositor_wl_wake
+                        // sends what the shim queued), not after the doors, the other clients' commits and the ticks below: a commit that
+                        // copies a picture takes milliseconds, and sat in front of every client's input of the same turn.
+                        if (any)
+                                compositor_wl_wake();
+#endif
+#ifdef MOONWATER_GPU_C
+                        // And once it is, the card is kept awake for what answers it (compositor_gpu_clocks).
+                        compositor_gpu_input_turn(now);
+#endif
+#ifdef CONFIG_MOONWATER_WAYLAND
+                        if (any && compositor_slingshot(wanted, &slots, awaited, now, until))
+                        {
+                                for (unsigned int at = 0; at < count; at++)
+                                        if (wanted[at].returned)
+                                                compositor_loop_by[compositor_loop_source(at, doors, done_at, card_at, fence_at, uevents_at, clip_at, wayland_at)]++;
+                                compositor_loop_tick(now, 0);
+                                sling = 1, sling_slots = slots, sling_held = held, sling_until = until;
+                                continue;
+                        }
+#endif
+                }
                 compositor_loop_tick(now, idle_turn);
 
                 // Whatever woke the loop, a sleep may be what it woke from; and auto's theme may have turned with the clock.
@@ -3346,22 +3437,11 @@ static b32 compositor_main()
                                 running = 0;
                 }
 
-                // The devices first, and what they said forwarded before anything else is done with the turn (compositor_inputs_turn):
-                // a settings file read again, a door's picture taken, a client's commit and the frame all come after it.
-                compositor_inputs_turn(wanted + inputs);
-#ifdef CONFIG_MOONWATER_WAYLAND
-                // A Wayland client's share of that is written to its socket now (the enter, the keys, the motion: compositor_wl_wake
-                // sends what the shim queued), not after the doors, the other clients' commits and the ticks below: a commit that
-                // copies a picture takes milliseconds, and sat in front of every client's input of the same turn.
-                for (unsigned int at = 0; at < compositor.input_count; at++)
-                        if (wanted[inputs + at].returned)
-                        {
-                                compositor_wl_wake();
-                                break;
-                        }
-#endif
+
+                // What the turn's other parts woke since (a picture the card let go of) knocked at, every turn as it was; and the card's clock
+                // hold's answer looked at, every turn (both answer nothing a second time in a turn the devices were read in, above).
+                compositor_forward();
 #ifdef MOONWATER_GPU_C
-                // And once it is, the card is kept awake for what answers it (compositor_gpu_clocks).
                 compositor_gpu_input_turn(now);
 #endif
 
