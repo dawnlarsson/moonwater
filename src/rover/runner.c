@@ -318,7 +318,10 @@ static p64 rover_runner_setting(const struct settings_row address_to row)
                         return 0;
                 string_copy_max(word, (string_address)row->standard, sizeof(word));
         }
-        (void)rover_runner_set_word(name, word, string_length(word));
+        //      A value its state's type does not take keeps the state as it was, and is said (it was dropped silently).
+        if (!rover_runner_set_word(name, word, string_length(word)))
+                rover_runner_say((string_address)row->path, " holds a value its setting does not take; the rules keep the one before: ",
+                                 (string_address)word);
         return ROVER_READS_BIT((positive)(state - rover_states));
 }
 
