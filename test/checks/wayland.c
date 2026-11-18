@@ -3367,6 +3367,31 @@ static void test_wire(void)
                         "an event is its object, its opcode with its size above it, and its words (%ld)", one.out_length);
         }
 
+        /* a send that took part of the queue: the rest moved up in its order and the slot still to flush; the rest sent, the queue
+           empty and the slot clean */
+        {
+                struct wlc *p = wlc_open();
+                struct wayland_client *pc = wayland.client[p->slot];
+                const unsigned char *bytes;
+                const long *out_fds;
+                long fd_count, whole, rest;
+                unsigned int word = 7;
+
+                wayland_sent(p->slot, wayland_out(p->slot, &bytes, &out_fds, &fd_count));
+                wayland_send(pc, 1, WLE_wl_display_delete_id, &word, 1);
+                word = 9;
+                wayland_send(pc, 1, WLE_wl_display_delete_id, &word, 1);
+                whole = wayland_out(p->slot, &bytes, &out_fds, &fd_count);
+                wayland_sent(p->slot, 12);
+                rest = wayland_out(p->slot, &bytes, &out_fds, &fd_count);
+                WLCHECK(whole == 24 && rest == 12 && wayland_get(bytes) == 1 && wayland_get(bytes + 8) == 9 && wayland_out_dirty(p->slot),
+                        "a send of part of the queue leaves the rest, moved up, still to flush (%ld %ld)", whole, rest);
+                wayland_sent(p->slot, rest);
+                WLCHECK(wayland_out(p->slot, &bytes, &out_fds, &fd_count) == 0 && !wayland_out_dirty(p->slot),
+                        "and a send of all of it leaves the queue empty and the slot clean");
+                wlc_end(p);
+        }
+
         /* units of a fixed number: at the scale of one a pixel is 256, with no division; at any other the division, rounded to zero */
         {
                 long scales[] = {WAYLAND_UNIT, 0, -3, 180, 240, 150, 90, 960, 30};

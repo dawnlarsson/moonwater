@@ -1523,6 +1523,31 @@ static void wayland_send(struct wayland_client *c, unsigned long object, long op
                 wayland_out_mark(c->slot);
 }
 
+/*
+        An event of a few words that the input path sends at every report of the hand (a relative motion, a frame, a motion, a key,
+        a button), written in place: the room asked once, the head and the words stored, the slot marked. A queue without the room,
+        or a dead client, goes the way wayland_send goes (the client dropped, nothing written). Where each was wayland_begin and
+        wayland_end, two calls that handed the event's place to each other through memory and asked again what the first had asked.
+*/
+static inline __attribute__((always_inline)) void wayland_emit(struct wayland_client *c, unsigned long object, long opcode,
+                                                               const unsigned int *words, long count)
+{
+        unsigned char *at;
+
+        if (c->out_length + WAYLAND_EVENT > WAYLAND_OUT || c->dead)
+        {
+                wayland_send(c, object, opcode, words, count);
+                return;
+        }
+        at = c->out + c->out_length;
+        wayland_put(at, object);
+        wayland_put(at + 4, (unsigned long)opcode | (unsigned long)(8 + 4 * count) << 16);
+        for (long word = 0; word < count; word++)
+                wayland_put(at + 8 + 4 * word, words[word]);
+        c->out_length += 8 + 4 * count;
+        wayland_out_mark(c->slot);
+}
+
 static void wayland_end(struct wayland_event *e)
 {
         unsigned char *base = e->ok ? e->client->out + e->start : wayland_sink;
@@ -6108,10 +6133,21 @@ static void wayland_seat_remove(struct wayland_client *c, long iface, unsigned i
 static void wayland_pointer_frame(struct wayland_client *c, long slot)
 {
         if (c->objects[slot].version >= 5)
-        {
-                struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_pointer_frame);
+                wayland_emit(c, c->objects[slot].id, WLE_wl_pointer_frame, 0, 0);
+}
 
-                wayland_end(&e);
+// A frame to each of a client's pointers that has one (from version 5), walked from its list of ids as wayland_seats walks it, in its
+// order: the frame that ends a report's events, where the list of slots was made in its table first for the one walk.
+static void wayland_pointer_frames(struct wayland_client *c)
+{
+        const struct wayland_ids *ids = &c->seat_ids[0];
+
+        for (long at = 0; at < ids->count; at++)
+        {
+                long slot = wayland_slot_of(c, ids->id[at]);
+
+                if (slot >= 0 && c->objects[slot].iface == WLI_wl_pointer)
+                        wayland_pointer_frame(c, slot);
         }
 }
 
@@ -6353,14 +6389,12 @@ WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
                 return;
         time = wayland.host->now(wayland.host->context);
         count = wayland_seats(c, WLI_wl_pointer, &slots);
-        for (long at = 0; at < count; at++)
         {
-                struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_pointer_motion);
+                const unsigned int words[3] = {(unsigned int)time, (unsigned int)wayland_fixed(sx, s->scale120),
+                                               (unsigned int)wayland_fixed(sy, s->scale120)};
 
-                wayland_word(&e, (unsigned long)time);
-                wayland_word(&e, wayland_fixed(sx, s->scale120));
-                wayland_word(&e, wayland_fixed(sy, s->scale120));
-                wayland_end(&e);
+                for (long at = 0; at < count; at++)
+                        wayland_emit(c, c->objects[slots[at]].id, WLE_wl_pointer_motion, words, 3);
         }
         // The hand's counts since the last motion, in this frame (wayland_pointer_relative): the reports' own, not the places' difference,
         // which stops at the screen's edge and is a pixel the gain rounded.
@@ -6558,16 +6592,15 @@ WAYLAND_API void wayland_pointer_button(long row, long code, long pressed)
         if (pressed)
                 c->press_serial = (unsigned int)serial;
         count = wayland_seats(c, WLI_wl_pointer, &slots);
-        for (long at = 0; at < count; at++)
         {
-                struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_pointer_button);
+                const unsigned int words[4] = {(unsigned int)serial, (unsigned int)time, (unsigned int)code,
+                                               pressed ? WLN_wl_pointer_button_state_pressed : WLN_wl_pointer_button_state_released};
 
-                wayland_word(&e, serial);
-                wayland_word(&e, (unsigned long)time);
-                wayland_word(&e, (unsigned long)code);
-                wayland_word(&e, pressed ? WLN_wl_pointer_button_state_pressed : WLN_wl_pointer_button_state_released);
-                wayland_end(&e);
-                wayland_pointer_frame(c, slots[at]);
+                for (long at = 0; at < count; at++)
+                {
+                        wayland_emit(c, c->objects[slots[at]].id, WLE_wl_pointer_button, words, 4);
+                        wayland_pointer_frame(c, slots[at]);
+                }
         }
         (void)s;
 }
@@ -6999,15 +7032,12 @@ WAYLAND_API void wayland_key(long row, long code, long pressed)
         time = wayland.host->now(wayland.host->context);
         serial = wayland_input_serial(c);
         count = wayland_seats(c, WLI_wl_keyboard, &slots);
-        for (long at = 0; at < count; at++)
         {
-                struct wayland_event e = wayland_begin(c, c->objects[slots[at]].id, WLE_wl_keyboard_key);
+                const unsigned int words[4] = {(unsigned int)serial, (unsigned int)time, (unsigned int)code,
+                                               pressed ? WLN_wl_keyboard_key_state_pressed : WLN_wl_keyboard_key_state_released};
 
-                wayland_word(&e, serial);
-                wayland_word(&e, (unsigned long)time);
-                wayland_word(&e, (unsigned long)code);
-                wayland_word(&e, pressed ? WLN_wl_keyboard_key_state_pressed : WLN_wl_keyboard_key_state_released);
-                wayland_end(&e);
+                for (long at = 0; at < count; at++)
+                        wayland_emit(c, c->objects[slots[at]].id, WLE_wl_keyboard_key, words, 4);
         }
         // The modifiers after the key that changed them, to each keyboard, when they did.
         {
@@ -9180,22 +9210,17 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
 static long wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro)
 {
         long sent = 0;
+        const unsigned int words[6] = {(unsigned int)((unsigned long)micro >> 32), (unsigned int)micro, (unsigned int)wayland_fixed(dx, scale120),
+                                       (unsigned int)wayland_fixed(dy, scale120), (unsigned int)wayland_fixed(udx, scale120),
+                                       (unsigned int)wayland_fixed(udy, scale120)};
 
         for (long at = 0; at < c->relative_ids.count; at++)
         {
                 long slot = wayland_slot_of(c, c->relative_ids.id[at]);
-                struct wayland_event e;
 
                 if (slot < 0 || c->objects[slot].iface != WLI_zwp_relative_pointer_v1)
                         continue;
-                e = wayland_begin(c, c->relative_ids.id[at], WLE_zwp_relative_pointer_v1_relative_motion);
-                wayland_word(&e, (unsigned long)micro >> 32);
-                wayland_word(&e, (unsigned long)micro & 0xffffffffUL);
-                wayland_word(&e, wayland_fixed(dx, scale120));
-                wayland_word(&e, wayland_fixed(dy, scale120));
-                wayland_word(&e, wayland_fixed(udx, scale120));
-                wayland_word(&e, wayland_fixed(udy, scale120));
-                wayland_end(&e);
+                wayland_emit(c, c->relative_ids.id[at], WLE_zwp_relative_pointer_v1_relative_motion, words, 6);
                 sent++;
         }
         return sent;
@@ -9207,7 +9232,7 @@ static void wayland_counts_send(int frame)
 {
         struct wayland_client *c;
         struct wayland_surface *s;
-        long row = wayland.counts_row, *slots, count;
+        long row = wayland.counts_row;
 
         wayland.counts_row = -1;
         if (row < 0 || !(s = wayland_row_surface(row, &c)) ||
@@ -9215,9 +9240,7 @@ static void wayland_counts_send(int frame)
                                    wayland.counts_micro) ||
             !frame)
                 return;
-        count = wayland_seats(c, WLI_wl_pointer, &slots);
-        for (long at = 0; at < count; at++)
-                wayland_pointer_frame(c, slots[at]);
+        wayland_pointer_frames(c);
 }
 
 /*
@@ -9234,7 +9257,6 @@ WAYLAND_API void wayland_pointer_relative(long row, long dx, long dy, long udx, 
 {
         struct wayland_client *c;
         struct wayland_surface *s = wayland_row_surface(row, &c);
-        long *slots, count;
 
         if (!wayland.host || !s || row != (wayland.hold_mode ? wayland.hold_row : wayland.pointer_row) || wayland_dragging() ||
             !c->relative_ids.count)
@@ -9251,11 +9273,8 @@ WAYLAND_API void wayland_pointer_relative(long row, long dx, long dy, long udx, 
                 wayland.counts_micro = micro;
                 return;
         }
-        if (!wayland_relative_send(c, s->scale120, dx, dy, udx, udy, micro))
-                return;
-        count = wayland_seats(c, WLI_wl_pointer, &slots);
-        for (long at = 0; at < count; at++)
-                wayland_pointer_frame(c, slots[at]);
+        if (wayland_relative_send(c, s->scale120, dx, dy, udx, udy, micro))
+                wayland_pointer_frames(c);
 }
 
 // The counts no motion took, in a frame of their own (the host's pass ends with it).
@@ -10923,6 +10942,15 @@ WAYLAND_API void wayland_sent(long slot, long count)
 
         if (!c || count <= 0 || count > c->out_length)
                 return;
+        // All of it sent with no descriptor and no feedback waiting for room, as nearly every send is: the queue is empty, nothing
+        // to move up or close.
+        if (count == c->out_length && !c->out_fd_count && !c->feedback_pending)
+        {
+                c->out_length = 0;
+                if (!c->dead)
+                        wayland_out_clear(slot);
+                return;
+        }
         for (long at = count; at < c->out_length; at++)
                 c->out[at - count] = c->out[at];
         c->out_length -= count;
