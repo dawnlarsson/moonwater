@@ -1956,7 +1956,7 @@ static p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to
         names it, and the source itself is looked at without following (a link is copied as the link it is, never what it names) and
         opened held to the inode looked at (file_open_same, file_walk_open_found_same), so a name swapped between the look and the
         open is refused. What is made in the folder is made only where the name is free (mkdirat, O_EXCL with O_NOFOLLOW, symlinkat,
-        renameat2 with RENAME_NOREPLACE); a name that is taken there is given a number, "name (2).txt" and on (renamed counts them),
+        renameat2 with RENAME_NOREPLACE); a name that is taken there is given a copy's, "name.copy.txt", "name.copy2.txt" and on (renamed counts them),
         so two things never become one. A device, a pipe or a socket is not copied (skipped counts them).
 
         A move is a rename where the source and the folder are on one filesystem, which is whole and instant; one into the folder it
@@ -2191,8 +2191,9 @@ static b32 files_move_within(bipolar folder, const file_facts address_to facts)
 }
 
 /*
-        A name for the source in the folder at into that is free there now: its own, else "stem (2).ext" and on (a name with its dot
-        first has no extension: ".profile (2)"). Answers false when none of the first thousand is free, or the name would not fit.
+        A name for the source in the folder at into that is free there now: its own, else "stem.copy.ext", then "stem.copy2.ext" and on (a
+        name with its dot first has no extension: ".profile.copy"), so the copy sorts beside what it is a copy of and keeps its kind.
+        Answers false when none of the first thousand is free, or the name would not fit.
 */
 static b32 files_move_free_name(bipolar into, const p8 address_to name, p8 address_to free, b32 address_to numbered)
 {
@@ -2211,18 +2212,17 @@ static b32 files_move_free_name(bipolar into, const p8 address_to name, p8 addre
                         dot = at - 1;
                         break;
                 }
-        for (positive number = 2; number < 1000; number++)
+        for (positive number = 1; number < 1000; number++)
         {
                 p8 digits[8];
-                positive count = positive_into(digits, number);
+                positive count = number > 1 ? positive_into(digits, number) : 0;
 
-                if (length + count + 4 >= FILES_NAME)
+                if (length + count + 6 >= FILES_NAME)
                         return false;
                 memory_copy(free, name, dot);
-                free[dot] = ' ', free[dot + 1] = '(';
-                memory_copy(free + dot + 2, digits, count);
-                free[dot + 2 + count] = ')';
-                memory_copy(free + dot + 3 + count, name + dot, length - dot + 1);
+                memory_copy(free + dot, ".copy", 5);
+                memory_copy(free + dot + 5, digits, count);
+                memory_copy(free + dot + 5 + count, name + dot, length - dot + 1);
                 if (file_look_code(into, (string_address)free, AT_SYMLINK_NOFOLLOW, &there) == -ERROR_NO_ENTRY)
                 {
                         *numbered = true;

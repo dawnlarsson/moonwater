@@ -4006,7 +4006,7 @@ static fn browser_moves(void)
         count = browser_sources(paths, sizeof(paths), copy_these, 4);
         copied = files_move_begin(&job, FILES_MOVE_COPY, browser_open_folder((string_address) "mv/dst"), paths, count) && job.count == 4;
         browser_move_run(&job);
-        copied = copied && job.state == FILES_JOB_DONE && browser_size((string_address) "mv/dst/f1") == 3 && browser_size((string_address) "mv/dst/f1 (2)") == 100 &&
+        copied = copied && job.state == FILES_JOB_DONE && browser_size((string_address) "mv/dst/f1") == 3 && browser_size((string_address) "mv/dst/f1.copy") == 100 &&
                  browser_size((string_address) "mv/dst/d/x") == 5 && browser_size((string_address) "mv/dst/d/sub/y") == 7 &&
                  browser_is_link((string_address) "mv/dst/link") && browser_size((string_address) "mv/dst/big") == 144 * 65536 && job.renamed == 1 &&
                  job.items_done == job.items_total && job.items_total == 7 && job.bytes_done == job.bytes_total && job.bytes_total == 100 + 5 + 7 + 144 * 65536;
@@ -4026,8 +4026,31 @@ static fn browser_moves(void)
                         system_close(right);
         }
         files_move_end(&job);
-        check("browser: a copy makes a file, a folder with what is in it and a link as the link it is, a name that is taken given a number and never written over, a file of several pieces byte for byte, the counts whole",
+        check("browser: a copy makes a file, a folder with what is in it and a link as the link it is, a name that is taken given a copy's name and never written over, a file of several pieces byte for byte, the counts whole",
               copied && same_bytes);
+        // The copy's names: f1 and f1.copy are taken, so the next is f1.copy2; a name with its dot first has no extension to keep.
+        {
+                p8 free[FILES_NAME];
+                b32 numbered = false, named;
+                bipolar fresh, into = browser_open_folder((string_address) "mv/dst");
+
+                named = into >= 0 && files_move_free_name(into, (const p8 address_to) "f1", free, &numbered) && numbered &&
+                        string_equals((string_address)free, (string_address) "f1.copy2");
+                named = named && files_move_free_name(into, (const p8 address_to) "x.tar", free, &numbered) && !numbered &&
+                        string_equals((string_address)free, (string_address) "x.tar");
+                fresh = into >= 0 ? (bipolar)system_call_4(syscall(openat), (positive)into, (positive) "a.txt", FILE_CREATE | FILE_WRITE | O_TRUNC, 0644) : -1;
+                if (fresh >= 0)
+                        system_call_1(syscall(close), fresh);
+                named = named && files_move_free_name(into, (const p8 address_to) "a.txt", free, &numbered) && numbered &&
+                        string_equals((string_address)free, (string_address) "a.copy.txt");
+                fresh = into >= 0 ? (bipolar)system_call_4(syscall(openat), (positive)into, (positive) ".rc", FILE_CREATE | FILE_WRITE | O_TRUNC, 0644) : -1;
+                if (fresh >= 0)
+                        system_call_1(syscall(close), fresh);
+                named = named && files_move_free_name(into, (const p8 address_to) ".rc", free, &numbered) && string_equals((string_address)free, (string_address) ".rc.copy");
+                if (into >= 0)
+                        system_close(into);
+                check("browser: a taken name's copy is stem.copy.ext, then stem.copy2.ext, a name with its dot first stem.copy, a free name its own", named);
+        }
 
         // A move on one filesystem: a rename. Then back into the folder it came from, where its name is free again.
         count = browser_sources(paths, sizeof(paths), move_these, 1);
@@ -4039,7 +4062,7 @@ static fn browser_moves(void)
         count = browser_sources(paths, sizeof(paths), back_these, 1);
         moved = moved && files_move_begin(&job, FILES_MOVE_MOVE, browser_open_folder((string_address) "mv/src"), paths, count);
         browser_move_run(&job);
-        moved = moved && job.state == FILES_JOB_DONE && browser_there((string_address) "mv/src/d") && !browser_there((string_address) "mv/src/d (2)") && job.items_done == 0;
+        moved = moved && job.state == FILES_JOB_DONE && browser_there((string_address) "mv/src/d") && !browser_there((string_address) "mv/src/d.copy") && job.items_done == 0;
         files_move_end(&job);
         check("browser: a move on one filesystem is a rename of the whole folder, and one into the folder it is already in does nothing", moved);
 
@@ -4076,7 +4099,7 @@ static fn browser_moves(void)
         inside = files_move_begin(&job, FILES_MOVE_MEASURE, browser_open_folder((string_address) "mv/dst2"), paths, count);
         browser_move_run(&job);
         inside = inside && job.state == FILES_JOB_DONE && job.items_total == 4 && job.bytes_total == 12 && job.items_done == 0 &&
-                 !browser_there((string_address) "mv/dst2/d (2)") && browser_there((string_address) "mv/src/d/sub/y");
+                 !browser_there((string_address) "mv/dst2/d.copy") && browser_there((string_address) "mv/src/d/sub/y");
         files_move_end(&job);
         check("browser: a measure counts what a folder holds (its folders, its files, their bytes) and makes and moves nothing", inside);
         browser_remove_in((string_address) "mv");
