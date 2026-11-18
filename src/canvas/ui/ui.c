@@ -1591,6 +1591,117 @@ static inline enum taskbar_cell_act taskbar_cell_press(struct taskbar_cells *cel
         return TASKBAR_ACT_NONE;
 }
 
+/*
+        The faces a program of the desktop draws in when it is given none:
+        what the machine script's desktop_font chose and handed every program
+        as -f, -b and -m, which each now finds for itself. /root/font's first
+        line, a path, is every face when it names a file that can be read;
+        else IBM Plex Mono for the terminals with its bold, and Inter for the
+        tabs and the windows' text; else the first mono face under
+        /usr/share/fonts (*Mono*Regular*.ttf a folder down, then *Mono*.ttf at
+        the top), by name. face is the mono one, text the windows', bold the
+        mono's bold or empty. Asked once a process; an empty face is none.
+*/
+#define UI_FACE_PLEX "/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf"
+#define UI_FACE_PLEX_BOLD "/usr/share/fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf"
+#define UI_FACE_INTER "/usr/share/fonts/inter/Inter-Regular.ttf"
+
+struct ui_faces
+{
+        p8 face[192];
+        p8 bold[192];
+        p8 text[192];
+};
+
+static bool ui_faces_readable(string_address path)
+{
+        bipolar handle = path[0] ? system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC) : -1;
+
+        if (handle < 0)
+                return false;
+        system_close(handle);
+        return true;
+}
+
+//      The first, by name, of the entries of folder whose names hold mono (and regular, when asked) and end .ttf.
+static bool ui_faces_first(string_address folder, bool regular, bool descend, p8 address_to into, positive room)
+{
+        p8 buffer[2048];
+        bipolar handle = system_open_at(AT_FDCWD, folder, FILE_READ | O_DIRECTORY | O_CLOEXEC), got;
+        bool found = false;
+
+        if (handle < 0)
+                return false;
+        while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
+                for (bipolar at = 0; at < got;)
+                {
+                        p16 length = memory_load_unaligned(p16, buffer + at + 16);
+                        string_address name = (string_address)(buffer + at + 19);
+                        positive size = string_length(name);
+                        p8 path[192];
+
+                        at += length;
+                        if (name[0] == '.' || string_length(folder) + 1 + size >= sizeof(path))
+                                continue;
+                        memory_copy(path, folder, string_length(folder));
+                        path[string_length(folder)] = '/';
+                        memory_copy(path + string_length(folder) + 1, name, size + 1);
+                        if (descend)
+                        {
+                                p8 deeper[192];
+
+                                if (ui_faces_first(path, regular, false, deeper, sizeof(deeper)) &&
+                                    (!found || string_compare(deeper, into) < 0))
+                                        found = true, string_copy_max(into, deeper, room);
+                                continue;
+                        }
+                        if (size < 4 || memory_compare(name + size - 4, ".ttf", 4) || !string_search(name, (string_address) "Mono") ||
+                            (regular && !string_search(name, (string_address) "Regular")))
+                                continue;
+                        if (!found || string_compare(path, into) < 0)
+                                found = true, string_copy_max(into, path, room);
+                }
+        system_close(handle);
+        return found;
+}
+
+static const struct ui_faces address_to ui_faces(void)
+{
+        static struct ui_faces faces;
+        static bool asked;
+        bipolar handle;
+
+        if (asked)
+                return &faces;
+        asked = true;
+        handle = system_open_at(AT_FDCWD, (string_address) "/root/font", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+        if (handle >= 0)
+        {
+                bipolar got = system_read_once(handle, faces.face, sizeof(faces.face) - 1);
+
+                system_close(handle);
+                faces.face[got > 0 ? got : 0] = 0;
+                for (positive at = 0; faces.face[at]; at++)
+                        if (faces.face[at] == '\n' || faces.face[at] == '\r')
+                                faces.face[at] = 0;
+                if (!ui_faces_readable(faces.face))
+                        faces.face[0] = 0;
+        }
+        if (!faces.face[0] && ui_faces_readable((string_address)UI_FACE_PLEX))
+                string_copy_max(faces.face, (string_address)UI_FACE_PLEX, sizeof(faces.face));
+        if (!faces.face[0] && !ui_faces_first((string_address) "/usr/share/fonts", true, true, faces.face, sizeof(faces.face)))
+                ui_faces_first((string_address) "/usr/share/fonts", false, false, faces.face, sizeof(faces.face));
+        string_copy_max(faces.text, faces.face, sizeof(faces.text));
+        if (string_equals(faces.face, (string_address)UI_FACE_PLEX))
+        {
+                if (ui_faces_readable((string_address)UI_FACE_PLEX_BOLD))
+                        string_copy_max(faces.bold, (string_address)UI_FACE_PLEX_BOLD, sizeof(faces.bold));
+                if (ui_faces_readable((string_address)UI_FACE_INTER))
+                        string_copy_max(faces.text, (string_address)UI_FACE_INTER, sizeof(faces.text));
+        }
+        return &faces;
+}
+
 #endif /* MOONWATER_CANVAS_UI_SHARED */
 
 #if !defined(UI_LIST_ONLY) && !defined(UI_SWITCHES_ONLY) && !defined(UI_SHARED_ONLY) && !defined(MOONWATER_CANVAS_UI)
@@ -27275,7 +27386,9 @@ static int ui_app_run(struct ui_app address_to app)
                          : table->scale >= 25 && table->scale <= 800 ? (int)table->scale : 100;
         if (!app->own_faces)
         {
-                if (!ui_engine_open_sized(app->ui, 512) || !ui_face_load(&app->ui->faces[0], app->font ? app->font : (string_address)UI_FONT_REGULAR))
+                if (!ui_engine_open_sized(app->ui, 512) || !ui_face_load(&app->ui->faces[0], app->font ? app->font
+                                                                                       : ui_faces()->text[0] ? (string_address)ui_faces()->text
+                                                                                                             : (string_address)UI_FONT_REGULAR))
                 {
                         compositor_kmsg(app->nofont, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                         windows_leave(app->own);

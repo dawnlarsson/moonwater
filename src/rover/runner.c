@@ -962,8 +962,8 @@ static fn rover_runner_keys(void)
                 rover_puts(&out, "\n");
         }
         (void)host_write_file(ROVER_KEYS_FILE, text, out.used, 0644, false);
-        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)ROVER_KEYS_FIRE, 0);
-        system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)ROVER_KEYS_FIRE, 0010600, 0);
+        (void)system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)ROVER_KEYS_FIRE, 0);
+        (void)system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)ROVER_KEYS_FIRE, 0010600, 0);
         rover_runner.fire = system_open_at(AT_FDCWD, ROVER_KEYS_FIRE, 2 /* O_RDWR */ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
 }
 
@@ -999,7 +999,7 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                 string_address newline = string_first_of(program, '\n');
                 if (newline)
                         newline[0] = 0;
-                system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
+                (void)system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0);
                 rover_runner_post(71, program, string_length(program), 5);
                 struct rover_event address_to event = &rover_runner.queue[rover_runner.queued - 1];
                 //      button's fields: name pin, the slot, the program.
@@ -1238,8 +1238,8 @@ static b32 rover_runner_run(bipolar device)
         rover_runner.watch = system_call_2(syscall(inotify_init1), O_CLOEXEC | O_NONBLOCK, 0);
         if (rover_runner.watch >= 0)
         {
-                system_call_3(syscall(inotify_add_watch), (positive)rover_runner.watch, (positive) "/root", 0x88);
-                system_call_3(syscall(inotify_add_watch), (positive)rover_runner.watch, (positive) "/run/moonwater", 0x188);
+                (void)system_call_3(syscall(inotify_add_watch), (positive)rover_runner.watch, (positive) "/root", 0x88);
+                (void)system_call_3(syscall(inotify_add_watch), (positive)rover_runner.watch, (positive) "/run/moonwater", 0x188);
         }
         if (system_call_2(syscall(pipe2), (positive)rover_runner.kernel_pipe, O_CLOEXEC) < 0 ||
             !thread_start(rover_runner_kernel_thread, null))

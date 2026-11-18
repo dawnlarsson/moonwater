@@ -3375,7 +3375,8 @@ static b32 compositor_main()
         compositor_look_read();
         compositor_input_settings_read();
         compositor_cursor_move();
-        compositor_font(font);
+        //      No face given is the faces the desktop's programs find for themselves (ui_faces).
+        compositor_font(font ? font : ui_faces()->text[0] ? (string_address)ui_faces()->text : null);
 
         compositor.signals = compositor_signals();
         compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;

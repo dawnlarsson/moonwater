@@ -1204,6 +1204,13 @@ static b32 launcher_main()
                         continue;
                 at++;
         }
+        //      No face given is the faces the desktop's programs find for themselves (ui_faces).
+        if (regular == (string_address)UI_FONT_REGULAR && ui_faces()->text[0])
+                regular = (string_address)ui_faces()->text;
+        if (!launcher.mono && ui_faces()->face[0])
+                launcher.mono = (const char address_to)ui_faces()->face;
+        if (!launcher.mono_bold && ui_faces()->bold[0])
+                launcher.mono_bold = (const char address_to)ui_faces()->bold;
         launcher.regular = (const char address_to)regular;
         launcher_app.font = regular;
         return ui_app_run(&launcher_app);

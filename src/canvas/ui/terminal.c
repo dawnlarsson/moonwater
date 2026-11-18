@@ -4049,6 +4049,13 @@ static int terminal_start(void)
         size = size ? size : TERMINAL_SIZE;
         size = size < terminal_steps[0] ? terminal_steps[0] : size > terminal_steps[TERMINAL_STEPS - 1] ? terminal_steps[TERMINAL_STEPS - 1] : size;
 
+        //      No face given is the faces the desktop's programs find for themselves: the mono one and its bold.
+        if (!terminal_face_count && ui_faces()->face[0])
+        {
+                terminal_paths[terminal_face_count++] = (string_address)ui_faces()->face;
+                if (!terminal_bold_path && ui_faces()->bold[0])
+                        terminal_bold_path = (string_address)ui_faces()->bold;
+        }
         if (!terminal_fonts(terminal_paths, terminal_face_count, terminal_bold_path, size))
         {
                 terminal_refused(terminal.reading, " has no font to draw with (-f FONT.ttf)");
