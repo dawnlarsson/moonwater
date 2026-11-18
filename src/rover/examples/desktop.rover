@@ -1,0 +1,48 @@
+# The desktop's services: what main.moonwater.sh kept up by hand, with bus_supervise, audio_supervise and
+# desktop_supervise (started again at once, then after half a second and after two, given up after four short lives,
+# a run of thirty seconds putting the count back), which is every service's policy unsaid. Each is started while its
+# if lines hold, so canvas on and canvas off (moonwater_canvas_on and moonwater_canvas_off) are the state they read.
+# The memory in the kernel log from as early in a boot as the runner starts, again whenever it changes (memory_start).
+service memory
+	about "The memory in the kernel log"
+	run /moonwater memory log
+
+# The session bus: where a bowl's programs ask how the desktop looks, and are told when it changes.
+service bus
+	about "The session bus"
+	run /sessionbus
+	ready /run/moonwater/bus
+	log /run/moonwater/bus.log
+	if canvas == on
+
+# The sound server, unless moonwater audio server off says it is not wanted.
+service audio
+	about "The sound server"
+	run /audio
+	if canvas == on and setting.audio.server == on
+
+# The desktop: up when its window table is made, which is what compositor.up and desktop_wait_for waited for, and
+# not wanted with moonwater.desktop=none on the kernel's command line.
+service compositor
+	about "The desktop: windows, taskbar, wallpaper"
+	run /compositor
+	needs bus
+	ready /run/moonwater/windows
+	log /run/moonwater/compositor.log
+	if canvas == on and boot.desktop != none
+
+# Four short lives of the compositor and the desktop rests until the next start, for the text console.
+rule desktop-rest
+	about "Rest the desktop when the compositor cannot stay up"
+	on service failed compositor
+	do desktop rest
+
+# Canvas on is the moment the desktop's choice is carried out: off is the text console (moonwater desktop boot).
+rule desktop-boot
+	on canvas on
+	run desktop-boot
+
+# A disk's /root is the session's once boot has said so: the compositor reads it again (desktop_settled).
+rule desktop-settled
+	on boot disk
+	do restart compositor

@@ -273,6 +273,8 @@ static p32 rover_pool_string(struct rover_build address_to build, const p8 addre
                 return 0;
         if (at + 2 + length + 1 > ROVER_POOL_MOST)
                 return rover_refused(build, "too many words and notes for one table", null, null), 0;
+        //      The alignment's bytes are zero, so a text makes the same table whatever was compiled before it.
+        memory_zero(rover_pool(build) + build->pool, at - build->pool);
         memory_copy(rover_pool(build) + at, &size, 2);
         memory_copy(rover_pool(build) + at + 2, bytes, length);
         rover_pool(build)[at + 2 + length] = 0;
@@ -286,6 +288,7 @@ static p32 rover_pool_number(struct rover_build address_to build, b64 value)
 
         if (at + 8 > ROVER_POOL_MOST)
                 return rover_refused(build, "too many constants for one table", null, null), 0;
+        memory_zero(rover_pool(build) + build->pool, at - build->pool);
         memory_copy(rover_pool(build) + at, &value, 8);
         build->pool = at + 8;
         return at;

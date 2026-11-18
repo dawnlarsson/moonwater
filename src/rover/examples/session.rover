@@ -1,0 +1,21 @@
+# What the desktop opens once it is up: desktop_session's tail, with no FIFO and no polling. A desktop primitive is
+# the compositor's, so it waits for the compositor to be up; these rules fire when it is.
+# The person's list, moonwater desktop autostart, in its order (desktop_autostart).
+rule autostart
+	about "What the desktop opens when it is up"
+	on service up compositor
+	run autostart
+
+# The on-screen keyboard, unless its setting is off: it starts hidden, and shows while a text field has the keys.
+rule onscreen-keyboard
+	on service up compositor
+	if setting.keyboard.onscreen != off
+	do open osk
+
+# The installer on a boot from the stick: a verdict of live, or ask (a disk holds another build); never on an
+# installed boot (desktop_installer).
+rule installer
+	about "The installer, on a live boot"
+	on boot
+	if $verdict != disk
+	do open installer

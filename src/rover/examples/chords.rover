@@ -1,0 +1,10 @@
+# The key_ functions: a chord pressed on the desktop.
+# Control, Shift and T: a terminal.
+rule terminal
+	on chord ctrl+shift+t
+	do open terminal
+
+# Super and Space: the launcher in the middle of the screen; the same chord puts it away.
+rule launcher
+	on chord super+space
+	do open launcher

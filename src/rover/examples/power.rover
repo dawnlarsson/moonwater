@@ -1,0 +1,16 @@
+# The keys that stop the machine, in the kernel, at the key: moonwater_poweroff, moonwater_reset and
+# moonwater_ctrl_alt_delete. The kernel's floor powers off or reboots with no table at all; these say it as rules.
+rule power
+	on key power
+	place kernel
+	do poweroff
+
+rule reset
+	on key reset
+	place kernel
+	do reboot
+
+rule ctrl-alt-delete
+	on key ctrl-alt-delete
+	place kernel
+	do reboot

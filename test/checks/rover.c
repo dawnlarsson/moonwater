@@ -997,9 +997,72 @@ static fn rover_check_evaluator(void)
         check("so it answers", rover_same(rover_fires(&event, ROVER_RUNNER), "a:then"));
 }
 
+/*
+        src/rover/examples, each file built into this program as it is in the tree (the build runs from the repository's
+        root, which is where .incbin finds them) and ended by a NUL. test/rover_schema.py --check refuses a file there
+        this list does not name, so a new example is compiled the day it is added.
+*/
+#define ROVER_EXAMPLE(name)                                                                                    \
+        __asm__(".pushsection .rodata\n.globl rover_example_" #name "\nrover_example_" #name                   \
+                ":\n.incbin \"src/rover/examples/" #name ".rover\"\n.byte 0\n.popsection\n");                   \
+        extern const char rover_example_##name[];
+
+ROVER_EXAMPLE(desktop)
+ROVER_EXAMPLE(session)
+ROVER_EXAMPLE(buttons)
+ROVER_EXAMPLE(chords)
+ROVER_EXAMPLE(power)
+
+static fn rover_check_examples(void)
+{
+        static const char address_to const examples[] = {rover_example_desktop, rover_example_session,
+                                                         rover_example_buttons, rover_example_chords,
+                                                         rover_example_power};
+        bool all = true, canonical = true;
+
+        for (positive at = 0; at < array_count(examples); at++)
+        {
+                if (!rover_compiled(examples[at]))
+                {
+                        all = false;
+                        continue;
+                }
+                if (!rover_same(rover_printed_of(), examples[at]))
+                        canonical = false;
+        }
+        check("every example compiles and passes the load-time check", all);
+        check("every example is canonical: it prints back as itself", canonical);
+
+        //      What they say, asked of them: the desktop's services and the rules on their events.
+        if (rover_compiled(rover_example_desktop))
+        {
+                check("the desktop example's four services, the compositor needing the bus",
+                      rover_view.head->services == 4 && rover_view.service[3].need[0] == 1);
+                rover_set("canvas", 1, null);
+                check("the compositor is wanted with Canvas on", rover_service_wanted(&rover_view, 3, rover_pages));
+                rover_set("boot.desktop", 0, "none");
+                check("and not with moonwater.desktop=none", !rover_service_wanted(&rover_view, 3, rover_pages));
+                check("the sound server is not wanted with its setting off",
+                      !rover_service_wanted(&rover_view, 2, rover_pages));
+                rover_set("setting.audio.server", 1, null);
+                check("and is with it on", rover_service_wanted(&rover_view, 2, rover_pages));
+                memory_zero(rover_page_store, sizeof(rover_page_store));
+        }
+        if (rover_compiled(rover_example_buttons))
+        {
+                struct rover_event press = rover_event_of("button", null);
+
+                press.count = 1;
+                press.field[0].number = 0; // launcher
+                check("the launcher button opens the launcher beside it",
+                      rover_same(rover_fires(&press, ROVER_DESKTOP), "launcher-button:then"));
+        }
+}
+
 b32 main(void)
 {
         rover_check_first_of_either();
+        rover_check_examples();
         rover_check_schema();
         rover_check_round_trip();
         rover_check_refusals();

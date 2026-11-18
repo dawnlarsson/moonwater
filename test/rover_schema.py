@@ -639,6 +639,13 @@ def main():
         sys.stdout.write(text)
         return 0
     if options.check:
+        #   Every example is one CHECK_rover compiles: the check names each by ROVER_EXAMPLE(name).
+        named = set(re.findall(r'^ROVER_EXAMPLE\((\w+)\)$', (ROOT / 'test/checks/rover.c').read_text(), re.M))
+        files = {path.stem for path in (ROOT / 'src/rover/examples').glob('*.rover')}
+        if named != files:
+            print('rover_schema: src/rover/examples and ROVER_EXAMPLE in test/checks/rover.c differ: %s' %
+                  ', '.join(sorted(named ^ files)))
+            return 1
         current = OUT.read_text() if OUT.exists() else ''
         if current != made:
             print('rover_schema: src/rover/schema.inc is stale; run python3 -I test/rover_schema.py')

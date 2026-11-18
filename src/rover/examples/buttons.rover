@@ -1,0 +1,31 @@
+# The desktop's own presses, which the compositor named down keys.fire for desktop_keys_answer: one keyed event,
+# and open with the words each program is started with.
+# The panel's launcher button: the launcher beside it.
+rule launcher-button
+	on button launcher
+	do open launcher -a
+
+# The tray's volume cell: the mixer's popup beside it.
+rule volume-button
+	on button volume
+	do open mixer -q -a
+
+# The tray's microphone cell, there while a program records: the popup's recording strips.
+rule mic-button
+	on button mic
+	do open mixer -q -a -i
+
+# The tray's notices dot: the notices beside it.
+rule notices-button
+	on button notices
+	do open notices -a
+
+# The clock and the battery pressed twice: Settings.
+rule settings-button
+	on button tray-double
+	do open settings
+
+# A pinned program's task: the program the compositor says, which it left in /run/moonwater/pin.N for desktop_pin.
+rule pinned
+	on button pin
+	do open $app
