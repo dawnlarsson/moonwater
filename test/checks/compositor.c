@@ -2825,7 +2825,7 @@ static void check_taskbar_launcher(void)
                         (vertical ? tx == bx && tw == bw && ty == y && th == h : tx == x && tw == w && ty == by && th == bh);
             {
                 int hurt[1][4] = {{x + w / 2, y + h / 2, x + w / 2 + 1, y + h / 2 + 1}};
-                unsigned long redo = taskbar_meets(&view, hurt, 1);
+                unsigned long redo = taskbar_meets(&view, hurt, 1, 0);
 
                 damaged &= (redo & taskbar_bit(TASKBAR_LAUNCHER)) != 0 && !(redo & taskbar_bit(-2));
             }
@@ -3274,9 +3274,13 @@ static void check_moon_motion(void)
     // Its own damage meets the moon and nothing else; the same rectangle from under the band meets the tasks beside it too.
     damage[0][0] = sx - 2, damage[0][1] = sy - 2, damage[0][2] = sx + sw + 2, damage[0][3] = sy + sh + 2;
     taskbar_moon_damaged(0, damage[0]);
-    own = taskbar_meets(&view, damage, 1) == taskbar_bit(TASKBAR_LAUNCHER);
+    own = taskbar_meets(&view, damage, 1, 0) == taskbar_bit(TASKBAR_LAUNCHER);
+    // Solid (a window under the band): the moon's own damage is the moon's alone, and the same rectangle from under the band is nothing's.
+    int solid_own = taskbar_meets(&view, damage, 1, 1) == taskbar_bit(TASKBAR_LAUNCHER);
     taskbar_bands[0].moon_own = 0;
-    own &= taskbar_meets(&view, damage, 1) != taskbar_bit(TASKBAR_LAUNCHER);
+    own &= taskbar_meets(&view, damage, 1, 0) != taskbar_bit(TASKBAR_LAUNCHER);
+    solid_own &= taskbar_meets(&view, damage, 1, 1) == 0;
+    check("moon: on a solid band its own damage redoes the moon and a window's damage under the band redoes nothing", solid_own);
     ui_kit.test_clock = 0;
     memory_zero(&taskbar_bands, sizeof(taskbar_bands));
     taskbar_moon_hover(-1);

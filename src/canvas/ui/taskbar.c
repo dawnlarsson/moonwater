@@ -1007,10 +1007,23 @@ _Static_assert(TASKBAR_TAB_BITS + 2 <= 64, "a redo bit a tab, the tray's and the
         in the scene under a tab, or under its reach, is one to its glass. The
         reach runs across the whole band and along the slot.
 */
-static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages)
+static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage)[4], unsigned int damages, int solid)
 {
         unsigned long redo = 0;
 
+        // A solid band (compositor_band_solid: a window under it or its blur's reach) is the desktop's ground, not the scene: nothing under it
+        // is a change to it, and only the moon's own damage (a step of its turn, its growing) is its to draw again. Where every slot the damage
+        // met was made again, the moon's square with its clock among them, at every frame of a window under the band: box, Chromium's page
+        // changing every frame under it, the taskbar's moon, its clock's glyphs and their glow a quarter of the loop thread's samples.
+        if (solid)
+        {
+                const struct taskbar_band address_to own = &taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0];
+
+                for (unsigned int at = 0; own->moon_own && at < damages; at++)
+                        if (!memory_compare(damage[at], own->moon_damage, sizeof(damage[at])))
+                                return taskbar_bit(TASKBAR_LAUNCHER);
+                return 0;
+        }
         for (int which = TASKBAR_TRAY_BEFORE; which < (int)view->count; which++)
         {
                 int reach[4];
@@ -2030,6 +2043,8 @@ static void taskbar_edit_ring(const struct taskbar_view *view, const struct ui_t
         ui_kit_ring(&grip, &ring, (b32)(s * 256 / 100 > 256 ? s * 256 / 100 : 256), (ink & 0xffffffu) | alpha);
 }
 
+static void taskbar_moon_clock(const struct taskbar_view *view, struct ui address_to grip, int x, int y, int size, int hours, int minutes);
+
 static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, int hours, int minutes, int lit)
 {
         struct ui ui;
@@ -2044,6 +2059,7 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
         // on either; white while the launcher is up.
         int light = window_light(compositor_tab_target(0));
         struct ui_moon_look look = {0xff0c0d10u, 0xfff7f5efu, 0, lit ? 0xffffffffu : light ? 0xa0868686u : 0xb4e8e8e8u, UI_MOON_RIM | UI_MOON_FULL_SQUARE, 0};
+        const unsigned int address_to cached_frame = null; // the baked frame the square was copied from, when it was
 
         if (!seconds)
         {
@@ -2082,7 +2098,7 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
                 {
                         for (int row = 0; row < size; row++)
                                 memory_copy(ui.pixels + (long)(y + row) * (long)ui.pitch + x, frame + row * size, (positive)size * 4);
-                        left = x, top = y, grown = size;
+                        left = x, top = y, grown = size, cached_frame = frame;
                 }
                 else
                 {
@@ -2095,6 +2111,61 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
         x = left, y = top, size = grown;
         if (taskbar.clock_tray || taskbar.clock_tab || taskbar.clock_none || hours < 0 || !view->engine || !view->face)
                 return;
+        // The square with its clock, kept as last drawn: the same step's frame at the same minute, size and look is that square again. The
+        // band's slot is made again whenever the glass round it changes (a window in the blur's reach drawing, a frame each), and the square
+        // is opaque (UI_MOON_FULL_SQUARE), so what is behind it changes nothing of it: where the clock's glyphs and their glow were drawn
+        // again at every such frame (box, Chromium's page drawing below the band: ui_moon_label 11.8 percent of the loop thread's samples).
+        {
+                static struct
+                {
+                        const unsigned int address_to frame;
+                        int size, hours, minutes, flags, bulge, read;
+                        unsigned int accent;
+                        const void address_to engine, address_to face;
+                        unsigned int address_to pixels;
+                        positive bytes;
+                } shown;
+                int flags = taskbar.clock_12h, bulge = taskbar.clock_bulge;
+                unsigned int accent = taskbar_accent();
+                const void address_to face = view->bold ? (const void address_to)view->bold : (const void address_to)view->face;
+                b32 whole = cached_frame && x >= 0 && y >= 0 && x + size <= ui.width && y + size <= ui.height;
+
+                if (whole && shown.pixels && shown.frame == cached_frame && shown.size == size && shown.hours == hours && shown.minutes == minutes &&
+                    shown.flags == flags && shown.bulge == bulge && shown.accent == accent && shown.engine == (const void address_to)view->engine &&
+                    shown.face == face)
+                {
+                        for (int row = 0; row < size; row++)
+                                memory_copy(ui.pixels + (long)(y + row) * (long)ui.pitch + x, shown.pixels + (positive)row * (positive)size, (positive)size * 4);
+                        taskbar.clock_read = shown.read;
+                        return;
+                }
+                taskbar_moon_clock(view, &ui, x, y, size, hours, minutes);
+                if (!whole)
+                        return;
+                if (!shown.pixels || shown.bytes < (positive)size * (positive)size * 4)
+                {
+                        long got;
+
+                        if (shown.pixels)
+                                compositor_call(syscall(munmap), (positive)shown.pixels, shown.bytes, 0, 0, 0, 0);
+                        shown.pixels = null;
+                        got = ui_map((positive)size * (positive)size * 4);
+                        if (got < 0 && got > -4096)
+                                return;
+                        shown.pixels = (unsigned int address_to)got, shown.bytes = (positive)size * (positive)size * 4;
+                }
+                for (int row = 0; row < size; row++)
+                        memory_copy(shown.pixels + (positive)row * (positive)size, ui.pixels + (long)(y + row) * (long)ui.pitch + x, (positive)size * 4);
+                shown.frame = cached_frame, shown.size = size, shown.hours = hours, shown.minutes = minutes, shown.flags = flags, shown.bulge = bulge;
+                shown.accent = accent, shown.engine = (const void address_to)view->engine, shown.face = face, shown.read = taskbar.clock_read;
+        }
+}
+
+// The clock drawn over the moon's square at x, y, size: the hour over the minute, in the accent's glow (ui_moon_label).
+static void taskbar_moon_clock(const struct taskbar_view *view, struct ui address_to grip, int x, int y, int size, int hours, int minutes)
+{
+        struct ui ui = *grip;
+
         {
                 int shown = taskbar.clock_12h ? (hours % 12 ? hours % 12 : 12) : hours;
                 char upper[3] = {(char)('0' + shown / 10), (char)('0' + shown % 10), 0}, lower[3] = {(char)('0' + minutes / 10), (char)('0' + minutes % 10), 0};
