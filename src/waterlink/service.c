@@ -1142,6 +1142,64 @@ static p8 link_part_owned(bipolar handle, p8 address_to path)
         path spelled round one is the same file. Reserved names remain
         protected before their files exist, by the parent directory's inode.
 */
+/*
+        Whether a path is in the machine's rules, or is their directory: what
+        /root/rules holds runs as root (the rules rover's runner loads at
+        boot, the scripts their run actions start), as the machine script
+        did, so a peer with files alone is not to write it, or it would have
+        what only a shell grant gives. The path's parent is opened as the
+        kernel resolves it, then walked up by .. to the top, and any step
+        that is the rules directory protects it: a link to the directory,
+        a second name, or a path spelled round one is the same directory.
+        The directory not there yet is protected by its name in /root, so
+        a push cannot make it. A parent that cannot be opened protects.
+*/
+static p8 link_path_in_rules(string_address path)
+{
+#if defined(MACOS)
+        (void)path; // a Mac runs no rules
+        return false;
+#else
+        p8 leaf[256];
+        file_facts rules, root, step, up;
+        p8 has_rules = file_look(AT_FDCWD, (string_address) "/root/rules", 0, address_of rules);
+        p8 has_root = file_look(AT_FDCWD, (string_address) "/root", 0, address_of root);
+        bipolar at = system_open_parent_pinned(AT_FDCWD, path, leaf, sizeof leaf);
+
+        if (at < 0)
+                return at != -2; // no parent at all is nothing to write into
+        for (positive depth = 0; depth < 4096; depth++)
+        {
+                bipolar parent;
+
+                if (!file_look(at, (string_address) "", AT_EMPTY_PATH, address_of step))
+                        break;
+                // The directory itself named, or the name it would take in /root.
+                if (depth == 0 && has_root && file_same_identity(address_of step, address_of root) &&
+                    !string_compare((string_address)leaf, (string_address) "rules"))
+                        break;
+                if (has_rules && file_same_identity(address_of step, address_of rules))
+                        break;
+                parent = system_open_at(at, "..", O_PATH | O_DIRECTORY | O_CLOEXEC);
+                if (parent < 0 || !file_look(parent, (string_address) "", AT_EMPTY_PATH, address_of up))
+                {
+                        if (parent >= 0)
+                                system_close(parent);
+                        break;
+                }
+                system_close(at);
+                at = parent;
+                if (file_same_identity(address_of step, address_of up))
+                {
+                        system_close(at);
+                        return false; // the top, and the rules were nowhere above
+                }
+        }
+        system_close(at);
+        return true;
+#endif
+}
+
 static p8 link_path_is_own(string_address path)
 {
         //      Not static: on Darwin each path is made at the call (link_state_path),
@@ -1186,7 +1244,7 @@ static p8 link_path_is_own(string_address path)
                                 return true;
                 }
         }
-        return false;
+        return link_path_in_rules(path);
 }
 
 /*

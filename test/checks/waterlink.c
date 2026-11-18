@@ -7247,6 +7247,35 @@ static fn own_files(void)
               wls_file_asked(s, LINK_ASK_PUSH, "/root/ordinary") &&
                       s->writes[0].fd >= 0);
         link_session_close(s);
+        //      The rules run as root, as the machine script did: their directory, what is in it at any depth, a
+        //      path spelled round it, a link to it, and the name before the directory is made, are all the link's own.
+        {
+                p8 rules_were = file_look(AT_FDCWD, (string_address) "/root/rules", AT_SYMLINK_NOFOLLOW,
+                                          address_of (file_facts){0});
+                p8 unmade = rules_were || link_path_is_own("/root/rules");
+                p8 made_rules = rules_were || system_make_directory_at(AT_FDCWD, "/root/rules", 0700) >= 0;
+                p8 made_scripts = system_make_directory_at(AT_FDCWD, "/root/rules/scripts", 0700) >= 0 || rules_were;
+
+                (void)system_remove_at(AT_FDCWD, "/root/rules-link", 0);
+                (void)system_symbolic_link_at("/root/rules", AT_FDCWD, "/root/rules-link");
+                check("sec: the rules, their scripts and their directory are the link's own, by any name",
+                      made_rules && made_scripts && unmade && link_path_is_own("/root/rules") &&
+                              link_path_is_own("/root/rules/lid.rover") &&
+                              link_path_is_own("/root/rules/scripts/autostart") &&
+                              link_path_is_own("/root/../root/rules/x.rover") &&
+                              link_path_is_own("/root/rules-link/x.rover"));
+                check("sec: a push into the rules is refused and nothing is staged",
+                      !wls_file_asked(s, LINK_ASK_PUSH, "/root/rules/evil.rover") && s->writes[0].fd < 0);
+                link_session_close(s);
+                check("and a file beside them is not",
+                      !link_path_is_own("/root/rulesx") && !link_path_is_own("/root/ordinary"));
+                (void)system_remove_at(AT_FDCWD, "/root/rules-link", 0);
+                if (!rules_were)
+                {
+                        (void)system_remove_at(AT_FDCWD, "/root/rules/scripts", AT_REMOVEDIR);
+                        (void)system_remove_at(AT_FDCWD, "/root/rules", AT_REMOVEDIR);
+                }
+        }
         (void)system_remove_at(AT_FDCWD, "/root/own-link", 0);
         (void)system_remove_at(AT_FDCWD, "/root/own-hard", 0);
         (void)system_remove_at(AT_FDCWD, "/run/own-hard", 0);
