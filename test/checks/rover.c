@@ -422,6 +422,8 @@ static const struct
     {"rule a\n\ton fullscreen on\n\tplace kernel\n\tdo suspend\n", 0, "kernel never sees it"},
     {"rule a\n\twhen $app == x\n\tdo suspend\n", 2, "fields are no states"},
     {"rule a\n\ton window opened\n\tdo open $app\n", 3, "not the rule's own word"},
+    {"rule a\n\ton lid close\n\tif byte_is_alnum(256) == 1\n\tdo log x\n", 3, "outside the range the routine takes"},
+    {"rule a\n\ton lid close\n\tif byte_is_alnum(-1) == 1\n\tdo log x\n", 3, "outside the range the routine takes"},
     {"rule a\n\ton lid close\n\ttool rfkill unblock all\n", 3, "is deliberate"},
     {"rule a\n\ton lid close\n\ttool ctrlaltdel hard\n", 3, "is deliberate"},
     {"rule a\n\ton lid close\n\ttool mount /dev/sda1 /mnt\n", 3, "is deliberate"},
@@ -1082,10 +1084,13 @@ static fn rover_check_evaluator(void)
         event = rover_event_of("lid close", null);
         check("and is evaluated there", rover_same(rover_fires(&event, ROVER_RUNNER), "a:then"));
 
-        //      A routine's integer argument is held to its range: byte_is_alpha of 321 is asked of 255.
-        check("a call's integer argument is held to the routine's range",
-              rover_compiled("rule a\n\ton lid close\n\tif byte_is_alpha(321) == 0 and byte_is_alpha(65)\n\tdo suspend\n"));
-        check("so it answers", rover_same(rover_fires(&event, ROVER_RUNNER), "a:then"));
+        //      A routine's integer argument is held to its range: a constant outside it is refused at compile (a field or a
+        //      state is clamped when it is called), and one inside it is asked.
+        check("a call's constant outside the routine's range is refused",
+              !rover_compiled("rule a\n\ton lid close\n\tif byte_is_alpha(321) == 0\n\tdo suspend\n"));
+        check("and one inside it compiles and answers",
+              rover_compiled("rule a\n\ton lid close\n\tif byte_is_alpha(65)\n\tdo suspend\n") &&
+                  rover_same(rover_fires(&event, ROVER_RUNNER), "a:then"));
 }
 
 /*

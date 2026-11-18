@@ -795,6 +795,15 @@ static bool rover_read_call(struct rover_build address_to build, const struct ro
                 if (integer == rover_kind_is_word(rover_types[argument.type].kind))
                         return rover_refused(build, "", &parts[k], integer ? " is a word where the routine takes a number"
                                                                            : " is a number where the routine takes a word");
+                //      A constant the routine's range does not hold is refused, as a literal outside its type is, where
+                //      the call would have clamped it to another value (byte_is_alnum(256) ran as 255).
+                if (integer && argument.operand.source == ROVER_CONST_NUMBER)
+                {
+                        b64 value = memory_load_unaligned(b64, rover_pool(build) + argument.operand.index);
+
+                        if (value < rover_functions[function].low[k] || value > rover_functions[function].high[k])
+                                return rover_refused(build, "", &parts[k], " is outside the range the routine takes");
+                }
                 made.argument[k] = argument.operand;
         }
         build->call[build->calls] = made;
