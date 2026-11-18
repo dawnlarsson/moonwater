@@ -340,6 +340,8 @@ static fn host_pause(p64 nanoseconds)
 #include "host/network.c" // the verb network: the interfaces, the name servers and discovery as one page, and discovery's switches
 #include "host/page.c" // the verbs setup (install, update, update usb, rollback, use, live, removable), status, help, wipe, machine, boot and ask: the page of verbs and its rows, the sticks and an update from one, a rollback, a wipe
 #include "host/install.c" // the verb install: the installer's drives, the one this started from, an update or an overwrite of one and what it wrote read back
+#define MOONWATER_CLI_ROVER
+#include "../rover/compile.c" // the verb rover: Moonwater's rules compiled to a table, printed back, drawn as a graph, tested against states; and the schema
 
 /*
         moonwater canvas identify: each screen's number, as a black-on-white badge in that screen's top left corner for three seconds (the window
@@ -1029,6 +1031,7 @@ static b32 host_main()
             {"ssh", ssh_main, false},
             {"wipe", host_wipe_verb, true},
             {"machine", host_machine_verb, false},
+            {"rover", rover_verb, false},
             {"version", host_version_verb, true},
             {"boot", host_boot_verb, false},
             {"ask", host_ask_verb, false},

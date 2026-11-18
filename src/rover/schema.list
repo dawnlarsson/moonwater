@@ -1,0 +1,110 @@
+# The part of rover's schema nothing in the code says yet, written by hand.
+#
+# test/rover_schema.py reads this with spark's event table, lib.c's
+# inventory and the shell's tool list, and writes src/rover/schema.inc.
+# One record a line; a name with a space in it is quoted.
+#
+#   state NAME PAGE TYPE              a state, at the next offset of its page
+#   event ID SOURCE NAME [FIELD:TYPE ...]
+#   primitive ID RUNS CLASS NAME [ARG:TYPE ...]
+#
+# TYPE is int:LOW:HIGH, percent, duration, clock, weekday, onoff,
+# enum:WORD,WORD..., chord, word or text. A state is never moved: a new one
+# goes at the end of its page. An id is never given to another event or
+# primitive.
+
+# The kernel's page: what the module knows as its events arrive.
+state lid kernel enum:open,closed
+state power.source kernel enum:ac,battery
+state battery.percent kernel percent
+state battery.state kernel enum:unknown,charging,discharging,full,not-charging
+state headphone kernel onoff
+state dock kernel onoff
+state tablet kernel onoff
+state canvas kernel onoff
+
+# The desktop's page: the compositor's own.
+state display.count desktop int:0:16
+state display.external desktop int:0:16
+state window.fullscreen desktop onoff
+state window.app desktop word
+
+# Events the compositor posts. Kernel events (ids 1 to 63) are spark's.
+event 64 desktop chord chord:chord
+event 65 desktop "fullscreen on" app:word
+event 66 desktop "fullscreen off" app:word
+event 67 desktop "window opened" app:word
+event 68 desktop "window closed" app:word
+event 69 desktop "display added" connector:word
+event 70 desktop "display removed" connector:word
+
+# The rules' own event, which emit posts.
+event 96 runner cue name:word
+
+# Moonwater's mechanisms. RUNS is where the call is a direct one.
+primitive 1 kernel any poweroff
+primitive 2 kernel any reboot
+primitive 3 kernel any suspend
+primitive 4 kernel any backlight level:percent
+primitive 5 kernel any latency limit:duration
+primitive 6 kernel any "latency off"
+primitive 7 kernel lower-only "radio off" which:enum:wifi,bluetooth,all
+primitive 8 kernel deliberate "radio on" which:enum:wifi,bluetooth,all
+primitive 9 kernel lower-only "usb lock"
+primitive 10 kernel deliberate "usb allow"
+primitive 11 kernel any log message:text
+primitive 12 desktop any "display off"
+primitive 13 desktop any "display on"
+primitive 14 desktop any open app:word
+primitive 15 desktop any notify message:text
+
+# lib.c's routines with integer arguments, and the values each argument
+# takes: PARAM:LOW:HIGH, by the prototype's names, or total when every value
+# of the argument's C type is one the routine answers. A rule's argument is
+# held to the range when the routine is called; a routine with an integer
+# argument and no row here is not bound at all, because a selector past its
+# cases or a byte past 255 is a read the routine never promised to bound.
+function absolute_whole total
+function absolute_wide total
+function bits_counted total
+function bits_first_set total
+function bits_first_set_wide total
+function bits_leading_zeros total
+function bits_trailing_zeros total
+function byte_class_holds which:0:11
+function byte_is_alnum value:0:255
+function byte_is_alpha value:0:255
+function byte_is_ascii value:0:255
+function byte_is_blank value:0:255
+function byte_is_control value:0:255
+function byte_is_digit value:0:255
+function byte_is_graphic value:0:255
+function byte_is_hexadecimal value:0:255
+function byte_is_lower value:0:255
+function byte_is_printable value:0:255
+function byte_is_punctuation value:0:255
+function byte_is_space value:0:255
+function byte_is_upper value:0:255
+function byte_to_ascii value:0:255
+function byte_to_lower value:0:255
+function byte_to_upper value:0:255
+function bytes_reverse_16 total
+function bytes_reverse_32 total
+function hash_crc32 total
+function hash_crc32_msb total
+function hash_crc32c total
+function hash_crc64 total
+function hash_xxh64 total
+function memory_checksum_bsd16 total
+function memory_count total
+function memory_escape_index policy:0:64
+function memory_growth total
+function pointer_gain total
+function positive_digits total
+function string_compare_folded_max total
+function string_compare_max total
+function string_length_max total
+function unicode_case total
+function unicode_width variant:0:1
+function wait_status_code total
+function wait_status_code_base total

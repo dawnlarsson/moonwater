@@ -247,7 +247,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine rover snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues"
 
 describe()
 {
@@ -341,6 +341,7 @@ describe()
         issues)   echo "the window table's issue board (window.c): a set, an update in place, a clear by code or by key, a full board that says so, the seqlock a reader checks and a hostile copy" ;;
         dbus)     echo "the session bus (src/dbus): the wire, the authentication, names, match rules, routing, the Settings portal, two dozen kinds of message that end a connection, caps and a fuzz; and sd-bus, libdbus and GDBus against the sessionbus tool" ;;
         machine) echo "the machine script: hooks, functions, case arms, overlay lines and file policy" ;;
+        rover) echo "rover, the rules: the schema against the code, the round trip, refusals, the load-time check against every byte flipped, and the evaluator" ;;
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
         browser) echo "the file browser's model with no window: a folder read in steps, its order, its selection, the way back, hostile names, links not followed, a folder that changes under its listing" ;;
@@ -404,7 +405,7 @@ seam_lanes()
         link) echo "waterlink modem link" ;;
         shell) echo "shell builtins audit" ;;
         tools) echo "text files misc util_linux awk table regex reuse_shell snapshot checksum sensors" ;;
-        machine) echo "machine cli script bowl storage_io storage_format" ;;
+        machine) echo "machine rover cli script bowl storage_io storage_format" ;;
         desktop) echo "term edit editing font font_shape canvas sleep wayland audio dbus issues osk band browser" ;;
         image) echo "kit switches boot install" ;;
         engine) echo "differential_oracle" ;;
@@ -4149,6 +4150,16 @@ lane_storage_format()
 }
 
 lane_machine() { freestanding_checks_lane machine machine; }
+
+#
+#       rover, the rules (src/rover): the schema test/rover_schema.py makes from
+#       the code is the one in the tree, and CHECK_rover's rows on each machine.
+#
+lane_rover()
+{
+        python3 -I test/rover_schema.py --check || return 1
+        freestanding_checks_lane rover rover
+}
 lane_snapshot() { freestanding_checks_lane snapshot snapshot; }
 
 #
