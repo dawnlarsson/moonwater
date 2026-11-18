@@ -862,6 +862,10 @@ static fn rover_check_evaluator(void)
         check("and is counted", rover_runs[2].dropped == 1); // the launcher, after the two service rules
         event.when += 200000000;
         check("300 ms later is past it", rover_same(rover_fires(&event, ROVER_DESKTOP), "launcher:then"));
+        event.when -= 1000;
+        check("an event stamped before the last firing is inside the limit, not past it",
+              rover_same(rover_fires(&event, ROVER_DESKTOP), ""));
+        event.when += 1000;
         event.field[0].number = (b64)(ROVER_CHORD_CTRL | ROVER_CHORD_ALT) << 16 | 20;
         check("ctrl+alt+t opens a terminal", rover_same(rover_fires(&event, ROVER_DESKTOP), "terminal:then"));
         check("once: a second ctrl+alt+t fires nothing", rover_same(rover_fires(&event, ROVER_DESKTOP), ""));

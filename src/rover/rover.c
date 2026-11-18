@@ -929,7 +929,9 @@ static bool rover_may(const struct rover_rule address_to rule, struct rover_run 
 {
         if ((rule->flags & ROVER_RULE_ONCE) && run->done)
                 return false;
-        if (rule->limit_ms && run->fires && when - run->last < (p64)rule->limit_ms * 1000000)
+        //      Signed: an event stamped before the last firing (two devices, a driver's stamp) is inside the window,
+        //      not a gap of centuries past it. The walkers compare the same way.
+        if (rule->limit_ms && run->fires && (b64)(when - run->last) < (b64)rule->limit_ms * 1000000)
         {
                 run->dropped++;
                 return false;
@@ -1044,7 +1046,7 @@ __asm__(
     "55: movzwl (%r13,%rbx,2), %eax\n   lea (%rax,%rax,2), %r10\n   shl $3, %r10\n   add 48(%rsp), %r10\n"
     "testb $2, 3(%rdi)\n   jz 56f\n   cmpb $0, 17(%r10)\n   jne 80f\n"
     "56: mov 16(%rdi), %esi\n   test %esi, %esi\n   jz 57f\n   cmpl $0, 8(%r10)\n   je 57f\n"
-    "imul $1000000, %rsi, %rsi\n   mov 8(%r15), %r11\n   sub (%r10), %r11\n   cmp %rsi, %r11\n   jae 57f\n"
+    "imul $1000000, %rsi, %rsi\n   mov 8(%r15), %r11\n   sub (%r10), %r11\n   cmp %rsi, %r11\n   jge 57f\n"
     "incl 12(%r10)\n   jmp 80f\n"
     //  The hit, one store: the rule, its first action, the count and the else.
     "57: shl $16, %rdx\n   or %rdx, %rax\n   shl $32, %rcx\n   or %rcx, %rax\n   shl $40, %r8\n   or %r8, %rax\n"
@@ -1106,7 +1108,7 @@ __asm__(
     "55: ldrh w0, [x11, x14, lsl #1]\n   mov x24, #24\n   madd x24, x0, x24, x1\n"
     "ldrb w2, [x19, #3]\n   tbz w2, #1, 56f\n   ldrb w2, [x24, #17]\n   cbnz w2, 80f\n"
     "56: ldr w2, [x19, #16]\n   cbz w2, 57f\n   ldr w0, [x24, #8]\n   cbz w0, 57f\n   mov x0, #16960\n   movk x0, #15, lsl #16\n"
-    "mul x2, x2, x0\n   ldr x0, [x3, #8]\n   ldr x20, [x24]\n   sub x0, x0, x20\n   cmp x0, x2\n   b.hs 57f\n"
+    "mul x2, x2, x0\n   ldr x0, [x3, #8]\n   ldr x20, [x24]\n   sub x0, x0, x20\n   cmp x0, x2\n   b.ge 57f\n"
     "ldr w0, [x24, #12]\n   add w0, w0, #1\n   str w0, [x24, #12]\n   b 80f\n"
     "57: ldrh w0, [x11, x14, lsl #1]\n   orr x0, x0, x22, lsl #16\n   orr x0, x0, x21, lsl #32\n   orr x0, x0, x23, lsl #40\n"
     "str x0, [x5, x15, lsl #3]\n   ldr w0, [x24, #8]\n   add w0, w0, #1\n   str w0, [x24, #8]\n   ldr x0, [x3, #8]\n   str x0, [x24]\n"
