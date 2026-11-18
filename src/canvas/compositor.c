@@ -144,6 +144,69 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #define COMPOSITOR_MINIMIZE_IN 3
 #define COMPOSITOR_RADIUS_MOST 64
 
+/*
+        The loop's set (compositor_loop_wait): the descriptors the loop's list names, kept in an epoll set from turn to turn, so a wait is
+        the kernel's look at what is ready and not at each of them: a ppoll over the list called every descriptor's poll and hung a wait on
+        each, and took each down again, at every wake (pollbench on new-dragonfly, Haswell: 3888 kernel instructions a wake for 1 descriptor,
+        12794 for 20, 31760 for 60, 50476 for 100; epoll_pwait 3500 for any of them), and the loop's list is fifty and more. A descriptor
+        of the set is known by its number (compositor_epoll_state[fd]: COMPOSITOR_EPOLL_IN the set, COMPOSITOR_EPOLL_LISTED in the list
+        of numbers the set holds, COMPOSITOR_EPOLL_REFUSED one the kernel will not watch, and the events it is watched for). A number the
+        program closes leaves the set first (system_close is compositor_epoll_close in the compositor's files): the set holds a file by its
+        number and its file both, and one closed and opened again under the same number between two waits would be another file, unwatched,
+        that the list names as before, or the old one still watched where something else holds it open.
+*/
+#define COMPOSITOR_EPOLL_FDS 65536 // the numbers the set takes; a list with a descriptor past them is waited on by ppoll
+#define COMPOSITOR_EPOLL_IN 0x8000u
+#define COMPOSITOR_EPOLL_LISTED 0x4000u
+#define COMPOSITOR_EPOLL_REFUSED 0x2000u
+#define COMPOSITOR_EPOLL_EVENTS 0x00ffu
+#define COMPOSITOR_EPOLL_HIGH 3000 // the set's own number, at or above this (the table is grown to COMPOSITOR_DESCRIPTORS_WARM at the start)
+#define COMPOSITOR_EPOLL_READY 128 // the answers one wait takes; more stay ready for the next (the set is level-triggered)
+#define COMPOSITOR_EPOLL_PREV 4096 // the entries of a list kept to tell the next list is the same
+static struct
+{
+        int ep;                    // the set: -1 not made yet, -2 none (the kernel has no epoll_pwait2: ppoll)
+        unsigned int turn, listed; // the syncs made (a descriptor's stamp of the last it was in the list for), the numbers in the list
+        unsigned int whole, count; // whether the last sync was whole (the set is the list), and that list's count
+        unsigned int forgets, forgets_seen; // numbers let go of (compositor_epoll_forget, any thread) and their count at the last sync
+        unsigned int answered;              // the entries the last wait answered (compositor_epoll_answers)
+} compositor_epoll = {-1, 0, 0, 0, 0, 0, 0, 0};
+static unsigned int compositor_epoll_answers[COMPOSITOR_EPOLL_READY];
+static unsigned long long compositor_epoll_prev[COMPOSITOR_EPOLL_PREV]; // each entry of that list: its descriptor and its events
+static unsigned short compositor_epoll_state[COMPOSITOR_EPOLL_FDS];
+static unsigned int compositor_epoll_seen[COMPOSITOR_EPOLL_FDS], compositor_epoll_slot[COMPOSITOR_EPOLL_FDS];
+static int compositor_epoll_list[COMPOSITOR_EPOLL_FDS];
+
+// epoll_ctl's event: packed on x86_64, as the kernel's is there (EPOLL_PACKED), and naturally aligned elsewhere.
+struct compositor_epoll_event
+{
+        unsigned int events;
+        unsigned long long data;
+}
+#if defined(__x86_64__)
+__attribute__((packed))
+#endif
+;
+
+// The number leaves the set, from any thread, before it is closed (what the set holds of it is not this file's any more).
+static void compositor_epoll_forget(long fd)
+{
+        if (fd < 0 || fd >= COMPOSITOR_EPOLL_FDS || compositor_epoll.ep < 0 ||
+            !(__atomic_load_n(&compositor_epoll_state[fd], __ATOMIC_ACQUIRE) & COMPOSITOR_EPOLL_IN))
+                return;
+        system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, 2, (positive)fd, 0); // EPOLL_CTL_DEL
+        __atomic_and_fetch(&compositor_epoll_state[fd], (unsigned short)COMPOSITOR_EPOLL_LISTED, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&compositor_epoll.forgets, 1, __ATOMIC_RELEASE);
+}
+
+static positive compositor_epoll_close(long fd)
+{
+        compositor_epoll_forget(fd);
+        return system_call_1(syscall(close), (positive)fd);
+}
+#undef system_close
+#define system_close(handle) compositor_epoll_close((long)(handle))
+
 // The kit's shared part (ui/ui.c): the switches, the theme's roles, the motion, the touch recogniser and what the taskbar is called by.
 // The rest of the kit reads the compositor, so it is taken after this file (shell.c).
 #define UI_SHARED_ONLY
@@ -2916,6 +2979,140 @@ static void compositor_loop_wanted(struct compositor_poll *wanted, struct compos
         slots->count = count;
 }
 
+/*
+        The wait of a turn on its list, as ppoll's (every entry's returned set, the entries with any counted, a negative errno), in the loop's
+        set (compositor_epoll): the list's descriptors put in it, changed or taken out by what changed since the last wait, then epoll_pwait2 to
+        the same timespec, and each answer written to the entry its number is at. A descriptor at two entries, one past the set's numbers, one the
+        kernel will not watch or is not open (ppoll says that one POLLNVAL, which the loop acts on), and a kernel without the set, wait by ppoll.
+*/
+static long compositor_loop_wait(struct compositor_poll *wanted, unsigned int count, const long *wait, b32 again)
+{
+        struct compositor_epoll_event ready[COMPOSITOR_EPOLL_READY];
+        unsigned int turn, distinct = 0;
+        long got, awaited = 0;
+
+        if (compositor_epoll.ep == -1)
+        {
+                long made = system_call_1(syscall(epoll_create1), 0x80000), high; // EPOLL_CLOEXEC
+
+                // Moved to a number high in the table, where no stale number of a list's (a descriptor closed and still named) is the set's own.
+                high = made >= 0 ? compositor_call(syscall(fcntl), (positive)made, COMPOSITOR_F_DUPFD_CLOEXEC, COMPOSITOR_EPOLL_HIGH, 0, 0, 0) : -1;
+                if (high >= 0)
+                        system_call_1(syscall(close), (positive)made), made = high;
+                compositor_epoll.ep = made >= 0 ? (int)made : -2;
+        }
+        if (compositor_epoll.ep < 0)
+                goto ppoll;
+        // The list the last whole sync made, entry for entry, with no number let go of since: the set is it already. A slingshot's turn
+        // polls the very list again (again), whose answers are the last wait's alone; most turns make the same list, read here entry for
+        // entry, its answers cleared on the way.
+        {
+                unsigned int forgets = __atomic_load_n(&compositor_epoll.forgets, __ATOMIC_ACQUIRE), same;
+
+                same = compositor_epoll.whole && count == compositor_epoll.count && forgets == compositor_epoll.forgets_seen;
+                if (same && again)
+                {
+                        for (unsigned int k = 0; k < compositor_epoll.answered; k++)
+                                wanted[compositor_epoll_answers[k]].returned = 0;
+                        goto wait;
+                }
+                for (unsigned int at = 0; at < count; at++)
+                {
+                        unsigned long long entry = (unsigned int)wanted[at].handle | (unsigned long long)(unsigned short)wanted[at].events << 32;
+
+                        wanted[at].returned = 0;
+                        if (at < COMPOSITOR_EPOLL_PREV)
+                                same &= compositor_epoll_prev[at] == entry, compositor_epoll_prev[at] = entry;
+                        else
+                                same = 0;
+                }
+                if (same)
+                        goto wait;
+                compositor_epoll.whole = 0, compositor_epoll.count = count, compositor_epoll.forgets_seen = forgets;
+        }
+        turn = ++compositor_epoll.turn;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int fd = wanted[at].handle;
+                unsigned int state, events = (unsigned short)wanted[at].events & COMPOSITOR_EPOLL_EVENTS;
+
+                if (fd < 0)
+                        continue;
+                if (fd >= COMPOSITOR_EPOLL_FDS || fd == compositor_epoll.ep || compositor_epoll_seen[fd] == turn)
+                        goto ppoll;
+                compositor_epoll_seen[fd] = turn, compositor_epoll_slot[fd] = at, distinct++;
+                state = __atomic_load_n(&compositor_epoll_state[fd], __ATOMIC_ACQUIRE);
+                if (!(state & COMPOSITOR_EPOLL_LISTED))
+                        compositor_epoll_list[compositor_epoll.listed++] = fd, state |= COMPOSITOR_EPOLL_LISTED;
+                if ((state & COMPOSITOR_EPOLL_REFUSED) && (state & COMPOSITOR_EPOLL_EVENTS) == events)
+                        goto ppoll;
+                if (!(state & COMPOSITOR_EPOLL_IN) || (state & COMPOSITOR_EPOLL_EVENTS) != events)
+                {
+                        struct compositor_epoll_event change = {events, (unsigned long long)fd};
+                        long op = state & COMPOSITOR_EPOLL_IN ? 3 : 1, done; // EPOLL_CTL_MOD, EPOLL_CTL_ADD
+
+                        done = (long)system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, (positive)op, (positive)fd, (positive)&change);
+                        // The set's word on the number is the kernel's: one it holds is changed (EEXIST), one it let go of is added (ENOENT).
+                        if (done == -17 || done == -2)
+                                done = (long)system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, done == -17 ? 3 : 1, (positive)fd,
+                                                           (positive)&change);
+                        if (done < 0)
+                        {
+                                // Not open (ppoll's POLLNVAL), or a file the set cannot watch (EPERM: a regular file), until the entry changes.
+                                __atomic_store_n(&compositor_epoll_state[fd],
+                                                 (unsigned short)(COMPOSITOR_EPOLL_LISTED | (done == -9 ? 0 : COMPOSITOR_EPOLL_REFUSED) | events), __ATOMIC_RELEASE);
+                                goto ppoll;
+                        }
+                        state = COMPOSITOR_EPOLL_IN | COMPOSITOR_EPOLL_LISTED | events;
+                }
+                __atomic_store_n(&compositor_epoll_state[fd], (unsigned short)state, __ATOMIC_RELEASE);
+        }
+        // A number the list named before and not now leaves the set (the list holds each number once; every number of this wait is in it).
+        if (compositor_epoll.listed != distinct)
+                for (unsigned int k = 0; k < compositor_epoll.listed;)
+                {
+                        int fd = compositor_epoll_list[k];
+
+                        if (compositor_epoll_seen[fd] == turn)
+                        {
+                                k++;
+                                continue;
+                        }
+                        if (__atomic_load_n(&compositor_epoll_state[fd], __ATOMIC_ACQUIRE) & COMPOSITOR_EPOLL_IN)
+                                system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, 2, (positive)fd, 0);
+                        __atomic_store_n(&compositor_epoll_state[fd], 0, __ATOMIC_RELEASE);
+                        compositor_epoll_list[k] = compositor_epoll_list[--compositor_epoll.listed];
+                }
+        compositor_epoll.whole = count <= COMPOSITOR_EPOLL_PREV;
+wait:
+        turn = compositor_epoll.turn;
+        got = (long)system_call_6(syscall(epoll_pwait2), (positive)compositor_epoll.ep, (positive)ready, COMPOSITOR_EPOLL_READY, (positive)wait, 0, 0);
+        if (got == -38) // ENOSYS: a kernel before 5.11
+        {
+                compositor_epoll.ep = -2, compositor_epoll.whole = 0;
+                goto ppoll;
+        }
+        compositor_epoll.answered = 0;
+        if (got < 0)
+                return got;
+        for (long k = 0; k < got; k++)
+        {
+                unsigned long long fd = ready[k].data;
+
+                if (fd < COMPOSITOR_EPOLL_FDS && compositor_epoll_seen[fd] == turn)
+                {
+                        unsigned int slot = compositor_epoll_slot[fd];
+
+                        compositor_epoll_answers[compositor_epoll.answered] = slot, compositor_epoll.answered += !wanted[slot].returned;
+                        awaited += !wanted[slot].returned;
+                        wanted[slot].returned = (short)(wanted[slot].returned | (short)(ready[k].events & 0xffffu));
+                }
+        }
+        return awaited;
+ppoll:
+        return compositor_call(syscall(ppoll), (positive)wanted, count, (positive)wait, 0, 0, 0);
+}
+
 #ifdef CONFIG_MOONWATER_WAYLAND
 /*
         The slingshot: a turn the input devices alone woke, whose input was a locked pointer's counts and nothing else (compositor_sling_only),
@@ -3210,7 +3407,7 @@ static b32 compositor_main()
                 static unsigned int turns;
                 unsigned int count, inputs, doors, card_at, fence_at, uevents_at, clip_at, wayland_at, done_at;
                 positive now = 0, until = 0;
-                b32 idle_turn = 0, held;
+                b32 idle_turn = 0, held, again = 0;
                 long awaited, wait[2];
 #ifdef CONFIG_MOONWATER_WAYLAND
                 static b32 sling, sling_held;
@@ -3220,7 +3417,7 @@ static b32 compositor_main()
                 // A slingshot turn (compositor_slingshot) polls again what it polled, until the time it had.
                 if (sling)
                 {
-                        sling = 0, slots = sling_slots, held = sling_held, until = sling_until;
+                        sling = 0, again = 1, slots = sling_slots, held = sling_held, until = sling_until;
                         count = slots.count, inputs = slots.inputs, doors = slots.doors, done_at = slots.done_at, card_at = slots.card_at;
                         fence_at = slots.fence_at, uevents_at = slots.uevents_at, clip_at = slots.clip_at, wayland_at = slots.wayland_at;
                         now = clock_monotonic_nanoseconds();
@@ -3414,8 +3611,7 @@ static b32 compositor_main()
                 wait[0] = until > now ? (long)((until - now) / 1000000000ull) : 0;
                 wait[1] = until > now ? (long)((until - now) % 1000000000ull) : 0;
                 idle_turn = until && until <= now;
-                awaited = compositor_call(syscall(ppoll), (positive)wanted, count,
-                                          until ? (positive)wait : 0, 0, 0, 0);
+                awaited = compositor_loop_wait(wanted, count, until ? wait : 0, again);
                 now = clock_monotonic_nanoseconds();
 
                 // The devices first, before anything else the turn does, and what they said forwarded at once (compositor_inputs_turn): a
@@ -3934,5 +4130,9 @@ static b32 surface_main()
         windows_leave(&own);
         return 0;
 }
+
+// The programs after the compositor close as lib.util.c does (the set is the compositor's).
+#undef system_close
+#define system_close(handle) system_call_1(syscall(close), (positive)(handle))
 
 #endif // MOONWATER_CANVAS_COMPOSITOR

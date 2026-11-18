@@ -4898,7 +4898,7 @@ static void compositor_wl_syncobj_drop_handle(long slot)
         }
         if (compositor_wl.syncobj[slot].eventfd >= 0)
         {
-                compositor_call(syscall(close), (positive)compositor_wl.syncobj[slot].eventfd, 0, 0, 0, 0, 0);
+                system_close(compositor_wl.syncobj[slot].eventfd);
                 compositor_wl.syncobj[slot].eventfd = -1;
         }
         compositor_wl.syncobj[slot].armed = 0;

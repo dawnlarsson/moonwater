@@ -9597,6 +9597,7 @@ b32 main()
         check_compositor_predict_drag();
         check_compositor_predict_model();
         check_compositor_predict_table();
+        check_compositor_loop_wait();
         check_compositor_picture();
         check_compositor_pointer_aside();
         check_compositor_lifecycle();

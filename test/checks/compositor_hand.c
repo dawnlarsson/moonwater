@@ -4564,3 +4564,66 @@ static void check_compositor_glyphs(void)
     }
 }
 
+/*
+        The loop's wait (compositor_loop_wait) answers as ppoll would, from its epoll set kept between waits: the entry that is ready
+        and no other, the same list again (no sync), nothing once read, a number closed and opened again as another file between two
+        waits of the same list (the close lets the set go of it), a changed entry's events, a descriptor at two entries, one not open
+        (POLLNVAL), and an entry the list no longer names, whose file is ready, not said.
+*/
+static void check_compositor_loop_wait(void)
+{
+        int a[2] = {-1, -1}, b[2] = {-1, -1}, c[2] = {-1, -1}, d[2] = {-1, -1}, old;
+        struct compositor_poll list[3];
+        long none[2] = {0, 0}, got;
+        char byte = 1, sink[8];
+        b32 ready, again, read, reused, changed, twice, closed, dropped;
+
+        if (system_call_2(syscall(pipe2), (positive)a, O_NONBLOCK | O_CLOEXEC) || system_call_2(syscall(pipe2), (positive)b, O_NONBLOCK | O_CLOEXEC) ||
+            system_call_2(syscall(pipe2), (positive)d, O_NONBLOCK | O_CLOEXEC))
+        {
+                check("loop: the pipes are made", false);
+                return;
+        }
+        list[0] = (struct compositor_poll){a[0], COMPOSITOR_POLLIN, 0};
+        list[1] = (struct compositor_poll){b[0], COMPOSITOR_POLLIN, 0};
+        system_write_once(b[1], &byte, 1);
+        got = compositor_loop_wait(list, 2, none, 0);
+        ready = got == 1 && list[0].returned == 0 && (list[1].returned & COMPOSITOR_POLLIN);
+        got = compositor_loop_wait(list, 2, none, 1); // the slingshot's wait of the very list again
+        again = got == 1 && list[0].returned == 0 && (list[1].returned & COMPOSITOR_POLLIN);
+        system_read_once(b[0], sink, sizeof sink);
+        got = compositor_loop_wait(list, 2, none, 0);
+        read = got == 0 && list[0].returned == 0 && list[1].returned == 0;
+        // b's number closed as the compositor's files close (system_close is compositor_epoll_close there) and another pipe opened under
+        // it: the list is the same, entry for entry.
+        old = b[0];
+        compositor_epoll_close(b[0]), compositor_epoll_close(b[1]);
+        system_call_2(syscall(pipe2), (positive)c, O_NONBLOCK | O_CLOEXEC);
+        system_write_once(c[1], &byte, 1);
+        list[1].handle = c[0];
+        got = compositor_loop_wait(list, 2, none, 0);
+        reused = c[0] == old && got == 1 && (list[1].returned & COMPOSITOR_POLLIN);
+        list[0] = (struct compositor_poll){a[1], 4, 0}; // POLLOUT: a pipe's writing end with room
+        got = compositor_loop_wait(list, 2, none, 0);
+        changed = got == 2 && (list[0].returned & 4) && (list[1].returned & COMPOSITOR_POLLIN);
+        list[2] = list[1];
+        got = compositor_loop_wait(list, 3, none, 0);
+        twice = got == 3 && (list[1].returned & COMPOSITOR_POLLIN) && (list[2].returned & COMPOSITOR_POLLIN);
+        // d's reading end closed under the set's back (no close of the compositor's): ppoll's answer, POLLNVAL.
+        system_call_1(syscall(close), (positive)d[0]);
+        list[2] = (struct compositor_poll){d[0], COMPOSITOR_POLLIN, 0};
+        got = compositor_loop_wait(list, 3, none, 0);
+        closed = got == 3 && list[2].returned == 32;
+        // c no longer in the list, still ready: the one entry left, a's writing end, is all that is said.
+        got = compositor_loop_wait(list, 1, none, 0);
+        dropped = got == 1 && (list[0].returned & 4);
+        check("loop: the wait answers the ready entry only, and again for the same list", ready && again);
+        check("loop: the wait says nothing once the entry is read", read);
+        check("loop: a number closed and opened again as another file under the same list is watched as the new file", reused);
+        check("loop: an entry's events changed are what it is watched for", changed);
+        check("loop: a descriptor at two entries is said at both", twice);
+        check("loop: a descriptor that is not open is said POLLNVAL, as ppoll says it", closed);
+        check("loop: an entry the list no longer names is not said", dropped);
+        system_close(a[0]), system_close(a[1]), system_close(c[0]), system_close(c[1]), system_close(d[1]);
+}
+
