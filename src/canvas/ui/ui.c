@@ -7984,6 +7984,9 @@ LANGUAGE_ID(menu_select_all, "Select &All") \
 LANGUAGE_ID(menu_show_hidden, "Show &Hidden Files") \
 LANGUAGE_ID(menu_toggle_comment, "Toggle Co&mment") \
 LANGUAGE_ID(menu_undo, "&Undo") \
+LANGUAGE_ID(menu_view_details, "&Details") \
+LANGUAGE_ID(menu_view_icons, "Large &Icons") \
+LANGUAGE_ID(menu_view_list, "&List") \
 LANGUAGE_ID(menu_zoom_in, "Zoom &In") \
 LANGUAGE_ID(menu_zoom_out, "Zoom &Out") \
 LANGUAGE_ID(mixer_allow, "Allow") \
@@ -22548,6 +22551,7 @@ enum
         UI_ICON_GLOBE,    // a globe, its meridian and parallels: the web, a browser (the installer's Chrome card)
         UI_ICON_GAMEPAD,  // a pad, its cross and two buttons: games (the installer's Steam card)
         UI_ICON_KEY,      // a key, its bow and its bit: a login from afar (the installer's SSH card)
+        UI_ICON_LINK,     // a page with an arrow out of it: a link to something elsewhere (a file browser's)
         UI_ICON_COUNT
 };
 
@@ -22582,6 +22586,7 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
                              {UI_ICON_BOX, 34, 25, 40, 31, 3}},
         [UI_ICON_KEY] = {{UI_ICON_RING, 4, 14, 24, 34, 10}, {UI_ICON_BOX, 11, 21, 17, 27, 3}, {UI_ICON_LINE, 24, 24, 44, 24, 0}, {UI_ICON_LINE, 37, 24, 37, 32, 0},
                          {UI_ICON_LINE, 43, 24, 43, 30, 0}},
+        [UI_ICON_LINK] = {{UI_ICON_RING, 10, 6, 38, 42, 4}, {UI_ICON_LINE, 17, 33, 31, 19, 0}, {UI_ICON_LINE, 22, 19, 31, 19, 0}, {UI_ICON_LINE, 31, 19, 31, 28, 0}},
 };
 
 // A place of a symbol's grid (halves of a 24th) on the picture, in 256ths of a device pixel: a whole pixel, the nearest.
@@ -23493,6 +23498,7 @@ struct ui_row
 {
         const char address_to cells[UI_COLUMNS_MOST]; // under a list's columns: the words of each column after the first (the label's)
         int indent;                        // levels the label is set in by (a tree's rows), UI_INDENT logical pixels each
+        int icon;                          // a tile's symbol, UI_ICON_* + 1 (0 none)
         const char address_to label;       // at the left
         const char address_to about;       // under the label, in the quiet ink: what the row does (a list whose words wrap)
         const char address_to value;       // at the right
@@ -23576,6 +23582,9 @@ struct ui_list
         // press's y held to the rows as they scroll under it (band_at: the content's y it was pressed at).
         b32 band;
         int band_x0, band_x1, band_y1, band_at;
+        // Tiles (a virtual list's icon or list view): its rows laid out as tiles this many logical pixels wide, as many a line as the list
+        // is wide, each tile_h tall (0: UI_TILE_H, a symbol over its label; a row high or less, a small symbol before it). 0: rows.
+        int tiles, tile_h;
 };
 
 static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_row address_to row)
@@ -23605,6 +23614,25 @@ static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_
 */
 #define UI_LIST_MARGIN 8 // rows laid out past each end of the view: a frame's scroll is drawn from them, and a place is not re-made every pixel
 #define UI_LIST_DROP_ALL -1 // ui_list.drop: a drop would go to what the whole list shows, not into one of its rows
+#define UI_TILE_H 96        // logical pixels of a tile, a symbol over its label (ui_list.tiles)
+
+/*
+        A virtual list's unit and its width in them: a row is a row high, one to a line; a tile is its height high, as many to a line as
+        the list's width holds. Every place, every hit and every reveal of a virtual list is worked out from these.
+*/
+static inline int ui_list_unit(const struct ui address_to ui, const struct ui_list address_to l)
+{
+        int unit = ui_dev(ui, l->tiles ? (l->tile_h ? l->tile_h : UI_TILE_H) : UI_ROW);
+
+        return unit < 1 ? 1 : unit;
+}
+
+static inline int ui_list_per(const struct ui address_to ui, const struct ui_list address_to l)
+{
+        int wide = l->tiles ? ui_dev(ui, l->tiles) : 0, per = wide > 0 ? l->w / wide : 1;
+
+        return per < 1 ? 1 : per;
+}
 
 // The row a place shows, in either kind of list.
 static inline int ui_list_id(const struct ui_list address_to l, int at)
@@ -23633,24 +23661,24 @@ static struct ui_control address_to ui_list_control(struct ui_list address_to l,
 // number's top. A row that comes to a place another had forgets that one's hover, press and ripple.
 static fn ui_list_window(const struct ui address_to ui, struct ui_list address_to l)
 {
-        int row = ui_dev(ui, UI_ROW), most, at_rest, first, count, was_first = l->first, was_count = l->count;
+        int row = ui_list_unit(ui, l), per = ui_list_per(ui, l), margin = l->tiles ? 2 : UI_LIST_MARGIN, most, at_rest, first, count;
+        int was_first = l->first, was_count = l->count;
 
-        row = row < 1 ? 1 : row;
         l->total = l->total < 0 ? 0 : l->total;
-        l->content = l->total * row;
+        l->content = (l->total + per - 1) / per * row;
         l->scroll.content = l->content;
         most = ui_scroll_most(&l->scroll);
         at_rest = l->scroll.scroll < 0 ? 0 : l->scroll.scroll > most ? most : l->scroll.scroll;
-        first = at_rest / row - UI_LIST_MARGIN;
-        first = first < 0 ? 0 : first;
-        count = (l->scroll.view > 0 ? l->scroll.view : 0) / row + 2 + 2 * UI_LIST_MARGIN;
-        count = count > UI_LIST_MOST ? UI_LIST_MOST : count;
+        first = at_rest / row - margin;
+        first = (first < 0 ? 0 : first) * per;
+        count = ((l->scroll.view > 0 ? l->scroll.view : 0) / row + 2 + 2 * margin) * per;
+        count = count > UI_LIST_MOST ? UI_LIST_MOST / per * per : count;
         count = count > l->total - first ? l->total - first : count;
         count = count < 0 ? 0 : count;
         l->first = first, l->count = count;
         for (int at = 0; at < count; at++)
         {
-                l->top[at] = (first + at) * row, l->tall[at] = l->whole[at] = row, l->starts[at] = 0;
+                l->top[at] = (first + at) / per * row, l->tall[at] = l->whole[at] = row, l->starts[at] = 0;
                 if (l->controls && l->ids > 0 && (first + at < was_first || first + at >= was_first + was_count))
                 {
                         ui_control_forget(&l->controls[2 * ((first + at) % l->ids)]);
@@ -23841,10 +23869,17 @@ static int ui_list_hit(const struct ui address_to ui, const struct ui_list addre
         inside = ui_list_unpull(ui, l, y) - l->y + at_rest;
         if (l->virtual)
         {
-                // A row's number is how many rows are above the point: no place is looked for.
-                int row = ui_dev(ui, UI_ROW) < 1 ? 1 : ui_dev(ui, UI_ROW);
+                // A row's number is how many rows are above the point: no place is looked for. A tile's is its line's first and how many
+                // tiles in from its start the point is.
+                int row = ui_list_unit(ui, l), per = ui_list_per(ui, l), column, id;
 
-                return inside >= 0 && inside / row < l->total ? inside / row : -1;
+                if (inside < 0)
+                        return -1;
+                if (!l->tiles)
+                        return inside / row < l->total ? inside / row : -1;
+                column = (ui_point(x, l->x, l->w) - l->x) / ui_dev(ui, l->tiles);
+                id = inside / row * per + column;
+                return column >= 0 && column < per && id < l->total ? id : -1;
         }
         for (int at = 0; at < l->count; at++)
                 if (inside >= l->top[at] && inside < l->top[at] + l->tall[at])
@@ -23859,8 +23894,8 @@ static b32 ui_list_reveal(const struct ui address_to ui, struct ui_list address_
 
         if (l->virtual && l->focus >= 0 && l->focus < l->total)
         {
-                // The row is where its number puts it, in the places or far from them.
-                top = l->focus * (ui_dev(ui, UI_ROW) < 1 ? 1 : ui_dev(ui, UI_ROW)), height = ui_dev(ui, UI_ROW);
+                // The row is where its number puts it, in the places or far from them (a tile, its line).
+                top = l->focus / ui_list_per(ui, l) * ui_list_unit(ui, l), height = ui_list_unit(ui, l);
         }
         else if (at < 0)
         {
@@ -24979,6 +25014,49 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
         return UI_COLUMNS_SORTED | UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
 }
 
+/*
+        A tile of a list's icon or list view: lit where the keys are (the list's lit fill), a hint of the ink under the pointer, ringed in the
+        accent when it is marked (one of many chosen); its symbol over its label, the label cut with dots to the tile and centred, or, for a
+        tile a row high or less, a small symbol before its label. Reading from the right the tiles run from the right.
+*/
+static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
+{
+        struct ui_row row;
+        int wide = ui_dev(ui, l->tiles), per = ui_list_per(ui, l), x = ui_mirror(l->x + id % per * wide, wide, l->x, l->w);
+        int pad = ui_dev(ui, 3), small = height <= ui_dev(ui, UI_ROW), size = small ? ui_dev(ui, 20) : ui_dev(ui, 40), width, at;
+        unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE);
+        char cut[UI_CUT_TEXT];
+        string_address shown;
+        struct ui_box box = {(b32)(x + pad) << 8, (b32)(y + pad) << 8, (b32)(x + wide - pad) << 8, (b32)(y + height - pad) << 8, 0, 0};
+
+        ui_list_describe(l, id, &row);
+        box.rx = box.ry = ui_q8(ui, 6);
+        if (l->lit && id == l->focus)
+                ui_kit_fill(ui, &box, ui_kit_lit(ui), null);
+        else if (l->hover == id)
+                ui_kit_fill(ui, &box, 0x18000000u | (strong & 0xffffffu), null);
+        if (row.mark)
+                ui_kit_ring(ui, &box, ui_q8(ui, 2), ui_role(UI_PRIMARY) | 0xff000000u);
+        if (small)
+        {
+                // A small symbol before the label, both on the tile's line.
+                at = ui_dev(ui, 8);
+                if (row.icon)
+                        ui_icon(ui, row.icon - 1, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, 0, strong);
+                at += size + ui_dev(ui, 8);
+                shown = ui_fit(ui, (string_address)(row.label ? row.label : ""), UI_BODY_MEDIUM, wide - at - ui_dev(ui, 8), cut, sizeof(cut));
+                width = ui_kit_measure(ui, shown, UI_BODY_MEDIUM);
+                ui_kit_text(ui, ui_mirror(x + at, width, x, wide), ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM), shown,
+                            UI_BODY_MEDIUM, strong, 0);
+                return;
+        }
+        if (row.icon)
+                ui_icon(ui, row.icon - 1, x + (wide - size) / 2, y + ui_dev(ui, 12), size, 0, strong);
+        shown = ui_fit(ui, (string_address)(row.label ? row.label : ""), UI_LABEL_MEDIUM, wide - 2 * pad - ui_dev(ui, 8), cut, sizeof(cut));
+        width = ui_kit_measure(ui, shown, UI_LABEL_MEDIUM);
+        ui_kit_text(ui, x + (wide - width) / 2, ui_kit_baseline(ui, y + ui_dev(ui, 60), UI_LABEL_MEDIUM), shown, UI_LABEL_MEDIUM, strong, 0);
+}
+
 static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
 {
         struct ui_row row;
@@ -25159,7 +25237,10 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 
                         if (height < l->whole[at])
                                 ui->top = y > l->y ? y : l->y, ui->bottom = y + height < l->y + l->h ? y + height : l->y + l->h;
-                        ui_list_row(ui, l, ui_list_id(l, at), y, height);
+                        if (l->tiles)
+                                ui_list_tile(ui, l, ui_list_id(l, at), y, height);
+                        else
+                                ui_list_row(ui, l, ui_list_id(l, at), y, height);
                         ui->top = band_top, ui->bottom = band_bottom;
                 }
         }
@@ -25197,6 +25278,9 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                 for (int at = 0; !found && at < l->count; at++)
                         if (ui_list_id(l, at) == l->drop - 1)
                                 y = ui_list_row_y(l, at), h = l->tall[at], found = true;
+                // A tile's ring is round the tile.
+                if (l->tiles && l->drop > 0 && found)
+                        w = ui_dev(ui, l->tiles), x = ui_mirror(l->x + (l->drop - 1) % ui_list_per(ui, l) * w, w, l->x, l->w);
                 if (found)
                 {
                         ui->top = l->y, ui->bottom = l->y + l->h;
@@ -25253,13 +25337,14 @@ static b32 ui_list_band_follow(struct ui_list address_to l, int x, int y)
 
 static b32 ui_list_band_rows(const struct ui address_to ui, const struct ui_list address_to l, int address_to first, int address_to last)
 {
-        int row = ui_dev(ui, UI_ROW), from = l->band_at, to = l->band_y1 - l->y + l->scroll.scroll, swap;
+        int row = ui_list_unit(ui, l), per = ui_list_per(ui, l), from = l->band_at, to = l->band_y1 - l->y + l->scroll.scroll, swap;
 
-        if (!l->band || !l->virtual || row < 1 || !l->total)
+        if (!l->band || !l->virtual || !l->total)
                 return false;
         if (from > to)
                 swap = from, from = to, to = swap;
-        from = from < 0 ? 0 : from / row, to = to < 0 ? -1 : to / row;
+        // Over tiles a band holds the whole lines it crosses.
+        from = from < 0 ? 0 : from / row * per, to = to < 0 ? -1 : (to / row + 1) * per - 1;
         to = to >= l->total ? l->total - 1 : to;
         if (to < from || from >= l->total)
                 return false;

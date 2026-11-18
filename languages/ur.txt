@@ -183,6 +183,9 @@ menu_select_all	f6f6	سب منتخب کریں
 menu_show_hidden	37bd	&پوشیدہ فائلیں دکھائیں
 menu_toggle_comment	92ac	تبصرہ بدلیں
 menu_undo	b9d3	کالعدم کریں
+menu_view_details	d3a1	&تفصیل
+menu_view_icons	57e8	بڑے &آئیکن
+menu_view_list	4cc5	&فہرست
 menu_zoom_in	5bcf	بڑا کریں
 menu_zoom_out	9234	چھوٹا کریں
 mixer_allow	19d2	اجازت دیں

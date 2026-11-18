@@ -183,6 +183,9 @@ menu_select_all	f6f6	בחר הכול
 menu_show_hidden	37bd	הצג קבצים &מוסתרים
 menu_toggle_comment	92ac	החלף הערה
 menu_undo	b9d3	בטל
+menu_view_details	d3a1	&פרטים
+menu_view_icons	57e8	&סמלים גדולים
+menu_view_list	4cc5	&רשימה
 menu_zoom_in	5bcf	הגדל זום
 menu_zoom_out	9234	הקטן זום
 mixer_allow	19d2	אפשר

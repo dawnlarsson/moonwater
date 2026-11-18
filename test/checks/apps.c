@@ -1041,6 +1041,15 @@ static fn band_check(struct ui address_to wui)
         none = none && !ui_list_band_rows(wui, &l, &first, &last);
         check("band: a rubber band holds the rows it crosses either way up, its press held to the rows as they scroll, and none when it is over or crosses none",
               down && up && scrolled && none);
+
+        // Tiles: as many to a line as the list is wide, a line a tile high; a point is the tile under it, past the last of a line none.
+        memory_zero(&l, sizeof(l));
+        l.virtual = true, l.total = 12, l.x = 0, l.y = 0, l.w = 520, l.h = 400, l.tiles = 100, l.row_x = 0, l.row_w = 520;
+        l.scroll.view = 400;
+        ui_list_window(wui, &l);
+        check("tiles: twelve tiles of 100 in 520 are five a line, three lines of UI_TILE_H, a point the tile under it and none past a line's last or the last tile",
+              ui_list_per(wui, &l) == 5 && l.content == 3 * ui_dev(wui, UI_TILE_H) && ui_list_hit(wui, &l, 250, ui_dev(wui, UI_TILE_H) + 10) == 7 &&
+                  ui_list_hit(wui, &l, 510, 10) == -1 && ui_list_hit(wui, &l, 250, 2 * ui_dev(wui, UI_TILE_H) + 10) == -1 && l.count == 12);
 }
 
 /*

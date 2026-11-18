@@ -183,6 +183,9 @@ menu_select_all	f6f6	تحديد الكل
 menu_show_hidden	37bd	إظهار الملفات &المخفية
 menu_toggle_comment	92ac	تبديل التعليق
 menu_undo	b9d3	تراجع
+menu_view_details	d3a1	&تفاصيل
+menu_view_icons	57e8	&أيقونات كبيرة
+menu_view_list	4cc5	&قائمة
 menu_zoom_in	5bcf	تكبير
 menu_zoom_out	9234	تصغير
 mixer_allow	19d2	السماح

@@ -183,6 +183,9 @@ menu_select_all	f6f6	انتخاب همه
 menu_show_hidden	37bd	نمایش پرونده‌های &پنهان
 menu_toggle_comment	92ac	تغییر وضعیت توضیح
 menu_undo	b9d3	واگرد
+menu_view_details	d3a1	&جزئیات
+menu_view_icons	57e8	&نمادهای بزرگ
+menu_view_list	4cc5	&فهرست
 menu_zoom_in	5bcf	بزرگ‌نمایی
 menu_zoom_out	9234	کوچک‌نمایی
 mixer_allow	19d2	اجازه

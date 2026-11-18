@@ -112,6 +112,15 @@
 #define FILES_MENU_HIDDEN 26
 #define FILES_MENU_ALL 27
 #define FILES_MENU_SHEET 28          // a line of a properties sheet: chosen, it only closes the sheet
+#define FILES_MENU_DETAILS 29        // the views: the rows as details under columns,
+#define FILES_MENU_ICONS 30          // as large icons,
+#define FILES_MENU_LIST 31           // or as a list of names, a small symbol before each
+#define FILES_VIEW_DETAILS 0
+#define FILES_VIEW_ICONS 1
+#define FILES_VIEW_LIST 2
+#define FILES_TILE_ICON 104          // logical pixels of a tile in the icon view,
+#define FILES_TILE_LIST 232          // and of a name in the list view (a row high)
+#define FILES_KEY_1 2
 #define FILES_CLIP_CUT "application/x-moonwater-cut" // beside the files a cut offers: a paste of them moves them
 #define FILES_SHEET_LINES 10                           // a properties sheet's lines
 
@@ -175,6 +184,7 @@ static struct
         p32 tree_at;             // the tree's node the keys are on there
         p32 tree_shown;          // the tree's node of the folder shown, FILES_NO when it is not in the tree
         b32 tree_reseat;         // the tree's rows are to be scrolled to the folder shown at the next layout
+        int view;                // FILES_VIEW_*: details, icons or a list
         b32 pasting;             // the clipboard was asked for files to paste: its answer is a paste into the folder shown
         // Find in the folder (Ctrl+F): a field at the foot whose text keeps the rows to the names that hold it (files_model_filter).
         b32 finding, find_keys;
@@ -297,6 +307,10 @@ static fn files_describe(int id, struct ui_row address_to row)
         }
         files_type_text(type, sizeof(type), m, entry);
         row->cells[1] = size, row->cells[2] = type, row->cells[3] = when;
+        row->icon = 1 + (entry->kind == FILES_KIND_DIRECTORY ? UI_ICON_FILES
+                         : entry->kind == FILES_KIND_LINK    ? UI_ICON_LINK
+                         : entry->kind == FILES_KIND_FILE    ? UI_ICON_EDITOR
+                                                             : UI_ICON_WINDOW);
         row->mark = files_model_chosen(m, (p32)id) && m->chosen_count > 1;
 }
 
@@ -541,7 +555,7 @@ static fn files_layout(void)
                         ui_rows(&files.big->tree_list, .class = "list", .grow = 1);
                 ui_col(.class = "rows", .grow = 1)
                 {
-                        ui_host(&files.head_box, .h = UI_COLUMNS_H);
+                        ui_host(&files.head_box, .h = UI_COLUMNS_H, .hidden = files.view != FILES_VIEW_DETAILS);
                         ui_rows(l, .class = "list", .grow = 1);
                 }
         }
@@ -563,7 +577,10 @@ static fn files_layout(void)
         files.columns.title[2] = WORDS(files_column_type), files.columns.title[3] = WORDS(files_column_modified);
         files.columns.at_end[1] = true;
         ui_columns_layout(ui, &files.columns, l->x, files.head_box.y, l->w);
-        l->columns = &files.columns;
+        // The view: details are rows under the columns, icons and a list are tiles (a symbol over a name, or before it).
+        l->columns = files.view == FILES_VIEW_DETAILS ? &files.columns : null;
+        l->tiles = files.view == FILES_VIEW_ICONS ? FILES_TILE_ICON : files.view == FILES_VIEW_LIST ? FILES_TILE_LIST : 0;
+        l->tile_h = files.view == FILES_VIEW_LIST ? UI_ROW : 0;
         // The tree's rows scrolled so the folder shown is in sight, once it is shown.
         if (files.tree_reseat && files.big->tree_list.h > 0)
         {
@@ -1350,7 +1367,7 @@ static b32 files_band_at(int x, int y)
         if (x < l->x || x >= l->x + l->w || y < l->y || y >= l->y + l->h)
                 return false;
         row = ui_list_hit(&files.ui, l, x, y);
-        return row < 0 || ui_point(x, files.columns.x, files.columns.w) >= files.columns.at[1];
+        return row < 0 || (files.view == FILES_VIEW_DETAILS && ui_point(x, files.columns.x, files.columns.w) >= files.columns.at[1]);
 }
 
 /* ---- the menu and the properties sheet ---- */
@@ -1637,6 +1654,11 @@ static fn files_menu_open(b32 on, int x, int y)
                 ui_popmenu_add(menu, WORDS(menu_new_folder), "Ctrl+Shift+N", 0, FILES_MENU_NEW_FOLDER);
                 ui_popmenu_add(menu, WORDS(menu_select_all), "Ctrl+A", files_model_count(m) ? 0 : UI_MENU_DISABLED, FILES_MENU_ALL);
                 ui_popmenu_add(menu, WORDS(menu_show_hidden), "Ctrl+H", UI_MENU_CHECK | (m->hidden ? UI_MENU_ON : 0), FILES_MENU_HIDDEN);
+                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(menu, WORDS(menu_view_details), "Ctrl+1", UI_MENU_RADIO | (files.view == FILES_VIEW_DETAILS ? UI_MENU_ON : 0), FILES_MENU_DETAILS);
+                ui_popmenu_add(menu, WORDS(menu_view_icons), "Ctrl+2", UI_MENU_RADIO | (files.view == FILES_VIEW_ICONS ? UI_MENU_ON : 0), FILES_MENU_ICONS);
+                ui_popmenu_add(menu, WORDS(menu_view_list), "Ctrl+3", UI_MENU_RADIO | (files.view == FILES_VIEW_LIST ? UI_MENU_ON : 0), FILES_MENU_LIST);
+                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(menu, WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL);
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(menu, WORDS(menu_properties), null, 0, FILES_MENU_PROPERTIES);
@@ -1683,6 +1705,15 @@ static fn files_delete(void);
 static fn files_new_folder(void);
 static fn files_open(p32 place);
 
+// The rows shown another way (FILES_VIEW_*): the cursor kept in sight.
+static fn files_view(int view)
+{
+        files.view = view;
+        files.big->list.scroll.scroll = 0;
+        files.dirty = true;
+        files_show_cursor();
+}
+
 // An item of the browser's menu, done.
 static fn files_menu_do(int id)
 {
@@ -1703,6 +1734,11 @@ static fn files_menu_do(int id)
         case FILES_MENU_HIDDEN:
                 m->hidden = !m->hidden;
                 files_model_reload(m);
+                break;
+        case FILES_MENU_DETAILS:
+        case FILES_MENU_ICONS:
+        case FILES_MENU_LIST:
+                files_view(id - FILES_MENU_DETAILS);
                 break;
         case FILES_MENU_ALL:
                 if (files_model_count(m))
@@ -1866,7 +1902,7 @@ static b32 files_key(const struct window_event address_to event)
         struct files_model address_to m = &files.big->model;
         struct ui_list address_to l = &files.big->list;
         b32 alt = (event->flags & WINDOW_KEY_ALT) != 0, control = (event->flags & WINDOW_KEY_CONTROL) != 0, shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
-        int page = l->scroll.view / ui_px(&files.ui, UI_ROW) - 1, key = (int)event->a;
+        int across = l->tiles ? ui_list_per(&files.ui, l) : 1, page = l->scroll.view / ui_list_unit(&files.ui, l) - 1, key = (int)event->a;
         bipolar by = 0;
 
         page = page < 1 ? 1 : page;
@@ -1953,6 +1989,11 @@ static b32 files_key(const struct window_event address_to event)
                 files_find(true);
                 return true;
         }
+        if (control && key >= FILES_KEY_1 && key < FILES_KEY_1 + 3)
+        {
+                files_view(key - FILES_KEY_1);
+                return true;
+        }
         if (key == UI_KEY_ESCAPE && files.finding)
         {
                 files_find(false);
@@ -1995,10 +2036,17 @@ static b32 files_key(const struct window_event address_to event)
                 files_model_choose(m, m->cursor, FILES_CHOOSE_TOGGLE);
                 files.dirty = true;
                 return true;
-        case UI_KEY_UP: by = -1; break;
-        case UI_KEY_DOWN: by = 1; break;
-        case UI_KEY_PAGE_UP: by = -page; break;
-        case UI_KEY_PAGE_DOWN: by = page; break;
+        case UI_KEY_UP: by = -across; break;
+        case UI_KEY_DOWN: by = across; break;
+        case UI_KEY_LEFT:
+        case UI_KEY_RIGHT:
+                // Over tiles Left and Right go along a line, the way it is read; over rows they are no move.
+                if (across < 2 && !l->tiles)
+                        return true;
+                by = ui_arrow(key);
+                break;
+        case UI_KEY_PAGE_UP: by = -page * across; break;
+        case UI_KEY_PAGE_DOWN: by = page * across; break;
         case UI_KEY_HOME: by = -(bipolar)FILES_MOST; break;
         case UI_KEY_END: by = (bipolar)FILES_MOST; break;
         default: return true;
@@ -2099,7 +2147,7 @@ static b32 files_event(const struct window_event address_to event)
         if (asks & UI_VIEW_TAKEN)
                 return true;
         // The columns' header: a title pressed orders the rows by it, an edge held makes a column wider or narrower.
-        if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
+        if (files.view == FILES_VIEW_DETAILS && (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON))
         {
                 p32 took = ui_columns_event(ui, &files.columns, event, event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x,
                                             event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y);
@@ -2288,7 +2336,8 @@ static fn files_draw(unsigned int address_to pixels)
         l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && !files.crumb_keys && !files.tree_keys;
         files.big->tree_list.lit = files.big->tree_list.focus >= 0, files.big->tree_list.keys = files.focused && files.tree_keys;
         ui_view_draw(ui, &files.big->view, files.focused);
-        ui_columns_draw(ui, &files.columns);
+        if (files.view == FILES_VIEW_DETAILS)
+                ui_columns_draw(ui, &files.columns);
         if (!files.editing || files.editing == FILES_EDIT_PART)
                 files_crumbs_draw();
         if (files.editing)
