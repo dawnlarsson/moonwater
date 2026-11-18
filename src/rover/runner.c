@@ -970,6 +970,29 @@ static fn rover_runner_keys(void)
         rover_runner.fire = system_open_at(AT_FDCWD, ROVER_KEYS_FIRE, 2 /* O_RDWR */ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
 }
 
+/*
+        A pin's line, pin_start_N: N whole, its digits and nothing else, into
+        digits. The taskbar makes N from the milliseconds of uptime and a count
+        (taskbar_pin_start), nine digits from 156 s on and more later, so N is
+        taken whole up to ROVER_PIN_DIGITS: one cut short names another file.
+*/
+#define ROVER_PIN_DIGITS 19u
+static bool rover_runner_pin_number(const p8 address_to line, positive length, p8 address_to digits)
+{
+        positive count = length - 10;
+
+        if (length <= 10 || count > ROVER_PIN_DIGITS)
+                return false;
+        for (positive at = 0; at < count; at++)
+        {
+                if (line[10 + at] < '0' || line[10 + at] > '9')
+                        return false;
+                digits[at] = line[10 + at];
+        }
+        digits[count] = 0;
+        return true;
+}
+
 //      One line the compositor said: a chord's key_ name, a button's word, or a pin's start.
 static fn rover_runner_line(const p8 address_to line, positive length)
 {
@@ -990,13 +1013,11 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                 }
         if (length > 10 && !memory_compare(line, "pin_start_", 10))
         {
-                p8 slot_text[8], path[48];
-                positive slot_length = length - 10 < 7 ? length - 10 : 7;
+                p8 slot_text[ROVER_PIN_DIGITS + 1], path[48];
                 bipolar got;
 
-                memory_copy(slot_text, line + 10, slot_length);
-                slot_text[slot_length] = 0;
-                if (!string_join(path, sizeof(path), "/run/moonwater/pin.", (string_address)slot_text))
+                if (!rover_runner_pin_number(line, length, slot_text) ||
+                    !string_join(path, sizeof(path), "/run/moonwater/pin.", (string_address)slot_text))
                         return;
                 //      The pin's words, a line each, made new by the compositor: the program is the first, and the open
                 //      of it is given the rest (rover_runner_pinned).
@@ -1027,7 +1048,7 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                 event->field[0].number = 5;
                 event->field[0].text = rover_nothing;
                 event->field[0].length = 0;
-                event->field[1].number = (b64)string_to_positive(slot_text);
+                event->field[1].number = 0; // the line names the start, not the pin's place on the taskbar
                 event->field[1].text = rover_nothing;
                 event->field[1].length = 0;
         }

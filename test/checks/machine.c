@@ -365,6 +365,29 @@ static fn machine_policy(void)
         stop does, and the attach it would ask the kernel to end is its own:
         it must not poll for a detach only it could perform.
 */
+/*
+        The runner's pin lines (rover_runner_pin_number): the taskbar's number is nine digits from 156 s of uptime on,
+        and was cut to seven, so every pin after that named a file that was not there.
+*/
+static fn machine_pin_numbers(void)
+{
+        p8 digits[ROVER_PIN_DIGITS + 1];
+
+        check("a pin's seven-digit number is taken whole",
+              rover_runner_pin_number((const p8 address_to)"pin_start_1234567", 17, digits) &&
+                  string_equals(digits, "1234567"));
+        check("and a nine-digit one, past 156 s of uptime, whole too",
+              rover_runner_pin_number((const p8 address_to)"pin_start_100000064", 19, digits) &&
+                  string_equals(digits, "100000064"));
+        check("and nineteen digits", rover_runner_pin_number((const p8 address_to)"pin_start_1234567890123456789", 29, digits) &&
+                                         string_equals(digits, "1234567890123456789"));
+        check("twenty are refused, not cut",
+              !rover_runner_pin_number((const p8 address_to)"pin_start_12345678901234567890", 30, digits));
+        check("a number with anything but digits is refused",
+              !rover_runner_pin_number((const p8 address_to)"pin_start_12/../x", 17, digits) &&
+                  !rover_runner_pin_number((const p8 address_to)"pin_start_", 10, digits));
+}
+
 static fn machine_stop_self(void)
 {
         p8 held = host_machine_self;
@@ -1820,6 +1843,7 @@ b32 main(void)
         machine_arms();
         machine_policy();
         machine_stop_self();
+        machine_pin_numbers();
         machine_sntp();
         machine_auto();
         machine_services();
