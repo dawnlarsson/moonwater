@@ -24827,11 +24827,14 @@ static b32 ui_list_tree_chevron_at(const struct ui address_to ui, const struct u
         return x >= -ui_dev(ui, 4) && x < ui_dev(ui, UI_INDENT);
 }
 
-// The header's columns placed across [x, x + w) (device pixels): each after the first as wide as the app says (never less than the
-// least), the first what is left (never less than the least either: the last ones then run off the end and are cut).
+/*
+        The header's columns placed across [x, x + w) (device pixels): each after the first as wide as the app says (never less than the
+        least), the first what is left. Where the others would leave the first less than two fifths of the width, they give way together,
+        each in its share, down to the least: a narrow window keeps the names readable, and its other columns are cut first.
+*/
 static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns address_to c, int x, int y, int w)
 {
-        int others = 0, at = x, least = ui_dev(ui, UI_COLUMN_LEAST);
+        int others = 0, at = x, least = ui_dev(ui, UI_COLUMN_LEAST), first = w * 2 / 5 > least ? w * 2 / 5 : least, room = w - first;
 
         c->count = c->count < 1 ? 1 : c->count > UI_COLUMNS_MOST ? UI_COLUMNS_MOST : c->count;
         c->x = x, c->y = y, c->w = w, c->h = ui_dev(ui, UI_COLUMNS_H);
@@ -24842,10 +24845,18 @@ static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns add
         }
         for (int k = 0; k < c->count; k++)
         {
+                int wide = k ? ui_dev(ui, c->width[k]) : 0;
+
+                if (k && others > room && others > 0)
+                        wide = (int)((long)wide * (room > 0 ? room : 0) / others), wide = wide < least ? least : wide;
                 c->at[k] = at;
-                c->wide[k] = k ? ui_dev(ui, c->width[k]) : (w - others > least ? w - others : least);
-                at += c->wide[k];
+                c->wide[k] = wide;
+                at += wide;
         }
+        // The first is what the others leave, and it is first: the others move along by it.
+        c->wide[0] = w - (at - x) > least ? w - (at - x) : least;
+        for (int k = 1; k < c->count; k++)
+                c->at[k] = c->at[k - 1] + c->wide[k - 1];
 }
 
 // The edge a point is on (the number of the column it ends), or -1: the edges between two columns, UI_COLUMN_EDGE either side.

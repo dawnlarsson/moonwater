@@ -78,7 +78,7 @@
 #define FILES_TURN_NS 4000000ll      // steps are taken for this long a pass,
 #define FILES_SHOW_NS 100000000ll    // the entries so far are drawn this often while it reads,
 #define FILES_LOOK_NS 1000000000ll   // and the folder shown is looked at again this often
-#define FILES_TREE_WIDTH 200         // logical pixels of the folder tree beside the rows
+#define FILES_TREE_WIDTH 180         // logical pixels of the folder tree beside the rows
 #define FILES_KEY_F5 63
 #define FILES_KEY_R 19
 #define FILES_KEY_H 35
@@ -174,6 +174,7 @@ static struct
         b32 tree_keys;           // the keys are in the folder tree
         p32 tree_at;             // the tree's node the keys are on there
         p32 tree_shown;          // the tree's node of the folder shown, FILES_NO when it is not in the tree
+        b32 tree_reseat;         // the tree's rows are to be scrolled to the folder shown at the next layout
         b32 pasting;             // the clipboard was asked for files to paste: its answer is a paste into the folder shown
         // Find in the folder (Ctrl+F): a field at the foot whose text keeps the rows to the names that hold it (files_model_filter).
         b32 finding, find_keys;
@@ -326,7 +327,7 @@ static fn files_tree_follow(void)
 {
         files.tree_shown = files_tree_reveal(&files.big->tree, files.big->model.path);
         if (files.tree_shown != FILES_NO)
-                files.tree_at = files.tree_shown;
+                files.tree_at = files.tree_shown, files.tree_reseat = true;
 }
 
 // The model's order for a column of the header: Name, Size, Type, Modified.
@@ -563,6 +564,13 @@ static fn files_layout(void)
         files.columns.at_end[1] = true;
         ui_columns_layout(ui, &files.columns, l->x, files.head_box.y, l->w);
         l->columns = &files.columns;
+        // The tree's rows scrolled so the folder shown is in sight, once it is shown.
+        if (files.tree_reseat && files.big->tree_list.h > 0)
+        {
+                files.big->tree_list.focus = (int)files.tree_shown;
+                ui_list_reveal(ui, &files.big->tree_list);
+                files.tree_reseat = false;
+        }
         if (!files.editing || files.editing == FILES_EDIT_PART)
                 files_crumbs_lay();
 }
@@ -1260,6 +1268,12 @@ static b32 files_crumb_key(const struct window_event address_to event)
                 files_part_edit(files.crumb_focus, false);
                 break;
         case UI_KEY_TAB:
+                // Tab goes on to the folder tree (Shift+Tab is the band's buttons', the kit's).
+                if (event->flags & WINDOW_KEY_SHIFT)
+                        return false;
+                files.crumb_keys = false, files.tree_keys = true;
+                files.tree_at = files.tree_shown != FILES_NO ? files.tree_shown : 0;
+                break;
         case UI_KEY_ESCAPE:
         case UI_KEY_DOWN:
                 files.crumb_keys = false;
