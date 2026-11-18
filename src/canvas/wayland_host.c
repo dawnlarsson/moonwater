@@ -343,6 +343,10 @@ _Static_assert(COMPOSITOR_LAYERS >= WAYLAND_LAYERS && COMPOSITOR_LAYERS <= WINDO
 */
 static positive compositor_wl_live(positive va, unsigned int epoch)
 {
+#ifdef MOONWATER_GPU_C
+        if (va && epoch == gpu_epoch)
+                gpu_import_handed(va); // a record may be given it: its import named in the job's bo list (gpu_import_named)
+#endif
         return va && epoch == gpu_epoch ? va : 0;
 }
 

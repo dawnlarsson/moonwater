@@ -34,7 +34,7 @@ static struct { unsigned int packets, args, state, code; } gpu_layout = {GPU_AMD
 // the same import, held again (gpu_import_again); after them, with the card idle, it is unmapped. imported_dead_after is the submit serial an import was let go
 // of after (gpu_submit_serial then): the submit that follows it is the last that names it (gpu_submit).
 #define GPU_IMPORT_GRACE 8
-static struct { int fd, broken; unsigned int family, device, ctx, handle, *imported, imports; positive *imported_va, *imported_bytes; unsigned char *imported_dead, *imported_holds; positive *imported_dead_at; unsigned int *imported_dead_after, address_to at; positive size, pending; } gpu;
+static struct { int fd, broken; unsigned int family, device, ctx, handle, *imported, imports; positive *imported_va, *imported_bytes; unsigned char *imported_dead, *imported_holds; positive *imported_dead_at; unsigned int *imported_dead_after, address_to at; positive size, pending; unsigned char *imported_own, *imported_handed; positive *imported_used; } gpu;
 static unsigned char *gpu_import_at_room; // the reservation the import table's arrays are in, and the imports committed in it
 static unsigned int gpu_import_room;
 static p64 *gpu_submit_bos;               // a submit's buffers (the ring, the imports and maps a job may read), as many as the imports have room for
@@ -49,7 +49,8 @@ static unsigned int gpu_memfd_count;
 
 // The import table's arrays pointed at their reservation (made at the first need), with room for `want`: 1, or 0 when the memory is not there.
 #define GPU_IMPORT_ARRAYS(X) X(imported, unsigned int) X(imported_va, positive) X(imported_bytes, positive) X(imported_dead, unsigned char) \
-        X(imported_holds, unsigned char) X(imported_dead_at, positive) X(imported_dead_after, unsigned int)
+        X(imported_holds, unsigned char) X(imported_dead_at, positive) X(imported_dead_after, unsigned int) X(imported_own, unsigned char) \
+        X(imported_handed, unsigned char) X(imported_used, positive)
 static b32 gpu_imports_room(unsigned int want)
 {
         positive at = 0, room;
@@ -172,6 +173,9 @@ static b32 gpu_round_off;
 // list as before 321d8bc6, the owner's way back if a window or a part of one is ever missing from the card's frame; and a check's switch, for the differential that
 // holds the cut to the picture the kernel draws without it.
 static b32 gpu_cut_off;
+// /run/moonwater/gpu-imports-all, looked for at each start as gpu-nouserptr is: every live import named in every job's bo list, as before (gpu_import_named), for the
+// owner to measure one against the other.
+static b32 gpu_imports_all;
 static unsigned int gpu_maps_user, gpu_maps_dma; // maps made, by userptr and by the dma-buf route (moonwater debug)
 static b32 gpu_lost; // a job's submit said the card lost its context or VM (set by gpu_run; the caller recovers and clears it)
 static unsigned int gpu_recovered; // how many times the card was started again after it lost its state (moonwater debug)
@@ -1357,6 +1361,7 @@ static b32 gpu_start(positive bytes)
         gpu_own_userptr = gpu_flag("/run/moonwater/gpu-own-userptr");
         gpu_round_off = gpu_flag("/run/moonwater/gpu-round-off");
         gpu_cut_off = gpu_flag("/run/moonwater/gpu-cut-off");
+        gpu_imports_all = gpu_flag("/run/moonwater/gpu-imports-all");
         {
                 long off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-gfx10", FILE_READ | O_CLOEXEC);
 
@@ -2055,10 +2060,12 @@ static int gpu_import_of(unsigned int handle)
 
 // A buffer the table has, held once more: the address it has had since it was mapped. One released and not yet unmapped (dead: no holder, kept until the card
 // is idle) is held again, by this holder alone. 0, and nothing held, for more bytes than its map has or more holders than the count holds.
+static b32 gpu_importing_own; // gpu_import is making the import: the compositor's own buffer, named in every job (gpu_import_named)
 static positive gpu_import_again(unsigned int i, positive bytes)
 {
         if (((bytes + 4095) & ~4095ull) > gpu.imported_bytes[i] || (!gpu.imported_dead[i] && gpu.imported_holds[i] == 255))
                 return 0;
+        gpu.imported_own[i] |= (unsigned char)gpu_importing_own, gpu.imported_handed[i] = 1, gpu.imported_used[i] = gpu_tick; // (asked for to be read now)
         if (gpu.imported_dead[i])
                 gpu.imported_dead[i] = 0, gpu.imported_holds[i] = 1;
         else
@@ -2078,6 +2085,7 @@ static positive gpu_import_at(unsigned int handle, positive bytes)
         if (!at || gpu_backend->bind(handle, at, whole, true) != 0)
                 return gpu_close(handle), 0;
         gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = whole, gpu.imported_dead[gpu.imports] = 0, gpu.imported_holds[gpu.imports] = 1;
+        gpu.imported_own[gpu.imports] = (unsigned char)gpu_importing_own, gpu.imported_handed[gpu.imports] = 1, gpu.imported_used[gpu.imports] = gpu_tick;
         gpu.imported[gpu.imports++] = handle;
         gpu_map_next = at + whole;
         return at;
@@ -2090,6 +2098,7 @@ static positive gpu_import(int node, unsigned int handle, positive bytes)
 {
         unsigned int share[3] = {handle, 2 | 0x80000, 0};
         int held;
+        positive at;
 
         if (gpu.fd < 0 || GPU_CONTROL(node, 3u << 30 | 12u << 16 | 0x642du, share) != 0)
                 return 0;
@@ -2098,7 +2107,10 @@ static positive gpu_import(int node, unsigned int handle, positive bytes)
                 return system_close((int)share[2]), 0;
         system_close((int)share[2]);
         held = gpu_import_of(share[0]);
-        return held >= 0 ? gpu_import_again((unsigned int)held, bytes) : gpu_import_at(share[0], bytes);
+        gpu_importing_own = 1;
+        at = held >= 0 ? gpu_import_again((unsigned int)held, bytes) : gpu_import_at(share[0], bytes);
+        gpu_importing_own = 0;
+        return at;
 }
 
 // A client's dma-buf (a descriptor the caller keeps, which is not closed here), made reachable to the GPU as gpu_import makes a buffer: the
@@ -2163,7 +2175,8 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
                         gpu.imported[i] = gpu.imported[gpu.imports - 1], gpu.imported_va[i] = gpu.imported_va[gpu.imports - 1];
                         gpu.imported_bytes[i] = gpu.imported_bytes[gpu.imports - 1], gpu.imported_dead[i] = gpu.imported_dead[gpu.imports - 1];
                         gpu.imported_dead_at[i] = gpu.imported_dead_at[gpu.imports - 1], gpu.imported_dead_after[i] = gpu.imported_dead_after[gpu.imports - 1];
-                        gpu.imported_holds[i] = gpu.imported_holds[gpu.imports - 1], gpu.imports--;
+                        gpu.imported_holds[i] = gpu.imported_holds[gpu.imports - 1], gpu.imported_own[i] = gpu.imported_own[gpu.imports - 1];
+                        gpu.imported_handed[i] = gpu.imported_handed[gpu.imports - 1], gpu.imported_used[i] = gpu.imported_used[gpu.imports - 1], gpu.imports--;
                         return;
                 }
 }
@@ -2962,6 +2975,40 @@ static void gpu_handed_clear(void)
 {
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 gpu_maps[i].handed = 0;
+        for (unsigned int i = 0; i < gpu.imports; i++)
+                gpu.imported_handed[i] = 0;
+}
+
+/*
+        A client's import whose address va is in, handed to a record (the shim's compositor_wl_live answers every client address a record is given): named in the
+        bo list of the jobs until one has run (gpu_handed_clear) and in every job of this tick, as a map handed is (gpu_map_named). An address in no import is nothing.
+*/
+static void gpu_import_handed(positive va)
+{
+        static unsigned int hint;
+        unsigned int i = hint;
+
+        if (!(i < gpu.imports && va - gpu.imported_va[i] < gpu.imported_bytes[i]))
+                for (i = 0; i < gpu.imports && va - gpu.imported_va[i] >= gpu.imported_bytes[i]; i++)
+                        ;
+        if (i >= gpu.imports)
+                return;
+        gpu.imported_handed[i] = 1, gpu.imported_used[i] = gpu_tick, hint = i;
+}
+
+/*
+        Whether the job's bo list names the import at i (gpu_submit). The compositor's own imports (the scanouts and the turned screens' buffers, gpu_import), which
+        jobs write, always; a client's only where a record of this job reads it (handed, or used in this tick) or where it was let go of since the last submit (a
+        record of this job may hold its address from before), as a map is named. amdgpu makes a job wait for every other program's fence on each buffer it names and
+        puts the job on each as a writer, and a client draws its next frame into the buffers it has back: every client buffer named, a present waited for the frame
+        a game was drawing into the buffer it was not showing, and that frame for the present (the review's P-c1-1, the gaming team's G-g3-4). The buffer read is
+        still named: the wait for its own frame is the implicit sync a client without explicit sync asks for.
+*/
+static b32 gpu_import_named(unsigned int i, unsigned int before)
+{
+        if (gpu.imported_dead[i])
+                return gpu.imported_dead_after[i] == before;
+        return gpu_imports_all || gpu.imported_own[i] || gpu.imported_handed[i] || gpu.imported_used[i] == gpu_tick;
 }
 
 // Whether the job's bo list (the submit's buffers) names the map at i. The invariant: every map a record of the job refers to is in the list. A record gets a map's address
@@ -3026,7 +3073,7 @@ static positive gpu_submit(void)
                 // amdgpu_cs_sync_rings) and puts the job on each as a writer (amdgpu_cs_submit, DMA_RESV_USAGE_WRITE), and a client draws its next frame into
                 // the very buffers it was given back: named, every present waited for the frame a game or Chromium was drawing, and that frame for the present.
                 for (unsigned int i = 0; i < gpu.imports; i++)
-                        if (!gpu.imported_dead[i] || gpu.imported_dead_after[i] == before)
+                        if (gpu_import_named(i, before))
                                 bos[named++] = gpu.imported[i];
                 // Of the maps, the ones a record of this job was given and the ones this present used (gpu_map_named): the kernel looks at the pages of every map named at
                 // every submission (ten 1920 by 1080 window buffers held cost a present 80 to 400 us on the box), and a map not named is not read by this job. A map the

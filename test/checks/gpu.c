@@ -2501,24 +2501,42 @@ static void gpu_bo_rows(void)
         check("gpu bo: a tick on, with no job run, a written map over it is not refused (9) and drops it",
               !gpu_map_written((const void *)0x10002000ull, 0x1000) && (gpu_map_why & 255) != 9 && gpu_map_count == 0);
 
-        // 6. The imports: one held, one let go of since the last submit (a record of this job may hold its address), one let go of before it (the client draws
-        // into it again: named, the job would wait for the client's frame and the client's next frame for the job). The job names the first two; the one after it
-        // the held one alone.
-        if (gpu_imports_room(3))
+        // 6. The imports: one held and given to a record, one let go of since the last submit (a record of this job may hold its address), one let go of before
+        // it (the client draws into it again: named, the job would wait for the client's frame and the client's next frame for the job). The job names the first
+        // two; the one after it in the same tick the held one alone.
+        if (gpu_imports_room(5))
         {
                 gpu_map_count = 0, gpu.imports = 3;
-                for (unsigned int i = 0; i < 3; i++)
+                for (unsigned int i = 0; i < 5; i++)
                         gpu.imported[i] = 21 + i, gpu.imported_va[i] = 0x40000000ull + 0x10000ull * i, gpu.imported_bytes[i] = 0x10000, gpu.imported_holds[i] = 1,
-                        gpu.imported_dead[i] = i > 0, gpu.imported_dead_at[i] = gpu_tick, gpu.imported_dead_after[i] = gpu_submit_serial - (i == 2);
+                        gpu.imported_dead[i] = i == 1 || i == 2, gpu.imported_dead_at[i] = gpu_tick, gpu.imported_dead_after[i] = gpu_submit_serial - (i == 2),
+                        gpu.imported_own[i] = i == 4, gpu.imported_handed[i] = 0, gpu.imported_used[i] = 0;
+                gpu_import_handed(0x40000010ull);
                 gpu_bo_run();
-                check("gpu bo: a held import and one let go of since the last submit are in the list", gpu_seen_has(21) && gpu_seen_has(22));
+                check("gpu bo: a held import given to a record and one let go of since the last submit are in the list", gpu_seen_has(21) && gpu_seen_has(22));
                 check("gpu bo: an import let go of before the last submit is not (its client draws into it again)", !gpu_seen_has(23));
                 gpu_bo_run();
-                check("gpu bo: the job after names the held import alone", gpu_seen_has(21) && !gpu_seen_has(22) && !gpu_seen_has(23) && gpu_seen_count == 1);
+                check("gpu bo: the job after in the same tick names the held import alone", gpu_seen_has(21) && !gpu_seen_has(22) && !gpu_seen_has(23) && gpu_seen_count == 1);
+
+                // 7. A client's import no record of this tick was given is not named (a game's buffer it draws its next frame into, which amdgpu would make the
+                // job wait for and the game wait for the job: P-c1-1, G-g3-4); the compositor's own (a scanout) always is; gpu-imports-all names every live one.
+                gpu.imports = 5;
+                gpu.imported_dead[1] = gpu.imported_dead[2] = 0;
+                gpu_trim();
+                gpu_import_handed(0x40020010ull);
+                gpu_bo_run();
+                check("gpu bo: a tick on, only the client import a record was given and the compositor's own are named",
+                      gpu_seen_has(23) && gpu_seen_has(25) && !gpu_seen_has(21) && !gpu_seen_has(22) && !gpu_seen_has(24) && gpu_seen_count == 2);
+                gpu_imports_all = 1;
+                gpu_bo_run();
+                gpu_imports_all = 0;
+                check("gpu bo: with gpu-imports-all every live import is named, as before", gpu_seen_count == 5);
+                gpu_import_handed(0x50000000ull);
+                check("gpu bo: an address in no import marks none", !gpu.imported_handed[0] && !gpu.imported_handed[1] && !gpu.imported_handed[3]);
                 gpu.imports = 0;
         }
         else
-                check("gpu bo: room for three imports", false);
+                check("gpu bo: room for five imports", false);
 
         gpu_map_count = 0, gpu_gone_at = 0, gpu_seen_count = 0, gpu_fake_cancel = 0, gpu_lost = 0, gpu_last_error = 0, gpu_fault[0] = 0;
         gpu.at = kept_at, gpu.fd = kept_fd;
