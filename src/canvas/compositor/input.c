@@ -4410,6 +4410,7 @@ struct compositor_reader_record
 {
         struct compositor_input_event raw;
         unsigned int at, generation;
+        unsigned long long read, sent; // a note's: when the reader read the key and when it had written it to the client (monotonic ns)
 };
 
 static int compositor_input_take(unsigned int at, const struct compositor_input_event *raw, bipolar got, int moved); // below: a read acted on
@@ -4432,6 +4433,7 @@ static struct
         unsigned long long late, late_most; // its sends 100 us and more after the device's stamp, and the latest (us)
         unsigned long long keys;     // keys it sent itself
         unsigned long long note_due; // when the loop is knocked for the notes of keys sent (0: none waits)
+        unsigned long long note_read, note_sent; // the next note's read and send (the reader's alone: it is the ring's one writer)
         unsigned int dropped;        // a record the ring had no room for, to be said as SYN_DROPPED
         int down[256];               // a key the reader sent pressed itself: the row it went to, and one (0: none)
         unsigned int generation[COMPOSITOR_INPUTS];
@@ -4459,7 +4461,8 @@ static int compositor_reader_running(void)
 static int compositor_wl_direct_send(long dx, long dy, positive micro); // wayland_host.c: a locked pointer's report sent from the reader
 static int compositor_wl_direct_clean(void); // wayland_host.c: nothing of the loop's is left queued for the client the reader sends to
 static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to); // a key sent from the reader
-static void compositor_wl_key_noted(unsigned int at, unsigned int code, int value, unsigned long serial, int row, positive stamp);
+static void compositor_wl_key_noted(unsigned int at, unsigned int code, int value, unsigned long serial, int row, positive stamp, positive read,
+                                    positive sent);
 static void compositor_wl_direct_publish(void); // what the reader sends to, made again from the loop's state
 #endif
 
@@ -4492,6 +4495,8 @@ static void compositor_reader_put(unsigned int at, unsigned int generation, cons
         }
         record = &compositor_reader.ring[handed++ % COMPOSITOR_READER_RING];
         record->raw = *raw, record->at = at, record->generation = generation;
+        record->read = raw->type == COMPOSITOR_READER_NOTE ? compositor_reader.note_read : 0;
+        record->sent = raw->type == COMPOSITOR_READER_NOTE ? compositor_reader.note_sent : 0;
         compositor_reader.handed_out += raw->type != COMPOSITOR_READER_NOTE;
         __atomic_store_n(&compositor_reader.handed, handed, __ATOMIC_SEQ_CST);
 }
@@ -4518,14 +4523,23 @@ static int compositor_reader_key(unsigned int at, unsigned int code, int value, 
                 return compositor_reader.down[code] != 0;
         if (!value && !compositor_reader.down[code])
                 return 0;
+        compositor_reader.note_read = clock_monotonic_nanoseconds();
         if (!compositor_wl_direct_key(code, value, &serial, &row, value ? -1 : compositor_reader.down[code] - 1))
         {
                 compositor_reader.down[code] = 0;
                 return 0;
         }
+        compositor_reader.note_sent = clock_monotonic_nanoseconds();
         compositor_reader.down[code] = value ? row + 1 : 0, compositor_reader.keys++;
         note.seconds = (long)serial, note.microseconds = (long)micro, note.code = (unsigned short)code, note.value = value;
         compositor_reader_put(at, (unsigned int)row, &note);
+        // While the keys are traced (moonwater canvas keys) the loop is knocked at once: the trace's later stages (the client's commit, the
+        // present) are taken by keys the loop has noted, and a note kept back a frame missed the commit the key made.
+        if (value == 1 && __atomic_load_n(&compositor_keytrace.until, __ATOMIC_RELAXED))
+        {
+                compositor_reader_knock();
+                return 1;
+        }
         // The loop is knocked for the note a moment later (COMPOSITOR_READER_NOTE_DELAY_NS), or with the next record it is handed: a loop
         // woken with the key takes the processor the client is woken on (both are the loop's and the client's to share), and its keeping
         // of a sent key waits for nothing.
@@ -4738,7 +4752,7 @@ static void compositor_reader_take(void)
                 if (first->raw.type == COMPOSITOR_READER_NOTE)
                 {
                         compositor_wl_key_noted(first->at, first->raw.code, first->raw.value, (unsigned long)first->raw.seconds, (int)first->generation,
-                                                (positive)first->raw.microseconds * 1000ull);
+                                                (positive)first->raw.microseconds * 1000ull, first->read, first->sent);
                         at++;
                         continue;
                 }

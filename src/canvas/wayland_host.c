@@ -6950,7 +6950,8 @@ static void compositor_wl_direct_publish(void)
         window they went to, the clipboard's gesture), the shim's (wayland_key_noted: the keys down, the serial among the client's), and
         what any read of a device keeps (the idle clock, the card's wake, the processor's hold).
 */
-static void compositor_wl_key_noted(unsigned int at, unsigned int code, int value, unsigned long serial, int row, positive stamp)
+static void compositor_wl_key_noted(unsigned int at, unsigned int code, int value, unsigned long serial, int row, positive stamp, positive read,
+                                    positive sent)
 {
         positive now = clock_monotonic_nanoseconds();
         unsigned char mask = (unsigned char)(1u << (code & 7)), *down = &compositor.keys_down[(code & 255) >> 3];
@@ -6958,7 +6959,8 @@ static void compositor_wl_key_noted(unsigned int at, unsigned int code, int valu
         taskbar_moon_seen(now);
         if (value == 1)
         {
-                compositor_keytrace_read(code, stamp, now);
+                // The trace's read and send are the reader's own (its stamps in the note), not this keeping of them a turn later.
+                compositor_keytrace_read(code, stamp, read ? read : now);
                 if (at < COMPOSITOR_INPUTS && (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD))
                         compositor.osk_typed = 1;
                 if (compositor.keys_to != row)
@@ -6971,7 +6973,7 @@ static void compositor_wl_key_noted(unsigned int at, unsigned int code, int valu
                 *down &= (unsigned char)~mask;
         wayland_key_noted(row, code, value, serial);
         if (value == 1)
-                compositor_keytrace_sent(row);
+                compositor_keytrace_direct(row, sent);
         compositor_wl_input();
 #ifdef MOONWATER_GPU_C
         compositor_gpu_wake();

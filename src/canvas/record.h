@@ -847,6 +847,25 @@ static void compositor_keytrace_sent(int row)
                 }
 }
 
+// The newest key read and not yet given to a client was written to this window's client by the input thread itself at sent (its socket
+// written then too: the thread's send is the flush); 0 for a send the loop made.
+static void compositor_keytrace_direct(int row, unsigned long long sent)
+{
+        if (!sent)
+        {
+                compositor_keytrace_sent(row);
+                return;
+        }
+        if (!compositor_keytrace.until || !compositor_keytrace.count)
+                return;
+        for (unsigned int at = compositor_keytrace.count; at-- > compositor_keytrace.open;)
+                if (!compositor_keytrace_ring[at].sent)
+                {
+                        compositor_keytrace_ring[at].sent = compositor_keytrace_ring[at].flushed = sent, compositor_keytrace_ring[at].row = row;
+                        return;
+                }
+}
+
 // Each stage below is taken by every open key at that stage: the first picture, present and vblank after it.
 static void compositor_keytrace_flushed(void)
 {
