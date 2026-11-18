@@ -33,6 +33,9 @@
 #define ROVER_WHY_MOST 240u
 #define ROVER_SLOT_AFTER 0xffffu
 #define ROVER_READS_CLOCK (1ull << 62)
+#define ROVER_EVENT_EVERY 102u
+#define ROVER_EVENT_AT 103u
+#define ROVER_EVERY_LEAST 1000000000ll // a second
 #define ROVER_READS_WEEKDAY (1ull << 63)
 
 //      The base types every schema has, at the front of its type rows (test/rover_schema.py puts them there).
@@ -1423,6 +1426,13 @@ static bool rover_rule_finish(struct rover_build address_to build)
                 return rover_refused(build, "a rule with no on or when", null, null);
         if (!rule->then)
                 return rover_refused(build, "a rule with nothing to do: give it a do, run, tool or emit", null, null);
+        if ((rule->event == ROVER_EVENT_EVERY || rule->event == ROVER_EVENT_AT) && !rule->trigger)
+                return rover_refused(build, rule->event == ROVER_EVENT_EVERY ? "every takes its duration"
+                                                                             : "at takes its clock time",
+                                     null, null);
+        if (rule->event == ROVER_EVENT_EVERY &&
+            memory_load_unaligned(b64, rover_pool(build) + build->comparison[rule->comparison].b.index) < ROVER_EVERY_LEAST)
+                return rover_refused(build, "every is a second or longer: the runner's clock is not a loop", null, null);
         if (build->stage == ROVER_STAGE_ELSE && !rule->otherwise)
                 return rover_refused(build, "an else with nothing after it to do", null, null);
         if (!rover_place(build, rule))
@@ -1767,6 +1777,31 @@ static bool rover_statement(struct rover_build address_to build)
         }
         if (rover_is(keyword, "on"))
                 return rover_header(build, 2) && rover_read_on(build, rule);
+        //      every DURATION and at CLOCK: on every and on at, with the one filter each must have.
+        if (rover_is(keyword, "every") || rover_is(keyword, "at"))
+        {
+                const struct rover_event_row address_to row =
+                    rover_event_find(rover_is(keyword, "every") ? ROVER_EVENT_EVERY : ROVER_EVENT_AT);
+                struct rover_comparison made;
+
+                if (!rover_header(build, 2))
+                        return false;
+                if (build->words != 2)
+                        return rover_refused(build, "", keyword, rover_is(keyword, "every") ? " takes one duration"
+                                                                                           : " takes one clock time");
+                memory_zero(&made, sizeof(made));
+                made.op = ROVER_EQ;
+                made.type = rover_types[row->field_type[0]].kind;
+                made.join = ROVER_JOIN_LINE;
+                made.a.source = ROVER_FIELD;
+                if (!rover_constant(build, &build->word[1], row->field_type[0], &made.b))
+                        return false;
+                build->event = row;
+                rule->event = row->id;
+                rule->comparisons++;
+                rule->trigger++;
+                return rover_add_comparison(build, &made);
+        }
         if (rover_is(keyword, "when"))
         {
                 if (!rover_header(build, 2))
@@ -1845,7 +1880,7 @@ static bool rover_statement(struct rover_build address_to build)
         if (rover_is(keyword, "rule"))
                 return rover_refused(build, "a rule line stands at the left edge, not inside a rule", null, null);
         return rover_refused(build, "", keyword,
-                             " is no statement: about, on, when, place, limit, once, off, if, do, set, run, tool, emit or else");
+                             " is no statement: about, on, when, every, at, place, limit, once, off, if, do, set, run, tool, emit or else");
 }
 
 /*
@@ -2279,6 +2314,14 @@ static fn rover_trigger_put(struct rover_text address_to text, const struct rove
         {
                 rover_puts(text, "when ");
                 rover_line_put(text, table, null, rule->comparison, (positive)rule->comparison + rule->trigger);
+                return;
+        }
+        //      every and at are their own words: the one filter is their argument.
+        if ((event->id == ROVER_EVENT_EVERY || event->id == ROVER_EVENT_AT) && rule->trigger == 1)
+        {
+                rover_puts(text, event->name);
+                rover_puts(text, " ");
+                rover_operand_put(text, table, event, table->comparison[rule->comparison].b);
                 return;
         }
         rover_puts(text, "on ");

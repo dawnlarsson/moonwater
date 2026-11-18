@@ -81,6 +81,8 @@ table it compiles to the same table, byte for byte.
 | `about "TEXT"` | What the rule is for, in a person's words. Settings shows it on the event node. |
 | `on EVENT [FIELD ...]` | Fire on this event. Each word after the event's name is a value its fields must have, in the fields' order; a word field's value may be a pattern. |
 | `when CONDITION` | Fire on the rising edge of a condition over states: when it becomes true, not while it stays true. |
+| `every DURATION` | Fire every DURATION, a second or longer, by the runner's clock. |
+| `at CLOCK` | Fire at that minute of every day, in the machine's zone. |
 | `place kernel` / `place user` | Where the rule must run. Unsaid, the compiler places it (below); said, a rule that cannot run there is refused. |
 | `limit DURATION` | Fire at most once in DURATION, whole milliseconds. A firing inside the window is dropped and counted. |
 | `once` | Fire once per load of the table, its then actions or its else actions, whichever comes first. |
@@ -318,6 +320,7 @@ of events and primitives are kept forever: one is never given to another.
 | kernel (spark, ids 1–22) | `key power`, `key sleep`, `key reset`, `key ctrl-alt-delete`, `lid close`, `lid open`, `volume up`, `volume down`, `mute`, `brightness up`, `brightness down`, `canvas on`, `canvas off`, `micmute`, `rfkill`, `tablet on`, `tablet off`, `headphone on`, `headphone off`, `dock on`, `dock off`, `resume` |
 | desktop (the compositor, ids 64–) | `chord` (chord), `fullscreen on` and `fullscreen off` (app: word), `window opened` and `window closed` (app: word), `display added` and `display removed` (connector: word), `button` (name: `launcher`, `volume`, `mic`, `notices`, `tray-double` or `pin`; slot: int 0 to 63, a pin's place on the taskbar; app: word, a pin's program) |
 | rules (id 96) | `cue` (name: word), posted by `emit cue NAME` |
+| runner clocks | `every` (period: duration) and `at` (time: clock), which `every DURATION` and `at CLOCK` are rules on: the runner posts `every` for each period its rules name, at that period, and `at` once a minute with the minute of the day, so the minute's rules are a scan of keys |
 | runner (ids 97–) | `service up`, `service down`, `service failed` (name: word); `setting` (name: word, a registry row's); `boot` (verdict: `live`, `disk` or `ask`; disk: word, the disk's name), once a boot when boot has said what this session's `/root` is, which is what `moonwater_init` was handed as its `$1` |
 
 ### States

@@ -393,6 +393,11 @@ static const struct
     {"service a\n\trun /a\n\tfrob\n", 3, "no service statement"},
     {"rule a\n\ton button frob\n\tdo open x\n", 2, "is not one of launcher"},
     {"rule a\n\ton lid open\n\tset airplane off\n", 3, "airplane off is deliberate"},
+    {"rule a\n\tevery 100ms\n\trun x\n", 0, "a second or longer"},
+    {"rule a\n\tevery\n\trun x\n", 2, "takes one duration"},
+    {"rule a\n\tat 25:00\n\trun x\n", 2, "00:00 to 23:59"},
+    {"rule a\n\ton at\n\trun x\n", 0, "at takes its clock time"},
+    {"rule a\n\tat 10:00\n\ton lid open\n\trun x\n", 3, "said twice"},
     {"rule a\n\ton lid open\n\tset airplane setting.canvas.gpu\n", 3, "airplane off is deliberate"},
     {"rule a\n\ton lid open\n\tset power turbo\n", 3, "is not one of performance"},
     {"rule a\n\ton lid open\n\tset nosuch 1\n", 3, "is no switch"},
@@ -869,6 +874,30 @@ static fn rover_check_evaluator(void)
                       made && rover_arguments(&rover_view, hits[0].action, &event, rover_pages, values) == 4 &&
                           rover_bytes_are(values[3].text, values[3].length, "-i"));
         }
+
+        //      The runner's clocks: every and at, each its own trigger word, at keyed on the minute.
+        check("every and at compile",
+              rover_compiled("rule tidy\n\tevery 5m\n\trun tidy\n\n"
+                             "rule night\n\tat 22:30\n\tif weekday between mon fri\n\tset brightness 20%\n"));
+        check("and print as their own words",
+              rover_same(rover_printed_of(), "rule tidy\n\tevery 5m\n\trun tidy\n\n"
+                                             "rule night\n\tat 22:30\n\tif weekday between mon fri\n\tset brightness 20%\n"));
+        event = rover_event_of("at", null);
+        event.count = 1;
+        event.field[0].number = 22 * 60 + 30;
+        event.realtime = 4 * 86400 + 22 * 3600 + 30 * 60; // a Monday
+        check("at 22:30 on a Monday dims", rover_same(rover_fires(&event, ROVER_RUNNER), "night:then"));
+        event.field[0].number = 22 * 60 + 31;
+        check("22:31 is another minute's", rover_same(rover_fires(&event, ROVER_RUNNER), ""));
+        event = rover_event_of("every", null);
+        event.count = 1;
+        event.field[0].number = 300 * 1000000000ll;
+        check("every 5m is the five minutes' timer", rover_same(rover_fires(&event, ROVER_RUNNER), "tidy:then"));
+        event.field[0].number = 60 * 1000000000ll;
+        check("and not a minute's", rover_same(rover_fires(&event, ROVER_RUNNER), ""));
+        check("on every reads as every",
+              rover_compiled("rule tidy\n\ton every 5m\n\trun tidy\n") &&
+                  rover_same(rover_printed_of(), "rule tidy\n\tevery 5m\n\trun tidy\n"));
 
         //      Boot's verdict: one runner event a boot, keyed on which.
         check("rules on the verdict compile",

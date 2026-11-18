@@ -60,6 +60,11 @@ event 100 runner setting name:word
 # build).
 event 101 runner boot verdict:enum:live,disk,ask disk:word
 
+# The runner's clocks: every DURATION and at CLOCK are rules on these, the
+# period or the minute of the day (the zone's) their first field.
+event 102 runner every period:duration
+event 103 runner at time:clock
+
 # Moonwater's mechanisms. RUNS is where the call is a direct one.
 primitive 1 kernel any poweroff
 primitive 2 kernel any reboot
