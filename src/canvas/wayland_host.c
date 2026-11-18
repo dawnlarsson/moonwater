@@ -251,12 +251,43 @@ struct compositor_wl_layer
         positive va, import;          // a dma-buf's: the card's address of the first pixel, and the import's
         unsigned int epoch, fourcc, offset;
         int synced;
-        int swap;                     // red and blue the other way round (an ABGR or XBGR dma-buf, compositor_wl_card_swaps): the frame's swap
+        int swap;                     // red and blue the other way round (an ABGR or XBGR buffer): the frame's swap
+        /*
+                A layer gathered (gather 1): a picture turned or flipped (a buffer transform, y_invert), or a viewport's source at an offset, or
+                scaled. It is drawn from a picture of its own at its rectangle's size, compositor_wl_layers.gathered[row][at], which the card
+                makes from the buffer (op 7 by tables of where each column and row comes from, compositor_wl_gathers_fill) or the processor
+                with the same tables, each time it changed; pixels and pitch are then the buffer's first pixel and its pitch, source_w by
+                source_h its size, and transform, y_invert, the viewport's source (sx, sy, sw, sh in 1/256 pixels of the turned buffer) and the
+                size drawn (tw by th) say where each pixel comes from, as compositor_wl_blit_xform reads them; ox, oy are the rectangle's first
+                column and row in the picture drawn (a layer cut by the window's edge).
+        */
+        int gather;
+        unsigned int at;
+        long source_w, source_h, transform, y_invert, sx, sy, sw, sh, tw, th, ox, oy;
+};
+
+/*
+        The picture a gathered layer is drawn from (compositor_wl_layer's gather): width by height of the buffer's pixels, each where the tables
+        say, with red and blue as the buffer has them (the frame's swap turns them), at a pitch of its width; after it the tables, the columns'
+        offsets (width of them) and the rows' (height), in the buffer's pixels from its first, which op 7 reads with a source pitch of 1 so that
+        a turned picture's column is a row of the buffer. A memfd's pages the card maps written (gpu_register_memfd for the dma-buf route), kept
+        for the surface while it is the row's (the next picture of the same size made in the same pages) and let go of with the row.
+*/
+struct compositor_wl_gathered
+{
+        unsigned int *memory;
+        positive bytes;     // the mapping's
+        int fd;             // its memfd and one, 0 for none
+        unsigned int id;    // the layer's surface (compositor_wl_layer's id), 0 for a slot no layer has
+        int filled;         // the picture is the layer's as it is now
+        positive va;        // the card's address of memory (its written map), with the card's epoch it was made in
+        unsigned int epoch;
 };
 
 static struct
 {
         struct compositor_wl_layer (*layer)[WAYLAND_LAYERS];
+        struct compositor_wl_gathered (*gathered)[WAYLAND_LAYERS];
         unsigned char *count;
         unsigned int total;
         // The row's own picture was copied when last handed with layers (root 1): it is not asked for again to have them
@@ -1001,6 +1032,8 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
         return -1;
 }
 
+static void compositor_wl_gathers_free(int row);
+
 static void compositor_wl_row_close(void *context, int row)
 {
         (void)context;
@@ -1013,6 +1046,7 @@ static void compositor_wl_row_close(void *context, int row)
                 compositor_wl.row_blend[row] = 0;
                 compositor_wl_unlend(row);
                 compositor_wl_source_drop(row);
+                compositor_wl_gathers_free(row);
         }
         compositor_clip_leave(row);
         compositor_popup_leave(row);
@@ -1335,6 +1369,255 @@ static int compositor_wl_row_async(int row)
         return row >= 0 && wayland_row_hint(row, WAYLAND_HINT_ASYNC) != 0;
 }
 
+/* ---- a window's layers gathered: turned, flipped, cropped at an offset or scaled (compositor_wl_layer's gather) ---- */
+
+static int compositor_wl_card_composes(void);
+
+/*
+        Where a gathered layer's pixel comes from, in the buffer's pixels from its first: the column's part (x of the layer's rectangle) and
+        the row's (y), which add up to it. The source cell is compositor_wl_blit_xform's, the one whose centre is the point's in the viewport's
+        source of the turned buffer, held to its edge; a turn that swaps the axes (transform 1, 3, 5, 7) makes a column of the drawn picture a
+        row of the buffer, so the column's part is then a row's offset and the row's a column's, and a flip (or y_invert, which flips the
+        buffer's rows after the turn) counts from the far edge. Every one of the eight turns, a crop and a scale is so a sum of a column's
+        part and a row's: the card's op 7 with a source pitch of 1 reads them so, and the processor the same tables.
+*/
+static unsigned int compositor_wl_gather_column(const struct compositor_wl_layer *l, long x)
+{
+        long reach = l->transform & 1 ? l->source_h : l->source_w;
+        long t = (l->sx + ((l->ox + x) * 2 + 1) * l->sw / (2 * l->tw)) >> 8;
+        int flip_x = 0x36 >> (l->transform & 7) & 1, flip_y = (0x6c >> (l->transform & 7) & 1) ^ (l->y_invert != 0);
+
+        t = t < 0 ? 0 : t >= reach ? reach - 1 : t;
+        if (l->transform & 1)
+                return (unsigned int)((unsigned long)(flip_y ? l->source_h - 1 - t : t) * l->pitch);
+        return (unsigned int)(flip_x ? l->source_w - 1 - t : t);
+}
+
+static unsigned int compositor_wl_gather_line(const struct compositor_wl_layer *l, long y)
+{
+        long reach = l->transform & 1 ? l->source_w : l->source_h;
+        long t = (l->sy + ((l->oy + y) * 2 + 1) * l->sh / (2 * l->th)) >> 8;
+        int flip_x = 0x36 >> (l->transform & 7) & 1, flip_y = (0x6c >> (l->transform & 7) & 1) ^ (l->y_invert != 0);
+
+        t = t < 0 ? 0 : t >= reach ? reach - 1 : t;
+        if (l->transform & 1)
+                return (unsigned int)(flip_x ? l->source_w - 1 - t : t);
+        return (unsigned int)((unsigned long)(flip_y ? l->source_h - 1 - t : t) * l->pitch);
+}
+
+// The bytes of a layer's buffer the card or the processor reads: a gathered layer's whole buffer, a plain one's rectangle.
+static positive compositor_wl_layer_bytes(const struct compositor_wl_layer *l)
+{
+        if (l->gather)
+                return (positive)(l->source_h - 1) * l->pitch * 4 + (positive)l->source_w * 4;
+        return (positive)(l->height - 1) * l->pitch * 4 + (positive)l->width * 4;
+}
+
+// Whether two gathered layers read the same pixels of the same buffer to the same places (a picture made for one is the other's).
+static int compositor_wl_gather_same(const struct compositor_wl_layer *a, const struct compositor_wl_layer *b)
+{
+        return a->gather && b->gather && a->pixels == b->pixels && a->pitch == b->pitch && a->map == b->map && a->fd == b->fd && a->dev == b->dev &&
+               a->ino == b->ino && a->width == b->width && a->height == b->height && a->source_w == b->source_w && a->source_h == b->source_h &&
+               a->transform == b->transform && a->y_invert == b->y_invert && a->sx == b->sx && a->sy == b->sy && a->sw == b->sw && a->sh == b->sh &&
+               a->tw == b->tw && a->th == b->th && a->ox == b->ox && a->oy == b->oy;
+}
+
+// A gathered picture's memory let go of: the card's maps of it first (dropped once the card is idle, gpu_forget), then the pages.
+static void compositor_wl_gathered_free(struct compositor_wl_gathered *g)
+{
+        if (g->memory)
+        {
+                gpu_forget(g->memory, g->bytes);
+#ifdef MOONWATER_GPU_C
+                if (g->fd)
+                        gpu_unregister_memfd(g->memory);
+#endif
+                compositor_call(syscall(munmap), (positive)g->memory, g->bytes, 0, 0, 0, 0);
+        }
+        if (g->fd)
+                system_close(g->fd - 1);
+        memory_zero(g, sizeof *g);
+}
+
+// A row's gathered pictures let go of (it closed).
+static void compositor_wl_gathers_free(int row)
+{
+        if (row < 0 || row >= COMPOSITOR_ROWS)
+                return;
+        for (unsigned int at = 0; at < WAYLAND_LAYERS; at++)
+                compositor_wl_gathered_free(&compositor_wl_layers.gathered[row][at]);
+}
+
+// Room for bytes in a gathered picture's memory, grown to a whole MiB when it has less (its picture made again): 0 when there is none.
+static unsigned int *compositor_wl_gathered_room(struct compositor_wl_gathered *g, positive bytes)
+{
+        positive grown = (bytes + (1ull << 20) - 1) & ~((1ull << 20) - 1);
+        unsigned int id = g->id;
+        long memfd, mapped;
+
+        if (g->memory && g->bytes >= bytes)
+                return g->memory;
+        compositor_wl_gathered_free(g);
+        g->id = id;
+        memfd = compositor_call(syscall(memfd_create), (positive) "moonwater-layer", 1 | 2, 0, 0, 0, 0); // MFD_CLOEXEC | MFD_ALLOW_SEALING
+        if (memfd < 0)
+                return 0;
+        if (system_truncate_handle((int)memfd, grown) != 0 ||
+            compositor_call(syscall(fcntl), (positive)memfd, WINDOWS_F_ADD_SEALS, 2, 0, 0, 0) != 0) // F_SEAL_SHRINK
+        {
+                system_close((int)memfd);
+                return 0;
+        }
+        mapped = compositor_call(syscall(mmap), 0, grown, 3, 1, (positive)memfd, 0);
+        if (mapped < 0 && mapped > -4096)
+        {
+                system_close((int)memfd);
+                return 0;
+        }
+        g->memory = (unsigned int *)mapped, g->bytes = grown, g->fd = (int)memfd + 1;
+#ifdef MOONWATER_GPU_C
+        gpu_register_memfd((int)memfd, g->memory, grown, 0);
+#endif
+        return g->memory;
+}
+
+/*
+        A run of a gathered layer's row as its buffer holds it (red and blue as they are): n pixels from column x of row y of its rectangle, into
+        run, each column's part reckoned as it is read. For a layer laid into the table (compositor_wl_layers_put_list), which is no present's.
+*/
+static void compositor_wl_gather_run(const struct compositor_wl_layer *l, long y, long x, unsigned long n, unsigned int *run)
+{
+        const unsigned int *line = l->pixels + compositor_wl_gather_line(l, y);
+
+        for (unsigned long at = 0; at < n; at++)
+                run[at] = line[compositor_wl_gather_column(l, x + (long)at)];
+}
+
+/*
+        The pictures of the gathered layers that changed, made before a present's frames are (compositor_present_frames, which makes them while no
+        job of the card's is on what it draws: compositor_card_holds), so that whatever reads a layer's frame, the card's scene or the processor's,
+        the glass under the taskbar or the record, reads the layer as it is. Each one's tables first (columns, then rows), then the card's op 7 over
+        them with a source pitch of 1 when the card composes, or the processor's walk of the same tables: a picture is the same bytes from either.
+        One whose memory is not there stays unmade, and its window's layers are laid into its picture (compositor_wl_layers_frames).
+*/
+static void compositor_wl_gathers_fill(void)
+{
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
+                {
+                        struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
+                        struct compositor_wl_gathered *g;
+                        positive pixels, bytes;
+                        unsigned int *cols, *lines;
+                        unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, and then END
+
+                        if (!l->gather || l->at >= WAYLAND_LAYERS || (g = &compositor_wl_layers.gathered[row][l->at])->filled || g->id != l->id)
+                                continue;
+                        pixels = (positive)l->width * (positive)l->height;
+                        bytes = 4 * (pixels + (positive)l->width + (positive)l->height);
+                        if (!compositor_wl_gathered_room(g, bytes))
+                                continue;
+                        cols = g->memory + pixels, lines = cols + l->width;
+                        for (long x = 0; x < l->width; x++)
+                                cols[x] = compositor_wl_gather_column(l, x);
+                        for (long y = 0; y < l->height; y++)
+                                lines[y] = compositor_wl_gather_line(l, y);
+                        g->va = 0;
+#ifdef MOONWATER_GPU_C
+                        if (compositor_wl_card_composes() && gpu_ready() && gpu_idle())
+                        {
+                                positive dst = gpu_va_written(g->memory, bytes), src = 0, extent = compositor_wl_layer_bytes(l);
+
+                                if (!dst && gpu_map_written(g->memory, g->bytes))
+                                        dst = gpu_va_written(g->memory, bytes);
+                                if (l->fd >= 0)
+                                        src = compositor_wl_live(l->va, l->epoch);
+                                else if (!(src = gpu_va_bytes(l->pixels, extent)) && gpu_map(l->pixels, extent))
+                                        src = gpu_va_bytes(l->pixels, extent);
+                                if (dst && src)
+                                {
+                                        g->va = dst, g->epoch = gpu_epoch;
+                                        if (gpu_blit(src, 1, dst, (unsigned int)l->width, dst + 4 * pixels, 7, (unsigned int)l->width, (unsigned int)l->height) ||
+                                            (gpu_end == GPU_END_LATE && gpu_finish()))
+                                        {
+                                                g->filled = 1;
+                                                if (compositor.table)
+                                                        compositor.table->client_layers_gathered[0]++;
+                                                continue;
+                                        }
+                                        if (gpu_end != GPU_END_NONE)
+                                                compositor_gpu_job_failed();
+                                        if (!gpu_idle()) // a job given up on still runs: nothing is written under it, and the layers are laid instead
+                                                continue;
+                                }
+                        }
+#endif
+                        if (l->fd >= 0)
+                                compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                        for (long y = 0; y < l->height; y++)
+                        {
+                                const unsigned int *line = l->pixels + lines[y];
+                                unsigned int *to = g->memory + (unsigned long)y * (unsigned long)l->width;
+
+                                for (long x = 0; x < l->width; x++)
+                                        to[x] = line[cols[x]];
+                        }
+                        if (l->fd >= 0)
+                        {
+                                sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
+                                compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                        }
+                        // A pool cut under the walk was read as the zeros its handler maps: the picture is not made, and the layers are laid.
+                        if (compositor_wl_cut(l->pixels))
+                                continue;
+                        g->filled = 1;
+                        if (compositor.table)
+                                compositor.table->client_layers_gathered[1]++;
+                }
+}
+
+/*
+        The pictures a row's layers are gathered into, taken as they are kept (compositor_wl_row_layers): each gathered layer keeps the one its
+        surface had, a new one takes one no layer of the row has now, and a slot no layer has is for the next. A picture is made again (not filled)
+        when its layer's surface committed (changed), when the root's picture is handed with the layers (a synchronized subsurface's commit is
+        applied with the root's, and its buffer may be the one it had), and when what the gathering reads is not what it was.
+*/
+static void compositor_wl_gathers_take(int row, struct compositor_wl_layer *made, unsigned int kept, const struct wayland_picture *const *from,
+                                       const struct compositor_wl_layer *old, unsigned int olds, long root)
+{
+        struct compositor_wl_gathered *g = compositor_wl_layers.gathered[row];
+        unsigned char used[WAYLAND_LAYERS] = {0};
+
+        for (unsigned int at = 0; at < kept; at++)
+        {
+                made[at].at = WAYLAND_LAYERS;
+                for (unsigned int s = 0; made[at].gather && s < WAYLAND_LAYERS && made[at].at == WAYLAND_LAYERS; s++)
+                        if (g[s].id == made[at].id && !used[s])
+                                made[at].at = s, used[s] = 1;
+        }
+        for (unsigned int at = 0; at < kept; at++)
+        {
+                const struct compositor_wl_layer *was = 0;
+
+                if (!made[at].gather)
+                        continue;
+                for (unsigned int s = 0; s < WAYLAND_LAYERS && made[at].at == WAYLAND_LAYERS; s++)
+                        if (!used[s])
+                        {
+                                made[at].at = s, used[s] = 1;
+                                g[s].id = made[at].id, g[s].filled = 0;
+                        }
+                for (unsigned int k = 0; k < olds && !was; k++)
+                        if (old[k].id == made[at].id)
+                                was = &old[k];
+                if (root || from[at]->changed || !was || !compositor_wl_gather_same(was, &made[at]))
+                        g[made[at].at].filled = 0;
+        }
+        for (unsigned int s = 0; s < WAYLAND_LAYERS; s++)
+                if (!used[s])
+                        g[s].id = 0, g[s].filled = 0;
+}
+
 // A window's subsurfaces laid into its picture and not kept as layers (compositor_wl_row_layers), counted by the reason (struct windows's
 // client_layers_refused): always 0.
 static int compositor_wl_layers_refused(unsigned int why)
@@ -1373,10 +1656,10 @@ static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list
 
                 if (l->fd >= 0)
                         compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
-                if (l->swap)
+                if (l->swap || l->gather)
                 {
-                        // Red and blue the other way round: each row read with the streaming loads into a run of its own, turned there, and
-                        // laid (over what is under it, or as it is) from it.
+                        // Red and blue the other way round, or gathered: each row read into a run of its own (with the streaming loads, or
+                        // walked where the gathering's tables say), turned there, and laid (over what is under it, or as it is) from it.
                         unsigned int run[1024];
                         unsigned int alpha = l->fourcc == WAYLAND_FOURCC_XBGR8888 ? 0xff000000u : 0;
 
@@ -1386,8 +1669,12 @@ static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list
                                         unsigned long n = (unsigned long)(l->width - x < 1024 ? l->width - x : 1024);
                                         unsigned int *line = into + (unsigned long)y * pitch + (unsigned long)x;
 
-                                        memory_copy_rect_stream_u32(run, n, l->pixels + (unsigned long)y * l->pitch + (unsigned long)x, l->pitch, n, 1);
-                                        memory_swizzle_rb_u32(run, run, (positive)n, alpha);
+                                        if (l->gather)
+                                                compositor_wl_gather_run(l, y, x, n, run);
+                                        else
+                                                memory_copy_rect_stream_u32(run, n, l->pixels + (unsigned long)y * l->pitch + (unsigned long)x, l->pitch, n, 1);
+                                        if (l->swap)
+                                                memory_swizzle_rb_u32(run, run, (positive)n, alpha);
                                         if (l->blend)
                                                 memory_over_u32_rect(line, pitch, run, n, n, 1);
                                         else
@@ -1515,8 +1802,7 @@ static void compositor_wl_settle(int row)
         {
                 for (unsigned int at = 0; at < compositor_wl_layers.count[row]; at++)
                         if (compositor_wl_cut(compositor_wl_layers.layer[row][at].pixels))
-                                gpu_forget(compositor_wl_layers.layer[row][at].pixels,
-                                           (positive)compositor_wl_layers.layer[row][at].height * compositor_wl_layers.layer[row][at].pitch * 4);
+                                gpu_forget(compositor_wl_layers.layer[row][at].pixels, compositor_wl_layer_bytes(&compositor_wl_layers.layer[row][at]));
                 if (!compositor_lent(row) || compositor.landing[row] || compositor.glassy[row])
                         compositor_wl_layers_refused(11), compositor_wl_layers_lay(row);
         }
@@ -1605,16 +1891,20 @@ static int compositor_wl_needs_xform(const struct wayland_picture *picture, long
 static int compositor_gpu_held(void);
 #endif
 
+// Whether the card composes now: up, not given up on, and not held off.
+static int compositor_wl_card_composes(void)
+{
+#ifdef MOONWATER_GPU_C
+        return compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && !compositor_gpu_held();
+#else
+        return 0;
+#endif
+}
+
 // Whether the card composes now and may be lent a picture whose red and blue it swaps (an ABGR or XBGR dma-buf: a pool's is the processor's).
 static int compositor_wl_card_swaps(const struct wayland_picture *picture)
 {
-#ifdef MOONWATER_GPU_C
-        return picture->sync_fd >= 0 && compositor_wl_fourcc_swapped(picture->fourcc) && compositor_gpu && compositor_gpu_state.up &&
-               !compositor_gpu_state.dead && !compositor_gpu_held();
-#else
-        (void)picture;
-        return 0;
-#endif
+        return picture->sync_fd >= 0 && compositor_wl_fourcc_swapped(picture->fourcc) && compositor_wl_card_composes();
 }
 
 // The dma-buf reads of the pictures shown in place are bracketed for a present: started before the frames are built and ended after (the
@@ -1859,6 +2149,37 @@ static unsigned long compositor_wl_picture_bytes(const struct wayland_picture *p
 }
 
 /*
+        The card's address of the start of a dma-buf picture's buffer, imported for the row while it is the one copied from (compositor_wl.source): the
+        same import while the buffer is, a new one for another. 0 when the kernel refuses it.
+*/
+static positive compositor_wl_source_import(int row, const struct wayland_picture *picture)
+{
+        unsigned long dev = 0, ino = 0;
+        long need_bytes = picture->map_bytes > 0 ? picture->map_bytes : (long)picture->plane_offset[0] + (long)picture->height * (long)picture->stride;
+
+        if (picture->pool_id)
+                dev = 0, ino = picture->pool_id;
+        else
+                compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
+        if (compositor_wl.source[row].map != picture->map || compositor_wl.source[row].fd != picture->sync_fd || compositor_wl.source[row].size != need_bytes ||
+            compositor_wl.source[row].dev != dev || compositor_wl.source[row].ino != ino ||
+            !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
+        {
+                compositor_wl_source_drop(row);
+                compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)need_bytes);
+                compositor_wl.source[row].epoch = gpu_epoch;
+                if (!compositor_wl.source[row].va)
+                        return 0;
+                compositor_wl.source[row].map = picture->map;
+                compositor_wl.source[row].fd = picture->sync_fd;
+                compositor_wl.source[row].size = need_bytes;
+                compositor_wl.source[row].dev = dev;
+                compositor_wl.source[row].ino = ino;
+        }
+        return compositor_wl.source[row].va;
+}
+
+/*
         A damage rectangle copied by the card instead of the processor: the rectangle sw by sh at (sx, sy) of the client's buffer, into the picture
         being laid at (dx, dy) in the table's buffer to. The card reads the buffer where the processor would: a pool's pages through a read-only map,
         or a dma-buf through its import, which is held for the buffer while it is the one the damage is copied from (compositor_wl.source), and it
@@ -1918,34 +2239,14 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
         }
         else
         {
-                unsigned long dev = 0, ino = 0;
-                long need_bytes = picture->map_bytes > 0 ? picture->map_bytes
-                                                         : (long)picture->plane_offset[0] + (long)picture->height * (long)stride;
+                positive base = compositor_wl_source_import(row, picture);
 
-                if (picture->pool_id)
-                        dev = 0, ino = picture->pool_id;
-                else
-                        compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
-                if (compositor_wl.source[row].map != picture->map || compositor_wl.source[row].fd != picture->sync_fd ||
-                    compositor_wl.source[row].size != need_bytes || compositor_wl.source[row].dev != dev ||
-                    compositor_wl.source[row].ino != ino ||
-                    !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
-                {
-                        compositor_wl_source_drop(row);
-                        compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)need_bytes);
-                        compositor_wl.source[row].epoch = gpu_epoch;
-                        if (!compositor_wl.source[row].va)
-                                return compositor_wl_card_refused(6);
-                        compositor_wl.source[row].map = picture->map;
-                        compositor_wl.source[row].fd = picture->sync_fd;
-                        compositor_wl.source[row].size = need_bytes;
-                        compositor_wl.source[row].dev = dev;
-                        compositor_wl.source[row].ino = ino;
-                }
+                if (!base)
+                        return compositor_wl_card_refused(6);
                 if (picture->pixels && picture->map)
-                        src_va = compositor_wl.source[row].va + (positive)(src - picture->map);
+                        src_va = base + (positive)(src - picture->map);
                 else
-                        src_va = compositor_wl.source[row].va + (positive)picture->plane_offset[0] + (positive)sy * stride + (positive)sx * 4;
+                        src_va = base + (positive)picture->plane_offset[0] + (positive)sy * stride + (positive)sx * 4;
         }
         dst_va = gpu_va_written(to, compositor.buffer);
         if (!dst_va && gpu_map_written(to, compositor.buffer))
@@ -2004,20 +2305,52 @@ static void compositor_wl_lent_damage(struct windows *table, int row, const stru
 }
 
 /*
+        Whether a picture that is not one a layer reads as it is (compositor_wl_needs_xform_ordered) can be gathered (compositor_wl_layer's
+        gather): ARGB, XRGB, ABGR or XBGR 8888 of one plane, linear, the format the shm's or the fourcc's own, with a size drawn of at least a
+        pixel and at most WAYLAND_DIMENSION, and a viewport's source of some size. NV12 and the 10-bit formats are the processor's alone
+        (compositor_wl_blit_xform), laid into the window's picture.
+*/
+static int compositor_wl_gatherable(const struct wayland_picture *picture, long *tw, long *th)
+{
+        unsigned int fourcc = picture->fourcc;
+        long turned_w = picture->transform & 1 ? picture->height : picture->width, turned_h = picture->transform & 1 ? picture->width : picture->height;
+
+        if (fourcc != COMPOSITOR_WL_FOURCC_ARGB8888 && fourcc != COMPOSITOR_WL_FOURCC_XRGB8888 && fourcc != WAYLAND_FOURCC_ABGR8888 &&
+            fourcc != WAYLAND_FOURCC_XBGR8888)
+                return 0;
+        if (picture->format != WLN_wl_shm_format_argb8888 && picture->format != WLN_wl_shm_format_xrgb8888 && (unsigned long)picture->format != fourcc)
+                return 0;
+        if (picture->plane_count > 1 || (picture->modifier && picture->modifier != WAYLAND_MODIFIER_INVALID) || picture->transform < 0 || picture->transform > 7)
+                return 0;
+        if (picture->src_width > 0 && (picture->src_height <= 0 || picture->src_x < 0 || picture->src_y < 0 || picture->src_width > WAYLAND_DIMENSION * 256 ||
+                                       picture->src_height > WAYLAND_DIMENSION * 256 || picture->src_x > WAYLAND_DIMENSION * 256 ||
+                                       picture->src_y > WAYLAND_DIMENSION * 256))
+                return 0;
+        *tw = picture->dst_width > 0 ? picture->dst_width : turned_w;
+        *th = picture->dst_height > 0 ? picture->dst_height : turned_h;
+        return *tw > 0 && *th > 0 && *tw <= WAYLAND_DIMENSION && *th <= WAYLAND_DIMENSION;
+}
+
+/*
         A subsurface's picture as a layer of a row (width by height the window's pixels; radius and line its frame's corners), made into out:
         1 when it can be one, with a rectangle of no width for one wholly outside the window, and 0 when it cannot, which refuses all of the
-        row's layers (they are laid into its picture). The rules are the lent picture's (compositor_wl_lend): plain ARGB or XRGB of a buffer
-        the processor reads, at its own size, its rectangle's first and last pixel read first (a pool cut under it is refused), mapped for the
-        card when the card is up, and a dma-buf imported to the card, an import a layer of the same buffer in old already has being taken
-        from it. And one whose rectangle meets a round corner of the window is refused: it would be drawn square over it.
+        row's layers (they are laid into its picture), why saying for what (struct windows's client_layers_refused). The rules are the lent
+        picture's (compositor_wl_lend): ARGB, XRGB, ABGR or XBGR 8888 (red and blue the other way round are the frame's swap, which the card
+        and the processor's compose both turn) of a buffer the processor reads, its rectangle's first and last pixel read first (a pool cut
+        under it is refused), mapped for the card when the card is up, and a dma-buf imported to the card, an import a layer of the same
+        buffer in old already has being taken from it. A picture that is not one as it is, turned, flipped, cropped at an offset or scaled, is
+        gathered (compositor_wl_gatherable): its rectangle is the size drawn, and what is read for it all of its buffer; a dma-buf so only while
+        the card composes, which gathers it where the processor would read it write-combined. And one whose rectangle meets a round corner of
+        the window is refused: it would be drawn square over it.
 */
 static int compositor_wl_layer_make(const struct wayland_picture *picture, long width, long height, int radius, int line,
                                     struct compositor_wl_layer *old, unsigned int olds, struct compositor_wl_layer *out, unsigned int *why)
 {
-        long x1, y1, x2, y2;
+        long x1, y1, x2, y2, tw = picture->width, th = picture->height;
         unsigned long stride = (unsigned long)picture->stride, dev = 0, ino = 0, bytes;
         const unsigned char *at;
         volatile unsigned int probe;
+        int gather;
 
         memory_zero(out, sizeof *out);
         out->fd = -1;
@@ -2029,7 +2362,11 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
         if (picture->fragile)
                 return 0;
         *why = 6;
-        if (compositor_wl_needs_xform_ordered(picture, picture->width, picture->height, compositor_wl_card_swaps(picture)))
+        gather = compositor_wl_needs_xform_ordered(picture, picture->width, picture->height, 1);
+        if (gather && !compositor_wl_gatherable(picture, &tw, &th))
+                return 0;
+        *why = 5;
+        if (gather && picture->sync_fd >= 0 && !compositor_wl_card_composes())
                 return 0;
         *why = 9;
         if (picture->width <= 0 || picture->height <= 0 || picture->width > WAYLAND_DIMENSION || picture->height > WAYLAND_DIMENSION || (stride & 3) ||
@@ -2038,14 +2375,22 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
                 return 0;
         x1 = picture->dest_x < 0 ? 0 : picture->dest_x;
         y1 = picture->dest_y < 0 ? 0 : picture->dest_y;
-        x2 = picture->dest_x + picture->width > width ? width : picture->dest_x + picture->width;
-        y2 = picture->dest_y + picture->height > height ? height : picture->dest_y + picture->height;
+        x2 = picture->dest_x + tw > width ? width : picture->dest_x + tw;
+        y2 = picture->dest_y + th > height ? height : picture->dest_y + th;
         if (x2 <= x1 || y2 <= y1)
                 return 1;
         if (compositor_wl_meets_corner((int)x1, (int)y1, (int)x2, (int)y2, (int)width, (int)height, radius, line))
                 return (*why = 8), 0;
-        at = picture->pixels + (unsigned long)(y1 - picture->dest_y) * stride + (unsigned long)(x1 - picture->dest_x) * 4;
-        bytes = (unsigned long)(y2 - y1 - 1) * stride + (unsigned long)(x2 - x1) * 4;
+        if (gather)
+        {
+                at = picture->pixels;
+                bytes = (unsigned long)(picture->height - 1) * stride + (unsigned long)picture->width * 4;
+        }
+        else
+        {
+                at = picture->pixels + (unsigned long)(y1 - picture->dest_y) * stride + (unsigned long)(x1 - picture->dest_x) * 4;
+                bytes = (unsigned long)(y2 - y1 - 1) * stride + (unsigned long)(x2 - x1) * 4;
+        }
         if (at < picture->map || (unsigned long)(at - picture->map) + bytes > (unsigned long)picture->map_bytes)
                 return 0;
         // A pool cut under the read raises the SIGBUS its handler answers with zeros, here, and the layer is refused as a copy of it is.
@@ -2097,6 +2442,19 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
         out->fourcc = picture->fourcc;
         out->offset = (unsigned int)(picture->plane_offset[0] + (unsigned long)(at - picture->pixels));
         out->swap = compositor_wl_fourcc_swapped(picture->fourcc);
+        out->at = WAYLAND_LAYERS;
+        if (gather)
+        {
+                out->gather = 1;
+                out->source_w = picture->width, out->source_h = picture->height;
+                out->transform = picture->transform & 7, out->y_invert = picture->y_invert != 0;
+                out->sx = picture->src_width > 0 ? picture->src_x : 0;
+                out->sy = picture->src_width > 0 ? picture->src_y : 0;
+                out->sw = picture->src_width > 0 ? picture->src_width : (picture->transform & 1 ? picture->height : picture->width) * 256;
+                out->sh = picture->src_width > 0 ? picture->src_height : (picture->transform & 1 ? picture->width : picture->height) * 256;
+                out->tw = tw, out->th = th;
+                out->ox = x1 - picture->dest_x, out->oy = y1 - picture->dest_y;
+        }
         return 1;
 }
 
@@ -2160,7 +2518,7 @@ static void compositor_wl_layers_changes(const struct compositor_wl_layer *old, 
                                 compositor_wl_change(rects, count, room, box, old[was].x, old[was].y, old[was].x + old[was].width,
                                                      old[was].y + old[was].height);
                 }
-                else if (p->changed && !p->full && p->damages > 0 && p->damages <= WAYLAND_DAMAGE)
+                else if (p->changed && !l->gather && !p->full && p->damages > 0 && p->damages <= WAYLAND_DAMAGE)
                         for (long k = 0; k < p->damages; k++)
                         {
                                 long x1 = p->damage[k].x + p->dest_x, y1 = p->damage[k].y + p->dest_y;
@@ -2170,7 +2528,8 @@ static void compositor_wl_layers_changes(const struct compositor_wl_layer *old, 
                                 x2 = x2 > l->x + l->width ? l->x + l->width : x2, y2 = y2 > l->y + l->height ? l->y + l->height : y2;
                                 compositor_wl_change(rects, count, room, box, (int)x1, (int)y1, (int)x2, (int)y2);
                         }
-                else if (p->changed || old[was].pixels != l->pixels)
+                else if (p->changed || old[was].pixels != l->pixels || old[was].gather != l->gather ||
+                         (l->gather && !compositor_wl_gather_same(&old[was], l)))
                         compositor_wl_change(rects, count, room, box, l->x, l->y, l->x + l->width, l->y + l->height);
         }
         for (unsigned int k = 0; k < olds; k++)
@@ -2250,6 +2609,7 @@ static int compositor_wl_row_layers(void *context, int row, const struct wayland
                 return compositor_wl_layers_refused(why);
         }
         compositor_wl_layers_changes(old, olds, made, from, kept, rects, &changes, WAYLAND_DAMAGE, box);
+        compositor_wl_gathers_take(row, made, kept, from, old, olds, root);
         for (unsigned int at = 0; at < olds; at++)
                 if (compositor_wl_live(old[at].import, old[at].epoch))
                         gpu_release_import(old[at].import);
@@ -2333,7 +2693,11 @@ static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame
         {
                 const struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
 
-                fit = !compositor_wl_meets_corner(l->x, l->y, l->x + l->width, l->y + l->height, window->width, window->height,
+                // A gathered layer whose picture is not made (no memory for it) is laid with the others.
+                if (l->gather && (l->at >= WAYLAND_LAYERS || !compositor_wl_layers.gathered[row][l->at].filled ||
+                                  compositor_wl_layers.gathered[row][l->at].id != l->id))
+                        fit = 0;
+                fit = fit && !compositor_wl_meets_corner(l->x, l->y, l->x + l->width, l->y + l->height, window->width, window->height,
                                                   compositor_radius(window), window->builtin || window->line < 0 ? 0 : window->line);
         }
         if (!fit)
@@ -2362,6 +2726,14 @@ static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame
                 f->pixels = l->pixels;
                 f->pitch = l->pitch;
                 f->gpu_base = compositor_wl_live(l->va, l->epoch);
+                if (l->gather)
+                {
+                        const struct compositor_wl_gathered *g = &compositor_wl_layers.gathered[row][l->at];
+
+                        f->pixels = g->memory;
+                        f->pitch = (unsigned long)l->width;
+                        f->gpu_base = compositor_wl_live(g->va, g->epoch);
+                }
                 f->blend = l->blend;
                 f->swap = l->swap;
                 f->layer = 1;
@@ -2481,6 +2853,97 @@ static void compositor_wl_convert_row(unsigned int *dst, const unsigned int *src
         }
         for (long i = 0; i < count; i++)
                 dst[i] = compositor_wl_over(compositor_wl_convert_pixel(src[i], fourcc), dst[i]);
+}
+
+/*
+        A picture that is not one as it is (turned, flipped, cropped at an offset or scaled: compositor_wl_needs_xform) laid into the table's picture by
+        the card, where the processor walks it (compositor_wl_blit_xform): the part of it in the window as a gathered layer would read it (its tables,
+        compositor_wl_gather_column and _line, made into memory of the compositor's own the card reads, compositor_wl_tables), op 7 over them with a
+        source pitch of 1, from the client's buffer (a pool's pages through a read map, a dma-buf through the row's import, compositor_wl.source) into
+        the picture through its written map. gpu_blit waits for the job, so the picture is laid when this answers 1. Refused (0, and the processor
+        walks it): the card not composing or busy, a blend (op 7 copies), red and blue the other way round (op 7 moves bytes, the table holds
+        ARGB), a picture the card cannot gather (compositor_wl_gatherable), a pool cut under the read, a map or an import refused, or the job failed.
+*/
+static struct compositor_wl_gathered compositor_wl_tables;
+
+static int compositor_wl_card_gather(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch, long width, long height)
+{
+#ifdef MOONWATER_GPU_C
+        struct compositor_wl_layer l;
+        unsigned long stride = (unsigned long)picture->stride;
+        positive src = 0, dst, extent, tables;
+        long tw, th, x1, y1, x2, y2;
+        unsigned int *cols, *lines;
+        volatile unsigned int probe;
+
+        // Red and blue the other way round are turned by the processor's walk: op 7 moves the bytes as they are, and the table's are ARGB.
+        if (!compositor_wl_card_composes() || picture->blend || compositor_wl_fourcc_swapped(picture->fourcc) || picture->width <= 0 || picture->height <= 0 || (stride & 3) ||
+            stride < (unsigned long)picture->width * 4 || !compositor_wl_gatherable(picture, &tw, &th) || !gpu_ready() || !gpu_idle())
+                return 0;
+        x1 = picture->dest_x < 0 ? 0 : picture->dest_x, y1 = picture->dest_y < 0 ? 0 : picture->dest_y;
+        x2 = picture->dest_x + tw > width ? width : picture->dest_x + tw, y2 = picture->dest_y + th > height ? height : picture->dest_y + th;
+        if (x2 <= x1 || y2 <= y1)
+                return 0;
+        memory_zero(&l, sizeof l);
+        l.pixels = (const unsigned int *)picture->pixels, l.pitch = stride / 4, l.gather = 1;
+        l.source_w = picture->width, l.source_h = picture->height, l.transform = picture->transform & 7, l.y_invert = picture->y_invert != 0;
+        l.sx = picture->src_width > 0 ? picture->src_x : 0, l.sy = picture->src_width > 0 ? picture->src_y : 0;
+        l.sw = picture->src_width > 0 ? picture->src_width : (picture->transform & 1 ? picture->height : picture->width) * 256;
+        l.sh = picture->src_width > 0 ? picture->src_height : (picture->transform & 1 ? picture->width : picture->height) * 256;
+        l.tw = tw, l.th = th, l.ox = x1 - picture->dest_x, l.oy = y1 - picture->dest_y, l.width = (int)(x2 - x1), l.height = (int)(y2 - y1);
+        extent = compositor_wl_layer_bytes(&l);
+        if (picture->sync_fd < 0)
+        {
+                // A pool's: its first and last pixel read first (a pool cut under the read is the processor's, which finds it), then its read map.
+                if (!picture->pixels || !picture->map || picture->pixels < picture->map ||
+                    (unsigned long)(picture->pixels - picture->map) + extent > (unsigned long)picture->map_bytes)
+                        return 0;
+                probe = *(const volatile unsigned int *)picture->pixels;
+                probe = probe + *(const volatile unsigned int *)(picture->pixels + extent - 4);
+                (void)probe;
+                if (compositor_wl_cut(picture->pixels))
+                        return 0;
+                if (!(src = gpu_va_bytes(picture->pixels, extent)) && gpu_map(picture->pixels, extent))
+                        src = gpu_va_bytes(picture->pixels, extent);
+                if (!src)
+                        return 0;
+        }
+        else
+        {
+                positive base = compositor_wl_source_import(row, picture);
+
+                if (!base)
+                        return 0;
+                src = base + (picture->pixels && picture->map ? (positive)(picture->pixels - picture->map) : (positive)picture->plane_offset[0]);
+        }
+        if (!compositor_wl_gathered_room(&compositor_wl_tables, 4 * ((positive)l.width + (positive)l.height)))
+                return 0;
+        cols = compositor_wl_tables.memory, lines = cols + l.width;
+        for (long x = 0; x < l.width; x++)
+                cols[x] = compositor_wl_gather_column(&l, x);
+        for (long y = 0; y < l.height; y++)
+                lines[y] = compositor_wl_gather_line(&l, y);
+        if (!(tables = gpu_va_written(compositor_wl_tables.memory, compositor_wl_tables.bytes)) &&
+            (!gpu_map_written(compositor_wl_tables.memory, compositor_wl_tables.bytes) ||
+             !(tables = gpu_va_written(compositor_wl_tables.memory, compositor_wl_tables.bytes))))
+                return 0;
+        if (!(dst = gpu_va_written(to, compositor.buffer)) && (!gpu_map_written(to, compositor.buffer) || !(dst = gpu_va_written(to, compositor.buffer))))
+                return 0;
+        if (gpu_blit(src, 1, dst + 4 * ((positive)y1 * pitch + (positive)x1), (unsigned int)pitch, tables, 7, (unsigned int)l.width, (unsigned int)l.height) ||
+            (gpu_end == GPU_END_LATE && gpu_finish()))
+        {
+                compositor_wl_laid(row, x1, y1, x2, y2);
+                return 1;
+        }
+        if (gpu_end != GPU_END_NONE)
+                compositor_gpu_job_failed();
+        if (!gpu_idle()) // a job given up on may still write the picture: the processor's walk waits for nothing, so it is done once the card is
+                gpu_finish();
+        return 0;
+#else
+        (void)row, (void)picture, (void)to, (void)pitch, (void)width, (void)height;
+        return 0;
+#endif
 }
 
 static int compositor_wl_blit_xform(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch,
@@ -2869,7 +3332,12 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 }
                                 sync_started = 1;
                         }
-                        xst = compositor_wl_blit_xform(row, picture, to, pitch, width, height);
+                        // The card first, which reads the buffer where it is (no processor's walk of a write-combined dma-buf), and the
+                        // processor's walk where the card cannot.
+                        if (compositor_wl_card_gather(row, picture, to, pitch, width, height))
+                                xst = 2;
+                        else
+                                xst = compositor_wl_blit_xform(row, picture, to, pitch, width, height);
 
                         if (sync_started)
                                 compositor_call(syscall(ioctl), (positive)picture->sync_fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
@@ -2878,7 +3346,9 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 compositor_wl.laying[row].open = 0;
                                 return -1;
                         }
-                        if (xst > 0)
+                        if (xst == 2)
+                                table->client_rects_card++;
+                        else if (xst > 0)
                                 table->client_rects_cpu++;
                 }
                 else

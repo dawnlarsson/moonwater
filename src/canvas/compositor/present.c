@@ -1055,6 +1055,9 @@ static void compositor_present_frames(void)
         if (!compositor.damages || compositor.flip_pending || compositor_card_holds())
                 return;
         compositor_bands_follow();
+        // The pictures of the clients' gathered layers that changed (turned, flipped, cropped or scaled subsurfaces), made before anything
+        // reads a frame of them: by the card while no job of its own is on what this present draws, or by the processor.
+        compositor_wl_gathers_fill();
 
         // What moonwater debug says of the card, once there is a table to say it in.
         if (compositor.table)

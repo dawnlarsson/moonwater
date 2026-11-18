@@ -2507,6 +2507,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor_wl.wc_reads, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.wc_copy, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl_layers.layer, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl_layers.gathered, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl_layers.count, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl_layers.root_refused, COMPOSITOR_ROWS_ROW)
 #else
