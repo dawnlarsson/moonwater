@@ -87,8 +87,8 @@ static struct bowl_mount_point bowl_isolated_mounts[] = {
         Fast view: the bowl's own programs at the paths it expects.
 
         The guest binary is executed at the path the guest calls it, and
-        /proc/PID/exe says that path: /usr/bin/plasmashell, not
-        /bowls/alpine/usr/bin/plasmashell. KWin matches a client to its
+        /proc/PID/exe says that path: /usr/bin/chromium, not
+        /bowls/alpine/usr/bin/chromium. A compositor matches a client to its
         desktop file by that name, polkit, portals and D-Bus policy name a
         program by it, ps and crash reporters print it, and Chrome, Firefox
         and Electron look for their resources next to it.
@@ -3416,8 +3416,7 @@ static fn bowl_ensure_tmp_x11(void)
                 bowl_mkdir("/tmp");
                 bowl_chmod_directory("/tmp", 01777);
         }
-        /* Where Xwayland, and every X client of any bowl, puts its socket:
-           kwin_wayland_wrapper stops at "/tmp/.X11-unix does not exist". */
+        /* Where Xwayland, and every X client of any bowl, puts its socket. */
         if (system_access_at(AT_FDCWD, "/tmp/.X11-unix", 0) < 0)
         {
                 bowl_mkdir_parents_made("/tmp/.X11-unix", BOWL_MAKE_LEAF,
@@ -4255,7 +4254,7 @@ static fn bowl_user_store_prepare(void)
         the launcher's outside id, which is 0 for root: the machine saw root
         in every file the program made, every signal it sent and a socket's
         credentials, so a program of a bowl that had been taken over (a
-        browser, a KDE component) could read /root's keys and settings, write
+        browser, a game) could read /root's keys and settings, write
         /root/main.moonwater.sh and be run as root at the next event, and
         signal any process of the machine's. Attacker 8 of SECURITY.md.
 
@@ -8028,7 +8027,7 @@ static b32 bowl_setup(positive count, string_address address_to arguments)
 /* ---- udev: the answer to "which of these is a keyboard", for every guest. ---- */
 
 /*
-        libinput, and with it KWin, Weston, sway and Xorg, does not look at
+        libinput, and with it Weston, sway and Xorg, does not look at
         /dev/input to learn what a device is. It asks udev, whose database
         under /run/udev says which event node is a keyboard, a mouse, a
         touchpad, and a device with none of those tags is skipped as "not
@@ -9129,8 +9128,8 @@ static b32 bowl_bus(positive count, string_address address_to arguments)
 
 /*
         A profile is not a distribution. It is a set of components, and each
-        component is the packages one bowl is best placed to supply: KDE from
-        Alpine, where it runs on musl and its closure is small, Steam from
+        component is the packages one bowl is best placed to supply: Chromium
+        from Alpine, where it runs on musl and its closure is small, Steam from
         Arch, where it finds the glibc it was built for. Every program runs
         against its own bowl's loader and libraries (the fast view binds them
         per launch), and they talk to each other over the host's /run, /tmp and
@@ -9142,7 +9141,7 @@ static b32 bowl_bus(positive count, string_address address_to arguments)
             manager add the packages;
           - makes every program the bowl holds reachable by name and by
             absolute path. Moonwater's /usr/bin is /bin, a guest that execs
-            dbus-daemon or /usr/bin/kwin_wayland never asks the shell, and the
+            dbus-daemon or /usr/bin/chromium-browser never asks the shell, and the
             bowl's own /usr/bin is not on any path. So each one gets a
             launcher in /bowls/bin and a link in /bin, except a name /bin
             already has, which stays Moonwater's;
@@ -9165,7 +9164,7 @@ struct bowl_component
         // The names of the programs of the bowl's /usr/bin and /usr/sbin this
         // component makes reachable, and no others: a list of none exposes
         // nothing, which is a browser whose profile's own launcher is the way
-        // in. Null is every program the bowl holds, which is a desktop.
+        // in. Null is every program the bowl holds.
         string_address address_to expose;
 };
 
@@ -9190,11 +9189,6 @@ struct bowl_profile
         // package manager can say), or null. Install says it and goes no
         // further; remove and the list still see the profile.
         string_address unavailable;
-        // A program that runs on the display there is, and not a session of
-        // its own: `moonwater desktop` does not take it for one, since that
-        // verb ends the compositor to give the display to a session, and a
-        // program has none to give it to.
-        bool program;
         // The session runs X programs, and so the bowl holds the wrapper
         // that starts their X server (xwayland-moonwater, below).
         bool xwayland;
@@ -9225,124 +9219,6 @@ struct bowl_profile
         // The bowl holds en_US.UTF-8, the locale the Steam Runtime's container runs its games in (bowl_profile_locales).
         bool locales;
 };
-
-/*
-        The desktop leaves out what Moonwater already is: no display manager
-        (the script is the session), no NetworkManager applet, no Bluetooth
-        or print stack, and no kernel, shell or coreutils, which the bowl's
-        own would only shadow.
-
-        The GPU is Mesa's: mesa-dri-gallium holds every OpenGL driver
-        (radeonsi, iris, nouveau, virtio, and the software ones for a
-        machine whose kernel has no render node), what KWin and Qt Quick
-        draw with. Vulkan is a driver of its own per vendor, which Plasma
-        never asks for and every game does: the Radeon and Intel ones are
-        listed, and NVK is not, because the kernel side of it is not in the
-        image. systemsettings is the panel's own favourite and where every
-        setting of the session is changed.
-*/
-static string_address bowl_desktop_alpine[] = {
-    "plasma-desktop", "plasma-workspace", "kwin", "kscreen", "plasma-pa",
-    "plasma-systemmonitor", "konsole", "dolphin", "spectacle", "breeze",
-    "breeze-icons", "kde-gtk-config", "xdg-desktop-portal-kde",
-    "qt6-qtwayland", "xwayland", "dbus", "elogind", "polkit-elogind",
-    "pipewire", "pipewire-pulse", "wireplumber", "mesa-dri-gallium",
-    "mesa-va-gallium", "mesa-egl", "mesa-gbm",
-    "mesa-vulkan-ati", "mesa-vulkan-intel", "mesa-vulkan-swrast",
-    "mesa-vulkan-layers", "vulkan-loader", "intel-media-driver",
-    "libva-intel-driver", "systemsettings", "font-noto", "font-dejavu",
-    "xdg-user-dirs", null};
-
-/* 2024 MiB in 631 packages: 1963 MiB in 628 measured on x86-64 Alpine 3.24
-   on 2026-10-01, and the three added since by their own sizes (apk add -s). */
-#if X64
-#define BOWL_DESKTOP_ALPINE_BYTES ((p64)2024 * 1024 * 1024)
-#else
-#define BOWL_DESKTOP_ALPINE_BYTES 0
-#endif
-
-static const struct bowl_component bowl_desktop_components[] = {
-    {"alpine", bowl_desktop_alpine, BOWL_DESKTOP_ALPINE_BYTES},
-    {null, null, 0},
-};
-
-/*
-        udev first, and the keyboard's layout read when the session starts and
-        not when the profile was installed: KWin has no layout of its own until
-        somebody picks one in its settings, and takes XKB's from the
-        environment, which would otherwise be a US keyboard on every machine.
-        The session names no desktop or platform of its own: startplasma sets
-        the session type, KDE_FULL_SESSION and XDG_CURRENT_DESKTOP, and Qt
-        takes Wayland from the compositor's socket.
-
-        KWallet is off until somebody turns it on. The first program that
-        asks the session's secret service for a key (Chrome and every
-        browser built on it does, before it loads a cookie, whenever
-        XDG_CURRENT_DESKTOP says KDE or a session bus is there) makes KDE
-        show "choose a password for the new wallet", and the program waits
-        on the answer: every page stays at "Loading..." behind a small
-        dialog, and there is no login password for a wallet to be opened
-        with. Disabled, the secret service is not started and the program
-        takes its own store. A kwalletrc that is there is the user's.
-
-        The screen does not lock itself, and unlocks with no password. KDE's
-        lock screen asks PAM's kde service, whose file includes base-auth,
-        which a bowl of Alpine's has not got, so every attempt failed: a
-        screen locked by the idle timer (five minutes) or Meta+L could never
-        be unlocked, and a machine with no login passwords has nothing for
-        PAM to ask. The service permits, as the machine does everywhere
-        else, and the idle lock is off until a kscreenlockerrc says otherwise.
-        A second `desktop` while kwin runs is refused, and the display the
-        shell was started under is not the one the session draws on.
-
-        The script is the session only when moonwater desktop started it
-        (that sets MOONWATER_SESSION): the machine's own compositor has the
-        card's master and has to be ended first, and the verb records the
-        session so that desktop off and stop can end it. Typed by hand, the
-        launcher hands over to the verb, which does both and comes back, where
-        a session started on the spot never got the display (KWin: failed to
-        authenticate the drm magic token) and was in no record, so a desktop
-        off left it running and the console black and deaf.
-
-        With no card that draws GL of its own, Qt Quick draws in software
-        (Mesa's llvmpipe), and plasmashell drew nothing and crashed at every
-        start on arm64: Qt draws a scene on a thread of its own, musl gives a
-        thread 128 KiB of stack where glibc gives 8 MiB, and llvmpipe compiles
-        each shader with LLVM on that thread, deep enough on aarch64 to step
-        over the stack's guard page (sp past the guard, the fault in it, in
-        llvm::AsmPrinter::doFinalization under MCJIT). The desktop was black,
-        with no panel, wallpaper or launcher. QSG_RENDER_LOOP=basic draws on
-        the main thread, whose stack is the process's; it is set only where
-        GL is software: no render node, or render nodes that are all virtio
-        GPUs without virgl (the feature's bit is the first of the device's
-        virtio features). A render node of any other driver, or a virtio GPU
-        with virgl, is a card that draws, and the session is left as it was;
-        a QSG_RENDER_LOOP already set is the person's.
-*/
-static string_address bowl_desktop_session[] = {
-    "[ -n \"$MOONWATER_SESSION\" ] || exec moonwater desktop \"$0\"",
-    "[ -z \"$(pidof kwin_wayland)\" ] || "
-    "{ echo \"a desktop session is already running\" >&2; exit 1; }",
-    "unset WAYLAND_DISPLAY DISPLAY",
-    "layout=$(moonwater keyboard xkb 2>/dev/null) && "
-    "[ -n \"$layout\" ] && export XKB_DEFAULT_LAYOUT=$layout",
-    "[ -e \"$HOME/.config/kwalletrc\" ] || { mkdir -p \"$HOME/.config\" && "
-    "printf '[Wallet]\\nEnabled=false\\n' > \"$HOME/.config/kwalletrc\"; }",
-    "[ -e \"$HOME/.config/kscreenlockerrc\" ] || "
-    "printf '[Daemon]\\nAutolock=false\\nLockOnResume=false\\n' > "
-    "\"$HOME/.config/kscreenlockerrc\"",
-    // Written in the bowl's own view, as its root: a write from here by the host's path (> /bowls/alpine/etc/pam.d/kde) is made by the host's
-    // root and follows a link a package of the bowl put at that name, out of the bowl, to any file of the machine.
-    "bowl " BOWL_ROOT_PREFIX "alpine /bin/sh -c \"[ -d /etc/pam.d ] && printf 'auth sufficient pam_permit.so\\n"
-    "account sufficient pam_permit.so\\nsession optional pam_permit.so\\n' > /etc/pam.d/kde\" 2>/dev/null || true",
-    "bowl udev",
-    "bowl bus",
-    "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "
-    "case $(cat \"$node\"/device/uevent 2>/dev/null) in *DRIVER=vgem*|*platform:vgem*|*DRIVER=vkms*) continue ;; esac; "
-    "case $(cat \"$node\"/device/features \"$node\"/device/virtio*/features 2>/dev/null) in 0*) ;; *) gl=card ;; esac; done; "
-    "[ \"$gl\" = card ] || export QSG_RENDER_LOOP=${QSG_RENDER_LOOP:-basic}",
-    "exec dbus-run-session -- startplasma-wayland",
-    null};
 
 /*
         The graphics, fonts and sound a program of a bowl loads by name, which
@@ -9436,7 +9312,7 @@ static const struct bowl_component bowl_graphics_components[] = {
         (MOONWATER_ASKED, which gives the first window the keys), asks for
         Wayland and not X11, and for the browser's own password store: the
         first browser that asks a session's secret service for a key (there
-        is none, and KDE's shows a dialog) waits on the answer and every page
+        is none, and a desktop's may show a dialog) waits on the answer and every page
         stays at "Loading...". The logs are quiet (a browser with no session
         bus says so in thirty lines of errors on every start). No flag is
         given for the GPU: with a render node it picks ANGLE on Mesa's GL, and
@@ -10857,27 +10733,25 @@ static b32 ssh_profile_record(string_address root);
 static fn ssh_profile_forget(void);
 
 static const struct bowl_profile bowl_profiles[] = {
-    {"desktop", "KDE Plasma", "start it with: desktop", bowl_desktop_components,
-     bowl_desktop_session, false},
     {"graphics", "Graphics, fonts and sound libraries",
      "programs of the bowls set up now can use the GPU, fonts and sound",
      bowl_graphics_components, null, true},
     {"chrome", "Chromium (Alpine's build, not Google Chrome: no Widevine) on Canvas",
      "start it with: chrome", bowl_chrome_components, bowl_chrome_session,
-     false, bowl_chrome_names, BOWL_CHROME_UNAVAILABLE, true, false, false, true},
+     false, bowl_chrome_names, BOWL_CHROME_UNAVAILABLE, false, false, true},
     {"steam", "Steam (Arch's package, with 32-bit graphics and sound) on Canvas",
      "start it with: steam", bowl_steam_components, bowl_steam_session,
-     false, null, BOWL_STEAM_UNAVAILABLE, true, true, true, false, false, null, null, false, true},
+     false, null, BOWL_STEAM_UNAVAILABLE, true, true, false, false, null, null, false, true},
     {"ssh", "OpenSSH's server (Alpine's openssh-server), run by Moonwater from its settings",
      "it is off: moonwater ssh on turns it on, and moonwater ssh says how it is",
-     bowl_ssh_components, null, false, null, null, false, false, false, false, true},
+     bowl_ssh_components, null, false, null, null, false, false, false, true},
     {"build", "Everything sh build.sh needs to build a Moonwater image here (Alpine's gcc, make and the kernel's tools)",
      "in a checkout, build an image with: build [profile...]; from a Mac: sh build.sh --on THIS-MACHINE",
-     bowl_build_components, bowl_build_session, false, null, null, true, false, false, false, false,
+     bowl_build_components, bowl_build_session, false, null, null, false, false, false, false,
      BOWL_BUILD_TRIPLET, bowl_build_tools, true},
 };
 
-#define BOWL_PROFILES_KNOWN "known profiles: desktop, graphics, chrome, steam, ssh, build\n"
+#define BOWL_PROFILES_KNOWN "known profiles: graphics, chrome, steam, ssh, build\n"
 
 static const struct bowl_profile address_to bowl_find_profile(string_address name)
 {
@@ -11935,7 +11809,7 @@ static b32 bowl_profile_unexpose(string_address root, string_address profile,
 /*
         Whether a package this profile lists is also listed by another
         profile that is installed in the same bowl: the graphics profile and a
-        browser both hold Mesa, and a desktop holds it too, so the removal of
+        browser both hold Mesa, so the removal of
         one must leave the others their libraries (the package manager would
         take them, as it takes anything the profile named).
 */

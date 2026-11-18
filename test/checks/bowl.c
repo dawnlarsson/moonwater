@@ -741,11 +741,11 @@ static fn profiles(void)
 {
         const struct bowl_profile address_to profile = null;
         p8 remove = false;
-        static string_address plain[] = {"bowl", "profile", "desktop", null};
-        static string_address install[] = {"bowl", "profile", "desktop", "install", null};
-        static string_address drop[] = {"bowl", "profile", "desktop", "remove", null};
-        static string_address front[] = {"bowl", "profile", "remove", "desktop", null};
-        static string_address odd[] = {"bowl", "profile", "desktop", "frob", null};
+        static string_address plain[] = {"bowl", "profile", "chrome", null};
+        static string_address install[] = {"bowl", "profile", "chrome", "install", null};
+        static string_address drop[] = {"bowl", "profile", "chrome", "remove", null};
+        static string_address front[] = {"bowl", "profile", "remove", "chrome", null};
+        static string_address odd[] = {"bowl", "profile", "chrome", "frob", null};
         static string_address none[] = {"bowl", "profile", "nosuch", null};
         static string_address both[] = {"bowl", "profile", "remove", "remove", null};
         static string_address many[] = {"bowl", "profile", "a", "b", "c", null};
@@ -818,70 +818,24 @@ static fn profiles(void)
 
         p8 header[96];
         check("The script's first lines name the profile that wrote it",
-              bowl_profile_header(header, sizeof header, "desktop") &&
-                  string_equals(header, "#!/bin/sh\n# bowl profile desktop\n") &&
-                  !bowl_profile_header(header, 20, "desktop"));
+              bowl_profile_header(header, sizeof header, "chrome") &&
+                  string_equals(header, "#!/bin/sh\n# bowl profile chrome\n") &&
+                  !bowl_profile_header(header, 19, "chrome"));
 
         check("A name /bin has is taken, one it lacks is not",
               bowl_bin_taken("sh") && !bowl_bin_taken("moonwater-no-such-program"));
 
-        /*
-                What a desktop needs before its compositor: libinput asks udev
-                which node is a keyboard, so a session that starts none came
-                up with a picture and no input at all, and KWin never takes
-                in a device that was named after it started.
-        */
         {
-                const struct bowl_profile address_to desktop = bowl_find_profile("desktop");
-                positive udev = 0, compositor = 0, layout = 0, wallet = 0, locker = 0, pam = 0,
-                         guard = 0, hands = 0, at = 0;
+                // No session of any profile writes into a bowl by the host's path: the host's root would follow a link the bowl's packages put there.
+                b32 none_into = 1;
 
-                for (string_address address_to line = desktop ? desktop->session : null;
-                     line && *line; line++, at++)
-                {
-                        if (strstr(*line, "kscreenlockerrc") && strstr(*line, "Autolock=false"))
-                                locker = at + 1;
-                        if (strstr(*line, "pam.d/kde") && strstr(*line, "pam_permit") &&
-                            string_has_prefix(*line, "bowl " BOWL_ROOT_PREFIX "alpine /bin/sh -c ") && !strstr(*line, "> " BOWL_ROOT_PREFIX))
-                                pam = at + 1;
-                        if (strstr(*line, "pidof kwin_wayland") && strstr(*line, "exit 1"))
-                                guard = at + 1;
-                        if (string_equals(*line, "[ -n \"$MOONWATER_SESSION\" ] || exec moonwater desktop \"$0\""))
-                                hands = at + 1;
-                        if (string_has_prefix(*line, "[ -e \"$HOME/.config/kwalletrc\" ] ||") &&
-                            strstr(*line, "Enabled=false"))
-                                wallet = at + 1;
-                        if (string_equals(*line, "bowl udev"))
-                                udev = at + 1;
-                        if (string_has_prefix(*line, "exec dbus-run-session"))
-                                compositor = at + 1;
-                        if (string_has_prefix(*line, "layout=$(moonwater keyboard xkb"))
-                                layout = at + 1;
-                }
-                {
-                        // No session of any profile writes into a bowl by the host's path: the host's root would follow a link the bowl's packages put there.
-                        b32 none_into = 1;
-
-                        for (positive p = 0; p < array_count(bowl_profiles); p++)
-                                for (string_address address_to line = bowl_profiles[p].session; line && *line; line++)
-                                        if (strstr(*line, "> " BOWL_ROOT_PREFIX) || strstr(*line, ">" BOWL_ROOT_PREFIX) || strstr(*line, ">> " BOWL_ROOT_PREFIX) ||
-                                            strstr(*line, "tee " BOWL_ROOT_PREFIX))
-                                                none_into = 0;
-                        check("No profile's session writes a file into a bowl by the host's path (a link the bowl's packages put there is followed out of it)",
-                              none_into);
-                }
-                check("The desktop session starts udev before the compositor does",
-                      udev && compositor && udev < compositor);
-                check("The desktop session reads the keyboard's XKB layout when it starts",
-                      layout && layout < compositor);
-                check("The desktop session turns KWallet off unless a kwalletrc is there, before the compositor",
-                      wallet && wallet < compositor);
-                check("The desktop session cannot lock its user out: no idle lock, and the kde PAM service permits",
-                      locker && pam && locker < compositor && pam < compositor);
-                check("A second desktop session is refused before anything starts",
-                      guard && guard < udev);
-                check("A launcher typed by hand hands over to moonwater desktop, which yields the display and records the session",
-                      hands == 1 && guard > hands);
+                for (positive p = 0; p < array_count(bowl_profiles); p++)
+                        for (string_address address_to line = bowl_profiles[p].session; line && *line; line++)
+                                if (strstr(*line, "> " BOWL_ROOT_PREFIX) || strstr(*line, ">" BOWL_ROOT_PREFIX) || strstr(*line, ">> " BOWL_ROOT_PREFIX) ||
+                                    strstr(*line, "tee " BOWL_ROOT_PREFIX))
+                                        none_into = 0;
+                check("No profile's session writes a file into a bowl by the host's path (a link the bowl's packages put there is followed out of it)",
+                      none_into);
         }
 
         check("A command is looked for in /sbin as well, where Alpine keeps udevd",
@@ -1236,8 +1190,8 @@ static fn build_profile(void)
         p8 all = true;
         p8 unique = true;
 
-        check("The build profile is a program with one component, Alpine's, and no libraries",
-              build && build->program && !build->libraries && build->session && part &&
+        check("The build profile has one component, Alpine's, and no libraries",
+              build && !build->libraries && build->session && part &&
                   string_equals(part->distro, "alpine") && !(part + 1)->distro);
         for (string_address address_to name = required; *name; name++)
                 all &= chrome_has(packages, *name);
@@ -1430,8 +1384,8 @@ static fn steam_profile(void)
         p8 unique = true;
         p8 named = true;
 
-        check("The steam profile is a program with one component, Arch's, and no libraries",
-              steam && steam->program && !steam->libraries && steam->session && part &&
+        check("The steam profile has one component, Arch's, and no libraries",
+              steam && !steam->libraries && steam->session && part &&
                   string_equals(part->distro, "arch") && !(part + 1)->distro);
         check("The steam row is its own profile, not chrome's or graphics'",
               steam && chrome && graphics && steam != chrome && steam != graphics);
@@ -1515,7 +1469,7 @@ static fn steam_profile(void)
               fallback && fallback > wrapped && fallback < xwayland && strstr(steam->session[fallback - 1], "exit $status"));
         check("Only the steam profile runs X programs: no other profile holds the wrapper",
               steam && steam->xwayland && bowl_find_profile("chrome") && !bowl_find_profile("chrome")->xwayland &&
-                  !bowl_find_profile("graphics")->xwayland && !bowl_find_profile("desktop")->xwayland);
+                  !bowl_find_profile("graphics")->xwayland);
         check("The session gives Steam no flags of its own (its CEF sandbox runs on the bowl's user namespaces)",
               run && !strstr(steam->session[run - 1], "--no-sandbox") &&
                   !strstr(steam->session[run - 1], "-no-cef-sandbox"));
@@ -1633,7 +1587,7 @@ static fn steam_profile(void)
         }
         check("The steam profile makes the Steam Runtime's locale in its bowl, and no other profile does",
               steam && steam->locales && chrome && !chrome->locales && graphics && !graphics->locales &&
-                  bowl_find_profile("desktop") && !bowl_find_profile("desktop")->locales && bowl_find_profile("build") &&
+                  bowl_find_profile("build") &&
                   !bowl_find_profile("build")->locales && bowl_find_profile("ssh") && !bowl_find_profile("ssh")->locales);
         check("A locale.gen lists en_US.UTF-8 when the line is there whole, at the start, after a newline or before a comment",
               bowl_locale_listed("en_US.UTF-8 UTF-8\n") && bowl_locale_listed("# head\nen_US.UTF-8 UTF-8") &&
@@ -1654,7 +1608,6 @@ static fn chrome_profile(void)
 {
         const struct bowl_profile address_to chrome = bowl_find_profile("chrome");
         const struct bowl_profile address_to graphics = bowl_find_profile("graphics");
-        const struct bowl_profile address_to desktop = bowl_find_profile("desktop");
         const struct bowl_component address_to part = chrome ? chrome->components : null;
         static string_address banned[] = {
             "weston", "kwin", "sway", "wayfire", "hyprland", "labwc", "mutter", "xorg", "xserver",
@@ -1663,12 +1616,10 @@ static fn chrome_profile(void)
         p8 clean = part != null;
         p8 graphic = part != null;
 
-        check("The chrome profile is a program with Alpine's chromium as its one component",
-              chrome && chrome->program && !chrome->libraries && chrome->session &&
+        check("The chrome profile has Alpine's chromium as its one component",
+              chrome && !chrome->libraries && chrome->session &&
                   part->distro && string_equals(part->distro, "alpine") && !part[1].distro &&
                   chrome_has(part->packages, "chromium"));
-        check("A desktop and the graphics libraries are no program of their own",
-              desktop && graphics && !desktop->program && !graphics->program);
 
         for (string_address address_to name = part ? part->packages : null; name && *name; name++)
                 for (string_address address_to word = banned; *word; word++)
@@ -1684,7 +1635,7 @@ static fn chrome_profile(void)
               graphic);
 
         check("The chrome component exposes no program of the bowl by name: its launcher is the way in",
-              part && part->expose && !part->expose[0] && !desktop->components->expose &&
+              part && part->expose && !part->expose[0] &&
                   !graphics->components->expose);
         check("The names a session answers to are valid, are not the profile's own, and name chromium",
               chrome && chrome->names && chrome_has(chrome->names, "chromium") &&
@@ -2045,8 +1996,8 @@ static fn chrome_profile(void)
                       unpack_write(root, BOWL_PROFILE_STATE "/chrome", "", 0644) &&
                           !bowl_profile_package_shared(chrome, "alpine", root, "chromium") &&
                           !bowl_profile_package_shared(chrome, "arch", root, "mesa-egl"));
-                check("Only a profile that is installed in the bowl shares: the browser's marker is there, the desktop's is not",
-                      !bowl_profile_package_shared(graphics, "alpine", root, "plasma-desktop") &&
+                check("Only a profile that is installed in the bowl shares: the browser's marker is there, the ssh server's is not",
+                      !bowl_profile_package_shared(graphics, "alpine", root, "openssh-server") &&
                           bowl_profile_package_shared(graphics, "alpine", root, "chromium"));
                 bowl_forget_path(root);
         }

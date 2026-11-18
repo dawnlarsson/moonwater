@@ -2841,6 +2841,11 @@ in box's build bowl).
 **Related.** MW-2026-043 (the desktop profile's marker removal through a guest
 link).
 
+**Since.** The desktop profile is gone (2026-11-18, the KDE removal: Moonwater is
+Canvas first): `bowl_desktop_session`, its PAM line and the two check rows named
+above were removed with it. The row that holds every profile's session to no
+write into a bowl by the host's path stays, and covers the profiles left.
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was

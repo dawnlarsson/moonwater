@@ -3455,7 +3455,7 @@ static void canvas_thread_wake(void)
         While another program is master of a card Canvas draws on.
 
         Nothing Canvas drew would land, so it draws nothing, and the consoles
-        stay off throughout: the other program (the compositor, KDE's, Weston)
+        stay off throughout: the other program (the compositor, Weston)
         reads the devices itself.
 
         The test is made every ~250 ms, and when the thread wakes for a
@@ -3469,8 +3469,8 @@ static void canvas_thread_wake(void)
 /*
         The session of whatever holds the display, ended.
 
-        Only the holder dying is not enough: KDE's wrapper starts KWin again
-        and the new one takes the card straight back. So its session goes with
+        Only the holder dying is not enough: a wrapper or a loop that starts
+        it again has the new one take the card straight back. So its session goes with
         it, which is every program the desktop started -- unless the session
         is init's own, which is every shell on a console that was never given
         another, and which is not this key's to end: the holder alone is then.

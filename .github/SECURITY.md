@@ -517,12 +517,12 @@ attacker gets its invariants here once there is a lane that proves them.
   src/bowl.c; MW-2026-010).** A bowl's programs run in a user namespace. At the
   default tier the user's inside id 1000 is mapped to the launcher's outside id,
   which is 0 when root launches the session (the Canvas terminal, the console,
-  the `/bowls/bin` launchers, the KDE session): a program of the bowl is then
+  the `/bowls/bin` launchers): a program of the bowl is then
   the machine's root to the kernel (every file it makes is root's, every file
   root owns is its own, a signal it sends is root's) and the fast view keeps the
   host's `/root` and `/run/moonwater`. This was deliberate (`6b81fbd2`, so a
   desktop's home, devices and runtime directory "need no other mode") and is 1:1
-  with before, but under attacker 8 a taken-over browser or KDE component is
+  with before, but under attacker 8 a taken-over browser or game is
   unconfined root (it reads `/root/link.key`, writes `/root/main.moonwater.sh`
   to be run as root, signals any root process). The **hardened bowl tier**
   (`MOONWATER_STRICT_BOWL >= STRICT_TIGHT`, `sec_bowl_hardened` and the locked
@@ -847,7 +847,7 @@ attacker gets its invariants here once there is a lane that proves them.
   Canvas terminal's picture (a root shell's) and writes keystrokes into the
   focused window's ring (a confused deputy over root). Every legitimate
   window program is root (the compositor and the terminal, log, launcher and
-  settings the machine script starts; a KDE or Chrome client speaks Wayland/X,
+  settings the machine script starts; a Chrome or Steam client speaks Wayland/X,
   not this table), so the table, its memfd and its door FIFOs are `0600`
   (`WINDOWS_MODE`) and `/dev/spark`'s `WINDOWS_IOCTL_TABLE_GET` needs
   `CAP_SYS_ADMIN`, matching its `SET` side; a process that is only root in its
