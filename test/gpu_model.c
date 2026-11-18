@@ -64,7 +64,7 @@ struct gpu_model_region
 // What a job ran: waves, instructions by kind, the lanes the vector ones ran on, the loads and stores lane by lane, and their bytes.
 struct gpu_model_cost
 {
-        positive waves, instructions, salu, valu, smem, vmem_loads, vmem_stores, ds, branches, lanes, lane_loads, lane_stores, bytes_loaded, bytes_stored, scalar_bytes;
+        positive waves, instructions, salu, valu, lanes, lane_loads, lane_stores, bytes_loaded, bytes_stored, scalar_bytes;
 };
 
 // The doubts (gpu_model.doubt), each the other way from the documentation's.

@@ -205,6 +205,7 @@ static int gpu_model_salu(const struct gpu_model_insn address_to in, const struc
         case GM_KEY(GM_SOPC, 0x0b): scc = x <= y; break;
         case GM_KEY(GM_SOPC, 0x0c): scc = !(x >> (y & 31) & 1); break;
         case GM_KEY(GM_SOPC, 0x0d): scc = x >> (y & 31) & 1; break;
+        default: return gpu_model_fail(GPU_MODEL_UNMODELLED, "a scalar instruction the model has no meaning for") ? gpu_model.fault.code : gpu_model_fail_end();
         }
         gpu_model.scc = scc & 1;
         if (row->form == GM_SOPC)
@@ -227,7 +228,7 @@ static int gpu_model_smem(const struct gpu_model_insn address_to in, const struc
                 return e;
         memory_copy(gpu_model.s + in->op[0], words, 4 * count);
         gpu_model_issue(1, false, in->op[0], count);
-        gpu_model.cost.smem++, gpu_model.cost.scalar_bytes += 4 * count;
+        gpu_model.cost.scalar_bytes += 4 * count;
         return 0;
 }
 
@@ -278,8 +279,6 @@ static int gpu_model_wave(unsigned int x, unsigned int y, const p32 address_to u
                                 return 0;
                         if (row->code == 0x0c)
                                 gpu_model_wait((p32)in->imm & 0xffff);
-                        if (row->shape[0] == 'l')
-                                gpu_model.cost.branches++;
                         if (taken)
                                 next = gpu_model.pc + 4 + (positive)((b64)in->imm * 4);
                         break;

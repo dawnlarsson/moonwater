@@ -48,7 +48,7 @@ static struct
         struct gpu_model_region region[1 + GPU_MODEL_IMPORTS + GPU_MAPS];
         p8 address_to import_host[GPU_MODEL_IMPORTS]; // the memory behind each import, as the row that made it says (none: the job may not reach it)
         p32 sh[0x400];                          // the SH registers the packets set, by their offsets (0x20c COMPUTE_PGM_LO ...)
-        unsigned int jobs, faults;
+        unsigned int jobs;
         p32 hits[GPU_KERNELS][GPU_MODEL_CARD_WORDS]; // each kernel's code words' runs, every job since the reset
         p8 address_to buffer;
         positive bytes;
@@ -63,7 +63,7 @@ static void gpu_model_card_reset(void)
 {
         memory_zero(&gpu_model.fault, sizeof(gpu_model.fault)), memory_zero(&gpu_model.cost, sizeof(gpu_model.cost));
         memory_zero(gpu_model_card.hits, sizeof(gpu_model_card.hits));
-        gpu_model_card.jobs = gpu_model_card.faults = 0;
+        gpu_model_card.jobs = 0;
 }
 
 static void gpu_model_card_refuse(const char *what, p64 value)
@@ -153,7 +153,6 @@ static void gpu_model_card_submit(positive ib_va, unsigned int ib_bytes, const p
                         gpu_model_card_refuse("a packet the model does not take: ", head);
                 at += 1 + count;
         }
-        gpu_model_card.faults += gpu_model.fault.code != 0;
 }
 
 // The card's buffer as gpu_start makes it for bytes of the caller's (and the self-test's megabyte), with the kernels copied in.

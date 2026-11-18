@@ -282,7 +282,6 @@ typedef struct gpuasm_label
         positive length;
         positive at;
         positive stop;
-        positive line;
         bool defined;
         bool sized;
 } gpuasm_label;
@@ -553,7 +552,6 @@ static positive gpuasm_label_of(gpuasm_span name)
         if (!gpuasm_keep(name, address_of gpuasm_labels[at].name))
                 return GPUASM_LABELS;
         gpuasm_labels[at].length = name.length;
-        gpuasm_labels[at].line = gpuasm.line;
         gpuasm_label_count++;
         return at;
 }
@@ -1204,7 +1202,6 @@ static bool gpuasm_define(gpuasm_span name)
                 return gpuasm_fail_span("a label defined twice", name);
         gpuasm_labels[at].defined = true;
         gpuasm_labels[at].at = gpuasm_position;
-        gpuasm_labels[at].line = gpuasm.line;
         return true;
 }
 

@@ -14,8 +14,7 @@
  *      Runs until SECONDS have passed (default: until SIGTERM). The path is
  *      looked at on every copy: a compositor that flips its scan image swaps
  *      two files' names, and the image shown is then the other file, which
- *      is mapped from then on. With SCAN_FRAMES=DIR in the environment, every
- *      distinct frame's pixels are also written to DIR/frame-NNNNNN.raw.
+ *      is mapped from then on.
  *      Built by gcc and clang as a hosted helper: libc only.
  */
 #include <errno.h>
@@ -66,7 +65,7 @@ static uint64_t row_hash(const unsigned char *row, size_t bytes)
 int main(int argc, char **argv)
 {
         struct sigaction act;
-        const char *scan, *log_path, *frames_dir;
+        const char *scan, *log_path;
         unsigned long width, height, rows;
         size_t bytes;
         unsigned char *cur, *last;
@@ -90,7 +89,6 @@ int main(int argc, char **argv)
         log_path = argv[4];
         if (argc > 5)
                 seconds = strtod(argv[5], NULL);
-        frames_dir = getenv("SCAN_FRAMES");
         if (!width || !height || width > 16384 || height > 16384)
                 return 2;
         rows = height;
@@ -159,16 +157,6 @@ int main(int argc, char **argv)
                 fwrite(&seq, sizeof(seq), 1, out);
                 fwrite(&n, sizeof(n), 1, out);
                 fwrite(hashes, sizeof(uint64_t), rows, out);
-                if (frames_dir)
-                {
-                        char name[512];
-                        FILE *raw;
-
-                        snprintf(name, sizeof(name), "%s/frame-%06u.raw", frames_dir, (unsigned)seq);
-                        raw = fopen(name, "wb");
-                        if (raw)
-                                fwrite(cur, 1, bytes, raw), fclose(raw);
-                }
                 memcpy(last, cur, bytes);
                 have = 1;
                 seq++;

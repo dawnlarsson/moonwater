@@ -200,10 +200,8 @@ static int gpu_model_vmem(const struct gpu_model_insn address_to in, const struc
                         gpu_model.v[data + r][lane] = words[r];
                 gpu_model.cost.lane_loads++, gpu_model.cost.bytes_loaded += bytes;
         }
-        if (store)
-                gpu_model.cost.vmem_stores++;
-        else
-                gpu_model.cost.vmem_loads++, gpu_model_issue(0, true, data, regs);
+        if (!store)
+                gpu_model_issue(0, true, data, regs);
         return 0;
 }
 
@@ -261,7 +259,7 @@ static int gpu_model_image(const struct gpu_model_insn address_to in)
                 }
                 gpu_model.cost.lane_loads++, gpu_model.cost.bytes_loaded += 4;
         }
-        gpu_model.cost.vmem_loads++, gpu_model_issue(0, true, data, one ? 1 : 4);
+        gpu_model_issue(0, true, data, one ? 1 : 4);
         return 0;
 }
 
@@ -291,6 +289,5 @@ static int gpu_model_ds(const struct gpu_model_insn address_to in)
                 if (exec >> lane & 1)
                         gpu_model.v[dst][lane] = taken[lane], gpu_model.cost.lanes++;
         gpu_model_issue(1, true, dst, 1);
-        gpu_model.cost.ds++;
         return 0;
 }
