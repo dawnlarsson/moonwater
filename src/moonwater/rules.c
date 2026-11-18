@@ -320,7 +320,7 @@ u64 moonwater_rules_pending(void)
 
 // ---- kernel primitives, queued -----------------------------------------------
 
-#define RULES_JOBS 16u
+#define RULES_JOBS (4u * ROVER_KERNEL_ACTIONS) // four events' worth; rover_kernel_fits holds one event to sixteen
 
 struct rules_job
 {
@@ -530,7 +530,7 @@ static void rules_irq_run(struct irq_work *work)
 
 // ---- an event ------------------------------------------------------------------
 
-#define RULES_HITS 16u
+#define RULES_HITS ROVER_KERNEL_HITS
 
 /*
         One event against the live table, with the lock held: the kernel's
@@ -1280,6 +1280,18 @@ static long rules_load(struct rover_control *request)
                 request->rule = why.rule;
                 rules_free(live);
                 return -EINVAL;
+        }
+        //      Never a table partly inert: whatever can fire on one event fits what one event is answered.
+        {
+                p32 event = 0;
+                const char *unfit = rover_kernel_fits(&live->view, &event);
+
+                if (unfit)
+                {
+                        snprintf(request->why, sizeof(request->why), "%s (event %u)", unfit, event);
+                        rules_free(live);
+                        return -EINVAL;
+                }
         }
         live->runs = kvcalloc(live->view.head->rules ? live->view.head->rules : 1, sizeof(struct rover_run),
                               GFP_KERNEL);

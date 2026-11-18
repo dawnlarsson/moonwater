@@ -1317,6 +1317,75 @@ static fn rover_check_red(void)
               rover_round("rule a\n\ton window opened\n\tif string_length(\"a\\\\b\") > 1\n\tdo log x\n"));
 }
 
+/*
+        What the kernel's loader takes (rover_kernel_fits): never a table
+        partly inert. Seventeen kernel rules on one event are refused, by the
+        compiler and by the loader; sixteen load; thirty-two key rules with a
+        key each load, since one key down is at most one of them and the rules
+        with no key; a when rule set past sixteen is refused; and a set of
+        patterns that would cost more than an event may with interrupts off.
+*/
+static p8 rover_fits_text[16384];
+
+static bool rover_fits_compiles(positive rules, const char address_to on, bool keyed, const char address_to extra)
+{
+        struct rover_text text = {rover_fits_text, 0, sizeof(rover_fits_text) - 1, false};
+        static const char address_to const keys[] = {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+                                                      "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+                                                      "1", "2", "3", "4", "5", "6"};
+
+        for (positive at = 0; at < rules; at++)
+        {
+                p8 name[24];
+
+                (void)string_join(name, sizeof(name), "rule r", keys[at % array_count(keys)]);
+                rover_puts(&text, (string_address)name);
+                rover_puts(&text, at >= array_count(keys) ? "x\n" : "\n");
+                rover_puts(&text, on);
+                if (keyed)
+                {
+                        rover_puts(&text, " ");
+                        rover_puts(&text, keys[at % array_count(keys)]);
+                }
+                rover_puts(&text, "\n");
+                if (extra)
+                        rover_puts(&text, extra);
+                rover_puts(&text, "\tdo log \"x\"\n\n");
+        }
+        rover_fits_text[text.used] = 0;
+        return rover_compile(&rover_one, rover_fits_text, text.used);
+}
+
+static fn rover_check_kernel_fits(void)
+{
+        struct rover_table view;
+        struct rover_refusal refusal;
+        p32 event = 0;
+
+        check("seventeen kernel rules on usb added are refused by the compiler",
+              !rover_fits_compiles(17, "\ton usb added", false, null) && rover_holds_why("than the kernel answers"));
+        check("sixteen compile", rover_fits_compiles(16, "\ton usb added", false, null));
+        check("and the kernel's loader takes them",
+              rover_check(rover_built(&rover_one), rover_one.size, &view, &refusal) && !rover_kernel_fits(&view, &event));
+        check("thirty-two keyed rules on key down compile: one key down is one of them",
+              rover_fits_compiles(32, "\ton key down", true, null));
+        check("seventeen when rules over kernel states are refused",
+              !rover_fits_compiles(17, "\twhen lid == closed", false, null) && rover_holds_why("than the kernel answers"));
+        check("seventeen in the runner are not the kernel's to answer",
+              rover_fits_compiles(17, "\ton usb added\n\tplace user", false, null));
+        check("patterns past an event's cost are refused",
+              !rover_fits_compiles(8, "\ton input added",
+                                   false, "\tif $name ~ \"*aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab*a\"\n") &&
+                  rover_holds_why("cost more"));
+        check("seventeen kernel primitives on one event are refused",
+              !rover_fits_compiles(1, "\ton usb added", false,
+                                   "\tdo log \"1\"\n\tdo log \"2\"\n\tdo log \"3\"\n\tdo log \"4\"\n\tdo log \"5\"\n"
+                                   "\tdo log \"6\"\n\tdo log \"7\"\n\tdo log \"8\"\n\tdo log \"9\"\n\tdo log \"a\"\n"
+                                   "\tdo log \"b\"\n\tdo log \"c\"\n\tdo log \"d\"\n\tdo log \"e\"\n\tdo log \"f\"\n"
+                                   "\tdo log \"g\"\n") &&
+                  rover_holds_why("16 kernel primitives"));
+}
+
 b32 main(void)
 {
         rover_check_first_of_either();
@@ -1328,6 +1397,7 @@ b32 main(void)
         rover_check_evaluator();
         rover_check_kernel_events();
         rover_check_red();
+        rover_check_kernel_fits();
         return test_report(null);
 }
 

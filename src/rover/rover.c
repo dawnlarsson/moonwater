@@ -1836,4 +1836,104 @@ static bool rover_check(const p8 address_to bytes, positive size, struct rover_t
         return true;
 }
 
+/*
+        What the kernel takes of a table rover_check passed. A table the
+        kernel loads must never be partly inert, so an event is refused when
+        more of the kernel's rules could fire on it than the kernel answers in
+        one event (ROVER_KERNEL_HITS), when they could queue more kernel
+        primitives than one event is given (ROVER_KERNEL_ACTIONS), or when
+        asking them could cost more than one event may with interrupts off
+        (ROVER_KERNEL_COST). The rules that can fire on one event are the ones
+        whose key is the event's or any: for every key a kernel rule of the
+        event asks, those with it and those with none, and those with none
+        alone. A when rule is any state's: the kernel's when rules all
+        together. Answers null, or why, with the event in *at.
+
+        The cost is in units of about a nanosecond: a comparison of the number
+        form is 1, a word compared whole 8, a call 256 (a routine linear in at
+        most 255 bytes), a pattern the longest text it can be asked of (64)
+        times its own length plus one (the matcher restarts at every byte of
+        the text), and an action 2.
+*/
+#define ROVER_KERNEL_HITS 16u
+#define ROVER_KERNEL_ACTIONS 16u
+#define ROVER_KERNEL_COST 16384u
+
+static p64 rover_comparison_cost(const struct rover_table address_to table,
+                                 const struct rover_comparison address_to comparison)
+{
+        if (comparison->form == ROVER_FORM_NUMBER)
+                return 1;
+        if (comparison->op == ROVER_MATCH || comparison->op == ROVER_NOMATCH)
+        {
+                p16 length = 64;
+
+                if (comparison->b.source == ROVER_CONST_WORD)
+                        memory_copy(&length, table->pool + comparison->b.index, 2);
+                return 64ull * ((p64)length + 1);
+        }
+        if (comparison->a.source == ROVER_CALL || comparison->b.source == ROVER_CALL ||
+            comparison->c.source == ROVER_CALL)
+                return 256;
+        return 8;
+}
+
+//      A kernel rule's part of an event: its cost, and the kernel primitives of the branch that queues more of them.
+static fn rover_rule_kernel_part(const struct rover_table address_to table, const struct rover_rule address_to rule,
+                                 p64 address_to cost, p64 address_to actions)
+{
+        p64 then = 0, otherwise = 0;
+
+        for (positive at = 0; at < rule->comparisons; at++)
+                *cost += rover_comparison_cost(table, table->comparison + rule->comparison + at);
+        for (positive at = 0; at < (positive)rule->then + rule->otherwise; at++)
+        {
+                const struct rover_action address_to action = table->action + rule->action + at;
+
+                *cost += 2;
+                if (action->kind == ROVER_DO && action->runs == ROVER_KERNEL)
+                        *(at < rule->then ? &then : &otherwise) += 1;
+        }
+        *actions += then > otherwise ? then : otherwise;
+}
+
+static const char address_to rover_kernel_fits(const struct rover_table address_to table, p32 address_to at)
+{
+        for (positive id = 0; id < ROVER_EVENTS; id++)
+        {
+                struct rover_span span = table->index[id];
+                positive count = span.count & ROVER_SPAN_COUNT;
+
+                //      Each probe is a key a kernel rule asks; the last (k == count) is no key at all.
+                for (positive k = 0; k <= count; k++)
+                {
+                        p32 want;
+                        p64 rules = 0, cost = 0, actions = 0;
+
+                        if (k < count && table->rule[table->order[span.first + k]].place != ROVER_KERNEL)
+                                continue;
+                        want = k < count && id ? table->key[span.first + k] : ROVER_KEY_ANY;
+                        for (positive j = 0; j < count; j++)
+                        {
+                                const struct rover_rule address_to rule = table->rule + table->order[span.first + j];
+                                p32 key = id ? table->key[span.first + j] : ROVER_KEY_ANY;
+
+                                if (rule->place != ROVER_KERNEL || (rule->flags & ROVER_RULE_OFF) ||
+                                    (key != want && key != ROVER_KEY_ANY))
+                                        continue;
+                                rules++;
+                                rover_rule_kernel_part(table, rule, &cost, &actions);
+                        }
+                        *at = (p32)id;
+                        if (rules > ROVER_KERNEL_HITS)
+                                return "an event more of the kernel's rules can fire on than the kernel answers (16)";
+                        if (actions > ROVER_KERNEL_ACTIONS)
+                                return "an event whose kernel rules can queue more than the 16 kernel primitives one event is given";
+                        if (cost > ROVER_KERNEL_COST)
+                                return "an event whose kernel rules cost more to ask than one event may with interrupts off";
+                }
+        }
+        return null;
+}
+
 #endif /* ROVER_INCLUDED */

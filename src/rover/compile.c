@@ -2144,6 +2144,19 @@ static bool rover_assemble(struct rover_build address_to build)
                 rover_refused(build, "the compiler made a table its own check refuses: ", null, refusal.why);
                 return false;
         }
+        //      What the kernel's loader refuses as well (rover_kernel_fits), said here with the event's name.
+        {
+                p32 event = 0;
+                const char address_to unfit = rover_kernel_fits(&view, &event);
+                const struct rover_event_row address_to row = rover_event_find(event);
+
+                if (unfit)
+                {
+                        rover_refused(build, unfit, null, ": ");
+                        rover_why_add(build, row ? row->name : "the when rules");
+                        return false;
+                }
+        }
         return true;
 }
 
