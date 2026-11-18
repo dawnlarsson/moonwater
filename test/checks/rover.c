@@ -1459,6 +1459,205 @@ static fn rover_check_kernel_fits(void)
         }
 }
 
+/*
+        Round-trip fuzz, gen.py's way (rover-red/repro/compiler): rule files made at random from the schema itself, a
+        state against a literal of its type or of the edges a literal has (the longest digits, a day and a nanosecond,
+        quotes and backslashes, the words that are keywords), an event with a field filter, and actions with literals.
+        Each that compiles must print as a text that compiles to the same table, byte for byte; none may fault. The seed
+        is fixed, so a failure is the same failure every run.
+*/
+static p64 rover_fuzz_state = 0x9e3779b97f4a7c15ull;
+
+static p64 rover_fuzz_next(void)
+{
+        rover_fuzz_state ^= rover_fuzz_state << 13;
+        rover_fuzz_state ^= rover_fuzz_state >> 7;
+        rover_fuzz_state ^= rover_fuzz_state << 17;
+        return rover_fuzz_state;
+}
+
+static positive rover_fuzz_pick(positive count)
+{
+        return (positive)(rover_fuzz_next() % count);
+}
+
+struct rover_fuzz_text
+{
+        p8 address_to bytes;
+        positive used, room;
+};
+
+static fn rover_fuzz_put(struct rover_fuzz_text address_to text, const char address_to part)
+{
+        positive length = string_length((string_address)part);
+
+        if (text->used + length >= text->room)
+                return;
+        memory_copy(text->bytes + text->used, part, length);
+        text->used += length;
+        text->bytes[text->used] = 0;
+}
+
+static fn rover_fuzz_number(struct rover_fuzz_text address_to text, b64 value)
+{
+        p8 digits[24];
+        positive at = 0;
+
+        if (value < 0)
+        {
+                rover_fuzz_put(text, "-");
+                value = -value;
+        }
+        digits[positive_into_string(digits, (positive)value)] = 0;
+        (void)at;
+        rover_fuzz_put(text, (const char address_to)digits);
+}
+
+//      A literal of a type, or an edge of one: what gen.py found the compiler's silent edges with.
+static fn rover_fuzz_literal(struct rover_fuzz_text address_to text, p8 type)
+{
+        static const char address_to const words[] = {"firefox", "steam_app_1", "a", "x-y", "a.b", "a_b", "a:b", "x=y",
+                                                      "*", "a*b", "fire?", "\"and\"", "\"a b\"", "\"a\\\\b\"", "\"a\\\"b\"",
+                                                      "UPPER", "\"\"", "\"a,b\""};
+        static const char address_to const durations[] = {"0s", "1ns", "999ms", "1.000000001s", "0.100000001s", "24h",
+                                                          "25h", "5124096h", "100000000ms", "1.5us", "0.5m", "86400s",
+                                                          "922337203685477580811s", "1000000001ns"};
+        static const char address_to const percents[] = {"100%", "100.00%", "0.05%", "0.5%", "50%", "100.5%",
+                                                         "922337203685477580880%", "7.25%"};
+        static const char address_to const ints[] = {"0", "1", "-1", "255", "256", "65535", "4611686018427387904",
+                                                     "922337203685477580880", "9223372036854775807", "-17"};
+        const struct rover_type_row address_to row = &rover_types[type];
+
+        switch (row->kind)
+        {
+        case ROVER_T_INT:
+                if (rover_fuzz_pick(3))
+                        rover_fuzz_number(text, row->low + (b64)rover_fuzz_pick(row->high - row->low > 300 ? 300
+                                                                                                           : (positive)(row->high - row->low + 1)));
+                else
+                        rover_fuzz_put(text, ints[rover_fuzz_pick(array_count(ints))]);
+                return;
+        case ROVER_T_PERCENT:
+                rover_fuzz_put(text, percents[rover_fuzz_pick(array_count(percents))]);
+                return;
+        case ROVER_T_DURATION:
+                rover_fuzz_put(text, durations[rover_fuzz_pick(array_count(durations))]);
+                return;
+        case ROVER_T_CLOCK:
+        {
+                p8 clock[8] = {'0', '0', ':', '0', '0', 0};
+                positive hour = rover_fuzz_pick(25), minute = rover_fuzz_pick(61);
+
+                clock[0] = (p8)('0' + hour / 10), clock[1] = (p8)('0' + hour % 10);
+                clock[3] = (p8)('0' + minute / 10), clock[4] = (p8)('0' + minute % 10);
+                rover_fuzz_put(text, (const char address_to)clock);
+                return;
+        }
+        case ROVER_T_ENUM:
+        case ROVER_T_ONOFF:
+        case ROVER_T_WEEKDAY:
+        {
+                //      One of the choices, or a word that is none.
+                const char address_to choices = row->kind == ROVER_T_ONOFF   ? "on,off"
+                                                : row->kind == ROVER_T_WEEKDAY ? "mon,tue,sun"
+                                                                               : row->choices;
+                positive count = 1, pick, at = 0;
+                p8 word[64];
+                positive used = 0;
+
+                for (const char address_to c = choices; *c; c++)
+                        count += *c == ',';
+                pick = rover_fuzz_pick(count + 1);
+                if (pick == count || !choices[0])
+                {
+                        rover_fuzz_put(text, "maybe");
+                        return;
+                }
+                for (const char address_to c = choices; *c; c++)
+                {
+                        if (*c == ',')
+                        {
+                                at++;
+                                continue;
+                        }
+                        if (at == pick && used < sizeof(word) - 1)
+                                word[used++] = (p8)*c;
+                }
+                word[used] = 0;
+                rover_fuzz_put(text, (const char address_to)word);
+                return;
+        }
+        default:
+                rover_fuzz_put(text, words[rover_fuzz_pick(array_count(words))]);
+                return;
+        }
+}
+
+static fn rover_check_fuzz(void)
+{
+        static const char address_to const ops[] = {" == ", " != ", " < ", " >= ", " ~ ", " !~ "};
+        static const char address_to const actions[] = {"\tdo log ", "\tdo notify ", "\tdo latency ", "\tdo backlight ",
+                                                       "\ttool logger ", "\temit cue ", "\trun note-"};
+        static const p8 action_types[] = {ROVER_TYPE_TEXT, ROVER_TYPE_TEXT, ROVER_TYPE_DURATION, ROVER_TYPE_PERCENT,
+                                          ROVER_TYPE_WORD, ROVER_TYPE_WORD, ROVER_TYPE_WORD};
+        positive made = 0, same = 0;
+
+        for (positive round = 0; round < 3000; round++)
+        {
+                struct rover_fuzz_text text = {rover_red_text, 0, sizeof(rover_red_text)};
+                positive rules = 1 + rover_fuzz_pick(4);
+
+                rover_red_text[0] = 0;
+                for (positive r = 0; r < rules; r++)
+                {
+                        const struct rover_state_row address_to state = &rover_states[rover_fuzz_pick(ROVER_STATES)];
+
+                        rover_fuzz_put(&text, "rule r");
+                        rover_fuzz_number(&text, (b64)r);
+                        if (rover_fuzz_pick(2))
+                        {
+                                const struct rover_event_row address_to event = &rover_event_rows[rover_fuzz_pick(ROVER_EVENT_ROWS)];
+
+                                rover_fuzz_put(&text, "\n\ton ");
+                                rover_fuzz_put(&text, event->name);
+                                if (event->fields && rover_fuzz_pick(2))
+                                {
+                                        rover_fuzz_put(&text, " ");
+                                        rover_fuzz_literal(&text, event->field_type[0]);
+                                }
+                                rover_fuzz_put(&text, "\n\tif ");
+                        }
+                        else
+                                rover_fuzz_put(&text, "\n\twhen ");
+                        rover_fuzz_put(&text, state->name);
+                        rover_fuzz_put(&text, ops[rover_fuzz_pick(array_count(ops))]);
+                        rover_fuzz_literal(&text, state->type);
+                        rover_fuzz_put(&text, "\n");
+                        for (positive a = 0, count = 1 + rover_fuzz_pick(3); a < count; a++)
+                        {
+                                positive which = rover_fuzz_pick(array_count(actions));
+
+                                rover_fuzz_put(&text, actions[which]);
+                                rover_fuzz_literal(&text, action_types[which]);
+                                rover_fuzz_put(&text, "\n");
+                        }
+                        rover_fuzz_put(&text, "\n");
+                }
+                if (!rover_compile(&rover_one, rover_red_text, text.used))
+                        continue;
+                made++;
+                same += rover_round((const char address_to)rover_red_text);
+                if (!rover_round((const char address_to)rover_red_text))
+                {
+                        string_format(log, "  rover fuzz: round %p does not round trip:\n%s\n", round, rover_red_text);
+                        log_flush();
+                }
+        }
+        string_format(log, "  rover fuzz: %p of 3000 random files compiled\n", made);
+        log_flush();
+        check("red: random rule files that compile print back to the same table, every one", made > 100 && same == made);
+}
+
 b32 main(void)
 {
         rover_check_first_of_either();
@@ -1471,6 +1670,7 @@ b32 main(void)
         rover_check_kernel_events();
         rover_check_red();
         rover_check_kernel_fits();
+        rover_check_fuzz();
         return test_report(null);
 }
 
