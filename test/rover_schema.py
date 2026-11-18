@@ -128,8 +128,9 @@ def tune_modes():
 
 def read_list(types):
     states, events, primitives, ranges = [], [], [], {}
-    global SWITCHES
+    global SWITCHES, TOOLS_ANY
     SWITCHES = []
+    TOOLS_ANY = set()
     offsets = {page: PAGE_HEAD for page in PAGES}
     for number, line in enumerate(LIST.read_text().splitlines(), 1):
         if not line.strip() or line.lstrip().startswith('#'):
@@ -164,6 +165,8 @@ def read_list(types):
                     fail('line %d: %s is none of the switch\'s values' % (number, value))
                 deliberate = choices.index(value)
             SWITCHES.append((int(words[1]), words[2], kind, deliberate))
+        elif words[0] == 'tools-any':
+            TOOLS_ANY.update(words[1:])
         elif words[0] == 'function':
             stated = {}
             for word in words[2:]:
@@ -480,7 +483,8 @@ def records(types, states, events, primitives, functions, tool_names):
             line += ' deliberate=' + types.rows[kind][3].split(',')[deliberate]
         lines.append(line)
     for number, name in enumerate(tool_names):
-        lines.append('tool id=%d name=%s runs=runner bounded=no' % (number, name))
+        lines.append('tool id=%d name=%s runs=runner class=%s bounded=no' %
+                     (number, name, 'any' if name in TOOLS_ANY else 'deliberate'))
     return ''.join(line + '\n' for line in lines)
 
 
@@ -523,6 +527,9 @@ def generate():
         seen.add(ident)
     functions = lib_functions(ranges)
     tool_names = tools()
+    unknown = TOOLS_ANY - set(tool_names)
+    if unknown:
+        fail('tools-any names %s, which tools.inc has not' % ', '.join(sorted(unknown)))
     text = records(types, states, events, primitives, functions, tool_names)
 
     out = ['/*',
@@ -616,6 +623,12 @@ def generate():
     out.append('static const char address_to const rover_tools[ROVER_TOOLS] = {')
     for at in range(0, len(tool_names), 8):
         out.append('        ' + ' '.join(c_string(t) + ',' for t in tool_names[at:at + 8]))
+    out.append('};')
+    out.append('')
+    out.append('//      Each tool\'s class (ROVER_ANY or ROVER_DELIBERATE): schema.list\'s tools-any rows, every other tool deliberate.')
+    out.append('static const p8 rover_tool_class[ROVER_TOOLS] = {')
+    for at in range(0, len(tool_names), 16):
+        out.append('        ' + ' '.join('%d,' % (0 if t in TOOLS_ANY else 2) for t in tool_names[at:at + 16]))
     out.append('};')
     out.append('')
     out.append('//      The records `moonwater rover schema` prints, whose FNV-1a is ROVER_SCHEMA_HASH.')

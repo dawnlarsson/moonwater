@@ -1230,6 +1230,11 @@ static bool rover_read_action(struct rover_build address_to build, struct rover_
                                 break;
                 if (tool == ROVER_TOOLS)
                         return rover_refused(build, "", &build->word[1], " is none of the shell's tools");
+                if (rover_tool_class[tool] == ROVER_DELIBERATE)
+                        return rover_refused(build, "", &build->word[1],
+                                             " is deliberate: it writes, runs another program, sets the machine or reaches "
+                                             "the network, and only a person runs it (moonwater rover schema lists the tools "
+                                             "a rule may run)");
                 action.kind = ROVER_TOOL;
                 action.id = (p16)tool;
                 action.runs = ROVER_RUNNER;

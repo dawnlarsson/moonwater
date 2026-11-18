@@ -1478,6 +1478,12 @@ static const char address_to rover_action_check(const struct rover_table address
             (positive)action->argument + action->count > table->head->arguments)
                 return "an action of no shape";
         argument = table->argument + action->argument;
+        //      What root runs is the rule file's own words: constants only where a program, its words or a cue are named.
+        if (action->kind == ROVER_RUN || action->kind == ROVER_TOOL || action->kind == ROVER_EMIT ||
+            (action->kind == ROVER_DO && action->id == 14))
+                for (positive k = 0; k < action->count; k++)
+                        if (argument[k].source != ROVER_CONST_NUMBER && argument[k].source != ROVER_CONST_WORD)
+                                return "a program, its words or a cue named by an event's field or a state";
         switch (action->kind)
         {
         case ROVER_DO:
@@ -1503,6 +1509,8 @@ static const char address_to rover_action_check(const struct rover_table address
         case ROVER_TOOL:
                 if (action->id >= ROVER_TOOLS || action->runs != ROVER_RUNNER)
                         return "a tool the schema does not have";
+                if (rover_tool_class[action->id] == ROVER_DELIBERATE)
+                        return "a deliberate tool, which only a person runs";
                 break;
         case ROVER_EMIT:
                 if (action->id != ROVER_CUE || action->count != 1 || action->runs != ROVER_RUNNER)

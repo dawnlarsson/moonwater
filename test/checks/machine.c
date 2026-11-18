@@ -388,6 +388,49 @@ static fn machine_pin_numbers(void)
                   !rover_runner_pin_number((const p8 address_to)"pin_start_", 10, digits));
 }
 
+/*
+        A run's script (rover_runner_script): the directory and the file each root's alone, looked at each run. As root
+        the rows hold every case; as another user every directory is not root's, so a present one is refused.
+*/
+static fn machine_run_scripts(void)
+{
+        static const char address_to dir = "/tmp/rover-scripts-check";
+        p8 path[160];
+        bool root = (bipolar)system_call_1(syscall(getuid), 0) == 0;
+        bipolar handle;
+
+        check("a script directory that is not there is no script",
+              rover_runner_script("/tmp/rover-scripts-check-none", true, "a", path, sizeof(path)) == 0);
+        system_call_3(syscall(mkdirat), AT_FDCWD, (positive)dir, 0755);
+        system_call_4(syscall(fchmodat), AT_FDCWD, (positive)dir, 0755, 0);
+        handle = system_open_output_at(AT_FDCWD, "/tmp/rover-scripts-check/a", true, 0644);
+        if (handle >= 0)
+                system_close(handle);
+        system_call_4(syscall(fchmodat), AT_FDCWD, (positive) "/tmp/rover-scripts-check/a", 0644, 0);
+        check("a person's script directory others may read is refused, not passed to the image's",
+              rover_runner_script(dir, true, "a", path, sizeof(path)) == -1);
+        if (root)
+        {
+                check("the image's directory, root's and written by root alone, gives its script",
+                      rover_runner_script(dir, false, "a", path, sizeof(path)) == 1 &&
+                          string_equals(path, "/tmp/rover-scripts-check/a"));
+                system_call_4(syscall(fchmodat), AT_FDCWD, (positive)dir, 0700, 0);
+                check("and a person's 0700 one", rover_runner_script(dir, true, "a", path, sizeof(path)) == 1);
+                check("a name the directory has not is no script", rover_runner_script(dir, true, "b", path, sizeof(path)) == 0);
+                system_call_4(syscall(fchmodat), AT_FDCWD, (positive) "/tmp/rover-scripts-check/a", 0666, 0);
+                check("a script others may write is refused", rover_runner_script(dir, true, "a", path, sizeof(path)) == -1);
+                system_call_4(syscall(fchmodat), AT_FDCWD, (positive)dir, 0777, 0);
+                system_call_4(syscall(fchmodat), AT_FDCWD, (positive) "/tmp/rover-scripts-check/a", 0644, 0);
+                check("a directory others may write is refused, the image's too",
+                      rover_runner_script(dir, false, "a", path, sizeof(path)) == -1);
+        }
+        else
+                check("as another user an image's directory not root's is refused",
+                      rover_runner_script(dir, false, "a", path, sizeof(path)) == -1);
+        system_call_3(syscall(unlinkat), AT_FDCWD, (positive) "/tmp/rover-scripts-check/a", 0);
+        system_call_3(syscall(unlinkat), AT_FDCWD, (positive)dir, 0x200);
+}
+
 static fn machine_stop_self(void)
 {
         p8 held = host_machine_self;
@@ -1844,6 +1887,7 @@ b32 main(void)
         machine_policy();
         machine_stop_self();
         machine_pin_numbers();
+        machine_run_scripts();
         machine_sntp();
         machine_auto();
         machine_services();

@@ -716,6 +716,42 @@ static bool rover_runner_pinned(string_address path)
                facts.owner == 0 && !(facts.mode & 0022);
 }
 
+/*
+        A run's script, looked at as it is run: the directory, opened with no
+        link followed, root's and not written by anyone else (for the
+        person's, 0700, so nothing but root can read or swap in it), and the
+        file in it regular, root's and written by root alone, looked at
+        through the directory's descriptor. Answers 1 with its path in path,
+        0 when the directory or the file is not there, and -1 when either is
+        there and is not root's alone (which runs nothing, and the image's of
+        the name is not tried in its place).
+*/
+static bipolar rover_runner_script(string_address directory, bool person, string_address name, p8 address_to path,
+                                   positive room)
+{
+        file_facts facts;
+        bipolar handle = system_open_at(AT_FDCWD, directory, FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        bool fits;
+
+        if (handle < 0)
+                return 0;
+        fits = file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) &&
+               (facts.mode & MODE_FORMAT) == MODE_DIRECTORY && facts.owner == 0 &&
+               !(facts.mode & (person ? 0077 : 0022));
+        if (!fits)
+        {
+                system_close(handle);
+                return -1;
+        }
+        fits = file_look(handle, name, AT_SYMLINK_NOFOLLOW, address_of facts);
+        system_close(handle);
+        if (!fits)
+                return 0;
+        if ((facts.mode & MODE_FORMAT) != MODE_FILE || facts.owner != 0 || (facts.mode & 0022))
+                return -1;
+        return string_join(path, room, directory, "/", name) ? 1 : 0;
+}
+
 //      A primitive that is not the kernel's (those are asked of it, rover_runner_do).
 static fn rover_runner_primitive(p16 id, const struct rover_value address_to values, positive count)
 {
@@ -873,14 +909,23 @@ static fn rover_runner_do(const struct rover_event address_to event, const struc
                         break;
                 case ROVER_RUN:
                 {
-                        //      The person's script of the name, when it is root's alone, else the image's.
-                        file_facts facts;
-                        bool person = string_join(path, sizeof(path), ROVER_ROOT_SCRIPTS "/", (string_address)values[0].text) &&
-                                      file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts) &&
-                                      (facts.mode & MODE_FORMAT) == MODE_FILE && facts.owner == 0 && !(facts.mode & 0022);
+                        //      The person's script of the name, else the image's, each only from a directory and as a
+                        //      file root alone may write (rover_runner_script).
+                        bipolar found = rover_runner_script(ROVER_ROOT_SCRIPTS, true, (string_address)values[0].text, path,
+                                                            sizeof(path));
 
-                        if (!person && !string_join(path, sizeof(path), ROVER_IMAGE_SCRIPTS "/", (string_address)values[0].text))
+                        if (found == 0)
+                                found = rover_runner_script(ROVER_IMAGE_SCRIPTS, false, (string_address)values[0].text, path,
+                                                            sizeof(path));
+                        if (found <= 0)
+                        {
+                                rover_runner_say("run ", (string_address)values[0].text,
+                                                 found ? ": its script is not root's alone (the directory root's and, for "
+                                                         "/root/rules/scripts, 0700; the file regular, root's, written by "
+                                                         "root alone); not run"
+                                                       : ": no such script");
                                 break;
+                        }
                         rover_runner_program(path, values, count, 1, null);
                         break;
                 }

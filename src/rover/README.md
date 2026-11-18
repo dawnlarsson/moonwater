@@ -95,7 +95,7 @@ table it compiles to the same table, byte for byte.
 | `do PRIMITIVE [ARG ...]` | A primitive: one of Moonwater's mechanisms. |
 | `set SWITCH VALUE` | One of the machine's switches, its value typed by the switch: `set brightness 30%`, `set power powersave`, `set cpu boost off`, `set cpu smt on`, `set charge limit 80`, `set airplane on`. |
 | `run SCRIPT [ARG ...]` | A POSIX script leaf, run in userspace, off the fast path. |
-| `tool TOOL [ARG ...]` | One of the shell's built-in tools, run in-process in userspace. |
+| `tool TOOL [ARG ...]` | One of the shell's built-in tools a rule may run (class any in the schema), as a child of the runner's: `/shell` under the tool's name, as root. |
 | `emit cue NAME` | Post the event `cue NAME`, which another rule's `on cue NAME` hears. |
 | `else` | The actions after it run when a condition did not hold. |
 
@@ -413,6 +413,25 @@ Each primitive has a class.
 
 A rule can never raise exposure. That keeps the air gap that radios off by
 default, the USB lock and the firewall's tiers give.
+
+**Tools have a class too.** A tool a rule may run is one that reads and
+says: `cat`, `grep`, `logger`, the sums, `ls`, `stat` (schema.list's
+`tools-any` rows). Every other tool is deliberate, and the compiler and the
+loader refuse it: one that writes a file (`cp`, `dd`, `tee`, `sort -o`,
+which reaches `/sys` and `/proc` as well), one that runs another program
+(`env`, `find -exec`, `xargs`, `nice`, `timeout`, `unshare`), one that sets
+the machine (`rfkill unblock`, `ip link set up`, `mount`, `chroot`,
+`ctrlaltdel`, `date`, `hostname`, `kill`) and `moonwater` itself. A new
+tool is deliberate until it is listed.
+
+**A `run` script is root, and outside the promise.** The script does
+whatever its text says, as root; the classes say nothing of it. That is why
+only root may write one: the person's scripts are read from
+`/root/rules/scripts`, which must be root's and 0700, and the image's from
+`/lib/moonwater/rules/scripts`, which must be root's and written by root
+alone; the runner looks at the directory and the file each time it runs one
+(the file regular, root's, written by root alone, not a link), and runs
+nothing from a directory that fails.
 
 **What root runs is the rule file's own words.** The runner is root, and an
 event's fields and the desktop's states are what other programs say: a

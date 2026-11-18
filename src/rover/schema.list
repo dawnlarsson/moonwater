@@ -187,3 +187,16 @@ function unicode_case total
 function unicode_width variant:0:1
 function wait_status_code total
 function wait_status_code_base total
+
+# The shell's tools a rule may run: each reads and says, and none writes a file, sets the machine, runs a
+# program it is handed, or reaches the network. Every tool not listed is deliberate, never a rule's: one that
+# writes (cp, dd, tee, sed's w, sort -o, tar), one that runs another (env, find -exec, xargs, nice, timeout,
+# setsid, unshare, nsenter), one that sets the machine (rfkill, ip, mount, chroot, ctrlaltdel, date, hostname,
+# kill, dmesg's -C and -n) and moonwater itself (moonwater wifi on is radio on). A new tool is deliberate until
+# it is listed here.
+tools-any b2sum base32 base64 basenc cat cksum cmp comm cut diff expand expr factor fmt fold false grep head
+tools-any join nl od paste pr ptx rev sum tac tail tr true unexpand uniq wc basename bits cal col colcrt colrm
+tools-any column dircolors dirname df du findmnt groups hostid id isosize logger logname look ls lsblk lscpu
+tools-any lsfd lsipc lslocks lsmem lsns lsclocks mcookie md5sum mountpoint namei nproc numfmt pathchk printenv
+tools-any readlink realpath seq sha1sum sha224sum sha256sum sha384sum sha512sum sleep stat tsort tty uname
+tools-any users uuidgen uuidparse whoami who whereis yes
