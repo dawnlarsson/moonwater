@@ -6454,8 +6454,16 @@ static struct
         long scale120, relatives, framed;
         unsigned int relative[COMPOSITOR_WL_DIRECT_IDS], frames[COMPOSITOR_WL_DIRECT_IDS];
         unsigned int rest_length; // bytes of the reader's last send the socket did not take
+        int rest_slot;            // the client they are for
         unsigned char rest[COMPOSITOR_WL_DIRECT_IDS * 40];
-} compositor_wl_direct = {0, 0, 0, -1, -1};
+        // The keys: the client of the window that has them, its socket and keyboards, where its serials are counted, the row, and the keys
+        // that are not the client's alone with the modifiers held now (a modifier, a lock, a volume key, a chord the script binds).
+        int keys_valid, keys_slot, keys_fd, keys_row;
+        long keys_count;
+        unsigned int keys_ids[COMPOSITOR_WL_DIRECT_IDS];
+        unsigned long *keys_serial;
+        unsigned char keys_refused[32];
+} compositor_wl_direct = {.slot = -1, .fd = -1, .rest_slot = -1, .keys_slot = -1, .keys_fd = -1, .keys_row = -1};
 
 static void compositor_wl_direct_hold(void)
 {
@@ -6485,9 +6493,51 @@ static void compositor_wl_direct_make(void)
                                       &compositor_wl_direct.scale120) - 1;
         if (slot < 0 || slot >= compositor_wl.slots || compositor_wl.fd[slot] < 0)
                 return;
-        if (compositor_wl_direct.rest_length && compositor_wl_direct.slot != slot)
-                compositor_wl_direct.rest_length = 0; // the rest of a send to a client that holds it no more: its socket is the client's own business
         compositor_wl_direct.slot = (int)slot, compositor_wl_direct.fd = compositor_wl.fd[slot], compositor_wl_direct.valid = 1;
+}
+
+static int compositor_wl_key_row(void); // below: the row whose client has the keys
+
+// The loop, holding the lock: the keys' part made again (nothing while a modifier but Shift is held, a hand moves or resizes a window, the snap
+// assist or Alt-Tab is up, a drag holds the pointer, or the keys held went to another window).
+static void compositor_wl_direct_keys_make(void)
+{
+        unsigned int modifiers;
+        int row;
+        long slot;
+
+        compositor_wl_direct.keys_valid = 0;
+        if (!compositor_reader.on || !compositor_wl.started || (row = compositor_wl_key_row()) < 0 || row != wayland.keyboard_row)
+                return;
+        modifiers = compositor_modifiers();
+        if ((modifiers & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_ALTGR | WINDOW_KEY_SUPER)) || compositor.drag >= 0 || compositor.resize >= 0 ||
+            compositor.assist_armed || compositor.cycle)
+                return;
+        if (compositor.keys_to != row)
+                for (unsigned int k = 0; k < sizeof compositor.keys_down; k++)
+                        if (compositor.keys_down[k])
+                                return;
+        slot = wayland_keyboard_direct(row, compositor_wl_direct.keys_ids, &compositor_wl_direct.keys_count, COMPOSITOR_WL_DIRECT_IDS,
+                                       &compositor_wl_direct.keys_serial) - 1;
+        if (slot < 0 || slot >= compositor_wl.slots || compositor_wl.fd[slot] < 0)
+                return;
+        // The keys refused whatever is held, made once: the modifiers, the locks (Caps, Num, Scroll) and the volume keys.
+        {
+                static unsigned char always[32];
+                static int made;
+
+                if (!made)
+                        for (unsigned int code = 0; code < 256; code++, made = 1)
+                                if (compositor_held_bit(code) || code == CK_CAPSLOCK || code == 69 || code == 70 || code == CK_KEY_MUTE ||
+                                    code == CK_KEY_VOLUME_DOWN || code == CK_KEY_VOLUME_UP || code == CK_KEY_MICMUTE)
+                                        always[code >> 3] |= (unsigned char)(1u << (code & 7));
+                memory_copy(compositor_wl_direct.keys_refused, always, sizeof always);
+        }
+        for (unsigned int at = 0; at < compositor_keys.count; at++)
+                if ((modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) == compositor_keys.modifiers[at])
+                        compositor_wl_direct.keys_refused[compositor_keys.code[at] >> 3] |= (unsigned char)(1u << (compositor_keys.code[at] & 7));
+        compositor_wl_direct.keys_slot = (int)slot, compositor_wl_direct.keys_fd = compositor_wl.fd[slot], compositor_wl_direct.keys_row = row;
+        compositor_wl_direct.keys_valid = 1;
 }
 
 static void compositor_wl_direct_publish(void)
@@ -6496,7 +6546,103 @@ static void compositor_wl_direct_publish(void)
                 return;
         compositor_wl_direct_hold();
         compositor_wl_direct_make();
+        compositor_wl_direct_keys_make();
         compositor_wl_direct_release();
+}
+
+/*
+        The loop's keeping of a key the input thread sent itself (its note, in the ring's order): what compositor_key and compositor_wl_key
+        keep of a key a client's window was given (the moon's hand, the key trace, the on-screen keyboard's last input, the keys down and the
+        window they went to, the clipboard's gesture), the shim's (wayland_key_noted: the keys down, the serial among the client's), and
+        what any read of a device keeps (the idle clock, the card's wake, the processor's hold).
+*/
+static void compositor_wl_key_noted(unsigned int at, unsigned int code, int value, unsigned long serial, int row, positive stamp)
+{
+        positive now = clock_monotonic_nanoseconds();
+        unsigned char mask = (unsigned char)(1u << (code & 7)), *down = &compositor.keys_down[(code & 255) >> 3];
+
+        taskbar_moon_seen(now);
+        if (value == 1)
+        {
+                compositor_keytrace_read(code, stamp, now);
+                if (at < COMPOSITOR_INPUTS && (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD))
+                        compositor.osk_typed = 1;
+                if (compositor.keys_to != row)
+                        compositor_keys_release();
+                *down |= mask;
+                compositor.keys_to = row;
+                compositor_clip_gesture(row);
+        }
+        else
+                *down &= (unsigned char)~mask;
+        wayland_key_noted(row, code, value, serial);
+        if (value == 1)
+                compositor_keytrace_sent(row);
+        compositor_wl_input();
+#ifdef MOONWATER_GPU_C
+        compositor_gpu_wake();
+#endif
+        compositor_hold_touch(now);
+}
+
+// The thread's send of the bytes of one event to a client (under the lock): 1 when they went, whole or in part (the loop sends the rest).
+static int compositor_wl_direct_bytes(int slot, int fd, const unsigned char *bytes, unsigned int length)
+{
+        long got = compositor_call(syscall(sendto), (positive)fd, (positive)bytes, length, 0x40 | 0x4000, 0, 0); // MSG_DONTWAIT | MSG_NOSIGNAL
+
+        if (got > 0 && got < (long)length)
+        {
+                compositor_wl_direct.rest_length = length - (unsigned int)got, compositor_wl_direct.rest_slot = slot;
+                memory_copy(compositor_wl_direct.rest, bytes + got, compositor_wl_direct.rest_length);
+        }
+        return got > 0;
+}
+
+// The lock taken by the thread: waited for some 20 us at the most (COMPOSITOR_WL_DIRECT_TRIES); 0 when the event is the loop's.
+static int compositor_wl_direct_try(void)
+{
+        for (unsigned int tries = 0; __atomic_exchange_n(&compositor_wl_direct.lock, 1u, __ATOMIC_ACQUIRE); tries++)
+        {
+                if (tries == COMPOSITOR_WL_DIRECT_TRIES)
+                        return 0;
+                COMPOSITOR_WL_SPIN();
+        }
+        return 1;
+}
+
+/*
+        The thread's send of a key to the window that has the keys (compositor_reader_key): wl_keyboard.key (event 3: serial, time, key,
+        state) to each of its keyboards, the words wayland_key sends, with a serial of the client's own count. 1 with the serial and the row
+        when it went, 0 when the key is the loop's (no window of a client's has the keys as made, the key is refused with the modifiers
+        held, the lock is the loop's, a rest of a send is still out, a release whose press went to another window: to, -1 for a press).
+*/
+static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to)
+{
+        unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 24];
+        unsigned int length = 0, time;
+        int sent;
+
+        if (code >= 256 || !compositor_wl_direct_try())
+                return 0;
+        if (!compositor_wl_direct.keys_valid || compositor_wl_direct.rest_length || (to >= 0 && to != compositor_wl_direct.keys_row) ||
+            (compositor_wl_direct.keys_refused[code >> 3] >> (code & 7) & 1))
+        {
+                __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
+                return 0;
+        }
+        *serial = __atomic_add_fetch(compositor_wl_direct.keys_serial, 1, __ATOMIC_RELAXED);
+        *row = compositor_wl_direct.keys_row;
+        time = (unsigned int)(clock_monotonic_nanoseconds() / 1000000ull);
+        for (long at = 0; at < compositor_wl_direct.keys_count; at++)
+        {
+                unsigned int words[6] = {compositor_wl_direct.keys_ids[at], 24u << 16 | 3u, (unsigned int)*serial, time, code, pressed ? 1u : 0u};
+
+                memory_copy(bytes + length, words, sizeof words);
+                length += sizeof words;
+        }
+        sent = compositor_wl_direct_bytes(compositor_wl_direct.keys_slot, compositor_wl_direct.keys_fd, bytes, length);
+        __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
+        return sent;
 }
 
 // The reader's send of one report: 1 when it went (or went in part, the loop finishing it), 0 when it is the loop's to send.
@@ -6508,12 +6654,8 @@ static int compositor_wl_direct_send(long dx, long dy, positive micro)
 
         // The loop holds the lock for a send to this client or a change of what is read here, microseconds: waited for that long at the most
         // (a loop this thread took the processor from cannot let go of it), then the report is the loop's.
-        for (unsigned int tries = 0; __atomic_exchange_n(&compositor_wl_direct.lock, 1u, __ATOMIC_ACQUIRE); tries++)
-        {
-                if (tries == COMPOSITOR_WL_DIRECT_TRIES)
-                        return 0;
-                COMPOSITOR_WL_SPIN();
-        }
+        if (!compositor_wl_direct_try())
+                return 0;
         // What the loop has queued for the client and not sent (a frame's done, a buffer's release) is not in front of the report: it is
         // of other objects, and the loop's input for it is all sent (compositor_reader_settle says so only then).
         if (!compositor_wl_direct.valid || compositor_wl_direct.rest_length)
@@ -6541,14 +6683,9 @@ static int compositor_wl_direct_send(long dx, long dy, positive micro)
                 memory_copy(bytes + length, words, sizeof words);
                 length += sizeof words;
         }
-        got = compositor_call(syscall(sendto), (positive)compositor_wl_direct.fd, (positive)bytes, length, 0x40 | 0x4000, 0, 0); // MSG_DONTWAIT | MSG_NOSIGNAL
-        if (got > 0 && got < (long)length)
-        {
-                compositor_wl_direct.rest_length = length - (unsigned int)got;
-                memory_copy(compositor_wl_direct.rest, bytes + got, compositor_wl_direct.rest_length);
-        }
+        got = compositor_wl_direct_bytes(compositor_wl_direct.slot, compositor_wl_direct.fd, bytes, length);
         __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
-        return got > 0;
+        return (int)got;
 }
 
 static int compositor_wl_direct_clean(void)
@@ -6561,7 +6698,7 @@ static int compositor_wl_direct_rest(long slot)
 {
         long got;
 
-        if (!compositor_wl_direct.rest_length || compositor_wl_direct.slot != slot)
+        if (!compositor_wl_direct.rest_length || compositor_wl_direct.rest_slot != slot)
                 return 1;
         got = compositor_call(syscall(sendto), (positive)compositor_wl.fd[slot], (positive)compositor_wl_direct.rest, compositor_wl_direct.rest_length,
                               0x40 | 0x4000, 0, 0);
@@ -6577,7 +6714,11 @@ static void compositor_wl_drop(long slot)
 {
         compositor_wl_direct_hold();
         if (compositor_wl_direct.slot == slot)
-                compositor_wl_direct.valid = 0, compositor_wl_direct.rest_length = 0;
+                compositor_wl_direct.valid = 0;
+        if (compositor_wl_direct.keys_slot == slot)
+                compositor_wl_direct.keys_valid = 0;
+        if (compositor_wl_direct.rest_slot == slot)
+                compositor_wl_direct.rest_length = 0;
         if (compositor_wl.fd[slot] >= 0)
                 system_close(compositor_wl.fd[slot]);
         compositor_wl.fd[slot] = -1;
@@ -6714,7 +6855,9 @@ static void compositor_wl_flush_held(long slot);
 static void compositor_wl_flush(long slot)
 {
         // Only the socket the input thread sends to is shared with it; a hold it does not know of yet is made known at the next send.
-        if (!compositor_reader.on || (compositor_wl_direct.valid ? compositor_wl_direct.slot != slot : !compositor_wl_locked()))
+        if (!compositor_reader.on || ((compositor_wl_direct.valid ? compositor_wl_direct.slot != slot : !compositor_wl_locked()) &&
+                                      (compositor_wl_direct.keys_valid ? compositor_wl_direct.keys_slot != slot : wayland.keyboard_row < 0) &&
+                                      compositor_wl_direct.rest_slot != slot))
         {
                 compositor_wl_flush_held(slot);
                 return;
@@ -6722,9 +6865,10 @@ static void compositor_wl_flush(long slot)
         compositor_wl_direct_hold();
         if (compositor_wl_direct_rest(slot))
                 compositor_wl_flush_held(slot);
-        // What the reader sends to, made again as the loop sends: a delete_id of one of its ids is in this flush when one was destroyed.
-        if (compositor_reader.on && (!compositor_wl_direct.valid || compositor_wl_direct.slot == slot))
-                compositor_wl_direct_make();
+        // What the reader sends to, made again as the loop sends: a delete_id of one of its ids, a leave of the keys, is in this flush
+        // when there was one.
+        compositor_wl_direct_make();
+        compositor_wl_direct_keys_make();
         compositor_wl_direct_release();
 }
 

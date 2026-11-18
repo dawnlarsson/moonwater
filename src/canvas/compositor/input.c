@@ -4325,7 +4325,10 @@ static void compositor_input_dropped(unsigned int at, positive now)
 #define COMPOSITOR_READER_RING 8192 // records: at 8000 reports a second of two records each, half a second of a loop that does not come
 #define COMPOSITOR_READER_PRIORITY 2
 #define COMPOSITOR_READER_NOTE_NS 50000000ull
+#define COMPOSITOR_READER_NOTE_DELAY_NS 16000000ull // a sent key's note waits a frame for a knock of its own (any turn takes it before)
 #define COMPOSITOR_READER_GONE 0xffffu // a record's type that says its device's read failed
+#define COMPOSITOR_READER_NOTE 0xfffeu // a record's type that says the reader sent a key itself: code, value, the serial (seconds), its
+                                       // device's microsecond (microseconds), the row (generation), for the loop to keep as its own send
 
 struct compositor_reader_record
 {
@@ -4345,12 +4348,16 @@ static struct
         unsigned int changes;        // the loop's count of device changes, which the reader's set is taken again for
         unsigned int knocked;        // the knock is written and not yet read
         unsigned long long handed;   // records the reader put in the ring
-        unsigned long long taken;    // records the loop has acted on, and whose answer to a client has gone out
-        unsigned long long reading;  // the loop's place in the ring, taken when its turn's sends are done (compositor_reader_settle)
+        unsigned long long reading;  // the loop's place in the ring
+        unsigned long long handed_out, reading_out; // of those, the ones but notes: what the loop sends to a client
+        unsigned long long taken;    // reading_out once the loop's sends of its turn are done (compositor_reader_settle)
         unsigned long long direct, noted; // reports the reader sent itself, and their count the loop last took
         unsigned long long note_at;  // when the reader last knocked for its direct sends
         unsigned long long late, late_most; // its sends 100 us and more after the device's stamp, and the latest (us)
+        unsigned long long keys;     // keys it sent itself
+        unsigned long long note_due; // when the loop is knocked for the notes of keys sent (0: none waits)
         unsigned int dropped;        // a record the ring had no room for, to be said as SYN_DROPPED
+        int down[256];               // a key the reader sent pressed itself: the row it went to, and one (0: none)
         unsigned int generation[COMPOSITOR_INPUTS];
         struct compositor_reader_record ring[COMPOSITOR_READER_RING];
 } compositor_reader = {0, -1, -1, -1};
@@ -4375,6 +4382,9 @@ static int compositor_reader_running(void)
 #ifdef CONFIG_MOONWATER_WAYLAND
 static int compositor_wl_direct_send(long dx, long dy, positive micro); // wayland_host.c: a locked pointer's report sent from the reader
 static int compositor_wl_direct_clean(void); // wayland_host.c: nothing of the loop's is left queued for the client the reader sends to
+static int compositor_wl_direct_key(unsigned int code, int pressed, unsigned long *serial, int *row, int to); // a key sent from the reader
+static void compositor_wl_key_noted(unsigned int at, unsigned int code, int value, unsigned long serial, int row, positive stamp);
+static void compositor_wl_direct_publish(void); // what the reader sends to, made again from the loop's state
 #endif
 
 static void compositor_reader_knock(void)
@@ -4402,31 +4412,74 @@ static void compositor_reader_put(unsigned int at, unsigned int generation, cons
                 memory_zero(record, sizeof *record);
                 record->raw.type = COMPOSITOR_EV_SYN, record->raw.code = COMPOSITOR_SYN_DROPPED;
                 record->at = compositor_reader.dropped - 1, record->generation = __atomic_load_n(&compositor_reader.generation[record->at], __ATOMIC_ACQUIRE);
-                compositor_reader.dropped = 0;
+                compositor_reader.dropped = 0, compositor_reader.handed_out++;
         }
         record = &compositor_reader.ring[handed++ % COMPOSITOR_READER_RING];
         record->raw = *raw, record->at = at, record->generation = generation;
+        compositor_reader.handed_out += raw->type != COMPOSITOR_READER_NOTE;
         __atomic_store_n(&compositor_reader.handed, handed, __ATOMIC_SEQ_CST);
 }
 
 // A locked pointer's report (only relative counts of x and y, scan codes, and its end) sent by the reader itself: the device is a mouse
 // the hand moves (no pad, no touch screen, no wake-only device), the loop has taken every record handed it and sent what they made, and the
 // client's queue is empty (compositor_wl_direct_send).
+#ifdef CONFIG_MOONWATER_WAYLAND
+/*
+        A key's report sent by the reader itself to the window that has the keys (compositor_wl_direct_key says when it may be: a client's
+        window, no modifier but Shift held, a key that is not a modifier, a lock, a volume key or a chord the script binds), and a note of it
+        handed to the loop, which keeps it as its own send of the key (compositor_wl_key_noted). A release goes so only after a press that
+        went so, to the same window; a repeat of such a press is no event (the client repeats the key at the rate it was told).
+*/
+static int compositor_reader_key(unsigned int at, unsigned int code, int value, positive micro)
+{
+        struct compositor_input_event note = {0, 0, COMPOSITOR_READER_NOTE, 0, 0};
+        unsigned long serial = 0;
+        int row = -1;
+
+        if (code >= 256)
+                return 0;
+        if (value == 2)
+                return compositor_reader.down[code] != 0;
+        if (!value && !compositor_reader.down[code])
+                return 0;
+        if (!compositor_wl_direct_key(code, value, &serial, &row, value ? -1 : compositor_reader.down[code] - 1))
+        {
+                compositor_reader.down[code] = 0;
+                return 0;
+        }
+        compositor_reader.down[code] = value ? row + 1 : 0, compositor_reader.keys++;
+        note.seconds = (long)serial, note.microseconds = (long)micro, note.code = (unsigned short)code, note.value = value;
+        compositor_reader_put(at, (unsigned int)row, &note);
+        // The loop is knocked for the note a moment later (COMPOSITOR_READER_NOTE_DELAY_NS), or with the next record it is handed: a loop
+        // woken with the key takes the processor the client is woken on (both are the loop's and the client's to share), and its keeping
+        // of a sent key waits for nothing.
+        if (!compositor_reader.note_due)
+                compositor_reader.note_due = clock_monotonic_nanoseconds() + COMPOSITOR_READER_NOTE_DELAY_NS;
+        return 1;
+}
+#endif
+
 static int compositor_reader_direct(unsigned int at, const struct compositor_input_event *raw, unsigned int count)
 {
 #ifdef CONFIG_MOONWATER_WAYLAND
         long dx = 0, dy = 0;
+        int key = -1, value = 0;
 
         if (compositor.touchpad[at] || compositor.touchscreen[at] || compositor.wakeonly[at] ||
-            __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) != compositor_reader.handed || compositor_reader.dropped)
+            __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) != compositor_reader.handed_out || compositor_reader.dropped)
                 return 0;
         for (unsigned int k = 0; k < count; k++)
                 if (raw[k].type == COMPOSITOR_EV_REL && raw[k].code == COMPOSITOR_REL_X)
                         dx += raw[k].value;
                 else if (raw[k].type == COMPOSITOR_EV_REL && raw[k].code == COMPOSITOR_REL_Y)
                         dy += raw[k].value;
+                else if (raw[k].type == COMPOSITOR_EV_KEY && raw[k].code < 256 && key < 0)
+                        key = raw[k].code, value = raw[k].value;
                 else if (raw[k].type != 4u && !(raw[k].type == COMPOSITOR_EV_SYN && raw[k].code == 0)) // EV_MSC; SYN_REPORT
                         return 0;
+        if (key >= 0)
+                return !dx && !dy && compositor_reader_key(at, (unsigned int)key, value,
+                                                          (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds);
         positive micro = (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds, late;
 
         if ((!dx && !dy) || !compositor_wl_direct_send(dx, dy, micro))
@@ -4490,7 +4543,21 @@ static fn compositor_reader_run(address_any context)
                         changes = __atomic_load_n(&compositor_reader.changes, __ATOMIC_ACQUIRE);
                         compositor_reader_sync(watched, generations, &count);
                 }
-                got = (long)system_call_6(syscall(epoll_pwait2), (positive)compositor_reader.set, (positive)ready, 16, 0, 0, 0);
+                // A note waiting for its knock bounds the wait; one due is knocked for.
+                {
+                        long wait[2] = {0, 0};
+                        positive now = compositor_reader.note_due ? clock_monotonic_nanoseconds() : 0;
+
+                        if (compositor_reader.note_due && now >= compositor_reader.note_due)
+                        {
+                                compositor_reader.note_due = 0;
+                                compositor_reader_knock();
+                        }
+                        if (compositor_reader.note_due)
+                                wait[1] = (long)(compositor_reader.note_due - now);
+                        got = (long)system_call_6(syscall(epoll_pwait2), (positive)compositor_reader.set, (positive)ready, 16,
+                                                  compositor_reader.note_due ? (positive)wait : 0, 0, 0);
+                }
                 for (long k = 0; k < got; k++)
                 {
                         unsigned int at = (unsigned int)ready[k].data;
@@ -4534,7 +4601,7 @@ static fn compositor_reader_run(address_any context)
                                         break;
                         }
                         if (put)
-                                compositor_reader_knock();
+                                compositor_reader.note_due = 0, compositor_reader_knock();
                 }
                 // The loop told of the reports sent here, once in a while: what a report keeps (the idle clock, the processor's hold, the card).
                 if (__atomic_load_n(&compositor_reader.direct, __ATOMIC_ACQUIRE) != __atomic_load_n(&compositor_reader.noted, __ATOMIC_ACQUIRE))
@@ -4590,13 +4657,23 @@ static void compositor_reader_take(void)
                 unsigned int device = first->at, generation = first->generation, count = 0;
                 int moved = 0;
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // A key the reader sent itself: kept as the loop's own send of it.
+                if (first->raw.type == COMPOSITOR_READER_NOTE)
+                {
+                        compositor_wl_key_noted(first->at, first->raw.code, first->raw.value, (unsigned long)first->raw.seconds, (int)first->generation,
+                                                (positive)first->raw.microseconds * 1000ull);
+                        at++;
+                        continue;
+                }
+#endif
                 while (at < handed && count < 64)
                 {
                         const struct compositor_reader_record *record = &compositor_reader.ring[at % COMPOSITOR_READER_RING];
 
-                        if (record->at != device || record->generation != generation)
+                        if (record->at != device || record->generation != generation || record->raw.type == COMPOSITOR_READER_NOTE)
                                 break;
-                        raw[count++] = record->raw, at++;
+                        raw[count++] = record->raw, at++, compositor_reader.reading_out++;
                         if (record->raw.type == COMPOSITOR_READER_GONE)
                                 break;
                 }
@@ -4640,13 +4717,16 @@ static void compositor_reader_take(void)
 // The loop's sends of its turn are out (compositor_wl_wake_input): what it took of the ring is taken, and the reader may send again.
 static void compositor_reader_settle(void)
 {
+        if (!compositor_reader.on)
+                return;
 #ifdef CONFIG_MOONWATER_WAYLAND
-        // A send that did not all go (the client's socket full) leaves the loop's input for it queued: the reader waits for the rest to go.
-        if (compositor_reader.on && compositor_wl_direct_clean())
-#else
-        if (compositor_reader.on)
+        // What the reader sends to made again: the turn's keys move the modifiers, the keys' window and what they hold. A send that did not
+        // all go (the client's socket full) leaves the loop's input for it queued: the reader waits for the rest to go.
+        compositor_wl_direct_publish();
+        if (!compositor_wl_direct_clean())
+                return;
 #endif
-                __atomic_store_n(&compositor_reader.taken, compositor_reader.reading, __ATOMIC_RELEASE);
+        __atomic_store_n(&compositor_reader.taken, compositor_reader.reading_out, __ATOMIC_RELEASE);
 }
 
 /*

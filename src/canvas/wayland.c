@@ -1718,13 +1718,13 @@ static long wayland_find(struct wayland_client *c, unsigned long id, long iface)
 
 static inline unsigned long wayland_serial(struct wayland_client *c)
 {
-        return ++c->serial;
+        return __atomic_add_fetch(&c->serial, 1, __ATOMIC_RELAXED); // the input thread takes a key's serial too (compositor_wl_direct_key)
 }
 
 // The serial of an input event sent to a client, kept among the last few: a selection is set by naming one.
 static unsigned long wayland_input_serial(struct wayland_client *c)
 {
-        unsigned long serial = ++c->serial;
+        unsigned long serial = __atomic_add_fetch(&c->serial, 1, __ATOMIC_RELAXED);
 
         c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)serial;
         return serial;
@@ -9369,6 +9369,49 @@ WAYLAND_API long wayland_pointer_direct(long row, unsigned int *relative, long *
         }
         *scale120 = s->scale120;
         return *relatives ? c->slot + 1 : 0;
+}
+
+/*
+        What the input thread needs to send a key to the window that has the keys itself, as wayland_key would send it: the ids of row's
+        client's keyboards and where its serials are counted (taken there atomically, as wayland_serial takes them); the client's slot and
+        one, or 0 when a key would not be sent so (no host, row not the keyboard's, no surface, a drag, no keyboard, more than room).
+*/
+WAYLAND_API long wayland_keyboard_direct(long row, unsigned int *ids, long *count, long room, unsigned long **serial)
+{
+        struct wayland_client *c;
+        long *slots, made;
+
+        *count = 0;
+        if (!wayland.host || row != wayland.keyboard_row || !wayland_row_surface(row, &c) || wayland_dragging())
+                return 0;
+        made = wayland_seats(c, WLI_wl_keyboard, &slots);
+        if (!made || made > room)
+                return 0;
+        for (long at = 0; at < made; at++)
+                ids[at] = (unsigned int)c->objects[slots[at]].id;
+        *count = made;
+        *serial = &c->serial;
+        return c->slot + 1;
+}
+
+// A key the input thread sent itself (wayland_keyboard_direct), kept as wayland_key keeps one: the keys down, and its serial among the
+// client's input serials (a selection or a popup names one).
+WAYLAND_API void wayland_key_noted(long row, long code, long pressed, unsigned long serial)
+{
+        struct wayland_client *c;
+
+        if (!wayland.host || code < 1 || code > 0x2ff)
+                return;
+        if (code < 128)
+        {
+                if (pressed)
+                        wayland.keys[code >> 3] |= (unsigned char)(1u << (code & 7));
+                else
+                        wayland.keys[code >> 3] &= (unsigned char)~(1u << (code & 7));
+        }
+        if (row != wayland.keyboard_row || !wayland_row_surface(row, &c))
+                return;
+        c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)serial;
 }
 
 // A count of the hand's in the wire's fixed point at a surface's scale (wayland_fixed's), for a sender that is not the loop.

@@ -2809,6 +2809,59 @@ static void check_compositor_hover(void)
         compositor.input_count = 0;
         system_close(device[1]);
     }
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+    /* The input thread's own sends (compositor_wl_direct_send, compositor_reader_key), to a socket pair that stands for the client: a
+       locked pointer's report is relative_motion to each relative pointer and a frame to each pointer of version 5, in the wire's words;
+       a key is wl_keyboard.key with the client's next serial, its note is handed to the loop, its repeat is no event and its release goes
+       the same way; a key refused with what is held (Shift, a modifier) and a release whose press was not sent so are the loop's. */
+    {
+        int pair[2] = {-1, -1};
+        unsigned int got[16];
+        unsigned long serial = 41;
+        long bytes;
+        b32 motion, key, noted, repeat, release, refused, unsent;
+        unsigned long long handed;
+
+        if (system_call_4(syscall(socketpair), 1, 1 | O_NONBLOCK, 0, (positive)pair))
+        {
+            check("input: the client's socket pair is made", false);
+            return;
+        }
+        compositor_wl_direct.valid = 1, compositor_wl_direct.slot = 0, compositor_wl_direct.fd = pair[0], compositor_wl_direct.scale120 = 120;
+        compositor_wl_direct.relatives = 1, compositor_wl_direct.relative[0] = 9, compositor_wl_direct.framed = 1, compositor_wl_direct.frames[0] = 5;
+        compositor_wl_direct.rest_length = 0;
+        motion = compositor_wl_direct_send(3, -2, 0x100000002ull) == 1;
+        bytes = (long)system_read_once(pair[1], got, sizeof got);
+        motion = motion && bytes == 40 && got[0] == 9 && got[1] == (32u << 16) && got[2] == 1 && got[3] == 2 && got[4] == (unsigned int)wayland_fixed_of(3, 120) &&
+                 got[5] == (unsigned int)wayland_fixed_of(-2, 120) && got[6] == got[4] && got[7] == got[5] && got[8] == 5 && got[9] == (8u << 16 | 5u);
+        compositor_wl_direct.valid = 0;
+        compositor_wl_direct.keys_valid = 1, compositor_wl_direct.keys_slot = 0, compositor_wl_direct.keys_fd = pair[0], compositor_wl_direct.keys_row = 1;
+        compositor_wl_direct.keys_count = 1, compositor_wl_direct.keys_ids[0] = 12, compositor_wl_direct.keys_serial = &serial;
+        memory_zero(compositor_wl_direct.keys_refused, sizeof compositor_wl_direct.keys_refused);
+        compositor_wl_direct.keys_refused[42 >> 3] |= (unsigned char)(1u << (42 & 7));
+        memory_zero(compositor_reader.down, sizeof compositor_reader.down);
+        handed = compositor_reader.handed;
+        key = compositor_reader_key(0, 30, 1, 77);
+        bytes = (long)system_read_once(pair[1], got, sizeof got);
+        key = key && bytes == 24 && got[0] == 12 && got[1] == (24u << 16 | 3u) && got[2] == 42 && got[4] == 30 && got[5] == 1 && serial == 42;
+        noted = compositor_reader.handed == handed + 1 && compositor_reader.ring[handed % COMPOSITOR_READER_RING].raw.type == COMPOSITOR_READER_NOTE &&
+                compositor_reader.ring[handed % COMPOSITOR_READER_RING].raw.code == 30 && compositor_reader.ring[handed % COMPOSITOR_READER_RING].raw.seconds == 42 &&
+                compositor_reader.ring[handed % COMPOSITOR_READER_RING].generation == 1;
+        repeat = compositor_reader_key(0, 30, 2, 78) && system_read_once(pair[1], got, sizeof got) < 0;
+        release = compositor_reader_key(0, 30, 0, 79) && system_read_once(pair[1], got, sizeof got) == 24 && got[4] == 30 && got[5] == 0 && got[2] == 43;
+        refused = !compositor_reader_key(0, 42, 1, 80) && system_read_once(pair[1], got, sizeof got) < 0;
+        unsent = !compositor_reader_key(0, 31, 0, 81) && system_read_once(pair[1], got, sizeof got) < 0;
+        check("input: the thread's own send of a locked pointer's report is relative_motion and a frame, in the wire's words", motion);
+        check("input: the thread's own send of a key is wl_keyboard.key with the client's next serial, and its note goes to the loop", key && noted);
+        check("input: a repeat of a key the thread sent is no event, and its release goes the same way", repeat && release);
+        check("input: a key refused with what is held, and a release whose press the thread did not send, are the loop's", refused && unsent);
+        compositor_wl_direct.keys_valid = 0;
+        compositor_reader.note_due = 0;
+        compositor_reader.reading = compositor_reader.handed, compositor_reader.reading_out = compositor_reader.handed_out;
+        system_close(pair[0]), system_close(pair[1]);
+    }
+#endif
 }
 
 /*

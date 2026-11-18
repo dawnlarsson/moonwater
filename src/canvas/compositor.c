@@ -2859,7 +2859,9 @@ static void compositor_inputs_turn(const struct compositor_poll *wanted)
         compositor_sling_only = 1, compositor_sling_sent = 0;
         if (compositor_reader.on)
         {
-                if (wanted[0].returned)
+                // The knock, or records handed and not yet knocked for (a sent key's note waits for its knock): taken before the turn reads a
+                // client's requests, which may name the key's serial (a selection, a popup).
+                if (wanted[0].returned || __atomic_load_n(&compositor_reader.handed, __ATOMIC_ACQUIRE) != compositor_reader.reading)
                         compositor_reader_take();
         }
         else
@@ -3912,9 +3914,10 @@ static b32 compositor_main()
                       compositor.recomposed);
         if (compositor_reader.on)
                 string_format(log, "compositor: the input thread sent %p reports itself (%p of them 100 us or more after the device's stamp, the "
-                                   "latest %p us) and handed %p records to the loop\n",
+                                   "latest %p us) and %p keys, and handed %p records to the loop\n",
                               (positive)__atomic_load_n(&compositor_reader.direct, __ATOMIC_ACQUIRE), (positive)compositor_reader.late,
-                              (positive)compositor_reader.late_most, (positive)__atomic_load_n(&compositor_reader.handed, __ATOMIC_ACQUIRE));
+                              (positive)compositor_reader.late_most, (positive)compositor_reader.keys,
+                              (positive)__atomic_load_n(&compositor_reader.handed, __ATOMIC_ACQUIRE));
         for (unsigned int which = 0; which < 3; which++)
                 string_format(log, "compositor: %s: %p, on average %p us, worst %p us\n",
                               which == 0 ? "pointer to the plane" : which == 1 ? "pointer to the frame" : "key to the window",
