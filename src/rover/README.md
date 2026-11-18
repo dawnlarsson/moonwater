@@ -433,6 +433,13 @@ alone; the runner looks at the directory and the file each time it runs one
 (the file regular, root's, written by root alone, not a link), and runs
 nothing from a directory that fails.
 
+**The link's files grant is root.** A peer granted `files` can push any
+file root has, and a file pushed over anything root runs is a command, so
+the grant is as powerful as `shell`. The link leaves `/root/rules`,
+`/lib/moonwater` and `/run/moonwater` out of what it pushes and pulls,
+with its own files, as a guard against a push that lands there by
+accident; it does not keep a peer with `files` from root.
+
 **What root runs is the rule file's own words.** The runner is root, and an
 event's fields and the desktop's states are what other programs say: a
 Wayland client chooses its app id, a USB device its vendor and a keyboard
@@ -567,8 +574,8 @@ group or others, not a link, and at most 64 KiB; the count of loads,
 `/root/rules/scripts/NAME`, else the image's
 `/lib/moonwater/rules/scripts/NAME`, which the runner runs as root: each
 directory and file is looked at as the script is run (Safety). The link
-keeps `/root/rules`, `/lib/moonwater` and `/run/moonwater` from a peer's
-files.
+leaves `/root/rules`, `/lib/moonwater` and `/run/moonwater` out of its
+files grant as a guard against accidents (Safety: the files grant is root).
 
 ## The kernel
 

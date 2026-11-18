@@ -48,11 +48,13 @@
         is kept under it with its key's suffix, as when it is paired.
 
         The grants: shell is a terminal, run is one command, log follows the
-        kernel log, and files is push and pull of any file root has, which
-        is as good as run -- a file pushed over a script that runs at boot is
-        a command -- bar the link's own: its key, machines, groups, stamps,
-        state, lock and the machine script are never read or written through
-        it.
+        kernel log, and files is push and pull of any file root has. files is
+        root: it is as powerful as shell, since a file pushed over anything
+        root runs is a command, and a person grants it knowing that. A few
+        paths are left out of it (the link's own files, /root/rules,
+        /lib/moonwater and /run/moonwater, link_path_is_own) as a guard
+        against a push that lands somewhere by accident, not to keep a peer
+        with files from root.
 
         The switch, the key and the machines live in /root, beside the
         wireless networks, so install carries them to the disk and wipe keeps

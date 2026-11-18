@@ -172,7 +172,7 @@ static const host_row host_rows[] = {
     {null, "link log NAME", "follow the kernel log of NAME", 'f'},
     {null, "link add NAME KEY [HOST[:PORT]]", "link by key, with no code", 'f'},
     {null, "link remove NAME", "stop knowing it", 'f'},
-    {null, "link allow|deny NAME GRANT...", "shell run log files (any file but the link state)", 'f'},
+    {null, "link allow|deny NAME GRANT...", "shell run log files (files is any file root has, as powerful as shell)", 'f'},
     {null, "link group [NAME [SECRET|-] [allow GRANT...]]", "machines on one network that link themselves", 'f'},
     {null, "link group add NAME:KEY|- [allow GRANT...]", "a group by its key, - reading it from standard input: it is kept in the image, so a machine that starts from it is in the group (every grant unless allow says fewer)", 'f'},
     {null, "link group key [NAME]", "the key of a group as NAME:KEY, which anybody who has it can join with", 'f'},

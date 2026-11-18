@@ -1148,8 +1148,10 @@ static p8 link_part_owned(bipolar handle, p8 address_to path)
         their run actions start), /lib/moonwater (the image's rules and
         scripts) and /run/moonwater (the machine's state as it runs: the kept
         settings, whose exit list runs as root at the stop, the verdict, the
-        pins and the desktop's lines), so a peer with files alone is not to
-        write them, or it would have what only a shell grant gives. The
+        pins and the desktop's lines), left out of the files grant as a guard
+        against a push that lands there by accident. It is no wall: files is
+        root (command.c), and a peer with it can write whatever else root
+        runs. The
         path's parent is opened as the kernel resolves it, then walked up by
         .. to the top, and any step that is a tree protects it: a link to the
         directory, a second name, or a path spelled round one is the same
