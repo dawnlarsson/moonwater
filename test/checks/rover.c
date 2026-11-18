@@ -215,6 +215,35 @@ static const char address_to const rover_canonical[] = {
     "\tplace kernel\n"
     "\tdo poweroff\n",
 
+    "# The session bus, which the desktop's programs need.\n"
+    "service bus\n"
+    "\tabout \"The session bus\"\n"
+    "\trun /sessionbus\n"
+    "\tready /run/moonwater/bus\n"
+    "\tlog /run/moonwater/bus.log\n"
+    "\tif canvas == on\n"
+    "\n"
+    "service compositor\n"
+    "\trun /compositor -u 3 \"two words\"\n"
+    "\tneeds bus\n"
+    "\tready /run/moonwater/windows\n"
+    "\trestart 0s 1s\n"
+    "\tgive-up 3 under 10s\n"
+    "\tif canvas == on and display.count > 0\n"
+    "\n"
+    "service spare\n"
+    "\trun /bin/true\n"
+    "\toff\n"
+    "\n"
+    "rule desktop-rest\n"
+    "\ton service failed compositor\n"
+    "\tdo desktop rest\n"
+    "\n"
+    "rule start-audio\n"
+    "\ton service up bus\n"
+    "\tdo start audio\n"
+    "\tdo restart spare\n"
+    "\n"
     "rule launcher\n"
     "\ton chord super+space\n"
     "\tlimit 250ms\n"
@@ -313,7 +342,20 @@ static const struct
     {"rule a\n\tdo suspend\n", 2, "before the rule's on"},
     {"rule a\n\ton lid close\n\ton lid open\n\tdo suspend\n", 3, "said twice"},
     {"rule A\n\ton lid close\n\tdo suspend\n", 1, "no rule name"},
-    {"\ton lid close\n", 1, "before any rule"},
+    {"\ton lid close\n", 1, "before any rule or service"},
+    {"rule a\n\ton lid close\n\tdo suspend\nservice b\n\trun /b\n", 4, "before its rules"},
+    {"service a\n\tready /x\n", 2, "before the service's run"},
+    {"service a\n\trun b\n", 2, "no absolute path"},
+    {"service a\n\trun /a\n\tneeds b\n", 3, "no service above"},
+    {"service a\n\trun /a\nservice a\n\trun /b\n", 3, "a service above"},
+    {"service a\n\trun /a\n\tready /r\n\tneeds a\n", 4, "out of order"},
+    {"service a\n\trun /a\n\trestart 1s 2s 3s 4s\n", 3, "one to three waits"},
+    {"service a\n\trun /a\n\tgive-up 4 in 30s\n", 3, "give-up LIVES under"},
+    {"service a\n\trun /a\n\tgive-up 40 under 30s\n", 3, "1 to 16 lives"},
+    {"service a\n\trun /a\n\trestart 1.5us\n", 3, "whole milliseconds"},
+    {"service a\n\trun /a\n\tif $app == x\n", 3, "fields are no states"},
+    {"service a\n\tabout \"x\"\n", 0, "no run"},
+    {"service a\n\trun /a\n\tfrob\n", 3, "no service statement"},
     {"on lid close\n", 1, "left edge"},
     {"rule a\n\ton lid close\n\tdo backlight\n", 3, "takes level"},
     {"rule a\n\ton lid close\n\tdo suspend now\n", 3, "takes no argument"},
@@ -629,13 +671,48 @@ static fn rover_check_evaluator(void)
 
         //      The second text: chords, limit, when edges, calls, patterns, weekdays, cues, off.
         check("the second text compiles", rover_compiled(rover_canonical[1]));
+
+        //      Its services: what the runner reads off the record, with no text.
+        {
+                const struct rover_service address_to bus = rover_view.service;
+                const struct rover_service address_to compositor = rover_view.service + 1;
+
+                check("three services", rover_view.head->services == 3);
+                check("a service's policy unless it says other is the script's",
+                      bus->wait_ms[0] == 0 && bus->wait_ms[1] == 500 && bus->wait_ms[2] == 2000 && bus->lives == 4 &&
+                          bus->short_ms == 30000);
+                check("restart 0s 1s waits 1s after the third short life too",
+                      compositor->wait_ms[0] == 0 && compositor->wait_ms[1] == 1000 && compositor->wait_ms[2] == 1000 &&
+                          compositor->lives == 3 && compositor->short_ms == 10000);
+                check("needs is the index of a service above", compositor->need[0] == 0 &&
+                                                                    compositor->need[1] == ROVER_SERVICE_NONE);
+                check("its run is its path and its words",
+                      compositor->count == 4 &&
+                          rover_bytes_are(rover_view.pool + rover_view.argument[compositor->argument].index + 2, 11,
+                                          "/compositor") &&
+                          rover_bytes_are(rover_view.pool + rover_view.argument[compositor->argument + 3].index + 2, 9,
+                                          "two words"));
+                rover_set("canvas", 0, null);
+                check("a service whose if does not hold is not wanted", !rover_service_wanted(&rover_view, 0, rover_pages));
+                rover_set("canvas", 1, null);
+                check("and is when it holds", rover_service_wanted(&rover_view, 0, rover_pages));
+                check("an if over two pages: no screen, not wanted", !rover_service_wanted(&rover_view, 1, rover_pages));
+                rover_set("display.count", 1, null);
+                check("a screen, wanted", rover_service_wanted(&rover_view, 1, rover_pages));
+                check("a service that is off is never wanted", !rover_service_wanted(&rover_view, 2, rover_pages));
+                rover_set("canvas", 0, null);
+                rover_set("display.count", 0, null);
+                struct rover_event failed = rover_event_of("service failed", "compositor");
+                check("a compositor given up rests the desktop, in the runner",
+                      rover_same(rover_fires(&failed, ROVER_RUNNER), "desktop-rest:then"));
+        }
         event = rover_event_of("chord", null);
         event.count = 1;
         event.field[0].number = (b64)ROVER_CHORD_SUPER << 16 | 57;
         check("super+space opens the launcher", rover_same(rover_fires(&event, ROVER_DESKTOP), "launcher:then"));
         event.when += 100000000;
         check("again 100 ms later is inside its limit", rover_same(rover_fires(&event, ROVER_DESKTOP), ""));
-        check("and is counted", rover_runs[0].dropped == 1);
+        check("and is counted", rover_runs[2].dropped == 1); // the launcher, after the two service rules
         event.when += 200000000;
         check("300 ms later is past it", rover_same(rover_fires(&event, ROVER_DESKTOP), "launcher:then"));
         event.field[0].number = (b64)(ROVER_CHORD_CTRL | ROVER_CHORD_ALT) << 16 | 20;

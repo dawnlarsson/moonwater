@@ -15,7 +15,7 @@
 #define ROVER_INCLUDED
 
 #define ROVER_MAGIC 0x52564f52u // "ROVR"
-#define ROVER_VERSION 2u
+#define ROVER_VERSION 3u
 #define ROVER_TABLE_MOST 65536u
 #define ROVER_EVENTS 128u
 #define ROVER_CUE 96u
@@ -118,7 +118,7 @@ struct rover_head
 {
         p32 magic;
         p16 version;
-        p16 flags; // none yet; nonzero is refused
+        p16 services; // the service blocks
         p32 size;
         p32 schema; // ROVER_SCHEMA_HASH of the schema it was compiled against
         p16 rules;
@@ -160,6 +160,41 @@ struct rover_rule
 };
 
 _Static_assert(sizeof(struct rover_rule) == 40, "rover rule");
+
+/*
+        A service: a long-lived program the runner keeps up, with nothing of
+        its text left to read. Its run is a run of the arguments section, the
+        program's path first; ready, log and about are pool words; needs are
+        the services earlier in the table it waits to be up for; the restart
+        policy is the waits after its first, second and third short life and
+        the lives it is given up after; and whether it is wanted is its if
+        lines, comparisons over states like a when rule's.
+*/
+#define ROVER_SERVICE_OFF 1u
+#define ROVER_SERVICE_NONE 0xffu
+#define ROVER_NEEDS 4u
+#define ROVER_SERVICES_MOST 64u
+
+struct rover_service
+{
+        p32 name;          // pool word
+        p32 ready;         // pool word: the path whose being there is the service up; 0, its start is
+        p32 log;           // pool word: where its output goes; 0, the kernel's log
+        p16 argument;      // its run, in the arguments: the program's path, then its words
+        p8 count;
+        p8 flags;          // ROVER_SERVICE_OFF
+        p16 comparison;    // its if lines, in the comparisons
+        p16 comparisons;
+        p8 need[ROVER_NEEDS]; // services earlier in the table it needs up first, ROVER_SERVICE_NONE past the last
+        p8 lives;          // short lives in a row it is given up after
+        p8 pad[3];
+        p32 wait_ms[3];    // the waits before a start after its first, second and third short life; past that, the last
+        p32 short_ms;      // a life shorter than this is short; one this long resets the count
+        p32 about;         // pool word, 0 none
+        p64 reads;         // the states its if lines read
+};
+
+_Static_assert(sizeof(struct rover_service) == 56, "rover service");
 
 struct rover_span
 {
@@ -203,6 +238,8 @@ struct rover_action
 };
 
 _Static_assert(sizeof(struct rover_action) == 8, "rover action");
+
+#define ROVER_NOTE_SERVICE 0x8000u // a note's rule with this bit is the service of the rest
 
 struct rover_note
 {
@@ -302,6 +339,7 @@ struct rover_table
         const struct rover_operand address_to argument;
         const struct rover_note address_to note;
         const p8 address_to pool;
+        const struct rover_service address_to service; // last, so the walker's offsets before it stay
 };
 
 //      What a rule has done since its table was loaded.
@@ -388,6 +426,7 @@ static positive rover_layout(const struct rover_head address_to head, positive a
         positive reach = sizeof(struct rover_head);
 
         at[0] = reach, reach = rover_align8(reach + (positive)head->rules * sizeof(struct rover_rule));
+        at[10] = reach, reach = rover_align8(reach + (positive)head->services * sizeof(struct rover_service));
         at[1] = reach, reach = rover_align8(reach + (positive)head->rules * sizeof(p16));
         at[2] = reach, reach = rover_align8(reach + (positive)head->rules * sizeof(p32));
         at[3] = reach, reach = rover_align8(reach + ROVER_EVENTS * sizeof(struct rover_span));
@@ -1528,6 +1567,100 @@ static const char address_to rover_rule_check(const struct rover_table address_t
         return null;
 }
 
+//      An absolute path's word: a pool string that starts with a slash.
+static bool rover_path_ok(const struct rover_table address_to table, p32 at)
+{
+        return rover_string_ok(table, at, ROVER_WORD_MOST) && table->pool[at + 2] == '/';
+}
+
+/*
+        One service: its words in the pool, its run words and its program a
+        path, its needs only services before it (so needs have no cycle), its
+        policy in range, and its if lines comparisons over states alone.
+*/
+static const char address_to rover_service_check(const struct rover_table address_to table, p32 which)
+{
+        const struct rover_service address_to service = table->service + which;
+        const char address_to why;
+        p16 length;
+
+        if (service->pad[0] || service->pad[1] || service->pad[2] || (service->flags & ~ROVER_SERVICE_OFF))
+                return "a service of no shape";
+        if (!rover_string_ok(table, service->name, ROVER_NAME_MOST))
+                return "a service's name outside the pool";
+        length = memory_load_unaligned(p16, table->pool + service->name);
+        if (!length)
+                return "a service with no name";
+        for (p32 other = 0; other < which; other++)
+        {
+                const struct rover_service address_to before = table->service + other;
+
+                if (memory_load_unaligned(p16, table->pool + before->name) == length &&
+                    !memory_compare(table->pool + before->name + 2, table->pool + service->name + 2, length))
+                        return "two services of one name";
+        }
+        if ((service->ready && !rover_path_ok(table, service->ready)) ||
+            (service->log && !rover_path_ok(table, service->log)) ||
+            (service->about && !rover_string_ok(table, service->about, ROVER_TEXT_MOST)))
+                return "a service's path that is not one, or an about outside the pool";
+        if (!service->count || (positive)service->argument + service->count > table->head->arguments)
+                return "a service with no run, or its run outside the table";
+        for (positive at = 0; at < service->count; at++)
+        {
+                struct rover_operand word = table->argument[service->argument + at];
+
+                if (word.source != ROVER_CONST_WORD || rover_operand_check(table, word, 2, false, false))
+                        return "a service's run that is not words";
+        }
+        if (!rover_path_ok(table, table->argument[service->argument].index))
+                return "a service whose program is not a path";
+        for (positive at = 0; at < ROVER_NEEDS; at++)
+                if (service->need[at] != ROVER_SERVICE_NONE && service->need[at] >= which)
+                        return "a service that needs one that is not before it";
+        if (!service->lives || service->lives > 16 || service->short_ms > ROVER_LIMIT_MOST_MS ||
+            service->wait_ms[0] > 3600000 || service->wait_ms[1] > 3600000 || service->wait_ms[2] > 3600000)
+                return "a service's restart policy out of range";
+        if ((positive)service->comparison + service->comparisons > table->head->comparisons)
+                return "a service's if lines outside the table";
+        if (service->comparisons &&
+            !(table->comparison[service->comparison + service->comparisons - 1].join & ROVER_JOIN_LINE))
+                return "a service whose last comparison does not end its line";
+        for (positive at = 0; at < service->comparisons; at++)
+        {
+                const struct rover_comparison address_to comparison = table->comparison + service->comparison + at;
+
+                if (comparison->a.source == ROVER_FIELD || comparison->b.source == ROVER_FIELD ||
+                    comparison->c.source == ROVER_FIELD)
+                        return "a service's if line that reads an event's field";
+                if ((why = rover_comparison_check(table, comparison, false)))
+                        return why;
+        }
+        return null;
+}
+
+/*
+        Whether a service is wanted now: not off, and its if lines hold over
+        the pages. What the runner asks when a state changes.
+*/
+static bool rover_service_wanted(const struct rover_table address_to table, positive which,
+                                 const p8 address_to const address_to given)
+{
+        const struct rover_service address_to service = table->service + which;
+        const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page,
+                                                  given[1] ? given[1] : rover_zero_page};
+        struct rover_rule rule;
+        struct rover_event none;
+
+        if (service->flags & ROVER_SERVICE_OFF)
+                return false;
+        memory_zero(&rule, sizeof(rule));
+        memory_zero(&none, sizeof(none));
+        rule.comparison = service->comparison;
+        rule.comparisons = service->comparisons;
+        rule.flags = ROVER_RULE_WHEN;
+        return rover_holds(table, &rule, &none, pages) > 0;
+}
+
 /*
         The whole table, before anything reads it. Every count and offset
         inside the table, every section where the counts put it, every
@@ -1540,14 +1673,14 @@ static bool rover_check(const p8 address_to bytes, positive size, struct rover_t
                         struct rover_refusal address_to why)
 {
         const struct rover_head address_to head = (const struct rover_head address_to)bytes;
-        positive at[10];
+        positive at[11];
         positive total = 0;
         p8 seen[ROVER_TABLE_MOST / sizeof(struct rover_rule) / 8 + 1];
 
         if (size < sizeof(struct rover_head) || size > ROVER_TABLE_MOST || ((positive)bytes & 7))
                 return rover_refuse(why, "a table smaller than its head, larger than 64 KiB, or not 8-aligned",
                                     ROVER_NO_RULE, 0);
-        if (head->magic != ROVER_MAGIC || head->version != ROVER_VERSION || head->flags)
+        if (head->magic != ROVER_MAGIC || head->version != ROVER_VERSION || head->services > ROVER_SERVICES_MOST)
                 return rover_refuse(why, "not a rover table of this version", ROVER_NO_RULE, 0);
         if (head->schema != ROVER_SCHEMA_HASH)
                 return rover_refuse(why, "a table of another schema: compile its text again", ROVER_NO_RULE, 0);
@@ -1565,6 +1698,7 @@ static bool rover_check(const p8 address_to bytes, positive size, struct rover_t
         view->argument = (const struct rover_operand address_to)(bytes + at[7]);
         view->note = (const struct rover_note address_to)(bytes + at[8]);
         view->pool = bytes + at[9];
+        view->service = (const struct rover_service address_to)(bytes + at[10]);
 
         //      The pool opens with the empty string, which is what an about of 0 is.
         if (head->pool < 4 || view->pool[0] || view->pool[1] || view->pool[2] || view->pool[3])
@@ -1623,8 +1757,17 @@ static bool rover_check(const p8 address_to bytes, positive size, struct rover_t
         for (positive k = 0; k < head->rules; k++)
                 if (view->key[k] != rover_key_of(view->rule + view->order[k], view->comparison, view->pool))
                         return rover_refuse(why, "a key that is not its rule's", (p32)view->order[k], 0);
+        for (positive k = 0; k < head->services; k++)
+        {
+                const char address_to reason = rover_service_check(view, (p32)k);
+
+                if (reason)
+                        return rover_refuse(why, reason, ROVER_NO_RULE, (p32)k);
+        }
         for (positive k = 0; k < head->notes; k++)
-                if (view->note[k].rule >= head->rules || !rover_string_ok(view, view->note[k].text, ROVER_TEXT_MOST))
+                if (((view->note[k].rule & ROVER_NOTE_SERVICE) ? (view->note[k].rule & ~ROVER_NOTE_SERVICE) >= head->services
+                                                               : view->note[k].rule >= head->rules) ||
+                    !rover_string_ok(view, view->note[k].text, ROVER_TEXT_MOST))
                         return rover_refuse(why, "a note outside the table", ROVER_NO_RULE, (p32)k);
         why->why = null;
         return true;

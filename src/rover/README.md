@@ -144,6 +144,84 @@ already holds fires then.
 An `on` rule whose filter does not match was not fired at all: its `else`
 runs only when the event is its own and an `if` did not hold.
 
+## Services
+
+A service is a long-lived program the runner keeps up: the session bus,
+the sound server, the compositor. It is a block of its own, beside the
+rules, and a file's services come before its rules.
+
+```
+service bus
+	about "The session bus"
+	run /sessionbus
+	ready /run/moonwater/bus
+	log /run/moonwater/bus.log
+	if canvas == on
+
+service compositor
+	run /compositor -u 3
+	needs bus
+	ready /run/moonwater/windows
+	if canvas == on and setting.desktop == on
+
+rule desktop-rest
+	on service failed compositor
+	do desktop rest
+```
+
+| Statement | Meaning |
+|---|---|
+| `service NAME` | A service, named as a rule is, unique among the services loaded together. |
+| `about "TEXT"` | What it is, in a person's words. |
+| `run PATH [WORD ...]` | The program, by its absolute path, and its words, each one argument, none read again by a shell. |
+| `needs NAME ...` | Up to four services above this one, which must be up before it is started. Naming only a service above keeps needs free of cycles. |
+| `ready PATH` | The file or socket whose being there means the service is up. A service with no `ready` is up once it has started. |
+| `log PATH` | Where its output goes; unsaid, the kernel's log, each line its name first. |
+| `restart WAIT [WAIT [WAIT]]` | The waits before it is started again after its first, second and third short life; a wait not said is the one before it. Unsaid, `restart 0s 500ms 2s`. |
+| `give-up LIVES under DURATION` | A life shorter than DURATION is short; LIVES short lives in a row and it is given up, and a life of DURATION or more puts the count back to nothing. Unsaid, `give-up 4 under 30s`. |
+| `off` | Compiled and checked, but never started. |
+| `if CONDITION` | Started while every `if` line holds, over states and settings, never an event's fields; stopped when one stops holding. |
+
+The statements go in that order, each at most once but the `if` lines.
+The policy unsaid is what the machine script's bus, audio and desktop
+supervisors did: start again at once, then after half a second, then
+after two, and give up after four short lives, a run of thirty seconds
+putting the count back.
+
+A service's life is told as events, which rules hear: `service up NAME`
+when it is ready, `service down NAME` when it ended, and `service failed
+NAME` when it was given up. What follows a failure is a rule's, as
+`desktop-rest` above turns the desktop off for the text console, which is
+what the script's desktop supervisor did by hand. The primitives `start
+NAME`, `stop NAME` and `restart NAME` ask the runner for one by its name.
+
+### Readiness and order
+
+`ready` turns waiting into an event. The script polled for a file every
+two thousandths of a second and then every twentieth (`desktop_wait_for`),
+read a line down a FIFO the compositor was handed (`compositor.up`), and
+held the desktop's programs back until boot's verdict (`desktop_settled`);
+a rule says `on service up compositor` instead, and is fired once, when
+the compositor's ready path is there.
+
+The runner keeps this order, so a rule never sees a service half started:
+
+1. A service is started only when its `if` lines hold and every service it
+   `needs` is up; one whose needs are not up waits, and is started the
+   moment the last of them is.
+2. `service up NAME` is posted when NAME's ready path is there, watched by
+   inotify on its directory and not polled, or at its start when it names
+   none. It is posted once a life.
+3. Services that need NAME are started before the rules on `service up
+   NAME` are fired, so a rule hears a service up with what it needs up too.
+4. `service down NAME` is posted when the program ended, before it is
+   started again or given up; `service failed NAME` after the last life,
+   once.
+5. A state that stops a service's `if` stops the service and every service
+   that needs it, dependents first, each waited for (TERM, then KILL after
+   three seconds) before anything that the same change starts is started.
+   That is the stop before start the desktop's hand-over needs.
+
 ## Types
 
 Every state, event field, primitive argument and function parameter has
@@ -365,8 +443,9 @@ checker compares the size it computes with the size the head says.
 
 | Section | Entry | Bytes |
 |---|---|---|
-| head | magic `ROVR`, version 2, flags, size, schema hash, the six counts, the pool's size | 32 |
+| head | magic `ROVR`, version 3, the services' count, size, schema hash, the six counts, the pool's size | 32 |
 | rules | one per rule | 40 each |
+| services | one per service | 56 each |
 | order | the rules' numbers sorted by event, so an event's rules are a run | 2 each |
 | keys | for each slot of order, the number its rule's first filter asks field 0 to be, or `0xffffffff` for any | 4 each |
 | index | for each event id below 128: the first entry of its run in order, and how many | 4 × 128 |
@@ -374,7 +453,7 @@ checker compares the size it computes with the size the head says.
 | calls | a function call: its id, its argument count, four operands | 20 each |
 | actions | a rule's then-actions, then its else-actions, in one run | 8 each |
 | arguments | an action's arguments, as operands | 4 each |
-| notes | a note: its rule, its statement's place, its text | 8 each |
+| notes | a note: its rule (with the top bit, its service), its statement's place, its text | 8 each |
 | pool | constants: numbers as 8 aligned bytes; strings as a length of two bytes, the bytes and a NUL | up to the rest |
 
 **A rule** is its event (0 for a `when` rule), where it runs, its flags
@@ -397,6 +476,15 @@ state, a field, a call, the clock, the weekday), a byte that is the
 state's page or the constant's type, and a 16-bit index: the state's
 offset in its page, the field's number, the call's number or the
 constant's offset in the pool.
+
+**A service** is its name, ready path, log path and about as pool
+words, its run as a run of the arguments (the program's path first, each
+a word), its flags (off), its if lines as a run of comparisons, the
+services it needs as up to four indices of services before it, the lives
+it is given up after, its three waits in milliseconds, the length a life
+must have not to be short, and the states its if lines read as a 64-bit
+mask. Nothing of it is text a runner has to read: it starts the program
+from the words, watches the path, and counts.
 
 **An action** is its kind (`do`, `run`, `tool`, `emit`), who runs it
 (kernel, runner, desktop), its id (the primitive, the tool or the event),

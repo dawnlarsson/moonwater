@@ -41,6 +41,12 @@ event 70 desktop "display removed" connector:word
 # The rules' own event, which emit posts.
 event 96 runner cue name:word
 
+# The runner's word on a service: up when its ready path is there (or it has
+# started, when it names none), down when it ended, failed when it was given up.
+event 97 runner "service up" name:word
+event 98 runner "service down" name:word
+event 99 runner "service failed" name:word
+
 # Moonwater's mechanisms. RUNS is where the call is a direct one.
 primitive 1 kernel any poweroff
 primitive 2 kernel any reboot
@@ -57,6 +63,10 @@ primitive 12 desktop any "display off"
 primitive 13 desktop any "display on"
 primitive 14 desktop any open app:word
 primitive 15 desktop any notify message:text
+primitive 16 runner any start service:word
+primitive 17 runner any stop service:word
+primitive 18 runner any restart service:word
+primitive 19 runner any "desktop rest"
 
 # lib.c's routines with integer arguments, and the values each argument
 # takes: PARAM:LOW:HIGH, by the prototype's names, or total when every value

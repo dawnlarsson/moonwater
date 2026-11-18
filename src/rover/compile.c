@@ -66,6 +66,10 @@ struct rover_build
         struct rover_action action[ROVER_ACTIONS_MOST];
         struct rover_operand argument[ROVER_OPERANDS_MOST];
         struct rover_note note[ROVER_NOTES_MOST];
+        struct rover_service service[ROVER_SERVICES_MOST];
+        p32 services;
+        p8 block;                  // ROVER_BLOCK_*: what the lines at depth 1 belong to
+        struct rover_rule service_rule; // a service's if lines, read as a when rule's
         p64 pool_words[ROVER_POOL_MOST / 8];
         p32 rules, comparisons, calls, actions, arguments, notes, pool;
 
@@ -94,6 +98,15 @@ struct rover_build
         p64 table_words[ROVER_TABLE_MOST / 8];
         positive size;
 };
+
+#define ROVER_BLOCK_NONE 0u
+#define ROVER_BLOCK_RULE 1u
+#define ROVER_BLOCK_SERVICE 2u
+
+//      A service's policy unless it says other: the script's bus, audio and desktop supervisors'.
+#define ROVER_SERVICE_WAITS {0, 500, 2000}
+#define ROVER_SERVICE_LIVES 4u
+#define ROVER_SERVICE_SHORT_MS 30000u
 
 #define ROVER_STAGE_HEADER 0u
 #define ROVER_STAGE_IF 1u
@@ -964,7 +977,9 @@ static bool rover_note_flush(struct rover_build address_to build, p16 slot)
         {
                 if (build->notes == ROVER_NOTES_MOST)
                         return rover_refused(build, "too many notes for one table", null, null);
-                build->note[build->notes].rule = (p16)(build->rules - 1);
+                build->note[build->notes].rule =
+                    build->block == ROVER_BLOCK_SERVICE ? (p16)((build->services - 1) | ROVER_NOTE_SERVICE)
+                                                        : (p16)(build->rules - 1);
                 build->note[build->notes].slot = slot;
                 build->note[build->notes].text = build->pending[at];
                 build->notes++;
@@ -1289,7 +1304,7 @@ static bool rover_rule_finish(struct rover_build address_to build)
 {
         struct rover_rule address_to rule;
 
-        if (!build->rules)
+        if (build->block != ROVER_BLOCK_RULE)
                 return true;
         rule = &build->rule[build->rules - 1];
         if (rule->event == 0 && !(rule->flags & ROVER_RULE_WHEN))
@@ -1327,12 +1342,242 @@ static bool rover_rule_finish(struct rover_build address_to build)
         return true;
 }
 
+// ---- services --------------------------------------------------------------
+
+//      A word of a service's that must be an absolute path: pooled, its offset, or 0 with the reason said.
+static p32 rover_path_word(struct rover_build address_to build, const struct rover_word address_to word)
+{
+        if (word->length < 2 || word->text[0] != '/' || word->length > ROVER_WORD_MOST || rover_find(word->text, 0, word->length))
+                return rover_refused(build, "", word, " is no absolute path of at most 62 bytes"), 0;
+        return rover_pool_string(build, word->text, word->length);
+}
+
+static bool rover_duration_ms(struct rover_build address_to build, const struct rover_word address_to word, b64 most,
+                              p32 address_to into)
+{
+        b64 value;
+
+        if (!rover_literal(build, word, ROVER_TYPE_DURATION, &value))
+                return false;
+        if (value % 1000000 || value / 1000000 > most)
+                return rover_refused(build, "", word, " is not whole milliseconds, or is longer than this takes");
+        *into = (p32)(value / 1000000);
+        return true;
+}
+
+//      A service's statements in their order, the way a rule's header keeps its own.
+static bool rover_service_slot(struct rover_build address_to build, p8 slot)
+{
+        static const char address_to const order =
+            "a service goes about, run, needs, ready, log, restart, give-up, off, then its if lines";
+
+        if (build->stage != ROVER_STAGE_HEADER)
+                return rover_refused(build, "", &build->word[0], " comes before a service's if lines");
+        if (slot <= build->header)
+        {
+                rover_refused(build, "", &build->word[0], slot == build->header ? " is said twice" : " is out of order: ");
+                if (slot != build->header)
+                        rover_why_add(build, order);
+                return false;
+        }
+        if (slot > 2 && build->header < 2)
+                return rover_refused(build, "", &build->word[0], " before the service's run");
+        build->header = slot;
+        return rover_note_flush(build, slot);
+}
+
+static bool rover_service_statement(struct rover_build address_to build)
+{
+        struct rover_service address_to service = &build->service[build->services - 1];
+        const struct rover_word address_to keyword = &build->word[0];
+        b64 value;
+
+        if (rover_is(keyword, "about"))
+        {
+                if (!rover_service_slot(build, 1))
+                        return false;
+                if (build->words != 2 || !rover_literal(build, &build->word[1], ROVER_TYPE_TEXT, &value))
+                        return build->why_used ? false : rover_refused(build, "about takes one text: quote it", null, null);
+                service->about = rover_pool_string(build, build->word[1].text, build->word[1].length);
+                return !build->why_used;
+        }
+        if (rover_is(keyword, "run"))
+        {
+                if (!rover_service_slot(build, 2))
+                        return false;
+                if (build->words < 2)
+                        return rover_refused(build, "run names the program, by its path", null, null);
+                if (build->arguments + build->words - 1 > ROVER_OPERANDS_MOST || build->words - 1 > 255)
+                        return rover_refused(build, "too many words for one table", null, null);
+                service->argument = (p16)build->arguments;
+                service->count = (p8)(build->words - 1);
+                for (positive at = 1; at < build->words; at++)
+                {
+                        struct rover_operand word = {ROVER_CONST_WORD, ROVER_TYPE_WORD, 0};
+                        p32 where = at == 1 ? rover_path_word(build, &build->word[at]) : 0;
+
+                        if (at > 1 && rover_literal(build, &build->word[at], ROVER_TYPE_WORD, &value))
+                                where = rover_pool_string(build, build->word[at].text, build->word[at].length);
+                        if (build->why_used)
+                                return false;
+                        if (!where)
+                                return rover_refused(build, "", &build->word[at], ": a service's words are not empty");
+                        word.index = (p16)where;
+                        build->argument[build->arguments++] = word;
+                }
+                return true;
+        }
+        if (rover_is(keyword, "needs"))
+        {
+                if (!rover_service_slot(build, 3))
+                        return false;
+                if (build->words < 2 || build->words - 1 > ROVER_NEEDS)
+                        return rover_refused(build, "needs names one to four services above", null, null);
+                for (positive at = 1; at < build->words; at++)
+                {
+                        p32 found = ROVER_SERVICE_NONE;
+
+                        for (p32 other = 0; other + 1 < build->services; other++)
+                        {
+                                p16 length = memory_load_unaligned(p16, rover_pool(build) + build->service[other].name);
+
+                                if (length == build->word[at].length &&
+                                    !memory_compare(rover_pool(build) + build->service[other].name + 2, build->word[at].text,
+                                                    length))
+                                        found = other;
+                        }
+                        if (found == ROVER_SERVICE_NONE)
+                                return rover_refused(build, "", &build->word[at], " is no service above this one");
+                        service->need[at - 1] = (p8)found;
+                }
+                return true;
+        }
+        if (rover_is(keyword, "ready") || rover_is(keyword, "log"))
+        {
+                bool ready = rover_is(keyword, "ready");
+
+                if (!rover_service_slot(build, ready ? 4 : 5))
+                        return false;
+                if (build->words != 2)
+                        return rover_refused(build, "", keyword, " takes one path");
+                p32 where = rover_path_word(build, &build->word[1]);
+                if (!where)
+                        return false;
+                *(ready ? &service->ready : &service->log) = where;
+                return true;
+        }
+        if (rover_is(keyword, "restart"))
+        {
+                if (!rover_service_slot(build, 6))
+                        return false;
+                if (build->words < 2 || build->words > 4)
+                        return rover_refused(build, "restart takes one to three waits, after the first, second and third short life", null,
+                                             null);
+                for (positive at = 0; at < 3; at++)
+                        if (!rover_duration_ms(build, &build->word[at + 1 < build->words ? at + 1 : build->words - 1], 3600000,
+                                               &service->wait_ms[at]))
+                                return false;
+                return true;
+        }
+        if (rover_is(keyword, "give-up"))
+        {
+                b64 lives;
+
+                if (!rover_service_slot(build, 7))
+                        return false;
+                if (build->words != 4 || !rover_is(&build->word[2], "under"))
+                        return rover_refused(build, "give-up is give-up LIVES under DURATION", null, null);
+                if (build->word[1].quoted || !rover_literal(build, &build->word[1], ROVER_TYPE_INT, &lives) || lives < 1 ||
+                    lives > 16)
+                        return build->why_used ? false : rover_refused(build, "", &build->word[1], " is not 1 to 16 lives");
+                service->lives = (p8)lives;
+                return rover_duration_ms(build, &build->word[3], ROVER_LIMIT_MOST_MS, &service->short_ms) &&
+                       (service->short_ms ? true : rover_refused(build, "a life of no length is never short", null, null));
+        }
+        if (rover_is(keyword, "off"))
+        {
+                if (!rover_service_slot(build, 8))
+                        return false;
+                if (build->words != 1)
+                        return rover_refused(build, "off takes nothing after it", null, null);
+                service->flags |= ROVER_SERVICE_OFF;
+                return true;
+        }
+        if (rover_is(keyword, "if"))
+        {
+                if (build->header < 2)
+                        return rover_refused(build, "an if before the service's run", null, null);
+                build->stage = ROVER_STAGE_IF;
+                build->event = null;
+                if (!rover_note_flush(build, build->slot++) || !rover_read_condition(build, &build->service_rule, 1))
+                        return false;
+                service->comparisons = build->service_rule.comparisons;
+                service->reads = build->service_rule.reads;
+                return true;
+        }
+        return rover_refused(build, "", keyword,
+                             " is no service statement: about, run, needs, ready, log, restart, give-up, off or if");
+}
+
+static bool rover_block_finish(struct rover_build address_to build)
+{
+        if (build->block == ROVER_BLOCK_SERVICE && !build->service[build->services - 1].count)
+                return rover_refused(build, "a service with no run", null, null);
+        return rover_rule_finish(build);
+}
+
+static bool rover_read_service(struct rover_build address_to build)
+{
+        static const p32 waits[3] = ROVER_SERVICE_WAITS;
+        const struct rover_word address_to name = &build->word[1];
+        struct rover_service address_to service;
+
+        if (!rover_block_finish(build))
+                return false;
+        if (build->rules)
+                return rover_refused(build, "a service after a rule: a file's services come before its rules", null, null);
+        if (build->words != 2 || name->quoted || !name->length || name->length > ROVER_NAME_MOST)
+                return rover_refused(build, "service takes one word, its name", null, null);
+        for (positive at = 0; at < name->length; at++)
+        {
+                p8 c = name->text[at];
+
+                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
+                        return rover_refused(build, "", name, " is no service name: at most 48 bytes of a-z, 0-9, . _ and -");
+        }
+        for (positive at = 0; at < build->services; at++)
+        {
+                p16 length = memory_load_unaligned(p16, rover_pool(build) + build->service[at].name);
+
+                if (length == name->length && !memory_compare(rover_pool(build) + build->service[at].name + 2, name->text, length))
+                        return rover_refused(build, "", name, " is the name of a service above");
+        }
+        if (build->services == ROVER_SERVICES_MOST)
+                return rover_refused(build, "too many services for one table", null, null);
+        service = &build->service[build->services++];
+        memory_zero(service, sizeof(*service));
+        memory_fill(service->need, ROVER_SERVICE_NONE, ROVER_NEEDS);
+        memory_copy(service->wait_ms, waits, sizeof(waits));
+        service->lives = ROVER_SERVICE_LIVES;
+        service->short_ms = ROVER_SERVICE_SHORT_MS;
+        service->comparison = (p16)build->comparisons;
+        service->name = rover_pool_string(build, name->text, name->length);
+        memory_zero(&build->service_rule, sizeof(build->service_rule));
+        build->service_rule.comparison = (p16)build->comparisons;
+        build->block = ROVER_BLOCK_SERVICE;
+        build->stage = ROVER_STAGE_HEADER;
+        build->header = 0;
+        build->slot = 9;
+        build->event = null;
+        return !build->why_used && rover_note_flush(build, 0);
+}
+
 static bool rover_read_rule(struct rover_build address_to build)
 {
         struct rover_rule address_to rule;
         const struct rover_word address_to name = &build->word[1];
 
-        if (!rover_rule_finish(build))
+        if (!rover_block_finish(build))
                 return false;
         if (build->words != 2)
                 return rover_refused(build, "rule takes one word, its name", null, null);
@@ -1361,6 +1606,7 @@ static bool rover_read_rule(struct rover_build address_to build)
         rule->comparison = (p16)build->comparisons;
         rule->action = (p16)build->actions;
         rule->name = rover_pool_string(build, name->text, name->length);
+        build->block = ROVER_BLOCK_RULE;
         build->stage = ROVER_STAGE_HEADER;
         build->header = 0;
         build->want = 0;
@@ -1576,6 +1822,8 @@ static bool rover_split(struct rover_build address_to build, const p8 address_to
 static fn rover_build_reset(struct rover_build address_to build)
 {
         build->rules = build->comparisons = build->calls = build->actions = build->arguments = build->notes = 0;
+        build->services = 0;
+        build->block = ROVER_BLOCK_NONE;
         build->pool = 4;
         memory_zero(build->pool_words, 8);
         build->pendings = 0;
@@ -1598,7 +1846,7 @@ static bool rover_assemble(struct rover_build address_to build)
 {
         p8 address_to table = rover_built(build);
         struct rover_head head;
-        positive at[10];
+        positive at[11];
         p16 count[ROVER_EVENTS];
         struct rover_span address_to index;
         p16 address_to order;
@@ -1615,6 +1863,7 @@ static bool rover_assemble(struct rover_build address_to build)
         head.actions = (p16)build->actions;
         head.arguments = (p16)build->arguments;
         head.notes = (p16)build->notes;
+        head.services = (p16)build->services;
         head.pool = (p32)rover_align8(build->pool);
         build->size = rover_layout(&head, at);
         if (build->size > ROVER_TABLE_MOST)
@@ -1623,6 +1872,7 @@ static bool rover_assemble(struct rover_build address_to build)
         memory_zero(table, build->size);
         memory_copy(table, &head, sizeof(head));
         memory_copy(table + at[0], build->rule, build->rules * sizeof(struct rover_rule));
+        memory_copy(table + at[10], build->service, build->services * sizeof(struct rover_service));
         memory_copy(table + at[4], build->comparison, build->comparisons * sizeof(struct rover_comparison));
         memory_copy(table + at[5], build->call, build->calls * sizeof(struct rover_call));
         memory_copy(table + at[6], build->action, build->actions * sizeof(struct rover_action));
@@ -1723,9 +1973,15 @@ static bool rover_compile(struct rover_build address_to build, const p8 address_
                         continue;
                 if (depth == 0)
                 {
+                        if (rover_is(&build->word[0], "service"))
+                        {
+                                if (!rover_read_service(build))
+                                        return false;
+                                continue;
+                        }
                         if (!rover_is(&build->word[0], "rule"))
                                 return rover_refused(build, "", &build->word[0],
-                                                     " stands at the left edge, where only rule lines stand: indent it with a tab");
+                                                     " stands at the left edge, where only rule and service lines stand: indent it with a tab");
                         if (!rover_read_rule(build))
                                 return false;
                         continue;
@@ -1733,15 +1989,15 @@ static bool rover_compile(struct rover_build address_to build, const p8 address_
                 if (depth > 1)
                         return rover_refused(build, "a line two tabs deep: a rule's statements are one tab deep", null,
                                              null);
-                if (!build->rules)
-                        return rover_refused(build, "a statement before any rule line", null, null);
-                if (!rover_statement(build))
+                if (build->block == ROVER_BLOCK_NONE)
+                        return rover_refused(build, "a statement before any rule or service line", null, null);
+                if (!(build->block == ROVER_BLOCK_SERVICE ? rover_service_statement(build) : rover_statement(build)))
                         return false;
         }
         build->line = 0;
-        if (!rover_rule_finish(build))
+        if (!rover_block_finish(build))
                 return false;
-        if (build->pendings && build->rules && !rover_note_flush(build, ROVER_SLOT_AFTER))
+        if (build->pendings && build->block != ROVER_BLOCK_NONE && !rover_note_flush(build, ROVER_SLOT_AFTER))
                 return false;
         build->pendings = 0;
         return rover_assemble(build);
@@ -1917,15 +2173,119 @@ static fn rover_trigger_put(struct rover_text address_to text, const struct rove
         }
 }
 
+static fn rover_word_put(struct rover_text address_to text, const struct rover_table address_to table, p32 at)
+{
+        p16 length = memory_load_unaligned(p16, table->pool + at);
+
+        rover_literal_put(text, ROVER_TYPE_WORD, 0, table->pool + at + 2, length);
+}
+
+//      A service as the text says it, its policy said only where it is not the script's.
+static fn rover_service_put(struct rover_text address_to text, const struct rover_table address_to table, positive which)
+{
+        static const p32 waits[3] = ROVER_SERVICE_WAITS;
+        const struct rover_service address_to service = table->service + which;
+        p16 owner = (p16)(which | ROVER_NOTE_SERVICE), slot = 9;
+
+        rover_notes_put(text, table, owner, 0, false);
+        rover_puts(text, "service ");
+        rover_pool_put(text, table, service->name);
+        rover_puts(text, "\n");
+        if (service->about)
+        {
+                rover_notes_put(text, table, owner, 1, true);
+                rover_puts(text, "\tabout ");
+                rover_put_quoted(text, table->pool + service->about + 2, memory_load_unaligned(p16, table->pool + service->about));
+                rover_puts(text, "\n");
+        }
+        rover_notes_put(text, table, owner, 2, true);
+        rover_puts(text, "\trun");
+        for (positive at = 0; at < service->count; at++)
+        {
+                rover_puts(text, " ");
+                rover_word_put(text, table, table->argument[service->argument + at].index);
+        }
+        rover_puts(text, "\n");
+        if (service->need[0] != ROVER_SERVICE_NONE)
+        {
+                rover_notes_put(text, table, owner, 3, true);
+                rover_puts(text, "\tneeds");
+                for (positive at = 0; at < ROVER_NEEDS && service->need[at] != ROVER_SERVICE_NONE; at++)
+                {
+                        rover_puts(text, " ");
+                        rover_pool_put(text, table, table->service[service->need[at]].name);
+                }
+                rover_puts(text, "\n");
+        }
+        if (service->ready)
+        {
+                rover_notes_put(text, table, owner, 4, true);
+                rover_puts(text, "\tready ");
+                rover_word_put(text, table, service->ready);
+                rover_puts(text, "\n");
+        }
+        if (service->log)
+        {
+                rover_notes_put(text, table, owner, 5, true);
+                rover_puts(text, "\tlog ");
+                rover_word_put(text, table, service->log);
+                rover_puts(text, "\n");
+        }
+        if (memory_compare(service->wait_ms, waits, sizeof(waits)))
+        {
+                positive said = 3;
+
+                //      The waits after the last one said are that one again, so they are not said.
+                while (said > 1 && service->wait_ms[said - 1] == service->wait_ms[said - 2])
+                        said--;
+                rover_notes_put(text, table, owner, 6, true);
+                rover_puts(text, "\trestart");
+                for (positive at = 0; at < said; at++)
+                {
+                        rover_puts(text, " ");
+                        rover_literal_put(text, ROVER_TYPE_DURATION, (b64)service->wait_ms[at] * 1000000, null, 0);
+                }
+                rover_puts(text, "\n");
+        }
+        if (service->lives != ROVER_SERVICE_LIVES || service->short_ms != ROVER_SERVICE_SHORT_MS)
+        {
+                rover_notes_put(text, table, owner, 7, true);
+                rover_puts(text, "\tgive-up ");
+                rover_put_number(text, service->lives);
+                rover_puts(text, " under ");
+                rover_literal_put(text, ROVER_TYPE_DURATION, (b64)service->short_ms * 1000000, null, 0);
+                rover_puts(text, "\n");
+        }
+        if (service->flags & ROVER_SERVICE_OFF)
+        {
+                rover_notes_put(text, table, owner, 8, true);
+                rover_puts(text, "\toff\n");
+        }
+        for (positive at = service->comparison; at < (positive)service->comparison + service->comparisons;)
+        {
+                rover_notes_put(text, table, owner, slot++, true);
+                rover_puts(text, "\tif ");
+                at = rover_line_put(text, table, null, at, (positive)service->comparison + service->comparisons);
+                rover_puts(text, "\n");
+        }
+        rover_notes_put(text, table, owner, ROVER_SLOT_AFTER, false);
+}
+
 static fn rover_print(struct rover_text address_to text, const struct rover_table address_to table)
 {
+        for (positive which = 0; which < table->head->services; which++)
+        {
+                if (which)
+                        rover_puts(text, "\n");
+                rover_service_put(text, table, which);
+        }
         for (positive number = 0; number < table->head->rules; number++)
         {
                 const struct rover_rule address_to rule = table->rule + number;
                 const struct rover_event_row address_to event = rule->event ? rover_event_find(rule->event) : null;
                 p16 slot = 7;
 
-                if (number)
+                if (number || table->head->services)
                         rover_puts(text, "\n");
                 rover_notes_put(text, table, number, 0, false);
                 rover_puts(text, "rule ");
@@ -2015,6 +2375,37 @@ static fn rover_graph(struct rover_text address_to text, const struct rover_tabl
         static const char address_to const places[ROVER_PLACES] = {"kernel", "runner", "desktop"};
         p8 label_bytes[512];
 
+        for (positive which = 0; which < table->head->services; which++)
+        {
+                const struct rover_service address_to service = table->service + which;
+                struct rover_text label = {label_bytes, 0, sizeof(label_bytes), false};
+
+                for (positive at = 0; at < service->count; at++)
+                {
+                        if (at)
+                                rover_puts(&label, " ");
+                        rover_word_put(&label, table, table->argument[service->argument + at].index);
+                }
+                rover_puts(text, "node");
+                rover_record_word(text, "service", table->pool + service->name + 2,
+                                  memory_load_unaligned(p16, table->pool + service->name));
+                rover_puts(text, " kind=service");
+                rover_record_word(text, "label", label.bytes, label.used);
+                if (service->flags & ROVER_SERVICE_OFF)
+                        rover_puts(text, " off=yes");
+                rover_puts(text, "\n");
+                for (positive at = 0; at < ROVER_NEEDS && service->need[at] != ROVER_SERVICE_NONE; at++)
+                {
+                        const struct rover_service address_to need = table->service + service->need[at];
+
+                        rover_puts(text, "edge");
+                        rover_record_word(text, "service", table->pool + service->name + 2,
+                                          memory_load_unaligned(p16, table->pool + service->name));
+                        rover_record_word(text, "needs", table->pool + need->name + 2,
+                                          memory_load_unaligned(p16, table->pool + need->name));
+                        rover_puts(text, "\n");
+                }
+        }
         for (positive number = 0; number < table->head->rules; number++)
         {
                 const struct rover_rule address_to rule = table->rule + number;
