@@ -3343,6 +3343,47 @@ static void test_wire(void)
         wl_reset();
         wayland_start(&fake_host);
 
+        /* a word of the wire is four bytes, the low first, read and written at any alignment, the bytes beside it untouched; an
+           event's size is the high half of its second word, its opcode the low half */
+        for (int offset = 0; offset < 4; offset++)
+        {
+                memset(b, 0xee, sizeof b);
+                wayland_put(b + offset, 0x11223344UL);
+                WLCHECK(b[offset] == 0x44 && b[offset + 1] == 0x33 && b[offset + 2] == 0x22 && b[offset + 3] == 0x11 &&
+                            (offset == 0 || b[offset - 1] == 0xee) && b[offset + 4] == 0xee && wayland_get(b + offset) == 0x11223344UL,
+                        "a word put at offset %d is its four bytes, low first, and is read back", offset);
+        }
+        {
+                struct wayland_client one;
+                struct wayland_event e;
+
+                memset(&one, 0, sizeof one);
+                one.slot = -1;
+                e = wayland_begin(&one, 0x01020304UL, 0x0506);
+                wayland_word(&e, 0xa0b0c0d0UL);
+                wayland_end(&e);
+                WLCHECK(one.out_length == 12 && wayland_get(one.out) == 0x01020304UL && wayland_get(one.out + 4) == (0x0506UL | 12UL << 16) &&
+                            wayland_get(one.out + 8) == 0xa0b0c0d0UL,
+                        "an event is its object, its opcode with its size above it, and its words (%ld)", one.out_length);
+        }
+
+        /* units of a fixed number: at the scale of one a pixel is 256, with no division; at any other the division, rounded to zero */
+        {
+                long scales[] = {WAYLAND_UNIT, 0, -3, 180, 240, 150, 90, 960, 30};
+                long pixels[] = {0, 1, -1, 7, -7, 30, -30, 1919, 1L << 20, -(1L << 20)};
+                int good = 1;
+
+                for (unsigned s = 0; s < sizeof scales / sizeof scales[0]; s++)
+                        for (unsigned p = 0; p < sizeof pixels / sizeof pixels[0]; p++)
+                        {
+                                long scale = scales[s] > 0 ? scales[s] : WAYLAND_UNIT;
+
+                                good &= wayland_units_fixed(pixels[p], scales[s]) == (unsigned long)(pixels[p] * 256 * WAYLAND_UNIT / scale) &&
+                                        wayland_units(pixels[p], scales[s]) == pixels[p] * WAYLAND_UNIT / scale;
+                        }
+                WLCHECK(good, "pixels to units, fixed and whole, are the division at every scale (none, one, a fraction, a whole)");
+        }
+
         /* a header whose size is below eight, above the largest, or not a multiple of four */
         for (int size = 0; size < 5; size++)
         {

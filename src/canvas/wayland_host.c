@@ -165,10 +165,6 @@ static struct
         // A program's drag and drop (compositor_drag): the serials of each row's drag offer, drop take and drop done last read.
         unsigned int *drag_seen, *take_seen, *done_seen;
         unsigned char *row_blend;    // 1 when the row's current surface has non-opaque alpha
-        struct compositor_wl_opaque
-        {
-                short x1, y1, x2, y2;
-        } *row_opaque;               // and where it is opaque all the same, in the window's pixels (x2 <= x1: nowhere known)
         unsigned long presents;         // the frames drawn and flipped, numbered for wp_presentation's sequence
         int presenting_waiting;         // a drawn frame's feedbacks wait for its flip to complete (compositor_wl_flip_presented)
         positive presenting_since;      // when they began to wait: a flip that never completes is answered by the clock two frames on
@@ -1055,7 +1051,6 @@ static void compositor_wl_row_close(void *context, int row)
                 compositor_wl.laying[row].last = 0;
                 compositor_wl.cursor_asked[row] = 0;
                 compositor_wl.row_blend[row] = 0;
-                memory_zero(&compositor_wl.row_opaque[row], sizeof compositor_wl.row_opaque[row]);
                 compositor_wl_unlend(row);
                 compositor_wl_source_drop(row);
                 compositor_wl_gathers_free(row);
@@ -1068,26 +1063,6 @@ static void compositor_wl_row_close(void *context, int row)
 static __attribute__((unused)) int compositor_wl_row_blend(int row)
 {
         return row >= 0 && row < COMPOSITOR_ROWS ? (int)compositor_wl.row_blend[row] : 0;
-}
-
-// Whether a row is a client's window (a Wayland or an X one) whose picture is not its dma-buf read in place: the shim lays it into the table,
-// or it is the client's shared memory, which no framebuffer is made of.
-static int compositor_wl_row_unscannable(int row)
-{
-        return compositor_wl.started && wayland_row_owner(row) >= 0 && (!compositor_lent(row) || compositor_wl.lent[row].fd < 0);
-}
-
-// Whether a rectangle of a window (x1, y1 to x2, y2 in its pixels) is opaque: the whole window is, or its client's opaque region holds it.
-static int compositor_wl_row_opaque(int row, int x1, int y1, int x2, int y2)
-{
-        const struct compositor_wl_opaque *o;
-
-        if (row < 0 || row >= COMPOSITOR_ROWS)
-                return 0;
-        if (!compositor_wl.row_blend[row])
-                return 1;
-        o = &compositor_wl.row_opaque[row];
-        return o->x2 > o->x1 && x1 >= o->x1 && y1 >= o->y1 && x2 <= o->x2 && y2 <= o->y2;
 }
 
 /*
@@ -1219,7 +1194,7 @@ static positive compositor_lent_va(int row)
         card scans the one before it until the flip lands, and which that is is not kept) wait here, and go at the next flip's end or present
         (compositor_wl_graves_sweep). Removed at once, a fullscreen window shown straight from its client's buffers had the framebuffer on the
         screen taken away at the client's next commit, before the flip to the new one, which blanked the screen for that frame. Full, the oldest
-        goes at once, as before. A buffer of a window on the overlay waiting to go with a plate's flip (compositor_plane_carry) is kept as well.
+        goes at once, as before.
 */
 #define COMPOSITOR_WL_GRAVES 16
 static unsigned int compositor_wl_graves[COMPOSITOR_WL_GRAVES];
@@ -1227,7 +1202,7 @@ static unsigned int compositor_wl_grave_count;
 
 static int compositor_wl_fb_scanned(unsigned int fb)
 {
-        return fb && (compositor.flip_pending || fb == compositor.on_screen || fb == compositor.plane_fb || fb == compositor_plane_carry.fb);
+        return fb && (compositor.flip_pending || fb == compositor.on_screen || fb == compositor.plane_fb);
 }
 
 static void compositor_wl_rmfb(unsigned int fb)
@@ -1312,23 +1287,7 @@ static void compositor_wl_scan_refuse(int row, unsigned int fourcc, unsigned int
         }
 }
 
-static unsigned int compositor_lent_fb_as(int row, int opaque);
-
 static unsigned int compositor_lent_fb(int row)
-{
-        return compositor_lent_fb_as(row, !compositor_wl.row_blend[row]);
-}
-
-/*
-        The same, as the X format of its bytes whatever its blending (opaque 1): for the overlay, which shows only a rectangle of the window
-        that its client's opaque region holds (compositor_wl_row_opaque), so the plane's alpha is not read there either.
-*/
-static unsigned int compositor_lent_fb_opaque(int row)
-{
-        return row >= 0 && row < COMPOSITOR_ROWS ? compositor_lent_fb_as(row, 1) : 0;
-}
-
-static unsigned int compositor_lent_fb_as(int row, int opaque)
 {
         static const char *const amd[] = {"amdgpu"};
         unsigned int fourcc;
@@ -1354,7 +1313,7 @@ static unsigned int compositor_lent_fb_as(int row, int opaque)
         // format of the same bytes, so the plane's alpha is not read: as ARGB the display engine blends the buffer's own alpha over the
         // primary plane under it, where nothing is drawn, and a client's alpha that is not meant to be seen (a game's, written as depth,
         // or an overlay blended into its frame) showed as black or darkened on the screen and nowhere in the composed picture.
-        if (opaque && (fourcc == 0x34325241u || fourcc == 0x34324241u || fourcc == 0x30335241u || fourcc == 0x30334241u))
+        if (!compositor_wl.row_blend[row] && (fourcc == 0x34325241u || fourcc == 0x34324241u || fourcc == 0x30335241u || fourcc == 0x30334241u))
                 fourcc = (fourcc & ~0xffu) | 'X'; // AR24, AB24, AR30, AB30 to XR24, XB24, XR30, XB30
         if (compositor_wl.lent[row].scan_fb && compositor_wl.lent[row].scan_fourcc != fourcc)
                 compositor_wl_lent_drop_fb(row);
@@ -3617,13 +3576,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         if (has_content)
                 compositor_keytrace_commit(row);
         if (has_content && !compositor_wl.laying[row].open)
-        {
                 compositor_wl.row_blend[row] = (unsigned char)(picture->transparent != 0);
-                compositor_wl.row_opaque[row].x1 = (short)picture->opaque_x;
-                compositor_wl.row_opaque[row].y1 = (short)picture->opaque_y;
-                compositor_wl.row_opaque[row].x2 = (short)(picture->opaque_x + picture->opaque_w);
-                compositor_wl.row_opaque[row].y2 = (short)(picture->opaque_y + picture->opaque_h);
-        }
         // A picture that is a whole window's, from one buffer, is read where it is (compositor_wl_lend): nothing is copied, and the window is
         // drawn whole from it.
         was_lent = compositor_lent(row);

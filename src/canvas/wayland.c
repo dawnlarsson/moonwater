@@ -1402,17 +1402,22 @@ static int wayland_subs_next(struct wayland_subs *it)
 }
 
 
+/*
+        A word of the wire read or written where it is, in one access at any alignment: the wire's words are the machine's
+        order, which is little-endian on all three the shim runs on. Spelled a byte at a time, gcc built an event's head of
+        two words in a register a byte at a time, shifted and or-ed together (45 instructions where two stores do).
+*/
+typedef unsigned int __attribute__((may_alias, aligned(1))) wayland_wire_word;
+typedef unsigned short __attribute__((may_alias, aligned(1))) wayland_wire_half;
+
 static inline unsigned long wayland_get(const unsigned char *at)
 {
-        return (unsigned long)at[0] | (unsigned long)at[1] << 8 | (unsigned long)at[2] << 16 | (unsigned long)at[3] << 24;
+        return *(const wayland_wire_word *)at;
 }
 
 static inline void wayland_put(unsigned char *at, unsigned long value)
 {
-        at[0] = (unsigned char)value;
-        at[1] = (unsigned char)(value >> 8);
-        at[2] = (unsigned char)(value >> 16);
-        at[3] = (unsigned char)(value >> 24);
+        *(wayland_wire_word *)at = (unsigned int)value;
 }
 
 static inline void wayland_copy(unsigned char *to, const unsigned char *from, long count)
@@ -1520,7 +1525,9 @@ static void wayland_end(struct wayland_event *e)
         unsigned char *base = e->ok ? e->client->out + e->start : wayland_sink;
         long size = (long)(e->at - base);
 
-        wayland_put(base + 4, wayland_get(base + 4) | (unsigned long)size << 16);
+        // The size is the head's second word's high half, which wayland_begin left 0 (an opcode is below 65536, an event below
+        // WAYLAND_EVENT).
+        *(wayland_wire_half *)(base + 6) = (unsigned short)size;
         if (e->ok)
         {
                 e->client->out_length += size;
@@ -1793,15 +1800,21 @@ static inline struct wayland_rect wayland_cover(struct wayland_rect r, long scal
 }
 
 // Pixels to units, as the 24.8 fixed number an event carries.
+// At the scale of one, which nearly every surface has, a unit is a pixel and there is nothing to divide: a relative motion's four
+// numbers were four 64-bit divisions (40 to 90 cycles each on Ivy Bridge) for every report of the hand.
 static inline unsigned long wayland_units_fixed(long pixels, long scale120)
 {
-        return (unsigned long)(pixels * 256 * WAYLAND_UNIT / (scale120 > 0 ? scale120 : WAYLAND_UNIT));
+        if (scale120 == WAYLAND_UNIT || scale120 <= 0)
+                return (unsigned long)(pixels * 256);
+        return (unsigned long)(pixels * 256 * WAYLAND_UNIT / scale120);
 }
 
 // Pixels to whole units, rounded down: the size a window of so many pixels is, to the client.
 static inline long wayland_units(long pixels, long scale120)
 {
-        return pixels * WAYLAND_UNIT / (scale120 > 0 ? scale120 : WAYLAND_UNIT);
+        if (scale120 == WAYLAND_UNIT || scale120 <= 0)
+                return pixels;
+        return pixels * WAYLAND_UNIT / scale120;
 }
 
 /* ---- the host, and the records a client's block holds ---- */
