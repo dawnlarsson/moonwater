@@ -2743,6 +2743,72 @@ static void check_compositor_hover(void)
         system_close(device[0]);
         system_close(device[1]);
     }
+
+    /* The input thread's ring (compositor_reader): records handed over are acted on by the loop as its own read of the device was, in
+       order; a record of an open since let go of (an old generation) is passed over; the ring's place wraps; a gone record lets the
+       device go. The thread is not started: the records are put as it puts them. */
+    {
+        int device[2] = {-1, -1};
+        struct compositor_input_event press[2] = {{0, 0, COMPOSITOR_EV_KEY, 30, 1}, {0, 0, COMPOSITOR_EV_SYN, 0, 0}};
+        struct compositor_input_event lift[2] = {{0, 0, COMPOSITOR_EV_KEY, 30, 0}, {0, 0, COMPOSITOR_EV_SYN, 0, 0}};
+        struct compositor_input_event other[2] = {{0, 0, COMPOSITOR_EV_KEY, 31, 1}, {0, 0, COMPOSITOR_EV_SYN, 0, 0}};
+        struct compositor_input_event gone = {0, 0, COMPOSITOR_READER_GONE, 0, 0};
+        unsigned int generation;
+        b32 down, order = false, stale, wrapped, left;
+
+        if (system_call_2(syscall(pipe2), (positive)device, O_NONBLOCK))
+        {
+            check("input: the reader's device is made", false);
+            return;
+        }
+        compositor.inputs[0] = device[0];
+        compositor.input_count = 1;
+        compositor.input_kinds[0] = WINDOWS_INPUT_KEYBOARD;
+        compositor_reader_changed(0);
+        generation = compositor_reader.generation[0];
+        compositor_reader.knock = (int)compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0);
+        compositor_reader.on = 1;
+        compositor_focus(1);
+        table->event_tail[1] = table->event_head[1];
+        // A press and its lift handed over together: both acted on, the press first.
+        compositor_reader_put(0, generation, &press[0]), compositor_reader_put(0, generation, &press[1]);
+        compositor_reader_put(0, generation, &lift[0]), compositor_reader_put(0, generation, &lift[1]);
+        compositor_reader_knock();
+        compositor_reader_take();
+        down = table->event_head[1] - table->event_tail[1] == 2;
+        if (down)
+        {
+            unsigned int first = table->event_tail[1] % WINDOWS_EVENTS, second = (table->event_tail[1] + 1) % WINDOWS_EVENTS;
+
+            order = table->event_a[1][first] == 30 && (table->event_flags[1][first] & WINDOW_KEY_DOWN) && table->event_a[1][second] == 30 &&
+                    !(table->event_flags[1][second] & WINDOW_KEY_DOWN);
+        }
+        table->event_tail[1] = table->event_head[1];
+        // A record of the open before (the device opened again since): nothing.
+        compositor_reader_put(0, generation - 1, &other[0]), compositor_reader_put(0, generation - 1, &other[1]);
+        compositor_reader_take();
+        stale = table->event_head[1] == table->event_tail[1] && !(compositor.keys_down[31 >> 3] >> (31 & 7) & 1);
+        // The ring's last record and its first: one report across the wrap.
+        compositor_reader.handed = compositor_reader.reading = COMPOSITOR_READER_RING * 3ull - 1;
+        compositor_reader_put(0, generation, &press[0]), compositor_reader_put(0, generation, &press[1]);
+        compositor_reader_take();
+        wrapped = (compositor.keys_down[30 >> 3] >> (30 & 7) & 1) && compositor_reader.reading == COMPOSITOR_READER_RING * 3ull + 1;
+        // Gone: the device let go of, and the key it held let go.
+        compositor_reader_put(0, generation, &gone);
+        compositor_reader_take();
+        left = compositor.inputs[0] < 0 && !(compositor.keys_down[30 >> 3] >> (30 & 7) & 1) && compositor_reader.generation[0] != generation;
+        check("input: the reader's records are acted on in order as the device's read was", down && order);
+        check("input: a record of a device's open let go of since is passed over", stale);
+        check("input: a report across the end of the reader's ring is whole", wrapped);
+        check("input: the reader's gone record lets the device go and what it held", left);
+        compositor_reader.on = 0;
+        system_close(compositor_reader.knock);
+        compositor_reader.knock = -1;
+        table->event_tail[1] = table->event_head[1];
+        compositor.inputs[0] = -1;
+        compositor.input_count = 0;
+        system_close(device[1]);
+    }
 }
 
 /*

@@ -4242,6 +4242,10 @@ static long compositor_wl_locks(void *context)
         client's as they come, unaccelerated, and the pointer is neither moved nor drawn (it is drawn again where it stopped when the
         lock ends); confined, the pointer moves as ever and is kept inside the window.
 */
+static void compositor_wl_direct_hold(void);    // below: the lock the input thread's own sends take
+static void compositor_wl_direct_release(void);
+static void compositor_wl_direct_make(void);
+
 static void compositor_wl_pointer_hold(void *context, long row, long mode)
 {
         long was = compositor_wl.hold_row;
@@ -4259,8 +4263,11 @@ static void compositor_wl_pointer_hold(void *context, long row, long mode)
                 compositor_pointer_shown();
         }
         wayland.hint_row = -1;
+        compositor_wl_direct_hold();
         compositor_wl.hold_row = (int)row;
         compositor_wl.hold = (int)mode;
+        compositor_wl_direct_make();
+        compositor_wl_direct_release();
         compositor.cursor.hold_hidden = mode == 1;
         compositor_cursor_move();
 }
@@ -6377,11 +6384,147 @@ static void compositor_wl_start(void)
                                                       SIGNAL_CATCH_RESTORER, null);
 }
 
+/*
+        The input thread's own send of a locked pointer's report (compositor_reader_direct, input.c): what it sends to is made here by the
+        loop from the shim's state (compositor_wl_direct_make: the client whose window holds the pointer locked, its socket, the ids of its
+        relative pointers and of its pointers that take a frame, its surface's scale), and both threads take one lock word for it: the
+        reader with a try, which it never waits on (a lock it does not get is a report the loop sends), and the loop around every send to a
+        client (compositor_wl_flush), every change of the hold and every client let go of. So the reader never sends after the loop sent an
+        id's delete_id (the loop makes what the reader reads again, under the lock, as it sends), never to a socket the loop closed, never
+        into the middle of a send of the loop's, and only to a client whose queue is empty (what the loop has for it goes first). A send the
+        socket took part of is finished by the loop before its own queue (compositor_wl_direct.rest).
+*/
+#define COMPOSITOR_WL_DIRECT_IDS 4
+#if defined(__x86_64__)
+#define COMPOSITOR_WL_SPIN() __asm__ volatile("pause" ::: "memory")
+#elif defined(__aarch64__)
+#define COMPOSITOR_WL_SPIN() __asm__ volatile("yield" ::: "memory")
+#else
+#define COMPOSITOR_WL_SPIN() __asm__ volatile("" ::: "memory")
+#endif
+static struct
+{
+        unsigned int lock;  // 1: one thread has it
+        unsigned int depth; // the loop's own holds (its sends nest: a flush that lets a client go)
+        int valid, slot, fd;
+        long scale120, relatives, framed;
+        unsigned int relative[COMPOSITOR_WL_DIRECT_IDS], frames[COMPOSITOR_WL_DIRECT_IDS];
+        unsigned int rest_length; // bytes of the reader's last send the socket did not take
+        unsigned char rest[COMPOSITOR_WL_DIRECT_IDS * 40];
+} compositor_wl_direct = {0, 0, 0, -1, -1};
+
+static void compositor_wl_direct_hold(void)
+{
+        if (compositor_wl_direct.depth++)
+                return;
+        while (__atomic_exchange_n(&compositor_wl_direct.lock, 1u, __ATOMIC_ACQUIRE))
+                while (__atomic_load_n(&compositor_wl_direct.lock, __ATOMIC_RELAXED))
+                        COMPOSITOR_WL_SPIN();
+}
+
+static void compositor_wl_direct_release(void)
+{
+        if (!--compositor_wl_direct.depth)
+                __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
+}
+
+// The loop, holding the lock: what the reader sends to made again from the shim as it is now (nothing, when no client holds it locked).
+static void compositor_wl_direct_make(void)
+{
+        long slot;
+
+        compositor_wl_direct.valid = 0;
+        if (!compositor_reader.on || !compositor_wl.started || !compositor_wl_locked())
+                return;
+        slot = wayland_pointer_direct(compositor_wl.hold_row, compositor_wl_direct.relative, &compositor_wl_direct.relatives,
+                                      compositor_wl_direct.frames, &compositor_wl_direct.framed, COMPOSITOR_WL_DIRECT_IDS,
+                                      &compositor_wl_direct.scale120) - 1;
+        if (slot < 0 || slot >= compositor_wl.slots || compositor_wl.fd[slot] < 0)
+                return;
+        if (compositor_wl_direct.rest_length && compositor_wl_direct.slot != slot)
+                compositor_wl_direct.rest_length = 0; // the rest of a send to a client that holds it no more: its socket is the client's own business
+        compositor_wl_direct.slot = (int)slot, compositor_wl_direct.fd = compositor_wl.fd[slot], compositor_wl_direct.valid = 1;
+}
+
+static void compositor_wl_direct_publish(void)
+{
+        if (!compositor_reader.on)
+                return;
+        compositor_wl_direct_hold();
+        compositor_wl_direct_make();
+        compositor_wl_direct_release();
+}
+
+// The reader's send of one report: 1 when it went (or went in part, the loop finishing it), 0 when it is the loop's to send.
+static int compositor_wl_direct_send(long dx, long dy, positive micro)
+{
+        unsigned char bytes[COMPOSITOR_WL_DIRECT_IDS * 40];
+        unsigned int length = 0;
+        long got;
+
+        if (__atomic_exchange_n(&compositor_wl_direct.lock, 1u, __ATOMIC_ACQUIRE))
+                return 0;
+        if (!compositor_wl_direct.valid || compositor_wl_direct.rest_length || wayland_out_dirty(compositor_wl_direct.slot))
+        {
+                __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
+                return 0;
+        }
+        // zwp_relative_pointer_v1.relative_motion (event 0: utime_hi, utime_lo, dx, dy, dx_unaccel, dy_unaccel) to each, then wl_pointer.frame
+        // (event 5) to each pointer of version 5 on: wayland_pointer_relative's words.
+        for (long at = 0; at < compositor_wl_direct.relatives; at++)
+        {
+                unsigned int words[8] = {compositor_wl_direct.relative[at], 32u << 16, (unsigned int)(micro >> 32), (unsigned int)micro,
+                                         (unsigned int)wayland_fixed_of(dx, compositor_wl_direct.scale120),
+                                         (unsigned int)wayland_fixed_of(dy, compositor_wl_direct.scale120),
+                                         (unsigned int)wayland_fixed_of(dx, compositor_wl_direct.scale120),
+                                         (unsigned int)wayland_fixed_of(dy, compositor_wl_direct.scale120)};
+
+                memory_copy(bytes + length, words, sizeof words);
+                length += sizeof words;
+        }
+        for (long at = 0; at < compositor_wl_direct.framed; at++)
+        {
+                unsigned int words[2] = {compositor_wl_direct.frames[at], 8u << 16 | 5u};
+
+                memory_copy(bytes + length, words, sizeof words);
+                length += sizeof words;
+        }
+        got = compositor_call(syscall(sendto), (positive)compositor_wl_direct.fd, (positive)bytes, length, 0x40 | 0x4000, 0, 0); // MSG_DONTWAIT | MSG_NOSIGNAL
+        if (got > 0 && got < (long)length)
+        {
+                compositor_wl_direct.rest_length = length - (unsigned int)got;
+                memory_copy(compositor_wl_direct.rest, bytes + got, compositor_wl_direct.rest_length);
+        }
+        __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
+        return got > 0;
+}
+
+// The loop, holding the lock, before the client's own queue: the rest of the reader's send, which goes first. 0 when it is not all out.
+static int compositor_wl_direct_rest(long slot)
+{
+        long got;
+
+        if (!compositor_wl_direct.rest_length || compositor_wl_direct.slot != slot)
+                return 1;
+        got = compositor_call(syscall(sendto), (positive)compositor_wl.fd[slot], (positive)compositor_wl_direct.rest, compositor_wl_direct.rest_length,
+                              0x40 | 0x4000, 0, 0);
+        if (got <= 0)
+                return got == -11 ? 0 : 1; // EAGAIN: later; a socket that fails is the flush's to find
+        compositor_wl_direct.rest_length -= (unsigned int)got;
+        for (unsigned int at = 0; at < compositor_wl_direct.rest_length; at++)
+                compositor_wl_direct.rest[at] = compositor_wl_direct.rest[at + (unsigned int)got];
+        return !compositor_wl_direct.rest_length;
+}
+
 static void compositor_wl_drop(long slot)
 {
+        compositor_wl_direct_hold();
+        if (compositor_wl_direct.slot == slot)
+                compositor_wl_direct.valid = 0, compositor_wl_direct.rest_length = 0;
         if (compositor_wl.fd[slot] >= 0)
                 system_close(compositor_wl.fd[slot]);
         compositor_wl.fd[slot] = -1;
+        compositor_wl_direct_release();
         wayland_drop(slot);
         compositor_wl_transfers_drop(slot);
 }
@@ -6509,7 +6652,20 @@ static void compositor_wl_read(long slot)
         socket takes is taken off the queue and the rest waits for the loop to find the socket writable. A client whose
         queue is full is dead (the shim says so), and one that was sent a protocol error is dropped once it is sent.
 */
+static void compositor_wl_flush_held(long slot);
+
 static void compositor_wl_flush(long slot)
+{
+        compositor_wl_direct_hold();
+        if (compositor_wl_direct_rest(slot))
+                compositor_wl_flush_held(slot);
+        // What the reader sends to, made again as the loop sends: a delete_id of one of its ids is in this flush when one was destroyed.
+        if (compositor_reader.on && (!compositor_wl_direct.valid || compositor_wl_direct.slot == slot))
+                compositor_wl_direct_make();
+        compositor_wl_direct_release();
+}
+
+static void compositor_wl_flush_held(long slot)
 {
         const unsigned char *bytes;
         const long *fds;
@@ -6901,26 +7057,9 @@ static void compositor_wl_wake(void)
 
         if (!compositor_wl.started)
                 return;
-        // A slingshot turn's (a locked pointer's counts and nothing else: compositor_sling_only) is the counts drained and sent: what the clients are
-        // told of the screens, the idle clock, the table's hints, the windows' scales, the keymap and the repeat is looked at again once a frame
-        // (COMPOSITOR_WL_KEEP_NS) and not at each of the hand's 8000 reports a second, on which none of it changes.
-        {
-                positive at = clock_monotonic_nanoseconds();
-
-                if (compositor_sling_only && compositor_sling_sent && at - compositor_wl_kept_at < COMPOSITOR_WL_KEEP_NS)
-                {
-                        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                                if (rows_has(&compositor.woken, row) && wayland_row_owner(row) >= 0)
-                                {
-                                        compositor_wl_drain(row);
-                                        wayland_row_wake(row);
-                                        rows_del(&compositor.woken, row);
-                                }
-                        compositor_wl_flush_all();
-                        return;
-                }
-                compositor_wl_kept_at = at;
-        }
+        // A slingshot turn (a locked pointer's counts and nothing else: compositor_sling_only) has no end, and its input's send
+        // (compositor_wl_wake_input) makes this whole once a frame (COMPOSITOR_WL_KEEP_NS) and not at each of the hand's 8000 reports a second.
+        compositor_wl_kept_at = clock_monotonic_nanoseconds();
         wayland_stats_get(&stats);
         // The screens: a scale, a mode, a place or a turn is told to every client whole, and each window the scale of its screen.
         unsigned long digest = compositor_wl_screens_digest();
@@ -6976,6 +7115,38 @@ static void compositor_wl_wake(void)
                 }
         // The hand's counts no motion took (the pointer stopped at an edge), in a frame of their own.
         wayland_pointer_counts_flush();
+        compositor_wl_flush_all();
+        compositor_wl_direct_publish();
+}
+
+/*
+        A turn's input, sent as soon as the devices are read (compositor_inputs_turn): each woken client's ring drained, its rows woken, the
+        hand's counts no motion took, and every socket flushed. What else the clients are told (the screens, the idle clock, the hints, the
+        scales, the pointer's and the keys' windows) is the turn's end's (compositor_wl_wake again, after the doors and the commits), and
+        nothing of it changes for a key or a report, so it is not looked at in front of them: a key turn sent its key after the screens'
+        digest, every row's hints and facts and the pointer's window under the band (new-dragonfly, Haswell: keys 31 us inject to client
+        where a locked pointer's report, which skipped them, took 28). Whole when the keymap changed under the turn's keys (its layout is
+        told before them), and on a slingshot turn whose keep is due (no turn's end follows it).
+*/
+static void compositor_wl_wake_input(void)
+{
+        if (!compositor_wl.started)
+                return;
+        if (compositor.keymap.layout != compositor_wl.layout_told ||
+            (compositor_sling_only && compositor_sling_sent && clock_monotonic_nanoseconds() - compositor_wl_kept_at >= COMPOSITOR_WL_KEEP_NS))
+        {
+                compositor_wl_wake();
+                return;
+        }
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                if (rows_has(&compositor.woken, row) && wayland_row_owner(row) >= 0)
+                {
+                        compositor_wl_drain(row);
+                        wayland_row_wake(row);
+                        rows_del(&compositor.woken, row);
+                }
+        if (!compositor_sling_only)
+                wayland_pointer_counts_flush();
         compositor_wl_flush_all();
 }
 

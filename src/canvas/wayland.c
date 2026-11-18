@@ -9330,6 +9330,53 @@ WAYLAND_API void wayland_pointer_counts_flush(void)
                 wayland_counts_send(1);
 }
 
+/*
+        What the compositor's input thread needs to send a locked pointer's report itself, as wayland_pointer_relative would send it: the
+        ids of row's client's relative pointers (each a relative_motion) and of its pointers that take a frame (version 5 on, a frame each
+        after them), and its surface's scale; the client's slot and one, or 0 when the report would not be sent so (no host, no surface, the
+        pointer not held locked on row, a drag, no relative pointer, more ids than room). Asked by the loop, whose state this reads.
+*/
+WAYLAND_API long wayland_pointer_direct(long row, unsigned int *relative, long *relatives, unsigned int *frames, long *framed, long room,
+                                        long *scale120)
+{
+        struct wayland_client *c;
+        struct wayland_surface *s = wayland_row_surface(row, &c);
+        const struct wayland_ids *ids;
+
+        *relatives = *framed = 0;
+        if (!wayland.host || !s || wayland.hold_mode != 1 || row != wayland.hold_row || wayland_dragging() || !c->relative_ids.count)
+                return 0;
+        for (long at = 0; at < c->relative_ids.count; at++)
+        {
+                long slot = wayland_slot_of(c, c->relative_ids.id[at]);
+
+                if (slot < 0 || c->objects[slot].iface != WLI_zwp_relative_pointer_v1)
+                        continue;
+                if (*relatives == room)
+                        return 0;
+                relative[(*relatives)++] = (unsigned int)c->relative_ids.id[at];
+        }
+        ids = &c->seat_ids[0];
+        for (long at = 0; at < ids->count; at++)
+        {
+                long slot = wayland_slot_of(c, ids->id[at]);
+
+                if (slot < 0 || c->objects[slot].iface != WLI_wl_pointer || c->objects[slot].version < 5)
+                        continue;
+                if (*framed == room)
+                        return 0;
+                frames[(*framed)++] = (unsigned int)ids->id[at];
+        }
+        *scale120 = s->scale120;
+        return *relatives ? c->slot + 1 : 0;
+}
+
+// A count of the hand's in the wire's fixed point at a surface's scale (wayland_fixed's), for a sender that is not the loop.
+WAYLAND_API unsigned long wayland_fixed_of(long pixels, long scale120)
+{
+        return wayland_units_fixed(pixels, scale120);
+}
+
 static void wayland_constraint_event(struct wayland_client *c, struct wayland_constraint *con, int on)
 {
         struct wayland_event e;

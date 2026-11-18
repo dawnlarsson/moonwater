@@ -2852,14 +2852,27 @@ static void compositor_forward(void)
                 }
 }
 
-// A turn's devices: each one the poll said has something is read, and what they said is forwarded at once (compositor_forward).
+// A turn's devices: each one the poll said has something is read (or, where the input thread reads them, the records it handed over are
+// taken: compositor_reader_take), and what they said is forwarded at once (compositor_forward).
 static void compositor_inputs_turn(const struct compositor_poll *wanted)
 {
         compositor_sling_only = 1, compositor_sling_sent = 0;
-        for (unsigned int at = 0; at < compositor.input_count; at++)
-                if (wanted[at].returned)
-                        compositor_input_read(at);
+        if (compositor_reader.on)
+        {
+                if (wanted[0].returned)
+                        compositor_reader_take();
+        }
+        else
+                for (unsigned int at = 0; at < compositor.input_count; at++)
+                        if (wanted[at].returned)
+                                compositor_input_read(at);
         compositor_forward();
+}
+
+// The loop's entries for the input: one a device, or the input thread's knock alone where it reads them (compositor_reader).
+static unsigned int compositor_inputs_polled(void)
+{
+        return compositor_reader.on ? 1 : compositor.input_count;
 }
 
 /*
@@ -2934,8 +2947,11 @@ static void compositor_loop_wanted(struct compositor_poll *wanted, struct compos
         wanted[count++] = (struct compositor_poll){compositor.signals, COMPOSITOR_POLLIN, 0};
         wanted[count++] = (struct compositor_poll){compositor.watch, COMPOSITOR_POLLIN, 0};
         slots->inputs = count;
-        for (unsigned int at = 0; at < compositor.input_count; at++)
-                wanted[count++] = (struct compositor_poll){compositor.inputs[at], COMPOSITOR_POLLIN, 0};
+        if (compositor_reader.on)
+                wanted[count++] = (struct compositor_poll){compositor_reader.knock, COMPOSITOR_POLLIN, 0};
+        else
+                for (unsigned int at = 0; at < compositor.input_count; at++)
+                        wanted[count++] = (struct compositor_poll){compositor.inputs[at], COMPOSITOR_POLLIN, 0};
         slots->doors = count;
         for (unsigned int row = 0; row < compositor_rows_in_use; row++)
                 wanted[count++] = (struct compositor_poll){held || rows_has(&compositor_doors.busy, row) ? -1 : __atomic_load_n(&compositor.door[row], __ATOMIC_ACQUIRE),
@@ -3130,7 +3146,7 @@ static b32 compositor_slingshot(const struct compositor_poll *wanted, const stru
         long answered = 0;
 
         if (!compositor_sling_only || !compositor_sling_sent || slots->fence_at || compositor.cursor.magnify || compositor.cursor.magnified ||
-            (until && now >= until) || slots->doors - slots->inputs != compositor.input_count ||
+            (until && now >= until) || slots->doors - slots->inputs != compositor_inputs_polled() ||
             (compositor.flip_pending && (now < compositor.flip_issued || now - compositor.flip_issued >= COMPOSITOR_FLIP_LOST / 2)))
                 return 0;
         for (unsigned int at = 0; at < slots->count; at++)
@@ -3142,8 +3158,8 @@ static b32 compositor_slingshot(const struct compositor_poll *wanted, const stru
                 }
         if (answered != awaited)
                 return 0;
-        for (unsigned int at = 0; at < compositor.input_count; at++)
-                if (wanted[slots->inputs + at].handle != compositor.inputs[at])
+        for (unsigned int at = 0; at < compositor_inputs_polled(); at++)
+                if (wanted[slots->inputs + at].handle != (compositor_reader.on ? compositor_reader.knock : compositor.inputs[at]))
                         return 0;
         for (long slot = 0; compositor_wl.started && slot < compositor_wl.slots; slot++)
                 if (compositor_wl.fd[slot] >= 0 && wayland_out_dirty(slot))
@@ -3389,6 +3405,9 @@ static b32 compositor_main()
         compositor_osk_setting_read();
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++) // every slot: one no device is in is said to be none (-1)
                 compositor_input_publish(at);
+        // The input thread, the devices' reader from here on (none: the loop reads them, as it did).
+        if (!headless)
+                compositor_reader_start();
         compositor_up_say(up);
 
         string_format(log, "compositor: %b by %b (scale %b), %p input devices, pointer %s, windows in %s\n",
@@ -3621,15 +3640,17 @@ static b32 compositor_main()
                         unsigned int any = 0;
 
                         compositor_inputs_turn(wanted + inputs);
-                        for (unsigned int at = 0; at < compositor.input_count && !any; at++)
+                        for (unsigned int at = 0; at < compositor_inputs_polled() && !any; at++)
                                 any = wanted[inputs + at].returned != 0;
 #ifdef CONFIG_MOONWATER_WAYLAND
                         // A Wayland client's share of that is written to its socket now (the enter, the keys, the motion: compositor_wl_wake
                         // sends what the shim queued), not after the doors, the other clients' commits and the ticks below: a commit that
                         // copies a picture takes milliseconds, and sat in front of every client's input of the same turn.
                         if (any)
-                                compositor_wl_wake();
+                                compositor_wl_wake_input();
 #endif
+                        // What the input thread handed over is taken and sent: it may send a locked pointer's report itself again.
+                        compositor_reader_settle();
 #ifdef MOONWATER_GPU_C
                         // And once it is, the card is kept awake for what answers it (compositor_gpu_clocks).
                         compositor_gpu_input_turn(now);

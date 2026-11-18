@@ -97,6 +97,9 @@ static void compositor_input_add(unsigned int number);
         (one already open is passed over) where /dev/input is watched; and what no device has down is let go. The count of devices let go, and of opened.
 */
 #define COMPOSITOR_EVIOCGVERSION 0x80044501u
+static void compositor_reader_changed(unsigned int at); // input.c: the reader takes its set of devices again
+static int compositor_reader_running(void);             // input.c: the reader thread reads the devices, not the loop
+static void compositor_input_gone(unsigned int at);     // input.c: a device let go of, and all it held
 static void compositor_inputs_woke(positive now, unsigned int *gone, unsigned int *opened)
 {
         unsigned int before = 0, after = 0;
@@ -111,7 +114,11 @@ static void compositor_inputs_woke(positive now, unsigned int *gone, unsigned in
                 before++;
                 if (system_control(compositor.inputs[at], COMPOSITOR_EVIOCGVERSION, address_of version) == -COMPOSITOR_ENODEV)
                 {
-                        compositor_input_read(at);
+                        // Read to its end, which lets it go; where the reader reads the devices, let go of here (the reader is not raced for it).
+                        if (compositor_reader_running())
+                                compositor_input_gone(at);
+                        else
+                                compositor_input_read(at);
                         *gone += compositor.inputs[at] < 0;
                 }
         }
@@ -1238,6 +1245,8 @@ static void compositor_input_add(unsigned int number)
         }
         compositor.devices[number / 64] |= 1ul << (number % 64);
         compositor.input_count = at + 1 > compositor.input_count ? at + 1 : compositor.input_count;
+        // The input thread takes the device into its set now that the count holds it (it reads the slots below the count).
+        compositor_reader_changed(at);
         compositor_input_publish(at);
 }
 

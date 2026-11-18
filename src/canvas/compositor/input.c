@@ -4309,6 +4309,334 @@ static void compositor_input_dropped(unsigned int at, positive now)
 }
 
 /*
+        The reader: a thread of its own, real time above the loop (SCHED_FIFO COMPOSITOR_READER_PRIORITY, the loop and the sound server at
+        1), that is the one reader of the input devices, waiting in an epoll set of them alone, so no work of the loop's (a frame composed,
+        the moon's turn, a commit's copy, a wait for the card) is ever in front of a key or a report being read. A locked pointer's report,
+        when the loop has taken everything the reader gave it and has nothing of its own waiting for the client, is sent to the client from
+        here (compositor_wl_direct_send): the loop is not woken for it, but for a note once every COMPOSITOR_READER_NOTE_NS (the idle clock,
+        the processor's hold, the card's wake, which a report keeps). Every other record goes to the loop in order through a ring the reader
+        alone writes and the loop alone reads (COMPOSITOR_READER_RING records: the device's slot, its open's generation, the record as the
+        kernel gave it), knocked on with an eventfd that is the loop's one input entry, and the loop acts on them as it acted on a device's
+        read (compositor_input_take). The devices are the loop's still: it opens and closes them, says so (compositor_reader_changed: a
+        generation a slot, and the reader's own knock), and the reader takes its set again from them; a read that fails is a record that the
+        device is gone, which the loop lets go of. A ring that is full drops the record and says SYN_DROPPED to the loop once there is room
+        (what the kernel says of a device's own queue), so what a person holds down is let go of as from a device that dropped.
+*/
+#define COMPOSITOR_READER_RING 8192 // records: at 8000 reports a second of two records each, half a second of a loop that does not come
+#define COMPOSITOR_READER_PRIORITY 2
+#define COMPOSITOR_READER_NOTE_NS 50000000ull
+#define COMPOSITOR_READER_GONE 0xffffu // a record's type that says its device's read failed
+
+struct compositor_reader_record
+{
+        struct compositor_input_event raw;
+        unsigned int at, generation;
+};
+
+static int compositor_input_take(unsigned int at, const struct compositor_input_event *raw, bipolar got, int moved); // below: a read acted on
+static void compositor_input_gone(unsigned int at);
+static void compositor_input_end(unsigned int at, int moved);
+
+static struct
+{
+        int on;                      // the thread runs and is the devices' reader
+        int knock, wake;             // eventfds: the reader's to the loop (in the loop's list), the loop's to the reader (in its set)
+        int set;                     // the reader's epoll set (its devices, and wake)
+        unsigned int changes;        // the loop's count of device changes, which the reader's set is taken again for
+        unsigned int knocked;        // the knock is written and not yet read
+        unsigned long long handed;   // records the reader put in the ring
+        unsigned long long taken;    // records the loop has acted on, and whose answer to a client has gone out
+        unsigned long long reading;  // the loop's place in the ring, taken when its turn's sends are done (compositor_reader_settle)
+        unsigned long long direct, noted; // reports the reader sent itself, and their count the loop last took
+        unsigned long long note_at;  // when the reader last knocked for its direct sends
+        unsigned int dropped;        // a record the ring had no room for, to be said as SYN_DROPPED
+        unsigned int generation[COMPOSITOR_INPUTS];
+        struct compositor_reader_record ring[COMPOSITOR_READER_RING];
+} compositor_reader = {0, -1, -1, -1};
+
+// Device at was opened or let go of by the loop: the reader takes its set again (from any of the loop's changes to the devices).
+static void compositor_reader_changed(unsigned int at)
+{
+        unsigned long long one = 1;
+
+        if (at < COMPOSITOR_INPUTS)
+                __atomic_add_fetch(&compositor_reader.generation[at], 1, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&compositor_reader.changes, 1, __ATOMIC_RELEASE);
+        if (compositor_reader.on)
+                system_write_once(compositor_reader.wake, &one, sizeof one);
+}
+
+static int compositor_reader_running(void)
+{
+        return compositor_reader.on;
+}
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+static int compositor_wl_direct_send(long dx, long dy, positive micro); // wayland_host.c: a locked pointer's report sent from the reader
+#endif
+
+static void compositor_reader_knock(void)
+{
+        unsigned long long one = 1;
+
+        if (!__atomic_exchange_n(&compositor_reader.knocked, 1u, __ATOMIC_SEQ_CST))
+                system_write_once(compositor_reader.knock, &one, sizeof one);
+}
+
+// A record into the ring, or none when it is full (the drop is said with the next record that fits).
+static void compositor_reader_put(unsigned int at, unsigned int generation, const struct compositor_input_event *raw)
+{
+        unsigned long long handed = compositor_reader.handed, taken = __atomic_load_n(&compositor_reader.reading, __ATOMIC_ACQUIRE);
+        struct compositor_reader_record *record;
+
+        if (handed - taken + (compositor_reader.dropped ? 2 : 1) > COMPOSITOR_READER_RING)
+        {
+                compositor_reader.dropped = at + 1;
+                return;
+        }
+        if (compositor_reader.dropped)
+        {
+                record = &compositor_reader.ring[handed++ % COMPOSITOR_READER_RING];
+                memory_zero(record, sizeof *record);
+                record->raw.type = COMPOSITOR_EV_SYN, record->raw.code = COMPOSITOR_SYN_DROPPED;
+                record->at = compositor_reader.dropped - 1, record->generation = __atomic_load_n(&compositor_reader.generation[record->at], __ATOMIC_ACQUIRE);
+                compositor_reader.dropped = 0;
+        }
+        record = &compositor_reader.ring[handed++ % COMPOSITOR_READER_RING];
+        record->raw = *raw, record->at = at, record->generation = generation;
+        __atomic_store_n(&compositor_reader.handed, handed, __ATOMIC_SEQ_CST);
+}
+
+// A locked pointer's report (only relative counts of x and y, scan codes, and its end) sent by the reader itself: the device is a mouse
+// the hand moves (no pad, no touch screen, no wake-only device), the loop has taken every record handed it and sent what they made, and the
+// client's queue is empty (compositor_wl_direct_send).
+static int compositor_reader_direct(unsigned int at, const struct compositor_input_event *raw, unsigned int count)
+{
+#ifdef CONFIG_MOONWATER_WAYLAND
+        long dx = 0, dy = 0;
+
+        if (compositor.touchpad[at] || compositor.touchscreen[at] || compositor.wakeonly[at] ||
+            __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) != compositor_reader.handed || compositor_reader.dropped)
+                return 0;
+        for (unsigned int k = 0; k < count; k++)
+                if (raw[k].type == COMPOSITOR_EV_REL && raw[k].code == COMPOSITOR_REL_X)
+                        dx += raw[k].value;
+                else if (raw[k].type == COMPOSITOR_EV_REL && raw[k].code == COMPOSITOR_REL_Y)
+                        dy += raw[k].value;
+                else if (raw[k].type != 4u && !(raw[k].type == COMPOSITOR_EV_SYN && raw[k].code == 0)) // EV_MSC; SYN_REPORT
+                        return 0;
+        if ((!dx && !dy) || !compositor_wl_direct_send(dx, dy, (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds))
+                return 0;
+        __atomic_add_fetch(&compositor_reader.direct, 1, __ATOMIC_RELEASE);
+        return 1;
+#else
+        (void)at, (void)raw, (void)count;
+        return 0;
+#endif
+}
+
+// The reader's set taken again from the loop's devices: each slot's descriptor watched under its slot's number (epoll's word for it).
+static void compositor_reader_sync(int *watched, unsigned int *generations, unsigned int *count)
+{
+        unsigned int devices = __atomic_load_n(&compositor.input_count, __ATOMIC_ACQUIRE);
+
+        for (unsigned int at = 0; at < COMPOSITOR_INPUTS && (at < devices || at < *count); at++)
+        {
+                int fd = at < devices ? __atomic_load_n(&compositor.inputs[at], __ATOMIC_ACQUIRE) : -1;
+                unsigned int generation = __atomic_load_n(&compositor_reader.generation[at], __ATOMIC_ACQUIRE);
+
+                if (fd == watched[at] && generation == generations[at])
+                        continue;
+                if (watched[at] >= 0)
+                        system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 2, (positive)watched[at], 0);
+                watched[at] = -1, generations[at] = generation;
+                if (fd >= 0)
+                {
+                        struct compositor_epoll_event in = {COMPOSITOR_POLLIN, at};
+
+                        if (system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 1, (positive)fd, (positive)&in) == 0)
+                                watched[at] = fd;
+                }
+        }
+        *count = devices > *count ? devices : *count;
+}
+
+static fn compositor_reader_run(address_any context)
+{
+        static int watched[COMPOSITOR_INPUTS];
+        static unsigned int generations[COMPOSITOR_INPUTS];
+        unsigned int count = 0, changes = ~0u;
+        int priority = COMPOSITOR_READER_PRIORITY;
+
+        (void)context;
+        compositor_call(syscall(sched_setscheduler), 0, 1, (positive)&priority, 0, 0, 0); // SCHED_FIFO: refused, it stays the loop's
+        for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
+                watched[at] = -1;
+        for (;;)
+        {
+                struct compositor_epoll_event ready[16];
+                long got;
+
+                if (__atomic_load_n(&compositor_reader.changes, __ATOMIC_ACQUIRE) != changes)
+                {
+                        changes = __atomic_load_n(&compositor_reader.changes, __ATOMIC_ACQUIRE);
+                        compositor_reader_sync(watched, generations, &count);
+                }
+                got = (long)system_call_6(syscall(epoll_pwait2), (positive)compositor_reader.set, (positive)ready, 16, 0, 0, 0);
+                for (long k = 0; k < got; k++)
+                {
+                        unsigned int at = (unsigned int)ready[k].data;
+                        struct compositor_input_event raw[64];
+                        unsigned int put = 0;
+
+                        if (at >= COMPOSITOR_INPUTS)
+                        {
+                                unsigned long long word;
+
+                                system_read_once(compositor_reader.wake, &word, sizeof word);
+                                continue;
+                        }
+                        for (unsigned int reads = 0; watched[at] >= 0 && reads < COMPOSITOR_INPUT_READS; reads++)
+                        {
+                                bipolar bytes = system_read_once(watched[at], raw, sizeof raw);
+                                unsigned int records = bytes > 0 ? (unsigned int)(bytes / (bipolar)sizeof raw[0]) : 0, from = 0;
+
+                                if (bytes < 0 && bytes != -COMPOSITOR_EAGAIN && bytes != -4)
+                                {
+                                        // Gone: no more reads of it here, and the loop lets it go (its close takes it out of this set too).
+                                        struct compositor_input_event gone = {0, 0, COMPOSITOR_READER_GONE, 0, 0};
+
+                                        system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 2, (positive)watched[at], 0);
+                                        watched[at] = -1;
+                                        compositor_reader_put(at, generations[at], &gone), put++;
+                                        break;
+                                }
+                                // Report by report: a locked pointer's sent here when it may be, the rest handed to the loop in order.
+                                for (unsigned int k2 = 0; k2 < records; k2++)
+                                        if (raw[k2].type == COMPOSITOR_EV_SYN && raw[k2].code == 0)
+                                        {
+                                                if (!compositor_reader_direct(at, raw + from, k2 + 1 - from))
+                                                        for (unsigned int r = from; r <= k2; r++)
+                                                                compositor_reader_put(at, generations[at], &raw[r]), put++;
+                                                from = k2 + 1;
+                                        }
+                                for (unsigned int r = from; r < records; r++)
+                                        compositor_reader_put(at, generations[at], &raw[r]), put++;
+                                if (bytes < (bipolar)sizeof raw)
+                                        break;
+                        }
+                        if (put)
+                                compositor_reader_knock();
+                }
+                // The loop told of the reports sent here, once in a while: what a report keeps (the idle clock, the processor's hold, the card).
+                if (__atomic_load_n(&compositor_reader.direct, __ATOMIC_ACQUIRE) != __atomic_load_n(&compositor_reader.noted, __ATOMIC_ACQUIRE))
+                {
+                        positive now = clock_monotonic_nanoseconds();
+
+                        if (now - compositor_reader.note_at >= COMPOSITOR_READER_NOTE_NS)
+                                compositor_reader.note_at = now, compositor_reader_knock();
+                }
+        }
+}
+
+// The reader started, once the devices are open: 0 when there is no thread (the loop reads the devices itself, as it did).
+static int compositor_reader_start(void)
+{
+        struct compositor_epoll_event wake;
+
+        compositor_reader.knock = (int)compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0); // EFD_CLOEXEC | EFD_NONBLOCK
+        compositor_reader.wake = (int)compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0);
+        compositor_reader.set = (int)system_call_1(syscall(epoll_create1), 0x80000);
+        wake = (struct compositor_epoll_event){COMPOSITOR_POLLIN, COMPOSITOR_INPUTS};
+        if (compositor_reader.knock < 0 || compositor_reader.wake < 0 || compositor_reader.set < 0 ||
+            system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 1, (positive)compositor_reader.wake, (positive)&wake) != 0)
+                goto none;
+        compositor_reader.on = 1;
+        if (thread_start(compositor_reader_run, null))
+                return 1;
+        compositor_reader.on = 0;
+none:
+        if (compositor_reader.knock >= 0)
+                system_close(compositor_reader.knock);
+        if (compositor_reader.wake >= 0)
+                system_close(compositor_reader.wake);
+        if (compositor_reader.set >= 0)
+                system_close(compositor_reader.set);
+        compositor_reader.knock = compositor_reader.wake = compositor_reader.set = -1;
+        return 0;
+}
+
+// The loop's turn of the ring: the knock read, each record acted on as its device's read was (a run of one device's records at a time, a
+// record of an open since let go of passed over), and a note of the reader's direct sends taken.
+static void compositor_reader_take(void)
+{
+        unsigned long long word, at = compositor_reader.reading, handed;
+        struct compositor_input_event raw[64];
+
+        system_read_once(compositor_reader.knock, &word, sizeof word);
+        __atomic_store_n(&compositor_reader.knocked, 0u, __ATOMIC_SEQ_CST);
+        handed = __atomic_load_n(&compositor_reader.handed, __ATOMIC_SEQ_CST);
+        while (at < handed)
+        {
+                const struct compositor_reader_record *first = &compositor_reader.ring[at % COMPOSITOR_READER_RING];
+                unsigned int device = first->at, generation = first->generation, count = 0;
+                int moved = 0;
+
+                while (at < handed && count < 64)
+                {
+                        const struct compositor_reader_record *record = &compositor_reader.ring[at % COMPOSITOR_READER_RING];
+
+                        if (record->at != device || record->generation != generation)
+                                break;
+                        raw[count++] = record->raw, at++;
+                        if (record->raw.type == COMPOSITOR_READER_GONE)
+                                break;
+                }
+                // An open let go of since (its generation is old), or a slot that holds no device, says nothing now.
+                if (device >= compositor.input_count || compositor.inputs[device] < 0 ||
+                    generation != __atomic_load_n(&compositor_reader.generation[device], __ATOMIC_ACQUIRE))
+                        continue;
+                compositor_post_physical = device < COMPOSITOR_INPUTS && compositor_input_physical[device];
+                if (raw[count - 1].type == COMPOSITOR_READER_GONE)
+                {
+                        if (count > 1)
+                                moved = compositor_input_take(device, raw, (bipolar)((count - 1) * sizeof raw[0]), 0);
+                        compositor_input_gone(device);
+                }
+                else
+                        moved = compositor_input_take(device, raw, (bipolar)(count * sizeof raw[0]), 0);
+                compositor_input_end(device, moved);
+                compositor_post_physical = 0;
+                if (compositor.inputs[device] < 0)
+                        compositor_input_physical[device] = 0;
+        }
+        __atomic_store_n(&compositor_reader.reading, at, __ATOMIC_RELEASE);
+        // The reports the reader sent itself: a person's input, which the idle clock, the processor's hold and the card's wake count.
+        {
+                unsigned long long direct = __atomic_load_n(&compositor_reader.direct, __ATOMIC_ACQUIRE);
+
+                if (direct != compositor_reader.noted)
+                {
+                        __atomic_store_n(&compositor_reader.noted, direct, __ATOMIC_RELEASE);
+#ifdef CONFIG_MOONWATER_WAYLAND
+                        compositor_wl_input();
+#endif
+#ifdef MOONWATER_GPU_C
+                        compositor_gpu_wake();
+#endif
+                        compositor_hold_touch(clock_monotonic_nanoseconds());
+                }
+        }
+}
+
+// The loop's sends of its turn are out (compositor_wl_wake_input): what it took of the ring is taken, and the reader may send again.
+static void compositor_reader_settle(void)
+{
+        if (compositor_reader.on)
+                __atomic_store_n(&compositor_reader.taken, compositor_reader.reading, __ATOMIC_RELEASE);
+}
+
+/*
         A device's reports read, and what they say posted. The posts it makes are the device's (compositor_post_physical says whether
         it is the machine's own, compositor_input_add) for as long as the read lasts and no longer, so a post made after it, from
         anywhere, is marked as one whose source is not known; a slot whose device has gone is the machine's no more.
@@ -4322,260 +4650,280 @@ static void compositor_input_read(unsigned int at)
                 compositor_input_physical[at] = 0;
 }
 
+static int compositor_input_take(unsigned int at, const struct compositor_input_event *raw, bipolar got, int moved);
+static void compositor_input_gone(unsigned int at);
+static void compositor_input_end(unsigned int at, int moved);
+
 static void compositor_input_read_device(unsigned int at)
 {
         struct compositor_input_event raw[64];
-        struct compositor_report_event events[64];
         int moved = 0;
 
         for (unsigned int reads = 0; reads < COMPOSITOR_INPUT_READS; reads++)
         {
                 bipolar got = system_read_once(compositor.inputs[at], raw, sizeof(raw));
-                positive count;
 
-                // A device that went away answers every poll at once, so it
-                // is let go of rather than read in a loop.
+                // A device that went away answers every poll at once, so it is let go of rather than read in a loop.
                 if (got < 0 && got != -COMPOSITOR_EAGAIN && got != -4)
-                {
-                        compositor_sling_only = 0;
-                        system_close(compositor.inputs[at]);
-                        compositor.inputs[at] = -1;
-                        compositor.table->input_number[at] = -1;
-                        if ((unsigned int)compositor.device_number[at] < COMPOSITOR_DEVICES)
-                                compositor.devices[compositor.device_number[at] / 64] &= ~(1ul << (compositor.device_number[at] % 64));
-
-                        // What it held down will never be let go of: not a key, not a button, not a finger. A keyboard's keys are
-                        // not told apart by device, so every key down is let go (to the window it went to); a pointer lets go of
-                        // each button it may have held. A keyboard that held no button releases none another device holds.
-                        compositor.held[at] = 0;
-                        if (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD)
-                                compositor_keys_release();
-                        if (compositor.input_kinds[at] & (WINDOWS_INPUT_MOUSE | WINDOWS_INPUT_TABLET | WINDOWS_INPUT_BUTTONS |
-                                                          WINDOWS_INPUT_TOUCH | WINDOWS_INPUT_FINGERS | WINDOWS_INPUT_DIRECT))
-                        {
-                                // The left is let go even with no button recorded: a drag of a titlebar or a resize has none.
-                                // The pointer holds no button it was told of either, so it is its own size again.
-                                compositor.cursor.held = 0;
-                                compositor_release(COMPOSITOR_BTN_LEFT, 0);
-                                for (unsigned int index = 1; index < 8; index++)
-                                        if (compositor.button_down >> index & 1)
-                                                compositor_release(COMPOSITOR_BTN_LEFT + index, 0);
-                        }
-                        if (compositor.touchscreen[at] && compositor.touch.gesture.mode != UI_TOUCH_NONE &&
-                            compositor.touch.device == (int)at)
-                        {
-                                // A long press it held is let go of in the row it landed on, as its lift would have: no lift comes now.
-                                if (compositor.touch.gesture.mode == UI_TOUCH_HELD && compositor.touch.hold_row >= 0)
-                                        compositor_post(compositor.touch.hold_row, WINDOW_EVENT_BUTTON,
-                                                        WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, COMPOSITOR_BTN_LEFT, 0);
-                                compositor.touch.hold_row = COMPOSITOR_NONE;
-                                ui_touch_reset(&compositor.touch.gesture);
-                        }
-                        if (compositor.touchscreen[at])
-                                for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
-                                        compositor_spot_lift(slot, clock_monotonic_nanoseconds());
-                        compositor.touchscreen[at] = 0;
-                }
-
+                        compositor_input_gone(at);
                 if (got <= 0)
                         break;
-#ifdef MOONWATER_GPU_C
-                // Input keeps the card awake for what answers it, asked once the turn's input is forwarded (compositor_gpu_input_turn)
-                if (!compositor.wakeonly[at])
-                        compositor_gpu_wake();
-#endif
-
-                // It woke the loop, and that was all it was for.
-                if (compositor.wakeonly[at])
-                {
-                        compositor_sling_only = 0;
-                        continue;
-                }
-
-                // The whole records of what was read, each with its stamp worked out, in one pass (evdev_decode).
-                count = evdev_decode((const p8 *)raw, (positive)got, (p64 *)events, 64);
-                for (positive i = 0; i < count; i++)
-                {
-                        const struct compositor_report_event *event = &events[i];
-                        positive now = event->stamp;
-
-                        // The events this one posts carry its own stamp (the device's), not the time the loop reads them at.
-                        compositor_stamp_now = now;
-                        // A locked pointer's counts and the end of their report are all a slingshot turn may hold (EV_MSC, 4, a scan code, says
-                        // nothing either); a touch screen's and a touchpad's are worked into gestures, a key, a button and a wheel are the
-                        // compositor's to look at (its keys, a click's focus, a stream).
-                        if (compositor.touchscreen[at] || compositor.touchpad[at] || !compositor_wl_locked() ||
-                            !((event->type == COMPOSITOR_EV_REL && event->code < 2) || (event->type == COMPOSITOR_EV_SYN && event->code == 0) ||
-                              event->type == 4u))
-                                compositor_sling_only = 0;
-#ifdef CONFIG_MOONWATER_WAYLAND
-                        // The idle clock (ext-idle-notify) counts from the input a person gives: keys, buttons, motion, fingers.
-                        if (event->type == COMPOSITOR_EV_KEY || event->type == COMPOSITOR_EV_REL || event->type == COMPOSITOR_EV_ABS)
-                                compositor_wl_input();
-#endif
-                        // The touch trace (window.c): a touch-down looks for its switch, and each raw event of a touch screen or a pad is a line.
-                        if (compositor.touchscreen[at] || compositor.touchpad[at])
-                        {
-                                // A finger down is BTN_TOUCH, or, on a screen that reports slots only (a virtio multitouch device sends no BTN_TOUCH), a tracking id.
-                                if ((event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOUCH && event->value) ||
-                                    (event->type == COMPOSITOR_EV_ABS && event->code == COMPOSITOR_ABS_MT_TRACKING_ID && event->value >= 0))
-                                        window_trace_touch();
-                                WINDOW_TRACE_START();
-                                WINDOW_TRACE_PART("compositor event: monotonic %p device %p ", (positive)clock_monotonic_nanoseconds(), now);
-                                window_trace_word((const char address_to)compositor.input_name[at]);
-                                WINDOW_TRACE_PART(" type %b code %b value %b", (bipolar)event->type, (bipolar)event->code, (bipolar)event->value);
-                                WINDOW_TRACE_END();
-                        }
-                        if ((event->type == COMPOSITOR_EV_REL && event->code < 2) || event->type == COMPOSITOR_EV_ABS)
-                                compositor.motion_ts = compositor.motion_ts ? compositor.motion_ts : now;
-
-                        // A touch screen's events are its fingers', taken when its report is over.
-                        if (compositor.touchscreen[at])
-                        {
-                                if (event->type == COMPOSITOR_EV_SYN && event->code == 0)
-                                        compositor_touch_report(at, now);
-                                else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
-                                {
-                                        compositor.table->input_dropped[at]++;
-                                        compositor.screen_touch[at].dropped = 1;
-                                }
-                                else
-                                        compositor_touch_event(at, event);
-                                continue;
-                        }
-
-                        if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_X)
-                        {
-                                compositor.raw_x = compositor_counts(compositor.raw_x, event->value);
-                                if (compositor_shaken(event->value, now))
-                                        compositor.cursor.magnify = 1;
-                        }
-                        else if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_Y)
-                                compositor.raw_y = compositor_counts(compositor.raw_y, event->value);
-                        else if (event->type == COMPOSITOR_EV_REL &&
-                                 (event->code == COMPOSITOR_REL_WHEEL || event->code == COMPOSITOR_REL_HWHEEL ||
-                                  event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI))
-                        {
-                                int fine = event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI;
-                                int sideways = event->code == COMPOSITOR_REL_HWHEEL || event->code == COMPOSITOR_REL_HWHEEL_HI;
-
-                                compositor.table->input_wheel_read[at]++;
-                                compositor.table->input_wheel_last[at] = now;
-                                // A wheel that reports in 120ths is read from those, and its notches are not counted again.
-                                if (fine || !(compositor.hires[at] >> sideways & 1))
-                                {
-                                        // A stream's notches are the finger's motion, one for one; a mouse's are stepped (compositor_wheel_stream).
-                                        int stream = compositor_wheel_streams(at, now);
-
-                                        if (compositor.table)
-                                                window_wheel_note(compositor.table, at, now, stream);
-
-                                        compositor.table->input_wheel_used[at]++;
-                                        long long value120 = fine ? (long long)event->value : (long long)event->value * 120;
-                                        unsigned int flags = 0;
-
-                                        if (stream)
-                                        {
-                                                long long gain = compositor_stream_gain_at(at, now);
-
-                                                value120 = compositor_stream_turn(at, value120, gain, sideways);
-                                                flags = WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM;
-                                        }
-                                        compositor_wheel(compositor_counts(0, value120), sideways, flags);
-                                }
-                        }
-                        else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
-                        {
-                                compositor.table->input_dropped[at]++;
-                                // What the kernel dropped may be a lift and a touch somewhere else: the touchpad's
-                                // next report says where the finger is, and is no move from where it was before.
-                                if (compositor.touchpad[at])
-                                {
-                                        compositor.pad[at].moving = 0;
-                                        compositor.pad[at].left_x = compositor.pad[at].left_y = 0;
-                                }
-                                // And a key's or a button's release: what no device has down is let go.
-                                compositor_input_dropped(at, now);
-                        }
-                        else if (event->type == COMPOSITOR_EV_ABS && compositor.touchpad[at] && event->code >= COMPOSITOR_ABS_MT_SLOT &&
-                                 event->code <= COMPOSITOR_ABS_MT_TRACKING_ID)
-                                compositor_pad_slot(&compositor.pad[at], event->code, event->value);
-                        else if (event->type == COMPOSITOR_EV_ABS && event->code < 2 && compositor.touchpad[at])
-                        {
-                                if (event->code)
-                                        compositor.pad[at].next_y = event->value;
-                                else
-                                        compositor.pad[at].next_x = event->value;
-                        }
-                        else if (event->type == COMPOSITOR_EV_ABS && event->code < 2)
-                        {
-                                int *range = event->code ? compositor.absolute_y[at] : compositor.absolute_x[at];
-                                int place = compositor_tablet(event->value, range[0], range[1],
-                                                              event->code ? compositor.height : compositor.width);
-
-                                if (event->code)
-                                        compositor.tablet_y = place;
-                                else
-                                        compositor.tablet_x = place;
-                                compositor.tablet_have |= event->code ? 2 : 1;
-                        }
-                        else if (event->type == COMPOSITOR_EV_SYN && event->code == 0)
-                        {
-                                if (compositor.touchpad[at])
-                                        compositor_pad_apply(at, now);
-                                moved |= compositor_report(now, now);
-                        }
-                        else if (event->type == COMPOSITOR_EV_KEY && compositor.touchpad[at] &&
-                                 compositor_pad_finger_key(event->code))
-                        {
-                                // The last finger lifting ends the precise gesture: the region in hand lets go at its lift (WINDOW_WHEEL_STOP).
-                                // Fingers that turned no wheel (a move of the pointer, a tap, a click) end none, and their lift sends nothing:
-                                // a stop is a wheel event to the window under the pointer, which an open menu there is not to be closed by.
-                                b32 down = compositor.pad[at].touching || compositor.pad[at].fingers;
-
-                                compositor_pad_key(&compositor.pad[at], event->code, event->value);
-                                if (down && !compositor.pad[at].touching && !compositor.pad[at].fingers)
-                                {
-                                        if (compositor.pad[at].turned)
-                                                compositor_wheel(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
-                                        compositor.pad[at].turned = 0;
-                                }
-                        }
-                        else if (event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOOL_PEN && !event->value &&
-                                 !compositor.touchpad[at] && !compositor.touchscreen[at])
-                                compositor_predict_clear(COMPOSITOR_PREDICT_PEN);
-                        else if (event->type == COMPOSITOR_EV_KEY &&
-                                 ((event->code >= COMPOSITOR_BTN_LEFT && event->code <= COMPOSITOR_BTN_TASK) ||
-                                  event->code == COMPOSITOR_BTN_TOUCH))
-                        {
-                                // A touch is the left button (a touchpad's is no press, above); the others are where
-                                // they are, but a touchpad's left pressed with two fingers on it, which is its right.
-                                unsigned int code = event->code == COMPOSITOR_BTN_TOUCH ? COMPOSITOR_BTN_LEFT : event->code;
-
-                                if (compositor.touchpad[at] && code == COMPOSITOR_BTN_LEFT)
-                                {
-                                        if (event->value)
-                                                compositor.pad[at].clicked = compositor.pad[at].fingers >= 2 ? COMPOSITOR_BTN_RIGHT
-                                                                                                             : COMPOSITOR_BTN_LEFT;
-                                        code = compositor.pad[at].clicked ? compositor.pad[at].clicked : code;
-                                }
-                                moved |= compositor_report(now, now);
-                                if (moved)
-                                        compositor_motion(), moved = 0;
-                                compositor_press(code, event->value != 0);
-                        }
-                        else if (event->type == COMPOSITOR_EV_KEY && event->code < 256)
-                        {
-                                // A key of a physical keyboard is the last input (the on-screen keyboard's auto rule).
-                                if (event->value == 1 && (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD))
-                                        compositor.osk_typed = 1;
-                                compositor_key(at, event->code, event->value, now);
-                        }
-                }
+                moved = compositor_input_take(at, raw, got, moved);
                 if (got < (bipolar)sizeof(raw))
                         break;
         }
+        compositor_input_end(at, moved);
+}
 
+// A device gone (its read failed, or it answered ENODEV after a sleep): let go of, and all it held.
+static void compositor_input_gone(unsigned int at)
+{
+        compositor_sling_only = 0;
+        system_close(compositor.inputs[at]);
+        compositor.inputs[at] = -1;
+        compositor.table->input_number[at] = -1;
+        if ((unsigned int)compositor.device_number[at] < COMPOSITOR_DEVICES)
+                compositor.devices[compositor.device_number[at] / 64] &= ~(1ul << (compositor.device_number[at] % 64));
+
+        // What it held down will never be let go of: not a key, not a button, not a finger. A keyboard's keys are
+        // not told apart by device, so every key down is let go (to the window it went to); a pointer lets go of
+        // each button it may have held. A keyboard that held no button releases none another device holds.
+        compositor.held[at] = 0;
+        if (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD)
+                compositor_keys_release();
+        if (compositor.input_kinds[at] & (WINDOWS_INPUT_MOUSE | WINDOWS_INPUT_TABLET | WINDOWS_INPUT_BUTTONS |
+                                          WINDOWS_INPUT_TOUCH | WINDOWS_INPUT_FINGERS | WINDOWS_INPUT_DIRECT))
+        {
+                // The left is let go even with no button recorded: a drag of a titlebar or a resize has none.
+                // The pointer holds no button it was told of either, so it is its own size again.
+                compositor.cursor.held = 0;
+                compositor_release(COMPOSITOR_BTN_LEFT, 0);
+                for (unsigned int index = 1; index < 8; index++)
+                        if (compositor.button_down >> index & 1)
+                                compositor_release(COMPOSITOR_BTN_LEFT + index, 0);
+        }
+        if (compositor.touchscreen[at] && compositor.touch.gesture.mode != UI_TOUCH_NONE &&
+            compositor.touch.device == (int)at)
+        {
+                // A long press it held is let go of in the row it landed on, as its lift would have: no lift comes now.
+                if (compositor.touch.gesture.mode == UI_TOUCH_HELD && compositor.touch.hold_row >= 0)
+                        compositor_post(compositor.touch.hold_row, WINDOW_EVENT_BUTTON,
+                                        WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, COMPOSITOR_BTN_LEFT, 0);
+                compositor.touch.hold_row = COMPOSITOR_NONE;
+                ui_touch_reset(&compositor.touch.gesture);
+        }
+        if (compositor.touchscreen[at])
+                for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+                        compositor_spot_lift(slot, clock_monotonic_nanoseconds());
+        compositor.touchscreen[at] = 0;
+        compositor_reader_changed(at);
+}
+
+// What one read of device at gave (got bytes of whole records), acted on; moved says a report moved the pointer, whose motion is made
+// once the device's reads are done (compositor_input_end).
+static int compositor_input_take(unsigned int at, const struct compositor_input_event *raw, bipolar got, int moved)
+{
+        struct compositor_report_event events[64];
+        positive count;
+
+#ifdef MOONWATER_GPU_C
+        // Input keeps the card awake for what answers it, asked once the turn's input is forwarded (compositor_gpu_input_turn)
+        if (!compositor.wakeonly[at])
+                compositor_gpu_wake();
+#endif
+
+        // It woke the loop, and that was all it was for.
+        if (compositor.wakeonly[at])
+        {
+                compositor_sling_only = 0;
+                return moved;
+        }
+
+        // The whole records of what was read, each with its stamp worked out, in one pass (evdev_decode).
+        count = evdev_decode((const p8 *)raw, (positive)got, (p64 *)events, 64);
+        for (positive i = 0; i < count; i++)
+        {
+                const struct compositor_report_event *event = &events[i];
+                positive now = event->stamp;
+
+                // The events this one posts carry its own stamp (the device's), not the time the loop reads them at.
+                compositor_stamp_now = now;
+                // A locked pointer's counts and the end of their report are all a slingshot turn may hold (EV_MSC, 4, a scan code, says
+                // nothing either); a touch screen's and a touchpad's are worked into gestures, a key, a button and a wheel are the
+                // compositor's to look at (its keys, a click's focus, a stream).
+                if (compositor.touchscreen[at] || compositor.touchpad[at] || !compositor_wl_locked() ||
+                    !((event->type == COMPOSITOR_EV_REL && event->code < 2) || (event->type == COMPOSITOR_EV_SYN && event->code == 0) ||
+                      event->type == 4u))
+                        compositor_sling_only = 0;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // The idle clock (ext-idle-notify) counts from the input a person gives: keys, buttons, motion, fingers.
+                if (event->type == COMPOSITOR_EV_KEY || event->type == COMPOSITOR_EV_REL || event->type == COMPOSITOR_EV_ABS)
+                        compositor_wl_input();
+#endif
+                // The touch trace (window.c): a touch-down looks for its switch, and each raw event of a touch screen or a pad is a line.
+                if (compositor.touchscreen[at] || compositor.touchpad[at])
+                {
+                        // A finger down is BTN_TOUCH, or, on a screen that reports slots only (a virtio multitouch device sends no BTN_TOUCH), a tracking id.
+                        if ((event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOUCH && event->value) ||
+                            (event->type == COMPOSITOR_EV_ABS && event->code == COMPOSITOR_ABS_MT_TRACKING_ID && event->value >= 0))
+                                window_trace_touch();
+                        WINDOW_TRACE_START();
+                        WINDOW_TRACE_PART("compositor event: monotonic %p device %p ", (positive)clock_monotonic_nanoseconds(), now);
+                        window_trace_word((const char address_to)compositor.input_name[at]);
+                        WINDOW_TRACE_PART(" type %b code %b value %b", (bipolar)event->type, (bipolar)event->code, (bipolar)event->value);
+                        WINDOW_TRACE_END();
+                }
+                if ((event->type == COMPOSITOR_EV_REL && event->code < 2) || event->type == COMPOSITOR_EV_ABS)
+                        compositor.motion_ts = compositor.motion_ts ? compositor.motion_ts : now;
+
+                // A touch screen's events are its fingers', taken when its report is over.
+                if (compositor.touchscreen[at])
+                {
+                        if (event->type == COMPOSITOR_EV_SYN && event->code == 0)
+                                compositor_touch_report(at, now);
+                        else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
+                        {
+                                compositor.table->input_dropped[at]++;
+                                compositor.screen_touch[at].dropped = 1;
+                        }
+                        else
+                                compositor_touch_event(at, event);
+                        continue;
+                }
+
+                if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_X)
+                {
+                        compositor.raw_x = compositor_counts(compositor.raw_x, event->value);
+                        if (compositor_shaken(event->value, now))
+                                compositor.cursor.magnify = 1;
+                }
+                else if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_Y)
+                        compositor.raw_y = compositor_counts(compositor.raw_y, event->value);
+                else if (event->type == COMPOSITOR_EV_REL &&
+                         (event->code == COMPOSITOR_REL_WHEEL || event->code == COMPOSITOR_REL_HWHEEL ||
+                          event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI))
+                {
+                        int fine = event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI;
+                        int sideways = event->code == COMPOSITOR_REL_HWHEEL || event->code == COMPOSITOR_REL_HWHEEL_HI;
+
+                        compositor.table->input_wheel_read[at]++;
+                        compositor.table->input_wheel_last[at] = now;
+                        // A wheel that reports in 120ths is read from those, and its notches are not counted again.
+                        if (fine || !(compositor.hires[at] >> sideways & 1))
+                        {
+                                // A stream's notches are the finger's motion, one for one; a mouse's are stepped (compositor_wheel_stream).
+                                int stream = compositor_wheel_streams(at, now);
+
+                                if (compositor.table)
+                                        window_wheel_note(compositor.table, at, now, stream);
+
+                                compositor.table->input_wheel_used[at]++;
+                                long long value120 = fine ? (long long)event->value : (long long)event->value * 120;
+                                unsigned int flags = 0;
+
+                                if (stream)
+                                {
+                                        long long gain = compositor_stream_gain_at(at, now);
+
+                                        value120 = compositor_stream_turn(at, value120, gain, sideways);
+                                        flags = WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM;
+                                }
+                                compositor_wheel(compositor_counts(0, value120), sideways, flags);
+                        }
+                }
+                else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
+                {
+                        compositor.table->input_dropped[at]++;
+                        // What the kernel dropped may be a lift and a touch somewhere else: the touchpad's
+                        // next report says where the finger is, and is no move from where it was before.
+                        if (compositor.touchpad[at])
+                        {
+                                compositor.pad[at].moving = 0;
+                                compositor.pad[at].left_x = compositor.pad[at].left_y = 0;
+                        }
+                        // And a key's or a button's release: what no device has down is let go.
+                        compositor_input_dropped(at, now);
+                }
+                else if (event->type == COMPOSITOR_EV_ABS && compositor.touchpad[at] && event->code >= COMPOSITOR_ABS_MT_SLOT &&
+                         event->code <= COMPOSITOR_ABS_MT_TRACKING_ID)
+                        compositor_pad_slot(&compositor.pad[at], event->code, event->value);
+                else if (event->type == COMPOSITOR_EV_ABS && event->code < 2 && compositor.touchpad[at])
+                {
+                        if (event->code)
+                                compositor.pad[at].next_y = event->value;
+                        else
+                                compositor.pad[at].next_x = event->value;
+                }
+                else if (event->type == COMPOSITOR_EV_ABS && event->code < 2)
+                {
+                        int *range = event->code ? compositor.absolute_y[at] : compositor.absolute_x[at];
+                        int place = compositor_tablet(event->value, range[0], range[1],
+                                                      event->code ? compositor.height : compositor.width);
+
+                        if (event->code)
+                                compositor.tablet_y = place;
+                        else
+                                compositor.tablet_x = place;
+                        compositor.tablet_have |= event->code ? 2 : 1;
+                }
+                else if (event->type == COMPOSITOR_EV_SYN && event->code == 0)
+                {
+                        if (compositor.touchpad[at])
+                                compositor_pad_apply(at, now);
+                        moved |= compositor_report(now, now);
+                }
+                else if (event->type == COMPOSITOR_EV_KEY && compositor.touchpad[at] &&
+                         compositor_pad_finger_key(event->code))
+                {
+                        // The last finger lifting ends the precise gesture: the region in hand lets go at its lift (WINDOW_WHEEL_STOP).
+                        // Fingers that turned no wheel (a move of the pointer, a tap, a click) end none, and their lift sends nothing:
+                        // a stop is a wheel event to the window under the pointer, which an open menu there is not to be closed by.
+                        b32 down = compositor.pad[at].touching || compositor.pad[at].fingers;
+
+                        compositor_pad_key(&compositor.pad[at], event->code, event->value);
+                        if (down && !compositor.pad[at].touching && !compositor.pad[at].fingers)
+                        {
+                                if (compositor.pad[at].turned)
+                                        compositor_wheel(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
+                                compositor.pad[at].turned = 0;
+                        }
+                }
+                else if (event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOOL_PEN && !event->value &&
+                         !compositor.touchpad[at] && !compositor.touchscreen[at])
+                        compositor_predict_clear(COMPOSITOR_PREDICT_PEN);
+                else if (event->type == COMPOSITOR_EV_KEY &&
+                         ((event->code >= COMPOSITOR_BTN_LEFT && event->code <= COMPOSITOR_BTN_TASK) ||
+                          event->code == COMPOSITOR_BTN_TOUCH))
+                {
+                        // A touch is the left button (a touchpad's is no press, above); the others are where
+                        // they are, but a touchpad's left pressed with two fingers on it, which is its right.
+                        unsigned int code = event->code == COMPOSITOR_BTN_TOUCH ? COMPOSITOR_BTN_LEFT : event->code;
+
+                        if (compositor.touchpad[at] && code == COMPOSITOR_BTN_LEFT)
+                        {
+                                if (event->value)
+                                        compositor.pad[at].clicked = compositor.pad[at].fingers >= 2 ? COMPOSITOR_BTN_RIGHT
+                                                                                                     : COMPOSITOR_BTN_LEFT;
+                                code = compositor.pad[at].clicked ? compositor.pad[at].clicked : code;
+                        }
+                        moved |= compositor_report(now, now);
+                        if (moved)
+                                compositor_motion(), moved = 0;
+                        compositor_press(code, event->value != 0);
+                }
+                else if (event->type == COMPOSITOR_EV_KEY && event->code < 256)
+                {
+                        // A key of a physical keyboard is the last input (the on-screen keyboard's auto rule).
+                        if (event->value == 1 && (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD))
+                                compositor.osk_typed = 1;
+                        compositor_key(at, event->code, event->value, now);
+                }
+        }
+return moved;
+}
+
+static void compositor_input_end(unsigned int at, int moved)
+{
         if (moved)
                 compositor_motion();
         compositor_stamp_now = 0;
