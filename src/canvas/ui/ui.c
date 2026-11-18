@@ -7971,6 +7971,7 @@ LANGUAGE_ID(files_delete_ask, "Delete %1$d: %2$s? Delete again does it, Escape l
 LANGUAGE_ID(files_delete_stopped, "Stopped at %2$s: %1$d deleted before it") \
 LANGUAGE_ID(files_deleted, "%d deleted") \
 LANGUAGE_ID(files_deleting, "Deleting: %d so far, Escape stops") \
+LANGUAGE_ID(files_done, "Done") \
 LANGUAGE_ID(files_empty, "This folder is empty") \
 LANGUAGE_ID(files_failed, "This folder could not be read") \
 LANGUAGE_ID(files_find_hint, "Find in this folder") \
@@ -7989,6 +7990,7 @@ LANGUAGE_ID(files_not_folder, "This is not a folder") \
 LANGUAGE_ID(files_nothing_to_paste, "The clipboard holds no files") \
 LANGUAGE_ID(files_reading, "Reading the folder") \
 LANGUAGE_ID(files_rename_hint, "New name") \
+LANGUAGE_ID(files_selecting, "Selection mode, %d chosen: tap items to add or take them out, Escape or Done to finish") \
 LANGUAGE_ID(files_sheet_created, "Made %s") \
 LANGUAGE_ID(files_sheet_file, "File") \
 LANGUAGE_ID(files_sheet_folder, "Folder") \
@@ -10707,6 +10709,69 @@ static b32 ui_pressed(const struct ui_press address_to press, int target)
 {
         return press->down && !press->dragged && target >= 0 && press->target == target;
 }
+
+/*
+        A hold: a press kept still (within UI_SLOP of where it went down) for UI_CHOOSE_HOLD_NS turns from what a press does (scroll the list,
+        click its row) into choosing: a list that asks for it (ui_list.hold_on) answers the hold done (ui_list_hold_tick) with where it
+        went down, a row or its ground, and the app chooses there, a rubber band from the ground or the row taken up from a row. From
+        the moment the press is still a ring of the accent grows round the press (ui_hold_draw), whole at UI_CHOOSE_HOLD_NS, and a pop of it
+        says the press has turned; a press moved past the slop before then is what it was, and no ring.
+*/
+#define UI_CHOOSE_HOLD_NS 3000000000ll  // how long a press is held still before it turns into choosing
+#define UI_CHOOSE_POP_NS 260000000ll // the ring's pop once it has
+#define UI_CHOOSE_RADIUS 22        // logical pixels: the ring's
+#define UI_CHOOSE_WIDTH 3          // and its stroke
+
+struct ui_hold
+{
+        b32 down, done;          // a press is held; it was held long enough (till the next press)
+        int x, y, target;        // where it went down and on what (-1 the ground)
+        b64 at;                  // when, and when it turned (the pop)
+        b64 turned;
+};
+
+static fn ui_hold_begin(struct ui_hold address_to h, int x, int y, int target, b64 now)
+{
+        h->down = true, h->done = false, h->x = x, h->y = y, h->target = target, h->at = now, h->turned = 0;
+}
+
+// The pressed hand moved: past the slop before the hold is done, the press is what it was, and no hold.
+static fn ui_hold_move(const struct ui address_to ui, struct ui_hold address_to h, int x, int y)
+{
+        if (h->down && !h->done && ui_press_past(ui, h->x, h->y, x, y))
+                h->down = false;
+}
+
+static fn ui_hold_end(struct ui_hold address_to h)
+{
+        h->down = false;
+}
+
+// How far the hold has come at now, Q30: 0 for none, UI_ONE once it is done.
+static b64 ui_hold_share(const struct ui_hold address_to h, b64 now)
+{
+        if (h->done)
+                return UI_ONE;
+        if (!h->down || now <= h->at)
+                return 0;
+        return now - h->at >= UI_CHOOSE_HOLD_NS ? UI_ONE : ((now - h->at) << UI_Q) / UI_CHOOSE_HOLD_NS;
+}
+
+// The hold at now: true the once it comes to UI_CHOOSE_HOLD_NS, which turns it (done, the pop's time).
+static b32 ui_hold_turns(struct ui_hold address_to h, b64 now)
+{
+        if (!h->down || h->done || ui_hold_share(h, now) < UI_ONE)
+                return false;
+        h->done = true, h->turned = now;
+        return true;
+}
+
+// Whether a picture is due for the hold at now: its ring growing, or its pop.
+static b32 ui_hold_moving(const struct ui_hold address_to h, b64 now)
+{
+        return (h->down && !h->done) || (h->turned && now - h->turned < UI_CHOOSE_POP_NS);
+}
+
 
 /* ---- kit: motion ---- */
 /*
@@ -23993,6 +24058,9 @@ struct ui_list
         int stripe;
         unsigned int stripe_tint;
         b32 stripe_accent;
+        // A hold (ui_hold): where the list asks for it (hold_on), a press kept still on it turns into choosing, as ui_list_hold_tick says.
+        b32 hold_on;
+        struct ui_hold hold;
 };
 
 #define UI_LIST_STRIPE_INK 0x0d    // the alpha of the ink a striped row is tinted with (about 5 percent)
@@ -25634,6 +25702,49 @@ static b32 ui_list_expander_at(struct ui address_to ui, struct ui_list address_t
         return first && x >= first->x - ui_dev(ui, UI_ROW_GAP) && x < last->x + last->w;
 }
 
+/*
+        The hold's ring round where the press is: a faint whole ring and the accent's arc over it from the top, round the way the window
+        reads, as far as the hold has come; once it has turned, a ring of the accent that grows and fades (the pop).
+*/
+static fn ui_hold_draw(struct ui address_to ui, const struct ui_hold address_to h, b64 now)
+{
+        int r = ui_dev(ui, UI_CHOOSE_RADIUS), cx = h->x, cy = h->y;
+        b32 thick = (b32)ui_dev(ui, UI_CHOOSE_WIDTH) << 8;
+        unsigned int accent = ui_role(UI_PRIMARY) & 0xffffffu;
+
+        if (h->turned && now - h->turned < UI_CHOOSE_POP_NS)
+        {
+                b64 t = ((now - h->turned) << UI_Q) / UI_CHOOSE_POP_NS;
+                int grow = r + (int)(ui_qmul(t, (b64)r) / 2);
+                unsigned int alpha = (unsigned int)(255 - ui_qmul(t, 255));
+
+                ui_kit_ring(ui, &(struct ui_box){(b32)(cx - grow) << 8, (b32)(cy - grow) << 8, (b32)(cx + grow) << 8, (b32)(cy + grow) << 8, (b32)grow << 8, (b32)grow << 8},
+                            thick, alpha << 24 | accent);
+                return;
+        }
+        if (!h->down || h->done)
+                return;
+        {
+                b64 share = ui_hold_share(h, now);
+                int steps = 64, lit = (int)ui_qmul(share, steps);
+                b64 sine, cosine;
+                b32 px = 0, py = 0;
+
+                ui_kit_ring(ui, &(struct ui_box){(b32)(cx - r) << 8, (b32)(cy - r) << 8, (b32)(cx + r) << 8, (b32)(cy + r) << 8, (b32)r << 8, (b32)r << 8},
+                            thick, 0x40000000u | (ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu));
+                for (int k = 0; k <= lit; k++)
+                {
+                        b32 x, y;
+
+                        ui_sincos((b64)k * 6746518852ll / steps, &sine, &cosine);
+                        x = (b32)(cx * 256 + ui_dir() * ui_qmul(sine, (b64)r * 256)), y = (b32)(cy * 256 - ui_qmul(cosine, (b64)r * 256));
+                        if (k)
+                                ui_chevron_stroke(ui, px, py, x, y, thick, 0xff000000u | accent);
+                        px = x, py = y;
+                }
+        }
+}
+
 // A striped row's tint (straight ARGB): the app's, else the accent's or the ink's at a low alpha, the ink being the glass's on glass.
 static unsigned int ui_list_stripe_colour(const struct ui address_to ui, const struct ui_list address_to l)
 {
@@ -25761,6 +25872,13 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                         ui_kit_fill(ui, &box, 0x40000000u | accent, null);
                         ui_kit_ring(ui, &box, ui_q8(ui, 1), 0xff000000u | accent);
                 }
+        }
+        // A hold's ring round the press, or its pop.
+        if (l->hold_on)
+        {
+                ui->top = 0, ui->bottom = ui->height;
+                ui_hold_draw(ui, &l->hold, (b64)ui_kit_time());
+                ui->top = l->y, ui->bottom = l->y + l->h;
         }
         // Where a drag over it would be dropped: the kit's focus ring round that row, or round the whole list.
         if (l->drop)
@@ -25970,6 +26088,7 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
         {
                 row = ui_list_hit(ui, l, x, y);
                 ui_list_pointer(ui, l, WINDOW_EVENT_MOTION, x, y, false);
+                ui_hold_move(ui, &l->hold, x, y);
                 if (l->press.down && l->press.drags)
                 {
                         b32 dragged = l->press.dragged;
@@ -25987,6 +26106,8 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
         if (event->flags & WINDOW_KEY_DOWN)
         {
                 row = ui_list_hit(ui, l, x, y);
+                if (l->hold_on)
+                        ui_hold_begin(&l->hold, x, y, row, (b64)ui_kit_time());
                 if (!ui_press_drags(event->flags))
                         ui_press_begin(&l->press, x, y, row, touch);
                 else if (ui_press_down(&l->press, x, y, row, &l->scroll), l->press.target < 0)
@@ -25995,11 +26116,35 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                 return -1;
         }
         ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, false);
+        ui_hold_end(&l->hold);
         row = ui_list_hit(ui, l, x, y);
         if (!l->press.drags)
                 return ui_press_release(&l->press, cancelled, row);
         clicked = ui_press_lift(&l->press, cancelled);
         return clicked >= 0 && clicked == row ? clicked : -1;
+}
+
+/*
+        A list's hold at now (ui_list.hold_on): UI_LIST_HELD the once its press, kept still, comes to UI_CHOOSE_HOLD_NS (where it went down is
+        l->hold.target, a row or -1 the ground, and x, y), and the press is taken back then (nothing scrolls on and its release clicks
+        nothing); UI_LIST_HOLDING while a picture is due for its ring or its pop; 0 else.
+*/
+#define UI_LIST_HELD 1u
+#define UI_LIST_HOLDING 2u
+static p32 ui_list_hold_tick(const struct ui address_to ui, struct ui_list address_to l, b64 now)
+{
+        p32 says = 0;
+
+        if (!l->hold_on)
+                return 0;
+        if (ui_hold_turns(&l->hold, now))
+        {
+                ui_list_press_cancel(ui, l);
+                says |= UI_LIST_HELD;
+        }
+        if (ui_hold_moving(&l->hold, now))
+                says |= UI_LIST_HOLDING;
+        return says;
 }
 
 /* ---- a finger's press: what it drags, and what its lift throws ---- */

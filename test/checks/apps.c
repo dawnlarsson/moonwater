@@ -934,6 +934,7 @@ static fn popmenu_bar_check(struct ui address_to wui);
 static fn drop_check(struct ui address_to wui);
 static fn band_check(struct ui address_to wui);
 static fn columns_check(struct ui address_to wui);
+static fn hold_check(struct ui address_to wui);
 
 /*
         An error's underline in a code view is a wave one pixel tall at 100 percent, a row under the text. The line was the scale's
@@ -1122,6 +1123,50 @@ static fn columns_check(struct ui address_to wui)
 #undef COLUMNS_HAND
         }
         ui_kit.rtl = 0;
+}
+
+/*
+        A hold: a press kept still is half way at 1.5 s and has not turned at 2.9 s, turns at 3 s (once), and stays turned till the next
+        press; one moved past the slop at 1 s is no hold and never turns. On a list that asks for it, a press held on a row turns with that
+        row as where it went down, and the press is taken back (its release clicks nothing); one held on the ground past the last row turns
+        with none (-1), which is a band's.
+*/
+static fn hold_check(struct ui address_to wui)
+{
+        static struct ui_list l;
+        struct ui_hold h;
+        struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+        struct window_event release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+        b64 second = 1000000000ll, half;
+        b32 timing, cancelled, row_held, ground_held;
+        int row;
+
+        wui->scale = 100;
+        memory_zero(&h, sizeof(h));
+        ui_hold_begin(&h, 100, 100, 3, 10 * second);
+        half = ui_hold_share(&h, 10 * second + 3 * second / 2);
+        timing = half > UI_ONE / 2 - 1024 && half < UI_ONE / 2 + 1024 && !ui_hold_turns(&h, 10 * second + 29 * second / 10) &&
+                 ui_hold_turns(&h, 13 * second) && h.done && h.target == 3 && !ui_hold_turns(&h, 14 * second) && ui_hold_share(&h, 20 * second) == UI_ONE;
+        check("hold: a still press is half way at 1.5 s, not turned at 2.9 s, turned once at 3 s and stays so", timing);
+        ui_hold_begin(&h, 100, 100, 3, 10 * second);
+        ui_hold_move(wui, &h, 100 + UI_SLOP + 2, 100);
+        cancelled = ui_hold_share(&h, 11 * second) == 0 && !ui_hold_turns(&h, 13 * second) && !h.done;
+        check("hold: a press moved past the slop before 3 s is no hold, and never turns", cancelled);
+
+        row = ui_dev(wui, UI_ROW);
+        memory_zero(&l, sizeof(l));
+        l.virtual = true, l.total = 4, l.x = 0, l.y = 100, l.w = 300, l.h = 10 * row, l.hold_on = true, l.hover = l.down = -1, l.describe = stripe_row, l.empty = "";
+        l.scroll.view = l.h;
+        ui_list_window(wui, &l);
+        ui_list_click(wui, &l, &press, 20, 100 + row + 2);
+        row_held = (ui_list_hold_tick(wui, &l, l.hold.at + UI_CHOOSE_HOLD_NS - 1) & UI_LIST_HELD) == 0 &&
+                   (ui_list_hold_tick(wui, &l, l.hold.at + UI_CHOOSE_HOLD_NS) & UI_LIST_HELD) && l.hold.target == 1 && !l.press.down &&
+                   ui_list_click(wui, &l, &release, 20, 100 + row + 2) == -1;
+        check("hold: on a list a press held on a row turns with that row, and its release clicks nothing", row_held);
+        ui_list_click(wui, &l, &press, 20, 100 + 8 * row);
+        ground_held = (ui_list_hold_tick(wui, &l, l.hold.at + UI_CHOOSE_HOLD_NS) & UI_LIST_HELD) && l.hold.target == -1;
+        ui_list_click(wui, &l, &release, 20, 100 + 8 * row);
+        check("hold: on a list a press held on the ground past its rows turns with none, a band's", ground_held);
 }
 
 /*
@@ -1578,6 +1623,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         drop_check(&wui);
         band_check(&wui);
         columns_check(&wui);
+        hold_check(&wui);
         squiggle_check(&wui);
         ui_over_check();
 }
