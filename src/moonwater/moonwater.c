@@ -2695,6 +2695,9 @@ static bool host_machine_early(void)
         return !stopped && !wait_status_code(status);
 }
 
+//      The runner, which takes this process's place for the script's on an image that carries rules.
+#include "../rover/runner.c"
+
 static b32 host_machine_run(void)
 {
         struct machine_control control;
@@ -2742,6 +2745,10 @@ static b32 host_machine_run(void)
         //      performs goes through host_machine_stop, including the one
         //      its own moonwater_poweroff asks for.
         host_machine_self = true;
+
+        //      An image with rules runs them: the services, the events and the actions are the runner's from here.
+        if (rover_runner_chosen())
+                return rover_runner_run(device);
 
         early = host_machine_early();
         host_machine_wait_verdict(verdict, sizeof(verdict));

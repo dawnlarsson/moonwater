@@ -75,6 +75,7 @@ struct rover_build
         struct rover_service service[ROVER_SERVICES_MOST];
         p32 services;
         p8 block;                  // ROVER_BLOCK_*: what the lines at depth 1 belong to
+        bool merge;                // many files as one table: a file's services may follow another file's rules
         struct rover_rule service_rule; // a service's if lines, read as a when rule's
         p64 pool_words[ROVER_POOL_MOST / 8];
         p32 rules, comparisons, calls, actions, arguments, notes, pool;
@@ -1659,7 +1660,7 @@ static bool rover_read_service(struct rover_build address_to build)
 
         if (!rover_block_finish(build))
                 return false;
-        if (build->rules)
+        if (build->rules && !build->merge)
                 return rover_refused(build, "a service after a rule: a file's services come before its rules", null, null);
         if (build->words != 2 || name->quoted || !name->length || name->length > ROVER_NAME_MOST)
                 return rover_refused(build, "service takes one word, its name", null, null);
