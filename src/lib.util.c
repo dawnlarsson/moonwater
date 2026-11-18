@@ -38970,10 +38970,30 @@ static inline __attribute__((target("avx512f"))) lanes8_word lanes8_permute(lane
 #endif
 }
 
-// Eight 32 bit pieces from p as lanes, zero extended: vpmovzxdq.
+/*
+        Eight 32 bit pieces from p as lanes, zero extended: vpmovzxdq.
+
+        GCC is given its builtin here, as for the two above, and not
+        __builtin_convertvector: that one is an internal call (.VEC_CONVERT)
+        until the call is expanded, and -fipa-pta, which the image's programs
+        are built with, reads the return of every call in the program under
+        the target the command line names, where a 64 byte vector is returned
+        in memory, and says "AVX512F vector return without AVX512F enabled
+        changes the ABI" for the whole program. No call returns one: the
+        conversion is one instruction either way, and a target builtin is not
+        read that way.
+*/
+typedef int lanes8_halves __attribute__((vector_size(32)));
+
 static inline __attribute__((target("avx512f"))) lanes8_word lanes8_load_pieces(const p32 *p)
 {
+#if defined(__GNUC__) && !defined(__clang__)
+        return (lanes8_word)__builtin_ia32_pmovzxdq512_mask((lanes8_halves) * (const lanes8_pieces *)p,
+                                                            (lanes8_index){0, 0, 0, 0, 0, 0, 0, 0},
+                                                            (unsigned char)255);
+#else
         return __builtin_convertvector(*(const lanes8_pieces *)p, lanes8_word);
+#endif
 }
 #endif // X64 && !KERNEL_MODE
 
