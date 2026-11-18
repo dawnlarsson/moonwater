@@ -25,13 +25,6 @@
 #define BOWL_DEFAULT_PATH "/fixture/bin"
 #include "../../src/canvas/terminfo.c"
 static fn host_terminal_opening() {}
-// Control-Shift-T asks the machine for a terminal; nothing answers here.
-static bipolar host_bind_request(unsigned int op, unsigned int event, string_address command,
-                                 struct bind_control address_to control)
-{
-        (void)op, (void)event, (void)command, (void)control;
-        return -1;
-}
 // A start ends here in the fixture, and a check reads what was asked: the program's words, a line in /tmp/mw-launcher-started.
 static bipolar shell_exec_file(string_address path, string_address address_to arguments, positive count,
                                string_address address_to environment)

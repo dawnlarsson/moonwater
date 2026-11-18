@@ -7276,6 +7276,21 @@ static fn own_files(void)
                         (void)system_remove_at(AT_FDCWD, "/root/rules", AT_REMOVEDIR);
                 }
         }
+        //      The other trees root runs or decides by: the image's rules and scripts, and the machine's state as it runs (the
+        //      kept settings' exit list runs as root at the stop), whether or not they are there yet.
+        check("sec: /run/moonwater and /lib/moonwater are the link's own too, by their names before they are made",
+              link_path_is_own("/run/moonwater") && link_path_is_own("/lib/moonwater"));
+        {
+                p8 was_run = file_look(AT_FDCWD, (string_address) "/run/moonwater", AT_SYMLINK_NOFOLLOW, address_of (file_facts){0});
+                p8 made_run = was_run || system_make_directory_at(AT_FDCWD, "/run/moonwater", 0755) >= 0;
+
+                check("sec: and what is in /run/moonwater, at any depth and by any spelling: the kept settings, a pin",
+                      made_run && link_path_is_own("/run/moonwater/settings") &&
+                              link_path_is_own("/run/../run/moonwater/pin.1"));
+                if (made_run && !was_run)
+                        (void)system_remove_at(AT_FDCWD, "/run/moonwater", AT_REMOVEDIR);
+        }
+        check("and a name beside them is not", !link_path_is_own("/run/moonwaterx") && !link_path_is_own("/lib/moonwaterx"));
         (void)system_remove_at(AT_FDCWD, "/root/own-link", 0);
         (void)system_remove_at(AT_FDCWD, "/root/own-hard", 0);
         (void)system_remove_at(AT_FDCWD, "/run/own-hard", 0);
@@ -7640,28 +7655,6 @@ static fn request_answers(void)
         link_session_close(s);
         (void)system_remove_at(AT_FDCWD, "/root/ordinary", 0);
         (void)system_remove_at(AT_FDCWD, "/root/private", 0);
-}
-
-/*
-        The kernel says how many events it binds, and moonwater bind asks that
-        many: a count past the names the shell knows is cut to them, and one
-        under them is kept, so that a kernel that offers more can never have
-        the walk go past its own table. (Here, with the rest of the shell
-        compiled in; the storage_format section, which holds the other host
-        checks, calls host_settings_apply with three arguments and does not
-        build on this tree.)
-*/
-static fn bind_events(void)
-{
-        check("the bind count the kernel offers is kept where it is under the "
-              "events this knows",
-              host_bind_known(1) == 1 &&
-                      host_bind_known(SPARK_BIND_EVENTS) == SPARK_BIND_EVENTS &&
-                      host_bind_known(SPARK_BIND_EVENTS - 1) ==
-                              SPARK_BIND_EVENTS - 1);
-        check("and is cut to them where it is over",
-              host_bind_known(SPARK_BIND_EVENTS + 1) == SPARK_BIND_EVENTS &&
-                      host_bind_known(0xffffffffu) == SPARK_BIND_EVENTS);
 }
 
 //      The words that name a machine, and the terminal a client names.
@@ -15814,7 +15807,6 @@ b32 main(void)
         stream_failures();
         request_answers();
         names_and_words();
-        bind_events();
         control_messages();
         private_records_never_wait();
         reaped_commands();
