@@ -3691,6 +3691,8 @@ static int compositor_wl_card_gather(int row, const struct wayland_picture *pict
 #endif
 }
 
+static int compositor_wl_dmabuf_holds(long fd, unsigned long size);
+
 static int compositor_wl_blit_xform(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch,
                                     long width, long height)
 {
@@ -3823,6 +3825,11 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
         if (fourcc == WAYLAND_FOURCC_NV12)
         {
                 uv_map_size = picture->plane_offset[1] + uv_stride * (unsigned long)((bh + 1) / 2);
+                // A plane of its own is read only when it is a dma-buf that holds every byte read of it: any other file a client hands
+                // (a memfd, a regular file) shorter than that raises SIGBUS in the reads below, which no pool's handler covers.
+                if (picture->plane_fd[1] >= 0 && picture->plane_fd[1] != picture->sync_fd &&
+                    !compositor_wl_dmabuf_holds(picture->plane_fd[1], uv_map_size))
+                        return -1;
                 if (picture->plane_fd[1] >= 0 && picture->plane_fd[1] != picture->sync_fd)
                 {
                         long got = compositor_call(syscall(mmap), 0, (positive)uv_map_size, 1, 1, (positive)picture->plane_fd[1], 0);
@@ -5229,6 +5236,19 @@ static long compositor_wl_dmabuf_table(void *context, long *size)
         }
         *size = compositor_wl.dmabuf_table_size;
         return compositor_wl.dmabuf_table;
+}
+
+// Whether a descriptor is a dma-buf (its filesystem's magic, DMAB) of at least size bytes.
+static int compositor_wl_dmabuf_holds(long fd, unsigned long size)
+{
+        unsigned long on[32];
+        long extent;
+
+        memory_zero(on, sizeof on);
+        if (compositor_call(syscall(fstatfs), (positive)fd, (positive)on, 0, 0, 0, 0) < 0 || on[0] != 0x444d4142ul)
+                return 0;
+        extent = compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0);
+        return extent >= 0 && (unsigned long)extent >= size;
 }
 
 /*
