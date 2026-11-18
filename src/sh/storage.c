@@ -209,7 +209,11 @@ static positive storage_hex_padded(p8 address_to into, positive value,
         positive count = positive_into_base(digits, value, 16, upper);
         positive padding = difference_or_zero(width, count);
 
-        memory_fill(into, '0', padding);
+        //      A byte at a time: a padding is a few zeros, and gcc, handed it
+        //      as a fill, followed a path where the width was below the count
+        //      and warned of a fill of 2^64 - 11 bytes that cannot come.
+        for (positive at = 0; at < padding; at++)
+                into[at] = '0';
         memory_copy(into + padding, digits, count);
         into[padding + count] = end;
         return padding + count;

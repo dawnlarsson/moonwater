@@ -27469,8 +27469,9 @@ static bool ul_lscpu_take()
                 if (i)
                         ul_lscpu_cache_heading[cache_heading++] = ':';
                 positive length = string_length(ul_lscpu.caches[i].name);
-                memory_copy(ul_lscpu_cache_heading + cache_heading,
-                            ul_lscpu.caches[i].name, length);
+                copy_short_apart(ul_lscpu_cache_heading + cache_heading,
+                                 ul_lscpu.caches[i].name, length,
+                                 sizeof ul_lscpu.caches[i].name - 1);
                 cache_heading += length;
         }
         ul_lscpu_cache_heading[cache_heading] = end;
@@ -27684,7 +27685,7 @@ static fn ul_lscpu_summary(bool json, bool hex, bool bytes)
                         continue;
                 p8 label[24];
                 positive used = string_length(cache->name);
-                memory_copy(label, cache->name, used);
+                copy_short_apart(label, cache->name, used, sizeof cache->name - 1);
                 memory_copy(label + used, " cache:", 8);
                 label[used + 7] = end;
                 ul_lscpu_summary_add(address_of rows,

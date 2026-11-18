@@ -7562,18 +7562,24 @@ static fn wc_utf8_block(wc_utf8 address_to state, const p8 address_to at, positi
                 p8 answer = wc_utf8_decode(joined, have + take, address_of code,
                                            address_of length);
 
+                //      Short is fewer bytes than the sequence they start
+                //      wants, so fewer than four: the carry holds them.
                 if (answer == WC_SHORT)
                 {
-                        memory_copy(state->carry + have, at + p, take);
+                        copy_short_apart(state->carry + have, at + p, take,
+                                         sizeof state->carry - 1);
                         state->carried = have + take;
                         return;
                 }
 
                 wc_utf8_step(state, answer == WC_VALID, code);
 
+                //      At most two bytes, moved down: the byte class
+                //      reads and writes upwards.
                 if (length <= have)
                 {
-                        memory_copy(state->carry, state->carry + length, have - length);
+                        copy_short_apart(state->carry, state->carry + length, have - length,
+                                         sizeof state->carry - 1);
                         state->carried = have - length;
                 }
                 else
@@ -7732,7 +7738,8 @@ static fn wc_utf8_block(wc_utf8 address_to state, const p8 address_to at, positi
                 if (answer == WC_SHORT)
                 {
                         state->carried = size - p;
-                        memory_copy(state->carry, at + p, state->carried);
+                        copy_short_apart(state->carry, at + p, state->carried,
+                                         sizeof state->carry - 1);
                         return;
                 }
 
@@ -9006,15 +9013,17 @@ static b32 text_rev()
                                                 memory_reverse(into, length);
                                 }
                         }
+                        //      Longer than the buffer: text_put would spill
+                        //      it whole, so it is handed there.
                         else if (utf8)
                         {
                                 rev_characters(line, length);
-                                text_put(line, length);
+                                text_put_spill(line, length);
                         }
                         else
                         {
                                 memory_reverse(line, length);
-                                text_put(line, length);
+                                text_put_spill(line, length);
                         }
 
                         if (text_line_ended)

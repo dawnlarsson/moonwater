@@ -4807,6 +4807,7 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                                                     t0.min == t.min ? "" : "--",
                                                     t0.sec == t.sec ? "" : "--"};
 
+                                                //      Each part is at most the four dashes of a year.
                                                 for (positive i = 0; i < 6; i++)
                                                 {
                                                         positive width = i ? 2 : 0;
@@ -4819,13 +4820,13 @@ static bool pd_parse(string_address text, b64 now, positive now_ns, bool debug,
                                                         if (!i)
                                                         {
                                                                 at = 37 - length;
-                                                                memory_copy(marks + at, parts[i], length);
+                                                                copy_short_apart(marks + at, parts[i], length, 4);
                                                                 at = 37;
                                                                 continue;
                                                         }
                                                         for (positive pad = length; pad < width; pad++)
                                                                 marks[at++] = ' ';
-                                                        memory_copy(marks + at, parts[i], length);
+                                                        copy_short_apart(marks + at, parts[i], length, 4);
                                                         at += length;
                                                 }
                                                 while (at && marks[at - 1] == ' ')

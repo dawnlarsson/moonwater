@@ -6232,9 +6232,36 @@ static inline INLINE address_any copy_running_windows(address_any destination,
 }
 #endif
 
+/*
+        A size no correct call passes: one past the end of either object.
+
+        The running copies and fills below test the size and send the large
+        ones to the routine, whose prototype says how much it reads and
+        writes. Where the call site's object is a literal, a member or a small
+        buffer, gcc builds those branches anyway and then warns that they run
+        past it (-Wstringop-overflow, -Wstringop-overread), and the image
+        build said so forty times. Where __builtin_object_size knows an end,
+        a size beyond it is unreachable, and the branches for it are not
+        built: the same code for every call that fits its objects, which is
+        every call. Mode 0, the whole object and not the member: a copy may run
+        from one member into the next. A build with MW_UBSAN traps on one that
+        does not fit. Not in the kernel, whose code stays as it was.
+*/
+#if defined(KERNEL_MODE)
+#define RUNNING_WITHIN(pointer, size) ((void)0)
+#else
+#define RUNNING_WITHIN(pointer, size)                                         \
+        do {                                                                  \
+                if ((positive)(size) > __builtin_object_size((pointer), 0))   \
+                        __builtin_unreachable();                              \
+        } while (0)
+#endif
+
 static inline INLINE address_any copy_running(address_any destination,
                                               const address_any source, positive size)
 {
+        RUNNING_WITHIN(destination, size);
+        RUNNING_WITHIN(source, size);
 #if !LIBRARY_INLINE_COPY
         return memory_copy(destination, source, size);
 #else
@@ -6386,6 +6413,8 @@ static inline INLINE address_any copy_apart_running(address_any destination,
                                                     const address_any source,
                                                     positive size)
 {
+        RUNNING_WITHIN(destination, size);
+        RUNNING_WITHIN(source, size);
 #if LIBRARY_INLINE_COPY
         if (size < LIBRARY_RUNNING_MAX)
                 return copy_running(destination, source, size);
@@ -6472,6 +6501,7 @@ static inline INLINE address_any fill_running_windows(address_any destination,
 static inline INLINE address_any fill_running(address_any destination,
                                               b8 value, positive size)
 {
+        RUNNING_WITHIN(destination, size);
 #if !LIBRARY_INLINE_FILL
         return memory_fill(destination, value, size);
 #else
