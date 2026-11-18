@@ -769,7 +769,6 @@ struct wayland_client
         long out_fd_count;
         long in_fds[WAYLAND_FDS], in_fd_count;
         unsigned long serial;
-        long pool_bytes;
         struct wayland_ids seat_ids[3]; // its pointers, keyboards and touches (wayland_seat_ids)
         unsigned char finger_scroll; // a precise (finger) scroll was sent to this client and no axis_stop since
         unsigned int press_serial;  // the last button press this client was sent, which a move or a resize must name
@@ -4338,7 +4337,6 @@ static void wayland_pool_unref(struct wayland_client *c, long pool)
                 c->dmabufs--;
                 wayland.dmabufs--;
         }
-        c->pool_bytes -= p->size;
         p->live = 0;
         wayland_table_give(&c->pool_table, p - c->pools);
         wayland.pools--;
@@ -5239,7 +5237,6 @@ static int wayland_shm_request(struct wayland_client *c, struct wayland_object *
         c->pools[pool].refs = 0;
         c->pools[pool].gone = 0;
         c->pools[pool].at = at;
-        c->pool_bytes += size;
         c->objects[a[0].slot].link = (int)pool;
         wayland.pools++;
         return WAYLAND_OK;
@@ -5266,7 +5263,6 @@ static int wayland_pool_request(struct wayland_client *c, struct wayland_object 
                 at = wayland.host->remap(wayland.host->context, p->at, p->size, size);
                 if (!at)
                         return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_fd, "the pool cannot grow");
-                c->pool_bytes += size - p->size;
                 p->at = at;
                 p->size = size;
                 return WAYLAND_OK;
@@ -8848,7 +8844,6 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
         c->pools[pool].gone = 1;
         c->pools[pool].id = ++wayland.pool_id;
         c->pools[pool].at = c->pools[pool].unmapped ? 0 : at;
-        c->pool_bytes += need;
         c->buffers[buffer].live = 1;
         c->buffers[buffer].pool = pool;
         c->buffers[buffer].offset = offset;

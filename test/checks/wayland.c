@@ -1670,8 +1670,11 @@ static void test_shm(void)
                         wlc_send(c, s.shm, WLQ_wl_shm_create_pool, pools[at], (long)big, 0x60000000L);
                 }
                 wlc_pump(c);
-                WLCHECK(c->errors == 0 && wayland.client[c->slot] && wayland.client[c->slot]->pool_bytes == 3 * 0x60000000L,
-                        "three pools of 1.5 GiB are each mapped, 4.5 GiB for one client");
+                long mapped = 0;
+
+                for (long at = 0; wayland.client[c->slot] && at < wayland.client[c->slot]->pool_table.count; at++)
+                        mapped += wayland.client[c->slot]->pools[at].live && wayland.client[c->slot]->pools[at].at ? wayland.client[c->slot]->pools[at].size : 0;
+                WLCHECK(c->errors == 0 && wayland.client[c->slot] && mapped == 3 * 0x60000000L, "three pools of 1.5 GiB are each mapped, 4.5 GiB for one client");
                 for (int at = 0; at < 3; at++)
                         wlc_send(c, pools[at], WLQ_wl_shm_pool_destroy);
         }
