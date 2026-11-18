@@ -23464,8 +23464,8 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 
 /*
         Columns over a list (a details view): a header of titles, each a press that orders the rows by it (a second press the other way),
-        the ordered one's title in the ink with an arrow after it that says which way, and the edges between titles taken by the hand
-        to make the column before them wider or narrower (never less than UI_COLUMNS_LEAST, the first taking what the others leave). A
+        the ordered one's title in the ink with an arrow after it that says which way, and each column's end edge taken by the hand to
+        make that column wider or narrower (never less than UI_COLUMNS_LEAST), the columns after it moving along with the edge. A
         list with columns (ui_list.columns) draws each row's label under the first title and its cells (ui_row.cells) under the others,
         each cut with dots to its column and a number at its column's end. Reading from the right the columns are turned over: the first
         is at the right. The app keeps the widths (logical pixels) and the order; the kit lays the header out (ui_columns_layout), draws
@@ -23483,7 +23483,7 @@ struct ui_columns
 {
         int count;
         const char address_to title[UI_COLUMNS_MOST];
-        int width[UI_COLUMNS_MOST];       // each column's width, logical pixels; the first's is what the others leave
+        int width[UI_COLUMNS_MOST];       // each column's width, logical pixels; the first's 0 until an edge is held: what the others leave
         b32 at_end[UI_COLUMNS_MOST];      // its words at its end (a number)
         int sorted;                       // the column the rows are in the order of, -1 none
         b32 descending;
@@ -23491,8 +23491,16 @@ struct ui_columns
         // pointer and the edge the hand holds (its column, -1 none) with where the press was and that column's width then.
         int x, y, w, h;
         int at[UI_COLUMNS_MOST], wide[UI_COLUMNS_MOST];
-        int hover, held, held_edge, held_sign, held_from, held_width;
+        int hover, held, held_edge, held_from, held_width; // held -1 when no edge is (an app sets it so at the start)
 };
+
+// How much of column k is in the header's width (device pixels from its start, as read from the left): none past the end.
+static inline int ui_columns_end(const struct ui_columns address_to c, int k)
+{
+        int room = c->x + c->w - c->at[k];
+
+        return room <= 0 ? 0 : c->wide[k] < room ? c->wide[k] : room;
+}
 
 struct ui_row
 {
@@ -24839,7 +24847,7 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
         for (int k = 0; k < count; k++)
         {
                 const char address_to words = k ? row->cells[k] : row->label;
-                int x = c ? c->at[k] : l->x, w = c ? c->wide[k] : l->w, width;
+                int x = c ? c->at[k] : l->x, w = c ? ui_columns_end(c, k) : l->w, width;
                 string_address shown;
 
                 x += k ? gap : pad + set_in;
@@ -24863,9 +24871,11 @@ static b32 ui_list_tree_chevron_at(const struct ui address_to ui, const struct u
 }
 
 /*
-        The header's columns placed across [x, x + w) (device pixels): each after the first as wide as the app says (never less than the
-        least), the first what is left. Where the others would leave the first less than two fifths of the width, they give way together,
-        each in its share, down to the least: a narrow window keeps the names readable, and its other columns are cut first.
+        The header's columns placed across [x, x + w) (device pixels), one after another from the start, each as wide as the app says
+        (never less than the least). Until an edge has been held the first has no width of its own and is what the others leave, and
+        where the others would leave it less than two fifths of the width they give way together, each in its share, down to the least:
+        a narrow window keeps the names readable, and its other columns are cut first. Once the first has a width every column keeps
+        its own, the room past the last is the list's ground, and columns past the end are cut there (ui_columns_end).
 */
 static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns address_to c, int x, int y, int w)
 {
@@ -24873,6 +24883,16 @@ static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns add
 
         c->count = c->count < 1 ? 1 : c->count > UI_COLUMNS_MOST ? UI_COLUMNS_MOST : c->count;
         c->x = x, c->y = y, c->w = w, c->h = ui_dev(ui, UI_COLUMNS_H);
+        if (c->width[0] > 0)
+        {
+                for (int k = 0; k < c->count; k++)
+                {
+                        c->width[k] = c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k];
+                        c->at[k] = at, c->wide[k] = ui_dev(ui, c->width[k]);
+                        at += c->wide[k];
+                }
+                return;
+        }
         for (int k = 1; k < c->count; k++)
         {
                 c->width[k] = c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k];
@@ -24894,21 +24914,25 @@ static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns add
                 c->at[k] = c->at[k - 1] + c->wide[k - 1];
 }
 
-// The edge a point is on (the number of the column it ends), or -1: the edges between two columns, UI_COLUMN_EDGE either side.
+// The edge a point is on (the number of the column it ends), or -1: each column's end, UI_COLUMN_EDGE either side, within the header; the
+// nearest when two are in reach, and the later one where they meet, so a column pressed narrow to the least is still widened from its end.
 static int ui_columns_edge(const struct ui address_to ui, const struct ui_columns address_to c, int px, int py)
 {
-        int x = ui_point(px, c->x, c->w), reach = ui_dev(ui, UI_COLUMN_EDGE);
+        int x = ui_point(px, c->x, c->w), reach = ui_dev(ui, UI_COLUMN_EDGE), found = -1, best = reach;
 
         if (py < c->y || py >= c->y + c->h)
                 return -1;
-        for (int k = 0; k + 1 < c->count; k++)
+        for (int k = 0; k < c->count; k++)
         {
-                int edge = c->at[k] + c->wide[k];
+                int edge = c->at[k] + c->wide[k], off = x - edge;
 
-                if (x >= edge - reach && x < edge + reach)
-                        return k;
+                off = off < 0 ? -off - 1 : off;
+                if (edge > c->x + c->w + reach || edge <= c->x)
+                        continue;
+                if (x >= edge - reach && x < edge + reach && off <= best)
+                        found = k, best = off;
         }
-        return -1;
+        return found;
 }
 
 // The title a point is on, or -1.
@@ -24919,7 +24943,7 @@ static int ui_columns_hit(const struct ui_columns address_to c, int px, int py)
         if (py < c->y || py >= c->y + c->h)
                 return -1;
         for (int k = 0; k < c->count; k++)
-                if (x >= c->at[k] && x < c->at[k] + c->wide[k])
+                if (x >= c->at[k] && x < c->at[k] + ui_columns_end(c, k))
                         return k;
         return -1;
 }
@@ -24933,7 +24957,7 @@ static fn ui_columns_draw(struct ui address_to ui, const struct ui_columns addre
 
         for (int k = 0; k < c->count; k++)
         {
-                int x = c->at[k] + (k ? gap : pad), w = c->wide[k] - (k ? gap : pad) - gap, width;
+                int x = c->at[k] + (k ? gap : pad), w = ui_columns_end(c, k) - (k ? gap : pad) - gap, width;
                 b32 sorted = k == c->sorted;
                 string_address shown;
 
@@ -24949,40 +24973,43 @@ static fn ui_columns_draw(struct ui address_to ui, const struct ui_columns addre
                                 x += w - width;
                         ui_kit_text(ui, ui_mirror(x, width, c->x, c->w), baseline, shown, UI_LABEL_MEDIUM, sorted || k == c->hover ? strong : quiet, 0);
                 }
-                // The edge after it, a rule a third of the header tall: the one the hand holds or is over in the ink.
-                if (k + 1 < c->count)
+                // The edge after it, a rule a third of the header tall: the one the hand holds in the ink. The last's where it is
+                // short of the header's end (where it is the end, the rule under the header ends it).
+                if (c->at[k] + c->wide[k] < c->x + c->w)
                 {
                         int edge = c->at[k] + c->wide[k], top = c->y + c->h / 3;
                         int ex = ui_mirror(edge, line, c->x, c->w);
 
                         ui_kit_fill(ui, &(struct ui_box){(b32)ex << 8, (b32)top << 8, (b32)(ex + line) << 8, (b32)(top + c->h / 3) << 8, 0, 0},
-                                    c->held > 0 && c->held_edge == k ? strong : rule, null);
+                                    c->held == k ? strong : rule, null);
                 }
         }
         ui_kit_fill(ui, &(struct ui_box){(b32)c->x << 8, (b32)(c->y + c->h - line) << 8, (b32)(c->x + c->w) << 8, (b32)(c->y + c->h) << 8, 0, 0}, rule, null);
 }
 
 /*
-        The hand on the header: over an edge the pointer says it resizes, and a press there holds it (the column before it follows the
-        hand, never narrower than the least); a press on a title orders the rows by it, a press on the title they are ordered by turns the
-        order round. UI_COLUMNS_* say what came of it. Events off the header (but the held edge's motion and release) are not its.
+        The hand on the header: over an edge the pointer says it resizes, and a press there holds it: the edge is a column's end, and the
+        column follows the hand (wider as the hand goes the way the header reads, never narrower than the least), the columns after it
+        moving along; the first's width is taken as it is shown when an edge is first held, so from then on no column gives way for
+        another. A press on a title orders the rows by it, a press on the title they are ordered by turns the order round. UI_COLUMNS_*
+        say what came of it. Events off the header (but the held edge's motion and release) are not its.
 */
 static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_to c, const struct window_event address_to event, int x, int y)
 {
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
         int was = c->hover, edge;
 
-        if (event->type == WINDOW_EVENT_MOTION && c->held > 0)
+        if (event->type == WINDOW_EVENT_MOTION && c->held >= 0)
         {
                 int moved = ui_point(x, c->x, c->w) - ui_point(c->held_from, c->x, c->w);
-                int width = c->held_width + c->held_sign * moved * 100 / (ui->scale > 0 ? ui->scale : 100);
+                int width = c->held_width + moved * 100 / (ui->scale > 0 ? ui->scale : 100);
 
                 c->width[c->held] = width < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : width;
                 ui_columns_layout(ui, c, c->x, c->y, c->w);
                 ui_kit_shape = WINDOW_POINTER_RESIZE;
                 return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
         }
-        if (event->type == WINDOW_EVENT_BUTTON && !down && c->held > 0)
+        if (event->type == WINDOW_EVENT_BUTTON && !down && c->held >= 0)
         {
                 c->held = -1;
                 return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
@@ -25001,10 +25028,13 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
                 return 0;
         if ((edge = ui_columns_edge(ui, c, x, y)) >= 0)
         {
-                // The edge's column before it follows the hand; the first's edge moves the second's start instead (the first takes what is
-                // left), so the second grows the other way.
-                c->held_edge = edge, c->held = edge ? edge : 1, c->held_sign = edge ? 1 : -1;
-                c->held_from = x, c->held_width = c->width[c->held];
+                // The column the edge ends follows the hand. The first is held at the width it is shown at, so a column after it
+                // made wider moves the ones after it along and takes nothing from the first.
+                if (c->width[0] <= 0)
+                        c->width[0] = c->wide[0] * 100 / (ui->scale > 0 ? ui->scale : 100);
+                c->held_edge = c->held = edge;
+                c->held_from = x, c->held_width = c->width[edge];
+                ui_columns_layout(ui, c, c->x, c->y, c->w);
                 return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
         }
         if ((edge = ui_columns_hit(c, x, y)) < 0)

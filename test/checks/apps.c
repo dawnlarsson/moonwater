@@ -933,6 +933,7 @@ static fn field_check(struct ui address_to wui);
 static fn popmenu_bar_check(struct ui address_to wui);
 static fn drop_check(struct ui address_to wui);
 static fn band_check(struct ui address_to wui);
+static fn columns_check(struct ui address_to wui);
 
 /*
         An error's underline in a code view is a wave one pixel tall at 100 percent, a row under the text. The line was the scale's
@@ -1050,6 +1051,77 @@ static fn band_check(struct ui address_to wui)
         check("tiles: twelve tiles of 100 in 520 are five a line, three lines of UI_TILE_H, a point the tile under it and none past a line's last or the last tile",
               ui_list_per(wui, &l) == 5 && l.content == 3 * ui_dev(wui, UI_TILE_H) && ui_list_hit(wui, &l, 250, ui_dev(wui, UI_TILE_H) + 10) == 7 &&
                   ui_list_hit(wui, &l, 510, 10) == -1 && ui_list_hit(wui, &l, 250, 2 * ui_dev(wui, UI_TILE_H) + 10) == -1 && l.count == 12);
+}
+
+/*
+        A details view's header: an edge is a column's end, and a hand that holds it and goes the way the header reads makes that column
+        wider, the columns after it moving along and none before it changing; back the other way narrower, never under the least. Reading
+        from the right the same, mirrored: the first column at the right, its end edge at its left, widened by a hand going left. A press
+        on a title orders by it and the same press again turns the order round.
+*/
+static fn columns_drag(struct ui address_to wui, struct ui_columns address_to c, int edge_at, int to)
+{
+        struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+        struct window_event release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+        struct window_event motion = {WINDOW_EVENT_MOTION, 0, (p32)to, 10};
+
+        ui_columns_event(wui, c, &press, edge_at, 10);
+        ui_columns_event(wui, c, &motion, to, 10);
+        ui_columns_event(wui, c, &release, to, 10);
+}
+
+static fn columns_check(struct ui address_to wui)
+{
+        static struct ui_columns c;
+        struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+        b32 name_right, name_left, size_right, size_left, least, sorted;
+
+        wui->scale = 100;
+        for (unsigned int rtl = 0; rtl < 2; rtl++)
+        {
+                // Reading from the left a column's end is at its at + wide; from the right that place is across the header.
+#define COLUMNS_AT(logical) (rtl ? 799 - (logical) : (logical))
+#define COLUMNS_HAND(logical, by) (rtl ? 799 - (logical) - (by) : (logical) + (by))
+                ui_kit.rtl = rtl;
+                memory_zero(&c, sizeof(c));
+                c.count = 4, c.width[1] = 90, c.width[2] = 110, c.width[3] = 140, c.hover = c.held = -1;
+                ui_columns_layout(wui, &c, 0, 0, 800);
+                // Name's end, at 460 (the others leave it 800 - 340), held and taken 40 along: Name 500, Size after it, the same width.
+                columns_drag(wui, &c, COLUMNS_AT(460), COLUMNS_HAND(460, 40));
+                name_right = c.wide[0] == 500 && c.at[1] == 500 && c.wide[1] == 90 && c.at[2] == 590 && c.wide[2] == 110 && c.at[3] == 700;
+                columns_drag(wui, &c, COLUMNS_AT(500), COLUMNS_HAND(500, -80));
+                name_left = c.wide[0] == 420 && c.at[1] == 420 && c.wide[1] == 90 && c.wide[2] == 110 && c.wide[3] == 140;
+                // Size's end, at 510, taken 50 along: Size 140, Name as it was, Type and Modified moved along by 50.
+                columns_drag(wui, &c, COLUMNS_AT(510), COLUMNS_HAND(510, 50));
+                size_right = c.wide[0] == 420 && c.wide[1] == 140 && c.at[2] == 560 && c.wide[2] == 110 && c.at[3] == 670 && c.wide[3] == 140;
+                columns_drag(wui, &c, COLUMNS_AT(560), COLUMNS_HAND(560, -20));
+                size_left = c.wide[0] == 420 && c.wide[1] == 120 && c.at[2] == 540;
+                // Narrower than the least is the least, and its end is still there to widen it again.
+                columns_drag(wui, &c, COLUMNS_AT(540), COLUMNS_HAND(540, -300));
+                least = c.wide[1] == ui_dev(wui, UI_COLUMNS_LEAST) && c.at[2] == 420 + ui_dev(wui, UI_COLUMNS_LEAST) && c.wide[0] == 420;
+                columns_drag(wui, &c, COLUMNS_AT(420 + UI_COLUMNS_LEAST), COLUMNS_HAND(420 + UI_COLUMNS_LEAST, 30));
+                least = least && c.wide[1] == UI_COLUMNS_LEAST + 30 && c.wide[0] == 420;
+                // A press on Type's title orders by it, and again the other way.
+                ui_columns_event(wui, &c, &press, COLUMNS_AT(c.at[2] + 20), 10);
+                sorted = c.sorted == 2 && !c.descending;
+                ui_columns_event(wui, &c, &press, COLUMNS_AT(c.at[2] + 20), 10);
+                sorted = sorted && c.sorted == 2 && c.descending;
+                if (rtl)
+                {
+                        check("columns, from the right: a column's end edge held and taken left widens that column alone, the columns after it moved along, right narrows it to the least",
+                              name_right && name_left && size_right && size_left && least);
+                        check("columns, from the right: a title pressed orders by it, pressed again the other way", sorted);
+                }
+                else
+                {
+                        check("columns: a column's end edge held and taken right widens that column alone, the columns after it moved along, left narrows it to the least",
+                              name_right && name_left && size_right && size_left && least);
+                        check("columns: a title pressed orders by it, pressed again the other way", sorted);
+                }
+#undef COLUMNS_AT
+#undef COLUMNS_HAND
+        }
+        ui_kit.rtl = 0;
 }
 
 /*
@@ -1505,6 +1577,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         popmenu_bar_check(&wui);
         drop_check(&wui);
         band_check(&wui);
+        columns_check(&wui);
         squiggle_check(&wui);
         ui_over_check();
 }
