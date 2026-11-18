@@ -23,7 +23,7 @@ static fn host_title(writer out)
         belongs to the verb its command starts with, or to every word of
         verbs where one row serves two. A row with no command is the line
         after the one above it. Most are on the main page and on their
-        verb's own, 'b'; a verb with more to say than a line (setup, bind,
+        verb's own, 'b'; a verb with more to say than a line (setup, init,
         link) has a row for the main page, 'm', and the rows of its own, 'f'.
         A row 'r' is a verb's rows from the table of settings (registry.c),
         in its order, each one a row of both: @canvas is every setting row
@@ -57,19 +57,16 @@ static const host_row host_rows[] = {
     {null, "", "erases DRIVE and installs anew; yes is for a script, which cannot be asked", 'b'},
     {null, "wipe [yes]", "forget /home and /root, keep the machine; yes", 'b'},
     {null, "", "is for a script, which cannot be asked", 'b'},
-    {null, "bind", "the events of the machine, and what each runs", 'b'},
-    {null, "bind EVENT [COMMAND]", "one event; empty puts the default back", 'b'},
-    {null, "bind init [add|remove ...]", "what runs at boot", 'm'},
-    {null, "bind exit [add|remove ...]", "what runs when the machine stops", 'm'},
-    {null, "bind poweroff [COMMAND]", "the power button [poweroff]", 'f'},
-    {null, "bind canvas on|off [COMMAND]", "when the desktop starts or stops", 'f'},
-    {null, "bind init", "what runs at every boot, with ids", 'f'},
-    {null, "bind init add \"command\"", "run a command at boot, once disks settle", 'f'},
-    {null, "bind init remove ID|\"command\"", "stop running one at boot", 'f'},
-    {null, "@bind", null, 'r'},
-    {null, "bind exit", "what runs at poweroff or reboot", 'f'},
-    {null, "bind exit add \"command\"", "run a command before the disks go read-only", 'f'},
-    {null, "bind exit remove ID|\"command\"", "stop running one at the stop", 'f'},
+    {null, "rover load|status|state|watch", "the rules: /root/rules over the image's", 'b'},
+    {null, "init [add|remove ...]", "what runs at boot", 'm'},
+    {null, "exit [add|remove ...]", "what runs when the machine stops", 'm'},
+    {null, "init", "what runs at every boot, with ids", 'f'},
+    {null, "init add \"command\"", "run a command at boot, once disks settle", 'f'},
+    {null, "init remove ID|\"command\"", "stop running one at boot", 'f'},
+    {null, "@init", null, 'r'},
+    {null, "exit", "what runs at poweroff or reboot", 'f'},
+    {null, "exit add \"command\"", "run a command before the disks go read-only", 'f'},
+    {null, "exit remove ID|\"command\"", "stop running one at the stop", 'f'},
     {null, "canvas", "whether Canvas is on, and the screens it draws on", 'b'},
     {null, "@canvas", null, 'r'},
     {null, "canvas arrange [NAME[@X,Y|@off]...|default]", "where each screen is: names left to right, the first the primary [default]", 'b'},
@@ -459,8 +456,7 @@ static fn host_page_write(writer out)
                  "\n"
                  TERM_DIM "    Settings stay in the image this session started from.\n"
                  "    install takes the settings of this session; update keeps those of the disk.\n"
-                 "    The machine script overwrites bind, init and exit.\n"
-                 "    " HOST_MACHINE_SCRIPT " overlays the kernel builtin.\n" TERM_RESET);
+                 "    The rules are /root/rules/NAME.rover over the image's (moonwater rover).\n" TERM_RESET);
 }
 
 /* A wrong argument's page: the verb's rows, or the whole of it for a word that is none. */
@@ -1339,8 +1335,6 @@ static b32 host_status(void)
 
         host_status_wifi();
 
-        (void)host_bind_each(false, false);
-
         if (host_settings_session(address_of settings))
         {
                 host_settings_lines(address_of settings, 0, true);
@@ -1439,7 +1433,7 @@ static b32 host_answer(bool update, string_address disk)
 //      The files of the settings table's plain rows are added when a wipe runs
 //      (host_wipe_table), after the files named here by hand.
 static string_address host_wipe_keep[128] = {
-    HOST_WIPE_KEEP(HOST_MACHINE_SCRIPT),
+    HOST_WIPE_KEEP("/root/rules"),
     HOST_WIPE_KEEP(NET_WIFI_LIST),
     HOST_WIPE_KEEP(RADIO_RULES_PATH),
     HOST_WIPE_KEEP(NET_WIFI_POWER),

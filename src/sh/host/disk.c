@@ -3171,7 +3171,6 @@ static b32 host_boot(void)
                 //      Before the disks are waited for: TLS can start sooner. Said
                 //      when it cannot be, as host_booted says it for the rest.
                 (void)security_publish_answer(address_of settings);
-                host_bind_apply(address_of settings);
         }
 
         if (known && settings.flags & SPARK_SETTINGS_MOUNT_OFF)
@@ -3268,7 +3267,6 @@ static b32 host_boot(void)
                 {
                         known = true;
                         host_settings_keep(address_of settings);
-                        host_bind_apply(address_of settings);
                 }
 
                 if (known && settings.flags & SPARK_SETTINGS_MOUNT_OFF)

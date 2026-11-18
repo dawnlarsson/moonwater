@@ -29,7 +29,7 @@ LIB = ROOT / 'src/lib.c'
 TOOLS = ROOT / 'src/sh/tools.inc'
 REGISTRY = ROOT / 'src/sh/registry.c'
 TUNE = ROOT / 'src/sh/host/tune.c'
-BOOT_SOURCES = [ROOT / 'src', ROOT / 'main.moonwater.sh']
+BOOT_SOURCES = [ROOT / 'src']
 OUT = ROOT / 'src/rover/schema.inc'
 DEBUG = False   # --why: say why each routine left out is left out
 
@@ -434,7 +434,7 @@ def boot_words():
     """The kernel's command line words of Moonwater's, moonwater.NAME=, as the sources ask for them."""
     names = set()
     for root in BOOT_SOURCES:
-        paths = [root] if root.is_file() else [p for p in root.rglob('*') if p.suffix in ('.c', '.inc', '.h', '.sh')]
+        paths = [root] if root.is_file() else [p for p in root.rglob('*') if p.suffix in ('.c', '.inc', '.h', '.sh', '.rover')]
         for path in paths:
             names.update(re.findall(r'moonwater\.([a-z_]+)=', path.read_text(errors='replace')))
     return sorted(names)

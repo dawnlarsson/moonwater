@@ -3,9 +3,8 @@
         place of the machine script. Userspace only; included by host.c after
         the verbs it calls, so its actions are the verbs' own code.
 
-        It is the process PID 1 keeps as the machine (moonwater machine), and
-        it is chosen over the script when the image carries rules
-        (/lib/moonwater/rules). It compiles the image's rules and the
+        It is the process PID 1 keeps as the machine (moonwater machine). It
+        compiles the image's rules and the
         person's into one table (src/rover/load.c), hands it to the kernel
         (ROVER_IOCTL), keeps the three state pages, supervises the services,
         hears every event there is, and does what the rules say:
@@ -517,6 +516,26 @@ static b32 rover_runner_service_named(const p8 address_to name, positive length)
         return -1;
 }
 
+//      HOST_STATE/NAME.pid while a service runs, which the verbs that tell one find it by (desktop's compositor.pid).
+static fn rover_runner_pid_file(positive which, bipolar pid)
+{
+        positive length;
+        const p8 address_to name = rover_runner_pool_word(rover_runner.view.service[which].name, &length);
+        p8 path[96], text[24];
+
+        if (length > 48 || !string_join(path, sizeof(path), HOST_STATE "/", (string_address)name) ||
+            !string_join(path, sizeof(path), (string_address)path, ".pid"))
+                return;
+        if (pid <= 0)
+        {
+                (void)system_remove_at(AT_FDCWD, (string_address)path, 0);
+                return;
+        }
+        positive used = positive_into_string(text, (positive)pid);
+        text[used++] = '\n';
+        (void)host_write_file((string_address)path, text, used, 0644, false);
+}
+
 static fn rover_runner_start(positive which)
 {
         const struct rover_service address_to service = rover_runner.view.service + which;
@@ -537,6 +556,7 @@ static fn rover_runner_start(positive which)
         running->up = 0;
         if (running->pid <= 0)
                 running->pid = 0;
+        rover_runner_pid_file(which, running->pid);
 }
 
 static fn rover_runner_stop(positive which)
@@ -572,6 +592,7 @@ static fn rover_runner_ended(positive which)
                 system_close(running->pidfd);
         running->pid = 0;
         running->pidfd = -1;
+        rover_runner_pid_file(which, 0);
         running->up = 0;
         running->stopping = 0;
         rover_runner_service_event(98, which);
@@ -1096,9 +1117,25 @@ static fn rover_runner_ring(void)
                         asked = true;
                         memory_zero(&request, sizeof(request));
                         request.op = ROVER_OP_STATUS;
+                        //      Compiled as it was loaded: with the person's files, else (a load in safe mode)
+                        //      the image's alone, whichever makes as many rules as the kernel holds.
                         if (rover_load_ask(rover_runner.device, &request) >= 0 && request.table &&
-                            request.table != rover_runner.table && rover_load_compile(false) >= 0)
-                                (void)rover_runner_adopt(request.table);
+                            request.table != rover_runner.table)
+                        {
+                                bool taken = false;
+
+                                for (p8 how = 1; how <= 2 && !taken; how++)
+                                {
+                                        rover_load_asked = how;
+                                        taken = rover_load_compile(false) >= 0 &&
+                                                rover_load_all.rules == request.rules &&
+                                                rover_runner_adopt(request.table);
+                                }
+                                rover_load_asked = 0;
+                                if (!taken)
+                                        rover_runner_say("a table loaded by hand is not one these files make: "
+                                                         "its records are left", null, null);
+                        }
                 }
                 if (record.table != rover_runner.table)
                         continue;
@@ -1119,23 +1156,6 @@ static fn rover_runner_ring(void)
 
 // ---- the loop --------------------------------------------------------------
 
-/*
-        The kernel's script made one that owns no event, so every event the
-        rules do not take runs its image line (the kernel's floor: the power
-        key powers off), where the builtin script would have the kernel hand
-        it to this process. An empty one is the builtin again, so it is a
-        comment.
-*/
-static fn rover_runner_disown(void)
-{
-        static const p8 text[] = "# The rules are the runner's: no event is this script's.\n";
-
-        memory_zero(address_of host_machine, sizeof(host_machine));
-        host_machine.length = sizeof(text) - 1;
-        host_machine.address = (unsigned long)text;
-        if (host_machine_script(MOONWATER_SCRIPT_SET) < 0)
-                rover_runner_say("the kernel kept its script: the events it owns come to the runner", null, null);
-}
 
 //      The opens held for the desktop, done once its table is there.
 static fn rover_runner_held(void)
@@ -1296,8 +1316,6 @@ static b32 rover_runner_run(bipolar device)
         (void)rover_runner_settings(null);
         if (!rover_runner_load())
                 return HOST_MACHINE_FAILED;
-        (void)host_write_text(HOST_MACHINE_SOURCED, "1\n");
-        rover_runner_disown();
 
         rover_runner.watch = system_call_2(syscall(inotify_init1), O_CLOEXEC | O_NONBLOCK, 0);
         if (rover_runner.watch >= 0)
@@ -1367,7 +1385,7 @@ static b32 rover_runner_run(bipolar device)
                         //      The machine's wait: 0 when the machine is stopping, MOONWATER_ROVER when the ring has records.
                         if (system_read_once(rover_runner.kernel_pipe[0], &event, 4) == 4 && (event == ~0u || !event))
                                 break;
-                        //      A stop the kernel handed here all the same (a script it holds that owns one): done.
+                        //      A stop the kernel handed here (an event its bindings give the machine): done.
                         if (event <= SPARK_BIND_EVENTS && spark_bind_is_stop(event))
                         {
                                 for (positive at = 0; at < rover_runner.view.head->services; at++)
@@ -1415,12 +1433,5 @@ static b32 rover_runner_run(bipolar device)
         return HOST_MACHINE_ENDED;
 }
 
-//      Whether this machine runs rules: the image carries them.
-static bool rover_runner_chosen(void)
-{
-        file_facts facts;
-
-        return file_look(AT_FDCWD, ROVER_IMAGE_RULES, 0, address_of facts) && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY;
-}
 
 #endif /* ROVER_RUNNER_INCLUDED */

@@ -362,19 +362,14 @@ menu "Moonwater"
     config MOONWATER_MACHINE_SCRIPT
         string "Default machine script"
         depends on MOONWATER_CORE
-        default "main.moonwater.sh"
+        default ""
         help
           Path relative to the repository root, compiled into the module
-          as the fallback machine script. The default is main.moonwater.sh
-          next to README.md: clone the repo and edit that file. The
-          machine process sources this text when /root/main.moonwater.sh
-          is missing or refused, so a disk that never appears still has
-          a working event table.
-
-          moonwater bind and moonwater machine both read the overlay from
-          the module; they do not each scan a private copy. A regular
-          file at /root/main.moonwater.sh, owned by root and not group-
-          or world-writable, overlays the baked text after boot.
+          as the fallback machine script, which decides the events the
+          machine process is handed. Empty, the default, is none: the
+          machine process is the rover runner (src/rover/runner.c), whose
+          rules take what they want in the kernel (src/moonwater/rules.c),
+          and every other event runs its binding.
     # Per-tool and per-builtin switches, generated: ./build switches
     source "kernel/moonwater/Kconfig.switches"
 endmenu # Moonwater

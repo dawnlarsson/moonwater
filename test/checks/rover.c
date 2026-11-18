@@ -1067,14 +1067,17 @@ static fn rover_check_examples(void)
 {
         bool all = true, canonical = true;
 
-        for (positive at = 0; at < array_count(rover_image); at++)
+        for (positive at = 0; at < ROVER_IMAGE_FILES; at++)
         {
-                if (!rover_compiled(rover_image[at].text))
+                const char address_to name;
+                const char address_to text = rover_image_file(at, &name);
+
+                if (!rover_compiled(text))
                 {
                         all = false;
                         continue;
                 }
-                if (!rover_same(rover_printed_of(), rover_image[at].text))
+                if (!rover_same(rover_printed_of(), text))
                         canonical = false;
         }
         check("every example compiles and passes the load-time check", all);

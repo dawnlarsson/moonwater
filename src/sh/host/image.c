@@ -1,13 +1,11 @@
 /*
         src/sh/host/image.c: the settings an image carries and a disk keeps (host_settings_*): read, written, carried
-        and applied; and spark's bind.
+        and applied.
 
         A run of src/sh/host.c, which includes this file where the run stood (test/split.py cut it there): it is
         compiled only as part of that file, with its statics and macros, and never on its own. host_main, at the end
         of src/sh/host.c, names the function each verb runs.
 */
-
-// Bindings ------------------------------------------------------
 
 /* One ioctl of /dev/spark, the device opened for it and let go of. */
 static bipolar host_spark_once(unsigned int command, void *request, unsigned int flags)
@@ -23,57 +21,6 @@ static bipolar host_spark_once(unsigned int command, void *request, unsigned int
         return failed;
 }
 
-static fn host_bind_fill(unsigned int op, unsigned int event, string_address command,
-                         struct bind_control address_to control)
-{
-        positive length;
-
-        memory_zero(control, sizeof(address_to control));
-        control->op = op;
-        control->event = event;
-
-        if (command)
-        {
-                length = string_length(command);
-                memory_copy(control->command, command,
-                            length < SPARK_BIND_COMMAND_MAX ? length + 1
-                                                            : SPARK_BIND_COMMAND_MAX);
-        }
-}
-
-//      What the kernel answers is ended here, whatever it left at the end.
-static bipolar host_bind_finish(bipolar failed, struct bind_control address_to control)
-{
-        control->command[SPARK_BIND_COMMAND_MAX - 1] = end;
-        control->name[SPARK_BIND_NAME_MAX - 1] = end;
-        return failed < 0 ? failed : 0;
-}
-
-static bipolar host_bind_ioctl(bipolar device, unsigned int op, unsigned int event,
-                               string_address command,
-                               struct bind_control address_to control)
-{
-        host_bind_fill(op, event, command, control);
-        return host_bind_finish(system_control(device, SPARK_IOCTL_BIND, control),
-                                control);
-}
-
-/*
-        One request to a bound event, the device opened for it alone. SET when
-        `command` is not null, then the kernel copies the row back. A command
-        too long is handed over whole, cut at the size without a terminator, so
-        the kernel's own refusal answers. The listing and boot apply keep the
-        file open (host_bind_ioctl); opening once per event was twenty-two trips
-        through /dev/spark for `moonwater bind` with no arguments.
-*/
-static bipolar host_bind_request(unsigned int op, unsigned int event,
-                                 string_address command,
-                                 struct bind_control address_to control)
-{
-        host_bind_fill(op, event, command, control);
-        return host_bind_finish(host_spark_once(SPARK_IOCTL_BIND, control, FILE_READ),
-                                control);
-}
 
 // Settings ------------------------------------------------------
 
@@ -123,11 +70,9 @@ static const struct
         string_address verb;
         p8 list;
         string_address empty;
-        p8 hook;
 } host_lists[] = {
-    {"init", SPARK_SETTINGS_INIT, "nothing runs at boot", MOONWATER_HOOK_INIT},
-    {"exit", SPARK_SETTINGS_EXIT, "nothing runs when the machine stops",
-     MOONWATER_HOOK_END},
+    {"init", SPARK_SETTINGS_INIT, "nothing runs at boot"},
+    {"exit", SPARK_SETTINGS_EXIT, "nothing runs when the machine stops"},
 };
 
 /*
@@ -1125,7 +1070,7 @@ static string_address host_plain(string_address text)
 /*
         One list said twice.
 
-        `moonwater bind init` writes it as log lines of its own, and
+        `moonwater init` writes it as log lines of its own, and
         `moonwater status` sets the same three answers -- the hook that took
         the list away, the entries, or the sentence for an empty one -- under
         a heading on the session page. Only the frame around them differs,
@@ -1138,18 +1083,6 @@ static fn host_settings_lines(host_settings address_to settings, positive which,
         host_setting setting;
         positive at = 0;
         positive shown = 0;
-        p16 line = host_machine_hook_line(host_lists[which].hook);
-
-        if (line)
-        {
-                string_format(log, page ? "  %s: %s:%p\n"
-                                        : host_label "%s is %s:%p\n",
-                              host_lists[which].verb, host_machine_where(),
-                              (positive)line);
-                if (!page)
-                        log_flush();
-                return;
-        }
 
         while (host_settings_next(settings, address_of at, address_of setting))
         {
@@ -1250,18 +1183,6 @@ static b32 host_settings_apply(host_settings address_to settings,
                 return HOST_SETTINGS_SHOWN;
         }
         at = host_switch_find(verb, arguments[2]);
-
-        //      A list a machine script sets is the script's, and only its
-        //      switches are still this command's.
-        {
-                p16 overlay = host_machine_hook_line(host_lists[which].hook);
-
-                if (overlay && at == array_count(host_switches))
-                {
-                        host_machine_refused(verb, overlay);
-                        return HOST_SETTINGS_REFUSED;
-                }
-        }
 
         if (at < array_count(host_switches))
         {

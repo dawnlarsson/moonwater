@@ -47,7 +47,7 @@
         machine, or throws away what a person keeps (wipe, setup install,
         update, use and rollback, sleep, hibernate, bios reboot, desktop start and rest,
         desktop off, link remove and group leave, wifi and bluetooth remove,
-        cpu offline, bind init and exit remove), whichever row it is typed
+        cpu offline, init and exit remove), whichever row it is typed
         in, is not run by the first Enter: the window says so and runs it
         when the same Enter is pressed again, and any other key asks again.
 
@@ -351,8 +351,8 @@ static const char address_to const settings_asks[][3] = {
     {"wifi", "remove"},
     {"bluetooth", "remove"},
     {"cpu", "offline"},
-    {"bind", "init", "remove"},
-    {"bind", "exit", "remove"},
+    {"init", "remove"},
+    {"exit", "remove"},
 };
 
 /* ---- the model: what a verb said, and what to run ---- */

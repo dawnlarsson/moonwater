@@ -285,20 +285,6 @@ static fn machine_arms(void)
 
 static fn machine_policy(void)
 {
-        check("root's 0644 regular file is allowed",
-              host_machine_file_allowed(MODE_FILE | 0644, 0));
-        check("root's 0600 regular file is allowed",
-              host_machine_file_allowed(MODE_FILE | 0600, 0));
-        check("group-writable is refused",
-              !host_machine_file_allowed(MODE_FILE | 0664, 0));
-        check("other-writable is refused",
-              !host_machine_file_allowed(MODE_FILE | 0642, 0));
-        check("a non-root owner is refused",
-              !host_machine_file_allowed(MODE_FILE | 0644, 1));
-        check("a symlink is refused",
-              !host_machine_file_allowed(MODE_LINK | 0644, 0));
-        check("a directory is refused",
-              !host_machine_file_allowed(MODE_DIRECTORY | 0700, 0));
         {
                 struct moonwater_overlay empty;
 
@@ -308,12 +294,6 @@ static fn machine_policy(void)
                                                  SPARK_BIND_POWEROFF) == 0);
         }
 
-        check("the one script path is /root/main.moonwater.sh",
-              string_equals(HOST_MACHINE_SCRIPT, "/root/main.moonwater.sh"));
-        check("the builtin overlay is named builtin",
-              string_equals(HOST_MACHINE_BUILTIN, "builtin"));
-        check("the sourced copy lives under /run/moonwater",
-              string_equals(HOST_MACHINE_RUNTIME, "/run/moonwater/machine.sh"));
         check("the machine ioctl request is 64 bytes",
               sizeof(struct machine_control) == 64);
         check("the machine script ioctl request is 80 bytes",
@@ -380,26 +360,22 @@ static fn machine_policy(void)
 /*
         The machine process stopping the machine it is the machine process of.
 
-        moonwater_poweroff in the script runs poweroff, which is a builtin, so
-        it stops the machine from inside the event the machine process is in
-        the middle of. That goes through host_machine_stop like every other
+        A rule's poweroff the runner does stops the machine from inside the
+        machine process. That goes through host_machine_stop like every other
         stop does, and the attach it would ask the kernel to end is its own:
-        it must not poll for a detach only it could perform. moonwater_end is
-        what the file promises runs while the filesystems still write, so that
-        stop runs it, and only the first of them does.
+        it must not poll for a detach only it could perform.
 */
 static fn machine_stop_self(void)
 {
         p8 held = host_machine_self;
 
-        memory_zero(address_of host_machine, sizeof(host_machine));
         host_machine_ended = false;
         host_machine_self = true;
 
         check("the machine process does not wait on the attach it holds itself",
               host_machine_stop());
-        check("and that stop spends moonwater_end", host_machine_ended);
-        check("a second stop does not run it again",
+        check("and that stop is the machine's end", host_machine_ended);
+        check("and a second is a stop as well",
               host_machine_stop() && host_machine_ended);
 
         host_machine_self = held;

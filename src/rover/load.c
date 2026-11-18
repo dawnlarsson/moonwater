@@ -1,8 +1,8 @@
 /*
         Rover and the kernel, from userspace: the verbs that load the rule
         files into the module, ask it what it has done, print its state page
-        and watch its ring, and the machine process's part as the ring's
-        consumer until the runner is. src/moonwater/rules.c is the kernel's
+        and watch its ring, and the one loader of the rule files the runner
+        (src/rover/runner.c) loads with too. src/moonwater/rules.c is the kernel's
         half and the ABI; src/rover/README.md is the language.
 
           moonwater rover load       the image's rules and the person's, compiled into one table and loaded
@@ -11,7 +11,7 @@
           moonwater rover state      the kernel's state page, one state a line
           moonwater rover watch [N]  the ring's records as they come, N of them, with the time to each
 
-        The image's rules are the program's own (rover_image, the files
+        The image's rules are the program's own (rover_image_file, the files
         /lib/moonwater/rules holds to read) and the person's are
         /root/rules/NAME.rover: a person's file replaces the image's of its
         name and an empty one masks it. A person's file is read only when it
@@ -35,9 +35,6 @@
 #define ROVER_FILE_NAME_MOST 64u
 #define ROVER_SET_MOST (4u * ROVER_SOURCE_MOST)
 
-positive shell_function_slot(string_address name);
-b32 shell_call_slot(positive slot, string_address name, string_address address_to arguments, positive count);
-
 static struct rover_build rover_load_one;
 static struct rover_build rover_load_all;
 static p8 rover_load_file[ROVER_SOURCE_MOST + 1];
@@ -45,6 +42,7 @@ static p8 rover_load_set[ROVER_SET_MOST];
 static positive rover_load_used;
 static bool rover_load_was_safe;    // the last compile read the image's rules alone
 static bool rover_load_forced_safe; // the image's alone from here: the set with the person's did not compile
+static p8 rover_load_asked;         // 0: safe mode as the command line and the count say; 1 the person's files too; 2 the image's alone
 
 //      A person's file into rover_load_file: regular, root's, written by root alone, at most 64 KiB, not a link (as the
 //      machine script was read). Its length, or -1.
@@ -109,6 +107,8 @@ static bool rover_load_safe(void)
                         if (!memory_compare(line + at, "moonwater.safe=1", 16) && (at == 0 || line[at - 1] == ' '))
                                 return true;
         }
+        if (rover_load_asked)
+                return rover_load_asked == 2;
         return rover_load_forced_safe || rover_load_boots() >= 2;
 }
 
@@ -135,7 +135,7 @@ static bool rover_load_add(const p8 address_to text, positive length, string_add
 
 /*
         The rules compiled into rover_load_all: the image's (the program's own,
-        rover_image) and the person's, /root/rules/NAME.rover, by name. A
+        rover_image_file) and the person's, /root/rules/NAME.rover, by name. A
         person's file replaces the image's of its name and an empty one masks
         it; one that may not be read or does not compile is said, and the
         image's of its name stands. Answers how many files went in, or -1 when
@@ -152,8 +152,13 @@ static bipolar rover_load_compile(bool say)
         rover_load_used = 0;
         if (rover_load_was_safe && say)
                 string_format(log_error, "rover: safe mode: the image's rules alone\n");
-        for (positive at = 0; at < array_count(rover_image); at++)
-                string_copy(names[count++], rover_image[at].name);
+        for (positive at = 0; at < ROVER_IMAGE_FILES; at++)
+        {
+                const char address_to name;
+
+                (void)rover_image_file(at, &name);
+                string_copy(names[count++], (string_address)name);
+        }
         handle = rover_load_was_safe ? -1
                                      : system_open_at(AT_FDCWD, ROVER_PERSON_RULES, FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (handle >= 0)
@@ -195,9 +200,14 @@ static bipolar rover_load_compile(bool say)
                 p8 path[160];
                 file_facts facts;
 
-                for (positive k = 0; k < array_count(rover_image); k++)
-                        if (string_equals((string_address)names[at], (string_address)rover_image[k].name))
-                                image = rover_image[k].text;
+                for (positive k = 0; k < ROVER_IMAGE_FILES; k++)
+                {
+                        const char address_to name;
+                        const char address_to text = rover_image_file(k, &name);
+
+                        if (string_equals((string_address)names[at], (string_address)name))
+                                image = text;
+                }
                 if (!rover_load_was_safe && string_join(path, sizeof(path), ROVER_PERSON_RULES "/", (string_address)names[at]) &&
                     file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
                 {
@@ -461,206 +471,6 @@ static b32 rover_kernel_verb(string_address address_to arguments, positive count
         log_flush();
         system_close(device);
         return answer;
-}
-
-// ---- the machine process, the ring's consumer until the runner is ----------
-
-static const p8 address_to rover_machine_map;
-
-static fn rover_load_pool_text(p8 address_to into, positive room, const struct rover_table address_to view, p32 at)
-{
-        p16 length;
-
-        memory_copy(&length, view->pool + at, 2);
-        if (length >= room)
-                length = (p16)(room - 1);
-        memory_copy(into, view->pool + at + 2, length);
-        into[length] = 0;
-}
-static p64 rover_machine_tail;
-static p32 rover_machine_table;
-static struct rover_run rover_machine_runs[ROVER_RULES_MOST];
-static struct rover_table rover_machine_view;
-
-/*
-        At the machine's start: the rules loaded, the table kept to read the
-        ring's records by, and the ring mapped. A machine with no rule files
-        loads an empty table, which clears one an earlier start left.
-*/
-static fn rover_machine_start(bipolar device)
-{
-        struct rover_refusal refusal;
-        bipolar table = rover_load_now(device, true);
-
-        rover_machine_table = 0;
-        if (!rover_machine_map)
-                rover_machine_map = rover_load_map(device, ROVER_MAP_BYTES);
-        if (rover_machine_map)
-                rover_machine_tail = ((const volatile struct rover_ring address_to)(rover_machine_map + ROVER_MAP_RING))->head;
-        if (table <= 0 || !rover_check(rover_built(&rover_load_all), rover_load_all.size, &rover_machine_view, &refusal))
-                return;
-        rover_machine_table = (p32)table;
-        memory_zero(rover_machine_runs, sizeof(rover_machine_runs));
-}
-
-//      One action of a hit, done by its owner as it is today: the machine script's moonwater_rover when it has one.
-static fn rover_machine_act(const struct rover_event address_to event, positive which, p16 rule)
-{
-        const struct rover_action address_to action = rover_machine_view.action + which;
-        const p8 address_to pages[ROVER_PAGES] = {rover_machine_map, null};
-        struct rover_value values[ROVER_ARGUMENTS];
-        p8 words[ROVER_ARGUMENTS + 2][ROVER_TEXT_MOST + 2];
-        string_address arguments[ROVER_ARGUMENTS + 2];
-        positive count = rover_arguments(&rover_machine_view, which, event, pages, values), slot;
-        static const char address_to const kinds[] = {"", "do", "run", "tool", "emit"};
-
-        rover_load_pool_text(words[0], sizeof(words[0]), &rover_machine_view, rover_machine_view.rule[rule].name);
-        string_copy(words[1], kinds[action->kind <= ROVER_EMIT ? action->kind : 0]);
-        if (action->kind == ROVER_DO)
-        {
-                const struct rover_primitive_row address_to primitive = rover_primitive_find(action->id);
-
-                string_copy(words[1], primitive ? primitive->name : "do");
-                if (primitive && primitive->runs == ROVER_KERNEL)
-                {
-                        //      A runner's rule asking the kernel: through the queue a kernel rule's goes through.
-                        struct rover_control request;
-                        bipolar device = rover_load_device();
-
-                        memory_zero(&request, sizeof(request));
-                        request.op = ROVER_OP_DO;
-                        request.primitive = action->id;
-                        request.number = count ? values[0].number : 0;
-                        if (count && values[0].text)
-                                memory_copy(request.text, values[0].text,
-                                            values[0].length < ROVER_TEXT_ROOM - 1 ? values[0].length : ROVER_TEXT_ROOM - 1);
-                        if (device >= 0)
-                        {
-                                (void)rover_load_ask(device, &request);
-                                system_close(device);
-                        }
-                        return;
-                }
-        }
-        for (positive at = 0; at < count; at++)
-        {
-                struct rover_text text = {words[2 + at], 0, ROVER_TEXT_MOST, false};
-
-                if (values[at].text)
-                        rover_put(&text, values[at].text, values[at].length);
-                else if (action->kind == ROVER_DO && rover_primitive_find(action->id))
-                        rover_literal_put(&text, rover_primitive_find(action->id)->type[at], values[at].number, null, 0);
-                words[2 + at][text.used] = 0;
-        }
-        for (positive at = 0; at < count + 2; at++)
-                arguments[at] = (string_address)words[at];
-        slot = shell_function_slot("moonwater_rover");
-        if (slot == positive_max)
-        {
-                string_format(log, "rover: %s: %s %s has no owner yet: define moonwater_rover in the machine script\n",
-                              words[0], words[1], count ? words[2] : (p8 address_to)"");
-                log_flush();
-                return;
-        }
-        (void)shell_call_slot(slot, "moonwater_rover", arguments, count + 2);
-}
-
-static fn rover_machine_hit(const struct rover_event address_to event, const struct rover_hit address_to hit);
-
-//      emit cue NAME: the runner's rules of the cue, here, cut at ROVER_EMIT_DEPTH cues deep.
-static fn rover_machine_cue(const struct rover_event address_to from, positive which)
-{
-        const p8 address_to pages[ROVER_PAGES] = {rover_machine_map, null};
-        struct rover_value values[ROVER_ARGUMENTS];
-        struct rover_event cue;
-        struct rover_hit hits[16];
-        positive made;
-
-        if (from->depth + 1 >= ROVER_EMIT_DEPTH ||
-            !rover_arguments(&rover_machine_view, which, from, pages, values) || !values[0].text)
-                return;
-        memory_zero(&cue, sizeof(cue));
-        cue.id = ROVER_CUE;
-        cue.count = 1;
-        cue.depth = (p8)(from->depth + 1);
-        cue.when = system_clock_ns(1);
-        cue.realtime = from->realtime;
-        cue.field[0] = values[0];
-        made = rover_fire(&rover_machine_view, rover_machine_runs, pages, &cue, ROVER_RUNNER, hits, 16);
-        for (positive at = 0; at < made; at++)
-                rover_machine_hit(&cue, &hits[at]);
-}
-
-static fn rover_machine_hit(const struct rover_event address_to event, const struct rover_hit address_to hit)
-{
-        for (positive k = 0; k < hit->count; k++)
-        {
-                positive which = (positive)hit->action + k;
-                const struct rover_action address_to action = rover_machine_view.action + which;
-
-                if (action->kind == ROVER_DO && action->runs == ROVER_KERNEL &&
-                    rover_machine_view.rule[hit->rule].place == ROVER_KERNEL)
-                        continue; // the kernel did it
-                if (action->kind == ROVER_EMIT)
-                        rover_machine_cue(event, which);
-                else
-                        rover_machine_act(event, which, hit->rule);
-        }
-}
-
-//      Every record since the last: a kernel hit's userspace actions done, and the runner's rules of an event.
-static fn rover_machine_drain(void)
-{
-        const volatile struct rover_ring address_to ring;
-        p64 head;
-
-        if (!rover_machine_map)
-                return;
-        ring = (const volatile struct rover_ring address_to)(rover_machine_map + ROVER_MAP_RING);
-        //      A table loaded since (moonwater rover load, by hand): the same files compiled again here, to read it by.
-        if (ring->table != rover_machine_table && ring->table)
-        {
-                struct rover_refusal refusal;
-
-                if (rover_load_compile(false) >= 0 &&
-                    rover_check(rover_built(&rover_load_all), rover_load_all.size, &rover_machine_view, &refusal))
-                {
-                        rover_machine_table = ring->table;
-                        memory_zero(rover_machine_runs, sizeof(rover_machine_runs));
-                }
-        }
-        if (!rover_machine_table)
-                return;
-        head = ring->head;
-        if (head - rover_machine_tail > ROVER_RING_SLOTS)
-                rover_machine_tail = head - ROVER_RING_SLOTS;
-        for (; rover_machine_tail < head; rover_machine_tail++)
-        {
-                struct rover_record record;
-                struct rover_event event;
-
-                if (!rover_record_take(rover_machine_map, rover_machine_tail, &record) || record.table != rover_machine_table)
-                        continue;
-                rover_record_event(&record, &event);
-                if (record.kind == ROVER_RECORD_HIT && (record.flags & ROVER_RECORD_USER) &&
-                    record.rule < rover_machine_view.head->rules)
-                {
-                        struct rover_hit hit = {record.rule, record.action, record.count,
-                                                (p8)!!(record.flags & ROVER_RECORD_ELSE), 0};
-
-                        rover_machine_hit(&event, &hit);
-                }
-                else if (record.kind == ROVER_RECORD_EVENT)
-                {
-                        const p8 address_to pages[ROVER_PAGES] = {rover_machine_map, null};
-                        struct rover_hit hits[16];
-                        positive made = rover_fire(&rover_machine_view, rover_machine_runs, pages, &event, ROVER_RUNNER,
-                                                   hits, 16);
-
-                        for (positive at = 0; at < made; at++)
-                                rover_machine_hit(&event, &hits[at]);
-                }
-        }
 }
 
 #endif /* ROVER_LOAD_INCLUDED */

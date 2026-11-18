@@ -16,7 +16,7 @@
         the keys while it holds it, and has the keyboard back when it ends.
 
         The choice is /root/desktop, as the keyboard's is /root/keyboard. The
-        machine script's canvas on line runs `desktop boot`, once for each boot,
+        rules' canvas on runs `desktop boot` (desktop-boot), once for each boot,
         which waits for the verdict so that /bowls is there and puts the choice
         in force, and `desktop start` is the same by hand. A word kept there that
         is neither (the name of a bowl profile's session, which an earlier
@@ -32,15 +32,10 @@ static string_address desktop_choice(p8 address_to name, positive room)
         return (string_address)name;
 }
 
-#define DESKTOP_SUPERVISOR HOST_STATE "/supervisor.pid"
+//      The compositor's pid, which the runner keeps while its service runs (src/rover/runner.c).
 #define DESKTOP_COMPOSITOR HOST_STATE "/compositor.pid"
-#define DESKTOP_KIDS HOST_STATE "/desktop.kids"
-//      The room the list of pids the machine script keeps is read into, and the
-//      most digits a number of it may have to be a pid (the kernel's most is 7).
-#define DESKTOP_KIDS_ROOM 256
-#define DESKTOP_PID_DIGITS 9
 
-// The pid a file of the machine script holds, or 0: a whole number that fits what kill takes it as, and
+// The pid a file holds, or 0: a whole number that fits what kill takes it as, and
 // nothing after its digits (4294967295 is -1, which every process answers to, and "123abc" is no pid).
 static positive desktop_pid_of(string_address path)
 {
@@ -73,59 +68,6 @@ static bool desktop_woke(void)
         return desktop_alive(compositor) && system_call_2(syscall(kill), compositor, DESKTOP_SIGUSR2) == 0;
 }
 
-/*
-        The compositor of the machine's own desktop, ended: the early desktop of a boot whose script from the disk has
-        no desktop of the builtin's (host_machine_run). The supervisor goes first so that the compositor is not started
-        again, as the machine script's desktop_stop does it, and what the compositor carried (the log, the terminals,
-        the key answerer) goes after it, the programs the script kept the pids of. Nothing is done where no compositor
-        is up.
-*/
-static fn desktop_yield(void)
-{
-        positive supervisor = desktop_pid_of((string_address)DESKTOP_SUPERVISOR),
-                 compositor = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
-        p8 kids[DESKTOP_KIDS_ROOM];
-        bipolar got;
-        bool cut;
-
-        if (supervisor > 1)
-                system_call_2(syscall(kill), supervisor, SIGTERM);
-        if (compositor > 1)
-                system_call_2(syscall(kill), compositor, SIGTERM);
-        for (positive pass = 0; pass < 60 && desktop_alive(compositor); pass++)
-                host_pause(50000000);
-        if (desktop_alive(compositor))
-        {
-                system_call_2(syscall(kill), compositor, SIGKILL);
-                host_pause(100000000);
-        }
-
-        got = file_read_once_at(AT_FDCWD, (p8 address_to)DESKTOP_KIDS, kids, sizeof(kids));
-        //      A read that filled the room may have more behind it, and a number
-        //      at its end may be the front of a longer one: not a pid, and not
-        //      to be killed as the one it looks like. A number of more digits
-        //      than a pid has is none either, and is not split into two.
-        cut = got == (bipolar)sizeof(kids);
-        for (positive at = 0, pid = 0, digits = 0; got > 0 && at <= (positive)got; at++)
-        {
-                p8 byte = at < (positive)got ? kids[at] : '\n';
-
-                if (byte >= '0' && byte <= '9')
-                {
-                        if (digits < DESKTOP_PID_DIGITS)
-                                pid = pid * 10 + (positive)(byte - '0');
-                        if (digits <= DESKTOP_PID_DIGITS)
-                                digits++;
-                        continue;
-                }
-                if (digits && digits <= DESKTOP_PID_DIGITS && pid > 1 && !(cut && at == (positive)got))
-                        system_call_2(syscall(kill), pid, SIGTERM);
-                pid = digits = 0;
-        }
-        (void)system_remove_at(AT_FDCWD, DESKTOP_SUPERVISOR, 0);
-        (void)system_remove_at(AT_FDCWD, DESKTOP_COMPOSITOR, 0);
-        (void)system_remove_at(AT_FDCWD, DESKTOP_KIDS, 0);
-}
 
 // Whether Canvas is running in the kernel: -1 when it cannot be asked.
 static int desktop_canvas_running(void)
@@ -137,9 +79,8 @@ static int desktop_canvas_running(void)
 
 /*
         The choice, put in force. on is the compositor: Canvas is turned on if it is off, or off and on if it is on
-        with no compositor (the machine script starts the compositor from the event that turns it on). off is the text
-        console: Canvas is turned off. At boot the machine script has started the compositor already, so on is nothing
-        then.
+        with no compositor (the runner starts the compositor's service when Canvas is on). off is the text console:
+        Canvas is turned off. At boot the runner has started the compositor already, so on is nothing then.
 */
 static b32 desktop_put(string_address name, bool boot)
 {
@@ -153,7 +94,7 @@ static b32 desktop_put(string_address name, bool boot)
                 return host_canvas_on();
         }
 
-        //      The machine script ends the compositor from the event Canvas off fires; the card is free when it has gone,
+        //      The runner stops the compositor's service when Canvas is off; the card is free when it has gone,
         //      and a compositor started straight after (weston) is refused its master until then.
         positive compositor = desktop_pid_of((string_address)DESKTOP_COMPOSITOR);
 
@@ -174,9 +115,9 @@ static b32 desktop_start(bool boot)
 }
 
 /*
-        From the machine script, when Canvas has started: the choice, once for
-        a boot, in a process of its own that waits for the disks. The script
-        goes on to its next line at once: the events behind it wait on it.
+        From the rules, when Canvas has started: the choice, once for a boot,
+        in a process of its own that waits for the disks, so the runner that
+        started it goes on at once.
 */
 static b32 desktop_boot(void)
 {

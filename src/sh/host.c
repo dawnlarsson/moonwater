@@ -57,11 +57,9 @@
 #define HOST_SYSTEM HOST_STATE "/system"
 #define HOST_MEDIUM HOST_STATE "/medium"
 #define HOST_LOOK HOST_STATE "/look"
+//      The machine script there was, which ran as root at boot: still a name the link keeps from a peer's files
+//      (src/waterlink/service.c), so one left on a disk is not a peer's to write.
 #define HOST_MACHINE_SCRIPT "/root/main.moonwater.sh"
-#define HOST_MACHINE_BUILTIN "builtin"
-#define HOST_MACHINE_RUNTIME HOST_STATE "/machine.sh"
-#define HOST_MACHINE_DIRTY HOST_STATE "/machine.dirty"
-#define HOST_MACHINE_SOURCED HOST_STATE "/machine.sourced"
 
 /*
         The commit this build was made from and its date, which build writes
@@ -229,18 +227,12 @@ static bool host_settings_keep(host_settings address_to settings);
 static bool host_settings_install(host_install address_to install,
                                   host_settings address_to into);
 static fn host_events_boot(host_settings address_to settings);
-static fn host_bind_apply(host_settings address_to settings);
-static b32 host_bind(string_address address_to arguments, positive count);
+static b32 host_settings_command(string_address address_to arguments, positive count);
 static b32 host_usage(void);
 static b32 host_setting_group(string_address address_to words, positive count);
 static positive radio_display(p8 address_to into, positive room, p8 address_to name,
                               positive length);
-static p16 host_machine_hook_line(p8 hook);
-static p16 host_machine_event_line(unsigned int event);
-static string_address host_machine_where(void);
-static fn host_machine_refused(string_address name, p16 line);
 static bool host_machine_stop(void);
-static bool host_init_list_runs(void);
 
 //      builtin.c's, which stops the machine the way reboot does; it is
 //      included after this file. The commands are shell.c's REBOOT_*.
@@ -989,7 +981,8 @@ static b32 host_main()
             {"install", host_install_verb, false, true},
             // Reading needs nothing, and the kernel decides who may set a bound
             // event. init and exit still need root.
-            {"bind", host_bind, false, true},
+            {"init", host_settings_command, false, true},
+            {"exit", host_settings_command, false, true},
             {"canvas", host_canvas, false},
             {"splash", host_splash, false, true},
             {"desktop", host_desktop, false},

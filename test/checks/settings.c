@@ -2098,8 +2098,7 @@ static fn check_settings(string_address regular, string_address bold)
 "\n"
 "    Settings stay in the image this session started from.\n"
 "    install takes the settings of this session; update keeps those of the disk.\n"
-"    The machine script overwrites bind, init and exit.\n"
-"    /root/main.moonwater.sh overlays the kernel builtin.\n"
+"    The rules are /root/rules/NAME.rover over the image's (moonwater rover).\n"
                     ;
                 string_address more[SETTINGS_WORDS];
                 int status = -1, wipe = -1, servers = -1, sleep = -1, hibernate = -1, setup = -1, desktop = -1, link = -1, any = SETTINGS_ANY;
@@ -6397,7 +6396,7 @@ static fn check_settings_groups(void)
             {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
             {{"airplane"}, "Network"}, {{"priority"}, "Network"}, {{"dns"}, "Network"}, {{"link"}, "Waterlink"}, {{"wifi"}, "Wi-Fi"},
             {{"bluetooth"}, "Bluetooth"}, {{"device"}, "Devices"}, {{"charge"}, "Power"}, {{"battery"}, "Power"}, {{"power"}, "Power"},
-            {{"cpu"}, "Power"}, {{"bind"}, "Boot"}, {{"ssh"}, "SSH"}};
+            {{"cpu"}, "Power"}, {{"init"}, "Boot"}, {{"ssh"}, "SSH"}};
         static const struct
         {
                 const char address_to label;

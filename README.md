@@ -339,8 +339,9 @@ changes it and needs root, and a word it does not take is a usage page (exit 2)
 and not a refusal (exit 1). `bowl` runs other distributions' programs
 (`bowl profile chrome` installs Alpine's Chromium as a program of Canvas,
 `bowl profile steam` Arch's Steam with its 32-bit graphics and sound, on x86-64,
-`bowl profile build` what `sh build.sh` needs to build an image here), and
-`main.moonwater.sh` is the machine script that sets a machine up at boot.
+`bowl profile build` what `sh build.sh` needs to build an image here), and the
+machine is set up by rules (src/rover): the image's in /lib/moonwater/rules, a
+person's in /root/rules, which `moonwater rover load` takes.
 
 `moonwater security` changes what the TLS client (wget, the clock's NTS, names over
 TLS) trusts without a rebuild. A key is named by the SHA-256 of its DER

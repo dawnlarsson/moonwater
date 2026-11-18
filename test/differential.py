@@ -29167,12 +29167,17 @@ def harness_core_state(argv):
     #   out of the file it is in, so it is given the header's text instead.
     spark = (root / "src/moonwater/spark.c").read_text().replace(
         '#define CANVAS_ABI_ONLY\n#include "../canvas/canvas.c"\n#undef CANVAS_ABI_ONLY', canvas_abi_region(root))
-    # The machine script this build bakes into the module. The scanner that
-    # decides which rows the machine process owns is compiled here for real,
-    # so the shipped file is scanned here for real as well: an edit to it that
-    # stops arming the power button is a red check rather than a dead button.
-    shipped_machine = (root / "main.moonwater.sh").read_text()
-    assert shipped_machine.isascii(), "the machine script is ASCII"
+    # A machine script for the kernel's half to hold. The module bakes in none
+    # now (the machine process is the rover runner, src/rover/runner.c), but
+    # a script set through MOONWATER_IOCTL_SCRIPT still decides which rows the
+    # machine process owns, and the scanner that decides it is compiled here
+    # for real: this is the one the machine script there was gave those rows
+    # with, the three stop keys and Canvas on and off.
+    shipped_machine = ("function moonwater_poweroff {\n  poweroff\n}\n\n"
+                       "function moonwater_reset {\n  reboot\n}\n\n"
+                       "function moonwater_ctrl_alt_delete {\n  reboot\n}\n\n"
+                       "function moonwater_canvas_on {\n  moonwater desktop boot\n}\n\n"
+                       "function moonwater_canvas_off {\n  :\n}\n")
 
 
     section = lambda source, first, following: src_slice(source, first, following, "core_state")
@@ -31128,7 +31133,7 @@ static void check_machine_events(void) {
     //  moonwater_event either, so only the rows it owns wake the process.
     check(!report_machine_script(&script) &&
           !(machine_script_overlay.hooks & (MOONWATER_HOOK_INIT | MOONWATER_HOOK_EVENT)),
-          "the machine script this build ships leaves init to the stored list and names no moonwater_event");
+          "a machine script with the stop keys' rows leaves init to the stored list and names no moonwater_event");
     check(moonwater_bind_line(&machine_script_overlay,SPARK_BIND_POWEROFF) &&
           moonwater_bind_line(&machine_script_overlay,SPARK_BIND_RESET) &&
           moonwater_bind_line(&machine_script_overlay,SPARK_BIND_CTRL_ALT_DELETE),
@@ -47090,7 +47095,7 @@ def harness_moonwater_cli(argv):
             script = ("".join(say(command) for command in (
                 "wired sideways", "wifi sideways", "wifi add", "wifi on", "wifi add x", "wifi remove x",
                 "bluetooth add", "bluetooth sideways", "bluetooth add x", "wired off", "priority internet cable",
-                "priority sideways", "priority internet wired", "wipe", "bind init add x", "link", "link on x",
+                "priority sideways", "priority internet wired", "wipe", "init add x", "link", "link on x",
                 "link add x", "link push b f", "link run b", "link help", "link leave", "link a@b",
                 "link a@b abc-def", "name keeper",
                 "cpu online 0", "cpu online x", "charge limit", "charge limit 5", "brightness bogus", "brightness 50",
@@ -47113,7 +47118,7 @@ def harness_moonwater_cli(argv):
                 "bluetooth add": (2, ""), "bluetooth sideways": (2, ""), "bluetooth add x": (1, "moonwater bluetooth needs root"),
                 "wired off": (1, "moonwater wired needs root"), "priority internet cable": (2, ""), "priority sideways": (2, ""),
                 "priority internet wired": (1, "moonwater priority needs root"), "wipe": (1, "moonwater wipe needs root"),
-                "bind init add x": (1, "moonwater bind needs root"), "link": (1, "moonwater link needs root"),
+                "init add x": (1, "moonwater init needs root"), "link": (1, "moonwater link needs root"),
                 "link on x": (2, ""), "link add x": (2, ""), "link push b f": (2, ""), "link run b": (2, ""),
                 "link help": (2, ""), "link leave": (2, ""), "link a@b": (2, ""),
                 "link a@b abc-def": (1, "a@b is not a machine name"),
@@ -47224,7 +47229,7 @@ def harness_moonwater_cli(argv):
                 "mouse sensitivity 5", "mouse sensitivity 150 200", "mouse sensitivity default", "mouse acceleration",
                 "mouse acceleration off", "mouse acceleration maybe", "mouse acceleration on off", "mouse acceleration default",
                 "settings", "settings extra",
-                "bind", "bind init", "bind exit", "bind bogus", "wifi",
+                "init", "exit", "wifi",
                 "wifi off", "wifi on", "wifi add", "wifi remove", "wifi remove nobody",
                 "wifi remove a b", 'wifi remove ""', "wired", "wired on", "wired off",
                 "wired on extra", "wired sideways", "airplane", "airplane extra", "airplane on extra",
@@ -47373,8 +47378,8 @@ def harness_moonwater_cli(argv):
             'name random',
             'name x',
             'name UPPER',
-            'bind init',
-            'bind exit',
+            'init',
+            'exit',
             'wifi',
             'wifi off',
             'wifi on',
@@ -47452,8 +47457,8 @@ def harness_moonwater_cli(argv):
             'mouse acceleration maybe',
             'settings',
             'settings gallery',
-            'bind',
-            'bind bogus',
+            'init',
+            'init bogus',
             'wifi remove nobody',
             'wifi remove ""',
             'bluetooth remove nobody',
@@ -51244,10 +51249,10 @@ int main(int count, char **words)
         # names of the person's own words is shown and not obeyed, to either: a
         # disk, a zone, a network, a layout and a name typed with ESC [ 2 J in
         # them cleared the screen of whoever read the refusal.
-        quiet = ("status", "help", "help wifi", "wifi", "name", "bind", "keyboard list", "timezone list",
+        quiet = ("status", "help", "help wifi", "wifi", "name", "init", "keyboard list", "timezone list",
                  "link", "ntp", "time", "wired", "bluetooth", "airplane", "priority", "setup", "device")
         hostile = ("timezone x${e}", "keyboard x${e}", "name x${e}", "wifi remove x${e}", "bluetooth remove x${e}",
-                   "bind init remove x${e}", "setup install x${e}", "setup use x${e}", "setup update x${e}",
+                   "init remove x${e}", "setup install x${e}", "setup use x${e}", "setup update x${e}",
                    "link remove x${e}", "link x${e} abc-def", "link group x${e}", "link allow x${e} shell",
                    "link add x${e} AAAA", "canvas x${e}", "canvas background x${e}", "canvas cursor size x${e}",
                    "canvas cursor look x${e}", "wifi add x${e} pw", "priority x${e}", "x${e}", "help x${e}",
@@ -51324,13 +51329,13 @@ int main(int count, char **words)
         # typed it: `bind init add sh -c 'echo hi there'` kept sh -c echo hi
         # there, joined with a space and no quote, which runs echo. One word is
         # the command as it is, and plain words are not dressed.
-        script = ("rm -f /run/moonwater/settings\n/tmp/moonwater bind init add sh -c 'echo hi there' > /dev/null 2>&1\n"
-                  "/tmp/moonwater bind init add echo plain words > /dev/null 2>&1\n"
-                  "/tmp/moonwater bind init add 'echo one  arg' > /dev/null 2>&1\n" + say("bind init") +
-                  "echo '@@ remove'; /tmp/moonwater bind init remove sh -c 'echo hi there' 2>&1; echo \"@@status $?\"\n")
+        script = ("rm -f /run/moonwater/settings\n/tmp/moonwater init add sh -c 'echo hi there' > /dev/null 2>&1\n"
+                  "/tmp/moonwater init add echo plain words > /dev/null 2>&1\n"
+                  "/tmp/moonwater init add 'echo one  arg' > /dev/null 2>&1\n" + say("init") +
+                  "echo '@@ remove'; /tmp/moonwater init remove sh -c 'echo hi there' 2>&1; echo \"@@status $?\"\n")
         lines, finished = session(script)
         seen = answers(lines)
-        check(finished and [line.split(None, 1)[1] for line in seen["bind init"]["out"] if line[:1].isdigit()][:3] ==
+        check(finished and [line.split(None, 1)[1] for line in seen["init"]["out"] if line[:1].isdigit()][:3] ==
               ["sh -c 'echo hi there'", "echo plain words", "echo one  arg"] and
               seen["remove"]["status"] == 0,
               "bind's words are joined with the quotes that keep them words", repr(seen)[:400])
@@ -51339,7 +51344,7 @@ int main(int count, char **words)
         # class, and wipe makes it, 0700.
         script = ("mv /root /root.gone\n" + "".join(say(command) for command in (
             "status", "keyboard", "ntp", "timezone", "name", "wifi", "bluetooth", "wired", "priority",
-            "time", "bind", "link", "wifi add a passpass1", "ntp off", "keyboard de", "name keeper")) +
+            "time", "init", "link", "wifi add a passpass1", "ntp off", "keyboard de", "name keeper")) +
                   say("wipe yes") + "echo \"@@mode $(stat -c %a /root)\"\nrm -rf /root; mv /root.gone /root\n")
         lines, finished = session(script)
         seen = answers(lines)
@@ -51518,8 +51523,8 @@ int main(int count, char **words)
         # reaches the terminal from the list of init entries or from status.
         lines, finished = session(
             "printf 'echo a\\033]0;title\\007b\\nline2\\tx\\177\\200' > /tmp/entry\n"
-            "timeout 20 /tmp/moonwater bind init add \"$(cat /tmp/entry)\" > /dev/null 2>&1\n"
-            "echo '@@ list'; timeout 20 /tmp/moonwater bind init 2>&1; echo '@@end'\n"
+            "timeout 20 /tmp/moonwater init add \"$(cat /tmp/entry)\" > /dev/null 2>&1\n"
+            "echo '@@ list'; timeout 20 /tmp/moonwater init 2>&1; echo '@@end'\n"
             "echo '@@ page'; timeout 20 /tmp/moonwater status 2>&1; echo '@@end'\n")
         listed = "\n".join(block("list"))
         paged = "\n".join(block("page"))
@@ -51528,25 +51533,6 @@ int main(int count, char **words)
         check("echo a\\x1b]0;title\\x07b\nline2\tx\\x7f\\x80" in listed.replace("1  ", "", 1),
               "with the bytes written out and the script's lines kept", repr(listed[:200]))
         check("\\x1b]0;title" in paged, "and status shows them the same way", repr(paged[:300]))
-
-        # A line that cannot be kept is refused before the kernel takes it:
-        # with the settings block full of init entries, a bind that needs
-        # room said refused after it had been set, and the command and the
-        # kernel disagreed about what the machine runs. Here there is no
-        # kernel to ask, so the room is the whole of the answer.
-        fill = "x" * 3999
-        lines, finished = session(
-            "rm -rf /run/moonwater\n" +
-            "for n in 1 2 3 4; do timeout 20 /tmp/moonwater bind init add \"${n}" + fill + "\" > /dev/null 2>&1; done\n"
-            "timeout 20 /tmp/moonwater bind init add \"" + "y" * 250 + "\" > /dev/null 2>&1\n" +
-            say("bind mute " + "z" * 100) + say("bind mute z") +
-            "echo '@@ left'; timeout 20 /tmp/moonwater bind init | wc -l; echo '@@end'\n")
-        seen = answers(lines)
-        check(finished and seen.get("bind mute " + "z" * 100, {}).get("status") == 1 and
-              any("settings block is full" in line for line in seen.get("bind mute " + "z" * 100, {}).get("out", [])),
-              "a bound line the settings block has no room for is refused", repr(seen.get("bind mute " + "z" * 100)))
-        check(not any("settings block is full" in line for line in seen.get("bind mute z", {}).get("out", [])),
-              "and one that fits is not", repr(seen.get("bind mute z")))
 
         # A state file a verb writes, planted as a link to something else
         # before the verb runs: the verb may refuse or may replace the link,
@@ -51598,8 +51584,8 @@ int main(int count, char **words)
                   ("link.key", "link key", "link"),
                   ("link.peers", "link remove nobody", "link"),
                   ("link.groups", "link group plantlab allow run", "link"))] + [
-                  ("/run/moonwater/settings.next", "bind init add true", "bind init"),
-                  ("/run/moonwater/settings", "bind init add true", "bind init")]
+                  ("/run/moonwater/settings.next", "init add true", "init"),
+                  ("/run/moonwater/settings", "init add true", "init")]
         kinds = {"link": "ln -s /tmp/victim {p}",
                  "dangling": "ln -s /tmp/nowhere/victim {p}",
                  "fifo": "mkfifo {p}",
@@ -51715,15 +51701,15 @@ int main(int count, char **words)
         #       The settings a session keeps are read as the other state files
         #       are, through no link: a link at the name is no copy of them, so
         #       the list is the defaults (the image's copy is not reached either).
-        script = ("rm -f /run/moonwater/settings /run/moonwater/settings.real\n" + say("bind init add kept") +
+        script = ("rm -f /run/moonwater/settings /run/moonwater/settings.real\n" + say("init add kept") +
                   "mv /run/moonwater/settings /run/moonwater/settings.real\n"
-                  "ln -s /run/moonwater/settings.real /run/moonwater/settings\n" + say("bind init") +
+                  "ln -s /run/moonwater/settings.real /run/moonwater/settings\n" + say("init") +
                   "rm -f /run/moonwater/settings /run/moonwater/settings.real\n")
         lines, finished = session(script)
         seen = answers(lines)
-        check(finished and seen.get("bind init", {}).get("out") == ["[Moonwater] init: nothing runs at boot"],
-              "moonwater bind init reads no settings through a link at /run/moonwater/settings",
-              repr(seen.get("bind init")))
+        check(finished and seen.get("init", {}).get("out") == ["[Moonwater] init: nothing runs at boot"],
+              "moonwater init reads no settings through a link at /run/moonwater/settings",
+              repr(seen.get("init")))
 
         #       A disk's /root is a disk's to choose (attacker 6), and the
         #       words boot reads from it are printed back by root. A word with
@@ -51814,10 +51800,10 @@ def said(words):
 def has(path):
     return os.path.exists(path)
 rows = [
-    ("bind init add", "bind init add zzz", lambda: "zzz" in said("bind init")),
-    ("bind init remove", "bind init remove zzz", lambda: "zzz" not in said("bind init"), "bind init add zzz"),
-    ("bind init canvas", "bind init canvas off", lambda: "off" in said("bind init canvas")),
-    ("bind exit add", "bind exit add yyy", lambda: "yyy" in said("bind exit")),
+    ("init add", "init add zzz", lambda: "zzz" in said("init")),
+    ("init remove", "init remove zzz", lambda: "zzz" not in said("init"), "init add zzz"),
+    ("init canvas", "init canvas off", lambda: "off" in said("init canvas")),
+    ("exit add", "exit add yyy", lambda: "yyy" in said("exit")),
     ("security block add", "security block add " + key, lambda: has("/run/moonwater/security") and key in said("security block")),
     ("security switch", "security tls12 off", lambda: has("/run/moonwater/security")),
     ("device lock", "device lock", lambda: waited(lambda: has("/run/moonwater/usb.watcher"))),
@@ -52004,13 +51990,13 @@ PYEOF
         #       output closed, held the line it said. The three are open before the
         #       command is (a closed one is /dev/null), and the lock stays empty.
         script = ("rm -rf /run/moonwater /root/*\n"
-                  "/tmp/moonwater bind init add zzz >&- 2>&-\n"
+                  "/tmp/moonwater init add zzz >&- 2>&-\n"
                   "echo \"@@size one $(stat -c %s /run/moonwater/lock)\"\n"
-                  "/tmp/moonwater bind init remove nothing-here 2>&-\n"
+                  "/tmp/moonwater init remove nothing-here 2>&-\n"
                   "echo \"@@size two $(stat -c %s /run/moonwater/lock)\"\n"
-                  "/tmp/moonwater bind init add yyy >&-\n"
+                  "/tmp/moonwater init add yyy >&-\n"
                   "echo \"@@size three $(stat -c %s /run/moonwater/lock)\"\n"
-                  "echo \"@@kept $(/tmp/moonwater bind init | grep -c -e zzz -e yyy)\"\n")
+                  "echo \"@@kept $(/tmp/moonwater init | grep -c -e zzz -e yyy)\"\n")
         lines, finished = session(script)
         sizes = {line.split()[1]: line.split()[2] for line in lines if line.startswith("@@size ")}
         check(finished and sizes == {"one": "0", "two": "0", "three": "0"} and "@@kept 2" in lines,
@@ -53420,7 +53406,7 @@ def harness_moonwater_lock(argv):
     holder lets go, and is woken by the letting go however the holder goes.
 
     In the cli harness's sandbox a holder takes /run/moonwater/lock and keeps
-    it for 280 to 302 ms; `moonwater bind init remove zzz` starts at once,
+    it for 280 to 302 ms; `moonwater init remove zzz` starts at once,
     takes the lock only after the holder lets go, refuses (the line is not
     there) and writes nothing. What is judged is what the waiter does, not how
     long the box took to run it:
@@ -53690,8 +53676,8 @@ PAIRS = [
     ("wifi add/add", "wifi add neta passpass1", "wifi add netb passpass2", lambda: "neta" in cat("/root/wifi") and "netb" in cat("/root/wifi")),
     ("wifi add/same", "wifi add neta passpass1", "wifi add neta passpass2", lambda: cat("/root/wifi").count("neta") == 1),
     ("bluetooth add/add", "bluetooth add dev1", "bluetooth add dev2", lambda: "dev1" in cat("/root/bluetooth") and "dev2" in cat("/root/bluetooth")),
-    ("bind add/add", "bind init add aaa", "bind init add bbb", lambda: says("bind init", "aaa", "bbb")),
-    ("bind add/security", "bind init add aaa", "security block add " + H1, lambda: says("bind init", "aaa") and says("security block", H1)),
+    ("bind add/add", "init add aaa", "init add bbb", lambda: says("init", "aaa", "bbb")),
+    ("bind add/security", "init add aaa", "security block add " + H1, lambda: says("init", "aaa") and says("security block", H1)),
     ("security add/add", "security block add " + H1, "security block add " + H2, lambda: says("security block", H1, H2)),
     ("link add/add", "link add peera " + K1, "link add peerb " + K2, lambda: says("link", "peera", "peerb")),
     ("link group/add", "link group lab S3cretOne11 allow run", "link add peerb " + K2, lambda: says("link", "lab", "peerb")),
@@ -53789,7 +53775,7 @@ READERS = [
     ("bluetooth", "bluetooth add stable", ["bluetooth add churn", "bluetooth remove churn"], "bluetooth", "stable"),
     ("link", "link add stable " + K1, ["link add churn " + K2, "link remove churn"], "link", "stable"),
     ("security", "security block add " + H1, ["security block add " + H2, "security block remove " + H2], "security block", H1),
-    ("bind", "bind init add stable", ["bind init add churn", "bind init remove churn"], "bind init", "stable"),
+    ("bind", "init add stable", ["init add churn", "init remove churn"], "init", "stable"),
     ("internet", "priority internet wifi", ["priority internet wired", "priority internet wifi"], "priority", "internet"),
 ]
 for name, setup, writers, reader, token in READERS:
@@ -53900,9 +53886,9 @@ def harness_moonwater_script(argv):
         ("bluetooth", 0), ("airplane on", 0), ("airplane off", 0), ("brightness 50%", 1), ("power balanced", 1),
         ("cpu smt on", 1), ("cpu online 1", 1), ("charge limit 80", 1), ("sleep", 1), ("hibernate", 1),
         ("bios", 0), ("bios reboot", 1), ("time", 0), ("time sync", 1), ("timezone auto", 1),
-        ("bind init add echo hi", 0), ("bind init add echo hi", 0), ("bind init mount off", 0),
-        ("bind init mount off", 0), ("bind init", 0), ("bind exit add echo bye", 0), ("bind exit add echo bye", 0),
-        ("bind exit", 0), ("bind poweroff", 1), ("canvas", 1), ("canvas on", 2), ("canvas off", 2),
+        ("init add echo hi", 0), ("init add echo hi", 0), ("init mount off", 0),
+        ("init mount off", 0), ("init", 0), ("exit add echo bye", 0), ("exit add echo bye", 0),
+        ("exit", 0), ("bind poweroff", 1), ("canvas", 1), ("canvas on", 2), ("canvas off", 2),
         ("desktop off", 0), ("desktop start", 0), ("desktop rest", 0), ("desktop boot", 0), ("desktop", 0),
         ("latency", 1), ("debug", 0), ("link on", 0), ("link on", 0), ("link key", 0), ("link port 22348", 0),
         ("link add peer1 " + key, 0), ("link add peer1 " + key, 0), ("link allow peer1 run", 0),
@@ -54056,14 +54042,14 @@ def harness_moonwater_script(argv):
                   f"moonwater {command} goes on without asking", got)
 
         # The same line again, counted: one entry, not two.
-        lines, _ = session(functions + "rm -rf /run/moonwater\n" + line_of("bind init add echo hi", 5) * 3 +
-                           line_of("bind init add echo hi there", 5) +
-                           line_of("bind exit add echo bye", 5) * 2 + line_of("bind init", 5) +
-                           line_of("bind exit", 5) + line_of("bind init mount off", 5) * 2)
+        lines, _ = session(functions + "rm -rf /run/moonwater\n" + line_of("init add echo hi", 5) * 3 +
+                           line_of("init add echo hi there", 5) +
+                           line_of("exit add echo bye", 5) * 2 + line_of("init", 5) +
+                           line_of("exit", 5) + line_of("init mount off", 5) * 2)
         got = blocks(lines)
         entries = [line.split(None, 1)[1] for line in got[6]["out"] if line.split(None, 1)[1:]]
         check(entries == ["echo hi", "echo hi there"],
-              "bind init add of a line already there is not another entry", got[6]["out"])
+              "init add of a line already there is not another entry", got[6]["out"])
         check(len(got[7]["out"]) == 1, "nor is bind exit add", got[7]["out"])
         check(got[1]["numbers"][0] == 0 and any("is already" in line for line in got[1]["out"]),
               "it says it is already there, and answers 0", got[1])
@@ -79297,9 +79283,9 @@ def harness_state_cuts(argv):
         ("keyboard repeat", ["keyboard repeat rate 20"], "keyboard repeat rate 40", None),
         ("ntp server", ["ntp server a.example"], "ntp server b.example", None),
         ("ntp nts servers", ["ntp nts servers a.example"], "ntp nts servers b.example", None),
-        ("bind add", ["bind init add xx"], "bind init add yy", None),
-        ("bind remove", ["bind init add xx", "bind init add yy"], "bind init remove xx", None),
-        ("bind switch", ["bind init canvas on"], "bind init canvas off", None),
+        ("bind add", ["init add xx"], "init add yy", None),
+        ("bind remove", ["init add xx", "init add yy"], "init remove xx", None),
+        ("bind switch", ["init canvas on"], "init canvas off", None),
         ("security block add", ["security block add " + "a" * 64], "security block add " + "b" * 64, None),
         ("security block remove", ["security block add " + "a" * 64], "security block remove " + "a" * 64, None),
         ("security switch", ["security tls12 on"], "security tls12 off", None),
@@ -79338,7 +79324,7 @@ def harness_state_cuts(argv):
         ("canvas background", ["canvas background 112233"], "canvas background 445566", None),
         ("canvas modes", ["canvas modes largest"], "canvas modes preferred", None),
         ("bluetooth off", ["bluetooth on"], "bluetooth off", None),
-        ("bind exit", ["bind exit add xx"], "bind exit add yy", None),
+        ("exit", ["exit add xx"], "exit add yy", None),
         ("ntp sampling", ["ntp sampling on"], "ntp sampling off", None),
         ("ntp nts", ["ntp nts on"], "ntp nts only", None),
         ("mouse acceleration", ["mouse acceleration on"], "mouse acceleration off", None),
@@ -79657,7 +79643,7 @@ def harness_moonwater_state_fuzz(argv):
         "mouse sensitivity 150", "mouse acceleration off", "taskbar position top",
         "taskbar display all", "desktop on", "airplane on", "airplane off", "power powersave",
         "cpu boost", "charge limit 80", "brightness 50", "wired off", "wifi off", "bluetooth off",
-        "bind init add echo hello", "bind exit add echo bye",
+        "init add echo hello", "exit add echo bye",
         "security block add " + "ab" * 32, "security tls12 on", "link on", "link off",
     ]
     #   Files no verb writes in a sandbox: what a daemon, a join or the machine's
@@ -79796,8 +79782,8 @@ def harness_moonwater_state_fuzz(argv):
                                                "link group lab", "link on"], "binary"),
         ("verdict", "/run/moonwater/verdict", ["status", "boot", "setup", "setup live"], "word"),
         ("security", "/run/moonwater/security", ["security", "security trust", "security block", "security tls12", "ntp on"], "binary"),
-        ("settings", "/run/moonwater/settings", ["security block add " + "cd" * 32, "security revocation hard", "bind exit",
-                                                  "bind init", "keyboard de", "name other", "status"], "word"),
+        ("settings", "/run/moonwater/settings", ["security block add " + "cd" * 32, "security revocation hard", "exit",
+                                                  "init", "keyboard de", "name other", "status"], "word"),
         ("clock.auth", "/run/moonwater/clock.auth", ["time", "ntp on", "status"], "word"),
         ("nts.failed", "/run/moonwater/nts.failed", ["ntp", "ntp nts", "ntp on"], "word"),
         ("ntp.last", "/run/moonwater/ntp.last", ["ntp", "ntp nts", "status"], "word"),
@@ -80357,7 +80343,7 @@ def harness_moonwater_state_fuzz(argv):
                    "device", "device lock", "device allow 0627:0001/S9", "device forget 0627:0001/S1", "device unlock", "device log",
                    "link", "link key", "link add wreck " + other_key, "link group wreck S3cretWreck33xyz allow run",
                    "link on", "link off", "security", "security block add " + "ef" * 32,                    "canvas background 010203", "mouse sensitivity 130", "taskbar position top", "desktop",
-                   "desktop off", "settings", "bind init add echo x", "bind exit", "wipe yes"]
+                   "desktop off", "settings", "init add echo x", "exit", "wipe yes"]
     wreck_specs = [("dir", ("dir",)), ("fifo", ("fifo",)), ("link", ("link", "/etc/canary")), ("empty", ("data", b"")),
                    ("junk", ("data", b"\x1b[31m%s\xff\0" * 40)), ("A", ("data", b"A" * 4097)),
                    ("sparse", ("sparse", 64 << 20)), ("no newline", ("data", b"x")), ("newlines", ("data", b"\n" * 300))]
@@ -84915,7 +84901,7 @@ scen_same_file() { cp "$2" /tmp/sc.got 2>/dev/null || : > /tmp/sc.got; scen_same
 scen_status() { if [ "$2" = "$3" ]; then scen_pass; else scen_miss "$1: status $3, wanted $2"; head -c 300 /tmp/sc.got 2>/dev/null; echo; fi; }
 scen_count() { if [ "$2" = "$3" ]; then scen_pass; else scen_miss "$1: $3, wanted $2"; fi; }
 scen_done() { t=$(printf 'scen-%s-%s-of-%s\n' "$1" "$scen_ok" "$scen_all" | rev); printf '%s\n' "$t"; sleep 0.2; printf '%s\n' "$t"; scen_ok=0; scen_all=0; }
-scen_expect_empty() { moonwater bind init 2>&1 | grep -c 'nothing runs at boot' > /tmp/sc.got; printf '1\n' > /tmp/sc.want; scen_same 'settings start from none'; }
+scen_expect_empty() { moonwater init 2>&1 | grep -c 'nothing runs at boot' > /tmp/sc.got; printf '1\n' > /tmp/sc.want; scen_same 'settings start from none'; }
 scen_zombies() { n=0; for f in /proc/[0-9]*/status; do s=$(sed -n 's/^State:[[:space:]]*\(.\).*/\1/p' "$f" 2>/dev/null); pp=$(sed -n 's/^PPid:[[:space:]]*//p' "$f" 2>/dev/null); [ "$s" = Z ] && [ "$pp" = 1 ] && n=$((n + 1)); done; echo $n; }
 scen_find() { for p in /proc/[0-9]*; do c=$(tr '\000' ' ' < $p/cmdline 2>/dev/null); case $c in *"$1"*) echo ${p#/proc/};; esac; done; }'''
 
@@ -85017,7 +85003,7 @@ def harness_guest_scenarios(argv):
         if not want:
             builds.append("printf '%%s\\n' %s" % q("%s: %s" % (name, "nothing runs at boot" if name == "init" else "nothing runs when the machine stops")))
         lines.append("{ %s; } > /tmp/sc.want" % "; ".join(builds))
-        lines.append("moonwater bind %s 2>&1 | scen_strip > /tmp/sc.got" % name)
+        lines.append("moonwater %s 2>&1 | scen_strip > /tmp/sc.got" % name)
         checked[0] += 1
         lines.append("scen_same %s" % q("settings list %s, check %d" % (name, checked[0])))
 
@@ -85072,7 +85058,7 @@ def harness_guest_scenarios(argv):
                 nexts[name] += 1
                 used[0] += ENTRY + padded(len(text))
             status("settings %d add %s" % (step, name), want,
-                   "moonwater bind %s add %s" % (name, args))
+                   "moonwater %s add %s" % (name, args))
         elif roll < 0.72:
             how = rng.random()
             if lists[name] and how < 0.45:
@@ -85094,34 +85080,34 @@ def harness_guest_scenarios(argv):
             else:
                 want = 1
             status("settings %d remove %s %s" % (step, name, args), want,
-                   "moonwater bind %s remove %s" % (name, args))
+                   "moonwater %s remove %s" % (name, args))
         elif roll < 0.82:
             word = rng.choice(("on", "off", "", "maybe"))
             if name == "exit":
-                status("settings %d exit mount" % step, 2, "moonwater bind exit mount %s" % word)
+                status("settings %d exit mount" % step, 2, "moonwater exit mount %s" % word)
             elif word in ("on", "off"):
                 mount_off[0] = word == "off"
-                status("settings %d mount %s" % (step, word), 0, "moonwater bind init mount " + word)
+                status("settings %d mount %s" % (step, word), 0, "moonwater init mount " + word)
             elif word == "maybe":
-                status("settings %d mount maybe" % step, 2, "moonwater bind init mount maybe")
+                status("settings %d mount maybe" % step, 2, "moonwater init mount maybe")
             else:
-                lines.append("moonwater bind init mount 2>&1 | scen_strip > /tmp/sc.got")
+                lines.append("moonwater init mount 2>&1 | scen_strip > /tmp/sc.got")
                 lines.append("printf '%%s\\n' %s > /tmp/sc.want" % q("init mount " + ("off" if mount_off[0] else "on")))
                 lines.append("scen_same %s" % q("settings %d mount shown" % step))
         elif roll < 0.9:
             status("settings %d usage" % step, 2, rng.choice((
-                "moonwater bind %s add" % name, "moonwater bind %s remove" % name,
-                "moonwater bind %s drop x" % name)))
+                "moonwater %s add" % name, "moonwater %s remove" % name,
+                "moonwater %s drop x" % name)))
         else:
             list_check(name)
     # Leave it as it was found: every entry out by id, mount on, both empty.
     for name in ("init", "exit"):
         for entry in list(lists[name]):
             status("settings cleanup %s %d" % (name, entry[0]), 0,
-                   "moonwater bind %s remove %d" % (name, entry[0]))
+                   "moonwater %s remove %d" % (name, entry[0]))
             lists[name].remove(entry)
         list_check(name)
-    status("settings cleanup mount", 0, "moonwater bind init mount on")
+    status("settings cleanup mount", 0, "moonwater init mount on")
     family("settings", lines)
 
     # -------------------------------------------------------------- wifi

@@ -1,4 +1,4 @@
-# The desktop's services: what main.moonwater.sh kept up by hand, with bus_supervise, audio_supervise and
+# The desktop's services: what the machine script kept up by hand, with bus_supervise, audio_supervise and
 # desktop_supervise (started again at once, then after half a second and after two, given up after four short lives,
 # a run of thirty seconds putting the count back), which is every service's policy unsaid. Each is started while its
 # if lines hold, so canvas on and canvas off (moonwater_canvas_on and moonwater_canvas_off) are the state they read.

@@ -2777,14 +2777,22 @@ ROVER_IMAGE(desktop)
 ROVER_IMAGE(power)
 ROVER_IMAGE(session)
 
-static const struct
+//      The at'th file's text, its name in *name; null past the last. A function, not a table of pointers: a static
+//      program's read-only data takes no relocation.
+#define ROVER_IMAGE_FILES 5u
+static const char address_to rover_image_file(positive at, const char address_to address_to name)
 {
-        const char address_to name;
-        const char address_to text;
-} rover_image[] = {
-    {"buttons.rover", rover_image_buttons}, {"chords.rover", rover_image_chords}, {"desktop.rover", rover_image_desktop},
-    {"power.rover", rover_image_power},     {"session.rover", rover_image_session},
-};
+        switch (at)
+        {
+        case 0: *name = "buttons.rover"; return rover_image_buttons;
+        case 1: *name = "chords.rover"; return rover_image_chords;
+        case 2: *name = "desktop.rover"; return rover_image_desktop;
+        case 3: *name = "power.rover"; return rover_image_power;
+        case 4: *name = "session.rover"; return rover_image_session;
+        }
+        *name = null;
+        return null;
+}
 
 // ---- the verb --------------------------------------------------------------
 

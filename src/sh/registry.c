@@ -961,10 +961,10 @@ static const struct settings_row settings_rows[] = {
     {null, "Charge limit (20 to 100, or off)", SETTINGS_FIELD, 1, 0, {"charge"}, "charging stops at ", null,
      {"charge", "limit"}, null, '%',
      .usage = "charge [limit N|limit off]", .help = "where the battery stops charging, 20 to 100"},
-    {"Boot", "Start the desktop", SETTINGS_SWITCH, 1, 0, {"bind", "init", "canvas"}, "init canvas ", null, {"bind", "init", "canvas"},
-     null, 0, .usage = "bind init canvas [on|off]", .help = "start Canvas at boot [on]"},
-    {null, "Mount kept disks", SETTINGS_SWITCH, 1, 0, {"bind", "init", "mount"}, "init mount ", null, {"bind", "init", "mount"}, null,
-     0, .usage = "bind init mount [on|off]", .help = "mount kept disks at boot [on]"},
+    {"Boot", "Start the desktop", SETTINGS_SWITCH, 1, 0, {"init", "canvas"}, "init canvas ", null, {"init", "canvas"},
+     null, 0, .usage = "init canvas [on|off]", .help = "start Canvas at boot [on]"},
+    {null, "Mount kept disks", SETTINGS_SWITCH, 1, 0, {"init", "mount"}, "init mount ", null, {"init", "mount"}, null,
+     0, .usage = "init mount [on|off]", .help = "mount kept disks at boot [on]"},
     //  What the desktop opens when it starts, in order (desktop.c's desktop_autostart; the machine script's desktop_autostart opens each):
     //  the desktop opens no window of its own, so these are all there is at its start: none unless the person says other. The whole list is typed in the first row, and one program is added or taken out in the two after it.
     {null, "Programs started with the desktop", SETTINGS_FIELD, 0, SETTINGS_LINE | SETTINGS_SPLIT, {"desktop", "autostart"}, "autostart ", null,

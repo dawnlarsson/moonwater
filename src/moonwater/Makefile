@@ -13,19 +13,22 @@ ccflags-y += $(if $(MOONWATER_STOCK),-DSTOCK_STRINGS)
 
 moonwater-y := core.o
 
-#       The machine script baked into the module. CONFIG_MOONWATER_MACHINE_SCRIPT
-#       is a path relative to the repository root. kbuild sees this directory
-#       through a symlink at kernel/moonwater, so resolve $(src) first and
-#       then walk up, otherwise ../ is kernel/ rather than the repo. Two
-#       levels, because this directory is src/moonwater and the root is
-#       above src. A miss leaves realpath empty and .incbin is handed "",
-#       which the assembler reports as "unable to include `./'".
+#       The machine script baked into the module, none unless
+#       CONFIG_MOONWATER_MACHINE_SCRIPT names one: a path relative to the
+#       repository root. kbuild sees this directory through a symlink at
+#       kernel/moonwater, so resolve $(src) first and then walk up, otherwise
+#       ../ is kernel/ rather than the repo. Two levels, because this
+#       directory is src/moonwater and the root is above src. A path named
+#       that is not there leaves realpath empty, which the rule refuses.
 mw-machine-script := $(patsubst "%",%,$(CONFIG_MOONWATER_MACHINE_SCRIPT))
-ifeq ($(mw-machine-script),)
-mw-machine-script := main.moonwater.sh
-endif
 mw-src := $(realpath $(src))
+ifneq ($(mw-machine-script),)
 mw-machine-abs := $(realpath $(mw-src)/../../$(mw-machine-script))
+mw-machine-incbin := echo '.incbin "$(mw-machine-abs)"';
+ifeq ($(mw-machine-abs),)
+$(error CONFIG_MOONWATER_MACHINE_SCRIPT names $(mw-machine-script), which is not in the repository)
+endif
+endif
 
 moonwater-y += machine_script.o
 targets += machine_script.S
@@ -37,7 +40,7 @@ quiet_cmd_mwscript = SCRIPT  $@
 	echo '.globl moonwater_machine_builtin'; \
 	echo '.globl moonwater_machine_builtin_end'; \
 	echo 'moonwater_machine_builtin:'; \
-	echo '.incbin "$(mw-machine-abs)"'; \
+	$(mw-machine-incbin) \
 	echo 'moonwater_machine_builtin_end:'; \
 } > $@
 

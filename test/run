@@ -446,7 +446,7 @@ seam_of_path()
         programs/utilities.c | programs/monitor.sh) echo tools ;;
         src/sh/registry.c) echo machine desktop ;;
         src/sh/host.c | src/sh/host/* | src/sh/storage.c | src/sh/system.c | src/bowl.c | \
-        src/sh/host_words.h | src/sh/splash_mark.c | main.moonwater.sh) echo machine ;;
+        src/sh/host_words.h | src/sh/splash_mark.c | src/rover/*) echo machine ;;
         src/sh/languages.c | languages/*) echo machine desktop ;;
         src/sh/edit.c | src/canvas/* | src/audio/* | src/dbus/* | fonts/*) echo desktop ;;
         src/moonwater/* | src/build/* | kernel/* | build.sh) echo image ;;
@@ -18041,77 +18041,6 @@ def asked(name, line, marker, seconds=20):
     out.append((name, "yes" if wait_for(marker, seconds) else "no", "yes"))
 
 asked("the compositor found no card", "true", b"gave up waiting for a card", 30)
-asked("a machine script overlays mute at its case arm",
-      "printf '%s\\n' 'function moonwater_init {' '  true' '}' 'function moonwater_event {' '  case $1 in' '  mute) : ;;' '  canvas) : ;;' '  *) : ;;' '  esac' '}' 'function moonwater_end {' '  true' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; moonwater bind mute | grep -c 'mute: /root/main.moonwater.sh:6' | sed 's/^/etum-/' | rev",
-      b"1-mute")
-asked("canvas on and canvas off share the canvas arm",
-      "moonwater bind canvas on | grep -c 'canvas on: /root/main.moonwater.sh:7' | sed 's/^/no-/' | rev",
-      b"1-on")
-asked("star does not own poweroff",
-      "moonwater bind poweroff | grep -c 'poweroff: /root/main.moonwater.sh' | sed 's/^/rats-/' | rev",
-      b"0-star")
-asked("SET is refused at the script line",
-      "moonwater bind mute true 2>&1 | grep -c 'mute is /root/main.moonwater.sh:6; change it there' | sed 's/^/esufer-/' | rev",
-      b"1-refuse")
-asked("init is the moonwater_init hook, not the stored list",
-      "moonwater bind init | grep -c '/root/main.moonwater.sh:1' | sed 's/^/tini-/' | rev",
-      b"1-init")
-asked("init add is refused the same way",
-      "moonwater bind init add true 2>&1 | grep -c 'init is /root/main.moonwater.sh:1; change it there' | sed 's/^/dda-/' | rev",
-      b"1-add")
-asked("exit is the moonwater_end hook, not the stored list",
-      "moonwater bind exit | grep -c '/root/main.moonwater.sh:11' | sed 's/^/dne-/' | rev",
-      b"1-end")
-asked("removing the script restores the builtin",
-      "rm -f /root/main.moonwater.sh; moonwater bind poweroff | grep -c 'poweroff: builtin:' | sed 's/^/tluafed-/' | rev",
-      b"1-default")
-asked("the power button is the builtin poweroff arm",
-      "moonwater bind poweroff | grep -c 'poweroff: builtin:' | sed 's/^/tluafed-/' | rev",
-      b"1-default")
-asked("a user cannot replace a script arm",
-      "setpriv --reuid=65534 --regid=65534 --clear-groups moonwater bind poweroff true 2>&1 | grep -c 'change it there' | sed 's/^/toorn-/' | rev",
-      b"1-nroot")
-#       Three counts in one answer: the helper left CAP_SYS_BOOT alone in the
-#       effective set, the kernel overlay refused the line, and the button
-#       still names the builtin afterwards.
-if capboot:
-    asked("root with only CAP_SYS_BOOT cannot replace a script arm",
-          "mkdir -p /mnt; mount -r -t vfat /dev/sda1 /mnt; { /mnt/capboot grep -c 'CapEff:.0000000000400000$' /proc/self/status; /mnt/capboot moonwater bind poweroff true 2>&1 | grep -c 'change it there'; moonwater bind poweroff | grep -c 'poweroff: builtin:'; } | tr -d '\\n' | sed 's/^/toob-/' | rev",
-          b"111-boot")
-else:
-    out.append(("root with only CAP_SYS_BOOT cannot replace a script arm",
-                "not run: the helper did not build", "yes"))
-asked("a command longer than a bound event holds is refused",
-      "moonwater bind mute \"$(printf '%0300d' 0)\" 2>&1 | grep -c 'longer than' | sed 's/^/gnol-/' | rev",
-      b"1-long")
-asked("a moonwater_mute function owns mute",
-      "printf '%s\\n' 'function moonwater_mute {' '  :' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; moonwater bind mute | grep -c 'mute: /root/main.moonwater.sh:1' | sed 's/^/nf-/' | rev",
-      b"1-fn")
-#       The file the machine script is read from is held to a policy, and a
-#       file that fails it is said to have been refused, by name, wherever the
-#       script's lines are shown: the kernel keeps what it had, and that is
-#       what `moonwater bind` is describing.
-def refused(name, make, marker, want):
-    asked(name,
-          "rm -f /root/main.moonwater.sh; " + make +
-          "; timeout 10 moonwater bind mute 2>&1 | grep -c 'refused' | sed 's/^/" + marker + "-/' | rev",
-          want)
-
-script_text = "printf '%s\\n' 'function moonwater_mute {' '  :' '}' > /root/main.moonwater.sh"
-refused("a script that others may write is refused, and the status says so",
-        script_text + "; chmod 666 /root/main.moonwater.sh", "wo", b"1-ow")
-refused("a script only the group may write is refused too",
-        script_text + "; chmod 664 /root/main.moonwater.sh", "pg", b"1-gp")
-refused("a link in its place is refused",
-        "echo ':' > /tmp/linked; chmod 600 /tmp/linked; ln -s /tmp/linked /root/main.moonwater.sh", "ln", b"1-nl")
-refused("a fifo in its place is refused and does not hang the command",
-        "mkfifo -m 600 /root/main.moonwater.sh", "fi", b"1-if")
-refused("a script over 64 KiB is refused",
-        "head -c 65537 /dev/zero | tr '\\0' '#' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh", "bg", b"1-gb")
-refused("a script of exactly 64 KiB is taken",
-        "head -c 65536 /dev/zero | tr '\\0' '#' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh", "ok", b"0-ko")
-refused("and an empty one",
-        ": > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh", "em", b"0-me")
 #       A second machine process is refused, and says why; and nobody but
 #       root is one.
 asked("a second machine process is refused with 2",
@@ -18126,97 +18055,6 @@ asked("poweroff by an ordinary user fails at once",
       "s=$(date +%s%N); setpriv --reuid=65534 --regid=65534 --clear-groups /shell -c poweroff >/dev/null 2>&1; e=$(date +%s%N); "
       "[ $(( (e - s) / 1000000 )) -lt 1500 ] && echo quick-poweroff | rev",
       b"fforewop-kciuq")
-#       The machine process killed while a job of its script that is not an
-#       exec -- a subshell loop, which keeps a copy of its descriptor -- is
-#       alive: the next one attaches. A counter file says how many times
-#       moonwater_init ran. The loop has the machine process's command line
-#       too, so the one killed is the one init started: the child of 1.
-asked("a machine process killed with a background job alive is replaced by one that attaches",
-      "mp() { for f in /proc/[0-9]*/cmdline; do case $(tr '\\0' ' ' < $f) in '/shell -c moonwater machine'*) p=${f#/proc/}; p=${p%/cmdline}; set -- $(cat /proc/$p/stat); [ \"$4\" = 1 ] && echo $p;; esac; done; }; "
-      "rm -f /root/inits /root/bgpids; "
-      "printf '%s\\n' 'function moonwater_init {' '  n=$(cat /root/inits 2>/dev/null || echo 0)' '  echo $((n + 1)) > /root/inits' "
-      "'  ( while :; do sleep 1; done ) &' '  echo $! >> /root/bgpids' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; "
-      "kill -9 $(mp); for i in $(seq 60); do [ \"$(cat /root/inits 2>/dev/null)\" = 1 ] && break; sleep 0.5; done; "
-      "kill -9 $(mp); for i in $(seq 60); do [ \"$(cat /root/inits 2>/dev/null)\" = 2 ] && break; sleep 0.5; done; "
-      "printf 'reattach-%s\\n' \"$(cat /root/inits)\" | rev; kill $(cat /root/bgpids) 2>/dev/null",
-      b"2-hcattaer", 90)
-#       The machine script has no one at its input. The machine process is
-#       started with init's descriptors, whose input is the console: a verb
-#       that asked, or a `read`, in moonwater_init held every event behind it
-#       until a key was struck. Here the script says what its input is, says
-#       a verb of each kind that has something to refuse or to keep, reads a
-#       line, and writes a file when it is done: all inside a minute. (mp is
-#       the function of the row above.)
-asked("a machine script with a verb of every kind has no input and comes back",
-      "rm -f /tmp/mscript.done /tmp/m[0-9]*; "
-      "printf '%s\\n' 'function moonwater_init {' '  readlink /proc/$$/fd/0 > /tmp/m0' "
-      "'  moonwater setup install nvme9n1 > /tmp/m1 2>&1' '  moonwater setup install nvme9n1 yes > /tmp/m2 2>&1' "
-      "'  moonwater wipe > /tmp/m3 2>&1' '  moonwater wifi add scripted passpass1 > /tmp/m4 2>&1' "
-      "'  moonwater wifi remove scripted > /dev/null 2>&1' '  moonwater link group lab > /tmp/m5 2>&1' "
-      "'  moonwater link group leave lab > /dev/null 2>&1' '  moonwater link off > /dev/null 2>&1' "
-      "'  moonwater dns 9.9.9.9 > /tmp/m6 2>&1' '  moonwater dns auto > /dev/null 2>&1' "
-      "'  moonwater keyboard us > /tmp/m7 2>&1' '  moonwater desktop start > /tmp/m8 2>&1' "
-      "'  moonwater bind init add true > /tmp/m9 2>&1' '  read line; echo \"[$line]\" > /tmp/m10' "
-      "'  date +%s > /tmp/mscript.done' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; "
-      "start=$(date +%s); kill -9 $(mp); for i in $(seq 120); do [ -e /tmp/mscript.done ] && break; sleep 0.5; done; "
-      "printf 'script-%s-%s-%s-%s-%s-%s\\n' \"$(cat /tmp/m0)\" \"$(grep -c 'nothing here can be asked' /tmp/m1)\" "
-      "\"$(grep -c 'there is no disk called nvme9n1' /tmp/m2)\" \"$(grep -c 'nothing here can be asked' /tmp/m3)\" "
-      "\"$(cat /tmp/m10)\" \"$(( $(cat /tmp/mscript.done) - start < 60 ))\" | rev; rm -f /root/main.moonwater.sh",
-      b"1-][-1-1-1-llun/ved/-tpircs", 90)
-#       The boot leaves the settings' init list to a script's moonwater_init only
-#       once the machine process says it has the script: its word is a file.
-asked("a machine process that took its script up says so, for the boot that waits to hear it",
-      "[ -e /run/moonwater/machine.sourced ] && echo sourced-yes | rev",
-      b"sey-decruos")
-#       A script says its bind at every boot: the line an event already
-#       runs is not set again, and the image it would be kept in is not
-#       written over with what it holds. The first says where it kept it.
-asked("a bound command said again is not kept again",
-      "rm -f /root/main.moonwater.sh; moonwater bind brightness_up 'true' > /tmp/bu1 2>&1; moonwater bind brightness_up 'true' > /tmp/bu2 2>&1; "
-      "moonwater bind brightness_up '' > /dev/null 2>&1; "
-      "printf 'again-%s-%s\\n' \"$(grep -c 'this session only' /tmp/bu1)\" \"$(grep -c 'this session only' /tmp/bu2)\" | rev",
-      b"0-1-niaga")
-#       A key held down is a flood of presses of a row with no debounce: each
-#       is queued or folded into the one waiting, and the machine goes on.
-if button:
-    asked("a volume key is bound to a command",
-          "rm -f /root/main.moonwater.sh /root/vol; moonwater bind volume_up 'echo VOL >> /root/vol' > /dev/null; printf 'bound-%s\\n' ok | rev",
-          b"ko-dnuob")
-    if ready:
-        for _ in range(100):
-            qcmd({"execute": "send-key", "arguments": {"keys": [{"type": "qcode", "data": "volumeup"}]}})
-        pump(3)
-    asked("a hundred volume key presses ran the command and left the machine answering",
-          "[ \"$(wc -l < /root/vol)\" -ge 1 ] && echo flood-answers | rev",
-          b"srewsna-doolf")
-    asked("and the key's command is put back",
-          "moonwater bind volume_up '' > /dev/null; printf 'unbound-%s\\n' ok | rev",
-          b"ko-dnuobnu")
-asked("the power button takes a command",
-      "printf '%s\\n' 'function moonwater_event {' '  :' '}' > /root/main.moonwater.sh; chmod 600 /root/main.moonwater.sh; moonwater bind mute >/dev/null; moonwater bind poweroff 'echo NOTTUB | rev > /dev/" + tty + "' | grep -c NOTTUB | sed 's/^/tes-/' | rev",
-      b"1-set")
-
-if button:
-    if ready:
-        press()
-        time.sleep(0.2)
-        press()
-        pump(4)
-    out.append(("two presses inside a second run it once",
-                str(transcript.count(b"BUTTON")), "1"))
-
-    if ready:
-        press()
-        pump(1.6)
-        press()
-        pump(4)
-    out.append(("two presses apart run it twice more",
-                str(transcript.count(b"BUTTON")), "3"))
-
-asked("the power button runs poweroff again",
-      "moonwater bind poweroff poweroff | grep -c 'poweroff: poweroff' | sed 's/^/niaga-/' | rev",
-      b"1-again")
-
 #       A coverage image writes what it reached before the press takes it
 #       down; see coverage_guest.
 if os.environ.get("MOONWATER_POWER_COVERAGE") and ready:
@@ -19341,11 +19179,11 @@ printf 'status-stick-%s\n' $(( $(grep -c 'this image is on sda1' /tmp/status) * 
 mkdir -p /bowls/probe
 printf 'kept\n' > /bowls/probe/file
 printf 'home\n' > /root/probe
-moonwater bind init add "echo carried > /root/carried" > /tmp/init-add 2>&1
+moonwater init add "echo carried > /root/carried" > /tmp/init-add 2>&1
 printf 'in-memory-%s\n' $(( $(grep -c 'this session only: sda1 is read-only' /tmp/init-add) * 7 ))
-moonwater bind init add "echo boot >> /root/boots" > /dev/null 2>&1
-moonwater bind exit add "echo stop >> /root/stops" > /dev/null 2>&1
-printf 'listed-%s\n' $(( $(moonwater bind init | grep -c -e '^1  echo carried' -e '^2  echo boot') * 7 ))
+moonwater init add "echo boot >> /root/boots" > /dev/null 2>&1
+moonwater exit add "echo stop >> /root/stops" > /dev/null 2>&1
+printf 'listed-%s\n' $(( $(moonwater init | grep -c -e '^1  echo carried' -e '^2  echo boot') * 7 ))
 moonwater security block add 5ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec1 > /tmp/security-add 2>&1
 printf 'security-live-%s\n' $(( $(moonwater security block | grep -c 'added     key       5ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec1') * 7 ))
 moonwater link key > /tmp/linkkey 2>&1
@@ -19473,16 +19311,11 @@ printf 'carried-%s\n' "$(rev < /root/carried)"
 printf 'booted-%s\n' $(( $(grep -c boot /root/boots) * 7 ))
 printf 'security-kept-%s\n' $(( $(moonwater security block | grep -c 'added     key       5ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec1') * 7 ))
 printf 'security-published-%s\n' $(( $(od -An -tx1 /run/moonwater/security | tr -d ' \n' | grep -c '5ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec15ec1') * 7 ))
-moonwater bind init add "echo disk >> /root/disk" > /tmp/disk-add 2>&1
+moonwater init add "echo disk >> /root/disk" > /tmp/disk-add 2>&1
 printf 'written-%s\n' $(( $(grep -c 'saved in the image on nvme0n1p1' /tmp/disk-add) * 7 ))
-moonwater bind init add "sleep 8; poweroff" > /dev/null 2>&1
-printf 'disk-listed-%s\n' $(( $(moonwater bind init | grep -c -e '^3  echo disk' -e '^4  sleep 8') * 7 ))
-printf '%s\n' 'function moonwater_event {' '  case $1 in' '  mute) : ;;' '  esac' '}' > /root/main.moonwater.sh
-chmod 600 /root/main.moonwater.sh
-printf 'script-%s\n' $(( $(moonwater bind mute | grep -c 'mute: /root/main.moonwater.sh:3') * 7 ))
-printf 'refused-%s\n' $(( $(moonwater bind mute true 2>&1 | grep -c 'change it there') * 7 ))
-printf 'init-kept-%s\n' $(( $(moonwater bind init | grep -c 'echo disk') * 7 ))
-rm -f /root/main.moonwater.sh
+moonwater init add "sleep 8; poweroff" > /dev/null 2>&1
+printf 'disk-listed-%s\n' $(( $(moonwater init | grep -c -e '^3  echo disk' -e '^4  sleep 8') * 7 ))
+printf 'init-kept-%s\n' $(( $(moonwater init | grep -c 'echo disk') * 7 ))
 mkdir -p /mnt
 mount -t vfat /dev/nvme0n1p1 /mnt
 at=$(od -An -tu2 -j526 -N2 /mnt/EFI/BOOT/BOOTX64.EFI)
@@ -19581,9 +19414,7 @@ says disk 'the install carried init'     'carried-deirrac'
 says disk 'init ran at the disk boot'    'booted-7'
 says disk 'a setting writes the disk in place' 'written-7'
 says disk 'and reads back from it'       'disk-listed-14'
-says disk 'a machine script overlays mute' 'script-7'
-says disk 'SET is refused at the script' 'refused-7'
-says disk 'init stays the stored list without moonwater_init' 'init-kept-7'
+says disk 'init keeps its list on the disk' 'init-kept-7'
 says live 'a security block is kept in the session' 'security-live-7'
 says disk 'the install carried the security block' 'security-kept-7'
 says disk 'and boot published it for TLS' 'security-published-7'
@@ -19666,10 +19497,10 @@ this line is eaten by the console
 nvme_of() { for d in /sys/block/nvme*; do [ "$(tr -d ' ' < $d/device/serial 2> /dev/null)" = "$1" ] && echo ${d##*/}; done; }
 disk=$(nvme_of moonwater); small=$(nvme_of moonwater3)
 [ -n "$disk" ] && [ -n "$small" ] && [ "$disk" != "$small" ] && printf 'named-%s\n' both | rev
-for n in 1 2 3 4 5 6; do moonwater bind init add "echo lock$n" > /dev/null 2>&1 & done
+for n in 1 2 3 4 5 6; do moonwater init add "echo lock$n" > /dev/null 2>&1 & done
 wait
-printf 'lock-%s\n' $(( $(moonwater bind init | grep -c 'echo lock') * 7 ))
-moonwater bind init add "/bin/cp /root/a /root/b" > /tmp/note 2>&1
+printf 'lock-%s\n' $(( $(moonwater init | grep -c 'echo lock') * 7 ))
+moonwater init add "/bin/cp /root/a /root/b" > /tmp/note 2>&1
 printf 'note-%s\n' $(( $(grep -c 'is read when the entry runs' /tmp/note) + 30 ))
 for d in /sys/class/block/nvme*n*; do [ "$(cat $d/queue/zoned 2> /dev/null)" = host-managed ] && z=${d##*/}; done
 moonwater setup install $z yes > /tmp/zoned 2>&1
@@ -20112,8 +19943,8 @@ PY
 this line is eaten by the console
 sleep 2
 printf 'read-%s\n' $(( $(dmesg | grep -c 'settings: slot 0, generation 1') * 7 ))
-printf 'listed-%s\n' $(( $(moonwater bind init | grep -c '^1  printf') * 7 ))
-printf 'switch-%s\n' $(( $(moonwater bind init mount | grep -c 'init mount off') * 7 ))
+printf 'listed-%s\n' $(( $(moonwater init | grep -c '^1  printf') * 7 ))
+printf 'switch-%s\n' $(( $(moonwater init mount | grep -c 'init mount off') * 7 ))
 printf 'verdict-%s\n' "$(rev < /run/moonwater/verdict)"
 printf 'ended-%s\n' "$(rev < /run/moonwater/init/1.status)"
 poweroff
@@ -20134,7 +19965,7 @@ COMMANDS
 this line is eaten by the console
 sleep 2
 printf 'damaged-%s\n' $(( $(dmesg | grep -c 'both settings slots in the image are damaged') * 7 ))
-printf 'defaults-%s\n' $(( $(moonwater bind init | grep -c 'nothing runs at boot') * 7 ))
+printf 'defaults-%s\n' $(( $(moonwater init | grep -c 'nothing runs at boot') * 7 ))
 poweroff
 COMMANDS
         settings_boot damaged
@@ -20231,463 +20062,6 @@ counted
 #       mouse_move there is relative whatever device is selected and a tablet
 #       has no relative axes to move along.
 #
-#       The machine script's desktop functions, the supervisor's give-up to the text console, the
-#       stop, the font the terminal draws with and the no-table line, run the way the machine
-#       runs them: the moonwater shell as bash, which is where the function keyword and $SECONDS
-#       are, against stub programs with the paths they name redirected into a directory of the
-#       lane's own. MOONWATER_DESKTOP_MAIN names another script; the parent's shows the rows fail.
-#       Seven of these are red on the commit before the machine script's desktop fixes.
-desktop_script_rows()
-{
-        desktop_main=${MOONWATER_DESKTOP_MAIN:-main.moonwater.sh}
-        desktop_work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-desktop-rows.XXXXXX") || return 0
-
-        if ! unshare -Urpf --mount-proc true 2> /dev/null || ! need_shell > /dev/null 2>&1; then
-                echo "  canvas       desktop script rows NOT RUN -- no unshare -Urpf or no shell"
-                rm -rf "$desktop_work"
-                return 0
-        fi
-
-        ln -sf "$shell_binary" "$desktop_work/bash" || return 0
-        cp "$desktop_main" "$desktop_work/main.sh" || return 0
-        cat > "$desktop_work/runner.sh" <<'RUNNER'
-#!/bin/sh
-# The desktop functions of the machine script, run as the moonwater shell runs them (the bash
-# personality, which has $SECONDS and the function keyword), against stub compositor, klog,
-# terminal and moonwater programs, with the absolute paths they name redirected into a
-# case directory. One row per verdict, tab separated: PASS|FAIL, the row, what it got, what it wants.
-#   runner.sh SHELL ROOT SCRIPT
-SH=$1
-ROOT=$2
-SCRIPT=$3
-
-make_stub()
-{
-        d=$1
-        rm -rf "$d"
-        mkdir -p "$d/bin" "$d/root" "$d/run/moonwater" "$d/fonts"
-        echo on > "$d/canvas"
-        echo on > "$d/desktop"
-        echo "console=ttyS0" > "$d/cmdline"
-        # Boot has said what this session is, as it has by the time canvas on is run; a case of the early desktop takes it away.
-        echo live > "$d/run/moonwater/verdict"
-        : > "$d/starts"
-        : > "$d/args"
-        : > "$d/calls"
-        : > "$d/kmsg"
-        echo x > "$d/fonts/A-Mono.ttf"
-        echo x > "$d/fonts/Q-Face.ttf"
-
-        for n in klog terminal; do
-                printf '#!/bin/sh\necho "%s $*" >> "$STUB/args"\nexit 0\n' "$n" > "$d/bin/$n"
-        done
-
-        cat > "$d/bin/compositor" <<'EOF'
-#!/bin/sh
-echo "compositor $*" >> "$STUB/args"
-echo "$$" >> "$STUB/starts"
-# -u N is the descriptor the session reads the compositor's word on: a line, and the descriptor closed, when it is up.
-up=
-while [ $# -gt 0 ]; do
-        [ "$1" = -u ] && up=$2
-        shift
-done
-[ -n "$up" ] && [ -p "/proc/$$/fd/$up" ] && echo "$up" > "$STUB/handed"
-say_up()
-{
-        [ -n "$up" ] && eval "echo up >&$up; exec $up>&-"
-        up=
-}
-# ready: up at once, with its table, there until it is ended, and noting each time it is told to read /root again.
-if [ -e "$STUB/ready" ]; then
-        trap 'echo again >> "$STUB/again"' USR1
-        trap 'exit 0' TERM
-        : > "$STUB/run/moonwater/windows"
-        say_up
-        while :; do sleep 0.05; done
-fi
-# late: up after six seconds, with its table, and then there until it is ended.
-if [ -e "$STUB/late" ]; then
-        sleep 6
-        : > "$STUB/run/moonwater/windows"
-        say_up
-        while :; do sleep 0.05; done
-fi
-if [ -e "$STUB/slow" ]; then
-        say_up
-        trap 'sleep 1; echo gone > "$STUB/gone"; exit 0' TERM
-        while :; do sleep 0.05; done
-fi
-if [ ! -s "$STUB/lives" ]; then
-        echo off > "$STUB/canvas"
-        exit 1
-fi
-set -- $(head -n 1 "$STUB/lives")
-tail -n +2 "$STUB/lives" > "$STUB/lives.next"
-mv "$STUB/lives.next" "$STUB/lives"
-if [ "$1" -ge 1 ]; then
-        sleep "$1"
-else
-        sleep 0.3
-fi
-if [ "$2" = off ]; then
-        echo off > "$STUB/canvas"
-fi
-exit 1
-EOF
-
-        cat > "$d/bin/moonwater" <<'EOF'
-#!/bin/sh
-case $1 in
-desktop)
-        case $2 in
-        "") echo "desktop $(cat "$STUB/desktop")" ;;
-        off) echo off >> "$STUB/calls"; echo off > "$STUB/canvas"; echo off > "$STUB/desktop" ;;
-        rest) echo rest >> "$STUB/calls"; echo off > "$STUB/canvas" ;;
-        # The programs the desktop opens: the case's autostart file, else the standard, as the verb says them.
-        autostart) if [ -s "$STUB/autostart" ]; then echo "[Moonwater] autostart $(cat "$STUB/autostart")"; else echo "[Moonwater] autostart none"; fi ;;
-        esac ;;
-canvas)
-        case $2 in
-        "") if [ "$(cat "$STUB/canvas")" = on ]; then echo "Canvas is on"; else echo "Canvas is off"; fi ;;
-        esac ;;
-esac
-EOF
-        chmod +x "$d/bin/"*
-}
-
-# The script with its absolute paths pointed into the case directory. The kmsg stub appends, as
-# /dev/kmsg does, and the program paths are matched only where a space follows them.
-redirect()
-{
-        sed -e "s#> /dev/kmsg#>> \$STUB/kmsg#g" \
-            -e "s#/sys/class/drm#\$STUB/drm#g" \
-            -e "s#/run/moonwater#\$STUB/run/moonwater#g" \
-            -e "s#/root/font#\$STUB/root/font#g" \
-            -e "s#/dev/kmsg#\$STUB/kmsg#g" \
-            -e "s#/proc/cmdline#\$STUB/cmdline#g" \
-            -e "s#/usr/share/fonts#\$STUB/fonts#g" \
-            -e "s#/compositor\([ &]\)#\$STUB/bin/compositor\1#g" \
-            -e "s#/klog\([ ]\)#\$STUB/bin/klog\1#g" \
-            -e "s#/terminal\([ ]\)#\$STUB/bin/terminal\1#g" "$1" > "$STUB/main.sed.sh"
-}
-
-# One case: $1 its name. The caller writes lives, root/font, slow and the driver.
-begin()
-{
-        STUB=$ROOT/cases/$1
-        export STUB
-        make_stub "$STUB"
-        redirect "$SCRIPT"
-        PATH=$STUB/bin:/usr/bin:/bin
-        export PATH
-}
-
-# moonwater is a builtin of the shell binary and wins over PATH, so the stub is reached through a
-# function, which is the only thing the drivers see.
-run_driver()
-{
-        printf '%s\n' 'moonwater() { "$STUB/bin/moonwater" "$@"; }' | cat - "$STUB/driver.sh" > "$STUB/driver.run"
-        "$SH" "$STUB/driver.run" > "$STUB/out" 2>&1
-}
-
-# report LABEL GOT WANT
-report()
-{
-        if [ "$2" = "$3" ]; then
-                printf 'PASS\t%s\t%s\t%s\n' "$1" "$2" "$3"
-        else
-                printf 'FAIL\t%s\t%s\t%s\n' "$1" "$2" "$3"
-        fi
-}
-
-rm -rf "$ROOT/cases"
-mkdir -p "$ROOT/cases"
-
-# A: four quick deaths, then a long life (31 s: the count starts again), then a death, then off.
-begin giveup
-printf '0\n0\n0\n31\n0\n0 off\n' > "$STUB/lives"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-sup=$(cat "$STUB/run/moonwater/supervisor.pid")
-wait $sup
-echo "starts=$(wc -l < "$STUB/starts")"
-echo "off=$(grep -c off "$STUB/calls")"
-echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
-EOF
-run_driver
-report "a long life restarts the count of deaths" "$(grep '^starts=' "$STUB/out")" "starts=6"
-report "no give-up to the text console after a long life" "$(grep '^off=' "$STUB/out")" "off=0"
-report "supervisor pid file removed when it ends" "$(grep '^stale=' "$STUB/out")" "stale=no"
-
-# B: four deaths, the fourth with Canvas turned off (the chord): the supervisor ends and is not given up on.
-begin offchord
-printf '0\n0\n0\n0 off\n' > "$STUB/lives"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-sup=$(cat "$STUB/run/moonwater/supervisor.pid")
-wait $sup
-echo "off=$(grep -c off "$STUB/calls")"
-echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
-EOF
-run_driver
-report "canvas off ends a supervisor with no give-up to the text console" "$(grep '^off=' "$STUB/out")" "off=0"
-report "canvas off leaves no supervisor pid file" "$(grep '^stale=' "$STUB/out")" "stale=no"
-
-# C: desktop_stop returns when the compositor has ended, not while it is on its way out.
-begin stop
-touch "$STUB/slow"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-sleep 0.3
-desktop_stop
-echo "gone=$([ -e "$STUB/gone" ] && echo yes || echo no)"
-echo "pidfile=$([ -e "$STUB/run/moonwater/compositor.pid" ] && echo yes || echo no)"
-EOF
-run_driver
-report "canvas off returns once the compositor has ended" "$(grep '^gone=' "$STUB/out")" "gone=yes"
-report "canvas off removes the compositor pid file" "$(grep '^pidfile=' "$STUB/out")" "pidfile=no"
-
-# D: a /root/font whose first line is a path and whose second is not: the first line is the face.
-begin font
-touch "$STUB/slow"
-printf '%s\njunk\n' "$STUB/fonts/Q-Face.ttf" > "$STUB/root/font"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-sleep 7
-desktop_stop
-echo "font=$(grep -c "^terminal -f $STUB/fonts/Q-Face.ttf\$" "$STUB/args")"
-EOF
-run_driver
-report "the first line of /root/font is the face of the terminal" "$(grep '^font=' "$STUB/out")" "font=1"
-
-# D2: what the desktop opens at its start is the autostart list and nothing else: the standard is the kernel log and then the
-# terminal; none opens no window; a list of the terminal alone opens no kernel log; another program is started by its path.
-for desktop_case in standard none terminal other; do
-        begin "autostart-$desktop_case"
-        touch "$STUB/ready"
-        case $desktop_case in
-        none) echo none > "$STUB/autostart" ;;
-        terminal) echo /terminal > "$STUB/autostart" ;;
-        other) echo "$STUB/bin/other /terminal" > "$STUB/autostart"
-                printf '#!/bin/sh\necho "other $*" >> "$STUB/args"\nexit 0\n' > "$STUB/bin/other"
-                chmod +x "$STUB/bin/other" ;;
-        esac
-        cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-sleep 1.5
-desktop_stop
-echo "opened=$(grep -v '^compositor ' "$STUB/args" | cut -d' ' -f1 | tr '\n' ' ')"
-EOF
-        run_driver
-        case $desktop_case in
-        standard) report "autostart: the standard opens the kernel log, then the terminal" "$(grep '^opened=' "$STUB/out")" "opened=klog terminal " ;;
-        none) report "autostart: none opens no window, the desktop is the wallpaper and the taskbar" "$(grep '^opened=' "$STUB/out")" "opened=" ;;
-        terminal) report "autostart: the terminal alone opens no kernel log" "$(grep '^opened=' "$STUB/out")" "opened=terminal " ;;
-        other) report "autostart: another program is opened by its path, in the list's order" "$(grep '^opened=' "$STUB/out")" "opened=other terminal " ;;
-        esac
-done
-
-# E: a compositor that makes no window table is not reported as up, and is seen at once.
-begin table
-printf '0 off\n' > "$STUB/lives"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-t0=$(/usr/bin/date +%s%N)
-desktop_start
-wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
-t1=$(/usr/bin/date +%s%N)
-echo "notable=$(grep -c 'made no window table' "$STUB/kmsg")"
-echo "quick=$(( (t1 - t0) < 2000000000 ))"
-EOF
-run_driver
-report "no table is said, not that the compositor is up" "$(grep '^notable=' "$STUB/out")" "notable=1"
-report "a compositor that dies at once is seen at once" "$(grep '^quick=' "$STUB/out")" "quick=1"
-
-# E2: the session waits for the compositor's word that it is up, on a FIFO the compositor is handed the writing end
-# of, and for as long as that takes: a compositor that is up after six seconds (one that waited for a screen) has its
-# terminal then, and not at five seconds with no table, which is where the look for the table's name gave up.
-begin late
-touch "$STUB/late"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-sleep 5.5
-echo "early=$(grep -c '^terminal ' "$STUB/args")"
-echo "handed=$([ -s "$STUB/handed" ] && echo yes || echo no)"
-sleep 2
-echo "after=$(grep -c '^terminal ' "$STUB/args")"
-echo "notable=$(grep -c 'made no window table' "$STUB/kmsg")"
-echo "fifo=$([ -e "$STUB/run/moonwater/compositor.up" ] && echo left || echo gone)"
-desktop_stop
-EOF
-run_driver
-report "the compositor is handed a FIFO's writing end to say it is up on" "$(grep '^handed=' "$STUB/out")" "handed=yes"
-report "nothing is started on a compositor that has not said it is up" "$(grep '^early=' "$STUB/out")" "early=0"
-report "the terminal is started when it says so, however late" "$(grep '^after=' "$STUB/out")" "after=1"
-report "and it is not said to have made no table" "$(grep '^notable=' "$STUB/out")" "notable=0"
-report "the FIFO is gone once the word is read" "$(grep '^fifo=' "$STUB/out")" "fifo=gone"
-
-# E3: the desktop before boot's verdict (desktop_early, which the machine process calls before it waits for the verdict):
-# the compositor is started with no verdict, the terminal is not until there is one, a disk taken since has the compositor
-# told to read /root again, and canvas on after the verdict starts no second compositor.
-begin early
-rm -f "$STUB/run/moonwater/verdict"
-touch "$STUB/ready"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_early
-sleep 1.5
-echo "starts=$(wc -l < "$STUB/starts")"
-echo "early=$(grep -c '^terminal ' "$STUB/args")"
-echo "disk sda" > "$STUB/run/moonwater/verdict"
-sleep 1
-echo "after=$(grep -c '^terminal ' "$STUB/args")"
-echo "told=$(grep -c again "$STUB/again" 2> /dev/null)"
-desktop_start
-sleep 0.3
-echo "second=$(wc -l < "$STUB/starts")"
-desktop_stop
-EOF
-run_driver
-report "early: the compositor is started before boot's verdict" "$(grep '^starts=' "$STUB/out")" "starts=1"
-report "early: the terminal is not, while /root is not yet the session's" "$(grep '^early=' "$STUB/out")" "early=0"
-report "early: the terminal is started at the verdict" "$(grep '^after=' "$STUB/out")" "after=1"
-report "early: a disk taken since has the compositor told to read /root again" "$(grep '^told=' "$STUB/out")" "told=1"
-report "early: canvas on after the verdict starts no second compositor" "$(grep '^second=' "$STUB/out")" "second=1"
-
-# E4: the disk's /root names another face for the tabs: the compositor is started again with it, and the terminal with it.
-begin early-font
-rm -f "$STUB/run/moonwater/verdict"
-touch "$STUB/ready"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_early
-sleep 1.5
-printf '%s\n' "$STUB/fonts/Q-Face.ttf" > "$STUB/root/font"
-echo "disk sda" > "$STUB/run/moonwater/verdict"
-sleep 1.5
-echo "starts=$(wc -l < "$STUB/starts")"
-echo "face=$(grep -c "^compositor -f $STUB/fonts/Q-Face.ttf " "$STUB/args")"
-echo "terminal=$(grep -c "^terminal -f $STUB/fonts/Q-Face.ttf\$" "$STUB/args")"
-echo "said=$(grep -c 'names another face' "$STUB/kmsg")"
-desktop_stop
-EOF
-run_driver
-report "early: a disk whose /root names another face has the compositor started again" "$(grep '^starts=' "$STUB/out")" "starts=2"
-report "early: with that face" "$(grep '^face=' "$STUB/out")" "face=1"
-report "early: and one terminal, with it" "$(grep '^terminal=' "$STUB/out")" "terminal=1"
-report "early: and the log says why" "$(grep '^said=' "$STUB/out")" "said=1"
-
-# E5: with a verdict already there is nothing early about a start: desktop_early starts nothing, and canvas on does.
-begin early-late
-touch "$STUB/ready"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_early
-sleep 0.3
-echo "starts=$(wc -l < "$STUB/starts")"
-EOF
-run_driver
-report "early: with a verdict already, desktop_early starts nothing" "$(grep '^starts=' "$STUB/out")" "starts=0"
-
-# F: a second start while a supervisor lives starts nothing.
-begin second
-touch "$STUB/slow"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-s1=$(cat "$STUB/run/moonwater/supervisor.pid")
-sleep 0.2
-desktop_start
-s2=$(cat "$STUB/run/moonwater/supervisor.pid")
-echo "same=$([ "$s1" = "$s2" ] && echo 1 || echo 0)"
-echo "starts=$(wc -l < "$STUB/starts")"
-desktop_stop
-EOF
-run_driver
-report "a second start keeps the one supervisor" "$(grep '^same=' "$STUB/out")" "same=1"
-report "and starts one compositor" "$(grep '^starts=' "$STUB/out")" "starts=1"
-
-# H: four quick deaths with Canvas on: the supervisor gives up, asks for the text console once and for this start alone
-# (desktop rest, which keeps nothing: it said desktop off, and every later boot was the text console), and no pid file is left.
-begin giveup-quick
-printf '0\n0\n0\n0\n' > "$STUB/lives"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-wait $(cat "$STUB/run/moonwater/supervisor.pid") 2> /dev/null
-echo "off=$(grep -c rest "$STUB/calls")"
-echo "kept=$(cat "$STUB/desktop") off=$(grep -c off "$STUB/calls")"
-echo "said=$(grep -c 'ended 4 times in a row' "$STUB/kmsg")"
-echo "stale=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
-EOF
-run_driver
-report "a give-up turns Canvas off once, for the text console" "$(grep '^off=' "$STUB/out")" "off=1"
-report "a give-up is for this start: the choice kept is still the desktop" "$(grep '^kept=' "$STUB/out")" "kept=on off=0"
-report "a give-up says so in the log" "$(grep '^said=' "$STUB/out")" "said=1"
-report "a give-up leaves no supervisor pid file" "$(grep '^stale=' "$STUB/out")" "stale=no"
-
-# I: a machine with no font at all has no desktop to start: no compositor, the log says so, and
-# Canvas is turned off once, for the text console.
-begin nofont
-rm -f "$STUB/fonts/A-Mono.ttf" "$STUB/fonts/Q-Face.ttf"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-echo "rc=$?"
-echo "nofont=$(grep -c 'no font to draw with' "$STUB/kmsg")"
-echo "starts=$(wc -l < "$STUB/starts")"
-echo "off=$(grep -c rest "$STUB/calls")"
-echo "kept=$(cat "$STUB/desktop") off=$(grep -c off "$STUB/calls")"
-EOF
-run_driver
-report "no font: desktop_start refuses" "$(grep '^rc=' "$STUB/out")" "rc=1"
-report "no font: the log names the missing font" "$(grep '^nofont=' "$STUB/out")" "nofont=1"
-report "no font: no compositor is started" "$(grep '^starts=' "$STUB/out")" "starts=0"
-report "no font: Canvas is turned off for the text console" "$(grep '^off=' "$STUB/out")" "off=1"
-report "no font: and the choice kept is still the desktop, for a start that has one" "$(grep '^kept=' "$STUB/out")" "kept=on off=0"
-
-# J: moonwater.desktop=none keeps the compositor out of the way; that is no failure and does not turn Canvas
-# off.
-begin none
-echo "console=ttyS0 moonwater.desktop=none" > "$STUB/cmdline"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-echo "rc=$?"
-echo "starts=$(wc -l < "$STUB/starts")"
-echo "off=$(grep -c off "$STUB/calls")"
-echo "pidfile=$([ -e "$STUB/run/moonwater/supervisor.pid" ] && echo yes || echo no)"
-EOF
-run_driver
-report "desktop=none: desktop_start comes back well" "$(grep '^rc=' "$STUB/out")" "rc=0"
-report "desktop=none: no compositor is started" "$(grep '^starts=' "$STUB/out")" "starts=0"
-report "desktop=none: Canvas stays on" "$(grep '^off=' "$STUB/out")" "off=0"
-report "desktop=none: no supervisor is left" "$(grep '^pidfile=' "$STUB/out")" "pidfile=no"
-
-RUNNER
-        unshare -Urpf --mount-proc sh "$desktop_work/runner.sh" "$desktop_work/bash" "$desktop_work/cases" \
-                "$desktop_work/main.sh" > "$desktop_work/rows" 2>&1
-
-        [ -s "$desktop_work/rows" ] || lost "desktop rows" "the runner printed nothing"
-        desktop_tab=$(printf '\t')
-        while IFS=$desktop_tab read -r desktop_verdict desktop_label desktop_got desktop_want; do
-                if [ "$desktop_verdict" = PASS ]; then
-                        won
-                else
-                        lost "$desktop_label" "got $desktop_got, want $desktop_want"
-                fi
-        done < "$desktop_work/rows"
-
-        rm -rf "$desktop_work"
-}
-
 lane_canvas()
 (
 image=${MOONWATER_IMAGE:-dist/bootx64.efi}
@@ -20709,7 +20083,6 @@ if [ ! -f "$image" ]; then
         exit 2
 fi
 
-desktop_script_rows
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/dawning-canvas.XXXXXX") || exit 1
 trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
@@ -22648,7 +22021,7 @@ if ovmf:
 
     guest, shell = guest_of("off", work + "/off.efi")
     state = shell.run("moonwater canvas | head -1")[0]
-    wording = shell.run("moonwater bind init canvas")[0].split("\n")[-1]
+    wording = shell.run("moonwater init canvas")[0].split("\n")[-1]
     said = shell.number("dmesg | grep -c 'off at boot, as the image'")
     shell.run("moonwater desktop on")
     after = "on" if "Canvas is on" in shell.run("moonwater canvas | head -1")[0] else "off"
@@ -22659,7 +22032,7 @@ if ovmf:
 
     guest, shell = guest_of("on", image)
     out.append((names[2], "%s / %s" % ("on" if "Canvas is on" in shell.run("moonwater canvas | head -1")[0] else "off",
-                                       shell.run("moonwater bind init canvas")[0].split("\n")[-1]),
+                                       shell.run("moonwater init canvas")[0].split("\n")[-1]),
                 "on / [Moonwater] init canvas on"))
     over(guest)
 else:

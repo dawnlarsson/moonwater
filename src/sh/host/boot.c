@@ -231,12 +231,6 @@ static fn host_events_boot(host_settings address_to settings)
         host_state_directory(HOST_EVENTS_INIT, 0700);
         host_verdict_settled();
 
-        //      After the verdict, which is when the machine process goes on to
-        //      its script: a script that names moonwater_init has the list's
-        //      place only if that process got that far.
-        if (!host_init_list_runs())
-                system_call_1(syscall(exit), 0);
-
         while (host_settings_next(settings, address_of at, address_of setting))
         {
                 p8 text[SPARK_SETTINGS_TEXT_MOST + 1];
@@ -308,9 +302,6 @@ fn host_exit_run(void)
         machine = host_machine_stop();
         if (!host_settings_kept(address_of settings) &&
             !host_settings_booted(address_of settings))
-                return;
-
-        if (machine && host_machine_hook_line(MOONWATER_HOOK_END))
                 return;
 
         while (host_settings_next(address_of settings, address_of at, address_of setting))

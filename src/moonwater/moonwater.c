@@ -2016,87 +2016,20 @@ static long report_bind(struct bind_control __user *out)
 #endif /* MOONWATER_INCLUDED */
 
 #ifdef MOONWATER_CLI
-#define HOST_MACHINE_OK 0
-#define HOST_MACHINE_ABSENT 1
-#define HOST_MACHINE_REFUSED 2
-
-extern string_address address_to shell_argv;
-extern positive shell_argc;
-
-COLD fn shell_dot(writer write);
-bool exec_function_readonly_set(string_address name);
-bool exec_function_readonly_clear(string_address name);
-positive shell_function_slot(string_address name);
-b32 shell_call_slot(positive slot, string_address name,
-                    string_address address_to arguments, positive count);
+/*
+        The machine process: PID 1's moonwater machine, attached to the
+        module, and the runner from there (src/rover/runner.c), which runs
+        the rules in place of the machine script there was.
+*/
 fn shell_stop(writer write, positive command);
 bool env_assign(const_string name, const_string value);
 
-static struct machine_script host_machine;
-static p8 host_machine_text[MOONWATER_SCRIPT_BYTES];
-static p8 host_machine_fresh;
-/*
-        What this process sourced, as against what the kernel now holds.
-
-        host_machine is the kernel's answer, re-asked on every event. The
-        functions this process can actually run are the ones it sourced, and
-        the two stop agreeing the moment anything else publishes an edited
-        /root/main.moonwater.sh -- moonwater status does, on its way to
-        printing the script's own lines. The kernel then routes an event by
-        the new text while this process still holds the old functions, and
-        bind_queue, having handed the press to the machine, does not also run
-        the image line. That is an event nobody runs.
-
-        Keeping what was sourced is what lets the loop notice and re-source.
-*/
-static unsigned int host_machine_sourced_length;
-static unsigned int host_machine_sourced_origin;
-static struct moonwater_overlay host_machine_sourced_overlay;
 //      This process owns the machine attach, from the moment it does.
 static bool host_machine_self;
-//      moonwater_end has run; it runs once however the machine stops.
+//      The machine's end has been had; it is had once however the machine stops.
 static bool host_machine_ended;
-//      The file the script is read from was there and was refused: its mode,
-//      its owner, a link, or too many bytes. The kernel then keeps what it had.
-static bool host_machine_rejected;
 
 #define HOST_MACHINE_ASSIGN(name, value) env_assign(name, value);
-
-static bool host_machine_file_allowed(p16 mode, p32 owner)
-{
-        return (mode & MODE_FORMAT) == MODE_FILE && owner == 0 &&
-               (mode & 0022) == 0;
-}
-
-static p8 host_machine_read_file(string_address path, byte_store address_to text)
-{
-        file_facts facts;
-        file_facts opened;
-        bipolar handle;
-        bipolar got;
-
-        if (!file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
-                return HOST_MACHINE_ABSENT;
-        if ((facts.mode & MODE_FORMAT) == MODE_LINK ||
-            !host_machine_file_allowed(facts.mode, facts.owner))
-                return HOST_MACHINE_REFUSED;
-
-        handle = system_open_at(AT_FDCWD, path,
-                                FILE_READ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-        if (handle < 0)
-                return HOST_MACHINE_REFUSED;
-        if (!file_look(handle, (string_address)"", AT_EMPTY_PATH, address_of opened) ||
-            !host_machine_file_allowed(opened.mode, opened.owner)) {
-                system_close(handle);
-                return HOST_MACHINE_REFUSED;
-        }
-
-        //      More than the kernel takes is refused rather than cut, and the
-        //      one probe past it is what tells a script that is exactly full.
-        got = file_store_read_limit((positive)handle, text, MOONWATER_SCRIPT_BYTES);
-        system_close(handle);
-        return got < 0 ? HOST_MACHINE_REFUSED : HOST_MACHINE_OK;
-}
 
 static bipolar host_machine_ioctl(bipolar device, unsigned int op,
                                   struct machine_control address_to control)
@@ -2117,320 +2050,6 @@ static bipolar host_machine_wait(bipolar device,
         return system_control(device, MOONWATER_IOCTL_MACHINE, control);
 }
 
-static bipolar host_machine_script(unsigned int op)
-{
-        host_machine.op = op;
-        return host_spark_once(MOONWATER_IOCTL_SCRIPT, address_of host_machine,
-                               FILE_READ);
-}
-
-static fn host_machine_publish(void)
-{
-        byte_store text = {0};
-        p8 loaded;
-
-        if (!bowl_is_root())
-                return;
-
-        loaded = host_machine_read_file(HOST_MACHINE_SCRIPT, address_of text);
-        host_machine_rejected = loaded == HOST_MACHINE_REFUSED;
-        if (host_machine_rejected) {
-                string_address line[] = { "machine script refused: ",
-                                          HOST_MACHINE_SCRIPT, null };
-
-                host_kmsg(line);
-                byte_store_release(address_of text);
-                return;
-        }
-
-        //      A file that is absent and one that is empty publish the same
-        //      thing, a length of 0, which the kernel takes as the builtin
-        //      script. That is meant: an empty script defines no function, so
-        //      there is no row it could own, and it is taken rather than
-        //      refused (test/run holds this, "and an empty one"); moonwater
-        //      bind then names the builtin as where a row comes from, as it
-        //      does with no file at all.
-        memory_zero(address_of host_machine, sizeof(host_machine));
-        if (loaded == HOST_MACHINE_OK) {
-                host_machine.length = (unsigned int)text.used;
-                host_machine.address = (unsigned long)text.bytes;
-        }
-        if (host_machine_script(MOONWATER_SCRIPT_SET) >= 0)
-                host_machine_fresh = 1;
-        byte_store_release(address_of text);
-}
-
-static fn host_machine_ask(void)
-{
-        if (host_machine_fresh)
-                return;
-        host_machine_publish();
-        if (host_machine_fresh)
-                return;
-        memory_zero(address_of host_machine, sizeof(host_machine));
-        if (host_machine_script(MOONWATER_SCRIPT_GET) < 0)
-                host_machine.origin = MOONWATER_ORIGIN_BUILTIN;
-        host_machine_fresh = 1;
-}
-
-static string_address host_machine_where(void)
-{
-        host_machine_ask();
-        if (host_machine_rejected)
-                return host_machine.origin == MOONWATER_ORIGIN_DISK
-                           ? "the script from before " HOST_MACHINE_SCRIPT
-                             " was refused"
-                           : HOST_MACHINE_BUILTIN " (" HOST_MACHINE_SCRIPT
-                             " is refused)";
-        return host_machine.origin == MOONWATER_ORIGIN_DISK
-                   ? HOST_MACHINE_SCRIPT
-                   : HOST_MACHINE_BUILTIN;
-}
-
-static p16 host_machine_hook_line(p8 hook)
-{
-        unsigned int i;
-
-        host_machine_ask();
-        for (i = 0; i < MOONWATER_HOOKS; i++)
-                if (moonwater_hook[i].bit == hook)
-                        return moonwater_overlay_line(&host_machine.overlay,
-                                                      moonwater_hook[i].line_off);
-        return 0;
-}
-
-static p16 host_machine_event_line(unsigned int event)
-{
-        host_machine_ask();
-        return moonwater_bind_line(&host_machine.overlay, event);
-}
-
-static fn host_machine_refused(string_address name, p16 line)
-{
-        string_format(log_error, host_label "%s is %s:%p; change it there\n", name,
-                      host_machine_where(), (positive)line);
-}
-
-/*
-        The verdict is waited for on the directory that publishes it, the same
-        watch host_verdict_settled holds (host.c): the machine process used to
-        re-read it every 200 ms, so a verdict written just after a read sat
-        for up to that long before the script was sourced. The watch is made
-        before the read, so a publish between the read and the wait is already
-        queued and the wait ends at once.
-*/
-static fn host_machine_wait_verdict(p8 address_to into, positive room)
-{
-        p64 started = system_clock_ns(HOST_CLOCK_BOOTTIME);
-        bipolar notify = host_verdict_watch();
-
-        into[0] = end;
-        for (;;) {
-                if (host_read_word(HOST_VERDICT, into, room) >= 0)
-                        break;
-                if (system_clock_ns(HOST_CLOCK_BOOTTIME) - started >=
-                    HOST_VERDICT_WAIT_NS)
-                        break;
-                host_verdict_pause(notify, started + HOST_VERDICT_WAIT_NS,
-                                   HOST_POLL_NS * 2);
-        }
-        host_verdict_unwatch(notify);
-}
-
-/*
-        Whether the machine process has taken the script up, which a boot has
-        to know before it leaves the settings' init list to moonwater_init.
-
-        The process says so when it has sourced the script and not before: a
-        process that never starts, or one that dies in the script's own
-        top-level lines (an exit in them, a failed restart that init gave up
-        on), never runs the hook, and a script naming the hook is then no
-        reason for nothing to run at boot. A script that does not name it is
-        never waited for. The wait is bounded, and a boot that has not heard
-        by the end of it runs the list.
-*/
-static bool host_machine_sourced(p64 wait)
-{
-        p64 started = system_clock_ns(HOST_CLOCK_BOOTTIME);
-        p8 said[8];
-
-        while (host_read_word(HOST_MACHINE_SOURCED, said, sizeof(said)) < 0) {
-                if (system_clock_ns(HOST_CLOCK_BOOTTIME) - started >= wait)
-                        return false;
-                host_pause(HOST_EVENT_POLL_NS);
-        }
-        return true;
-}
-
-static bool host_init_list_runs(void)
-{
-        return !host_machine_hook_line(MOONWATER_HOOK_INIT) ||
-               !host_machine_sourced(HOST_MACHINE_SOURCED_WAIT_NS);
-}
-
-static b32 host_machine_call(positive slot, string_address name,
-                             string_address first, string_address second)
-{
-        string_address arguments[2];
-        positive count = 0;
-
-        if (first)
-                arguments[count++] = first;
-        if (second)
-                arguments[count++] = second;
-        return shell_call_slot(slot, name, arguments, count);
-}
-
-#define HOST_MACHINE_FN 32
-
-static fn host_machine_bind_fn(p8 address_to into, positive room, string_address rest)
-{
-        string_copy_bounded(into, "moonwater_", room);
-        string_append_bounded(into, rest, room);
-        string_replace_all(into, ' ', '_');
-}
-
-static bool host_machine_try(string_address rest, string_address first,
-                             string_address second)
-{
-        p8 fn[HOST_MACHINE_FN];
-        positive slot;
-
-        host_machine_bind_fn(fn, sizeof(fn), rest);
-        slot = shell_function_slot(fn);
-        if (slot == positive_max)
-                return false;
-        host_machine_call(slot, fn, first, second);
-        return true;
-}
-
-static fn host_machine_lock_one(string_address name, bool lock)
-{
-        if (lock)
-                exec_function_readonly_set(name);
-        else
-                exec_function_readonly_clear(name);
-}
-
-static fn host_machine_lock_fns(bool lock)
-{
-        p8 fn[HOST_MACHINE_FN];
-        unsigned int event, i;
-
-        for (event = 0; event < SPARK_BIND_EVENTS; event++)
-        {
-                host_machine_bind_fn(fn, sizeof(fn),
-                                     (string_address)spark_bind_event_name[event]);
-                host_machine_lock_one(fn, lock);
-        }
-        for (i = 0; i < MOONWATER_PAIRS; i++)
-        {
-                host_machine_bind_fn(fn, sizeof(fn),
-                                     (string_address)moonwater_pairs[i].name);
-                host_machine_lock_one(fn, lock);
-        }
-        host_machine_bind_fn(fn, sizeof(fn), "recover");
-        host_machine_lock_one(fn, lock);
-}
-
-/*
-        Asking the kernel what it holds now, and saying whether that is still
-        the script this process is running.
-
-        The answer is the overlay, the length and where the text came from --
-        everything the kernel already puts in the reply, so noticing costs
-        the GET that was happening anyway and nothing more. An edit that adds
-        or removes a function moves the overlay, and one that changes a body
-        almost always moves the length; what escapes is an edit that keeps
-        the byte count, every line number and the same set of functions, and
-        that leaves a stale body rather than an event nobody runs.
-*/
-static bool host_machine_changed(bipolar device)
-{
-        struct machine_script held = host_machine;
-
-        //      On the descriptor this process already holds: the device was
-        //      opened and closed again for every event.
-        memory_zero(address_of host_machine, sizeof(host_machine));
-        host_machine.op = MOONWATER_SCRIPT_GET;
-        if (system_control(device, MOONWATER_IOCTL_SCRIPT, address_of host_machine) < 0) {
-                host_machine = held;
-                return false;
-        }
-        host_machine_fresh = 1;
-        return host_machine.length != host_machine_sourced_length ||
-               host_machine.origin != host_machine_sourced_origin ||
-               memory_compare(address_of host_machine.overlay,
-                              address_of host_machine_sourced_overlay,
-                              sizeof(host_machine_sourced_overlay));
-}
-
-static fn host_machine_hook(positive slot, unsigned int which,
-                            string_address first, string_address second);
-
-/*
-        An event the script owns and this process could not run.
-
-        The kernel hands a press to the machine instead of the bound image
-        line precisely because the script owns that row, so there is no
-        second copy waiting behind this call: a miss here is a key that does
-        nothing. It should be unreachable now that the loop re-sources an
-        edited script before naming the event, and that is the reason to say
-        it out loud -- the next way this breaks will be silent otherwise.
-*/
-static fn host_machine_missed(string_address name)
-{
-        string_address line[] = { "machine script owns ", name,
-                                  " but this process has no function for it; "
-                                  "the event ran nowhere", null };
-
-        host_kmsg(line);
-}
-
-static fn host_machine_emit(positive event_slot, unsigned int event,
-                            string_address name, string_address extra)
-{
-        const struct moonwater_pair *pair = moonwater_paired(event);
-
-        if (event && moonwater_bind_line(&host_machine.overlay, event))
-        {
-                if (pair && extra)
-                {
-                        p8 rest[24];
-
-                        rest[0] = end;
-                        string_append_bounded(rest, (string_address)pair->name,
-                                              sizeof(rest));
-                        string_append_bounded(rest, "_", sizeof(rest));
-                        string_append_bounded(rest, extra, sizeof(rest));
-                        if (!host_machine_try(rest, extra, null) &&
-                            !host_machine_try((string_address)pair->name, extra,
-                                              null))
-                                host_machine_missed(name);
-                }
-                else if (!host_machine_try(name, name, extra))
-                        host_machine_missed(name);
-        }
-        else if (string_equals(name, "recover"))
-                host_machine_try("recover", name, extra);
-
-        host_machine_hook(event_slot, 1, name, extra);
-}
-
-static fn host_machine_dirty(bool on)
-{
-        if (on) {
-                //      The mark is how the next process knows this one died
-                //      with an event in hand: one that was not written is a
-                //      crash that raises no recover event, so it is said.
-                bipolar failed = host_write_text(HOST_MACHINE_DIRTY, "1\n");
-
-                if (failed < 0)
-                        host_fail(HOST_MACHINE_DIRTY, failed);
-        } else
-                system_remove_at(AT_FDCWD, HOST_MACHINE_DIRTY, 0);
-}
-
 static fn host_machine_close(bipolar device)
 {
         struct machine_control control;
@@ -2441,43 +2060,26 @@ static fn host_machine_close(bipolar device)
         system_close(device);
 }
 
-/*
-        moonwater_end, at most once, wherever the machine turns out to stop.
-
-        A machine script stops the machine from inside its own event function
-        -- moonwater_poweroff runs poweroff -- and that never comes back to
-        the wait loop, so the loop's own call is not the only place this has
-        to happen. Running it from here as well, guarded, means the one
-        function the file promises runs whether the stop came from the event
-        or from the machine being told to end.
-*/
+//      The machine's end, at most once, wherever the machine turns out to stop: the runner's services are its to stop.
 static fn host_machine_end_run(void)
 {
-        string_address name = (string_address)moonwater_hook[2].name;
-
-        if (host_machine_ended)
-                return;
         host_machine_ended = true;
-        if (!(host_machine.overlay.hooks & MOONWATER_HOOK_END))
-                return;
-        (void)host_machine_call(shell_function_slot(name), name, null, null);
 }
 
 /*
         Telling the machine process the machine is stopping, and waiting for
-        it to let go -- unless we are it. True once moonwater_end has had its
-        turn: the process was told, and was seen to leave. False when there
-        was no process to tell, when it would not be told (the caller is not
-        root: END is CAP_SYS_ADMIN's), and when it was still attached after
-        ten seconds, which is a machine process that never ran moonwater_end,
-        so the stop must not behave as though it had.
+        it to let go -- unless we are it. True once the process was told, and
+        was seen to leave. False when there was no process to tell, when it
+        would not be told (the caller is not root: END is CAP_SYS_ADMIN's),
+        and when it was still attached after ten seconds, a machine process
+        that never let go, so the stop must not behave as though it had.
 
         host_machine_self is set the moment this process owns the attach, not
-        when it is told to stop: its own moonwater_poweroff calls poweroff,
-        which comes through here, and a process that asked the kernel to end
-        the attach it is itself holding would poll for ten seconds for a
-        detach only it could perform -- ten seconds in which the button
-        already pressed looks like a button that did nothing.
+        when it is told to stop: a poweroff the runner asks for comes through
+        here, and a process that asked the kernel to end the attach it is
+        itself holding would poll for ten seconds for a detach only it could
+        perform -- ten seconds in which the button already pressed looks like
+        a button that did nothing.
 */
 static bool host_machine_stop(void)
 {
@@ -2534,228 +2136,17 @@ static bipolar host_machine_attach(bipolar device, struct machine_control addres
         return failed;
 }
 
-static b32 host_machine_source(void)
-{
-        string_address argv[3];
-        string_address address_to saved_argv;
-        positive saved_argc;
-        bipolar failed;
-
-        memory_zero(address_of host_machine, sizeof(host_machine));
-        host_machine.address = (unsigned long)host_machine_text;
-        host_machine.length = MOONWATER_SCRIPT_BYTES;
-        failed = host_machine_script(MOONWATER_SCRIPT_GET);
-        if (failed < 0)
-                return failed;
-        host_machine_fresh = 1;
-
-        host_state_ready();
-        failed = host_write_file(HOST_MACHINE_RUNTIME, host_machine_text,
-                                 host_machine.length, 0600, false);
-        if (failed < 0)
-                return failed;
-
-        saved_argv = shell_argv;
-        saved_argc = shell_argc;
-        argv[0] = ".";
-        argv[1] = HOST_MACHINE_RUNTIME;
-        argv[2] = null;
-        shell_argv = argv;
-        shell_argc = 2;
-        shell_dot(log);
-        shell_argv = saved_argv;
-        shell_argc = saved_argc;
-
-        //      From here the functions in this process are this text's.
-        host_machine_sourced_length = host_machine.length;
-        host_machine_sourced_origin = host_machine.origin;
-        host_machine_sourced_overlay = host_machine.overlay;
-        return 0;
-}
-
-/*
-        Holding the script's functions, and letting go.
-
-        Locking them is what stops anything the script starts from redefining
-        the machine's own bindings. Letting go is for one caller: this
-        process reloading its own script, which has to be allowed to replace
-        the bodies it locked, and takes the lock straight back.
-*/
-static fn host_machine_hold(positive address_to slot, bool lock)
-{
-        unsigned int i;
-
-        for (i = 0; i < MOONWATER_HOOKS; i++) {
-                host_machine_lock_one((string_address)moonwater_hook[i].name,
-                                      lock);
-                if (lock)
-                        slot[i] = shell_function_slot(
-                            (string_address)moonwater_hook[i].name);
-        }
-        host_machine_lock_fns(lock);
-}
-
-/*
-        Taking up an edited script without restarting.
-
-        Re-sourcing is the whole of it: the kernel already holds the new
-        text, host_machine_source writes it out and dots it, and the
-        definitions in it replace the ones this process is holding -- which
-        is why the lock comes off first and goes straight back on. The hook
-        slots are re-taken because a redefinition can land in a different
-        one, and calling the old index would run the old body or nothing.
-
-        A reload that fails leaves the old functions in place and the sourced
-        identity unchanged, so the next event tries again rather than running
-        on with a script it only half took. What it does not put back is the
-        overlay: host_machine keeps the kernel's answer, because that is the
-        answer the kernel routed this event by, and judging the event the
-        same way it was routed is what turns a function this process has not
-        got into one loud line instead of another silent drop.
-
-        This re-runs the file's top-level lines, which is why a machine
-        script keeps its work inside functions.
-*/
-static fn host_machine_reload(positive address_to slot)
-{
-        host_machine_hold(slot, false);
-        if (host_machine_source() < 0) {
-                string_address line[] = { "machine script reload refused; "
-                                          "keeping the running one", null };
-
-                host_kmsg(line);
-        }
-        host_machine_hold(slot, true);
-}
-
-static fn host_machine_hook(positive slot, unsigned int which,
-                            string_address first, string_address second)
-{
-        if (host_machine.overlay.hooks & moonwater_hook[which].bit)
-                host_machine_call(slot, (string_address)moonwater_hook[which].name,
-                                  first, second);
-}
-
-/*
-        What this process answers, and what PID 1 reads into it.
-
-        init retires the machine for the rest of the boot on 0 and on 1,
-        because those are the two ways it is finished on purpose: 0 is the
-        queue told to end, 1 is a stop event already handed to shell_stop.
-        Every other answer is a machine that did not get to start, or one
-        that could not keep going, and init restarts it a bounded number of
-        times.
-
-        So a failure has to say something else. host_fail answers 1, so a
-        /dev/spark that is not there yet, an attach the last machine process
-        has not let go of, or one refused ioctl is otherwise retired for the
-        rest of the boot, and the script's moonwater_init never runs. (The
-        settings' init list does not wait on that: host_events_boot runs it
-        unless the process said it had sourced the script, which is the one
-        thing that makes a script naming the hook the list's replacement.)
-
-        The bound image lines are not part of that: bind_queue hands a press
-        to the machine only while an attach is live, and the process that
-        died took its attach with it, so the power button is still poweroff.
-
-        Not being root stays at host_refuse's 1. Every other refusal in this
-        command answers 1, and PID 1 runs this as root, so that answer never
-        reaches the retirement.
-*/
 #define HOST_MACHINE_ENDED 0
 #define HOST_MACHINE_STOPPED 1
 #define HOST_MACHINE_FAILED 2
 
-/*
-        The desktop before the disks.
-
-        Boot's verdict is a second of uptime away on a machine with no disk
-        of its own (the floor a USB disk is given to arrive, HOST_SETTLE_FLOOR_NS),
-        and up to ten when one is on its way, and this process sources nothing
-        and runs no event before it: the script and what it reads are /root's,
-        which a disk can replace. So the screen stayed Canvas's ground for all
-        of that. The compositor needs none of it. With no verdict yet, the
-        script the kernel holds for the /root there is now (the image's own, or
-        the builtin) is sourced in a child, and its desktop_early, if it has
-        one, is called there: the builtin's starts the compositor's supervisor
-        on the image's settings and font, and the session it runs keeps the
-        terminal back until the verdict (desktop_settled), because a shell
-        started sooner would have the image's /root for its own. The child is
-        waited for, a few milliseconds, so that the script file it sources is
-        not written under it by this process, and this process's own functions
-        are untouched: it sources once, after the verdict, as before.
-
-        What orders it: the child ends before the verdict is waited for; the
-        supervisor it leaves is found by the pid file when canvas on is run
-        after the verdict (desktop_start starts no second one); a disk taken
-        since has the compositor read /root again (the session's SIGUSR1); and
-        a script from the disk that has no desktop_start is not the builtin's
-        desktop, so the early one is ended before that script's first function
-        runs (desktop_yield). The fallback is the old order: no child, a script
-        with no desktop_early, Canvas not yet on, or moonwater.early=0 on the
-        kernel's command line, and the desktop starts at canvas on after the
-        verdict as it did. True when the early desktop was asked for.
-*/
-#define HOST_MACHINE_EARLY_OFF "moonwater.early=0"
-#define HOST_MACHINE_EARLY_FN "desktop_early"
-#define HOST_MACHINE_EARLY_NS ((p64)5000000000)
-
-static fn desktop_yield(void);
-
-static bool host_machine_early_wanted(void)
-{
-        p8 line[4096];
-        p8 verdict[HOST_NAME_ROOM + 16];
-
-        if (host_read_word(HOST_VERDICT, verdict, sizeof(verdict)) >= 0)
-                return false;
-        return host_read_kernel("/proc/cmdline", line, sizeof(line)) < 0 ||
-               !string_find(line, HOST_MACHINE_EARLY_OFF);
-}
-
-static bool host_machine_early(void)
-{
-        positive status = 0;
-        bool stopped = false;
-        bipolar child;
-
-        if (!host_machine_early_wanted())
-                return false;
-        host_machine_publish();
-        child = system_fork();
-        if (child < 0)
-                return false;
-        if (!child) {
-                positive slot = positive_max;
-
-                if (host_machine_source() >= 0)
-                        slot = shell_function_slot(HOST_MACHINE_EARLY_FN);
-                if (slot != positive_max)
-                        (void)host_machine_call(slot, HOST_MACHINE_EARLY_FN, null, null);
-                log_flush();
-                system_call_1(syscall(exit), slot == positive_max);
-        }
-        //      Five seconds at most: a child that has not come back by then
-        //      (a script whose desktop_early waits on something) is ended,
-        //      and the boot goes on in the old order.
-        status = host_event_wait(child, HOST_MACHINE_EARLY_NS, address_of stopped);
-        return !stopped && !wait_status_code(status);
-}
-
-//      The runner, which takes this process's place for the script's on an image that carries rules.
 #include "../rover/runner.c"
 
 static b32 host_machine_run(void)
 {
         struct machine_control control;
-        p8 verdict[HOST_NAME_ROOM + 16];
-        bipolar device = -1;
+        bipolar device;
         bipolar failed;
-        p8 dirty[8];
-        positive slot[MOONWATER_HOOKS];
-        bool marked = false;
-        bool early;
-        b32 answer = HOST_MACHINE_ENDED;
 
         if (!bowl_is_root())
                 return host_refuse("moonwater machine needs root\n");
@@ -2768,15 +2159,12 @@ static b32 host_machine_run(void)
         bowl_session_prepare("/root", null);
         SPARK_COMMAND_ENVIRONMENT(HOST_MACHINE_ASSIGN)
 
-        //      The three returns below come before the restores, and init
-        //      starts this process again after each (it answers
-        //      HOST_MACHINE_FAILED), every start doing them. What they skip
-        //      is done elsewhere for a session with a disk, whose take did it
-        //      (host_take), and for a start after another process's, which
-        //      did it before it died or kept the attach. A session with no
-        //      disk, or one that is being asked, has only this process for
-        //      them: when every try fails they are not done, and init says so
-        //      once, "the machine script keeps exiting; leaving it alone".
+        //      The returns below come before the restores, and init starts
+        //      this process again after each (it answers HOST_MACHINE_FAILED),
+        //      every start doing them. What they skip is done elsewhere for a
+        //      session with a disk, whose take did it (host_take), and for a
+        //      start after another process's, which did it before it died or
+        //      kept the attach.
         device = system_open_at(AT_FDCWD, SPARK_DEVICE, FILE_READ | O_CLOEXEC);
         if (device < 0) {
                 host_fail(SPARK_DEVICE, device);
@@ -2790,127 +2178,11 @@ static b32 host_machine_run(void)
         }
         //      The attach is ours from here, and every stop this process
         //      performs goes through host_machine_stop, including the one
-        //      its own moonwater_poweroff asks for.
+        //      a rule's poweroff asks for.
         host_machine_self = true;
-
-        //      An image with rules runs them: the services, the events and the actions are the runner's from here.
-        if (rover_runner_chosen())
-                return rover_runner_run(device);
-
-        early = host_machine_early();
-        host_machine_wait_verdict(verdict, sizeof(verdict));
-        host_machine_publish();
-        failed = host_machine_source();
-        //      The rule files, into the kernel: rover's table, beside the script, which still runs everything it did.
-        if (failed >= 0)
-                rover_machine_start(device);
-        if (failed < 0) {
-                host_machine_close(device);
-                host_fail("machine script", failed);
-                return HOST_MACHINE_FAILED;
-        }
-        //      The script this session keeps is not the one the early desktop
-        //      was started from, and carries no desktop of the builtin's.
-        if (early && shell_function_slot("desktop_start") == positive_max)
-                desktop_yield();
-
-        //      Said before the restores below, which can take a join's time:
-        //      a boot waiting to see whether this process has the script is
-        //      waiting for this and not for them. A write that is lost is said:
-        //      unheard, the boot waits out HOST_MACHINE_SOURCED_WAIT_NS and
-        //      runs the settings' init list beside the script's moonwater_init.
-        failed = host_write_text(HOST_MACHINE_SOURCED, "1\n");
-        if (failed < 0)
-                host_fail(HOST_MACHINE_SOURCED, failed);
-
-        host_restore_session(!string_has_prefix((string_address)verdict, "ask "),
-                             false);
-
-        host_machine_hold(slot, true);
-
-        host_machine_hook(slot[0], 0, (string_address)verdict, null);
-        if (host_read_word(HOST_MACHINE_DIRTY, dirty, sizeof(dirty)) >= 0) {
-                host_machine_dirty(false);
-                host_machine_emit(slot[1], 0, "recover", null);
-        }
-
-        for (;;) {
-                string_address extra = null;
-                string_address name;
-                const struct moonwater_pair *pair;
-
-                radio_recover();
-                usb_recover();
-                locale_recover();
-                link_keep_machine();
-                ssh_keep_machine();
-                failed = host_machine_wait(device, address_of control);
-                if (failed == -EINTR || failed == -ETIMEDOUT)
-                        continue;
-                if (failed < 0) {
-                        //      Not an ending: the wait itself was refused.
-                        //      Answering the ending's own 0 here is the one
-                        //      refused ioctl that retires the machine for the
-                        //      rest of the boot.
-                        host_fail("machine wait", failed);
-                        answer = HOST_MACHINE_FAILED;
-                        break;
-                }
-
-                if (!control.event) {
-                        host_machine_dirty(false);
-                        marked = false;
-                        host_machine_end_run();
-                        break;
-                }
-
-                //      Before the event is named, because naming it is how
-                //      the new overlay decides whether the script owns it,
-                //      and the functions have to be the new ones by then.
-                if (host_machine_changed(device))
-                        host_machine_reload(slot);
-                //      Rover's ring: the machine is its consumer until the runner is.
-                if (control.event == MOONWATER_ROVER) {
-                        rover_machine_drain();
-                        continue;
-                }
-                pair = moonwater_paired(control.event);
-                if (pair) {
-                        name = (string_address)pair->name;
-                        extra = control.event == pair->on ? (string_address) "on"
-                                                          : (string_address) "off";
-                } else if (control.event > SPARK_BIND_EVENTS)
-                        continue;
-                else
-                        name = (string_address)spark_bind_event_name[control.event - 1];
-
-                if (!marked) {
-                        host_machine_dirty(true);
-                        marked = true;
-                }
-                host_machine_emit(slot[1], control.event, name, extra);
-                if (!control.queued && marked) {
-                        host_machine_dirty(false);
-                        marked = false;
-                }
-
-                if (spark_bind_is_stop(control.event) &&
-                    moonwater_bind_line(&host_machine.overlay, control.event)) {
-                        unsigned int stopping = control.event;
-
-                        host_machine_end_run();
-                        host_machine_dirty(false);
-                        host_machine_close(device);
-                        shell_stop(log, stopping == SPARK_BIND_POWEROFF
-                                            ? REBOOT_POWER_OFF
-                                            : REBOOT_RESTART);
-                        return HOST_MACHINE_STOPPED;
-                }
-        }
-
-        host_machine_dirty(false);
+        failed = rover_runner_run(device);
         host_machine_close(device);
-        return answer;
+        return failed;
 }
 
 #endif /* MOONWATER_CLI */
