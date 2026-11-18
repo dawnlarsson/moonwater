@@ -1297,7 +1297,8 @@ static fn rover_check_red(void)
 
                 for (positive k = 0; k < 17; k++)
                 {
-                        static const char tail[] = "\n\twhen battery.percent > 50%\n\tdo log up\n\n";
+                        //      The runner's: the kernel's loader takes at most 16 when rules (rover_kernel_fits).
+                        static const char tail[] = "\n\twhen battery.percent > 50%\n\tplace user\n\tdo log up\n\n";
 
                         memory_copy(rover_red_text + used, "rule w", 6);
                         used += 6;
@@ -1309,10 +1310,10 @@ static fn rover_check_red(void)
                 if (rover_compiled((const char address_to)rover_red_text))
                 {
                         memory_zero(&edge, sizeof(edge));
-                        (void)rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_KERNEL, hits, 16);
+                        (void)rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_RUNNER, hits, 16);
                         rover_set("battery.percent", 8000, null);
-                        positive first = rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_KERNEL, hits, 16);
-                        positive second = rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_KERNEL, hits, 16);
+                        positive first = rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_RUNNER, hits, 16);
+                        positive second = rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_RUNNER, hits, 16);
                         check("red: seventeen rising when rules in a room of 16 are told as 16 and then the 17th",
                               first == 16 && second == 1 && hits[0].rule == 16);
                         memory_zero(rover_page_store, sizeof(rover_page_store));
