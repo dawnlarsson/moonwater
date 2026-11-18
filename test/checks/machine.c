@@ -464,6 +464,29 @@ static fn machine_runner_children(void)
               !left && system_wait4_retry(-1, null, 1, null) < 0);
 }
 
+/*
+        The loader's set (rover_load_add): a file whose rule names clash with the files before it is left out by itself,
+        and the rest load, where one clash dropped every person's rule (R-compiler-8).
+*/
+static fn machine_load_clash(void)
+{
+        static const char first[] = "rule power\n\ton key power\n\tdo log one\n";
+        static const char again[] = "rule power\n\ton lid close\n\tdo log two\n";
+        static const char other[] = "rule lid\n\ton lid close\n\tdo log three\n";
+
+        rover_load_used = 0;
+        check("a file of rules goes into the set", rover_load_add((const p8 address_to)first, sizeof(first) - 1, "a", false));
+        check("a file with a rule of a name the set has is left out by itself",
+              !rover_load_add((const p8 address_to)again, sizeof(again) - 1, "b", false) &&
+                  rover_load_used == sizeof(first));
+        check("and the next file still goes in", rover_load_add((const p8 address_to)other, sizeof(other) - 1, "c", false));
+        rover_load_all.merge = true;
+        check("and the set compiles, with both rules",
+              rover_compile(&rover_load_all, rover_load_set, rover_load_used) && rover_load_all.rules == 2);
+        rover_load_all.merge = false;
+        rover_load_used = 0;
+}
+
 static fn machine_stop_self(void)
 {
         p8 held = host_machine_self;
@@ -1922,6 +1945,7 @@ b32 main(void)
         machine_pin_numbers();
         machine_run_scripts();
         machine_runner_children();
+        machine_load_clash();
         machine_sntp();
         machine_auto();
         machine_services();

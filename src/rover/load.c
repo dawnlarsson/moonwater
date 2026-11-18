@@ -141,8 +141,19 @@ static bool rover_load_add(const p8 address_to text, positive length, string_add
                 return false;
         }
         memory_copy(rover_load_set + rover_load_used, text, length);
-        rover_load_used += length;
-        rover_load_set[rover_load_used++] = '\n';
+        rover_load_set[rover_load_used + length] = '\n';
+        //      The set so far with this file must compile as one (two files with a rule of one name do not): one that does
+        //      not is left out by itself, and the rest still load, where one clash dropped every person's rule.
+        rover_load_all.merge = true;
+        bool fits = rover_compile(&rover_load_all, rover_load_set, rover_load_used + length + 1);
+        rover_load_all.merge = false;
+        if (!fits)
+        {
+                if (say)
+                        string_format(log_error, "rover: %s is left out: with the files before it, %s\n", said, rover_load_all.why);
+                return false;
+        }
+        rover_load_used += length + 1;
         return true;
 }
 
@@ -226,11 +237,19 @@ static bipolar rover_load_compile(bool say)
                         memory_copy(names[k], names[k - 1], sizeof(swap));
                         memory_copy(names[k - 1], swap, sizeof(swap));
                 }
+        //      The image's files first and the person's after, each pass by name, so a person's file that clashes with
+        //      the image's is the one left out, and the image's stand.
+        for (positive pass = 0; pass < 2; pass++)
         for (positive at = 0; at < count; at++)
         {
                 const char address_to image = null;
                 p8 path[160];
                 file_facts facts;
+                bool mine = person && string_join(path, sizeof(path), ROVER_PERSON_RULES "/", (string_address)names[at]) &&
+                            file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts);
+
+                if (mine != (pass == 1))
+                        continue;
 
                 for (positive k = 0; k < ROVER_IMAGE_FILES; k++)
                 {
@@ -240,8 +259,7 @@ static bipolar rover_load_compile(bool say)
                         if (string_equals((string_address)names[at], (string_address)name))
                                 image = text;
                 }
-                if (person && string_join(path, sizeof(path), ROVER_PERSON_RULES "/", (string_address)names[at]) &&
-                    file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
+                if (mine)
                 {
                         bipolar length = rover_load_read((string_address)path);
 
