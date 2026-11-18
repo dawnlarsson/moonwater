@@ -1844,47 +1844,174 @@ static unsigned int taskbar_accent(void)
 }
 
 /*
-        The moon's disc at rest, kept a frame for each step of its turn: the steps of one turn (`taskbar moon spin` seconds,
-        TASKBAR_MOON_STEPS a second) at one size and one look, so after the first turn a step is a copy of its square and no more. The disc
-        is drawn on its own square (UI_MOON_FULL_SQUARE), so what is behind it is no part of it. Up to TASKBAR_MOON_KEPT bytes; a moon
-        larger, grown, at a check's time or in ink is drawn each time.
+        The moon's disc at rest with its rim, a frame for each step of its turn (`taskbar moon spin` seconds, TASKBAR_MOON_STEPS a
+        second), made on a thread of its own (taskbar_moon_bake_run, at ordinary scheduling, nice 10) and never on the loop's: the loop
+        copies the step's frame and draws the clock over it. A step not made yet shows the nearest one before it that is; a look not
+        made at all is its first frame drawn on the loop once and the rest on the thread. Where every step of the first turn, and every
+        step of every turn of a moon too large to keep, was the sphere's light worked out on the loop (ui_moon, about 5 ms a step on
+        Ivy Bridge, five a second) and its rim lit on every step after (ui_moon_rim, a square root and a hue a pixel): the loop that
+        reads the keys and the mouse was busy with it 48 million instructions a second at idle (asm-x11's count on hasty-tail), and
+        a key that came then waited for it. Two looks are kept (the rim with the launcher up is white), each up to TASKBAR_MOON_KEPT
+        bytes. The disc is drawn on its own square (UI_MOON_FULL_SQUARE), so what is behind it is no part of it. While the thread
+        draws, the loop calls no ui_moon: the tables the sphere is lit from (ui_moon_map_for, ui_moon_sphere_for) are one for all.
 */
-#define TASKBAR_MOON_KEPT (8ul << 20)
+#define TASKBAR_MOON_KEPT (32ul << 20)
+#define TASKBAR_MOON_BAKES 2
 
-static unsigned int address_to taskbar_moon_kept(int size, unsigned int look, b32 address_to fresh)
+static struct taskbar_moon_bake
 {
-        static struct
+        unsigned int address_to frames; // period frames of size by size: the disc and its rim
+        unsigned char address_to have;  // a byte a frame, set (release) once the frame is drawn
+        positive bytes;
+        int size, period, from;         // from: the step the thread starts at
+        unsigned int rim, accent;
+        unsigned long used;
+} taskbar_bakes[TASKBAR_MOON_BAKES];
+static int taskbar_bake_running, taskbar_bake_at; // the thread draws into taskbar_bakes[taskbar_bake_at] (acquire/release)
+static int taskbar_bake_stop;                     // the loop asks the thread to end after the frame it draws (taskbar_moon_bake_halt)
+static thread address_to taskbar_bake_worker;
+static unsigned long taskbar_bake_uses;
+
+static void taskbar_moon_bake_frame(struct taskbar_moon_bake address_to b, int step)
+{
+        struct ui ui;
+        struct ui_moon_look look = {0xff0c0d10u, 0xfff7f5efu, 0, b->rim, UI_MOON_RIM | UI_MOON_FULL_SQUARE, 0};
+
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = b->frames + (positive)b->size * (positive)b->size * (positive)step;
+        ui.pitch = (unsigned long)b->size, ui.width = b->size, ui.height = b->size, ui.top = 0, ui.bottom = b->size;
+        ui_moon(&ui, 0, 0, b->size, UI_ONE / 2, (b64)step * UI_ONE / (b64)b->period, &look);
+        ui_moon_rim(&ui, 0, 0, b->size, b->accent, 1.2);
+        __atomic_store_n(&b->have[step], 1, __ATOMIC_RELEASE);
+}
+
+static fn taskbar_moon_bake_run(address_any context)
+{
+        struct taskbar_moon_bake address_to b = &taskbar_bakes[(long)context];
+
+        compositor_ordinary(10);
+        for (int k = 0; k < b->period; k++)
         {
-                unsigned int address_to frames;
-                unsigned char address_to have;
-                positive bytes;
-                int size, period;
-                unsigned int look;
-        } kept;
+                int step = (b->from + k) % b->period;
+
+                if (__atomic_load_n(&taskbar_bake_stop, __ATOMIC_ACQUIRE))
+                        break;
+                if (!__atomic_load_n(&b->have[step], __ATOMIC_ACQUIRE))
+                        taskbar_moon_bake_frame(b, step);
+        }
+        __atomic_store_n(&taskbar_bake_running, 0, __ATOMIC_RELEASE);
+}
+
+// The bake's thread ended after the frame it draws (one frame at the most, a few milliseconds): before the loop draws a moon itself (one
+// grown, clipped at the band's edge, or of a look with no frame made yet), since the sphere's tables are one for all. The thread is
+// started again on what is left by the next look at a moon at rest.
+static void taskbar_moon_bake_halt(void)
+{
+        if (!taskbar_bake_worker)
+                return;
+        __atomic_store_n(&taskbar_bake_stop, 1, __ATOMIC_RELEASE);
+        while (__atomic_load_n(&taskbar_bake_running, __ATOMIC_ACQUIRE))
+        {
+                positive nap[2] = {0, 50000};
+
+                compositor_call(syscall(nanosleep), (positive)nap, 0, 0, 0, 0, 0);
+        }
+        thread_join(taskbar_bake_worker);
+        taskbar_bake_worker = null;
+        __atomic_store_n(&taskbar_bake_stop, 0, __ATOMIC_RELEASE);
+}
+
+// Whether the bake's thread is drawing now: the loop calls no ui_moon while it is.
+static int taskbar_moon_baking(void)
+{
+        return __atomic_load_n(&taskbar_bake_running, __ATOMIC_ACQUIRE);
+}
+
+/*
+        The frame of this step of the moon at rest at size with rim and accent (the disc and its rim lit, size by size), or null: a look
+        not kept is given a slot (the one least lately used that the thread is not drawing), the step's frame, or the nearest made before
+        it, is the answer, and the thread is started on the look's frames still to make. Null when none of it is made and the thread is
+        drawing another, or the look cannot be kept (too large, a check's time).
+*/
+static const unsigned int address_to taskbar_moon_baked(int size, unsigned int rim, unsigned int accent)
+{
         int period = taskbar.spin * TASKBAR_MOON_STEPS;
         positive frame = (positive)size * (positive)size, bytes = frame * 4 * (positive)period + (positive)period;
-        long step = (long)(taskbar.moon_step % (period > 0 ? period : 1));
+        int step = (int)(taskbar.moon_step % (period > 0 ? period : 1)), at = -1, running = taskbar_moon_baking();
+        struct taskbar_moon_bake address_to b;
 
-        *fresh = 0;
         if (period <= 0 || size <= 0 || bytes > TASKBAR_MOON_KEPT || taskbar.moon_at)
                 return null;
-        if (kept.size != size || kept.period != period || kept.look != look || !kept.frames)
+        for (int k = 0; k < TASKBAR_MOON_BAKES && at < 0; k++)
+                if (taskbar_bakes[k].frames && taskbar_bakes[k].size == size && taskbar_bakes[k].period == period &&
+                    taskbar_bakes[k].rim == rim && taskbar_bakes[k].accent == accent)
+                        at = k;
+        if (at < 0)
         {
-                if (kept.frames)
-                        compositor_call(syscall(munmap), (positive)kept.frames, kept.bytes, 0, 0, 0, 0);
-                kept.frames = null;
+                for (int k = 0; k < TASKBAR_MOON_BAKES; k++)
+                        if (!(running && k == taskbar_bake_at) && (at < 0 || taskbar_bakes[k].used < taskbar_bakes[at].used))
+                                at = k;
+                if (at < 0)
+                        return null;
+                b = &taskbar_bakes[at];
+                if (b->frames)
+                        compositor_call(syscall(munmap), (positive)b->frames, b->bytes, 0, 0, 0, 0);
+                b->frames = null;
                 {
                         long got = ui_map(bytes);
 
                         if (got < 0 && got > -4096)
                                 return null;
-                        kept.frames = (unsigned int address_to)got, kept.have = (unsigned char address_to)(got + (long)(frame * 4 * (positive)period));
+                        b->frames = (unsigned int address_to)got, b->have = (unsigned char address_to)(got + (long)(frame * 4 * (positive)period));
                 }
-                kept.bytes = bytes, kept.size = size, kept.period = period, kept.look = look;
+                b->bytes = bytes, b->size = size, b->period = period, b->rim = rim, b->accent = accent;
         }
-        *fresh = !kept.have[step];
-        kept.have[step] = 1;
-        return kept.frames + frame * (positive)step;
+        b = &taskbar_bakes[at];
+        b->used = ++taskbar_bake_uses;
+        // A look with nothing made yet: its first frame drawn here, once (the thread, drawing another look, ended first).
+        if (!__atomic_load_n(&b->have[step], __ATOMIC_ACQUIRE))
+        {
+                int any = 0;
+
+                for (int k = 0; k < period && !any; k++)
+                        any = __atomic_load_n(&b->have[k], __ATOMIC_ACQUIRE);
+                if (!any)
+                {
+                        if (running)
+                                taskbar_moon_bake_halt(), running = 0;
+                        taskbar_moon_bake_frame(b, step);
+                }
+        }
+        // The rest on the thread, from the step after this one, while any is still to make.
+        if (!running)
+        {
+                int missing = 0;
+
+                for (int k = 0; k < period && !missing; k++)
+                        missing = !b->have[k];
+                if (missing)
+                {
+                        if (taskbar_bake_worker)
+                                thread_join(taskbar_bake_worker);
+                        taskbar_bake_worker = null;
+                        b->from = (step + 1) % period, taskbar_bake_at = at;
+                        __atomic_store_n(&taskbar_bake_running, 1, __ATOMIC_RELEASE);
+                        taskbar_bake_worker = thread_start(taskbar_moon_bake_run, (address_any)(long)at);
+                        // No thread to be had: the rest made here, as it was (a step at a time as the turn goes).
+                        if (!taskbar_bake_worker)
+                                __atomic_store_n(&taskbar_bake_running, 0, __ATOMIC_RELEASE);
+                }
+        }
+        for (int k = 0; k < period; k++)
+        {
+                int back = ((step - k) % period + period) % period;
+
+                if (__atomic_load_n(&b->have[back], __ATOMIC_ACQUIRE))
+                        return b->frames + frame * (positive)back;
+        }
+        taskbar_moon_bake_halt();
+        taskbar_moon_bake_frame(b, step);
+        return b->frames + frame * (positive)step;
 }
 
 // The arrangement ring of a slot or the moon: a thin ring of ink (its alpha in the top byte of alpha) a little in from the slot's edges,
@@ -1940,25 +2067,31 @@ static void taskbar_moon(const struct taskbar_view *view, const struct ui_tree a
                                 if (top + row >= 0 && top + row < ui.height && left + column >= 0 && left + column < ui.width)
                                         ui.pixels[(long)(top + row) * (long)ui.pitch + left + column] = ink;
                 ui_moon_paper(&ui, left, top, grown, turn, light ? 0 : UI_MOON_PAPER_DARK, 0);
+                // Lit at its rim as the wallpaper's moon is, by the glow's hues from the theme's accent (ui_moon_rim), a third stronger than it was.
+                ui_moon_rim(&ui, left, top, grown, taskbar_accent(), 1.2);
         }
         else
         {
-                b32 fresh = 0;
-                unsigned int address_to frame = grow > 0 || x < 0 || y < 0 || x + size > ui.width || y + size > ui.height ? null
-                                                                                                                          : taskbar_moon_kept(size, look.rim, &fresh);
+                // At rest, the step's frame with its rim, made on the thread (taskbar_moon_baked); grown, clipped or too large to keep,
+                // drawn here, the thread ended first.
+                const unsigned int address_to frame = grow > 0 || x < 0 || y < 0 || x + size > ui.width || y + size > ui.height
+                                                          ? null
+                                                          : taskbar_moon_baked(size, look.rim, taskbar_accent());
 
-                if (frame && !fresh)
+                if (frame)
+                {
                         for (int row = 0; row < size; row++)
                                 memory_copy(ui.pixels + (long)(y + row) * (long)ui.pitch + x, frame + row * size, (positive)size * 4);
+                        left = x, top = y, grown = size;
+                }
                 else
                 {
+                        taskbar_moon_bake_halt();
                         ui_moon(&ui, x, y, size, UI_ONE / 2, turn, &look);
-                        for (int row = 0; frame && row < size; row++)
-                                memory_copy(frame + row * size, ui.pixels + (long)(y + row) * (long)ui.pitch + x, (positive)size * 4);
+                        // Lit at its rim as the wallpaper's moon is, by the glow's hues from the theme's accent (ui_moon_rim), a third stronger than it was.
+                        ui_moon_rim(&ui, left, top, grown, taskbar_accent(), 1.2);
                 }
         }
-        // Lit at its rim as the wallpaper's moon is, by the glow's hues from the theme's accent (ui_moon_rim), a third stronger than it was.
-        ui_moon_rim(&ui, left, top, grown, taskbar_accent(), 1.2);
         x = left, y = top, size = grown;
         if (taskbar.clock_tray || taskbar.clock_tab || taskbar.clock_none || hours < 0 || !view->engine || !view->face)
                 return;
