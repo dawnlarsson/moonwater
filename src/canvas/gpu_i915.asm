@@ -1,7 +1,9 @@
 ; The Intel GPU's kernels, by hand: Gen9 (graphics version 9), SIMD16. Each kernel is written as its instruction words, four per
 ; instruction, the words in the order the EU fetches them: a `kernel NAME` line starts it, the words follow, comma separated, with
-; comments after a `;`. test/gpu_kernels.py --target intel-gen9 checks these words against Intel's own (IGT's gen9 fill, lib/gpgpu_fill.c)
-; and the build (build gpu-kernels) writes them to artifacts/gpu_i915_gen9.inc, which src/canvas/gpu.c includes.
+; comments after a `;`. The fill's words are IGT's gen9 fill (lib/gpgpu_fill.c). The other kernels are written in Gen9 assembly as
+; src/canvas/gpu_i915_<op>.iga (assembled with iga64 -a -p=9, which gives these words). test/gpu_kernels.py --target intel-gen9 holds every
+; kernel to its literal copy of these words; `build gpu-i915` writes them to artifacts/gpu_i915_gen9.inc, which src/canvas/gpu.c includes,
+; and `test/gpu_kernels.py --print-intel` writes the same bytes.
 ;
 ; fill (op 1): d[y * dp + x] = v for x below w, in bytes, 16 bytes a block. The compositor's fill of a 32-bit pixel is the same
 ; fill in bytes: a surface of 4 * w bytes at 4 * dp bytes a row, with the colour's dword as the payload (a dword is a pixel,

@@ -263,6 +263,10 @@ static void gpu_i915_set_rows(void)
                 check("gpu i915 scene: no records is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 a->count = 16385;
                 check("gpu i915 scene: more records than the surface's height holds is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->w = 7;
+                check("gpu i915 scene: a rectangle 7 pixels wide (not a multiple of 4) is refused (0 words): its last block would be dropped",
+                      gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->w = 256;
                 a->count = 300;
                 check("gpu i915 scene: records that run past the GPU buffer are refused (0 words), not read", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 a->count = 2, a->op = 6;
