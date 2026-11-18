@@ -1669,22 +1669,27 @@ static void gpu_maps_reset(void)
         gpu_map_count = 0, gpu_map_next = GPU_VA_MAPS;
 }
 
+#define GPU_IMPORT_GUARD 0x100000ull // the addresses kept clear on either side of an import (gpu_place_aligned)
 // Addresses for bytes, none of a map's or an import's that is held: after the last ones handed out, or, where they would end past GPU_VA_END (a long
-// session's maps made and let go of), the first gap from the start; 0 for none.
-static positive gpu_place_aligned(positive bytes, positive align)
+// session's maps made and let go of), the first gap from the start; 0 for none. guard is the space kept clear on either side of what is placed, and every
+// held import has GPU_IMPORT_GUARD clear on either side of it too: a client's picture the card reads by its layout may be read a little past its
+// buffer (gpu_amd_image_fits), and that read is to find no page there (a fault the hang's blame names), never another buffer's or the compositor's.
+static positive gpu_place_aligned(positive bytes, positive align, positive guard)
 {
-        positive at = gpu_map_next + bytes <= GPU_VA_END ? gpu_map_next : GPU_VA_MAPS;
+        positive at = gpu_map_next + guard + bytes <= GPU_VA_END ? gpu_map_next + guard : GPU_VA_MAPS + guard;
 
         at = (at + align - 1) & ~(align - 1);
         for (unsigned int i = 0; i < gpu_map_count + gpu.imports; i++)
         {
-                positive from = i < gpu_map_count ? gpu_maps[i].va : gpu.imported_va[i - gpu_map_count];
-                positive to = from + (i < gpu_map_count ? gpu_maps[i].bytes : gpu.imported_bytes[i - gpu_map_count]); // a forgotten map keeps its span
+                b32 map = i < gpu_map_count;
+                positive from = map ? gpu_maps[i].va : gpu.imported_va[i - gpu_map_count];
+                positive to = from + (map ? gpu_maps[i].bytes : gpu.imported_bytes[i - gpu_map_count]); // a forgotten map keeps its span
+                positive gap = guard + (map ? 0 : GPU_IMPORT_GUARD);
 
-                if (at < to && from < at + bytes)
-                        at = (to + align - 1) & ~(align - 1), i = ~0u; // past it, and each held one looked at again
+                if (at < to + gap && from < at + bytes + gap)
+                        at = (to + gap + align - 1) & ~(align - 1), i = ~0u; // past it, and each held one looked at again
         }
-        return at + bytes <= GPU_VA_END ? at : 0;
+        return at + bytes + guard <= GPU_VA_END ? at : 0;
 }
 
 // Where an import is placed: at a whole 64 KiB. A client's tiled buffer is laid out in blocks of 64 KiB whose pipe and bank bits are the address's own
@@ -1901,7 +1906,7 @@ static b32 gpu_map_try(const void *addr, positive size, b32 written)
         }
         if (gpu_map_count == GPU_MAPS)
                 return gpu_map_why = 1, false;
-        if (!(at = gpu_place_aligned(to - from, 4096)))
+        if (!(at = gpu_place_aligned(to - from, 4096, 0)))
                 return gpu_map_why = 2, false;
         if (first && gpu_map_dmabuf(&region, from, to, at, written))
                 return true;
@@ -2068,7 +2073,7 @@ static positive gpu_import_at(unsigned int handle, positive bytes)
         positive whole = (bytes + 4095) & ~4095ull, at;
 
         // Room for one more import: the table grown (the memory refuses, and the import is refused as a full table's was).
-        at = gpu_imports_room(gpu.imports + 1) ? gpu_place_aligned(whole, GPU_IMPORT_ALIGN) : 0;
+        at = gpu_imports_room(gpu.imports + 1) ? gpu_place_aligned(whole, GPU_IMPORT_ALIGN, GPU_IMPORT_GUARD) : 0;
         if (!at || gpu_backend->bind(handle, at, whole, true) != 0)
                 return gpu_close(handle), 0;
         gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = whole, gpu.imported_dead[gpu.imports] = 0, gpu.imported_holds[gpu.imports] = 1;
@@ -3437,6 +3442,26 @@ static unsigned int gpu_amd_image(unsigned int desc[8], positive va, positive me
         desc[6] = dcc ? 2u << 15 | block << 17 | piped << 19 | 1u << 21 | 1u << 22 | (unsigned int)(meta >> 8 & 0xff) << 24 : 0;
         desc[7] = dcc ? (unsigned int)(meta >> 16) : 0;
         return GPU_IMAGE_MADE | (unorm ? 0 : GPU_IMAGE_RAW | (swapped ? GPU_IMAGE_SWAP : 0));
+}
+
+/*
+        Whether a picture gpu_amd_image makes a resource of lies inside the bytes of the buffer it is read from: the texture unit reads by the
+        layout, not by the buffer, so a client's buffer that is smaller than its layout has the card read past its end, into the gap after the
+        import (a fault and a ring reset) or into whatever the next address holds. width is the pitch in pixels and height the rows, as
+        gpu_amd_image takes them, at offset in the buffer; meta the metadata's offset where the modifier has DCC. A 64 KiB tile of four bytes a pixel
+        is 128 by 128 pixels whatever its swizzle (the pipe and bank xor of the _X modes moves bytes inside the block), and the pitch is whole blocks,
+        so the rows are read in blocks of 128: the picture is width * 4 * the rows rounded up to 128, and linear is width * 4 * its rows. DCC keeps one
+        key byte for each 256 bytes of the picture (MAX_UNCOMPRESSED_BLOCK_SIZE 256, which gpu_amd_image holds the block to), so the metadata is at
+        least the picture's bytes over 256: a buffer shorter than that is refused. The metadata's own layout rounds to its blocks, which this does not
+        know, so what it may read past that is kept off every other buffer by the clear addresses on either side of each import (GPU_IMPORT_GUARD).
+*/
+static b32 gpu_amd_image_fits(positive bytes, positive offset, positive meta, unsigned int width, unsigned int height, p64 modifier)
+{
+        positive picture = (positive)width * 4 * (modifier ? ((positive)height + 127) & ~127ull : (positive)height);
+
+        if (offset > bytes || picture > bytes - offset)
+                return false;
+        return !(modifier >> 13 & 1) || (meta <= bytes && (picture + 255) / 256 <= bytes - meta);
 }
 
 // Whether the card reads a client's picture of this modifier now: the texture unit's read drew its test at this start, and the modifier is one

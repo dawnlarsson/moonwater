@@ -2593,7 +2593,7 @@ static void compositor_wl_tiled_settle(void)
         dma-buf's is. The job is waited for (a card still busy is waited for first: the processor cannot read this picture, so there is no other copy to
         make). A blended picture (a subsurface laid over its window's) is laid over as the processor lays one (the kernel's over). Refused, and counted
         (compositor_wl.tiled_refused): a card not composing, a transform, a plane in another
-        buffer, an import or a resource refused, a job that failed. A refused rectangle is not laid: the window keeps what it showed there.
+        buffer, an import or a resource refused, a buffer smaller than its picture's layout (gpu_amd_image_fits), a job that failed. A refused rectangle is not laid: the window keeps what it showed there.
 */
 static int compositor_wl_card_image(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch, long dx, long dy, long sx,
                                     long sy, long w, long h)
@@ -2659,6 +2659,8 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
         if (meta_plane)
                 meta = compositor_wl.source[row].va + (positive)picture->plane_offset[meta_plane];
         if ((stride & 3) || (positive)picture->plane_offset[0] >= (positive)bytes || (meta_plane && (positive)picture->plane_offset[meta_plane] >= (positive)bytes) ||
+            !gpu_amd_image_fits((positive)bytes, (positive)picture->plane_offset[0], meta_plane ? (positive)picture->plane_offset[meta_plane] : 0,
+                                (unsigned int)(stride / 4), (unsigned int)picture->height, (p64)picture->modifier) ||
             !(kind = gpu_amd_image(desc, base, meta, (unsigned int)(stride / 4), (unsigned int)picture->height, (p64)picture->modifier,
                                    compositor_wl_fourcc_swapped(picture->fourcc), false)))
                 return compositor_wl_tiled_refused(5);

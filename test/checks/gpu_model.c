@@ -694,6 +694,16 @@ b32 main()
                           desc[7] == 0x23 && (desc[3] >> 20 & 0x1f) == 27 && (desc[1] >> 20 & 0x1ff) == 56 &&
                           gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0200000000401b03ull, true, false) == (GPU_IMAGE_MADE | GPU_IMAGE_RAW | GPU_IMAGE_SWAP) &&
                           (desc[1] >> 20 & 0x1ff) == 20 && (desc[3] & 0xfff) == 4);
+                // 1920 by 1080 in 64K_R_X: 15 blocks a row of blocks, 9 rows of them (1080 up to 1152), 8,847,360 bytes; its DCC keys 34,560.
+                check("gpu model: gpu_amd_image_fits holds a tiled picture to its 64 KiB blocks' rows (1080 rows read as 1152), linear to its rows, and DCC's "
+                      "metadata to a key byte a 256, past an offset, and refuses one byte short of each",
+                      gpu_amd_image_fits(8847360, 0, 0, 1920, 1080, 0x0200000000401b03ull) && !gpu_amd_image_fits(8847359, 0, 0, 1920, 1080, 0x0200000000401b03ull) &&
+                          !gpu_amd_image_fits(1920 * 4 * 1080, 0, 0, 1920, 1080, 0x0200000000401b03ull) && gpu_amd_image_fits(1920 * 4 * 1080, 0, 0, 1920, 1080, 0) &&
+                          !gpu_amd_image_fits(1920 * 4 * 1080 - 1, 0, 0, 1920, 1080, 0) && gpu_amd_image_fits(8847360 + 4096, 4096, 0, 1920, 1080, 0x0200000000401b03ull) &&
+                          !gpu_amd_image_fits(8847360 + 4095, 4096, 0, 1920, 1080, 0x0200000000401b03ull) &&
+                          gpu_amd_image_fits(8847360 + 34560, 0, 8847360, 1920, 1080, 0x0200000000537b03ull) &&
+                          !gpu_amd_image_fits(8847360 + 34559, 0, 8847360, 1920, 1080, 0x0200000000537b03ull) &&
+                          !gpu_amd_image_fits(8847360, 0, 8847360 + 1, 1920, 1080, 0x0200000000537b03ull) && !gpu_amd_image_fits(100, 200, 0, 128, 1, 0));
                 gpu_model_card_reset();
         }
 
