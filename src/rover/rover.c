@@ -1223,8 +1223,9 @@ static positive rover_edges(const struct rover_table address_to table, struct ro
         struct rover_span span = table->index[0];
         const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page, given[1] ? given[1] : rover_zero_page, given[2] ? given[2] : rover_zero_page};
 
-        for (positive at = span.first; at < (positive)span.first + (span.count & ROVER_SPAN_COUNT) && made < room;
-             at++)
+        //      Room caps the hits and never the state: a rule past it keeps the edge it had, so it is reported at the next
+        //      ask rather than marked as told and lost (the 17th of 17 when rules was never fired again).
+        for (positive at = span.first; at < (positive)span.first + (span.count & ROVER_SPAN_COUNT); at++)
         {
                 p16 number = table->order[at];
                 const struct rover_rule address_to rule = table->rule + number;
@@ -1235,6 +1236,8 @@ static positive rover_edges(const struct rover_table address_to table, struct ro
                         continue;
                 held = rover_holds(table, rule, event, pages) > 0;
                 if (held == run->edge)
+                        continue;
+                if (made == room && (held || rule->otherwise))
                         continue;
                 run->edge = (p8)held;
                 if ((!held && !rule->otherwise) || !rover_may(rule, run, event->when))

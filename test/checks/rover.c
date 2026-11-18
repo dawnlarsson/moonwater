@@ -1274,6 +1274,38 @@ static fn rover_check_red(void)
         check("red: place kernel on a when rule over the clock is refused with the reason",
               !rover_compiled("rule night\n\twhen clock between 22:00 06:00\n\tplace kernel\n\tdo log night\n") &&
                   rover_holds_why("runner's, which asks it each minute"));
+        //      R-table-6: room caps the hits, not the state. Seventeen when rules rise at once into a room of 16: the 17th
+        //      keeps its edge and is told at the next ask.
+        {
+                positive used = 0;
+                struct rover_event edge;
+                struct rover_hit hits[16];
+
+                for (positive k = 0; k < 17; k++)
+                {
+                        static const char tail[] = "\n\twhen battery.percent > 50%\n\tdo log up\n\n";
+
+                        memory_copy(rover_red_text + used, "rule w", 6);
+                        used += 6;
+                        used += positive_into_string(rover_red_text + used, k);
+                        memory_copy(rover_red_text + used, tail, sizeof(tail) - 1);
+                        used += sizeof(tail) - 1;
+                }
+                rover_red_text[used] = 0;
+                if (rover_compiled((const char address_to)rover_red_text))
+                {
+                        memory_zero(&edge, sizeof(edge));
+                        (void)rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_KERNEL, hits, 16);
+                        rover_set("battery.percent", 8000, null);
+                        positive first = rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_KERNEL, hits, 16);
+                        positive second = rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_KERNEL, hits, 16);
+                        check("red: seventeen rising when rules in a room of 16 are told as 16 and then the 17th",
+                              first == 16 && second == 1 && hits[0].rule == 16);
+                        memory_zero(rover_page_store, sizeof(rover_page_store));
+                }
+                else
+                        check("red: seventeen when rules compile", false);
+        }
         //      R-table-10: a service's clock if line reads the turn's time, not the epoch.
         if (rover_compiled("service night\n\trun /night\n\tif clock between 22:00 06:00\n"))
                 check("red: a service over the clock is wanted at 23:00 and not at noon",

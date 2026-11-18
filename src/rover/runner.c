@@ -961,9 +961,11 @@ static fn rover_runner_do(const struct rover_event address_to event, const struc
 
 //      An event, asked of the runner's rules and the desktop's (the compositor asks none itself yet), and then the when
 //      rules of what it changed; the kernel's rules too when the kernel has no table.
+//      As many hits as the table has rules, so no rule of an event, on or when, is cut by the room (the kernel's own
+//      room is its own).
 static fn rover_runner_fire(const struct rover_event address_to event, p64 changed)
 {
-        struct rover_hit hits[16];
+        static struct rover_hit hits[ROVER_RULES_MOST];
 
         for (p8 place = 0; place < ROVER_PLACES; place++)
         {
@@ -971,7 +973,7 @@ static fn rover_runner_fire(const struct rover_event address_to event, p64 chang
 
                 if (place == ROVER_KERNEL && rover_runner.table)
                         continue;
-                made = rover_fire(&rover_runner.view, rover_runner.runs, rover_runner.pages, event, place, hits, 16);
+                made = rover_fire(&rover_runner.view, rover_runner.runs, rover_runner.pages, event, place, hits, ROVER_RULES_MOST);
                 for (positive at = 0; at < made; at++)
                         rover_runner_do(event, &hits[at], false);
                 if (changed)
@@ -981,7 +983,7 @@ static fn rover_runner_fire(const struct rover_event address_to event, p64 chang
                         edge.id = 0;
                         edge.count = 0;
                         made = rover_edges(&rover_runner.view, rover_runner.runs, rover_runner.pages, changed, &edge, place,
-                                           hits, 16);
+                                           hits, ROVER_RULES_MOST);
                         for (positive at = 0; at < made; at++)
                                 rover_runner_do(&edge, &hits[at], false);
                 }
