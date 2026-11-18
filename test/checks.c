@@ -10091,7 +10091,7 @@ static AUDIO_C_UNUSED long audio_c_window_peaks(float *out0, float *out1, const 
 #include "checks/coverage.c" // the hook a coverage build calls at each basic block
 #include "checks/gpu_model.c" // the model of the card held to the card and to itself, and the GPU kit's rows drawn on it
 #include "checks/routine.c" // the routine driver's benchmark
-#include "checks/rover.c" // rover, the rules: its schema, the round trip, refusals, the load-time check and the evaluator
+#include "checks/rover.c" // rover, the rules: its schema, the round trip, refusals, the load-time check and the evaluator, and its nanoseconds per event
 #endif
 
 #include "checks/libdiff.c" // the library's memory routines held to C (libdiff)

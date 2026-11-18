@@ -2,18 +2,19 @@
         test/checks/rover.c: rover, Moonwater's rules (src/rover).
 
         A run of test/checks.c, which includes this file where the run stood: it is compiled only as part of that file,
-        with its statics and macros, and never on its own. It is freestanding, built as test/checks.c is:
+        with its statics and macros, and never on its own. Both sections are freestanding, built as test/checks.c is:
         gcc -O2 -static -nostdlib -nostartfiles -march=x86-64 -w -DCHECK_rover -fwhole-program -o OUT test/checks.c
-        (sh test/run rover builds it with its freestanding_check).
+        (sh test/run rover builds it with its freestanding_check), and -DBENCH_rover the same way for the timing.
 
         CHECK_rover holds the language to src/rover/README.md: the schema against the code it was generated from, the
         round trip (a canonical text prints back byte for byte and its table compiles back byte for byte), the one
         spelling of every literal, a refusal with its line for each thing the language is not, the load-time check
         against every byte of a table flipped, and the evaluator's answers: filters, else, and and or, between over
-        midnight, calls, limit, once, off, when edges and where each rule is placed.
+        midnight, calls, limit, once, off, when edges and where each rule is placed. BENCH_rover is nanoseconds per
+        event for the rules a machine has, and what loading a file costs.
 */
 
-#ifdef CHECK_rover
+#if defined(CHECK_rover) || defined(BENCH_rover)
 #include "../../src/lib.util.c"
 #include "../../src/moonwater/spark.c"
 #define SHARED_counted
@@ -675,3 +676,130 @@ b32 main(void)
 }
 
 #endif /* CHECK_rover */
+
+
+#ifdef BENCH_rover
+/*
+        Nanoseconds per event, the best of seven runs of a million events
+        each, for the shapes of rule a machine has: a kernel event with two
+        conditions, a chord among thirty-two, a pattern and a call on a
+        window's name, a when edge, and an event no rule has.
+*/
+static char rover_bench_text[16384];
+
+static positive rover_bench(const struct rover_event address_to event, p8 place, bool edges, p64 changed)
+{
+        struct rover_hit hits[8];
+        positive best = ~(positive)0;
+        volatile positive sink = 0;
+
+        for (positive trial = 0; trial < 7; trial++)
+        {
+                positive start = clock_monotonic_nanoseconds(), made = 0;
+
+                for (positive at = 0; at < 1000000; at++)
+                {
+                        if (edges)
+                        {
+                                rover_runs[0].edge = 0;
+                                made += rover_edges(&rover_view, rover_runs, rover_pages, changed, event, place, hits, 8);
+                        }
+                        else
+                                made += rover_fire(&rover_view, rover_runs, rover_pages, event, place, hits, 8);
+                }
+                positive took = clock_monotonic_nanoseconds() - start;
+                sink += made;
+                if (took < best)
+                        best = took;
+        }
+        (void)sink;
+        return best; // per million events: picoseconds a thousand per event, i.e. ns * 1000
+}
+
+static fn rover_bench_say(const char address_to name, positive per_million)
+{
+        string_format(log, "  %s: %p.%p%p ns per event\n", name, per_million / 1000000,
+                      per_million / 100000 % 10, per_million / 10000 % 10);
+        log_flush();
+}
+
+b32 main(void)
+{
+        struct rover_event event;
+        struct rover_text text = {(p8 address_to)rover_bench_text, 0, sizeof(rover_bench_text) - 1, false};
+        static const char address_to const keys = "abcdefghijklmnopqrstuvwxyz012345";
+
+        memory_zero(rover_page_store, sizeof(rover_page_store));
+        rover_set("power.source", 1, null);
+
+        rover_compiled("rule lid-sleep\n\ton lid close\n\tif power.source == battery\n\tif lid == closed\n"
+                       "\tdo suspend\n\telse\n\tdo backlight 10%\n");
+        rover_set("lid", 1, null);
+        event = rover_event_of("lid close", null);
+        rover_bench_say("lid close, two conditions, kernel", rover_bench(&event, ROVER_KERNEL, false, 0));
+
+        for (positive at = 0; at < 32; at++)
+        {
+                p8 key[2] = {(p8)keys[at], 0};
+
+                rover_puts(&text, "rule chord-");
+                rover_put_number(&text, (b64)at);
+                rover_puts(&text, "\n\ton chord ctrl+alt+");
+                rover_puts(&text, (const char address_to)key);
+                rover_puts(&text, "\n\tdo open terminal\n\n");
+        }
+        rover_bench_text[text.used] = 0;
+        rover_compiled(rover_bench_text);
+        event = rover_event_of("chord", null);
+        event.count = 1;
+        event.field[0].number = (b64)(ROVER_CHORD_CTRL | ROVER_CHORD_ALT) << 16 | 3; // ctrl+alt+2, the 30th rule
+        rover_bench_say("a chord among 32 rules, desktop", rover_bench(&event, ROVER_DESKTOP, false, 0));
+
+        rover_compiled("rule game\n\ton fullscreen on steam_app_*\n\tif string_length($app) > 4\n\tdo latency 20us\n");
+        event = rover_event_of("fullscreen on", "steam_app_1172470");
+        rover_bench_say("a pattern and a call on the app, desktop", rover_bench(&event, ROVER_DESKTOP, false, 0));
+
+        rover_compiled("rule low\n\twhen battery.percent < 10% and power.source == battery\n\tdo suspend\n");
+        rover_set("battery.percent", 500, null);
+        event = rover_event_of("", null);
+        rover_bench_say("a when edge, kernel", rover_bench(&event, ROVER_KERNEL, true, 1ull << 2));
+
+        event = rover_event_of("mute", null);
+        rover_bench_say("an event no rule has", rover_bench(&event, ROVER_KERNEL, false, 0));
+
+        //      The load, which happens once a file and never at an event: compile, check, and print back.
+        {
+                static const char address_to const file =
+                    "rule lid-sleep\n\tabout \"Sleep when the lid closes on battery\"\n\ton lid close\n"
+                    "\tif power.source == battery\n\tif display.external == 0\n\tdo suspend\n\telse\n\tdo display off\n\n"
+                    "rule game-latency\n\ton fullscreen on steam_app_*\n\tdo latency 20us\n\n"
+                    "rule late-dim\n\ton lid open\n\tif clock between 22:00 06:00\n\tdo backlight 30%\n\n"
+                    "rule power\n\ton key power\n\tplace kernel\n\tdo poweroff\n";
+                positive best = ~(positive)0, check_best = ~(positive)0;
+                struct rover_table view;
+                struct rover_refusal refusal;
+
+                for (positive trial = 0; trial < 7; trial++)
+                {
+                        positive start = clock_monotonic_nanoseconds();
+
+                        for (positive at = 0; at < 1000; at++)
+                                rover_compile(&rover_one, (const p8 address_to)file, string_length((string_address)file));
+                        positive took = clock_monotonic_nanoseconds() - start;
+                        if (took < best)
+                                best = took;
+                        start = clock_monotonic_nanoseconds();
+                        for (positive at = 0; at < 1000; at++)
+                                rover_check(rover_built(&rover_one), rover_one.size, &view, &refusal);
+                        took = clock_monotonic_nanoseconds() - start;
+                        if (took < check_best)
+                                check_best = took;
+                }
+                string_format(log, "  compiling the README's four rules (%p bytes of table): %p.%p us, its check alone %p.%p us\n",
+                              rover_one.size, best / 1000000, best / 100000 % 10, check_best / 1000000,
+                              check_best / 100000 % 10);
+                log_flush();
+        }
+        return 0;
+}
+#endif /* BENCH_rover */
