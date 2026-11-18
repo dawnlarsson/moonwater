@@ -464,7 +464,9 @@ The compiler places every rule, and the table says where.
 2. A desktop event's rule runs in the **desktop**, in the compositor, which
    maps the kernel's page too.
 3. A `when` rule over kernel states only runs in the kernel; over any
-   desktop state, in the desktop.
+   desktop state, in the desktop; over the clock or the weekday, in the
+   runner, which asks it again at every minute (and at every new day for
+   the weekday), since no page changes with the time.
 4. Anything else, and every `cue` rule, runs in the **runner**, the
    userspace end of the kernel's ring: a kernel event whose rule reads a
    desktop state is handed to the runner, which evaluates it there.

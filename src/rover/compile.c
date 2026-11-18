@@ -1453,6 +1453,16 @@ static bool rover_place(struct rover_build address_to build, struct rover_rule a
                                     !rover_reads_page(build, rule, ROVER_PAGE_DESKTOP)
                               ? ROVER_RUNNER
                               : ROVER_DESKTOP;
+        //      A when rule over the clock or the weekday is the runner's: it is the one that keeps the clock, and its minute
+        //      is the change such a rule is asked at (the kernel's page never changes with the time).
+        if (!event && (rule->reads & (ROVER_READS_CLOCK | ROVER_READS_WEEKDAY)))
+        {
+                if (build->want == 1)
+                        return rover_refused(build, "place kernel, but a when rule over the clock or the weekday is the "
+                                                    "runner's, which asks it each minute",
+                                             null, null);
+                source = ROVER_RUNNER;
+        }
         if (build->want == 1 && (source != ROVER_KERNEL || blocked))
         {
                 if (source != ROVER_KERNEL && event)

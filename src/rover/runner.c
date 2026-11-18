@@ -627,7 +627,7 @@ static fn rover_runner_services(void)
         {
                 const struct rover_service address_to service = rover_runner.view.service + which;
                 struct rover_running address_to running = &rover_runner.service[which];
-                bool wanted = rover_service_wanted(&rover_runner.view, which, rover_runner.pages) && rover_runner_needs_up(which);
+                bool wanted = rover_service_wanted(&rover_runner.view, which, rover_runner.pages, rover_runner_realtime()) && rover_runner_needs_up(which);
 
                 if (running->pid && !wanted)
                         rover_runner_stop(which);
@@ -1289,8 +1289,16 @@ static fn rover_runner_clocks(p64 now)
                 }
         if (minute != rover_runner.minute)
         {
+                struct rover_event edge;
+                bool day = rover_runner.minute / 1440 != minute / 1440;
+
                 rover_runner.minute = minute;
                 rover_runner_post(103, null, 0, rover_floor_mod(zoned, 86400) / 60);
+                //      The clock moved: the when rules over it (and over the weekday, at a new day) asked again.
+                memory_zero(&edge, sizeof(edge));
+                edge.when = now;
+                edge.realtime = realtime;
+                rover_runner_fire(&edge, ROVER_READS_CLOCK | (day ? ROVER_READS_WEEKDAY : 0));
         }
 }
 

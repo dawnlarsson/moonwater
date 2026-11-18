@@ -831,13 +831,13 @@ static fn rover_check_evaluator(void)
                           rover_bytes_are(rover_view.pool + rover_view.argument[compositor->argument + 3].index + 2, 9,
                                           "two words"));
                 rover_set("canvas", 0, null);
-                check("a service whose if does not hold is not wanted", !rover_service_wanted(&rover_view, 0, rover_pages));
+                check("a service whose if does not hold is not wanted", !rover_service_wanted(&rover_view, 0, rover_pages, 0));
                 rover_set("canvas", 1, null);
-                check("and is when it holds", rover_service_wanted(&rover_view, 0, rover_pages));
-                check("an if over two pages: no screen, not wanted", !rover_service_wanted(&rover_view, 1, rover_pages));
+                check("and is when it holds", rover_service_wanted(&rover_view, 0, rover_pages, 0));
+                check("an if over two pages: no screen, not wanted", !rover_service_wanted(&rover_view, 1, rover_pages, 0));
                 rover_set("display.count", 1, null);
-                check("a screen, wanted", rover_service_wanted(&rover_view, 1, rover_pages));
-                check("a service that is off is never wanted", !rover_service_wanted(&rover_view, 2, rover_pages));
+                check("a screen, wanted", rover_service_wanted(&rover_view, 1, rover_pages, 0));
+                check("a service that is off is never wanted", !rover_service_wanted(&rover_view, 2, rover_pages, 0));
                 rover_set("canvas", 0, null);
                 rover_set("display.count", 0, null);
                 struct rover_event failed = rover_event_of("service failed", "compositor");
@@ -1103,13 +1103,13 @@ static fn rover_check_examples(void)
                 check("the desktop example's four services, the compositor needing the bus",
                       rover_view.head->services == 4 && rover_view.service[3].need[0] == 1);
                 rover_set("canvas", 1, null);
-                check("the compositor is wanted with Canvas on", rover_service_wanted(&rover_view, 3, rover_pages));
+                check("the compositor is wanted with Canvas on", rover_service_wanted(&rover_view, 3, rover_pages, 0));
                 rover_set("boot.desktop", 0, "none");
-                check("and not with moonwater.desktop=none", !rover_service_wanted(&rover_view, 3, rover_pages));
+                check("and not with moonwater.desktop=none", !rover_service_wanted(&rover_view, 3, rover_pages, 0));
                 check("the sound server is not wanted with its setting off",
-                      !rover_service_wanted(&rover_view, 2, rover_pages));
+                      !rover_service_wanted(&rover_view, 2, rover_pages, 0));
                 rover_set("setting.audio.server", 1, null);
-                check("and is with it on", rover_service_wanted(&rover_view, 2, rover_pages));
+                check("and is with it on", rover_service_wanted(&rover_view, 2, rover_pages, 0));
                 memory_zero(rover_page_store, sizeof(rover_page_store));
         }
         if (rover_compiled(rover_image_buttons))
@@ -1255,6 +1255,32 @@ static fn rover_check_red(void)
         check("red: a duration of a nanosecond past a second prints as what reads back",
               rover_round("rule a\n\ton lid close\n\tdo latency 1.000000001s\n") &&
                   rover_round("rule a\n\tevery 1.000000001s\n\tdo log x\n"));
+        //      R-table-7: a when rule over the clock is the runner's, asked at each minute (the change the runner posts).
+        if (rover_compiled("rule night\n\twhen clock between 22:00 06:00\n\tdo log night\n"))
+        {
+                struct rover_event edge;
+                struct rover_hit hits[4];
+
+                check("red: a when rule over the clock is placed in the runner", rover_view.rule[0].place == ROVER_RUNNER);
+                memory_zero(&edge, sizeof(edge));
+                edge.realtime = 12 * 3600; // noon, the first of January 1970
+                (void)rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_RUNNER, hits, 4);
+                edge.realtime = 23 * 3600;
+                check("red: and the clock's minute change makes it fire at 23:00",
+                      rover_edges(&rover_view, rover_runs, rover_pages, ROVER_READS_CLOCK, &edge, ROVER_RUNNER, hits, 4) == 1);
+        }
+        else
+                check("red: a when rule over the clock compiles", false);
+        check("red: place kernel on a when rule over the clock is refused with the reason",
+              !rover_compiled("rule night\n\twhen clock between 22:00 06:00\n\tplace kernel\n\tdo log night\n") &&
+                  rover_holds_why("runner's, which asks it each minute"));
+        //      R-table-10: a service's clock if line reads the turn's time, not the epoch.
+        if (rover_compiled("service night\n\trun /night\n\tif clock between 22:00 06:00\n"))
+                check("red: a service over the clock is wanted at 23:00 and not at noon",
+                      rover_service_wanted(&rover_view, 0, rover_pages, 23 * 3600) &&
+                          !rover_service_wanted(&rover_view, 0, rover_pages, 12 * 3600));
+        else
+                check("red: a service over the clock compiles", false);
         check("red: a call's quoted argument with a backslash prints as it was read",
               rover_round("rule a\n\ton window opened\n\tif string_length(\"a\\\\b\") > 1\n\tdo log x\n"));
 }

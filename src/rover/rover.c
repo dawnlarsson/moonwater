@@ -1698,11 +1698,12 @@ static const char address_to rover_service_check(const struct rover_table addres
 
 /*
         Whether a service is wanted now: not off, and its if lines hold over
-        the pages. What the runner asks when a state changes; a kernel build
-        has no services to run, and keeps it unused.
+        the pages at realtime (the turn's seconds since the epoch, which a
+        clock or weekday if line reads). What the runner asks every turn; a
+        kernel build has no services to run, and keeps it unused.
 */
 static __attribute__((unused)) bool rover_service_wanted(const struct rover_table address_to table, positive which,
-                                 const p8 address_to const address_to given)
+                                 const p8 address_to const address_to given, b64 realtime)
 {
         const struct rover_service address_to service = table->service + which;
         const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page, given[1] ? given[1] : rover_zero_page, given[2] ? given[2] : rover_zero_page};
@@ -1713,6 +1714,7 @@ static __attribute__((unused)) bool rover_service_wanted(const struct rover_tabl
                 return false;
         memory_zero(&rule, sizeof(rule));
         memory_zero(&none, sizeof(none));
+        none.realtime = realtime;
         rule.comparison = service->comparison;
         rule.comparisons = service->comparisons;
         rule.flags = ROVER_RULE_WHEN;
