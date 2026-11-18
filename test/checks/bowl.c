@@ -841,7 +841,8 @@ static fn profiles(void)
                 {
                         if (strstr(*line, "kscreenlockerrc") && strstr(*line, "Autolock=false"))
                                 locker = at + 1;
-                        if (strstr(*line, "pam.d/kde") && strstr(*line, "pam_permit"))
+                        if (strstr(*line, "pam.d/kde") && strstr(*line, "pam_permit") &&
+                            string_has_prefix(*line, "bowl " BOWL_ROOT_PREFIX "alpine /bin/sh -c ") && !strstr(*line, "> " BOWL_ROOT_PREFIX))
                                 pam = at + 1;
                         if (strstr(*line, "pidof kwin_wayland") && strstr(*line, "exit 1"))
                                 guard = at + 1;
@@ -856,6 +857,18 @@ static fn profiles(void)
                                 compositor = at + 1;
                         if (string_has_prefix(*line, "layout=$(moonwater keyboard xkb"))
                                 layout = at + 1;
+                }
+                {
+                        // No session of any profile writes into a bowl by the host's path: the host's root would follow a link the bowl's packages put there.
+                        b32 none_into = 1;
+
+                        for (positive p = 0; p < array_count(bowl_profiles); p++)
+                                for (string_address address_to line = bowl_profiles[p].session; line && *line; line++)
+                                        if (strstr(*line, "> " BOWL_ROOT_PREFIX) || strstr(*line, ">" BOWL_ROOT_PREFIX) || strstr(*line, ">> " BOWL_ROOT_PREFIX) ||
+                                            strstr(*line, "tee " BOWL_ROOT_PREFIX))
+                                                none_into = 0;
+                        check("No profile's session writes a file into a bowl by the host's path (a link the bowl's packages put there is followed out of it)",
+                              none_into);
                 }
                 check("The desktop session starts udev before the compositor does",
                       udev && compositor && udev < compositor);

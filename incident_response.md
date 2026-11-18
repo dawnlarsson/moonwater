@@ -2808,6 +2808,39 @@ too (1650 and 1).
 `input` lane's granted rows now go through the keeper; not run on a booted
 image in this pass.
 
+### MW-2026-205: the desktop session wrote the KDE bowl's PAM file by the host's path
+
+| | |
+|---|---|
+| Status | Fixed on main, 2026-11-18 (the commit that adds this entry) |
+| Class | Link following: a path inside a guest tree resolved by the host, here for a write as the host's root |
+| Attacker | A guest: whatever runs as root inside the desktop's Alpine bowl (a package's install script), which can put a link at `/etc/pam.d/kde` |
+| Reachable | Every start of the desktop profile's session (`bowl_desktop_session` in src/bowl.c), run by the host's root |
+
+**What happened.** The session made the KDE screen locker's PAM file with a
+shell redirect on the host: `printf '...' > /bowls/alpine/etc/pam.d/kde`. The
+host's shell resolved that path, so a link a guest left at the name was
+followed out of the bowl, and the next desktop start wrote three PAM lines
+over any file of the machine the link named (a host file truncated and
+rewritten as root). Found by the userspace design survey (2026-11-18), the
+same class as MW-2026-043.
+
+**The fix.** The file is written inside the bowl's own view, as its root
+(`bowl /bowls/alpine /bin/sh -c "... > /etc/pam.d/kde"`): a link there resolves
+in the guest, to nothing the bowl's own programs could not write already. A
+check row holds the line to that shape, and a new row holds every profile's
+session to no write into a bowl by the host's path (`> /bowls/`, `>> /bowls/`,
+`tee /bowls/`).
+
+**Tests that fail without the fix.** CHECK_bowl's rows "The desktop session
+gives the KDE locker a PAM file ... in the bowl's own view" and "No profile's
+session writes a file into a bowl by the host's path": the parent's line holds
+`> /bowls/alpine/etc/pam.d/kde`, which both reject (1677/1677 with the fix,
+in box's build bowl).
+
+**Related.** MW-2026-043 (the desktop profile's marker removal through a guest
+link).
+
 ## Reviews with no exposure found
 
 Disclosures read against the code on 2026-10-23, each with the check that was

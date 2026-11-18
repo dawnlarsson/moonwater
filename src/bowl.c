@@ -9221,9 +9221,10 @@ static string_address bowl_desktop_session[] = {
     "[ -e \"$HOME/.config/kscreenlockerrc\" ] || "
     "printf '[Daemon]\\nAutolock=false\\nLockOnResume=false\\n' > "
     "\"$HOME/.config/kscreenlockerrc\"",
-    "[ -d /bowls/alpine/etc/pam.d ] && printf 'auth sufficient pam_permit.so\\n"
-    "account sufficient pam_permit.so\\nsession optional pam_permit.so\\n' "
-    "> /bowls/alpine/etc/pam.d/kde",
+    // Written in the bowl's own view, as its root: a write from here by the host's path (> /bowls/alpine/etc/pam.d/kde) is made by the host's
+    // root and follows a link a package of the bowl put at that name, out of the bowl, to any file of the machine.
+    "bowl " BOWL_ROOT_PREFIX "alpine /bin/sh -c \"[ -d /etc/pam.d ] && printf 'auth sufficient pam_permit.so\\n"
+    "account sufficient pam_permit.so\\nsession optional pam_permit.so\\n' > /etc/pam.d/kde\" 2>/dev/null || true",
     "bowl udev",
     "bowl bus",
     "gl=software; for node in /sys/class/drm/renderD*; do [ -e \"$node/device\" ] || continue; "
