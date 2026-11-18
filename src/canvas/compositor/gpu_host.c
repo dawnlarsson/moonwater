@@ -124,6 +124,13 @@ static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor)
         b64 now = 0;
 
         compositor_gpu_counts.processor += (unsigned int)processor;
+        // The setting off is no refusal to say in the log (moonwater canvas gpu says it, and debug counts it): the first present of every start
+        // was said so, made before the settings are read, on a machine whose setting is on.
+        if (why == COMPOSITOR_GPU_WHY_OFF)
+        {
+                compositor_gpu_publish();
+                return;
+        }
         if (n == 1 || ((n & 63) == 0 && (now = clock_monotonic_nanoseconds()) - compositor_gpu_counts.said_at[why] >= 60000000000ull))
         {
                 compositor_gpu_counts.said_at[why] = now ? now : clock_monotonic_nanoseconds();

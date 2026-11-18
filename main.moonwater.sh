@@ -66,7 +66,7 @@ function key_super_space {
   desktop_asked desktop_launcher
 }
 
-# The memory in the kernel log from as early in a boot as the script runs, and every minute after (moonwater memory log):
+# The memory in the kernel log from as early in a boot as the script runs, and again whenever it changes (moonwater memory log):
 # installed, usable, available, shared, and the largest memfds with who holds them, so a boot that runs out of memory
 # leaves what took it in the log. One at a time, however often this is called.
 function memory_start {
@@ -110,7 +110,7 @@ function bus_start {
     return
   fi
   rm -f /run/moonwater/bus
-  (bus_supervise) > /dev/null 2>&1 &
+  (bus_supervise) > /run/moonwater/bus.log 2>&1 &
   bus_sup=$!
   echo $bus_sup > /run/moonwater/bus.pid
   desktop_wait_for /run/moonwater/bus $bus_sup
@@ -156,7 +156,7 @@ function audio_start {
   if [ -s /run/moonwater/audio.supervisor ] && kill -0 $(cat /run/moonwater/audio.supervisor) 2> /dev/null; then
     return
   fi
-  (audio_supervise) > /dev/null 2>&1 &
+  (audio_supervise) > /run/moonwater/audio.log 2>&1 &
   echo $! > /run/moonwater/audio.supervisor
 }
 
@@ -435,7 +435,7 @@ function desktop_session {
   desktop_keys_list
   mkfifo -m 600 /run/moonwater/compositor.up
   exec 9<> /run/moonwater/compositor.up
-  setsid /compositor ${desktop_text:+-f "$desktop_text"} -u 9 &
+  setsid /compositor ${desktop_text:+-f "$desktop_text"} -u 9 > /run/moonwater/compositor.log 2>&1 &
   desktop_compositor=$!
   echo $desktop_compositor > /run/moonwater/compositor.pid
   exec 8< /run/moonwater/compositor.up 9>&-

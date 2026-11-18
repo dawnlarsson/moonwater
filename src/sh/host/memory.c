@@ -14,8 +14,8 @@
         is its allocated blocks, so a sparse table of terabytes is said by the
         pages it has.
 
-        log writes that line to the kernel log now and again every SECONDS
-        (sixty by default), and runs until it is stopped: the machine script
+        log looks again every SECONDS (sixty by default) and writes the line
+        to the kernel log when it changed, and once an hour, until it is stopped: the machine script
         starts it at boot, so a boot that runs out of memory leaves what used
         it in the log (the window table faulted in whole, 7db1fea3f, was found
         from the OOM killer's lines alone).
@@ -255,12 +255,27 @@ static b32 host_memory(string_address address_to arguments, positive count)
                 host_say(log, "%s\n", (string_address)line);
                 return 0;
         }
-        for (;;)
+        //      Looked at every SECONDS, written when it says something the last one written did not, and once an hour
+        //      whatever it says: memory running out changes the line, and the log keeps the trail of it; where the same
+        //      line went to the kernel's log every minute of a quiet machine (box: an hour of identical lines, the rest of
+        //      the log pushed out of its ring by them).
         {
-                string_address parts[] = {(string_address)line, null};
+                p8 last[sizeof(line)];
+                positive quiet = 0;
 
-                memory_line(line, sizeof(line));
-                host_kmsg(parts);
-                host_pause((p64)seconds * 1000000000);
+                last[0] = end;
+                for (;;)
+                {
+                        string_address parts[] = {(string_address)line, null};
+
+                        memory_line(line, sizeof(line));
+                        if (!string_equals(line, last) || (quiet += seconds) >= 3600)
+                        {
+                                host_kmsg(parts);
+                                string_copy_bounded(last, line, sizeof(last));
+                                quiet = 0;
+                        }
+                        host_pause((p64)seconds * 1000000000);
+                }
         }
 }
