@@ -1194,8 +1194,11 @@ static void compositor_present_frames(void)
         if (turning)
                 compositor_unscanned(15);
 
+        // A window that asked to tear (wp_tearing_control async: a game with vsync off) with nothing on the overlay is flipped by the
+        // page flip, which can be asynchronous (compositor_flip), not the atomic commit, which waits for the vblank.
         if (direct >= 0 &&
-            ((compositor_overlay_ready() && compositor_present_overlaid(direct, frames, count, windows)) ||
+            ((compositor_overlay_ready() && !(compositor_wl_row_async(direct) && !compositor.overlay_on) &&
+              compositor_present_overlaid(direct, frames, count, windows)) ||
              compositor_present_direct(direct, frames + windows, count - windows)))
         {
                 // The overlay is the tabs' now, or nothing's.

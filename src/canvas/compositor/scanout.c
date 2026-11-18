@@ -459,6 +459,8 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks a drawn frame took, answered at its flip
 static void compositor_wl_graves_sweep(void);   // wayland_host.c: the client framebuffers the card was still on, removed once it is off them
+static void compositor_wl_frame(void);           // wayland_host.c: a frame drawn: callbacks answered, buffers given back
+static int compositor_wl_frame_owed;             // a frame shown straight whose callbacks wait for its flip (compositor.c's loop)
 static void compositor_wl_dmabuf_refresh(void); // wayland_host.c: re-probe render node after late GPU init or drm uevents
 static int compositor_wl_dmabuf_missing(void);
 #endif
@@ -493,6 +495,11 @@ static void compositor_flip_done(void)
         compositor_wl_graves_sweep();
         // The feedbacks of the frame this flip showed are answered with the card's time for it.
         compositor_wl_flip_presented();
+        if (compositor_wl_frame_owed)
+        {
+                compositor_wl_frame_owed = 0;
+                compositor_wl_frame();
+        }
 #endif
 }
 

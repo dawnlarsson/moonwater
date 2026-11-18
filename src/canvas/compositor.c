@@ -3499,7 +3499,14 @@ static b32 compositor_main()
                                         compositor.motion_ts = 0;
                                 }
 #ifdef CONFIG_MOONWATER_WAYLAND
-                                if (!compositor_card.on)
+                                // A window shown straight is told of its frame when the card flips to it (compositor_flip_done), not when the flip
+                                // is asked for: told here, its next picture came while the flip was still on its way, waited for it, and was shown a
+                                // refresh later than a composed window's (13.6 ms from picture to vblank against 9.4). Not one that asked to tear: it
+                                // draws unpaced, and the callback is no pace of it.
+                                if (!compositor_card.on && compositor.flip_pending && compositor.direct_row >= 0 && compositor.flip_row == compositor.direct_row &&
+                                    !compositor_wl_row_async(compositor.direct_row))
+                                        compositor_wl_frame_owed = 1;
+                                else if (!compositor_card.on)
                                         compositor_wl_frame();
 #endif
                         }
