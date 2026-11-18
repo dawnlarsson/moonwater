@@ -7953,6 +7953,8 @@ LANGUAGE_ID(editor_writes_over_changed, "writes over the change on disk (Ctrl+R 
 LANGUAGE_ID(editor_writes_over_readonly, "writes over a read-only file") \
 LANGUAGE_ID(files_back, "Back") \
 LANGUAGE_ID(files_busy, "A copy, a move or a delete is under way") \
+LANGUAGE_ID(files_carry_here, "They are in this folder already: nothing is moved") \
+LANGUAGE_ID(files_carrying, "Carrying %d: Tab drops them here, a press on a folder drops them in it, Escape puts them back") \
 LANGUAGE_ID(files_changed, "It is not what was listed: the folder is read again") \
 LANGUAGE_ID(files_chosen, "%1$d of %2$d chosen") \
 LANGUAGE_ID(files_chosen_size, "%1$d of %2$d chosen, %3$s") \

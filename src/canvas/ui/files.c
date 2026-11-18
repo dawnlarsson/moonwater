@@ -107,6 +107,8 @@
 #define FILES_KEY_X 45
 #define FILES_KEY_V 47
 #define FILES_KEY_F10 68
+#define FILES_KEY_F6 64
+#define FILES_CARRY_POP_NS 220000000ll // the ghost's lift as what is carried is picked up, settling to rest
 #define FILES_KEY_MENU 127           // the keyboard's menu key (KEY_COMPOSE)
 // The browser's own menu items: after the kit's text menu's (1 to 7), which the path's field has.
 #define FILES_MENU_OPEN 16
@@ -188,6 +190,19 @@ static struct
         struct ui_columns columns; // the details' header over the rows: Name, Size, Type, Modified, each a press that orders by it
         struct ui_rect head_box;   // where the view put it
         struct ui_rect side_box;   // the folder tree's pane: the window's glass, its whole height at its start
+        // Carrying (Tab): the entries picked up, as paths each with its end, from the folder carry_from, dim where they lie and a ghost of
+        // them at the pointer with their count, till Tab drops them in the folder shown (a press, in a folder's row) or Escape puts them
+        // back; cut_dim is the same list for a cut (Ctrl+X), dim and not carried. carry_at is when they were picked up (the ghost's pop).
+        b32 carrying, cut_dim;
+        p8 address_to carry_paths;
+        positive carry_room, carry_used;
+        p32 carry_count;
+        unsigned int carry_kind;
+        p8 carry_from[FILES_PATH];
+        b64 carry_at;
+        // A rubber band begun with Control held adds what it crosses to what was chosen (band_base, as it was at its press).
+        b32 band_add;
+        p32 band_base_count;
         struct ui_drop drop;     // a drag of files over the window: dropped, they are copied or moved into the folder it is over
         int drop_row;            // the folder's row the drop goes into, -1 the folder shown
         b64 next_progress;       // when the foot next says how far a copy has gone
@@ -213,6 +228,9 @@ static struct
 } files;
 
 static struct ui_app files_app;
+static p8 files_band_base[FILES_MOST / 8]; // what was chosen when a band with Control began
+static b32 files_carried(const p8 address_to name, positive length);
+static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how);
 
 /* ---- the rows ---- */
 
@@ -367,6 +385,7 @@ static fn files_describe(int id, struct ui_row address_to row)
         row->cells[1] = size, row->cells[2] = type, row->cells[3] = when;
         row->file = 1 + files_symbol(m, entry);
         row->extension = files_extension_label(m, entry);
+        row->dim = files_carried(files_model_name(m, entry), entry->length);
         row->mark = files_model_chosen(m, (p32)id) && m->chosen_count > 1;
 }
 
@@ -469,6 +488,8 @@ static fn files_status_text(void)
         }
         else if (files.big->job.state == FILES_JOB_RUNNING)
                 language_format(into, room, WORDS(files_deleting), (int)files.big->job.removed);
+        else if (files.carrying)
+                language_format(into, room, WORDS(files_carrying), (int)files.carry_count);
         else if (files.big->note[0])
                 string_copy_bounded((string_address)into, (string_address)files.big->note, room);
         else if (files.said)
@@ -975,6 +996,118 @@ static fn files_uris_free(p8 address_to uris, positive uris_room, p8 address_to 
         array_store_release(paths, paths_room, path_length);
 }
 
+/* ---- carrying ---- */
+
+static fn files_carry_end(void)
+{
+        array_store_release(files.carry_paths, files.carry_room, files.carry_used);
+        files.carry_paths = null, files.carry_room = files.carry_used = 0, files.carry_count = 0;
+        files.carrying = files.cut_dim = false;
+        files.dirty = true;
+}
+
+// The rows chosen (the cursor's when none is) as paths, each with its end, from the folder shown: what is carried or cut. False for none.
+static b32 files_carry_take(void)
+{
+        const struct files_model address_to m = &files.big->model;
+        b32 any = m->chosen_count > 0;
+        positive folder = string_length((string_address)m->path);
+
+        files_carry_end();
+        for (p32 at = 0; at < files_model_count(m); at++)
+        {
+                const struct files_entry address_to entry = files_model_entry(m, at);
+                const p8 address_to name = entry ? files_model_name(m, entry) : null;
+                positive length = name ? string_length((string_address)name) : 0, used = files.carry_used;
+
+                if (!name || (any ? !files_model_chosen(m, at) : at != m->cursor))
+                        continue;
+                if (!array_store_reserve(files.carry_paths, files.carry_room, used, used + folder + length + 2, 4096))
+                        break;
+                memory_copy(files.carry_paths + used, m->path, folder), used += folder;
+                if (folder > 1)
+                        files.carry_paths[used++] = '/';
+                memory_copy(files.carry_paths + used, name, length + 1), used += length + 1;
+                if (!files.carry_count)
+                        files.carry_kind = files_symbol(m, entry);
+                files.carry_used = used, files.carry_count++;
+        }
+        string_copy_bounded((string_address)files.carry_from, (string_address)m->path, FILES_PATH);
+        return files.carry_count > 0;
+}
+
+// Whether the entry name of the folder shown is one carried or cut from it: drawn dim where it lies.
+static b32 files_carried(const p8 address_to name, positive length)
+{
+        const struct files_model address_to m = &files.big->model;
+
+        if ((!files.carrying && !files.cut_dim) || !string_equals((string_address)files.carry_from, (string_address)m->path))
+                return false;
+        for (positive at = 0; at < files.carry_used;)
+        {
+                positive whole = string_length((string_address)files.carry_paths + at), base = whole;
+
+                while (base && files.carry_paths[at + base - 1] != '/')
+                        base--;
+                if (whole - base == length && !memory_compare(files.carry_paths + at + base, name, length))
+                        return true;
+                at += whole + 1;
+        }
+        return false;
+}
+
+// Tab on the rows: what is chosen picked up (carried), and Tab again, with any folder shown meanwhile, drops it there.
+static fn files_carry_pick(void)
+{
+        if (!files_carry_take())
+                return;
+        files.carrying = true, files.carry_at = (b64)ui_kit.now, files.said = 0, files.big->note[0] = 0;
+}
+
+// What is carried dropped into the folder of a row (-1 the folder shown): moved there, unless it is the folder it came from.
+static fn files_carry_drop(int row)
+{
+        const struct files_model address_to m = &files.big->model;
+
+        if (!files.carrying)
+                return;
+        if (row < 0 && string_equals((string_address)files.carry_from, (string_address)m->path))
+        {
+                files_carry_end();
+                files.said = LANGUAGE_files_carry_here;
+                return;
+        }
+        files_transfer(files.carry_paths, files.carry_count, row, FILES_MOVE_MOVE);
+        files_carry_end();
+}
+
+/*
+        The ghost of what is carried, at the pointer while it is over the window: the first one's symbol, lifted as it is picked up and
+        settling (the pop, FILES_CARRY_POP_NS), and its count on a badge of the accent at its corner.
+*/
+static fn files_carry_draw(void)
+{
+        struct ui address_to ui = &files.ui;
+        int size = ui_dev(ui, UI_FILE_TILE_ICON), x = ui_kit.pointer_x + ui_dev(ui, 14), y = ui_kit.pointer_y + ui_dev(ui, 10);
+        b64 since = (b64)ui_kit.now - files.carry_at;
+        char count[12];
+        int width, d = ui_dev(ui, 20), cx, cy;
+
+        if (!files.carrying || ui_kit.pointer_x < 0 || ui_kit.pointer_y < 0 || ui_kit.pointer_x >= files.width || ui_kit.pointer_y >= files.height)
+                return;
+        if (since >= 0 && since < FILES_CARRY_POP_NS)
+                y -= (int)((FILES_CARRY_POP_NS - since) * ui_dev(ui, 6) / FILES_CARRY_POP_NS);
+        ui_file_icon(ui, files.carry_kind, null, x, y, size, ui_text_colour(ui, UI_ON_SURFACE));
+        count[positive_into_string((p8 address_to)count, files.carry_count)] = 0;
+        width = ui_kit_measure(ui, (string_address)count, UI_LABEL_MEDIUM);
+        d = width + ui_dev(ui, 10) > d ? width + ui_dev(ui, 10) : d;
+        cx = x + size - d / 3, cy = y - ui_dev(ui, 4);
+        ui_kit_fill(ui, &(struct ui_box){(b32)cx << 8, (b32)cy << 8, (b32)(cx + d) << 8, (b32)(cy + ui_dev(ui, 20)) << 8, (b32)ui_dev(ui, 10) << 8, (b32)ui_dev(ui, 10) << 8},
+                    ui_role(UI_PRIMARY) | 0xff000000u, null);
+        ui_kit_text(ui, cx + (d - width) / 2, ui_kit_baseline(ui, cy + ui_dev(ui, 2), UI_LABEL_MEDIUM), (string_address)count, UI_LABEL_MEDIUM,
+                    ui_role(UI_ON_PRIMARY) | 0xff000000u, 0);
+}
+
 /*
         The rows chosen (the cursor's when none is) copied, as files (files_uris), or cut: a cut offers them with a word beside
         (FILES_CLIP_CUT) that makes a browser's paste of them a move, here or in another window; any other program pastes them as it
@@ -991,6 +1124,11 @@ static fn files_rows_copy(b32 cut)
         parts[2] = (struct windows_clip_part){FILES_CLIP_CUT, (const p8 address_to) "cut", 3};
         windows_clip_offer_parts(&files.own, WINDOWS_CLIP_CLIPBOARD, parts, cut ? 3 : 2);
         files_uris_free(uris, uris_room, paths, paths_room, parts);
+        // What is cut is dim where it lies till it is pasted (it is gone from here then) or another copy or cut is made.
+        if (files_carry_take() && cut)
+                files.cut_dim = true;
+        else
+                files_carry_end();
 }
 
 // Paste: the clipboard is asked for its files (the answer comes as a WINDOW_EVENT_CLIP, files_clip_event).
@@ -2042,6 +2180,21 @@ static b32 files_key(const struct window_event address_to event)
         }
         if (files.armed || files.big->note[0])
                 files.armed = false, files.big->note[0] = 0, files.dirty = true;
+        // Carrying: Tab on the rows drops what is carried in the folder shown, Escape puts it back; anything else goes on as it would.
+        if (files.carrying && key == UI_KEY_ESCAPE)
+        {
+                files_carry_end();
+                return true;
+        }
+        if (key == UI_KEY_TAB && !shift && !control && !alt && !files.crumb_keys && !files.tree_keys)
+        {
+                if (files.carrying)
+                        files_carry_drop(-1);
+                else
+                        files_carry_pick();
+                files.dirty = true;
+                return true;
+        }
         // Along the trail, wherever the keys are; then the trail's own keys while they are in it.
         if (alt && (key == UI_KEY_UP || key == UI_KEY_DOWN))
         {
@@ -2052,8 +2205,8 @@ static b32 files_key(const struct window_event address_to event)
                 return true;
         if (files.tree_keys && files_tree_key(event))
                 return true;
-        // Tab: the rows, the trail, the tree, and the rows again (Shift+Tab is the band's buttons', the kit's).
-        if (key == UI_KEY_TAB && !shift && !control && !alt)
+        // F6 (and Tab from the trail): the rows, the trail, the tree, and the rows again (Shift+Tab is the band's buttons', the kit's).
+        if ((key == UI_KEY_TAB || key == FILES_KEY_F6) && !shift && !control && !alt)
         {
                 if (files.crumb_keys)
                         files.crumb_keys = false, files.tree_keys = true, files.tree_at = files.tree_shown != FILES_NO ? files.tree_shown : 0;
@@ -2287,6 +2440,7 @@ static b32 files_event(const struct window_event address_to event)
         case WINDOW_EVENT_KEY:
                 return !down || ui_key_modifier((int)event->a) ? true : files_key(event);
         case WINDOW_EVENT_MOTION:
+                files.dirty |= files.carrying; // the ghost follows the pointer
                 // A rubber band held: the rows it crosses are the ones chosen, the cursor on the row the hand is at.
                 if (l->band)
                 {
@@ -2296,11 +2450,29 @@ static b32 files_event(const struct window_event address_to event)
                         {
                                 b32 down_band = event->b >= l->y + l->band_at - l->scroll.scroll;
 
-                                files_model_choose(m, (p32)(down_band ? first : last), FILES_CHOOSE_ONLY);
-                                files_model_choose(m, (p32)(down_band ? last : first), FILES_CHOOSE_RANGE);
+                                if (files.band_add)
+                                {
+                                        // What was chosen at the press, and every row the band crosses as well.
+                                        memory_copy(m->chosen, files_band_base, FILES_MOST / 8), m->chosen_count = files.band_base_count;
+                                        for (int k = first; k <= last; k++)
+                                                if ((p32)k < m->shown.places)
+                                                        files_chosen_put(m, m->shown.order[k], true);
+                                        m->cursor = (p32)(down_band ? last : first), m->revision++;
+                                }
+                                else
+                                {
+                                        files_model_choose(m, (p32)(down_band ? first : last), FILES_CHOOSE_ONLY);
+                                        files_model_choose(m, (p32)(down_band ? last : first), FILES_CHOOSE_RANGE);
+                                }
                         }
                         else if (!ui_list_band_rows(ui, l, &first, &last))
-                                files_model_choose_none(m), m->revision++;
+                        {
+                                if (files.band_add)
+                                        memory_copy(m->chosen, files_band_base, FILES_MOST / 8), m->chosen_count = files.band_base_count;
+                                else
+                                        files_model_choose_none(m);
+                                m->revision++;
+                        }
                         files.dirty = true;
                         break;
                 }
@@ -2385,6 +2557,18 @@ static b32 files_event(const struct window_event address_to event)
                         ui_list_band_end(l);
                         break;
                 }
+                // Carrying: a press on a folder's row drops what is carried in it, a press on the rows' ground in the folder shown.
+                if (event->a == UI_POINTER_LEFT && down && files.carrying && ui_point(ui_kit.pointer_x, l->x, l->w) >= l->x &&
+                    ui_kit.pointer_y >= l->y && ui_kit.pointer_y < l->y + l->h)
+                {
+                        int at = ui_list_hit(ui, l, ui_kit.pointer_x, ui_kit.pointer_y);
+                        const struct files_entry address_to entry = at >= 0 ? files_model_entry(m, (p32)at) : null;
+
+                        if (!entry || entry->kind == FILES_KIND_DIRECTORY)
+                                files_carry_drop(entry ? at : -1);
+                        files.dirty = true;
+                        break;
+                }
                 if (event->a == UI_POINTER_LEFT && down && !files.editing && files_band_at(ui_kit.pointer_x, ui_kit.pointer_y))
                 {
                         int at = ui_list_hit(ui, l, ui_kit.pointer_x, ui_kit.pointer_y);
@@ -2396,8 +2580,15 @@ static b32 files_event(const struct window_event address_to event)
                                 files_open((p32)at);
                                 break;
                         }
-                        files_model_choose_none(m);
-                        if (at >= 0)
+                        // With Control held the band adds what it crosses to what is chosen; else it chooses afresh.
+                        files.band_add = (event->flags & WINDOW_KEY_CONTROL) != 0;
+                        if (files.band_add)
+                                memory_copy(files_band_base, m->chosen, FILES_MOST / 8), files.band_base_count = m->chosen_count;
+                        else
+                                files_model_choose_none(m);
+                        if (at >= 0 && files.band_add)
+                                files_model_choose(m, (p32)at, FILES_CHOOSE_TOGGLE), files.clicked = (p32)at, files.clicked_at = (b64)ui_kit.now;
+                        else if (at >= 0)
                                 files_model_choose(m, (p32)at, FILES_CHOOSE_ONLY), files.clicked = (p32)at, files.clicked_at = (b64)ui_kit.now;
                         else
                                 m->cursor = FILES_NO, files.clicked = FILES_NO;
@@ -2462,6 +2653,7 @@ static fn files_draw(unsigned int address_to pixels)
                 ui_text_overlay(ui, files_field()); // a finger's selection in the field: its handles, over the rows
         if (files.finding)
                 ui_text_overlay(ui, &files.finder);
+        files_carry_draw();
         files.seen = files.big->model.revision;
 }
 
@@ -2477,6 +2669,12 @@ static long files_tick(long timeout, long address_to other)
         b64 now = (b64)ui_kit.now, wait;
 
         (void)other;
+        // The ghost of what is carried settling after it was picked up: a picture a frame till it is at rest.
+        if (files.carrying && now - files.carry_at < FILES_CARRY_POP_NS + 20000000ll)
+        {
+                files.dirty = true;
+                timeout = timeout < 0 || timeout > 16000000 ? 16000000 : timeout;
+        }
         // The field's caret blinks while the path is typed, and the find field's while it has the keys.
         if (files.editing)
         {
