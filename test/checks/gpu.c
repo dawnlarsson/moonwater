@@ -49,6 +49,77 @@ static const unsigned int *gpu_grain(unsigned int light, int x, int y)
 
 static unsigned int gpu_want[1500 * 700];
 
+// The Intel set (Gen9, fill only, not registered): the edge split of a byte fill, and its batch, on the host (no card).
+static void gpu_i915_set_rows(void)
+{
+        // The Intel set (Gen9, fill only, not registered): the edge split of a byte fill, and its batch. The rules are measured on Gen9:
+        // a 32-byte-aligned base and a span in multiples of 16. Here: d at 16 and 48, span 100 (the coordinator's rows), a pitch below the
+        // span, a span under 16 bytes (all edge).
+        {
+                struct gpu_i915_split s;
+
+                check("gpu i915: d at 16, span 100: the GPU takes 32..112, the head 16 bytes and the tail 4 go to the processor",
+                      gpu_i915_fill_split(16, 100, 512, &s) == 0 && s.interior == 32 && s.span == 80 && s.head == 16 && s.tail == 4);
+                check("gpu i915: d at 48, span 100: the GPU takes 64..144, the head 16 bytes and the tail 4 go to the processor",
+                      gpu_i915_fill_split(48, 100, 512, &s) == 0 && s.interior == 64 && s.span == 80 && s.head == 16 && s.tail == 4);
+                check("gpu i915: an aligned span is all interior",
+                      gpu_i915_fill_split(64, 256, 1024, &s) == 0 && s.interior == 64 && s.span == 256 && s.head == 0 && s.tail == 0);
+                check("gpu i915: a pitch below the span is refused, not split",
+                      gpu_i915_fill_split(0, 256, 128, &s) == -1);
+                check("gpu i915: a pitch that is not a multiple of 16 is refused",
+                      gpu_i915_fill_split(0, 100, 510, &s) == -1);
+                check("gpu i915: a span under 16 bytes is all edge: nothing for the GPU, the whole span to the processor",
+                      gpu_i915_fill_split(16, 10, 512, &s) == 0 && s.span == 0 && s.head == 10 && s.tail == 0);
+                check("gpu i915: a span under 16 bytes that crosses a 16-byte boundary is all edge too",
+                      gpu_i915_fill_split(28, 10, 512, &s) == 0 && s.span == 0 && s.head + s.tail == 10);
+                {
+                        // every start and span of a sweep: the parts tile the fill exactly, and the GPU's are aligned
+                        int tiled = 1;
+
+                        for (positive d = 0; d < 96; d++)
+                                for (unsigned int n = 1; n <= 160; n++)
+                                {
+                                        if (gpu_i915_fill_split(d, n, 512, &s) || s.head + s.span + s.tail != n || (s.span && ((s.interior & 31) || (s.span & 15))))
+                                                tiled = 0;
+                                }
+                        check("gpu i915: over every start below 96 and span to 160, the parts tile the fill and the GPU's are aligned", tiled);
+                }
+                {
+                        // the batch for one fill, on a card's buffer at GPU_VA: the arguments 512 bytes before the state, as the slot lays them
+                        static unsigned char buffer[4096] __attribute__((aligned(4096)));
+                        struct gpu_job job;
+                        struct gpu_args address_to a = (struct gpu_args address_to)(buffer + 2048);
+                        unsigned int words[64], n;
+                        unsigned int address_to state = (unsigned int address_to)(buffer + 2560);
+
+                        memset(buffer, 0, sizeof buffer);
+                        a->d = GPU_VA + 0x2010; /* 16 bytes past a 32-byte boundary: head 16 */
+                        a->dp = 128, a->w = 25, a->rows = 4, a->op = 1, a->v = 0x11223344u;
+                        job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
+                        job.code = GPU_VA + 3584;
+                        n = gpu_i915_gen9_batch(&job, words, 64);
+                        check("gpu i915: a fill's batch is the 56 dwords the Gen9 walker takes", n == 56 && words[0] == 0x69040302u && words[1] == 0x61010011u);
+                        check("gpu i915: the walker's columns are the interior's 80 bytes over 16: five, and the rows are the fill's",
+                              words[44] == 5u && words[47] == 4u && words[37] == 0x7105000du && words[51] == 0xffffffffu);
+                        check("gpu i915: the colour dword is the CURBE's first dword, the CURBE reads 64 bytes from the state",
+                              state[48] == 0x11223344u && words[29] == 0x70010002u && words[32] == 2560 + 192);
+                        check("gpu i915: the binding table points at the surface state, both in the state region",
+                              state[0] == 2560 + 64 && words[36] == 2560 + 128);
+                        check("gpu i915: the surface base is the interior's first byte, 32-byte aligned",
+                              state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2020) && ((state[(64 + 32) / 4]) & 31) == 0);
+                        check("gpu i915: the surface is 80 bytes wide, rows high, on a 512-byte pitch",
+                              state[(64 + 8) / 4] == (79u | (3u << 16)) && state[(64 + 12) / 4] == 511u);
+                        a->op = 2;
+                        check("gpu i915: an op the set has no kernel for is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->op = 1, a->dp = 10;
+                        check("gpu i915: a pitch below the span is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->dp = 128, a->d = GPU_VA + 0x2000;
+                        check("gpu i915: a fill whose span is under 16 bytes leaves the GPU nothing (0 words)",
+                              (a->w = 2, gpu_i915_gen9_batch(&job, words, 64)) == 0);
+                }
+        }
+}
+
 b32 main(void)
 {
         enum { BW = 1220, BH = 1320, SW = 2560, SH = 1440, W = 1219, H = 211, OW = 1500, OH = 300, X = 301, Y = 7 };
@@ -60,6 +131,7 @@ b32 main(void)
         unsigned int tones[5] = {0x80402010u, 0u, 0xff112233u, 0x01ffffffu, 0};
         positive began, cpu[4], gpu_time[4];
 
+        gpu_i915_set_rows(); // on the host: no card needed, so before the prerequisites can return
         if (!gpu_start(((positive)BW * BH * 2 + (positive)SW * SH + (positive)7680 * 4320) * 4 + (33 << 20)))
         {
                 check("gpu: a card that is there passes the self-test", !gpu.broken);
@@ -243,6 +315,7 @@ b32 main(void)
         }
         return test_report(null);
 }
+
 #endif /* CHECK_gpu */
 
 #ifdef CHECK_gpu_kit

@@ -225,7 +225,63 @@ def check_regs(asm):
             sys.exit('%s: kernel %s uses s%d, exceeding .amdhsa_next_free_sgpr %d' % (asm, name, sg, ns))
 
 
+def intel_kernels(src_text):
+    """The Intel kernels of src/canvas/gpu_i915.asm: kernel NAME, then the words, comma separated, comments after ';'."""
+    kernels, name = [], None
+    for raw in src_text.splitlines():
+        line = raw.split(';', 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith('kernel '):
+            name = line.split()[1]
+            kernels.append((name, []))
+            continue
+        if name is None or not re.fullmatch(r'0x[0-9a-fA-F]+(\s*,\s*0x[0-9a-fA-F]+)*\s*,?', line):
+            sys.exit('gpu_i915.asm: not a kernel word line: %r' % raw)
+        kernels[-1][1].extend(int(w, 16) for w in re.findall(r'0x[0-9a-fA-F]+', line))
+    return kernels
+
+
+# IGT's gen9 gpgpu_fill kernel (lib/gpgpu_fill.c, gen9_gpgpu_kernel, 10 rows of 4 words), rows 1 to 9 of it: the
+# fill without the replicate of row 0 (the colour is a dword, see gpu_i915.asm). Read from IGT, not from our own build.
+IGT_GEN9_FILL_ROWS_1_TO_9 = [
+    0x00000041, 0x20400208, 0x06000004, 0x00000010,
+    0x00000001, 0x20440208, 0x00000018, 0x00000000,
+    0x00600001, 0x20800208, 0x008d0000, 0x00000000,
+    0x00200001, 0x20800208, 0x00450040, 0x00000000,
+    0x00000001, 0x20880608, 0x00000000, 0x0000000f,
+    0x00800001, 0x20a00208, 0x00000020, 0x00000000,
+    0x0c800031, 0x24000a40, 0x06000080, 0x060a8000,
+    0x00600001, 0x2e000208, 0x008d0000, 0x00000000,
+    0x07800031, 0x20000a40, 0x06000e00, 0x82000010,
+]
+
+
+def intel_arrays(text):
+    return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
+            for name, body in re.findall(r'static const unsigned int gpu_i915_(\w+)\[\] = \{(.*?)\};', text, re.S)]
+
+
+def intel_check(src, inc):
+    kernels = intel_kernels(pathlib.Path(src).read_text())
+    if [n for n, _ in kernels] != ['fill']:
+        sys.exit('%s: the kernels are %s, the Gen9 set has fill only' % (src, [n for n, _ in kernels]))
+    fill = kernels[0][1]
+    if fill != IGT_GEN9_FILL_ROWS_1_TO_9:
+        bad = [i for i in range(max(len(fill), 36)) if i >= len(fill) or i >= 36 or fill[i] != IGT_GEN9_FILL_ROWS_1_TO_9[i]]
+        sys.exit('%s: fill differs from IGT at word %d (%s)' % (src, bad[0], 'missing' if bad[0] >= len(fill) else '%08x vs IGT' % fill[bad[0]]))
+    made = intel_arrays(pathlib.Path(inc).read_text())
+    if [n for n, _ in made] != ['fill']:
+        sys.exit('%s: the arrays are %s, the source has fill' % (inc, [n for n, _ in made]))
+    if made[0][1] != fill:
+        sys.exit('%s: the array fill is not the source\'s words' % inc)
+    print('gpu i915 kernels: %s, %d kernel, %d words, fill the same as IGT rows 1 to 9 and as %s' % (src, len(kernels), len(fill), inc))
+
+
 def main():
+    if len(sys.argv) == 5 and sys.argv[1] == '--target' and sys.argv[2] == 'intel-gen9':
+        intel_check(sys.argv[3], sys.argv[4])
+        return
     if len(sys.argv) > 3 and sys.argv[1] == '--chips':
         chips(sys.argv[2], sys.argv[3:])
         return

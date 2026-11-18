@@ -78,6 +78,8 @@ static build_setting build_settings[BUILD_SETTING_ROOM] = {
                 directory, which src/canvas/gpu.c includes. */
         {"gpu_source", "src/canvas/gpu.asm"},
         {"gpu_kernels", "gpu_kernels.inc"},
+        {"gpu_i915_source", "src/canvas/gpu_i915.asm"},
+        {"gpu_i915_kernels", "gpu_i915_gen9.inc"},
 
         /*      The kernel this tree builds on, and where it comes from.
 
@@ -3228,6 +3230,10 @@ static b32 build_spark(string_address source, string_address output,
                         words[count++] = config;
                 if (kernels && *kernels && count + 1 < BUILD_ARGUMENT_ROOM)
                         words[count++] = kernels;
+                string_address i915 = build_setting_get("spark_gpu_i915_kernels");
+
+                if (i915 && *i915 && count + 1 < BUILD_ARGUMENT_ROOM)
+                        words[count++] = i915;
         }
         //      The nine words below and the null that ends the vector have
         //      to fit: the split keeps that room.
@@ -4955,6 +4961,166 @@ static b32 build_gpu_kernels(string_address input, string_address output)
 }
 
 /*
+        The Intel GPU's kernels (src/canvas/gpu_i915.asm, Gen9): the words after each `kernel NAME`
+        line, written as arrays named gpu_i915_NAME into output, which src/canvas/gpu.c's Intel
+        set includes. A word is a hex number after a comma; a comment runs from a `;`. A line that
+        is neither a kernel nor words refuses the build. The checker (test/gpu_kernels.py
+        --target intel-gen9) holds the words to Intel's own table.
+*/
+static p8 build_gpu_i915_source[1 << 16];
+static p8 build_gpu_i915_made[1 << 17];
+
+//      Copies text, then `digits` hex digits of value (0: none), into at, for as much of room as there is; the bytes written.
+static positive build_gpu_i915_text(p8 address_to at, positive room, string_address text, unsigned long value, positive digits)
+{
+        static const char hex[] = "0123456789abcdef";
+        positive n = 0;
+
+        for (positive i = 0; text && text[i]; i++)
+        {
+                if (n + 1 < room)
+                        at[n] = (unsigned char)text[i];
+                n++;
+        }
+        for (positive i = digits; i > 0; i--)
+        {
+                if (n + 1 < room)
+                        at[n] = (unsigned char)hex[(value >> (4 * (i - 1))) & 15];
+                n++;
+        }
+        if (room && n >= room)
+                return room - 1;
+        return n;
+}
+
+//      `static const unsigned int gpu_i915_NAME[] = {` with NAME the word(s) from name up to end's blank or end.
+static positive build_gpu_i915_sprintf_open(p8 address_to at, positive room, p8 address_to name, p8 address_to stop)
+{
+        char buffer[160];
+        positive k = 0, n = 0;
+
+        while (name + k < stop && name[k] != ' ' && name[k] != '\t' && k + 1 < sizeof(buffer))
+        {
+                buffer[k] = (char)name[k];
+                k++;
+        }
+        buffer[k] = 0;
+        n = build_gpu_i915_text(at, room, "static const unsigned int gpu_i915_", 0, 0);
+        n += build_gpu_i915_text(at + n, room > n ? room - n : 0, buffer, 0, 0);
+        n += build_gpu_i915_text(at + n, room > n ? room - n : 0, "[] = {\n", 0, 0);
+        return n;
+}
+
+//      The end of a kernel's array.
+static positive build_gpu_i915_sprintf_close(p8 address_to at, positive room)
+{
+        return build_gpu_i915_text(at, room, "\n};\n", 0, 0);
+}
+
+static b32 build_gpu_i915(string_address input, string_address output)
+{
+        string_address temporary = build_join(output, ".gpu_i915_tmp.", build_number((positive)system_call_1(syscall(getpid), 0)), null);
+        bipolar got;
+        positive at = 0, lines = 0, words = 0, in_kernel = 0, column = 0;
+        p8 address_to line, address_to stop;
+
+        refuse_if(!build_is_type(input, S_IFREG), 1, "gpu-i915: no such file: %s\n", input);
+        got = file_slurp(input, build_gpu_i915_source, sizeof(build_gpu_i915_source));
+        refuse_if(got < 0 || (positive)got + 1 >= sizeof(build_gpu_i915_source), 1, "gpu-i915: cannot read %s\n", input);
+        build_gpu_i915_source[got] = 0;
+
+        //      The output: each word on its line's column, ten to a line, the arrays closed when the next kernel starts.
+        for (line = build_gpu_i915_source; *line; line = stop)
+        {
+                p8 address_to p = line;
+                positive n = 0;
+
+                stop = line;
+                while (*stop && *stop != '\n')
+                        stop++;
+                if (*stop == '\n')
+                        stop++;
+                lines++;
+                while (p < stop && *p != ';' && *p != '\n')
+                        p++;
+                //      trim the blanks at the start of the line
+                p8 address_to start = line;
+                while (start < p && (*start == ' ' || *start == '\t'))
+                        start++;
+                if (start == p)
+                        continue;
+                if (start[0] == 'k' && start + 7 <= p && start[1] == 'e' && start[2] == 'r' && start[3] == 'n' && start[4] == 'e' && start[5] == 'l' && start[6] == ' ')
+                {
+                        p8 address_to name = start + 7;
+                        while (name < p && *name == ' ')
+                                name++;
+                        if (in_kernel)
+                                at += (positive)build_gpu_i915_sprintf_close(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at);
+                        at += (positive)build_gpu_i915_sprintf_open(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, name, p);
+                        in_kernel = 1;
+                        column = 0;
+                        continue;
+                }
+                if (!in_kernel)
+                        return string_report(log_error, 1, "gpu-i915: words before a kernel name in %s, line %lu\n", input, (unsigned long)lines);
+                //      the words of this line: each 0x... token
+                while (start < p)
+                {
+                        if (start[0] == '0' && (start[1] == 'x' || start[1] == 'X'))
+                        {
+                                unsigned long v = 0;
+                                p8 address_to q = start + 2;
+                                while (q < p && ((*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'f') || (*q >= 'A' && *q <= 'F')))
+                                {
+                                        v = v * 16 + (unsigned long)(*q <= '9' ? *q - '0' : ((*q | 0x20) - 'a' + 10));
+                                        q++;
+                                }
+                                if (q == start + 2 || v > 0xffffffffUL)
+                                        return string_report(log_error, 1, "gpu-i915: not a word in %s, line %lu\n", input, (unsigned long)lines);
+                                if (column == 0)
+                                        at += (positive)build_gpu_i915_text(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, "    ", 0, 0);
+                                at += (positive)build_gpu_i915_text(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, "0x", v, 8);
+                                words++;
+                                n++;
+                                column++;
+                                start = q;
+                                if (column == 10)
+                                {
+                                        at += (positive)build_gpu_i915_text(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, ",\n", 0, 0);
+                                        column = 0;
+                                }
+                                else
+                                        at += (positive)build_gpu_i915_text(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, ", ", 0, 0);
+                                while (start < p && (*start == ',' || *start == ' ' || *start == '\t'))
+                                        start++;
+                                continue;
+                        }
+                        if (*start == ',' || *start == ' ' || *start == '\t')
+                        {
+                                start++;
+                                continue;
+                        }
+                        return string_report(log_error, 1, "gpu-i915: not a word in %s, line %lu\n", input, (unsigned long)lines);
+                }
+                (void)n;
+        }
+        if (!in_kernel)
+                return string_report(log_error, 1, "gpu-i915: no kernels in %s\n", input);
+        at += (positive)build_gpu_i915_sprintf_close(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at);
+        (void)words;
+
+        build_tool("mkdir", "-p", build_directory_of(output), null);
+        if (!build_write_file(temporary, (string_address)build_gpu_i915_made, at))
+                return string_report(log_error, 1, "gpu-i915: cannot write %s\n", temporary);
+        if (rename(temporary, output) < 0)
+        {
+                unlink(temporary);
+                return string_report(log_error, 1, "gpu-i915: cannot rename %s to %s\n", temporary, output);
+        }
+        return 0;
+}
+
+/*
         Write the header for the configuration now held and point the next
         spark build at it. The path is absolute because a quoted include is
         looked up beside the file that asks for it, not where the compiler
@@ -4994,6 +5160,18 @@ static b32 build_config_header_install(string_address from,
 
                 build_setting_set("spark_gpu_kernels",
                                   build_join("-DMOONWATER_GPU_KERNELS=\"", kernels, "\"", null));
+
+                //      The Intel GPU's kernels (Gen9), beside the AMD ones: the same build, the same define.
+                string_address i915 = build_in("artifacts", build_setting_get("gpu_i915_kernels"));
+
+                if (build_gpu_i915(build_setting_get("gpu_i915_source"), i915))
+                        return build_die("assembling the Intel GPU's kernels");
+
+                if (i915[0] != '/')
+                        i915 = build_join(build_working_directory(), "/", i915, null);
+
+                build_setting_set("spark_gpu_i915_kernels",
+                                  build_join("-DMOONWATER_GPU_I915_KERNELS=\"", i915, "\"", null));
         }
 
         return 0;
@@ -7632,6 +7810,7 @@ static fn build_usage()
                       "    build config-header <config> <header> [utility]\n"
                       "                                            the header a .config gives the programs\n"
                       "    build gpu-kernels [source [output]]     assemble the GPU's kernels\n"
+                      "    build gpu-i915 [source [output]]        assemble the Intel GPU's kernels (Gen9)\n"
                       "\n"
                       "--set name=value overrides one setting, anywhere on the line.\n"
                       "    build key-one <name>                    the same, refusing two\n"
@@ -7660,6 +7839,8 @@ static fn build_usage()
       "config-header: usage: build config-header <config> <header> [utility]\n") \
     X(GPU_KERNELS, "gpu-kernels", 2, 4, true, false, \
       "gpu-kernels: usage: build gpu-kernels [source [output]]\n") \
+    X(GPU_I915, "gpu-i915", 2, 4, true, false, \
+      "gpu-i915: usage: build gpu-i915 [source [output]]\n") \
     X(FREESTANDING, "freestanding", 2, 0, false, true, null) \
     X(FLOOR, "floor", 2, 0, true, false, null) \
     X(HELP, "--help", 2, 0, false, false, null) \
@@ -7798,6 +7979,10 @@ b32 main()
                         return build_gpu_kernels(count > 2 ? arguments[2] : build_setting_get("gpu_source"),
                                                  count > 3 ? arguments[3]
                                                            : build_in("artifacts", build_setting_get("gpu_kernels")));
+                case BUILD_GPU_I915:
+                        return build_gpu_i915(count > 2 ? arguments[2] : build_setting_get("gpu_i915_source"),
+                                              count > 3 ? arguments[3]
+                                                        : build_in("artifacts", build_setting_get("gpu_i915_kernels")));
                 case BUILD_FREESTANDING:
                         return build_freestanding(arguments + 2, count - 2);
                 case BUILD_FLOOR:
