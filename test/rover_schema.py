@@ -33,7 +33,7 @@ DEBUG = False   # --why: say why each routine left out is left out
 PAGE_HEAD = 16      # a page's first bytes: its version, its sequence, the zone's offset
 PAGE_BYTES = 4096
 WORD_SLOT = 64      # a word state: its length, 62 bytes and a NUL
-KINDS = ['int', 'percent', 'duration', 'clock', 'weekday', 'enum', 'onoff', 'chord', 'word', 'text']
+KINDS = ['int', 'percent', 'duration', 'clock', 'weekday', 'enum', 'onoff', 'chord', 'word', 'text', 'words']
 PAGES = ['kernel', 'desktop']
 SOURCES = ['kernel', 'runner', 'desktop']
 CLASSES = ['any', 'lower-only', 'deliberate']
@@ -81,7 +81,7 @@ class Types:
     def __init__(self):
         self.rows, self.index = [], {}
         #   The base types, first and in this order: the compiler names them by row (ROVER_TYPE_INT .. _TEXT).
-        for base in ('int', 'percent', 'duration', 'clock', 'weekday', 'onoff', 'chord', 'word', 'text'):
+        for base in ('int', 'percent', 'duration', 'clock', 'weekday', 'onoff', 'chord', 'word', 'text', 'words'):
             self.take(base)
 
     def take(self, spelling):
@@ -343,7 +343,7 @@ def records(types, states, events, primitives, functions, tool_names):
     for ident, name, source, fields in events:
         line = 'event id=%d name=%s source=%s' % (ident, quote(name), SOURCES[source])
         if fields:
-            line += ' fields=' + ','.join('%s:%s' % (f, types.spell(t)) for f, t in fields)
+            line += ' fields=' + ';'.join('%s:%s' % (f, types.spell(t)) for f, t in fields)
         lines.append(line)
     for name, page, kind, offset in states:
         lines.append('state name=%s page=%s offset=%d type=%s' % (name, PAGES[page], offset, types.spell(kind)))
@@ -353,7 +353,7 @@ def records(types, states, events, primitives, functions, tool_names):
         line = 'primitive id=%d name=%s runs=%s class=%s bounded=yes' % (ident, quote(name), SOURCES[runs],
                                                                         CLASSES[klass])
         if args:
-            line += ' args=' + ','.join('%s:%s' % (a, types.spell(t)) for a, t in args)
+            line += ' args=' + ';'.join('%s:%s' % (a, types.spell(t)) for a, t in args)
         lines.append(line)
     for number, (name, answer, signature, casts, kernel) in enumerate(functions):
         stated = ''.join(' %s=%d:%d' % (c[2], c[3], c[4]) for c in casts if c[0] == 'i')

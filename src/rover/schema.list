@@ -9,7 +9,8 @@
 #   primitive ID RUNS CLASS NAME [ARG:TYPE ...]
 #
 # TYPE is int:LOW:HIGH, percent, duration, clock, weekday, onoff,
-# enum:WORD,WORD..., chord, word or text. A state is never moved: a new one
+# enum:WORD,WORD..., chord, word or text; a primitive's last argument may be
+# words, none or more words up to an action's four arguments. A state is never moved: a new one
 # goes at the end of its page. An id is never given to another event or
 # primitive.
 
@@ -37,6 +38,9 @@ event 67 desktop "window opened" app:word
 event 68 desktop "window closed" app:word
 event 69 desktop "display added" connector:word
 event 70 desktop "display removed" connector:word
+# A press of the desktop's own: the panel's launcher button, the tray's volume, microphone and notices cells,
+# its clock pressed twice, and a pinned program's task, whose slot and program the compositor says.
+event 71 desktop button name:enum:launcher,volume,mic,notices,tray-double,pin slot:int:0:63 app:word
 
 # The rules' own event, which emit posts.
 event 96 runner cue name:word
@@ -61,7 +65,7 @@ primitive 10 kernel deliberate "usb allow"
 primitive 11 kernel any log message:text
 primitive 12 desktop any "display off"
 primitive 13 desktop any "display on"
-primitive 14 desktop any open app:word
+primitive 14 desktop any open app:word words:words
 primitive 15 desktop any notify message:text
 primitive 16 runner any start service:word
 primitive 17 runner any stop service:word

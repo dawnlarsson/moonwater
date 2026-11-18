@@ -283,6 +283,26 @@ static const char address_to const rover_canonical[] = {
     "\tdo usb lock\n"
     "\tdo latency 1500ms\n"
     "\tdo latency off\n",
+
+    "rule settings\n"
+    "\ton button tray-double\n"
+    "\tdo open settings\n"
+    "\n"
+    "rule mixer\n"
+    "\ton button volume\n"
+    "\tdo open mixer -q -a\n"
+    "\n"
+    "rule microphone\n"
+    "\ton button mic\n"
+    "\tdo open mixer -q -a -i\n"
+    "\n"
+    "rule pinned\n"
+    "\ton button pin\n"
+    "\tdo open $app\n"
+    "\n"
+    "rule first-pin\n"
+    "\ton button pin 0\n"
+    "\tdo notify \"the first pin\"\n",
 };
 
 //      Text that is not canonical, and the one way it prints.
@@ -356,6 +376,9 @@ static const struct
     {"service a\n\trun /a\n\tif $app == x\n", 3, "fields are no states"},
     {"service a\n\tabout \"x\"\n", 0, "no run"},
     {"service a\n\trun /a\n\tfrob\n", 3, "no service statement"},
+    {"rule a\n\ton button frob\n\tdo open x\n", 2, "is not one of launcher"},
+    {"rule a\n\ton button volume\n\tdo open mixer -q -a -i -x\n", 3, "past an action's four arguments"},
+    {"rule a\n\ton button volume\n\tdo open\n", 3, "open takes app, words"},
     {"on lid close\n", 1, "left edge"},
     {"rule a\n\ton lid close\n\tdo backlight\n", 3, "takes level"},
     {"rule a\n\ton lid close\n\tdo suspend now\n", 3, "takes no argument"},
@@ -779,6 +802,37 @@ static fn rover_check_evaluator(void)
                           rover_bytes_are(values[1].text, values[1].length, "many_under_scores_here") &&
                           rover_bytes_are(values[2].text, values[2].length, "a b"));
                 check("a hit's actions are its then run", made && hits[0].count == 3);
+        }
+
+        //      The desktop's buttons: one event, keyed on which, and open with the words a program is started with.
+        check("the fourth text compiles", rover_compiled(rover_canonical[3]));
+        event = rover_event_of("button", null);
+        event.count = 3;
+        event.field[0].number = 1; // volume
+        check("the volume cell opens the mixer's popup", rover_same(rover_fires(&event, ROVER_DESKTOP), "mixer:then"));
+        event.field[0].number = 4; // tray-double
+        check("the clock pressed twice opens settings", rover_same(rover_fires(&event, ROVER_DESKTOP), "settings:then"));
+        event.field[0].number = 5; // pin
+        event.field[1].number = 0;
+        event.field[2].text = (const p8 address_to)"/usr/bin/foot";
+        event.field[2].length = 13;
+        check("a pinned task opens its program, and the first pin's rule hears its slot",
+              rover_same(rover_fires(&event, ROVER_DESKTOP), "pinned:then first-pin:then"));
+        event.field[1].number = 3;
+        check("another slot is not the first pin's", rover_same(rover_fires(&event, ROVER_DESKTOP), "pinned:then"));
+        {
+                struct rover_hit hits[4];
+                struct rover_value values[ROVER_ARGUMENTS];
+                positive made = rover_fire(&rover_view, rover_runs, rover_pages, &event, ROVER_DESKTOP, hits, 4);
+
+                check("open's argument is the pinned program",
+                      made && rover_arguments(&rover_view, hits[0].action, &event, rover_pages, values) == 1 &&
+                          rover_bytes_are(values[0].text, values[0].length, "/usr/bin/foot"));
+                event.field[0].number = 2; // mic
+                made = rover_fire(&rover_view, rover_runs, rover_pages, &event, ROVER_DESKTOP, hits, 4);
+                check("open with words hands them on, each one",
+                      made && rover_arguments(&rover_view, hits[0].action, &event, rover_pages, values) == 4 &&
+                          rover_bytes_are(values[3].text, values[3].length, "-i"));
         }
 
         //      Placement: the kernel's rules are the kernel's, the rest are not.

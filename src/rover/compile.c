@@ -45,6 +45,7 @@
 #define ROVER_TYPE_CHORD 6u
 #define ROVER_TYPE_WORD 7u
 #define ROVER_TYPE_TEXT 8u
+#define ROVER_TYPE_WORDS 9u
 
 _Static_assert(ROVER_STATES <= 62, "a rule's reads are 64 bits, two of them the clock's");
 
@@ -497,8 +498,9 @@ static bool rover_literal(struct rover_build address_to build, const struct rove
                 return false;
         }
         case ROVER_T_WORD:
+        case ROVER_T_WORDS:
         case ROVER_T_TEXT:
-                if (length > (row->kind == ROVER_T_WORD ? ROVER_WORD_MOST : ROVER_TEXT_MOST))
+                if (length > (row->kind == ROVER_T_TEXT ? ROVER_TEXT_MOST : ROVER_WORD_MOST))
                         return rover_refused(build, "", word, row->kind == ROVER_T_WORD ? " is longer than a word's 62 bytes"
                                                                                        : " is longer than 255 bytes");
                 if (rover_find(text, 0, length))
@@ -596,6 +598,7 @@ static fn rover_literal_put(struct rover_text address_to text, p8 type, b64 valu
                                 rover_puts(text, rover_keys[k].name);
                 return;
         case ROVER_T_WORD:
+        case ROVER_T_WORDS:
                 if (rover_bare(bytes, length))
                         rover_put(text, bytes, length);
                 else
@@ -1102,10 +1105,12 @@ static bool rover_read_arguments(struct rover_build address_to build, struct rov
                                  const struct rover_primitive_row address_to primitive)
 {
         positive count = build->words - first;
+        bool rest = primitive && primitive->count &&
+                    rover_types[primitive->type[primitive->count - 1]].kind == ROVER_T_WORDS;
 
         if (count > ROVER_ARGUMENTS)
                 return rover_refused(build, "", &build->word[first + ROVER_ARGUMENTS], " is past an action's four arguments");
-        if (primitive && count != primitive->count)
+        if (primitive && (rest ? count + 1 < primitive->count : count != primitive->count))
         {
                 rover_refused(build, primitive->name, null, primitive->count ? " takes " : " takes no argument");
                 if (primitive->count)
@@ -1123,7 +1128,7 @@ static bool rover_read_arguments(struct rover_build address_to build, struct rov
         for (positive k = 0; k < count; k++)
         {
                 struct rover_side side;
-                p8 type = primitive ? primitive->type[k] : ROVER_TYPE_WORD;
+                p8 type = primitive ? primitive->type[k < primitive->count ? k : primitive->count - 1] : ROVER_TYPE_WORD;
 
                 if (!rover_read_side(build, &build->word[first + k], rule, false, &side))
                         return false;

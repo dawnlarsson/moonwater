@@ -61,7 +61,8 @@
 #define ROVER_T_CHORD 7u
 #define ROVER_T_WORD 8u
 #define ROVER_T_TEXT 9u
-#define ROVER_T_KINDS 10u
+#define ROVER_T_WORDS 10u // a primitive's last argument: none or more words
+#define ROVER_T_KINDS 11u
 
 #define ROVER_RULE_WHEN 1u
 #define ROVER_RULE_ONCE 2u
@@ -457,7 +458,7 @@ static const struct rover_primitive_row address_to rover_primitive_find(positive
 
 static inline bool rover_kind_is_word(p8 kind)
 {
-        return kind == ROVER_T_WORD || kind == ROVER_T_TEXT;
+        return kind == ROVER_T_WORD || kind == ROVER_T_TEXT || kind == ROVER_T_WORDS;
 }
 
 static inline bool rover_number_side(p8 source)
@@ -1464,7 +1465,10 @@ static const char address_to rover_action_check(const struct rover_table address
                         return "a deliberate primitive, which only a person may ask for";
                 if (action->runs != primitive->runs)
                         return "a primitive done somewhere it does not run";
-                if (action->count != primitive->count)
+                //      A last argument of words takes none or more, up to the four an action has.
+                if (primitive->count && rover_types[primitive->type[primitive->count - 1]].kind == ROVER_T_WORDS
+                        ? action->count + 1 < primitive->count
+                        : action->count != primitive->count)
                         return "a primitive with another count of arguments than it takes";
                 break;
         case ROVER_RUN:
@@ -1488,13 +1492,15 @@ static const char address_to rover_action_check(const struct rover_table address
         {
                 b32 want = 2;
 
-                if (primitive && !rover_kind_is_word(rover_types[primitive->type[at]].kind))
+                p8 type = primitive ? primitive->type[at < primitive->count ? at : primitive->count - 1] : 0;
+
+                if (primitive && !rover_kind_is_word(rover_types[type].kind))
                         want = 1;
                 if (argument[at].source == ROVER_CALL)
                         return "a call as an action's argument";
                 if ((why = rover_operand_check(table, argument[at], want, kernel, false)))
                         return why;
-                if (primitive && !rover_constant_ok(table, argument[at], primitive->type[at]))
+                if (primitive && !rover_constant_ok(table, argument[at], type))
                         return "an argument outside its type's range";
                 if (primitive && argument[at].source == ROVER_CONST_WORD &&
                     !rover_kind_is_word(rover_types[argument[at].page].kind))

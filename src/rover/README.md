@@ -260,13 +260,16 @@ that.
 
 ```
 event id=5 name="lid close" source=kernel
-event id=64 name="chord" source=desktop fields=chord:chord
+event id=64 name=chord source=desktop fields=chord:chord
 state name=power.source page=kernel type=enum choices=ac,battery
 primitive id=3 name=suspend runs=kernel class=any bounded=yes
 primitive id=8 name="radio on" runs=kernel class=deliberate bounded=yes args=which:enum:wifi,bluetooth,all
 function name=string_length args=s returns=int kernel=yes bounded=yes
 tool name=grep runs=user bounded=no
 ```
+
+A record's list of fields or arguments is separated by `;`, since an
+enum's words are separated by `,`.
 
 It is generated, not written beside the code, wherever the code already
 says it:
@@ -312,7 +315,7 @@ of events and primitives are kept forever: one is never given to another.
 | Source | Events, with their fields |
 |---|---|
 | kernel (spark, ids 1–22) | `key power`, `key sleep`, `key reset`, `key ctrl-alt-delete`, `lid close`, `lid open`, `volume up`, `volume down`, `mute`, `brightness up`, `brightness down`, `canvas on`, `canvas off`, `micmute`, `rfkill`, `tablet on`, `tablet off`, `headphone on`, `headphone off`, `dock on`, `dock off`, `resume` |
-| desktop (the compositor, ids 64–) | `chord` (chord), `fullscreen on` and `fullscreen off` (app: word), `window opened` and `window closed` (app: word), `display added` and `display removed` (connector: word) |
+| desktop (the compositor, ids 64–) | `chord` (chord), `fullscreen on` and `fullscreen off` (app: word), `window opened` and `window closed` (app: word), `display added` and `display removed` (connector: word), `button` (name: `launcher`, `volume`, `mic`, `notices`, `tray-double` or `pin`; slot: int 0 to 63, a pin's place on the taskbar; app: word, a pin's program) |
 | rules (id 96) | `cue` (name: word), posted by `emit cue NAME` |
 
 ### States
@@ -341,7 +344,7 @@ userspace maps read-only; the desktop's page is the compositor's own.
 | `usb allow` | kernel | deliberate | |
 | `log` | kernel | any | text, to the kernel's log |
 | `display off`, `display on` | desktop | any | |
-| `open` | desktop | any | word: an app's name, as the launcher opens it |
+| `open` | desktop | any | word: an app's name or a program's path, as the launcher opens it; then none or more words, its arguments (`do open mixer -q -a`) |
 | `notify` | desktop | any | text, as a notice |
 
 ## Safety
