@@ -4851,7 +4851,21 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         int xdg = (s->flags & WAYLAND_SURFACE_XDG) != 0, initial = 0, quiet;
         // An X window the window manager has said is one is shown as the surface of an xdg toplevel (or popup) is, with no xdg
         // object to configure: the window manager sizes it.
-        int shown;
+        int shown = xdg || (s->xsurface && s->xadopted && !s->xdead);
+
+        // A quiet commit (wayland_commit_quiet) is not held (no barrier, no time, no X window's first picture), copies nothing and
+        // waits for nothing: its pending state is taken (the fifo wait and the time that end with it), the feedbacks of the commit
+        // before it no frame has latched are discarded as any commit's are, and it is counted; the rest of a commit would do nothing.
+        quiet = wayland_commit_quiet(c, s, xdg, shown);
+        if (quiet && (!xdg || s->role_id) && !(s->min_width && s->max_width && s->min_width > s->max_width) &&
+            !(s->min_height && s->max_height && s->min_height > s->max_height))
+        {
+                wayland_commit_take(c, s);
+                if (s->presentings.count)
+                        wayland_feedback_take(c, s, s->row >= 0);
+                wayland.quiet++;
+                return WAYLAND_OK;
+        }
 
         // wp_fifo and wp_commit_timing: a commit that is held is held as one that waits for its budget is: the client's stream waits
         // here, and the commit is made again when wayland_resume finds it no longer held. A barrier this commit sets is set once it is
@@ -4872,16 +4886,15 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         }
         // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time. The
         // pending state is taken (wayland_commit_take) only once the commit is sure to be made, so a commit that waits here or
-        // for its dma-buf is made again with the state it was sent with. A quiet commit copies nothing, and is made past its budget.
-        shown = xdg || (s->xsurface && s->xadopted && !s->xdead);
-        quiet = wayland_commit_quiet(c, s, xdg, shown);
-        if (!quiet && !wayland_budget_left(wayland_root_of(c, s)))
+        // for its dma-buf is made again with the state it was sent with.
+        if (!wayland_budget_left(wayland_root_of(c, s)))
         {
                 c->stalled_fd = -1;
                 c->stalled_sync_handle = -1;
                 c->budget_surface = wayland_surface_index(c, wayland_root_of(c, s));
                 return WAYLAND_STALL;
         }
+        shown = xdg || (s->xsurface && s->xadopted && !s->xdead); // the hold above may have adopted an X window that waited too long
         if (s->role == WAYLAND_ROLE_SUBSURFACE)
         {
                 long sub_buf = s->attach_made && s->attached ? wayland_find(c, s->attached, WLI_wl_buffer) : -1;
@@ -5105,7 +5118,6 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         wayland_feedback_take(c, s, s->row >= 0);
         if (s->row < 0 && s->readies.count)
                 wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
-        wayland.quiet += quiet;
         return WAYLAND_OK;
 }
 
