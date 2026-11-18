@@ -4404,6 +4404,26 @@ static void check_compositor_minimise(void)
           glass_at(139, 41) == glass_at(139, 42) && glass_at(139, 42) != 0x404040u && glass_at(139, 40) == 0x404040u &&
               glass_at(139, 43) == 0x404040u && glass_at(134, 42) == 0x404040u && glass_at(144, 42) == 0x404040u);
 
+    // A change that touches a button damages both whole (compositor_close_join, which reads the buttons' places from the window's
+    // rectangle, scale and asks): a pixel of the disc is the pair's box, 132,35 to 165,49. A change inside a window away from its buttons,
+    // or one that meets no window, is only itself.
+    compositor.damages = 0;
+    compositor_damage(158, 40, 1, 1);
+    check("minimise: a pixel of the close disc damages the close and minimise pair whole",
+          compositor.damages == 1 && compositor.damage[0][0] == 132 && compositor.damage[0][1] == 35 && compositor.damage[0][2] == 165 &&
+              compositor.damage[0][3] == 49);
+    compositor.damages = 0;
+    compositor_damage(100, 80, 2, 2);
+    check("minimise: a change inside a window away from its buttons is only itself",
+          compositor.damages == 1 && compositor.damage[0][0] == 100 && compositor.damage[0][1] == 80 && compositor.damage[0][2] == 102 &&
+              compositor.damage[0][3] == 82);
+    compositor.damages = 0;
+    compositor_damage(5, 5, 3, 3);
+    check("minimise: a change that meets no window is only itself",
+          compositor.damages == 1 && compositor.damage[0][0] == 5 && compositor.damage[0][1] == 5 && compositor.damage[0][2] == 8 &&
+              compositor.damage[0][3] == 8);
+    compositor.damages = 0;
+
     compositor.pointer_x = 139, compositor.pointer_y = 42;
     head = table->event_head[1];
     compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);

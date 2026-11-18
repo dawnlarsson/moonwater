@@ -128,6 +128,7 @@ static void compositor_glass_touch(const int *rectangle)
 
 static int compositor_visible(int row);
 static void compositor_frame_of(int row, struct compositor_frame *frame);
+static int compositor_row_scale(int row);
 static unsigned int compositor_snap(const int *box, unsigned int *touch, int *screen);
 static void compositor_assist_refresh(void);
 static int compositor_overlays_up(void);
@@ -158,7 +159,23 @@ static void compositor_close_join(int *rectangle)
 
                         if (!compositor_visible(row))
                                 continue;
-                        compositor_frame_of(row, &frame);
+                        // The buttons are read from what places them only: the window's rectangle, its scale and its asks, which are its
+                        // frame's while it neither glides nor lands (those move or shrink the frame, which is then made whole). Its whole
+                        // frame (compositor_frame_of: the picture settled, the land and glide, the lit edge, the preview) was made for every
+                        // window at every rectangle damaged, a client's commit included, to find two discs.
+                        if (compositor.glide[row] || compositor.landing[row])
+                                compositor_frame_of(row, &frame);
+                        else
+                        {
+                                // Inside the rectangle, or nothing of it is touched.
+                                if (rectangle[2] <= compositor.x[row] || rectangle[0] >= compositor.x[row] + (int)compositor.w[row] ||
+                                    rectangle[3] <= compositor.y[row] || rectangle[1] >= compositor.y[row] + (int)compositor.h[row])
+                                        continue;
+                                frame = (struct compositor_frame){.x = compositor.x[row], .y = compositor.y[row], .width = (int)compositor.w[row],
+                                                                  .height = (int)compositor.h[row], .scale = compositor_row_scale(row),
+                                                                  .close = !(compositor.asks[row] & WINDOW_NO_CLOSE),
+                                                                  .minimize = !(compositor.asks[row] & WINDOW_NO_TAB)};
+                        }
                         if (!compositor_close_box(&frame, &bx, &by, &side))
                                 continue;
                         // The minimise button is left of the close one: its damage is the pair's, the close button's right edge kept.
