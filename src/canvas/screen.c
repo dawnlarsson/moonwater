@@ -311,6 +311,9 @@ static bipolar term_session(b32 address_to master, positive address_to oom_kills
                 //      may have a question for whoever is at this window.
                 host_terminal_opening();
 
+                // What is typed here is the person's: the ask recorded for the shell, so a Wayland client started from it takes the keys
+                // with its first window (compositor_wl_asked), as the seed's MOONWATER_ASKED does for the kit's own.
+                windows_asked_record();
                 bowl_session_prepare("/root", null);
                 if (term_program_count)
                 {

@@ -989,49 +989,50 @@ static int compositor_wl_cut(const void *pixels)
 }
 
 /*
-        Whether the person asked for the program a client is: MOONWATER_ASKED=1 in its environment, which the launcher, a typed
-        command or a terminal the keys opened set, and which a program of the compositor's own empties after its first window.
-        Read from /proc as the compositor, which is root; at most a few KiB, and the first window of a connection only.
+        Whether the person asked for the program a client is: the client's process or one of its forebears (up to 64 of them) has
+        the ask recorded in WINDOWS_ASKED_DIR, by the process root started it from (the kit's launcher, a terminal's shell, the
+        runner's launch of a person's rule: windows_asked_record), with the start it has now. Where it was the client's own
+        environment (MOONWATER_ASKED=1), any program could set that for itself and take the keys at its first window. The
+        directory is read only while it is root's (or the compositor's) and no one else's to write (0700): a record another made
+        is no ask. A record whose process has gone and whose number another has now is taken away. The first window of a
+        connection only.
 */
 static int compositor_wl_asked(long client)
 {
-        char path[32] = "/proc/", text[4096];
-        unsigned int length = 6, pid = compositor_wl.pid[client] > 0 ? (unsigned int)compositor_wl.pid[client] : 0, digits = 0;
-        long handle, got, held = 0;
-        int found = 0;
+        unsigned char info[256];
+        unsigned int pid = compositor_wl.pid[client] > 0 ? (unsigned int)compositor_wl.pid[client] : 0, mode, owner;
+        unsigned int uid = (unsigned int)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0);
 
-        if (!pid)
+        // struct statx: stx_uid at 20, stx_mode at 28; the directory itself, not through a link.
+        memory_zero(info, sizeof info);
+        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive)windows_asked_dir, 0x100, 0x3, (positive)info, 0) < 0)
                 return 0;
-        for (unsigned int copy = pid; copy; copy /= 10)
-                digits++;
-        for (unsigned int index = digits; index--; pid /= 10)
-                path[length + index] = (char)('0' + pid % 10);
-        length += digits;
-        for (const char *tail = "/environ"; *tail; tail++)
-                path[length++] = *tail;
-        path[length] = 0;
-        handle = (long)system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
-        if (handle < 0)
+        owner = *(unsigned int *)(info + 20), mode = (unsigned int)info[28] | (unsigned int)info[29] << 8;
+        if ((mode & 0170000) != 0040000 || (mode & 077) || (owner != 0 && owner != uid))
                 return 0;
-        // The variables run together, ended by NULs; an entry cut by the end of what was read is not looked at.
-        while (!found && (got = (long)system_read_once((int)handle, text + held, sizeof text - 1 - (unsigned long)held)) > 0)
+        for (unsigned int depth = 0; pid > 1 && depth < 64; depth++)
         {
-                long start = 0, limit = held + got;
+                char path[64], text[24];
+                unsigned int parent;
+                unsigned long start = windows_proc_stat(pid, &parent), recorded = 0;
+                long handle, got;
 
-                for (long at = 0; at < limit; at++)
-                        if (!text[at])
-                        {
-                                found |= at - start == 17 && !memory_compare(text + start, "MOONWATER_ASKED=1", 17);
-                                start = at + 1;
-                        }
-                held = limit - start;
-                for (long at = 0; at < held; at++)
-                        text[at] = text[start + at];
-                if (held >= (long)sizeof text - 1)
-                        held = 0;
+                if (!start)
+                        return 0;
+                windows_asked_path(path, pid);
+                handle = (long)system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+                got = handle >= 0 ? (long)system_read_once((int)handle, text, sizeof text - 1) : 0;
+                if (handle >= 0)
+                        system_close((int)handle);
+                for (long k = 0; k < got && text[k] >= '0' && text[k] <= '9'; k++)
+                        recorded = recorded * 10 + (unsigned long)(text[k] - '0');
+                if (got > 0 && recorded == start)
+                        return 1;
+                if (got > 0)
+                        compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0, 0, 0, 0); // another process's, gone
+                pid = parent;
         }
-        system_close((int)handle);
-        return found;
+        return 0;
 }
 
 /* A table row for a client's window, claimed as a program claims one, with its pid. -1 when none is free. */

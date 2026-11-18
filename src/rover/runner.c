@@ -514,6 +514,12 @@ static bipolar rover_runner_exec(string_address address_to argv, string_address 
                 environment[used++] = extra;
         environment[used] = null;
         system_call_1(syscall(setsid), 0);
+#ifdef WINDOWS_ASKED_DIR
+        // A person's ask (MOONWATER_ASKED=1): recorded for this process where only root writes, which is what the compositor gives a Wayland
+        // client's first window the keys by (compositor_wl_asked; the client's own environment is anyone's to set).
+        if (extra && string_has_prefix(extra, WINDOW_ASKED_VARIABLE "=1"))
+                windows_asked_record();
+#endif
         bipolar null_handle = system_open_at(AT_FDCWD, "/dev/null", FILE_READ);
         bipolar out = system_open_at_mode(AT_FDCWD, log_path ? log_path : (string_address) "/dev/kmsg",
                                           FILE_WRITE | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);

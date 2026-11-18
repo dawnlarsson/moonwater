@@ -4296,6 +4296,75 @@ static void xwm_atom_rows(void)
         compositor_xwm_at = kept;
 }
 
+// A Wayland client is asked for (its first window takes the keys) by the record root made for it or a forebear (windows_asked_record,
+// compositor_wl_asked, R-seams-13), never by its own environment: a child of this process is asked once this process records its ask, a record
+// of another start is no ask and is taken away, and a directory others may write is not read. Over a directory of the check's own.
+static void asked_record_rows(void)
+{
+        static char dir[48] = "/tmp/mw-asked-check-";
+        const char *kept_dir = windows_asked_dir;
+        unsigned int me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), parent = 0, at = 20;
+        unsigned long start = windows_proc_stat(me, &parent);
+        int saved_started = compositor_wl.started, pipe_ends[2] = {-1, -1}, saved_pid;
+        long child;
+        char path[64];
+        b32 stat_ok, none, self, descendant, stale, gone, open_dir;
+
+        stat_ok = start > 0 && parent == (unsigned int)compositor_call(syscall(getppid), 0, 0, 0, 0, 0, 0);
+        for (unsigned int copy = me, digits = 0, index; ; )
+        {
+                for (unsigned int c = copy; c; c /= 10)
+                        digits++;
+                for (index = digits; index--; copy /= 10)
+                        dir[at + index] = (char)('0' + copy % 10);
+                dir[at + digits] = 0;
+                break;
+        }
+        compositor_call(syscall(mkdirat), (positive)AT_FDCWD, (positive)dir, 0700, 0, 0, 0);
+        windows_asked_dir = dir;
+        compositor_wl.started = 1;
+        (void)compositor_wl_slots_reach(1);
+        saved_pid = compositor_wl.pid[0];
+        compositor_call(syscall(pipe2), (positive)pipe_ends, 0x80000, 0, 0, 0, 0);
+        child = (long)system_fork();
+        if (child == 0)
+        {
+                char byte;
+
+                system_close(pipe_ends[1]);
+                system_read_once(pipe_ends[0], &byte, 1); // until the check is done with it
+                system_call_1(syscall(exit_group), 0);
+        }
+        compositor_wl.pid[0] = (int)child;
+        none = !compositor_wl_asked(0);
+        windows_asked_record();
+        compositor_wl.pid[0] = (int)me;
+        self = compositor_wl_asked(0);
+        compositor_wl.pid[0] = (int)child;
+        descendant = compositor_wl_asked(0);
+        windows_asked_path(path, me);
+        {
+                long handle = (long)system_open_at(AT_FDCWD, (string_address)path, FILE_WRITE | O_TRUNC | O_CLOEXEC);
+
+                if (handle >= 0)
+                        compositor_call(syscall(write), (positive)handle, (positive) "7\n", 2, 0, 0, 0), system_close((int)handle);
+        }
+        stale = !compositor_wl_asked(0);
+        gone = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC) < 0;
+        windows_asked_record();
+        compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)dir, 0755, 0, 0, 0);
+        open_dir = !compositor_wl_asked(0);
+        check("asked: a client is asked by its forebear's record and by nothing of its own; a record of another start is no ask and is taken away; "
+              "a directory others may write is not read",
+              stat_ok && none && self && descendant && stale && gone && open_dir);
+        system_close(pipe_ends[1]), system_close(pipe_ends[0]);
+        if (child > 0)
+                system_wait4_retry((bipolar)child, null, 0, null);
+        compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)path, 0, 0, 0, 0);
+        compositor_call(syscall(unlinkat), (positive)AT_FDCWD, (positive)dir, 0x200, 0, 0, 0); // AT_REMOVEDIR
+        compositor_wl.pid[0] = saved_pid, compositor_wl.started = saved_started, windows_asked_dir = kept_dir;
+}
+
 // The X window manager's socket (xwm.c, S-c3-2): one connection for each wrapper (a second from the same pid takes the first one's place), and a
 // connection whose wrapper has no child on the Wayland socket by COMPOSITOR_XWM_BIND_NS is closed: a program of uid 1000 that only holds the
 // socket holds no slot. Over an abstract socket of the check's own, with this process as the wrapper.
@@ -5458,6 +5527,7 @@ b32 main(void)
         display_off_rows();
         reader_own_rows();
         clip_most_rows();
+        asked_record_rows();
         grab_protocol_rows();
         fullscreen_rows();
         gpu_i915_rows();

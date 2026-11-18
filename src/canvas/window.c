@@ -867,6 +867,7 @@ static inline int window_drag_y(int b)
 // A launch the user asked for (the launcher, a typed command, a terminal the keys opened) carries this variable as 1,
 // and the first window its program opens takes the keys when it first shows. Any other window shows without them.
 #define WINDOW_ASKED_VARIABLE "MOONWATER_ASKED"
+#define WINDOWS_ASKED_DIR "/run/moonwater/asked" // the person's asks, by pid (windows_asked_record): root's alone, mode 0700
 #define WINDOW_ASKED_ENVIRONMENT 256
 
 // A placement as it is parsed, and as a row's columns hold it.
@@ -3183,6 +3184,7 @@ _Static_assert(offset_of(struct window_cell, flags) == 6, "window cell ABI");
 #define WINDOW_SYS_PREAD 17
 #define WINDOW_SYS_FSTAT 5
 #define WINDOW_SYS_FTRUNCATE 77
+#define WINDOW_SYS_MKDIRAT 258
 #else
 // arm64 and riscv share the asm-generic numbering.
 #define WINDOW_SYS_OPENAT 56
@@ -3201,6 +3203,7 @@ _Static_assert(offset_of(struct window_cell, flags) == 6, "window cell ABI");
 #define WINDOW_SYS_PREAD 67
 #define WINDOW_SYS_FSTAT 80
 #define WINDOW_SYS_FTRUNCATE 46
+#define WINDOW_SYS_MKDIRAT 34
 #endif
 
 /*
@@ -4165,9 +4168,105 @@ static void windows_asked_take(struct windows *table, unsigned int row, string_a
 }
 
 /*
+        A process's parent and its start (/proc/PID/stat's fourth field and its twenty-second, the clock ticks since boot it
+        started at): the start, 0 when there is no such process. The fields are read after the command name's last ')', which
+        may hold anything.
+*/
+static unsigned long windows_proc_stat(unsigned int pid, unsigned int *parent)
+{
+        char path[32] = "/proc/", text[512];
+        unsigned int at = 6, digits = 0, field = 3;
+        unsigned long value = 0, start = 0;
+        long handle, got, from = -1;
+
+        *parent = 0;
+        for (unsigned int copy = pid; copy; copy /= 10)
+                digits++;
+        for (unsigned int index = digits, copy = pid; index--; copy /= 10)
+                path[at + index] = (char)('0' + copy % 10);
+        at += digits;
+        for (const char *tail = "/stat"; *tail; tail++)
+                path[at++] = *tail;
+        path[at] = 0;
+        handle = pid ? window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0) : -1; // O_RDONLY | O_CLOEXEC
+        if (handle < 0)
+                return 0;
+        got = window_call(WINDOW_SYS_READ, handle, (long)text, (long)sizeof text - 1, 0, 0, 0);
+        window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
+        for (long k = 0; k < got; k++)
+                from = text[k] == ')' ? k : from;
+        if (from < 0)
+                return 0;
+        // " S ppid ... starttime": field 3 is the state; each field a run of what is not a space.
+        for (long k = from + 2; k < got && field <= 22; k++)
+                if (text[k] == ' ')
+                        field++, value = 0;
+                else if (text[k] >= '0' && text[k] <= '9')
+                {
+                        value = value * 10 + (unsigned long)(text[k] - '0');
+                        if (field == 4)
+                                *parent = (unsigned int)value;
+                        if (field == 22)
+                                start = value;
+                }
+        return start;
+}
+
+/*
+        The person's ask recorded for this process, before it runs what was asked for (the kit's launches, through
+        window_asked_environment; a terminal's shell; the runner's launch of a person's rule): WINDOWS_ASKED_DIR/PID, holding
+        its start (windows_proc_stat). The compositor gives the keys to the first window of a Wayland client that is this
+        process or one of its descendants (compositor_wl_asked), reading only what root wrote there: a client's own
+        environment, which any program sets for itself, is not asked. The start keeps a record of a process gone from naming
+        the next one given its number; the compositor takes such a one away when it meets it. Only root can write it (the
+        directory is root's, 0700): anyone else's record is not made, and its windows are not asked.
+*/
+static const char *windows_asked_dir = WINDOWS_ASKED_DIR; // (a check points it at a directory of its own)
+
+// The record of pid's ask, windows_asked_dir/PID, into path (64 bytes).
+static void windows_asked_path(char *path, unsigned int pid)
+{
+        unsigned int at = 0, digits = 0;
+
+        for (const char *from = windows_asked_dir; *from && at < 40; from++)
+                path[at++] = *from;
+        path[at++] = '/';
+        for (unsigned int copy = pid; copy; copy /= 10)
+                digits++;
+        for (unsigned int index = digits, copy = pid; index--; copy /= 10)
+                path[at + index] = (char)('0' + copy % 10);
+        path[at + digits] = 0;
+}
+
+static void windows_asked_record(void)
+{
+        char path[64], line[24];
+        unsigned int parent, pid = (unsigned int)window_call(WINDOW_SYS_GETPID, 0, 0, 0, 0, 0, 0), length = 0;
+        unsigned long start = windows_proc_stat(pid, &parent);
+        long handle;
+
+        if (!start)
+                return;
+        window_call(WINDOW_SYS_MKDIRAT, -100, (long)windows_asked_dir, 0700, 0, 0, 0);
+        windows_asked_path(path, pid);
+        for (unsigned long copy = start; copy; copy /= 10)
+                length++;
+        for (unsigned int index = length; index--;)
+                line[index] = (char)('0' + start % 10), start /= 10;
+        line[length++] = '\n';
+        // O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW (the architecture's) | O_CLOEXEC
+        handle = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 01 | 0100 | 01000 | O_NOFOLLOW | 02000000, 0600, 0, 0);
+        if (handle < 0)
+                return;
+        window_call(WINDOW_SYS_WRITE, handle, (long)line, (long)length, 0, 0, 0);
+        window_call(WINDOW_SYS_CLOSE, handle, 0, 0, 0, 0, 0);
+}
+
+/*
         The environment of a program the user asked for: the program's own, with MOONWATER_ASKED=1 first and any
         MOONWATER_ASKED it had taken out. Built once in a static array; a program with more variables than that is
-        started as it is, without the mark, which is what it was before the mark.
+        started as it is, without the mark, which is what it was before the mark. Called in the child that runs it, so the
+        ask is recorded for it there too (windows_asked_record), which is what a Wayland client is asked by.
 */
 static string_address address_to window_asked_environment(void)
 {
@@ -4176,6 +4275,7 @@ static string_address address_to window_asked_environment(void)
         string_address address_to inherited = program_environment_list();
         unsigned int used = 0;
 
+        windows_asked_record();
         for (unsigned int at = 0; inherited && inherited[at]; at++)
                 if (!string_has_prefix(inherited[at], WINDOW_ASKED_VARIABLE "="))
                         used++;
