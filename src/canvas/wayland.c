@@ -4840,15 +4840,16 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         }
         // A client past its share of a frame's copies: this commit and what follows it wait for its next window of time. The
         // pending state is taken (wayland_commit_take) only once the commit is sure to be made, so a commit that waits here or
-        // for its dma-buf is made again with the state it was sent with.
-        if (!wayland_budget_left(wayland_root_of(c, s)))
+        // for its dma-buf is made again with the state it was sent with. A quiet commit copies nothing, and is made past its budget.
+        shown = xdg || (s->xsurface && s->xadopted && !s->xdead);
+        quiet = wayland_commit_quiet(c, s, xdg, shown);
+        if (!quiet && !wayland_budget_left(wayland_root_of(c, s)))
         {
                 c->stalled_fd = -1;
                 c->stalled_sync_handle = -1;
                 c->budget_surface = wayland_surface_index(c, wayland_root_of(c, s));
                 return WAYLAND_STALL;
         }
-        shown = xdg || (s->xsurface && s->xadopted && !s->xdead);
         if (s->role == WAYLAND_ROLE_SUBSURFACE)
         {
                 long sub_buf = s->attach_made && s->attached ? wayland_find(c, s->attached, WLI_wl_buffer) : -1;
@@ -4924,7 +4925,6 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         return WAYLAND_STALL;
                 }
         }
-        quiet = wayland_commit_quiet(c, s, xdg, shown);
         wayland_commit_take(c, s);
         if ((s->min_width && s->max_width && s->min_width > s->max_width) ||
             (s->min_height && s->max_height && s->min_height > s->max_height))
@@ -5066,8 +5066,10 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         s->attached = 0;
         s->damages = 0;
         s->damage_full = 0;
-        // The frame callbacks the commit takes. A surface with no window has no frame: its callbacks are answered now.
-        wayland_callbacks_take(c, s, wayland.host->now(wayland.host->context));
+        // The frame callbacks the commit takes (the clock read only for some). A surface with no window has no frame: its callbacks are
+        // answered now.
+        if (s->callbacks.count)
+                wayland_callbacks_take(c, s, wayland.host->now(wayland.host->context));
         wayland_feedback_take(c, s, s->row >= 0);
         if (s->row < 0 && s->readies.count)
                 wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));

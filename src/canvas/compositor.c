@@ -2964,16 +2964,13 @@ static b32 compositor_slingshot(const struct compositor_poll *wanted, const stru
         the device's a slingshot and Xwayland's a whole turn (the moon's keep, the owed releases, the poll list made again, the window
         manager's walk of every X window, the clients' whole wake): 11.4k instructions and 12.9k cycles of the loop's thread a report.
 */
-static b32 compositor_quietshot(const struct compositor_poll *wanted, const struct compositor_slots *slots, positive now, positive until)
+static b32 compositor_quietshot(const struct compositor_poll *wanted, const struct compositor_slots *slots, long awaited, positive now, positive until)
 {
         if (!compositor_wl.started || !slots->wayland_at || slots->fence_at || compositor.cursor.magnify || compositor.cursor.magnified ||
             (until && now >= until) ||
             (compositor.flip_pending && (now < compositor.flip_issued || now - compositor.flip_issued >= COMPOSITOR_FLIP_LOST / 2)))
                 return 0;
-        for (unsigned int at = 0; at < slots->count; at++)
-                if (wanted[at].returned && (at <= slots->wayland_at || at > slots->wayland_at + compositor_wl.slots))
-                        return 0;
-        return compositor_wl_quiet_read(wanted + slots->wayland_at);
+        return compositor_wl_quiet_read(wanted + slots->wayland_at, awaited, now);
 }
 #endif
 
@@ -3443,7 +3440,7 @@ static b32 compositor_main()
 #endif
 #ifdef CONFIG_MOONWATER_WAYLAND
                         if ((any && compositor_slingshot(wanted, &slots, awaited, now, until)) ||
-                            (!any && compositor_quietshot(wanted, &slots, now, until)))
+                            (!any && compositor_quietshot(wanted, &slots, awaited, now, until)))
                         {
                                 for (unsigned int at = 0; at < count; at++)
                                         if (wanted[at].returned)

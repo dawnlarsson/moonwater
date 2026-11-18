@@ -108,6 +108,7 @@ static struct
         int *uid, *pid;
         unsigned char *asked;
         long slots;
+        long polled; // the slots the loop's poll list was made with (compositor_wl_poll), which a list polled again has, and no more
         struct wayland_table fd_table, uid_table, pid_table, asked_table, slow_table;
         int started, handler;
         unsigned long frames;
@@ -6574,6 +6575,7 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
         if (!compositor_wl.started)
                 return count;
         wanted[count++] = (struct compositor_poll){compositor_wl.listen, COMPOSITOR_POLLIN, 0};
+        compositor_wl.polled = compositor_wl.slots;
         for (long slot = 0; slot < compositor_wl.slots; slot++)
         {
                 const unsigned char *bytes;
@@ -6602,28 +6604,36 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
 
 static void compositor_wl_target(void); // the vblank a commit for a time is held against, said to the shim (below)
 
-/*
-        The clients a quiet turn woke (compositor_quietshot) read, each socket the poll answered with POLLIN alone, before the rest of the
-        turn: whether every request they sent was quiet (wayland_heard: a lock's hint, a commit with nothing pending), none of them waits
-        for its GPU, its budget or a hold or went, and what they were answered went out. A read that was not quiet has been dispatched as
-        the turn's wl pass would have, and the turn goes on whole (its pass reads the sockets again and finds nothing).
-*/
-static b32 compositor_wl_quiet_read(const struct compositor_poll *wanted)
-{
-        long heard, quiet, heard_now, quiet_now;
+static void compositor_wl_target_at(positive now);
 
-        if (!compositor_wl.started)
+/*
+        The clients a quiet turn woke (compositor_quietshot) read before the rest of the turn, when every one of the descriptors the poll
+        answered (awaited) is a client's socket that answered POLLIN alone: whether every request they sent was quiet (wayland_heard: a
+        lock's hint, a commit with nothing pending), none of them waits now for its GPU, its budget or a hold or went, and what they were
+        answered went out. A read that was not quiet has been dispatched as the turn's wl pass would have (after the vblank a commit for a
+        time is held against, said to the shim at the turn's now), and the turn goes on whole (its pass reads the sockets again and finds
+        nothing). A client that waits and was not answered is the whole turn's to resume, at its descriptor's answer or its time.
+*/
+static b32 compositor_wl_quiet_read(const struct compositor_poll *wanted, long awaited, positive now)
+{
+        long heard, quiet, heard_now, quiet_now, answered = 0, polled = compositor_wl.polled < compositor_wl.slots ? compositor_wl.polled : compositor_wl.slots;
+
+        for (long slot = 0; slot < polled; slot++)
+                if (wanted[1 + slot].returned)
+                {
+                        if (wanted[1 + slot].returned != COMPOSITOR_POLLIN || compositor_wl.fd[slot] < 0)
+                                return 0;
+                        answered++;
+                }
+        if (answered != awaited)
                 return 0;
-        for (long slot = 0; slot < compositor_wl.slots; slot++)
-                if (compositor_wl.fd[slot] >= 0 && (wayland_stalled(slot) || (wanted[1 + slot].returned && wanted[1 + slot].returned != COMPOSITOR_POLLIN)))
-                        return 0;
-        compositor_wl_target();
+        compositor_wl_target_at(now);
         heard = wayland_heard(&quiet);
-        for (long slot = 0; slot < compositor_wl.slots; slot++)
-                if (compositor_wl.fd[slot] >= 0 && wanted[1 + slot].returned)
+        for (long slot = 0; slot < polled; slot++)
+                if (wanted[1 + slot].returned)
                         compositor_wl_read(slot);
         heard_now = wayland_heard(&quiet_now);
-        for (long slot = 0; slot < compositor_wl.slots; slot++)
+        for (long slot = 0; slot < polled; slot++)
         {
                 if (!wanted[1 + slot].returned)
                         continue;
@@ -7041,8 +7051,13 @@ static positive compositor_wl_vblank_next(positive now, unsigned long *seq)
 */
 static void compositor_wl_target(void)
 {
+        compositor_wl_target_at(clock_monotonic_nanoseconds());
+}
+
+static void compositor_wl_target_at(positive now)
+{
         unsigned long seq;
-        positive next = compositor_wl_vblank_next(clock_monotonic_nanoseconds(), &seq);
+        positive next = compositor_wl_vblank_next(now, &seq);
 
         if (next && (compositor.flip_pending || compositor_card.on))
                 next += compositor_wl_refresh();
