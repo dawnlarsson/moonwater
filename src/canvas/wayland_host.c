@@ -5696,13 +5696,17 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
 /* ---- input: the pointer and the keys, as a client is told of them ---- */
 
 /*
-        The window the pointer is over, for a client: the one a button is held on, else the one it moved over last, when it is
-        a client's window and it is shown and is not being moved or resized. Just outside a window's picture is the edge the
-        compositor resizes by, and no client's.
+        The window the pointer is over, for a client: the one a button is held on, else the one under it now (compositor_under, as
+        a motion finds it), when it is a client's window and it is shown and is not being moved or resized. Just outside a window's
+        picture is the edge the compositor resizes by, and no client's. Now, not where it last moved: a window that comes up under a
+        resting pointer (a game going fullscreen, a window raised by a key) is entered at once, as a motion would have entered it,
+        where it was entered only when the hand next moved, and a game's lock or confinement waited for that move: Xwayland then
+        had the enter, the confinement and the lock together with the first report, and SDL2's mouse-look through Xwayland got
+        counts that cancelled out (hasty-tail: -2 of 3999 counts in 8 of 10 runs).
 */
 static int compositor_wl_pointer_row(void)
 {
-        int row = compositor.grab >= 0 ? compositor.grab : compositor.hover;
+        int tab, row = compositor.grab >= 0 ? compositor.grab : compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
 
         if (row < 0 || compositor.drag >= 0 || compositor.resize >= 0 || wayland_row_owner(row) < 0 || !compositor.showing[row] ||
             (compositor.state[row] & WINDOW_MINIMIZED))
