@@ -3172,7 +3172,8 @@ static void compositor_gpu_settings(void)
 #endif
 
         compositor_word(SETTING_GPU_PATH, word, sizeof(word));
-        compositor_gpu = string_equals((string_address)word, (string_address) "on");
+        // No file in /root is the registry's standard, on: the GPU is the default on every machine. A word is on only when it says so.
+        compositor_gpu = word[0] ? string_equals((string_address)word, (string_address) "on") : 1;
 #ifdef MOONWATER_GPU_C
         // Turned on again: a GPU given up on after three hangs is tried again (one that never started, a card that is not one the kernels are for or that
         // drew its self-test wrong, stays given up).
