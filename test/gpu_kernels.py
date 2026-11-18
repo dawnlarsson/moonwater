@@ -263,15 +263,19 @@ IGT_GEN9_FILL_ROWS_1_TO_9 = [
 
 
 def intel_text(kernels):
-    """The include build gpu-i915 writes: one array per kernel, ten words a line, each word and its comma and space."""
+    """The include build gpu-i915 writes, byte for byte: one array per kernel, ten words a line. A full line ends with a comma and
+    a newline; a short line (the array's last) ends with ', ' and no newline; the close is a newline, '};' and a newline, so an
+    array whose last line is full has a blank line before its '};', as the build's output does."""
     out = []
     for name, words in kernels:
         out.append('static const unsigned int gpu_i915_%s[] = {\n' % name)
         for at in range(0, len(words), 10):
             line = words[at:at + 10]
-            # the words are comma and space separated; a full line ends with a comma, a short one (the array's last) with ', '
-            out.append('    ' + ', '.join('0x%08x' % w for w in line) + (',' if len(line) == 10 else ', ') + '\n')
-        out.append('};\n')
+            if len(line) == 10:
+                out.append('    ' + ', '.join('0x%08x' % w for w in line) + ',\n')
+            else:
+                out.append('    ' + ', '.join('0x%08x' % w for w in line) + ', ')
+        out.append('\n};\n')
     return ''.join(out)
 
 
