@@ -1,0 +1,156 @@
+// Gen9 scene (op 4, "cp"): a scene of fills (record kind 0) and tones (kind 1) over the whole picture, of any width, at a pitch
+// that is a multiple of 16 pixels (64 bytes: rows sharing a 64-byte line raced on the card). One thread a 16-byte block (4 pixels) of one row: thread group X (r0.1) is the block, group Y
+// (r0.6) the row. The block's 64 by 64 cell is looked up in the bins table on binding table entry 1 (two dwords a cell: the
+// first record's index and the count, bins_starts and bins_place's layout), and the cell's records are read in the order the
+// scene gave them (32 bytes each: kind, x0, y0, x1, y1, colour, 0, 0; the lists start cw * ch * 8 bytes into the bins). Each
+// record lays over the block's pixels inside it, as the processor's scene does: a fill (kind 0) writes its colour, a tone
+// (kind 1) lays its colour over the pixel by ui_over (the same lane formula as gpu_i915_tone.iga; a tone of alpha 0 leaves the
+// pixel as it was). A pixel is changed only when x < w (the picture's width), so the pad bytes of a block past w keep their
+// value. Assemble with: iga64 -a -p=9 src/canvas/gpu_i915_cp.iga -o cp.krn (the words are in src/canvas/gpu_i915.asm).
+//
+// CURBE (r1, read at the start): r1.0 = w (pixels), r1.1 = cw (cells a row, (w + 63) / 64), r1.2 = the lists' offset in bytes from
+// the bins (8 * cw * ch). Binding table entry 0 is the destination (the block read and write, as the tone's), entry 1 the bins.
+// The records and the table are read with 8-byte media block reads (the header's block width is bytes minus one: 7 here, 15 for the
+// 16-byte block; a 3 read only the start of an entry), two dwords back, at offsets that are a multiple of 8, so no read crosses the
+// bins surface's 16384-byte rows.
+mov (1|M0)               r60.0<1>:ud   r1.0<0;1,0>:ud
+mov (1|M0)               r60.1<1>:ud   r1.1<0;1,0>:ud
+mov (1|M0)               r60.2<1>:ud   r1.2<0;1,0>:ud
+mul (1|M0)               r2.0<1>:ud    r0.1<0;1,0>:ud    0x10:ud
+mov (1|M0)               r2.1<1>:ud    r0.6<0;1,0>:ud
+mov (8|M0)               r4.0<1>:ud    r0.0<8;8,1>:ud
+mov (2|M0)               r4.0<1>:ud    r2.0<2;2,1>:ud
+mov (1|M0)               r4.2<1>:ud    0xF:ud
+send (16|M0)             r5:ud         r4:ud     0xC  0x02190000     // media block read of the destination (entry 0), header, 1 GRF
+mov (4|M0)               r6.0<1>:ud    r5.0<1;1,0>:ud                 // waits for the block's response before r5 is written (a write to a pending response's register hangs the card)
+// the pixels' x (the block's first pixel, 4 * bx), the cell (cy * cw + cx), its table offset (8 * cell)
+shl (1|M0)               r61.0<1>:ud   r0.1<0;1,0>:ud    2:ud
+shr (1|M0)               r61.1<1>:ud   r0.1<0;1,0>:ud    4:ud
+shr (1|M0)               r61.2<1>:ud   r0.6<0;1,0>:ud    6:ud
+mul (1|M0)               r61.3<1>:ud   r61.2<0;1,0>:ud   r60.2<0;1,0>:uw   // cw: the low word of r60.1 (a :uw subregister is in 2-byte units)
+add (1|M0)               r61.3<1>:ud   r61.3<0;1,0>:ud   r61.1<0;1,0>:ud
+shl (1|M0)               r61.4<1>:ud   r61.3<0;1,0>:ud   3:ud
+// the table entry: the header's x (the offset within a 16384-byte row) and y (the row), read two dwords back
+and (1|M0)               r62.0<1>:ud   r61.4<0;1,0>:ud   0x3fff:ud
+shr (1|M0)               r62.1<1>:ud   r61.4<0;1,0>:ud   14:ud
+mov (8|M0)               r40.0<1>:ud   r0.0<8;8,1>:ud
+mov (2|M0)               r40.0<1>:ud   r62.0<2;2,1>:ud
+mov (1|M0)               r40.2<1>:ud   0x7:ud
+send (16|M0)             r41:ud        r40:ud    0xC  0x02190001     // table entry: start (r41.0) and count (r41.1), entry 1
+mov (1|M0)               r63.0<1>:ud   r41.0<0;1,0>:ud               // start (records)
+mov (1|M0)               r63.1<1>:ud   r41.1<0;1,0>:ud               // count
+shl (1|M0)               r63.2<1>:ud   r63.0<0;1,0>:ud   5:ud        // 32 * start
+add (1|M0)               r63.2<1>:ud   r63.2<0;1,0>:ud   r60.2<0;1,0>:ud  // the first record's offset
+// the lanes' pixels: x = 4 * bx + lane (r91), lane numbers in r92
+mov (1|M0)               r92.0<1>:ud   0:ud
+mov (1|M0)               r92.1<1>:ud   1:ud
+mov (1|M0)               r92.2<1>:ud   2:ud
+mov (1|M0)               r92.3<1>:ud   3:ud
+add (4|M0)               r91.0<1>:ud   r92.0<4;4,1>:ud   r61.0<0;1,0>:ud
+cmp (1|M0)   (eq)f1.0    null:ud       r63.1<0;1,0>:ud   0:ud
+(f1.0) jmpi (1|M0) Lwrite
+Lrec:
+// the record: eight dwords read as four 8-byte block reads at its offset, 0, 8, 16, 24 (headers r44..r47, responses r70..r73)
+add (1|M0)               r64.0<1>:ud   r63.2<0;1,0>:ud   0:ud
+and (1|M0)               r64.1<1>:ud   r64.0<0;1,0>:ud   0x3fff:ud
+shr (1|M0)               r64.2<1>:ud   r64.0<0;1,0>:ud   14:ud
+mov (8|M0)               r44.0<1>:ud   r0.0<8;8,1>:ud
+mov (2|M0)               r44.0<1>:ud   r64.1<2;2,1>:ud
+mov (1|M0)               r44.2<1>:ud   0x7:ud
+send (16|M0)             r70:ud        r44:ud    0xC  0x02190001
+add (1|M0)               r64.0<1>:ud   r63.2<0;1,0>:ud   8:ud
+and (1|M0)               r64.1<1>:ud   r64.0<0;1,0>:ud   0x3fff:ud
+shr (1|M0)               r64.2<1>:ud   r64.0<0;1,0>:ud   14:ud
+mov (8|M0)               r45.0<1>:ud   r0.0<8;8,1>:ud
+mov (2|M0)               r45.0<1>:ud   r64.1<2;2,1>:ud
+mov (1|M0)               r45.2<1>:ud   0x7:ud
+send (16|M0)             r71:ud        r45:ud    0xC  0x02190001
+add (1|M0)               r64.0<1>:ud   r63.2<0;1,0>:ud   16:ud
+and (1|M0)               r64.1<1>:ud   r64.0<0;1,0>:ud   0x3fff:ud
+shr (1|M0)               r64.2<1>:ud   r64.0<0;1,0>:ud   14:ud
+mov (8|M0)               r46.0<1>:ud   r0.0<8;8,1>:ud
+mov (2|M0)               r46.0<1>:ud   r64.1<2;2,1>:ud
+mov (1|M0)               r46.2<1>:ud   0x7:ud
+send (16|M0)             r72:ud        r46:ud    0xC  0x02190001
+add (1|M0)               r64.0<1>:ud   r63.2<0;1,0>:ud   24:ud
+and (1|M0)               r64.1<1>:ud   r64.0<0;1,0>:ud   0x3fff:ud
+shr (1|M0)               r64.2<1>:ud   r64.0<0;1,0>:ud   14:ud
+mov (8|M0)               r47.0<1>:ud   r0.0<8;8,1>:ud
+mov (2|M0)               r47.0<1>:ud   r64.1<2;2,1>:ud
+mov (1|M0)               r47.2<1>:ud   0x7:ud
+send (16|M0)             r73:ud        r47:ud    0xC  0x02190001
+// the record's words: r80.0 kind, r80.1 x0, r80.2 y0, r80.3 x1, r80.4 y1, r80.5 colour
+mov (1|M0)               r80.0<1>:ud   r70.0<0;1,0>:ud
+mov (1|M0)               r80.1<1>:ud   r70.1<0;1,0>:ud
+mov (1|M0)               r80.2<1>:ud   r71.0<0;1,0>:ud
+mov (1|M0)               r80.3<1>:ud   r71.1<0;1,0>:ud
+mov (1|M0)               r80.4<1>:ud   r72.0<0;1,0>:ud
+mov (1|M0)               r80.5<1>:ud   r72.1<0;1,0>:ud
+shr (1|M0)               r81.0<1>:ud   r80.5<0;1,0>:ud   24:ud        // alpha
+add (1|M0)               r84.0<1>:ud   -r81.0<0;1,0>:ud  255:ud       // rest = 255 - alpha
+and (1|M0)               r85.0<1>:ud   r80.5<0;1,0>:ud   0x00ff00ff:ud
+shr (1|M0)               r86.0<1>:ud   r80.5<0;1,0>:ud   8:ud
+and (1|M0)               r86.0<1>:ud   r86.0<0;1,0>:ud   0x00ff00ff:ud
+// the cover of the record on this block: U = max(min(x1, w), x0) - x0 (x0 <= x < that), zero unless the row is in [y0, y1) and
+// the record is not a tone of alpha 0 (ui_over leaves that pixel as it was)
+sel (1|M0)   (lt)f0.0    r81.1<1>:d    r80.3<0;1,0>:d    r60.0<0;1,0>:d
+sel (1|M0)   (ge)f0.0    r81.1<1>:d    r81.1<0;1,0>:d    r80.1<0;1,0>:d
+add (1|M0)               r81.2<1>:ud   r81.1<0;1,0>:ud   -r80.1<0;1,0>:ud
+add (1|M0)               r82.0<1>:ud   r0.6<0;1,0>:ud    -r80.2<0;1,0>:ud
+sel (1|M0)   (ge)f0.0    r82.1<1>:d    r80.4<0;1,0>:d    r80.2<0;1,0>:d
+add (1|M0)               r82.1<1>:ud   r82.1<0;1,0>:ud   -r80.2<0;1,0>:ud
+mov (1|M0)               r82.2<1>:ud   0:ud
+cmp (1|M0)   (lt)f0.0    null:ud       r82.0<0;1,0>:ud   r82.1<0;1,0>:ud
+(f0.0) mov (1|M0)        r82.2<1>:ud   r81.2<0;1,0>:ud
+cmp (1|M0)   (eq)f0.0    null:ud       r81.0<0;1,0>:ud   0:ud        // alpha 0 ...
+mov (1|M0)               r83.0<1>:ud   0:ud
+(f0.0) mov (1|M0)        r83.0<1>:ud   1:ud
+and (1|M0)               r83.0<1>:ud   r83.0<0;1,0>:ud   r80.0<0;1,0>:ud   // ... of kind 1 (a tone; kinds are 0 or 1): no change
+cmp (1|M0)   (ne)f0.0    null:ud       r83.0<0;1,0>:ud   0:ud
+(f0.0) mov (1|M0)        r82.2<1>:ud   0:ud
+// the lanes this record covers: (x - x0) < U (unsigned), so a lane left of x0 is never in it
+add (4|M0)               r90.0<1>:ud   r91.0<4;4,1>:ud   -r80.1<0;1,0>:ud
+cmp (4|M0)   (lt)f0.0    null:ud       r90.0<4;4,1>:ud   r82.2<0;1,0>:ud
+cmp (1|M0)   (eq)f1.0    null:ud       r80.0<0;1,0>:ud   0:ud        // a fill (kind 0) writes its colour
+(f1.0) jmpi (1|M0) Lfill
+// a tone: the lane formula of ui_over (as gpu_i915_tone.iga): the under times rest plus 127 per 16-bit lane, shifted down with
+// its own carry, plus the tone's channel, clamped at 255 per lane
+and (4|M0)               r10.0<1>:ud   r5.0<1;1,0>:ud    0x00ff00ff:ud
+shr (4|M0)               r11.0<1>:ud   r5.0<1;1,0>:ud    8:ud
+and (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   0x00ff00ff:ud
+mul (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   r84.0<0;1,0>:uw
+add (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   0x007f007f:ud
+mul (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   r84.0<0;1,0>:uw
+add (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   0x007f007f:ud
+shr (4|M0)               r12.0<1>:ud   r10.0<1;1,0>:ud   8:ud
+and (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   r10.0<1;1,0>:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00010001:ud
+shr (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   8:ud
+and (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00ff00ff:ud
+shr (4|M0)               r13.0<1>:ud   r11.0<1;1,0>:ud   8:ud
+and (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r11.0<1;1,0>:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00010001:ud
+shr (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   8:ud
+and (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   r85.0<0;1,0>:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r86.0<0;1,0>:ud
+sel (8|M0)   (lt)f0.0    r12.0<1>:uw   r12.0<8;8,1>:uw   0x00ff:uw
+sel (8|M0)   (lt)f0.0    r13.0<1>:uw   r13.0<8;8,1>:uw   0x00ff:uw
+shl (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   8:ud
+or (4|M0)                r15.0<1>:ud   r12.0<1;1,0>:ud   r13.0<1;1,0>:ud
+cmp (4|M0)   (lt)f0.0    null:ud       r90.0<4;4,1>:ud   r82.2<0;1,0>:ud
+(f0.0) mov (4|M0)        r5.0<1>:ud    r15.0<1;1,0>:ud
+jmpi (1|M0) Lnext
+Lfill:
+(f0.0) mov (4|M0)        r5.0<1>:ud    r80.5<0;1,0>:ud
+Lnext:
+add (1|M0)               r63.1<1>:ud   r63.1<0;1,0>:ud   -1:ud
+add (1|M0)               r63.2<1>:ud   r63.2<0;1,0>:ud   32:ud
+cmp (1|M0)   (ne)f1.0    null:ud       r63.1<0;1,0>:ud   0:ud
+(f1.0) jmpi (1|M0) Lrec
+Lwrite:
+send (16|M0)             acc0:uw       r4:d      0xC  0x060A8000     // media block write of the destination (entry 0), as the tone
+mov (8|M0)               r112.0<1>:ud  r0.0<8;8,1>:ud
+send (16|M0)             null:uw       r112:d    0x27 0x02000010 {EOT}

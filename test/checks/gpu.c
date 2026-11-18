@@ -52,6 +52,49 @@ static unsigned int gpu_want[1500 * 700];
 // The Intel set (Gen9, fill only, not registered): the edge split of a byte fill, and its batch, on the host (no card).
 static void gpu_i915_set_rows(void)
 {
+        // The cp (op 4), the scene's batch: a picture 13 pixels by 9 rows on a pitch of 16 pixels, its destination at GPU_VA + 0x2000, its bins at
+        // GPU_VA + 0x8000 (the table of one cell, then the lists). The walker's groups are the blocks of a row (4) and the rows (9); the CURBE holds the
+        // width, the cells a row and the lists' offset (8 times the cells); the bins are binding table entry 1. A pitch that is not a multiple of 16
+        // pixels, a destination or bins not aligned, or a width past the picture's fields is refused (0 words: the processor draws the scene).
+        {
+                static unsigned char buffer[4096] __attribute__((aligned(4096)));
+                struct gpu_job job;
+                struct gpu_args address_to a = (struct gpu_args address_to)(buffer + 2048);
+                unsigned int words[64];
+                unsigned int address_to state = (unsigned int address_to)(buffer + 2560);
+
+                memset(buffer, 0, sizeof buffer);
+                a->d = GPU_VA + 0x2000, a->g = GPU_VA + 0x8000, a->dp = 16, a->sp = 13, a->gp = 9, a->w = 13, a->rows = 3, a->op = 4;
+                job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
+                job.code = GPU_VA + 3584;
+                check("gpu i915 cp: a 13 by 9 scene on a pitch of 16 pixels is taken: the batch is the 56 dwords the walker takes",
+                      gpu_i915_gen9_batch(&job, words, 64) == 56 && words[0] == 0x69040302u);
+                check("gpu i915 cp: the walker's groups are the 4 blocks of a row and the 9 rows", words[44] == 4 && words[47] == 9);
+                check("gpu i915 cp: the CURBE holds the width (13), the cells a row (1) and the lists' offset (8 * 1 cell = 8)",
+                      state[48] == 13 && state[49] == 1 && state[50] == 8);
+                check("gpu i915 cp: the binding table's entry 0 is the destination's surface state, entry 1 the bins'",
+                      state[0] == 2560 + 64 && state[1] == 2560 + 256);
+                check("gpu i915 cp: the bins' surface is at the bins' address (GPU_VA + 0x8000) and the destination's at GPU_VA + 0x2000",
+                      state[(256 + 32) / 4] == (unsigned int)(GPU_VA + 0x8000) && state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2000));
+                a->dp = 18, a->d = GPU_VA + 0x2000;
+                check("gpu i915 cp: a pitch that is not a multiple of 16 pixels (18) is refused whole", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->dp = 0;
+                check("gpu i915 cp: a pitch of 0 is refused whole", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->dp = 16;
+                a->dp = 16, a->d = GPU_VA + 0x2010;
+                check("gpu i915 cp: a destination that is not 32-byte aligned is refused whole", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->d = GPU_VA + 0x2000, a->g = GPU_VA + 0x8010;
+                check("gpu i915 cp: bins that are not 64-byte aligned are refused whole", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->g = GPU_VA + 0x8000, a->x0 = 1;
+                check("gpu i915 cp: a scene with an origin (x0) is refused whole", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->x0 = 0, a->w = 4097, a->dp = 4112;
+                check("gpu i915 cp: a width past 4096 pixels is refused whole", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->w = 4096, a->dp = 4096;
+                check("gpu i915 cp: 4096 pixels (the surface's 16384 bytes) is the most a row can be and is taken",
+                      gpu_i915_gen9_batch(&job, words, 64) == 56 && words[44] == 1024);
+                a->w = 13, a->dp = 16;
+                check("gpu i915 cp: the scene is taken again at 13 by 9 after the refusals", gpu_i915_gen9_batch(&job, words, 64) == 56 && words[44] == 4);
+        }
         // The Intel set (Gen9, fill only, not registered): the edge split of a byte fill, and its batch. The rules are measured on Gen9:
         // a 32-byte-aligned base and a span in multiples of 16. Here: d at 16 and 48, span 100 (the coordinator's rows), a pitch below the
         // span, a span under 16 bytes (all edge).
