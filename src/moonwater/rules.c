@@ -1028,12 +1028,15 @@ static bool rules_input(struct bind_handle *bind, unsigned int type, unsigned in
                                 taken = true;
                 }
         }
-        if (value == 1 && taken)
-                __set_bit(code, bind->rover_taken);
-        else if (value == 0 && test_bit(code, bind->rover_taken))
+        //      A press and its release are taken together: a release is taken when its press was, and only then,
+        //      whatever a rule on the release said, so no reader is ever left holding a key, a button or a finger.
+        if (value == 1)
+                __assign_bit(code, bind->rover_taken, taken);
+        else if (value == 0)
         {
-                __clear_bit(code, bind->rover_taken);
-                taken = true;
+                taken = test_bit(code, bind->rover_taken);
+                if (taken)
+                        __clear_bit(code, bind->rover_taken);
         }
         if (taken)
         {
