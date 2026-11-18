@@ -74,11 +74,24 @@ static bipolar rover_load_read(string_address path)
         return got < 0 ? -1 : (bipolar)used;
 }
 
+//      The count of loads that did not stand, from a regular file of root's that root alone writes; any other is 0.
 static positive rover_load_boots(void)
 {
         p8 boots[16];
+        file_facts facts;
+        bipolar handle = system_open_at(AT_FDCWD, ROVER_BOOTS_FILE, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        bipolar got = -1;
 
-        return host_read_word(ROVER_BOOTS_FILE, boots, sizeof(boots)) >= 0 ? string_to_positive(boots) : 0;
+        if (handle < 0)
+                return 0;
+        if (file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) &&
+            (facts.mode & MODE_FORMAT) == MODE_FILE && facts.owner == 0 && !(facts.mode & 0022))
+                got = system_read_retry((positive)handle, boots, sizeof(boots) - 1);
+        system_close(handle);
+        if (got <= 0)
+                return 0;
+        boots[got] = 0;
+        return string_to_positive(boots);
 }
 
 static fn rover_load_boots_put(positive count)
@@ -147,6 +160,7 @@ static bipolar rover_load_compile(bool say)
         static p8 names[ROVER_FILES_MOST][ROVER_FILE_NAME_MOST];
         positive count = 0, files = 0;
         bipolar handle;
+        bool person;
 
         rover_load_was_safe = rover_load_safe();
         rover_load_used = 0;
@@ -161,6 +175,24 @@ static bipolar rover_load_compile(bool say)
         }
         handle = rover_load_was_safe ? -1
                                      : system_open_at(AT_FDCWD, ROVER_PERSON_RULES, FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        //      The person's directory, root's and written by root alone: a writer of it could take a person's file away (the
+        //      image's then stands) or forge the count of loads, so a directory that is not is read for nothing.
+        person = !rover_load_was_safe;
+        if (handle >= 0)
+        {
+                file_facts facts;
+
+                if (!file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) || facts.owner != 0 ||
+                    (facts.mode & 0022))
+                {
+                        if (say)
+                                string_format(log_error, "rover: " ROVER_PERSON_RULES " is not root's alone (root's, written by "
+                                                         "root alone): its files are left out\n");
+                        system_close(handle);
+                        handle = -1;
+                        person = false;
+                }
+        }
         if (handle >= 0)
         {
                 p8 buffer[4096];
@@ -208,7 +240,7 @@ static bipolar rover_load_compile(bool say)
                         if (string_equals((string_address)names[at], (string_address)name))
                                 image = text;
                 }
-                if (!rover_load_was_safe && string_join(path, sizeof(path), ROVER_PERSON_RULES "/", (string_address)names[at]) &&
+                if (person && string_join(path, sizeof(path), ROVER_PERSON_RULES "/", (string_address)names[at]) &&
                     file_look(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts))
                 {
                         bipolar length = rover_load_read((string_address)path);
