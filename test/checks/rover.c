@@ -20,6 +20,11 @@
 #define SHARED_counted
 #include "../checks.c"
 #undef SHARED_counted
+#ifdef BENCH_rover
+//      The bench times the walker and the C beside it in one process, a trial each in turn.
+static volatile bool rover_bench_walker = true;
+#define ROVER_WALKER_ASKED rover_bench_walker
+#endif
 #include "../../src/rover/compile.c"
 
 static struct rover_build rover_one;
@@ -744,15 +749,22 @@ b32 main(void)
 */
 static char rover_bench_text[16384];
 
+static positive rover_bench_c; // the C side's best of the last row, when the walker took the row too
+
 static positive rover_bench(const struct rover_event address_to event, p8 place, bool edges, p64 changed)
 {
         struct rover_hit hits[8];
         positive best = ~(positive)0;
         volatile positive sink = 0;
 
-        for (positive trial = 0; trial < 7; trial++)
+        //      Fourteen trials, the walker's and the C's in turn, so neither has the warm half of the machine.
+        rover_bench_c = ~(positive)0;
+        for (positive trial = 0; trial < 14; trial++)
         {
-                positive start = clock_monotonic_nanoseconds(), made = 0;
+                positive start, made = 0;
+
+                rover_bench_walker = !(trial & 1);
+                start = clock_monotonic_nanoseconds();
 
                 for (positive at = 0; at < 1000000; at++)
                 {
@@ -766,17 +778,25 @@ static positive rover_bench(const struct rover_event address_to event, p8 place,
                 }
                 positive took = clock_monotonic_nanoseconds() - start;
                 sink += made;
-                if (took < best)
+                if (trial & 1)
+                        rover_bench_c = took < rover_bench_c ? took : rover_bench_c;
+                else if (took < best)
                         best = took;
         }
+        rover_bench_walker = true;
         (void)sink;
         return best; // per million events: picoseconds a thousand per event, i.e. ns * 1000
 }
 
 static fn rover_bench_say(const char address_to name, positive per_million)
 {
-        string_format(log, "  %s: %p.%p%p ns per event\n", name, per_million / 1000000,
-                      per_million / 100000 % 10, per_million / 10000 % 10);
+        positive c = rover_bench_c;
+
+        string_format(log, "  %s: %p.%p%p ns per event", name, per_million / 1000000, per_million / 100000 % 10,
+                      per_million / 10000 % 10);
+        if (ROVER_WALKER)
+                string_format(log, " (C alone %p.%p%p)", c / 1000000, c / 100000 % 10, c / 10000 % 10);
+        string_format(log, "\n");
         log_flush();
 }
 
@@ -850,8 +870,11 @@ b32 main(void)
         rover_bench_say("lid close, two conditions, kernel", rover_bench(&event, ROVER_KERNEL, false, 0));
 
         //      Chords: n rules of ctrl+alt+KEY, the event the n-2th's, so all but two are passed over.
-        static const positive counts[3] = {8, 32, 128};
-        for (positive c = 0; c < 3; c++)
+        static const positive counts[4] = {4, 8, 32, 128};
+        static const char address_to const chord_rows[4] = {
+            "a chord among 4 rules, desktop", "a chord among 8 rules, desktop", "a chord among 32 rules, desktop",
+            "a chord among 128 rules, desktop"};
+        for (positive c = 0; c < 4; c++)
         {
                 text.used = 0;
                 for (positive at = 0; at < counts[c]; at++)
@@ -879,9 +902,7 @@ b32 main(void)
                         memory_copy(&key, rover_view.pool + rover_view.comparison[rule->comparison].b.index, 8);
                         event.field[0].number = key;
                 }
-                rover_bench_say(c == 0 ? "a chord among 8 rules, desktop"
-                                       : c == 1 ? "a chord among 32 rules, desktop" : "a chord among 128 rules, desktop",
-                                rover_bench(&event, ROVER_DESKTOP, false, 0));
+                rover_bench_say(chord_rows[c], rover_bench(&event, ROVER_DESKTOP, false, 0));
         }
 
         rover_compiled("rule game\n\ton fullscreen on steam_app_*\n\tdo latency 20us\n");

@@ -67,7 +67,8 @@
 #define ROVER_RULE_ONCE 2u
 #define ROVER_RULE_OFF 4u
 #define ROVER_RULE_PLACED 8u
-#define ROVER_RULE_FLAGS 15u
+#define ROVER_RULE_NUMBERS 16u // every comparison of the rule has the number form: the walker's to take whole
+#define ROVER_RULE_FLAGS 31u
 
 #define ROVER_TRUE 0u
 #define ROVER_EQ 1u
@@ -163,8 +164,12 @@ _Static_assert(sizeof(struct rover_rule) == 40, "rover rule");
 struct rover_span
 {
         p16 first;
-        p16 count;
+        p16 count; // ROVER_SPAN_COUNT of it the rules; ROVER_SPAN_NUMBERS when every one is a numbers rule
 };
+
+//      A table holds at most 1,638 rules, so a span's count has its top bit to spare: the walker's hint.
+#define ROVER_SPAN_COUNT 0x7fffu
+#define ROVER_SPAN_NUMBERS 0x8000u
 
 struct rover_comparison
 {
@@ -331,6 +336,31 @@ struct rover_hit
         p16 pad;
 };
 
+//      The walker's assembly reads these by offset; a struct that moves breaks the build, not the walk.
+_Static_assert(offset_of(struct rover_table, rule) == 8 && offset_of(struct rover_table, order) == 16 &&
+                   offset_of(struct rover_table, key) == 24 && offset_of(struct rover_table, index) == 32 &&
+                   offset_of(struct rover_table, comparison) == 40 && offset_of(struct rover_table, pool) == 80,
+               "rover walker: the view");
+_Static_assert(offset_of(struct rover_rule, place) == 2 && offset_of(struct rover_rule, flags) == 3 &&
+                   offset_of(struct rover_rule, comparison) == 4 && offset_of(struct rover_rule, comparisons) == 6 &&
+                   offset_of(struct rover_rule, trigger) == 8 && offset_of(struct rover_rule, then) == 9 &&
+                   offset_of(struct rover_rule, otherwise) == 10 && offset_of(struct rover_rule, action) == 12 &&
+                   offset_of(struct rover_rule, limit_ms) == 16 && sizeof(struct rover_rule) == 40,
+               "rover walker: the rule");
+_Static_assert(offset_of(struct rover_event, count) == 2 && offset_of(struct rover_event, when) == 8 &&
+                   offset_of(struct rover_event, field) == 24 && sizeof(struct rover_value) == 24,
+               "rover walker: the event");
+_Static_assert(offset_of(struct rover_run, fires) == 8 && offset_of(struct rover_run, dropped) == 12 &&
+                   offset_of(struct rover_run, done) == 17 && sizeof(struct rover_run) == 24,
+               "rover walker: the run");
+_Static_assert(sizeof(struct rover_hit) == 8 && offset_of(struct rover_hit, action) == 2 &&
+                   offset_of(struct rover_hit, count) == 4 && offset_of(struct rover_hit, otherwise) == 5,
+               "rover walker: the hit");
+_Static_assert(ROVER_RULE_WHEN == 1 && ROVER_RULE_ONCE == 2 && ROVER_RULE_OFF == 4 && ROVER_RULE_NUMBERS == 16 &&
+                   ROVER_CONST_NUMBER == 1 && ROVER_STATE_NUMBER == 3 && ROVER_FIELD == 5 && ROVER_JOIN_OR == 1 &&
+                   ROVER_JOIN_LINE == 2 && ROVER_EQ == 1 && ROVER_GE == 6,
+               "rover walker: the codes");
+
 struct rover_refusal
 {
         const char address_to why;
@@ -404,6 +434,16 @@ static p8 rover_form_of(const struct rover_comparison address_to comparison)
             !comparison->c.source && !comparison->c.page && !comparison->c.index)
                 return ROVER_FORM_NUMBER;
         return ROVER_FORM_GENERAL;
+}
+
+//      Whether every comparison of a rule has the number form, which ROVER_RULE_NUMBERS says.
+static bool rover_rule_numbers(const struct rover_rule address_to rule,
+                               const struct rover_comparison address_to comparisons)
+{
+        for (positive at = 0; at < rule->comparisons; at++)
+                if (comparisons[rule->comparison + at].form != ROVER_FORM_NUMBER)
+                        return false;
+        return true;
 }
 
 //      A rule's key: the constant its on line's first filter asks of field 0, when that is a number below ANY.
@@ -808,6 +848,117 @@ static fn rover_fired(const struct rover_rule address_to rule, struct rover_run 
                 run->done = 1;
 }
 
+/*
+        The walker: an event's run of rules, while each rule it meets is one
+        whose comparisons all have the number form, in assembly, as a leaf
+        (no call, so a kernel build takes the same body). It answers the hits
+        it made in the low 32 bits; with bit 63 set, it stopped at the slot
+        in bits 32 to 47, a rule it does not take, and rover_fire_rules asks
+        that rule and the rest in C. place_room is the place in its low byte
+        and the room in its high 32 bits. pages are never null here.
+
+        A comparison is its two sides loaded (a state one movslq from its
+        page, a constant one load from the pool, a field one load from the
+        event) and which of below, equal and above its operator holds for
+        read out of one immediate: 0x06431520 holds the mask of operator n in
+        bits 4n to 4n+2, so the answer is that word shifted by four times the
+        operator plus the side the compare fell on, its low bit. There is no
+        table to load and no jump table to take; the C's lines and terms are
+        bit 1 and bit 0 of one register.
+*/
+positive rover_walk_numbers(const struct rover_table address_to table, struct rover_run address_to runs,
+                            const p8 address_to const address_to pages, const struct rover_event address_to event,
+                            positive place_room, struct rover_hit address_to hits);
+
+#define ROVER_WALK_STOPPED (1ull << 63)
+
+/*
+        The walker takes runs of fewer than eight rules. Paired against the C
+        in one process on box (Zen 5), a run of one rule is 13 to 19 percent
+        faster through it (the dispatch, one condition, two), and a run of
+        eight chord rules four percent slower: the C's key loop, inlined in
+        its own walk, beats the walker's at that length.
+*/
+#define ROVER_WALK_MOST 8u
+
+//      Whether the walker is asked at all: 1, but for BENCH_rover, which points it at a switch to time both sides.
+#ifndef ROVER_WALKER_ASKED
+#define ROVER_WALKER_ASKED 1
+#endif
+
+#if X64
+#define ROVER_WALK_SIDE(at, next)                                                                                 \
+    "movzbl " #at "(%r8), %ecx\n   movzwl " #at "+2(%r8), %edx\n   cmp $3, %ecx\n   jne 61f\n"                        \
+    "mov (%rsp), %rax\n   cmpb $0, " #at "+1(%r8)\n   cmovne 8(%rsp), %rax\n   movslq (%rax,%rdx), %rax\n   jmp " next "\n" \
+    "61: cmp $1, %ecx\n   jne 62f\n   mov 16(%rsp), %rax\n   mov (%rax,%rdx), %rax\n   jmp " next "\n"               \
+    "62: xor %eax, %eax\n   movzbl 2(%r15), %ecx\n   cmp %ecx, %edx\n   jae " next "\n"                             \
+    "lea (%rdx,%rdx,2), %rdx\n   mov 24(%r15,%rdx,8), %rax\n"
+
+__asm__(
+    ASM_FUNC(rover_walk_numbers)
+    "push %rbx\n   push %rbp\n   push %r12\n   push %r13\n   push %r14\n   push %r15\n   sub $56, %rsp\n"
+    //  The frame: 0 and 8 the pages, 16 the pool, 24 the key wanted, 32 place and room, 40 the table, 48 the runs.
+    "mov (%rdx), %rax\n   mov %rax, (%rsp)\n   mov 8(%rdx), %rax\n   mov %rax, 8(%rsp)\n"
+    "mov 80(%rdi), %rax\n   mov %rax, 16(%rsp)\n   mov %r8, 32(%rsp)\n   mov %rdi, 40(%rsp)\n   mov %rsi, 48(%rsp)\n"
+    "mov %rcx, %r15\n"
+    //  The event's run: r13 its order, r14 its keys, r12 how many; rbx the slot, rbp the hits made.
+    "movzwl (%r15), %eax\n   mov 32(%rdi), %rdx\n   movzwl (%rdx,%rax,4), %ecx\n   movzwl 2(%rdx,%rax,4), %r12d\n"
+    "and $0x7fff, %r12d\n"
+    "mov 16(%rdi), %r13\n   lea (%r13,%rcx,2), %r13\n   mov 24(%rdi), %r14\n   lea (%r14,%rcx,4), %r14\n"
+    "mov $-1, %eax\n   cmpb $0, 2(%r15)\n   je 1f\n   mov 24(%r15), %rdx\n   test %rdx, %rdx\n   js 1f\n"
+    "cmp %rax, %rdx\n   jae 1f\n   mov %edx, %eax\n"
+    "1:  mov %eax, 24(%rsp)\n   xor %ebx, %ebx\n   xor %ebp, %ebp\n"
+    //  The keys: a slot whose key is the one wanted or any.
+    "10: cmp %r12, %rbx\n   jae 90f\n   mov (%r14,%rbx,4), %eax\n   cmp 24(%rsp), %eax\n   je 20f\n"
+    "cmp $-1, %eax\n   je 20f\n   inc %rbx\n   jmp 10b\n"
+    //  The rule: rdi; placed here, not off, and every comparison a number's, or handed back.
+    "20: movzwl (%r13,%rbx,2), %eax\n   lea (%rax,%rax,4), %rdi\n   mov 40(%rsp), %rdx\n   shl $3, %rdi\n   add 8(%rdx), %rdi\n"
+    "movzbl 2(%rdi), %ecx\n   cmp 32(%rsp), %cl\n   jne 80f\n"
+    "movzbl 3(%rdi), %ecx\n   test $4, %cl\n   jnz 80f\n   test $16, %cl\n   jz 95f\n"
+    //  Its comparisons, r8 to r11; r10 bit 0 the term, bit 1 the line.
+    "movzwl 4(%rdi), %r8d\n   shl $4, %r8\n   add 40(%rdx), %r8\n   movzwl 6(%rdi), %r11d\n   shl $4, %r11\n   add %r8, %r11\n"
+    "mov $1, %r10d\n"
+    "30: cmp %r11, %r8\n   jae 50f\n   cmp $1, %r10d\n   jne 38f\n"
+    ROVER_WALK_SIDE(4, "63f")
+    "63: mov %rax, %rsi\n"
+    ROVER_WALK_SIDE(8, "64f")
+    "64: xor %ecx, %ecx\n   xor %edx, %edx\n   cmp %rax, %rsi\n   setg %cl\n   setl %dl\n   sub %edx, %ecx\n"
+    "movzbl (%r8), %edx\n   lea 1(%rcx,%rdx,4), %ecx\n   mov $0x06431520, %eax\n   shr %cl, %eax\n   and $1, %eax\n"
+    "and $2, %r10d\n   or %eax, %r10d\n"
+    //  The join: or and the line's end fold the term into the line; the end asks the line.
+    "38: movzbl 2(%r8), %ecx\n   test $3, %cl\n   jz 39f\n   lea (%r10,%r10), %eax\n   or %eax, %r10d\n   and $2, %r10d\n"
+    "or $1, %r10d\n   test $2, %cl\n   jz 39f\n   test $2, %r10d\n   jz 45f\n   mov $1, %r10d\n"
+    "39: add $16, %r8\n   jmp 30b\n"
+    //  A line that did not hold: inside an on line's filters it is not the rule's event at all.
+    "45: testb $1, 3(%rdi)\n   jnz 47f\n   mov 40(%rsp), %rdx\n   movzwl 4(%rdi), %eax\n   shl $4, %rax\n   add 40(%rdx), %rax\n"
+    "sub %rax, %r8\n   shr $4, %r8\n   movzbl 8(%rdi), %eax\n   cmp %rax, %r8\n   jb 80f\n"
+    "47: movzbl 10(%rdi), %ecx\n   test %ecx, %ecx\n   jz 80f\n   movzwl 12(%rdi), %edx\n   movzbl 9(%rdi), %eax\n"
+    "add %eax, %edx\n   mov $1, %r8d\n   jmp 55f\n"
+    "50: movzbl 9(%rdi), %ecx\n   movzwl 12(%rdi), %edx\n   xor %r8d, %r8d\n"
+    //  ecx the actions, edx the first, r8 the else; the run (r10) says whether once and the limit let it.
+    "55: movzwl (%r13,%rbx,2), %eax\n   lea (%rax,%rax,2), %r10\n   shl $3, %r10\n   add 48(%rsp), %r10\n"
+    "testb $2, 3(%rdi)\n   jz 56f\n   cmpb $0, 17(%r10)\n   jne 80f\n"
+    "56: mov 16(%rdi), %esi\n   test %esi, %esi\n   jz 57f\n   cmpl $0, 8(%r10)\n   je 57f\n"
+    "imul $1000000, %rsi, %rsi\n   mov 8(%r15), %r11\n   sub (%r10), %r11\n   cmp %rsi, %r11\n   jae 57f\n"
+    "incl 12(%r10)\n   jmp 80f\n"
+    //  The hit, one store: the rule, its first action, the count and the else.
+    "57: shl $16, %rdx\n   or %rdx, %rax\n   shl $32, %rcx\n   or %rcx, %rax\n   shl $40, %r8\n   or %r8, %rax\n"
+    "mov %rax, (%r9,%rbp,8)\n   incl 8(%r10)\n   mov 8(%r15), %rax\n   mov %rax, (%r10)\n"
+    "testb $2, 3(%rdi)\n   jz 58f\n   movb $1, 17(%r10)\n"
+    "58: inc %rbp\n   mov 32(%rsp), %rax\n   shr $32, %rax\n   cmp %rax, %rbp\n   jae 90f\n"
+    "80: inc %rbx\n   jmp 10b\n"
+    "90: mov %rbp, %rax\n   jmp 99f\n"
+    "95: mov %rbx, %rax\n   shl $32, %rax\n   or %rbp, %rax\n   bts $63, %rax\n"
+    "99: add $56, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    ASM_RET
+    ASM_END(rover_walk_numbers)
+);
+#define ROVER_WALKER 1
+#undef ROVER_WALK_SIDE
+#else
+#define ROVER_WALKER 0
+#endif
+
 //      The page the evaluator reads where a caller has none: every state on it is 0, the empty word.
 static const p8 rover_zero_page[ROVER_PAGE_BYTES];
 
@@ -842,13 +993,20 @@ static inline INLINE positive rover_key_next(const p32 address_to keys, positive
 /*
         The rules an event fires, among those placed where this runs: each
         hit is a rule and the run of actions it chose, in the table's order.
-        Answers how many hits; past room, the rest are not looked at.
+        Answers how many hits; past room, the rest are not looked at. from is
+        the slot to start at, a candidate already, or ROVER_FROM_FIRST for the
+        run's first; made is how many hits are in hits already.
 */
-static positive rover_fire_rules(const struct rover_table address_to table, struct rover_run address_to runs,
-                                 const p8 address_to const address_to given, const struct rover_event address_to event,
-                                 p8 place, struct rover_hit address_to hits, positive room)
+#define ROVER_FROM_FIRST ((positive)-1)
+
+static __attribute__((noinline)) positive rover_fire_rules(const struct rover_table address_to table,
+                                                           struct rover_run address_to runs,
+                                                           const p8 address_to const address_to given,
+                                                           const struct rover_event address_to event, p8 place,
+                                                           struct rover_hit address_to hits, positive room,
+                                                           positive from, positive made)
 {
-        positive made = 0, count, at;
+        positive count, at;
         struct rover_span span = table->index[event->id];
         const p16 address_to order = table->order + span.first;
         const p32 address_to keys = table->key + span.first;
@@ -859,9 +1017,9 @@ static positive rover_fire_rules(const struct rover_table address_to table, stru
         //      The key the event's field 0 is, when it is one a rule could have.
         if (event->count && event->field[0].number >= 0 && event->field[0].number < (b64)ROVER_KEY_ANY)
                 want = (p32)event->field[0].number;
-        count = span.count;
-        for (at = rover_key_next(keys, 0, count, want); at < count && made < room;
-             at = rover_key_next(keys, at + 1, count, want))
+        count = span.count & ROVER_SPAN_COUNT;
+        at = from == ROVER_FROM_FIRST ? rover_key_next(keys, 0, count, want) : from;
+        for (; at < count && made < room; at = rover_key_next(keys, at + 1, count, want))
         {
                 p16 number = order[at];
                 const struct rover_rule address_to rule = table->rule + number;
@@ -883,15 +1041,37 @@ static positive rover_fire_rules(const struct rover_table address_to table, stru
         return made;
 }
 
-//      An event with no rules is one load and one branch, here, before any call.
+/*
+        An event with no rules is one load and one branch, here, before any
+        call. A short run goes to the walker, where there is one, straight
+        from here; a rule it does not take, and the rest after it, are the
+        C's from that slot.
+*/
 static inline INLINE positive rover_fire(const struct rover_table address_to table, struct rover_run address_to runs,
                                          const p8 address_to const address_to pages,
                                          const struct rover_event address_to event, p8 place,
                                          struct rover_hit address_to hits, positive room)
 {
-        if ((p32)event->id - 1 >= ROVER_EVENTS - 1 || !table->index[event->id].count)
+        p16 rules;
+
+        if ((p32)event->id - 1 >= ROVER_EVENTS - 1 || !((rules = table->index[event->id].count) & ROVER_SPAN_COUNT))
                 return 0;
-        return rover_fire_rules(table, runs, pages, event, place, hits, room);
+#if ROVER_WALKER
+        //      Only a run the table says is all numbers rules: one with another would be handed back at once.
+        if ((rules & ROVER_SPAN_NUMBERS) && (rules & ROVER_SPAN_COUNT) < ROVER_WALK_MOST && room && ROVER_WALKER_ASKED)
+        {
+                const p8 address_to seen[ROVER_PAGES] = {pages[0] ? pages[0] : rover_zero_page,
+                                                         pages[1] ? pages[1] : rover_zero_page};
+                positive walked = rover_walk_numbers(table, runs, seen, event,
+                                                     place | (room > 0xffffffffu ? 0xffffffffu : room) << 32, hits);
+
+                if (!(walked & ROVER_WALK_STOPPED))
+                        return (p32)walked;
+                return rover_fire_rules(table, runs, pages, event, place, hits, room, (walked >> 32) & 0xffff,
+                                        (p32)walked);
+        }
+#endif
+        return rover_fire_rules(table, runs, pages, event, place, hits, room, ROVER_FROM_FIRST, 0);
 }
 
 /*
@@ -911,7 +1091,8 @@ static positive rover_edges(const struct rover_table address_to table, struct ro
         const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page,
                                                   given[1] ? given[1] : rover_zero_page};
 
-        for (positive at = span.first; at < (positive)span.first + span.count && made < room; at++)
+        for (positive at = span.first; at < (positive)span.first + (span.count & ROVER_SPAN_COUNT) && made < room;
+             at++)
         {
                 p16 number = table->order[at];
                 const struct rover_rule address_to rule = table->rule + number;
@@ -1273,6 +1454,8 @@ static const char address_to rover_rule_check(const struct rover_table address_t
         for (positive at = 0; at < (positive)rule->then + rule->otherwise; at++)
                 if ((why = rover_action_check(table, table->action + rule->action + at, kernel)))
                         return why;
+        if (!!(rule->flags & ROVER_RULE_NUMBERS) != rover_rule_numbers(rule, table->comparison))
+                return "a rule whose numbers flag is not its comparisons' forms";
         return null;
 }
 
@@ -1323,7 +1506,9 @@ static bool rover_check(const p8 address_to bytes, positive size, struct rover_t
         for (positive id = 0; id < ROVER_EVENTS; id++)
         {
                 struct rover_span span = view->index[id];
+                bool numbers = true;
 
+                span.count &= ROVER_SPAN_COUNT;
                 if (span.first != total || total + span.count > head->rules)
                         return rover_refuse(why, "an index that is not the order's runs", ROVER_NO_RULE, (p32)id);
                 for (positive k = span.first; k < (positive)span.first + span.count; k++)
@@ -1335,7 +1520,11 @@ static bool rover_check(const p8 address_to bytes, positive size, struct rover_t
                                 return rover_refuse(why, "an order that is not each rule once, under its event",
                                                     ROVER_NO_RULE, (p32)k);
                         seen[number >> 3] |= (p8)(1u << (number & 7));
+                        numbers = numbers && (view->rule[number].flags & ROVER_RULE_NUMBERS);
                 }
+                //      The walker's hint is a promise about the rules' flags, which the rules' check holds.
+                if (!!(view->index[id].count & ROVER_SPAN_NUMBERS) != (numbers && span.count))
+                        return rover_refuse(why, "a span whose numbers bit is not its rules'", ROVER_NO_RULE, (p32)id);
                 total += span.count;
         }
         if (total != head->rules)

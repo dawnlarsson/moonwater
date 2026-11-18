@@ -1300,6 +1300,8 @@ static bool rover_rule_finish(struct rover_build address_to build)
                 return rover_refused(build, "an else with nothing after it to do", null, null);
         if (!rover_place(build, rule))
                 return false;
+        if (rover_rule_numbers(rule, build->comparison))
+                rule->flags |= ROVER_RULE_NUMBERS;
         //      A cue that posts itself with nothing to stop it is a loop the runner would cut at depth four.
         if (rule->event == ROVER_CUE && rule->comparisons == rule->trigger && rule->trigger)
         {
@@ -1645,6 +1647,15 @@ static bool rover_assemble(struct rover_build address_to build)
                 struct rover_span address_to span = &index[build->rule[k].event];
 
                 order[span->first + span->count++] = (p16)k;
+        }
+        for (positive id = 0; id < ROVER_EVENTS; id++)
+        {
+                bool numbers = index[id].count != 0;
+
+                for (positive k = index[id].first; k < (positive)index[id].first + index[id].count; k++)
+                        numbers = numbers && (build->rule[order[k]].flags & ROVER_RULE_NUMBERS);
+                if (numbers)
+                        index[id].count |= ROVER_SPAN_NUMBERS;
         }
         for (positive k = 0; k < build->rules; k++)
                 ((p32 address_to)(table + at[2]))[k] = rover_key_of(&build->rule[order[k]], build->comparison,

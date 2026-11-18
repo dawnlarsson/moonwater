@@ -428,6 +428,19 @@ by the table's size and nothing else.
 The same C is the userspace evaluator and, built with `KERNEL_MODE`, the
 kernel's.
 
+Two pieces are assembly where it was measured to win:
+
+- **The key scan** of a run of sixteen rules and more is lib.c's
+  `memory_first_of_either_u32`: AVX2 and SSE2 on x86_64, NEON on arm64,
+  the word loop in a kernel build, which owns no vector register.
+- **The walker**, `rover_walk_numbers` in `rover.c` on x86_64: a run of
+  fewer than eight rules whose comparisons all have the number form
+  (the index marks such a run, and the check holds the mark to the
+  rules) is walked by one leaf of scalar assembly, which a kernel build
+  takes too. A comparison there is its two loads and one shift of an
+  immediate that holds every operator's answer. Anything else, and every
+  run on arm64 and riscv64, is the C.
+
 ### What it costs
 
 `BENCH_rover`, the best of seven runs of a million events each, on box
