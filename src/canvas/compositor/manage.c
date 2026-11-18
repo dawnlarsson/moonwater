@@ -3214,7 +3214,8 @@ static void compositor_clip_settings(void)
 
 /*
         A memfd another process holds, opened and checked: its descriptor here and its size, or -1. Sealed against
-        every change of its bytes and size, and a copy that holds together (windows_clip_valid), however large.
+        every change of its bytes and size, no larger than WINDOWS_CLIP_MOST (it is read through here, on the loop: a
+        copy of gigabytes held every frame and key for the read), and a copy that holds together (windows_clip_valid).
 */
 static int compositor_clip_open(unsigned int pid, int fd, unsigned long address_to length)
 {
@@ -3254,7 +3255,7 @@ static int compositor_clip_open(unsigned int pid, int fd, unsigned long address_
                 return -1;
         seals = compositor_call(syscall(fcntl), (positive)opened, WINDOWS_F_GET_SEALS, 0, 0, 0, 0);
         size = compositor_call(syscall(lseek), (positive)opened, 0, 2, 0, 0, 0);
-        if (seals < 0 || (seals & COMPOSITOR_CLIP_SEALS) != COMPOSITOR_CLIP_SEALS || size <= 0)
+        if (seals < 0 || (seals & COMPOSITOR_CLIP_SEALS) != COMPOSITOR_CLIP_SEALS || size <= 0 || (unsigned long)size > WINDOWS_CLIP_MOST)
         {
                 system_close((bipolar)opened);
                 return -1;

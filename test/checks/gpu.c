@@ -4157,6 +4157,38 @@ static void under_ready_rows(void)
         compositor.under[1] = kept_under, compositor_under_bytes[1] = kept_bytes, compositor.width = kept_width, compositor.height = kept_height;
 }
 
+// A program's copy the compositor takes (compositor_clip_open) is read through on the loop, so one past WINDOWS_CLIP_MOST is declined before it is read;
+// one under it is taken. Copies of this process (windows_clip_memfd), of text a page short of the most and of the most (its index and trailer then over).
+static void clip_most_rows(void)
+{
+        unsigned int me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        long text = compositor_call(syscall(mmap), 0, WINDOWS_CLIP_MOST, 3, 0x22, (positive)-1, 0); // PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS
+        long under = -1, over = -1;
+        int taken = -1, declined = -1;
+        unsigned long length = 0;
+        b32 kept;
+
+        if (!(text < 0 && text > -4096))
+        {
+                memory_fill((void *)text, 'a', WINDOWS_CLIP_MOST);
+                under = windows_clip_memfd((const void *)text, WINDOWS_CLIP_MOST - 4096);
+                over = windows_clip_memfd((const void *)text, WINDOWS_CLIP_MOST);
+                compositor_call(syscall(munmap), (positive)text, WINDOWS_CLIP_MOST, 0, 0, 0, 0);
+        }
+        taken = under >= 0 ? compositor_clip_open(me, (int)under, &length) : -1;
+        kept = taken >= 0 && length > WINDOWS_CLIP_MOST - 4096 && length <= WINDOWS_CLIP_MOST;
+        declined = over >= 0 ? compositor_clip_open(me, (int)over, &length) : 0;
+        check("clip: a program's copy under WINDOWS_CLIP_MOST is taken, and one past it is declined before it is read", kept && over >= 0 && declined < 0);
+        if (taken >= 0)
+                system_close(taken);
+        if (declined >= 0)
+                system_close(declined);
+        if (under >= 0)
+                system_close((int)under);
+        if (over >= 0)
+                system_close((int)over);
+}
+
 // The input thread reads its own duplicates of the devices (H-c5-1): a device the loop closes, whose number the kernel then gives to another file
 // (a client's socket), is still the device to the reader until the loop's change hands it the next one; and a device let go of is closed there.
 // Pipes stand for the devices: the loop's descriptor, closed, and a new pipe made at the same number.
@@ -5378,6 +5410,7 @@ b32 main(void)
         xwm_socket_rows();
         display_off_rows();
         reader_own_rows();
+        clip_most_rows();
         grab_protocol_rows();
         fullscreen_rows();
         gpu_i915_rows();

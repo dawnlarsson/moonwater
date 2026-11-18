@@ -1439,6 +1439,9 @@ static inline unsigned int windows_rows(const struct windows *table)
 #define WINDOWS_CLIP_TAKEN 4
 #define WINDOWS_CLIP_DECLINED 5
 #define WINDOWS_CLIP_NO 0x80000000u
+// The most a copy may be that the compositor takes from a program (compositor_clip_open): it is read through on the compositor's loop (windows_clip_valid),
+// so a larger one is declined, as the kit's own copies are above the same 64 MiB (KIT_COPY_MOST).
+#define WINDOWS_CLIP_MOST (64ul << 20)
 // The compositor keeps each selection's memfd at this descriptor and the next: numbers nothing else is given.
 #define WINDOWS_CLIP_FD 900
 #define WINDOWS_CLIP_DOOR "/run/moonwater/clip"
