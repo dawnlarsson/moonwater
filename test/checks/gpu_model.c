@@ -742,15 +742,14 @@ b32 main()
         a program's list (with the face, the fourth argument). The seed is CHECK_gpu_kit's, 88172645. The rounds 697 wide are clang's kernels, which
         the model does not take: NOT RUN.
 */
-static unsigned int gpu_seed = 88172645u;
-static unsigned int gpu_random(void)
-{
-        gpu_seed ^= gpu_seed << 13, gpu_seed ^= gpu_seed >> 17, gpu_seed ^= gpu_seed << 5;
-        return gpu_seed;
-}
-
-static unsigned int gpu_kit_want[700 * 420];
 static positive model_wrong; // the pixels that differ from the processor's, every block's
+
+// A pixel of a block that differs from the processor's: counted in model_wrong, and the first five of a block named with their round.
+static void model_kit_pixel(positive *bad, string_address label, positive round, positive x, positive y, unsigned int got, unsigned int want)
+{
+        if (got != want && (++model_wrong, ++*bad) < 6)
+                string_format(log, "  FAIL %s round %p: pixel %p,%p is %p, wanted %p\n", label, round, x, y, (positive)got, (positive)want);
+}
 
 b32 main()
 {
@@ -800,17 +799,12 @@ b32 main()
                         q[7] = (unsigned int)ry;
                         ui_kit_fill(&ui, &box, argb, 0);
                 }
-                if (!gpu_scene(ops_at, N, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
-                {
-                        check("gpu kit: the scene finishes", false);
+                if (!gpu_scene_taken(gpu_scene(ops_at, N, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH), "gpu kit: the scene finishes"))
                         return test_report(null);
-                }
                 for (int y = 0; y < PH; y++)
                         for (int x = 0; x < PW; x++)
                         {
-                                if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++model_wrong, ++bad) < 6)
-                                        string_format(log, "  FAIL gpu kit round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
-                                                      (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                model_kit_pixel(&bad, "gpu kit", round, x, y, pic[(positive)y * PP + x], gpu_kit_want[(positive)y * PP + x]);
                         }
         }
 
@@ -871,9 +865,7 @@ b32 main()
                         for (int y = 0; y < TRH; y++)
                                 for (int x = 0; x < TRW; x++)
                                 {
-                                        if (tpic[(positive)y * TRP + x] != want_t[(positive)y * TRP + x] && (++model_wrong, ++translate_bad) < 6)
-                                                string_format(log, "  FAIL gpu translate round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
-                                                              (positive)tpic[(positive)y * TRP + x], (positive)want_t[(positive)y * TRP + x]);
+                                        model_kit_pixel(&translate_bad, "gpu translate", round, x, y, tpic[(positive)y * TRP + x], want_t[(positive)y * TRP + x]);
                                 }
                 }
         }
@@ -940,17 +932,12 @@ b32 main()
                         }
                         check("gpu rings: the records fit", !scene.lost && scene.count >= N / 2);
                         check("gpu rings: an odd width is refused", !gpu_scene(ops_at, scene.count, bins_at, pic_at, PP, 697, PH, 0, 0, 697, PH));
-                        if (!gpu_scene(ops_at, scene.count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
-                        {
-                                check("gpu rings: the scene finishes", false);
+                        if (!gpu_scene_taken(gpu_scene(ops_at, scene.count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH), "gpu rings: the scene finishes"))
                                 return test_report(null);
-                        }
                         for (int y = 0; y < PH; y++)
                                 for (int x = 0; x < PW; x++)
                                 {
-                                        if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++model_wrong, ++ring_bad) < 6)
-                                                string_format(log, "  FAIL gpu rings round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
-                                                              (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                        model_kit_pixel(&ring_bad, "gpu rings", round, x, y, pic[(positive)y * PP + x], gpu_kit_want[(positive)y * PP + x]);
                                 }
                 }
                 ui.top = 0, ui.bottom = PH, ui.width = PW, ui.band_top = ui.band_bottom = 0, ui.opaque = 0;
@@ -1007,17 +994,12 @@ b32 main()
                                                      (positive)(cx1 - cx0), (positive)(cy1 - cy0));
                                 count++;
                         }
-                        if (!gpu_scene(ops_at, (unsigned int)count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
-                        {
-                                check("gpu images: the scene finishes", false);
+                        if (!gpu_scene_taken(gpu_scene(ops_at, (unsigned int)count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH), "gpu images: the scene finishes"))
                                 return test_report(null);
-                        }
                         for (int y = 0; y < PH; y++)
                                 for (int x = 0; x < PW; x++)
                                 {
-                                        if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++model_wrong, ++image_bad) < 6)
-                                                string_format(log, "  FAIL gpu images round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
-                                                              (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                        model_kit_pixel(&image_bad, "gpu images", round, x, y, pic[(positive)y * PP + x], gpu_kit_want[(positive)y * PP + x]);
                                 }
                 }
                 // Mixes: memory_mix_u32_row over rectangles (a corner's square or a line's end), the ink a colour or a picture, the covers a table of bytes in the
@@ -1077,17 +1059,12 @@ b32 main()
                                         }
                                         count++;
                                 }
-                                if (!gpu_scene(ops_at, (unsigned int)count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH))
-                                {
-                                        check("gpu mixes: the scene finishes", false);
+                                if (!gpu_scene_taken(gpu_scene(ops_at, (unsigned int)count, bins_at, pic_at, PP, PW, PH, 0, 0, PW, PH), "gpu mixes: the scene finishes"))
                                         return test_report(null);
-                                }
                                 for (int y = 0; y < PH; y++)
                                         for (int x = 0; x < PW; x++)
                                         {
-                                                if (pic[(positive)y * PP + x] != gpu_kit_want[(positive)y * PP + x] && (++model_wrong, ++mix_bad) < 6)
-                                                        string_format(log, "  FAIL gpu mixes round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
-                                                                      (positive)pic[(positive)y * PP + x], (positive)gpu_kit_want[(positive)y * PP + x]);
+                                                model_kit_pixel(&mix_bad, "gpu mixes", round, x, y, pic[(positive)y * PP + x], gpu_kit_want[(positive)y * PP + x]);
                                         }
                         }
                 }
@@ -1129,11 +1106,8 @@ b32 main()
                                 q[0] = 7u | (unsigned int)(stepx + 0x800000) << 8, q[1] = 0, q[2] = 0, q[3] = (unsigned int)pw, q[4] = (unsigned int)ph;
                                 q[5] = (unsigned int)at, q[6] = (unsigned int)(at >> 32), q[7] = (unsigned int)stepy;
                                 windows_rotate_panel((unsigned int)lw, (unsigned int)lh, degrees, x0, y0, x1, y1, panel);
-                                if (!gpu_scene(ops_at, 1, bins_at, tdst_at, DP, (unsigned int)pw, (unsigned int)ph, panel[0], panel[1], panel[2], panel[3]))
-                                {
-                                        check("gpu turns: the scene finishes", false);
+                                if (!gpu_scene_taken(gpu_scene(ops_at, 1, bins_at, tdst_at, DP, (unsigned int)pw, (unsigned int)ph, panel[0], panel[1], panel[2], panel[3]), "gpu turns: the scene finishes"))
                                         return test_report(null);
-                                }
                                 {
                                         unsigned int rx0 = (panel[0] >> 6) << 6, rx1 = ((panel[2] + 63) >> 6) << 6, ry0 = (panel[1] >> 2) << 2, ry1 = ((panel[3] + 3) >> 2) << 2;
 
@@ -1203,17 +1177,12 @@ b32 main()
                                         ui_run_in(&rec, faces, x, baseline, (string_address)word, size_px, colour, alpha, low, high, stroke);
                                 }
                                 check("gpu text: the runs were recorded", scene.count > 10);
-                                if (!gpu_scene(tops_at, 1 + scene.count, tbins_at, tpic_at, TP, TW, TH, 0, 0, TW, TH))
-                                {
-                                        check("gpu text: the scene finishes", false);
+                                if (!gpu_scene_taken(gpu_scene(tops_at, 1 + scene.count, tbins_at, tpic_at, TP, TW, TH, 0, 0, TW, TH), "gpu text: the scene finishes"))
                                         break;
-                                }
                                 for (int y = 0; y < TH; y++)
                                         for (int x = 0; x < TW; x++)
                                         {
-                                                if (tpic[(positive)y * TP + x] != want_text[(positive)y * TP + x] && (++model_wrong, ++text_bad) < 6)
-                                                        string_format(log, "  FAIL gpu text round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
-                                                                      (positive)tpic[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
+                                                model_kit_pixel(&text_bad, "gpu text", round, x, y, tpic[(positive)y * TP + x], want_text[(positive)y * TP + x]);
                                         }
                                 // The same runs as a program's list: the ops read by the compositor's cut (compositor_gpu_list_ops), the cover bytes being the list's, its base
                                 // the buffer's start (base number 3) and its cover bytes [tcover_at, tcover_at + scene.used), and drawn from what the cut wrote.
@@ -1234,9 +1203,7 @@ b32 main()
                                         for (int y = 0; y < TH; y++)
                                                 for (int x = 0; x < TW; x++)
                                                 {
-                                                        if (tpic[(positive)y * TP + x] != want_text[(positive)y * TP + x] && (++model_wrong, ++text_bad) < 6)
-                                                                string_format(log, "  FAIL gpu list round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
-                                                                              (positive)tpic[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
+                                                        model_kit_pixel(&text_bad, "gpu list", round, x, y, tpic[(positive)y * TP + x], want_text[(positive)y * TP + x]);
                                                 }
                                 }
                                 // The same runs as a program's published list in a memfd of its own, drawn by compositor_gpu_list_render_bytes into a picture in another memfd: the
@@ -1289,9 +1256,7 @@ b32 main()
                                         for (int y = 0; y < TH; y++)
                                                 for (int x = 0; x < TW; x++)
                                                 {
-                                                        if (list_picture[(positive)y * TP + x] != want_text[(positive)y * TP + x] && (++model_wrong, ++text_bad) < 6)
-                                                                string_format(log, "  FAIL gpu list render round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
-                                                                              (positive)list_picture[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
+                                                        model_kit_pixel(&text_bad, "gpu list render", round, x, y, list_picture[(positive)y * TP + x], want_text[(positive)y * TP + x]);
                                                 }
                                         // The same list again (the next frame of a window whose cover bytes are the same, or a few less): its cover bytes are in the map the
                                         // first frame made, and no map is made for them (a map a frame was a userptr and a mapping of the card's each time).
@@ -1326,17 +1291,12 @@ b32 main()
                                         }
                                         for (positive i = 0; i < (positive)TP * TH; i++)
                                                 tpic[i] = 0x12345678u;
-                                        if (!gpu_scene(tops_at, 1 + scene.count, tbins_at, tpic_at, TP, TW, TH, 0, 0, TW, TH))
-                                        {
-                                                check("gpu text bases: the scene finishes", false);
+                                        if (!gpu_scene_taken(gpu_scene(tops_at, 1 + scene.count, tbins_at, tpic_at, TP, TW, TH, 0, 0, TW, TH), "gpu text bases: the scene finishes"))
                                                 break;
-                                        }
                                         for (int y = 0; y < TH; y++)
                                                 for (int x = 0; x < TW; x++)
                                                 {
-                                                        if (tpic[(positive)y * TP + x] != want_text[(positive)y * TP + x] && (++model_wrong, ++text_bad) < 6)
-                                                                string_format(log, "  FAIL gpu text bases round %p: pixel %p,%p is %p, wanted %p\n", (positive)round, (positive)x, (positive)y,
-                                                                              (positive)tpic[(positive)y * TP + x], (positive)want_text[(positive)y * TP + x]);
+                                                        model_kit_pixel(&text_bad, "gpu text bases", round, x, y, tpic[(positive)y * TP + x], want_text[(positive)y * TP + x]);
                                                 }
                                 }
                         }
