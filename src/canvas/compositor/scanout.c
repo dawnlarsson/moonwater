@@ -208,8 +208,8 @@ static int compositor_shows_row(int row)
         present waited for in place as it was (gpu_scene and gpu_blit, a tick each), for a comparison. What the programs are told of their pictures waits
         for the jobs that read them wherever it is told (compositor_card_reads: the doors' taken, compositor_take; the shim's releases, row_busy).
 
-        A window's list is drawn the same way where the owner asks for it (the file /run/moonwater/lists-nowait, looked for at the start:
-        compositor_card.lists_nowait), and waited for in place otherwise, as it was: its job is submitted (gpu_scene_submit, its records in their own half
+        A window's list is drawn the same way unless the owner asks for it waited for in place, as it was (the file /run/moonwater/lists-wait, looked
+        for at the start: compositor_card.lists_nowait 0): its job is submitted (gpu_scene_submit, its records in their own half
         of the ops' megabyte, COMPOSITOR_GPU_LIST_OPS_AT) and the row's picture is the job's until its fence says done (compositor_card_reads, so the door's
         taken is held and the program writes nothing the job reads); a present is held while it runs (it reads that picture), the clients' doors and
         sockets are not read while it is younger than GPU_LATE_NS (no other list asks for the card meanwhile, so none is refused for want of it), the doors
@@ -247,7 +247,7 @@ static struct
         unsigned int clips;
         int turning, composed, flip_own, back, plane_off; // how the present ends (compositor_present_tell)
         struct compositor_rows rows; // the rows whose pictures the present's jobs read (bit row)
-        b32 lists_nowait;           // a window's list is drawn by a job not waited for (/run/moonwater/lists-nowait was there at the start)
+        b32 lists_nowait;           // a window's list is drawn by a job not waited for (/run/moonwater/lists-wait was not there at the start)
         struct compositor_rows list_rows; // the rows whose picture a list's job not waited for draws (bit row), each one's job, and when the first began
         positive *list_seq, list_began;
         unsigned int list_recovered; // the card's restarts (gpu_recovered) when they were submitted: one since ends them, as a hang does

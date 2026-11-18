@@ -3284,7 +3284,7 @@ static void gpu_card_rows(void)
 }
 
 /*
-        A window's list drawn without a wait (compositor_card.lists_nowait: /run/moonwater/lists-nowait), on the fake card and the fake fence, the list one
+        A window's list drawn without a wait (compositor_card.lists_nowait, unless /run/moonwater/lists-wait), on the fake card and the fake fence, the list one
         box over a 64 by 4 picture held by a written map: a list's records are cut into their own half of the ops' megabyte and a present's into the other;
         its job is submitted and not waited for, the frame said drawn with its damage; the row's picture is the job's (compositor_card_reads, which the
         door's taken and a flip's end wait on) and a present is held while it runs, the clients while it is younger than GPU_LATE_NS, and the doors that

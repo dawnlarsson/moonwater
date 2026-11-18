@@ -57,8 +57,8 @@
             present-early     compositor.c's start, once: every present by the old rule, early in its period (compositor_late.early)
             present-wait      compositor.c's start, once: every job of the card's present waited for in place (compositor_card.nowait 0)
             lists-off         gpu_host.c, compositor_lists_switch, every 512th present: while it is there no window is drawn from its list
-            lists-nowait      compositor.c's start, once: a list's render goes to the card without a wait (compositor_card.lists_nowait);
-                              without it the render is waited for in place
+            lists-wait        compositor.c's start, once: a list's render is waited for in place, as it was (compositor_card.lists_nowait 0);
+                              without it the render goes to the card without a wait
             gpu-nouserptr     gpu.c, gpu_start, at each start of the card: every map by the dma-buf route, never userptr
             gpu-own-userptr   gpu.c, gpu_start: the maps' old order, userptr first for the compositor's own memory too
             gpu-gfx10         gpu.c, gpu_start: the cards of family 143 (RDNA1 and 2) let in, which no one has run the kernels on
@@ -3003,12 +3003,14 @@ static b32 compositor_main()
                 if (off >= 0)
                         compositor_gpu_clocks.level = 0, system_close(off);
         }
-        // A window's list drawn by a job of the card the loop does not wait for, where the owner asks for it (/run/moonwater/lists-nowait); waited for in
-        // place otherwise, as it was.
+        // A window's list drawn by a job of the card the loop does not wait for, unless the owner asks for it waited for in place, as it was
+        // (/run/moonwater/lists-wait). Waited for, every list a kit program drew (a terminal's frame, the settings') stopped the loop for its job,
+        // 1853 us mean on box (22 ms a second at 10 lists a second): no input device was read meanwhile, so a key pressed in it reached its window
+        // that much later.
         {
-                bipolar lists = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/lists-nowait", FILE_READ | O_CLOEXEC);
+                bipolar lists = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/lists-wait", FILE_READ | O_CLOEXEC);
 
-                compositor_card.lists_nowait = lists >= 0;
+                compositor_card.lists_nowait = lists < 0;
                 if (lists >= 0)
                         system_close(lists);
         }
