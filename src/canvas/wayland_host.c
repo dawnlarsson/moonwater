@@ -291,6 +291,14 @@ struct compositor_wl_layer
         int gather;
         unsigned int at;
         long source_w, source_h, transform, y_invert, sx, sy, sw, sh, tw, th, ox, oy;
+        /*
+                An NV12 layer (nv12 1, always gathered: its picture is made XRGB, by the card's op 9 or the processor's walk of the same tables):
+                a dma-buf whose two planes are one buffer's, its luma at byte luma of it (luma_pitch bytes a row) and its chroma at chroma
+                (chroma_pitch), extent the bytes of the buffer the two reach; va is the import's first byte (the buffer's), pitch 1, so that
+                the rows' table holds the source's row and the columns' its column. Never turned across its axes (transform 1, 3, 5, 7).
+        */
+        int nv12;
+        unsigned long luma, chroma, luma_pitch, chroma_pitch, extent;
 };
 
 /*
@@ -1675,6 +1683,8 @@ static unsigned int compositor_wl_gather_line(const struct compositor_wl_layer *
 // The bytes of a layer's buffer the card or the processor reads: a gathered layer's whole buffer, a plain one's rectangle.
 static positive compositor_wl_layer_bytes(const struct compositor_wl_layer *l)
 {
+        if (l->nv12)
+                return (positive)l->extent;
         if (l->gather)
                 return (positive)(l->source_h - 1) * l->pitch * 4 + (positive)l->source_w * 4;
         return (positive)(l->height - 1) * l->pitch * 4 + (positive)l->width * 4;
@@ -1761,6 +1771,57 @@ static void compositor_wl_gather_run(const struct compositor_wl_layer *l, long y
 }
 
 /*
+        The colour of a pixel of NV12 (luma yv, chroma u and v), compositor_wl_decode_pixel's and the card's op 9's, bit for bit: BT.601, limited
+        range, 8 bits of fraction.
+*/
+static unsigned int compositor_wl_yuv(long yv, long u, long v)
+{
+        long c = yv < 16 ? 0 : yv - 16, d = u - 128, e = v - 128;
+        long r = (298 * c + 409 * e + 128) >> 8, g = (298 * c - 100 * d - 208 * e + 128) >> 8, b = (298 * c + 516 * d + 128) >> 8;
+
+        r = r < 0 ? 0 : r > 255 ? 255 : r;
+        g = g < 0 ? 0 : g > 255 ? 255 : g;
+        b = b < 0 ? 0 : b > 255 ? 255 : b;
+        return 0xff000000u | (unsigned int)r << 16 | (unsigned int)g << 8 | (unsigned int)b;
+}
+
+// A run of an NV12 layer's row made XRGB by the processor: n pixels from column x of row y of its rectangle, where the gathering's tables say,
+// from base, the layer's buffer as compositor_wl_nv12_map maps it.
+static void compositor_wl_nv12_run(const struct compositor_wl_layer *l, const unsigned char *base, long y, long x, unsigned long n, unsigned int *run)
+{
+        unsigned long line = compositor_wl_gather_line(l, y);
+        const unsigned char *luma = base + l->luma + line * l->luma_pitch, *chroma = base + l->chroma + (line >> 1) * l->chroma_pitch;
+
+        for (unsigned long at = 0; at < n; at++)
+        {
+                unsigned long column = compositor_wl_gather_column(l, x + (long)at), pair = column & ~1ul;
+
+                run[at] = compositor_wl_yuv(luma[column], chroma[pair], chroma[pair + 1]);
+        }
+}
+
+// An NV12 layer's buffer mapped for the processor to read, its extent from its first byte, the read begun (DMA_BUF_SYNC): 0 when the map is refused.
+static const unsigned char *compositor_wl_nv12_map(const struct compositor_wl_layer *l)
+{
+        unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
+        long got = compositor_call(syscall(mmap), 0, (positive)l->extent, 1, 1, (positive)l->fd, 0);
+
+        if (got < 0 && got > -4096)
+                return 0;
+        compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+        return (const unsigned char *)got;
+}
+
+// The read ended and the map let go of.
+static void compositor_wl_nv12_unmap(const struct compositor_wl_layer *l, const unsigned char *base)
+{
+        unsigned long sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
+
+        compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+        compositor_call(syscall(munmap), (positive)base, (positive)l->extent, 0, 0, 0, 0);
+}
+
+/*
         The pictures of the gathered layers that changed, made before a present's frames are (compositor_present_frames, which makes them while no
         job of the card's is on what it draws: compositor_card_holds), so that whatever reads a layer's frame, the card's scene or the processor's,
         the glass under the taskbar or the record, reads the layer as it is. Each one's tables first (columns, then rows), then the card's op 7 over
@@ -1803,9 +1864,16 @@ static void compositor_wl_gathers_fill(void)
                                         src = gpu_va_bytes(l->pixels, extent);
                                 if (dst && src)
                                 {
+                                        b32 made;
+
                                         g->va = dst, g->epoch = gpu_epoch;
-                                        if (gpu_blit(src, 1, dst, (unsigned int)l->width, dst + 4 * pixels, 7, (unsigned int)l->width, (unsigned int)l->height) ||
-                                            (gpu_end == GPU_END_LATE && gpu_finish()))
+                                        if (l->nv12)
+                                                made = l->luma_pitch < 65536 && l->chroma_pitch < 65536 &&
+                                                       gpu_nv12(src + l->luma, (unsigned int)l->luma_pitch, src + l->chroma, (unsigned int)l->chroma_pitch, dst,
+                                                                (unsigned int)l->width, dst + 4 * pixels, (unsigned int)l->width, (unsigned int)l->height);
+                                        else
+                                                made = gpu_blit(src, 1, dst, (unsigned int)l->width, dst + 4 * pixels, 7, (unsigned int)l->width, (unsigned int)l->height);
+                                        if (made || (gpu_end == GPU_END_LATE && gpu_finish()))
                                         {
                                                 g->filled = 1;
                                                 if (compositor.table)
@@ -1819,6 +1887,21 @@ static void compositor_wl_gathers_fill(void)
                                 }
                         }
 #endif
+                        // An NV12 layer the card did not make: the processor's walk of the same tables, the buffer mapped whole for it.
+                        if (l->nv12)
+                        {
+                                const unsigned char *base = compositor_wl_nv12_map(l);
+
+                                if (!base)
+                                        continue;
+                                for (long y = 0; y < l->height; y++)
+                                        compositor_wl_nv12_run(l, base, y, 0, (unsigned long)l->width, g->memory + (unsigned long)y * (unsigned long)l->width);
+                                compositor_wl_nv12_unmap(l, base);
+                                g->filled = 1;
+                                if (compositor.table)
+                                        compositor.table->client_layers_gathered[1]++;
+                                continue;
+                        }
                         if (l->fd >= 0)
                                 compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
                         for (long y = 0; y < l->height; y++)
@@ -1921,6 +2004,25 @@ static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list
                 unsigned int *into = to + (unsigned long)l->y * pitch + (unsigned long)l->x;
                 unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, and then END
 
+                if (l->nv12)
+                {
+                        // NV12, made XRGB a run at a time where the gathering's tables say, and laid as it is (it has no alpha).
+                        const unsigned char *base = compositor_wl_nv12_map(l);
+                        unsigned int run[1024];
+
+                        if (!base)
+                                continue;
+                        for (long y = 0; y < l->height; y++)
+                                for (long x = 0; x < l->width; x += 1024)
+                                {
+                                        unsigned long n = (unsigned long)(l->width - x < 1024 ? l->width - x : 1024);
+
+                                        compositor_wl_nv12_run(l, base, y, x, n, run);
+                                        memory_copy_rect_u32(into + (unsigned long)y * pitch + (unsigned long)x, pitch, run, n, n, 1);
+                                }
+                        compositor_wl_nv12_unmap(l, base);
+                        continue;
+                }
                 if (l->fd >= 0)
                         compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
                 if (l->swap || l->gather)
@@ -3107,6 +3209,85 @@ static int compositor_wl_gatherable(const struct wayland_picture *picture, long 
 }
 
 /*
+        An NV12 subsurface (a video a browser hands the compositor to show, decoded by the card) as a layer: gathered, its picture made XRGB by the
+        card's op 9 (compositor_wl_gathers_fill), so that nothing of it is read by the processor; laid into the window's picture as before (by the
+        processor, compositor_wl_blit_xform) where it cannot be: shared memory, the card not composing, two planes that are not one buffer's (both
+        planes are imported as the one buffer), a layout that is not linear, a turn across the axes, a picture past the buffer's size. 1 when
+        it is one, as compositor_wl_layer_make answers; *why its refusal.
+*/
+static int compositor_wl_layer_nv12(const struct wayland_picture *picture, long width, long height, int radius, int line, struct compositor_wl_layer *old,
+                                    unsigned int olds, struct compositor_wl_layer *out)
+{
+        unsigned long dev = 0, ino = 0, plane_dev = 0, plane_ino = 0, luma_end, chroma_end, extent;
+        long tw, th, x1, y1, x2, y2, size;
+
+        if (picture->sync_fd < 0 || !compositor_wl_card_composes() || !gpu_ready())
+                return 0;
+        if (picture->plane_count != 2 || picture->plane_fd[1] < 0 || (picture->modifier && picture->modifier != WAYLAND_MODIFIER_INVALID) ||
+            (picture->transform & 1) || picture->transform < 0 || picture->transform > 7 || picture->width < 2 || picture->height < 2 ||
+            picture->width > WAYLAND_DIMENSION || picture->height > WAYLAND_DIMENSION || picture->stride < picture->width ||
+            picture->plane_stride[1] < (unsigned long)picture->width || picture->stride >= 65536 || picture->plane_stride[1] >= 65536)
+                return 0;
+        if (picture->src_width > 0 && (picture->src_height <= 0 || picture->src_x < 0 || picture->src_y < 0 || picture->src_width > WAYLAND_DIMENSION * 256 ||
+                                       picture->src_height > WAYLAND_DIMENSION * 256 || picture->src_x > WAYLAND_DIMENSION * 256 ||
+                                       picture->src_y > WAYLAND_DIMENSION * 256))
+                return 0;
+        compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
+        compositor_wl_fd_ident(picture->plane_fd[1], &plane_dev, &plane_ino);
+        if (!ino || plane_dev != dev || plane_ino != ino)
+                return 0;
+        luma_end = picture->plane_offset[0] + (unsigned long)picture->stride * (unsigned long)picture->height;
+        chroma_end = picture->plane_offset[1] + picture->plane_stride[1] * (unsigned long)(picture->height / 2);
+        extent = luma_end > chroma_end ? luma_end : chroma_end;
+        size = compositor_call(syscall(lseek), (positive)picture->sync_fd, 0, 2, 0, 0, 0); // SEEK_END: a dma-buf's size
+        if (size <= 0 || extent > (unsigned long)size)
+                return 0;
+        tw = picture->dst_width > 0 ? picture->dst_width : picture->src_width > 0 ? picture->src_width / 256 : picture->width;
+        th = picture->dst_height > 0 ? picture->dst_height : picture->src_width > 0 ? picture->src_height / 256 : picture->height;
+        if (tw <= 0 || th <= 0 || tw > WAYLAND_DIMENSION || th > WAYLAND_DIMENSION || picture->dest_x < -WAYLAND_DIMENSION ||
+            picture->dest_x > WAYLAND_DIMENSION || picture->dest_y < -WAYLAND_DIMENSION || picture->dest_y > WAYLAND_DIMENSION)
+                return 0;
+        x1 = picture->dest_x < 0 ? 0 : picture->dest_x;
+        y1 = picture->dest_y < 0 ? 0 : picture->dest_y;
+        x2 = picture->dest_x + tw > width ? width : picture->dest_x + tw;
+        y2 = picture->dest_y + th > height ? height : picture->dest_y + th;
+        out->id = (unsigned int)picture->layer;
+        if (x2 <= x1 || y2 <= y1)
+                return 1;
+        if (compositor_wl_meets_corner((int)x1, (int)y1, (int)x2, (int)y2, (int)width, (int)height, radius, line))
+                return 0;
+        for (unsigned int k = 0; k < olds && !out->import; k++)
+                if (old[k].fd == picture->sync_fd && old[k].nv12 && old[k].extent == extent && old[k].dev == dev && old[k].ino == ino &&
+                    compositor_wl_live(old[k].import, old[k].epoch))
+                {
+                        out->import = old[k].import;
+                        old[k].import = 0; // the new layer's now
+                }
+        if (!out->import)
+                out->import = gpu_import_fd((int)picture->sync_fd, (positive)extent);
+        if (!out->import)
+                return 0;
+        out->va = out->import;
+        out->pixels = (const unsigned int *)picture->pixels;
+        out->pitch = 1;
+        out->x = (int)x1, out->y = (int)y1, out->width = (int)(x2 - x1), out->height = (int)(y2 - y1);
+        out->map = picture->map, out->fd = picture->sync_fd, out->size = picture->map_bytes, out->dev = dev, out->ino = ino;
+        out->modifier = picture->modifier, out->epoch = gpu_epoch, out->fourcc = picture->fourcc, out->at = WAYLAND_LAYERS;
+        out->nv12 = 1, out->luma = picture->plane_offset[0], out->chroma = picture->plane_offset[1];
+        out->luma_pitch = (unsigned long)picture->stride, out->chroma_pitch = picture->plane_stride[1], out->extent = extent;
+        out->gather = 1;
+        out->source_w = picture->width, out->source_h = picture->height;
+        out->transform = picture->transform & 7, out->y_invert = picture->y_invert != 0;
+        out->sx = picture->src_width > 0 ? picture->src_x : 0;
+        out->sy = picture->src_width > 0 ? picture->src_y : 0;
+        out->sw = picture->src_width > 0 ? picture->src_width : picture->width * 256;
+        out->sh = picture->src_width > 0 ? picture->src_height : picture->height * 256;
+        out->tw = tw, out->th = th;
+        out->ox = x1 - picture->dest_x, out->oy = y1 - picture->dest_y;
+        return 1;
+}
+
+/*
         A subsurface's picture as a layer of a row (width by height the window's pixels; radius and line its frame's corners), made into out:
         1 when it can be one, with a rectangle of no width for one wholly outside the window, and 0 when it cannot, which refuses all of the
         row's layers (they are laid into its picture), why saying for what (struct windows's client_layers_refused). The rules are the lent
@@ -3137,6 +3318,8 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
         if (picture->fragile)
                 return 0;
         *why = 6;
+        if (picture->fourcc == WAYLAND_FOURCC_NV12)
+                return compositor_wl_layer_nv12(picture, width, height, radius, line, old, olds, out);
         gather = compositor_wl_needs_xform_ordered(picture, picture->width, picture->height, 1);
         if (gather && !compositor_wl_gatherable(picture, &tw, &th))
                 return 0;

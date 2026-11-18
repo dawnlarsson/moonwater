@@ -174,7 +174,9 @@ def udmabuf(width, height, pixels, flags):
     fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK)
     try:
         dev = os.open('/dev/udmabuf', os.O_RDWR)
-        made = fcntl.ioctl(dev, 0x40187542, struct.pack('<IIQQ', fd, 1, 0, size))  # UDMABUF_CREATE, UDMABUF_FLAGS_CLOEXEC
+        # UDMABUF_CREATE, UDMABUF_FLAGS_CLOEXEC; the argument a mutable buffer, so the answer is the ioctl's own (the new descriptor):
+        # given bytes, fcntl.ioctl answers the bytes back, and every dma-buf row here said NOT RUN
+        made = fcntl.ioctl(dev, 0x40187542, bytearray(struct.pack('<IIQQ', fd, 1, 0, size)), True)
         os.close(dev)
     except OSError:
         return None

@@ -1421,6 +1421,83 @@ image:
 	s_endpgm
 .size image, .-image
 
+; op 9: a picture of NV12 (a byte of luma a pixel at s, sp bytes a row; then the chroma, a byte of U and one of V for each 2 by 2 pixels, at ops
+; (0x48), gp bytes a row) scaled by tables as op 7 is, into d as 32-bit XRGB: d[y * dp + x] = rgb(Y[ytab[y] * sp + xtab[x]], UV[ytab[y] / 2 * gp +
+; (xtab[x] & ~1)]), xtab (w entries, the source's column) at g and ytab (the rows', the source's row) after it. The colour is compositor_wl_decode_pixel's,
+; bit for bit (BT.601, limited range, 8 bits of fraction): c = max(Y - 16, 0), d = U - 128, e = V - 128, R = (298c + 409e + 128) >> 8,
+; G = (298c - 100d - 208e + 128) >> 8, B = (298c + 516d + 128) >> 8, each held to 0..255, alpha 255.
+.globl nv12
+.p2align 8
+.type nv12,@function
+nv12:
+	s_load_dwordx4	s[8:11], s[4:5], 0x0
+	s_load_dwordx2	s[12:13], s[4:5], 0x10
+	s_load_dwordx4	s[16:19], s[4:5], 0x18
+	s_load_dwordx2	s[20:21], s[4:5], 0x48
+	v_lshl_or_b32	v1, s6, 6, v0
+	s_waitcnt	lgkmcnt(0)
+	v_cmp_gt_u32	vcc, s19, v1
+	s_and_saveexec_b64 s[0:1], vcc
+	s_cbranch_execz	.nv12_done
+	s_lshl_b32	s22, s19, 2
+	s_add_u32	s24, s12, s22
+	s_addc_u32	s25, s13, 0
+	s_lshl_b32	s22, s7, 2
+	s_add_u32	s24, s24, s22
+	s_addc_u32	s25, s25, 0
+	s_load_dword	s26, s[24:25], 0x0
+	v_lshlrev_b32	v2, 2, v1
+	global_load_dword v3, v2, s[12:13]
+	s_mov_b32	s29, 0x12a
+	s_mov_b32	s30, 0x199
+	s_mov_b32	s31, 0x204
+	s_mov_b32	s32, 0x64
+	s_mov_b32	s33, 0xd0
+	s_waitcnt	lgkmcnt(0)
+	s_mul_i32	s27, s26, s16
+	s_lshr_b32	s28, s26, 1
+	s_mul_i32	s28, s28, s18
+	s_waitcnt	vmcnt(0)
+	v_add_nc_u32	v4, s27, v3
+	v_and_b32	v5, -2, v3
+	v_add_nc_u32	v5, s28, v5
+	global_load_ubyte v6, v4, s[8:9]
+	global_load_ubyte v7, v5, s[20:21]
+	global_load_ubyte v8, v5, s[20:21] offset:1
+	s_mul_i32	s34, s7, s17
+	v_add_nc_u32	v13, s34, v1
+	v_lshlrev_b32	v13, 2, v13
+	s_waitcnt	vmcnt(0)
+	v_sub_nc_u32	v6, v6, 16
+	v_max_i32	v6, 0, v6
+	v_sub_nc_u32	v7, v7, 0x80
+	v_sub_nc_u32	v8, v8, 0x80
+	v_mad_u32_u24	v9, v6, s29, 0x80
+	v_mul_lo_u32	v10, v8, s30
+	v_add_nc_u32	v10, v9, v10
+	v_ashrrev_i32	v10, 8, v10
+	v_max_i32	v10, 0, v10
+	v_min_i32	v10, 0xff, v10
+	v_mul_lo_u32	v11, v7, s32
+	v_mul_lo_u32	v12, v8, s33
+	v_sub_nc_u32	v11, v9, v11
+	v_sub_nc_u32	v11, v11, v12
+	v_ashrrev_i32	v11, 8, v11
+	v_max_i32	v11, 0, v11
+	v_min_i32	v11, 0xff, v11
+	v_mul_lo_u32	v12, v7, s31
+	v_add_nc_u32	v12, v9, v12
+	v_ashrrev_i32	v12, 8, v12
+	v_max_i32	v12, 0, v12
+	v_min_i32	v12, 0xff, v12
+	v_lshl_or_b32	v12, v11, 8, v12
+	v_lshl_or_b32	v12, v10, 16, v12
+	v_add_nc_u32	v12, 0xff000000, v12
+	global_store_dword v13, v12, s[10:11]
+.nv12_done:
+	s_endpgm
+.size nv12, .-nv12
+
 .rodata
 .p2align 6
 .macro kernel name, vgprs, sgprs
@@ -1445,3 +1522,4 @@ kernel glass, 16, 32
 kernel scene, 88, 106
 kernel scale, 8, 24
 kernel image, 42, 76
+kernel nv12, 16, 40

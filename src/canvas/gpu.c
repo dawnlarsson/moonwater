@@ -225,17 +225,17 @@ static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover sta
 #include "../../artifacts/gpu_i915_gen9.inc"
 #endif
 
-// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024, in the order of the ops that run them (4 and 5 the clang scenes, 6 the scene by hand for a width and a pitch of a multiple of 4, 7 a picture scaled by tables, 8 a picture read through the texture unit).
+// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024, in the order of the ops that run them (4 and 5 the clang scenes, 6 the scene by hand for a width and a pitch of a multiple of 4, 7 a picture scaled by tables, 8 a picture read through the texture unit, 9 an NV12 picture scaled by tables and made XRGB).
 struct gpu_code { const unsigned int *words; unsigned int size; };
 static const struct gpu_code gpu_kernels[] = {
     {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_k_tone, sizeof(gpu_k_tone)}, {gpu_k_glass, sizeof(gpu_k_glass)},
     {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}, {gpu_k_scene, sizeof(gpu_k_scene)}, {gpu_k_scale, sizeof(gpu_k_scale)},
-    {gpu_k_image, sizeof(gpu_k_image)}};
+    {gpu_k_image, sizeof(gpu_k_image)}, {gpu_k_nv12, sizeof(gpu_k_nv12)}};
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
 #define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
 static unsigned int gpu_kernel_at[GPU_KERNELS];
 typedef char gpu_amd_slots_fit[GPU_SLOTS * GPU_AMD_PACKETS + 256 * GPU_SLOTS <= 1024 ? 1 : -1]; // amdgpu's packets and arguments end where its kernels begin
-typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + sizeof(gpu_k_image) + 256 * 9 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
+typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + sizeof(gpu_k_image) + sizeof(gpu_k_nv12) + 256 * 10 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
 
 #define gpu_io(dir, n, size, a) (GPU_CONTROL(gpu.fd, GPU_IO(dir, n, size), a) == 0)
 #ifndef GPU_WAIT_CS
@@ -247,7 +247,7 @@ typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gp
 #define GPU_FAMILIES(f) ((f) == 144 || (f) == 146 || (f) == 149 || (f) == 151)
 #define GPU_TEST_HASH 2024535671u
 // The rest of the chips the kernels are code for, which nobody has run them on: family 143 (Navi 10, 12 and 14, RDNA1; Navi 21 to 24, the RDNA2 cards). llvm-mc
-// makes of gpu.asm the same 3,018 words for gfx1010, gfx1012, gfx1030 and gfx1036 (the gate asks it: gpu-kernels-chips), so the code is theirs too as far as an assembler can say; what the dispatch's
+// makes of gpu.asm the same 3,749 words for gfx1010, gfx1012, gfx1030 and gfx1036 (the gate asks it: gpu-kernels-chips), so the code is theirs too as far as an assembler can say; what the dispatch's
 // registers and the ring do on them has been seen by no one. They are let in only where the machine's owner asks (the file /run/moonwater/gpu-gfx10, looked for at
 // each start, as gpu-nouserptr is), and then held to the self-test as every card is: a card that draws it wrong is not trusted, and one that hangs on it is the
 // hang's two seconds and no card. Off unless asked: a job that hangs on a ring the kernel ends only after its own timeout (sixty seconds at v6.12) is a minute of
@@ -1658,7 +1658,7 @@ static unsigned long long gpu_job_ns;
 // a scene (ops 4, 5 and 6: a present, a program's list, a turned screen), 1 a copy (op 0), 2 a picture scaled (op 7), with their time (the waited ones' whole time).
 static unsigned int gpu_jobs_waited, gpu_jobs_unwaited, gpu_jobs_kind[3];
 static unsigned long long gpu_job_submit_ns, gpu_job_wait_ns, gpu_job_ns_kind[3], gpu_submit_took; // (the last submit's own time, gpu_submit)
-#define GPU_JOB_KIND(op) ((op) == 0 ? 1u : (op) == 7 ? 2u : 0u)
+#define GPU_JOB_KIND(op) ((op) == 0 ? 1u : (op) == 7 || (op) == 9 ? 2u : 0u) // scenes, copies, pictures scaled by tables (7, and NV12 made XRGB, 9)
 #ifndef GPU_MAP_FAKE
 #define GPU_MAP_FAKE(taken)
 #endif
@@ -3408,6 +3408,26 @@ static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp
                 return false;
         gpu_slot_take(), a = GPU_ARGS;
         a->s = src, a->d = dst, a->g = tab, a->sp = sp, a->dp = dp, a->gp = 0, a->w = w, a->op = op, a->v = 0, a->x0 = a->y0 = 0, a->rows = h, a->tab = op ? GPU_VA + GPU_BASES_AT : 0;
+        return gpu_run();
+}
+
+/*
+        An NV12 picture made XRGB by the card (op 9), scaled by tables as op 7 is: its luma at luma (luma_pitch bytes a row), its chroma at chroma
+        (chroma_pitch bytes a row, a U and a V byte for each 2 by 2 pixels), into dst (dp pixels a row) over w by h; the processor has made the w
+        entries of the columns' and then the h entries of the rows' at tab, each the source's column and row (no pitch in them). The colour is
+        compositor_wl_decode_pixel's, bit for bit (BT.601, limited range). amdgpu's set alone has the kernel. gpu_run waits, as gpu_blit's does.
+*/
+static b32 gpu_nv12(positive luma, unsigned int luma_pitch, positive chroma, unsigned int chroma_pitch, positive dst, unsigned int dp, positive tab,
+                    unsigned int w, unsigned int h)
+{
+        struct gpu_args address_to a;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!w || !h || !gpu_idle() || gpu_set != &gpu_amd_rdna2)
+                return false;
+        gpu_slot_take(), a = GPU_ARGS;
+        a->s = luma, a->d = dst, a->g = tab, a->sp = luma_pitch, a->dp = dp, a->gp = chroma_pitch, a->w = w, a->op = 9, a->v = 0, a->x0 = a->y0 = 0, a->rows = h;
+        a->tab = 0, a->ops = chroma, a->count = 0;
         return gpu_run();
 }
 

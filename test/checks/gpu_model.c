@@ -242,7 +242,7 @@ b32 main()
                 unsigned int size;
         } kernels[] = {{"copy", gpu_k_copy, sizeof(gpu_k_copy)}, {"fill", gpu_k_fill, sizeof(gpu_k_fill)},     {"tone", gpu_k_tone, sizeof(gpu_k_tone)},
                        {"glass", gpu_k_glass, sizeof(gpu_k_glass)}, {"scene", gpu_k_scene, sizeof(gpu_k_scene)}, {"scale", gpu_k_scale, sizeof(gpu_k_scale)},
-                       {"image", gpu_k_image, sizeof(gpu_k_image)}};
+                       {"image", gpu_k_image, sizeof(gpu_k_image)}, {"nv12", gpu_k_nv12, sizeof(gpu_k_nv12)}};
         unsigned int hash, instructions = 0, stop = 0, total = 0;
         b32 same, all = true;
 
@@ -265,8 +265,8 @@ b32 main()
                         string_format(log, "  gpu model: %s stops at word %p: %s\n", kernels[k].name, (positive)stop, gpu_model.fault.text);
                 all = all && back && (kernels[k].words[0] & ~63u) == 0xe0ac0000u && kernels[k].words[1] == 0x18cu, total += instructions;
         }
-        string_format(log, "gpu model: %p instructions of the seven kernels decoded and made again\n", (positive)total);
-        check("gpu model: every word of copy, fill, tone, glass, scene, scale and image decodes to an instruction of gpuasm's, and goes there and back unchanged", all && total > 1000);
+        string_format(log, "gpu model: %p instructions of the eight kernels decoded and made again\n", (positive)total);
+        check("gpu model: every word of copy, fill, tone, glass, scene, scale, image and nv12 decodes to an instruction of gpuasm's, and goes there and back unchanged", all && total > 1000);
         {
                 static p8 text[1 << 20];
                 bipolar got = file_slurp((string_address) "test/gpu_stress.asm", text, sizeof(text));
@@ -320,6 +320,51 @@ b32 main()
                                 right = right && d[y * 128 + x] == (x < 100 ? 0xff102030u : 0x5a5a5a5au);
                 check("gpu model: gpu_model_run runs a kernel of gpuasm's over its grid in the regions it is given (fill: w of 100 pixels in two rows of 128)", !failed && right);
                 check("gpu model: its cost says what ran: four waves, the stores of 200 lanes", gpu_model.cost.waves == 4 && gpu_model.cost.lane_stores == 200);
+        }
+
+        // nv12 (op 9): a picture of NV12 of 40 by 10 (every luma and chroma byte, 0 to 255, at pitches past the width) scaled by tables to 70 by 13,
+        // into XRGB, is compositor_wl_decode_pixel's colour pixel for pixel; the columns past w are left as they were.
+        {
+                enum { SW = 40, SH = 10, YP = 48, UP = 56, W = 70, H = 13, DP = 80 };
+                static p8 memory[256 + YP * SH + UP * SH / 2 + 4 * (W + H) + 4 * DP * H + 64];
+                struct gpu_model_region r = {0x300000000ull, sizeof(memory), memory, GPU_MODEL_READ | GPU_MODEL_WRITE};
+                struct gpu_args address_to a = (struct gpu_args address_to)memory;
+                p8 address_to luma = memory + 256, address_to chroma = luma + YP * SH;
+                unsigned int address_to tab = (unsigned int address_to)(chroma + UP * SH / 2), address_to d = tab + W + H;
+                unsigned int seed = 0x9e3779b9u, wrong = 0;
+                int failed;
+
+                for (unsigned int i = 0; i < YP * SH + UP * SH / 2; i++)
+                        seed = seed * 1664525u + 1013904223u, luma[i] = (p8)(i < 256 ? i : seed >> 24);
+                for (unsigned int x = 0; x < W; x++)
+                        tab[x] = (2 * x + 1) * SW / (2 * W);
+                for (unsigned int y = 0; y < H; y++)
+                        tab[W + y] = (2 * y + 1) * SH / (2 * H);
+                for (unsigned int i = 0; i < DP * H; i++)
+                        d[i] = 0x5a5a5a5au;
+                a->s = r.va + 256, a->ops = r.va + 256 + YP * SH, a->g = r.va + (positive)((p8 address_to)tab - memory), a->d = r.va + (positive)((p8 address_to)d - memory);
+                a->sp = YP, a->gp = UP, a->dp = DP, a->w = W, a->op = 9, a->rows = H;
+                failed = gpu_model_run(gpu_k_nv12, sizeof(gpu_k_nv12) / 4, r.va, (W + 63) / 64, H, &r, 1);
+                for (unsigned int y = 0; y < H; y++)
+                        for (unsigned int x = 0; x < DP; x++)
+                        {
+                                unsigned int sx = tab[x < W ? x : 0], sy = tab[W + y], want = 0x5a5a5a5au;
+
+                                if (x < W)
+                                {
+                                        long c = (long)luma[sy * YP + sx] - 16, u = (long)chroma[sy / 2 * UP + (sx & ~1u)] - 128, v = (long)chroma[sy / 2 * UP + (sx & ~1u) + 1] - 128;
+                                        long rr = (298 * (c < 0 ? 0 : c) + 409 * v + 128) >> 8, gg = (298 * (c < 0 ? 0 : c) - 100 * u - 208 * v + 128) >> 8,
+                                             bb = (298 * (c < 0 ? 0 : c) + 516 * u + 128) >> 8;
+
+                                        rr = rr < 0 ? 0 : rr > 255 ? 255 : rr, gg = gg < 0 ? 0 : gg > 255 ? 255 : gg, bb = bb < 0 ? 0 : bb > 255 ? 255 : bb;
+                                        want = 0xff000000u | (unsigned int)rr << 16 | (unsigned int)gg << 8 | (unsigned int)bb;
+                                }
+                                wrong += d[y * DP + x] != want;
+                        }
+                string_format(log, "gpu model: nv12, %p pixels made, %p not the processor's, %p instructions run%s%s\n", (positive)gpu_model.cost.lane_stores,
+                              (positive)wrong, (positive)gpu_model.cost.instructions, failed ? ": " : "", failed ? gpu_model.fault.text : "");
+                check("gpu model: nv12 (op 9) makes XRGB of an NV12 picture scaled by tables, compositor_wl_decode_pixel's colour pixel for pixel (40 by 10 to 70 by 13)",
+                      !failed && !wrong && gpu_model.cost.lane_stores == W * H);
         }
 
         if (!gpu_model_card_start(24 << 20)) // (the cut's desktop of 1920 by 1080 and its pictures, from GPU_DATA to 16 MiB on)
