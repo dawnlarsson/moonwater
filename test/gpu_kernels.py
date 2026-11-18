@@ -6,6 +6,11 @@
                                             same words, kernel by kernel
     python3 test/gpu_kernels.py --print ASM the arrays llvm-mc makes of ASM, in the form the
                                             build writes them
+    python3 test/gpu_kernels.py --print-intel SRC
+                                            the array gpu_i915_gen9.inc holds, made from SRC
+                                            (src/canvas/gpu_i915.asm) the way `build gpu-i915`
+                                            writes it: a hand build is
+                                            python3 test/gpu_kernels.py --print-intel src/canvas/gpu_i915.asm > artifacts/gpu_i915_gen9.inc
     python3 test/gpu_kernels.py --probe     whether the llvm-mc at hand writes the words the build's
                                             assembler is held to, where LLVM's versions differ: 0
                                             when it does, 2 and why when it does not
@@ -257,6 +262,19 @@ IGT_GEN9_FILL_ROWS_1_TO_9 = [
 ]
 
 
+def intel_text(kernels):
+    """The include build gpu-i915 writes: one array per kernel, ten words a line, each word and its comma and space."""
+    out = []
+    for name, words in kernels:
+        out.append('static const unsigned int gpu_i915_%s[] = {\n' % name)
+        for at in range(0, len(words), 10):
+            line = words[at:at + 10]
+            # the words are comma and space separated; a full line ends with a comma, a short one (the array's last) with ', '
+            out.append('    ' + ', '.join('0x%08x' % w for w in line) + (',' if len(line) == 10 else ', ') + '\n')
+        out.append('};\n')
+    return ''.join(out)
+
+
 def intel_arrays(text):
     return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
             for name, body in re.findall(r'static const unsigned int gpu_i915_(\w+)\[\] = \{(.*?)\};', text, re.S)]
@@ -281,6 +299,9 @@ def intel_check(src, inc):
 def main():
     if len(sys.argv) == 5 and sys.argv[1] == '--target' and sys.argv[2] == 'intel-gen9':
         intel_check(sys.argv[3], sys.argv[4])
+        return
+    if len(sys.argv) == 3 and sys.argv[1] == '--print-intel':
+        sys.stdout.write(intel_text(intel_kernels(pathlib.Path(sys.argv[2]).read_text())))
         return
     if len(sys.argv) > 3 and sys.argv[1] == '--chips':
         chips(sys.argv[2], sys.argv[3:])
