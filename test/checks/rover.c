@@ -1243,7 +1243,8 @@ static fn rover_check_red(void)
         {
                 positive used = 0;
 
-                string_copy(rover_red_text, "rule many\n\ton lid close\n");
+                //      In userspace: the kernel's loader takes no more than 16 kernel primitives an event (rover_kernel_fits).
+                string_copy(rover_red_text, "rule many\n\ton lid close\n\tplace user\n");
                 used = string_length(rover_red_text);
                 for (positive k = 0; k < 255; k++, used += 10)
                         memory_copy(rover_red_text + used, "\tdo log x\n", 10);
