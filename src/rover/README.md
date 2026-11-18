@@ -757,7 +757,17 @@ aligned and in range, so the evaluator checks nothing again. The answer
 resolves an action's arguments only when its owner asks
 (`rover_arguments`). Nothing is allocated, no text is parsed and nothing
 loops but over the table's own runs, so the time an event takes is bounded
-by the table's size and nothing else.
+by the table: by its size, and by its patterns, since a pattern is matched
+in time its length times the text's (a `*` restarts it at every byte of
+the text, so a 31-byte pattern against a 55-byte name is about 2 µs). For
+the kernel, where an event is asked with interrupts off, that bound is a
+budget the loader holds (`rover_kernel_fits`, under The kernel): no more
+than 16 of the kernel's rules can fire on one event, they queue at most 16
+kernel primitives, and asking them costs at most 16384 units of about a
+nanosecond, a pattern counted at 64 times its length plus one. A table
+past any of the three is refused by the compiler and the loader alike,
+with the event named; the same rules placed in userspace (`place user`)
+have no such budget.
 
 The same C is the userspace evaluator and, built with `KERNEL_MODE`, the
 kernel's.
