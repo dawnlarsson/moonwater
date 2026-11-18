@@ -1082,8 +1082,9 @@ static void compositor_apart_drop(void)
         A card that scans out what its buffer holds (a card with memory of its own, amdgpu, radeon, nouveau, the emulated cards' VRAM, and i915 and xe,
         whose buffer is the machine's memory scanned as it is) shows a buffer while it is being written: composed in place, a frame tears at the line the
         write has reached. There the frame goes into the second plate and the screen is flipped to it (compositor_plate_swap, compositor_flip), with one
-        screen and no window on a plane; with two screens, a plane up or a screen turned it is composed in place, apart (compositor_slice_flush, with the
-        mirror) where a store to the card is dear, as it was before the plates.
+        screen, a window on the overlay or not (what is under the plane is not composed, and a new buffer of that window goes with the plate's flip,
+        compositor_plane_carry); with two screens or a screen turned it is composed in place, apart (compositor_slice_flush, with the mirror) where a
+        store to the card is dear, as it was before the plates.
 
         A card that copies to its device or its host what it is told changed, from a buffer in the machine's memory (compositor_copies_damage: virtio_gpu
         and the other guests' cards that keep one, simpledrm, the server boards' ast and mgag200, the USB displays udl and gud) shows nothing of the buffer
@@ -1099,11 +1100,11 @@ static int compositor_copies_damage(void)
         return compositor.card >= 0 && compositor_driver_in(compositor_damage_copied, sizeof(compositor_damage_copied) / sizeof(compositor_damage_copied[0]));
 }
 
-// Whether this present composes into the second plate and flips to it: one screen, no window on a plane, no screen turned, and a card that shows
+// Whether this present composes into the second plate and flips to it: one screen, no screen turned, and a card that shows
 // what its buffer holds (a headless scan image's names are exchanged the same way); never one that copies its damage.
 static int compositor_plate_wanted(int turning)
 {
-        return !turning && compositor_output_count() < 2 && compositor.plane_row < 0 && !compositor_copies_damage();
+        return !turning && compositor_output_count() < 2 && !compositor_copies_damage();
 }
 
 static int compositor_changed_ready(void)
@@ -1564,6 +1565,56 @@ static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, in
         return 1;
 }
 
+/*
+        A window on the overlay with a new buffer in a present that also composes what is round it (the desktop, its corners' rows): the overlay's
+        change is carried by the flip of the plate that is composed (compositor_flip_fenced's commit, or compositor_present_tell's), so the window
+        and what is round it are shown at the same vertical blank, and the desktop under the plane is composed into the plate the screen is not
+        showing, as it is with no plane. fb 0: none carried. A commit that would not take it shows the plate alone, and the next present commits
+        the overlay's buffer (compositor.plane_fb is still the old one).
+*/
+static struct
+{
+        unsigned int fb, which;
+        int row, source[2], rect[4];
+} compositor_plane_carry;
+
+// The carried overlay's properties after the primary's in an atomic commit's lists: the overlay's object and its count, and the plane's
+// state once the commit is taken (compositor_plane_carried).
+static unsigned int compositor_plane_carry_props(unsigned int *objects, unsigned int *counts, unsigned int *props, unsigned long *values,
+                                                 unsigned int n)
+{
+        const unsigned int *id = compositor.overlay_props;
+        unsigned long width = (unsigned long)(compositor_plane_carry.rect[2] - compositor_plane_carry.rect[0]);
+        unsigned long height = (unsigned long)(compositor_plane_carry.rect[3] - compositor_plane_carry.rect[1]);
+        unsigned int from = n;
+
+        props[n] = id[COMPOSITOR_PLANE_FB], values[n++] = compositor_plane_carry.fb;
+        props[n] = id[COMPOSITOR_PLANE_CRTC], values[n++] = compositor.crtc;
+        props[n] = id[COMPOSITOR_PLANE_SRC_X], values[n++] = (unsigned long)compositor_plane_carry.source[0] << 16;
+        props[n] = id[COMPOSITOR_PLANE_SRC_Y], values[n++] = (unsigned long)compositor_plane_carry.source[1] << 16;
+        props[n] = id[COMPOSITOR_PLANE_SRC_W], values[n++] = width << 16;
+        props[n] = id[COMPOSITOR_PLANE_SRC_H], values[n++] = height << 16;
+        props[n] = id[COMPOSITOR_PLANE_CRTC_X], values[n++] = (unsigned long)compositor_plane_carry.rect[0];
+        props[n] = id[COMPOSITOR_PLANE_CRTC_Y], values[n++] = (unsigned long)compositor_plane_carry.rect[1];
+        props[n] = id[COMPOSITOR_PLANE_CRTC_W], values[n++] = width;
+        props[n] = id[COMPOSITOR_PLANE_CRTC_H], values[n++] = height;
+        objects[1] = compositor.overlay;
+        counts[1] = n - from;
+        return n;
+}
+
+// The carried overlay taken by a commit (shown), or not (none): carried no more either way.
+static void compositor_plane_carried(int shown)
+{
+        if (shown && compositor_plane_carry.fb)
+        {
+                compositor.plane_fb = compositor_plane_carry.fb;
+                compositor.overlay_on = 1;
+                memory_copy(compositor.overlay_rect, compositor_plane_carry.rect, sizeof(compositor.overlay_rect));
+        }
+        compositor_plane_carry.fb = 0;
+}
+
 // The tabs' buffer which on the overlay at rect, read from the same place in it.
 static int compositor_atomic(unsigned int fb, int row, unsigned int which, int overlay, const int *rect, unsigned int buffer)
 {
@@ -1696,9 +1747,37 @@ static void compositor_unscanned(unsigned int why)
         less its rows with corners, its close button and its line, which the
         compositor still draws round it. A card with no overlay, or one that
         refuses, has the window composed as any other.
+
+        A client's window (a Wayland or an X one: no close button, no grab of
+        the compositor's) goes on it as the compositor's own do, its picture
+        the client's buffer itself (compositor_lent_fb): a commit of the
+        client's is then a commit of the overlay's framebuffer, and nothing is
+        composed for it. Nothing the scene draws after the windows (the tabs,
+        the moon's glow and menu, the snap preview, the grid) may meet the
+        plane's rectangle: drawn over the window, it would be under the
+        overlay, unseen. Nor may the window have layers (subsurfaces composed
+        over it): its framebuffer is then not the window as it is seen.
 */
+// Whether the owner's file /run/moonwater/planes-off is there (looked for every 512th present, as lists-off is): then no window goes on the
+// overlay and every one is composed, for a comparison.
+static int compositor_planes_off(void)
+{
+        static unsigned int probes;
+        static int off;
+
+        if ((probes++ & 511) == 0)
+        {
+                long handle = (long)system_open_at(AT_FDCWD, (string_address) "/run/moonwater/planes-off", FILE_READ | O_CLOEXEC);
+
+                off = handle >= 0;
+                if (handle >= 0)
+                        system_close(handle);
+        }
+        return off;
+}
+
 static int compositor_plane_candidate(const struct compositor_frame *frames, const unsigned int *rows,
-                                      unsigned int windows, int rect[4])
+                                      unsigned int windows, unsigned int count, int rect[4])
 {
         struct compositor_frame band;
         int row, bx, by, side, radius, top, bottom;
@@ -1711,6 +1790,8 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
                 return *why = 13, -1;
         if (compositor.cursor.soft)
                 return *why = 3, -1;
+        if (compositor_planes_off())
+                return *why = 21, -1;
         if (!windows || compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw)
                 return *why = 4, -1; // a preview is over the window, and the overlay is not composed under it
         if (compositor_spots_any(0))
@@ -1720,11 +1801,19 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 
         if (!compositor_lent(row) && (compositor.direct_refused || !compositor.table_memfd))
                 return *why = compositor.direct_refused ? 11 : 2, -1;
-        if (compositor.glassy[row] || frame->blend)
+        // Glass is the window's WINDOW_GLASS (compositor.glassy): the row's other flags (a client's NO_CLOSE and NO_GRAB) are no glass. Tested
+        // as the row's whole glass word, every client's window was refused as glass and composed.
+        if (compositor.glassy[row])
                 return *why = 5, -1;
-        // A window with the flags of a client's (or a popup's: no close, no grab), which the glass test refused as glass, goes on the overlay only
-        // fullscreen, where it is not shown straight (its framebuffer or its flip refused); windowed it is composed, as it always was.
-        if (compositor.table->glass[row] && !compositor.fullscreen[row])
+        // A client's window whose picture is not its dma-buf read in place stays composed. One the shim copies into the table (the processor
+        // composes, or its format is turned): on the overlay its table buffer is the screen's, so each commit is laid into the other one,
+        // which first takes the whole last picture (compositor_wl.laying's last), and the whole window is damage (new-dragonfly, Haswell,
+        // Chromium typing: 1.86 ms from its commit to the present against 0.15 composed, the taskbar's glass made again at each key). One in
+        // the client's shared memory has no framebuffer (compositor_lent_fb makes one of a dma-buf only).
+        if (compositor_wl_row_unscannable(row))
+                return *why = 22, -1;
+        // The window's own frame, not a subsurface's over it (layers are frames of the same row after it).
+        if (windows > 1 && rows[windows - 2] == (unsigned int)row)
                 return *why = 18, -1;
         // While the windows' lists are drawn the card writes a window's picture in place, each frame (a clear and then the frame's ops): shown straight,
         // the screen would scan that picture out while it is half drawn, and every frame would flicker. With list mode on every window is composed (by
@@ -1747,15 +1836,28 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         if (bottom - top < 64 * compositor.scale / 100)
                 return *why = 8, -1;
         rect[0] = frame->x, rect[1] = top, rect[2] = frame->x + frame->width, rect[3] = bottom;
+        // A window blended over what is under it goes on the plane only where what the plane shows of it is opaque all the same (its client's
+        // opaque region: Chromium's is all of it but its round top corners, which are in the rows above the plane), shown as the X format
+        // (compositor_lent_fb_opaque); the overlay is not blended over the primary, where nothing is composed.
+        if (frame->blend && !compositor_wl_row_opaque(row, 0, top - frame->y, frame->width, bottom - frame->y))
+                return *why = 20, -1;
 
         compositor_band_frame(&band);
         if (compositor.band && band.x < rect[2] && band.x + band.width > rect[0] && band.y < rect[3] &&
             band.y + band.height > rect[1])
                 return *why = 9, -1;
+        for (unsigned int at = windows; at < count; at++)
+        {
+                int x, y, width, height;
+
+                compositor_outline(&frames[at], &x, &y, &width, &height);
+                if (width > 0 && height > 0 && x < rect[2] && x + width > rect[0] && y < rect[3] && y + height > rect[1])
+                        return *why = 19, -1;
+        }
         // The card asked last: whether it has an overlay, then the window's framebuffer.
         if (!compositor_overlay_ready())
                 return *why = 10, -1;
-        return (compositor_lent(row) ? compositor_lent_fb(row) : compositor_window_fb(row, compositor.front[row])) ? row : (*why = 11, -1);
+        return (compositor_lent(row) ? compositor_lent_fb_opaque(row) : compositor_window_fb(row, compositor.front[row])) ? row : (*why = 11, -1);
 }
 
 // The damage less the rectangle the overlay shows; false when the pieces do not fit the list, which is then left whole.

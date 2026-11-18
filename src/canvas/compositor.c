@@ -71,6 +71,8 @@
                               to touch-trace.log
             layers-off        wayland_host.c, compositor_wl_start, once: a client's subsurfaces laid into its window's picture as before,
                               not drawn as layers of their own
+            planes-off        scanout.c, compositor_planes_off, every 512th present: while it is there no window goes on the overlay plane
+                              (compositor_plane_candidate), every one composed
             cursor-plane-probe  kms.c, at the pointer's start: the cursor plane tried on i915 and xe, with a vblank probe that keeps it only
                               where the pipe runs on with it
 
@@ -2509,6 +2511,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor_wl.take_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.done_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.row_blend, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.row_opaque, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.lent, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.source, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.wc_reads, COMPOSITOR_ROWS_ROW) \

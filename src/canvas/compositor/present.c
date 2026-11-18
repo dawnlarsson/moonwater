@@ -273,6 +273,15 @@ static void compositor_present_tell(const unsigned short (*clip)[4], unsigned in
         // Back on the compositor's own screen: what was held for the window is said taken when the card is there.
         if ((back || plane_off) && compositor.overlay_on && !compositor_atomic(compositor.fb, -1, 0, 1, 0, 0))
                 compositor_overlay_off();
+        // A window on the overlay with a new buffer goes with the plate composed round it, in one atomic commit (compositor_plane_carry); one
+        // the card refuses is the plate's flip alone, and the overlay's buffer is committed by the next present.
+        if (flip_own && compositor.on_screen != compositor.fb && compositor_plane_carry.fb && compositor.card >= 0)
+        {
+                if (compositor_atomic_to(compositor.fb, compositor_plane_carry.row, compositor_plane_carry.which, 1, compositor_plane_carry.fb,
+                                         compositor_plane_carry.source, compositor_plane_carry.rect))
+                        compositor_flip_refused = 0, compositor_plane_carried(1);
+                compositor_plane_carry.fb = 0;
+        }
         if (flip_own && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
         {
                 compositor_record_refuse();
@@ -373,8 +382,8 @@ static unsigned int compositor_in_fence(void)
 
 static int compositor_flip_fenced(unsigned int fb, int fence)
 {
-        unsigned int prop = compositor_in_fence(), objects[1] = {compositor.primary}, counts[1] = {2}, props[2];
-        unsigned long values[2] = {fb, (unsigned long)(long)fence};
+        unsigned int prop = compositor_in_fence(), objects[2] = {compositor.primary, 0}, counts[2] = {2, 0}, props[12];
+        unsigned long values[12] = {fb, (unsigned long)(long)fence};
         struct
         {
                 unsigned int flags, count;
@@ -385,13 +394,24 @@ static int compositor_flip_fenced(unsigned int fb, int fence)
         if (!prop || fence < 0 || compositor.card < 0)
                 return 0;
         props[0] = compositor.primary_props[COMPOSITOR_PLANE_FB], props[1] = prop;
+        // A window on the overlay with a new buffer goes with the plate composed round it (compositor_plane_carry).
+        if (compositor_plane_carry.fb)
+                compositor_plane_carry_props(objects, counts, props, values, 2), commit.count = 2;
         commit.user_data = compositor.flip_serial + 1;
-        if ((refused = system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit)) != 0)
+        if ((refused = system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit)) != 0 && commit.count == 2 && refused != -16)
+        {
+                // Refused with the overlay in it: the plate alone, and the overlay's buffer is committed by the next present.
+                compositor_plane_carried(0);
+                commit.count = 1;
+                refused = system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit);
+        }
+        if (refused != 0)
         {
                 if (refused != -16) // not a flip still in flight: no fenced commit on this card
                         compositor_fence_prop = -1, compositor_fence_errno = (int)-refused;
                 return 0;
         }
+        compositor_plane_carried(1);
         compositor.flip_serial++;
         compositor_flip_refused = 0;
         compositor.flip_pending = 1;
@@ -461,6 +481,7 @@ static void compositor_card_began(positive began)
 static void compositor_card_abandon(void)
 {
         compositor_card_record.wanted = 0; // not shown: nothing of it is recorded
+        compositor_plane_carried(0);
         compositor_card_fence_close();
         compositor_card.on = 0;
         compositor_card_release();
@@ -1245,7 +1266,9 @@ static void compositor_present_frames(void)
         compositor.screen_stale = 0;
 
         // The top window on the overlay where it can be: nothing of it composed under the plane.
-        int planed[4], plane = !back && !turning ? compositor_plane_candidate(frames, rows, windows, planed) : -1;
+        int planed[4], plane = !back && !turning ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
+
+        compositor_plane_carry.fb = 0;
         int plane_off = 0;
 
         if (compositor.plane_row >= 0 && (plane != compositor.plane_row ||
@@ -1271,12 +1294,23 @@ static void compositor_present_frames(void)
         {
                 int lent = compositor_lent(plane);
                 unsigned int which = compositor.front[plane];
-                unsigned int fb = lent ? compositor_lent_fb(plane) : compositor_window_fb(plane, which);
+                unsigned int fb = lent ? compositor_lent_fb_opaque(plane) : compositor_window_fb(plane, which);
                 int source[2] = {planed[0] - compositor.x[plane], planed[1] - compositor.y[plane]};
 
                 if (compositor.flip_pending)
                         return;
-                if (!fb || (fb != compositor.plane_fb && !compositor_atomic_to(compositor.fb, plane, which, 1, fb, source, planed)))
+                // What is under the plane is not composed; a new buffer of the window with nothing else to compose is the overlay's commit
+                // alone, and with more (the desktop round it, the window's corners) it goes with the flip of the plate that is composed for it
+                // (compositor_plane_carried), so the window and what is round it change at the same vertical blank.
+                compositor_damage_cut(planed);
+                if (fb && fb != compositor.plane_fb && compositor.plane_row == plane && compositor.damages && compositor_plate_wanted(turning) &&
+                    compositor_spare.fb)
+                {
+                        compositor_plane_carry.fb = fb, compositor_plane_carry.row = plane, compositor_plane_carry.which = which;
+                        memory_copy(compositor_plane_carry.source, source, sizeof(source));
+                        memory_copy(compositor_plane_carry.rect, planed, sizeof(planed));
+                }
+                else if (!fb || (fb != compositor.plane_fb && !compositor_atomic_to(compositor.fb, plane, which, 1, fb, source, planed)))
                 {
                         if (lent)
                                 compositor_lent_fb_fail(plane);
@@ -1296,10 +1330,12 @@ static void compositor_present_frames(void)
                         compositor_unscanned(0);
                         compositor.plane_row = compositor.direct_row = plane;
                         memory_copy(compositor.plane_rect, planed, sizeof(planed));
-                        compositor.table->scanned++;
-                        // Where the pieces do not fit the list, what is under the plane is composed too, unseen.
-                        compositor_damage_cut(planed);
                 }
+                if (compositor.plane_row == plane)
+                        compositor.table->scanned++;
+                // The window's commit was all under the plane: nothing is composed, and no job of the card is made for nothing.
+                if (compositor.plane_row == plane && !compositor.damages)
+                        return;
         }
 
         // The frame goes into the buffer the screen is not showing, which is then shown (compositor_plate_swap): when the screens are one and no window
@@ -1457,7 +1493,9 @@ static void compositor_present_frames(void)
                                 compositor_stale_part(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts, r);
                         }
         }
-        if (compositor_output_count() < 2 && compositor.plane_row < 0)
+        // The buffer composed into is whole now, but under a plane where it was composed in place (the screen's own buffer, no plate): what is
+        // under a plane is composed when the window leaves it (its rectangle is that present's damage, and the other plate's stale).
+        if (compositor_output_count() < 2 && (compositor.plane_row < 0 || flip_own))
                 compositor_front_stale_any = 0;
         compositor.damages = 0;
         // The screens told, turned and shown (compositor_present_tell): now for the processor's present; for the card's, when its jobs are done, its flip
