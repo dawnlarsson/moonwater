@@ -23465,14 +23465,14 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 /*
         Columns over a list (a details view): a header of titles, each a press that orders the rows by it (a second press the other way),
         the ordered one's title in the ink with an arrow after it that says which way, and the edges between titles taken by the hand
-        to make the column before them wider or narrower (never less than UI_COLUMN_LEAST, the first taking what the others leave). A
+        to make the column before them wider or narrower (never less than UI_COLUMNS_LEAST, the first taking what the others leave). A
         list with columns (ui_list.columns) draws each row's label under the first title and its cells (ui_row.cells) under the others,
         each cut with dots to its column and a number at its column's end. Reading from the right the columns are turned over: the first
         is at the right. The app keeps the widths (logical pixels) and the order; the kit lays the header out (ui_columns_layout), draws
         it (ui_columns_draw) and takes the hand on it (ui_columns_event).
 */
 #define UI_COLUMNS_MOST 6
-#define UI_COLUMN_LEAST 48 // logical pixels a column keeps at least
+#define UI_COLUMNS_LEAST 48 // logical pixels a column keeps at least
 #define UI_COLUMN_EDGE 5   // logical pixels either side of an edge that take the hand
 #define UI_COLUMNS_H 32    // the header's height, logical pixels
 #define UI_COLUMNS_SORTED 1u // ui_columns_event: the order asked for changed (sorted, descending)
@@ -24869,13 +24869,13 @@ static b32 ui_list_tree_chevron_at(const struct ui address_to ui, const struct u
 */
 static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns address_to c, int x, int y, int w)
 {
-        int others = 0, at = x, least = ui_dev(ui, UI_COLUMN_LEAST), first = w * 2 / 5 > least ? w * 2 / 5 : least, room = w - first;
+        int others = 0, at = x, least = ui_dev(ui, UI_COLUMNS_LEAST), first = w * 2 / 5 > least ? w * 2 / 5 : least, room = w - first;
 
         c->count = c->count < 1 ? 1 : c->count > UI_COLUMNS_MOST ? UI_COLUMNS_MOST : c->count;
         c->x = x, c->y = y, c->w = w, c->h = ui_dev(ui, UI_COLUMNS_H);
         for (int k = 1; k < c->count; k++)
         {
-                c->width[k] = c->width[k] < UI_COLUMN_LEAST ? UI_COLUMN_LEAST : c->width[k];
+                c->width[k] = c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k];
                 others += ui_dev(ui, c->width[k]);
         }
         for (int k = 0; k < c->count; k++)
@@ -24977,7 +24977,7 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
                 int moved = ui_point(x, c->x, c->w) - ui_point(c->held_from, c->x, c->w);
                 int width = c->held_width + c->held_sign * moved * 100 / (ui->scale > 0 ? ui->scale : 100);
 
-                c->width[c->held] = width < UI_COLUMN_LEAST ? UI_COLUMN_LEAST : width;
+                c->width[c->held] = width < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : width;
                 ui_columns_layout(ui, c, c->x, c->y, c->w);
                 ui_kit_shape = WINDOW_POINTER_RESIZE;
                 return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
