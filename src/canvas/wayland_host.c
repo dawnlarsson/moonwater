@@ -210,6 +210,7 @@ static struct
                 unsigned int epoch; // the card's epoch the import was made in (gpu_epoch): an import of an earlier one is the card's no more
                 unsigned int fourcc, offset, scan_fb, scan_fourcc; // scan_fourcc: the format scan_fb was made as
                 int synced, scan_failed;
+                unsigned int scan_x, scan_y; // where the window is in scan_fb (made from the buffer's first pixel: compositor_lent_fb_as)
         } *lent;
         /*
                 A row's picture a tiled dma-buf the whole window is (compositor_wl_straight_take): the commit as it was handed, its descriptors the
@@ -1351,6 +1352,7 @@ static void compositor_wl_lent_drop_fb(int row)
         unsigned int fb = compositor_wl.lent[row].scan_fb;
 
         compositor_wl.lent[row].scan_fb = 0;
+        compositor_wl.lent[row].scan_x = compositor_wl.lent[row].scan_y = 0;
         compositor_wl_drop_fb(fb);
 }
 
@@ -1476,8 +1478,11 @@ static unsigned int compositor_lent_fb_as(int row, int opaque)
                 fourcc = (fourcc & ~0xffu) | 'X'; // AR24, AB24, AR30, AB30 to XR24, XB24, XR30, XB30
         if (compositor_wl.lent[row].scan_fb && compositor_wl.lent[row].scan_fourcc != fourcc)
                 compositor_wl_lent_drop_fb(row);
+        // A framebuffer whose window is not at its first pixel shows the window only through a plane's source rectangle (the overlay's, which
+        // the plane's present moves by compositor_lent_fb_origin): the primary plane's flip, which shows a framebuffer from its first pixel,
+        // is not given one (opaque 0: the fullscreen paths).
         if (compositor_wl.lent[row].scan_fb)
-                return compositor_wl.lent[row].scan_fb;
+                return opaque || (!compositor_wl.lent[row].scan_x && !compositor_wl.lent[row].scan_y) ? compositor_wl.lent[row].scan_fb : 0;
         fb.width = (unsigned int)compositor_wl.lent[row].width;
         fb.height = (unsigned int)compositor_wl.lent[row].height;
         fb.pixel_format = fourcc;
@@ -1487,6 +1492,23 @@ static unsigned int compositor_lent_fb_as(int row, int opaque)
         {
                 fb.flags = 2u; // DRM_MODE_FB_MODIFIERS: the client's, linear (0) or not
                 fb.modifier[0] = compositor_wl.lent[row].modifier;
+        }
+        /*
+                amdgpu takes a linear framebuffer only at an offset of whole 256-byte blocks (and a pitch of them): a window inside its buffer
+                (a browser's, which draws its shadow and edges round the window: Chromium's frame is at 16, 10 of its buffer, 51264 bytes in at a
+                pitch of 5120) was refused the overlay at every commit, and composed. Its framebuffer for the overlay is made from the buffer's
+                first pixel (the plane's offset, whole blocks), as large as reaches the window's last pixel, and the window's place in it kept
+                (scan_x, scan_y): the overlay's source rectangle is moved by it, so the plane shows the window and nothing round it.
+        */
+        if (compositor_driver_in(amd, 1) && !compositor_wl.lent[row].modifier && opaque && !(fb.pitches[0] & 255u) && (fb.offsets[0] & 255u) &&
+            !(compositor_wl.lent[row].offset & 255u) && fb.offsets[0] >= compositor_wl.lent[row].offset)
+        {
+                unsigned int into = fb.offsets[0] - compositor_wl.lent[row].offset;
+
+                compositor_wl.lent[row].scan_y = into / fb.pitches[0];
+                compositor_wl.lent[row].scan_x = into % fb.pitches[0] / 4;
+                fb.width += compositor_wl.lent[row].scan_x, fb.height += compositor_wl.lent[row].scan_y;
+                fb.offsets[0] = compositor_wl.lent[row].offset;
         }
         if (compositor_driver_in(amd, 1) && !compositor_wl.lent[row].modifier && (fb.pitches[0] & 255u || fb.offsets[0] & 255u))
         {
@@ -1507,6 +1529,7 @@ static unsigned int compositor_lent_fb_as(int row, int opaque)
                 unsigned int close[2] = {prime.handle, 0};
 
                 system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                compositor_wl.lent[row].scan_x = compositor_wl.lent[row].scan_y = 0;
                 compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], refused < 0 ? (int)-refused : (int)refused);
                 return 0;
         }
@@ -1520,6 +1543,16 @@ static unsigned int compositor_lent_fb_as(int row, int opaque)
         compositor_wl.lent[row].scan_fb = fb.fb_id;
         compositor_wl.lent[row].scan_fourcc = fourcc;
         return fb.fb_id;
+}
+
+// Where the row's window is in the framebuffer the overlay shows it from (compositor_lent_fb_as): 0, 0 but for a lent buffer whose window is
+// inside it. The overlay's source rectangle, in the window's pixels, is moved by it.
+static void compositor_lent_fb_origin(int row, int *x, int *y)
+{
+        *x = *y = 0;
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_lent(row) || !compositor_wl.lent[row].scan_fb)
+                return;
+        *x = (int)compositor_wl.lent[row].scan_x, *y = (int)compositor_wl.lent[row].scan_y;
 }
 
 static void compositor_lent_fb_fail(int row)

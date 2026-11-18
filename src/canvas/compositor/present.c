@@ -1317,7 +1317,12 @@ static void compositor_present_frames(void)
                 int lent = compositor_client_scans(plane);
                 unsigned int which = compositor.front[plane];
                 unsigned int fb = lent ? compositor_lent_fb_opaque(plane) : compositor_window_fb(plane, which);
-                int source[2] = {planed[0] - compositor.x[plane], planed[1] - compositor.y[plane]};
+                int source[2] = {planed[0] - compositor.x[plane], planed[1] - compositor.y[plane]}, origin[2] = {0, 0};
+
+                // A buffer whose window is inside it (a browser's shadow round it) is shown from the window's place in it.
+                if (lent)
+                        compositor_lent_fb_origin(plane, &origin[0], &origin[1]);
+                source[0] += origin[0], source[1] += origin[1];
 
                 if (compositor.flip_pending)
                         return;
