@@ -1528,6 +1528,11 @@ static fn steam_profile(void)
                       zenity && zenity < wrapped && zenity < run);
         }
         {
+                positive fonts = chrome_line(steam ? steam->session : null,
+                                             "FONTCONFIG_FILE=${FONTCONFIG_FILE:-/etc/fonts/fonts.conf}");
+                check("The session names fontconfig's file and path before Steam starts, kept where the person set them",
+                      fonts && fonts < wrapped && fonts < run &&
+                          strstr(steam->session[fonts - 1], "FONTCONFIG_PATH=${FONTCONFIG_PATH:-/etc/fonts}"));
                 check("The steam profile has UPower, which Steam's CEF asks the system bus for, and dbus, the bus",
                       chrome_has(part ? part->packages : null, "upower") &&
                           chrome_has(part ? part->packages : null, "dbus"));

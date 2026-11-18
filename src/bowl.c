@@ -10520,6 +10520,11 @@ static string_address bowl_steam_session[] = {
     "CONFIG_MOONWATER_WAYLAND=n, or Canvas's desktop is not running (moonwater desktop on)\" >&2; exit 1; }",
     "export WAYLAND_DISPLAY=" BOWL_STEAM_SOCKET " MOONWATER_ASKED=1 BOWL_CAPABILITIES=none GSETTINGS_BACKEND=memory",
     "export STEAM_ZENITY=${STEAM_ZENITY:-zenity} GTK_A11Y=none",
+    // Fontconfig's file named, for the copies of the library that games carry with a configuration directory of their builder's
+    // own: Half-Life 2's bin/libfontconfig.so.1 looks in /mnt/Code/josh_s2_pango/build_linux32_scout/dist/etc/fonts and said
+    // "Fontconfig error: Cannot load default config file" at every start. /etc/fonts is where every other copy looks already (the
+    // bowl's, and the Steam Runtime's container's own), and the path is for the relative conf.d of the file.
+    "export FONTCONFIG_FILE=${FONTCONFIG_FILE:-/etc/fonts/fonts.conf} FONTCONFIG_PATH=${FONTCONFIG_PATH:-/etc/fonts}",
     "[ -S " BOWL_STEAM_SOUND " ] && export PULSE_SERVER=unix:" BOWL_STEAM_SOUND,
     "[ -S /run/dbus/system_bus_socket ] || bowl bus >/dev/null 2>&1 || true",
     // SDL games draw on Canvas directly (SDL 2.0.22 and later read the list, Wayland first, X11 where it is refused): a game through
