@@ -619,8 +619,11 @@ static positive compositor_lent_va(int row);
 static int compositor_lent(int row);
 static int compositor_lent_swap(int row);
 static unsigned int compositor_lent_fb(int row);
+static unsigned int compositor_lent_fb_opaque(int row);
 static void compositor_lent_fb_fail(int row);
 static int compositor_wl_row_async(int row);
+static int compositor_wl_row_opaque(int row, int x1, int y1, int x2, int y2);
+static int compositor_wl_row_unscannable(int row);
 static int compositor_wl_held(void);
 static int compositor_wl_row_blend(int row);
 static void compositor_wl_settle(int row);
@@ -654,11 +657,26 @@ static unsigned int compositor_lent_fb(int row)
         (void)row;
         return 0;
 }
+static unsigned int compositor_lent_fb_opaque(int row)
+{
+        (void)row;
+        return 0;
+}
 static void compositor_lent_fb_fail(int row)
 {
         (void)row;
 }
 static int compositor_wl_row_async(int row)
+{
+        (void)row;
+        return 0;
+}
+static int compositor_wl_row_opaque(int row, int x1, int y1, int x2, int y2)
+{
+        (void)row, (void)x1, (void)y1, (void)x2, (void)y2;
+        return 0;
+}
+static int compositor_wl_row_unscannable(int row)
 {
         (void)row;
         return 0;

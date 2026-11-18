@@ -687,6 +687,45 @@ static void compositor_film_end(void)
 }
 
 static int compositor_under(int x, int y, int *tab); // manage.c
+
+/*
+        What the overlay shows of a film's rectangle, over what was copied of the screen's buffer: a window on the plane is scanned out from its
+        own buffer, and what the compositor's buffer holds under it is not on the screen (nothing is composed there). The plane's picture is read
+        where the card reads it (the client's lent buffer, red and blue put back where it is the other way round, or the table's buffer it shows),
+        so the film is the screen. Word 3's bit 29 says a frame has the plane in it, as it says one shown straight.
+*/
+static unsigned int *compositor_buffer(int row, unsigned int which); // scanout.c
+static void compositor_film_plane(unsigned int *out, int x, int y, int w, int h)
+{
+        int row = compositor.plane_row, x1, y1, x2, y2;
+        const unsigned int *from;
+        unsigned long pitch;
+
+        if (row < 0 || !compositor.plane_fb)
+                return;
+        x1 = compositor.plane_rect[0] > x ? compositor.plane_rect[0] : x, y1 = compositor.plane_rect[1] > y ? compositor.plane_rect[1] : y;
+        x2 = compositor.plane_rect[2] < x + w ? compositor.plane_rect[2] : x + w, y2 = compositor.plane_rect[3] < y + h ? compositor.plane_rect[3] : y + h;
+        if (x2 <= x1 || y2 <= y1)
+                return;
+        from = compositor_lent_pixels(row, &pitch);
+        if (!from)
+        {
+                from = compositor_buffer(row, compositor.front[row]);
+                pitch = (unsigned long)compositor_stride();
+        }
+        if (!from)
+                return;
+        for (int at = y1; at < y2; at++)
+        {
+                unsigned int *line = out + (unsigned long)(at - y) * (unsigned long)w + (unsigned long)(x1 - x);
+
+                memory_copy(line, from + (unsigned long)(at - compositor.y[row]) * pitch + (unsigned long)(x1 - compositor.x[row]), (unsigned long)(x2 - x1) * 4);
+                if (compositor_lent_swap(row))
+                        memory_swizzle_rb_u32(line, line, (positive)(x2 - x1), 0);
+        }
+        compositor_film.buffer[3] |= 1u << 29;
+}
+
 // A frame of the film: the present just made, its rectangle, one write.
 static void compositor_film_frame(unsigned long long when)
 {
@@ -753,6 +792,7 @@ static void compositor_film_frame(unsigned long long when)
                         memory_copy(out + (unsigned long)row * (unsigned long)w, from + (unsigned long)(y + row) * pitch + (unsigned long)x,
                                     (unsigned long)w * 4);
         }
+        compositor_film_plane(out, x, y, w, h);
         system_write_all((int)compositor_film.fd, (const char *)compositor_film.buffer, 32 + (unsigned long)w * (unsigned long)h * 4);
         compositor_film.frames++;
 }

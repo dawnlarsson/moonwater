@@ -1583,6 +1583,95 @@ static void gpu_scan_rows(void)
 }
 
 /*
+        A client's window on the overlay plane (compositor_plane_candidate): a Wayland row's flags (no close button, no grab) are no glass, so its
+        window, the top one, goes on the overlay; its picture blended (Chromium's: round top corners outside its opaque region) goes there only where
+        the plane's rectangle, the window less its corners' rows, is inside the opaque rectangle the client said, and its framebuffer is then asked as
+        the X format of its bytes (compositor_lent_fb_opaque), the composed path's keeping its alpha (compositor_lent_fb). A window with subsurfaces
+        over it, anything the desktop draws over the plane's rectangle, and a window that is glass are composed. Before, every client's window was
+        refused as glass (the row's whole flags word tested) and a blended one as not opaque wherever its opaque region was.
+*/
+static void gpu_plane_rows(void)
+{
+        enum { ROW = 6, W = 128, H = 96, X = 100, Y = 50 };
+        struct fb_asked
+        {
+                unsigned int fb_id, width, height, pixel_format, flags;
+                unsigned int handles[4], pitches[4], offsets[4];
+                unsigned long long modifier[4];
+        } asked;
+        static unsigned int buffer[256 * 100];
+        static struct windows *table_scratch;
+        struct windows *const kept_table = compositor.table, *const table_at = windows_scratch_fresh(&table_scratch);
+        struct compositor_frame frames[2];
+        unsigned int rows[2] = {ROW, ROW};
+        int kept_card = compositor.card, kept_width = compositor.width, kept_height = compositor.height, kept_scale = compositor.scale;
+        int kept_overlay = compositor.overlay_state, kept_soft = compositor.cursor.soft, rect[4];
+        unsigned int *kept_band = compositor.band;
+        int kept_drag = compositor.drag, kept_resize = compositor.resize;
+        unsigned int kept_outputs = compositor.outputs;
+        char kept_driver[sizeof compositor.driver];
+
+        windows_scratch_zero(table_at);
+        compositor.table = table_at;
+        memory_copy(kept_driver, compositor.driver, sizeof kept_driver);
+        memory_zero(compositor.driver, sizeof compositor.driver);
+        memory_copy(compositor.driver, "i915", 5);
+        compositor.card = 1000; // no descriptor: the framebuffer's requests are the fakes
+        compositor.width = 640, compositor.height = 480, compositor.scale = 100, compositor.outputs = 0;
+        compositor.overlay_state = 1, compositor.cursor.soft = 0, compositor.band = 0, compositor.drag = compositor.resize = -1;
+        compositor.x[ROW] = X, compositor.y[ROW] = Y, compositor.w[ROW] = compositor.picture_w[ROW] = W, compositor.h[ROW] = compositor.picture_h[ROW] = H;
+        compositor.landing[ROW] = compositor.asking[ROW] = 0, compositor.glassy[ROW] = 0;
+        table_at->glass[ROW] = WINDOW_NO_CLOSE | WINDOW_NO_GRAB;
+        compositor_wl_unlend(ROW);
+        memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]);
+        compositor_wl.lent[ROW].map = (const unsigned char *)buffer, compositor_wl.lent[ROW].pitch = 256, compositor_wl.lent[ROW].pixels = buffer + 2 * 256 + 64;
+        compositor_wl.lent[ROW].width = W, compositor_wl.lent[ROW].height = H, compositor_wl.lent[ROW].fd = 9, compositor_wl.lent[ROW].size = sizeof buffer;
+        compositor_wl.lent[ROW].fourcc = 0x34325241u, compositor_wl.lent[ROW].modifier = 0; // AR24, linear
+        compositor_wl.row_blend[ROW] = 1;
+        compositor_wl.row_opaque[ROW].x1 = 0, compositor_wl.row_opaque[ROW].y1 = 8, compositor_wl.row_opaque[ROW].x2 = W, compositor_wl.row_opaque[ROW].y2 = H;
+        memory_zero(frames, sizeof frames);
+        frames[0].x = X, frames[0].y = Y, frames[0].width = W, frames[0].height = H, frames[0].scale = 100, frames[0].radius = 8, frames[0].line = 1;
+        frames[0].blend = 1, frames[0].pixels = compositor_wl.lent[ROW].pixels, frames[0].pitch = 256;
+        gpu_fake_addfb_answer = 0;
+        check("gpu plane: a client's window (no close, no grab) on top goes on the overlay, less its corners' rows",
+              compositor_plane_candidate(frames, rows, 1, 1, rect) == ROW && rect[0] == X && rect[1] == Y + 8 && rect[2] == X + W && rect[3] == Y + H - 8 &&
+                      table_at->unscanned == 0);
+        memory_copy(&asked, gpu_fake_addfb, sizeof asked);
+        check("gpu plane: blended, its plane's framebuffer is the X format of its bytes (AR24 as XR24)", asked.pixel_format == 0x34325258u &&
+                                                                                                           compositor_wl.lent[ROW].scan_fourcc == 0x34325258u);
+        check("gpu plane: and its composed framebuffer keeps its alpha (AR24)", compositor_lent_fb(ROW) != 0 &&
+                                                                               (memory_copy(&asked, gpu_fake_addfb, sizeof asked), asked.pixel_format == 0x34325241u));
+        compositor_wl.row_opaque[ROW].y1 = 12;
+        check("gpu plane: a blended window whose opaque rectangle does not hold the plane's is composed (20)",
+              compositor_plane_candidate(frames, rows, 1, 1, rect) < 0 && table_at->unscanned == 20);
+        compositor_wl.row_opaque[ROW].x1 = 0, compositor_wl.row_opaque[ROW].y1 = 8;
+        compositor_wl.row_blend[ROW] = 0;
+        compositor_wl.row_opaque[ROW].x2 = 0; // none known: an opaque window needs none
+        frames[0].blend = 0;
+        check("gpu plane: an opaque window goes on the overlay with no opaque rectangle told", compositor_plane_candidate(frames, rows, 1, 1, rect) == ROW);
+        frames[1] = frames[0];
+        frames[1].x = X + 20, frames[1].y = Y + 30, frames[1].width = frames[1].height = 16, frames[1].line = 0, frames[1].radius = 0;
+        check("gpu plane: a frame the desktop draws over the plane's rectangle keeps it composed (19)",
+              compositor_plane_candidate(frames, rows, 1, 2, rect) < 0 && table_at->unscanned == 19);
+        frames[1].y = Y + H + 4;
+        check("gpu plane: and one beside it does not", compositor_plane_candidate(frames, rows, 1, 2, rect) == ROW);
+        check("gpu plane: a window with subsurfaces over it (its layers, frames of the same row) is composed (18)",
+              compositor_plane_candidate(frames, rows, 2, 2, rect) < 0 && table_at->unscanned == 18);
+        compositor.glassy[ROW] = 1;
+        check("gpu plane: a window of glass is composed (5)", compositor_plane_candidate(frames, rows, 1, 1, rect) < 0 && table_at->unscanned == 5);
+        compositor.glassy[ROW] = 0;
+        table_at->glass[ROW] = 0;
+        compositor_wl_unlend(ROW);
+        memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]);
+        compositor_wl.row_blend[ROW] = 0;
+        compositor.table = kept_table;
+        compositor.card = kept_card, compositor.width = kept_width, compositor.height = kept_height, compositor.scale = kept_scale;
+        compositor.overlay_state = kept_overlay, compositor.cursor.soft = kept_soft, compositor.band = kept_band, compositor.outputs = kept_outputs;
+        compositor.drag = kept_drag, compositor.resize = kept_resize;
+        memory_copy(compositor.driver, kept_driver, sizeof kept_driver);
+}
+
+/*
         Layers off (/run/moonwater/layers-off at the shim's start, compositor_wl_layers.off): the host keeps no subsurface as a layer, whatever it is
         handed (row_layers answers 0, the shim's way to lay them into the window's picture as before), with the root's picture lent or not.
 */
@@ -3741,7 +3830,7 @@ static void plate_wanted_rows(void)
         string_copy((string_address)compositor.driver, (string_address) "amdgpu");
         check("plate: a screen turned has none", !compositor_plate_wanted(1));
         compositor.plane_row = 2;
-        check("plate: nor a window on a plane", !compositor_plate_wanted(0));
+        check("plate: and a window on a plane has the desktop under it composed into the second plate too", compositor_plate_wanted(0));
         compositor.plane_row = -1, compositor.outputs = 2;
         check("plate: nor two screens", !compositor_plate_wanted(0));
         compositor.card = kept_card, compositor.plane_row = kept_plane, compositor.outputs = kept_outputs;
@@ -4975,6 +5064,7 @@ b32 main(void)
         gpu_overlay_rows();
         gpu_layers_off_rows();
         gpu_scan_rows();
+        gpu_plane_rows();
         if (!gpu_start((positive)PP * PH * 4 + (1 << 20) + (8 << 20) + (positive)7680 * 4320 * 4 + (16 << 20) + (24 << 20)))
         {
                 // A card that is there and draws the self-test wrong fails here; no card at all is no failure, and no pass either: every row after this one
