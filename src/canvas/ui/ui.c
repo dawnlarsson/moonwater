@@ -23977,6 +23977,7 @@ struct ui_row
         int icon;                          // a tile's symbol, UI_ICON_* + 1 (0 none)
         unsigned int file;                 // a folder's entry's symbol, UI_FILE_* + 1 with UI_FILE_LINKED (0 none): before its label in a row, over it in a tile
         const char address_to extension;   // the label a file's symbol wears in a tile (its extension), or none
+        unsigned int ink;                  // the label's own colour (straight ARGB), 0 the row's: a work tree's untracked file's
         const char address_to label;       // at the left
         const char address_to about;       // under the label, in the quiet ink: what the row does (a list whose words wrap)
         const char address_to value;       // at the right
@@ -25355,7 +25356,7 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
                 width = ui_kit_measure(ui, shown, UI_BODY_MEDIUM);
                 if (c && c->at_end[k])
                         x += w - width;
-                ui_kit_text(ui, ui_mirror(x, width, left, span), baseline, shown, UI_BODY_MEDIUM, k ? quiet : ink, 0);
+                ui_kit_text(ui, ui_mirror(x, width, left, span), baseline, shown, UI_BODY_MEDIUM, k ? quiet : row->ink ? row->ink : ink, 0);
         }
 }
 

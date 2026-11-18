@@ -2937,4 +2937,214 @@ static int files_bin_restore(const p8 address_to bin, const p8 address_to name, 
         return FILES_DID;
 }
 
+/* ---- git: what a work tree tracks ---- */
+/*
+        Where the folder shown is in a git work tree (a .git folder in it or a folder above it), each entry of its listing is marked as
+        git sees it, from the index and the ignore files alone (no git is run): FILES_GIT_TRACKED where the index holds it (a folder,
+        where it holds anything under it), FILES_GIT_IGNORED where a .gitignore of the work tree's root or of the folder shown matches
+        its name (a name, * and ? in it, a / at its end for folders only, a / at its start for that folder's own names; negations and
+        patterns with a / inside are not read), FILES_GIT_UNTRACKED else. The index is read in versions 2 and 3 (version 4 compresses its
+        paths and is not read: nothing is marked). .git itself is left unmarked.
+*/
+#define FILES_GIT_NONE 0
+#define FILES_GIT_TRACKED 1
+#define FILES_GIT_UNTRACKED 2
+#define FILES_GIT_IGNORED 3
+#define FILES_GIT_INDEX_MOST (64u << 20) // an index larger than this is not read
+#define FILES_GIT_NAMES 131072u          // the names' table: twice the listing's most
+
+// Whether text matches a glob of * and ? (no classes), both length-bounded.
+static b32 files_git_glob(const p8 address_to glob, positive glob_length, const p8 address_to text, positive length)
+{
+        positive g = 0, t = 0, star = (positive)-1, mark = 0;
+
+        while (t < length)
+        {
+                if (g < glob_length && (glob[g] == '?' || glob[g] == text[t]))
+                        g++, t++;
+                else if (g < glob_length && glob[g] == '*')
+                        star = g++, mark = t;
+                else if (star != (positive)-1)
+                        g = star + 1, t = ++mark;
+                else
+                        return false;
+        }
+        while (g < glob_length && glob[g] == '*')
+                g++;
+        return g == glob_length;
+}
+
+// Whether a .gitignore's text ignores name (a folder's when folder): rooted is true for the folder the file is in.
+static b32 files_git_ignores(const p8 address_to text, positive size, const p8 address_to name, positive length, b32 folder, b32 rooted)
+{
+        b32 ignored = false;
+
+        for (positive at = 0; at < size;)
+        {
+                positive start = at, stop;
+                b32 only_folders = false, anchored = false, inside = false;
+
+                while (at < size && text[at] != '\n')
+                        at++;
+                stop = at++;
+                while (stop > start && (text[stop - 1] == ' ' || text[stop - 1] == '\r'))
+                        stop--;
+                if (stop == start || text[start] == '#' || text[start] == '!')
+                        continue;
+                if (text[stop - 1] == '/')
+                        only_folders = true, stop--;
+                if (stop > start && text[start] == '/')
+                        anchored = true, start++;
+                for (positive k = start; k < stop; k++)
+                        inside |= text[k] == '/';
+                if (inside || stop == start || (anchored && !rooted) || (only_folders && !folder))
+                        continue;
+                if (files_git_glob(text + start, stop - start, name, length))
+                        ignored = true;
+        }
+        return ignored;
+}
+
+/*
+        The marks of the listing shown, by entry (state[k] for m->shown.entry[k], FILES_MOST of them): true where the folder is in a
+        work tree and its index was read, false (every mark FILES_GIT_NONE) else.
+*/
+static b32 files_git_marks(const struct files_model address_to m, p8 address_to state)
+{
+        static p32 table[FILES_GIT_NAMES];
+        static p8 root[FILES_PATH], ignore[2][16384];
+        p8 at_path[FILES_PATH];
+        positive length = string_length((string_address)m->path), rel, ignore_size[2] = {0, 0}, size = 0;
+        file_facts facts;
+        bipolar handle;
+        long mapped;
+        const p8 address_to index;
+        p32 count, version;
+        b32 at_root;
+
+        memory_fill(state, FILES_GIT_NONE, FILES_MOST);
+        if (!length || length >= FILES_PATH - 16)
+                return false;
+        // The work tree: the folder shown or the nearest above it with a .git folder.
+        string_copy_bounded((string_address)root, (string_address)m->path, FILES_PATH);
+        for (;;)
+        {
+                positive here = string_length((string_address)root);
+
+                string_copy_bounded((string_address)at_path, (string_address)root, FILES_PATH);
+                string_append_bounded((string_address)at_path, (string_address)(here > 1 ? "/.git" : ".git"), FILES_PATH);
+                if (file_look_code(AT_FDCWD, (string_address)at_path, 0, &facts) == 0 && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+                        break;
+                if (here <= 1)
+                        return false;
+                while (here > 1 && root[here - 1] != '/')
+                        here--;
+                root[here > 1 ? here - 1 : 1] = 0;
+        }
+        rel = string_length((string_address)root);
+        rel = rel > 1 ? rel + 1 : 1; // the folder shown's path inside the work tree starts here ("" at the root)
+        at_root = rel <= 1 || length + 1 == rel;
+        string_append_bounded((string_address)at_path, (string_address) "/index", FILES_PATH);
+        if ((handle = system_open_at(AT_FDCWD, (string_address)at_path, FILE_READ | O_CLOEXEC)) < 0)
+                return false;
+        size = file_look_code(handle, (string_address) "", AT_EMPTY_PATH, &facts) == 0 ? (positive)facts.size : 0;
+        mapped = size >= 12 && size <= FILES_GIT_INDEX_MOST ? (long)system_call_6(syscall(mmap), 0, size, 1, 2, (positive)handle, 0) : -1;
+        system_close(handle);
+        if (mapped < 0 && mapped > -4096)
+                return false;
+        index = (const p8 address_to)mapped;
+        version = (p32)index[4] << 24 | (p32)index[5] << 16 | (p32)index[6] << 8 | index[7];
+        count = (p32)index[8] << 24 | (p32)index[9] << 16 | (p32)index[10] << 8 | index[11];
+        if (memory_compare(index, "DIRC", 4) || (version != 2 && version != 3))
+        {
+                system_call_2(syscall(munmap), (positive)mapped, size);
+                return false;
+        }
+        // The listing's names in a table, each to its entry, so a path of the index finds its entry at once.
+        memory_fill(table, 0xff, sizeof(table));
+        for (p32 k = 0; k < m->shown.count; k++)
+        {
+                const struct files_entry address_to entry = &m->shown.entry[k];
+                p32 hash = 2166136261u;
+
+                for (p16 c = 0; c < entry->length; c++)
+                        hash = (hash ^ m->shown.names[entry->name + c]) * 16777619u;
+                while (table[hash & (FILES_GIT_NAMES - 1)] != 0xffffffffu)
+                        hash++;
+                table[hash & (FILES_GIT_NAMES - 1)] = k;
+                state[k] = FILES_GIT_UNTRACKED;
+        }
+        // Every path of the index under the folder shown marks the name it starts with there tracked.
+        for (positive at = 12, k = 0; k < count && at + 62 < size; k++)
+        {
+                p16 flags = (p16)(index[at + 60] << 8 | index[at + 61]);
+                positive fixed = 62 + (version >= 3 && (flags & 0x4000) ? 2 : 0), name_at = at + fixed, end_at = name_at, first;
+                p32 hash = 2166136261u, found;
+
+                while (end_at < size && index[end_at])
+                        end_at++;
+                at = at + ((fixed + (end_at - name_at) + 8) & ~(positive)7);
+                // The path inside the work tree is the folder shown's (m->path from rel) and a /, then the name.
+                first = name_at;
+                if (!at_root)
+                {
+                        positive inside = length - (rel - 1); // m->path + rel - 1 is "/sub/dir": its bytes after the slash are inside - 1
+
+                        if (end_at - name_at < inside || memory_compare(index + name_at, m->path + rel, inside - 1) || index[name_at + inside - 1] != '/')
+                                continue;
+                        first = name_at + inside;
+                }
+                for (positive c = first; c < end_at && index[c] != '/'; c++)
+                        hash = (hash ^ index[c]) * 16777619u;
+                {
+                        positive stop = first;
+
+                        while (stop < end_at && index[stop] != '/')
+                                stop++;
+                        while ((found = table[hash & (FILES_GIT_NAMES - 1)]) != 0xffffffffu)
+                        {
+                                const struct files_entry address_to entry = &m->shown.entry[found];
+
+                                if (entry->length == stop - first && !memory_compare(m->shown.names + entry->name, index + first, stop - first))
+                                {
+                                        state[found] = FILES_GIT_TRACKED;
+                                        break;
+                                }
+                                hash++;
+                        }
+                }
+        }
+        system_call_2(syscall(munmap), (positive)mapped, size);
+        // The ignore files: the work tree's root's and the folder shown's.
+        for (int which = 0; which < 2; which++)
+        {
+                bipolar got;
+
+                string_copy_bounded((string_address)at_path, (string_address)(which ? m->path : root), FILES_PATH);
+                string_append_bounded((string_address)at_path, (string_address)(string_length((string_address)at_path) > 1 ? "/.gitignore" : ".gitignore"), FILES_PATH);
+                got = file_slurp_once_at(AT_FDCWD, (string_address)at_path, ignore[which], sizeof(ignore[which]));
+                ignore_size[which] = got > 0 ? (positive)got : 0;
+                if (at_root)
+                        break; // the folder shown is the root: one file
+        }
+        for (p32 k = 0; k < m->shown.count; k++)
+        {
+                const struct files_entry address_to entry = &m->shown.entry[k];
+                const p8 address_to name = m->shown.names + entry->name;
+                b32 folder = entry->kind == FILES_KIND_DIRECTORY;
+
+                if (entry->length == 4 && !memory_compare(name, ".git", 4))
+                {
+                        state[k] = FILES_GIT_NONE;
+                        continue;
+                }
+                if (state[k] != FILES_GIT_UNTRACKED)
+                        continue;
+                if (files_git_ignores(ignore[0], ignore_size[0], name, entry->length, folder, at_root) ||
+                    (!at_root && files_git_ignores(ignore[1], ignore_size[1], name, entry->length, folder, true)))
+                        state[k] = FILES_GIT_IGNORED;
+        }
+        return true;
+}
+
 #endif // MOONWATER_FILES_MODEL

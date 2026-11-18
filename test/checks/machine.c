@@ -2844,6 +2844,8 @@ static b32 browser_is(const struct files_model address_to m, string_address want
         return same;
 }
 
+static p8 files_git_check_state[FILES_MOST];
+
 static p32 browser_at(const struct files_model address_to m, const char address_to name)
 {
         return files_model_find(m, (const p8 address_to)name);
@@ -4240,6 +4242,53 @@ static fn browser_asks(void)
         check("browser: a listing that changed since the question is asked about again, and Delete again on the listing asked of removes what was asked and no more",
               again && begun);
         files_job_end(&files.big->job);
+        // A work tree: an index that holds kept.c and sub/x, a .gitignore of *.o and build/; the folder's names marked as git sees them.
+        {
+                static p8 index[256];
+                static const char ignore[] = "# built\n*.o\nbuild/\n!keep.o\n";
+                const char address_to tracked[2] = {"kept.c", "sub/x"};
+                positive used = 12;
+                p8 path[FILES_PATH];
+                bipolar out;
+                b32 marked;
+
+                memory_zero(index, sizeof(index));
+                memory_copy(index, "DIRC\0\0\0\2\0\0\0\2", 12);
+                for (int k = 0; k < 2; k++)
+                {
+                        positive length = string_length((string_address)tracked[k]);
+
+                        index[used + 61] = (p8)length;
+                        memory_copy(index + used + 62, tracked[k], length);
+                        used += (62 + length + 8) & ~(positive)7;
+                }
+                browser_folder((string_address) "gt");
+                browser_folder((string_address) "gt/.git");
+                browser_folder((string_address) "gt/sub");
+                browser_folder((string_address) "gt/build");
+                browser_file((string_address) "gt/kept.c", 1, 0);
+                browser_file((string_address) "gt/new.c", 1, 0);
+                browser_file((string_address) "gt/a.o", 1, 0);
+                browser_path(path, (string_address) "gt/.git/index");
+                out = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+                if (out >= 0)
+                        system_write_once((b32)out, index, used + 20), system_close(out);
+                browser_path(path, (string_address) "gt/.gitignore");
+                out = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+                if (out >= 0)
+                        system_write_once((b32)out, ignore, sizeof(ignore) - 1), system_close(out);
+                m->hidden = true;
+                browser_go(m, (string_address) "gt");
+                marked = files_git_marks(m, files_git_check_state);
+#define GIT_MARK(name) files_git_check_state[m->shown.order[browser_at(m, name)]]
+                marked = marked && GIT_MARK("kept.c") == FILES_GIT_TRACKED && GIT_MARK("sub") == FILES_GIT_TRACKED && GIT_MARK("new.c") == FILES_GIT_UNTRACKED &&
+                         GIT_MARK("a.o") == FILES_GIT_IGNORED && GIT_MARK("build") == FILES_GIT_IGNORED && GIT_MARK(".git") == FILES_GIT_NONE &&
+                         GIT_MARK(".gitignore") == FILES_GIT_UNTRACKED;
+#undef GIT_MARK
+                browser_go(m, (string_address) "asks");
+                check("browser: in a work tree a name the index holds is tracked (a folder by what is under it), one a .gitignore matches ignored (a folder by a pattern with its /), any other untracked, .git none",
+                      marked && !files_git_marks(m, files_git_check_state));
+        }
         files_model_close(m);
 }
 

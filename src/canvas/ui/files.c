@@ -134,6 +134,7 @@
 #define FILES_MENU_BIN_EMPTY 43      // everything in it deleted for good, asked first
 #define FILES_MENU_RESTORE 44        // what is chosen in it put back where it was
 #define FILES_KEY_Z 44
+#define FILES_FLASH_NS 450000000ll // a drop's things lit where they landed
 #define FILES_SPRING_NS 900000000ll  // a drag held this long over a folder opens it, so the drop can go further in
 #define FILES_SPRING_NODE 0x10000    // a spring's target is a tree node (this plus its number), not a row
 #define FILES_EDGE 28                // logical pixels at a list's top and foot where a drag over it scrolls it
@@ -249,6 +250,14 @@ static struct
         int deed_count, deed_done;
         p8 move_into[FILES_PATH];
         b32 undoing;
+        // The listing's marks as git sees them where the folder is in a work tree (files_git_marks), worked out again when the listing changes.
+        b32 git;
+        p64 git_key;
+        // The drop's pop: the names a copy or a move landed as in the folder shown (or the folder of it they went into), lit in the
+        // accent for FILES_FLASH_NS from flash_at, each with its end.
+        p8 flash[4096];
+        positive flash_used;
+        b64 flash_at;
         struct ui_drop drop;     // a drag of files over the window: dropped, they are copied or moved into the folder it is over
         int drop_row;            // the folder's row the drop goes into, -1 the folder shown
         int drop_node;           // or the folder tree's node it is over (a drop goes into its folder), -1 none
@@ -279,7 +288,9 @@ static struct
 
 static struct ui_app files_app;
 static p8 files_band_base[FILES_MOST / 8]; // what was chosen when a band with Control began
+static p8 files_git_state[FILES_MOST];     // each entry's git mark (FILES_GIT_*)
 static b32 files_carried(const p8 address_to name, positive length);
+static b32 files_flashed(const p8 address_to name, positive length);
 static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how);
 static b32 files_in_bin(void);
 static struct files_deed address_to files_deed_new(int kind);
@@ -440,6 +451,15 @@ static fn files_describe(int id, struct ui_row address_to row)
         row->file = 1 + files_symbol(m, entry);
         row->extension = files_extension_label(m, entry);
         row->dim = files_carried(files_model_name(m, entry), entry->length);
+        row->mark |= files_flashed(files_model_name(m, entry), entry->length);
+        // In a work tree: what git ignores is quiet, what it does not track yet is cyan, a shade the theme's ground keeps readable.
+        if (files.git && entry >= m->shown.entry && entry < m->shown.entry + m->shown.count)
+        {
+                p8 mark = files_git_state[entry - m->shown.entry];
+
+                row->dim |= mark == FILES_GIT_IGNORED;
+                row->ink = mark == FILES_GIT_UNTRACKED ? (ui_kit_light(&files.ui) ? 0xff00838fu : 0xff5fd7e0u) : 0;
+        }
         row->mark = files_model_chosen(m, (p32)id) && m->chosen_count > 1;
 }
 
@@ -1172,12 +1192,57 @@ static fn files_deed_keep(struct files_deed address_to d)
         files.deed_count--, files.deed_done = files.deed_count;
 }
 
+// The drop's pop: what a copy or a move that is over landed as, where the folder shown shows it (its rows), or the folder of the folder
+// shown it went into (that row).
+static fn files_flash_set(const struct files_move address_to job)
+{
+        const p8 address_to path = files.big->model.path;
+        positive length = string_length((string_address)path), into = string_length((string_address)files.move_into);
+
+        files.flash_used = 0;
+        if (string_equals((string_address)files.move_into, (string_address)path))
+                for (p32 k = 0; k < job->count; k++)
+                {
+                        const p8 address_to landed = files_move_landed(job, k);
+                        positive n = string_length((string_address)landed);
+
+                        if (n && files.flash_used + n + 1 <= sizeof(files.flash))
+                                memory_copy(files.flash + files.flash_used, landed, n + 1), files.flash_used += n + 1;
+                }
+        else if (into > length && !memory_compare(files.move_into, path, length) && (length == 1 || files.move_into[length] == '/'))
+        {
+                const p8 address_to name = files.move_into + (length == 1 ? 1 : length + 1);
+                positive n = string_length((string_address)name);
+
+                if (n + 1 <= sizeof(files.flash))
+                        memory_copy(files.flash, name, n + 1), files.flash_used = n + 1;
+        }
+        files.flash_at = (b64)ui_kit_time();
+}
+
+// Whether a name of the folder shown is lit by the drop's pop now.
+static b32 files_flashed(const p8 address_to name, positive length)
+{
+        if (!files.flash_used || (b64)ui_kit_time() - files.flash_at >= FILES_FLASH_NS)
+                return false;
+        for (positive at = 0; at < files.flash_used;)
+        {
+                positive n = string_length((string_address)files.flash + at);
+
+                if (n == length && !memory_compare(files.flash + at, name, length))
+                        return true;
+                at += n + 1;
+        }
+        return false;
+}
+
 // The deed of a copy or a move that is over: each thing that landed, from its source to its name in the folder it went into.
 static fn files_move_deed(const struct files_move address_to job)
 {
         struct files_deed address_to d;
         p8 to[FILES_PATH];
 
+        files_flash_set(job);
         if (files.undoing || job->how == FILES_MOVE_MEASURE || !files.move_into[0])
         {
                 files.undoing = false;
@@ -3188,6 +3253,16 @@ static fn files_draw(unsigned int address_to pixels)
         struct ui_list address_to l = &files.big->list;
 
         ui_begin(ui, pixels, files.own.table->stride, files.width, files.height);
+        // The git marks of a listing that is whole and is not the one they were worked out for.
+        {
+                const struct files_model address_to m = &files.big->model;
+                p64 key = (p64)m->shown.count * 1000003ull + m->shown.names_used + (p64)language_hash((const char address_to)m->path) * 7919ull;
+
+                if (m->state == FILES_READY && key != files.git_key)
+                        files.git = files_git_marks(m, files_git_state), files.git_key = key;
+                else if (m->state != FILES_READY)
+                        files.git_key = 0;
+        }
         files_layout();
         ui_side_place(ui, files.side_box.x, files.side_box.w);
         l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && !files.crumb_keys && !files.tree_keys;
@@ -3279,6 +3354,17 @@ static long files_tick(long timeout, long address_to other)
                         files.dirty = true;
                         timeout = timeout < 0 || timeout > 16000000 ? 16000000 : timeout;
                 }
+        }
+        // The drop's pop: a picture as it begins and as it ends.
+        if (files.flash_used)
+        {
+                b64 since = (b64)ui_kit_time() - files.flash_at;
+
+                files.dirty = true;
+                if (since >= FILES_FLASH_NS)
+                        files.flash_used = 0;
+                else
+                        timeout = timeout < 0 || timeout > FILES_FLASH_NS - since ? (long)(FILES_FLASH_NS - since) : timeout;
         }
         // The ghost of what is carried settling after it was picked up: a picture a frame till it is at rest.
         if (files.carrying && now - files.carry_at < FILES_CARRY_POP_NS + 20000000ll)
