@@ -642,19 +642,26 @@ b32 main()
                 gpu_model_card_reset();
                 for (unsigned int i = 0; i < 256 * 64; i++)
                         seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, from[i] = seed, into[i] = 0x5a5a5a5au;
-                read = gpu_amd_image(desc, GPU_VA + from_at, 0, 256, 64, 0, false) && gpu_image(desc, 5, 7, GPU_VA + into_at, 200, 190, 50, false) && !gpu_model.fault.code;
-                for (unsigned int y = 0; read && y < 50; y++)
-                        for (unsigned int x = 0; x < 190; x++)
-                                wrong += into[y * 200 + x] != from[(y + 7) * 256 + x + 5];
-                read = read && gpu_amd_image(desc, GPU_VA + from_at, 0, 256, 64, 0, true) && gpu_image(desc, 60, 0, GPU_VA + into_at, 256, 196, 64, false) && !gpu_model.fault.code;
-                for (unsigned int y = 0; read && y < 64; y++)
-                        for (unsigned int x = 0; x < 196; x++)
-                        {
-                                unsigned int c = from[y * 256 + x + 60];
+                read = true;
+                for (unsigned int unorm = 0; unorm < 2; unorm++)
+                {
+                        unsigned int kind = gpu_amd_image(desc, GPU_VA + from_at, 0, 256, 64, 0, false, unorm);
 
-                                wrong += into[y * 256 + x] != ((c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16);
-                        }
-                check("gpu model: the image kernel reads a linear picture's rectangle through its resource as it is, and as ABGR with red and blue the other way, pixel for pixel",
+                        read = read && kind && gpu_image(desc, kind, 5, 7, GPU_VA + into_at, 200, 190, 50) && !gpu_model.fault.code;
+                        for (unsigned int y = 0; read && y < 50; y++)
+                                for (unsigned int x = 0; x < 190; x++)
+                                        wrong += into[y * 200 + x] != from[(y + 7) * 256 + x + 5];
+                        kind = gpu_amd_image(desc, GPU_VA + from_at, 0, 256, 64, 0, true, unorm);
+                        read = read && kind && gpu_image(desc, kind, 60, 0, GPU_VA + into_at, 256, 196, 64) && !gpu_model.fault.code;
+                        for (unsigned int y = 0; read && y < 64; y++)
+                                for (unsigned int x = 0; x < 196; x++)
+                                {
+                                        unsigned int c = from[y * 256 + x + 60];
+
+                                        wrong += into[y * 256 + x] != ((c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16);
+                                }
+                }
+                check("gpu model: the image kernel reads a linear picture's rectangle through its resource as it is, and as ABGR with red and blue the other way, as 32_UINT's word and as UNORM's channels, pixel for pixel",
                       read && !wrong);
                 // Laid over: each pixel the scene's image over of the picture's (premultiplied: the colours held under the alpha) on what was there.
                 for (unsigned int i = 0; i < 256 * 64; i++)
@@ -666,7 +673,8 @@ b32 main()
                         want[i] = into[i];
                 }
                 gpu_model_card_reset();
-                read = gpu_amd_image(desc, GPU_VA + from_at, 0, 256, 64, 0, false) && gpu_image(desc, 9, 2, GPU_VA + into_at, 256, 230, 60, true) && !gpu_model.fault.code;
+                read = gpu_amd_image(desc, GPU_VA + from_at, 0, 256, 64, 0, false, false) &&
+                       gpu_image(desc, GPU_IMAGE_RAW | GPU_IMAGE_OVER, 9, 2, GPU_VA + into_at, 256, 230, 60) && !gpu_model.fault.code;
                 wrong = 0;
                 for (unsigned int y = 0; read && y < 64; y++)
                         for (unsigned int x = 0; x < 256; x++)
@@ -675,15 +683,17 @@ b32 main()
                       read && !wrong);
                 model_coverage("image", 8, &ran, &of);
                 gpu_model_card_reset();
-                refused = gpu_amd_image(desc, GPU_VA + from_at, GPU_VA + into_at, 256, 64, 0x0200000000533b03ull, false);
-                refused = refused && (gpu_image(desc, 0, 0, GPU_VA + into_at, 256, 64, 4, false), gpu_model.fault.code == GPU_MODEL_UNMODELLED);
+                refused = gpu_amd_image(desc, GPU_VA + from_at, GPU_VA + into_at, 256, 64, 0x0200000000533b03ull, false, false) == GPU_IMAGE_MADE;
+                refused = refused && (gpu_image(desc, GPU_IMAGE_MADE, 0, 0, GPU_VA + into_at, 256, 64, 4), gpu_model.fault.code == GPU_MODEL_UNMODELLED);
                 check("gpu model: a resource of a tiled, compressed picture (64K_R_X with DCC) is refused by the model as unmodelled, not read as linear", refused);
-                check("gpu model: gpu_amd_image refuses a modifier not AMD's, another tile, a pitch not of whole 64 KiB blocks, DCC with no metadata, and a block of 256 bytes",
-                      !gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0100000000000001ull, false) && !gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0200000000401503ull, false) &&
-                          !gpu_amd_image(desc, 0x100000, 0, 1900, 1080, 0x0200000000401b03ull, false) && !gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0200000000533b03ull, false) &&
-                          !gpu_amd_image(desc, 0x100000, 0x200000, 1920, 1080, 0x0200000000533b03ull | 2ull << 18, false) &&
-                          gpu_amd_image(desc, 0x100000, 0x234500, 1920, 1080, 0x0200000000537b03ull, false) && desc[6] >> 19 == (1u << 0 | 1u << 2 | 1u << 3 | 0x45u << 5) &&
-                          desc[7] == 0x23 && (desc[3] >> 20 & 0x1f) == 27);
+                check("gpu model: gpu_amd_image refuses a modifier not AMD's, another tile, a pitch not of whole 64 KiB blocks, DCC with no metadata, and a block of 256 bytes, reads DCC as UNORM and a tiled picture without as 32_UINT",
+                      !gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0100000000000001ull, false, false) && !gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0200000000401503ull, false, false) &&
+                          !gpu_amd_image(desc, 0x100000, 0, 1900, 1080, 0x0200000000401b03ull, false, false) && !gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0200000000533b03ull, false, false) &&
+                          !gpu_amd_image(desc, 0x100000, 0x200000, 1920, 1080, 0x0200000000533b03ull | 2ull << 18, false, false) &&
+                          gpu_amd_image(desc, 0x100000, 0x234500, 1920, 1080, 0x0200000000537b03ull, false, false) && desc[6] >> 19 == (1u << 0 | 1u << 2 | 1u << 3 | 0x45u << 5) &&
+                          desc[7] == 0x23 && (desc[3] >> 20 & 0x1f) == 27 && (desc[1] >> 20 & 0x1ff) == 56 &&
+                          gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0200000000401b03ull, true, false) == (GPU_IMAGE_MADE | GPU_IMAGE_RAW | GPU_IMAGE_SWAP) &&
+                          (desc[1] >> 20 & 0x1ff) == 20 && (desc[3] & 0xfff) == 4);
                 gpu_model_card_reset();
         }
 

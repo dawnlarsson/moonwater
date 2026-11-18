@@ -1361,8 +1361,10 @@ scale:
 
 ; op 8: a picture read through the texture unit, d[y * dp + x] = image(x0 + x, y0 + y) for x below w: the image's resource (its eight words at 0x80 of the
 ; arguments, gpu_amd_image) says its layout, so a client's tiled or compressed (DCC) buffer is read as the card's own sampler reads it, and written out linear.
-; The four channels come back as floats of the bytes over 255, each made a byte again by 255.5 and a truncation (b + b / 510 is in [b, b + 1) for every byte).
-; v nonzero (0x2c) lays the picture over d as a premultiplied picture is laid (overv, the scene's image over), instead of copying it.
+; v (0x2c) is the kind: bit 1 a resource of the format 32_UINT, the pixel's word read as it is in one channel (a picture without DCC), and bit 2 then its
+; red and blue the other way (bytes 0 and 2 swapped); without bit 1 the resource is 8_8_8_8 UNORM (DCC, whose fast clears are encoded by the format's
+; channels): the four channels come back as floats of the bytes over 255, each made a byte again by 255.5 and a truncation (b + b / 510 is in
+; [b, b + 1) for every byte). Bit 0 lays the picture over d as a premultiplied picture is laid (overv, the scene's image over), instead of copying it.
 .globl image
 .p2align 8
 .type image,@function
@@ -1381,10 +1383,19 @@ image:
 	v_add_nc_u32	v4, s12, v1
 	s_add_u32	s17, s13, s7
 	v_mov_b32	v5, s17
-	image_load	v[6:9], v[4:5], s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
 	s_mul_i32	s19, s7, s15
 	v_add_nc_u32	v3, s19, v1
 	v_lshlrev_b32	v3, 2, v3
+	s_bitcmp1_b32	s20, 1
+	s_cbranch_scc0	.unit_unorm
+	image_load	v2, v[4:5], s[24:31] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	s_waitcnt	vmcnt(0)
+	s_bitcmp1_b32	s20, 2
+	s_cbranch_scc0	.unit_blend
+	v_perm_b32	v2, v2, v2, 0x3000102
+	s_branch	.unit_blend
+.unit_unorm:
+	image_load	v[6:9], v[4:5], s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
 	s_waitcnt	vmcnt(0)
 	v_mul_f32	v6, 0x437f8000, v6
 	v_mul_f32	v7, 0x437f8000, v7
@@ -1397,8 +1408,9 @@ image:
 	v_lshl_or_b32	v2, v7, 8, v6
 	v_lshl_or_b32	v2, v8, 16, v2
 	v_lshl_or_b32	v2, v9, 24, v2
-	s_cmp_eq_u32	s20, 0
-	s_cbranch_scc1	.unit_store
+.unit_blend:
+	s_bitcmp1_b32	s20, 0
+	s_cbranch_scc0	.unit_store
 	global_load_dword v10, v3, s[10:11]
 	s_mov_b32	s75, 0x00ff00ff
 	s_waitcnt	vmcnt(0)

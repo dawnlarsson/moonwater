@@ -18,10 +18,11 @@
                           and the .amdhsa_kernel block
             instructions  the SALU, SMEM, VALU (32-bit and VOP3 encodings),
                           packed, DS and global forms the table below lists,
-                          and image_load in the one form the kernels write:
-                          four channels of a 2D image at whole coordinates,
-                          dmask:0xf dim:SQ_RSRC_IMG_2D unorm, which must be
-                          written so (the image's own layout, tiled or
+                          and image_load in the forms the kernels write:
+                          four channels (dmask:0xf, four registers) or the
+                          first alone (dmask:0x1, one) of a 2D image at whole
+                          coordinates, dim:SQ_RSRC_IMG_2D unorm, which must
+                          be written so (the image's own layout, tiled or
                           compressed, is the resource's to say)
             operands      s5 s[8:11] v3 v[5:8] vcc exec null, inline
                           constants, one 32-bit literal, labels in branches
@@ -866,6 +867,7 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         bool clamp = false;
         bool offset_given = false;
         positive image_words = 0;
+        p32 image_dmask = 0xf;
         bool off;
         bool literal = false;
         b64 offset = 0;
@@ -923,6 +925,8 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                         image_words |= 2;
                 else if (op->form == GPUASM_MIMG && !(image_words & 4) && gpuasm_is(word, "dmask:0xf"))
                         image_words |= 4;
+                else if (op->form == GPUASM_MIMG && !(image_words & 4) && gpuasm_is(word, "dmask:0x1"))
+                        image_words |= 4, image_dmask = 1;
                 else if (word.length > 7 && !memory_compare(word.at, "offset:", 7) && !offset_given)
                 {
                         gpuasm_span number = {word.at + 7, word.length - 7};
@@ -939,7 +943,7 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         if (offset_given && form != GPUASM_GLD && form != GPUASM_GST)
                 return gpuasm_fail_span("an offset on an instruction that has none:", mnemonic);
         if (form == GPUASM_MIMG && image_words != 7)
-                return gpuasm_fail_span("dmask:0xf dim:SQ_RSRC_IMG_2D unorm, and nothing else, on", mnemonic);
+                return gpuasm_fail_span("dmask:0xf or dmask:0x1, dim:SQ_RSRC_IMG_2D and unorm, and nothing else, on", mnemonic);
         if (clamp)
         {
                 bool takes = false;
@@ -974,6 +978,8 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
 
                 if (off && kind == 'v' && at == (form == GPUASM_GLD ? 1u : 0u))
                         size = 2;
+                if (form == GPUASM_MIMG && at == 0)
+                        size = image_dmask == 1 ? 1 : 4; // the registers the channels the mask names
 
                 if ((form == GPUASM_VOP2 || form == GPUASM_VOPC) && kind == 'v' && at == 2)
                         kind = op->shape[2];
@@ -1139,7 +1145,7 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         {
                 // MIMG: the dimension at bit 3 (1: 2D), dmask at 8, unorm at 12, the opcode at 18; the address, the data and the resource
                 // (in fours of scalar registers) in the second word.
-                w0 = 0xf0000000u | (p32)op->code << 18 | 1u << 12 | 0xfu << 8 | 1u << 3;
+                w0 = 0xf0000000u | (p32)op->code << 18 | 1u << 12 | image_dmask << 8 | 1u << 3;
                 w1 = (o[1].code - 256) | o[0].code << 8 | (o[2].code >> 2) << 16;
         }
         else if (form == GPUASM_GLD)

@@ -264,7 +264,10 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                         // the address, the data and the resource's first register over four in the second word, no sampler.
                         id = gpu_model_find(GM_MIMG, (p16)gpu_model_field(w0, 18, 7));
                         out->op[0] = (p16)(256 + gpu_model_field(w1, 8, 8)), out->op[1] = (p16)(256 + (w1 & 0xff)), out->op[2] = (p16)(gpu_model_field(w1, 16, 5) * 4);
-                        fixed = (w0 & ~(0x7fu << 18)) | (p64)(w1 & 0xffe00000u) << 32, want = 0xf0001f08u;
+                        fixed = (w0 & ~(0x7fu << 18 | 0xfu << 8)) | (p64)(w1 & 0xffe00000u) << 32, want = 0xf0001008u;
+                        if (gpu_model_field(w0, 8, 4) != 0xf && gpu_model_field(w0, 8, 4) != 1)
+                                return gpu_model_unknown(w0, pc, "an image dmask gpuasm does not write (0xf or 0x1)");
+                        out->imm = (b32)gpu_model_field(w0, 8, 4);
                 }
                 else
                         return gpu_model_unknown(w0, pc, "an encoding gpuasm does not make");
@@ -377,7 +380,7 @@ static unsigned int gpu_model_encode(const struct gpu_model_insn address_to in, 
                 break;
         case GM_VOP3P: out[0] = 0xcc000000u | code << 16 | clamp | 1u << 14 | ((p32)o[0] - 256), out[1] = o[1] | (p32)o[2] << 9 | 128u << 18 | 3u << 27, words = 2; break;
         case GM_DS: out[0] = 0xd8000000u | code << 18, out[1] = ((p32)o[1] - 256) | ((p32)o[2] - 256) << 8 | ((p32)o[0] - 256) << 24, words = 2; break;
-        case GM_MIMG: out[0] = 0xf0001f08u | code << 18, out[1] = ((p32)o[1] - 256) | ((p32)o[0] - 256) << 8 | ((p32)o[2] >> 2) << 16, words = 2; break;
+        case GM_MIMG: out[0] = 0xf0001008u | (p32)in->imm << 8 | code << 18, out[1] = ((p32)o[1] - 256) | ((p32)o[0] - 256) << 8 | ((p32)o[2] >> 2) << 16, words = 2; break;
         case GM_GLD:
                 out[0] = 0xdc008000u | code << 18 | ((p32)in->imm & 0xfff), out[1] = ((p32)o[1] - 256) | (p32)o[2] << 16 | ((p32)o[0] - 256) << 24, words = 2;
                 break;

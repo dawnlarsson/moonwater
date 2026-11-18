@@ -2418,7 +2418,7 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
 {
 #ifdef MOONWATER_GPU_C
         unsigned long stride = (unsigned long)picture->stride, dev = 0, ino = 0;
-        unsigned int desc[8], meta_plane = 0;
+        unsigned int desc[8], meta_plane = 0, kind;
         positive dst_va, base, meta = 0, began;
         long bytes;
 
@@ -2477,8 +2477,8 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
         if (meta_plane)
                 meta = compositor_wl.source[row].va + (positive)picture->plane_offset[meta_plane];
         if ((stride & 3) || (positive)picture->plane_offset[0] >= (positive)bytes || (meta_plane && (positive)picture->plane_offset[meta_plane] >= (positive)bytes) ||
-            !gpu_amd_image(desc, base, meta, (unsigned int)(stride / 4), (unsigned int)picture->height, (p64)picture->modifier,
-                           compositor_wl_fourcc_swapped(picture->fourcc)))
+            !(kind = gpu_amd_image(desc, base, meta, (unsigned int)(stride / 4), (unsigned int)picture->height, (p64)picture->modifier,
+                                   compositor_wl_fourcc_swapped(picture->fourcc), false)))
                 return compositor_wl_tiled_refused(5);
         dst_va = gpu_va_written(to, compositor.buffer);
         if (!dst_va && gpu_map_written(to, compositor.buffer))
@@ -2486,8 +2486,8 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
         if (!dst_va || (!gpu_idle() && !gpu_finish()))
                 return compositor_wl_tiled_refused(6);
         began = clock_monotonic_nanoseconds();
-        if (gpu_image(desc, (unsigned int)sx, (unsigned int)sy, dst_va + 4 * ((positive)dy * pitch + (positive)dx), (unsigned int)pitch, (unsigned int)w,
-                      (unsigned int)h, picture->blend != 0))
+        if (gpu_image(desc, kind | (picture->blend ? GPU_IMAGE_OVER : 0), (unsigned int)sx, (unsigned int)sy, dst_va + 4 * ((positive)dy * pitch + (positive)dx),
+                      (unsigned int)pitch, (unsigned int)w, (unsigned int)h))
         {
                 positive took = clock_monotonic_nanoseconds() - began;
 

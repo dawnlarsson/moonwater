@@ -3219,11 +3219,15 @@ static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp
 
 /*
         A picture the card reads through its texture unit (op 8): the resource's eight words desc (gpu_amd_image) at byte 128 of the slot's arguments, the
-        rectangle w by h from (x0, y0) of it written linear into dst, dp pixels a row (over: laid over what dst holds as a premultiplied picture is, the
-        scene's image over, instead of copied). The unit undoes the picture's tiling and its compression (DCC) as it does
+        rectangle w by h from (x0, y0) of it written linear into dst, dp pixels a row. kind is what gpu_amd_image answered for the resource, and with
+        GPU_IMAGE_OVER the picture is laid over what dst holds as a premultiplied picture is (the scene's image over) instead of copied. The unit undoes the picture's tiling and its compression (DCC) as it does
         for the card's own sampling, so a client that draws in the card's own layout is read as it drew. gpu_run waits, as gpu_blit's does.
 */
-static b32 gpu_image(const unsigned int desc[8], unsigned int x0, unsigned int y0, positive dst, unsigned int dp, unsigned int w, unsigned int h, b32 over)
+#define GPU_IMAGE_OVER 1u // gpu_image's kind: laid over, not copied
+#define GPU_IMAGE_RAW 2u  // (gpu_amd_image's word) a resource of 32_UINT: the pixel's word as it is
+#define GPU_IMAGE_SWAP 4u // and its red and blue the other way
+#define GPU_IMAGE_MADE 8u // a resource made
+static b32 gpu_image(const unsigned int desc[8], unsigned int kind, unsigned int x0, unsigned int y0, positive dst, unsigned int dp, unsigned int w, unsigned int h)
 {
         struct gpu_args address_to a;
 
@@ -3231,7 +3235,7 @@ static b32 gpu_image(const unsigned int desc[8], unsigned int x0, unsigned int y
         if (!w || !h || !gpu_idle() || gpu_set != &gpu_amd_rdna2)
                 return false;
         gpu_slot_take(), a = GPU_ARGS;
-        a->s = 0, a->d = dst, a->g = 0, a->sp = 0, a->dp = dp, a->gp = 0, a->w = w, a->op = 8, a->v = over ? 1u : 0u, a->x0 = x0, a->y0 = y0, a->rows = h, a->tab = 0;
+        a->s = 0, a->d = dst, a->g = 0, a->sp = 0, a->dp = dp, a->gp = 0, a->w = w, a->op = 8, a->v = kind & (GPU_IMAGE_OVER | GPU_IMAGE_RAW | GPU_IMAGE_SWAP), a->x0 = x0, a->y0 = y0, a->rows = h, a->tab = 0;
         memory_copy((p8 address_to)a + 128, desc, 32);
         return gpu_run();
 }
@@ -3242,7 +3246,10 @@ static b32 gpu_image(const unsigned int desc[8], unsigned int x0, unsigned int y
         the picture's first byte at va (its plane 0), width the row's pitch in pixels (the unit makes the tiled layout's pitch of it, which is the client's
         when it is a whole number of the 64 KiB block's 128 pixels: the caller holds it to that), height its rows; format 8_8_8_8 UNORM (56) with the
         channels as they lie (ARGB8888's bytes B, G, R, A out as they are; ABGR8888's red and blue selected the other way, so both come out in ARGB's order),
-        type 2D (9), one level, PERF_MOD 4 and RESOURCE_LEVEL 1 as Mesa sets them on gfx10. The swizzle mode is the modifier's tile (Mesa's
+        type 2D (9), one level, PERF_MOD 4 and RESOURCE_LEVEL 1 as Mesa sets them on gfx10. A picture without DCC (and unorm not asked) is read as
+        32_UINT (20) instead, one channel that is the pixel's word as it lies (the tiling is the same for any format of 32 bits a pixel), which the kernel
+        stores as it is, or with bytes 0 and 2 swapped (GPU_IMAGE_SWAP): no conversion of four floats a pixel. DCC is read as UNORM because the
+        compression's fast clears are values of the format's channels. The swizzle mode is the modifier's tile (Mesa's
         ac_get_modifier_swizzle_mode: the modifier's TILE field is the hardware's SW_MODE). A modifier with DCC names its metadata at meta: the plane the
         sampler reads, which is plane 2 (the pipe-aligned copy) when DCC_RETILE is set and plane 1 otherwise (Mesa's ac_surface_get_plane_offset), and it
         sets COMPRESSION_EN, META_PIPE_ALIGNED (1 for the retiled copy; else the modifier's DCC_PIPE_ALIGN, as ac_modifier_fill_dcc_params makes it),
@@ -3255,34 +3262,35 @@ static b32 gpu_image(const unsigned int desc[8], unsigned int x0, unsigned int y
         or 64K_R_X (27), an address not of whole 256-byte blocks, a size past the unit's 16384.
 */
 #define GPU_MOD_AMD 2ull
-static b32 gpu_amd_image(unsigned int desc[8], positive va, positive meta, unsigned int width, unsigned int height, p64 modifier, b32 swapped)
+static unsigned int gpu_amd_image(unsigned int desc[8], positive va, positive meta, unsigned int width, unsigned int height, p64 modifier, b32 swapped, b32 unorm)
 {
         unsigned int tile = 0, dcc = 0, retile = 0, piped = 0, block = 0;
 
         if (!width || !height || width > 16384 || height > 16384 || (va & 255))
-                return false;
+                return 0;
         if (modifier)
         {
                 unsigned int version = (unsigned int)(modifier & 0xff);
 
                 if (modifier >> 56 != GPU_MOD_AMD || (version != 1 && version != 3))
-                        return false;
+                        return 0;
                 tile = (unsigned int)(modifier >> 8 & 0x1f), dcc = (unsigned int)(modifier >> 13 & 1), retile = (unsigned int)(modifier >> 14 & 1);
                 piped = retile ? 1u : (unsigned int)(modifier >> 15 & 1), block = (unsigned int)(modifier >> 18 & 3);
                 if ((tile != 9 && tile != 10 && tile != 25 && tile != 27) || (width & 127) || (dcc && (!meta || (meta & 255) || block > 1)))
-                        return false;
+                        return 0;
         }
         else if (width & 63)
-                return false;
+                return 0;
+        unorm = unorm || dcc;
         desc[0] = (unsigned int)(va >> 8);
-        desc[1] = (unsigned int)(va >> 40 & 0xff) | 56u << 20 | ((width - 1) & 3) << 30;
+        desc[1] = (unsigned int)(va >> 40 & 0xff) | (unorm ? 56u : 20u) << 20 | ((width - 1) & 3) << 30;
         desc[2] = ((width - 1) >> 2 & 0xfff) | (height - 1) << 14 | 1u << 31;
-        desc[3] = (swapped ? 6u | 5u << 3 | 4u << 6 : 4u | 5u << 3 | 6u << 6) | 7u << 9 | tile << 20 | 9u << 28;
+        desc[3] = (!unorm ? 4u : swapped ? 6u | 5u << 3 | 4u << 6 | 7u << 9 : 4u | 5u << 3 | 6u << 6 | 7u << 9) | tile << 20 | 9u << 28;
         desc[4] = modifier ? 0 : width - 1;
         desc[5] = 4u << 20;
         desc[6] = dcc ? 2u << 15 | block << 17 | piped << 19 | 1u << 21 | 1u << 22 | (unsigned int)(meta >> 8 & 0xff) << 24 : 0;
         desc[7] = dcc ? (unsigned int)(meta >> 16) : 0;
-        return true;
+        return GPU_IMAGE_MADE | (unorm ? 0 : GPU_IMAGE_RAW | (swapped ? GPU_IMAGE_SWAP : 0));
 }
 
 // Whether the card reads a client's picture of this modifier now: the texture unit's read drew its test at this start, and the modifier is one
@@ -3293,7 +3301,7 @@ static b32 gpu_image_takes(p64 modifier)
 
         if (!gpu_image_ok || gpu.broken || gpu.fd < 0 || (modifier && (modifier & 0xff) == 3 && !GPU_FAMILIES(gpu.family) && !gpu_gfx103))
                 return false;
-        return gpu_amd_image(d, 0x100000, modifier >> 13 & 1 ? 0x200000 : 0, 1920, 1080, modifier, false);
+        return gpu_amd_image(d, 0x100000, modifier >> 13 & 1 ? 0x200000 : 0, 1920, 1080, modifier, false, false) != 0;
 }
 
 // One small scene of every kind of op, made from nothing but numbers (a generator for the pictures, the covers and the glyph's bitmap), and the hash of its pixels,
@@ -3512,33 +3520,38 @@ static unsigned int gpu_test_hash(void)
 
 
 /*
-        The texture unit's read held to what it must give (op 8 over a linear resource: the one layout the processor can make and check): 64 by 4 pixels of
-        numbers read whole, then a rectangle of them from (3, 1) with the red and blue selected the other way (an ABGR picture's resource), each pixel compared.
+        The texture unit's read held to what it must give (op 8 over a linear resource: the one layout the processor can make and check), both ways it reads
+        (32_UINT's word and UNORM's channels): 64 by 4 pixels of numbers read whole, then a rectangle of them from (3, 1) with red and blue the other way (an ABGR
+        picture's), each pixel compared.
         True when both are what they must be; the card's buffer's last megabyte is the self-test's, and the card is idle here (the self-test waited).
 */
 static b32 gpu_image_test(void)
 {
         positive base = gpu.size - (1 << 20), src_at = base + 131072, dst_at = base + 262144;
         unsigned int address_to src = (unsigned int address_to)((p8 address_to)gpu.at + src_at), address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at);
-        unsigned int desc[8], seed = 777u;
-        b32 ok;
+        unsigned int desc[8], seed = 777u, kind;
+        b32 ok = true;
 
         for (unsigned int i = 0; i < 64 * 4; i++)
                 seed = seed * 1664525u + 1013904223u, src[i] = seed;
-        memory_zero(dst, 64 * 4 * 4);
-        if (!gpu_amd_image(desc, GPU_VA + src_at, 0, 64, 4, 0, false) || !gpu_image(desc, 0, 0, GPU_VA + dst_at, 64, 64, 4, false))
-                return false;
-        ok = !memory_compare(dst, src, 64 * 4 * 4);
-        memory_zero(dst, 64 * 4 * 4);
-        if (!ok || !gpu_amd_image(desc, GPU_VA + src_at, 0, 64, 4, 0, true) || !gpu_image(desc, 3, 1, GPU_VA + dst_at, 64, 50, 3, false))
-                return false;
-        for (unsigned int y = 0; y < 3 && ok; y++)
-                for (unsigned int x = 0; x < 50 && ok; x++)
-                {
-                        unsigned int c = src[(y + 1) * 64 + x + 3];
+        // Each way the kernel reads: the word as it is (32_UINT), and the four channels as UNORM bytes (DCC's way); each straight, then swapped from (3, 1).
+        for (unsigned int unorm = 0; unorm < 2 && ok; unorm++)
+        {
+                memory_zero(dst, 64 * 4 * 4);
+                if (!(kind = gpu_amd_image(desc, GPU_VA + src_at, 0, 64, 4, 0, false, unorm)) || !gpu_image(desc, kind, 0, 0, GPU_VA + dst_at, 64, 64, 4))
+                        return false;
+                ok = !memory_compare(dst, src, 64 * 4 * 4);
+                memory_zero(dst, 64 * 4 * 4);
+                if (!ok || !(kind = gpu_amd_image(desc, GPU_VA + src_at, 0, 64, 4, 0, true, unorm)) || !gpu_image(desc, kind, 3, 1, GPU_VA + dst_at, 64, 50, 3))
+                        return false;
+                for (unsigned int y = 0; y < 3 && ok; y++)
+                        for (unsigned int x = 0; x < 50 && ok; x++)
+                        {
+                                unsigned int c = src[(y + 1) * 64 + x + 3];
 
-                        ok = dst[y * 64 + x] == ((c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16);
-                }
+                                ok = dst[y * 64 + x] == ((c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16);
+                        }
+        }
         return ok;
 }
 

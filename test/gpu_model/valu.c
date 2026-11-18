@@ -212,7 +212,8 @@ static int gpu_model_vmem(const struct gpu_model_insn address_to in, const struc
         in the scalar registers: what the model takes is the one layout a processor can name, SW_MODE 0 (linear), uncompressed, of the format
         8_8_8_8 UNORM (56), type 2D (9), one level, a width that is a multiple of 64 with DEPTH 0 or the width less one (so that the row's
         pitch is the width under either reading of the field on gfx10.3), the channels' selects X, Y, Z, W or any order of them. Each channel
-        is its byte over 255 as a float, rounded to nearest; a lane outside the image reads zeros, as the card's does. Any other resource
+        is its byte over 255 as a float, rounded to nearest; a lane outside the image reads zeros, as the card's does. The one-channel load
+        (dmask 0x1) reads the format 32_UINT (20), the pixel's word as it is, into one register (its select X). Any other resource
         (a tiled swizzle, DCC, another format) is UNMODELLED: the card's own addressing of those is not the model's to say.
 */
 static int gpu_model_image(const struct gpu_model_insn address_to in)
@@ -221,10 +222,10 @@ static int gpu_model_image(const struct gpu_model_insn address_to in)
         p64 exec = gpu_model.s[126] | (p64)gpu_model.s[127] << 32;
         p32 r[8];
         positive base;
-        unsigned int width, height, depth, sel[4];
+        unsigned int width, height, depth, sel[4], one = in->imm == 1, format;
         int e;
 
-        if ((e = gpu_model_vgprs_ready(address, 2)) || (e = gpu_model_vgprs_ready(data, 4)) || (e = gpu_model_sgprs_ready(rs, 8)))
+        if ((e = gpu_model_vgprs_ready(address, 2)) || (e = gpu_model_vgprs_ready(data, one ? 1 : 4)) || (e = gpu_model_sgprs_ready(rs, 8)))
                 return e;
         for (unsigned int k = 0; k < 8; k++)
                 r[k] = gpu_model.s[rs + k];
@@ -232,8 +233,9 @@ static int gpu_model_image(const struct gpu_model_insn address_to in)
         width = ((r[1] >> 30) | (r[2] & 0xfff) << 2) + 1, height = (r[2] >> 14 & 0x3fff) + 1, depth = r[4] & 0x1fff;
         for (unsigned int c = 0; c < 4; c++)
                 sel[c] = r[3] >> (3 * c) & 7;
-        if ((r[1] >> 20 & 0x1ff) != 56 || (r[3] >> 20 & 0x1f) != 0 || (r[3] >> 28) != 9 || (r[3] >> 12 & 0xff) != 0 || (r[6] >> 21 & 1) || r[7] ||
-            (width & 63) || (depth && depth + 1 != width) || sel[0] < 4 || sel[1] < 4 || sel[2] < 4 || sel[3] < 4)
+        format = r[1] >> 20 & 0x1ff;
+        if (format != (one ? 20u : 56u) || (one && sel[0] != 4) || (r[3] >> 20 & 0x1f) != 0 || (r[3] >> 28) != 9 || (r[3] >> 12 & 0xff) != 0 || (r[6] >> 21 & 1) || r[7] ||
+            (width & 63) || (depth && depth + 1 != width) || (!one && (sel[0] < 4 || sel[1] < 4 || sel[2] < 4 || sel[3] < 4)))
                 return gpu_model_fail(GPU_MODEL_UNMODELLED, "an image resource the model does not read (not linear 8_8_8_8 UNORM 2D)") ? gpu_model.fault.code
                                                                                                                                   : gpu_model_fail_end();
         for (unsigned int lane = 0; lane < 64; lane++)
@@ -245,6 +247,12 @@ static int gpu_model_image(const struct gpu_model_insn address_to in)
                         continue;
                 if (x < width && y < height && (e = gpu_model_load(base + 4 * ((positive)y * width + x), 4, px, lane)))
                         return e;
+                if (one)
+                {
+                        gpu_model.v[data][lane] = (p32)px[0] | (p32)px[1] << 8 | (p32)px[2] << 16 | (p32)px[3] << 24;
+                        gpu_model.cost.lane_loads++, gpu_model.cost.bytes_loaded += 4;
+                        continue;
+                }
                 for (unsigned int c = 0; c < 4; c++)
                 {
                         p64 scaled = (p64)px[sel[c] - 4] << 40;
@@ -253,7 +261,7 @@ static int gpu_model_image(const struct gpu_model_insn address_to in)
                 }
                 gpu_model.cost.lane_loads++, gpu_model.cost.bytes_loaded += 4;
         }
-        gpu_model.cost.vmem_loads++, gpu_model_issue(0, true, data, 4);
+        gpu_model.cost.vmem_loads++, gpu_model_issue(0, true, data, one ? 1 : 4);
         return 0;
 }
 
