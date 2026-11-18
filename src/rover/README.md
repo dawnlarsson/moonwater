@@ -272,7 +272,7 @@ state name=power.source page=kernel type=enum choices=ac,battery
 primitive id=3 name=suspend runs=kernel class=any bounded=yes
 primitive id=8 name="radio on" runs=kernel class=deliberate bounded=yes args=which:enum:wifi,bluetooth,all
 function name=string_length args=s returns=int kernel=yes bounded=yes
-tool name=grep runs=user bounded=no
+tool name=grep runs=runner class=any bounded=no
 ```
 
 A record's list of fields or arguments is separated by `;`, since an
@@ -558,11 +558,17 @@ The image's rules are the program's own, the same files as
 `/root/rules/*.rover`. A file in `/root/rules` replaces the image's file
 of the same name, and an empty one masks it; one that may not be read or
 does not compile is said with its line, and the image's of its name
-stands. A `run` script is
-`/root/rules/scripts/NAME`, else the image's of that name. Files under
-`/root/rules` are read only if they are regular, owned by root, not
-writable by group or others, and at most 64 KiB, as the machine script was
-read today.
+stands. A file whose rule names clash with the files before it (the
+image's first, then the person's, each by name) is left out by itself.
+`/root/rules` is read only when it is root's and written by root alone,
+and a file in it only when it is regular, owned by root, not writable by
+group or others, not a link, and at most 64 KiB; the count of loads,
+`/root/rules/.boots`, is read on the same terms. A `run` script is
+`/root/rules/scripts/NAME`, else the image's
+`/lib/moonwater/rules/scripts/NAME`, which the runner runs as root: each
+directory and file is looked at as the script is run (Safety). The link
+keeps `/root/rules`, `/lib/moonwater` and `/run/moonwater` from a peer's
+files.
 
 ## The kernel
 
