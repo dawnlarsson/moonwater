@@ -51,6 +51,9 @@ event 97 runner "service up" name:word
 event 98 runner "service down" name:word
 event 99 runner "service failed" name:word
 
+# A Settings row changed: its name as its state says it, without setting. (on setting canvas.gpu).
+event 100 runner setting name:word
+
 # Moonwater's mechanisms. RUNS is where the call is a direct one.
 primitive 1 kernel any poweroff
 primitive 2 kernel any reboot

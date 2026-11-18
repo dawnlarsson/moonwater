@@ -33,7 +33,8 @@ static struct rover_table rover_view;
 static struct rover_run rover_runs[ROVER_RULES_MOST];
 static p64 rover_page_store[ROVER_PAGES][ROVER_PAGE_BYTES / 8];
 static const p8 address_to rover_pages[ROVER_PAGES] = {(const p8 address_to)rover_page_store[0],
-                                                       (const p8 address_to)rover_page_store[1]};
+                                                       (const p8 address_to)rover_page_store[1],
+                                                       (const p8 address_to)rover_page_store[2]};
 static p8 rover_printed[ROVER_TABLE_MOST];
 
 static bool rover_compiled(const char address_to text)
@@ -377,6 +378,8 @@ static const struct
     {"service a\n\tabout \"x\"\n", 0, "no run"},
     {"service a\n\trun /a\n\tfrob\n", 3, "no service statement"},
     {"rule a\n\ton button frob\n\tdo open x\n", 2, "is not one of launcher"},
+    {"rule a\n\ton lid close\n\tplace kernel\n\tif setting.canvas.gpu == on\n\tdo suspend\n", 0, "reads a setting"},
+    {"rule a\n\ton lid close\n\tif setting.canvas.theme == purple\n\tdo suspend\n", 3, "is not one of light"},
     {"rule a\n\ton button volume\n\tdo open mixer -q -a -i -x\n", 3, "past an action's four arguments"},
     {"rule a\n\ton button volume\n\tdo open\n", 3, "open takes app, words"},
     {"on lid close\n", 1, "left edge"},
@@ -672,7 +675,8 @@ static fn rover_check_evaluator(void)
 
         //      STATE=VALUE, as moonwater rover test reads it: typed by the state, and a typo named.
         {
-                p8 address_to writable[ROVER_PAGES] = {(p8 address_to)rover_page_store[0], (p8 address_to)rover_page_store[1]};
+                p8 address_to writable[ROVER_PAGES] = {(p8 address_to)rover_page_store[0], (p8 address_to)rover_page_store[1],
+                                                       (p8 address_to)rover_page_store[2]};
                 struct rover_event when = rover_event_of("lid open", null);
                 const char address_to set[] = {"battery.percent=42%", "window.app=firefox", "clock=23:10", "weekday=sat"};
                 bool all = true;
@@ -834,6 +838,45 @@ static fn rover_check_evaluator(void)
                       made && rover_arguments(&rover_view, hits[0].action, &event, rover_pages, values) == 4 &&
                           rover_bytes_are(values[3].text, values[3].length, "-i"));
         }
+
+        //      Settings and the boot's words: states of their pages, typed by the registry's rows.
+        check("the registry's rows are states", rover_state_named((const p8 address_to)"setting.canvas.gpu", 18) &&
+                                                    rover_state_named((const p8 address_to)"setting.audio.server", 20) &&
+                                                    rover_state_named((const p8 address_to)"boot.desktop", 12));
+        check("a setting's state is the settings page's",
+              rover_state_named((const p8 address_to)"setting.canvas.gpu", 18)->page == ROVER_PAGE_SETTINGS);
+        check("a number row is its bounds",
+              rover_types[rover_state_named((const p8 address_to)"setting.canvas.border.width", 27)->type].low == 1 &&
+                  rover_types[rover_state_named((const p8 address_to)"setting.canvas.border.width", 27)->type].high == 4);
+        check("a when rule over a setting is the runner's",
+              rover_compiled("rule gpu-off\n\twhen setting.canvas.gpu == off\n\tdo notify \"no card\"\n") &&
+                  rover_view.rule[0].place == ROVER_RUNNER);
+        {
+                const struct rover_state_row address_to gpu =
+                    rover_state_named((const p8 address_to)"setting.canvas.gpu", 18);
+                struct rover_hit hits[4];
+                struct rover_event edge = rover_event_of("", null);
+
+                rover_set("setting.canvas.gpu", 1, null);
+                rover_edges(&rover_view, rover_runs, rover_pages, ~0ull, &edge, ROVER_RUNNER, hits, 4);
+                rover_set("setting.canvas.gpu", 0, null);
+                check("its edge is heard through its state's bit, past the 62nd state too",
+                      rover_edges(&rover_view, rover_runs, rover_pages, 1ull << ((positive)(gpu - rover_states) % 62), &edge,
+                                  ROVER_RUNNER, hits, 4) == 1);
+        }
+        check("on setting hears a row by its name",
+              rover_compiled("rule gpu\n\ton setting canvas.gpu\n\tif setting.canvas.gpu == off\n\tdo notify \"off\"\n"));
+        event = rover_event_of("setting", "canvas.gpu");
+        check("and fires in the runner when it changes", rover_same(rover_fires(&event, ROVER_RUNNER), "gpu:then"));
+        event = rover_event_of("setting", "canvas.theme");
+        check("another row's change is not its event", rover_same(rover_fires(&event, ROVER_RUNNER), ""));
+        check("a boot word is the kernel's: a rule over it stays in the kernel",
+              rover_compiled("rule no-desktop\n\ton lid close\n\tif boot.desktop == none\n\tdo suspend\n") &&
+                  rover_view.rule[0].place == ROVER_KERNEL);
+        rover_set("boot.desktop", 0, "none");
+        event = rover_event_of("lid close", null);
+        check("and reads the word", rover_same(rover_fires(&event, ROVER_KERNEL), "no-desktop:then"));
+        memory_zero(rover_page_store, sizeof(rover_page_store));
 
         //      Placement: the kernel's rules are the kernel's, the rest are not.
         check("the third text compiles", rover_compiled(rover_canonical[2]));

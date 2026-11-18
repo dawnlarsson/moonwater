@@ -40,6 +40,7 @@ bit LINK_GROUP_DONE	a one-use code that has been used: spent is where it ends, b
 bit MS_MOVE	a mount's flags from the command line, for the one call
 bit MS_REMOUNT	a mount's flags from the command line, for the one call
 bit PF_RANDOMIZE	the kernel's own per-task flag, set for the image being started
+bit ROVER_READS_BIT	a rule's record is zeroed when its rule line is read (rover_read_rule) and built once from its lines; the table is never edited, only compiled again
 bit ROVER_READS_CLOCK	a rule's record is zeroed when its rule line is read (rover_read_rule) and built once from its lines; the table is never edited, only compiled again
 bit ROVER_READS_WEEKDAY	a rule's record is zeroed when its rule line is read (rover_read_rule) and built once from its lines; the table is never edited, only compiled again
 bit ROVER_RULE_NUMBERS	a rule's record is zeroed when its rule line is read (rover_read_rule) and built once from its lines; the table is never edited, only compiled again

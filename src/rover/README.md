@@ -317,6 +317,7 @@ of events and primitives are kept forever: one is never given to another.
 | kernel (spark, ids 1–22) | `key power`, `key sleep`, `key reset`, `key ctrl-alt-delete`, `lid close`, `lid open`, `volume up`, `volume down`, `mute`, `brightness up`, `brightness down`, `canvas on`, `canvas off`, `micmute`, `rfkill`, `tablet on`, `tablet off`, `headphone on`, `headphone off`, `dock on`, `dock off`, `resume` |
 | desktop (the compositor, ids 64–) | `chord` (chord), `fullscreen on` and `fullscreen off` (app: word), `window opened` and `window closed` (app: word), `display added` and `display removed` (connector: word), `button` (name: `launcher`, `volume`, `mic`, `notices`, `tray-double` or `pin`; slot: int 0 to 63, a pin's place on the taskbar; app: word, a pin's program) |
 | rules (id 96) | `cue` (name: word), posted by `emit cue NAME` |
+| runner (ids 97–) | `service up`, `service down`, `service failed` (name: word); `setting` (name: word, a registry row's) |
 
 ### States
 
@@ -325,10 +326,31 @@ of events and primitives are kept forever: one is never given to another.
 | kernel | `lid` (open, closed), `power.source` (ac, battery), `battery.percent` (percent), `battery.state` (unknown, charging, discharging, full, not-charging), `headphone`, `dock`, `tablet`, `canvas` (onoff) |
 | desktop | `display.count`, `display.external` (int 0 16), `window.fullscreen` (onoff), `window.app` (word) |
 | the clock | `clock` (clock) and `weekday` (weekday), from the event's time and the page's zone offset |
+| kernel | `boot.NAME`, a word: the value of `moonwater.NAME=` on the kernel's command line (`boot.desktop`, `boot.early`, `boot.cursor_plane`), one for each such argument the sources ask for |
+| settings | `setting.NAME`, one for every plain row of the Settings registry (`src/sh/registry.c`), NAME its verb's words joined by dots (`setting.canvas.gpu`, `setting.audio.server`, `setting.keyboard.onscreen`) |
 
 A state lives at a fixed offset of a page. The kernel's page is one page
 of the module's memory that the kernel writes as the events arrive and
-userspace maps read-only; the desktop's page is the compositor's own.
+userspace maps read-only; the desktop's page is the compositor's own; the
+settings page is the runner's, which it fills from the files the rows
+keep and writes again on each change, and which the desktop maps too.
+
+The settings and boot states are generated. A registry row's type is its
+row's: a number row (`.type = SETTING_NUMBER`) is an int between its
+`.low` and `.high`, a switch is onoff, a choice of plain words is an
+enum of them in the row's order, and anything else (a colour, a font, a
+name) is a word. A row added to the registry is a state the next time the
+schema is generated; there is no second list. `on setting NAME` (a runner
+event, its field the row's name without `setting.`) fires when the row
+changes.
+
+A rule's 64-bit mask of the states its conditions read gives a state the
+bit of its number modulo 62 (the last two are the clock's and the
+weekday's), since there are more states than bits: two states that share
+a bit cost a `when` rule a look at a change it does not read, and never
+miss one, since its edge is the condition asked again. A comparison over
+the settings page is never the walker's, which picks between the first
+two pages; the C asks it.
 
 ### Primitives
 

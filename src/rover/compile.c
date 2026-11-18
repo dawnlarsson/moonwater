@@ -47,7 +47,9 @@
 #define ROVER_TYPE_TEXT 8u
 #define ROVER_TYPE_WORDS 9u
 
-_Static_assert(ROVER_STATES <= 62, "a rule's reads are 64 bits, two of them the clock's");
+//      A rule's reads are 64 bits, two of them the clock's: a state's bit is its number modulo the other 62, so two
+//      states may share one, which costs a when rule a look at a change it does not read and never misses one.
+#define ROVER_READS_BIT(state) (1ull << ((state) % 62))
 
 //      One word of a line: where it is, how long, and whether it was quoted
 //      (its bytes then are the decoded copy, in the line's scratch).
@@ -800,7 +802,7 @@ static bool rover_read_side(struct rover_build address_to build, const struct ro
                 side->operand.page = state->page;
                 side->operand.index = state->offset;
                 side->type = state->type;
-                rule->reads |= 1ull << (state - rover_states);
+                rule->reads |= ROVER_READS_BIT((positive)(state - rover_states));
                 return true;
         }
         if (!word->quoted && (rover_is(word, "clock") || rover_is(word, "weekday")))
@@ -1247,7 +1249,8 @@ static const char address_to rover_not_kernel(struct rover_build address_to buil
                 {
                         if ((side[k]->source == ROVER_STATE_NUMBER || side[k]->source == ROVER_STATE_WORD) &&
                             side[k]->page != ROVER_PAGE_KERNEL)
-                                return " reads a desktop state, which the kernel does not have";
+                                return side[k]->page == ROVER_PAGE_SETTINGS ? " reads a setting, which the kernel does not have"
+                                                                           : " reads a desktop state, which the kernel does not have";
                         if (side[k]->source == ROVER_CALL)
                         {
                                 const struct rover_call address_to asked = &build->call[side[k]->index];
@@ -1278,14 +1281,45 @@ static const char address_to rover_not_kernel(struct rover_build address_to buil
         return null;
 }
 
+//      Whether a rule's comparisons, or the calls in them, read a state of a page.
+static bool rover_reads_page(struct rover_build address_to build, const struct rover_rule address_to rule, p8 page)
+{
+        for (positive at = 0; at < rule->comparisons; at++)
+        {
+                const struct rover_comparison address_to c = &build->comparison[rule->comparison + at];
+                const struct rover_operand address_to side[3] = {&c->a, &c->b, &c->c};
+
+                for (positive k = 0; k < 3; k++)
+                {
+                        if ((side[k]->source == ROVER_STATE_NUMBER || side[k]->source == ROVER_STATE_WORD) &&
+                            side[k]->page == page)
+                                return true;
+                        if (side[k]->source == ROVER_CALL)
+                                for (positive a = 0; a < build->call[side[k]->index].count; a++)
+                                {
+                                        struct rover_operand argument = build->call[side[k]->index].argument[a];
+
+                                        if ((argument.source == ROVER_STATE_NUMBER || argument.source == ROVER_STATE_WORD) &&
+                                            argument.page == page)
+                                                return true;
+                                }
+                }
+        }
+        return false;
+}
+
 static bool rover_place(struct rover_build address_to build, struct rover_rule address_to rule)
 {
         const char address_to blocked = rover_not_kernel(build, rule);
         const struct rover_event_row address_to event = build->event;
-        p8 source = event ? event->source : (blocked ? ROVER_DESKTOP : ROVER_KERNEL);
-
-        if (!event && blocked && !(rule->reads & ((1ull << ROVER_STATES) - 1)))
-                source = ROVER_RUNNER;
+        //      A when rule goes where its states are: the kernel's alone in the kernel, the desktop's in the desktop, and
+        //      the settings page (the runner's) or a routine the kernel has no body of in the runner.
+        p8 source = event ? event->source
+                          : !blocked ? ROVER_KERNEL
+                          : rover_reads_page(build, rule, ROVER_PAGE_SETTINGS) ||
+                                    !rover_reads_page(build, rule, ROVER_PAGE_DESKTOP)
+                              ? ROVER_RUNNER
+                              : ROVER_DESKTOP;
         if (build->want == 1 && (source != ROVER_KERNEL || blocked))
         {
                 if (source != ROVER_KERNEL && event)
@@ -2647,8 +2681,10 @@ static b32 rover_verb_test(string_address address_to arguments, positive count)
         struct rover_event event;
         struct rover_hit hits[64];
         const p8 address_to pages[ROVER_PAGES] = {(const p8 address_to)rover_page_words[0],
-                                                   (const p8 address_to)rover_page_words[1]};
-        p8 address_to writable[ROVER_PAGES] = {(p8 address_to)rover_page_words[0], (p8 address_to)rover_page_words[1]};
+                                                   (const p8 address_to)rover_page_words[1],
+                                                   (const p8 address_to)rover_page_words[2]};
+        p8 address_to writable[ROVER_PAGES] = {(p8 address_to)rover_page_words[0], (p8 address_to)rover_page_words[1],
+                                               (p8 address_to)rover_page_words[2]};
         static const char address_to const places[ROVER_PLACES] = {"kernel", "runner", "desktop"};
         positive at = 4, used = 0, fired = 0;
         const struct rover_event_row address_to row;

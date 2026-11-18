@@ -27,6 +27,8 @@ SPARK = ROOT / 'src/moonwater/spark.c'
 CANVAS = ROOT / 'src/canvas/canvas.c'
 LIB = ROOT / 'src/lib.c'
 TOOLS = ROOT / 'src/sh/tools.inc'
+REGISTRY = ROOT / 'src/sh/registry.c'
+BOOT_SOURCES = [ROOT / 'src', ROOT / 'main.moonwater.sh']
 OUT = ROOT / 'src/rover/schema.inc'
 DEBUG = False   # --why: say why each routine left out is left out
 
@@ -34,7 +36,7 @@ PAGE_HEAD = 16      # a page's first bytes: its version, its sequence, the zone'
 PAGE_BYTES = 4096
 WORD_SLOT = 64      # a word state: its length, 62 bytes and a NUL
 KINDS = ['int', 'percent', 'duration', 'clock', 'weekday', 'enum', 'onoff', 'chord', 'word', 'text', 'words']
-PAGES = ['kernel', 'desktop']
+PAGES = ['kernel', 'desktop', 'settings']
 SOURCES = ['kernel', 'runner', 'desktop']
 CLASSES = ['any', 'lower-only', 'deliberate']
 KEY_RENAMES = {'poweroff': 'key power', 'sleep': 'key sleep', 'reset': 'key reset',
@@ -325,6 +327,95 @@ def value_signature(params):
     return signature, casts
 
 
+def macro_args(text, at):
+    """The top-level arguments of the call whose ( is at text[at]: strings and brackets respected."""
+    args, depth, start, index = [], 0, at + 1, at
+    while True:
+        c = text[index]
+        if c == '"':
+            index += 1
+            while text[index] != '"':
+                index += 2 if text[index] == '\\' else 1
+        elif c in '({[':
+            depth += 1
+        elif c in ')}]':
+            depth -= 1
+            if depth == 0:
+                args.append(text[start:index].strip())
+                return args
+        elif c == ',' and depth == 1:
+            args.append(text[start:index].strip())
+            start = index + 1
+        index += 1
+
+
+def c_text(value, defines):
+    """A C string expression as Python: literals joined, macros of the file resolved; None when it is none."""
+    value = value.strip()
+    if value in ('null', '0', ''):
+        return None
+    parts = re.findall(r'"((?:[^"\\]|\\.)*)"|([A-Z_][A-Z0-9_]*)', value)
+    out = ''
+    for literal, name in parts:
+        if name:
+            if name not in defines:
+                return None
+            out += defines[name]
+        else:
+            out += literal
+    return out
+
+
+def setting_states(types):
+    """The Settings registry's plain rows, each a state setting.WORDS, typed by its row: a number its bounds, a switch
+    on or off, a choice its words, and anything else a word."""
+    text = strip_comments(REGISTRY.read_text())
+    defines = {}
+    for name, value in re.findall(r'#define (\w+) ((?:"[^"\n]*"\s*)+)\n', text):
+        defines[name] = ''.join(re.findall(r'"([^"]*)"', value))
+    rows, at = [], 0
+    while True:
+        at = text.find('SETTING_PLAIN_ROW(', at)
+        if at < 0:
+            break
+        if text[:at].rstrip().endswith('#define'):
+            at += 1
+            continue
+        args = macro_args(text, at + len('SETTING_PLAIN_ROW'))
+        at += 1
+        verb = re.findall(r'"([^"]*)"', args[4])
+        named = {}
+        for arg in args[7:]:
+            match = re.match(r'\.(\w+)\s*=\s*(.*)$', arg, re.S)
+            if match:
+                named[match.group(1)] = match.group(2).strip()
+        name = 'setting.' + '.'.join(verb)
+        choices = c_text(args[6], defines)
+        if named.get('type') == 'SETTING_NUMBER':
+            spelling = 'int:%d:%d' % (int(named.get('low', '0')), int(named.get('high', '0')))
+        elif args[2] == 'SETTINGS_SWITCH':
+            spelling = 'onoff'
+        elif args[2] == 'SETTINGS_CHOICE' and choices and 'SETTINGS_INK' not in args[3] and \
+                'SETTINGS_BATTERIES' not in args[3] and all(re.fullmatch(r'[a-z0-9_.-]+', w) for w in choices.split()):
+            words = choices.split()
+            spelling = 'onoff' if sorted(words) == ['off', 'on'] and words == ['off', 'on'] else 'enum:' + ','.join(words)
+        else:
+            spelling = 'word'
+        if name not in [r[0] for r in rows]:
+            rows.append((name, spelling))
+    return rows
+
+
+def boot_words():
+    """The kernel's command line words of Moonwater's, moonwater.NAME=, as the sources ask for them."""
+    names = set()
+    for root in BOOT_SOURCES:
+        paths = [root] if root.is_file() else [p for p in root.rglob('*') if p.suffix in ('.c', '.inc', '.h', '.sh')]
+        for path in paths:
+            names.update(re.findall(r'moonwater\.([a-z_]+)=', path.read_text(errors='replace')))
+    return sorted(names)
+
+
 def tools():
     names = []
     for line in TOOLS.read_text().splitlines():
@@ -383,6 +474,18 @@ def c_string(text):
 def generate():
     types = Types()
     states, user_events, primitives, ranges = read_list(types)
+    offsets = {page: PAGE_HEAD for page in PAGES}
+    for name, page, kind, offset in states:
+        offsets[PAGES[page]] = max(offsets[PAGES[page]], offset + (WORD_SLOT if types.rows[kind][0] == 'word' else 4))
+    generated = [(n, 'kernel', 'word') for n in ('boot.' + w for w in boot_words())]
+    generated += [(n, 'settings', spelling) for n, spelling in setting_states(types)]
+    for name, page, spelling in generated:
+        kind = types.take(spelling)
+        size = WORD_SLOT if types.rows[kind][0] == 'word' else 4
+        states.append((name, PAGES.index(page), kind, offsets[page]))
+        offsets[page] += size
+        if offsets[page] > PAGE_BYTES:
+            fail('page %s is full at %s' % (page, name))
     events = sorted(kernel_events() + user_events)
     seen = set()
     for ident, name, _, _ in events:

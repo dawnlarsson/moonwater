@@ -38,7 +38,8 @@
 #define ROVER_WORD_SLOT 64u
 #define ROVER_PAGE_KERNEL 0u
 #define ROVER_PAGE_DESKTOP 1u
-#define ROVER_PAGES 2u
+#define ROVER_PAGE_SETTINGS 2u // the runner's: the Settings rows and what it keeps of them
+#define ROVER_PAGES 3u
 
 //      Where a rule runs and an action is done; the schema's sources in the
 //      same order.
@@ -469,8 +470,11 @@ static inline bool rover_number_side(p8 source)
 //      The form a comparison's shape gives it; the compiler writes it and the check holds the table to it.
 static p8 rover_form_of(const struct rover_comparison address_to comparison)
 {
+        //      The walker picks between the first two pages; a state of the settings page is the general form's.
         if (comparison->op >= ROVER_EQ && comparison->op <= ROVER_GE && !rover_kind_is_word(comparison->type) &&
             rover_number_side(comparison->a.source) && rover_number_side(comparison->b.source) &&
+            !(comparison->a.source == ROVER_STATE_NUMBER && comparison->a.page > ROVER_PAGE_DESKTOP) &&
+            !(comparison->b.source == ROVER_STATE_NUMBER && comparison->b.page > ROVER_PAGE_DESKTOP) &&
             !comparison->c.source && !comparison->c.page && !comparison->c.index)
                 return ROVER_FORM_NUMBER;
         return ROVER_FORM_GENERAL;
@@ -1119,8 +1123,7 @@ static __attribute__((noinline)) positive rover_fire_rules(const struct rover_ta
         struct rover_span span = table->index[event->id];
         const p16 address_to order = table->order + span.first;
         const p32 address_to keys = table->key + span.first;
-        const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page,
-                                                  given[1] ? given[1] : rover_zero_page};
+        const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page, given[1] ? given[1] : rover_zero_page, given[2] ? given[2] : rover_zero_page};
         p32 want = ROVER_KEY_ANY;
 
         //      The key the event's field 0 is, when it is one a rule could have.
@@ -1169,8 +1172,7 @@ static inline INLINE positive rover_fire(const struct rover_table address_to tab
         //      Only a run the table says is all numbers rules: one with another would be handed back at once.
         if ((rules & ROVER_SPAN_NUMBERS) && (rules & ROVER_SPAN_COUNT) < ROVER_WALK_MOST && room && ROVER_WALKER_ASKED)
         {
-                const p8 address_to seen[ROVER_PAGES] = {pages[0] ? pages[0] : rover_zero_page,
-                                                         pages[1] ? pages[1] : rover_zero_page};
+                const p8 address_to seen[ROVER_PAGES] = {pages[0] ? pages[0] : rover_zero_page, pages[1] ? pages[1] : rover_zero_page, pages[2] ? pages[2] : rover_zero_page};
                 positive walked = rover_walk_numbers(table, runs, seen, event,
                                                      place | (room > 0xffffffffu ? 0xffffffffu : room) << 32, hits);
 
@@ -1197,8 +1199,7 @@ static positive rover_edges(const struct rover_table address_to table, struct ro
 {
         positive made = 0;
         struct rover_span span = table->index[0];
-        const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page,
-                                                  given[1] ? given[1] : rover_zero_page};
+        const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page, given[1] ? given[1] : rover_zero_page, given[2] ? given[2] : rover_zero_page};
 
         for (positive at = span.first; at < (positive)span.first + (span.count & ROVER_SPAN_COUNT) && made < room;
              at++)
@@ -1652,8 +1653,7 @@ static bool rover_service_wanted(const struct rover_table address_to table, posi
                                  const p8 address_to const address_to given)
 {
         const struct rover_service address_to service = table->service + which;
-        const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page,
-                                                  given[1] ? given[1] : rover_zero_page};
+        const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page, given[1] ? given[1] : rover_zero_page, given[2] ? given[2] : rover_zero_page};
         struct rover_rule rule;
         struct rover_event none;
 
