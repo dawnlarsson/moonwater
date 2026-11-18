@@ -873,13 +873,21 @@ positive rover_walk_numbers(const struct rover_table address_to table, struct ro
 #define ROVER_WALK_STOPPED (1ull << 63)
 
 /*
-        The walker takes runs of fewer than eight rules. Paired against the C
-        in one process on box (Zen 5), a run of one rule is 13 to 19 percent
-        faster through it (the dispatch, one condition, two), and a run of
-        eight chord rules four percent slower: the C's key loop, inlined in
-        its own walk, beats the walker's at that length.
+        The walker takes runs of fewer than ROVER_WALK_MOST rules, where it
+        was measured faster, paired against the C in one process, a trial
+        each in turn. On box (Zen 5), against gcc -O2 a run of one rule is 1
+        to 9 percent faster through it (the dispatch, one condition, two) and
+        four chord rules 7 percent; eight chord rules were 4 percent slower,
+        the C's key loop beating the walker's at that length. On arm64 (Lima),
+        against gcc a run of one rule is 15 to 21 percent faster, and four
+        chord rules 2 percent slower (6 percent faster against clang), so
+        arm64 stops at four.
 */
+#if ARM64
+#define ROVER_WALK_MOST 4u
+#else
 #define ROVER_WALK_MOST 8u
+#endif
 
 //      Whether the walker is asked at all: 1, but for BENCH_rover, which points it at a switch to time both sides.
 #ifndef ROVER_WALKER_ASKED
@@ -950,6 +958,67 @@ __asm__(
     "90: mov %rbp, %rax\n   jmp 99f\n"
     "95: mov %rbx, %rax\n   shl $32, %rax\n   or %rbp, %rax\n   bts $63, %rax\n"
     "99: add $56, %rsp\n   pop %r15\n   pop %r14\n   pop %r13\n   pop %r12\n   pop %rbp\n   pop %rbx\n"
+    ASM_RET
+    ASM_END(rover_walk_numbers)
+);
+#define ROVER_WALKER 1
+#undef ROVER_WALK_SIDE
+#elif ARM64
+#define ROVER_WALK_SIDE(at, into, next)                                                                           \
+    "ldrb w0, [x20, #" #at "]\n   ldrh w2, [x20, #" #at "+2]\n   cmp w0, #3\n   b.ne 61f\n"                            \
+    "ldrb w0, [x20, #" #at "+1]\n   cmp w0, #0\n   csel x0, x6, x7, eq\n   ldrsw " into ", [x0, x2]\n   b " next "\n"  \
+    "61: cmp w0, #1\n   b.ne 62f\n   ldr " into ", [x8, x2]\n   b " next "\n"                                           \
+    "62: mov " into ", #0\n   ldrb w0, [x3, #2]\n   cmp w2, w0\n   b.hs " next "\n   mov x0, #24\n   mul x2, x2, x0\n"   \
+    "add x2, x2, x3\n   ldr " into ", [x2, #24]\n"
+
+/*
+        The arm64 walker: the x86_64 block's algorithm, with every value it
+        keeps in a register of its own (x6 and x7 the pages, x8 the pool, x9
+        the rules, x10 the comparisons, x11 the order, x12 the keys, x13 the
+        count, x14 the slot, x15 the hits made, w16 the key wanted, x17 the
+        room), so it has no frame but the six registers it saves.
+*/
+__asm__(
+    ASM_FUNC(rover_walk_numbers)
+    "stp x19, x20, [sp, #-48]!\n   stp x21, x22, [sp, #16]\n   stp x23, x24, [sp, #32]\n"
+    "ldp x6, x7, [x2]\n   ldr x8, [x0, #80]\n   ldr x9, [x0, #8]\n   ldr x10, [x0, #40]\n"
+    "ldrh w2, [x3]\n   ldr x24, [x0, #32]\n   add x24, x24, x2, lsl #2\n   ldrh w2, [x24]\n   ldrh w13, [x24, #2]\n"
+    "and w13, w13, #0x7fff\n   ldr x11, [x0, #16]\n   add x11, x11, x2, lsl #1\n   ldr x12, [x0, #24]\n   add x12, x12, x2, lsl #2\n"
+    "mov w16, #-1\n   ldrb w2, [x3, #2]\n   cbz w2, 1f\n   ldr x2, [x3, #24]\n   tbnz x2, #63, 1f\n"
+    "mov x24, #0xffffffff\n   cmp x2, x24\n   b.hs 1f\n   mov w16, w2\n"
+    "1:  lsr x17, x4, #32\n   and w4, w4, #0xff\n   mov x14, #0\n   mov x15, #0\n"
+    "10: cmp x14, x13\n   b.hs 90f\n   ldr w2, [x12, x14, lsl #2]\n   cmp w2, w16\n   b.eq 20f\n   cmn w2, #1\n   b.eq 20f\n"
+    "add x14, x14, #1\n   b 10b\n"
+    "20: ldrh w0, [x11, x14, lsl #1]\n   mov x24, #40\n   madd x19, x0, x24, x9\n"
+    "ldrb w2, [x19, #2]\n   cmp w2, w4\n   b.ne 80f\n   ldrb w2, [x19, #3]\n   tbnz w2, #2, 80f\n   tbz w2, #4, 95f\n"
+    "ldrh w20, [x19, #4]\n   add x20, x10, x20, lsl #4\n   ldrh w21, [x19, #6]\n   add x21, x20, x21, lsl #4\n   mov w22, #1\n"
+    "30: cmp x20, x21\n   b.hs 50f\n   cmp w22, #1\n   b.ne 38f\n"
+    ROVER_WALK_SIDE(4, "x23", "63f")
+    "63:\n"
+    ROVER_WALK_SIDE(8, "x24", "64f")
+    "64: cmp x23, x24\n   cset w0, gt\n   csinv w0, w0, wzr, ge\n   add w0, w0, #1\n   ldrb w2, [x20]\n   add w0, w0, w2, lsl #2\n"
+    "mov w2, #0x1520\n   movk w2, #0x0643, lsl #16\n   lsr w2, w2, w0\n   and w2, w2, #1\n   and w22, w22, #2\n   orr w22, w22, w2\n"
+    "38: ldrb w0, [x20, #2]\n   tst w0, #3\n   b.eq 39f\n   orr w22, w22, w22, lsl #1\n   and w22, w22, #2\n   orr w22, w22, #1\n"
+    "tbz w0, #1, 39f\n   tbz w22, #1, 45f\n   mov w22, #1\n"
+    "39: add x20, x20, #16\n   b 30b\n"
+    "45: ldrb w0, [x19, #3]\n   tbnz w0, #0, 47f\n   ldrh w0, [x19, #4]\n   add x0, x10, x0, lsl #4\n   sub x0, x20, x0\n"
+    "lsr x0, x0, #4\n   ldrb w2, [x19, #8]\n   cmp x0, x2\n   b.lo 80f\n"
+    "47: ldrb w21, [x19, #10]\n   cbz w21, 80f\n   ldrh w22, [x19, #12]\n   ldrb w0, [x19, #9]\n   add w22, w22, w0\n"
+    "mov w23, #1\n   b 55f\n"
+    "50: ldrb w21, [x19, #9]\n   ldrh w22, [x19, #12]\n   mov w23, #0\n"
+    "55: ldrh w0, [x11, x14, lsl #1]\n   mov x24, #24\n   madd x24, x0, x24, x1\n"
+    "ldrb w2, [x19, #3]\n   tbz w2, #1, 56f\n   ldrb w2, [x24, #17]\n   cbnz w2, 80f\n"
+    "56: ldr w2, [x19, #16]\n   cbz w2, 57f\n   ldr w0, [x24, #8]\n   cbz w0, 57f\n   mov x0, #16960\n   movk x0, #15, lsl #16\n"
+    "mul x2, x2, x0\n   ldr x0, [x3, #8]\n   ldr x20, [x24]\n   sub x0, x0, x20\n   cmp x0, x2\n   b.hs 57f\n"
+    "ldr w0, [x24, #12]\n   add w0, w0, #1\n   str w0, [x24, #12]\n   b 80f\n"
+    "57: ldrh w0, [x11, x14, lsl #1]\n   orr x0, x0, x22, lsl #16\n   orr x0, x0, x21, lsl #32\n   orr x0, x0, x23, lsl #40\n"
+    "str x0, [x5, x15, lsl #3]\n   ldr w0, [x24, #8]\n   add w0, w0, #1\n   str w0, [x24, #8]\n   ldr x0, [x3, #8]\n   str x0, [x24]\n"
+    "ldrb w0, [x19, #3]\n   tbz w0, #1, 58f\n   mov w0, #1\n   strb w0, [x24, #17]\n"
+    "58: add x15, x15, #1\n   cmp x15, x17\n   b.hs 90f\n"
+    "80: add x14, x14, #1\n   b 10b\n"
+    "90: mov x0, x15\n   b 99f\n"
+    "95: lsl x0, x14, #32\n   orr x0, x0, x15\n   orr x0, x0, #0x8000000000000000\n"
+    "99: ldp x23, x24, [sp, #32]\n   ldp x21, x22, [sp, #16]\n   ldp x19, x20, [sp], #48\n"
     ASM_RET
     ASM_END(rover_walk_numbers)
 );

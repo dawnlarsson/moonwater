@@ -433,33 +433,55 @@ Two pieces are assembly where it was measured to win:
 - **The key scan** of a run of sixteen rules and more is lib.c's
   `memory_first_of_either_u32`: AVX2 and SSE2 on x86_64, NEON on arm64,
   the word loop in a kernel build, which owns no vector register.
-- **The walker**, `rover_walk_numbers` in `rover.c` on x86_64: a run of
-  fewer than eight rules whose comparisons all have the number form
-  (the index marks such a run, and the check holds the mark to the
-  rules) is walked by one leaf of scalar assembly, which a kernel build
-  takes too. A comparison there is its two loads and one shift of an
-  immediate that holds every operator's answer. Anything else, and every
-  run on arm64 and riscv64, is the C.
+- **The walker**, `rover_walk_numbers` in `rover.c` on x86_64 and arm64:
+  a short run whose rules' comparisons all have the number form (the
+  index marks such a run, and the check holds the mark to the rules) is
+  walked by one leaf of scalar assembly, which a kernel build takes too.
+  A comparison there is its two loads and one shift of an immediate that
+  holds every operator's answer. It takes runs of fewer than eight rules
+  on x86_64 and fewer than four on arm64, where it measured faster;
+  anything else, and every run on riscv64, is the C. The walker reads
+  rover's records by offset, so it lives beside them and not in lib.c,
+  and `_Static_assert`s hold every offset it reads.
 
 ### What it costs
 
-`BENCH_rover`, the best of seven runs of a million events each, on box
-(Ryzen 9 9950X, one core) and in the Mac's Lima VM (Apple silicon, arm64):
+`BENCH_rover`: the best of a million events a trial, the walker's trials
+and the C's taken in turn in one process. x86_64 is box (Ryzen 9 9950X,
+one core, measured while a game was running there, so the pairs are the
+claim and the absolute numbers are slow); arm64 is the Mac's Lima VM
+(Apple silicon). gcc -O2 is the image's compiler; asm is the walker or
+lib.c's routine, and C is the same build with them off.
 
-| An event | x86_64 | arm64 |
+| An event | x86_64 gcc: C, asm | arm64 gcc: C, asm |
 |---|---|---|
-| `lid close`, two conditions over kernel states | 9.0 ns | 8.6 ns |
-| a chord among 32 chord rules | 53 ns | 65 ns |
-| a pattern and a lib.c call on a window's name | 26 ns | 27 ns |
-| a `when` edge | 9.3 ns | 9.8 ns |
-| an event no rule has | 1.0 ns | 2.2 ns |
-| loading the four rules of the example above: compile and check, once a file | 1.6 µs | 1.8 µs |
-| the load's check alone, as the kernel runs it | 0.1 µs | 0.2 µs |
+| `lid close`, no condition: the dispatch | 5.87, 5.80 ns | 5.91, 4.67 ns |
+| `lid close`, one condition | 8.74, 8.03 ns | 7.76, 6.50 ns |
+| `lid close`, two conditions | 11.2, 10.1 ns | 10.3, 8.20 ns |
+| a chord among 4 rules | 9.46, 8.83 ns | 8.64 ns (C) |
+| a chord among 8 rules | 10.6 ns (C) | 10.0 ns (C) |
+| a chord among 32 rules, lib.c's scan | 12.3 ns | 14.1 ns |
+| a chord among 128 rules, lib.c's scan | 16.1 ns | 23.7 ns |
+| a pattern on a window's name | 18.3 ns | 16.2 ns |
+| a lib.c call on a window's name | 14.5 ns | 14.4 ns |
+| a `when` edge | 9.2 ns | 8.6 ns |
+| an event no rule has | 0.53 ns | 0.57 ns |
+
+`memory_first_of_either_u32` against the key loop it replaced, C then
+asm: 16 keys 4.2, 0.9 ns on x86_64 (AVX2) and 7.8, 4.9 ns on arm64
+(NEON); 32 keys 7.1, 1.6 and 15.0, 6.4; 128 keys 25, 3.8 and 61, 14; 1000
+keys 212, 27 and 424, 90.
+
+Before this floor (the first evaluator, on an idle box, clang): the
+dispatch 3.2 ns, two conditions 9.9, a chord among 32 rules 59 and among
+128 228, a pattern 17, an event no rule has 0.82. A file's load, compile
+and check, is 1.1 to 2.0 µs once a file; its check alone, as the kernel
+runs it, 0.1 to 0.2 µs.
 
 For scale, on the same box: a hook script run for each event is about
 514 µs, and a shell function in a long-lived process about 17 µs. A rule
-answered by rover is about 1,900 times cheaper than the function and
-57,000 times cheaper than the script, before any action runs.
+answered by rover is about two thousand times cheaper than the function
+and fifty thousand times cheaper than the script, before any action runs.
 
 ## The verb
 
