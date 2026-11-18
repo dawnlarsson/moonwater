@@ -535,7 +535,11 @@ static b32 files_listing_take(struct files_model address_to m, struct files_list
                 entry->size = facts.size, entry->modified = facts.modified.seconds, entry->inode = facts.inode;
                 // A link's symbol is what it names, looked at through it once; a link to nothing is a link to a plain file.
                 if (entry->kind == FILES_KIND_LINK)
-                        entry->mode = file_look_code(m->reader.handle, (string_address)record->d_name, 0, &facts) == 0 ? (p16)facts.mode : 0;
+                {
+                        file_facts named;
+
+                        entry->mode = file_look_code(m->reader.handle, (string_address)record->d_name, 0, &named) == 0 ? (p16)named.mode : 0;
+                }
                 entry->device_major = facts.device_major, entry->device_minor = facts.device_minor;
                 entry->born = facts.created.seconds, entry->born_part = facts.created.nanoseconds;
         }
@@ -1998,6 +2002,7 @@ struct files_move
         file_facts into_facts;
         p8 address_to paths;              // the sources, absolute, each with its end
         p8 address_to copied;             // per source: 1 when it is copied (a copy, or a move across filesystems), 2 when it is done
+        p8 address_to landed;             // per source, FILES_NAME bytes: the name it has in into once it is there ("" none), for an undo
         p32 count, next;
         // The source being worked: its folder, its name, how it was looked at, the name it has in into.
         bipolar from;
@@ -2020,6 +2025,12 @@ struct files_move
         thread address_to worker;
         b32 begun;                        // files_move_begin was called: files_move_end has what it holds to let go of
 };
+
+// The name source which has in the folder it went into, "" while it has none there.
+static inline p8 address_to files_move_landed(const struct files_move address_to job, p32 which)
+{
+        return job->landed + (positive)which * FILES_NAME;
+}
 
 static b32 files_move_cancelled(const struct files_move address_to job)
 {
@@ -2070,7 +2081,7 @@ static fn files_move_close(struct files_move address_to job)
 // The bytes of a move's own memory: the sources' paths, and a mark each.
 static positive files_move_bytes(void)
 {
-        return (positive)FILES_MOVE_MOST * FILES_PATH / 4 + FILES_MOVE_MOST;
+        return (positive)FILES_MOVE_MOST * FILES_PATH / 4 + FILES_MOVE_MOST + (positive)FILES_MOVE_MOST * FILES_NAME;
 }
 
 /*
@@ -2100,7 +2111,7 @@ static b32 files_move_begin(struct files_move address_to job, int how, bipolar i
                 files_move_fail(job, mapped);
                 return false;
         }
-        job->paths = (p8 address_to)mapped, job->copied = job->paths + room;
+        job->paths = (p8 address_to)mapped, job->copied = job->paths + room, job->landed = job->copied + FILES_MOVE_MOST;
         for (p32 k = 0; k < count && job->count < FILES_MOVE_MOST; k++)
         {
                 positive length = string_length((string_address)paths);
@@ -2598,6 +2609,7 @@ static b32 files_move_step(struct files_move address_to job)
                                                                  (positive)job->named, FILE_RENAME_NOREPLACE)) >= 0)
                         {
                                 job->copied[job->next] = 2, job->renamed += numbered;
+                                string_copy_bounded((string_address)files_move_landed(job, job->next), (string_address)job->named, FILES_NAME);
                                 __atomic_add_fetch(&job->items_total, 1, __ATOMIC_RELEASE);
                                 __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE);
                         }
@@ -2656,6 +2668,7 @@ static b32 files_move_step(struct files_move address_to job)
                         return false;
                 }
                 job->renamed += numbered;
+                string_copy_bounded((string_address)files_move_landed(job, job->next), (string_address)job->named, FILES_NAME);
                 if (!files_move_one(job, job->from, job->name, &job->facts, job->named, false))
                         return false;
                 if (!job->depth && job->out < 0)
@@ -2732,6 +2745,196 @@ static fn files_move_end(struct files_move address_to job)
         }
         memory_fill(job, 0, sizeof(*job));
         job->into = job->from = job->in = job->out = job->out_folder = -1;
+}
+
+/* ---- the bin ---- */
+/*
+        The bin is the desktop's common one under the home folder (on the data partition): BIN/files holds what was put there, each
+        under a name free there (files_move_free_name), and BIN/info/NAME.trashinfo says where it was and when:
+
+            [Trash Info]
+            Path=/root/a/one.txt
+            DeletionDate=2026-11-18T17:45:00
+
+        the path with every byte but letters, digits and / . - _ ~ as %XX. Putting is a rename on one filesystem (nothing is copied, so
+        nothing is lost if it stops); one on another filesystem is refused (FILES_DID_CROSS), which a real delete (Shift+Delete) does.
+        Restoring renames it back where it was, under a free name there if that is taken, and removes its info.
+*/
+#define FILES_DID_CROSS 9 // the bin is on another filesystem: nothing was moved
+
+// A path's folders made where they are missing (mode 0700), as mkdir -p does.
+static b32 files_bin_folders(const p8 address_to path)
+{
+        p8 at[FILES_PATH];
+        positive length = string_length((string_address)path);
+
+        if (!length || length >= FILES_PATH)
+                return false;
+        memory_copy(at, path, length + 1);
+        for (positive k = 1; k <= length; k++)
+                if (at[k] == '/' || at[k] == 0)
+                {
+                        p8 was = at[k];
+                        bipolar made;
+
+                        at[k] = 0;
+                        made = (bipolar)system_call_3(syscall(mkdirat), AT_FDCWD, (positive)at, 0700);
+                        if (made < 0 && made != -ERROR_EXISTS)
+                                return false;
+                        at[k] = was;
+                }
+        return true;
+}
+
+// The bin's own folder kind into into: BIN/files or BIN/info, with a name after it when one is given.
+static b32 files_bin_join(p8 address_to into, const p8 address_to bin, const char address_to part, const p8 address_to name, const char address_to suffix)
+{
+        string_copy_bounded((string_address)into, (string_address)bin, FILES_PATH);
+        string_append_bounded((string_address)into, (string_address)part, FILES_PATH);
+        if (name)
+        {
+                string_append_bounded((string_address)into, (string_address) "/", FILES_PATH);
+                string_append_bounded((string_address)into, (string_address)name, FILES_PATH);
+        }
+        if (suffix)
+                string_append_bounded((string_address)into, (string_address)suffix, FILES_PATH);
+        return string_length((string_address)into) + 1 < FILES_PATH;
+}
+
+// The last name of a path.
+static const p8 address_to files_base_name(const p8 address_to path)
+{
+        const p8 address_to base = path;
+
+        for (const p8 address_to c = path; *c; c++)
+                if (*c == '/' && c[1])
+                        base = c + 1;
+        return base;
+}
+
+/*
+        The entry at path (absolute) put in the bin, its info saying it was deleted at when ("YYYY-MM-DDThh:mm:ss"): FILES_DID with the
+        name it has in BIN/files in named (FILES_NAME), FILES_DID_CROSS where the bin is on another filesystem, FILES_DID_FAILED else.
+*/
+static int files_bin_put(const p8 address_to bin, const p8 address_to path, const char address_to when, p8 address_to named)
+{
+        static const char hex[] = "0123456789ABCDEF";
+        p8 files_dir[FILES_PATH], into[FILES_PATH], info[FILES_PATH], text[FILES_PATH * 3 + 96];
+        positive used = 0;
+        b32 numbered;
+        bipolar folder, moved, out;
+
+        if (!files_bin_join(files_dir, bin, "/files", null, null) || !files_bin_folders(files_dir) || !files_bin_join(info, bin, "/info", null, null) ||
+            !files_bin_folders(info))
+                return FILES_DID_FAILED;
+        if ((folder = system_open_at(AT_FDCWD, (string_address)files_dir, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return FILES_DID_FAILED;
+        // The info first, under the name the entry will have: a name whose info could not be made is never taken.
+        for (int tries = 0; tries < 8; tries++)
+        {
+                if (!files_move_free_name(folder, files_base_name(path), named, &numbered) || !files_bin_join(info, bin, "/info", named, ".trashinfo"))
+                {
+                        system_close(folder);
+                        return FILES_DID_FAILED;
+                }
+                out = system_open_at_mode(AT_FDCWD, (string_address)info, FILE_WRITE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC, 0600);
+                if (out >= 0)
+                        break;
+        }
+        if (out < 0)
+        {
+                system_close(folder);
+                return FILES_DID_FAILED;
+        }
+        memory_copy(text, "[Trash Info]\nPath=", 18), used = 18;
+        for (const p8 address_to c = path; *c && used + 4 < sizeof(text) - 64; c++)
+                if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '/' || *c == '.' || *c == '-' || *c == '_' || *c == '~')
+                        text[used++] = *c;
+                else
+                        text[used++] = '%', text[used++] = (p8)hex[*c >> 4], text[used++] = (p8)hex[*c & 15];
+        memory_copy(text + used, "\nDeletionDate=", 14), used += 14;
+        for (const char address_to c = when; *c && used + 2 < sizeof(text); c++)
+                text[used++] = (p8)*c;
+        text[used++] = '\n';
+        system_write_once((b32)out, text, used);
+        system_close(out);
+        files_bin_join(into, bin, "/files", named, null);
+        moved = (bipolar)system_call_5(syscall(renameat2), AT_FDCWD, (positive)path, AT_FDCWD, (positive)into, FILE_RENAME_NOREPLACE);
+        system_close(folder);
+        if (moved < 0)
+        {
+                system_remove_at(AT_FDCWD, (string_address)info, 0);
+                return moved == -ERROR_CROSS_DEVICE ? FILES_DID_CROSS : FILES_DID_FAILED;
+        }
+        return FILES_DID;
+}
+
+// Where an entry of the bin (its name in BIN/files) was, from its info, %XX made bytes again: false when it has no info or none says.
+static b32 files_bin_was(const p8 address_to bin, const p8 address_to name, p8 address_to path)
+{
+        p8 info[FILES_PATH], text[FILES_PATH * 3 + 128];
+        bipolar got;
+        positive at = 0, out = 0;
+
+        if (!files_bin_join(info, bin, "/info", name, ".trashinfo"))
+                return false;
+        got = file_slurp_once_at(AT_FDCWD, (string_address)info, text, sizeof(text) - 1);
+        if (got <= 0)
+                return false;
+        text[got] = 0;
+        for (; at + 5 < (positive)got; at++)
+                if ((at == 0 || text[at - 1] == '\n') && !memory_compare(text + at, "Path=", 5))
+                        break;
+        if (at + 5 >= (positive)got)
+                return false;
+        for (at += 5; text[at] && text[at] != '\n' && out + 1 < FILES_PATH; at++)
+        {
+                p8 c = text[at];
+
+                if (c == '%' && text[at + 1] && text[at + 2])
+                {
+                        int high = text[at + 1] <= '9' ? text[at + 1] - '0' : (text[at + 1] | 32) - 'a' + 10;
+                        int low = text[at + 2] <= '9' ? text[at + 2] - '0' : (text[at + 2] | 32) - 'a' + 10;
+
+                        c = (p8)(high << 4 | low), at += 2;
+                }
+                path[out++] = c;
+        }
+        path[out] = 0;
+        return out > 1 && path[0] == '/';
+}
+
+/*
+        The entry of the bin named name put back where it was: FILES_DID with the path it has now in back (FILES_PATH; a free name in its
+        folder if its own is taken, the folder made if it is gone), FILES_DID_FAILED else.
+*/
+static int files_bin_restore(const p8 address_to bin, const p8 address_to name, p8 address_to back)
+{
+        p8 from[FILES_PATH], info[FILES_PATH], folder_path[FILES_PATH], free[FILES_NAME];
+        positive cut;
+        b32 numbered;
+        bipolar folder, moved;
+
+        if (!files_bin_was(bin, name, back) || !files_bin_join(from, bin, "/files", name, null) || !files_bin_join(info, bin, "/info", name, ".trashinfo"))
+                return FILES_DID_FAILED;
+        string_copy_bounded((string_address)folder_path, (string_address)back, FILES_PATH);
+        cut = (positive)(files_base_name(folder_path) - folder_path);
+        folder_path[cut > 1 ? cut - 1 : 1] = 0;
+        if (!files_bin_folders(folder_path) || (folder = system_open_at(AT_FDCWD, (string_address)folder_path, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return FILES_DID_FAILED;
+        if (!files_move_free_name(folder, files_base_name(back), free, &numbered))
+        {
+                system_close(folder);
+                return FILES_DID_FAILED;
+        }
+        moved = (bipolar)system_call_5(syscall(renameat2), AT_FDCWD, (positive)from, (positive)folder, (positive)free, FILE_RENAME_NOREPLACE);
+        system_close(folder);
+        if (moved < 0)
+                return FILES_DID_FAILED;
+        system_remove_at(AT_FDCWD, (string_address)info, 0);
+        back[cut] = 0;
+        string_append_bounded((string_address)back, (string_address)free, FILES_PATH);
+        return FILES_DID;
 }
 
 #endif // MOONWATER_FILES_MODEL

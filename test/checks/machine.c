@@ -4051,6 +4051,43 @@ static fn browser_moves(void)
                         system_close(into);
                 check("browser: a taken name's copy is stem.copy.ext, then stem.copy2.ext, a name with its dot first stem.copy, a free name its own", named);
         }
+        // The bin: a file put there is gone from its folder, in BIN/files with an info that says where it was (its odd bytes as %XX), a
+        // second of the same name given a copy's name; put back, it is where it was and its info gone; put back where its name is taken,
+        // it is given a free one. And a move says the names its things landed as, for its undo.
+        {
+                p8 bin[FILES_PATH], path[FILES_PATH], named[FILES_NAME], second[FILES_NAME], was[FILES_PATH], back[FILES_PATH];
+                bipolar fresh;
+                b32 put, restored, again;
+
+                browser_path(bin, (string_address) "bin");
+                browser_path(path, (string_address) "mv/dst/a b.txt");
+                fresh = (bipolar)system_call_4(syscall(openat), AT_FDCWD, (positive)path, FILE_CREATE | FILE_WRITE | O_TRUNC, 0644);
+                if (fresh >= 0)
+                        system_call_1(syscall(close), fresh);
+                put = files_bin_put(bin, path, "2026-11-18T12:00:00", named) == FILES_DID && string_equals((string_address)named, (string_address) "a b.txt") &&
+                      !browser_there((string_address) "mv/dst/a b.txt") && browser_there((string_address) "bin/files/a b.txt") &&
+                      browser_there((string_address) "bin/info/a b.txt.trashinfo") && files_bin_was(bin, named, was) && string_equals((string_address)was, (string_address)path);
+                {
+                        p8 info[FILES_PATH * 3];
+                        bipolar got;
+
+                        browser_path(was, (string_address) "bin/info/a b.txt.trashinfo");
+                        got = file_slurp_once_at(AT_FDCWD, (string_address)was, info, sizeof(info) - 1);
+                        info[got > 0 ? got : 0] = 0;
+                        put = put && got > 0 && string_find((string_address)info, (string_address) "a%20b.txt\nDeletionDate=2026-11-18T12:00:00\n") &&
+                              !memory_compare(info, "[Trash Info]\nPath=/", 19);
+                }
+                fresh = (bipolar)system_call_4(syscall(openat), AT_FDCWD, (positive)path, FILE_CREATE | FILE_WRITE | O_TRUNC, 0644);
+                if (fresh >= 0)
+                        system_call_1(syscall(close), fresh);
+                put = put && files_bin_put(bin, path, "2026-11-18T12:00:01", second) == FILES_DID && string_equals((string_address)second, (string_address) "a b.copy.txt");
+                check("browser: Delete puts a file in the bin's files with an info of where it was and when, a second of its name as a copy's", put);
+                restored = files_bin_restore(bin, named, back) == FILES_DID && string_equals((string_address)back, (string_address)path) &&
+                           browser_there((string_address) "mv/dst/a b.txt") && !browser_there((string_address) "bin/info/a b.txt.trashinfo") &&
+                           !browser_there((string_address) "bin/files/a b.txt");
+                again = files_bin_restore(bin, second, back) == FILES_DID && browser_there((string_address) "mv/dst/a b.copy.txt");
+                check("browser: put back, a thing in the bin is where it was and its info is gone; where its name is taken it has a free one", restored && again);
+        }
 
         // A move on one filesystem: a rename. Then back into the folder it came from, where its name is free again.
         count = browser_sources(paths, sizeof(paths), move_these, 1);
@@ -4209,7 +4246,7 @@ static fn browser_asks(void)
         check("browser: a delete's question says how many would go and the first three of their names as words from outside, with how many more after them", said);
         files_delete();
         asked = files.armed && files.big->job.state == FILES_JOB_IDLE && files.big->note[0] && browser_there((string_address) "asks/a") &&
-                string_equals((string_address)files.big->note, (string_address) "Delete 5: a, b\xe2\x90\x8a" "ad, c +2? Delete again does it, Escape leaves them");
+                string_equals((string_address)files.big->note, (string_address) "Delete 5 for good: a, b\xe2\x90\x8a" "ad, c +2? Shift+Delete again does it, Escape leaves them");
         check("browser: Delete asks first: the foot has the question, and nothing is removed by the asking", asked);
         // The listing changes after the question (a reload counts its revision up): Delete asks again and removes nothing.
         files_model_reload(m);
@@ -4217,7 +4254,7 @@ static fn browser_asks(void)
         files_model_choose(m, 0, FILES_CHOOSE_ONLY);
         files_delete();
         again = files.armed && files.big->job.state == FILES_JOB_IDLE && browser_there((string_address) "asks/a") &&
-                string_equals((string_address)files.big->note, (string_address) "Delete 1: a? Delete again does it, Escape leaves them");
+                string_equals((string_address)files.big->note, (string_address) "Delete 1 for good: a? Shift+Delete again does it, Escape leaves them");
         files_delete();
         begun = !files.armed && files.big->job.state == FILES_JOB_RUNNING && files.big->job.count == 1;
         while (files_job_step(m, &files.big->job, 4))

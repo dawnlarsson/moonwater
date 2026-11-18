@@ -7952,6 +7952,9 @@ LANGUAGE_ID(editor_write_beside, "could not write beside the file") \
 LANGUAGE_ID(editor_writes_over_changed, "writes over the change on disk (Ctrl+R reads it again)") \
 LANGUAGE_ID(editor_writes_over_readonly, "writes over a read-only file") \
 LANGUAGE_ID(files_back, "Back") \
+LANGUAGE_ID(files_bin_cross, "The bin is on another disk: Shift+Delete deletes it for good") \
+LANGUAGE_ID(files_bin_emptied, "The bin is empty") \
+LANGUAGE_ID(files_binned, "%d moved to the bin: Ctrl+Z puts them back") \
 LANGUAGE_ID(files_busy, "A copy, a move or a delete is under way") \
 LANGUAGE_ID(files_carry_here, "They are in this folder already: nothing is moved") \
 LANGUAGE_ID(files_carrying, "Carrying %d: Tab drops them here, a press on a folder drops them in it, Escape puts them back") \
@@ -7968,6 +7971,7 @@ LANGUAGE_ID(files_count, "%d items") \
 LANGUAGE_ID(files_count_cut, "The first %d items: the folder has more") \
 LANGUAGE_ID(files_count_found, "%1$d of %2$d shown") \
 LANGUAGE_ID(files_delete_ask, "Delete %1$d: %2$s? Delete again does it, Escape leaves them") \
+LANGUAGE_ID(files_delete_for_good, "Delete %1$d for good: %2$s? Shift+Delete again does it, Escape leaves them") \
 LANGUAGE_ID(files_delete_stopped, "Stopped at %2$s: %1$d deleted before it") \
 LANGUAGE_ID(files_deleted, "%d deleted") \
 LANGUAGE_ID(files_deleting, "Deleting: %d so far, Escape stops") \
@@ -7988,8 +7992,12 @@ LANGUAGE_ID(files_name_taken, "That name is taken") \
 LANGUAGE_ID(files_new_folder, "New folder") \
 LANGUAGE_ID(files_not_folder, "This is not a folder") \
 LANGUAGE_ID(files_nothing_to_paste, "The clipboard holds no files") \
+LANGUAGE_ID(files_nothing_to_redo, "Nothing to do again") \
+LANGUAGE_ID(files_nothing_to_undo, "Nothing to undo") \
 LANGUAGE_ID(files_reading, "Reading the folder") \
+LANGUAGE_ID(files_redone, "%d done again") \
 LANGUAGE_ID(files_rename_hint, "New name") \
+LANGUAGE_ID(files_restored, "%d put back where they were") \
 LANGUAGE_ID(files_selecting, "Selection mode, %d chosen: tap items to add or take them out, Escape or Done to finish") \
 LANGUAGE_ID(files_sheet_created, "Made %s") \
 LANGUAGE_ID(files_sheet_file, "File") \
@@ -8007,6 +8015,7 @@ LANGUAGE_ID(files_sheet_size_in, "Size %1$s in %2$d items") \
 LANGUAGE_ID(files_type_ext, "%s file") \
 LANGUAGE_ID(files_type_link, "Link") \
 LANGUAGE_ID(files_type_other, "Special file") \
+LANGUAGE_ID(files_undone, "%d undone") \
 LANGUAGE_ID(files_unreadable, "This folder may not be read") \
 LANGUAGE_ID(files_up, "Up") \
 LANGUAGE_ID(installer_apps_about, "They are installed on the new system once it is written.") \
@@ -8084,6 +8093,9 @@ LANGUAGE_ID(launcher_run, "Run %s") \
 LANGUAGE_ID(launcher_search_hint, "Search programs, or type a command") \
 LANGUAGE_ID(launcher_sleep, "Sleep") \
 LANGUAGE_ID(launcher_sleep_armed, "sleep") \
+LANGUAGE_ID(menu_bin_empty, "Empty the bin") \
+LANGUAGE_ID(menu_bin_open, "Open the bin") \
+LANGUAGE_ID(menu_bin_restore, "Put back") \
 LANGUAGE_ID(menu_copy, "&Copy") \
 LANGUAGE_ID(menu_cut, "Cu&t") \
 LANGUAGE_ID(menu_delete, "&Delete") \

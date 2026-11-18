@@ -128,6 +128,13 @@
 #define FILES_MENU_ICONS 30          // as large icons,
 #define FILES_MENU_LIST 31           // or as a list of names, a small symbol before each
 #define FILES_MENU_SORT 32           // and 33, 34, 35: the rows ordered by name, size, type or time (the columns' order)
+#define FILES_MENU_UNDO 40
+#define FILES_MENU_REDO 41
+#define FILES_MENU_BIN 42            // the bin shown
+#define FILES_MENU_BIN_EMPTY 43      // everything in it deleted for good, asked first
+#define FILES_MENU_RESTORE 44        // what is chosen in it put back where it was
+#define FILES_KEY_Z 44
+#define FILES_KEY_Y 21
 #define FILES_VIEW_DETAILS 0
 #define FILES_VIEW_ICONS 1
 #define FILES_VIEW_LIST 2
@@ -151,6 +158,30 @@ struct files_big
         char note[256];                // what the foot says of the last thing done, in the language's words with its numbers and names in
         char status[192];              // the foot's words
         char sheet[FILES_SHEET_LINES][FILES_NAME * 3 + 64]; // a properties sheet's lines
+};
+
+/*
+        A deed (Ctrl+Z, Ctrl+Y): what a move, a copy, a rename or a putting in the bin did, as pairs of paths, each with its end: where
+        each thing was and where it is now (a copy's: its source and the copy). Undone, a move and a rename are renamed back, a thing in
+        the bin is put back, and a copy is put in the bin (nothing is ever deleted by an undo); done again, the other way.
+*/
+#define FILES_DEEDS 32
+enum
+{
+        FILES_DEED_MOVE,   // from, to: moved there (a carry, a drop, a cut's paste)
+        FILES_DEED_COPY,   // source, copy
+        FILES_DEED_RENAME, // old path, new path
+        FILES_DEED_BIN,    // where it was, where it is in the bin's files
+};
+
+struct files_deed
+{
+        int kind;
+        p32 count;
+        p8 address_to pairs;
+        positive room, used;
+        b32 binned;   // a copy undone: its copies are in the bin, the pairs are the copy and where it is in the bin
+        b32 restored; // a bin's deed that put things back: undone it puts them in again
 };
 
 static struct
@@ -207,6 +238,13 @@ static struct
         // while the press is held (hold_carry: its release drops it), on the ground it turns to selection mode (selecting: a tap on a
         // row adds it or takes it out, a press on the ground begins a band that adds, the foot says so and has Done), till Escape or Done.
         b32 hold_carry, selecting;
+        // What was done that Ctrl+Z undoes and Ctrl+Y does again (files_deed): the last FILES_DEEDS, deed_done of them done, the ones after
+        // them undone (a new one forgets those). move_into is the folder a copy or a move under way goes into, for its deed; undoing is a
+        // move begun by an undo, which is no deed of its own.
+        struct files_deed deed[FILES_DEEDS];
+        int deed_count, deed_done;
+        p8 move_into[FILES_PATH];
+        b32 undoing;
         struct ui_drop drop;     // a drag of files over the window: dropped, they are copied or moved into the folder it is over
         int drop_row;            // the folder's row the drop goes into, -1 the folder shown
         b64 next_progress;       // when the foot next says how far a copy has gone
@@ -235,6 +273,10 @@ static struct ui_app files_app;
 static p8 files_band_base[FILES_MOST / 8]; // what was chosen when a band with Control began
 static b32 files_carried(const p8 address_to name, positive length);
 static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how);
+static b32 files_in_bin(void);
+static struct files_deed address_to files_deed_new(int kind);
+static fn files_deed_add(struct files_deed address_to d, const p8 address_to from, const p8 address_to to);
+static fn files_deed_keep(struct files_deed address_to d);
 
 /* ---- the rows ---- */
 
@@ -819,7 +861,7 @@ static fn files_delete(void)
                 return;
         }
         files.armed = true, files.armed_at = m->revision;
-        language_format(files.big->note, sizeof(files.big->note), WORDS(files_delete_ask), (int)count, names);
+        language_format(files.big->note, sizeof(files.big->note), files_in_bin() ? WORDS(files_delete_ask) : WORDS(files_delete_for_good), (int)count, names);
         files.dirty = true;
 }
 
@@ -862,7 +904,30 @@ static fn files_name_go(void)
         int did;
 
         typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
-        did = files_model_rename(m, files.naming, typed);
+        {
+                // The deed: the old path and the new, made before the rename while the entry is still the one listed.
+                const struct files_entry address_to entry = files_model_entry(m, files.naming);
+                static p8 was[FILES_PATH], now[FILES_PATH];
+
+                was[0] = 0;
+                if (entry)
+                {
+                        string_copy_bounded((string_address)was, (string_address)m->path, FILES_PATH);
+                        if (string_length((string_address)was) > 1)
+                                string_append_bounded((string_address)was, (string_address) "/", FILES_PATH);
+                        string_copy_bounded((string_address)now, (string_address)was, FILES_PATH);
+                        string_append_bounded((string_address)was, (string_address)files_model_name(m, entry), FILES_PATH);
+                        string_append_bounded((string_address)now, (string_address)typed, FILES_PATH);
+                }
+                did = files_model_rename(m, files.naming, typed);
+                if (did == FILES_DID && was[0])
+                {
+                        struct files_deed address_to d = files_deed_new(FILES_DEED_RENAME);
+
+                        files_deed_add(d, was, now);
+                        files_deed_keep(d);
+                }
+        }
         if (did != FILES_DID)
         {
                 files.said = did == FILES_DID_EXISTS ? LANGUAGE_files_name_taken : did == FILES_DID_BAD ? LANGUAGE_files_name_bad : LANGUAGE_files_unreadable;
@@ -1002,6 +1067,344 @@ static fn files_uris_free(p8 address_to uris, positive uris_room, p8 address_to 
 
         array_store_release(uris, uris_room, uri_length);
         array_store_release(paths, paths_room, path_length);
+}
+
+/* ---- the bin and the deeds ---- */
+
+// The bin's folder: the desktop's common one under the home folder ($HOME/.local/share/Trash), or none without a home.
+static b32 files_bin_root(p8 address_to into)
+{
+        string_address home = getenv((string_address) "HOME");
+
+        if (!home || home[0] != '/')
+                return false;
+        string_copy_bounded((string_address)into, home, FILES_PATH);
+        string_append_bounded((string_address)into, (string_address) "/.local/share/Trash", FILES_PATH);
+        return string_length((string_address)into) + 16 < FILES_PATH;
+}
+
+// Whether the folder shown is the bin's files.
+static b32 files_in_bin(void)
+{
+        p8 bin[FILES_PATH];
+
+        if (!files_bin_root(bin))
+                return false;
+        string_append_bounded((string_address)bin, (string_address) "/files", FILES_PATH);
+        return string_equals((string_address)bin, (string_address)files.big->model.path);
+}
+
+// Now, as a bin's info says when: 2026-11-18T17:45:00 in the machine's zone.
+static fn files_now_text(char address_to into)
+{
+        tm broken;
+        timespec real = {0, 0};
+        time_t at;
+
+        clock_gettime(CLOCK_REALTIME, address_of real);
+        at = (time_t)real.tv_sec;
+
+        string_copy_bounded((string_address)into, (string_address) "1970-01-01T00:00:00", 20);
+        if (!localtime_r(&at, &broken) || broken.tm_year + 1900 < 0 || broken.tm_year + 1900 > 9999)
+                return;
+        {
+                int year = broken.tm_year + 1900, parts[5] = {broken.tm_mon + 1, broken.tm_mday, broken.tm_hour, broken.tm_min, broken.tm_sec};
+
+                into[0] = (char)('0' + year / 1000), into[1] = (char)('0' + year / 100 % 10), into[2] = (char)('0' + year / 10 % 10), into[3] = (char)('0' + year % 10);
+                for (int k = 0; k < 5; k++)
+                        into[5 + 3 * k] = (char)('0' + parts[k] / 10), into[6 + 3 * k] = (char)('0' + parts[k] % 10);
+        }
+}
+
+static fn files_deed_free(struct files_deed address_to d)
+{
+        array_store_release(d->pairs, d->room, d->used);
+        memory_zero(d, sizeof(*d));
+}
+
+// A new deed of a kind: the ones undone after the last done are forgotten, and the oldest when there are FILES_DEEDS.
+static struct files_deed address_to files_deed_new(int kind)
+{
+        struct files_deed address_to d;
+
+        while (files.deed_count > files.deed_done)
+                files_deed_free(&files.deed[--files.deed_count]);
+        if (files.deed_count == FILES_DEEDS)
+        {
+                files_deed_free(&files.deed[0]);
+                for (int k = 0; k + 1 < FILES_DEEDS; k++)
+                        files.deed[k] = files.deed[k + 1];
+                memory_zero(&files.deed[FILES_DEEDS - 1], sizeof(files.deed[0]));
+                files.deed_count--, files.deed_done--;
+        }
+        d = &files.deed[files.deed_count++];
+        files.deed_done = files.deed_count;
+        memory_zero(d, sizeof(*d));
+        d->kind = kind;
+        return d;
+}
+
+// A pair added to a deed: where it was, where it is.
+static fn files_deed_add(struct files_deed address_to d, const p8 address_to from, const p8 address_to to)
+{
+        positive a = string_length((string_address)from) + 1, b = string_length((string_address)to) + 1;
+
+        if (!array_store_reserve(d->pairs, d->room, d->used, d->used + a + b, 4096))
+                return;
+        memory_copy(d->pairs + d->used, from, a), memory_copy(d->pairs + d->used + a, to, b);
+        d->used += a + b, d->count++;
+}
+
+// A deed with nothing in it is no deed.
+static fn files_deed_keep(struct files_deed address_to d)
+{
+        if (d->count)
+                return;
+        files_deed_free(d);
+        files.deed_count--, files.deed_done = files.deed_count;
+}
+
+// The deed of a copy or a move that is over: each thing that landed, from its source to its name in the folder it went into.
+static fn files_move_deed(const struct files_move address_to job)
+{
+        struct files_deed address_to d;
+        p8 to[FILES_PATH];
+
+        if (files.undoing || job->how == FILES_MOVE_MEASURE || !files.move_into[0])
+        {
+                files.undoing = false;
+                return;
+        }
+        d = files_deed_new(job->how == FILES_MOVE_MOVE ? FILES_DEED_MOVE : FILES_DEED_COPY);
+        for (p32 k = 0; k < job->count; k++)
+        {
+                const p8 address_to landed = files_move_landed(job, k);
+
+                if (!landed[0] || !job->copied[k])
+                        continue;
+                string_copy_bounded((string_address)to, (string_address)files.move_into, FILES_PATH);
+                if (string_length((string_address)to) > 1)
+                        string_append_bounded((string_address)to, (string_address) "/", FILES_PATH);
+                string_append_bounded((string_address)to, (string_address)landed, FILES_PATH);
+                files_deed_add(d, files_move_path(job, k), to);
+        }
+        files_deed_keep(d);
+}
+
+/*
+        A deed undone (back) or done again: each pair the other way, the last first. A rename back that fails (the name is taken now, or a
+        move went across filesystems) leaves that one where it is. Answers how many were turned.
+*/
+static int files_deed_turn(struct files_deed address_to d, b32 back)
+{
+        p8 bin[FILES_PATH], named[FILES_NAME], where[FILES_PATH];
+        char when[24];
+        static const p8 address_to pair[FILES_MOVE_MOST][2];
+        struct files_deed turned;
+        int done = 0;
+        p32 count = 0;
+
+        files_now_text(when);
+        for (positive at = 0; at < d->used && count < FILES_MOVE_MOST; count++)
+        {
+                pair[count][0] = d->pairs + at, at += string_length((string_address)d->pairs + at) + 1;
+                pair[count][1] = d->pairs + at, at += string_length((string_address)d->pairs + at) + 1;
+        }
+        memory_zero(&turned, sizeof(turned));
+        turned.kind = d->kind;
+        for (p32 k = count; k-- > 0;)
+        {
+                const p8 address_to from = pair[k][0], address_to to = pair[k][1];
+                b32 ok = false;
+
+                if (d->kind == FILES_DEED_MOVE || d->kind == FILES_DEED_RENAME)
+                {
+                        // Renamed from where it is to where it was, or back again; the pair stays.
+                        ok = (bipolar)system_call_5(syscall(renameat2), AT_FDCWD, (positive)(back ? to : from), AT_FDCWD, (positive)(back ? from : to),
+                                                    FILE_RENAME_NOREPLACE) >= 0;
+                        files_deed_add(&turned, from, to);
+                }
+                else if (d->kind == FILES_DEED_COPY && !d->binned && files_bin_root(bin))
+                {
+                        // A copy undone: the copy put in the bin (the pair is the copy and where it is there).
+                        ok = files_bin_put(bin, to, when, named) == FILES_DID;
+                        if (ok)
+                                files_bin_join(where, bin, "/files", named, null), files_deed_add(&turned, to, where);
+                        else
+                                files_deed_add(&turned, from, to);
+                }
+                else if (d->kind == FILES_DEED_COPY && files_bin_root(bin))
+                {
+                        // A copy done again: the copy back from the bin where it was made.
+                        ok = files_bin_restore(bin, files_base_name(to), where) == FILES_DID;
+                        if (ok)
+                                files_deed_add(&turned, where, where);
+                        else
+                                files_deed_add(&turned, from, to);
+                }
+                else if (d->kind == FILES_DEED_BIN && files_bin_root(bin))
+                {
+                        // A putting in the bin undone puts back, done again puts in; one that put back the other way round.
+                        b32 into_bin = d->restored ? back : !back;
+
+                        if (into_bin && (ok = files_bin_put(bin, from, when, named) == FILES_DID))
+                                files_bin_join(where, bin, "/files", named, null), files_deed_add(&turned, from, where);
+                        else if (!into_bin && (ok = files_bin_restore(bin, files_base_name(to), where) == FILES_DID))
+                                files_deed_add(&turned, where, to);
+                        else
+                                files_deed_add(&turned, from, to);
+                }
+                else
+                        files_deed_add(&turned, from, to);
+                done += ok;
+        }
+        // The pairs as they are now, in their first order again (they were turned the last first).
+        {
+                struct files_deed again;
+                static const p8 address_to at[FILES_MOVE_MOST][2];
+                p32 n = 0;
+
+                memory_zero(&again, sizeof(again));
+                again.kind = d->kind;
+                for (positive k = 0; k < turned.used && n < FILES_MOVE_MOST; n++)
+                {
+                        at[n][0] = turned.pairs + k, k += string_length((string_address)turned.pairs + k) + 1;
+                        at[n][1] = turned.pairs + k, k += string_length((string_address)turned.pairs + k) + 1;
+                }
+                for (p32 k = n; k-- > 0;)
+                        files_deed_add(&again, at[k][0], at[k][1]);
+                again.binned = d->kind == FILES_DEED_COPY ? (d->binned ? !done && d->binned : done > 0) : false;
+                again.restored = d->restored;
+                files_deed_free(&turned);
+                files_deed_free(d);
+                *d = again;
+        }
+        return done;
+}
+
+// Ctrl+Z: the last deed done undone. Ctrl+Y: the first undone done again. The foot says how many, and the folder is read again.
+static fn files_undo(b32 again)
+{
+        struct files_model address_to m = &files.big->model;
+        int turned;
+
+        files.said = 0, files.big->note[0] = 0;
+        if (again ? files.deed_done >= files.deed_count : files.deed_done <= 0)
+        {
+                files.said = again ? LANGUAGE_files_nothing_to_redo : LANGUAGE_files_nothing_to_undo;
+                files.dirty = true;
+                return;
+        }
+        turned = files_deed_turn(&files.deed[again ? files.deed_done : files.deed_done - 1], !again);
+        files.deed_done += again ? 1 : -1;
+        language_format(files.big->note, sizeof(files.big->note), again ? WORDS(files_redone) : WORDS(files_undone), turned);
+        files_model_reload(m);
+        files.dirty = true;
+}
+
+// Delete: what is chosen put in the bin (a deed, undone by Ctrl+Z); in the bin itself, or with Shift, a real delete, asked first.
+static fn files_bin_delete(void)
+{
+        struct files_model address_to m = &files.big->model;
+        p8 bin[FILES_PATH], named[FILES_NAME], path[FILES_PATH], where[FILES_PATH];
+        char when[24];
+        struct files_deed address_to d;
+        b32 any = m->chosen_count > 0, cross = false;
+
+        files.said = 0, files.big->note[0] = 0, files.armed = false;
+        if (m->state != FILES_READY || !files_bin_root(bin))
+                return;
+        files_now_text(when);
+        files_after_delete(m);
+        d = files_deed_new(FILES_DEED_BIN);
+        for (p32 at = 0; at < files_model_count(m); at++)
+        {
+                const struct files_entry address_to entry = files_model_entry(m, at);
+                positive folder = string_length((string_address)m->path);
+                int did;
+
+                if (!entry || (any ? !files_model_chosen(m, at) : at != m->cursor))
+                        continue;
+                string_copy_bounded((string_address)path, (string_address)m->path, FILES_PATH);
+                if (folder > 1)
+                        string_append_bounded((string_address)path, (string_address) "/", FILES_PATH);
+                string_append_bounded((string_address)path, (string_address)files_model_name(m, entry), FILES_PATH);
+                did = files_bin_put(bin, path, when, named);
+                cross |= did == FILES_DID_CROSS;
+                if (did == FILES_DID)
+                        files_bin_join(where, bin, "/files", named, null), files_deed_add(d, path, where);
+        }
+        if (d->count)
+                language_format(files.big->note, sizeof(files.big->note), WORDS(files_binned), (int)d->count);
+        else if (cross)
+                files.said = LANGUAGE_files_bin_cross;
+        files_deed_keep(d);
+        files_model_reload(m);
+        files.dirty = true;
+}
+
+// Put back: what is chosen in the bin put back where it was (a deed of the bin's, undone by putting it in again).
+static fn files_bin_put_back(void)
+{
+        struct files_model address_to m = &files.big->model;
+        p8 bin[FILES_PATH], back[FILES_PATH], where[FILES_PATH];
+        struct files_deed address_to d;
+        b32 any = m->chosen_count > 0;
+        int done = 0;
+
+        if (!files_bin_root(bin) || !files_in_bin())
+                return;
+        d = files_deed_new(FILES_DEED_BIN);
+        for (p32 at = 0; at < files_model_count(m); at++)
+        {
+                const struct files_entry address_to entry = files_model_entry(m, at);
+
+                if (!entry || (any ? !files_model_chosen(m, at) : at != m->cursor))
+                        continue;
+                files_bin_join(where, bin, "/files", files_model_name(m, entry), null);
+                if (files_bin_restore(bin, files_model_name(m, entry), back) == FILES_DID)
+                        done++, files_deed_add(d, back, where);
+        }
+        // Undone, the deed puts them in the bin again: a putting back is a bin's deed the other way round.
+        d->restored = true;
+        files_deed_keep(d);
+        language_format(files.big->note, sizeof(files.big->note), WORDS(files_restored), done);
+        files_model_reload(m);
+        files.dirty = true;
+}
+
+// The bin shown (its files), made first if there is none yet.
+static fn files_bin_show(void)
+{
+        p8 bin[FILES_PATH];
+
+        if (!files_bin_root(bin))
+                return;
+        string_append_bounded((string_address)bin, (string_address) "/files", FILES_PATH);
+        files_bin_folders(bin);
+        if (files_model_go(&files.big->model, (string_address)bin))
+                files_moved();
+}
+
+// Empty the bin: what is in it chosen and deleted for good, asked first as a delete is (Delete again does it); its infos go with it.
+static fn files_bin_empty(void)
+{
+        struct files_model address_to m = &files.big->model;
+        p8 bin[FILES_PATH], info[FILES_PATH];
+
+        if (!files_in_bin() || !files_model_count(m) || !files_bin_root(bin))
+                return;
+        files_model_choose(m, 0, FILES_CHOOSE_ONLY);
+        files_model_choose(m, files_model_count(m) - 1, FILES_CHOOSE_RANGE);
+        if (files.armed && files.armed_at == m->revision)
+                for (p32 at = 0; at < files_model_count(m); at++)
+                {
+                        const struct files_entry address_to entry = files_model_entry(m, at);
+
+                        if (entry && files_bin_join(info, bin, "/info", files_model_name(m, entry), ".trashinfo"))
+                                system_remove_at(AT_FDCWD, (string_address)info, 0);
+                }
+        files_delete();
 }
 
 /* ---- carrying ---- */
@@ -1287,6 +1690,19 @@ static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how
         }
         if (!files_move_begin(job, how, into, paths, count))
                 return false;
+        // Where it goes, for its deed (Ctrl+Z): the folder shown, or the folder of the row.
+        {
+                const struct files_model address_to m = &files.big->model;
+                const struct files_entry address_to entry = row >= 0 ? files_model_entry(m, (p32)row) : null;
+
+                string_copy_bounded((string_address)files.move_into, (string_address)m->path, FILES_PATH);
+                if (entry)
+                {
+                        if (string_length((string_address)files.move_into) > 1)
+                                string_append_bounded((string_address)files.move_into, (string_address) "/", FILES_PATH);
+                        string_append_bounded((string_address)files.move_into, (string_address)files_model_name(m, entry), FILES_PATH);
+                }
+        }
         files_move_start(job);
         files.moving = true, files.next_progress = (b64)ui_kit.now;
         return true;
@@ -1899,12 +2315,17 @@ static fn files_menu_open(b32 on, int x, int y)
                 ui_popmenu_add(menu, WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE);
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(menu, WORDS(menu_rename), "F2", m->chosen_count > 1 ? UI_MENU_DISABLED : 0, FILES_MENU_RENAME);
-                ui_popmenu_add(menu, WORDS(menu_delete), "Delete", 0, FILES_MENU_DELETE);
+                if (files_in_bin())
+                        ui_popmenu_add(menu, WORDS(menu_bin_restore), null, 0, FILES_MENU_RESTORE);
+                ui_popmenu_add(menu, WORDS(menu_delete), files_in_bin() ? "Shift+Delete" : "Delete", 0, FILES_MENU_DELETE);
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(menu, WORDS(menu_properties), "Alt+Enter", 0, FILES_MENU_PROPERTIES);
         }
         else
         {
+                ui_popmenu_add(menu, WORDS(menu_undo), "Ctrl+Z", files.deed_done > 0 ? 0 : UI_MENU_DISABLED, FILES_MENU_UNDO);
+                ui_popmenu_add(menu, WORDS(menu_redo), "Ctrl+Y", files.deed_done < files.deed_count ? 0 : UI_MENU_DISABLED, FILES_MENU_REDO);
+                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(menu, WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE);
                 ui_popmenu_add(menu, WORDS(menu_new_folder), "Ctrl+Shift+N", 0, FILES_MENU_NEW_FOLDER);
                 ui_popmenu_add(menu, WORDS(menu_select_all), "Ctrl+A", files_model_count(m) ? 0 : UI_MENU_DISABLED, FILES_MENU_ALL);
@@ -1920,6 +2341,10 @@ static fn files_menu_open(b32 on, int x, int y)
                                        UI_MENU_RADIO | (column == files.columns.sorted ? UI_MENU_ON : 0), FILES_MENU_SORT + column);
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(menu, WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL);
+                if (files_in_bin())
+                        ui_popmenu_add(menu, WORDS(menu_bin_empty), null, files_model_count(m) ? 0 : UI_MENU_DISABLED, FILES_MENU_BIN_EMPTY);
+                else
+                        ui_popmenu_add(menu, WORDS(menu_bin_open), null, 0, FILES_MENU_BIN);
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(menu, WORDS(menu_properties), null, 0, FILES_MENU_PROPERTIES);
                 // The folder's own: nothing chosen, the cursor off the rows, so what the items do is the folder's.
@@ -1988,7 +2413,17 @@ static fn files_menu_do(int id)
         case FILES_MENU_COPY: files_rows_copy(false); break;
         case FILES_MENU_PASTE: files_paste(); break;
         case FILES_MENU_RENAME: files_edit(FILES_EDIT_NAME); break;
-        case FILES_MENU_DELETE: files_delete(); break;
+        case FILES_MENU_DELETE:
+                if (files_in_bin())
+                        files_delete();
+                else
+                        files_bin_delete();
+                break;
+        case FILES_MENU_UNDO: files_undo(false); break;
+        case FILES_MENU_REDO: files_undo(true); break;
+        case FILES_MENU_RESTORE: files_bin_put_back(); break;
+        case FILES_MENU_BIN: files_bin_show(); break;
+        case FILES_MENU_BIN_EMPTY: files_bin_empty(); break;
         case FILES_MENU_NEW_FOLDER: files_new_folder(); break;
         case FILES_MENU_PROPERTIES: files_sheet_open(files.sheet_folder, files.sheet_x, files.sheet_y); break;
         case FILES_MENU_HIDDEN:
@@ -2176,10 +2611,20 @@ static b32 files_key(const struct window_event address_to event)
 
         page = page < 1 ? 1 : page;
         // Delete asks and Delete again does; Escape stops a delete under way; any other key leaves what was asked about.
+        // Delete puts what is chosen in the bin (Ctrl+Z puts it back); Shift+Delete, or Delete in the bin, deletes it for good, asked first.
         if (key == UI_KEY_DELETE)
         {
-                if (!(event->flags & WINDOW_KEY_REPEAT))
+                if (event->flags & WINDOW_KEY_REPEAT)
+                        return true;
+                if ((event->flags & WINDOW_KEY_SHIFT) || files_in_bin())
                         files_delete();
+                else
+                        files_bin_delete();
+                return true;
+        }
+        if ((event->flags & WINDOW_KEY_CONTROL) && (key == FILES_KEY_Z || key == FILES_KEY_Y))
+        {
+                files_undo(key == FILES_KEY_Y || (event->flags & WINDOW_KEY_SHIFT));
                 return true;
         }
         if (key == UI_KEY_ESCAPE && files.big->job.state == FILES_JOB_RUNNING)
@@ -2780,6 +3225,7 @@ static long files_tick(long timeout, long address_to other)
                 else if (!files_move_running(job))
                 {
                         files_move_said();
+                        files_move_deed(job);
                         files_move_end(job);
                         files.moving = false;
                         files_model_reload(m);
