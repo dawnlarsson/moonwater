@@ -70,7 +70,8 @@
 #define ROVER_RULE_OFF 4u
 #define ROVER_RULE_PLACED 8u
 #define ROVER_RULE_NUMBERS 16u // every comparison of the rule has the number form: the walker's to take whole
-#define ROVER_RULE_FLAGS 31u
+#define ROVER_RULE_TAKE 32u    // the event is the rule's: the kernel drops it before any reader (take)
+#define ROVER_RULE_FLAGS 63u
 
 #define ROVER_TRUE 0u
 #define ROVER_EQ 1u
@@ -713,7 +714,7 @@ static bool rover_glob(const p8 address_to text, p32 length, const p8 address_to
 }
 
 //      The rare numbers, out of the comparison's way: a call, the clock, the weekday.
-static __attribute__((noinline)) b64 rover_number_far(const struct rover_table address_to table,
+static __attribute__((__noinline__)) b64 rover_number_far(const struct rover_table address_to table,
                                                       struct rover_operand operand,
                                                       const struct rover_event address_to event,
                                                       const p8 address_to const address_to pages)
@@ -1103,9 +1104,11 @@ static const p8 rover_zero_page[ROVER_PAGE_BYTES];
         call (eight chord rules: 5.0 ns here against 5.9 through the scan on
         x86_64, 8.0 against 9.1 on arm64). riscv64's library body is the same
         word loop as this one, and nothing here could time it on hardware, so
-        that machine keeps the loop.
+        that machine keeps the loop, and so does a kernel build, which has no
+        body of the routine at all (lib.c keeps it under #ifndef KERNEL_MODE,
+        and the kernel owns no vector register for it).
 */
-#if RISCV64
+#if RISCV64 || defined(KERNEL_MODE)
 #define ROVER_KEY_SCAN ((positive)-1)
 #else
 #define ROVER_KEY_SCAN 16u
@@ -1113,8 +1116,10 @@ static const p8 rover_zero_page[ROVER_PAGE_BYTES];
 
 static inline INLINE positive rover_key_next(const p32 address_to keys, positive at, positive count, p32 want)
 {
+#ifndef KERNEL_MODE
         if (count - at >= ROVER_KEY_SCAN)
                 return at + memory_first_of_either_u32(keys + at, count - at, want, ROVER_KEY_ANY);
+#endif
         while (at < count && keys[at] != want && keys[at] != ROVER_KEY_ANY)
                 at++;
         return at;
@@ -1129,7 +1134,7 @@ static inline INLINE positive rover_key_next(const p32 address_to keys, positive
 */
 #define ROVER_FROM_FIRST ((positive)-1)
 
-static __attribute__((noinline)) positive rover_fire_rules(const struct rover_table address_to table,
+static __attribute__((__noinline__)) positive rover_fire_rules(const struct rover_table address_to table,
                                                            struct rover_run address_to runs,
                                                            const p8 address_to const address_to given,
                                                            const struct rover_event address_to event, p8 place,
@@ -1606,6 +1611,9 @@ static const char address_to rover_rule_check(const struct rover_table address_t
                         return why;
         if (!!(rule->flags & ROVER_RULE_NUMBERS) != rover_rule_numbers(rule, table->comparison))
                 return "a rule whose numbers flag is not its comparisons' forms";
+        //      Only the kernel can drop an event before its readers, and only an event of its own.
+        if ((rule->flags & ROVER_RULE_TAKE) && (!kernel || !event || event->source != ROVER_KERNEL))
+                return "a take on a rule outside the kernel";
         return null;
 }
 
@@ -1682,9 +1690,10 @@ static const char address_to rover_service_check(const struct rover_table addres
 
 /*
         Whether a service is wanted now: not off, and its if lines hold over
-        the pages. What the runner asks when a state changes.
+        the pages. What the runner asks when a state changes; a kernel build
+        has no services to run, and keeps it unused.
 */
-static bool rover_service_wanted(const struct rover_table address_to table, positive which,
+static __attribute__((unused)) bool rover_service_wanted(const struct rover_table address_to table, positive which,
                                  const p8 address_to const address_to given)
 {
         const struct rover_service address_to service = table->service + which;

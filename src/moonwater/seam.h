@@ -46,6 +46,18 @@
 void moonwater_bind_fire(unsigned int event);
 
 /*
+        Rover's kernel events that come from another object (rules.c): a
+        display hotplug, the counts after it and the connector that came or
+        went (none when only the counts are news), from Canvas's DRM client.
+        A spark event fired another way than a key (canvas on and off) goes
+        through moonwater_bind_fire, which tells the rules as well.
+*/
+void moonwater_rules_display(unsigned int count, unsigned int external, const char *connector, _Bool connected);
+void moonwater_rules_spark(unsigned int event);
+// How many ring records want a userspace owner to act on them: the machine's wait watches it.
+u64 moonwater_rules_pending(void);
+
+/*
         The flags of the settings this machine booted with, or those a later
         SET replaced them with; zero where there are none, which is every
         default. The bits are spark.c's and canvas.c's.

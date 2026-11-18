@@ -29990,6 +29990,17 @@ static void wake_up(wait_queue_head_t *w) { (void)w; wakes++; }
    is not in this program. */
 static _Bool canvas_running;
 static _Bool canvas_is_on(void) { return canvas_running; }
+/* Rover's kernel half (rules.c) is not in this program: the bindings tell it of
+   canvas on and off, and the machine's wait asks its ring, which stays empty. */
+#ifndef KEY_CNT
+#define KEY_CNT 0x300
+#endif
+#ifndef BITS_TO_LONGS
+#define BITS_TO_LONGS(bits) (((bits) + 8 * sizeof(long) - 1) / (8 * sizeof(long)))
+#endif
+static unsigned rules_sparks;
+void moonwater_rules_spark(unsigned int event) { (void)event; rules_sparks++; }
+u64 moonwater_rules_pending(void) { return 0; }
 """
     # The script the module bakes in, as the module has it: one object, and an
     # end that is its end. Two empty arrays stood here, and the difference

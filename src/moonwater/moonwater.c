@@ -15,6 +15,8 @@
 #define MOONWATER_STATUS 3u
 #define MOONWATER_END 4u
 #define MOONWATER_ATTACHED 0x1u
+// A wait's answer that is no spark event: rover's ring has records for userspace (src/moonwater/rules.c).
+#define MOONWATER_ROVER 0xffu
 
 struct machine_control {
         unsigned int op;     // MOONWATER_ATTACH .. END
@@ -809,6 +811,9 @@ struct bind_handle {
         struct work_struct open;
         int opened;
         unsigned int mods;
+        // rover's (rules.c): the chord modifiers this device holds, and the keys a rule took on their way down
+        unsigned int rover_mods;
+        unsigned long rover_taken[BITS_TO_LONGS(KEY_CNT)];
 };
 
 static struct bind_row bind_table[SPARK_BIND_EVENTS];
@@ -845,6 +850,7 @@ static struct {
         struct pid *process; // the thread group that attached it
         wait_queue_head_t wait;
         bool ending;
+        u64 ring_seen; // rover's ring: the records for userspace this process has been told of
 } bind_machine;
 
 static DEFINE_SPINLOCK(bind_machine_lock);
@@ -1219,6 +1225,7 @@ static void bind_fire(unsigned int event)
 void moonwater_bind_fire(unsigned int event)
 {
         bind_fire(event);
+        moonwater_rules_spark(event);
 }
 
 /*
@@ -1313,7 +1320,7 @@ static void bind_machine_fill(struct machine_control *request, unsigned int even
                 strscpy(request->name, spark_bind_event_name[event - 1],
                         sizeof(request->name));
         else
-                strscpy(request->name, "end", sizeof(request->name));
+                strscpy(request->name, event == MOONWATER_ROVER ? "rover" : "end", sizeof(request->name));
 }
 
 static long bind_machine_wait(struct file *file, struct machine_control *request)
@@ -1346,13 +1353,21 @@ static long bind_machine_wait(struct file *file, struct machine_control *request
                         spin_unlock_irqrestore(&bind_machine_lock, flags);
                         return 0;
                 }
+                //      Rover's ring has records a userspace owner acts on: the machine is that owner until the runner is.
+                if (moonwater_rules_pending() != bind_machine.ring_seen) {
+                        bind_machine.ring_seen = moonwater_rules_pending();
+                        bind_machine_fill(request, MOONWATER_ROVER);
+                        spin_unlock_irqrestore(&bind_machine_lock, flags);
+                        return 0;
+                }
                 spin_unlock_irqrestore(&bind_machine_lock, flags);
                 if (wait_ms) {
                         left = wait_event_interruptible_timeout(
                                 bind_machine.wait,
                                 READ_ONCE(bind_machine.count) ||
                                     READ_ONCE(bind_machine.ending) ||
-                                    READ_ONCE(bind_machine.owner) != file,
+                                    READ_ONCE(bind_machine.owner) != file ||
+                                    moonwater_rules_pending() != READ_ONCE(bind_machine.ring_seen),
                                 msecs_to_jiffies(wait_ms));
                         if (left < 0)
                                 return -EINTR;
@@ -1364,7 +1379,8 @@ static long bind_machine_wait(struct file *file, struct machine_control *request
                             bind_machine.wait,
                             READ_ONCE(bind_machine.count) ||
                                 READ_ONCE(bind_machine.ending) ||
-                                READ_ONCE(bind_machine.owner) != file))
+                                READ_ONCE(bind_machine.owner) != file ||
+                                moonwater_rules_pending() != READ_ONCE(bind_machine.ring_seen)))
                         return -EINTR;
         }
 }
@@ -1446,6 +1462,7 @@ static long report_machine(struct file *file, struct machine_control __user *out
                 bind_machine.process = process;
                 bind_machine.owner = file;
                 bind_machine.ending = false;
+                bind_machine.ring_seen = moonwater_rules_pending();
                 request.queued = bind_machine.count;
                 atomic_set(&bind_machine_live, 1);
                 spin_unlock_irqrestore(&bind_machine_lock, flags);
@@ -1682,8 +1699,10 @@ static void bind_event_run(struct input_handle *handle, unsigned int type,
         bind_queue(row);
 }
 
-// Counted and, one in sixteen, timed: what `moonwater latency` shows.
-static void bind_event(struct input_handle *handle, unsigned int type,
+// Counted and, one in sixteen, timed: what `moonwater latency` shows. The
+// kernel's watch is bind_filter now, which counts the same way; this is the
+// bindings alone, as a test drives them.
+static __attribute__((unused)) void bind_event(struct input_handle *handle, unsigned int type,
                        unsigned int code, int value)
 {
         u64 started = moonwater_cost_begin(&bind_cost);
@@ -1711,6 +1730,32 @@ static void bind_open(struct work_struct *work)
         bind->opened = input_open_device(&bind->handle);
 }
 
+// Rover's half of the key watch, in rules.c, which is expanded after this file.
+static bool rules_input(struct bind_handle *bind, unsigned int type, unsigned int code, int value);
+static void rules_device(struct bind_handle *bind, bool added);
+
+/*
+        The watch is a filter, so the input core puts it at the head of each
+        device's handles and calls it before evdev and the console's keyboard:
+        rover's rules hear an event before any reader does, and a rule that
+        takes it drops it here. The bindings below hear what it lets through.
+*/
+static _Bool bind_filter(struct input_handle *handle, unsigned int type,
+                         unsigned int code, int value)
+{
+        struct bind_handle *bind = container_of(handle, struct bind_handle, handle);
+        u64 started = moonwater_cost_begin(&bind_cost);
+        bool taken = false;
+
+        if (unlikely(type == EV_KEY || type == EV_SW)) {
+                taken = rules_input(bind, type, code, value);
+                if (!taken)
+                        bind_event_run(handle, type, code, value);
+        }
+        moonwater_cost_end(&bind_cost, started);
+        return taken;
+}
+
 static int bind_connect(struct input_handler *handler, struct input_dev *dev,
                         const struct input_device_id *id)
 {
@@ -1732,6 +1777,7 @@ static int bind_connect(struct input_handler *handler, struct input_dev *dev,
                 return ret;
         }
         schedule_work(&bind->open);
+        rules_device(bind, true);
         return 0;
 }
 
@@ -1741,6 +1787,7 @@ static void bind_disconnect(struct input_handle *handle)
         unsigned int i;
 
         cancel_work_sync(&bind->open);
+        rules_device(bind, false);
         for (i = 0; i < ARRAY_SIZE(bind_mod_code); i++)
                 bind_mods(bind, bind_mod_code[i], 0);
         if (!bind->opened)
@@ -1756,7 +1803,7 @@ static const struct input_device_id bind_ids[] = {
 };
 
 static struct input_handler bind_handler = {
-        .event = bind_event,
+        .filter = bind_filter,
         .connect = bind_connect,
         .disconnect = bind_disconnect,
         .name = "moonwater-bind",
@@ -2754,6 +2801,9 @@ static b32 host_machine_run(void)
         host_machine_wait_verdict(verdict, sizeof(verdict));
         host_machine_publish();
         failed = host_machine_source();
+        //      The rule files, into the kernel: rover's table, beside the script, which still runs everything it did.
+        if (failed >= 0)
+                rover_machine_start(device);
         if (failed < 0) {
                 host_machine_close(device);
                 host_fail("machine script", failed);
@@ -2819,6 +2869,11 @@ static b32 host_machine_run(void)
                 //      and the functions have to be the new ones by then.
                 if (host_machine_changed(device))
                         host_machine_reload(slot);
+                //      Rover's ring: the machine is its consumer until the runner is.
+                if (control.event == MOONWATER_ROVER) {
+                        rover_machine_drain();
+                        continue;
+                }
                 pair = moonwater_paired(control.event);
                 if (pair) {
                         name = (string_address)pair->name;

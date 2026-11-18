@@ -24,14 +24,51 @@ state headphone kernel onoff
 state dock kernel onoff
 state tablet kernel onoff
 state canvas kernel onoff
+# The screens the kernel's display client sees connected, and how many of
+# them are not the machine's own panel (eDP, LVDS, DSI): Canvas counts them at
+# its DRM hotplug, so a rule in the kernel can read them.
+state display.count kernel int:0:16
+state display.external kernel int:0:16
+# USB devices plugged in, root hubs not counted; network links with a carrier
+# (loopback and other namespaces not counted).
+state usb.count kernel int:0:255
+state net.link kernel int:0:64
 
 # The desktop's page: the compositor's own.
-state display.count desktop int:0:16
-state display.external desktop int:0:16
 state window.fullscreen desktop onoff
 state window.app desktop word
 
-# Events the compositor posts. Kernel events (ids 1 to 63) are spark's.
+# Kernel events past spark's 1 to 22, posted by the module's own hooks
+# (src/moonwater/rules.c), each at the earliest point the kernel offers:
+# input in the input core's filter, before evdev and so before any reader;
+# power at the power supply notifier; USB at the USB notifier; links at the
+# netdevice notifier; displays at Canvas's DRM client hotplug; sleep at the
+# pm notifier. A key's chord is the modifiers held as it went down (or up)
+# and Linux's key number; a button is its place in the enum, Linux's order.
+event 23 kernel "key down" chord:chord
+event 24 kernel "key up" chord:chord
+event 25 kernel "mouse down" button:enum:left,right,middle,side,extra,forward,back,task
+event 26 kernel "mouse up" button:enum:left,right,middle,side,extra,forward,back,task
+event 27 kernel "pad down" button:enum:south,east,c,north,west,z,tl,tr,tl2,tr2,select,start,mode,thumbl,thumbr,up,down,left,right
+event 28 kernel "pad up" button:enum:south,east,c,north,west,z,tl,tr,tl2,tr2,select,start,mode,thumbl,thumbr,up,down,left,right
+event 29 kernel "touch down"
+event 30 kernel "touch up"
+event 31 kernel "switch on" which:enum:lid,tablet,headphone,rfkill,microphone,dock,lineout,jack,videoout,camera-cover,keypad,proximity,rotate-lock,linein,mute,pen,cover
+event 32 kernel "switch off" which:enum:lid,tablet,headphone,rfkill,microphone,dock,lineout,jack,videoout,camera-cover,keypad,proximity,rotate-lock,linein,mute,pen,cover
+event 33 kernel "power ac"
+event 34 kernel "power battery"
+event 35 kernel battery percent:percent state:enum:unknown,charging,discharging,full,not-charging
+event 36 kernel "usb added" class:enum:other,audio,comm,hid,image,printer,storage,hub,data,smartcard,video,wireless,vendor vendor:int:0:65535 product:int:0:65535 port:word
+event 37 kernel "usb removed" class:enum:other,audio,comm,hid,image,printer,storage,hub,data,smartcard,video,wireless,vendor vendor:int:0:65535 product:int:0:65535 port:word
+event 38 kernel "input added" kind:enum:keyboard,mouse,touchpad,touchscreen,pad,tablet,switch,other name:word
+event 39 kernel "input removed" kind:enum:keyboard,mouse,touchpad,touchscreen,pad,tablet,switch,other name:word
+event 40 kernel "display connected" connector:word
+event 41 kernel "display disconnected" connector:word
+event 42 kernel "link up" interface:word
+event 43 kernel "link down" interface:word
+event 44 kernel sleep
+
+# Events the compositor posts. Kernel events (ids 1 to 63) are spark's to 22, then the module's.
 event 64 desktop chord chord:chord
 event 65 desktop "fullscreen on" app:word
 event 66 desktop "fullscreen off" app:word

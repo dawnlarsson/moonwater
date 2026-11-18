@@ -29,6 +29,8 @@ the Settings palette both read it.
 | `src/rover/rover.c` | the table's format, the load-time checker and the evaluator: one C file built into userspace and into the kernel module (`KERNEL_MODE`) |
 | `src/rover/compile.c` | userspace only: the compiler (text to table), the printer (table to text), the graph and the schema's records, and the verb |
 | `src/rover/examples/` | what `main.moonwater.sh` does, as rover: the desktop's services, the session's rules, the buttons, the chords and the keys that stop the machine; `CHECK_rover` compiles each and holds it canonical |
+| `src/rover/load.c` | userspace only: the verb's kernel half (`load`, `unload`, `status`, `state`, `watch`) and the machine process as the ring's consumer |
+| `src/moonwater/rules.c` | the kernel's half: the load, the state page, the ring, the hooks at each event and the queue a kernel primitive goes through |
 | `test/checks/rover.c` | `CHECK_rover` (the language's rows, the round trip, the load-time check and the evaluator) and `BENCH_rover` (nanoseconds per event, and what a load costs) |
 
 ## A rule file
@@ -71,7 +73,7 @@ statement's words is a note on that statement, printed back above it.
 
 A rule's statements come in this order, and the compiler refuses any
 other: the header (`about`, the trigger, then the options `place`,
-`limit`, `once` and `off`, each at most once and in that order), then the
+`limit`, `once`, `off` and `take`, each at most once and in that order), then the
 conditions, then the actions, then `else` and the actions after it. One
 order is what makes the printed text the text that was read, and the
 table it compiles to the same table, byte for byte.
@@ -88,6 +90,7 @@ table it compiles to the same table, byte for byte.
 | `limit DURATION` | Fire at most once in DURATION, whole milliseconds. A firing inside the window is dropped and counted. |
 | `once` | Fire once per load of the table, its then actions or its else actions, whichever comes first. |
 | `off` | Compiled, checked and shown, but never fired. |
+| `take` | The event is the rule's: when the rule fires, the kernel drops the event before any reader sees it (evdev, the console, the compositor). A key taken on its way down is taken on its repeats and its way up. Only a rule the kernel runs can take, so `take` is a `place kernel` the rule must meet; it means something for the key and button events, the ones the input core can drop. |
 | `if CONDITION` | A condition. Every `if` line must hold; when one does not, the `else` actions run instead. |
 | `do PRIMITIVE [ARG ...]` | A primitive: one of Moonwater's mechanisms. |
 | `set SWITCH VALUE` | One of the machine's switches, its value typed by the switch: `set brightness 30%`, `set power powersave`, `set cpu boost off`, `set cpu smt on`, `set charge limit 80`, `set airplane on`. |
@@ -319,6 +322,7 @@ of events and primitives are kept forever: one is never given to another.
 | Source | Events, with their fields |
 |---|---|
 | kernel (spark, ids 1–22) | `key power`, `key sleep`, `key reset`, `key ctrl-alt-delete`, `lid close`, `lid open`, `volume up`, `volume down`, `mute`, `brightness up`, `brightness down`, `canvas on`, `canvas off`, `micmute`, `rfkill`, `tablet on`, `tablet off`, `headphone on`, `headphone off`, `dock on`, `dock off`, `resume` |
+| kernel (the module's hooks, ids 23–44, written in `schema.list`) | `key down` and `key up` (chord: every key, with the modifiers held), `mouse down` and `mouse up` (button: left right middle side extra forward back task), `pad down` and `pad up` (button: south east c north west z tl tr tl2 tr2 select start mode thumbl thumbr up down left right), `touch down`, `touch up`, `switch on` and `switch off` (which: every EV_SW switch, Linux's order), `power ac`, `power battery`, `battery` (percent, state), `usb added` and `usb removed` (class, vendor, product: int, port: word), `input added` and `input removed` (kind: keyboard mouse touchpad touchscreen pad tablet switch other, name: word), `display connected` and `display disconnected` (connector: word), `link up` and `link down` (interface: word), `sleep` |
 | desktop (the compositor, ids 64–) | `chord` (chord), `fullscreen on` and `fullscreen off` (app: word), `window opened` and `window closed` (app: word), `display added` and `display removed` (connector: word), `button` (name: `launcher`, `volume`, `mic`, `notices`, `tray-double` or `pin`; slot: int 0 to 63, a pin's place on the taskbar; app: word, a pin's program) |
 | rules (id 96) | `cue` (name: word), posted by `emit cue NAME` |
 | runner clocks | `every` (period: duration) and `at` (time: clock), which `every DURATION` and `at CLOCK` are rules on: the runner posts `every` for each period its rules name, at that period, and `at` once a minute with the minute of the day, so the minute's rules are a scan of keys |
@@ -328,8 +332,8 @@ of events and primitives are kept forever: one is never given to another.
 
 | Page | States |
 |---|---|
-| kernel | `lid` (open, closed), `power.source` (ac, battery), `battery.percent` (percent), `battery.state` (unknown, charging, discharging, full, not-charging), `headphone`, `dock`, `tablet`, `canvas` (onoff) |
-| desktop | `display.count`, `display.external` (int 0 16), `window.fullscreen` (onoff), `window.app` (word) |
+| kernel | `lid` (open, closed), `power.source` (ac, battery), `battery.percent` (percent), `battery.state` (unknown, charging, discharging, full, not-charging), `headphone`, `dock`, `tablet`, `canvas` (onoff), `display.count`, `display.external` (int 0 16: the screens connected, and those that are not the machine's own panel), `usb.count` (int 0 255, root hubs not counted), `net.link` (int 0 64: links with a carrier, loopback not counted) |
+| desktop | `window.fullscreen` (onoff), `window.app` (word) |
 | the clock | `clock` (clock) and `weekday` (weekday), from the event's time and the page's zone offset |
 | kernel | `boot.NAME`, a word: the value of `moonwater.NAME=` on the kernel's command line (`boot.desktop`, `boot.early`, `boot.cursor_plane`), one for each such argument the sources ask for |
 | settings | `setting.NAME`, one for every plain row of the Settings registry (`src/sh/registry.c`), NAME its verb's words joined by dots (`setting.canvas.gpu`, `setting.audio.server`, `setting.keyboard.onscreen`) |
@@ -464,12 +468,20 @@ the table before it stays.
   compiler refuses a rule that emits its own cue with no condition.
 
 **Safe mode** (`moonwater.safe=1`, or two boots that never loaded a
-table) loads the image's own table and ignores the person's files.
+table) loads the image's own table and ignores the person's files. Today
+`moonwater.safe=1` is what is read; the two-boot count, and a table the
+build embeds so safe mode needs no file at all, are not done yet.
 
 **The floor**: the power key and Ctrl-Alt-Delete always work. With no
 table loaded, or with a table whose rule for them is refused or turned
 off, the kernel powers off or reboots as it does today; a second press
-within ten seconds always takes the kernel's default.
+within ten seconds always takes the kernel's default. `take` is where the
+floor is kept: a `key power` or `key ctrl-alt-delete` rule that takes a
+press is let take it only when the press before it was not taken inside
+ten seconds, so the second press goes on to the bindings as it always
+did (and `status` counts it as floor). A `key down power` or `key down
+ctrl+alt+delete` rule fires, but never takes: the stop keys are taken
+only through their own events, which keep the floor.
 
 ### Files
 
@@ -480,6 +492,107 @@ of the same name, and an empty one masks it. A `run` script is
 `/root/rules` are read only if they are regular, owned by root, not
 writable by group or others, and at most 64 KiB, as the machine script is
 read today.
+
+## The kernel
+
+The module's half is `src/moonwater/rules.c`, built into the core with
+`rover.c` under `KERNEL_MODE` (the walkers included; the key scan is the
+word loop, since lib.c keeps no kernel body of it).
+
+**The load.** `ROVER_IOCTL` on `/dev/spark` (`_IOWR('s', 19)`, a
+512-byte request; LOAD, UNLOAD and DO are CAP_SYS_ADMIN's, STATUS is
+anyone's). LOAD copies the table in, runs `rover_check` over the whole of
+it, makes its run records, and swaps it in under the rules' lock with
+`rcu_assign_pointer`; the table before it is freed after a grace period.
+A refused table is answered with the reason and the rule, and the live
+one stays. A load is every state changing at once, so the `when` rules
+that hold fire at it. The machine process loads the rule files at its
+start; `moonwater rover load` does it by hand.
+
+**The state page.** One 4 KiB page the module writes as its events
+arrive: its head (version, a sequence odd while a write is in flight, the
+zone's offset from `sys_tz`), then the kernel states at the schema's
+offsets. `/dev/spark` mapped read-only from offset 0 is the page, for
+anyone; a map can never be made writable. A new device's switches are
+read into it at connect, and the supplies at start, so a lid closed at
+boot reads closed before it moves.
+
+**The hooks**, each at the earliest point the kernel offers its event:
+
+| Event | Where it is heard | Context |
+|---|---|---|
+| keys, buttons, switches (the ACPI buttons are input devices) | the input core's filter: the key watch is an `input_handler` with `.filter`, which the core puts at the head of each device's handles, ahead of evdev and the console's keyboard | the device's event lock, interrupts off |
+| `input added`, `input removed` | the handler's connect and disconnect | the input core's mutex |
+| `power ac`, `power battery`, `battery` | `power_supply_reg_notifier`, as a supply's change work runs; every supply read again, no polling | process |
+| `usb added`, `usb removed` | `usb_register_notify`, once the device is configured (so its first interface's class is known) | process |
+| `display connected`, `display disconnected`, the counts | Canvas's DRM client hotplug, after the probe helper set each connector's status | process |
+| `link up`, `link down`, `net.link` | the netdevice notifier: a carrier with the link running, in the first namespace | RTNL |
+| `sleep`, `resume` | the pm notifier, PM_SUSPEND_PREPARE and PM_POST_SUSPEND | process |
+| `canvas on`, `canvas off` | `moonwater_bind_fire`, which Canvas calls | process |
+
+Not heard, and why: rfkill has no in-kernel listener (a change goes to
+`/dev/rfkill` only; the rfkill keys and `SW_RFKILL_ALL` are heard as keys
+and switches), and a thermal trip reaches only netlink and a tracepoint
+the image does not build.
+
+**An event** takes the rules' raw spinlock once: the states it changes
+are written, the kernel's rules of its event fired by `rover_fire`, and
+then the `when` rules over what changed by `rover_edges`. An event no
+rule has is a bit test in the live table before the lock is taken, and
+a mouse moving costs one compare of its type.
+
+**Actions.** A kernel rule's kernel primitive is never run in the hook:
+its arguments are resolved there (a text copied out), it goes into a
+queue of sixteen, an `irq_work` is raised, and its handler queues a work
+item that does it: `log` to the kernel's log, `latency` and `latency off`
+as a cpu latency QoS request, `backlight` through the backlight class
+(else `moonwater brightness`), and `poweroff`, `reboot`, `suspend`
+(`moonwater sleep`), `radio off` (`moonwater wifi off`, `bluetooth off` or
+`airplane on`) and `usb lock` (`moonwater device lock`) as the bindings
+run a line, `poweroff` and `reboot` stopping the machine anyway if the
+line fails. A full queue drops the action and counts it (`lost`).
+
+**The ring.** Every rule the kernel fires is one record in a ring of 256
+records of 128 bytes, after the state page in the same map (the ring is
+CAP_SYS_ADMIN's: a key rule's ring is a key log), and so is every kernel
+event a runner's rule waits for. A record is the event (its id, its
+time, its fields, its one word field copied), the rule and its run of
+actions, the load it is of, whether it was taken, and when the kernel
+decided. One producer writes it under the lock, its sequence last; a
+reader that finds another sequence was overtaken. `read` on `/dev/spark`
+answers the head and blocks until it moves; `poll` says readable when it
+has moved past what the descriptor read.
+
+**The consumer**, until the runner exists, is the machine process: its
+wait (`MOONWATER_IOCTL_MACHINE`, WAIT) also answers `MOONWATER_ROVER`
+(255) when the ring has records a userspace owner acts on, and the
+process then reads them. A hit's actions that are not the kernel's, and
+the runner's rules of an event record (evaluated there with the kernel's
+page mapped), go to the machine script's `moonwater_rover RULE ACTION
+ARG ...` when it defines one; `emit cue` runs the runner's cue rules in
+place, to depth four; a runner rule's kernel primitive is asked through
+DO. Today's spark bindings and the machine script run beside all of it,
+unchanged.
+
+**Measured** in an x86_64 guest under QEMU's TCG on the Mac (no KVM on
+box, no x86 virtualisation on Apple silicon), so every figure is
+emulated, several times what a machine takes; the pairs are what is
+claimed. Forty F10 presses typed through QMP into a USB keyboard, a
+`key down f10` rule in the kernel, heard at once by `moonwater rover
+watch` on the ring and by an evdev reader (the compositor's first hop
+today, `EVIOCSCLOCKID` monotonic, the same timestamp): the event to the
+rule's decision 25.4 µs on average (11 to 15 µs typical, 464 µs at
+worst); the event to the ring's reader awake 284 µs on average, 1.08 ms
+at worst; the event to the evdev reader awake 598 µs on average, 2.98 ms
+at worst. Today's chord path goes on from that evdev hop to the
+compositor's key table, the `keys.fire` FIFO and the shell function, so
+rover's ring is ahead of it before the compositor has read the key.
+Natively the evaluator's part is `BENCH_rover`'s nanoseconds (above).
+In the same guest a taken F9 reached no evdev reader, three presses, and
+the power key taken once (`system_powerdown`) did not stop the machine;
+the second, three seconds later, went to the bindings and powered off.
+`usb added`, `input added`, a `when usb.count >= 3` edge and `link down`
+and `link up` (QMP `set_link`) each fired their rule.
 
 ## The table
 
@@ -632,6 +745,11 @@ moonwater rover show FILE              the graph: event, condition and action no
 moonwater rover schema                 the schema's records
 moonwater rover test FILE EVENT ... [STATE=VALUE ...]
                                        fire EVENT against the rules with those states, and say what would run
+moonwater rover load                   the image's and the person's rule files, compiled into one table and loaded
+moonwater rover unload                 the kernel's table cleared
+moonwater rover status                 what the kernel's rules did: events, hits, taken, queued, and how fast
+moonwater rover state                  the kernel's state page, one state a line
+moonwater rover watch [N]              the ring's records as they come (N of them), each with its times
 ```
 
 `show` prints the graph Settings draws: an event node with one out port, a

@@ -310,6 +310,21 @@ static const struct
     {"f7", 65}, {"f8", 66}, {"f9", 67}, {"f10", 68}, {"f11", 87}, {"f12", 88}, {"print", 99}, {"home", 102},
     {"up", 103}, {"pageup", 104}, {"left", 105}, {"right", 106}, {"end", 107}, {"down", 108}, {"pagedown", 109},
     {"insert", 110}, {"delete", 111},
+    //  Every other key a keyboard has, by Linux's name for it without KEY_: the kernel's key down and key up
+    //  hear each, the modifiers themselves among them.
+    {"minus", 12}, {"equal", 13}, {"leftbrace", 26}, {"rightbrace", 27}, {"leftctrl", 29}, {"semicolon", 39},
+    {"apostrophe", 40}, {"grave", 41}, {"leftshift", 42}, {"backslash", 43}, {"comma", 51}, {"dot", 52},
+    {"slash", 53}, {"rightshift", 54}, {"kpasterisk", 55}, {"leftalt", 56}, {"capslock", 58}, {"numlock", 69},
+    {"scrolllock", 70}, {"kp7", 71}, {"kp8", 72}, {"kp9", 73}, {"kpminus", 74}, {"kp4", 75}, {"kp5", 76},
+    {"kp6", 77}, {"kpplus", 78}, {"kp1", 79}, {"kp2", 80}, {"kp3", 81}, {"kp0", 82}, {"kpdot", 83},
+    {"kpenter", 96}, {"rightctrl", 97}, {"kpslash", 98}, {"rightalt", 100}, {"mute", 113}, {"volumedown", 114},
+    {"volumeup", 115}, {"power", 116}, {"kpequal", 117}, {"pause", 119}, {"leftmeta", 125}, {"rightmeta", 126},
+    {"compose", 127}, {"stop", 128}, {"menu", 139}, {"calc", 140}, {"sleep", 142}, {"wakeup", 143}, {"www", 150},
+    {"mail", 155}, {"back", 158}, {"forward", 159}, {"eject", 161}, {"nextsong", 163}, {"playpause", 164},
+    {"previoussong", 165}, {"stopcd", 166}, {"homepage", 172}, {"f13", 183}, {"f14", 184}, {"f15", 185},
+    {"f16", 186}, {"f17", 187}, {"f18", 188}, {"f19", 189}, {"f20", 190}, {"f21", 191}, {"f22", 192},
+    {"f23", 193}, {"f24", 194}, {"camera", 212}, {"search", 217}, {"brightnessdown", 224},
+    {"brightnessup", 225}, {"bluetooth", 237}, {"wlan", 238}, {"rfkill", 247}, {"micmute", 248},
 };
 
 static const struct
@@ -1413,6 +1428,20 @@ static bool rover_place(struct rover_build address_to build, struct rover_rule a
         }
         if (source == ROVER_KERNEL && (blocked || build->want == 2))
                 source = ROVER_RUNNER;
+        //      Only the kernel drops an event before its readers: a take is a place kernel the rule must meet.
+        if ((rule->flags & ROVER_RULE_TAKE) && !event)
+                return rover_refused(build, "take is an on rule's: a when rule has no event to take", null, null);
+        if ((rule->flags & ROVER_RULE_TAKE) && source != ROVER_KERNEL)
+        {
+                if (event && event->source != ROVER_KERNEL)
+                {
+                        rover_refused(build, "take, but ", null, event->name);
+                        rover_why_add(build, " is posted in userspace, after every reader has it");
+                        return false;
+                }
+                return rover_refused(build, "take, but the rule", null,
+                                     blocked ? blocked : " is placed in userspace, where the event has been read already");
+        }
         rule->place = source;
         if (build->want)
                 rule->flags |= ROVER_RULE_PLACED;
@@ -1736,15 +1765,15 @@ static bool rover_read_rule(struct rover_build address_to build)
         build->stage = ROVER_STAGE_HEADER;
         build->header = 0;
         build->want = 0;
-        build->slot = 7;
+        build->slot = 8;
         build->event = null;
         return !build->why_used && rover_note_flush(build, 0);
 }
 
-//      A header statement in its place: about, the trigger, place, limit, once, off.
+//      A header statement in its place: about, the trigger, place, limit, once, off, take.
 static bool rover_header(struct rover_build address_to build, p8 slot)
 {
-        static const char address_to const order = "the header goes about, on or when, place, limit, once, off";
+        static const char address_to const order = "the header goes about, on or when, place, limit, once, off, take";
 
         if (build->stage != ROVER_STAGE_HEADER)
                 return rover_refused(build, "", &build->word[0],
@@ -1841,15 +1870,15 @@ static bool rover_statement(struct rover_build address_to build)
                 rule->limit_ms = (p32)(value / 1000000);
                 return true;
         }
-        if (rover_is(keyword, "once") || rover_is(keyword, "off"))
+        if (rover_is(keyword, "once") || rover_is(keyword, "off") || rover_is(keyword, "take"))
         {
-                bool once = rover_is(keyword, "once");
+                p8 slot = rover_is(keyword, "once") ? 5 : rover_is(keyword, "off") ? 6 : 7;
 
-                if (!rover_header(build, once ? 5 : 6))
+                if (!rover_header(build, slot))
                         return false;
                 if (build->words != 1)
                         return rover_refused(build, "", keyword, " takes nothing after it");
-                rule->flags |= once ? ROVER_RULE_ONCE : ROVER_RULE_OFF;
+                rule->flags |= slot == 5 ? ROVER_RULE_ONCE : slot == 6 ? ROVER_RULE_OFF : ROVER_RULE_TAKE;
                 return true;
         }
         if (build->header < 2 && (rover_is(keyword, "if") || rover_is(keyword, "do") || rover_is(keyword, "run") ||
@@ -1884,7 +1913,7 @@ static bool rover_statement(struct rover_build address_to build)
         if (rover_is(keyword, "rule"))
                 return rover_refused(build, "a rule line stands at the left edge, not inside a rule", null, null);
         return rover_refused(build, "", keyword,
-                             " is no statement: about, on, when, every, at, place, limit, once, off, if, do, set, run, tool, emit or else");
+                             " is no statement: about, on, when, every, at, place, limit, once, off, take, if, do, set, run, tool, emit or else");
 }
 
 /*
@@ -2447,7 +2476,7 @@ static fn rover_print(struct rover_text address_to text, const struct rover_tabl
         {
                 const struct rover_rule address_to rule = table->rule + number;
                 const struct rover_event_row address_to event = rule->event ? rover_event_find(rule->event) : null;
-                p16 slot = 7;
+                p16 slot = 8;
 
                 if (number || table->head->services)
                         rover_puts(text, "\n");
@@ -2489,6 +2518,11 @@ static fn rover_print(struct rover_text address_to text, const struct rover_tabl
                 {
                         rover_notes_put(text, table, number, 6, true);
                         rover_puts(text, "\toff\n");
+                }
+                if (rule->flags & ROVER_RULE_TAKE)
+                {
+                        rover_notes_put(text, table, number, 7, true);
+                        rover_puts(text, "\ttake\n");
                 }
                 for (positive at = (positive)rule->comparison + rule->trigger;
                      at < (positive)rule->comparison + rule->comparisons;)

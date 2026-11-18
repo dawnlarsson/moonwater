@@ -246,6 +246,7 @@ static bool host_init_list_runs(void);
 //      included after this file. The commands are shell.c's REBOOT_*.
 fn shell_stop(writer write, positive command);
 static b32 host_machine_run(void);
+static b32 rover_kernel_verb(string_address address_to arguments, positive count);
 static b32 host_version_verb(string_address address_to arguments, positive count);
 static fn tune_restore(void);
 static fn radio_restore(void);
@@ -1031,7 +1032,7 @@ static b32 host_main()
             {"ssh", ssh_main, false},
             {"wipe", host_wipe_verb, true},
             {"machine", host_machine_verb, false},
-            {"rover", rover_verb, false},
+            {"rover", rover_kernel_verb, false},
             {"version", host_version_verb, true},
             {"boot", host_boot_verb, false},
             {"ask", host_ask_verb, false},
@@ -1104,6 +1105,7 @@ static b32 host_main()
         return answer;
 }
 
+#include "../rover/load.c" // the verb rover's kernel half: load, unload, status, state and watch, and the machine as the ring's consumer
 #define MOONWATER_CLI
 #include "../moonwater/moonwater.c"
 

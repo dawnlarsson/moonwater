@@ -359,6 +359,13 @@ struct canvas
         // The next hotplug is a change of which mode to take, and the screen
         // may get smaller by it as well as larger.
         _Bool retarget;
+
+        // What this card's connectors said at its last hotplug, for rover's
+        // display events: a bit a connector index, and how many of them are
+        // connected and not the machine's own panel.
+        u32 rules_connected;
+        unsigned int rules_count;
+        unsigned int rules_external;
 };
 
 static struct desktop
@@ -2172,9 +2179,70 @@ static COLD void client_free(struct drm_client_dev *client)
         kfree(canvas_from_client(client));
 }
 
+/*
+        Rover's display events and counts, at the earliest point the kernel
+        offers a connector's change to anything that is not its driver: the
+        DRM core's client hotplug, which runs after the probe helper has set
+        each connector's status. Counted over every card; a connector that
+        came or went is one event, and a hotplug that changed none still
+        writes the counts. Sleeps (the list's mutex), which the hotplug may.
+*/
+static void canvas_rules_hotplug(struct canvas *canvas)
+{
+        struct drm_connector_list_iter iter;
+        struct drm_connector *connector;
+        struct canvas *each;
+        u32 now = 0, before = canvas->rules_connected, changed;
+        unsigned int count = 0, external = 0, total = 0, outside = 0;
+        char name[32];
+
+        drm_connector_list_iter_begin(canvas->client.dev, &iter);
+        drm_for_each_connector_iter(connector, &iter)
+        {
+                if (connector->index >= 32 || connector->status != connector_status_connected)
+                        continue;
+                now |= 1u << connector->index;
+                count++;
+                if (connector->connector_type != DRM_MODE_CONNECTOR_eDP &&
+                    connector->connector_type != DRM_MODE_CONNECTOR_LVDS &&
+                    connector->connector_type != DRM_MODE_CONNECTOR_DSI)
+                        external++;
+        }
+        drm_connector_list_iter_end(&iter);
+
+        mutex_lock(&canvas_list_lock);
+        canvas->rules_connected = now;
+        canvas->rules_count = count;
+        canvas->rules_external = external;
+        list_for_each_entry(each, &canvas_list, link)
+        {
+                total += each->rules_count;
+                outside += each->rules_external;
+        }
+        mutex_unlock(&canvas_list_lock);
+
+        changed = now ^ before;
+        if (!changed)
+        {
+                moonwater_rules_display(total, outside, NULL, false);
+                return;
+        }
+        drm_connector_list_iter_begin(canvas->client.dev, &iter);
+        drm_for_each_connector_iter(connector, &iter)
+        {
+                if (connector->index >= 32 || !(changed & (1u << connector->index)))
+                        continue;
+                strscpy(name, connector->name ? connector->name : "", sizeof(name));
+                moonwater_rules_display(total, outside, name, (now >> connector->index) & 1);
+        }
+        drm_connector_list_iter_end(&iter);
+}
+
 static int client_hotplug(struct drm_client_dev *client)
 {
         struct canvas *canvas = canvas_from_client(client);
+
+        canvas_rules_hotplug(canvas);
 
         /*
                 Never start or rebind on the caller's workqueue.

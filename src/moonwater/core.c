@@ -66,6 +66,20 @@
 #include <linux/suspend.h>
 #endif
 #include <linux/io.h>
+// Rover's kernel half (rules.c): its queue, its holds and the notifiers it hears.
+#include <linux/irq_work.h>
+#include <linux/pm_qos.h>
+#include <linux/rcupdate.h>
+#include <linux/time.h>
+#if IS_REACHABLE(CONFIG_POWER_SUPPLY)
+#include <linux/power_supply.h>
+#endif
+#if IS_REACHABLE(CONFIG_USB)
+#include <linux/usb.h>
+#endif
+#if IS_REACHABLE(CONFIG_BACKLIGHT_CLASS_DEVICE)
+#include <linux/backlight.h>
+#endif
 #ifdef CONFIG_EFI
 #include <linux/efi.h>
 #endif
@@ -103,6 +117,7 @@
 #include "../lib.util.c"
 #include "spark.c"
 #include "moonwater.c"
+#include "rules.c"
 
 struct spawn_strings
 {
@@ -133,6 +148,9 @@ struct device_context
                 and the fast path stays a single compare.
         */
         const struct cred *environment_cred;
+
+        // Rover's ring: the head this descriptor read last (rules_read, rules_poll).
+        u64 rover_seen;
 };
 
 // Kernel functions rewritten in assembly (kernel/kernel.c, GPL-2.0), which
@@ -286,6 +304,8 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
                 return report_machine(file, (struct machine_control __user *)arg);
         case MOONWATER_IOCTL_SCRIPT:
                 return report_machine_script((struct machine_script __user *)arg);
+        case ROVER_IOCTL:
+                return report_rover((struct rover_control __user *)arg);
         case SPARK_IOCTL_SETTINGS_GET:
                 return settings_get((struct spark_settings_request __user *)arg);
         case SPARK_IOCTL_SETTINGS_SET:
@@ -331,9 +351,33 @@ static int device_close(struct inode *inode, struct file *file)
         return 0;
 }
 
+// Rover's state page and ring (rules.c): mapped, polled, and read for the ring's head.
+static int device_mmap(struct file *file, struct vm_area_struct *vma)
+{
+        return rules_mmap(file, vma);
+}
+
+static __poll_t device_poll(struct file *file, poll_table *wait)
+{
+        struct device_context *context = file->private_data;
+
+        return rules_poll(file, &context->rover_seen, wait);
+}
+
+static ssize_t device_read(struct file *file, char __user *into, size_t room, loff_t *at)
+{
+        struct device_context *context = file->private_data;
+
+        (void)at;
+        return rules_read(file, &context->rover_seen, into, room);
+}
+
 static const struct file_operations device_ops = {
     .owner = THIS_MODULE,
     .open = device_open,
+    .read = device_read,
+    .poll = device_poll,
+    .mmap = device_mmap,
     .unlocked_ioctl = device_ioctl,
     .flush = device_flush,
     .release = device_close,
@@ -495,7 +539,9 @@ static b32 __init start()
         else
                 device_registered = true;
 
-        // Before the compositor: bindings have to work with no screen.
+        // Before the compositor: bindings have to work with no screen. Rover's
+        // page and ring first, so the watch's first device writes its switches.
+        rules_start();
         bind_start();
 
         canvas_boot();
@@ -510,6 +556,7 @@ static void __exit exit_module(void)
         canvas_unload();
 
         bind_stop();
+        rules_stop();
 
         if (device_registered)
                 misc_deregister(&device);

@@ -318,6 +318,59 @@ static const char address_to const rover_canonical[] = {
     "\tset charge limit 80\n"
     "\telse\n"
     "\tset cpu smt off\n",
+
+    "rule power-sleeps\n"
+    "\ton key power\n"
+    "\ttake\n"
+    "\tdo suspend\n"
+    "\n"
+    "rule terminal-key\n"
+    "\ton key down ctrl+alt+t\n"
+    "\tplace kernel\n"
+    "\ttake\n"
+    "\tdo log \"terminal\"\n"
+    "\n"
+    "rule mic\n"
+    "\ton key up micmute\n"
+    "\tlimit 1s\n"
+    "\tdo log \"mic\"\n"
+    "\n"
+    "rule pad-home\n"
+    "\ton pad down mode\n"
+    "\tdo log \"home\"\n"
+    "\n"
+    "rule on-ac\n"
+    "\ton power ac\n"
+    "\tif lid == closed\n"
+    "\tdo backlight 40%\n"
+    "\n"
+    "rule low\n"
+    "\ton battery\n"
+    "\tif battery.percent < 5% and power.source == battery\n"
+    "\tdo suspend\n"
+    "\n"
+    "rule stick\n"
+    "\ton usb added storage\n"
+    "\tif usb.count > 4\n"
+    "\tdo usb lock\n"
+    "\n"
+    "rule keyboard-in\n"
+    "\ton input added keyboard\n"
+    "\trun note-keyboard $name\n"
+    "\n"
+    "rule docked\n"
+    "\ton display connected\n"
+    "\tif display.external >= 1 and lid == closed\n"
+    "\tdo log \"docked\"\n"
+    "\n"
+    "rule wired\n"
+    "\ton link up eth0\n"
+    "\tif net.link == 1\n"
+    "\tdo log \"wired\"\n"
+    "\n"
+    "rule nap\n"
+    "\ton sleep\n"
+    "\tdo latency off\n",
 };
 
 //      Text that is not canonical, and the one way it prints.
@@ -349,7 +402,14 @@ static const struct
     {"rule a\n\ton lid close\n\tdo backlight 120%\n", 3, "0% to 100%"},
     {"rule a\n\ton dock off\n\tdo radio on wifi\n", 3, "deliberate"},
     {"rule a\n\ton dock on\n\tdo usb allow\n", 3, "deliberate"},
-    {"rule a\n\ton lid close\n\tplace kernel\n\tif display.external == 0\n\tdo suspend\n", 0, "desktop state"},
+    {"rule a\n\ton lid close\n\tplace kernel\n\tif window.fullscreen == on\n\tdo suspend\n", 0, "desktop state"},
+    {"rule a\n\ton chord super+space\n\ttake\n\tdo suspend\n", 0, "after every reader has it"},
+    {"rule a\n\ton key down ctrl+t\n\tplace user\n\ttake\n\tdo suspend\n", 0, "placed in userspace"},
+    {"rule a\n\twhen lid == closed\n\ttake\n\tdo suspend\n", 0, "no event to take"},
+    {"rule a\n\ton key down ctrl+t\n\ttake\n\tif window.fullscreen == on\n\tdo suspend\n", 0, "desktop state"},
+    {"rule a\n\ton key down ctrl+t\n\ttake\n\toff\n\tdo suspend\n", 4, "out of order"},
+    {"rule a\n\ton key down hyper+t\n\tdo suspend\n", 2, "not ctrl, alt, shift or super"},
+    {"rule a\n\ton usb added storage 1 2 x y\n\tdo suspend\n", 2, "more than"},
     {"rule a\n\ton fullscreen on\n\tplace kernel\n\tdo suspend\n", 0, "kernel never sees it"},
     {"rule a\n\twhen $app == x\n\tdo suspend\n", 2, "fields are no states"},
     {"rule a\n\ton cue loop\n\temit cue loop\n", 0, "own cue"},
@@ -653,15 +713,15 @@ static fn rover_check_evaluator(void)
         check("the first text compiles", rover_compiled(rover_canonical[0]));
         event = rover_event_of("lid close", null);
         rover_set("power.source", 1, null);
-        check("lid close on battery sleeps, in the runner (it reads a desktop state)",
-              rover_same(rover_fires(&event, ROVER_RUNNER), "lid-sleep:then"));
-        check("and nothing of it runs in the kernel", rover_same(rover_fires(&event, ROVER_KERNEL), ""));
+        check("lid close on battery sleeps, in the kernel (the display counts are the kernel page's)",
+              rover_same(rover_fires(&event, ROVER_KERNEL), "lid-sleep:then"));
+        check("and nothing of it runs in the runner", rover_same(rover_fires(&event, ROVER_RUNNER), ""));
         rover_set("display.external", 1, null);
-        check("with a screen plugged in it turns the panel off", rover_same(rover_fires(&event, ROVER_RUNNER),
+        check("with a screen plugged in it turns the panel off", rover_same(rover_fires(&event, ROVER_KERNEL),
                                                                             "lid-sleep:else"));
         rover_set("display.external", 0, null);
         rover_set("power.source", 0, null);
-        check("on mains it turns the panel off", rover_same(rover_fires(&event, ROVER_RUNNER), "lid-sleep:else"));
+        check("on mains it turns the panel off", rover_same(rover_fires(&event, ROVER_KERNEL), "lid-sleep:else"));
 
         event = rover_event_of("fullscreen on", "steam_app_440");
         check("a game full screen holds the latency", rover_same(rover_fires(&event, ROVER_DESKTOP), "game-latency:then"));
@@ -690,7 +750,7 @@ static fn rover_check_evaluator(void)
         {
                 struct rover_text text = {rover_print_text, 0, sizeof(rover_print_text) - 1, false};
                 const char address_to want[] = {
-                    "node rule=lid-sleep id=0 kind=event place=runner label=\"on lid close\" about=\"Sleep when the lid "
+                    "node rule=lid-sleep id=0 kind=event place=kernel label=\"on lid close\" about=\"Sleep when the lid "
                     "closes on battery\"\n",
                     "node rule=lid-sleep id=2 kind=condition label=\"display.external == 0\"\n",
                     "edge rule=lid-sleep from=1 port=yes to=2\n", "edge rule=lid-sleep from=2 port=no to=4\n",
@@ -1059,6 +1119,87 @@ static fn rover_check_examples(void)
         }
 }
 
+//      The kernel's events past spark's: keys and buttons by number, take, power, USB, input, displays, links.
+static fn rover_check_kernel_events(void)
+{
+        struct rover_event event;
+        struct rover_refusal refusal;
+        bool taken = true;
+
+        memory_zero(rover_page_store, sizeof(rover_page_store));
+        check("the kernel events' text compiles", rover_compiled(rover_canonical[5]));
+        for (positive at = 0; at < 2; at++)
+                taken = taken && (rover_view.rule[at].flags & ROVER_RULE_TAKE) && rover_view.rule[at].place == ROVER_KERNEL;
+        check("a take rule is the kernel's and says so", taken && !(rover_view.rule[2].flags & ROVER_RULE_TAKE));
+        check("an input rule whose action is a script stays in the kernel, its run handed on",
+              rover_view.rule[7].place == ROVER_KERNEL && rover_view.action[rover_view.rule[7].action].runs == ROVER_RUNNER);
+
+        event = rover_event_of("key power", null);
+        check("the power key, taken, sleeps", rover_same(rover_fires(&event, ROVER_KERNEL), "power-sleeps:then"));
+        event = rover_event_of("key down", null);
+        event.count = 1;
+        event.field[0].number = (b64)(ROVER_CHORD_CTRL | ROVER_CHORD_ALT) << 16 | 20;
+        check("key down ctrl+alt+t is the kernel's", rover_same(rover_fires(&event, ROVER_KERNEL), "terminal-key:then"));
+        event.field[0].number = 20;
+        check("a bare t is not", rover_same(rover_fires(&event, ROVER_KERNEL), ""));
+        event = rover_event_of("key up", null);
+        event.count = 1;
+        event.field[0].number = 248;
+        check("micmute's release is its own event", rover_same(rover_fires(&event, ROVER_KERNEL), "mic:then"));
+        event = rover_event_of("pad down", null);
+        event.count = 1;
+        event.field[0].number = 12;
+        check("a pad's mode button is its place in the enum", rover_same(rover_fires(&event, ROVER_KERNEL), "pad-home:then"));
+
+        event = rover_event_of("power ac", null);
+        rover_set("lid", 1, null);
+        check("mains with the lid closed dims", rover_same(rover_fires(&event, ROVER_KERNEL), "on-ac:then"));
+        event = rover_event_of("battery", null);
+        event.count = 2;
+        event.field[0].number = 400;
+        rover_set("battery.percent", 400, null);
+        rover_set("power.source", 1, null);
+        check("a battery change under 5% on battery sleeps", rover_same(rover_fires(&event, ROVER_KERNEL), "low:then"));
+        rover_set("power.source", 0, null);
+        check("not on mains", rover_same(rover_fires(&event, ROVER_KERNEL), ""));
+
+        event = rover_event_of("usb added", null);
+        event.count = 4;
+        event.field[0].number = 6; // storage
+        event.field[1].number = 0x0781;
+        event.field[2].number = 0x5567;
+        event.field[3].text = (const p8 address_to)"1-2";
+        event.field[3].length = 3;
+        rover_set("usb.count", 5, null);
+        check("a fifth stick locks USB", rover_same(rover_fires(&event, ROVER_KERNEL), "stick:then"));
+        event.field[0].number = 3; // hid
+        check("a keyboard does not", rover_same(rover_fires(&event, ROVER_KERNEL), ""));
+
+        event = rover_event_of("input added", null);
+        event.count = 2;
+        event.field[1].text = (const p8 address_to)"AT keyboard";
+        event.field[1].length = 11;
+        check("a keyboard plugged in is heard", rover_same(rover_fires(&event, ROVER_KERNEL), "keyboard-in:then"));
+        event = rover_event_of("display connected", "HDMI-A-1");
+        rover_set("display.external", 1, null);
+        check("a screen on a closed lid is docked", rover_same(rover_fires(&event, ROVER_KERNEL), "docked:then"));
+        event = rover_event_of("link up", "eth0");
+        rover_set("net.link", 1, null);
+        check("a link's name is its filter", rover_same(rover_fires(&event, ROVER_KERNEL), "wired:then"));
+        event = rover_event_of("link up", "wlan0");
+        check("another link is not", rover_same(rover_fires(&event, ROVER_KERNEL), ""));
+        event = rover_event_of("sleep", null);
+        check("sleep is heard", rover_same(rover_fires(&event, ROVER_KERNEL), "nap:then"));
+
+        //      The loader holds take to the kernel: a desktop rule that says it is refused.
+        check("the second text compiles", rover_compiled(rover_canonical[1]));
+        ((struct rover_rule address_to)rover_view.rule)[0].flags |= ROVER_RULE_TAKE;
+        check("a take on a desktop rule is refused at load",
+              !rover_check(rover_built(&rover_one), rover_one.size, &rover_view, &refusal) &&
+                  string_equals((string_address)refusal.why, "a take on a rule outside the kernel"));
+        memory_zero(rover_page_store, sizeof(rover_page_store));
+}
+
 b32 main(void)
 {
         rover_check_first_of_either();
@@ -1068,6 +1209,7 @@ b32 main(void)
         rover_check_refusals();
         rover_check_tamper();
         rover_check_evaluator();
+        rover_check_kernel_events();
         return test_report(null);
 }
 
