@@ -1216,7 +1216,8 @@ static struct notifier_block rules_power_nb = {.notifier_call = rules_power_noti
 // ---- USB --------------------------------------------------------------------------
 
 #if IS_REACHABLE(CONFIG_USB)
-static p32 rules_usb_devices;
+//      USB's notifier is a blocking chain, which two hubs can be in at once: the count is atomic.
+static atomic_t rules_usb_devices;
 
 //      The class: the device's, or its first interface's when the device leaves it to them.
 static b64 rules_usb_class(struct usb_device *udev)
@@ -1253,11 +1254,12 @@ static int rules_usb_notify(struct notifier_block *nb, unsigned long what, void 
         (void)nb;
         if ((what != USB_DEVICE_ADD && what != USB_DEVICE_REMOVE) || !udev->parent)
                 return NOTIFY_OK;
-        if (added)
-                rules_usb_devices++;
-        else if (rules_usb_devices)
-                rules_usb_devices--;
-        set = (struct rules_change){RS_USB, rules_usb_devices > 255 ? 255 : (b32)rules_usb_devices};
+        {
+                b32 now = added ? atomic_fetch_add(1, &rules_usb_devices) + 1
+                                : atomic_fetch_add_unless(&rules_usb_devices, -1, 0) - 1;
+
+                set = (struct rules_change){RS_USB, now < 0 ? 0 : now > 255 ? 255 : now};
+        }
         rules_event_init(&event, added ? RULES_USB_ADDED : RULES_USB_REMOVED, 0);
         rules_number(&event, 0, rules_usb_class(udev));
         rules_number(&event, 1, le16_to_cpu(udev->descriptor.idVendor));
@@ -1272,7 +1274,8 @@ static struct notifier_block rules_usb_nb = {.notifier_call = rules_usb_notify};
 
 // ---- links ---------------------------------------------------------------------------
 
-//      Which links had a carrier, by ifindex, the first 256 of them; the notifier is called under RTNL.
+//      Which links had a carrier, by ifindex, the first 256 of them; the notifier is called under RTNL, which
+//      serialises every change of these two.
 static DECLARE_BITMAP(rules_link_up, 256);
 static p32 rules_links;
 
