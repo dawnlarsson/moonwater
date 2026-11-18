@@ -1337,14 +1337,11 @@ static bool rover_is_word_source(p8 source)
 }
 
 //      A constant's value, which the check holds to its type's range.
-static bool rover_constant_ok(const struct rover_table address_to table, struct rover_operand operand, p8 type)
+//      A number in its type's range: what a constant of the type may be, and a number the kernel is asked to do.
+static bool rover_number_ok(p8 type, b64 number)
 {
         const struct rover_type_row address_to row = &rover_types[type];
-        b64 number;
 
-        if (operand.source != ROVER_CONST_NUMBER)
-                return true;
-        memory_copy(&number, table->pool + operand.index, sizeof(number));
         switch (row->kind)
         {
         case ROVER_T_INT: return number >= row->low && number <= row->high;
@@ -1357,6 +1354,16 @@ static bool rover_constant_ok(const struct rover_table address_to table, struct 
         case ROVER_T_CHORD: return number >= 0 && (number >> 16) <= 15 && (number & 0xffff) < 768;
         }
         return false;
+}
+
+static bool rover_constant_ok(const struct rover_table address_to table, struct rover_operand operand, p8 type)
+{
+        b64 number;
+
+        if (operand.source != ROVER_CONST_NUMBER)
+                return true;
+        memory_copy(&number, table->pool + operand.index, sizeof(number));
+        return rover_number_ok(type, number);
 }
 
 /*

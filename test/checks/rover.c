@@ -1393,6 +1393,19 @@ static fn rover_check_kernel_fits(void)
                                    "\tdo log \"b\"\n\tdo log \"c\"\n\tdo log \"d\"\n\tdo log \"e\"\n\tdo log \"f\"\n"
                                    "\tdo log \"g\"\n") &&
                   rover_holds_why("16 kernel primitives"));
+
+        //      What the kernel's DO holds an asked primitive's number to: the type's range, as a constant's.
+        {
+                const struct rover_primitive_row address_to latency = rover_primitive_find(5);
+                const struct rover_primitive_row address_to backlight = rover_primitive_find(4);
+
+                check("an asked latency of more than a day is out of range",
+                      latency && !rover_number_ok(latency->type[0], ROVER_DURATION_MOST + 1) &&
+                          rover_number_ok(latency->type[0], 20000));
+                check("an asked backlight past 100% or below 0 is out of range",
+                      backlight && !rover_number_ok(backlight->type[0], 10001) &&
+                          !rover_number_ok(backlight->type[0], -1) && rover_number_ok(backlight->type[0], 3000));
+        }
 }
 
 b32 main(void)

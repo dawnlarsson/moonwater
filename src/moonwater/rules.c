@@ -1502,6 +1502,11 @@ static long rules_do_asked(struct rover_control *request)
                 return -EINVAL;
         if (primitive->klass == ROVER_DELIBERATE)
                 return -EPERM;
+        //      Held to the schema's range as a table's constant is by the loader: latency at most a day, a backlight
+        //      0 to 100%, an enum one of its words.
+        if (primitive->count && !rover_kind_is_word(rover_types[primitive->type[0]].kind) &&
+            !rover_number_ok(primitive->type[0], request->number))
+                return -ERANGE;
         raw_spin_lock_irqsave(&rules_lock, flags);
         if (request->primitive == rules_p_poweroff || request->primitive == rules_p_reboot)
         {
