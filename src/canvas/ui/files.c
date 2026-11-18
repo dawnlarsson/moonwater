@@ -134,6 +134,10 @@
 #define FILES_MENU_BIN_EMPTY 43      // everything in it deleted for good, asked first
 #define FILES_MENU_RESTORE 44        // what is chosen in it put back where it was
 #define FILES_KEY_Z 44
+#define FILES_SPRING_NS 900000000ll  // a drag held this long over a folder opens it, so the drop can go further in
+#define FILES_SPRING_NODE 0x10000    // a spring's target is a tree node (this plus its number), not a row
+#define FILES_EDGE 28                // logical pixels at a list's top and foot where a drag over it scrolls it
+#define FILES_EDGE_STEP 14           // and how far a frame, at its very edge
 #define FILES_KEY_Y 21
 #define FILES_VIEW_DETAILS 0
 #define FILES_VIEW_ICONS 1
@@ -247,6 +251,10 @@ static struct
         b32 undoing;
         struct ui_drop drop;     // a drag of files over the window: dropped, they are copied or moved into the folder it is over
         int drop_row;            // the folder's row the drop goes into, -1 the folder shown
+        int drop_node;           // or the folder tree's node it is over (a drop goes into its folder), -1 none
+        b32 drop_over;           // a drag is over the window now, at drop.x, drop.y
+        int spring;              // the folder (a row, or a node plus FILES_SPRING_NODE) a drag has been held over since spring_at, -1 none
+        b64 spring_at;
         b64 next_progress;       // when the foot next says how far a copy has gone
         b32 moving;              // a copy or a move was begun and its end is not said yet
         b32 tree_keys;           // the keys are in the folder tree
@@ -1670,10 +1678,20 @@ static bipolar files_drop_folder(int row)
         A copy or a move of files (paths, count of them, each with its end) into the folder at row (-1 the folder shown), begun on its own
         thread. False, with the foot saying why, when it could not begin.
 */
+static b32 files_transfer_into(const p8 address_to paths, p32 count, const p8 address_to folder, int how);
+
 static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how)
 {
         struct files_move address_to job = &files.big->move;
         bipolar into;
+
+        // A drop on a node of the folder tree: into that node's folder, by its path.
+        if (row <= -2 && files.drop_node >= 0)
+        {
+                static p8 path[FILES_PATH];
+
+                return files_tree_path(&files.big->tree, (p32)files.drop_node, path) && files_transfer_into(paths, count, path, how);
+        }
 
         files.said = 0, files.big->note[0] = 0, files.dirty = true;
         if (files_move_running(job) || files.big->job.state == FILES_JOB_RUNNING)
@@ -1703,6 +1721,32 @@ static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how
                         string_append_bounded((string_address)files.move_into, (string_address)files_model_name(m, entry), FILES_PATH);
                 }
         }
+        files_move_start(job);
+        files.moving = true, files.next_progress = (b64)ui_kit.now;
+        return true;
+}
+
+// A copy or a move into the folder at an absolute path (a tree node's), begun on its own thread as files_transfer's is.
+static b32 files_transfer_into(const p8 address_to paths, p32 count, const p8 address_to folder, int how)
+{
+        struct files_move address_to job = &files.big->move;
+        bipolar into;
+
+        files.said = 0, files.big->note[0] = 0, files.dirty = true;
+        if (files_move_running(job) || files.big->job.state == FILES_JOB_RUNNING)
+        {
+                files.said = LANGUAGE_files_busy;
+                return false;
+        }
+        files_move_end(job);
+        if ((into = system_open_at(AT_FDCWD, (string_address)folder, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+        {
+                files.said = LANGUAGE_files_changed;
+                return false;
+        }
+        if (!files_move_begin(job, how, into, paths, count))
+                return false;
+        string_copy_bounded((string_address)files.move_into, (string_address)folder, FILES_PATH);
         files_move_start(job);
         files.moving = true, files.next_progress = (b64)ui_kit.now;
         return true;
@@ -1744,8 +1788,23 @@ static b32 files_drag_event(const struct window_event address_to event)
         what = ui_drop_event(&files.drop, event);
         if (what == UI_DROP_OVER)
         {
-                int row = files_drop_row(files.drop.x, files.drop.y);
-                b32 none = (files.drag.live && row < 0) || files.big->model.state != FILES_READY;
+                struct ui_list address_to tl = &files.big->tree_list;
+                int node = ui_list_hit(&files.ui, tl, files.drop.x, files.drop.y);
+                int row = node >= 0 ? -2 : files_drop_row(files.drop.x, files.drop.y);
+                b32 none = (files.drag.live && row == -1) || (node < 0 && files.big->model.state != FILES_READY);
+
+                // Over a node of the tree the drop goes into its folder, the node ringed; a drag held over a folder opens it (the spring).
+                files.drop_over = true;
+                if (node != files.drop_node)
+                        files.drop.nth = -2;
+                files.drop_node = node;
+                tl->drop = node >= 0 ? node + 1 : 0;
+                {
+                        int spring = node >= 0 ? FILES_SPRING_NODE + node : row;
+
+                        if (spring != files.spring)
+                                files.spring = spring, files.spring_at = (b64)ui_kit_time();
+                }
                 p32 preferred = files.drop.keys & WINDOW_KEY_CONTROL ? WINDOWS_DRAG_COPY
                                 : files.drop.keys & WINDOW_KEY_SHIFT ? WINDOWS_DRAG_MOVE
                                 : files_drop_near()                  ? WINDOWS_DRAG_MOVE
@@ -1756,10 +1815,10 @@ static b32 files_drag_event(const struct window_event address_to event)
                         files.drop.nth = -2;
                 files.drop_row = row, files.drop.action = preferred;
                 ui_drop_pick(&files.own, &files.drop, names, none ? 0 : 1, WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE, preferred);
-                l->drop = files.drop.nth < 0 ? 0 : row >= 0 ? row + 1 : UI_LIST_DROP_ALL;
+                l->drop = files.drop.nth < 0 || node >= 0 ? 0 : row >= 0 ? row + 1 : UI_LIST_DROP_ALL;
         }
         else if (what == UI_DROP_LEFT || what == UI_DROP_DONE || what == UI_DROP_DROPPED)
-                l->drop = 0;
+                l->drop = 0, files.big->tree_list.drop = 0, files.drop_over = false, files.spring = -1, files.drop_node = what == UI_DROP_DROPPED ? files.drop_node : -1;
         else if (what == UI_DROP_READY)
         {
                 p8 address_to bytes, address_to paths = null;
@@ -1783,6 +1842,7 @@ static b32 files_drag_event(const struct window_event address_to event)
                         array_store_release(paths, room, used);
                 }
                 ui_drop_done(&files.own, &files.drop, took);
+                files.drop_node = -1;
         }
         files.dirty = true;
         return true;
@@ -3157,6 +3217,43 @@ static long files_tick(long timeout, long address_to other)
         b64 now = (b64)ui_kit.now, wait;
 
         (void)other;
+        // A drag over the window: held over a folder it opens it (a row's folder shown, a tree node's shown and opened in the tree), and
+        // near a list's top or foot it scrolls that list, faster nearer the edge, a frame at a time.
+        if (files.drop_over)
+        {
+                b64 at = (b64)ui_kit_time();
+                struct ui_list address_to lists[2] = {&files.big->list, &files.big->tree_list};
+
+                if (files.spring >= 0 && at - files.spring_at >= FILES_SPRING_NS)
+                {
+                        int spring = files.spring;
+
+                        files.spring = -1, files.drop.nth = -2;
+                        if (spring >= FILES_SPRING_NODE && (p32)(spring - FILES_SPRING_NODE) < files.big->tree.count)
+                        {
+                                if (!files.big->tree.node[spring - FILES_SPRING_NODE].open)
+                                        files_tree_toggle((p32)(spring - FILES_SPRING_NODE));
+                                files_tree_go((p32)(spring - FILES_SPRING_NODE));
+                        }
+                        else if (spring < FILES_SPRING_NODE)
+                                files_open((p32)spring);
+                }
+                for (int k = 0; k < 2; k++)
+                {
+                        struct ui_list address_to over = lists[k];
+                        int edge = ui_dev(&files.ui, FILES_EDGE), top = files.drop.y - over->y, foot = over->y + over->h - files.drop.y, by = 0;
+
+                        if (files.drop.x < over->x || files.drop.x >= over->x + over->w || top < 0 || foot < 0)
+                                continue;
+                        if (top < edge)
+                                by = -ui_dev(&files.ui, FILES_EDGE_STEP) * (edge - top) / edge - 1;
+                        else if (foot < edge)
+                                by = ui_dev(&files.ui, FILES_EDGE_STEP) * (edge - foot) / edge + 1;
+                        if (by && ui_scroll_set(&over->scroll, over->scroll.scroll + by))
+                                files.dirty = true;
+                }
+                timeout = timeout < 0 || timeout > 16000000 ? 16000000 : timeout;
+        }
         // A press held still on the rows: its ring a frame at a time, and once it has been held long enough, on a row that row taken up
         // and carried (its release drops it), on the ground selection mode.
         {
@@ -3307,7 +3404,7 @@ static int files_open_window(void)
                 compositor_kmsg((string_address) "files: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                 return 1;
         }
-        files.clicked = FILES_NO, files.crumb_hover = -1, files.crumb_clicked = -1, files.drop_row = -1;
+        files.clicked = FILES_NO, files.crumb_hover = -1, files.crumb_clicked = -1, files.drop_row = -1, files.drop_node = -1, files.spring = -1;
         files.columns.width[1] = 90, files.columns.width[2] = 110, files.columns.width[3] = 140;
         files.columns.sorted = 0, files.columns.hover = files.columns.held = -1;
         files_move_end(&files.big->move);
