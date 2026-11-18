@@ -11246,6 +11246,8 @@ static b32 bowl_profile_refresh(const struct bowl_profile address_to profile)
         return bowl_profile_script(profile);
 }
 
+static fn bowl_profile_keep(const struct bowl_profile address_to profile);
+
 /* `bowl profile NAME session [argument...]`: the profile's session, lines of
    a shell script, run by /bin/sh with the arguments as its own. What the
    launcher the profile exposes under its name does. */
@@ -11269,6 +11271,7 @@ bowl_profile_session(const struct bowl_profile address_to profile,
                 text[used++] = '\n';
         }
         text[used] = end;
+        bowl_profile_keep(profile);
         if (profile->xwayland)
                 bowl_xwayland_install(profile);
         if (profile->pwrite_shim)
@@ -11445,6 +11448,185 @@ bowl_profile_recorded(string_address root, string_address name,
         system_close(handle);
 }
 
+/*
+        A profile's generation: what this binary says the profile is, as one number. It is its bowls and their package lists and
+        the steps an install takes beyond the packages (the locale, the shims, the tools, the grants), and nothing else, so an image
+        whose profile gained a package or a step has another number and one that only changed a session line has the same. Every
+        install writes it to the bowl's marker last ("generation N"), and a session started from a bowl whose marker has another,
+        or none (a bowl set up by an older image), installs again first: an image that adds a driver to a profile gives it to the
+        bowls already set up the next time each is used, with nobody having to know to ask (box's Alpine bowl, set up before
+        mesa-va-gallium and the Intel media drivers were in the list, ran Chromium with no video on the card at all).
+*/
+static p32 bowl_profile_generation(const struct bowl_profile address_to profile)
+{
+        p32 hash = hash_fnv1a(2166136261u, profile->name, string_length(profile->name) + 1);
+        const p8 steps[] = {profile->libraries, profile->xwayland, profile->input, profile->pwrite_shim,
+                            profile->ssh, profile->bins_first, profile->locales};
+
+        for (const struct bowl_component address_to part = profile->components; part->distro; part++)
+        {
+                hash = hash_fnv1a(hash, part->distro, string_length(part->distro) + 1);
+                for (positive at = 0; part->packages[at]; at++)
+                        hash = hash_fnv1a(hash, part->packages[at], string_length(part->packages[at]) + 1);
+                hash = hash_fnv1a(hash, "", 1);
+        }
+        for (positive at = 0; profile->tools && profile->tools[at]; at++)
+                hash = hash_fnv1a(hash, profile->tools[at], string_length(profile->tools[at]) + 1);
+        if (profile->tool_prefix)
+                hash = hash_fnv1a(hash, profile->tool_prefix, string_length(profile->tool_prefix) + 1);
+        return hash_fnv1a(hash, steps, sizeof(steps));
+}
+
+#define BOWL_GENERATION_WORD "generation "
+
+/* The generation line for a number: "generation" and eight hex digits, the line's end included; length 20. */
+static fn bowl_generation_line(p8 address_to line, p32 generation)
+{
+        static const p8 digits[] = "0123456789abcdef";
+
+        memory_copy(line, BOWL_GENERATION_WORD, sizeof(BOWL_GENERATION_WORD) - 1);
+        for (positive at = 0; at < 8; at++)
+                line[sizeof(BOWL_GENERATION_WORD) - 1 + at] = digits[(generation >> (28 - 4 * at)) & 15];
+        line[sizeof(BOWL_GENERATION_WORD) + 7] = '\n';
+        line[sizeof(BOWL_GENERATION_WORD) + 8] = end;
+}
+
+/* Whether a bowl's marker for the profile ends at this generation: the last generation line it holds is the number. */
+static bool __attribute__((__noinline__))
+bowl_profile_generation_is(string_address root, string_address name, p32 generation)
+{
+        p8 want[sizeof(BOWL_GENERATION_WORD) + 9];
+        p8 chunk[4096];
+        p8 line[32];
+        positive have = 0;
+        bool whole = true;
+        bool same = false;
+        bipolar handle = bowl_profile_marker_open(root, name, FILE_READ);
+        bipolar got;
+
+        if (handle < 0)
+                return false;
+        bowl_generation_line(want, generation);
+        want[string_length(want) - 1] = end;
+        while ((got = system_read_retry((positive)handle, chunk, sizeof(chunk))) > 0)
+                for (bipolar at = 0; at < got; at++)
+                {
+                        if (chunk[at] != '\n')
+                        {
+                                if (have + 1 < sizeof(line))
+                                        line[have++] = chunk[at];
+                                else
+                                        whole = false;
+                                continue;
+                        }
+                        line[have] = end;
+                        if (whole && string_has_prefix(line, BOWL_GENERATION_WORD))
+                                same = string_equals(line, want);
+                        have = 0;
+                        whole = true;
+                }
+        system_close(handle);
+        return same;
+}
+
+/* The bowls a profile is in, each told the generation it is now at. */
+static fn bowl_profile_generation_note(const struct bowl_profile address_to profile)
+{
+        p8 line[sizeof(BOWL_GENERATION_WORD) + 9];
+
+        bowl_generation_line(line, bowl_profile_generation(profile));
+        for (const struct bowl_component address_to part = profile->components; part->distro; part++)
+        {
+                const struct bowl_distro address_to distro = bowl_find_distro(part->distro);
+                bipolar marker;
+
+                if (!distro || !bowl_profile_marked(distro->root, profile->name))
+                        continue;
+                marker = bowl_profile_marker_open(distro->root, profile->name, FILE_APPEND);
+                if (marker < 0)
+                        continue;
+                (void)system_write_all((positive)marker, line, string_length(line));
+                system_close(marker);
+        }
+}
+
+/* Whether every bowl the profile is in (for a library profile: every bowl it was put in) is at this binary's generation. */
+static bool bowl_profile_current(const struct bowl_profile address_to profile)
+{
+        p32 generation = bowl_profile_generation(profile);
+
+        for (const struct bowl_component address_to part = profile->components; part->distro; part++)
+        {
+                const struct bowl_distro address_to distro = bowl_find_distro(part->distro);
+
+                if (!distro)
+                        continue;
+                if (profile->libraries && !bowl_profile_marked(distro->root, profile->name))
+                        continue;
+                if (!bowl_profile_generation_is(distro->root, profile->name, generation))
+                        return false;
+        }
+        return true;
+}
+
+static bool bowl_keeping;
+static b32 bowl_profile_install(const struct bowl_profile address_to profile);
+
+/*
+        Before a session starts: a profile whose bowls are behind this binary's generation of it is installed again, and so is
+        every other profile one of its bowls holds (the graphics profile's drivers are for the programs of these bowls, and a
+        profile with no session of its own, ssh's, is brought up to date by the next session that starts from its bowl). One
+        start at a time does it (a lock in /run, waited for, and the generation looked at again after it), and one that cannot
+        (no network, no room) says so and starts the session as the bowl is: the next start tries again.
+*/
+static fn bowl_profile_keep(const struct bowl_profile address_to profile)
+{
+        const struct bowl_profile address_to behind[array_count(bowl_profiles)];
+        positive count = 0;
+        bipolar lock;
+
+        for (positive at = 0; at < array_count(bowl_profiles); at++)
+        {
+                const struct bowl_profile address_to other = bowl_profiles + at;
+                bool ours = other == profile;
+
+                for (const struct bowl_component address_to part = profile->components;
+                     !ours && part->distro; part++)
+                {
+                        const struct bowl_distro address_to distro = bowl_find_distro(part->distro);
+
+                        ours = distro && bowl_profile_marked(distro->root, other->name);
+                }
+                if (ours && !other->unavailable && !bowl_profile_current(other))
+                        behind[count++] = other;
+        }
+        if (!count)
+                return;
+        (void)bowl_mkdir("/run/moonwater");
+        lock = system_open_at_mode(AT_FDCWD, "/run/moonwater/bowl-profile.lock",
+                                   FILE_WRITE | FILE_CREATE | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (lock >= 0)
+                (void)system_call_2(syscall(flock), (positive)lock, 2);
+        bowl_keeping = true;
+        for (positive at = 0; at < count; at++)
+        {
+                if (bowl_profile_current(behind[at]))
+                        continue;
+                string_format(log, bowl_label "%s: this image's profile has changed since its bowl was set up: bringing it up to date\n",
+                              behind[at]->name);
+                log_flush();
+                if (bowl_profile_install(behind[at]))
+                {
+                        string_format(log, bowl_label "%s: could not bring it up to date; starting it as it is, the next start tries again\n",
+                                      behind[at]->name);
+                        log_flush();
+                }
+        }
+        bowl_keeping = false;
+        if (lock >= 0)
+                system_close(lock);
+}
+
 static b32 bowl_profile_install(const struct bowl_profile address_to profile)
 {
         return_if(profile->unavailable, bowl_refuse(profile->unavailable));
@@ -11545,8 +11727,9 @@ static b32 bowl_profile_install(const struct bowl_profile address_to profile)
                                 return 1;
                 }
 
+        bowl_profile_generation_note(profile);
         string_format(log, bowl_label "%s is ready. %s\n", profile->label,
-                      profile->next);
+                      bowl_keeping ? (string_address)"" : profile->next);
         log_flush();
         return 0;
 }
@@ -11812,8 +11995,10 @@ static b32 bowl_profile_list(void)
                 string_format(log, bowl_label "%s  %s%s\n", profile->name,
                               profile->label,
                               profile->unavailable ? "  (not for this architecture)"
-                              : installed          ? "  (installed)"
-                                                   : "");
+                              : installed && !bowl_profile_current(profile)
+                                  ? "  (installed; this image changed it: the next start of a program from its bowl brings it up to date)"
+                              : installed ? "  (installed)"
+                                          : "");
         }
 
         log_flush();

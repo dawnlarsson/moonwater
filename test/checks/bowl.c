@@ -952,6 +952,56 @@ static fn profiles(void)
                 system_close(noted);
         check("A marker is added to by a second install, not started over",
               made && noted >= 0 && unpack_says(first, BOWL_PROFILE_STATE "/kept", "one\ntwo\n"));
+        {
+                //      A profile's generation: what the binary says it is (bowls, packages, steps), kept in the marker last.
+                const struct bowl_profile address_to chrome_profile = bowl_find_profile("chrome");
+                struct bowl_profile grown = *chrome_profile;
+                struct bowl_profile retold = *chrome_profile;
+                struct bowl_component grown_parts[2] = {chrome_profile->components[0], {null, null, 0, null}};
+                string_address grown_packages[BOWL_PROFILE_ARGV];
+                static string_address other_session[] = {"exec true", null};
+                positive at = 0;
+                p8 line[sizeof(BOWL_GENERATION_WORD) + 9];
+                p32 now = bowl_profile_generation(chrome_profile);
+
+                for (; chrome_profile->components[0].packages[at] && at + 2 < BOWL_PROFILE_ARGV; at++)
+                        grown_packages[at] = chrome_profile->components[0].packages[at];
+                grown_packages[at++] = "a-driver-the-image-added";
+                grown_packages[at] = null;
+                grown_parts[0].packages = grown_packages;
+                grown.components = grown_parts;
+                retold.session = other_session;
+                check("A profile's generation is the same number each time it is asked, and another profile's is another",
+                      now == bowl_profile_generation(chrome_profile) && now != bowl_profile_generation(bowl_find_profile("steam")));
+                check("A package added to a profile's list is a new generation, and a session line changed is not",
+                      bowl_profile_generation(&grown) != now && bowl_profile_generation(&retold) == now);
+                bowl_generation_line(line, 0x0123abcdu);
+                check("The generation line is the word and eight hex digits", string_equals(line, "generation 0123abcd\n"));
+                made = unpack_write(first, BOWL_PROFILE_STATE "/gen", "package mesa held\nchrome\n", 0644);
+                check("A marker from before generations (none in it) is behind: the bowl is brought up to date once",
+                      made && !bowl_profile_generation_is(first, "gen", now));
+                p8 lines[3 * sizeof(line)];
+                p8 own[256];
+                p8 own_state[256];
+
+                //      A root of these rows' own, made whole here, so they hold whatever the rows above left.
+                unpack_path(own, "profgen", "");
+                unpack_path(own_state, "profgen", BOWL_PROFILE_STATE);
+                (void)bowl_mkdir_parents(own_state);
+
+                bowl_generation_line(line, now + 1);
+                string_copy_bounded(lines, line, sizeof lines);
+                bowl_generation_line(line, now);
+                string_append_bounded(lines, line, sizeof lines);
+                made = unpack_write(own, BOWL_PROFILE_STATE "/gen2", lines, 0644);
+                bowl_generation_line(line, now + 1);
+                string_append_bounded(lines, line, sizeof lines);
+                made &= unpack_write(own, BOWL_PROFILE_STATE "/gen3", lines, 0644);
+                check("The last generation in the marker is the one it is at, not an earlier one",
+                      made && bowl_profile_generation_is(own, "gen2", now) && !bowl_profile_generation_is(own, "gen2", now + 1) &&
+                          bowl_profile_generation_is(own, "gen3", now + 1) && !bowl_profile_generation_is(own, "gen3", now));
+                check("A marker that is not there is no generation", !bowl_profile_generation_is(first, "no-such-marker", now));
+        }
         p8 aimed[256];
         p8 pointer[256];
         unpack_path(aimed, "profa", "/aimed");
