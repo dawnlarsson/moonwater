@@ -36,8 +36,11 @@ editor_write_beside	ec75	impossibile scrivere accanto al file
 editor_writes_over_changed	df15	sovrascrive la modifica sul disco (Ctrl+R la rilegge)
 editor_writes_over_readonly	e22f	sovrascrive un file di sola lettura
 files_back	4bc2	Indietro
+files_busy	5ba5	Una copia, uno spostamento o un'eliminazione è in corso
 files_changed	df4e	Non è ciò che era elencato: la cartella viene riletta
 files_chosen	7a7f	%1$d di %2$d scelti
+files_copied	6570	%d copiati
+files_copying	c870	Copia %1$d di %2$d, %3$s di %4$s: Esc ferma
 files_count	cab8	%d elementi
 files_count_cut	f139	I primi %d elementi: la cartella ne ha altri
 files_delete_ask	807b	Eliminare %1$d: %2$s? Di nuovo Canc lo fa, Escape li lascia
@@ -49,6 +52,11 @@ files_failed	c564	Impossibile leggere questa cartella
 files_forward	83ba	Avanti
 files_gone	b09c	Questa cartella non c'è più
 files_link	9abb	Un collegamento non viene seguito
+files_move_cancelled	b54b	Fermato: %d fatti
+files_move_inside	deb2	Una cartella non può andare dentro se stessa
+files_move_stopped	e305	Fermato a %2$s: %1$d fatti prima
+files_moved	f6ef	%d spostati
+files_moving	2b61	Spostamento %1$d di %2$d, %3$s di %4$s: Esc ferma
 files_name_bad	467d	Questo non è un nome
 files_name_taken	cbce	Questo nome è già usato
 files_new_folder	d127	Nuova cartella

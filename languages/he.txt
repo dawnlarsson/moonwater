@@ -37,8 +37,11 @@ editor_write_beside	ec75	לא ניתן לכתוב לצד הקובץ
 editor_writes_over_changed	df15	יכתוב מעל שינוי הדיסק (Ctrl+R קורא שוב)
 editor_writes_over_readonly	e22f	יכתוב מעל קובץ לקריאה בלבד
 files_back	4bc2	אחורה
+files_busy	5ba5	העתקה, העברה או מחיקה מתבצעת
 files_changed	df4e	זה לא מה שהופיע ברשימה: התיקייה נקראת מחדש
 files_chosen	7a7f	נבחרו %1$d מתוך %2$d
+files_copied	6570	%d הועתקו
+files_copying	c870	מעתיק %1$d מתוך %2$d, %3$s מתוך %4$s: Escape עוצר
 files_count	cab8	%d פריטים
 files_count_cut	f139	%d הפריטים הראשונים: בתיקייה יש עוד
 files_delete_ask	807b	למחוק %1$d: %2$s? Delete שוב מוחק, Escape משאיר
@@ -50,6 +53,11 @@ files_failed	c564	לא ניתן היה לקרוא את התיקייה
 files_forward	83ba	קדימה
 files_gone	b09c	התיקייה הזו כבר לא קיימת
 files_link	9abb	לא עוקבים אחרי קישור
+files_move_cancelled	b54b	נעצר: %d בוצעו
+files_move_inside	deb2	תיקייה אינה יכולה להיכנס לתוך עצמה
+files_move_stopped	e305	נעצר ב־%2$s: %1$d בוצעו לפניו
+files_moved	f6ef	%d הועברו
+files_moving	2b61	מעביר %1$d מתוך %2$d, %3$s מתוך %4$s: Escape עוצר
 files_name_bad	467d	זה לא שם
 files_name_taken	cbce	השם הזה תפוס
 files_new_folder	d127	תיקייה חדשה

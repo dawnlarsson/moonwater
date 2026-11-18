@@ -36,8 +36,11 @@ editor_write_beside	ec75	could not write beside the file
 editor_writes_over_changed	df15	writes over the change on disk (Ctrl+R reads it again)
 editor_writes_over_readonly	e22f	writes over a read-only file
 files_back	4bc2	Back
+files_busy	5ba5	A copy, a move or a delete is under way
 files_changed	df4e	It is not what was listed: the folder is read again
 files_chosen	7a7f	%1$d of %2$d chosen
+files_copied	6570	%d copied
+files_copying	c870	Copying %1$d of %2$d, %3$s of %4$s: Escape stops
 files_count	cab8	%d items
 files_count_cut	f139	The first %d items: the folder has more
 files_delete_ask	807b	Delete %1$d: %2$s? Delete again does it, Escape leaves them
@@ -49,6 +52,11 @@ files_failed	c564	This folder could not be read
 files_forward	83ba	Forward
 files_gone	b09c	This folder is gone
 files_link	9abb	A link is not followed
+files_move_cancelled	b54b	Stopped: %d done
+files_move_inside	deb2	A folder cannot go into itself
+files_move_stopped	e305	Stopped at %2$s: %1$d done before it
+files_moved	f6ef	%d moved
+files_moving	2b61	Moving %1$d of %2$d, %3$s of %4$s: Escape stops
 files_name_bad	467d	That is not a name
 files_name_taken	cbce	That name is taken
 files_new_folder	d127	New folder

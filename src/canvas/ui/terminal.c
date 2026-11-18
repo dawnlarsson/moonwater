@@ -3149,17 +3149,20 @@ static b32 terminal_select_key(const struct window_event address_to event, b32 a
 }
 
 /*
-        A drag over the terminal (the kit's ui_drop): text, or files as their list, taken as a copy, and dropped as a paste is (term_paste's
-        filter: no sequence of a dropped text runs, and a program in bracketed paste is given it between the markers).
+        A drag over the terminal (the kit's ui_drop): files as their list first, else text, taken as a copy, and dropped as a paste is
+        (term_paste's filter: no sequence of a dropped text runs, and a program in bracketed paste is given it between the markers).
+        Files are typed as a command line takes them, each path quoted for the shell and a blank after it (ui_uris_quoted), never as
+        lines: the paths of files dropped as text were a line each, and each line's end ran what was typed so far.
 */
 static struct ui_drop terminal_drop;
 
 static b32 terminal_drop_event(b32 master, const struct window_event address_to event)
 {
-        static const char address_to const names[4] = {WINDOWS_CLIP_TEXT, "text/plain", "UTF8_STRING", WINDOWS_CLIP_URIS};
+        static const char address_to const names[4] = {WINDOWS_CLIP_URIS, WINDOWS_CLIP_TEXT, "text/plain", "UTF8_STRING"};
         int what = ui_drop_event(&terminal_drop, event);
-        p8 address_to bytes;
+        p8 address_to bytes, address_to quoted;
         unsigned long length;
+        positive room, typed;
 
         if (what == UI_DROP_OVER)
                 ui_drop_pick(&terminal.own, &terminal_drop, names, 4, WINDOWS_DRAG_COPY, WINDOWS_DRAG_COPY);
@@ -3171,7 +3174,15 @@ static b32 terminal_drop_event(b32 master, const struct window_event address_to 
                 return true;
         }
         cursor_hide();
-        term_paste(bytes, length);
+        if (windows_clip_same(terminal_drop.name, string_length((string_address)terminal_drop.name), WINDOWS_CLIP_URIS))
+        {
+                typed = ui_uris_quoted(bytes, (positive)length, &quoted, &room);
+                if (typed)
+                        term_paste(quoted, typed);
+                array_store_release(quoted, room, typed);
+        }
+        else
+                term_paste(bytes, length);
         windows_clip_free(bytes, length);
         ui_drop_done(&terminal.own, &terminal_drop, true);
         return term_send(master);

@@ -1617,4 +1617,786 @@ static b32 files_job_step(struct files_model address_to m, struct files_job addr
         return job->state == FILES_JOB_RUNNING;
 }
 
+/*
+        Copying and moving (struct files_move): files named by their paths (a drop's, a paste's, the browser's own rows) put into a
+        folder held open (into), copied or moved, run in steps by a thread of its own (files_move_start) so that a folder of any size
+        and a disk of any speed never holds the window, which reads the counts as they go (bytes_done of bytes_total, items_done of
+        items_total) and may ask it to stop (files_move_cancel) between two pieces.
+
+        Nothing is written over and nothing is followed. A source is a path a person handed over: its folder is opened as the path
+        names it, and the source itself is looked at without following (a link is copied as the link it is, never what it names) and
+        opened held to the inode looked at (file_open_same, file_walk_open_found_same), so a name swapped between the look and the
+        open is refused. What is made in the folder is made only where the name is free (mkdirat, O_EXCL with O_NOFOLLOW, symlinkat,
+        renameat2 with RENAME_NOREPLACE); a name that is taken there is given a number, "name (2).txt" and on (renamed counts them),
+        so two things never become one. A device, a pipe or a socket is not copied (skipped counts them).
+
+        A move is a rename where the source and the folder are on one filesystem, which is whole and instant; one into the folder it
+        is already in is nothing; across filesystems it is a copy and then, once the copy of that source is whole, its removal (as
+        the delete removes: held to what was looked at, a link removed and never what it names). A folder copied or moved into
+        itself or a folder inside it is refused (FILES_MOVE_INSIDE) before anything of it is made.
+
+        A copy that stops (cancelled, or the kernel refused) leaves what was whole and removes the file it was in the middle of; the
+        sources of a move are removed only when their copy is whole. The thread touches nothing of the model: the folder shown is read
+        again when the view sees the move end.
+*/
+#define FILES_MOVE_MOST 4096          // the sources one move takes
+#define FILES_MOVE_PIECE (8u << 20)   // a file's bytes copied in one piece: a cancel is seen between two
+#define FILES_MOVE_BUFFER (1u << 20)  // the bytes read and written at a time where the kernel will not copy a range
+#define FILES_MOVE_INSIDE 1000        // error: a folder into itself
+#define FILES_MOVE_COPY 1             // what a move does: the values the drag's actions have (WINDOWS_DRAG_COPY, _MOVE)
+#define FILES_MOVE_MOVE 2
+
+enum
+{
+        FILES_MOVE_RENAME, // the moves by rename, and which sources must be copied
+        FILES_MOVE_COUNT,  // what is to be copied, counted
+        FILES_MOVE_COPYING,
+        FILES_MOVE_REMOVE, // a moved source's copy is whole: the source goes
+        FILES_MOVE_OVER,
+};
+
+struct files_move
+{
+        int how, state, phase;            // FILES_MOVE_COPY or _MOVE; FILES_JOB_*; FILES_MOVE_RENAME and on
+        bipolar error;                    // why it stopped: the kernel's code, or FILES_MOVE_INSIDE
+        b32 cancel;                       // asked by the view
+        p64 bytes_total, bytes_done;      // the bytes to copy and copied (moves by rename count none)
+        p32 items_total, items_done;      // the things: a file, a link, a folder each
+        p32 skipped, renamed;             // not copied (a device, a pipe), and given a number for a name that was taken
+        p8 at[FILES_NAME];                // the source it stopped at (the view reads it once the move is over)
+        bipolar into;                     // the folder it goes into, its own descriptor
+        file_facts into_facts;
+        p8 address_to paths;              // the sources, absolute, each with its end
+        p8 address_to copied;             // per source: 1 when it is copied (a copy, or a move across filesystems), 2 when it is done
+        p32 count, next;
+        // The source being worked: its folder, its name, how it was looked at, the name it has in into.
+        bipolar from;
+        p8 name[FILES_NAME], named[FILES_NAME];
+        file_facts facts;
+        // The folders inside it being copied (or counted, or removed), innermost last: each source folder's walk and the folder made
+        // for it, and the source folder's facts (its mode and times, given to the copy when it is whole).
+        int depth;
+        file_walk walk[FILES_JOB_DEEP];
+        bipolar made[FILES_JOB_DEEP];
+        file_facts made_facts[FILES_JOB_DEEP];
+        p8 inside[FILES_JOB_DEEP][FILES_NAME];
+        // A file being copied, a piece at a time.
+        bipolar in, out, out_folder;
+        p8 out_name[FILES_NAME];
+        p64 left;
+        file_facts piece_facts;           // and how its source was looked at: its mode and times, given to it when it is whole
+        b32 ranged;                       // the kernel copies a range here: no buffer
+        p8 address_to buffer;
+        thread address_to worker;
+        b32 begun;                        // files_move_begin was called: files_move_end has what it holds to let go of
+};
+
+static b32 files_move_cancelled(const struct files_move address_to job)
+{
+        return __atomic_load_n(&job->cancel, __ATOMIC_ACQUIRE) != 0;
+}
+
+static fn files_move_fail(struct files_move address_to job, bipolar error)
+{
+        job->error = error;
+        __atomic_store_n(&job->state, FILES_JOB_FAILED, __ATOMIC_RELEASE);
+}
+
+// The file half copied let go of: its descriptors closed and, when it was not whole, what was made of it removed (it is the move's own:
+// made with O_EXCL, and removed held to the inode it has).
+static fn files_move_file_drop(struct files_move address_to job, b32 whole)
+{
+        file_facts made;
+
+        if (job->in >= 0)
+                system_close(job->in);
+        if (job->out >= 0)
+        {
+                if (!whole && file_look_code(job->out, (string_address) "", AT_EMPTY_PATH, &made) >= 0)
+                        file_remove_same(job->out_folder, (string_address)job->out_name, 0, &made);
+                system_close(job->out);
+        }
+        job->in = job->out = -1, job->left = 0;
+}
+
+// Everything the move holds let go of (its thread joined first by files_move_end): its folders, its file, its memory.
+static fn files_move_close(struct files_move address_to job)
+{
+        files_move_file_drop(job, false);
+        while (job->depth > 0)
+        {
+                job->depth--;
+                file_walk_close(&job->walk[job->depth]);
+                if (job->made[job->depth] >= 0)
+                        system_close(job->made[job->depth]);
+        }
+        if (job->from >= 0)
+                system_close(job->from);
+        if (job->into >= 0)
+                system_close(job->into);
+        job->from = job->into = -1;
+}
+
+// The bytes of a move's own memory: the sources' paths, and a mark each.
+static positive files_move_bytes(void)
+{
+        return (positive)FILES_MOVE_MOST * FILES_PATH / 4 + FILES_MOVE_MOST;
+}
+
+/*
+        A move set up, not started: the sources (paths, count of them, each with its end) into the folder at into (a descriptor that is
+        the move's from now on, closed when it ends, whatever comes of this). A source that is no absolute path, the folder itself, or
+        more than FILES_MOVE_MOST of them are left out. The job's memory is a mapping of its own (files_move_end gives it back).
+*/
+static b32 files_move_begin(struct files_move address_to job, int how, bipolar into, const p8 address_to paths, p32 count)
+{
+        bipolar mapped;
+        positive used = 0, room = (positive)FILES_MOVE_MOST * FILES_PATH / 4;
+
+        memory_fill(job, 0, sizeof(*job));
+        job->into = into, job->from = job->in = job->out = job->out_folder = -1, job->begun = true;
+        job->how = how == FILES_MOVE_MOVE ? FILES_MOVE_MOVE : FILES_MOVE_COPY;
+        for (int k = 0; k < FILES_JOB_DEEP; k++)
+                job->made[k] = -1, job->walk[k].handle = -1;
+        if (into < 0 || file_look_code(into, (string_address) "", AT_EMPTY_PATH, &job->into_facts) < 0 ||
+            (job->into_facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+        {
+                files_move_fail(job, into < 0 ? into : -ERROR_NOT_DIRECTORY);
+                return false;
+        }
+        mapped = (bipolar)system_call_6(syscall(mmap), 0, files_move_bytes(), 3, 0x22, (positive)-1, 0);
+        if (mapped < 0 && mapped > -4096)
+        {
+                files_move_fail(job, mapped);
+                return false;
+        }
+        job->paths = (p8 address_to)mapped, job->copied = job->paths + room;
+        for (p32 k = 0; k < count && job->count < FILES_MOVE_MOST; k++)
+        {
+                positive length = string_length((string_address)paths);
+
+                if (length > 1 && paths[0] == '/' && length < FILES_PATH && used + length + 1 <= room)
+                {
+                        memory_copy(job->paths + used, paths, length + 1);
+                        used += length + 1, job->count++;
+                }
+                paths += length + 1;
+        }
+        job->state = job->count ? FILES_JOB_RUNNING : FILES_JOB_DONE;
+        return job->count != 0;
+}
+
+static const p8 address_to files_move_path(const struct files_move address_to job, p32 which)
+{
+        const p8 address_to path = job->paths;
+
+        while (which--)
+                path += string_length((string_address)path) + 1;
+        return path;
+}
+
+/*
+        The source number which made the one worked: its folder opened as its path names it and the source looked at in it without
+        following. False (the move failed) when either is not there.
+*/
+static b32 files_move_take(struct files_move address_to job, p32 which)
+{
+        const p8 address_to path = files_move_path(job, which);
+        positive length = string_length((string_address)path), cut = length;
+        p8 folder[FILES_PATH];
+        bipolar looked;
+
+        while (cut > 0 && path[cut - 1] != '/')
+                cut--;
+        if (job->from >= 0)
+                system_close(job->from);
+        job->from = -1;
+        if (!cut || cut == length || length - cut >= FILES_NAME)
+        {
+                files_move_fail(job, -ERROR_INVALID);
+                return false;
+        }
+        memory_copy(job->name, path + cut, length - cut + 1);
+        string_copy_bounded(job->at, (string_address)job->name, FILES_NAME);
+        memory_copy(folder, path, cut > 1 ? cut - 1 : 1);
+        folder[cut > 1 ? cut - 1 : 1] = end;
+        job->from = system_open_at(AT_FDCWD, folder, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        looked = job->from < 0 ? job->from : file_look_code(job->from, (string_address)job->name, AT_SYMLINK_NOFOLLOW, &job->facts);
+        if (looked < 0)
+        {
+                files_move_fail(job, looked);
+                return false;
+        }
+        return true;
+}
+
+// Whether the folder (a descriptor) is the folder shown by facts or inside it: its folders looked at up to the root.
+static b32 files_move_within(bipolar folder, const file_facts address_to facts)
+{
+        bipolar at = system_open_at(folder, (string_address) ".", FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        b32 inside = false;
+
+        for (int up = 0; at >= 0 && up < 4096 && !inside; up++)
+        {
+                file_facts here, above;
+                bipolar next;
+
+                if (file_look_code(at, (string_address) "", AT_EMPTY_PATH, &here) < 0)
+                        break;
+                inside = here.inode == facts->inode && here.device_major == facts->device_major && here.device_minor == facts->device_minor;
+                next = system_open_at(at, (string_address) "..", FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                if (next < 0 || file_look_code(next, (string_address) "", AT_EMPTY_PATH, &above) < 0 ||
+                    (above.inode == here.inode && above.device_major == here.device_major && above.device_minor == here.device_minor))
+                {
+                        if (next >= 0)
+                                system_close(next);
+                        break;
+                }
+                system_close(at);
+                at = next;
+        }
+        if (at >= 0)
+                system_close(at);
+        return inside;
+}
+
+/*
+        A name for the source in the folder at into that is free there now: its own, else "stem (2).ext" and on (a name with its dot
+        first has no extension: ".profile (2)"). Answers false when none of the first thousand is free, or the name would not fit.
+*/
+static b32 files_move_free_name(bipolar into, const p8 address_to name, p8 address_to free, b32 address_to numbered)
+{
+        positive length = string_length((string_address)name), dot = length;
+        file_facts there;
+
+        *numbered = false;
+        if (file_look_code(into, (string_address)name, AT_SYMLINK_NOFOLLOW, &there) == -ERROR_NO_ENTRY)
+        {
+                memory_copy(free, name, length + 1);
+                return true;
+        }
+        for (positive at = length; at > 1; at--)
+                if (name[at - 1] == '.')
+                {
+                        dot = at - 1;
+                        break;
+                }
+        for (positive number = 2; number < 1000; number++)
+        {
+                p8 digits[8];
+                positive count = positive_into(digits, number);
+
+                if (length + count + 4 >= FILES_NAME)
+                        return false;
+                memory_copy(free, name, dot);
+                free[dot] = ' ', free[dot + 1] = '(';
+                memory_copy(free + dot + 2, digits, count);
+                free[dot + 2 + count] = ')';
+                memory_copy(free + dot + 3 + count, name + dot, length - dot + 1);
+                if (file_look_code(into, (string_address)free, AT_SYMLINK_NOFOLLOW, &there) == -ERROR_NO_ENTRY)
+                {
+                        *numbered = true;
+                        return true;
+                }
+        }
+        return false;
+}
+
+// The innermost folder being copied into, or into itself when none.
+static bipolar files_move_target(const struct files_move address_to job)
+{
+        return job->depth ? job->made[job->depth - 1] : job->into;
+}
+
+// The innermost source folder, or the source's own folder.
+static bipolar files_move_source(const struct files_move address_to job)
+{
+        return job->depth ? job->walk[job->depth - 1].handle : job->from;
+}
+
+// A folder's mode and its times given to its copy, now that what is in it is whole.
+static fn files_move_settle(bipolar made, const file_facts address_to facts)
+{
+        b64 times[4] = {facts->accessed.seconds, facts->accessed.nanoseconds, facts->modified.seconds, facts->modified.nanoseconds};
+
+        system_call_2(syscall(fchmod), (positive)made, (positive)(facts->mode & 0777));
+        system_call_4(syscall(utimensat), (positive)made, 0, (positive)times, 0);
+}
+
+/*
+        One thing of a copy (or of its count, when counting): the source as it was looked at (in the folder source, by name), made in
+        target under made_name. A folder is made and gone into (its walk and the folder made pushed), a file opened for its pieces, a link
+        made again, anything else skipped. False when the move stopped (failed).
+*/
+static b32 files_move_one(struct files_move address_to job, bipolar source, const p8 address_to name, file_facts address_to facts, const p8 address_to made_name,
+                          b32 counting)
+{
+        p32 format = facts->mode & MODE_FORMAT;
+        bipolar target = files_move_target(job), made;
+
+        if (format == MODE_DIRECTORY)
+        {
+                if (job->depth >= FILES_JOB_DEEP)
+                {
+                        files_move_fail(job, -ERROR_LOOP);
+                        return false;
+                }
+                if (!file_walk_open_found_same(&job->walk[job->depth], source, (string_address)name, facts))
+                {
+                        files_move_fail(job, job->walk[job->depth].error);
+                        return false;
+                }
+                job->made[job->depth] = -1, job->made_facts[job->depth] = *facts;
+                string_copy_bounded(job->inside[job->depth], (string_address)name, FILES_NAME);
+                if (!counting)
+                {
+                        made = (bipolar)system_call_3(syscall(mkdirat), (positive)target, (positive)made_name, 0700);
+                        made = made < 0 ? made : system_open_at(target, (string_address)made_name, FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                        if (made < 0)
+                        {
+                                file_walk_close(&job->walk[job->depth]);
+                                files_move_fail(job, made);
+                                return false;
+                        }
+                        job->made[job->depth] = made;
+                }
+                job->depth++;
+                return true;
+        }
+        if (counting)
+        {
+                __atomic_add_fetch(&job->items_total, 1, __ATOMIC_RELEASE);
+                if (format == MODE_FILE)
+                        __atomic_add_fetch(&job->bytes_total, facts->size, __ATOMIC_RELEASE);
+                return true;
+        }
+        if (format == MODE_LINK)
+        {
+                p8 points[FILES_PATH];
+                bipolar length = (bipolar)system_call_4(syscall(readlinkat), (positive)source, (positive)name, (positive)points, sizeof(points) - 1);
+
+                if (length >= 0)
+                {
+                        points[length] = end;
+                        length = (bipolar)system_call_3(syscall(symlinkat), (positive)points, (positive)target, (positive)made_name);
+                }
+                if (length < 0)
+                {
+                        files_move_fail(job, length);
+                        return false;
+                }
+                __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE);
+                return true;
+        }
+        if (format != MODE_FILE)
+        {
+                job->skipped++;
+                __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE);
+                return true;
+        }
+        job->in = file_open_same(source, (string_address)name, facts, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        job->out = job->in < 0 ? -1 : system_open_at_mode(target, (string_address)made_name, FILE_WRITE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (job->in < 0 || job->out < 0)
+        {
+                bipolar why = job->in < 0 ? job->in : job->out;
+
+                job->out = -1; // nothing was made
+                files_move_file_drop(job, true);
+                files_move_fail(job, why);
+                return false;
+        }
+        job->out_folder = target, job->left = facts->size, job->ranged = true;
+        string_copy_bounded(job->out_name, (string_address)made_name, FILES_NAME);
+        job->piece_facts = *facts; // the file's own mode and times, for when it is whole
+        return true;
+}
+
+// A piece of the file under way: FILES_MOVE_PIECE bytes, by the kernel's range copy or, where it will not, read and written. When it is
+// whole its mode and times are given to the copy. False when the move stopped.
+static b32 files_move_piece(struct files_move address_to job)
+{
+        positive want = job->left < FILES_MOVE_PIECE ? (positive)job->left : FILES_MOVE_PIECE, moved = 0;
+        bipolar got = 0;
+
+        while (moved < want)
+        {
+                if (job->ranged)
+                {
+                        got = (bipolar)system_call_6(syscall(copy_file_range), (positive)job->in, 0, (positive)job->out, 0, want - moved, 0);
+                        if (got == -ERROR_CROSS_DEVICE || got == -38 || got == -ERROR_INVALID || got == -95 || (got == 0 && !moved))
+                        {
+                                job->ranged = false; // EXDEV, ENOSYS, EINVAL, EOPNOTSUPP, or nothing: the bytes go by hand
+                                continue;
+                        }
+                }
+                else
+                {
+                        if (!job->buffer)
+                        {
+                                bipolar mapped = (bipolar)system_call_6(syscall(mmap), 0, FILES_MOVE_BUFFER, 3, 0x22, (positive)-1, 0);
+
+                                if (mapped < 0 && mapped > -4096)
+                                {
+                                        got = mapped;
+                                        break;
+                                }
+                                job->buffer = (p8 address_to)mapped;
+                        }
+                        got = (bipolar)system_read_once(job->in, job->buffer, want - moved < FILES_MOVE_BUFFER ? want - moved : FILES_MOVE_BUFFER);
+                        if (got > 0 && (bipolar)system_write_all((positive)job->out, job->buffer, (positive)got) != got)
+                                got = -5;
+                }
+                if (got == -ERROR_INTERRUPTED)
+                        continue;
+                if (got <= 0)
+                        break;
+                moved += (positive)got;
+                __atomic_add_fetch(&job->bytes_done, (p64)got, __ATOMIC_RELEASE);
+        }
+        job->left -= moved;
+        if (got < 0 || (!moved && job->left))
+        {
+                // A file that shrank under the copy ends where it ended; anything else the kernel said stops the move.
+                if (got == 0)
+                        job->left = 0;
+                else
+                {
+                        files_move_file_drop(job, false);
+                        files_move_fail(job, got);
+                        return false;
+                }
+        }
+        if (!job->left)
+        {
+                files_move_settle(job->out, &job->piece_facts);
+                files_move_file_drop(job, true);
+                __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE);
+        }
+        return true;
+}
+
+/*
+        A step of a copy (or a count) of the source worked: the file under way's next piece; else the next thing in the innermost
+        folder, or that folder ended (its copy given its mode and times). True while the source has more; false at its end or when
+        the move stopped (state says which).
+*/
+static b32 files_move_walk(struct files_move address_to job, b32 counting)
+{
+        struct linux_dirent64 address_to record;
+        file_facts facts;
+        bipolar looked;
+        file_walk address_to walk;
+
+        if (job->out >= 0)
+                return files_move_piece(job) && (job->out >= 0 || job->depth > 0);
+        if (!job->depth)
+                return false;
+        walk = &job->walk[job->depth - 1];
+        while ((record = file_walk_next(walk)) && file_is_dot((string_address)record->d_name))
+                ;
+        if (!record)
+        {
+                if (walk->error < 0)
+                {
+                        files_move_fail(job, walk->error);
+                        return false;
+                }
+                job->depth--;
+                file_walk_close(walk);
+                if (job->made[job->depth] >= 0)
+                {
+                        files_move_settle(job->made[job->depth], &job->made_facts[job->depth]);
+                        system_close(job->made[job->depth]);
+                        job->made[job->depth] = -1;
+                }
+                __atomic_add_fetch(counting ? &job->items_total : &job->items_done, 1, __ATOMIC_RELEASE);
+                return job->depth > 0;
+        }
+        looked = file_look_code(walk->handle, (string_address)record->d_name, AT_SYMLINK_NOFOLLOW, &facts);
+        if (looked < 0)
+        {
+                string_copy_bounded(job->at, (string_address)record->d_name, FILES_NAME);
+                files_move_fail(job, looked);
+                return false;
+        }
+        return files_move_one(job, walk->handle, (const p8 address_to)record->d_name, &facts, (const p8 address_to)record->d_name, counting) &&
+               (job->depth > 0 || job->out >= 0);
+}
+
+/*
+        A step of a moved source's removal (its copy is whole): the first thing left in the innermost folder removed or gone into, or
+        that folder, empty, removed from the one it is in; the source itself last. False at the end, or when it stopped.
+*/
+static b32 files_move_remove(struct files_move address_to job)
+{
+        bipolar in = files_move_source(job), gone;
+        file_walk walk;
+        struct linux_dirent64 address_to record;
+        file_facts facts;
+
+        if (!job->depth)
+        {
+                // The source itself: a folder is emptied first, anything else removed as it was looked at.
+                if ((job->facts.mode & MODE_FORMAT) == MODE_DIRECTORY && !job->made_facts[0].mode)
+                {
+                        job->made_facts[0].mode = 1; // gone into once
+                        if (!file_walk_open_found_same(&job->walk[0], job->from, (string_address)job->name, &job->facts))
+                        {
+                                files_move_fail(job, job->walk[0].error);
+                                return false;
+                        }
+                        string_copy_bounded(job->inside[0], (string_address)job->name, FILES_NAME);
+                        job->made[0] = -1, job->depth = 1;
+                        return true;
+                }
+                gone = (job->facts.mode & MODE_FORMAT) == MODE_DIRECTORY
+                           ? (bipolar)system_call_3(syscall(unlinkat), (positive)job->from, (positive)job->name, AT_REMOVEDIR)
+                           : file_remove_same(job->from, (string_address)job->name, 0, &job->facts);
+                if (gone < 0)
+                        files_move_fail(job, gone);
+                return false;
+        }
+        if (!file_walk_open(&walk, in, (string_address) "."))
+        {
+                files_move_fail(job, walk.error);
+                return false;
+        }
+        while ((record = file_walk_next(&walk)) && file_is_dot((string_address)record->d_name))
+                ;
+        if (record)
+                string_copy_bounded(job->at, (string_address)record->d_name, FILES_NAME);
+        gone = walk.error;
+        file_walk_close(&walk);
+        if (!record)
+        {
+                if (gone < 0)
+                {
+                        files_move_fail(job, gone);
+                        return false;
+                }
+                job->depth--;
+                file_walk_close(&job->walk[job->depth]);
+                if (job->depth)
+                {
+                        gone = (bipolar)system_call_3(syscall(unlinkat), (positive)files_move_source(job), (positive)job->inside[job->depth], AT_REMOVEDIR);
+                        if (gone < 0)
+                        {
+                                files_move_fail(job, gone);
+                                return false;
+                        }
+                }
+                return true;
+        }
+        gone = file_look_code(in, (string_address)job->at, AT_SYMLINK_NOFOLLOW, &facts);
+        if (gone >= 0 && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+        {
+                if (job->depth >= FILES_JOB_DEEP)
+                {
+                        files_move_fail(job, -ERROR_LOOP);
+                        return false;
+                }
+                if (!file_walk_open_found_same(&job->walk[job->depth], in, (string_address)job->at, &facts))
+                {
+                        files_move_fail(job, job->walk[job->depth].error);
+                        return false;
+                }
+                string_copy_bounded(job->inside[job->depth], (string_address)job->at, FILES_NAME);
+                job->made[job->depth] = -1, job->depth++;
+                return true;
+        }
+        gone = gone < 0 ? gone : file_remove_same(in, (string_address)job->at, 0, &facts);
+        if (gone < 0)
+        {
+                files_move_fail(job, gone);
+                return false;
+        }
+        return true;
+}
+
+/*
+        A step of the move: a few things of the phase it is in, and back (a cancel is seen at each). True while there is more. The phases:
+        the sources moved by rename where they can be (a move), and marked to be copied where they cannot; what is to be copied counted;
+        each copied, and a moved one removed once its copy is whole; over.
+*/
+static b32 files_move_step(struct files_move address_to job)
+{
+        if (__atomic_load_n(&job->state, __ATOMIC_ACQUIRE) != FILES_JOB_RUNNING)
+                return false;
+        if (files_move_cancelled(job))
+        {
+                files_move_file_drop(job, false);
+                __atomic_store_n(&job->state, FILES_JOB_CANCELLED, __ATOMIC_RELEASE);
+                return false;
+        }
+        if (job->phase == FILES_MOVE_RENAME)
+        {
+                b32 numbered;
+                bipolar moved;
+                file_facts folder;
+
+                if (job->next >= job->count)
+                {
+                        job->phase = FILES_MOVE_COUNT, job->next = 0;
+                        return true;
+                }
+                if (!files_move_take(job, job->next))
+                        return false;
+                // A folder into itself, or into a folder inside it, is no copy and no move: nothing of it is made.
+                if ((job->facts.mode & MODE_FORMAT) == MODE_DIRECTORY && files_move_within(job->into, &job->facts))
+                {
+                        files_move_fail(job, -FILES_MOVE_INSIDE);
+                        return false;
+                }
+                job->copied[job->next] = 1;
+                if (job->how == FILES_MOVE_MOVE)
+                {
+                        // Already in the folder: nothing to do. Else a rename where the name is free, and a copy where it crosses filesystems.
+                        if (file_look_code(job->from, (string_address) "", AT_EMPTY_PATH, &folder) >= 0 && folder.inode == job->into_facts.inode &&
+                            folder.device_major == job->into_facts.device_major && folder.device_minor == job->into_facts.device_minor)
+                                job->copied[job->next] = 2;
+                        else if (!files_move_free_name(job->into, job->name, job->named, &numbered))
+                        {
+                                files_move_fail(job, -ERROR_EXISTS);
+                                return false;
+                        }
+                        else if ((moved = (bipolar)system_call_5(syscall(renameat2), (positive)job->from, (positive)job->name, (positive)job->into,
+                                                                 (positive)job->named, FILE_RENAME_NOREPLACE)) >= 0)
+                        {
+                                job->copied[job->next] = 2, job->renamed += numbered;
+                                __atomic_add_fetch(&job->items_total, 1, __ATOMIC_RELEASE);
+                                __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE);
+                        }
+                        else if (moved != -ERROR_CROSS_DEVICE)
+                        {
+                                files_move_fail(job, moved);
+                                return false;
+                        }
+                }
+                job->next++;
+                return true;
+        }
+        // Counting and copying go source by source: each taken, then walked.
+        if (job->phase == FILES_MOVE_COUNT || job->phase == FILES_MOVE_COPYING)
+        {
+                b32 counting = job->phase == FILES_MOVE_COUNT, numbered;
+
+                if (job->depth || job->out >= 0)
+                {
+                        if (files_move_walk(job, counting))
+                                return true;
+                        if (__atomic_load_n(&job->state, __ATOMIC_ACQUIRE) != FILES_JOB_RUNNING)
+                                return false;
+                        // That source is counted, or whole: a moved one is removed now, else on to the next.
+                        if (counting)
+                                job->next++;
+                        else if (job->how == FILES_MOVE_MOVE)
+                                job->phase = FILES_MOVE_REMOVE, job->made_facts[0].mode = 0;
+                        else
+                                job->copied[job->next++] = 2;
+                        return true;
+                }
+                while (job->next < job->count && job->copied[job->next] != 1)
+                        job->next++;
+                if (job->next >= job->count)
+                {
+                        job->next = 0;
+                        job->phase = counting ? FILES_MOVE_COPYING : FILES_MOVE_OVER;
+                        if (!counting)
+                                __atomic_store_n(&job->state, FILES_JOB_DONE, __ATOMIC_RELEASE);
+                        return job->phase != FILES_MOVE_OVER;
+                }
+                if (!files_move_take(job, job->next))
+                        return false;
+                if (counting)
+                {
+                        if (!files_move_one(job, job->from, job->name, &job->facts, job->name, true))
+                                return false;
+                        if (!job->depth)
+                                job->next++;
+                        return true;
+                }
+                if (!files_move_free_name(job->into, job->name, job->named, &numbered))
+                {
+                        files_move_fail(job, -ERROR_EXISTS);
+                        return false;
+                }
+                job->renamed += numbered;
+                if (!files_move_one(job, job->from, job->name, &job->facts, job->named, false))
+                        return false;
+                if (!job->depth && job->out < 0)
+                {
+                        // A link is whole at once (a moved one removed now), and something skipped stays where it is.
+                        if (job->how == FILES_MOVE_MOVE && (job->facts.mode & MODE_FORMAT) == MODE_LINK)
+                                job->phase = FILES_MOVE_REMOVE, job->made_facts[0].mode = 0;
+                        else
+                                job->copied[job->next++] = 2;
+                }
+                return true;
+        }
+        if (job->phase == FILES_MOVE_REMOVE)
+        {
+                if (files_move_remove(job))
+                        return true;
+                if (__atomic_load_n(&job->state, __ATOMIC_ACQUIRE) != FILES_JOB_RUNNING)
+                        return false;
+                job->copied[job->next++] = 2;
+                job->phase = FILES_MOVE_COPYING;
+                return true;
+        }
+        return false;
+}
+
+// The thread: steps to the end, or till it is stopped.
+static fn files_move_run(address_any argument)
+{
+        struct files_move address_to job = (struct files_move address_to)argument;
+
+        while (files_move_step(job))
+                ;
+}
+
+/*
+        The move begun on a thread of its own; where no thread can be made, the view steps it between its events (files_move_step, as
+        the delete is stepped). True when a thread has it.
+*/
+static b32 files_move_start(struct files_move address_to job)
+{
+        if (job->state != FILES_JOB_RUNNING)
+                return false;
+        job->worker = thread_start(files_move_run, (address_any)job);
+        return job->worker != null;
+}
+
+static fn files_move_cancel(struct files_move address_to job)
+{
+        __atomic_store_n(&job->cancel, 1, __ATOMIC_RELEASE);
+}
+
+// Whether the move is under way (on its thread, or waiting for the view's steps).
+static b32 files_move_running(const struct files_move address_to job)
+{
+        return __atomic_load_n(&job->state, __ATOMIC_ACQUIRE) == FILES_JOB_RUNNING;
+}
+
+// The move let go of, once it is over (or stopped first): its thread joined, everything it holds closed, its memory given back. A move
+// never begun (a view's at its start) is only made empty.
+static fn files_move_end(struct files_move address_to job)
+{
+        if (job->begun)
+        {
+                if (job->worker)
+                {
+                        files_move_cancel(job);
+                        thread_join(job->worker);
+                }
+                files_move_close(job);
+                if (job->paths)
+                        system_call_2(syscall(munmap), (positive)job->paths, files_move_bytes());
+                if (job->buffer)
+                        system_call_2(syscall(munmap), (positive)job->buffer, FILES_MOVE_BUFFER);
+        }
+        memory_fill(job, 0, sizeof(*job));
+        job->into = job->from = job->in = job->out = job->out_folder = -1;
+}
+
 #endif // MOONWATER_FILES_MODEL

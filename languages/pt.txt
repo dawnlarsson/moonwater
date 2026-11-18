@@ -36,8 +36,11 @@ editor_write_beside	ec75	não foi possível gravar ao lado do arquivo
 editor_writes_over_changed	df15	sobrescreve a alteração no disco (Ctrl+R lê de novo)
 editor_writes_over_readonly	e22f	sobrescreve um arquivo somente leitura
 files_back	4bc2	Voltar
+files_busy	5ba5	Uma cópia, movimentação ou exclusão está em andamento
 files_changed	df4e	Não é o que foi listado: a pasta é lida de novo
 files_chosen	7a7f	%1$d de %2$d escolhidos
+files_copied	6570	%d copiados
+files_copying	c870	Copiando %1$d de %2$d, %3$s de %4$s: Escape para
 files_count	cab8	%d itens
 files_count_cut	f139	Os primeiros %d itens: a pasta tem mais
 files_delete_ask	807b	Excluir %1$d: %2$s? Delete de novo exclui, Escape os mantém
@@ -49,6 +52,11 @@ files_failed	c564	Não foi possível ler esta pasta
 files_forward	83ba	Avançar
 files_gone	b09c	Esta pasta não existe mais
 files_link	9abb	Um link não é seguido
+files_move_cancelled	b54b	Parado: %d feitos
+files_move_inside	deb2	Uma pasta não pode ir para dentro de si mesma
+files_move_stopped	e305	Parado em %2$s: %1$d feitos antes
+files_moved	f6ef	%d movidos
+files_moving	2b61	Movendo %1$d de %2$d, %3$s de %4$s: Escape para
 files_name_bad	467d	Isso não é um nome
 files_name_taken	cbce	Esse nome já existe
 files_new_folder	d127	Nova pasta

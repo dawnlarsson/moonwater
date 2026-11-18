@@ -4725,7 +4725,8 @@ static struct
         int named;                      // the drag's copy at WINDOWS_CLIP_DRAG is the names of another's drag's types
         unsigned char *types;           // the drag's types for the shim, each with its NUL (a reservation: compositor_wl_room)
         long types_room, types_bytes;
-} compositor_drag = {-1, -1, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0};
+        int place;                      // where over the target it was last, as its events carry it (compositor_drag_place)
+} compositor_drag = {-1, -1, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0};
 
 // A copy made the drag's: put at WINDOWS_CLIP_DRAG (what was there let go), mapped, its size in the table, its serial moved.
 static void compositor_drag_keep(int opened, unsigned long length)
@@ -4753,10 +4754,26 @@ static void compositor_drag_drop_copy(void)
         __atomic_add_fetch(&compositor.table->clip_serial[WINDOWS_CLIP_DRAG], 1, __ATOMIC_RELEASE);
 }
 
+/*
+        A drag's news to a program. Over its window and at the drop the event's flags are the person's Shift, Control and Alt as they are
+        held now, which is how a target says what it would do (Control a copy, Shift a move, as a drop of files goes).
+*/
 static void compositor_drag_tell(int row, int what, int word)
 {
+        unsigned int keys = what == WINDOWS_DRAG_ENTER || what == WINDOWS_DRAG_MOTION || what == WINDOWS_DRAG_DROP
+                                ? compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)
+                                : 0;
+
         if (row >= 0 && row < COMPOSITOR_ROWS && compositor.table->pid[row])
-                compositor_post(row, WINDOW_EVENT_DRAG, 0, what, word);
+                compositor_post(row, WINDOW_EVENT_DRAG, keys, what, word);
+}
+
+// A modifier went down or up while a drag is over a program and not dropped: it is told again where the drag is, with the keys as they are
+// now, so it says again what it takes (compositor_key).
+static void compositor_drag_keys(void)
+{
+        if (compositor_wl.started && compositor_drag.target >= 0 && !compositor_drag.dropped)
+                compositor_drag_tell(compositor_drag.target, WINDOWS_DRAG_MOTION, compositor_drag.place);
 }
 
 // A place in a row's pixels as a drag's event carries it (window_drag_x and _y).
@@ -4807,18 +4824,17 @@ static int compositor_drag_held(int row)
 }
 
 /*
-        A program offers a drag (drag_offer_*): begun when the person's button or finger is down on its window now and has just been
-        (the clipboard's rule for a copy) and no drag is, its copy checked as any copy is and made the drag's; else DECLINED.
+        A program offers a drag (drag_offer_*): begun when the person's button or finger is down on its window now (a drag is that press,
+        held: one held still a while before it moves is a drag all the same) and no drag is, its copy checked as any copy is and made the
+        drag's; else DECLINED.
 */
 static void compositor_drag_offer(int row)
 {
         struct windows *table = compositor.table;
-        positive now = clock_monotonic_nanoseconds();
         unsigned long length = 0;
         int opened = -1, tab = 0, under;
 
         if (wayland_dragging() || wayland_x_dragging() || compositor_drag.source >= 0 || !compositor_drag_held(row) ||
-            now - compositor_clip.gesture[row] > COMPOSITOR_CLIP_GESTURE_NS ||
             (opened = compositor_clip_open(table->pid[row], table->drag_offer_fd[row], &length)) < 0)
         {
                 compositor_drag_tell(row, WINDOWS_DRAG_DECLINED, 0);
@@ -4977,15 +4993,16 @@ static long compositor_drag_host(long what, long row, long x, long y)
         if (row < 0 || row >= COMPOSITOR_ROWS || !table->drop_ok[row] || !table->pid[row])
                 return 0;
         compositor_drag_name_types();
+        compositor_drag.place = compositor_drag_place(x, y);
         if (row != target)
         {
                 if (target >= 0)
                         compositor_drag_tell(target, WINDOWS_DRAG_LEAVE, 0);
                 compositor_drag.target = (int)row, compositor_drag.take = -1;
-                compositor_drag_tell((int)row, WINDOWS_DRAG_ENTER, compositor_drag_place(x, y));
+                compositor_drag_tell((int)row, WINDOWS_DRAG_ENTER, compositor_drag.place);
         }
         else
-                compositor_drag_tell((int)row, WINDOWS_DRAG_MOTION, compositor_drag_place(x, y));
+                compositor_drag_tell((int)row, WINDOWS_DRAG_MOTION, compositor_drag.place);
         return 1;
 }
 

@@ -37,8 +37,11 @@ editor_write_beside	ec75	نوشتن در کنار پرونده ممکن نشد
 editor_writes_over_changed	df15	تغییر دیسک را بازنویسی می‌کند
 editor_writes_over_readonly	e22f	فقط‌خواندنی را بازنویسی می‌کند
 files_back	4bc2	عقب
+files_busy	5ba5	یک رونوشت، جابه‌جایی یا حذف در جریان است
 files_changed	df4e	این همان چیزی نیست که فهرست شده بود: پوشه دوباره خوانده می‌شود
 files_chosen	7a7f	%1$d از %2$d انتخاب شد
+files_copied	6570	%d رونوشت شد
+files_copying	c870	رونوشت %1$d از %2$d، %3$s از %4$s: Escape متوقف می‌کند
 files_count	cab8	%d مورد
 files_count_cut	f139	%d مورد نخست: پوشه بیشتر دارد
 files_delete_ask	807b	حذف %1$d: %2$s؟ Delete دوباره حذف می‌کند، Escape نگه می‌دارد
@@ -50,6 +53,11 @@ files_failed	c564	خواندن این پوشه ممکن نشد
 files_forward	83ba	جلو
 files_gone	b09c	این پوشه دیگر نیست
 files_link	9abb	پیوند دنبال نمی‌شود
+files_move_cancelled	b54b	متوقف شد: %d انجام شد
+files_move_inside	deb2	یک پوشه نمی‌تواند درون خودش برود
+files_move_stopped	e305	در %2$s متوقف شد: %1$d پیش از آن انجام شد
+files_moved	f6ef	%d جابه‌جا شد
+files_moving	2b61	جابه‌جایی %1$d از %2$d، %3$s از %4$s: Escape متوقف می‌کند
 files_name_bad	467d	این نام نیست
 files_name_taken	cbce	این نام گرفته شده است
 files_new_folder	d127	پوشه تازه

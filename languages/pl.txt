@@ -36,8 +36,11 @@ editor_write_beside	ec75	nie można zapisać obok pliku
 editor_writes_over_changed	df15	nadpisuje zmianę na dysku (Ctrl+R wczytuje ponownie)
 editor_writes_over_readonly	e22f	nadpisuje plik tylko do odczytu
 files_back	4bc2	Wstecz
+files_busy	5ba5	Trwa kopiowanie, przenoszenie lub usuwanie
 files_changed	df4e	To nie to, co było na liście: folder jest czytany ponownie
 files_chosen	7a7f	Wybrano %1$d z %2$d
+files_copied	6570	Skopiowano %d
+files_copying	c870	Kopiowanie %1$d z %2$d, %3$s z %4$s: Escape zatrzymuje
 files_count	cab8	Elementy: %d
 files_count_cut	f139	Pierwsze %d elementów: folder ma ich więcej
 files_delete_ask	807b	Usunąć %1$d: %2$s? Ponowne Delete usuwa, Escape zostawia
@@ -49,6 +52,11 @@ files_failed	c564	Nie udało się odczytać tego folderu
 files_forward	83ba	Dalej
 files_gone	b09c	Tego folderu już nie ma
 files_link	9abb	Dowiązanie nie jest śledzone
+files_move_cancelled	b54b	Zatrzymano: wykonano %d
+files_move_inside	deb2	Folder nie może trafić do samego siebie
+files_move_stopped	e305	Zatrzymano na %2$s: wcześniej wykonano %1$d
+files_moved	f6ef	Przeniesiono %d
+files_moving	2b61	Przenoszenie %1$d z %2$d, %3$s z %4$s: Escape zatrzymuje
 files_name_bad	467d	To nie jest nazwa
 files_name_taken	cbce	Ta nazwa jest zajęta
 files_new_folder	d127	Nowy folder

@@ -7838,8 +7838,11 @@ LANGUAGE_ID(editor_write_beside, "could not write beside the file") \
 LANGUAGE_ID(editor_writes_over_changed, "writes over the change on disk (Ctrl+R reads it again)") \
 LANGUAGE_ID(editor_writes_over_readonly, "writes over a read-only file") \
 LANGUAGE_ID(files_back, "Back") \
+LANGUAGE_ID(files_busy, "A copy, a move or a delete is under way") \
 LANGUAGE_ID(files_changed, "It is not what was listed: the folder is read again") \
 LANGUAGE_ID(files_chosen, "%1$d of %2$d chosen") \
+LANGUAGE_ID(files_copied, "%d copied") \
+LANGUAGE_ID(files_copying, "Copying %1$d of %2$d, %3$s of %4$s: Escape stops") \
 LANGUAGE_ID(files_count, "%d items") \
 LANGUAGE_ID(files_count_cut, "The first %d items: the folder has more") \
 LANGUAGE_ID(files_delete_ask, "Delete %1$d: %2$s? Delete again does it, Escape leaves them") \
@@ -7851,6 +7854,11 @@ LANGUAGE_ID(files_failed, "This folder could not be read") \
 LANGUAGE_ID(files_forward, "Forward") \
 LANGUAGE_ID(files_gone, "This folder is gone") \
 LANGUAGE_ID(files_link, "A link is not followed") \
+LANGUAGE_ID(files_move_cancelled, "Stopped: %d done") \
+LANGUAGE_ID(files_move_inside, "A folder cannot go into itself") \
+LANGUAGE_ID(files_move_stopped, "Stopped at %2$s: %1$d done before it") \
+LANGUAGE_ID(files_moved, "%d moved") \
+LANGUAGE_ID(files_moving, "Moving %1$d of %2$d, %3$s of %4$s: Escape stops") \
 LANGUAGE_ID(files_name_bad, "That is not a name") \
 LANGUAGE_ID(files_name_taken, "That name is taken") \
 LANGUAGE_ID(files_new_folder, "New folder") \
@@ -23490,6 +23498,7 @@ struct ui_list
         int part, way;                     // a press's: the item of a tabs or swatches row it was on (-1 none), a step's way
         int slide;                         // the row (plus one) whose slider the pointer is dragging, 0 none: what the hand holds is the slider's (ui_list_slider)
         int slid, slid_value;              // the row (plus one) whose slider was let go, and the value the hand left it at: the app takes them and clears slid
+        int drop;                          // the row (plus one) a drag over it would be dropped into, ringed (UI_LIST_DROP_ALL: the whole list), 0 none
         struct ui_press press;             // the press on a row (ui_list_click): where it went down, and whether it is a drag
         int pointer_x, pointer_y;
         b32 pointer_mouse;                 // that place is a mouse's, which stays over the list while it is still (a finger's hovers nothing)
@@ -23523,6 +23532,7 @@ static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_
         asks for none of those, and describe's section, header, tall and reveal are not read for it.
 */
 #define UI_LIST_MARGIN 8 // rows laid out past each end of the view: a frame's scroll is drawn from them, and a place is not re-made every pixel
+#define UI_LIST_DROP_ALL -1 // ui_list.drop: a drop would go to what the whole list shows, not into one of its rows
 
 // The row a place shows, in either kind of list.
 static inline int ui_list_id(const struct ui_list address_to l, int at)
@@ -24873,6 +24883,25 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         l->pointer_y = pointer_y;
         // The rows' own span, which a row's band reaches to the window's edge across (row_x, row_w), and the list's where it has none
         ui_scroll_pull(ui, &l->scroll, drawn, l->row_w ? l->row_x : l->x, l->y, l->row_w ? l->row_w : l->w, l->h);
+        // Where a drag over it would be dropped: the kit's focus ring round that row, or round the whole list.
+        if (l->drop)
+        {
+                int x = l->row_w ? l->row_x : l->x, w = l->row_w ? l->row_w : l->w, inset = ui_dev(ui, UI_FOCUS_GAP + UI_FOCUS_WIDTH);
+                int y = l->y, h = l->h;
+                b32 found = l->drop < 0;
+                struct ui_box box;
+
+                for (int at = 0; !found && at < l->count; at++)
+                        if (ui_list_id(l, at) == l->drop - 1)
+                                y = ui_list_row_y(l, at), h = l->tall[at], found = true;
+                if (found)
+                {
+                        ui->top = l->y, ui->bottom = l->y + l->h;
+                        box = (struct ui_box){(b32)(x + inset) << 8, (b32)(y + inset) << 8, (b32)(x + w - inset) << 8, (b32)(y + h - inset) << 8, 0, 0};
+                        box.rx = box.ry = ui_q8(ui, UI_FOCUS_WIDTH * 2);
+                        ui_kit_focus_ring(ui, &box);
+                }
+        }
         ui_scroll_draw(ui, &l->scroll);
 }
 
@@ -24895,6 +24924,23 @@ static fn ui_list_let_go(const struct ui address_to ui, struct ui_list address_t
                 ui_kit_ripples_exit(trailing);
         ui_list_damage(ui, l, l->down);
         l->down = -1;
+}
+
+/*
+        The press on a list taken back, as a drag of what it pressed begins (a file browser's rows dragged out): the row no longer shows
+        pressed, the press is over and clicks nothing at its release, and a mouse's or a finger's drag of the rows that it had begun is let
+        go where it is, with no throw (a pull past an end goes back).
+*/
+static fn ui_list_press_cancel(const struct ui address_to ui, struct ui_list address_to l)
+{
+        if (l->press.down)
+        {
+                if (l->press.dragged && l->press.region)
+                        ui_scroll_let_go(l->press.region, 0);
+                l->press.dragged = false;
+                ui_press_end(&l->press, true);
+        }
+        ui_list_let_go(ui, l);
 }
 
 /*
@@ -27372,6 +27418,7 @@ struct ui_drop
 {
         b32 over, dropped;
         int x, y;    // where it is over the window, its pixels
+        unsigned int keys; // the person's Shift, Control and Alt as the drag was last over it or dropped (WINDOW_KEY_*): what a target prefers by
         long nth;    // what is taken: the nth name the drag is offered under, -1 for none
         p32 action;  // the action of the drop
         char name[UI_DROP_NAME];
@@ -28426,6 +28473,21 @@ static fn ui_drag_arm(struct ui_drag address_to d, int x, int y)
         d->armed = true, d->x = x, d->y = y;
 }
 
+/*
+        A button's news for what may be dragged: a left press (a mouse's: a finger's press scrolls and selects) on what may be dragged
+        arms it at the press, any other press and every release disarm it. A press that was let go never drags: the next motion past the
+        slop is a hand with no button down, and the drag it would offer is refused (and was the last press's, wherever this one is).
+*/
+static fn ui_drag_button(struct ui_drag address_to d, const struct window_event address_to event, int x, int y, b32 may)
+{
+        if (event->type != WINDOW_EVENT_BUTTON)
+                return;
+        if ((event->flags & WINDOW_KEY_DOWN) && may && event->a == UI_POINTER_LEFT && !(event->flags & WINDOW_KEY_TOUCH))
+                ui_drag_arm(d, x, y);
+        else
+                d->armed = false;
+}
+
 static b32 ui_drag_past(const struct ui address_to ui, const struct ui_drag address_to d, int x, int y)
 {
         int slop = UI_SLOP * ui->scale / 100, dx = x - d->x, dy = y - d->y;
@@ -28470,12 +28532,14 @@ static int ui_drop_event(struct ui_drop address_to drop, const struct window_eve
         case WINDOWS_DRAG_ENTER:
         case WINDOWS_DRAG_MOTION:
                 drop->over = true, drop->x = window_drag_x(event->b), drop->y = window_drag_y(event->b);
+                drop->keys = event->flags & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
                 return UI_DROP_OVER;
         case WINDOWS_DRAG_LEAVE:
                 drop->over = false;
                 return UI_DROP_LEFT;
         case WINDOWS_DRAG_DROP:
                 drop->over = false, drop->dropped = true, drop->action = (p32)event->b;
+                drop->keys = event->flags & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
                 return UI_DROP_DROPPED;
         case WINDOWS_DRAG_READY:
                 return drop->dropped ? UI_DROP_READY : 0;
@@ -28538,6 +28602,110 @@ static fn ui_drop_ring(struct ui address_to ui, const struct ui_drop address_to 
 {
         if (drop->over && drop->nth >= 0)
                 ui_kit_focus_ring(ui, box);
+}
+
+/*
+        A list of URIs (text/uri-list: a URI a line, CRLF or LF, a line starting with # a comment) read a file at a time: the next
+        file:// URI's path from *at on, its %XX made bytes again, into into (room bytes with its end); its length, or 0 at the end. A
+        URI of another scheme is passed over, and so is a path that is not absolute, has a NUL in it or does not fit. A host before the
+        path is only taken when it is none or localhost: a file of another machine is not this one's.
+*/
+static int ui_hex_digit(p8 c)
+{
+        return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+static positive ui_uri_next(const p8 address_to bytes, positive length, positive address_to at, p8 address_to into, positive room)
+{
+        while (*at < length && room > 1)
+        {
+                positive start = *at, stop = start, put = 0, from;
+                b32 good = true;
+
+                while (stop < length && bytes[stop] != '\n' && bytes[stop] != '\r')
+                        stop++;
+                *at = stop;
+                while (*at < length && (bytes[*at] == '\n' || bytes[*at] == '\r'))
+                        (*at)++;
+                if (stop - start < 8 || memory_compare(bytes + start, "file://", 7))
+                        continue;
+                from = start + 7;
+                if (bytes[from] != '/')
+                {
+                        // file://host/path: only this machine's.
+                        if (stop - from < 10 || memory_compare(bytes + from, "localhost/", 10))
+                                continue;
+                        from += 9;
+                }
+                for (positive k = from; k < stop && good; k++)
+                {
+                        p8 c = bytes[k];
+
+                        if (c == '%')
+                        {
+                                int hi = k + 2 < stop ? ui_hex_digit(bytes[k + 1]) : -1, lo = k + 2 < stop ? ui_hex_digit(bytes[k + 2]) : -1;
+
+                                good = hi >= 0 && lo >= 0;
+                                c = (p8)(hi << 4 | lo), k += 2;
+                        }
+                        good = good && c && put + 1 < room;
+                        if (good)
+                                into[put++] = c;
+                }
+                if (!good || !put || into[0] != '/')
+                        continue;
+                into[put] = end;
+                return put;
+        }
+        return 0;
+}
+
+/*
+        A drop of files as a command line takes it: each file's path quoted for a shell (in single quotes, a quote in it as '\''), a blank
+        after each, and URIs of other schemes as they are, quoted the same way; the bytes the caller releases (array_store_release of
+        room). Zero when there was nothing.
+*/
+static positive ui_uris_quoted(const p8 address_to bytes, positive length, p8 address_to address_to text, positive address_to room)
+{
+        static p8 path[4096];
+        positive used = 0, at = 0, line = 0;
+
+        *text = null, *room = 0;
+        while (line < length)
+        {
+                positive start = line, stop = line, got = 0;
+                const p8 address_to word = null;
+
+                while (stop < length && bytes[stop] != '\n' && bytes[stop] != '\r')
+                        stop++;
+                line = stop;
+                while (line < length && (bytes[line] == '\n' || bytes[line] == '\r'))
+                        line++;
+                if (stop == start || bytes[start] == '#')
+                        continue;
+                at = start;
+                if ((got = ui_uri_next(bytes, stop, &at, path, sizeof(path))))
+                        word = path;
+                else if (!memory_compare(bytes + start, "file:", 5))
+                        continue; // a file of another machine's, or no path: nothing of it is typed
+                else
+                        word = bytes + start, got = stop - start;
+                if (!array_store_reserve(*text, *room, used, used + 4 * got + 4, 256))
+                        break;
+                (*text)[used++] = '\'';
+                for (positive k = 0; k < got; k++)
+                {
+                        if (word[k] == '\'')
+                        {
+                                memory_copy(*text + used, "'\\''", 4);
+                                used += 4;
+                        }
+                        else if (word[k] >= 0x20 && word[k] != 0x7f)
+                                (*text)[used++] = word[k];
+                }
+                (*text)[used++] = '\'', (*text)[used++] = ' ';
+        }
+        return used;
 }
 
 // A selection's text to a selection of the clipboard; never a masked field's.

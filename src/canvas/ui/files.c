@@ -61,6 +61,12 @@
         gives it the new name and Escape leaves it; a name that is taken or is no name says so and nothing is renamed. Ctrl+Shift+N
         makes a folder called New folder (New folder 2 and on while the name is taken) with the keys on it, ready for F2.
 
+        Dragging. A mouse's press on a row taken past the slop drags the rows out as files (text/uri-list, their paths as text beside):
+        dropped on a terminal they are typed as quoted paths, on another program as it takes files. Files dragged over this window are
+        copied or moved into the folder row under the pointer, ringed, or into the folder shown, the whole list ringed: Control a copy,
+        Shift a move, else a move on the folder's own filesystem and a copy across. The copy is the model's (files_move_*), on a thread
+        of its own: the foot counts what is done of how much, Escape stops it, and the folder is read again when it ends.
+
         Starts: files [PATH] [-f FONT] [-b BOLD]. With no path it shows HOME, or the root.
 */
 #ifndef MOONWATER_CANVAS_FILES
@@ -93,6 +99,7 @@ struct files_big
         struct ui_list list;
         struct ui_view view;
         struct files_job job;          // the delete under way, if one is
+        struct files_move move;        // the copy or move under way (a drop's, a paste's), on its own thread
         char crumb_words[FILES_TRAIL][FILES_NAME * 3 + 4]; // the trail's folders as the band writes them
         char note[256];                // what the foot says of the last thing done, in the language's words with its numbers and names in
         char status[192];              // the foot's words
@@ -131,7 +138,11 @@ static struct
         struct ui_popup menu;    // the field's own menu (copy, paste)
         struct ui_drag drag;     // the rows dragged out (files_uris: their list of files)
         p32 drag_place;          // the row the drag was pressed on
-        struct ui_drop drop;     // a drag of files over the window: dropped, its first folder is gone to
+        b32 drag_chosen;         // and whether it drags the rows chosen (else that row alone)
+        struct ui_drop drop;     // a drag of files over the window: dropped, they are copied or moved into the folder it is over
+        int drop_row;            // the folder's row the drop goes into, -1 the folder shown
+        b64 next_progress;       // when the foot next says how far a copy has gone
+        b32 moving;              // a copy or a move was begun and its end is not said yet
 } files;
 
 /* ---- the rows ---- */
@@ -227,7 +238,18 @@ static fn files_status_text(void)
         positive room = sizeof(files.big->status);
 
         into[0] = 0;
-        if (files.big->job.state == FILES_JOB_RUNNING)
+        if (files.moving && files_move_running(&files.big->move))
+        {
+                const struct files_move address_to job = &files.big->move;
+                char done[16], whole[16];
+                p32 items_done = __atomic_load_n(&job->items_done, __ATOMIC_ACQUIRE), items_total = __atomic_load_n(&job->items_total, __ATOMIC_ACQUIRE);
+
+                files_size_text(done, __atomic_load_n(&job->bytes_done, __ATOMIC_ACQUIRE));
+                files_size_text(whole, __atomic_load_n(&job->bytes_total, __ATOMIC_ACQUIRE));
+                language_format(into, room, job->how == FILES_MOVE_MOVE ? WORDS(files_moving) : WORDS(files_copying), (int)items_done,
+                                (int)(items_total > items_done ? items_total : items_done), done, whole);
+        }
+        else if (files.big->job.state == FILES_JOB_RUNNING)
                 language_format(into, room, WORDS(files_deleting), (int)files.big->job.removed);
         else if (files.big->note[0])
                 string_copy_bounded((string_address)into, (string_address)files.big->note, room);
@@ -636,12 +658,6 @@ static b32 files_uris(p32 place, struct windows_clip_part address_to parts, p8 a
         return true;
 }
 
-// A hex digit's value, or -1.
-static int files_hex(p8 c)
-{
-        return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
-}
-
 static fn files_uris_free(p8 address_to uris, positive uris_room, p8 address_to paths, positive paths_room, const struct windows_clip_part address_to parts)
 {
         positive uri_length = parts[0].length, path_length = parts[1].length + 1;
@@ -664,58 +680,179 @@ static fn files_rows_copy(void)
 }
 
 /*
-        Drag and drop (the kit's ui_drag and ui_drop). Out: a press on a row taken past the slop drags the rows (files_uris), copied, to
-        any program. In: a drag of files over the window is taken, and its drop goes to the folder of its first file (the folder itself
-        when it is one), the window showing where what was dropped is.
+        Drag and drop (the kit's ui_drag and ui_drop).
+
+        Out: a mouse's press on a row taken past the slop drags the rows (files_uris: the chosen ones when it was pressed on one of them,
+        else that row), copied or moved, to any program; the press is the drag's from then on (the list's own press is let go: it neither
+        scrolls nor stretches the rows under the drag). Its target does what is done: the browser takes nothing away when a move ends,
+        and reads its folder again.
+
+        In: a drag of files (text/uri-list) over the window is copied or moved into a folder: the folder row under the pointer, ringed, or
+        else the folder shown, the whole list ringed. Control makes it a copy and Shift a move; else it is a move when the files are on
+        the folder's own filesystem (a drag of this window's own rows, or another program's whose first file is there) and a copy
+        otherwise. A drag of this window's rows over the folder they are in, or over one of the rows dragged, is taken nowhere. The drop
+        is the model's move (files_move_*), on a thread of its own, the foot counting and Escape stopping it.
 */
+#define FILES_DROP_MOST (FILES_MOVE_MOST * FILES_PATH / 4) // the bytes of a drop's paths, each with its end
+
+// Whether the row at place is one of those this window's drag holds.
+static b32 files_dragged(p32 place)
+{
+        return files.drag.live && (files.drag_chosen ? files_model_chosen(&files.big->model, place) : place == files.drag_place);
+}
+
+// The folder row a drag at (x, y) over the window would go into, -1 for the folder shown.
+static int files_drop_row(int x, int y)
+{
+        struct files_model address_to m = &files.big->model;
+        int row = ui_list_hit(&files.ui, &files.big->list, x, y);
+        const struct files_entry address_to entry = row >= 0 ? files_model_entry(m, (p32)row) : null;
+
+        return entry && entry->kind == FILES_KIND_DIRECTORY && !files_dragged((p32)row) ? row : -1;
+}
+
+// Whether the first file of the drag over the window is on the filesystem of the folder shown: a move is then a rename.
+static b32 files_drop_near(void)
+{
+        const struct files_model address_to m = &files.big->model;
+        unsigned long size = 0;
+        const unsigned char address_to copy;
+        struct windows_clip_type type;
+        static p8 path[FILES_PATH];
+        positive at = 0;
+        file_facts facts;
+        b32 near = false;
+
+        if (files.drag.live)
+                return true;
+        copy = windows_drag_types(&files.own, &size);
+        if (copy && windows_clip_find(copy, size, WINDOWS_CLIP_URIS, string_length((string_address)WINDOWS_CLIP_URIS), &type) && type.length &&
+            ui_uri_next((const p8 address_to)copy + type.offset, (positive)type.length, &at, path, sizeof(path)) &&
+            file_look_code(AT_FDCWD, (string_address)path, AT_SYMLINK_NOFOLLOW, &facts) >= 0)
+                near = facts.device_major == m->folder.device_major && facts.device_minor == m->folder.device_minor;
+        if (copy)
+                window_call(WINDOW_SYS_MUNMAP, (long)copy, (long)size, 0, 0, 0, 0);
+        return near;
+}
+
+// The folder a drop goes into, opened as its own descriptor: the row's (held to what was listed, not followed) or the folder shown's.
+static bipolar files_drop_folder(int row)
+{
+        struct files_model address_to m = &files.big->model;
+        const struct files_entry address_to entry = row >= 0 ? files_model_entry(m, (p32)row) : null;
+        file_facts facts;
+
+        if (m->handle < 0)
+                return -ERROR_NO_ENTRY;
+        if (row < 0)
+                return system_open_at(m->handle, (string_address) ".", FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        if (!entry || entry->kind != FILES_KIND_DIRECTORY || files_model_check(m, (p32)row, &facts) != FILES_SAME)
+                return -ERROR_NO_ENTRY;
+        return file_open_same(m->handle, (string_address)files_model_name(m, entry), &facts, FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+}
+
+/*
+        A copy or a move of files (paths, count of them, each with its end) into the folder at row (-1 the folder shown), begun on its own
+        thread. False, with the foot saying why, when it could not begin.
+*/
+static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how)
+{
+        struct files_move address_to job = &files.big->move;
+        bipolar into;
+
+        files.said = 0, files.big->note[0] = 0, files.dirty = true;
+        if (files_move_running(job) || files.big->job.state == FILES_JOB_RUNNING)
+        {
+                files.said = LANGUAGE_files_busy;
+                return false;
+        }
+        files_move_end(job);
+        if ((into = files_drop_folder(row)) < 0)
+        {
+                files.said = LANGUAGE_files_changed;
+                files_model_reload(&files.big->model);
+                return false;
+        }
+        if (!files_move_begin(job, how, into, paths, count))
+                return false;
+        files_move_start(job);
+        files.moving = true, files.next_progress = (b64)ui_kit.now;
+        return true;
+}
+
+// What a copy or a move that is over came to, in the foot: how many, or where it stopped and why.
+static fn files_move_said(void)
+{
+        const struct files_move address_to job = &files.big->move;
+        char at[FILES_NAME * 3 + 4];
+        int done = (int)job->items_done;
+
+        files.said = 0;
+        ui_label_foreign(at, 96, job->at, string_length((string_address)job->at));
+        if (job->state == FILES_JOB_FAILED && job->error == -FILES_MOVE_INSIDE)
+                files.said = LANGUAGE_files_move_inside;
+        else if (job->state == FILES_JOB_FAILED)
+                language_format(files.big->note, sizeof(files.big->note), WORDS(files_move_stopped), done, at);
+        else if (job->state == FILES_JOB_CANCELLED)
+                language_format(files.big->note, sizeof(files.big->note), WORDS(files_move_cancelled), done);
+        else
+                language_format(files.big->note, sizeof(files.big->note), job->how == FILES_MOVE_MOVE ? WORDS(files_moved) : WORDS(files_copied), done);
+}
+
 static b32 files_drag_event(const struct window_event address_to event)
 {
         static const char address_to const names[1] = {WINDOWS_CLIP_URIS};
+        struct ui_list address_to l = &files.big->list;
         int what;
 
         if (ui_drag_source(&files.drag, event))
+        {
+                // The drag is over: what a move took from here is gone by its target's hand, and the folder is read again to show it.
+                if (files.drag.finished && files.drag.action == WINDOWS_DRAG_MOVE)
+                        files_model_reload(&files.big->model);
+                files.dirty = true;
                 return true;
+        }
         what = ui_drop_event(&files.drop, event);
         if (what == UI_DROP_OVER)
-                ui_drop_pick(&files.own, &files.drop, names, 1, WINDOWS_DRAG_COPY, WINDOWS_DRAG_COPY);
+        {
+                int row = files_drop_row(files.drop.x, files.drop.y);
+                b32 none = (files.drag.live && row < 0) || files.big->model.state != FILES_READY;
+                p32 preferred = files.drop.keys & WINDOW_KEY_CONTROL ? WINDOWS_DRAG_COPY
+                                : files.drop.keys & WINDOW_KEY_SHIFT ? WINDOWS_DRAG_MOVE
+                                : files_drop_near()                  ? WINDOWS_DRAG_MOVE
+                                                                     : WINDOWS_DRAG_COPY;
+
+                // Another folder or another preference is a new answer: the pick is said again (ui_drop_pick says only a change).
+                if (files.drop_row != row || files.drop.action != preferred)
+                        files.drop.nth = -2;
+                files.drop_row = row, files.drop.action = preferred;
+                ui_drop_pick(&files.own, &files.drop, names, none ? 0 : 1, WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE, preferred);
+                l->drop = files.drop.nth < 0 ? 0 : row >= 0 ? row + 1 : UI_LIST_DROP_ALL;
+        }
+        else if (what == UI_DROP_LEFT || what == UI_DROP_DONE || what == UI_DROP_DROPPED)
+                l->drop = 0;
         else if (what == UI_DROP_READY)
         {
-                static p8 path[FILES_PATH];
-                p8 address_to bytes;
+                p8 address_to bytes, address_to paths = null;
                 unsigned long length;
-                positive at = 0, put = 0;
+                positive at = 0, used = 0, room = 0, got;
+                p32 count = 0;
                 b32 took = false;
+                static p8 path[FILES_PATH];
 
                 if (ui_drop_read(&files.own, &files.drop, &bytes, &length))
                 {
-                        // The first line's path, its %XX made bytes again, and from it the folder (files_model_try goes there).
-                        if (length > 7 && !memory_compare(bytes, "file://", 7))
-                                at = 7;
-                        while (at < length && bytes[at] != '/' && bytes[at] != '\r' && bytes[at] != '\n')
-                                at++; // a host before the path
-                        for (; at < length && bytes[at] != '\r' && bytes[at] != '\n' && put + 1 < sizeof(path); at++)
+                        while ((got = ui_uri_next(bytes, (positive)length, &at, path, sizeof(path))) && used + got + 1 <= FILES_DROP_MOST)
                         {
-                                p8 c = bytes[at];
-                                int hi = at + 2 < length ? files_hex(bytes[at + 1]) : -1, lo = at + 2 < length ? files_hex(bytes[at + 2]) : -1;
-
-                                if (c == '%' && hi >= 0 && lo >= 0)
-                                        c = (p8)(hi << 4 | lo), at += 2;
-                                path[put++] = c;
+                                if (!array_store_reserve(paths, room, used, used + got + 1, 4096))
+                                        break;
+                                memory_copy(paths + used, path, got + 1);
+                                used += got + 1, count++;
                         }
-                        path[put] = 0;
                         windows_clip_free(bytes, length);
-                        if (put && files_model_try(&files.big->model, (string_address)path) == FILES_READING)
-                                took = true;
-                        else
-                        {
-                                while (put > 1 && path[put - 1] != '/')
-                                        path[--put] = 0;
-                                if (put > 1)
-                                        path[--put] = 0;
-                                took = put && files_model_try(&files.big->model, (string_address)path) == FILES_READING;
-                        }
-                        if (took)
-                                files_moved();
+                        took = count && files_transfer(paths, count, files.drop_row, files.drop.action == WINDOWS_DRAG_MOVE ? FILES_MOVE_MOVE : FILES_MOVE_COPY);
+                        array_store_release(paths, room, used);
                 }
                 ui_drop_done(&files.own, &files.drop, took);
         }
@@ -969,6 +1106,11 @@ static b32 files_key(const struct window_event address_to event)
                 files_job_cancel(&files.big->job);
                 return true;
         }
+        if (key == UI_KEY_ESCAPE && files.moving && files_move_running(&files.big->move))
+        {
+                files_move_cancel(&files.big->move);
+                return true;
+        }
         if (files.armed || files.big->note[0])
                 files.armed = false, files.big->note[0] = 0, files.dirty = true;
         // Along the trail, wherever the keys are; then the trail's own keys while they are in it.
@@ -1068,6 +1210,12 @@ static b32 files_event(const struct window_event address_to event)
         int row;
 
         files_layout();
+        // Every press and release disarms a drag of the rows; a press on a row arms it again, below (ui_drag_button). The news of the
+        // rows' own drag (its action, its end) is the rows', whatever has the keys: a field open meanwhile does not take it.
+        ui_drag_button(&files.drag, event, 0, 0, false);
+        if (event->type == WINDOW_EVENT_DRAG && files.drag.live &&
+            (event->a == WINDOWS_DRAG_ACTION || event->a == WINDOWS_DRAG_ENDED || event->a == WINDOWS_DRAG_DECLINED))
+                return files_drag_event(event);
         // The path's field while it is typed: its keys, its pointer, its menu. Enter goes, Escape and a press elsewhere put the crumbs
         // back (the press goes on to what it is on), Tab finishes a name, and no other key is the rows' while the field has them.
         if (files.editing)
@@ -1118,20 +1266,21 @@ static b32 files_event(const struct window_event address_to event)
         case WINDOW_EVENT_KEY:
                 return !down || ui_key_modifier((int)event->a) ? true : files_key(event);
         case WINDOW_EVENT_MOTION:
-                // A row pressed and taken past the slop: the rows dragged out, as files.
+                // A row pressed and taken past the slop: the rows dragged out, as files, copied or moved; the list's press is the drag's now.
                 if (ui_drag_past(ui, &files.drag, event->a, event->b))
                 {
                         struct windows_clip_part parts[2];
                         p8 address_to uris, address_to paths;
                         positive uris_room, paths_room;
 
+                        ui_list_press_cancel(ui, l);
+                        files.drag_chosen = files_model_chosen(m, files.drag_place);
                         if (files_uris(files.drag_place, parts, &uris, &uris_room, &paths, &paths_room))
                         {
-                                ui_drag_offer(&files.own, &files.drag, parts, 2, WINDOWS_DRAG_COPY);
+                                ui_drag_offer(&files.own, &files.drag, parts, 2, WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE);
                                 files_uris_free(uris, uris_room, paths, paths_room, parts);
                         }
                         files.drag.armed = false;
-                        l->down = -1;
                         break;
                 }
                 ui_list_click(ui, l, event, event->a, event->b);
@@ -1175,9 +1324,9 @@ static b32 files_event(const struct window_event address_to event)
                 // The press itself puts the cursor on its row, as the list lights it; a mouse's left press on a row may drag it out.
                 if (down && l->down >= 0 && (p32)l->down != m->cursor)
                         m->cursor = (p32)l->down, m->revision++;
-                files.drag.armed = down && l->down >= 0 && event->a == UI_POINTER_LEFT && !(event->flags & WINDOW_KEY_TOUCH);
+                ui_drag_button(&files.drag, event, ui_kit.pointer_x, ui_kit.pointer_y, down && l->down >= 0);
                 if (files.drag.armed)
-                        ui_drag_arm(&files.drag, ui_kit.pointer_x, ui_kit.pointer_y), files.drag_place = (p32)l->down;
+                        files.drag_place = (p32)l->down;
                 if (row >= 0)
                 {
                         p32 place = (p32)row;
@@ -1236,6 +1385,28 @@ static long files_tick(long timeout, long address_to other)
 
                 timeout = ui_text_timeout(&files.ui, files_field(), timeout, &redraw);
                 files.dirty |= redraw;
+        }
+        // A copy or a move under way: stepped here when it has no thread of its own, the foot counting while it runs, and when it ends
+        // the foot says what it came to and the folder is read again.
+        if (files.moving)
+        {
+                struct files_move address_to job = &files.big->move;
+                b64 began = (b64)ui_kit_clock();
+
+                while (!job->worker && files_move_running(job) && (b64)ui_kit_clock() - began < FILES_TURN_NS)
+                        files_move_step(job);
+                if (!files_move_running(job))
+                {
+                        files_move_said();
+                        files_move_end(job);
+                        files.moving = false;
+                        files_model_reload(m);
+                        files.dirty = true;
+                }
+                else if (now >= files.next_progress)
+                        files.next_progress = now + FILES_SHOW_NS, files.dirty = true;
+                if (files.moving)
+                        timeout = job->worker ? (timeout < 0 || timeout > FILES_SHOW_NS ? (long)FILES_SHOW_NS : timeout) : 1;
         }
         // A delete under way: steps of it for a few milliseconds and back to the events; when it ends the foot says what it came to and
         // the folder is read again.
@@ -1307,7 +1478,8 @@ static int files_open_window(void)
                 compositor_kmsg((string_address) "files: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                 return 1;
         }
-        files.clicked = FILES_NO, files.crumb_hover = -1, files.crumb_clicked = -1;
+        files.clicked = FILES_NO, files.crumb_hover = -1, files.crumb_clicked = -1, files.drop_row = -1;
+        files_move_end(&files.big->move);
         if (!files.start || !files_model_go(&files.big->model, files.start))
                 files_model_go(&files.big->model, (string_address) "/");
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;

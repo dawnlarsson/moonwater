@@ -36,8 +36,11 @@ editor_write_beside	ec75	δεν ήταν δυνατή η εγγραφή δίπλ
 editor_writes_over_changed	df15	αντικαθιστά την αλλαγή στον δίσκο (το Ctrl+R το διαβάζει ξανά)
 editor_writes_over_readonly	e22f	αντικαθιστά αρχείο μόνο για ανάγνωση
 files_back	4bc2	Πίσω
+files_busy	5ba5	Μια αντιγραφή, μετακίνηση ή διαγραφή είναι σε εξέλιξη
 files_changed	df4e	Δεν είναι αυτό που εμφανίστηκε: ο φάκελος διαβάζεται ξανά
 files_chosen	7a7f	Επιλέχθηκαν %1$d από %2$d
+files_copied	6570	Αντιγράφηκαν %d
+files_copying	c870	Αντιγραφή %1$d από %2$d, %3$s από %4$s: Escape σταματά
 files_count	cab8	%d στοιχεία
 files_count_cut	f139	Τα πρώτα %d στοιχεία: ο φάκελος έχει περισσότερα
 files_delete_ask	807b	Διαγραφή %1$d: %2$s; Ξανά Delete το κάνει, Escape τα αφήνει
@@ -49,6 +52,11 @@ files_failed	c564	Δεν ήταν δυνατή η ανάγνωση του φακ
 files_forward	83ba	Εμπρός
 files_gone	b09c	Αυτός ο φάκελος δεν υπάρχει πια
 files_link	9abb	Ένας σύνδεσμος δεν ακολουθείται
+files_move_cancelled	b54b	Σταμάτησε: έγιναν %d
+files_move_inside	deb2	Ένας φάκελος δεν μπαίνει μέσα στον εαυτό του
+files_move_stopped	e305	Σταμάτησε στο %2$s: έγιναν %1$d πριν
+files_moved	f6ef	Μετακινήθηκαν %d
+files_moving	2b61	Μετακίνηση %1$d από %2$d, %3$s από %4$s: Escape σταματά
 files_name_bad	467d	Αυτό δεν είναι όνομα
 files_name_taken	cbce	Το όνομα χρησιμοποιείται
 files_new_folder	d127	Νέος φάκελος

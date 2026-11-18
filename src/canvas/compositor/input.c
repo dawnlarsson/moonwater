@@ -888,6 +888,7 @@ static void compositor_screen_chord(unsigned int code)
 // A key a client's window reads as it is, from the keymap it was sent (wayland_host.c): true when the key was the client's.
 static int compositor_wl_key(unsigned int code, int value);
 static int compositor_wl_drag_escape(int value);
+static void compositor_drag_keys(void);
 static int compositor_wl_locked(void);
 static void compositor_wl_counts(int dx, int dy, int udx, int udy, positive now);
 static void compositor_wl_hold_keep(void);
@@ -964,6 +965,10 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 // next motion.
                 if (compositor.drag >= 0)
                         compositor_preview(compositor.drag);
+#ifdef CONFIG_MOONWATER_WAYLAND
+                // And of what a drop of files would do (a copy, a move): the program a drag is over is told the keys now.
+                compositor_drag_keys();
+#endif
         }
 
         modifiers = compositor_modifiers();

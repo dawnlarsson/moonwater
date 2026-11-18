@@ -37,8 +37,11 @@ editor_write_beside	ec75	فائل کے ساتھ لکھنا ممکن نہ ہوا
 editor_writes_over_changed	df15	ڈسک کی تبدیلی پر لکھتا ہے (Ctrl+R)
 editor_writes_over_readonly	e22f	صرف پڑھنے والی فائل پر لکھتا ہے
 files_back	4bc2	پیچھے
+files_busy	5ba5	نقل، منتقلی یا حذف جاری ہے
 files_changed	df4e	یہ وہ نہیں جو فہرست میں تھا: فولڈر دوبارہ پڑھا جا رہا ہے
 files_chosen	7a7f	%2$d میں سے %1$d منتخب
+files_copied	6570	%d نقل ہوئے
+files_copying	c870	نقل %1$d از %2$d، %3$s از %4$s: Escape روکتا ہے
 files_count	cab8	%d اشیاء
 files_count_cut	f139	پہلی %d اشیاء: فولڈر میں مزید ہیں
 files_delete_ask	807b	%1$d حذف کریں: %2$s؟ دوبارہ Delete حذف کرتا ہے، Escape چھوڑ دیتا ہے
@@ -50,6 +53,11 @@ files_failed	c564	یہ فولڈر پڑھا نہیں جا سکا
 files_forward	83ba	آگے
 files_gone	b09c	یہ فولڈر اب نہیں ہے
 files_link	9abb	لنک کی پیروی نہیں کی جاتی
+files_move_cancelled	b54b	رک گیا: %d مکمل
+files_move_inside	deb2	فولڈر اپنے اندر نہیں جا سکتا
+files_move_stopped	e305	%2$s پر رک گیا: اس سے پہلے %1$d مکمل
+files_moved	f6ef	%d منتقل ہوئے
+files_moving	2b61	منتقلی %1$d از %2$d، %3$s از %4$s: Escape روکتا ہے
 files_name_bad	467d	یہ نام نہیں ہے
 files_name_taken	cbce	یہ نام لیا جا چکا ہے
 files_new_folder	d127	نیا فولڈر

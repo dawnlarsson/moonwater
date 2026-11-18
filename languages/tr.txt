@@ -36,8 +36,11 @@ editor_write_beside	ec75	dosyanın yanına yazılamadı
 editor_writes_over_changed	df15	diskteki değişikliğin üzerine yazar (Ctrl+R yeniden okur)
 editor_writes_over_readonly	e22f	salt okunur bir dosyanın üzerine yazar
 files_back	4bc2	Geri
+files_busy	5ba5	Bir kopyalama, taşıma ya da silme sürüyor
 files_changed	df4e	Listelenen bu değil: klasör yeniden okunuyor
 files_chosen	7a7f	%1$d / %2$d seçildi
+files_copied	6570	%d kopyalandı
+files_copying	c870	Kopyalanıyor %1$d / %2$d, %3$s / %4$s: Escape durdurur
 files_count	cab8	%d öğe
 files_count_cut	f139	İlk %d öğe: klasörde daha fazlası var
 files_delete_ask	807b	%1$d silinsin mi: %2$s? Yeniden Delete siler, Escape bırakır
@@ -49,6 +52,11 @@ files_failed	c564	Bu klasör okunamadı
 files_forward	83ba	İleri
 files_gone	b09c	Bu klasör artık yok
 files_link	9abb	Bağlantı izlenmez
+files_move_cancelled	b54b	Durduruldu: %d yapıldı
+files_move_inside	deb2	Bir klasör kendi içine giremez
+files_move_stopped	e305	%2$s üzerinde durdu: önce %1$d yapıldı
+files_moved	f6ef	%d taşındı
+files_moving	2b61	Taşınıyor %1$d / %2$d, %3$s / %4$s: Escape durdurur
 files_name_bad	467d	Bu bir ad değil
 files_name_taken	cbce	Bu ad kullanılıyor
 files_new_folder	d127	Yeni klasör

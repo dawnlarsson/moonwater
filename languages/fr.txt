@@ -36,8 +36,11 @@ editor_write_beside	ec75	impossible d'écrire à côté du fichier
 editor_writes_over_changed	df15	écrase la modification sur le disque (Ctrl+R la relit)
 editor_writes_over_readonly	e22f	écrase un fichier en lecture seule
 files_back	4bc2	Retour
+files_busy	5ba5	Une copie, un déplacement ou une suppression est en cours
 files_changed	df4e	Ce n'est plus ce qui était listé : le dossier est relu
 files_chosen	7a7f	%1$d sur %2$d choisis
+files_copied	6570	%d copiés
+files_copying	c870	Copie %1$d sur %2$d, %3$s sur %4$s : Échap arrête
 files_count	cab8	%d éléments
 files_count_cut	f139	Les %d premiers éléments : le dossier en a plus
 files_delete_ask	807b	Supprimer %1$d : %2$s ? Suppr à nouveau le fait, Escape les garde
@@ -49,6 +52,11 @@ files_failed	c564	Ce dossier n'a pas pu être lu
 files_forward	83ba	Suivant
 files_gone	b09c	Ce dossier n'existe plus
 files_link	9abb	Un lien n'est pas suivi
+files_move_cancelled	b54b	Arrêté : %d faits
+files_move_inside	deb2	Un dossier ne peut pas aller en lui-même
+files_move_stopped	e305	Arrêté à %2$s : %1$d faits avant
+files_moved	f6ef	%d déplacés
+files_moving	2b61	Déplacement %1$d sur %2$d, %3$s sur %4$s : Échap arrête
 files_name_bad	467d	Ce n'est pas un nom
 files_name_taken	cbce	Ce nom est déjà pris
 files_new_folder	d127	Nouveau dossier

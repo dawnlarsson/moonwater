@@ -3899,6 +3899,180 @@ static fn browser_ops(struct files_model address_to m)
         asking; Delete again, with the listing as it was asked of, begins the job; and a listing that changed since the question is
         asked about again and removes nothing.
 */
+/*
+        Copying and moving (files_move_*), with no window: paths into a folder held open, stepped to the end here (and once on its own
+        thread). A copy makes a file, a folder with what is in it and a link as the link it is, never over a name that is taken (that one is
+        given a number), with the bytes of a file of several pieces whole; a move on one filesystem is a rename, and one into the folder it
+        is in is nothing; a folder into itself is refused before anything is made; a cancel between two pieces leaves no half file.
+*/
+static positive browser_size(string_address relative)
+{
+        p8 path[FILES_PATH];
+        file_facts facts;
+
+        browser_path(path, relative);
+        return file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts) == 0 ? (positive)facts.size : 0;
+}
+
+static b32 browser_is_link(string_address relative)
+{
+        p8 path[FILES_PATH];
+        file_facts facts;
+
+        browser_path(path, relative);
+        return file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, address_of facts) == 0 && (facts.mode & MODE_FORMAT) == MODE_LINK;
+}
+
+// The sources, absolute, each with its end, into paths (room bytes): how many.
+static p32 browser_sources(p8 address_to paths, positive room, const char address_to const address_to relative, p32 count)
+{
+        positive used = 0;
+
+        for (p32 at = 0; at < count; at++)
+        {
+                p8 path[FILES_PATH];
+                positive length;
+
+                browser_path(path, (string_address)relative[at]);
+                length = string_length(path);
+                if (used + length + 1 > room)
+                        return at;
+                memory_copy(paths + used, path, length + 1);
+                used += length + 1;
+        }
+        return count;
+}
+
+static bipolar browser_open_folder(string_address relative)
+{
+        p8 path[FILES_PATH];
+
+        browser_path(path, relative);
+        return system_open_at(AT_FDCWD, path, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+}
+
+// The move stepped to its end here: how many steps it took.
+static positive browser_move_run(struct files_move address_to job)
+{
+        positive steps = 0;
+
+        while (files_move_step(job) && steps < 100000)
+                steps++;
+        return steps;
+}
+
+static fn browser_moves(void)
+{
+        static struct files_move job;
+        static p8 paths[4 * FILES_PATH];
+        static const char address_to const copy_these[] = {"mv/src/f1", "mv/src/d", "mv/src/link", "mv/src/big"};
+        static const char address_to const move_these[] = {"mv/dst/d"};
+        static const char address_to const back_these[] = {"mv/src/d"};
+        static const char address_to const inside_these[] = {"mv/src/d"};
+        static const char address_to const cancel_these[] = {"mv/src/big"};
+        b32 copied, same_bytes = true, moved, inside, cancelled, threaded;
+        p8 a[FILES_PATH], b[FILES_PATH];
+        p32 count;
+
+        browser_folder((string_address) "mv");
+        browser_folder((string_address) "mv/src");
+        browser_folder((string_address) "mv/src/d");
+        browser_folder((string_address) "mv/src/d/sub");
+        browser_folder((string_address) "mv/dst");
+        browser_folder((string_address) "mv/dst2");
+        browser_file((string_address) "mv/src/f1", 100, 1700000000);
+        browser_file((string_address) "mv/src/d/x", 5, 0);
+        browser_file((string_address) "mv/src/d/sub/y", 7, 0);
+        browser_file((string_address) "mv/dst/f1", 3, 0);
+        browser_link((string_address) "f1", (string_address) "mv/src/link");
+        // Nine megabytes of bytes that differ, so a piece out of place shows: two pieces and a part.
+        {
+                p8 path[FILES_PATH];
+                bipolar made;
+                static p8 block[65536];
+
+                browser_path(path, (string_address) "mv/src/big");
+                made = (bipolar)system_call_4(syscall(openat), AT_FDCWD, (positive)path, FILE_CREATE | FILE_WRITE | O_TRUNC, 0644);
+                for (positive k = 0; made >= 0 && k < 144; k++)
+                {
+                        for (positive at = 0; at < sizeof(block); at++)
+                                block[at] = (p8)(at * 7 + k * 13);
+                        system_call_3(syscall(write), made, (positive)block, sizeof(block));
+                }
+                if (made >= 0)
+                        system_call_1(syscall(close), made);
+        }
+
+        count = browser_sources(paths, sizeof(paths), copy_these, 4);
+        copied = files_move_begin(&job, FILES_MOVE_COPY, browser_open_folder((string_address) "mv/dst"), paths, count) && job.count == 4;
+        browser_move_run(&job);
+        copied = copied && job.state == FILES_JOB_DONE && browser_size((string_address) "mv/dst/f1") == 3 && browser_size((string_address) "mv/dst/f1 (2)") == 100 &&
+                 browser_size((string_address) "mv/dst/d/x") == 5 && browser_size((string_address) "mv/dst/d/sub/y") == 7 &&
+                 browser_is_link((string_address) "mv/dst/link") && browser_size((string_address) "mv/dst/big") == 144 * 65536 && job.renamed == 1 &&
+                 job.items_done == job.items_total && job.items_total == 7 && job.bytes_done == job.bytes_total && job.bytes_total == 100 + 5 + 7 + 144 * 65536;
+        // The big copy's bytes, compared.
+        {
+                static p8 one[65536], two[65536];
+                bipolar left, right;
+
+                browser_path(a, (string_address) "mv/src/big"), browser_path(b, (string_address) "mv/dst/big");
+                left = system_open_at(AT_FDCWD, a, FILE_READ | O_CLOEXEC), right = system_open_at(AT_FDCWD, b, FILE_READ | O_CLOEXEC);
+                for (positive k = 0; left >= 0 && right >= 0 && k < 144; k++)
+                        same_bytes = same_bytes && system_read_once(left, one, sizeof(one)) == sizeof(one) && system_read_once(right, two, sizeof(two)) == sizeof(two) &&
+                                     !memory_compare(one, two, sizeof(one));
+                if (left >= 0)
+                        system_close(left);
+                if (right >= 0)
+                        system_close(right);
+        }
+        files_move_end(&job);
+        check("browser: a copy makes a file, a folder with what is in it and a link as the link it is, a name that is taken given a number and never written over, a file of several pieces byte for byte, the counts whole",
+              copied && same_bytes);
+
+        // A move on one filesystem: a rename. Then back into the folder it came from, where its name is free again.
+        count = browser_sources(paths, sizeof(paths), move_these, 1);
+        moved = files_move_begin(&job, FILES_MOVE_MOVE, browser_open_folder((string_address) "mv/dst2"), paths, count);
+        browser_move_run(&job);
+        moved = moved && job.state == FILES_JOB_DONE && !browser_there((string_address) "mv/dst/d") && browser_size((string_address) "mv/dst2/d/sub/y") == 7 &&
+                job.bytes_done == 0 && job.items_done == 1;
+        files_move_end(&job);
+        count = browser_sources(paths, sizeof(paths), back_these, 1);
+        moved = moved && files_move_begin(&job, FILES_MOVE_MOVE, browser_open_folder((string_address) "mv/src"), paths, count);
+        browser_move_run(&job);
+        moved = moved && job.state == FILES_JOB_DONE && browser_there((string_address) "mv/src/d") && !browser_there((string_address) "mv/src/d (2)") && job.items_done == 0;
+        files_move_end(&job);
+        check("browser: a move on one filesystem is a rename of the whole folder, and one into the folder it is already in does nothing", moved);
+
+        // Into itself: refused, nothing made.
+        count = browser_sources(paths, sizeof(paths), inside_these, 1);
+        inside = files_move_begin(&job, FILES_MOVE_COPY, browser_open_folder((string_address) "mv/src/d/sub"), paths, count);
+        browser_move_run(&job);
+        inside = inside && job.state == FILES_JOB_FAILED && job.error == -FILES_MOVE_INSIDE && !browser_there((string_address) "mv/src/d/sub/d");
+        files_move_end(&job);
+        check("browser: a folder copied into a folder inside itself is refused before anything of it is made", inside);
+
+        // A cancel after the first piece: no half file left.
+        count = browser_sources(paths, sizeof(paths), cancel_these, 1);
+        cancelled = files_move_begin(&job, FILES_MOVE_COPY, browser_open_folder((string_address) "mv/dst2"), paths, count);
+        while (files_move_step(&job) && !job.bytes_done)
+                ;
+        files_move_cancel(&job);
+        browser_move_run(&job);
+        cancelled = cancelled && job.state == FILES_JOB_CANCELLED && job.bytes_done > 0 && job.bytes_done < 144 * 65536 && !browser_there((string_address) "mv/dst2/big");
+        files_move_end(&job);
+        check("browser: a copy cancelled between two pieces stops there and leaves no half of the file it was in", cancelled);
+
+        // On its own thread, waited for.
+        count = browser_sources(paths, sizeof(paths), cancel_these, 1);
+        threaded = files_move_begin(&job, FILES_MOVE_COPY, browser_open_folder((string_address) "mv/dst2"), paths, count) && files_move_start(&job);
+        for (int waited = 0; files_move_running(&job) && waited < 500; waited++)
+                browser_wait_a_tick();
+        threaded = threaded && job.state == FILES_JOB_DONE && browser_size((string_address) "mv/dst2/big") == 144 * 65536;
+        files_move_end(&job);
+        check("browser: a copy runs to its end on a thread of its own", threaded);
+        browser_remove_in((string_address) "mv");
+}
+
 static fn browser_asks(void)
 {
         static const p8 hostile[] = "asks/b\nad";
@@ -4034,6 +4208,7 @@ b32 main(void)
         browser_changes(address_of model);
         browser_many(address_of model);
         browser_ops(address_of model);
+        browser_moves();
         browser_asks();
         browser_apart();
         files_model_close(address_of model);

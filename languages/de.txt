@@ -36,8 +36,11 @@ editor_write_beside	ec75	neben der Datei konnte nicht geschrieben werden
 editor_writes_over_changed	df15	überschreibt die Änderung auf dem Datenträger (Ctrl+R liest neu)
 editor_writes_over_readonly	e22f	überschreibt eine schreibgeschützte Datei
 files_back	4bc2	Zurück
+files_busy	5ba5	Ein Kopieren, Verschieben oder Löschen läuft
 files_changed	df4e	Nicht mehr das Aufgelistete: der Ordner wird neu gelesen
 files_chosen	7a7f	%1$d von %2$d gewählt
+files_copied	6570	%d kopiert
+files_copying	c870	Kopiere %1$d von %2$d, %3$s von %4$s: Escape hält an
 files_count	cab8	%d Einträge
 files_count_cut	f139	Die ersten %d Einträge: der Ordner hat mehr
 files_delete_ask	807b	%1$d löschen: %2$s? Nochmal Entf löscht, Escape lässt sie
@@ -49,6 +52,11 @@ files_failed	c564	Dieser Ordner konnte nicht gelesen werden
 files_forward	83ba	Vor
 files_gone	b09c	Dieser Ordner ist weg
 files_link	9abb	Einer Verknüpfung wird nicht gefolgt
+files_move_cancelled	b54b	Angehalten: %d erledigt
+files_move_inside	deb2	Ein Ordner kann nicht in sich selbst
+files_move_stopped	e305	Angehalten bei %2$s: %1$d davor erledigt
+files_moved	f6ef	%d verschoben
+files_moving	2b61	Verschiebe %1$d von %2$d, %3$s von %4$s: Escape hält an
 files_name_bad	467d	Das ist kein Name
 files_name_taken	cbce	Der Name ist vergeben
 files_new_folder	d127	Neuer Ordner

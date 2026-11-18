@@ -36,8 +36,11 @@ editor_write_beside	ec75	не удалось записать рядом с фа
 editor_writes_over_changed	df15	перезапишет изменение на диске (Ctrl+R читает заново)
 editor_writes_over_readonly	e22f	перезапишет файл только для чтения
 files_back	4bc2	Назад
+files_busy	5ba5	Идёт копирование, перемещение или удаление
 files_changed	df4e	Это уже не то, что было в списке: папка читается заново
 files_chosen	7a7f	Выбрано %1$d из %2$d
+files_copied	6570	Скопировано: %d
+files_copying	c870	Копирование %1$d из %2$d, %3$s из %4$s: Escape останавливает
 files_count	cab8	Объектов: %d
 files_count_cut	f139	Первые %d объектов: в папке есть ещё
 files_delete_ask	807b	Удалить %1$d: %2$s? Ещё раз Delete удаляет, Escape оставляет
@@ -49,6 +52,11 @@ files_failed	c564	Не удалось прочитать эту папку
 files_forward	83ba	Вперёд
 files_gone	b09c	Этой папки больше нет
 files_link	9abb	Переход по ссылке не выполняется
+files_move_cancelled	b54b	Остановлено: сделано %d
+files_move_inside	deb2	Папку нельзя поместить в неё саму
+files_move_stopped	e305	Остановлено на %2$s: до него сделано %1$d
+files_moved	f6ef	Перемещено: %d
+files_moving	2b61	Перемещение %1$d из %2$d, %3$s из %4$s: Escape останавливает
 files_name_bad	467d	Это не имя
 files_name_taken	cbce	Это имя занято
 files_new_folder	d127	Новая папка

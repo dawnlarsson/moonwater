@@ -931,6 +931,7 @@ static fn editor_edge_check(struct ui address_to wui);
 static fn editor_readonly_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
 static fn popmenu_bar_check(struct ui address_to wui);
+static fn drop_check(struct ui address_to wui);
 
 /*
         An error's underline in a code view is a wave one pixel tall at 100 percent, a row under the text. The line was the scale's
@@ -954,6 +955,60 @@ static fn squiggle_check(struct ui address_to wui)
         check("squiggle: an error's underline is one pixel tall at 100 percent, not the scale's 100", rows >= 1 && rows <= 2);
         ui_text_close(&view);
         compositor_call(syscall(munmap), pixels, 400 * 300 * 4, 0, 0, 0, 0);
+}
+
+/*
+        The kit's drag and drop helpers. A list of URIs gives this machine's files' paths, %XX made bytes again, and passes over a
+        comment, another scheme, another machine's file and a path with a NUL in it; dropped on a command line the same list is each
+        path quoted for a shell, a quote in it closed and opened again, never a line's end. A press arms a drag and its release disarms
+        it, so a hand with no button down never drags what the last press was on; a release, a finger's press and another button's
+        disarm as well. The drag's news carries the person's keys at a drop target, which is how a drop of files is a copy or a move.
+*/
+static fn drop_check(struct ui address_to wui)
+{
+        static const char list[] = "file:///a/b%20c\r\n# a comment\r\nhttp://example.org/x\r\nfile://localhost/tmp/z\nfile://elsewhere/etc/passwd\r\n"
+                                   "file:///nul%00x\r\nfile:///last";
+        static const char quoting[] = "file:///it's%0Ahere\r\nhttps://example.org/q\r\n";
+        p8 path[64], address_to text;
+        positive at = 0, length, room, got;
+        b32 paths;
+        struct ui_drag d;
+        struct ui_drop drop;
+        struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+        struct window_event release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+        struct window_event finger = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | WINDOW_KEY_TOUCH, UI_POINTER_LEFT, 0};
+        struct window_event over = {WINDOW_EVENT_DRAG, WINDOW_KEY_CONTROL, WINDOWS_DRAG_MOTION, (7 << 16) | 9};
+
+        length = sizeof(list) - 1;
+        got = ui_uri_next((const p8 address_to)list, length, &at, path, sizeof(path));
+        paths = got == 6 && !memory_compare(path, "/a/b c", 7);
+        got = ui_uri_next((const p8 address_to)list, length, &at, path, sizeof(path));
+        paths = paths && got == 6 && !memory_compare(path, "/tmp/z", 7);
+        got = ui_uri_next((const p8 address_to)list, length, &at, path, sizeof(path));
+        paths = paths && got == 5 && !memory_compare(path, "/last", 6);
+        paths = paths && !ui_uri_next((const p8 address_to)list, length, &at, path, sizeof(path));
+        check("drop: a list of URIs gives this machine's files, their %XX made bytes, and passes over comments, other schemes, other machines and a NUL", paths);
+
+        got = ui_uris_quoted((const p8 address_to)quoting, sizeof(quoting) - 1, &text, &room);
+        check("drop: files dropped on a command line are each quoted for the shell with a blank after, a quote closed and opened, no line end",
+              got == 39 && !memory_compare(text, "'/it'\\''shere' 'https://example.org/q' ", 39));
+        array_store_release(text, room, got);
+
+        memory_zero(&d, sizeof(d));
+        wui->scale = 100;
+        ui_drag_button(&d, &press, 10, 10, true);
+        paths = d.armed && ui_drag_past(wui, &d, 40, 10);
+        ui_drag_button(&d, &release, 10, 10, false);
+        paths = paths && !d.armed && !ui_drag_past(wui, &d, 40, 10);
+        ui_drag_button(&d, &finger, 10, 10, true);
+        paths = paths && !d.armed;
+        ui_drag_button(&d, &press, 10, 10, false);
+        check("drop: a press arms a drag and its release disarms it, so a hand with no button down drags nothing; a finger's press and a press on nothing to drag arm none",
+              paths && !d.armed);
+
+        memory_zero(&drop, sizeof(drop));
+        check("drop: a drag over a target carries where it is and the person's Control (what makes a drop of files a copy)",
+              ui_drop_event(&drop, &over) == UI_DROP_OVER && drop.x == 9 && drop.y == 7 && drop.keys == WINDOW_KEY_CONTROL);
 }
 
 /*
@@ -1407,6 +1462,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         editor_readonly_check(&wui);
         field_check(&wui);
         popmenu_bar_check(&wui);
+        drop_check(&wui);
         squiggle_check(&wui);
         ui_over_check();
 }
