@@ -243,6 +243,10 @@ static struct
         // while the press is held (hold_carry: its release drops it), on the ground it turns to selection mode (selecting: a tap on a
         // row adds it or takes it out, a press on the ground begins a band that adds, the foot says so and has Done), till Escape or Done.
         b32 hold_carry, selecting;
+        // A press while carrying (Tab's): where it went down; its release there drops as a press did, and taken past the slop it hands
+        // what is carried to the desktop's drag, which another window or a Wayland client takes as its drop.
+        b32 carry_press;
+        int carry_px, carry_py;
         // What was done that Ctrl+Z undoes and Ctrl+Y does again (files_deed): the last FILES_DEEDS, deed_done of them done, the ones after
         // them undone (a new one forgets those). move_into is the folder a copy or a move under way goes into, for its deed; undoing is a
         // move begun by an undo, which is no deed of its own.
@@ -451,7 +455,7 @@ static fn files_describe(int id, struct ui_row address_to row)
         row->file = 1 + files_symbol(m, entry);
         row->extension = files_extension_label(m, entry);
         row->dim = files_carried(files_model_name(m, entry), entry->length);
-        row->mark |= files_flashed(files_model_name(m, entry), entry->length);
+        row->glow = files_flashed(files_model_name(m, entry), entry->length);
         // In a work tree: what git ignores is quiet, what it does not track yet is cyan, a shade the theme's ground keeps readable.
         if (files.git && entry >= m->shown.entry && entry < m->shown.entry + m->shown.count)
         {
@@ -1563,6 +1567,58 @@ static fn files_carry_drop(int row)
         }
         files_transfer(files.carry_paths, files.carry_count, row, FILES_MOVE_MOVE);
         files_carry_end();
+}
+
+/*
+        What is carried handed to the desktop's drag (the button down on the window, as a drag of rows is): offered as a list of files,
+        a copy or a move, with their count and the first one's symbol for the drag's chip, so another browser or any Wayland client takes
+        it as a drop; the carry here is over, and a move the target made is shown when the drag ends (files_drag_event).
+*/
+static b32 files_carry_offer(void)
+{
+        static const char hex[] = "0123456789ABCDEF";
+        struct windows_clip_part parts[2];
+        p8 address_to uris = null, address_to text = null;
+        positive uris_room = 0, text_room = 0, uris_used = 0, text_used = 0;
+        p32 items = files.carry_count, kind = (files.carry_kind & 0xffu) + 1;
+        b32 offered = false;
+
+        if (!files.carrying || !files.carry_count)
+                return false;
+        for (positive at = 0; at < files.carry_used;)
+        {
+                const p8 address_to path = files.carry_paths + at;
+                positive length = string_length((string_address)path);
+
+                at += length + 1;
+                if (!array_store_reserve(uris, uris_room, uris_used, uris_used + 3 * length + 12, 4096) ||
+                    !array_store_reserve(text, text_room, text_used, text_used + length + 2, 4096))
+                        break;
+                memory_copy(uris + uris_used, "file://", 7), uris_used += 7;
+                for (positive k = 0; k < length; k++)
+                {
+                        p8 c = path[k];
+
+                        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' || c == '.' || c == '~')
+                                uris[uris_used++] = c;
+                        else
+                                uris[uris_used++] = '%', uris[uris_used++] = (p8)hex[c >> 4], uris[uris_used++] = (p8)hex[c & 15];
+                }
+                uris[uris_used++] = '\r', uris[uris_used++] = '\n';
+                memory_copy(text + text_used, path, length), text_used += length, text[text_used++] = '\n';
+        }
+        if (uris_used && text_used)
+        {
+                parts[0] = (struct windows_clip_part){WINDOWS_CLIP_URIS, uris, uris_used};
+                parts[1] = (struct windows_clip_part){WINDOWS_CLIP_TEXT, text, text_used - 1};
+                offered = ui_drag_offer(&files.own, &files.drag, parts, 2,
+                                        WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE | kind << WINDOWS_DRAG_KIND_SHIFT | (items > 0xffff ? 0xffffu : items) << WINDOWS_DRAG_ITEMS_SHIFT);
+        }
+        array_store_release(uris, uris_room, uris_used);
+        array_store_release(text, text_room, text_used);
+        if (offered)
+                files_carry_end(), files.hold_carry = files.carry_press = false;
+        return offered;
 }
 
 /*
@@ -3030,6 +3086,15 @@ static b32 files_event(const struct window_event address_to event)
                 return !down || ui_key_modifier((int)event->a) ? true : files_key(event);
         case WINDOW_EVENT_MOTION:
                 files.dirty |= files.carrying; // the ghost follows the pointer
+                // What is carried taken out of the window with the button down (a hold's carry), or a press while carrying taken past the
+                // slop: the desktop's drag carries it on.
+                if ((files.hold_carry && ((int)event->a < 0 || (int)event->b < 0 || (int)event->a >= files.width || (int)event->b >= files.height)) ||
+                    (files.carry_press && ui_press_past(ui, files.carry_px, files.carry_py, (int)event->a, (int)event->b)))
+                {
+                        files_carry_offer();
+                        files.dirty = true;
+                        break;
+                }
                 // A rubber band held: the rows it crosses are the ones chosen, the cursor on the row the hand is at.
                 if (l->band)
                 {
@@ -3080,8 +3145,12 @@ static b32 files_event(const struct window_event address_to event)
                                 // The offer says how many it drags (the chosen ones, or the row alone), which the drag's chip shows.
                                 p32 items = files.drag_chosen && m->chosen_count ? m->chosen_count : 1;
 
+                                const struct files_entry address_to first = files_model_entry(m, files.drag_place);
+                                p32 kind = first ? (files_symbol(m, first) & 0xffu) + 1 : 0;
+
                                 ui_drag_offer(&files.own, &files.drag, parts, 2,
-                                              WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE | (items > 0xffff ? 0xffffu : items) << WINDOWS_DRAG_ITEMS_SHIFT);
+                                              WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE | kind << WINDOWS_DRAG_KIND_SHIFT |
+                                                  (items > 0xffff ? 0xffffu : items) << WINDOWS_DRAG_ITEMS_SHIFT);
                                 files_uris_free(uris, uris_room, paths, paths_room, parts);
                         }
                         files.drag.armed = false;
@@ -3166,14 +3235,23 @@ static b32 files_event(const struct window_event address_to event)
                         break;
                 }
                 // Carrying: a press on a folder's row drops what is carried in it, a press on the rows' ground in the folder shown.
-                if (event->a == UI_POINTER_LEFT && down && files.carrying && ui_point(ui_kit.pointer_x, l->x, l->w) >= l->x &&
-                    ui_kit.pointer_y >= l->y && ui_kit.pointer_y < l->y + l->h)
+                // Its press is held: a release where it went down drops there, a press taken past the slop is the desktop's drag.
+                if (event->a == UI_POINTER_LEFT && down && files.carrying && !files.hold_carry)
                 {
-                        int at = ui_list_hit(ui, l, ui_kit.pointer_x, ui_kit.pointer_y);
-                        const struct files_entry address_to entry = at >= 0 ? files_model_entry(m, (p32)at) : null;
+                        files.carry_press = true, files.carry_px = ui_kit.pointer_x, files.carry_py = ui_kit.pointer_y;
+                        break;
+                }
+                if (event->a == UI_POINTER_LEFT && !down && files.carry_press)
+                {
+                        files.carry_press = false;
+                        if (ui_point(files.carry_px, l->x, l->w) >= l->x && files.carry_py >= l->y && files.carry_py < l->y + l->h)
+                        {
+                                int at = ui_list_hit(ui, l, files.carry_px, files.carry_py);
+                                const struct files_entry address_to entry = at >= 0 ? files_model_entry(m, (p32)at) : null;
 
-                        if (!entry || entry->kind == FILES_KIND_DIRECTORY)
-                                files_carry_drop(entry ? at : -1);
+                                if (!entry || entry->kind == FILES_KIND_DIRECTORY)
+                                        files_carry_drop(entry ? at : -1);
+                        }
                         files.dirty = true;
                         break;
                 }

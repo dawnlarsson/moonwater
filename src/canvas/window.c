@@ -810,6 +810,7 @@ static inline int window_pinch_y(int b)
 #define WINDOWS_DRAG_MOVE 2u
 #define WINDOWS_DRAG_ASK 4u
 #define WINDOWS_DRAG_ITEMS_SHIFT 16 // a drag offer's actions may carry, from this bit up, how many things it drags: its chip says so
+#define WINDOWS_DRAG_KIND_SHIFT 8   // and in the eight bits from this one the first thing's file symbol plus one (UI_FILE_*), its chip's
 
 static inline int window_drag_x(int b)
 {
@@ -5465,7 +5466,7 @@ static long windows_drag_offer(const struct window_row *own, const struct window
                 window_call(WINDOW_SYS_CLOSE, windows_drag_held, 0, 0, 0, 0, 0);
         windows_drag_held = fd;
         table->drag_offer_fd[own->row] = (int)fd;
-        table->drag_offer_actions[own->row] = actions & (7u | 0xffffu << WINDOWS_DRAG_ITEMS_SHIFT);
+        table->drag_offer_actions[own->row] = actions & (7u | 0xffu << WINDOWS_DRAG_KIND_SHIFT | 0xffffu << WINDOWS_DRAG_ITEMS_SHIFT);
         __atomic_add_fetch(&table->drag_offer_serial[own->row], 1, __ATOMIC_RELEASE);
         windows_knock(own);
         return 0;

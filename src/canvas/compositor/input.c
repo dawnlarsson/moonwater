@@ -3237,6 +3237,42 @@ static void compositor_chip_hint(const int *rect, int x, int y, int side, positi
         (action -1).
 */
 static unsigned int compositor_chip_drag_items; // the things the program's drag carries, 0 when it did not say (any other drag's)
+static unsigned int compositor_chip_drag_kind;  // and the first one's file symbol plus one (UI_FILE_*), 0 none
+
+// One part of a symbol's table (the kit's, ui_file_parts) into a chip's glyph layer, size to a side from x, y: lines and outlines as the
+// chip's strokes, a box filled whole and a shade at a third.
+static void compositor_chip_part(unsigned char *glyph, int w, int h, long x, long y, long size, const struct ui_icon_part *part, long radius)
+{
+        long x0 = x + part->x0 * size / 48, y0 = y + part->y0 * size / 48, x1 = x + part->x1 * size / 48, y1 = y + part->y1 * size / 48;
+
+        if (part->kind == UI_ICON_LINE)
+                compositor_chip_stroke_into(glyph, w, h, x0, y0, x1, y1, radius);
+        else if (part->kind == UI_ICON_RING)
+        {
+                compositor_chip_stroke_into(glyph, w, h, x0, y0, x1, y0, radius), compositor_chip_stroke_into(glyph, w, h, x1, y0, x1, y1, radius);
+                compositor_chip_stroke_into(glyph, w, h, x1, y1, x0, y1, radius), compositor_chip_stroke_into(glyph, w, h, x0, y1, x0, y0, radius);
+        }
+        else if (part->kind == UI_ICON_BOX || part->kind == UI_ICON_SHADE)
+                for (long py = y0 < 0 ? 0 : y0; py < y1 && py < h; py++)
+                        for (long px = x0 < 0 ? 0 : x0; px < x1 && px < w; px++)
+                        {
+                                unsigned char want = part->kind == UI_ICON_BOX ? 255 : 85;
+
+                                glyph[py * w + px] = glyph[py * w + px] > want ? glyph[py * w + px] : want;
+                        }
+}
+
+// A file's symbol of a kind (UI_FILE_*) into a chip's glyph layer, size to a side from x, y: its page where it has one, then its parts.
+static void compositor_chip_icon(unsigned char *glyph, int w, int h, long x, long y, long size, int kind, long radius)
+{
+        if (kind < 0 || kind >= UI_FILE_KINDS)
+                return;
+        if (kind >= UI_FILE_PLAIN && kind <= UI_FILE_DOCUMENT)
+                for (int k = 0; k < 7; k++)
+                        compositor_chip_part(glyph, w, h, x, y, size, &ui_file_page[k], radius);
+        for (int k = 0; k < UI_FILE_PARTS && ui_file_parts[kind][k].kind; k++)
+                compositor_chip_part(glyph, w, h, x, y, size, &ui_file_parts[kind][k], radius);
+}
 
 // A figure 0 to 9 as seven strokes into a chip's glyph layer, its box x, y, fw by fh.
 static void compositor_chip_figure(unsigned char *glyph, int w, int h, long x, long y, long fw, long fh, int figure, long radius)
@@ -3256,21 +3292,25 @@ static void compositor_chip_drag(int action)
         struct compositor_chip *c = &compositor.chip;
         int scale = compositor.scale, h = COMPOSITOR_CHIP_HEIGHT_DP * scale / 100, w = h * 3 / 2, gap = COMPOSITOR_CHIP_DRAG_GAP_DP * scale / 100;
         unsigned int items = compositor_chip_drag_items > 1 ? (compositor_chip_drag_items > 999 ? 999 : compositor_chip_drag_items) : 0;
-        int figures = items >= 100 ? 3 : items >= 10 ? 2 : items ? 1 : 0, glyph_w = w;
+        int figures = items >= 100 ? 3 : items >= 10 ? 2 : items ? 1 : 0, glyph_w = w, kind = (int)compositor_chip_drag_kind - 1;
+        int icon = kind >= 0 && kind < UI_FILE_KINDS ? h * 2 / 3 : 0, icon_x = glyph_w - h / 8;
 
-        // The count's room: a figure half the glyph's height wide and a gap after each, and the capsule's end.
+        // The symbol's room after the glyph, then the count's: a figure half the glyph's height wide and a gap after each, and the end.
+        w += icon ? icon + h / 6 : 0;
         w += figures ? figures * (h * 2 / 5) + h / 4 : 0;
+        if (icon)
+                glyph_w += icon + h / 6;
 
         if (action < 0)
         {
-                compositor_chip_drag_items = 0; // a drag over: the next one's count is its own, or none
+                compositor_chip_drag_items = compositor_chip_drag_kind = 0; // a drag over: the next one's count and symbol are its own, or none
                 if (c->kind == COMPOSITOR_CHIP_DRAG)
                         compositor_chip_hide();
                 return;
         }
         if (c->kind != COMPOSITOR_CHIP_DRAG || c->cells != action || c->w != w)
         {
-                long g = COMPOSITOR_CHIP_GLYPH_DP * scale / 100, cx = glyph_w / 2, cy = h / 2, radius = 3 * scale / 200 > 2 ? 3 * scale / 200 : 2;
+                long g = COMPOSITOR_CHIP_GLYPH_DP * scale / 100, cx = (h * 3 / 2) / 2, cy = h / 2, radius = 3 * scale / 200 > 2 ? 3 * scale / 200 : 2;
                 unsigned char *glyph;
 
                 if (w < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST || !compositor_chip_map())
@@ -3291,6 +3331,9 @@ static void compositor_chip_drag(int action)
                                 compositor_chip_stroke_into(glyph, w, h, cx + dot * g, cy, cx + dot * g, cy, radius + 1);
                 else
                         compositor_chip_stroke_into(glyph, w, h, cx - g, cy + g, cx + g, cy - g, radius);
+                // The dragged thing's symbol after the action's glyph, in the middle of the chip's height.
+                if (icon)
+                        compositor_chip_icon(glyph, w, h, icon_x, (h - icon) / 2, icon, kind, radius > 2 ? radius - 1 : radius);
                 // The count after the glyph: its figures left to right, each as tall as the glyph's reach.
                 for (int k = 0, value = (int)items; k < figures; k++)
                 {

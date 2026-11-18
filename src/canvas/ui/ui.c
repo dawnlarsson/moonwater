@@ -1705,6 +1705,68 @@ static const struct ui_faces address_to ui_faces(void)
         return &faces;
 }
 
+/*
+        The shapes of the kit's symbols and file symbols, shared with the compositor, which draws a dragged file's symbol on the drag's
+        chip from the same table (compositor_chip_icon) as the kit draws it in a row (ui_file_icon).
+*/
+#define UI_ICON_BOX 1  // x0, y0, x1, y1 filled, its corners r
+#define UI_ICON_RING 2 // the outline of that box, a stroke thick
+#define UI_ICON_LINE 3 // a stroke from x0, y0 to x1, y1
+struct ui_icon_part
+{
+        unsigned char kind, x0, y0, x1, y1, r; // halves of a 24th of the symbol's side
+};
+
+enum
+{
+        UI_FILE_FOLDER,      // a folder, shut
+        UI_FILE_FOLDER_OPEN, // a folder that is open (the tree's node shown, a folder a drag is over)
+        UI_FILE_PLAIN,       // a file of no kind it is known by
+        UI_FILE_TEXT,        // text: source, notes, configuration
+        UI_FILE_IMAGE,       // a picture
+        UI_FILE_AUDIO,       // a sound
+        UI_FILE_VIDEO,       // a film
+        UI_FILE_ARCHIVE,     // an archive or a disk's image
+        UI_FILE_PROGRAM,     // a file one may run (its mode says so): a program or a script
+        UI_FILE_DOCUMENT,    // a document: pages, sheets, slides
+        UI_FILE_DRIVE,       // a disk: the root, a mount
+        UI_FILE_HOME,        // the home folder
+        UI_FILE_TRASH,       // the bin
+        UI_FILE_SPECIAL,     // a device, a pipe, a socket
+        UI_FILE_KINDS
+};
+#define UI_FILE_LINKED 0x100u // with a kind: it is a link to one (the arrow at its foot)
+#define UI_FILE_ROW_ICON 16   // logical pixels a side: a file's symbol before its label in a row
+#define UI_FILE_TILE_ICON 32  // and over it in a tile
+#define UI_FILE_PARTS 12
+#define UI_ICON_SHADE 4 // a part: a filled box at a third of the colour
+
+static const struct ui_icon_part ui_file_parts[UI_FILE_KINDS][UI_FILE_PARTS] = {
+        [UI_FILE_FOLDER] = {{UI_ICON_RING, 4, 8, 20, 15, 0}, {UI_ICON_RING, 4, 13, 44, 40, 0}},
+        [UI_FILE_FOLDER_OPEN] = {{UI_ICON_RING, 4, 8, 20, 15, 0}, {UI_ICON_LINE, 4, 13, 4, 40, 0}, {UI_ICON_LINE, 4, 13, 38, 13, 0}, {UI_ICON_LINE, 38, 13, 38, 21, 0},
+                                 {UI_ICON_LINE, 11, 21, 46, 21, 0}, {UI_ICON_LINE, 46, 21, 40, 40, 0}, {UI_ICON_LINE, 11, 21, 4, 40, 0}, {UI_ICON_LINE, 4, 40, 40, 40, 0}},
+        [UI_FILE_TEXT] = {{UI_ICON_LINE, 15, 21, 33, 21, 0}, {UI_ICON_LINE, 15, 27, 33, 27, 0}, {UI_ICON_LINE, 15, 33, 33, 33, 0}, {UI_ICON_LINE, 15, 39, 26, 39, 0}},
+        [UI_FILE_DOCUMENT] = {{UI_ICON_BOX, 15, 18, 33, 24, 0}, {UI_ICON_LINE, 15, 30, 33, 30, 0}, {UI_ICON_LINE, 15, 36, 30, 36, 0}},
+        [UI_FILE_IMAGE] = {{UI_ICON_BOX, 15, 16, 22, 23, 4}, {UI_ICON_LINE, 14, 38, 21, 28, 0}, {UI_ICON_LINE, 21, 28, 27, 35, 0}, {UI_ICON_LINE, 25, 32, 29, 27, 0},
+                           {UI_ICON_LINE, 29, 27, 35, 38, 0}, {UI_ICON_LINE, 14, 38, 35, 38, 0}},
+        [UI_FILE_AUDIO] = {{UI_ICON_BOX, 14, 32, 22, 40, 4}, {UI_ICON_LINE, 21, 17, 21, 36, 0}, {UI_ICON_LINE, 21, 17, 31, 21, 0}, {UI_ICON_LINE, 31, 21, 31, 25, 0}},
+        [UI_FILE_VIDEO] = {{UI_ICON_LINE, 18, 21, 18, 37, 0}, {UI_ICON_LINE, 18, 21, 31, 29, 0}, {UI_ICON_LINE, 31, 29, 18, 37, 0}},
+        [UI_FILE_ARCHIVE] = {{UI_ICON_BOX, 22, 5, 26, 9, 0}, {UI_ICON_BOX, 22, 11, 26, 15, 0}, {UI_ICON_BOX, 22, 17, 26, 21, 0}, {UI_ICON_RING, 20, 24, 28, 34, 1}},
+        [UI_FILE_PROGRAM] = {{UI_ICON_SHADE, 11, 14, 37, 43, 0}, {UI_ICON_LINE, 15, 23, 21, 28, 0}, {UI_ICON_LINE, 21, 28, 15, 33, 0}, {UI_ICON_LINE, 23, 35, 32, 35, 0}},
+        [UI_FILE_DRIVE] = {{UI_ICON_RING, 4, 15, 44, 35, 3}, {UI_ICON_BOX, 34, 23, 39, 28, 2}, {UI_ICON_LINE, 10, 25, 26, 25, 0}},
+        [UI_FILE_HOME] = {{UI_ICON_LINE, 4, 24, 24, 6, 0}, {UI_ICON_LINE, 24, 6, 44, 24, 0}, {UI_ICON_LINE, 10, 20, 10, 42, 0}, {UI_ICON_LINE, 38, 20, 38, 42, 0},
+                          {UI_ICON_LINE, 10, 42, 38, 42, 0}, {UI_ICON_RING, 20, 30, 28, 42, 0}},
+        [UI_FILE_TRASH] = {{UI_ICON_LINE, 7, 12, 41, 12, 0}, {UI_ICON_RING, 18, 6, 30, 12, 1}, {UI_ICON_LINE, 12, 12, 15, 43, 0}, {UI_ICON_LINE, 36, 12, 33, 43, 0},
+                           {UI_ICON_LINE, 15, 43, 33, 43, 0}, {UI_ICON_LINE, 20, 18, 20, 37, 0}, {UI_ICON_LINE, 28, 18, 28, 37, 0}},
+        [UI_FILE_SPECIAL] = {{UI_ICON_RING, 8, 8, 40, 40, 16}, {UI_ICON_BOX, 20, 20, 28, 28, 4}},
+};
+
+// The page every file kind is drawn on: its outline with the top right corner folded, and the fold.
+static const struct ui_icon_part ui_file_page[7] = {
+        {UI_ICON_LINE, 10, 4, 29, 4, 0}, {UI_ICON_LINE, 29, 4, 38, 13, 0}, {UI_ICON_LINE, 38, 13, 38, 44, 0}, {UI_ICON_LINE, 10, 44, 38, 44, 0},
+        {UI_ICON_LINE, 10, 4, 10, 44, 0}, {UI_ICON_LINE, 29, 4, 29, 13, 0}, {UI_ICON_LINE, 29, 13, 38, 13, 0},
+};
+
 #endif /* MOONWATER_CANVAS_UI_SHARED */
 
 #if !defined(UI_LIST_ONLY) && !defined(UI_SWITCHES_ONLY) && !defined(UI_SHARED_ONLY) && !defined(MOONWATER_CANVAS_UI)
@@ -22806,15 +22868,8 @@ enum
         UI_ICON_COUNT
 };
 
-#define UI_ICON_BOX 1  // x0, y0, x1, y1 filled, its corners r
-#define UI_ICON_RING 2 // the outline of that box, a stroke thick
-#define UI_ICON_LINE 3 // a stroke from x0, y0 to x1, y1
 #define UI_ICON_PARTS 8
 
-struct ui_icon_part
-{
-        unsigned char kind, x0, y0, x1, y1, r; // halves of a 24th of the symbol's side
-};
 
 static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_APPS] = {{UI_ICON_BOX, 7, 7, 21, 21, 3}, {UI_ICON_BOX, 27, 7, 41, 21, 3}, {UI_ICON_BOX, 7, 27, 21, 41, 3}, {UI_ICON_BOX, 27, 27, 41, 41, 3}},
@@ -22921,56 +22976,6 @@ static fn ui_icon(struct ui address_to ui, int which, int left, int top, int siz
         foot holding an arrow out (UI_FILE_LINKED). The colour is the kind's: a folder's amber, a program's green (each a shade the theme's
         ground keeps readable), any other the ink it is given.
 */
-enum
-{
-        UI_FILE_FOLDER,      // a folder, shut
-        UI_FILE_FOLDER_OPEN, // a folder that is open (the tree's node shown, a folder a drag is over)
-        UI_FILE_PLAIN,       // a file of no kind it is known by
-        UI_FILE_TEXT,        // text: source, notes, configuration
-        UI_FILE_IMAGE,       // a picture
-        UI_FILE_AUDIO,       // a sound
-        UI_FILE_VIDEO,       // a film
-        UI_FILE_ARCHIVE,     // an archive or a disk's image
-        UI_FILE_PROGRAM,     // a file one may run (its mode says so): a program or a script
-        UI_FILE_DOCUMENT,    // a document: pages, sheets, slides
-        UI_FILE_DRIVE,       // a disk: the root, a mount
-        UI_FILE_HOME,        // the home folder
-        UI_FILE_TRASH,       // the bin
-        UI_FILE_SPECIAL,     // a device, a pipe, a socket
-        UI_FILE_KINDS
-};
-#define UI_FILE_LINKED 0x100u // with a kind: it is a link to one (the arrow at its foot)
-#define UI_FILE_ROW_ICON 16   // logical pixels a side: a file's symbol before its label in a row
-#define UI_FILE_TILE_ICON 32  // and over it in a tile
-#define UI_FILE_PARTS 12
-#define UI_ICON_SHADE 4 // a part: a filled box at a third of the colour
-
-static const struct ui_icon_part ui_file_parts[UI_FILE_KINDS][UI_FILE_PARTS] = {
-        [UI_FILE_FOLDER] = {{UI_ICON_RING, 4, 8, 20, 15, 0}, {UI_ICON_RING, 4, 13, 44, 40, 0}},
-        [UI_FILE_FOLDER_OPEN] = {{UI_ICON_RING, 4, 8, 20, 15, 0}, {UI_ICON_LINE, 4, 13, 4, 40, 0}, {UI_ICON_LINE, 4, 13, 38, 13, 0}, {UI_ICON_LINE, 38, 13, 38, 21, 0},
-                                 {UI_ICON_LINE, 11, 21, 46, 21, 0}, {UI_ICON_LINE, 46, 21, 40, 40, 0}, {UI_ICON_LINE, 11, 21, 4, 40, 0}, {UI_ICON_LINE, 4, 40, 40, 40, 0}},
-        [UI_FILE_TEXT] = {{UI_ICON_LINE, 15, 21, 33, 21, 0}, {UI_ICON_LINE, 15, 27, 33, 27, 0}, {UI_ICON_LINE, 15, 33, 33, 33, 0}, {UI_ICON_LINE, 15, 39, 26, 39, 0}},
-        [UI_FILE_DOCUMENT] = {{UI_ICON_BOX, 15, 18, 33, 24, 0}, {UI_ICON_LINE, 15, 30, 33, 30, 0}, {UI_ICON_LINE, 15, 36, 30, 36, 0}},
-        [UI_FILE_IMAGE] = {{UI_ICON_BOX, 15, 16, 22, 23, 4}, {UI_ICON_LINE, 14, 38, 21, 28, 0}, {UI_ICON_LINE, 21, 28, 27, 35, 0}, {UI_ICON_LINE, 25, 32, 29, 27, 0},
-                           {UI_ICON_LINE, 29, 27, 35, 38, 0}, {UI_ICON_LINE, 14, 38, 35, 38, 0}},
-        [UI_FILE_AUDIO] = {{UI_ICON_BOX, 14, 32, 22, 40, 4}, {UI_ICON_LINE, 21, 17, 21, 36, 0}, {UI_ICON_LINE, 21, 17, 31, 21, 0}, {UI_ICON_LINE, 31, 21, 31, 25, 0}},
-        [UI_FILE_VIDEO] = {{UI_ICON_LINE, 18, 21, 18, 37, 0}, {UI_ICON_LINE, 18, 21, 31, 29, 0}, {UI_ICON_LINE, 31, 29, 18, 37, 0}},
-        [UI_FILE_ARCHIVE] = {{UI_ICON_BOX, 22, 5, 26, 9, 0}, {UI_ICON_BOX, 22, 11, 26, 15, 0}, {UI_ICON_BOX, 22, 17, 26, 21, 0}, {UI_ICON_RING, 20, 24, 28, 34, 1}},
-        [UI_FILE_PROGRAM] = {{UI_ICON_SHADE, 11, 14, 37, 43, 0}, {UI_ICON_LINE, 15, 23, 21, 28, 0}, {UI_ICON_LINE, 21, 28, 15, 33, 0}, {UI_ICON_LINE, 23, 35, 32, 35, 0}},
-        [UI_FILE_DRIVE] = {{UI_ICON_RING, 4, 15, 44, 35, 3}, {UI_ICON_BOX, 34, 23, 39, 28, 2}, {UI_ICON_LINE, 10, 25, 26, 25, 0}},
-        [UI_FILE_HOME] = {{UI_ICON_LINE, 4, 24, 24, 6, 0}, {UI_ICON_LINE, 24, 6, 44, 24, 0}, {UI_ICON_LINE, 10, 20, 10, 42, 0}, {UI_ICON_LINE, 38, 20, 38, 42, 0},
-                          {UI_ICON_LINE, 10, 42, 38, 42, 0}, {UI_ICON_RING, 20, 30, 28, 42, 0}},
-        [UI_FILE_TRASH] = {{UI_ICON_LINE, 7, 12, 41, 12, 0}, {UI_ICON_RING, 18, 6, 30, 12, 1}, {UI_ICON_LINE, 12, 12, 15, 43, 0}, {UI_ICON_LINE, 36, 12, 33, 43, 0},
-                           {UI_ICON_LINE, 15, 43, 33, 43, 0}, {UI_ICON_LINE, 20, 18, 20, 37, 0}, {UI_ICON_LINE, 28, 18, 28, 37, 0}},
-        [UI_FILE_SPECIAL] = {{UI_ICON_RING, 8, 8, 40, 40, 16}, {UI_ICON_BOX, 20, 20, 28, 28, 4}},
-};
-
-// The page every file kind is drawn on: its outline with the top right corner folded, and the fold.
-static const struct ui_icon_part ui_file_page[7] = {
-        {UI_ICON_LINE, 10, 4, 29, 4, 0}, {UI_ICON_LINE, 29, 4, 38, 13, 0}, {UI_ICON_LINE, 38, 13, 38, 44, 0}, {UI_ICON_LINE, 10, 44, 38, 44, 0},
-        {UI_ICON_LINE, 10, 4, 10, 44, 0}, {UI_ICON_LINE, 29, 4, 29, 13, 0}, {UI_ICON_LINE, 29, 13, 38, 13, 0},
-};
-
 /*
         Parts on the grid, size to a side from left, top (device pixels), in argb. A stroke along the grid is a box with square ends that
         reach half its width past its points, so two strokes that meet at a corner close it; one across the grid is the chevron's stroke.
@@ -23978,6 +23983,7 @@ struct ui_row
         unsigned int file;                 // a folder's entry's symbol, UI_FILE_* + 1 with UI_FILE_LINKED (0 none): before its label in a row, over it in a tile
         const char address_to extension;   // the label a file's symbol wears in a tile (its extension), or none
         unsigned int ink;                  // the label's own colour (straight ARGB), 0 the row's: a work tree's untracked file's
+        b32 glow;                          // lit for a moment (a drop landing on it): the selection's fill and a ring of the ink, in either theme
         const char address_to label;       // at the left
         const char address_to about;       // under the label, in the quiet ink: what the row does (a list whose words wrap)
         const char address_to value;       // at the right
@@ -25559,7 +25565,7 @@ static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int
 
         ui_list_describe(l, id, &row);
         box.rx = box.ry = ui_q8(ui, 6);
-        if (l->lit && id == l->focus)
+        if ((l->lit && id == l->focus) || row.glow)
                 ui_kit_fill(ui, &box, ui_kit_lit(ui), null);
         else if (l->hover == id)
                 ui_kit_fill(ui, &box, 0x18000000u | (strong & 0xffffffu), null);
@@ -25652,6 +25658,15 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         // before it.
         if (l->columns || l->tree)
         {
+                // A row lit for a moment (a drop landed on it): the selection's own fill, which reads on a light theme and a dark one alike
+                // (the accent may be white on the dark one), and a ring of the ink round it.
+                if (row.glow)
+                {
+                        struct ui_box glow = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
+
+                        ui_kit_fill(ui, &glow, ui_kit_lit(ui), null);
+                        ui_kit_ring(ui, &glow, ui_q8(ui, 1), 0x90000000u | (strong & 0xffffffu));
+                }
                 // A row that is one of many chosen is a well of the accent across its span (the row the keys are on is lit over it too).
                 if (row.mark)
                         ui_kit_fill(ui, &(struct ui_box){across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0},
