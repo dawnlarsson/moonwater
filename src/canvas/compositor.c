@@ -3403,6 +3403,8 @@ static b32 compositor_main()
                                 sling = 1, sling_slots = slots, sling_held = held, sling_until = until;
                                 continue;
                         }
+                        // Not one: the turn is whole, and what it tells the clients further on (compositor_wl_wake) is whole too.
+                        compositor_sling_only = 0;
 #endif
                 }
                 compositor_loop_tick(now, idle_turn);

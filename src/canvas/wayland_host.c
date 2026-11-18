@@ -6354,7 +6354,15 @@ static void compositor_wl_pass(const struct compositor_poll *wanted)
 */
 static int compositor_wl_pointer_row(void)
 {
-        int tab, row = compositor.grab >= 0 ? compositor.grab : compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+        int tab, row;
+
+        // A pointer locked to a window is over that window, and stays where it was locked: no other window can be under it, so it is not looked
+        // for (compositor_under, which walks the band's tree for a tab first: a third of a game's every report on hasty-tail, 8000 a second).
+        if (compositor_wl.hold == 1 && compositor_wl.hold_row >= 0 && compositor.grab < 0 && compositor.drag < 0 && compositor.resize < 0 &&
+            wayland_row_owner(compositor_wl.hold_row) >= 0 && compositor.showing[compositor_wl.hold_row] &&
+            !(compositor.state[compositor_wl.hold_row] & WINDOW_MINIMIZED))
+                return compositor_wl.hold_row;
+        row = compositor.grab >= 0 ? compositor.grab : compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
 
         if (row < 0 || compositor.drag >= 0 || compositor.resize >= 0 || wayland_row_owner(row) < 0 || !compositor.showing[row] ||
             (compositor.state[row] & WINDOW_MINIMIZED))
@@ -6530,12 +6538,35 @@ static void compositor_wl_drain(int row)
         new keymap), and each window the compositor knocked on, its ring read and its state and size said. Called before the
         frame is drawn, so no event waits for it; everything queued is sent.
 */
+#define COMPOSITOR_WL_KEEP_NS 16000000ull
+static positive compositor_wl_kept_at; // when compositor_wl_wake last looked at the screens, the hints and the scales
+
 static void compositor_wl_wake(void)
 {
         struct wayland_stats stats;
 
         if (!compositor_wl.started)
                 return;
+        // A slingshot turn's (a locked pointer's counts and nothing else: compositor_sling_only) is the counts drained and sent: what the clients are
+        // told of the screens, the idle clock, the table's hints, the windows' scales, the keymap and the repeat is looked at again once a frame
+        // (COMPOSITOR_WL_KEEP_NS) and not at each of the hand's 8000 reports a second, on which none of it changes.
+        {
+                positive at = clock_monotonic_nanoseconds();
+
+                if (compositor_sling_only && compositor_sling_sent && at - compositor_wl_kept_at < COMPOSITOR_WL_KEEP_NS)
+                {
+                        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                                if (rows_has(&compositor.woken, row) && wayland_row_owner(row) >= 0)
+                                {
+                                        compositor_wl_drain(row);
+                                        wayland_row_wake(row);
+                                        rows_del(&compositor.woken, row);
+                                }
+                        compositor_wl_flush_all();
+                        return;
+                }
+                compositor_wl_kept_at = at;
+        }
         wayland_stats_get(&stats);
         // The screens: a scale, a mode, a place or a turn is told to every client whole, and each window the scale of its screen.
         unsigned long digest = compositor_wl_screens_digest();
