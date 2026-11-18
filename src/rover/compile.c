@@ -849,7 +849,9 @@ static bool rover_add_comparison(struct rover_build address_to build, const stru
 {
         if (build->comparisons == ROVER_COMPARISONS_MOST)
                 return rover_refused(build, "too many comparisons for one table", null, null);
-        build->comparison[build->comparisons++] = *made;
+        build->comparison[build->comparisons] = *made;
+        build->comparison[build->comparisons].form = rover_form_of(made);
+        build->comparisons++;
         return true;
 }
 
@@ -1594,7 +1596,7 @@ static bool rover_assemble(struct rover_build address_to build)
 {
         p8 address_to table = rover_built(build);
         struct rover_head head;
-        positive at[9];
+        positive at[10];
         p16 count[ROVER_EVENTS];
         struct rover_span address_to index;
         p16 address_to order;
@@ -1619,14 +1621,14 @@ static bool rover_assemble(struct rover_build address_to build)
         memory_zero(table, build->size);
         memory_copy(table, &head, sizeof(head));
         memory_copy(table + at[0], build->rule, build->rules * sizeof(struct rover_rule));
-        memory_copy(table + at[3], build->comparison, build->comparisons * sizeof(struct rover_comparison));
-        memory_copy(table + at[4], build->call, build->calls * sizeof(struct rover_call));
-        memory_copy(table + at[5], build->action, build->actions * sizeof(struct rover_action));
-        memory_copy(table + at[6], build->argument, build->arguments * sizeof(struct rover_operand));
-        memory_copy(table + at[7], build->note, build->notes * sizeof(struct rover_note));
-        memory_copy(table + at[8], rover_pool(build), build->pool);
+        memory_copy(table + at[4], build->comparison, build->comparisons * sizeof(struct rover_comparison));
+        memory_copy(table + at[5], build->call, build->calls * sizeof(struct rover_call));
+        memory_copy(table + at[6], build->action, build->actions * sizeof(struct rover_action));
+        memory_copy(table + at[7], build->argument, build->arguments * sizeof(struct rover_operand));
+        memory_copy(table + at[8], build->note, build->notes * sizeof(struct rover_note));
+        memory_copy(table + at[9], rover_pool(build), build->pool);
 
-        index = (struct rover_span address_to)(table + at[2]);
+        index = (struct rover_span address_to)(table + at[3]);
         order = (p16 address_to)(table + at[1]);
         memory_zero(count, sizeof(count));
         for (positive k = 0; k < build->rules; k++)
@@ -1644,6 +1646,9 @@ static bool rover_assemble(struct rover_build address_to build)
 
                 order[span->first + span->count++] = (p16)k;
         }
+        for (positive k = 0; k < build->rules; k++)
+                ((p32 address_to)(table + at[2]))[k] = rover_key_of(&build->rule[order[k]], build->comparison,
+                                                                    rover_pool(build));
         if (!rover_check(table, build->size, &view, &refusal))
         {
                 rover_refused(build, "the compiler made a table its own check refuses: ", null, refusal.why);

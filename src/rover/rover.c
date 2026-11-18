@@ -15,7 +15,7 @@
 #define ROVER_INCLUDED
 
 #define ROVER_MAGIC 0x52564f52u // "ROVR"
-#define ROVER_VERSION 1u
+#define ROVER_VERSION 2u
 #define ROVER_TABLE_MOST 65536u
 #define ROVER_EVENTS 128u
 #define ROVER_CUE 96u
@@ -83,6 +83,14 @@
 
 #define ROVER_JOIN_OR 1u
 #define ROVER_JOIN_LINE 2u
+
+//      A comparison's form: how the evaluator asks it. NUMBER is two number sides (a constant, a state or a
+//      field) under == != < <= > or >=, which is two loads and one compare; anything else is GENERAL.
+#define ROVER_FORM_GENERAL 0u
+#define ROVER_FORM_NUMBER 1u
+
+//      A rule's key: the number its on line's first filter asks field 0 to be, or ANY.
+#define ROVER_KEY_ANY 0xffffffffu
 
 #define ROVER_NONE 0u
 #define ROVER_CONST_NUMBER 1u
@@ -163,7 +171,7 @@ struct rover_comparison
         p8 op;
         p8 type;
         p8 join;
-        p8 pad;
+        p8 form; // ROVER_FORM_*, which the check holds to what the comparison is
         struct rover_operand a, b, c;
 };
 
@@ -210,7 +218,10 @@ struct rover_value
         p32 pad;
 };
 
-typedef b64(address_to rover_function)(const struct rover_value address_to value);
+//      A routine as rover calls it: its arguments in registers, a word as its address, a buffer as its address
+//      and its length, a number as itself; the six are what every machine's convention passes in registers.
+typedef b64(address_to rover_function)(b64, b64, b64, b64, b64, b64);
+#define ROVER_REGISTERS 6u
 
 struct rover_type_row
 {
@@ -278,6 +289,7 @@ struct rover_table
         const struct rover_head address_to head;
         const struct rover_rule address_to rule;
         const p16 address_to order;
+        const p32 address_to key; // one a slot of order
         const struct rover_span address_to index;
         const struct rover_comparison address_to comparison;
         const struct rover_call address_to call;
@@ -337,8 +349,9 @@ static inline positive rover_align8(positive value)
 
 /*
         Where each section starts, from the head's counts, and the size the
-        table must be: the head, then rules, order, index, comparisons, calls,
-        actions, arguments, notes and the pool, each at a multiple of eight.
+        table must be: the head, then rules, order, keys, index, comparisons,
+        calls, actions, arguments, notes and the pool, each at a multiple of
+        eight.
 */
 static positive rover_layout(const struct rover_head address_to head, positive address_to at)
 {
@@ -346,13 +359,14 @@ static positive rover_layout(const struct rover_head address_to head, positive a
 
         at[0] = reach, reach = rover_align8(reach + (positive)head->rules * sizeof(struct rover_rule));
         at[1] = reach, reach = rover_align8(reach + (positive)head->rules * sizeof(p16));
-        at[2] = reach, reach = rover_align8(reach + ROVER_EVENTS * sizeof(struct rover_span));
-        at[3] = reach, reach = rover_align8(reach + (positive)head->comparisons * sizeof(struct rover_comparison));
-        at[4] = reach, reach = rover_align8(reach + (positive)head->calls * sizeof(struct rover_call));
-        at[5] = reach, reach = rover_align8(reach + (positive)head->actions * sizeof(struct rover_action));
-        at[6] = reach, reach = rover_align8(reach + (positive)head->arguments * sizeof(struct rover_operand));
-        at[7] = reach, reach = rover_align8(reach + (positive)head->notes * sizeof(struct rover_note));
-        at[8] = reach, reach = rover_align8(reach + head->pool);
+        at[2] = reach, reach = rover_align8(reach + (positive)head->rules * sizeof(p32));
+        at[3] = reach, reach = rover_align8(reach + ROVER_EVENTS * sizeof(struct rover_span));
+        at[4] = reach, reach = rover_align8(reach + (positive)head->comparisons * sizeof(struct rover_comparison));
+        at[5] = reach, reach = rover_align8(reach + (positive)head->calls * sizeof(struct rover_call));
+        at[6] = reach, reach = rover_align8(reach + (positive)head->actions * sizeof(struct rover_action));
+        at[7] = reach, reach = rover_align8(reach + (positive)head->arguments * sizeof(struct rover_operand));
+        at[8] = reach, reach = rover_align8(reach + (positive)head->notes * sizeof(struct rover_note));
+        at[9] = reach, reach = rover_align8(reach + head->pool);
         return reach;
 }
 
@@ -375,6 +389,35 @@ static const struct rover_primitive_row address_to rover_primitive_find(positive
 static inline bool rover_kind_is_word(p8 kind)
 {
         return kind == ROVER_T_WORD || kind == ROVER_T_TEXT;
+}
+
+static inline bool rover_number_side(p8 source)
+{
+        return source == ROVER_CONST_NUMBER || source == ROVER_STATE_NUMBER || source == ROVER_FIELD;
+}
+
+//      The form a comparison's shape gives it; the compiler writes it and the check holds the table to it.
+static p8 rover_form_of(const struct rover_comparison address_to comparison)
+{
+        if (comparison->op >= ROVER_EQ && comparison->op <= ROVER_GE && !rover_kind_is_word(comparison->type) &&
+            rover_number_side(comparison->a.source) && rover_number_side(comparison->b.source) &&
+            !comparison->c.source && !comparison->c.page && !comparison->c.index)
+                return ROVER_FORM_NUMBER;
+        return ROVER_FORM_GENERAL;
+}
+
+//      A rule's key: the constant its on line's first filter asks of field 0, when that is a number below ANY.
+static p32 rover_key_of(const struct rover_rule address_to rule, const struct rover_comparison address_to comparisons,
+                        const p8 address_to pool)
+{
+        const struct rover_comparison address_to first = comparisons + rule->comparison;
+        b64 value;
+
+        if ((rule->flags & ROVER_RULE_WHEN) || !rule->trigger || first->op != ROVER_EQ ||
+            first->a.source != ROVER_FIELD || first->a.index || first->b.source != ROVER_CONST_NUMBER)
+                return ROVER_KEY_ANY;
+        value = memory_load_unaligned(b64, pool + first->b.index);
+        return value >= 0 && value < (b64)ROVER_KEY_ANY ? (p32)value : ROVER_KEY_ANY;
 }
 
 // ---- the evaluator ---------------------------------------------------------
@@ -420,22 +463,31 @@ static b64 rover_called(const struct rover_table address_to table, p16 which, co
 {
         const struct rover_call address_to asked = table->call + which;
         const struct rover_function_row address_to row = &rover_functions[asked->function];
-        struct rover_value value[ROVER_ARGUMENTS];
+        b64 in[ROVER_REGISTERS] = {0, 0, 0, 0, 0, 0};
+        positive used = 0;
 
         if (!row->routine)
                 return 0;
+        //      Straight into the registers the routine's convention reads: no value records, no copies.
         for (positive at = 0; at < asked->count; at++)
         {
-                rover_value_of(table, asked->argument[at], event, pages, &value[at]);
+                struct rover_value value;
+
+                rover_value_of(table, asked->argument[at], event, pages, &value);
                 if (row->signature[at] == 'i')
                 {
-                        if (value[at].number < row->low[at])
-                                value[at].number = row->low[at];
-                        if (value[at].number > row->high[at])
-                                value[at].number = row->high[at];
+                        if (value.number < row->low[at])
+                                value.number = row->low[at];
+                        if (value.number > row->high[at])
+                                value.number = row->high[at];
+                        in[used++] = value.number;
+                        continue;
                 }
+                in[used++] = (b64)(positive)value.text;
+                if (row->signature[at] == 'b')
+                        in[used++] = value.length;
         }
-        return row->routine(value);
+        return row->routine(in[0], in[1], in[2], in[3], in[4], in[5]);
 }
 
 static fn rover_value_of(const struct rover_table address_to table, struct rover_operand operand,
@@ -498,7 +550,7 @@ static fn rover_value_of(const struct rover_table address_to table, struct rover
         One star is remembered and returned to, so the walk is at most the
         product of the two lengths, which a word bounds at 62 by 255.
 */
-static bool rover_glob(const p8 address_to text, p32 length, const p8 address_to pattern, p32 size)
+static bool rover_glob_loop(const p8 address_to text, p32 length, const p8 address_to pattern, p32 size)
 {
         p32 at = 0, in = 0, star = 0, mark = 0;
         bool starred = false;
@@ -524,6 +576,39 @@ static bool rover_glob(const p8 address_to text, p32 length, const p8 address_to
         while (in < size && pattern[in] == '*')
                 in++;
         return in == size;
+}
+
+/*
+        The pattern's literal head and tail are compared whole, by the
+        library's memory_compare, and only what lies between its first and
+        last star is walked: steam_app_* is one compare of ten bytes.
+*/
+static bool rover_glob(const p8 address_to text, p32 length, const p8 address_to pattern, p32 size)
+{
+        p32 head = 0, tail = 0, last;
+
+        while (head < size && pattern[head] != '*' && pattern[head] != '?')
+                head++;
+        if (head == size)
+                return length == size && !memory_compare(text, pattern, size);
+        if (head > length || (head && memory_compare(text, pattern, head)))
+                return false;
+        last = size;
+        while (last > head && pattern[last - 1] != '*' && pattern[last - 1] != '?')
+                last--, tail++;
+        if (last > head && pattern[last - 1] == '*')
+        {
+                if (head + tail > length || (tail && memory_compare(text + length - tail, pattern + last, tail)))
+                        return false;
+                //      Between the head and the tail, a pattern that is only stars holds anything.
+                p32 star = head;
+                while (star < last && pattern[star] == '*')
+                        star++;
+                if (star == last)
+                        return true;
+                return rover_glob_loop(text + head, length - head - tail, pattern + head, last - head);
+        }
+        return rover_glob_loop(text + head, length - head, pattern + head, size - head);
 }
 
 //      The rare numbers, out of the comparison's way: a call, the clock, the weekday.
@@ -596,11 +681,33 @@ static inline const p8 address_to rover_word_at(const struct rover_table address
         return rover_nothing;
 }
 
+//      The number form's side: a constant, a state on a page that is never null here, or a field.
+static inline INLINE b64 rover_side(const struct rover_table address_to table, struct rover_operand operand,
+                                    const struct rover_event address_to event, const p8 address_to const address_to pages)
+{
+        if (operand.source == ROVER_STATE_NUMBER)
+                return memory_load_unaligned(b32, pages[operand.page] + operand.index);
+        if (operand.source == ROVER_CONST_NUMBER)
+                return memory_load_unaligned(b64, table->pool + operand.index);
+        return operand.index < event->count ? event->field[operand.index].number : 0;
+}
+
+//      Which of < == > a comparison holds for: bit 0 below, bit 1 equal, bit 2 above.
+static const p8 rover_holds_for[ROVER_OPS] = {
+    [ROVER_EQ] = 2, [ROVER_NE] = 5, [ROVER_LT] = 1, [ROVER_LE] = 3, [ROVER_GT] = 4, [ROVER_GE] = 6,
+};
+
 static inline INLINE bool rover_compare(const struct rover_table address_to table, const struct rover_comparison address_to comparison,
                           const struct rover_event address_to event, const p8 address_to const address_to pages)
 {
         b64 a, b, c;
 
+        if (comparison->form == ROVER_FORM_NUMBER)
+        {
+                a = rover_side(table, comparison->a, event, pages);
+                b = rover_side(table, comparison->b, event, pages);
+                return (rover_holds_for[comparison->op] >> ((a > b) - (a < b) + 1)) & 1;
+        }
         if (rover_kind_is_word(comparison->type))
         {
                 p32 one, two;
@@ -701,43 +808,67 @@ static fn rover_fired(const struct rover_rule address_to rule, struct rover_run 
                 run->done = 1;
 }
 
+//      The page the evaluator reads where a caller has none: every state on it is 0, the empty word.
+static const p8 rover_zero_page[ROVER_PAGE_BYTES];
+
+/*
+        The next slot from at, below count, whose key is want or ANY: the
+        keys of an event's run are a row of words, so a chord among many is
+        a scan of them and not a walk of each rule.
+*/
+/*
+        Sixteen keys and more are the library's vector scan; fewer, the two
+        compares a key here, which measured faster below sixteen than the
+        call (eight chord rules: 5.0 ns here against 5.9 through the scan on
+        x86_64, 8.0 against 9.1 on arm64). riscv64's library body is the same
+        word loop as this one, and nothing here could time it on hardware, so
+        that machine keeps the loop.
+*/
+#if RISCV64
+#define ROVER_KEY_SCAN ((positive)-1)
+#else
+#define ROVER_KEY_SCAN 16u
+#endif
+
+static inline INLINE positive rover_key_next(const p32 address_to keys, positive at, positive count, p32 want)
+{
+        if (count - at >= ROVER_KEY_SCAN)
+                return at + memory_first_of_either_u32(keys + at, count - at, want, ROVER_KEY_ANY);
+        while (at < count && keys[at] != want && keys[at] != ROVER_KEY_ANY)
+                at++;
+        return at;
+}
+
 /*
         The rules an event fires, among those placed where this runs: each
         hit is a rule and the run of actions it chose, in the table's order.
         Answers how many hits; past room, the rest are not looked at.
 */
-static positive rover_fire(const struct rover_table address_to table, struct rover_run address_to runs,
-                           const p8 address_to const address_to pages, const struct rover_event address_to event,
-                           p8 place, struct rover_hit address_to hits, positive room)
+static positive rover_fire_rules(const struct rover_table address_to table, struct rover_run address_to runs,
+                                 const p8 address_to const address_to given, const struct rover_event address_to event,
+                                 p8 place, struct rover_hit address_to hits, positive room)
 {
-        positive made = 0;
-        struct rover_span span;
+        positive made = 0, count, at;
+        struct rover_span span = table->index[event->id];
+        const p16 address_to order = table->order + span.first;
+        const p32 address_to keys = table->key + span.first;
+        const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page,
+                                                  given[1] ? given[1] : rover_zero_page};
+        p32 want = ROVER_KEY_ANY;
 
-        if (!event->id || event->id >= ROVER_EVENTS)
-                return 0;
-        span = table->index[event->id];
-        for (positive at = span.first; at < (positive)span.first + span.count && made < room; at++)
+        //      The key the event's field 0 is, when it is one a rule could have.
+        if (event->count && event->field[0].number >= 0 && event->field[0].number < (b64)ROVER_KEY_ANY)
+                want = (p32)event->field[0].number;
+        count = span.count;
+        for (at = rover_key_next(keys, 0, count, want); at < count && made < room;
+             at = rover_key_next(keys, at + 1, count, want))
         {
-                p16 number = table->order[at];
+                p16 number = order[at];
                 const struct rover_rule address_to rule = table->rule + number;
                 b32 held;
 
                 if (rule->place != place || (rule->flags & ROVER_RULE_OFF))
                         continue;
-                //      A rule keyed on a number (a chord, every on line's filter of a number) is passed over at its
-                //      key: thirty two chord rules are thirty one loads and compares, not thirty one walks.
-                if (rule->trigger)
-                {
-                        const struct rover_comparison address_to key = table->comparison + rule->comparison;
-                        b64 value;
-
-                        if (key->op == ROVER_EQ && key->b.source == ROVER_CONST_NUMBER)
-                        {
-                                value = memory_load_unaligned(b64, table->pool + key->b.index);
-                                if (key->a.index >= event->count || event->field[key->a.index].number != value)
-                                        continue;
-                        }
-                }
                 held = rover_holds(table, rule, event, pages);
                 if (held < 0 || (!held && !rule->otherwise) || !rover_may(rule, runs + number, event->when))
                         continue;
@@ -752,6 +883,17 @@ static positive rover_fire(const struct rover_table address_to table, struct rov
         return made;
 }
 
+//      An event with no rules is one load and one branch, here, before any call.
+static inline INLINE positive rover_fire(const struct rover_table address_to table, struct rover_run address_to runs,
+                                         const p8 address_to const address_to pages,
+                                         const struct rover_event address_to event, p8 place,
+                                         struct rover_hit address_to hits, positive room)
+{
+        if ((p32)event->id - 1 >= ROVER_EVENTS - 1 || !table->index[event->id].count)
+                return 0;
+        return rover_fire_rules(table, runs, pages, event, place, hits, room);
+}
+
 /*
         The when rules some states changed under: changed has a bit for each
         state that did, and a rule that reads none of them is not looked at.
@@ -760,12 +902,14 @@ static positive rover_fire(const struct rover_table address_to table, struct rov
         changing at once, so a when rule that already holds fires then.
 */
 static positive rover_edges(const struct rover_table address_to table, struct rover_run address_to runs,
-                            const p8 address_to const address_to pages, p64 changed,
+                            const p8 address_to const address_to given, p64 changed,
                             const struct rover_event address_to event, p8 place, struct rover_hit address_to hits,
                             positive room)
 {
         positive made = 0;
         struct rover_span span = table->index[0];
+        const p8 address_to pages[ROVER_PAGES] = {given[0] ? given[0] : rover_zero_page,
+                                                  given[1] ? given[1] : rover_zero_page};
 
         for (positive at = span.first; at < (positive)span.first + span.count && made < room; at++)
         {
@@ -940,7 +1084,7 @@ static const char address_to rover_comparison_check(const struct rover_table add
         const char address_to why;
         b32 want;
 
-        if (comparison->op >= ROVER_OPS || comparison->type >= ROVER_T_KINDS || comparison->pad ||
+        if (comparison->op >= ROVER_OPS || comparison->type >= ROVER_T_KINDS ||
             (comparison->join & ~(ROVER_JOIN_OR | ROVER_JOIN_LINE)))
                 return "a comparison of no kind";
         want = rover_kind_is_word(comparison->type) ? 2 : 1;
@@ -948,6 +1092,8 @@ static const char address_to rover_comparison_check(const struct rover_table add
                                                        comparison->op != ROVER_NOMATCH
                                                  : comparison->op == ROVER_MATCH || comparison->op == ROVER_NOMATCH)
                 return "an operator its type does not have";
+        if (comparison->form != rover_form_of(comparison))
+                return "a comparison whose form is not its shape's";
         if ((why = rover_operand_check(table, comparison->a, want, kernel, false)))
                 return why;
         if (comparison->op == ROVER_TRUE)
@@ -1142,7 +1288,7 @@ static bool rover_check(const p8 address_to bytes, positive size, struct rover_t
                         struct rover_refusal address_to why)
 {
         const struct rover_head address_to head = (const struct rover_head address_to)bytes;
-        positive at[9];
+        positive at[10];
         positive total = 0;
         p8 seen[ROVER_TABLE_MOST / sizeof(struct rover_rule) / 8 + 1];
 
@@ -1159,13 +1305,14 @@ static bool rover_check(const p8 address_to bytes, positive size, struct rover_t
         view->head = head;
         view->rule = (const struct rover_rule address_to)(bytes + at[0]);
         view->order = (const p16 address_to)(bytes + at[1]);
-        view->index = (const struct rover_span address_to)(bytes + at[2]);
-        view->comparison = (const struct rover_comparison address_to)(bytes + at[3]);
-        view->call = (const struct rover_call address_to)(bytes + at[4]);
-        view->action = (const struct rover_action address_to)(bytes + at[5]);
-        view->argument = (const struct rover_operand address_to)(bytes + at[6]);
-        view->note = (const struct rover_note address_to)(bytes + at[7]);
-        view->pool = bytes + at[8];
+        view->key = (const p32 address_to)(bytes + at[2]);
+        view->index = (const struct rover_span address_to)(bytes + at[3]);
+        view->comparison = (const struct rover_comparison address_to)(bytes + at[4]);
+        view->call = (const struct rover_call address_to)(bytes + at[5]);
+        view->action = (const struct rover_action address_to)(bytes + at[6]);
+        view->argument = (const struct rover_operand address_to)(bytes + at[7]);
+        view->note = (const struct rover_note address_to)(bytes + at[8]);
+        view->pool = bytes + at[9];
 
         //      The pool opens with the empty string, which is what an about of 0 is.
         if (head->pool < 4 || view->pool[0] || view->pool[1] || view->pool[2] || view->pool[3])
@@ -1196,6 +1343,9 @@ static bool rover_check(const p8 address_to bytes, positive size, struct rover_t
         for (positive k = head->rules; k < rover_align8(head->rules * 2) / 2; k++)
                 if (view->order[k])
                         return rover_refuse(why, "padding that is not zero", ROVER_NO_RULE, 0);
+        for (positive k = head->rules; k < rover_align8(head->rules * 4) / 4; k++)
+                if (view->key[k])
+                        return rover_refuse(why, "padding that is not zero", ROVER_NO_RULE, 0);
 
         for (positive k = 0; k < head->calls; k++)
         {
@@ -1211,6 +1361,10 @@ static bool rover_check(const p8 address_to bytes, positive size, struct rover_t
                 if (reason)
                         return rover_refuse(why, reason, (p32)k, 0);
         }
+        //      After the rules, whose comparison runs are now known to be inside the table.
+        for (positive k = 0; k < head->rules; k++)
+                if (view->key[k] != rover_key_of(view->rule + view->order[k], view->comparison, view->pool))
+                        return rover_refuse(why, "a key that is not its rule's", (p32)view->order[k], 0);
         for (positive k = 0; k < head->notes; k++)
                 if (view->note[k].rule >= head->rules || !rover_string_ok(view, view->note[k].text, ROVER_TEXT_MOST))
                         return rover_refuse(why, "a note outside the table", ROVER_NO_RULE, (p32)k);

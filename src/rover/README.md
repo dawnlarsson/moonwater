@@ -365,9 +365,10 @@ checker compares the size it computes with the size the head says.
 
 | Section | Entry | Bytes |
 |---|---|---|
-| head | magic `ROVR`, version 1, flags, size, schema hash, the six counts, the pool's size | 32 |
+| head | magic `ROVR`, version 2, flags, size, schema hash, the six counts, the pool's size | 32 |
 | rules | one per rule | 40 each |
 | order | the rules' numbers sorted by event, so an event's rules are a run | 2 each |
+| keys | for each slot of order, the number its rule's first filter asks field 0 to be, or `0xffffffff` for any | 4 each |
 | index | for each event id below 128: the first entry of its run in order, and how many | 4 × 128 |
 | comparisons | one per comparison, a rule's in one run | 16 each |
 | calls | a function call: its id, its argument count, four operands | 20 each |
@@ -383,8 +384,13 @@ checker compares the size it computes with the size the head says.
 offsets, and the states it reads as a 64-bit mask.
 
 **A comparison** is its operator, its type, how it joins the next (and,
-or, or the end of its line) and three operands; the third is `between`'s
-upper bound.
+or, or the end of its line), its form and three operands; the third is
+`between`'s upper bound. The form says how the evaluator asks it: two
+number sides (a constant, a state or a field) under `== != < <= > >=` are
+the number form, two loads and one compare; anything else is the general
+one. The check holds every form, and every key, to what its comparison
+and its rule are, so neither can be told apart from the table's own
+shape.
 
 **An operand** is four bytes: where the value comes from (a constant, a
 state, a field, a call, the clock, the weekday), a byte that is the

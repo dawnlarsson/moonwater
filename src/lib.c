@@ -64,7 +64,7 @@
         A .set is a second label on the same address, so there is no wrapper
         and no jump, and which names get one depends on who is linking.
 
-        517 routines (490 public, 27 local), 505 of them on all three and 12 local to one.
+        518 routines (491 public, 27 local), 506 of them on all three and 12 local to one.
         Raw C purity: 0 function bodies, 0 object definitions, 0 body macros, and 0 object macros (all forbidden).
 
           routine                        scope   x86_64  arm64   riscv64
@@ -288,6 +288,7 @@
           memory_first_differs_u32       public  yes     yes     yes
           memory_first_of                public  yes     yes     yes
           memory_first_of_ascii_case     public  yes     yes     yes
+          memory_first_of_either_u32     public  yes     yes     yes
           memory_fold_lines__room_64     public  yes     yes     yes
           memory_free                    public  yes     yes     yes
           memory_frob                    public  yes     yes     yes
@@ -16166,6 +16167,60 @@ __asm__(
     ASM_END(memory_first_differs_u32)
 
     //
+    //       memory_first_of_either_u32 -- rdi words, rsi count, edx first,
+    //       ecx second; answers in rax the index of the first word that is
+    //       first or second, or count when none is. Only the count's words
+    //       are read. rover's chord rules are its caller: the keys of an
+    //       event's rules, a row of words, and the key pressed and the key
+    //       that stands for any. AVX2: sixteen words a turn in two loads, each
+    //       compared against both values and or-ed, the turn's two masks
+    //       joined by vmovmskps so a turn with a match is answered by one
+    //       bsf; eight a step after that, and the count's last eight as one
+    //       overlapped compare, whose lanes before the index are known to
+    //       match neither. SSE2 is the same shape at four. Under eight words
+    //       (four for SSE2) a word at a time, which is all a kernel build
+    //       keeps (ASM_USERSPACE_WIDE).
+    //
+    ASM_FUNC(memory_first_of_either_u32)
+    "xor %eax, %eax\n"
+    ASM_USERSPACE_WIDE(
+        ASM_NARROW("cpu_has_avx2", "" ASM_LABEL(first_either_x64_sse) "")
+        "cmp $8, %rsi\n   jb " ASM_LABEL(first_either_x64_scalar) "\n"
+        "vmovd %edx, %xmm0\n   vpbroadcastd %xmm0, %ymm0\n   vmovd %ecx, %xmm1\n   vpbroadcastd %xmm1, %ymm1\n"
+        "" ASM_LABEL(first_either_x64_avx16) ":\n   lea 16(%rax), %r8\n   cmp %rsi, %r8\n   ja " ASM_LABEL(first_either_x64_avx8) "\n"
+        "vmovdqu (%rdi,%rax,4), %ymm2\n   vmovdqu 32(%rdi,%rax,4), %ymm3\n"
+        "vpcmpeqd %ymm0, %ymm2, %ymm4\n   vpcmpeqd %ymm1, %ymm2, %ymm2\n   vpor %ymm4, %ymm2, %ymm2\n"
+        "vpcmpeqd %ymm0, %ymm3, %ymm5\n   vpcmpeqd %ymm1, %ymm3, %ymm3\n   vpor %ymm5, %ymm3, %ymm3\n"
+        "vmovmskps %ymm2, %r8d\n   vmovmskps %ymm3, %r9d\n   shl $8, %r9d\n   or %r9d, %r8d\n   jnz " ASM_LABEL(first_either_x64_avx_hit) "\n"
+        "add $16, %rax\n   jmp " ASM_LABEL(first_either_x64_avx16) "\n"
+        "" ASM_LABEL(first_either_x64_avx8) ":\n   lea 8(%rax), %r8\n   cmp %rsi, %r8\n   ja " ASM_LABEL(first_either_x64_avx_tail) "\n"
+        "vmovdqu (%rdi,%rax,4), %ymm2\n   vpcmpeqd %ymm0, %ymm2, %ymm4\n   vpcmpeqd %ymm1, %ymm2, %ymm2\n   vpor %ymm4, %ymm2, %ymm2\n"
+        "vmovmskps %ymm2, %r8d\n   test %r8d, %r8d\n   jnz " ASM_LABEL(first_either_x64_avx_hit) "\n"
+        "add $8, %rax\n   jmp " ASM_LABEL(first_either_x64_avx8) "\n"
+        "" ASM_LABEL(first_either_x64_avx_tail) ":\n   cmp %rsi, %rax\n   jae " ASM_LABEL(first_either_x64_avx_none) "\n"
+        "lea -8(%rsi), %rax\n   vmovdqu (%rdi,%rax,4), %ymm2\n   vpcmpeqd %ymm0, %ymm2, %ymm4\n   vpcmpeqd %ymm1, %ymm2, %ymm2\n"
+        "vpor %ymm4, %ymm2, %ymm2\n   vmovmskps %ymm2, %r8d\n   test %r8d, %r8d\n   jnz " ASM_LABEL(first_either_x64_avx_hit) "\n"
+        "" ASM_LABEL(first_either_x64_avx_none) ":\n   mov %rsi, %rax\n   vzeroupper\n" ASM_RET
+        "" ASM_LABEL(first_either_x64_avx_hit) ":\n   bsf %r8d, %r8d\n   add %r8, %rax\n   vzeroupper\n" ASM_RET
+        "" ASM_LABEL(first_either_x64_sse) ":\n   cmp $4, %rsi\n   jb " ASM_LABEL(first_either_x64_scalar) "\n"
+        "movd %edx, %xmm0\n   pshufd $0, %xmm0, %xmm0\n   movd %ecx, %xmm1\n   pshufd $0, %xmm1, %xmm1\n"
+        "" ASM_LABEL(first_either_x64_sse4) ":\n   lea 4(%rax), %r8\n   cmp %rsi, %r8\n   ja " ASM_LABEL(first_either_x64_sse_tail) "\n"
+        "movdqu (%rdi,%rax,4), %xmm2\n   movdqa %xmm2, %xmm3\n   pcmpeqd %xmm0, %xmm2\n   pcmpeqd %xmm1, %xmm3\n   por %xmm3, %xmm2\n"
+        "movmskps %xmm2, %r8d\n   test %r8d, %r8d\n   jnz " ASM_LABEL(first_either_x64_sse_hit) "\n"
+        "add $4, %rax\n   jmp " ASM_LABEL(first_either_x64_sse4) "\n"
+        "" ASM_LABEL(first_either_x64_sse_tail) ":\n   cmp %rsi, %rax\n   jae " ASM_LABEL(first_either_x64_sse_none) "\n"
+        "lea -4(%rsi), %rax\n   movdqu (%rdi,%rax,4), %xmm2\n   movdqa %xmm2, %xmm3\n   pcmpeqd %xmm0, %xmm2\n   pcmpeqd %xmm1, %xmm3\n"
+        "por %xmm3, %xmm2\n   movmskps %xmm2, %r8d\n   test %r8d, %r8d\n   jnz " ASM_LABEL(first_either_x64_sse_hit) "\n"
+        "" ASM_LABEL(first_either_x64_sse_none) ":\n   mov %rsi, %rax\n" ASM_RET
+        "" ASM_LABEL(first_either_x64_sse_hit) ":\n   bsf %r8d, %r8d\n   add %r8, %rax\n" ASM_RET
+    )
+    "" ASM_LABEL(first_either_x64_scalar) ":\n   cmp %rsi, %rax\n   jae " ASM_LABEL(first_either_x64_done) "\n"
+    "mov (%rdi,%rax,4), %r8d\n   cmp %edx, %r8d\n   je " ASM_LABEL(first_either_x64_done) "\n"
+    "cmp %ecx, %r8d\n   je " ASM_LABEL(first_either_x64_done) "\n   inc %rax\n   jmp " ASM_LABEL(first_either_x64_scalar) "\n"
+    "" ASM_LABEL(first_either_x64_done) ":\n" ASM_RET
+    ASM_END(memory_first_of_either_u32)
+
+    //
     //       memory_copy_changed_u32 -- rdi into, rsi mirror, rdx from, rcx
     //       count in words; answers in rax how many 64-byte chunks were
     //       stored. A chunk of from is compared with mirror's and, where any
@@ -28040,6 +28095,37 @@ __asm__(
     "" ASM_LABEL(first_differs_a64_done) ":\n   mov x0, x3\n" ASM_RET
     ASM_END(memory_first_differs_u32)
 
+    //       memory_first_of_either_u32: x0 words, x1 count, w2 first, w3
+    //       second; answers in x0 the index of the first word that is first
+    //       or second, or count. NEON: sixteen words a turn in four q loads,
+    //       cmeq against each value and orr-ed down to one vector, umaxv to a
+    //       word that is zero when no lane matched; a turn with a match is
+    //       taken again four words at a time, and a word at a time for what is
+    //       left. Only the count's words are read. Kernel builds keep the word
+    //       at a time body alone. The x86_64 block carries the contract.
+    ASM_FUNC(memory_first_of_either_u32)
+    "mov x4, #0\n"
+#ifndef KERNEL_MODE
+        "cmp x1, #4\n   b.lo " ASM_LABEL(first_either_a64_scalar) "\n   dup v30.4s, w2\n   dup v31.4s, w3\n"
+        "" ASM_LABEL(first_either_a64_16) ":\n   add x5, x4, #16\n   cmp x5, x1\n   b.hi " ASM_LABEL(first_either_a64_4) "\n"
+        "add x6, x0, x4, lsl #2\n   ld1 {v0.4s, v1.4s, v2.4s, v3.4s}, [x6]\n"
+        "cmeq v4.4s, v0.4s, v30.4s\n   cmeq v0.4s, v0.4s, v31.4s\n   cmeq v5.4s, v1.4s, v30.4s\n   cmeq v1.4s, v1.4s, v31.4s\n"
+        "cmeq v6.4s, v2.4s, v30.4s\n   cmeq v2.4s, v2.4s, v31.4s\n   cmeq v7.4s, v3.4s, v30.4s\n   cmeq v3.4s, v3.4s, v31.4s\n"
+        "orr v0.16b, v0.16b, v4.16b\n   orr v1.16b, v1.16b, v5.16b\n   orr v2.16b, v2.16b, v6.16b\n   orr v3.16b, v3.16b, v7.16b\n"
+        "orr v0.16b, v0.16b, v1.16b\n   orr v2.16b, v2.16b, v3.16b\n   orr v0.16b, v0.16b, v2.16b\n"
+        "umaxv s0, v0.4s\n   fmov w5, s0\n   cbnz w5, " ASM_LABEL(first_either_a64_4) "\n"
+        "add x4, x4, #16\n   b " ASM_LABEL(first_either_a64_16) "\n"
+        "" ASM_LABEL(first_either_a64_4) ":\n   add x5, x4, #4\n   cmp x5, x1\n   b.hi " ASM_LABEL(first_either_a64_scalar) "\n"
+        "add x6, x0, x4, lsl #2\n   ldr q0, [x6]\n   cmeq v4.4s, v0.4s, v30.4s\n   cmeq v0.4s, v0.4s, v31.4s\n"
+        "orr v0.16b, v0.16b, v4.16b\n   umaxv s0, v0.4s\n   fmov w5, s0\n"
+        "cbnz w5, " ASM_LABEL(first_either_a64_scalar) "\n   add x4, x4, #4\n   b " ASM_LABEL(first_either_a64_4) "\n"
+#endif
+    "" ASM_LABEL(first_either_a64_scalar) ":\n   cmp x4, x1\n   b.hs " ASM_LABEL(first_either_a64_done) "\n"
+    "ldr w5, [x0, x4, lsl #2]\n   cmp w5, w2\n   b.eq " ASM_LABEL(first_either_a64_done) "\n"
+    "cmp w5, w3\n   b.eq " ASM_LABEL(first_either_a64_done) "\n   add x4, x4, #1\n   b " ASM_LABEL(first_either_a64_scalar) "\n"
+    "" ASM_LABEL(first_either_a64_done) ":\n   mov x0, x4\n" ASM_RET
+    ASM_END(memory_first_of_either_u32)
+
     //       memory_copy_changed_u32: a chunk is two ldp of q from each side,
     //       four eor and three orr folded by umaxp to one doubleword, and on
     //       a difference two stp pairs to each of mirror and into; under 16
@@ -38649,6 +38735,19 @@ __asm__(
     "addi t1, t1, 4\n   addi a0, a0, 1\n   addi t2, t2, -1\n   j " ASM_LABEL(first_differs_rv_word) "\n"
     "" ASM_LABEL(first_differs_rv_done) ":\n" ASM_RET
     ASM_END(memory_first_differs_u32)
+
+    //       memory_first_of_either_u32: a0 words, a1 count, a2 first, a3
+    //       second; answers in a0 the index of the first word that is first
+    //       or second, or count. A word at a time, lwu against the two values
+    //       zero extended; the same body in a kernel build. The x86_64 block
+    //       carries the contract.
+    ASM_FUNC(memory_first_of_either_u32)
+    "slli t5, a2, 32\n   srli t5, t5, 32\n   slli t6, a3, 32\n   srli t6, t6, 32\n   mv t1, a0\n   li a0, 0\n"
+    "" ASM_LABEL(first_either_rv_word) ":\n   bgeu a0, a1, " ASM_LABEL(first_either_rv_done) "\n   lwu t3, 0(t1)\n"
+    "beq t3, t5, " ASM_LABEL(first_either_rv_done) "\n   beq t3, t6, " ASM_LABEL(first_either_rv_done) "\n"
+    "addi t1, t1, 4\n   addi a0, a0, 1\n   j " ASM_LABEL(first_either_rv_word) "\n"
+    "" ASM_LABEL(first_either_rv_done) ":\n" ASM_RET
+    ASM_END(memory_first_of_either_u32)
 
     //       memory_copy_changed_u32: with V, a chunk is up to 16 words at
     //       e32 m4 (64 bytes at the smallest VLEN), vmsne and vfirst, and on
@@ -55861,6 +55960,11 @@ fn memory_over_tone_u32(p32 address_to into, positive count, p32 tone);
 // The index of the first of count 32-bit words that is not value, or count when every word is value. A zero count
 // answers zero and reads nothing; only the count's words are read, so a run that ends at a page's end is safe.
 positive memory_first_differs_u32(const unsigned int address_to words, positive count, unsigned int value);
+// The index of the first of count 32-bit words that is first or second, or count when none is. A zero count answers
+// zero and reads nothing; only the count's words are read. rover's keys: the key an event's field is, and the one that
+// stands for any.
+PURE positive memory_first_of_either_u32(const unsigned int address_to words, positive count, unsigned int first,
+                                         unsigned int second);
 // Each of count bytes from data becomes the mean of itself and the byte distance after it, rounded up, first to
 // last and in place: a byte is averaged only with one that has not been yet, so the pass is the same however wide
 // the body takes it. Reads count + distance bytes. A blur is passes of it across a frame (a pixel's four bytes and

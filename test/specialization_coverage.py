@@ -473,6 +473,9 @@ cover('folds_already', 'count', 'memory_first_differs_u32',
       'ui_run_in hands it the rest of a row of scratch paper from the column '
       'it has reached, a length the run sets at run time (its width less the '
       'column); no reachable call site passes a literal')
+cover('folds_already', 'count', 'memory_first_of_either_u32',
+      'rover_key_next hands it the rest of an event\'s run of keys, which the loaded table sets at run time and '
+      'which is sixteen or more when it is called; no reachable call site passes a literal')
 cover('folds_already', 'count', 'memory_saturate_u32',
       'the compositor hands it a span of the changed backdrop cells of a row, whose length the damage sets at run '
       'time; no reachable call site passes a literal, and a one-pixel call is the taskbar\'s per-column loop')

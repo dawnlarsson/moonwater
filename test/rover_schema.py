@@ -436,23 +436,31 @@ def generate():
                                                                 names))
     out.append('};')
     out.append('')
-    out.append('//      One call a function: the values of a comparison handed to the routine as its prototype says.')
+    out.append('//      One call a function: its registers handed on as the routine\'s prototype types them, a narrowing and')
+    out.append('//      a jump, so the argument is never in memory between the comparison and the routine.')
     for name, answer, signature, casts, kernel in functions:
-        args, slot = [], 0
+        args, register = [], 0
         for kind, ctype, *_ in casts:
+            pointer = 'address_any' if 'address_any' in ctype else ctype.replace('address_to', '*')
             if kind == 'b':
-                args.append('(%s)value[%d].text' % ('address_any' if 'address_any' in ctype else
-                                                     ctype.replace('address_to', '*'), slot))
-                args.append('(positive)value[%d].length' % slot)
+                args.append('(%s)(positive)r%d' % (pointer, register))
+                args.append('(positive)r%d' % (register + 1))
+                register += 2
             elif kind == 'w':
-                args.append('(%s)value[%d].text' % (ctype.replace('address_to', '*'), slot))
+                args.append('(%s)(positive)r%d' % (pointer, register))
+                register += 1
             else:
-                args.append('(%s)value[%d].number' % (ctype, slot))
-            slot += 1
+                args.append('(%s)r%d' % (ctype, register))
+                register += 1
+        if register > 6:
+            fail('%s takes more than six registers' % name)
+        unused = ''.join('        (void)r%d;\n' % r for r in range(register, 6))
         if not kernel:
             out.append('#ifndef KERNEL_MODE')
-        out.append('static b64 rover_call_%s(const struct rover_value address_to value)' % name)
+        out.append('static b64 rover_call_%s(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)' % name)
         out.append('{')
+        if unused:
+            out.append(unused.rstrip('\n'))
         out.append('        return (b64)%s(%s);' % (name, ', '.join(args)))
         out.append('}')
         if not kernel:

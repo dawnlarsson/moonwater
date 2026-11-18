@@ -435,6 +435,10 @@ cover('direct_benchmark', 'test/checks.c#BENCH_first_differs', 'memory_first_dif
       'paired timing against the word loop ui_run_in had, over rows of paper '
       'ended by a difference after one, three, twelve, sixty and three hundred '
       'words, with AVX2 and SSE2, NEON, and V and scalar on riscv64')
+cover('direct_benchmark', 'test/checks.c#BENCH_rover', 'memory_first_of_either_u32',
+      'paired timing against the word loop rover_key_next had, over rows of 16, 32, 128 and 1000 keys with the match '
+      'last, with AVX2 on x86-64 and NEON on arm64 (riscv64 keeps the loop in rover: its body is the same word loop), '
+      'and inside BENCH_rover\'s chord rows among 8, 32 and 128 rules')
 cover('direct_benchmark', 'test/checks.c#BENCH_saturate', 'memory_saturate_u32',
       'paired timing against the C compositor_vivid made of each pixel, over runs of one, three, twelve, sixty and '
       'three hundred pixels, with AVX-512, AVX2 and the word body on x86-64, NEON, and V and the word body on riscv64')

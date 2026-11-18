@@ -123,6 +123,62 @@ static const p8 address_to rover_printed_of(void)
         rover_print_text[text.used] = 0;
         return rover_print_text;
 }
+//      In the shared block, so BENCH_rover's section names the routine its key rows time as well.
+/*
+        memory_first_of_either_u32, lib.c's scan of rover's keys, against the loop: every count from 0 to 100, every
+        place of the first word that is either value and none, the match the first value or the second, the words
+        after it matching or not, and the words ending against a guard page, so a word read past the count faults. On
+        x86_64 with AVX2 and without (SSE2), on arm64 with NEON, and riscv64's one body.
+*/
+static fn rover_check_first_of_either(void)
+{
+        unsigned int address_to pages = (unsigned int address_to)memory(2 * 4096);
+        bool guarded = pages != null, answers = true;
+
+        if (guarded)
+                guarded = system_call_3(syscall(mprotect), (positive)((p8 address_to)pages + 4096), 4096, 0) == 0;
+        check("first of either: guard page", guarded);
+        if (!guarded)
+                return;
+#if X64
+        p8 wide2 = cpu_has_avx2;
+        for (positive tier = 0; tier < 2; tier++)
+        {
+                cpu_has_avx2 = tier == 0 ? wide2 : 0;
+#else
+        for (positive tier = 0; tier < 1; tier++)
+        {
+#endif
+                unsigned int address_to ends = pages + 1024;
+
+                for (positive count = 0; count <= 100; count++)
+                        for (b64 place = -1; place < (b64)count; place++)
+                                for (positive shape = 0; shape < 4; shape++)
+                                {
+                                        unsigned int address_to words = ends - count;
+                                        unsigned int first = 0x00020039u, second = ROVER_KEY_ANY;
+                                        positive want = count;
+
+                                        for (positive i = 0; i < count; i++)
+                                                words[i] = 0x00060000u + (unsigned int)i;
+                                        if (place >= 0)
+                                        {
+                                                words[place] = shape & 1 ? second : first;
+                                                for (positive i = (positive)place + 1; i < count && (shape & 2); i++)
+                                                        words[i] = i & 1 ? first : second;
+                                                want = (positive)place;
+                                        }
+                                        answers = answers && memory_first_of_either_u32(words, count, first, second) == want;
+                                }
+#if X64
+        }
+        cpu_has_avx2 = wide2;
+#else
+        }
+#endif
+        check("first of either: the first word that is either value, or the count", answers);
+}
+
 #endif
 
 #ifdef CHECK_rover
@@ -667,6 +723,7 @@ static fn rover_check_evaluator(void)
 
 b32 main(void)
 {
+        rover_check_first_of_either();
         rover_check_schema();
         rover_check_round_trip();
         rover_check_refusals();
@@ -723,6 +780,56 @@ static fn rover_bench_say(const char address_to name, positive per_million)
         log_flush();
 }
 
+//      The loop memory_first_of_either_u32 replaced in rover_key_next, kept here as its C side.
+static __attribute__((noinline)) positive rover_bench_either_c(const unsigned int address_to words, positive count,
+                                                               unsigned int first, unsigned int second)
+{
+        positive at = 0;
+
+        while (at < count && words[at] != first && words[at] != second)
+                at++;
+        return at;
+}
+
+/*
+        memory_first_of_either_u32 against that loop, paired and alternated:
+        rows of keys with the match last, at 16, 32, 128 and 1000 words.
+*/
+static fn rover_bench_either(void)
+{
+        static unsigned int words[1000];
+        static const positive counts[4] = {16, 32, 128, 1000};
+
+        for (positive at = 0; at < 1000; at++)
+                words[at] = 0x00060000u + (unsigned int)at;
+        for (positive c = 0; c < 4; c++)
+        {
+                positive count = counts[c], best_asm = ~(positive)0, best_c = ~(positive)0;
+                volatile positive sink = 0;
+
+                words[count - 1] = 0x00020039u;
+                for (positive trial = 0; trial < 14; trial++)
+                {
+                        positive start = clock_monotonic_nanoseconds();
+
+                        for (positive at = 0; at < 100000; at++)
+                                sink += (trial & 1) ? rover_bench_either_c(words, count, 0x00020039u, ROVER_KEY_ANY)
+                                                    : memory_first_of_either_u32(words, count, 0x00020039u, ROVER_KEY_ANY);
+                        positive took = (clock_monotonic_nanoseconds() - start) * 10;
+                        if (trial & 1)
+                                best_c = took < best_c ? took : best_c;
+                        else
+                                best_asm = took < best_asm ? took : best_asm;
+                }
+                words[count - 1] = 0x00060000u + (unsigned int)(count - 1);
+                (void)sink;
+                string_format(log, "  memory_first_of_either_u32, %p keys: asm %p.%p%p ns, C %p.%p%p ns\n", count,
+                              best_asm / 1000000, best_asm / 100000 % 10, best_asm / 10000 % 10, best_c / 1000000,
+                              best_c / 100000 % 10, best_c / 10000 % 10);
+                log_flush();
+        }
+}
+
 b32 main(void)
 {
         struct rover_event event;
@@ -732,29 +839,56 @@ b32 main(void)
         memory_zero(rover_page_store, sizeof(rover_page_store));
         rover_set("power.source", 1, null);
 
-        rover_compiled("rule lid-sleep\n\ton lid close\n\tif power.source == battery\n\tif lid == closed\n"
-                       "\tdo suspend\n\telse\n\tdo backlight 10%\n");
         rover_set("lid", 1, null);
         event = rover_event_of("lid close", null);
+        rover_compiled("rule lid-sleep\n\ton lid close\n\tdo suspend\n");
+        rover_bench_say("lid close, no condition (the dispatch), kernel", rover_bench(&event, ROVER_KERNEL, false, 0));
+        rover_compiled("rule lid-sleep\n\ton lid close\n\tif power.source == battery\n\tdo suspend\n");
+        rover_bench_say("lid close, one condition, kernel", rover_bench(&event, ROVER_KERNEL, false, 0));
+        rover_compiled("rule lid-sleep\n\ton lid close\n\tif power.source == battery\n\tif lid == closed\n"
+                       "\tdo suspend\n\telse\n\tdo backlight 10%\n");
         rover_bench_say("lid close, two conditions, kernel", rover_bench(&event, ROVER_KERNEL, false, 0));
 
-        for (positive at = 0; at < 32; at++)
+        //      Chords: n rules of ctrl+alt+KEY, the event the n-2th's, so all but two are passed over.
+        static const positive counts[3] = {8, 32, 128};
+        for (positive c = 0; c < 3; c++)
         {
-                p8 key[2] = {(p8)keys[at], 0};
+                text.used = 0;
+                for (positive at = 0; at < counts[c]; at++)
+                {
+                        p8 key[4] = {(p8)keys[at % 32], 0, 0, 0};
+                        static const char address_to const mods[4] = {"ctrl+alt+", "ctrl+shift+", "alt+shift+",
+                                                                      "ctrl+super+"};
 
-                rover_puts(&text, "rule chord-");
-                rover_put_number(&text, (b64)at);
-                rover_puts(&text, "\n\ton chord ctrl+alt+");
-                rover_puts(&text, (const char address_to)key);
-                rover_puts(&text, "\n\tdo open terminal\n\n");
+                        rover_puts(&text, "rule chord-");
+                        rover_put_number(&text, (b64)at);
+                        rover_puts(&text, "\n\ton chord ");
+                        rover_puts(&text, mods[at / 32]);
+                        rover_puts(&text, (const char address_to)key);
+                        rover_puts(&text, "\n\tdo open terminal\n\n");
+                }
+                rover_bench_text[text.used] = 0;
+                rover_compiled(rover_bench_text);
+                event = rover_event_of("chord", null);
+                event.count = 1;
+                event.field[0].number = rover_view.pool[0]; // replaced below by the n-2th rule's own key
+                {
+                        const struct rover_rule address_to rule = rover_view.rule + counts[c] - 2;
+                        b64 key;
+
+                        memory_copy(&key, rover_view.pool + rover_view.comparison[rule->comparison].b.index, 8);
+                        event.field[0].number = key;
+                }
+                rover_bench_say(c == 0 ? "a chord among 8 rules, desktop"
+                                       : c == 1 ? "a chord among 32 rules, desktop" : "a chord among 128 rules, desktop",
+                                rover_bench(&event, ROVER_DESKTOP, false, 0));
         }
-        rover_bench_text[text.used] = 0;
-        rover_compiled(rover_bench_text);
-        event = rover_event_of("chord", null);
-        event.count = 1;
-        event.field[0].number = (b64)(ROVER_CHORD_CTRL | ROVER_CHORD_ALT) << 16 | 3; // ctrl+alt+2, the 30th rule
-        rover_bench_say("a chord among 32 rules, desktop", rover_bench(&event, ROVER_DESKTOP, false, 0));
 
+        rover_compiled("rule game\n\ton fullscreen on steam_app_*\n\tdo latency 20us\n");
+        event = rover_event_of("fullscreen on", "steam_app_1172470");
+        rover_bench_say("a pattern on the app, desktop", rover_bench(&event, ROVER_DESKTOP, false, 0));
+        rover_compiled("rule game\n\ton fullscreen on\n\tif string_length($app) > 4\n\tdo latency 20us\n");
+        rover_bench_say("a lib.c call on the app, desktop", rover_bench(&event, ROVER_DESKTOP, false, 0));
         rover_compiled("rule game\n\ton fullscreen on steam_app_*\n\tif string_length($app) > 4\n\tdo latency 20us\n");
         event = rover_event_of("fullscreen on", "steam_app_1172470");
         rover_bench_say("a pattern and a call on the app, desktop", rover_bench(&event, ROVER_DESKTOP, false, 0));
@@ -766,6 +900,8 @@ b32 main(void)
 
         event = rover_event_of("mute", null);
         rover_bench_say("an event no rule has", rover_bench(&event, ROVER_KERNEL, false, 0));
+
+        rover_bench_either();
 
         //      The load, which happens once a file and never at an event: compile, check, and print back.
         {

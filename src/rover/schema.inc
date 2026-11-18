@@ -96,316 +96,578 @@ static const struct rover_primitive_row rover_primitives[ROVER_PRIMITIVES] = {
         {"notify", 15, 2, 0, 1, {8}, {"message"}},
 };
 
-//      One call a function: the values of a comparison handed to the routine as its prototype says.
+//      One call a function: its registers handed on as the routine's prototype types them, a narrowing and
+//      a jump, so the argument is never in memory between the comparison and the routine.
 #ifndef KERNEL_MODE
-static b64 rover_call_absolute_whole(const struct rover_value address_to value)
+static b64 rover_call_absolute_whole(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)absolute_whole((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)absolute_whole((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_absolute_wide(const struct rover_value address_to value)
+static b64 rover_call_absolute_wide(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)absolute_wide((bipolar)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)absolute_wide((bipolar)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_bits_counted(const struct rover_value address_to value)
+static b64 rover_call_bits_counted(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)bits_counted((positive)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)bits_counted((positive)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_bits_first_set(const struct rover_value address_to value)
+static b64 rover_call_bits_first_set(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)bits_first_set((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)bits_first_set((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_bits_first_set_wide(const struct rover_value address_to value)
+static b64 rover_call_bits_first_set_wide(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)bits_first_set_wide((bipolar)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)bits_first_set_wide((bipolar)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_bits_leading_zeros(const struct rover_value address_to value)
+static b64 rover_call_bits_leading_zeros(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)bits_leading_zeros((positive)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)bits_leading_zeros((positive)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_bits_trailing_zeros(const struct rover_value address_to value)
+static b64 rover_call_bits_trailing_zeros(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)bits_trailing_zeros((positive)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)bits_trailing_zeros((positive)r0);
 }
 #endif
-static b64 rover_call_byte_class_holds(const struct rover_value address_to value)
+static b64 rover_call_byte_class_holds(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_class_holds((b32)value[0].number, (p8)value[1].number);
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_class_holds((b32)r0, (p8)r1);
 }
-static b64 rover_call_byte_class_index(const struct rover_value address_to value)
+static b64 rover_call_byte_class_index(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_class_index((string_address)value[0].text, (positive)value[0].length);
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_class_index((string_address)(positive)r0, (positive)r1);
 }
-static b64 rover_call_byte_class_index_5_5(const struct rover_value address_to value)
+static b64 rover_call_byte_class_index_5_5(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_class_index_5_5((string_address)value[0].text, (positive)value[0].length);
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_class_index_5_5((string_address)(positive)r0, (positive)r1);
 }
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_is_alnum(const struct rover_value address_to value)
+static b64 rover_call_byte_is_alnum(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_is_alnum((b32)value[0].number);
-}
-#endif
-#ifndef KERNEL_MODE
-static b64 rover_call_byte_is_alpha(const struct rover_value address_to value)
-{
-        return (b64)byte_is_alpha((b32)value[0].number);
-}
-#endif
-#ifndef KERNEL_MODE
-static b64 rover_call_byte_is_ascii(const struct rover_value address_to value)
-{
-        return (b64)byte_is_ascii((b32)value[0].number);
-}
-#endif
-#ifndef KERNEL_MODE
-static b64 rover_call_byte_is_blank(const struct rover_value address_to value)
-{
-        return (b64)byte_is_blank((b32)value[0].number);
-}
-#endif
-#ifndef KERNEL_MODE
-static b64 rover_call_byte_is_control(const struct rover_value address_to value)
-{
-        return (b64)byte_is_control((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_alnum((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_is_digit(const struct rover_value address_to value)
+static b64 rover_call_byte_is_alpha(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_is_digit((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_alpha((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_is_graphic(const struct rover_value address_to value)
+static b64 rover_call_byte_is_ascii(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_is_graphic((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_ascii((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_is_hexadecimal(const struct rover_value address_to value)
+static b64 rover_call_byte_is_blank(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_is_hexadecimal((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_blank((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_is_lower(const struct rover_value address_to value)
+static b64 rover_call_byte_is_control(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_is_lower((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_control((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_is_printable(const struct rover_value address_to value)
+static b64 rover_call_byte_is_digit(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_is_printable((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_digit((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_is_punctuation(const struct rover_value address_to value)
+static b64 rover_call_byte_is_graphic(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_is_punctuation((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_graphic((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_is_space(const struct rover_value address_to value)
+static b64 rover_call_byte_is_hexadecimal(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_is_space((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_hexadecimal((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_is_upper(const struct rover_value address_to value)
+static b64 rover_call_byte_is_lower(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_is_upper((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_lower((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_to_ascii(const struct rover_value address_to value)
+static b64 rover_call_byte_is_printable(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_to_ascii((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_printable((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_to_lower(const struct rover_value address_to value)
+static b64 rover_call_byte_is_punctuation(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_to_lower((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_punctuation((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_byte_to_upper(const struct rover_value address_to value)
+static b64 rover_call_byte_is_space(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)byte_to_upper((b32)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_space((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_bytes_reverse_16(const struct rover_value address_to value)
+static b64 rover_call_byte_is_upper(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)bytes_reverse_16((p16)value[0].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_is_upper((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_bytes_reverse_32(const struct rover_value address_to value)
+static b64 rover_call_byte_to_ascii(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)bytes_reverse_32((p32)value[0].number);
-}
-#endif
-static b64 rover_call_hash_crc32(const struct rover_value address_to value)
-{
-        return (b64)hash_crc32((p32)value[0].number, (address_any)value[1].text, (positive)value[1].length);
-}
-static b64 rover_call_hash_crc32_msb(const struct rover_value address_to value)
-{
-        return (b64)hash_crc32_msb((p32)value[0].number, (address_any)value[1].text, (positive)value[1].length);
-}
-#ifndef KERNEL_MODE
-static b64 rover_call_hash_crc32c(const struct rover_value address_to value)
-{
-        return (b64)hash_crc32c((p32)value[0].number, (address_any)value[1].text, (positive)value[1].length);
-}
-#endif
-static b64 rover_call_hash_crc64(const struct rover_value address_to value)
-{
-        return (b64)hash_crc64((p64)value[0].number, (address_any)value[1].text, (positive)value[1].length);
-}
-static b64 rover_call_hash_xxh64(const struct rover_value address_to value)
-{
-        return (b64)hash_xxh64((address_any)value[0].text, (positive)value[0].length, (p64)value[1].number);
-}
-#ifndef KERNEL_MODE
-static b64 rover_call_memory_ascii_span(const struct rover_value address_to value)
-{
-        return (b64)memory_ascii_span((address_any)value[0].text, (positive)value[0].length);
-}
-#endif
-static b64 rover_call_memory_checksum_bsd16(const struct rover_value address_to value)
-{
-        return (b64)memory_checksum_bsd16((address_any)value[0].text, (positive)value[0].length, (p32)value[1].number);
-}
-static b64 rover_call_memory_count(const struct rover_value address_to value)
-{
-        return (b64)memory_count((address_any)value[0].text, (positive)value[0].length, (b8)value[1].number);
-}
-static b64 rover_call_memory_escape_index(const struct rover_value address_to value)
-{
-        return (b64)memory_escape_index((address_any)value[0].text, (positive)value[0].length, (p8)value[1].number);
-}
-#ifndef KERNEL_MODE
-static b64 rover_call_memory_growth(const struct rover_value address_to value)
-{
-        return (b64)memory_growth((positive)value[0].number, (positive)value[1].number, (positive)value[2].number);
-}
-#endif
-static b64 rover_call_memory_hash_33(const struct rover_value address_to value)
-{
-        return (b64)memory_hash_33((address_any)value[0].text, (positive)value[0].length);
-}
-static b64 rover_call_memory_sum_bytes(const struct rover_value address_to value)
-{
-        return (b64)memory_sum_bytes((address_any)value[0].text, (positive)value[0].length);
-}
-static b64 rover_call_memory_text_span(const struct rover_value address_to value)
-{
-        return (b64)memory_text_span((address_any)value[0].text, (positive)value[0].length);
-}
-static b64 rover_call_pointer_gain(const struct rover_value address_to value)
-{
-        return (b64)pointer_gain((bipolar)value[0].number, (bipolar)value[1].number, (positive)value[2].number);
-}
-static b64 rover_call_positive_digits(const struct rover_value address_to value)
-{
-        return (b64)positive_digits((positive)value[0].number);
-}
-static b64 rover_call_string_compare(const struct rover_value address_to value)
-{
-        return (b64)string_compare((string_address)value[0].text, (string_address)value[1].text);
-}
-#ifndef KERNEL_MODE
-static b64 rover_call_string_compare_folded(const struct rover_value address_to value)
-{
-        return (b64)string_compare_folded((string_address)value[0].text, (string_address)value[1].text);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_to_ascii((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_string_compare_folded_max(const struct rover_value address_to value)
+static b64 rover_call_byte_to_lower(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)string_compare_folded_max((string_address)value[0].text, (string_address)value[1].text, (positive)value[2].number);
-}
-#endif
-static b64 rover_call_string_compare_max(const struct rover_value address_to value)
-{
-        return (b64)string_compare_max((const_string)value[0].text, (const_string)value[1].text, (positive)value[2].number);
-}
-static b64 rover_call_string_length(const struct rover_value address_to value)
-{
-        return (b64)string_length((const_string)value[0].text);
-}
-static b64 rover_call_string_length_max(const struct rover_value address_to value)
-{
-        return (b64)string_length_max((string_address)value[0].text, (positive)value[1].number);
-}
-#ifndef KERNEL_MODE
-static b64 rover_call_string_span_of_set(const struct rover_value address_to value)
-{
-        return (b64)string_span_of_set((string_address)value[0].text, (string_address)value[1].text);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_to_lower((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_string_span_without_set(const struct rover_value address_to value)
+static b64 rover_call_byte_to_upper(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)string_span_without_set((string_address)value[0].text, (string_address)value[1].text);
-}
-#endif
-static b64 rover_call_string_to_bipolar(const struct rover_value address_to value)
-{
-        return (b64)string_to_bipolar((string_address)value[0].text);
-}
-#ifndef KERNEL_MODE
-static b64 rover_call_string_to_host(const struct rover_value address_to value)
-{
-        return (b64)string_to_host((string_address)value[0].text);
-}
-#endif
-static b64 rover_call_string_to_positive(const struct rover_value address_to value)
-{
-        return (b64)string_to_positive((string_address)value[0].text);
-}
-#ifndef KERNEL_MODE
-static b64 rover_call_string_to_whole(const struct rover_value address_to value)
-{
-        return (b64)string_to_whole((string_address)value[0].text);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)byte_to_upper((b32)r0);
 }
 #endif
 #ifndef KERNEL_MODE
-static b64 rover_call_string_to_whole_wide(const struct rover_value address_to value)
+static b64 rover_call_bytes_reverse_16(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)string_to_whole_wide((string_address)value[0].text);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)bytes_reverse_16((p16)r0);
 }
 #endif
-static b64 rover_call_unicode_case(const struct rover_value address_to value)
+#ifndef KERNEL_MODE
+static b64 rover_call_bytes_reverse_32(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)unicode_case((p32)value[0].number, (positive)value[1].number);
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)bytes_reverse_32((p32)r0);
 }
-static b64 rover_call_unicode_width(const struct rover_value address_to value)
+#endif
+static b64 rover_call_hash_crc32(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)unicode_width((p32)value[0].number, (positive)value[1].number);
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)hash_crc32((p32)r0, (address_any)(positive)r1, (positive)r2);
 }
-static b64 rover_call_wait_status_code(const struct rover_value address_to value)
+static b64 rover_call_hash_crc32_msb(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)wait_status_code((positive)value[0].number);
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)hash_crc32_msb((p32)r0, (address_any)(positive)r1, (positive)r2);
 }
-static b64 rover_call_wait_status_code_base(const struct rover_value address_to value)
+#ifndef KERNEL_MODE
+static b64 rover_call_hash_crc32c(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
 {
-        return (b64)wait_status_code_base((positive)value[0].number, (b32)value[1].number);
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)hash_crc32c((p32)r0, (address_any)(positive)r1, (positive)r2);
+}
+#endif
+static b64 rover_call_hash_crc64(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)hash_crc64((p64)r0, (address_any)(positive)r1, (positive)r2);
+}
+static b64 rover_call_hash_xxh64(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)hash_xxh64((address_any)(positive)r0, (positive)r1, (p64)r2);
+}
+#ifndef KERNEL_MODE
+static b64 rover_call_memory_ascii_span(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)memory_ascii_span((address_any)(positive)r0, (positive)r1);
+}
+#endif
+static b64 rover_call_memory_checksum_bsd16(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)memory_checksum_bsd16((address_any)(positive)r0, (positive)r1, (p32)r2);
+}
+static b64 rover_call_memory_count(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)memory_count((address_any)(positive)r0, (positive)r1, (b8)r2);
+}
+static b64 rover_call_memory_escape_index(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)memory_escape_index((address_any)(positive)r0, (positive)r1, (p8)r2);
+}
+#ifndef KERNEL_MODE
+static b64 rover_call_memory_growth(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)memory_growth((positive)r0, (positive)r1, (positive)r2);
+}
+#endif
+static b64 rover_call_memory_hash_33(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)memory_hash_33((address_any)(positive)r0, (positive)r1);
+}
+static b64 rover_call_memory_sum_bytes(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)memory_sum_bytes((address_any)(positive)r0, (positive)r1);
+}
+static b64 rover_call_memory_text_span(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)memory_text_span((address_any)(positive)r0, (positive)r1);
+}
+static b64 rover_call_pointer_gain(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)pointer_gain((bipolar)r0, (bipolar)r1, (positive)r2);
+}
+static b64 rover_call_positive_digits(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)positive_digits((positive)r0);
+}
+static b64 rover_call_string_compare(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_compare((string_address)(positive)r0, (string_address)(positive)r1);
+}
+#ifndef KERNEL_MODE
+static b64 rover_call_string_compare_folded(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_compare_folded((string_address)(positive)r0, (string_address)(positive)r1);
+}
+#endif
+#ifndef KERNEL_MODE
+static b64 rover_call_string_compare_folded_max(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_compare_folded_max((string_address)(positive)r0, (string_address)(positive)r1, (positive)r2);
+}
+#endif
+static b64 rover_call_string_compare_max(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_compare_max((const_string)(positive)r0, (const_string)(positive)r1, (positive)r2);
+}
+static b64 rover_call_string_length(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_length((const_string)(positive)r0);
+}
+static b64 rover_call_string_length_max(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_length_max((string_address)(positive)r0, (positive)r1);
+}
+#ifndef KERNEL_MODE
+static b64 rover_call_string_span_of_set(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_span_of_set((string_address)(positive)r0, (string_address)(positive)r1);
+}
+#endif
+#ifndef KERNEL_MODE
+static b64 rover_call_string_span_without_set(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_span_without_set((string_address)(positive)r0, (string_address)(positive)r1);
+}
+#endif
+static b64 rover_call_string_to_bipolar(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_to_bipolar((string_address)(positive)r0);
+}
+#ifndef KERNEL_MODE
+static b64 rover_call_string_to_host(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_to_host((string_address)(positive)r0);
+}
+#endif
+static b64 rover_call_string_to_positive(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_to_positive((string_address)(positive)r0);
+}
+#ifndef KERNEL_MODE
+static b64 rover_call_string_to_whole(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_to_whole((string_address)(positive)r0);
+}
+#endif
+#ifndef KERNEL_MODE
+static b64 rover_call_string_to_whole_wide(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)string_to_whole_wide((string_address)(positive)r0);
+}
+#endif
+static b64 rover_call_unicode_case(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)unicode_case((p32)r0, (positive)r1);
+}
+static b64 rover_call_unicode_width(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)unicode_width((p32)r0, (positive)r1);
+}
+static b64 rover_call_wait_status_code(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r1;
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)wait_status_code((positive)r0);
+}
+static b64 rover_call_wait_status_code_base(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)
+{
+        (void)r2;
+        (void)r3;
+        (void)r4;
+        (void)r5;
+        return (b64)wait_status_code_base((positive)r0, (b32)r1);
 }
 
 static const struct rover_function_row rover_functions[ROVER_FUNCTIONS] = {
