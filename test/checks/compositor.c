@@ -4658,6 +4658,7 @@ static void check_moon_bench(void)
         check("moon bench: each step of the turn draws the moon", drawn && rect[2] < view.width / 4);
     }
     taskbar.moon_turn = 0, taskbar.moon_step = 0;
+    taskbar_moon_bake_halt(); // the moon drawn below by the check itself: the bake's thread ended first (the sphere's tables are one for all)
     // Its parts at 32 pixels: the disc, the rim's light and the clock.
     {
         static unsigned int field[64 * 64];
@@ -4731,6 +4732,7 @@ static void wallpaper_bench(string_address into)
         memory_zero(&ui, sizeof(ui));
         ui.pixels = field, ui.pitch = 64, ui.width = 64, ui.height = 64, ui.bottom = 64, ui.scale = 100;
         at[0] = clock_monotonic_nanoseconds();
+        taskbar_moon_bake_halt(); // the moon drawn here and not by the taskbar: the bake's thread ended first (the sphere's tables are one for all)
         ui_moon_map_for(32);
         at[1] = clock_monotonic_nanoseconds();
         for (int k = 0; k < 50; k++)
@@ -5366,6 +5368,7 @@ static void band_pictures(string_address face_path)
                 {
                     static const struct ui_moon_look bar = {0xff0c0d10u, 0xfff7f5efu, 0, 0xb4e8e8e8u, UI_MOON_RIM | UI_MOON_FULL_SQUARE, 0};
 
+                    taskbar_moon_bake_halt(); // the moon drawn here and not by the taskbar: the bake's thread ended first (the sphere's tables are one for all)
                     ui_moon(&ui, left, top, size, UI_ONE / 2, UI_ONE * 7 / 60, &bar);
                 }
                 // The round frame the compositor cuts the disc out with: what is outside the circle is the ground again.
