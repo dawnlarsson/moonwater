@@ -1632,12 +1632,15 @@ static void compositor_dark(int dark)
                         (string_address) "");
 }
 
-// Whether the file is there, looked at the start and at each change of it.
+// Whether the file is there, looked at the start and at each change of it: opened as the other switch files are
+// (compositor.c's /run/moonwater ones), which every build of this file has.
 static void compositor_dark_look(void)
 {
-        file_facts facts;
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_DARK_FILE, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
 
-        compositor_dark(file_look(AT_FDCWD, (string_address)COMPOSITOR_DARK_FILE, AT_SYMLINK_NOFOLLOW, address_of facts));
+        if (handle >= 0)
+                system_close(handle);
+        compositor_dark(handle >= 0);
 }
 
 // A person at the machine: the screens lit again.
