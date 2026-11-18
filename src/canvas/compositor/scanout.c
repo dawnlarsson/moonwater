@@ -941,11 +941,11 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
             compositor_spots_any(0))
                 return -1;
         row = rows[windows - 1];
-        if (!compositor_lent(row) && (compositor.direct_refused || !compositor.table_memfd))
+        if (!compositor_client_scans(row) && (compositor.direct_refused || !compositor.table_memfd))
                 return -1;
         if (frames[windows - 1].blend)
                 return -1;
-        if (!compositor_lent(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
+        if (!compositor_client_scans(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
                 return -1;
         // Glass is the window's WINDOW_GLASS (compositor.glassy): the row's other flags (a client's NO_CLOSE and NO_GRAB) are no glass.
         if (compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
@@ -953,13 +953,13 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
             compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row] ||
             compositor.asking[row] || compositor_radius(&frames[windows - 1]) || frames[windows - 1].line)
                 return -1;
-        return (compositor_lent(row) ? compositor_lent_fb(row) : compositor_window_fb(row, compositor.front[row])) ? row : -1;
+        return (compositor_client_scans(row) ? compositor_lent_fb(row) : compositor_window_fb(row, compositor.front[row])) ? row : -1;
 }
 
 // The frame of a window shown straight: the tabs over its buffer, and the card flipped to it. False when the card will not.
 static b32 compositor_present_direct(int row, const struct compositor_frame *tabs, unsigned int count)
 {
-        int lent = compositor_lent(row), rect[4];
+        int lent = compositor_client_scans(row), rect[4];
         unsigned int which = compositor.front[row];
         unsigned int fb = lent ? compositor_lent_fb(row) : compositor_window_fb(row, which);
         unsigned short clip[COMPOSITOR_DAMAGE][4];
@@ -1660,7 +1660,7 @@ static int compositor_tabs_rect(const struct compositor_frame *tabs, unsigned in
 // then patched in.
 static b32 compositor_present_overlaid(int row, const struct compositor_frame *frames, unsigned int count, unsigned int windows)
 {
-        unsigned int which = compositor.front[row], fb = compositor_lent(row) ? compositor_lent_fb(row) : compositor_window_fb(row, which),
+        unsigned int which = compositor.front[row], fb = compositor_client_scans(row) ? compositor_lent_fb(row) : compositor_window_fb(row, which),
                      buffer = compositor.overlay_back;
         int rect[4], shown = compositor_tabs_rect(frames + windows, count - windows, rect), drawn = 0;
         unsigned short clip[COMPOSITOR_DAMAGE][4];
@@ -1688,6 +1688,8 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
                         struct compositor_target target = {compositor.overlay_pixels[buffer], 0, compositor.width,
                                                            compositor.height, rect[0], rect[1], rect[2], rect[3], 0, rect[1], 0};
                         int rows[2];
+
+                        compositor_wl_straight_pays(-1); // the window under the tabs is composed with them
 
                         if (!compositor_overlay_buffers((unsigned int)(rect[3] - rect[1])))
                         {
@@ -1799,7 +1801,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         row = rows[windows - 1];
         const struct compositor_frame *frame = &frames[windows - 1];
 
-        if (!compositor_lent(row) && (compositor.direct_refused || !compositor.table_memfd))
+        if (!compositor_client_scans(row) && (compositor.direct_refused || !compositor.table_memfd))
                 return *why = compositor.direct_refused ? 11 : 2, -1;
         // Glass is the window's WINDOW_GLASS (compositor.glassy): the row's other flags (a client's NO_CLOSE and NO_GRAB) are no glass. Tested
         // as the row's whole glass word, every client's window was refused as glass and composed.
@@ -1818,7 +1820,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         // While the windows' lists are drawn the card writes a window's picture in place, each frame (a clear and then the frame's ops): shown straight,
         // the screen would scan that picture out while it is half drawn, and every frame would flicker. With list mode on every window is composed (by
         // the card, after it has drawn the pictures), so none is shown straight.
-        if (!compositor_lent(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
+        if (!compositor_client_scans(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
                 return *why = 16, -1;
         if (compositor.landing[row])
                 return *why = 4, -1; // a window landing is drawn smaller than its picture
@@ -1857,7 +1859,7 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
         // The card asked last: whether it has an overlay, then the window's framebuffer.
         if (!compositor_overlay_ready())
                 return *why = 10, -1;
-        return (compositor_lent(row) ? compositor_lent_fb_opaque(row) : compositor_window_fb(row, compositor.front[row])) ? row : (*why = 11, -1);
+        return (compositor_client_scans(row) ? compositor_lent_fb_opaque(row) : compositor_window_fb(row, compositor.front[row])) ? row : (*why = 11, -1);
 }
 
 // The damage less the rectangle the overlay shows; false when the pieces do not fit the list, which is then left whole.

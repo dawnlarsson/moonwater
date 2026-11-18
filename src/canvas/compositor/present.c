@@ -1121,11 +1121,17 @@ static void compositor_present_frames(void)
         tinted = compositor_preview_lift(frames, windows, &preview);
         int turning = compositor_turning();
         int direct = turning ? -1 : compositor_direct_candidate(frames, rows, windows);
-        int stay_live_direct = direct >= 0 && !compositor_lent(direct) && direct == compositor.direct_row && !compositor_overlay_ready() &&
+        int stay_live_direct = direct >= 0 && !compositor_client_scans(direct) && direct == compositor.direct_row && !compositor_overlay_ready() &&
                                compositor.patched[direct][compositor.front[direct] & 1u] &&
                                compositor_window_fb(direct, compositor.front[direct]) == compositor.on_screen &&
                                compositor.under[compositor.front[direct] & 1u];
 
+        // A window's straight picture the table does not have yet (compositor_wl_straight_pay) is read into it before anything is composed
+        // from it. With a window to show straight, nothing is composed but what goes over it (a band's glass, the tabs on the overlay), which
+        // reads what it owes there, or the present falls to composing (compositor_plane_candidate's turn reads it then): every window under it
+        // is hidden, and a game's own pictures and the covered windows' (Steam's, behind it) are not read at all.
+        if (direct < 0)
+                compositor_wl_straight_pays(-1);
         // A window the card shows straight has what the tabs covered put back, so the glass is made from the window,
         // unless we are staying on the same patched live on-screen framebuffer.
         if (!stay_live_direct)
@@ -1186,6 +1192,7 @@ static void compositor_present_frames(void)
 #ifdef CONFIG_MOONWATER_WAYLAND
                                 compositor_wl_lent_sync(1);
 #endif
+                                compositor_wl_straight_pays(-1); // the glass is made from what is under the band
                                 compositor_band_draw(frames, windows, redo);
                         }
                 }
@@ -1194,6 +1201,11 @@ static void compositor_present_frames(void)
                 for (compositor.band_at = 0; compositor.band_at < bands; compositor.band_at++)
                 {
                         compositor_band_frame(&band);
+                        // A band slid all the way off shows nothing, its plates' outlines neither: their shadow's reach above the screen's
+                        // edge (box: a 417 by 17 strip at the bottom, over a fullscreen game) put tabs over the window every frame, so the
+                        // window was shown with the overlay composed over it from its picture, read whole for it when it was a straight one.
+                        if (taskbar_shift() >= UI_ONE)
+                                continue;
                         count += compositor_moon_glow_frame(&frames[count]); // under the plates
                         count += compositor_panel_tabs(&band, &frames[count]);
                 }
@@ -1268,6 +1280,13 @@ static void compositor_present_frames(void)
         // The top window on the overlay where it can be: nothing of it composed under the plane.
         int planed[4], plane = !back && !turning ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
 
+        // Composed from here: a straight picture owed to the table is read first, all but the one the overlay is to show whole.
+        compositor_wl_straight_pays(plane >= 0 && planed[0] == compositor.x[plane] && planed[1] == compositor.y[plane] &&
+                                                    planed[2] == compositor.x[plane] + (int)compositor.w[plane] &&
+                                                    planed[3] == compositor.y[plane] + (int)compositor.h[plane]
+                                            ? plane
+                                            : -1);
+
         compositor_plane_carry.fb = 0;
         int plane_off = 0;
 
@@ -1292,7 +1311,7 @@ static void compositor_present_frames(void)
         }
         if (plane >= 0)
         {
-                int lent = compositor_lent(plane);
+                int lent = compositor_client_scans(plane);
                 unsigned int which = compositor.front[plane];
                 unsigned int fb = lent ? compositor_lent_fb_opaque(plane) : compositor_window_fb(plane, which);
                 int source[2] = {planed[0] - compositor.x[plane], planed[1] - compositor.y[plane]};
@@ -1323,6 +1342,7 @@ static void compositor_present_frames(void)
                         }
                         compositor.plane_row = compositor.direct_row = -1;
                         compositor_damage(planed[0], planed[1], planed[2] - planed[0], planed[3] - planed[1]);
+                        compositor_wl_straight_pays(-1); // the window is composed
                 }
                 else
                 {

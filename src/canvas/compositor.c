@@ -2570,6 +2570,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor_wl.row_blend, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.row_opaque, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.lent, COMPOSITOR_ROWS_ROW) \
+        X(compositor_wl.straight, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.source, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.wc_reads, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.wc_copy, COMPOSITOR_ROWS_ROW) \

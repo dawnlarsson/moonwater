@@ -94,6 +94,7 @@ static int compositor_wl_room(unsigned char **at, long *room, long unit, long mo
 #define COMPOSITOR_WL_PUMP_NS 10000000000ull      // a pump that moves nothing for this long ends
 #define COMPOSITOR_WL_DMABUF_SYNC 0x40086200u         // DMA_BUF_IOCTL_SYNC
 #define COMPOSITOR_WL_DMABUF_WAIT_NS 2000000ull       // how long a dma-buf's writer is waited for (bounded so a slow client never stalls a frame)
+#define COMPOSITOR_WL_STRAIGHT_WAIT_NS 8000000ull     // and a straight picture's, before its owed read (compositor_wl_straight_pay): a frame or so
 #define COMPOSITOR_WL_DMABUF_SLOW_NS 2000000000ull    // after one that did not finish in time, a client's are not waited for this long
 #define COMPOSITOR_WL_FOURCC_ARGB8888 0x34325241u
 #define COMPOSITOR_WL_FOURCC_XRGB8888 0x34325258u
@@ -213,6 +214,20 @@ static struct
                 unsigned int fourcc, offset, scan_fb, scan_fourcc; // scan_fourcc: the format scan_fb was made as
                 int synced, scan_failed;
         } *lent;
+        /*
+                A row's picture a tiled dma-buf the whole window is (compositor_wl_straight_take): the commit as it was handed, its descriptors the
+                buffer's for as long as the shim holds it (WAYLAND_PICTURE_LENT), so the display scans it out as it is (compositor_lent_fb makes
+                its framebuffer, with its modifier and planes). owed: the commit was not read into the table, the screen showing the window from
+                the buffer itself, and the table's picture is the one before (compositor_wl_straight_pay reads it the first time anything is
+                composed from it).
+        */
+        struct
+        {
+                struct wayland_picture picture;
+                unsigned long dev, ino;
+                unsigned int scan_fb, scan_fourcc;
+                unsigned char live, owed, scan_failed;
+        } *straight;
         // The dma-buf a row's damage is copied from on the card (compositor_wl_card_rect): its mapping and its import's address, let go of
         // when the buffer changes or the row closes.
         struct
@@ -855,6 +870,9 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
 }
 
 static void compositor_wl_unlend(int row);
+static int compositor_straight(int row);
+static void compositor_wl_straight_pay(int row);
+static void compositor_wl_straight_drop(int row);
 
 static void compositor_wl_source_drop(int row)
 {
@@ -898,6 +916,12 @@ static void compositor_wl_close(void *context, long fd)
                                 compositor_wl_source_drop(row);
                         if (compositor_lent(row) && compositor_wl.lent[row].fd == fd)
                                 compositor_wl_unlend(row);
+                        // A straight picture's buffer going: an owed read is made while the descriptor is still the buffer's.
+                        if (compositor_straight(row) && compositor_wl.straight[row].picture.sync_fd == fd)
+                        {
+                                compositor_wl_straight_pay(row);
+                                compositor_wl_straight_drop(row);
+                        }
                 }
         }
         system_close((int)fd);
@@ -1061,6 +1085,7 @@ static void compositor_wl_row_close(void *context, int row)
                 compositor_wl.row_blend[row] = 0;
                 memory_zero(&compositor_wl.row_opaque[row], sizeof compositor_wl.row_opaque[row]);
                 compositor_wl_unlend(row);
+                compositor_wl_straight_drop(row);
                 compositor_wl_source_drop(row);
                 compositor_wl_gathers_free(row);
         }
@@ -1078,7 +1103,7 @@ static __attribute__((unused)) int compositor_wl_row_blend(int row)
 // or it is the client's shared memory, which no framebuffer is made of.
 static int compositor_wl_row_unscannable(int row)
 {
-        return compositor_wl.started && wayland_row_owner(row) >= 0 && (!compositor_lent(row) || compositor_wl.lent[row].fd < 0);
+        return compositor_wl.started && wayland_row_owner(row) >= 0 && !compositor_straight(row) && (!compositor_lent(row) || compositor_wl.lent[row].fd < 0);
 }
 
 // Whether a rectangle of a window (x1, y1 to x2, y2 in its pixels) is opaque: the whole window is, or its client's opaque region holds it.
@@ -1252,13 +1277,21 @@ static void compositor_wl_graves_sweep(void)
         compositor_wl_grave_count = kept;
 }
 
+static void compositor_wl_drop_fb(unsigned int fb);
+
 static void compositor_wl_lent_drop_fb(int row)
 {
         unsigned int fb = compositor_wl.lent[row].scan_fb;
 
+        compositor_wl.lent[row].scan_fb = 0;
+        compositor_wl_drop_fb(fb);
+}
+
+// A client buffer's framebuffer removed, now or (while the card may scan it) at the next flip's end (compositor_wl_graves).
+static void compositor_wl_drop_fb(unsigned int fb)
+{
         if (!fb)
                 return;
-        compositor_wl.lent[row].scan_fb = 0;
         if (!compositor_wl_fb_scanned(fb))
         {
                 compositor_wl_rmfb(fb);
@@ -1297,12 +1330,23 @@ static void compositor_wl_scan_refuse(int row, unsigned int fourcc, unsigned int
         compositor_wl.scan_refused.fourcc = fourcc;
         compositor_wl.scan_refused.pitch = pitch;
         compositor_wl.scan_refused.offset = offset;
-        compositor_wl.scan_refused.width = (unsigned int)compositor_wl.lent[row].width;
-        compositor_wl.scan_refused.height = (unsigned int)compositor_wl.lent[row].height;
-        compositor_wl.scan_refused.modifier = compositor_wl.lent[row].modifier;
+        // A lent picture's, or a tiled one's the window is (compositor_wl.straight): the one the framebuffer was asked of.
+        if (compositor_wl.lent[row].pixels)
+        {
+                compositor_wl.scan_refused.width = (unsigned int)compositor_wl.lent[row].width;
+                compositor_wl.scan_refused.height = (unsigned int)compositor_wl.lent[row].height;
+                compositor_wl.scan_refused.modifier = compositor_wl.lent[row].modifier;
+                compositor_wl.lent[row].scan_failed = 1;
+        }
+        else
+        {
+                compositor_wl.scan_refused.width = (unsigned int)compositor_wl.straight[row].picture.width;
+                compositor_wl.scan_refused.height = (unsigned int)compositor_wl.straight[row].picture.height;
+                compositor_wl.scan_refused.modifier = compositor_wl.straight[row].picture.modifier;
+                compositor_wl.straight[row].scan_failed = 1;
+        }
         compositor_wl.scan_refused.error = error;
         compositor_wl.scan_refused.count++;
-        compositor_wl.lent[row].scan_failed = 1;
         if (compositor.table)
         {
                 compositor.table->client_scan_fourcc = fourcc;
@@ -1317,6 +1361,7 @@ static void compositor_wl_scan_refuse(int row, unsigned int fourcc, unsigned int
 }
 
 static unsigned int compositor_lent_fb_as(int row, int opaque);
+static unsigned int compositor_wl_straight_fb(int row, int opaque);
 
 static unsigned int compositor_lent_fb(int row)
 {
@@ -1349,8 +1394,10 @@ static unsigned int compositor_lent_fb_as(int row, int opaque)
                 unsigned long long modifier[4];
         } fb = {0};
 
+        if (!compositor_lent(row))
+                return compositor_wl_straight_fb(row, opaque);
         // A picture with layers over it is not the window: its layers are composed over it (compositor_wl_layers_frames).
-        if (!compositor_lent(row) || compositor_wl.lent[row].fd < 0 || compositor_wl.lent[row].scan_failed || compositor.card < 0 ||
+        if (compositor_wl.lent[row].fd < 0 || compositor_wl.lent[row].scan_failed || compositor.card < 0 ||
             compositor_wl_layers.count[row])
                 return 0;
         fourcc = compositor_wl.lent[row].fourcc ? compositor_wl.lent[row].fourcc : COMPOSITOR_XRGB8888;
@@ -1412,8 +1459,117 @@ static void compositor_lent_fb_fail(int row)
 {
         if (row < 0 || row >= COMPOSITOR_ROWS)
                 return;
+        if (!compositor_lent(row))
+        {
+                compositor_wl.straight[row].scan_failed = 1;
+                compositor_wl_drop_fb(compositor_wl.straight[row].scan_fb);
+                compositor_wl.straight[row].scan_fb = 0;
+                return;
+        }
         compositor_wl.lent[row].scan_failed = 1;
         compositor_wl_lent_drop_fb(row);
+}
+
+/*
+        A tiled dma-buf the whole window is, scanned out as it is: ADDFB2 of the client's buffer with its modifier, and a handle, an offset and a
+        pitch for each of its planes (one for the plain tiled layouts; the DCC ones have the metadata as plane 1, and a retiled one the display's
+        own metadata as plane 2, each in the same buffer or another the client gave). The pairs a client is told for the card's tiled layouts are
+        the primary plane's own (its IN_FORMATS, compositor_wl_dmabuf_tiled_pairs), so the display takes every one of them; one refused is kept
+        (compositor_wl.scan_refused) and not asked again for that buffer, and the window is composed from the table as before. Made the first
+        time it is asked for a buffer, and the same while the window's picture is that buffer: a client that draws into three in turn has one
+        framebuffer made at each commit, and the one it replaces goes when no flip may still be on its way to it (compositor_wl_drop_fb).
+*/
+static int compositor_straight(int row)
+{
+        return row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.straight[row].live;
+}
+
+// Whether the row's picture is a client's buffer the display may be given as it is (compositor_lent_fb): a lent one, or a straight one.
+static int compositor_client_scans(int row)
+{
+        return compositor_lent(row) || compositor_straight(row);
+}
+
+static unsigned int compositor_wl_straight_fb(int row, int opaque)
+{
+        struct wayland_picture *picture;
+        unsigned int fourcc, planes, close[2] = {0, 0};
+        long refused = 0;
+        struct
+        {
+                unsigned int handle, flags;
+                int fd;
+        } prime;
+        struct
+        {
+                unsigned int fb_id, width, height, pixel_format, flags;
+                unsigned int handles[4], pitches[4], offsets[4];
+                unsigned long long modifier[4];
+        } fb = {0};
+
+        if (!compositor_straight(row) || compositor_wl.straight[row].scan_failed || compositor.card < 0 || compositor_wl_layers.count[row])
+                return 0;
+        picture = &compositor_wl.straight[row].picture;
+        fourcc = picture->fourcc ? picture->fourcc : COMPOSITOR_XRGB8888;
+        // Opaque as a lent picture is (compositor_lent_fb_as): the X format of the same bytes, so the display reads no alpha of the client's.
+        if (opaque && (fourcc == 0x34325241u || fourcc == 0x34324241u))
+                fourcc = (fourcc & ~0xffu) | 'X';
+        if (compositor_wl.straight[row].scan_fb && compositor_wl.straight[row].scan_fourcc != fourcc)
+        {
+                compositor_wl_drop_fb(compositor_wl.straight[row].scan_fb);
+                compositor_wl.straight[row].scan_fb = 0;
+        }
+        if (compositor_wl.straight[row].scan_fb)
+                return compositor_wl.straight[row].scan_fb;
+        planes = picture->plane_count < 1 ? 1u : picture->plane_count > 4 ? 4u : (unsigned int)picture->plane_count;
+        fb.width = compositor.table ? compositor.table->width[row] : (unsigned int)picture->width;
+        fb.height = compositor.table ? compositor.table->height[row] : (unsigned int)picture->height;
+        fb.pixel_format = fourcc;
+        fb.flags = 2u; // DRM_MODE_FB_MODIFIERS
+        for (unsigned int at = 0; at < planes; at++)
+        {
+                long fd = at && picture->plane_fd[at] >= 0 ? picture->plane_fd[at] : picture->sync_fd;
+                unsigned int same = 0;
+
+                // A plane in the buffer plane 0 is in has its handle (PRIME gives a buffer one handle on a file); another's is its own.
+                for (unsigned int before = 0; before < at && !same; before++)
+                        if ((before ? picture->plane_fd[before] : picture->sync_fd) == fd)
+                                same = fb.handles[before];
+                if (!same)
+                {
+                        prime.handle = 0, prime.flags = 0, prime.fd = (int)fd;
+                        if (COMPOSITOR_WL_PRIME(prime) != 0 || !prime.handle)
+                        {
+                                refused = COMPOSITOR_WL_SCAN_PRIME;
+                                break;
+                        }
+                        same = prime.handle;
+                }
+                fb.handles[at] = same;
+                fb.pitches[at] = (unsigned int)picture->plane_stride[at];
+                fb.offsets[at] = (unsigned int)picture->plane_offset[at];
+                fb.modifier[at] = picture->modifier;
+        }
+        if (!refused && ((refused = COMPOSITOR_WL_ADDFB(fb)) != 0 || !fb.fb_id))
+                refused = refused < 0 ? -refused : refused ? refused : 22;
+        // The framebuffer holds the buffers: their handles go now (compositor_lent_fb_as says why).
+        for (unsigned int at = 0; at < planes; at++)
+        {
+                unsigned int first = 1;
+
+                for (unsigned int before = 0; before < at; before++)
+                        first = first && fb.handles[before] != fb.handles[at];
+                if (fb.handles[at] && first)
+                        close[0] = fb.handles[at], system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+        }
+        if (refused)
+        {
+                compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], (int)refused);
+                return 0;
+        }
+        compositor_wl.straight[row].scan_fb = fb.fb_id;
+        compositor_wl.straight[row].scan_fourcc = fourcc;
+        return fb.fb_id;
 }
 
 static int compositor_wl_row_async(int row)
@@ -2552,6 +2708,150 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
 }
 
 /*
+        A tiled picture the whole window is, shown as it is. While the screen shows the window from its client's buffer (the primary plane is the
+        buffer, the window fullscreen and on top: compositor_direct_candidate; or the overlay shows all of the window: compositor_plane_candidate),
+        a commit of another such buffer is not read into the table at all: it is the row's straight picture (compositor_wl.straight), its
+        framebuffer is made of the buffer (compositor_wl_straight_fb), and the shim holds the buffer as it holds a lent one, until the frame after
+        the one that replaces it is drawn, and a dma-buf until the flip away from it lands (wayland_presented). The table's picture is then the one
+        before (owed), and the first thing that reads it reads the buffer first (compositor_wl_straight_pay, the texture unit's read of the whole
+        picture into the buffer the row shows): a present that composes the window (it is no longer alone on the screen, a band or a menu is over
+        it, the flip was refused), a commit that is read into the table (its damage goes over the whole last picture), a film of the screen, and
+        the buffer's descriptor closed. Where every commit of a fullscreen game was read so, by a card already busy with the game (box: Half-Life 2
+        through Xwayland in 64K_R_X tiles, the 2-CU iGPU 100 percent busy at 2200 MHz, the card's present 1.3-1.5 ms of it, shown straight 0).
+*/
+static void compositor_wl_straight_drop(int row)
+{
+        if (!compositor_straight(row))
+                return;
+        compositor_wl_drop_fb(compositor_wl.straight[row].scan_fb);
+        memory_zero(&compositor_wl.straight[row], sizeof compositor_wl.straight[row]);
+}
+
+static void compositor_wl_straight_pay(int row)
+{
+        struct wayland_picture whole;
+        struct windows *table = compositor.table;
+        unsigned int which, *to;
+        long w, h;
+
+        if (!compositor_straight(row) || !compositor_wl.straight[row].owed || !table)
+                return;
+        compositor_wl.straight[row].owed = 0;
+        memory_copy(&whole, &compositor_wl.straight[row].picture, sizeof whole);
+        whole.full = 1, whole.damages = 0, whole.last = 1, whole.blend = 0;
+        which = compositor.front[row] & 1u;
+        w = (long)table->width[row] < whole.width ? (long)table->width[row] : whole.width;
+        h = (long)table->height[row] < whole.height ? (long)table->height[row] : whole.height;
+        to = (unsigned int *)((char *)table + compositor.pixels + ((unsigned long)row * 2 + which) * compositor.buffer);
+        // The client's drawing of it may still be on its card (implicit sync: the display waits for it before it scans the buffer out, and the
+        // commit's read used to wait for it, compositor_wl_dmabuf_ready): read before it is done, the table got half a frame. Waited for here,
+        // COMPOSITOR_WL_STRAIGHT_WAIT_NS at most; explicitly synced, its acquire point was reached before the commit was taken.
+        if (!whole.explicit_sync && whole.sync_fd >= 0)
+        {
+                struct compositor_poll watch = {(int)whole.sync_fd, COMPOSITOR_POLLIN, 0};
+                positive wait[2] = {0, COMPOSITOR_WL_STRAIGHT_WAIT_NS};
+
+                compositor_call(syscall(ppoll), (positive)&watch, 1, (positive)wait, 0, 0, 0);
+        }
+        if (w > 0 && h > 0 && compositor_wl_card_image(row, &whole, to, (unsigned long)compositor_stride(), 0, 0, 0, 0, w, h))
+        {
+                table->client_rects_card++;
+                compositor_wl.laying[row].last = (unsigned char)(which + 1); // the picture is whole in this buffer now
+        }
+}
+
+// Every row's owed read made (compositor_wl_straight_pay) but keep's (-1 for none): the present is to compose what it reads.
+static void compositor_wl_straight_pays(int keep)
+{
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                if (row != keep && compositor_straight(row) && compositor_wl.straight[row].owed)
+                        compositor_wl_straight_pay(row);
+}
+
+/*
+        The row shown straight read from the table by the processor (a film of the screen): the straight picture read into the buffer it shows
+        and waited for, owed or not. The screen is the client's buffer, the last one taken: a commit read into the table is laid into the buffer
+        the row does not show yet, and the film read the one before it there (an older frame, or a half laid one, at a return to straight).
+*/
+static void compositor_wl_straight_settle(int row)
+{
+        if (compositor_straight(row))
+        {
+                compositor_wl.straight[row].owed = 1;
+                compositor_wl_straight_pay(row);
+                compositor_wl_tiled_settle();
+        }
+}
+
+/*
+        Whether the screen shows the row from its buffers now: straight on the primary plane, or on the overlay over all of the window. The last
+        present's word (direct_row), whichever buffer it flipped to: a game that draws faster than the screen commits twice between presents, and
+        asked whether the framebuffer on the screen is the last commit's, every second commit was read into the table. A present that does not
+        show the row so after all reads what it owes first (compositor_wl_straight_pays).
+*/
+static int compositor_wl_straight_shown(int row)
+{
+        if (compositor.direct_row != row || !compositor.showing[row])
+                return 0;
+        if (compositor.plane_row != row)
+                return 1;
+        return compositor.plane_rect[0] == compositor.x[row] && compositor.plane_rect[1] == compositor.y[row] &&
+               compositor.plane_rect[2] == compositor.x[row] + (int)compositor.w[row] && compositor.plane_rect[3] == compositor.y[row] + (int)compositor.h[row];
+}
+
+/*
+        A commit's picture taken as the row's straight one (compositor_wl.straight): 2 when it is not to be read (the screen shows the window from
+        the buffer it replaces), 1 when it is read into the table as well, 0 for a picture that is no tiled buffer the whole window is (the row's
+        straight picture let go of, its owed read made first). A plane in a buffer the descriptor is not, a transform, a viewport, layers over the
+        picture, a picture laid in parts, one the card's texture unit cannot read (there would be no way back to the table) are none.
+*/
+static int compositor_wl_straight_take(int row, const struct wayland_picture *picture, long width, long height)
+{
+        struct wayland_picture *was = &compositor_wl.straight[row].picture;
+        unsigned long dev = 0, ino = 0;
+        int shown, same;
+
+        if (!compositor_wl_tiled(picture) || !picture->last || picture->blend || picture->dest_x || picture->dest_y || width <= 0 || height <= 0 ||
+            picture->width < width || picture->height < height || picture->plane_count > 4 || compositor_wl.laying[row].open ||
+            compositor_wl_layers.pending_row == row || compositor_wl_layers.count[row] || !compositor_wl_tiled_now() ||
+            !compositor_wl_tiled_takes(picture->modifier) || compositor_wl_needs_xform_ordered(picture, width, height, 3))
+        {
+                compositor_wl_straight_pay(row);
+                compositor_wl_straight_drop(row);
+                return 0;
+        }
+        // Shown from its buffers, or hidden under another window that is (straight on the primary plane, the whole screen): either way
+        // nothing reads the table's picture until a present composes the window, which reads what it owes first.
+        shown = (compositor_wl_straight_shown(row) ||
+                 (compositor.direct_row >= 0 && compositor.direct_row != row && compositor.plane_row != compositor.direct_row)) &&
+                compositor.table && width == (long)compositor.table->width[row] && height == (long)compositor.table->height[row];
+        compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
+        same = compositor_straight(row) && compositor_wl.straight[row].dev == dev && compositor_wl.straight[row].ino == ino && ino &&
+               was->modifier == picture->modifier && was->fourcc == picture->fourcc && was->plane_count == picture->plane_count &&
+               was->width == picture->width && was->height == picture->height &&
+               memory_compare(was->plane_offset, picture->plane_offset, sizeof was->plane_offset) == 0 &&
+               memory_compare(was->plane_stride, picture->plane_stride, sizeof was->plane_stride) == 0;
+        // Read into the table, the commit's damage goes over the last picture whole: one owed is read first. Not read, it is the whole window.
+        if (!shown)
+                compositor_wl_straight_pay(row);
+        if (!same)
+        {
+                compositor_wl_drop_fb(compositor_wl.straight[row].scan_fb);
+                compositor_wl.straight[row].scan_fb = 0;
+                compositor_wl.straight[row].scan_failed = 0;
+        }
+        memory_copy(was, picture, sizeof *was);
+        compositor_wl.straight[row].dev = dev;
+        compositor_wl.straight[row].ino = ino;
+        compositor_wl.straight[row].live = 1;
+        compositor_wl.straight[row].owed = (unsigned char)(shown != 0);
+        // A row that was lent a linear buffer is the straight one's now (a read lays over it and lets it go itself).
+        if (shown && compositor_lent(row))
+                compositor_wl_unlend(row);
+        return shown ? 2 : 1;
+}
+
+/*
         A damage rectangle copied by the card instead of the processor: the rectangle sw by sh at (sx, sy) of the client's buffer, into the picture
         being laid at (dx, dy) in the table's buffer to. The card reads the buffer where the processor would: a pool's pages through a read-only map,
         or a dma-buf through its import, which is held for the buffer while it is the one the damage is copied from (compositor_wl.source), and it
@@ -3666,6 +3966,22 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                 compositor_wl.row_opaque[row].y1 = (short)picture->opaque_y;
                 compositor_wl.row_opaque[row].x2 = (short)(picture->opaque_x + picture->opaque_w);
                 compositor_wl.row_opaque[row].y2 = (short)(picture->opaque_y + picture->opaque_h);
+        }
+        // A tiled picture the whole window is, while the screen shows the window from its buffers: not read (compositor_wl_straight_take).
+        if (has_content && !compositor_wl.laying[row].open && compositor_wl_straight_take(row, picture, width, height) == 2)
+        {
+                if (width != (long)table->width[row] || height != (long)table->height[row])
+                {
+                        table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = table->damage_height[row] = 0;
+                        compositor_wl.parts[row].count = 0;
+                }
+                else
+                        compositor_wl_lent_damage(table, row, picture, width, height);
+                compositor_wl_layers.root_refused[row] = 0;
+                table->client_in_place++;
+                __atomic_store_n(&table->frame[row], table->frame[row] + 1, __ATOMIC_RELEASE);
+                compositor_wl_take(row);
+                return WAYLAND_PICTURE_LENT;
         }
         // A picture that is a whole window's, from one buffer, is read where it is (compositor_wl_lend): nothing is copied, and the window is
         // drawn whole from it.
