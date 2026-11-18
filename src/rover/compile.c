@@ -1490,6 +1490,13 @@ static bool rover_place(struct rover_build address_to build, struct rover_rule a
                 return rover_refused(build, "take, but the rule", null,
                                      blocked ? blocked : " is placed in userspace, where the event has been read already");
         }
+        {
+                const char address_to refused =
+                    rover_take_refused(rule, rover_key_of(rule, build->comparison, rover_pool(build)));
+
+                if (refused)
+                        return rover_refused(build, refused + 2, null, null);
+        }
         rule->place = source;
         if (build->want)
                 rule->flags |= ROVER_RULE_PLACED;

@@ -510,6 +510,41 @@ static bool rover_rule_numbers(const struct rover_rule address_to rule,
 
 //      A rule's key: the constant its on line's first filter asks of field 0, when that is a number below ANY.
 static p32 rover_key_of(const struct rover_rule address_to rule, const struct rover_comparison address_to comparisons,
+                        const p8 address_to pool);
+
+/*
+        Why a take cannot stand, or null. The kernel drops an event before
+        its readers only in the input filter, and only a press: the key and
+        button events' presses (spark's stop keys, sleep, the volume,
+        brightness, mute, micmute and rfkill keys, and key down, mouse down,
+        pad down and touch down). A release is taken with its press and never
+        alone, and no other event has a reader to keep it from. A key down
+        rule whose key is a stop key (power, reset, Delete or the keypad's dot
+        with Ctrl and Alt) cannot take it: the stop keys are taken only through
+        their own events, which keep the floor. key is the rule's key.
+*/
+static const char address_to rover_take_refused(const struct rover_rule address_to rule, p32 key)
+{
+        static const p8 presses[] = {1, 2, 3, 4, 7, 8, 9, 10, 11, 14, 15, 23, 25, 27, 29};
+        bool press = false;
+
+        if (!(rule->flags & ROVER_RULE_TAKE))
+                return null;
+        for (positive at = 0; at < sizeof(presses); at++)
+                press = press || rule->event == presses[at];
+        if (rule->event == 24 || rule->event == 26 || rule->event == 28 || rule->event == 30)
+                return "a take on a release, which is taken with its press and never alone";
+        if (!press)
+                return "a take on an event no reader is kept from: only a key's or a button's press can be taken";
+        if (rule->event == 23 && key != ROVER_KEY_ANY &&
+            ((key & 0xffff) == 116 || (key & 0xffff) == 408 ||
+             (((key & 0xffff) == 111 || (key & 0xffff) == 83) &&
+              ((key >> 16) & (ROVER_CHORD_CTRL | ROVER_CHORD_ALT)) == (ROVER_CHORD_CTRL | ROVER_CHORD_ALT))))
+                return "a take on a stop key's key down: take key power, key reset or key ctrl-alt-delete, which keep the floor";
+        return null;
+}
+
+static p32 rover_key_of(const struct rover_rule address_to rule, const struct rover_comparison address_to comparisons,
                         const p8 address_to pool)
 {
         const struct rover_comparison address_to first = comparisons + rule->comparison;
@@ -1625,6 +1660,8 @@ static const char address_to rover_rule_check(const struct rover_table address_t
         //      Only the kernel can drop an event before its readers, and only an event of its own.
         if ((rule->flags & ROVER_RULE_TAKE) && (!kernel || !event || event->source != ROVER_KERNEL))
                 return "a take on a rule outside the kernel";
+        if ((why = rover_take_refused(rule, rover_key_of(rule, table->comparison, table->pool))))
+                return why;
         return null;
 }
 
