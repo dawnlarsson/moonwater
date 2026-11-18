@@ -1631,6 +1631,262 @@ static b32 files_job_step(struct files_model address_to m, struct files_job addr
 }
 
 /*
+        The folder tree (struct files_tree): the folders of the disk as a tree a view shows beside the listing, its nodes in the order they
+        are shown (each node's folders straight after it, one level in), opened and shut by the person. A node opened has its folders read
+        (files_tree_open): its entries looked at without following, the folders among them (a link to a folder is not one) kept in name
+        order, at most FILES_TREE_CHILDREN of them and FILES_TREE_SCAN entries looked through, so a folder of any size costs a bounded
+        read; a node shut lets go of everything under it. Each node is held to the device and inode it was read as, so a path made of
+        the tree (files_tree_path) names what was listed or, when it was swapped since, is found out by the model's own open (it is
+        opened as a named path, files_model_try, and the model says what it found). files_tree_reveal opens the nodes down a path, so the
+        folder shown is in the tree; a folder that is not there is not added.
+*/
+#define FILES_TREE_MOST 4096       // the nodes a tree holds
+#define FILES_TREE_NAMES (FILES_TREE_MOST * 32u) // and the bytes of their names
+#define FILES_TREE_CHILDREN 1024   // the folders a node opened shows at most
+#define FILES_TREE_SCAN 65536      // and the entries looked through to find them
+
+struct files_node
+{
+        p32 name;          // where its name starts in the tree's names
+        p16 length;
+        p16 depth;         // 0 the root
+        b8 open, read;     // its folders are shown; they were read (and it has has of them)
+        p16 has;           // the folders it was read to have
+        p64 inode;
+        p32 device_major, device_minor;
+};
+
+struct files_tree
+{
+        struct files_node address_to node;
+        p8 address_to names;
+        p32 count, names_used;
+        address_any mapped;
+        positive mapped_size;
+};
+
+static positive files_tree_bytes(void)
+{
+        return (positive)FILES_TREE_MOST * sizeof(struct files_node) + FILES_TREE_NAMES;
+}
+
+// The tree's memory, and its root, the folder /. False when there is no memory.
+static b32 files_tree_begin(struct files_tree address_to t)
+{
+        bipolar mapped = (bipolar)system_call_6(syscall(mmap), 0, files_tree_bytes(), 3, 0x22, (positive)-1, 0);
+        file_facts facts;
+
+        memory_fill(t, 0, sizeof(*t));
+        if (mapped < 0 && mapped > -4096)
+                return false;
+        t->mapped = (address_any)mapped, t->mapped_size = files_tree_bytes();
+        t->node = (struct files_node address_to)mapped;
+        t->names = (p8 address_to)mapped + (positive)FILES_TREE_MOST * sizeof(struct files_node);
+        t->names[0] = '/', t->names[1] = end, t->names_used = 2;
+        t->node[0] = (struct files_node){0, 1, 0, false, false, 0, 0, 0, 0};
+        if (file_look_code(AT_FDCWD, (string_address) "/", 0, &facts) >= 0)
+                t->node[0].inode = facts.inode, t->node[0].device_major = facts.device_major, t->node[0].device_minor = facts.device_minor;
+        t->count = 1;
+        return true;
+}
+
+static fn files_tree_end(struct files_tree address_to t)
+{
+        if (t->mapped)
+                system_call_2(syscall(munmap), (positive)t->mapped, t->mapped_size);
+        memory_fill(t, 0, sizeof(*t));
+}
+
+static inline const p8 address_to files_tree_name(const struct files_tree address_to t, p32 at)
+{
+        return t->names + t->node[at].name;
+}
+
+// The place after a node's last one under it: where its folders end.
+static p32 files_tree_after(const struct files_tree address_to t, p32 at)
+{
+        p32 next = at + 1;
+
+        while (next < t->count && t->node[next].depth > t->node[at].depth)
+                next++;
+        return next;
+}
+
+// The node's parent's place, or FILES_NO for the root.
+static p32 files_tree_parent(const struct files_tree address_to t, p32 at)
+{
+        while (at > 0 && at < t->count)
+        {
+                p32 depth = t->node[at].depth;
+
+                for (p32 up = at; up-- > 0;)
+                        if (t->node[up].depth < depth)
+                                return up;
+                break;
+        }
+        return FILES_NO;
+}
+
+// A node's path, the root's names joined with strokes: into, FILES_PATH bytes. False when it would not fit.
+static b32 files_tree_path(const struct files_tree address_to t, p32 at, p8 address_to into)
+{
+        p32 chain[256];
+        int links = 0;
+        positive used = 0;
+
+        for (p32 here = at; here != FILES_NO && here < t->count && links < 256; here = files_tree_parent(t, here))
+                chain[links++] = here;
+        into[used++] = '/';
+        for (int k = links - 2; k >= 0; k--)
+        {
+                const struct files_node address_to n = &t->node[chain[k]];
+
+                if (used + n->length + 2 >= FILES_PATH)
+                        return false;
+                if (used > 1)
+                        into[used++] = '/';
+                memory_copy(into + used, t->names + n->name, n->length);
+                used += n->length;
+        }
+        into[used] = end;
+        return true;
+}
+
+// The names of a node's folders read, in order: the collected names (each with its end) of names_used bytes, count of them.
+static int files_tree_name_order(address_any left, address_any right, address_any context)
+{
+        const p8 address_to names = (const p8 address_to)context;
+
+        return files_name_order(names + *(const p32 address_to)left, names + *(const p32 address_to)right);
+}
+
+/*
+        A node opened: its folders read (once; a node read before shows what it read, and is read again by files_tree_shut then open) and
+        put after it, one level in. False when it cannot be read or there is no room; it is then shown with none.
+*/
+static b32 files_tree_open(struct files_tree address_to t, p32 at)
+{
+        static p8 path[FILES_PATH];
+        static p32 offsets[FILES_TREE_CHILDREN];
+        static p8 found[FILES_TREE_CHILDREN * 64];
+        file_walk walk;
+        struct linux_dirent64 address_to record;
+        file_facts folder;
+        p32 count = 0, scanned = 0, after, depth;
+        positive used = 0, need = 0;
+
+        if (at >= t->count || t->node[at].open)
+                return at < t->count;
+        if (!files_tree_path(t, at, path) || !file_walk_open(&walk, AT_FDCWD, (string_address)path))
+        {
+                t->node[at].read = true, t->node[at].has = 0;
+                return false;
+        }
+        // The folder held to what the node was read as: another one under its path is not this node's.
+        if (file_look_code(walk.handle, (string_address) "", AT_EMPTY_PATH, &folder) < 0 ||
+            (t->node[at].inode && (folder.inode != t->node[at].inode || folder.device_major != t->node[at].device_major ||
+                                   folder.device_minor != t->node[at].device_minor)))
+        {
+                file_walk_close(&walk);
+                t->node[at].read = true, t->node[at].has = 0;
+                return false;
+        }
+        while (count < FILES_TREE_CHILDREN && scanned < FILES_TREE_SCAN && (record = file_walk_next(&walk)))
+        {
+                positive length = string_length((string_address)record->d_name);
+                file_facts facts;
+
+                scanned++;
+                if (file_is_dot((string_address)record->d_name) || record->d_name[0] == '.' || length >= FILES_NAME || used + length + 1 > sizeof(found))
+                        continue;
+                // A folder as it is, not followed: d_type when the disk says it, a look otherwise.
+                if (record->d_type != DT_DIR && (record->d_type != DT_UNKNOWN || file_look_code(walk.handle, (string_address)record->d_name, AT_SYMLINK_NOFOLLOW, &facts) < 0 ||
+                                                 (facts.mode & MODE_FORMAT) != MODE_DIRECTORY))
+                        continue;
+                offsets[count++] = (p32)used;
+                memory_copy(found + used, record->d_name, length + 1);
+                used += length + 1;
+        }
+        if (count > 1)
+                qsort_r(offsets, count, sizeof(p32), files_tree_name_order, found);
+        for (p32 k = 0; k < count; k++)
+                need += string_length((string_address)(found + offsets[k]));
+        after = at + 1, depth = t->node[at].depth + 1u;
+        t->node[at].read = true, t->node[at].has = (p16)count, t->node[at].open = true;
+        if (t->count + count > FILES_TREE_MOST || t->names_used + need + count > FILES_TREE_NAMES)
+        {
+                file_walk_close(&walk);
+                t->node[at].open = false;
+                return false;
+        }
+        // Room after the node, and each folder put there, its device and inode looked at without following.
+        memory_copy(&t->node[after + count], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
+        for (p32 k = 0; k < count; k++)
+        {
+                const p8 address_to name = found + offsets[k];
+                positive length = string_length((string_address)name);
+                struct files_node address_to n = &t->node[after + k];
+                file_facts facts;
+
+                memory_fill(n, 0, sizeof(*n));
+                n->name = t->names_used, n->length = (p16)length, n->depth = (p16)depth;
+                memory_copy(t->names + t->names_used, name, length + 1);
+                t->names_used += (p32)length + 1;
+                if (file_look_code(walk.handle, (string_address)name, AT_SYMLINK_NOFOLLOW, &facts) >= 0)
+                        n->inode = facts.inode, n->device_major = facts.device_major, n->device_minor = facts.device_minor;
+        }
+        t->count += count;
+        file_walk_close(&walk);
+        return true;
+}
+
+// A node shut: every node under it let go (their names stay in the tree's bytes till it is made again), and read again when opened.
+static fn files_tree_shut(struct files_tree address_to t, p32 at)
+{
+        p32 after;
+
+        if (at >= t->count || !t->node[at].open)
+                return;
+        after = files_tree_after(t, at);
+        memory_copy(&t->node[at + 1], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
+        t->count -= after - at - 1;
+        t->node[at].open = false, t->node[at].read = false;
+}
+
+/*
+        The nodes down a path opened, the root first, so the folder at its end shows: the node of the path's last folder (FILES_NO when a
+        folder of it is not in the tree: hidden, gone, or past what a node shows).
+*/
+static p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to path)
+{
+        p32 at = 0;
+        positive start = 1, length = string_length((string_address)path);
+
+        if (!t->count || path[0] != '/')
+                return FILES_NO;
+        while (start < length)
+        {
+                positive stop = start;
+                p32 next = FILES_NO;
+
+                while (stop < length && path[stop] != '/')
+                        stop++;
+                if (!t->node[at].open)
+                        files_tree_open(t, at);
+                for (p32 k = at + 1; k < t->count && t->node[k].depth > t->node[at].depth; k = files_tree_after(t, k))
+                        if (t->node[k].length == stop - start && !memory_compare(t->names + t->node[k].name, path + start, stop - start))
+                        {
+                                next = k;
+                                break;
+                        }
+                if (next == FILES_NO)
+                        return FILES_NO;
+                at = next, start = stop + 1;
+        }
+        return at;
+}
+
+/*
         Copying and moving (struct files_move): files named by their paths (a drop's, a paste's, the browser's own rows) put into a
         folder held open (into), copied or moved, run in steps by a thread of its own (files_move_start) so that a folder of any size
         and a disk of any speed never holds the window, which reads the counts as they go (bytes_done of bytes_total, items_done of

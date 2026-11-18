@@ -21287,7 +21287,7 @@ static struct ui_view address_to ui_view_now; // the view being declared: the la
 
 // A list that is an element (ui_rows) is the list's own code, after the view: its place and layout, its picture, the wheel on it and where it is.
 struct ui_list;
-static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l, const struct ui_node address_to n, int width);
+static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l, const struct ui_node address_to n, const struct ui_node address_to column, int width);
 static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l);
 static b32 ui_view_list_wheel(struct ui address_to ui, struct ui_list address_to l, int x, int y, b32 anywhere, const struct window_event address_to event);
 
@@ -21673,7 +21673,7 @@ static int ui_view_end(struct ui_view address_to v)
                 if (item->control)
                         ui_view_box(ui, n, item->control);
                 if (item->list)
-                        ui_view_list_lay(ui, item->list, n, v->width);
+                        ui_view_list_lay(ui, item->list, n, n->parent >= 0 ? &v->tree.node[n->parent] : n, v->width);
                 if (item->host)
                         *item->host = (struct ui_rect){n->x, n->y, n->w, n->h};
                 if (item->kind == UI_ITEM_BUTTON && item->button >= 0)
@@ -23568,6 +23568,8 @@ struct ui_list
         int hover_at;                      // where the rows were scrolled to when the hover was last hit: moved since, it is hit again (ui_list_draw)
         struct ui_control address_to controls; // two to a row: the row's own (or its switch) and its trailing control
         struct ui_columns address_to columns;  // a details view's: its rows are drawn as cells under these (ui_columns), none else
+        b32 tree;                          // a tree's: each row's label set in by its indent, its expander's chevron before it (ui_list_cells)
+        b32 beside;                        // a view's list beside another (two panes): its rows run across its own column, not the window
 };
 
 static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_row address_to row)
@@ -23715,12 +23717,13 @@ static fn ui_list_place(const struct ui address_to ui, struct ui_list address_to
         scroll container), by ui_view_event. What a press on a row does is the app's
         (ui_list_click). A list the app has not described yet (no describe) is not laid out.
 */
-static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l, const struct ui_node address_to n, int width)
+static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l, const struct ui_node address_to n, const struct ui_node address_to column, int width)
 {
         if (!l->describe)
                 return;
         ui_list_place(ui, l, n->x, n->y, n->w, n->h);
-        l->row_x = 0, l->row_w = width;
+        // A list beside another runs its rows across its own column (the container it is in, its pad with it), not the window.
+        l->row_x = l->beside ? column->x : 0, l->row_w = l->beside ? column->w : width;
         ui_list_layout(ui, l);
 }
 
@@ -24810,6 +24813,14 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
         }
 }
 
+// Whether a press at px (device pixels) on a tree's row of this indent is on its expander's chevron (the room before its label).
+static b32 ui_list_tree_chevron_at(const struct ui address_to ui, const struct ui_list address_to l, int indent, int px)
+{
+        int x = ui_point(px, l->x, l->w) - l->x - ui_dev(ui, UI_INSET) - ui_dev(ui, UI_INDENT) * indent;
+
+        return x >= -ui_dev(ui, 4) && x < ui_dev(ui, UI_INDENT);
+}
+
 // The header's columns placed across [x, x + w) (device pixels): each after the first as wide as the app says (never less than the
 // least), the first what is left (never less than the least either: the last ones then run off the end and are cut).
 static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns address_to c, int x, int y, int w)
@@ -25010,7 +25021,7 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                             ui_role(UI_PRIMARY), null);
         // Under columns the row is its cells; with an indent (a tree's row) its label is set in by it, with the expander's chevron
         // before it.
-        if (l->columns || row.indent)
+        if (l->columns || l->tree)
         {
                 ui_list_cells(ui, l, &row, y, height, ink, quiet);
                 if (trailing)

@@ -78,6 +78,7 @@
 #define FILES_TURN_NS 4000000ll      // steps are taken for this long a pass,
 #define FILES_SHOW_NS 100000000ll    // the entries so far are drawn this often while it reads,
 #define FILES_LOOK_NS 1000000000ll   // and the folder shown is looked at again this often
+#define FILES_TREE_WIDTH 200         // logical pixels of the folder tree beside the rows
 #define FILES_KEY_F5 63
 #define FILES_KEY_R 19
 #define FILES_KEY_H 35
@@ -120,6 +121,8 @@ struct files_big
         struct ui_view view;
         struct files_job job;          // the delete under way, if one is
         struct files_move move;        // the copy or move under way (a drop's, a paste's), on its own thread
+        struct files_tree tree;        // the folder tree beside the rows,
+        struct ui_list tree_list;      // and the kit's list it is drawn as (a tree's rows: indented, with their chevrons)
         char crumb_words[FILES_TRAIL][FILES_NAME * 3 + 4]; // the trail's folders as the band writes them
         char note[256];                // what the foot says of the last thing done, in the language's words with its numbers and names in
         char status[192];              // the foot's words
@@ -166,6 +169,9 @@ static struct
         int drop_row;            // the folder's row the drop goes into, -1 the folder shown
         b64 next_progress;       // when the foot next says how far a copy has gone
         b32 moving;              // a copy or a move was begun and its end is not said yet
+        b32 tree_keys;           // the keys are in the folder tree
+        p32 tree_at;             // the tree's node the keys are on there
+        p32 tree_shown;          // the tree's node of the folder shown, FILES_NO when it is not in the tree
         b32 pasting;             // the clipboard was asked for files to paste: its answer is a paste into the folder shown
         // A properties sheet open (the menu's popup, as lines): of the rows chosen or the cursor's (sheet_all false), or of the folder
         // shown; its size is measured on the move's thread (measuring) and the sheet is opened again with it when that is done.
@@ -281,6 +287,36 @@ static fn files_describe(int id, struct ui_row address_to row)
         files_type_text(type, sizeof(type), m, entry);
         row->cells[1] = size, row->cells[2] = type, row->cells[3] = when;
         row->mark = files_model_chosen(m, (p32)id) && m->chosen_count > 1;
+}
+
+// A node of the folder tree, for its list: its name set in by its depth, a chevron before it unless it was read to have no folders, and
+// the folder shown lit.
+static fn files_tree_describe(int id, struct ui_row address_to row)
+{
+        static char label[FILES_NAME * 3 + 4];
+        const struct files_tree address_to t = &files.big->tree;
+        const struct files_node address_to n = id >= 0 && (p32)id < t->count ? &t->node[id] : null;
+
+        if (!n)
+                return;
+        ui_label_foreign(label, sizeof(label), files_tree_name(t, (p32)id), n->length);
+        row->label = label;
+        row->indent = n->depth;
+        row->expander = n->open ? UI_ROW_EXPANDER_OPEN : n->read && !n->has ? 0 : UI_ROW_EXPANDER_SHUT;
+}
+
+static fn files_tree_damaged(int top, int bottom)
+{
+        (void)top, (void)bottom;
+        files.dirty = true;
+}
+
+// The tree after the folder shown changed: the nodes down to it opened, and it is the lit one (none when it is not in the tree).
+static fn files_tree_follow(void)
+{
+        files.tree_shown = files_tree_reveal(&files.big->tree, files.big->model.path);
+        if (files.tree_shown != FILES_NO)
+                files.tree_at = files.tree_shown;
 }
 
 // The model's order for a column of the header: Name, Size, Type, Modified.
@@ -438,11 +474,22 @@ static fn files_layout(void)
 
         if (!l->describe)
         {
-                l->virtual = true;
+                l->virtual = true, l->beside = true;
                 l->describe = files_describe;
                 l->damaged = files_damaged;
                 l->hover = l->down = -1;
         }
+        if (!files.big->tree_list.describe)
+        {
+                struct ui_list address_to t = &files.big->tree_list;
+
+                t->virtual = true, t->tree = true, t->beside = true;
+                t->describe = files_tree_describe;
+                t->damaged = files_tree_damaged;
+                t->hover = t->down = -1;
+        }
+        files.big->tree_list.total = (int)files.big->tree.count;
+        files.big->tree_list.focus = files.tree_keys ? (int)files.tree_at : files.tree_shown != FILES_NO ? (int)files.tree_shown : -1;
         files_status_text();
         if (!files.path.kind)
         {
@@ -467,12 +514,16 @@ static fn files_layout(void)
                 else
                         ui_host(&files.crumbs_box, .grow = 1, .h = UI_ROW);
         }
-        // The header of the columns, then the rows: the kit's list, its words in from the window's margin and its rows from one edge to
-        // the other, each as cells under the header's titles.
-        ui_col(.class = "rows", .grow = 1)
+        // The folder tree, then the header of the columns over the rows: the kit's lists, their words in from their margins.
+        ui_row(.grow = 1)
         {
-                ui_host(&files.head_box, .h = UI_COLUMNS_H);
-                ui_rows(l, .class = "list", .grow = 1);
+                ui_col(.class = "rows", .w = FILES_TREE_WIDTH, .shrink = 0)
+                        ui_rows(&files.big->tree_list, .class = "list", .grow = 1);
+                ui_col(.class = "rows", .grow = 1)
+                {
+                        ui_host(&files.head_box, .h = UI_COLUMNS_H);
+                        ui_rows(l, .class = "list", .grow = 1);
+                }
         }
         ui_row(.class = "bar")
                 ui_text(files.big->status, .class = "status");
@@ -1207,6 +1258,7 @@ static fn files_moved(void)
         files_trail_note(&files.trail, m->path, m->handle >= 0 ? &m->folder : null);
         files_keep_trim(m, &files.trail);
         files.crumb_focus = files.trail.current;
+        files_tree_follow();
         files.clicked = FILES_NO, files.said = 0;
         // The rows: where they were left for a listing shown as it was left, which is then looked at again at once; else from the top.
         files.reseat = true;
@@ -1610,6 +1662,89 @@ static fn files_menu_do(int id)
         }
 }
 
+// To the tree's node at: its folder shown (opened as a named path: the model says what is there now).
+static fn files_tree_go(p32 at)
+{
+        static p8 path[FILES_PATH];
+        int came;
+
+        if (at >= files.big->tree.count || !files_tree_path(&files.big->tree, at, path))
+                return;
+        came = files_model_try(&files.big->model, (string_address)path);
+        if (came == FILES_READING)
+        {
+                files_moved();
+                return;
+        }
+        files.said = files_state_said(came);
+        files.dirty = true;
+}
+
+// A node opened or shut, the keys kept on it.
+static fn files_tree_toggle(p32 at)
+{
+        struct files_tree address_to t = &files.big->tree;
+
+        if (at >= t->count)
+                return;
+        if (t->node[at].open)
+                files_tree_shut(t, at);
+        else
+                files_tree_open(t, at);
+        files.tree_shown = files_tree_reveal(t, files.big->model.path);
+        files.dirty = true;
+}
+
+/*
+        The keys while they are in the tree: Up and Down move, Home and End to its ends, Right opens a node (or goes to its first folder
+        when it is open), Left shuts it (or goes to its parent when it is shut), Enter and Space show its folder, Tab or Escape give the
+        keys back to the rows. False for a key that is not the tree's.
+*/
+static b32 files_tree_key(const struct window_event address_to event)
+{
+        struct files_tree address_to t = &files.big->tree;
+        int key = (int)event->a, step;
+        p32 at = files.tree_at < t->count ? files.tree_at : 0;
+
+        if (event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT))
+                return false;
+        switch (key)
+        {
+        case UI_KEY_UP: at = at ? at - 1 : 0; break;
+        case UI_KEY_DOWN: at = at + 1 < t->count ? at + 1 : at; break;
+        case UI_KEY_HOME: at = 0; break;
+        case UI_KEY_END: at = t->count ? t->count - 1 : 0; break;
+        case UI_KEY_LEFT:
+        case UI_KEY_RIGHT:
+                step = ui_arrow(key);
+                if (step > 0 && !t->node[at].open)
+                        files_tree_toggle(at);
+                else if (step > 0 && at + 1 < t->count && t->node[at + 1].depth > t->node[at].depth)
+                        at++;
+                else if (step < 0 && t->node[at].open)
+                        files_tree_toggle(at);
+                else if (step < 0 && files_tree_parent(t, at) != FILES_NO)
+                        at = files_tree_parent(t, at);
+                break;
+        case UI_KEY_ENTER:
+        case UI_KEY_ENTER_PAD:
+        case UI_KEY_SPACE:
+                if (!(event->flags & WINDOW_KEY_REPEAT))
+                        files_tree_go(at);
+                break;
+        case UI_KEY_TAB:
+        case UI_KEY_ESCAPE:
+                files.tree_keys = false;
+                break;
+        default: return false;
+        }
+        files.tree_at = at;
+        files.big->tree_list.focus = (int)at;
+        ui_list_reveal(&files.ui, &files.big->tree_list);
+        files.dirty = true;
+        return true;
+}
+
 static b32 files_key(const struct window_event address_to event)
 {
         struct files_model address_to m = &files.big->model;
@@ -1646,9 +1781,16 @@ static b32 files_key(const struct window_event address_to event)
         }
         if (files.crumb_keys && files_crumb_key(event))
                 return true;
+        if (files.tree_keys && files_tree_key(event))
+                return true;
+        // Tab: the rows, the trail, the tree, and the rows again (Shift+Tab is the band's buttons', the kit's).
         if (key == UI_KEY_TAB && !shift && !control && !alt)
         {
-                files.crumb_keys = !files.crumb_keys, files.crumb_focus = files.trail.current, files.dirty = true;
+                if (files.crumb_keys)
+                        files.crumb_keys = false, files.tree_keys = true, files.tree_at = files.tree_shown != FILES_NO ? files.tree_shown : 0;
+                else
+                        files.crumb_keys = true, files.crumb_focus = files.trail.current;
+                files.dirty = true;
                 return true;
         }
         if (key == FILES_KEY_F2)
@@ -1841,6 +1983,7 @@ static b32 files_event(const struct window_event address_to event)
                         break;
                 }
                 ui_list_click(ui, l, event, event->a, event->b);
+                ui_list_click(ui, &files.big->tree_list, event, event->a, event->b);
                 // A crumb under the pointer is the hand's, and is drawn in the ink.
                 files.crumb_hover = files_crumb_at(event->a, event->b);
                 if (files.crumb_hover >= 0)
@@ -1877,6 +2020,24 @@ static b32 files_event(const struct window_event address_to event)
                 }
                 if (down)
                         files.crumb_keys = false, files.crumb_clicked = -1;
+                // The tree: a press on a node's chevron opens or shuts it, anywhere else on it shows its folder; the keys go to the tree.
+                if (event->a == UI_POINTER_LEFT && ui_list_hit(ui, &files.big->tree_list, ui_kit.pointer_x, ui_kit.pointer_y) >= 0)
+                {
+                        struct ui_list address_to tl = &files.big->tree_list;
+                        int node = ui_list_click(ui, tl, event, ui_kit.pointer_x, ui_kit.pointer_y);
+
+                        if (down)
+                                files.tree_keys = true, files.crumb_keys = false;
+                        if (node >= 0 && (p32)node < files.big->tree.count)
+                        {
+                                files.tree_at = (p32)node;
+                                if (ui_list_tree_chevron_at(ui, tl, files.big->tree.node[node].depth, ui_kit.pointer_x))
+                                        files_tree_toggle((p32)node);
+                                else
+                                        files_tree_go((p32)node);
+                        }
+                        break;
+                }
                 // The right button: the menu of the row under the pointer (chosen alone first, unless it is among those chosen), or of the
                 // folder shown where no row is.
                 if (event->a == UI_POINTER_RIGHT)
@@ -1922,7 +2083,8 @@ static fn files_draw(unsigned int address_to pixels)
 
         ui_begin(ui, pixels, files.own.table->stride, files.width, files.height);
         files_layout();
-        l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && !files.crumb_keys;
+        l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && !files.crumb_keys && !files.tree_keys;
+        files.big->tree_list.lit = files.big->tree_list.focus >= 0, files.big->tree_list.keys = files.focused && files.tree_keys;
         ui_view_draw(ui, &files.big->view, files.focused);
         ui_columns_draw(ui, &files.columns);
         if (!files.editing || files.editing == FILES_EDIT_PART)
@@ -2057,10 +2219,13 @@ static int files_open_window(void)
         files.columns.width[1] = 90, files.columns.width[2] = 110, files.columns.width[3] = 140;
         files.columns.sorted = 0, files.columns.hover = files.columns.held = -1;
         files_move_end(&files.big->move);
+        if (!files_tree_begin(&files.big->tree))
+                return 1;
         if (!files.start || !files_model_go(&files.big->model, files.start))
                 files_model_go(&files.big->model, (string_address) "/");
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;
         files_trail_note(&files.trail, files.big->model.path, files.big->model.handle >= 0 ? &files.big->model.folder : null);
+        files_tree_follow();
         ui_app_place(&files_app, ui_px(&files.ui, FILES_WIDTH), ui_px(&files.ui, FILES_HEIGHT));
         return -1;
 }

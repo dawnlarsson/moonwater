@@ -4082,6 +4082,47 @@ static fn browser_moves(void)
         browser_remove_in((string_address) "mv");
 }
 
+/*
+        The folder tree (files_tree_*): a path revealed opens each folder down it from the root, a node's folders are its folders alone
+        in name order (no file, no link to a folder, no hidden one), the path of a node is the path it was made from, and a node shut
+        lets go of everything under it.
+*/
+static fn browser_tree(void)
+{
+        static struct files_tree tree;
+        p8 path[FILES_PATH], made[FILES_PATH];
+        p32 at, sub;
+        b32 revealed, children, shut;
+
+        browser_folder((string_address) "tr");
+        browser_folder((string_address) "tr/b");
+        browser_folder((string_address) "tr/a");
+        browser_folder((string_address) "tr/.hidden");
+        browser_folder((string_address) "tr/a/deep");
+        browser_file((string_address) "tr/file", 3, 0);
+        browser_link((string_address) "a", (string_address) "tr/link");
+        browser_path(path, (string_address) "tr/a/deep");
+        if (!files_tree_begin(&tree))
+        {
+                check("browser: the tree's memory is mapped", false);
+                return;
+        }
+        at = files_tree_reveal(&tree, path);
+        revealed = at != FILES_NO && files_tree_path(&tree, at, made) && string_equals((string_address)made, (string_address)path) &&
+                   tree.node[0].open;
+        browser_path(path, (string_address) "tr");
+        sub = files_tree_reveal(&tree, path);
+        children = sub != FILES_NO && tree.node[sub].open && tree.node[sub].has == 2 && sub + 2 < tree.count &&
+                   tree.node[sub + 1].length == 1 && files_tree_name(&tree, sub + 1)[0] == 'a' && tree.node[sub + 1].open &&
+                   tree.node[sub + 2].depth == tree.node[sub + 1].depth + 1 && files_tree_name(&tree, files_tree_after(&tree, sub + 1))[0] == 'b';
+        files_tree_shut(&tree, sub);
+        shut = !tree.node[sub].open && files_tree_after(&tree, sub) == sub + 1 && (sub + 1 >= tree.count || tree.node[sub + 1].depth <= tree.node[sub].depth);
+        check("browser: the tree opens each folder down a path from the root, a node's folders are its folders in name order (no file, no link, no hidden one), its path is the path, and shut it lets go of what is under it",
+              revealed && children && shut);
+        files_tree_end(&tree);
+        browser_remove_in((string_address) "tr");
+}
+
 static fn browser_asks(void)
 {
         static const p8 hostile[] = "asks/b\nad";
@@ -4218,6 +4259,7 @@ b32 main(void)
         browser_many(address_of model);
         browser_ops(address_of model);
         browser_moves();
+        browser_tree();
         browser_asks();
         browser_apart();
         files_model_close(address_of model);
