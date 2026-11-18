@@ -894,6 +894,7 @@ static void compositor_wl_counts(int dx, int dy, int udx, int udy, positive now)
 static void compositor_wl_hold_keep(void);
 static void compositor_wl_input(void);
 static int compositor_wl_suspends(unsigned int code, int value, int super);
+static int compositor_wl_steam_key(unsigned int code, int value, unsigned int modifiers);
 #else
 // No Wayland shim in the build: no window holds the pointer, and the hand's counts are nobody's.
 static int compositor_wl_locked(void)
@@ -974,6 +975,11 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         modifiers = compositor_modifiers();
         chord = modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+        // Steam's overlay over a game on Wayland: Shift+Tab opens it, and while it is open every key is its own (wayland_host.c).
+        if (compositor_wl_steam_key(code, (int)value, modifiers))
+                return;
+#endif
         if (bit & (CK_HELD_ALT | CK_HELD_ALTGR))
         {
                 if (!(modifiers & WINDOW_KEY_ALT) && compositor.cycle)

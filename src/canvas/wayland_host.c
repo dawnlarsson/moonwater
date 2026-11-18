@@ -6639,6 +6639,10 @@ static void compositor_wl_xreceive(void *context, long client, long which, const
 
 // A Wayland drag over an X window, or the end of a drag across the bridge (xwm.c).
 static long compositor_xwm_xdrag(long what, long row, long x, long y);
+// Steam's overlay in a game on Wayland (xwm.c): what its window wants, and the keys and the pointer sent to the overlay while it is open.
+static int compositor_xwm_steam_wants(unsigned int pid);
+static int compositor_xwm_steam_key(unsigned int pid, unsigned int code, int value, unsigned int modifiers);
+static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, unsigned int flags, int a, int b);
 
 static int compositor_xwm_row_is_x(int row);
 
@@ -6976,6 +6980,16 @@ static void compositor_wl_direct_keys_make(void)
         for (unsigned int at = 0; at < compositor_keys.count; at++)
                 if ((modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) == compositor_keys.modifiers[at])
                         compositor_wl_direct.keys_refused[compositor_keys.code[at] >> 3] |= (unsigned char)(1u << (compositor_keys.code[at] & 7));
+        // A game with Steam's overlay window: its Tab is read in the loop (Shift+Tab is the overlay's), and while the overlay is open
+        // no key is sent from here (every key is the overlay's).
+        {
+                int steam = compositor_xwm_steam_wants(compositor.table ? __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE) : 0);
+
+                if (steam == 2)
+                        return;
+                if (steam)
+                        compositor_wl_direct.keys_refused[CK_KEY_TAB >> 3] |= (unsigned char)(1u << (CK_KEY_TAB & 7));
+        }
         compositor_wl_direct.keys_slot = (int)slot, compositor_wl_direct.keys_fd = compositor_wl.fd[slot], compositor_wl_direct.keys_row = row;
         compositor_wl_direct.keys_valid = 1;
 }
@@ -7588,6 +7602,17 @@ static int compositor_wl_drag_escape(int value)
         reading of a key (its characters, its dead accents) is for its own windows, which a client does by its keymap. True
         when the key was a client's.
 */
+// A key while a game on Wayland with Steam's overlay window has the keys: its Shift+Tab, and every key while the overlay is
+// open, go to the overlay (xwm.c). True when the key was the overlay's.
+static int compositor_wl_steam_key(unsigned int code, int value, unsigned int modifiers)
+{
+        int row;
+
+        if (!compositor_wl.started || !compositor.table || (row = compositor_wl_key_row()) < 0)
+                return 0;
+        return compositor_xwm_steam_key(__atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE), code, value, modifiers);
+}
+
 static int compositor_wl_key(unsigned int code, int value)
 {
         int row;
@@ -7672,6 +7697,9 @@ static void compositor_wl_drain(int row)
                                             under >= 0 ? compositor.pointer_y - compositor.y[under] : 0);
                         continue;
                 }
+                // Steam's overlay open over a game on Wayland: the pointer is the overlay's (xwm.c), and none of it the game's.
+                if (compositor_xwm_steam_pointer(__atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE), type, flags, a, b))
+                        continue;
                 // Whatever the event, the pointer is on this window for the client first.
                 if (wayland.pointer_row != row)
                         wayland_pointer_to(row, type == WINDOW_EVENT_MOTION ? a : compositor.pointer_x - compositor.x[row],
@@ -7727,6 +7755,15 @@ static void compositor_wl_wake(void)
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (rows_has(&compositor.woken, row) && wayland_row_owner(row) >= 0)
                         compositor_wl_drain(row);
+        // Steam's overlay open over the game with the keys: the game's hold of the pointer is let go (the overlay has the pointer,
+        // as on X11), and taken again when it closes.
+        if (compositor.table)
+        {
+                int keys = compositor_wl_key_row();
+
+                wayland_unhold_row(keys >= 0 && compositor_xwm_steam_wants(__atomic_load_n(&compositor.table->pid[keys], __ATOMIC_ACQUIRE)) == 2
+                                           ? keys : -1);
+        }
         if (stats.rows > 0 || stats.clients > 0)
         {
                 int want = compositor_wl_pointer_row(), keys = compositor_wl_key_row();

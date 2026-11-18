@@ -903,6 +903,7 @@ static struct
         long syncobj_ok;
         char drm_node[64];
         long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
+        long unheld_row;                       // a window whose constraints the host holds off (Steam's overlay open over it), -1 for none
         long hint_row, hint_x, hint_y;         // where a lock let go of hinted the pointer is: the row and the place in its picture
         // Requests dispatched, and of them the quiet ones (a lock's hint, a commit with nothing pending: wayland_quiet), over every
         // client: a read whose requests were all quiet changed nothing the host shows (compositor_wl_quiet_turn).
@@ -9399,7 +9400,8 @@ static void wayland_constraint_release(struct wayland_client *c, struct wayland_
 
 /*
         Which constraint holds the pointer: the first, of the clients in order, whose window is under the pointer and has the
-        keys. The others that held it are let go, the one that qualifies is told it holds, and the host is told what is held.
+        keys, and is not the window the host holds constraints off (wayland_unhold_row). The others that held it are let go, the
+        one that qualifies is told it holds, and the host is told what is held.
 */
 static void wayland_constraints_update(void)
 {
@@ -9417,7 +9419,8 @@ static void wayland_constraints_update(void)
                         struct wayland_surface *surface = con->live && con->surface ? &c->surfaces[con->surface - 1] : 0;
                         struct wayland_surface *root = surface && surface->live ? wayland_root_of(c, surface) : 0;
 
-                        if (root && root->row >= 0 && root->row == wayland.pointer_row && root->row == wayland.keyboard_row)
+                        if (root && root->row >= 0 && root->row == wayland.pointer_row && root->row == wayland.keyboard_row &&
+                            root->row != wayland.unheld_row)
                         {
                                 client = slot;
                                 chosen = at;
@@ -9445,6 +9448,16 @@ static void wayland_constraints_update(void)
                 wayland.hold_mode = mode;
                 wayland.host->pointer_hold(wayland.host->context, row, mode);
         }
+}
+
+// The host holds the pointer's constraints off a window (row), or none (-1): a lock or a confinement there is let go of now and
+// taken again, as the protocol's persistent ones are, once the window is not held off.
+WAYLAND_API void wayland_unhold_row(long row)
+{
+        if (row == wayland.unheld_row)
+                return;
+        wayland.unheld_row = row;
+        wayland_constraints_update();
 }
 
 // A surface that is going: its constraints go, and what they held is let go.
@@ -10496,7 +10509,7 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
         if (wayland.screens < 0)
                 wayland.screens = 0;
         wayland_dmabuf_load();
-        wayland.hold_row = wayland.hint_row = wayland.counts_row = -1;
+        wayland.hold_row = wayland.hint_row = wayland.counts_row = wayland.unheld_row = -1;
         return 0;
 }
 

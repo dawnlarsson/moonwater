@@ -101,7 +101,7 @@
 #define COMPOSITOR_XWM_SETUP_NS 5000000000ull        // a connection that has not finished its setup in this long is closed
 #define COMPOSITOR_XWM_TARGETS_MOST 64               // the types of an X copy or drag taken, and their names asked: no toolkit offers more
 #define COMPOSITOR_XWM_BIND_NS 15000000000ull        // nor one whose X server is not a Wayland client by then (the wrapper waits 5 s for it)
-#define COMPOSITOR_XWM_ATOMS 61
+#define COMPOSITOR_XWM_ATOMS 63
 #define COMPOSITOR_XWM_A_PROTOCOLS 0
 #define COMPOSITOR_XWM_A_DELETE 1
 #define COMPOSITOR_XWM_A_NET_STATE 2
@@ -159,6 +159,8 @@
 #define COMPOSITOR_XWM_A_XDND_DESCRIPTIONS 58 // XdndActionDescription
 #define COMPOSITOR_XWM_A_XDND_PRIVATE 59
 #define COMPOSITOR_XWM_A_XDND_LINK 60
+#define COMPOSITOR_XWM_A_STEAM 61            // _MOONWATER_STEAM_OVERLAY: a game's window for Steam's overlay (its pid)
+#define COMPOSITOR_XWM_A_STEAM_OPEN 62       // _MOONWATER_STEAM_OVERLAY_OPEN: whether the overlay is open
 #define COMPOSITOR_XWM_XA_PRIMARY 1
 #define COMPOSITOR_XWM_XA_INTEGER 19
 #define COMPOSITOR_XWM_MOVERESIZE_MOVE 8u
@@ -191,6 +193,8 @@
 #define COMPOSITOR_XWM_PROP_XDND_PROXIED 19   // the XdndProxy of that proxy, which names itself when it is one (window: the X window; slot: the proxy)
 #define COMPOSITOR_XWM_PROP_XDND_ACTIONS 20   // the XdndActionList of an X drag's source (window: the source)
 #define COMPOSITOR_XWM_PROP_XDND_WORDS 21     // its XdndActionDescription (window: the source)
+#define COMPOSITOR_XWM_PROP_STEAM 22          // _MOONWATER_STEAM_OVERLAY of a window (the game's pid)
+#define COMPOSITOR_XWM_PROP_STEAM_OPEN 23     // _MOONWATER_STEAM_OVERLAY_OPEN of that window
 #define COMPOSITOR_XWM_DND_REPLY(what) (((what) >= COMPOSITOR_XWM_PROP_XDND_AWARE && (what) <= COMPOSITOR_XWM_PROP_XDND_SYNC) || \
                                         ((what) >= COMPOSITOR_XWM_PROP_XDND_PROXY && (what) <= COMPOSITOR_XWM_PROP_XDND_WORDS))
 #define COMPOSITOR_XWM_PROTO_DELETE 1u
@@ -255,6 +259,11 @@ struct compositor_xwm_window
         unsigned char no_input;        // 1 if WM_HINTS InputHint is explicitly False
         unsigned int owner;            // the pid of the program whose window it is, as X-Resource says (0 until it has; compositor_xwm_owned)
         unsigned int asking;           // title requests in flight
+        unsigned int steam_pid;        // the game it is Steam's overlay window for (_MOONWATER_STEAM_OVERLAY), 0 for none
+        unsigned char steam_open;      // the overlay is open (_MOONWATER_STEAM_OVERLAY_OPEN): the person's input is the overlay's
+        unsigned char steam_focused;   // told FocusIn, as the renderer takes the hot-key from the window with the focus
+        unsigned char steam_tab;       // the Tab of a Shift+Tab sent it is held: its repeats and its release are the overlay's too
+        int steam_x, steam_y;          // the pointer's last place in the game's window
         unsigned int dirty;            // the shim has not the window's latest title
         char title[COMPOSITOR_XWM_TITLE];
 };
@@ -657,7 +666,8 @@ static const char *const compositor_xwm_names[COMPOSITOR_XWM_ATOMS] = {"WM_PROTO
                                                                 "XdndStatus", "XdndLeave", "XdndDrop", "XdndFinished", "XdndSelection",
                                                                 "XdndTypeList", "XdndActionCopy", "XdndActionMove", "XdndActionAsk",
                                                                 "MULTIPLE", "ATOM_PAIR", "CLIPBOARD_MANAGER", "SAVE_TARGETS", "XdndProxy",
-                                                                "XdndActionList", "XdndActionDescription", "XdndActionPrivate", "XdndActionLink"};
+                                                                "XdndActionList", "XdndActionDescription", "XdndActionPrivate", "XdndActionLink",
+                                                                "_MOONWATER_STEAM_OVERLAY", "_MOONWATER_STEAM_OVERLAY_OPEN"};
 
 static void compositor_xwm_intern(unsigned int at)
 {
@@ -1047,6 +1057,15 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                 }
                 compositor_xwm_title_done(w);
         }
+        else if (p->what == COMPOSITOR_XWM_PROP_STEAM)
+        {
+                // Whose overlay window it is: believed only once X-Resource says the window is that program's own (the owner asked now).
+                w->steam_pid = r.format == XWM_FORMAT_32 && r.value_len >= 4 ? xwm_get32(r.value) : 0;
+                if (w->steam_pid && !w->owner)
+                        compositor_xwm_ask_owner(w->id);
+        }
+        else if (p->what == COMPOSITOR_XWM_PROP_STEAM_OPEN)
+                w->steam_open = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != 0;
         else if (p->what == COMPOSITOR_XWM_PROP_TRANSIENT)
                 w->transient = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != w->id ? xwm_get32(r.value) : 0;
         else if (p->what == COMPOSITOR_XWM_PROP_STATE)
@@ -3814,6 +3833,17 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 w = compositor_xwm_find(e->window, 1);
                 if (w && e->override)
                         w->state |= COMPOSITOR_XWM_OVERRIDE;
+                // A window that is not mapped is still watched for _MOONWATER_STEAM_OVERLAY (its changes, and what it has now).
+                if (w && !e->override && compositor_xwm_at->atoms[COMPOSITOR_XWM_A_STEAM])
+                {
+                        unsigned char req[16];
+                        long n = xwm_enc_select_events(req, sizeof req, e->window, XWM_MASK_PROPERTY_CHANGE);
+
+                        if (n > 0)
+                                compositor_xwm_queue(req, n);
+                        compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_STEAM, compositor_xwm_at->atoms[COMPOSITOR_XWM_A_STEAM],
+                                           COMPOSITOR_XWM_ALLOW_TYPE);
+                }
                 if (w)
                 {
                         w->x = e->x;
@@ -3862,6 +3892,10 @@ static void compositor_xwm_event(const struct xwm_event *e)
                         compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_WM_HINTS, e->atom, 0);
                 else if (e->atom == COMPOSITOR_XWM_XA_WM_NORMAL_HINTS)
                         compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NORMAL_HINTS, e->atom, 0);
+                else if (e->atom && e->atom == compositor_xwm_at->atoms[COMPOSITOR_XWM_A_STEAM])
+                        compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_STEAM, e->atom, COMPOSITOR_XWM_ALLOW_TYPE);
+                else if (e->atom && e->atom == compositor_xwm_at->atoms[COMPOSITOR_XWM_A_STEAM_OPEN])
+                        compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_STEAM_OPEN, e->atom, COMPOSITOR_XWM_ALLOW_TYPE);
                 break;
         case XWM_EV_UNMAP_NOTIFY:
                 w = compositor_xwm_find(e->window, 0);
@@ -4816,6 +4850,161 @@ static long compositor_xwm_xdrag(long what, long row, long px, long py)
         got = compositor_xwm_xdrag_one(what, row, px, py);
         compositor_xwm_at = &compositor_xwm_slots[0];
         return got;
+}
+
+/*
+        STEAM'S OVERLAY IN A GAME ON WAYLAND
+
+        Steam's overlay renderer reads its hot-key and the overlay's input only from X events. In a game that is a Wayland
+        client, steam-overlay-gl.so (the steam profile's preload, test/steam_overlay_gl_shim.c) makes an unmapped X window the
+        renderer takes for the game's, and names the game's pid on it (_MOONWATER_STEAM_OVERLAY), with
+        _MOONWATER_STEAM_OVERLAY_OPEN saying when the overlay is open. While that game's window has the keys, its Shift+Tab is
+        sent to the X window as the X server would send a key (Shift, Tab, their releases), and while the overlay is open every
+        key, motion, button and wheel of the person's is sent there and none to the game, as Steam's overlay has them on X11.
+        The window is believed only when X-Resource says its client is the program the pid names, so no other X client can
+        ask for a program's keys. Events go by SendEvent with no mask, to the client that made the window.
+*/
+static struct compositor_xwm_window *compositor_xwm_steam_window(unsigned int pid)
+{
+        if (!pid || pid == 1)
+                return 0;
+        for (int slot = 0; slot < COMPOSITOR_XWM_SLOTS; slot++)
+        {
+                struct compositor_xwm *x = &compositor_xwm_slots[slot];
+
+                if (x->fd < 0)
+                        continue;
+                for (long at = 0; at < x->window_table.count; at++)
+                        if (x->window[at].id && x->window[at].steam_pid == pid && x->window[at].owner == pid)
+                        {
+                                compositor_xwm_at = x;
+                                return &x->window[at];
+                        }
+        }
+        return 0;
+}
+
+// The modifiers as X's state mask: Shift, Control, Mod1 (Alt), Mod4 (the logo key).
+static unsigned int compositor_xwm_steam_state(unsigned int modifiers)
+{
+        return ((modifiers & WINDOW_KEY_SHIFT) ? 1u : 0u) | ((modifiers & WINDOW_KEY_CONTROL) ? 4u : 0u) |
+               ((modifiers & WINDOW_KEY_ALT) ? 8u : 0u) | ((modifiers & WINDOW_KEY_SUPER) ? 0x40u : 0u);
+}
+
+static void compositor_xwm_steam_send(struct compositor_xwm_window *w, unsigned int type, unsigned int detail, unsigned int state)
+{
+        static unsigned int last;
+        unsigned int now = (unsigned int)(clock_monotonic_nanoseconds() / 1000000);
+        unsigned char event[XWM_EVENT_SIZE], req[64];
+        long n;
+
+        // Each event a later time than the one before: an X client takes a release and a press of one time for a key's repeat.
+        now = now > last ? now : last + 1;
+        last = now;
+        n = xwm_enc_input_event(event, sizeof event, type, detail, now, compositor_xwm_at->root, w->id, w->steam_x, w->steam_y, state);
+        if (n == XWM_EVENT_SIZE && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, 0, event, XWM_EVENT_SIZE)) > 0)
+                compositor_xwm_queue(req, n);
+}
+
+// What the game of pid has: 0 no overlay window, 1 one (its Tab is the compositor's to read), 2 one whose overlay is open.
+static int compositor_xwm_steam_wants(unsigned int pid)
+{
+        struct compositor_xwm_window *w = compositor_xwm_steam_window(pid);
+        int wants = w ? (w->steam_open ? 2 : 1) : 0;
+
+        compositor_xwm_at = &compositor_xwm_slots[0];
+        return wants;
+}
+
+// A key while the game of pid has the keys: true when it went to the overlay (and is not the game's).
+static int compositor_xwm_steam_key(unsigned int pid, unsigned int code, int value, unsigned int modifiers)
+{
+        struct compositor_xwm_window *w = compositor_xwm_steam_window(pid);
+        unsigned int state = compositor_xwm_steam_state(modifiers);
+        int taken = 0;
+
+        if (!w)
+        {
+                compositor_xwm_at = &compositor_xwm_slots[0];
+                return 0;
+        }
+        if (!w->steam_focused)
+        {
+                // FocusIn, mode NotifyNormal, detail NotifyNonlinear: the renderer reads the hot-key of the window with the focus.
+                unsigned char event[XWM_EVENT_SIZE], req[64];
+                long n = xwm_enc_input_event(event, sizeof event, XWM_EVENT_FOCUS_IN, 3, 0, 0, w->id, 0, 0, 0);
+
+                if (n == XWM_EVENT_SIZE && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, 0, event, XWM_EVENT_SIZE)) > 0)
+                        compositor_xwm_queue(req, n);
+                w->steam_focused = 1;
+        }
+        if (code == CK_KEY_TAB && w->steam_tab && value != 1)
+        {
+                // The Tab of the Shift+Tab sent: its repeats and its release are not the game's.
+                if (!value)
+                        w->steam_tab = 0;
+                taken = 1;
+        }
+        else if (w->steam_open)
+        {
+                // The overlay is open: the key is its own, at the X keycode of the evdev code (Xwayland's keymap is the compositor's).
+                if (value != 2 && code + 8 <= 255)
+                        compositor_xwm_steam_send(w, value ? XWM_EVENT_KEY_PRESS : XWM_EVENT_KEY_RELEASE, code + 8, state);
+                taken = 1;
+        }
+        else if (code == CK_KEY_TAB && value == 1 && (modifiers & WINDOW_KEY_SHIFT) &&
+                 !(modifiers & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)))
+        {
+                // Shift+Tab: Shift_L (X keycode 50) down, Tab (23) down and up, Shift up, as a person's keys reach an X window.
+                compositor_xwm_steam_send(w, XWM_EVENT_KEY_PRESS, 50, 0);
+                compositor_xwm_steam_send(w, XWM_EVENT_KEY_PRESS, 23, 1);
+                compositor_xwm_steam_send(w, XWM_EVENT_KEY_RELEASE, 23, 1);
+                compositor_xwm_steam_send(w, XWM_EVENT_KEY_RELEASE, 50, 1);
+                w->steam_tab = 1;
+                taken = 1;
+        }
+        if (taken)
+                compositor_xwm_flush();
+        compositor_xwm_at = &compositor_xwm_slots[0];
+        return taken;
+}
+
+// The pointer on the window of the game of pid (the window's own pixels): true when the overlay is open and it went there.
+static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, unsigned int flags, int a, int b)
+{
+        struct compositor_xwm_window *w = compositor_xwm_steam_window(pid);
+        int taken = 0;
+
+        if (w && w->steam_open)
+        {
+                taken = 1;
+                if (type == WINDOW_EVENT_MOTION)
+                {
+                        w->steam_x = a;
+                        w->steam_y = b;
+                        compositor_xwm_steam_send(w, XWM_EVENT_MOTION_NOTIFY, 0, 0);
+                }
+                else if (type == WINDOW_EVENT_BUTTON)
+                {
+                        // The buttons as X numbers them: left 1, middle 2, right 3.
+                        unsigned int button = a == 0x110 ? 1u : a == 0x112 ? 2u : a == 0x111 ? 3u : 0u;
+
+                        if (button)
+                                compositor_xwm_steam_send(w, (flags & WINDOW_KEY_DOWN) ? XWM_EVENT_BUTTON_PRESS : XWM_EVENT_BUTTON_RELEASE,
+                                                          button, 0);
+                }
+                else if (type == WINDOW_EVENT_WHEEL && !(flags & WINDOW_WHEEL_STOP) && b == 0 && a)
+                {
+                        // A wheel's turn as X's buttons 4 (up) and 5 (down), a press and a release each.
+                        unsigned int button = a > 0 ? 4u : 5u;
+
+                        compositor_xwm_steam_send(w, XWM_EVENT_BUTTON_PRESS, button, 0);
+                        compositor_xwm_steam_send(w, XWM_EVENT_BUTTON_RELEASE, button, 0);
+                }
+                compositor_xwm_flush();
+        }
+        compositor_xwm_at = &compositor_xwm_slots[0];
+        return taken;
 }
 
 static int compositor_xwm_drag_escape(void)

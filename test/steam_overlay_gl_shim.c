@@ -1,14 +1,34 @@
 /*
- * Freestanding LD_PRELOAD shim for OpenGL games under Steam's in-game overlay.
+ * Freestanding LD_PRELOAD library for games under Steam's in-game overlay (steam-overlay-gl.so, i386 and x86_64).
  *
+ * THE GAME'S STATE AROUND THE RENDERER'S DRAWS
  * Steam's overlay renderer (gameoverlayrenderer.so, preloaded into the game) draws the overlay, the FPS corner and its
  * notifications into the game's frame with fixed-function GL (glBegin quads, GL_MODULATE, unit 0) at the game's swap, and
  * leaves the game's GLSL program and the sampler object of unit 0 bound while it does. Mesa runs those quads through the
  * game's last shader, which draws them dark and samples none of the overlay's textures: Half-Life 2 (togl, program and
- * sampler bound at every swap) showed a near-black screen for Shift+Tab and no FPS corner, though the textures it uploaded
- * held the overlay's pixels. Here, a draw made by the renderer (its glBegin, glDrawArrays or glDrawElements) first saves
- * and unbinds the program and the unit-0 sampler, and the renderer's next glPopAttrib (which ends each of its passes)
- * binds them again, so the game finds its state as it left it. Calls made by anything else go straight to the driver.
+ * sampler bound at every swap) showed a near-black screen for Shift+Tab and no FPS corner. Here, a draw made by the renderer
+ * (its glBegin, glDrawArrays or glDrawElements) first saves and unbinds the program and the unit-0 sampler, and the
+ * renderer's next glPopAttrib (which ends each of its passes) binds them again, so the game finds its state as it left it.
+ *
+ * THE OVERLAY IN A GAME ON WAYLAND
+ * The renderer draws into an OpenGL game only at its glXSwapBuffers hook and reads the hot-key only from the X events its
+ * Xlib hooks see; an OpenGL game on Wayland (EGL) gives it neither, and a Vulkan game on Wayland gives Steam's Vulkan layer
+ * the frames but the renderer no hot-key. So, in a game that is a Wayland client (it made a Vulkan Wayland surface, or it
+ * swaps EGL buffers and never opened an X display of its own), this library gives the renderer what an X11 game would,
+ * through the renderer's exported entries only (its hooks of XOpenDisplay, XCreateSimpleWindow, XSelectInput, XNextEvent,
+ * XPending and glXSwapBuffers, resolved by name): a private X connection and an unmapped window of its own, which the
+ * renderer tracks as the game's; for an OpenGL game, at each EGL swap, the renderer's glXSwapBuffers on that window, which
+ * runs its draw into the current EGL frame (glXGetCurrentContext answers for that call; the real swap after it, on a window
+ * with no GLX drawable, is an X error the bridge's own connection ignores); and a thread that hands each X event sent to the window to the renderer through its XNextEvent hook, which is
+ * where the hot-key and the overlay's input are read. Canvas sends the window the person's keys and pointer while the
+ * game has the keys (_MOONWATER_STEAM_OVERLAY on the window names the game's pid; _MOONWATER_STEAM_OVERLAY_OPEN says
+ * whether the overlay is open, so all input goes to it then and none to the game). Anything not found leaves the game as it
+ * was, and one line on standard error says what was missing.
+ *
+ * SDL loads libEGL and libvulkan with dlopen and takes their functions with dlsym, so this library exports dlsym: a lookup
+ * by handle is answered by the next dlsym (the renderer's own hook), with wrappers for libEGL's eglSwapBuffers and libvulkan's
+ * vkGetInstanceProcAddr (a Vulkan layer's own is left alone); RTLD_NEXT is a jump to the next dlsym with the caller's own
+ * return address, as glibc needs.
  *
  * Built into the byte arrays in src/bowl.c (i386 and x86_64) with:
  *   clang -target {i386,x86_64}-linux-gnu -Os -fPIC -shared -nostdlib -ffreestanding -fno-stack-protector \
@@ -20,6 +40,7 @@ typedef unsigned int GLenum;
 typedef int GLint;
 typedef int GLsizei;
 typedef unsigned int GLuint;
+typedef unsigned long XID;
 
 #if defined(__x86_64__)
 typedef struct
@@ -42,15 +63,98 @@ struct dl_phdr_info
 	unsigned short dlpi_phnum;
 };
 
-extern void *dlsym(void *, const char *);
+extern void *dlvsym(void *, const char *, const char *);
+extern void *dlopen(const char *, int);
 extern int dl_iterate_phdr(int (*)(struct dl_phdr_info *, unsigned long, void *), void *);
+extern long write(int, const void *, unsigned long);
+extern int getpid(void);
 
+#define RTLD_DEFAULT ((void *)0)
 #define RTLD_NEXT ((void *)-1l)
+#define RTLD_NOW_GLOBAL 0x102
 #define PT_LOAD 1
 #define GL_ACTIVE_TEXTURE 0x84E0
 #define GL_TEXTURE0 0x84C0
 #define GL_CURRENT_PROGRAM 0x8B8D
 #define GL_SAMPLER_BINDING 0x8919
+#define EGL_HEIGHT 0x3056
+#define EGL_WIDTH 0x3057
+
+#define HIDDEN __attribute__((visibility("hidden")))
+
+/* ---- dlsym ---- */
+
+HIDDEN void *(*next_dlsym)(void *, const char *);
+static void *(*libc_dlsym)(void *, const char *);
+HIDDEN void *overlay_dlsym(void *, const char *);
+HIDDEN void overlay_resolve(void);
+HIDDEN void *overlay_none(void) { return 0; }
+
+#if defined(__x86_64__)
+__asm__(".globl dlsym\n.type dlsym,@function\ndlsym:\n"
+	"  cmpq $-1, %rdi\n  jne 1f\n"
+	"  movq next_dlsym(%rip), %rax\n  testq %rax, %rax\n  jne 2f\n"
+	"  pushq %rdi\n  pushq %rsi\n  subq $8, %rsp\n  call overlay_resolve\n  addq $8, %rsp\n  popq %rsi\n  popq %rdi\n"
+	"  movq next_dlsym(%rip), %rax\n  testq %rax, %rax\n  je overlay_none\n"
+	"2: jmp *%rax\n"
+	"1: jmp overlay_dlsym\n");
+#else
+__asm__(".globl dlsym\n.type dlsym,@function\ndlsym:\n"
+	"  cmpl $-1, 4(%esp)\n  jne 1f\n"
+	"  call 3f\n3: popl %eax\n  addl $_GLOBAL_OFFSET_TABLE_+(.-3b), %eax\n"
+	"  cmpl $0, next_dlsym@GOTOFF(%eax)\n  jne 2f\n"
+	"  call overlay_resolve\n"
+	"  call 4f\n4: popl %eax\n  addl $_GLOBAL_OFFSET_TABLE_+(.-4b), %eax\n"
+	"  cmpl $0, next_dlsym@GOTOFF(%eax)\n  je overlay_none\n"
+	"2: jmp *next_dlsym@GOTOFF(%eax)\n"
+	"1: jmp overlay_dlsym\n");
+#endif
+
+// glibc's own dlsym (by version, so no interposer answers), and the next dlsym after this library (the renderer's hook).
+HIDDEN void overlay_resolve(void)
+{
+	static const char *const versions[] = {"GLIBC_2.34", "GLIBC_2.2.5", "GLIBC_2.0"};
+
+	if (next_dlsym)
+		return;
+	for (unsigned at = 0; !libc_dlsym && at < 3; at++)
+		libc_dlsym = (void *(*)(void *, const char *))dlvsym(RTLD_NEXT, "dlsym", versions[at]);
+	if (libc_dlsym)
+		next_dlsym = (void *(*)(void *, const char *))libc_dlsym(RTLD_NEXT, "dlsym");
+}
+
+// What comes after this library: the renderer's hook where it has one, the library's own function where not.
+static void *after_us(const char *name)
+{
+	overlay_resolve();
+	return libc_dlsym ? libc_dlsym(RTLD_NEXT, name) : 0;
+}
+
+static int same(const char *a, const char *b)
+{
+	while (*a && *a == *b)
+		a++, b++;
+	return *a == *b;
+}
+
+static void say(const char *what, const char *name)
+{
+	static const char head[] = "steam-overlay-gl: the overlay on Wayland is off: ";
+	const char *s = what;
+	unsigned n = 0;
+
+	write(2, head, sizeof(head) - 1);
+	while (s[n])
+		n++;
+	write(2, what, n);
+	for (n = 0; name && name[n]; n++)
+		;
+	if (name)
+		write(2, name, n);
+	write(2, "\n", 1);
+}
+
+/* ---- Steam's renderer: where it is, and the state around its draws ---- */
 
 static unsigned long renderer_low, renderer_high;
 static int renderer_looked;
@@ -102,17 +206,22 @@ static int find_renderer(struct dl_phdr_info *info, unsigned long size, void *un
 	return 1;
 }
 
-// True when the call came from Steam's overlay renderer. Steam puts the renderer in LD_PRELOAD, so it is loaded before the
-// first draw: it is looked for once, then, and a process without it (Xwayland, the webhelper) pays one compare a call.
-static int from_renderer(void *caller)
+// Steam puts the renderer in LD_PRELOAD, so it is loaded before anything asks: it is looked for once.
+static int renderer_present(void)
 {
-	unsigned long at = (unsigned long)caller;
-
 	if (!renderer_looked)
 	{
 		renderer_looked = 1;
 		dl_iterate_phdr(find_renderer, 0);
 	}
+	return renderer_high != 0;
+}
+
+static int from_renderer(void *caller)
+{
+	unsigned long at = (unsigned long)caller;
+
+	renderer_present();
 	return at >= renderer_low && at < renderer_high;
 }
 
@@ -124,10 +233,10 @@ static void unbind_game_state(void)
 		return;
 	if (!real_get_integer)
 	{
-		real_get_integer = (void (*)(GLenum, GLint *))dlsym(RTLD_NEXT, "glGetIntegerv");
-		real_use_program = (void (*)(GLuint))dlsym(RTLD_NEXT, "glUseProgram");
-		real_bind_sampler = (void (*)(GLuint, GLuint))dlsym(RTLD_NEXT, "glBindSampler");
-		real_active_texture = (void (*)(GLenum))dlsym(RTLD_NEXT, "glActiveTexture");
+		real_get_integer = (void (*)(GLenum, GLint *))after_us("glGetIntegerv");
+		real_use_program = (void (*)(GLuint))after_us("glUseProgram");
+		real_bind_sampler = (void (*)(GLuint, GLuint))after_us("glBindSampler");
+		real_active_texture = (void (*)(GLenum))after_us("glActiveTexture");
 	}
 	if (!real_get_integer)
 		return;
@@ -169,7 +278,7 @@ typedef void (*pop_attrib_fn)(void);
 #define NEXT(type, name)                                                                                                  \
 	static type real_##name;                                                                                          \
 	if (!real_##name)                                                                                                 \
-		real_##name = (type)dlsym(RTLD_NEXT, #name);                                                              \
+		real_##name = (type)after_us(#name);                                                                      \
 	if (!real_##name)                                                                                                 \
 		return
 
@@ -203,4 +312,313 @@ void glPopAttrib(void)
 	real_glPopAttrib();
 	if (saved_program >= 0 && from_renderer(__builtin_return_address(0)))
 		bind_game_state();
+}
+
+/* ---- the bridge: a private X window the renderer takes for the game's ---- */
+
+typedef struct
+{
+	int type;
+	unsigned long serial;
+	int send_event;
+	void *display;
+	XID window;
+} XAnyEvent;
+typedef union
+{
+	int type;
+	XAnyEvent any;
+	long pad[24];
+} XEvent;
+
+static int game_x_displays;   // XOpenDisplay calls made by the game itself: one says it is an X11 game
+static int bridge_state;      // 0 not tried, 1 up, -1 off
+static int bridge_gl;         // the game draws with EGL, and the renderer's draw runs at its swaps
+static void *bridge_display;
+static XID bridge_window;
+static int bridge_width = 1920, bridge_height = 1080, bridge_open = -1;
+static long bridge_context[64];
+static int fake_context;
+
+static void *(*x_open)(const char *);
+static XID (*x_create)(void *, XID, int, int, unsigned, unsigned, unsigned, unsigned long, unsigned long);
+static int (*x_select)(void *, XID, long);
+static int (*x_pending)(void *);
+static int (*x_next)(void *, XEvent *);
+static int (*x_flush)(void *);
+static XID (*x_root)(void *, int);
+static int (*x_screen)(void *);
+static int (*x_resize)(void *, XID, unsigned, unsigned);
+static unsigned long (*x_atom)(void *, const char *, int);
+static int (*x_property)(void *, XID, unsigned long, unsigned long, int, int, const void *, int);
+static int (*x_threads)(void);
+static void *(*x_error)(int (*)(void *, void *));
+static void (*r_glx_swap)(void *, XID);
+static int (*r_overlay_open)(void);
+static int (*thread_make)(unsigned long *, const void *, void *(*)(void *), void *);
+
+#define FIND(variable, name, required)                                                                                    \
+	do                                                                                                                \
+	{                                                                                                                 \
+		*(void **)&variable = after_us(name);                                                                     \
+		if (!variable && required)                                                                                \
+		{                                                                                                         \
+			say("not found: ", name);                                                                         \
+			return 0;                                                                                         \
+		}                                                                                                         \
+	} while (0)
+
+static int ignore_x_error(void *display, void *event)
+{
+	(void)display;
+	(void)event;
+	return 0;
+}
+
+// The overlay's state, told to Canvas on the window when it changes.
+static void tell_open(void)
+{
+	int open = r_overlay_open ? r_overlay_open() != 0 : 0;
+	long value = open;
+
+	if (open == bridge_open || !x_atom || !x_property)
+		return;
+	bridge_open = open;
+	x_property(bridge_display, bridge_window, x_atom(bridge_display, "_MOONWATER_STEAM_OVERLAY_OPEN", 0), 6, 32, 0, &value, 1);
+	x_flush(bridge_display);
+}
+
+// Each X event Canvas sends the window goes to the renderer through its XNextEvent hook, which reads the hot-key and the input.
+static void *bridge_pump(void *unused)
+{
+	(void)unused;
+	for (;;)
+	{
+		XEvent event;
+
+		x_next(bridge_display, &event);
+		tell_open();
+	}
+	return 0;
+}
+
+static int bridge_up(int gl)
+{
+	void *display;
+	long pid = getpid();
+	int screen;
+
+	if (!dlopen("libX11.so.6", RTLD_NOW_GLOBAL) || (gl && !dlopen("libGL.so.1", RTLD_NOW_GLOBAL)))
+	{
+		say("cannot load ", gl ? "libX11.so.6 or libGL.so.1" : "libX11.so.6");
+		return 0;
+	}
+	FIND(x_threads, "XInitThreads", 1);
+	FIND(x_open, "XOpenDisplay", 1);
+	FIND(x_create, "XCreateSimpleWindow", 1);
+	FIND(x_select, "XSelectInput", 1);
+	FIND(x_pending, "XPending", 1);
+	FIND(x_next, "XNextEvent", 1);
+	FIND(x_flush, "XFlush", 1);
+	FIND(x_root, "XRootWindow", 1);
+	FIND(x_screen, "XDefaultScreen", 1);
+	FIND(x_resize, "XResizeWindow", 1);
+	FIND(x_atom, "XInternAtom", 1);
+	FIND(x_property, "XChangeProperty", 1);
+	FIND(x_error, "XSetErrorHandler", 0);
+	FIND(r_overlay_open, "IsOverlayEnabled", 1);
+	FIND(thread_make, "pthread_create", 1);
+	if (gl)
+		FIND(r_glx_swap, "glXSwapBuffers", 1);
+	x_threads();
+	display = x_open(0);
+	if (!display)
+	{
+		say("no X display (DISPLAY)", 0);
+		return 0;
+	}
+	if (x_error)
+		x_error(ignore_x_error);
+	screen = x_screen(display);
+	bridge_window = x_create(display, x_root(display, screen), 0, 0, (unsigned)bridge_width, (unsigned)bridge_height, 0, 0, 0);
+	if (!bridge_window)
+	{
+		say("no window", 0);
+		return 0;
+	}
+	// KeyPress, KeyRelease, ButtonPress, ButtonRelease, PointerMotion, FocusChange: what Canvas sends and the renderer reads.
+	x_select(display, bridge_window, 1 | 2 | 4 | 8 | 64 | (1l << 21));
+	x_property(display, bridge_window, x_atom(display, "_MOONWATER_STEAM_OVERLAY", 0), 6, 32, 0, &pid, 1);
+	x_flush(display);
+	bridge_display = display;
+	bridge_gl = gl;
+	tell_open();
+	{
+		unsigned long thread;
+
+		if (thread_make(&thread, 0, bridge_pump, 0) != 0)
+		{
+			say("no thread", 0);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int bridge(int gl)
+{
+	if (bridge_state == 0)
+	{
+		bridge_state = -1;
+		if (renderer_present() && !game_x_displays && bridge_up(gl))
+			bridge_state = 1;
+	}
+	return bridge_state > 0;
+}
+
+// The game's own X displays: a game that opens one draws through X, where the renderer works by itself.
+void *XOpenDisplay(const char *name)
+{
+	static void *(*real)(const char *);
+
+	if (!real)
+		real = (void *(*)(const char *))after_us("XOpenDisplay");
+	if (!from_renderer(__builtin_return_address(0)))
+		game_x_displays++;
+	return real ? real(name) : 0;
+}
+
+// glXGetCurrentContext answers for the renderer's draw at an EGL swap, which asks it before drawing.
+void *glXGetCurrentContext(void)
+{
+	static void *(*real)(void);
+
+	if (fake_context)
+		return bridge_context;
+	if (!real)
+		real = (void *(*)(void))after_us("glXGetCurrentContext");
+	return real ? real() : 0;
+}
+
+/* ---- EGL and Vulkan, as SDL takes them ---- */
+
+static unsigned (*real_egl_swap)(void *, void *);
+static unsigned (*real_egl_query)(void *, void *, int, int *);
+
+unsigned eglSwapBuffers(void *display, void *surface)
+{
+	if (!real_egl_swap)
+		real_egl_swap = (unsigned (*)(void *, void *))after_us("eglSwapBuffers");
+	if (!real_egl_swap)
+		return 0;
+	if (bridge(1) && bridge_gl)
+	{
+		int width = 0, height = 0;
+
+		if (!real_egl_query)
+			real_egl_query = (unsigned (*)(void *, void *, int, int *))after_us("eglQuerySurface");
+		if (real_egl_query && real_egl_query(display, surface, EGL_WIDTH, &width) && real_egl_query(display, surface, EGL_HEIGHT, &height) &&
+		    width > 0 && height > 0 && (width != bridge_width || height != bridge_height))
+		{
+			bridge_width = width;
+			bridge_height = height;
+			x_resize(bridge_display, bridge_window, (unsigned)width, (unsigned)height);
+		}
+		// The renderer draws for the window it tracks; its own glXSwapBuffers after the draw, on a window GLX has no drawable
+		// for, is an X error the bridge's connection ignores.
+		fake_context = 1;
+		r_glx_swap(bridge_display, bridge_window);
+		fake_context = 0;
+		tell_open();
+	}
+	return real_egl_swap(display, surface);
+}
+
+static int (*real_vk_wayland_surface)(void *, const void *, const void *, void *);
+static void *(*real_vk_instance_proc)(void *, const char *);
+
+static int overlay_vk_wayland_surface(void *instance, const void *info, const void *allocator, void *surface)
+{
+	bridge(0);
+	return real_vk_wayland_surface(instance, info, allocator, surface);
+}
+
+// Handed to SDL in place of libvulkan's (overlay_dlsym), never exported: a layer's own vkGetInstanceProcAddr stays its own.
+HIDDEN void *overlay_vk_instance_proc(void *instance, const char *name)
+{
+	void *found;
+
+	if (!real_vk_instance_proc)
+		return 0;
+	found = real_vk_instance_proc(instance, name);
+	if (found && name && same(name, "vkCreateWaylandSurfaceKHR") && renderer_present())
+	{
+		real_vk_wayland_surface = (int (*)(void *, const void *, const void *, void *))found;
+		return (void *)overlay_vk_wayland_surface;
+	}
+	return found;
+}
+
+// Whether address is in a loaded module whose name has want in it (libEGL, libvulkan): the loader's own function, not a layer's.
+static const char *module_want;
+static unsigned long module_address;
+static int module_found;
+
+static int module_has(struct dl_phdr_info *info, unsigned long size, void *unused)
+{
+	(void)size;
+	(void)unused;
+	for (unsigned short at = 0; at < info->dlpi_phnum; at++)
+		if (info->dlpi_phdr[at].p_type == PT_LOAD && module_address >= info->dlpi_addr + info->dlpi_phdr[at].p_vaddr &&
+		    module_address < info->dlpi_addr + info->dlpi_phdr[at].p_vaddr + info->dlpi_phdr[at].p_memsz)
+		{
+			const char *name = info->dlpi_name;
+
+			for (; name && *name; name++)
+			{
+				int at2 = 0;
+
+				while (module_want[at2] && name[at2] == module_want[at2])
+					at2++;
+				if (!module_want[at2])
+				{
+					module_found = 1;
+					break;
+				}
+			}
+			return 1;
+		}
+	return 0;
+}
+
+static int in_module(void *address, const char *want)
+{
+	module_want = want;
+	module_address = (unsigned long)address;
+	module_found = 0;
+	dl_iterate_phdr(module_has, 0);
+	return module_found;
+}
+
+// A lookup by handle: the next dlsym answers, and SDL's eglSwapBuffers (libEGL's) and vkGetInstanceProcAddr (libvulkan's, the
+// loader's: a layer's own is left as it is) are this library's.
+HIDDEN void *overlay_dlsym(void *handle, const char *name)
+{
+	void *found;
+
+	overlay_resolve();
+	found = next_dlsym ? next_dlsym(handle, name) : 0;
+	if (!found || !name || !renderer_present())
+		return found;
+	if (same(name, "eglSwapBuffers") && in_module(found, "libEGL"))
+	{
+		real_egl_swap = (unsigned (*)(void *, void *))found;
+		return (void *)eglSwapBuffers;
+	}
+	if (same(name, "vkGetInstanceProcAddr") && in_module(found, "libvulkan"))
+	{
+		real_vk_instance_proc = (void *(*)(void *, const char *))found;
+		return (void *)overlay_vk_instance_proc;
+	}
+	return found;
 }

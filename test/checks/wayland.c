@@ -10053,6 +10053,24 @@ static void xw_test_client_message(unsigned char *ev)
         XWCHECK(xwm_enc_client_message(ev, 31, 0x00400001, 0x100, data, 2) == XWM_ERR_SPACE, "a ClientMessage into 31 bytes is refused");
 }
 
+// The input events the window manager sends Steam's overlay window of a game on Wayland: a key, a motion, a focus.
+static void xw_test_input_event(unsigned char *ev)
+{
+        static const unsigned char key[32] = {0x02, 23, 0, 0, 0x10, 0x27, 0, 0, 0x08, 0x04, 0, 0, 0x01, 0x00, 0x40, 0x00,
+                0, 0, 0, 0, 0x0a, 0, 0x14, 0, 0x0a, 0, 0x14, 0, 0x01, 0x00, 0x01, 0};
+        static const unsigned char focus[32] = {0x09, 0x03, 0, 0, 0x01, 0x00, 0x40, 0x00, 0x00};
+        long n;
+
+        n = xwm_enc_input_event(ev, 32, XWM_EVENT_KEY_PRESS, 23, 10000, 0x408, 0x00400001, 10, 20, 1);
+        XWCHECK(n == 32 && xw_same(ev, key, 32), "a KeyPress: keycode, time, root, window, the place twice, Shift's state, same-screen");
+        n = xwm_enc_input_event(ev, 32, XWM_EVENT_FOCUS_IN, 3, 10000, 0x408, 0x00400001, 10, 20, 0);
+        XWCHECK(n == 32 && xw_same(ev, focus, 32), "a FocusIn: NotifyNonlinear, the window, NotifyNormal, the rest zero");
+        n = xwm_enc_input_event(ev, 32, XWM_EVENT_MOTION_NOTIFY, 0, 1, 0x408, 0x00400001, -5, 70000, 0);
+        XWCHECK(n == XWM_ERR_ARG, "a motion outside 16 bits is refused");
+        XWCHECK(xwm_enc_input_event(ev, 32, XWM_EVENT_CLIENT_MESSAGE, 0, 0, 0, 1, 0, 0, 0) == XWM_ERR_ARG, "a ClientMessage is not an input event");
+        XWCHECK(xwm_enc_input_event(ev, 31, XWM_EVENT_KEY_RELEASE, 23, 0, 0, 1, 0, 0, 0) == XWM_ERR_SPACE, "an input event into 31 bytes is refused");
+}
+
 static void xw_test_send_event(void)
 {
         static const unsigned char want[44] = {0x19, 0x00, 0x0b, 0x00, 0x01, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -10071,6 +10089,7 @@ static void xw_test_send_event(void)
         XWCHECK(xwm_enc_send_event(out, sizeof out, 0, 0x00400001, 0, ev, 32) == XWM_ERR_ARG, "an event of type 99 is refused");
         ev[0] = 33;
         XWCHECK(xwm_enc_send_event(out, 43, 0, 0x00400001, 0, ev, 32) == XWM_ERR_SPACE, "SendEvent into 43 bytes is refused");
+        xw_test_input_event(ev);
 }
 
 /* Every encoder into a buffer of exactly its size writes it, and into one byte less answers XWM_ERR_SPACE (the buffers are

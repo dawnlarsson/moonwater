@@ -77,6 +77,11 @@
 #define XWM_ERROR 0
 #define XWM_REPLY 1
 #define XWM_EVENT_FIRST 2
+#define XWM_EVENT_KEY_PRESS 2
+#define XWM_EVENT_KEY_RELEASE 3
+#define XWM_EVENT_BUTTON_PRESS 4
+#define XWM_EVENT_BUTTON_RELEASE 5
+#define XWM_EVENT_MOTION_NOTIFY 6
 #define XWM_EVENT_ENTER 7
 #define XWM_EVENT_LEAVE 8
 #define XWM_EVENT_FOCUS_IN 9
@@ -746,6 +751,44 @@ XWM_API long xwm_enc_client_message(unsigned char *out, unsigned long cap, unsig
         xwm_put32(out + 8, type);
         for (unsigned long i = 0; i < count; i++)
                 xwm_put32(out + 12 + XWM_UNIT * i, data[i]);
+        return XWM_EVENT_SIZE;
+}
+
+/*
+        An input event of the core protocol as the 32 bytes SendEvent carries, for a window of a client that reads it from
+        the window manager: KeyPress, KeyRelease, ButtonPress, ButtonRelease and MotionNotify (detail the keycode or the
+        button; the pointer at x, y in the window, the same in the root; state the modifiers' and buttons' mask, same-screen
+        set), or FocusIn (detail NotifyNonlinear and the like, state its mode). Its sequence is zero: the server sets it.
+*/
+XWM_API long xwm_enc_input_event(unsigned char *out, unsigned long cap, unsigned int type, unsigned int detail, unsigned int time,
+                                 unsigned int root, unsigned int window, int x, int y, unsigned int state)
+{
+        if (!out)
+                return XWM_ERR_ARG;
+        if ((type < XWM_EVENT_KEY_PRESS || type > XWM_EVENT_MOTION_NOTIFY) && type != XWM_EVENT_FOCUS_IN)
+                return XWM_ERR_ARG;
+        if (detail > 255 || x < -32768 || x > 32767 || y < -32768 || y > 32767 || state > 0xffffu)
+                return XWM_ERR_ARG;
+        if (cap < XWM_EVENT_SIZE)
+                return XWM_ERR_SPACE;
+        xwm_zero(out, XWM_EVENT_SIZE);
+        out[0] = (unsigned char)type;
+        out[1] = (unsigned char)detail;
+        if (type == XWM_EVENT_FOCUS_IN)
+        {
+                xwm_put32(out + 4, window);
+                out[8] = (unsigned char)state;
+                return XWM_EVENT_SIZE;
+        }
+        xwm_put32(out + 4, time);
+        xwm_put32(out + 8, root);
+        xwm_put32(out + 12, window);
+        xwm_put16(out + 20, (unsigned int)x & 0xffffu);
+        xwm_put16(out + 22, (unsigned int)y & 0xffffu);
+        xwm_put16(out + 24, (unsigned int)x & 0xffffu);
+        xwm_put16(out + 26, (unsigned int)y & 0xffffu);
+        xwm_put16(out + 28, state);
+        out[30] = 1;
         return XWM_EVENT_SIZE;
 }
 
