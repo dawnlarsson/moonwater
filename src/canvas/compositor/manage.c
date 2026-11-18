@@ -3620,8 +3620,6 @@ static void compositor_door_gone(int row)
 */
 static void compositor_door(int row, int returned)
 {
-        p8 name[48];
-
         if (compositor_door_ask((unsigned int)row, returned & COMPOSITOR_POLLHUP ? COMPOSITOR_DOOR_REOPEN : COMPOSITOR_DOOR_DRAIN))
         {
                 rows_add(&compositor_doors.busy, row);
@@ -3637,9 +3635,7 @@ static void compositor_door(int row, int returned)
         if (!(returned & COMPOSITOR_POLLHUP))
                 return;
 
-        windows_door_name((char *)name, (unsigned int)row, 0);
-        system_close(compositor.door[row]);
-        compositor.door[row] = (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        compositor_door_reopen((unsigned int)row);
         compositor_door_gone(row);
 }
 

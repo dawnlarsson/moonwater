@@ -2763,7 +2763,7 @@ static long compositor_door_make(unsigned int row)
                 if (handle < 0)
                 {
                         if (wake)
-                                system_close(compositor.door[row]);
+                                system_close(compositor.door[row]), compositor.door[row] = -1; // no number kept that the kernel may give again
                         return handle;
                 }
                 if (wake)

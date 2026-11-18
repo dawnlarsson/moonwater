@@ -1628,6 +1628,17 @@ static void compositor_door_told(struct compositor_rows *into, unsigned int slot
         compositor_call(syscall(write), (positive)compositor_doors.done, (positive)&one, sizeof one, 0, 0, 0);
 }
 
+// A row's door opened again after its writer closed it (a FIFO's reader sees the hang-up for ever until it does): the loop's (compositor_door) and
+// the door's thread's (compositor_door_row) one way of it.
+static void compositor_door_reopen(unsigned int row)
+{
+        p8 name[48];
+
+        windows_door_name((char *)name, row, 0);
+        system_close(compositor.door[row]);
+        __atomic_store_n(&compositor.door[row], (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC), __ATOMIC_RELEASE);
+}
+
 // A row's work: its wake written, its door drained, and its door opened again when it closed.
 static void compositor_door_row(unsigned int row, unsigned int asked)
 {
@@ -1638,14 +1649,7 @@ static void compositor_door_row(unsigned int row, unsigned int asked)
         if (asked & (COMPOSITOR_DOOR_DRAIN | COMPOSITOR_DOOR_REOPEN))
                 compositor_door_drain(compositor.door[row]);
         if (asked & COMPOSITOR_DOOR_REOPEN)
-        {
-                p8 name[48];
-
-                windows_door_name((char *)name, row, 0);
-                system_close(compositor.door[row]);
-                __atomic_store_n(&compositor.door[row], (int)system_open_at(AT_FDCWD, name, FILE_READ | O_NONBLOCK | O_CLOEXEC), __ATOMIC_RELEASE);
-                compositor_door_told(&compositor_doors.reopened, row);
-        }
+                compositor_door_reopen(row), compositor_door_told(&compositor_doors.reopened, row);
         else if (asked & COMPOSITOR_DOOR_DRAIN)
                 compositor_door_told(&compositor_doors.drained, row);
 }
