@@ -431,6 +431,39 @@ static fn machine_run_scripts(void)
         system_call_3(syscall(unlinkat), AT_FDCWD, (positive)dir, 0x200);
 }
 
+/*
+        The runner's children (rover_runner_child): a pid is never dropped. A hundred children that end at once are all
+        reaped, where past 64 they were left as zombies for good.
+*/
+static fn machine_runner_children(void)
+{
+        positive left = 0;
+
+        for (positive at = 0; at < 100; at++)
+        {
+                bipolar pid = system_fork();
+
+                if (pid == 0)
+                        system_call_1(syscall(exit), 0);
+                if (pid > 0)
+                        rover_runner_child(pid);
+        }
+        for (positive tries = 0; tries < 200; tries++)
+        {
+                timespec pause = {0, 10000000};
+
+                rover_runner_reap();
+                left = 0;
+                for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
+                        left += rover_runner.children[at] != 0;
+                if (!left)
+                        break;
+                system_call_2(syscall(nanosleep), (positive)&pause, 0);
+        }
+        check("a hundred children of the runner are all reaped, none dropped and left a zombie",
+              !left && system_wait4_retry(-1, null, 1, null) < 0);
+}
+
 static fn machine_stop_self(void)
 {
         p8 held = host_machine_self;
@@ -1888,6 +1921,7 @@ b32 main(void)
         machine_stop_self();
         machine_pin_numbers();
         machine_run_scripts();
+        machine_runner_children();
         machine_sntp();
         machine_auto();
         machine_services();

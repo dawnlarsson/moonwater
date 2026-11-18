@@ -36,7 +36,7 @@
 #define ROVER_KEYS_FILE "/run/moonwater/keys"
 #define ROVER_KEYS_FIRE "/run/moonwater/keys.fire"
 #define ROVER_VERDICT "/run/moonwater/verdict"
-#define ROVER_CHILDREN_MOST 64u
+#define ROVER_CHILDREN_MOST 1024u
 #define ROVER_QUEUE_MOST 32u
 #define ROVER_STOP_GRACE_NS 3000000000ull // TERM, then KILL after this
 #define ROVER_KEYS_MOST 32u
@@ -122,6 +122,7 @@ static fn rover_runner_say(string_address first, string_address second, string_a
 
 static const p8 address_to rover_runner_pool_word(p32 at, positive address_to length);
 static fn rover_runner_child(bipolar pid);
+static fn rover_runner_leaving(bipolar pid);
 static fn rover_runner_find_everys(void);
 static fn rover_runner_keys(void);
 
@@ -177,10 +178,15 @@ static bool rover_runner_adopt(p32 table)
         for (positive k = 0; k < had; k++)
                 if (!kept[k] && before[k].pid > 0)
                 {
+                        p8 path[96];
+
                         (void)system_call_2(syscall(kill), (positive)before[k].pid, 15);
                         if (before[k].pidfd >= 0)
                                 system_close(before[k].pidfd);
-                        rover_runner_child(before[k].pid);
+                        rover_runner_leaving(before[k].pid);
+                        if (string_join(path, sizeof(path), HOST_STATE "/", (string_address)names[k]) &&
+                            string_join(path, sizeof(path), (string_address)path, ".pid"))
+                                (void)system_remove_at(AT_FDCWD, (string_address)path, 0);
                 }
         rover_runner.table = table;
         rover_runner.stood = clock_monotonic_nanoseconds() + ROVER_STOOD_NS;
@@ -380,22 +386,78 @@ static p64 rover_runner_kernel_page(void)
 
 // ---- children --------------------------------------------------------------
 
-static fn rover_runner_child(bipolar pid)
-{
-        for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
-                if (!rover_runner.children[at])
-                {
-                        rover_runner.children[at] = pid;
-                        return;
-                }
-}
-
 static fn rover_runner_reap(void)
 {
         for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
                 if (rover_runner.children[at] &&
                     system_wait4_retry(rover_runner.children[at], null, 1 /* WNOHANG */, null) != 0)
                         rover_runner.children[at] = 0;
+}
+
+/*
+        A child kept to be reaped. A pid is never dropped (one was, past 64,
+        and left a zombie for good): with every slot taken the ended are
+        reaped first, and with none ended the oldest is waited for here,
+        which holds the runner only while a thousand children run at once.
+*/
+static fn rover_runner_child(bipolar pid)
+{
+        for (positive pass = 0; pass < 2; pass++)
+        {
+                for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
+                        if (!rover_runner.children[at])
+                        {
+                                rover_runner.children[at] = pid;
+                                return;
+                        }
+                rover_runner_reap();
+        }
+        rover_runner_say("a thousand children run at once: the runner waits for the oldest", null, null);
+        (void)system_wait4_retry(rover_runner.children[0], null, 0, null);
+        rover_runner.children[0] = pid;
+}
+
+/*
+        A service a reload dropped: TERM was sent, and it is reaped as a child,
+        and KILLed if it is still there after the grace a stop gives.
+*/
+#define ROVER_LEAVING_MOST 16u
+static struct
+{
+        bipolar pid;
+        p64 kill_at;
+} rover_runner_gone[ROVER_LEAVING_MOST];
+
+static fn rover_runner_leaving(bipolar pid)
+{
+        for (positive at = 0; at < ROVER_LEAVING_MOST; at++)
+                if (!rover_runner_gone[at].pid)
+                {
+                        rover_runner_gone[at].pid = pid;
+                        rover_runner_gone[at].kill_at = clock_monotonic_nanoseconds() + ROVER_STOP_GRACE_NS;
+                        return;
+                }
+        (void)system_call_2(syscall(kill), (positive)pid, 9);
+        rover_runner_child(pid);
+}
+
+static fn rover_runner_gone_look(p64 now)
+{
+        for (positive at = 0; at < ROVER_LEAVING_MOST; at++)
+        {
+                bipolar pid = rover_runner_gone[at].pid;
+
+                if (!pid)
+                        continue;
+                if (system_wait4_retry(pid, null, 1 /* WNOHANG */, null) != 0)
+                        rover_runner_gone[at].pid = 0;
+                else if (now >= rover_runner_gone[at].kill_at)
+                {
+                        (void)system_call_2(syscall(kill), (positive)pid, 9);
+                        rover_runner_gone[at].pid = 0;
+                        rover_runner_child(pid);
+                }
+        }
 }
 
 //      A program started from words: its own session, standard input nothing, its output where it is told. extra is
@@ -420,7 +482,7 @@ static bipolar rover_runner_exec(string_address address_to argv, string_address 
         system_call_1(syscall(setsid), 0);
         bipolar null_handle = system_open_at(AT_FDCWD, "/dev/null", FILE_READ);
         bipolar out = system_open_at_mode(AT_FDCWD, log_path ? log_path : (string_address) "/dev/kmsg",
-                                          FILE_WRITE | O_CREAT | O_APPEND, 0600);
+                                          FILE_WRITE | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
         if (null_handle >= 0)
                 system_descriptor_move(null_handle, 0);
         if (out >= 0)
@@ -547,10 +609,15 @@ static fn rover_runner_start(positive which)
                 argv[at] = (string_address)rover_runner_pool_word(rover_runner.view.argument[service->argument + at].index,
                                                                   &length);
         argv[count] = null;
+        //      A ready path left by the life before is no word of this one's: removed before the start.
+        if (service->ready)
+                (void)system_remove_at(AT_FDCWD, (string_address)rover_runner_pool_word(service->ready, &length), 0);
         running->pid = rover_runner_exec(argv,
                                          service->log ? (string_address)rover_runner_pool_word(service->log, &length) : null,
                                          null);
         running->pidfd = running->pid > 0 ? system_call_2(syscall(pidfd_open), (positive)running->pid, 0) : -1;
+        if (running->pidfd < 0)
+                running->pidfd = -1; // looked at by its pid each turn (rover_runner_services)
         running->started = clock_monotonic_nanoseconds();
         running->stopping = 0;
         running->up = 0;
@@ -587,7 +654,8 @@ static fn rover_runner_ended(positive which)
         p64 now = clock_monotonic_nanoseconds();
         bool stopped = running->stopping != 0;
 
-        system_wait4_retry(running->pid, null, 0, null);
+        if (running->pid > 0)
+                system_wait4_retry(running->pid, null, 0, null);
         if (running->pidfd >= 0)
                 system_close(running->pidfd);
         running->pid = 0;
@@ -629,6 +697,14 @@ static fn rover_runner_services(void)
                 struct rover_running address_to running = &rover_runner.service[which];
                 bool wanted = rover_service_wanted(&rover_runner.view, which, rover_runner.pages, rover_runner_realtime()) && rover_runner_needs_up(which);
 
+                //      One with no pidfd (pidfd_open refused it) is seen to end by its pid.
+                if (running->pid && running->pidfd < 0 &&
+                    system_wait4_retry(running->pid, null, 1 /* WNOHANG */, null) == running->pid)
+                {
+                        running->pid = -running->pid; // reaped: ended must not wait for it again
+                        rover_runner_ended(which);
+                        continue;
+                }
                 if (running->pid && !wanted)
                         rover_runner_stop(which);
                 if (running->stopping && now - running->stopping >= ROVER_STOP_GRACE_NS)
@@ -836,9 +912,15 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
                         return;
                 }
                 struct rover_running address_to running = &rover_runner.service[which];
-                running->failed = 0;
-                running->shorts = 0;
-                running->retry = 0;
+
+                //      A rule keeps the policy: a service given up stays given up (a person starts it, moonwater rover
+                //      load), and a start waits out the wait its last end set. restart is a stop the policy starts again.
+                if (running->failed)
+                {
+                        rover_runner_say("a rule asked for a service that was given up; not started: ",
+                                         (string_address)values[0].text, null);
+                        return;
+                }
                 if (id != 16)
                         rover_runner_stop((positive)which);
                 return;
@@ -1099,7 +1181,16 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                         return;
                 //      The pin's words, a line each, made new by the compositor: the program is the first, and the open
                 //      of it is given the rest (rover_runner_pinned).
-                bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
+                bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+                file_facts facts;
+
+                //      A regular file only: a FIFO at the name would hold the runner's loop.
+                if (handle >= 0 && (!file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) ||
+                                    (facts.mode & MODE_FORMAT) != MODE_FILE))
+                {
+                        system_close(handle);
+                        handle = -1;
+                }
                 got = handle < 0 ? -1 : system_read_retry((positive)handle, rover_runner.pin_text, sizeof(rover_runner.pin_text) - 1);
                 if (handle >= 0)
                         system_close(handle);
@@ -1469,6 +1560,7 @@ static b32 rover_runner_run(bipolar device)
                 rover_runner_clocks(now);
                 rover_runner_drain();
                 rover_runner_reap();
+                rover_runner_gone_look(now);
 
                 wait[count].descriptor = (b32)rover_runner.kernel_pipe[0];
                 wait[count++].events = SYSTEM_POLL_READ;
