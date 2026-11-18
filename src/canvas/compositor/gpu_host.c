@@ -82,7 +82,7 @@ static void compositor_gpu_publish(void)
         compositor.table->gpu_req_mode = gpu_req.mode, compositor.table->gpu_req_owner = gpu_req.owner;
         compositor.table->gpu_req_route = gpu_req.route, compositor.table->gpu_req_route_error = gpu_req.route_error;
         compositor.table->gpu_map_user = gpu_maps_user, compositor.table->gpu_map_dma = gpu_maps_dma;
-        compositor.table->gpu_recovered = gpu_recovered;
+        compositor.table->gpu_recovered = gpu_recovered, compositor.table->gpu_priority = gpu_priority, compositor.table->gpu_priority_error = gpu_priority_error;
         memory_copy(compositor.table->gpu_node_bus, gpu_req.bus, sizeof(gpu_req.bus)), memory_copy(compositor.table->gpu_display_bus, gpu_display, sizeof(gpu_display));
         compositor.table->gpu_node_pick = gpu_req.pick;
         memory_copy(compositor.table->gpu_req_driver, gpu_req.driver, sizeof(gpu_req.driver)), memory_copy(compositor.table->gpu_req_node, gpu_req.node, sizeof(gpu_req.node));

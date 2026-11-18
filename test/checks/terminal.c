@@ -164,6 +164,7 @@ static struct
         // AMDGPU_CTX_OP_SET_STABLE_PSTATE (gpu_amd_clocks): the asks, the level and the context of the last, and the errno the rows have it refused with.
         unsigned int pstate_asks, pstate_level, pstate_ctx;
         long pstate_error;
+        int priority_asked, priority_refused; // the priority the last AMDGPU_CTX_OP_ALLOC_CTX asked; one above normal is refused (EACCES) while set
         unsigned int interrupts, waits; // the waits a signal ends before one is answered (EINTR), and the waits asked
         char unique[40];              // the display node's bus as GET_UNIQUE says it
         unsigned int unique_length;
@@ -312,7 +313,11 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
         if (!gpu_kernel.on || (fd != GPU_KERNEL_FD && fd != GPU_KERNEL_CARD && fd != GPU_KERNEL_UDMABUF))
         {
                 if (gpu_fake_card && fd < 0 && request == 0xc0106442u && !gpu_kernel.no_context) // DRM_IOCTL_AMDGPU_CTX
+                {
+                        if (words[0] == 1 && (gpu_kernel.priority_asked = (int)words[3]) > 0 && gpu_kernel.priority_refused)
+                                return -13;
                         return words[0] == 1 ? (words[0] = 2 + ++gpu_kernel.contexts, 0) : 0;
+                }
                 return system_control(fd, request, a);
         }
         switch (request)
@@ -380,6 +385,8 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
                         gpu_kernel.pstate_asks++, gpu_kernel.pstate_level = words[1], gpu_kernel.pstate_ctx = words[2];
                         return -gpu_kernel.pstate_error;
                 }
+                if (words[0] == 1 && (gpu_kernel.priority_asked = (int)words[3]) > 0 && gpu_kernel.priority_refused)
+                        return -13;
                 if (words[0] == 1)
                         words[0] = 2 + ++gpu_kernel.contexts;
                 return 0;

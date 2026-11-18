@@ -31,12 +31,13 @@ static struct { unsigned int packets, args, state, code; } gpu_layout = {GPU_AMD
 #define GPU_IMPORTS_MOST (1u << 20)
 // The ticks an import let go of stays mapped before it is unmapped (gpu_trim): a client's buffers come round again (Chromium's three or four are lent in turn,
 // each let go of as the next is lent), and a job built or still running in the tick an import was let go of may name it. Taken again within them it is
-// the same import, held again (gpu_import_again); after them, with the card idle, it is unmapped.
+// the same import, held again (gpu_import_again); after them, with the card idle, it is unmapped. imported_dead_after is the submit serial an import was let go
+// of after (gpu_submit_serial then): the submit that follows it is the last that names it (gpu_submit).
 #define GPU_IMPORT_GRACE 8
-static struct { int fd, broken; unsigned int family, device, ctx, handle, *imported, imports; positive *imported_va, *imported_bytes; unsigned char *imported_dead, *imported_holds; positive *imported_dead_at; unsigned int address_to at; positive size, pending; } gpu;
+static struct { int fd, broken; unsigned int family, device, ctx, handle, *imported, imports; positive *imported_va, *imported_bytes; unsigned char *imported_dead, *imported_holds; positive *imported_dead_at; unsigned int *imported_dead_after, address_to at; positive size, pending; } gpu;
 static unsigned char *gpu_import_at_room; // the reservation the import table's arrays are in, and the imports committed in it
 static unsigned int gpu_import_room;
-static p64 *gpu_submit_bos;               // a submit's buffers (the ring, every import and every map), as many as the imports have room for
+static p64 *gpu_submit_bos;               // a submit's buffers (the ring, the imports and maps a job may read), as many as the imports have room for
 static positive gpu_last_job; // when the last job finished (monotonic ns): the idle clock's measure (gpu_wake)
 // The memory the dma-buf route may reach: the window table's memfd (fd), mapped at at (its byte 0), the picture part of it (bytes), and pin(offset, on) when a
 // map of its pages is made or let go, so that the program that owns them does not give them back while the card may read them.
@@ -48,7 +49,7 @@ static unsigned int gpu_memfd_count;
 
 // The import table's arrays pointed at their reservation (made at the first need), with room for `want`: 1, or 0 when the memory is not there.
 #define GPU_IMPORT_ARRAYS(X) X(imported, unsigned int) X(imported_va, positive) X(imported_bytes, positive) X(imported_dead, unsigned char) \
-        X(imported_holds, unsigned char) X(imported_dead_at, positive)
+        X(imported_holds, unsigned char) X(imported_dead_at, positive) X(imported_dead_after, unsigned int)
 static b32 gpu_imports_room(unsigned int want)
 {
         positive at = 0, room;
@@ -488,13 +489,24 @@ static unsigned int gpu_amd_buffer(positive size, positive at, unsigned int *han
         return e;
 }
 
+/*
+        The context the jobs run on, made at AMDGPU_CTX_PRIORITY_HIGH (512) where the kernel lets it (amdgpu_ctx_priority_permit: CAP_SYS_NICE, which the
+        compositor has as root, or the master of the node): a high context's compute jobs go to the one compute queue the driver made high (the first, its
+        pipe priority HIGH and queue priority MAXIMUM: amdgpu_gfx_is_high_priority_compute_queue, amdgpu_ring.c), whose waves the shader units' arbiter
+        launches before those of the graphics queue a game draws on and of the normal compute queues; a normal context's are spread over the others, with
+        a game's own compute. Refused (EACCES), the context is a normal one. gpu_priority: 2 high, 1 normal after a refusal (gpu_priority_error its errno).
+*/
+static unsigned int gpu_priority, gpu_priority_error;
 static unsigned int gpu_amd_context(unsigned int *made, unsigned int before)
 {
-        unsigned int ctx[4] = {1, 0, 0, 0}, old[4] = {2, 0, before, 0}; // AMDGPU_CTX_OP_ALLOC_CTX, and FREE_CTX of the one before
+        unsigned int ctx[4] = {1, 0, 0, 512}, old[4] = {2, 0, before, 0}; // AMDGPU_CTX_OP_ALLOC_CTX at AMDGPU_CTX_PRIORITY_HIGH, and FREE_CTX of the one before
         unsigned int e = gpu_call(3u, 2, 16, ctx);
 
+        gpu_priority = e ? 1 : 2, gpu_priority_error = e;
         if (e)
-                return e;
+                ctx[0] = 1, ctx[1] = ctx[2] = ctx[3] = 0, e = gpu_call(3u, 2, 16, ctx);
+        if (e)
+                return gpu_priority = 0, e;
         if (before)
                 gpu_call(3u, 2, 16, old);
         *made = ctx[0];
@@ -2137,7 +2149,7 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
                         }
                         if (gpu.pending && !gpu_idle())
                         {
-                                gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0, gpu.imported_dead_at[i] = gpu_tick;
+                                gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0, gpu.imported_dead_at[i] = gpu_tick, gpu.imported_dead_after[i] = gpu_submit_serial;
                                 return;
                         }
                         gpu_gone_put(at, gpu.imported_bytes[i], 0, 0, gpu.imported[i], why, 1, 1, 1, 0);
@@ -2145,7 +2157,7 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
                         gpu_close(gpu.imported[i]);
                         gpu.imported[i] = gpu.imported[gpu.imports - 1], gpu.imported_va[i] = gpu.imported_va[gpu.imports - 1];
                         gpu.imported_bytes[i] = gpu.imported_bytes[gpu.imports - 1], gpu.imported_dead[i] = gpu.imported_dead[gpu.imports - 1];
-                        gpu.imported_dead_at[i] = gpu.imported_dead_at[gpu.imports - 1];
+                        gpu.imported_dead_at[i] = gpu.imported_dead_at[gpu.imports - 1], gpu.imported_dead_after[i] = gpu.imported_dead_after[gpu.imports - 1];
                         gpu.imported_holds[i] = gpu.imported_holds[gpu.imports - 1], gpu.imports--;
                         return;
                 }
@@ -2160,7 +2172,7 @@ static void gpu_release_import(positive at)
                         if (!gpu.imported_dead[i] && gpu.imported_holds[i] > 1)
                                 gpu.imported_holds[i]--;
                         else
-                                gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0, gpu.imported_dead_at[i] = gpu_tick;
+                                gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0, gpu.imported_dead_at[i] = gpu_tick, gpu.imported_dead_after[i] = gpu_submit_serial;
                         return;
                 }
 }
@@ -2680,7 +2692,7 @@ static positive gpu_submit(void)
                                     gpu_backend->state ? GPU_VA + gpu_layout.state + gpu_backend->state * gpu_slot : 0};
         p64 *bos = gpu_imports_room(gpu.imports) ? gpu_submit_bos : 0;
         positive sequence = 0, began = clock_monotonic_nanoseconds(), kept = gpu_job_began;
-        unsigned int named, tries = 0, again = 0;
+        unsigned int named, tries = 0, again = 0, before = gpu_submit_serial;
         enum gpu_err kind;
 
         if (!bos) // no memory for the list of the job's buffers: the job is not made, as one too late is not
@@ -2694,8 +2706,13 @@ static positive gpu_submit(void)
         for (;;)
         {
                 named = 0;
+                // Of the imports, the ones held and the ones let go of since the last submit (a record of this job may have been given their addresses before
+                // they were): never one let go of earlier. amdgpu makes a job wait for every other program's fence on every buffer it names (AMDGPU_SYNC_NE_OWNER,
+                // amdgpu_cs_sync_rings) and puts the job on each as a writer (amdgpu_cs_submit, DMA_RESV_USAGE_WRITE), and a client draws its next frame into
+                // the very buffers it was given back: named, every present waited for the frame a game or Chromium was drawing, and that frame for the present.
                 for (unsigned int i = 0; i < gpu.imports; i++)
-                        bos[named++] = gpu.imported[i];
+                        if (!gpu.imported_dead[i] || gpu.imported_dead_after[i] == before)
+                                bos[named++] = gpu.imported[i];
                 // Of the maps, the ones a record of this job was given and the ones this present used (gpu_map_named): the kernel looks at the pages of every map named at
                 // every submission (ten 1920 by 1080 window buffers held cost a present 80 to 400 us on the box), and a map not named is not read by this job. A map the
                 // compositor let go of that no record of this job holds is not named: a glass scratch grown in the tick that used it made every job of the tick fail.

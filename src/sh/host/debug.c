@@ -669,6 +669,11 @@ static b32 host_debug(string_address address_to arguments, positive count)
                                                      (string_address) "the first node of a chip with kernels (no display's bus known)",
                          display_bus[0] ? (string_address)display_bus : (string_address) "-");
         }
+        if (table->gpu_priority)
+                host_say(log, "  gpu priority    %s\n", table->gpu_priority == 2 ? (string_address) "high: the compositor's jobs run on the card's high-priority compute queue, ahead of a game's drawing"
+                                                                              : (string_address) "normal: the kernel refused a high-priority context (error below; 13 is no CAP_SYS_NICE)");
+        if (table->gpu_priority == 1)
+                host_say(log, "                  error %p\n", (positive)table->gpu_priority_error);
         if (table->gpu_recovered)
                 host_say(log, "  gpu recovered   %p times: the card lost its state (a reset or a resume) and was started again\n", (positive)table->gpu_recovered);
         if (table->gpu_map_user || table->gpu_map_dma)

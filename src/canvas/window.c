@@ -1196,6 +1196,7 @@ struct windows
         unsigned int gpu_faults; char gpu_fault[320]; // the jobs that found a page fault in the kernel's log, and the last one's text (gpu.c's gpu_fault, GPU_FAULT_BYTES): "" for none yet
         unsigned int gpu_map_user, gpu_map_dma; // the maps the card has, by userptr and by the dma-buf route
         unsigned int gpu_recovered; // the times the card was started again after it lost its state (a reset, a resume)
+        unsigned int gpu_priority, gpu_priority_error; // the card's context: 2 made at high priority, 1 normal after the high one was refused (its errno), 0 not said (gpu.c)
         // The machine's wakes the compositor heard (compositor_woke), how it heard the last (1 the clocks, 2 the sleep verb's SIGUSR2, 3 both), and the
         // takes of the screens after them that set every crtc again and that could not (no screen yet, or the card refused: looked at again in 5 s).
         unsigned int wakes, wake_how, wake_sets, wake_refused;

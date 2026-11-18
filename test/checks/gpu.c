@@ -2051,6 +2051,25 @@ static void gpu_bo_rows(void)
         check("gpu bo: a tick on, with no job run, a written map over it is not refused (9) and drops it",
               !gpu_map_written((const void *)0x10002000ull, 0x1000) && (gpu_map_why & 255) != 9 && gpu_map_count == 0);
 
+        // 6. The imports: one held, one let go of since the last submit (a record of this job may hold its address), one let go of before it (the client draws
+        // into it again: named, the job would wait for the client's frame and the client's next frame for the job). The job names the first two; the one after it
+        // the held one alone.
+        if (gpu_imports_room(3))
+        {
+                gpu_map_count = 0, gpu.imports = 3;
+                for (unsigned int i = 0; i < 3; i++)
+                        gpu.imported[i] = 21 + i, gpu.imported_va[i] = 0x40000000ull + 0x10000ull * i, gpu.imported_bytes[i] = 0x10000, gpu.imported_holds[i] = 1,
+                        gpu.imported_dead[i] = i > 0, gpu.imported_dead_at[i] = gpu_tick, gpu.imported_dead_after[i] = gpu_submit_serial - (i == 2);
+                gpu_bo_run();
+                check("gpu bo: a held import and one let go of since the last submit are in the list", gpu_seen_has(21) && gpu_seen_has(22));
+                check("gpu bo: an import let go of before the last submit is not (its client draws into it again)", !gpu_seen_has(23));
+                gpu_bo_run();
+                check("gpu bo: the job after names the held import alone", gpu_seen_has(21) && !gpu_seen_has(22) && !gpu_seen_has(23) && gpu_seen_count == 1);
+                gpu.imports = 0;
+        }
+        else
+                check("gpu bo: room for three imports", false);
+
         gpu_map_count = 0, gpu_gone_at = 0, gpu_seen_count = 0, gpu_fake_cancel = 0, gpu_lost = 0, gpu_last_error = 0, gpu_fault[0] = 0;
         gpu.at = kept_at, gpu.fd = kept_fd;
 }
@@ -2496,6 +2515,22 @@ static void gpu_import_rows(void)
         check("gpu idle: the lost card is started again (here to no node: given up as no card), and nothing is pending on the old one",
               gpu_recovered == before + 1 && gpu.pending == 0 && !gpu_lost && compositor_gpu_state.dead && gpu.fd == -1);
         gpu_kernel.no_context = 0, gpu_fake_errno = 0;
+
+        // The context's priority: asked high (AMDGPU_CTX_PRIORITY_HIGH, 512), and where the kernel refuses that (EACCES: no CAP_SYS_NICE) a normal one is made.
+        {
+                unsigned int made = 0, contexts = gpu_kernel.contexts;
+                int kept_fd = gpu.fd, kept_on = gpu_kernel.on;
+
+                gpu.fd = GPU_KERNEL_FD, gpu_kernel.on = 1, gpu_kernel.priority_refused = 0;
+                check("gpu priority: the context is asked at high priority and made so",
+                      gpu_amd_context(&made, 0) == 0 && made && gpu_kernel.priority_asked == 512 && gpu_priority == 2 && gpu_kernel.contexts == contexts + 1);
+                gpu_kernel.priority_refused = 1, made = 0;
+                check("gpu priority: refused high (EACCES), a normal context is made and the refusal kept",
+                      gpu_amd_context(&made, 0) == 0 && made && gpu_kernel.priority_asked == 0 && gpu_priority == 1 && gpu_priority_error == 13);
+                gpu_kernel.no_context = 1, gpu_kernel.priority_refused = 0;
+                check("gpu priority: no context at all is the kernel's error, and no priority said", gpu_amd_context(&made, 0) == 19 && gpu_priority == 0);
+                gpu_kernel.no_context = 0, gpu.fd = kept_fd, gpu_kernel.on = kept_on;
+        }
 
         // The families: the four the kernels were written and run on are let in always; family 143 (the rest of gfx10: the same words by llvm-mc, run by nobody)
         // only where the owner's file asks, which a start looks for each time; no other family either way.
