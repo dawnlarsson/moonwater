@@ -1559,6 +1559,14 @@ static long report_rover(struct rover_control __user *out)
         if (ret && ret != -EINVAL)
                 return ret;
         rules_status(&request);
+        //      The counts are root's: with a key rule loaded, events and hits are keystrokes counted, and the
+        //      timings when they came. Anyone may ask which table is live and how many rules it has.
+        if (!capable(CAP_SYS_ADMIN))
+        {
+                request.events = request.hits = request.taken = request.floor = request.queued = request.lost = 0;
+                request.posted = request.decide_ns = request.decide_worst = request.decide_count = 0;
+                request.hook_ns = request.hook_worst = request.hook_count = 0;
+        }
         if (copy_to_user(out, &request, sizeof(request)))
                 return -EFAULT;
         return ret;
@@ -1591,8 +1599,11 @@ static int rules_mmap(struct file *file, struct vm_area_struct *vma)
 //      Readable when the ring has a record past what this descriptor read last: the read answers the head.
 static __poll_t rules_poll(struct file *file, p64 *seen, poll_table *wait)
 {
-        (void)file;
+        //      The ring's movement is root's as its records are (a key rule's ring moves at each key): a poll by
+        //      anyone else never says readable, and its read is refused.
         poll_wait(file, &rules_wait, wait);
+        if (!file_ns_capable(file, &init_user_ns, CAP_SYS_ADMIN) || !capable(CAP_SYS_ADMIN))
+                return 0;
         return rules_head() != READ_ONCE(*seen) ? EPOLLIN | EPOLLRDNORM : 0;
 }
 

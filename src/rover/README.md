@@ -566,7 +566,9 @@ word loop, since lib.c keeps no kernel body of it).
 
 **The load.** `ROVER_IOCTL` on `/dev/spark` (`_IOWR('s', 19)`, a
 512-byte request; LOAD, UNLOAD and DO are CAP_SYS_ADMIN's, STATUS is
-anyone's). LOAD copies the table in, runs `rover_check` over the whole of
+anyone's, but its counts and timings are CAP_SYS_ADMIN's alone, since with
+a key rule loaded they are keystrokes counted; anyone else is told the
+live table and its rules, and a poll by anyone else is never readable). LOAD copies the table in, runs `rover_check` over the whole of
 it, makes its run records, and swaps it in under the rules' lock with
 `rcu_assign_pointer`; the table before it is freed after a grace period.
 A refused table is answered with the reason and the rule, and the live
