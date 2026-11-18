@@ -5,17 +5,24 @@
 
         THE SOCKET
 
-        /run/moonwater/xwm/wm-0 is a unix socket in a directory that is mode 0700, so only the session's own user reaches
-        it; the socket is mode 0600 as well, and a peer whose uid is not the compositor's is closed at once (SO_PEERCRED).
-        A wrapper (xwayland-moonwater) connects to it and gives the connected descriptor to Xwayland as its -wm argument,
-        so Xwayland's end of the connection is its window manager's, and this end is ours: the setup handshake is ours to
-        start, and Xwayland answers it as a server does.
+        /run/moonwater/xwm/wm-0 is a unix socket in a directory of mode 0711 (no other user lists it); the socket is mode 0660,
+        its group 1000 when the compositor is root, so the bowl's programs (uid 1000) reach it, and a peer whose uid is neither
+        the compositor's nor, for a root compositor, 1000 is closed at once (SO_PEERCRED). A wrapper (xwayland-moonwater, a
+        bowl program: the compositor does not start it) connects to it and gives the connected descriptor to Xwayland as its
+        -wm argument, so Xwayland's end of the connection is its window manager's, and this end is ours: the setup handshake
+        is ours to start, and Xwayland answers it as a server does. The peer is any program of uid 1000, so a connection is
+        held to being an X server's: see ONE CONNECTION.
 
         ONE CONNECTION
 
-        One Xwayland has one window manager. A connection that comes while another is live is closed. A connection that
-        does not finish its setup within COMPOSITOR_XWM_SETUP_NS is closed, and so is one whose bytes break the codec's
-        bounds (xwm_wire.c refuses every length it cannot hold, and the connection is dropped on the first refusal).
+        One Xwayland has one window manager, and each program run has an Xwayland of its own, so up to COMPOSITOR_XWM_SLOTS
+        connections are live at once, one for each wrapper: a second connection from the same wrapper (its pid) takes the
+        place of the first, which is closed (a wrapper whose display did not come up tries the next with a new connection).
+        A connection that does not finish its setup within COMPOSITOR_XWM_SETUP_NS is closed, and so is one whose X server,
+        the wrapper's child, has not come to the Wayland socket within COMPOSITOR_XWM_BIND_NS (compositor_xwm_server), or
+        has left it: a program that only holds the socket holds no slot, and is offered no selection, for longer than that.
+        So is one whose bytes break the codec's bounds (xwm_wire.c refuses every length it cannot hold, and the connection
+        is dropped on the first refusal).
 
         WHAT THE WINDOW MANAGER DOES
 
@@ -92,6 +99,7 @@
 #define COMPOSITOR_XWM_IN (XWM_REPLY_MAX + 4096)     // what the server has sent and no message is whole yet: one whole message and more
 #define COMPOSITOR_XWM_OUT 131072                    // what is queued for the server (a selection's piece of 32 KiB and more); a queue that would overflow closes the connection
 #define COMPOSITOR_XWM_SETUP_NS 5000000000ull        // a connection that has not finished its setup in this long is closed
+#define COMPOSITOR_XWM_BIND_NS 15000000000ull        // nor one whose X server is not a Wayland client by then (the wrapper waits 5 s for it)
 #define COMPOSITOR_XWM_ATOMS 61
 #define COMPOSITOR_XWM_A_PROTOCOLS 0
 #define COMPOSITOR_XWM_A_DELETE 1
@@ -4267,11 +4275,19 @@ static void compositor_xwm_accept(void)
         fd = compositor_call(syscall(accept4), (positive)compositor_xwm_listen_fd, 0, 0, 0x800 | 0x80000, 0, 0);
         if (fd < 0)
                 return;
+        if (compositor_call(syscall(getsockopt), (positive)fd, 1, COMPOSITOR_XWM_SO_PEERCRED, (positive)credentials, (positive)&size, 0) >= 0 &&
+            credentials[0] > 0)
+                // One window manager for each wrapper: its new connection (the next display tried) takes the old one's place.
+                for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
+                        if (compositor_xwm_slots[at].fd >= 0 && compositor_xwm_slots[at].peer_pid == credentials[0])
+                        {
+                                compositor_xwm_at = &compositor_xwm_slots[at];
+                                compositor_xwm_drop("its wrapper connected again");
+                        }
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS && !x; at++)
                 if (compositor_xwm_slots[at].fd < 0)
                         x = &compositor_xwm_slots[at];
-        if (compositor_call(syscall(getsockopt), (positive)fd, 1, COMPOSITOR_XWM_SO_PEERCRED, (positive)credentials, (positive)&size, 0) < 0 ||
-            (credentials[1] != compositor_xwm_uid && !(compositor_xwm_uid == 0 && credentials[1] == 1000)) || !x)
+        if (credentials[0] <= 0 || (credentials[1] != compositor_xwm_uid && !(compositor_xwm_uid == 0 && credentials[1] == 1000)) || !x)
         {
                 // Every slot is an X server's already: the connection is refused (counted on the first slot).
                 if (!x)
@@ -4450,6 +4466,8 @@ static void compositor_xwm_pass_one(const struct compositor_poll *wanted)
                 compositor_xwm_drop("a message the codec refused, or a queue that overflowed");
         if (x->fd >= 0 && !x->ready && clock_monotonic_nanoseconds() - x->since > COMPOSITOR_XWM_SETUP_NS)
                 compositor_xwm_drop("the setup did not finish in time");
+        if (x->fd >= 0 && clock_monotonic_nanoseconds() - x->since > COMPOSITOR_XWM_BIND_NS && compositor_xwm_server(x) < 0)
+                compositor_xwm_drop("no X server of its wrapper is a Wayland client");
         if (x->fd < 0 || !x->ready)
                 return;
         // What a drained queue lets be taken of the input.
@@ -4687,8 +4705,9 @@ static struct compositor_xwm *compositor_xwm_first_ready(void)
 
 static void compositor_xwm_selection_changed(unsigned int which)
 {
+        // Only to a server that is one: its wrapper's child a Wayland client (a connection that is a socket and nothing else is offered nothing).
         for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
-                if (compositor_xwm_slots[at].fd >= 0 && compositor_xwm_slots[at].ready)
+                if (compositor_xwm_slots[at].fd >= 0 && compositor_xwm_slots[at].ready && compositor_xwm_server(&compositor_xwm_slots[at]) >= 0)
                 {
                         compositor_xwm_at = &compositor_xwm_slots[at];
                         compositor_xwm_selection_changed_one(which);

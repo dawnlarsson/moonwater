@@ -4144,6 +4144,57 @@ static void under_ready_rows(void)
         compositor.under[1] = kept_under, compositor_under_bytes[1] = kept_bytes, compositor.width = kept_width, compositor.height = kept_height;
 }
 
+// The X window manager's socket (xwm.c, S-c3-2): one connection for each wrapper (a second from the same pid takes the first one's place), and a
+// connection whose wrapper has no child on the Wayland socket by COMPOSITOR_XWM_BIND_NS is closed: a program of uid 1000 that only holds the
+// socket holds no slot. Over an abstract socket of the check's own, with this process as the wrapper.
+static void xwm_socket_rows(void)
+{
+        static const unsigned char address[] = {1, 0, 0, 'm', 'w', '-', 'x', 'w', 'm', '-', 'c', 'h', 'e', 'c', 'k'};
+        const positive length = sizeof address;
+        int saved_listen = compositor_xwm_listen_fd, saved_uid = compositor_xwm_uid, live = 0, slot = -1;
+        long me = compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), first, second, listener;
+        struct compositor_poll wanted[COMPOSITOR_XWM_POLLS];
+        b32 made, replaced, dropped;
+
+        memory_zero(wanted, sizeof wanted);
+        listener = compositor_call(syscall(socket), 1, 1 | 0x800 | 0x80000, 0, 0, 0, 0);
+        made = listener >= 0 && compositor_call(syscall(bind), (positive)listener, (positive)address, length, 0, 0, 0) >= 0 &&
+               compositor_call(syscall(listen), (positive)listener, 4, 0, 0, 0, 0) >= 0;
+        compositor_xwm_listen_fd = (int)listener, compositor_xwm_uid = (int)compositor_call(syscall(getuid), 0, 0, 0, 0, 0, 0);
+        first = compositor_call(syscall(socket), 1, 1 | 0x80000, 0, 0, 0, 0);
+        made = made && first >= 0 && compositor_call(syscall(connect), (positive)first, (positive)address, length, 0, 0, 0) >= 0;
+        compositor_xwm_accept();
+        second = compositor_call(syscall(socket), 1, 1 | 0x80000, 0, 0, 0, 0);
+        made = made && second >= 0 && compositor_call(syscall(connect), (positive)second, (positive)address, length, 0, 0, 0) >= 0;
+        compositor_xwm_accept();
+        for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
+                if (compositor_xwm_slots[at].fd >= 0 && compositor_xwm_slots[at].peer_pid == (int)me)
+                        live++, slot = at;
+        // The first connection's end was closed by the compositor: a read of it ends (0), where the second's has the setup request waiting to be flushed.
+        replaced = live == 1 && compositor_call(syscall(recvfrom), (positive)first, (positive)wanted, 1, COMPOSITOR_XWM_MSG_DONTWAIT, 0, 0) == 0;
+        dropped = false;
+        if (slot >= 0)
+        {
+                compositor_xwm_slots[slot].since = clock_monotonic_nanoseconds() - COMPOSITOR_XWM_SETUP_NS / 2;
+                compositor_xwm_slots[slot].ready = 1, compositor_xwm_slots[slot].poll_at = 0;
+                compositor_xwm_at = &compositor_xwm_slots[slot];
+                compositor_xwm_pass_one(wanted);
+                dropped = compositor_xwm_slots[slot].fd >= 0; // within the time: kept
+                compositor_xwm_slots[slot].since = clock_monotonic_nanoseconds() - COMPOSITOR_XWM_BIND_NS - 1;
+                compositor_xwm_at = &compositor_xwm_slots[slot];
+                compositor_xwm_pass_one(wanted);
+                dropped = dropped && compositor_xwm_slots[slot].fd < 0;
+        }
+        check("xwm: a wrapper's second connection takes its first one's place, and a connection whose wrapper has no Wayland client by the bind time is closed",
+              made && replaced && dropped);
+        for (int at = 0; at < COMPOSITOR_XWM_SLOTS; at++)
+                if (compositor_xwm_slots[at].fd >= 0 && compositor_xwm_slots[at].peer_pid == (int)me)
+                        compositor_xwm_at = &compositor_xwm_slots[at], compositor_xwm_drop("the check is over");
+        compositor_xwm_at = &compositor_xwm_slots[0];
+        system_close((int)first), system_close((int)second), system_close((int)listener);
+        compositor_xwm_listen_fd = saved_listen, compositor_xwm_uid = saved_uid;
+}
+
 // A window asked to go is asked each time (compositor_close counts the asks, and the X window manager tells its window of each one it has not told it of): one that
 // answered with a question and stayed is asked by the next press. WINDOW_CLOSING alone carried it, set once and never cleared, and the ask went once.
 // The count is one, said three ways: the row's program reads it in the table and hears each ask once (windows_close_asked), the Wayland shim is given it as the
@@ -5250,6 +5301,7 @@ b32 main(void)
         metric_present_rows();
         dirty_rows();
         close_ask_rows();
+        xwm_socket_rows();
         grab_protocol_rows();
         fullscreen_rows();
         gpu_i915_rows();
