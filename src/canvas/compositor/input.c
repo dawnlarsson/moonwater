@@ -3232,22 +3232,45 @@ static void compositor_chip_hint(const int *rect, int x, int y, int side, positi
 /*
         A drag's chip, whoever's the drag is (a Wayland client's, an X client's, a program's): a capsule of the kit's glass beside the
         pointer, following it, its glyph the action the drag would come to where it is (copy a plus, move an arrow, ask three dots, none a
-        slash). Shown while the drag is and taken off with it (action -1).
+        slash), and where the program said how many things it drags and they are more than one (compositor_chip_drag_items, from its
+        offer), their count after the glyph, drawn as the chip's strokes are, seven to a figure. Shown while the drag is and taken off with it
+        (action -1).
 */
+static unsigned int compositor_chip_drag_items; // the things the program's drag carries, 0 when it did not say (any other drag's)
+
+// A figure 0 to 9 as seven strokes into a chip's glyph layer, its box x, y, fw by fh.
+static void compositor_chip_figure(unsigned char *glyph, int w, int h, long x, long y, long fw, long fh, int figure, long radius)
+{
+        // The segments a figure lights: a top, b top right, c bottom right, d bottom, e bottom left, f top left, g middle.
+        static const unsigned char lit[10] = {0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f};
+        long x1 = x + fw, ym = y + fh / 2, y1 = y + fh;
+        long ends[7][4] = {{x, y, x1, y}, {x1, y, x1, ym}, {x1, ym, x1, y1}, {x, y1, x1, y1}, {x, ym, x, y1}, {x, y, x, ym}, {x, ym, x1, ym}};
+
+        for (int k = 0; k < 7; k++)
+                if (lit[figure] >> k & 1)
+                        compositor_chip_stroke_into(glyph, w, h, ends[k][0], ends[k][1], ends[k][2], ends[k][3], radius);
+}
+
 static void compositor_chip_drag(int action)
 {
         struct compositor_chip *c = &compositor.chip;
         int scale = compositor.scale, h = COMPOSITOR_CHIP_HEIGHT_DP * scale / 100, w = h * 3 / 2, gap = COMPOSITOR_CHIP_DRAG_GAP_DP * scale / 100;
+        unsigned int items = compositor_chip_drag_items > 1 ? (compositor_chip_drag_items > 999 ? 999 : compositor_chip_drag_items) : 0;
+        int figures = items >= 100 ? 3 : items >= 10 ? 2 : items ? 1 : 0, glyph_w = w;
+
+        // The count's room: a figure half the glyph's height wide and a gap after each, and the capsule's end.
+        w += figures ? figures * (h * 2 / 5) + h / 4 : 0;
 
         if (action < 0)
         {
+                compositor_chip_drag_items = 0; // a drag over: the next one's count is its own, or none
                 if (c->kind == COMPOSITOR_CHIP_DRAG)
                         compositor_chip_hide();
                 return;
         }
-        if (c->kind != COMPOSITOR_CHIP_DRAG || c->cells != action)
+        if (c->kind != COMPOSITOR_CHIP_DRAG || c->cells != action || c->w != w)
         {
-                long g = COMPOSITOR_CHIP_GLYPH_DP * scale / 100, cx = w / 2, cy = h / 2, radius = 3 * scale / 200 > 2 ? 3 * scale / 200 : 2;
+                long g = COMPOSITOR_CHIP_GLYPH_DP * scale / 100, cx = glyph_w / 2, cy = h / 2, radius = 3 * scale / 200 > 2 ? 3 * scale / 200 : 2;
                 unsigned char *glyph;
 
                 if (w < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST || !compositor_chip_map())
@@ -3268,6 +3291,15 @@ static void compositor_chip_drag(int action)
                                 compositor_chip_stroke_into(glyph, w, h, cx + dot * g, cy, cx + dot * g, cy, radius + 1);
                 else
                         compositor_chip_stroke_into(glyph, w, h, cx - g, cy + g, cx + g, cy - g, radius);
+                // The count after the glyph: its figures left to right, each as tall as the glyph's reach.
+                for (int k = 0, value = (int)items; k < figures; k++)
+                {
+                        int place = figures - 1 - k, figure = value % 10;
+                        long fw = h / 4, x = glyph_w - h / 8 + place * (h * 2 / 5);
+
+                        compositor_chip_figure(glyph, w, h, x, cy - g, fw, 2 * g, figure, radius);
+                        value /= 10;
+                }
                 c->kind = COMPOSITOR_CHIP_DRAG, c->row = COMPOSITOR_NONE, c->cells = action;
                 c->w = w, c->h = h, c->slide = 0, c->alpha = 255;
                 c->shown = clock_monotonic_nanoseconds(), c->hold = (positive)1 << 62, c->fade = 0;

@@ -3077,7 +3077,11 @@ static b32 files_event(const struct window_event address_to event)
                         files.drag_chosen = files_model_chosen(m, files.drag_place);
                         if (files_uris(files.drag_place, parts, &uris, &uris_room, &paths, &paths_room))
                         {
-                                ui_drag_offer(&files.own, &files.drag, parts, 2, WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE);
+                                // The offer says how many it drags (the chosen ones, or the row alone), which the drag's chip shows.
+                                p32 items = files.drag_chosen && m->chosen_count ? m->chosen_count : 1;
+
+                                ui_drag_offer(&files.own, &files.drag, parts, 2,
+                                              WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE | (items > 0xffff ? 0xffffu : items) << WINDOWS_DRAG_ITEMS_SHIFT);
                                 files_uris_free(uris, uris_room, paths, paths_room, parts);
                         }
                         files.drag.armed = false;

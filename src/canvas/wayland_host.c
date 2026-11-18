@@ -6191,7 +6191,8 @@ static void compositor_drag_offer(int row)
         compositor_drag.told_action = 0;
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
         if (!compositor_drag_types_of() ||
-            !wayland_drag_host_begin((const char *)compositor_drag.types, compositor_drag.types_bytes, table->drag_offer_actions[row], under,
+            (compositor_chip_drag_items = table->drag_offer_actions[row] >> WINDOWS_DRAG_ITEMS_SHIFT, false) ||
+            !wayland_drag_host_begin((const char *)compositor_drag.types, compositor_drag.types_bytes, table->drag_offer_actions[row] & 7u, under,
                                      under >= 0 ? compositor.pointer_x - compositor.x[under] : 0, under >= 0 ? compositor.pointer_y - compositor.y[under] : 0))
         {
                 compositor_drag.source = -1;
