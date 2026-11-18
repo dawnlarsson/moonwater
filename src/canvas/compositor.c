@@ -1741,6 +1741,9 @@ static int compositor_table(void)
                                                    FILE_READ_WRITE | O_CREAT | O_EXCL | O_CLOEXEC, WINDOWS_MODE);
                 if (handle < 0)
                         return (int)handle;
+                // The mode exactly (the umask took its part of the open's), by the descriptor: the path may name another file by now. A memfd's is set
+                // where it is made (compositor_table_memfd), and the path is then a link to it.
+                compositor_call(syscall(fchmod), (positive)handle, WINDOWS_MODE, 0, 0, 0, 0);
                 if (compositor_call(syscall(ftruncate), (positive)handle, bytes, 0, 0, 0, 0) < 0)
                 {
                         system_close(handle);
@@ -1753,7 +1756,6 @@ static int compositor_table(void)
                 system_close(handle);
         if (mapped < 0 && mapped > -4096)
                 return (int)mapped;
-        compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)WINDOWS_TABLE, WINDOWS_MODE, 0, 0, 0);
 
         compositor.table = (struct windows *)mapped;
         compositor.pixels = WINDOWS_HEADER;
