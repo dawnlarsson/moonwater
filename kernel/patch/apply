@@ -1111,6 +1111,42 @@ settings_insert linux/drivers/input/joydev.c "	joydev->dev.type = &input_node_ty
         "	joydev->dev.class = &input_class;" after "$input_work/input-joydev" \
         "input group"
 
+#       The input core's filters ahead of a grab. A process holding
+#       EVIOCGRAB on a device gets its events alone: the core skips every
+#       other handle, filters included, and evdev's grab asks for no
+#       capability, only an open node (0660 in the input group). Moonwater's
+#       key watch is a filter (src/moonwater/moonwater.c, bind_filter): rover's
+#       rules, the floor that keeps the power key, Reset and Ctrl-Alt-Delete
+#       working, and the stop keys' bindings all run there. So the filters run
+#       first under a grab too, and what one takes the grab does not see,
+#       as it is without a grab. The grab still has every event to itself
+#       among the readers.
+cat > "$input_work/input-grab" <<'INPUTGRAB'
+		/*
+		 * Moonwater: the filters run ahead of a grab as well, so a
+		 * process holding EVIOCGRAB cannot blind the machine's own
+		 * key watch; what a filter takes, no grab sees either.
+		 */
+		if (rcu_access_pointer(dev->grab)) {
+			struct input_handle *grab = rcu_dereference(dev->grab);
+
+			list_for_each_entry_rcu(handle, &dev->h_list, d_node) {
+				if (!handle->handler->filter)
+					break;
+				if (handle != grab && handle->open)
+					count = handle->handle_events(handle, vals, count);
+				if (!count)
+					break;
+			}
+			if (!count)
+				break;
+		}
+
+INPUTGRAB
+settings_insert linux/drivers/input/input.c "Moonwater: the filters run ahead of a grab" \
+        "		handle = rcu_dereference(dev->grab);" before "$input_work/input-grab" \
+        "input filters under a grab"
+
 lttpr_cap=linux/drivers/gpu/drm/amd/display/dc/link/protocols/link_dp_capability.c
 if [ -f "$lttpr_cap" ]; then
         if grep -q -F -- 'DC_LOG_ERROR("lttpr_caps phy_repeater_cnt is 0x%x, forcing it to 0x80.",' "$lttpr_cap"; then

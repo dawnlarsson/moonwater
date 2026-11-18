@@ -519,12 +519,31 @@ image's alone.
 table loaded, or with a table whose rule for them is refused or turned
 off, the kernel powers off or reboots as it does today; a second press
 within ten seconds always takes the kernel's default. `take` is where the
-floor is kept: a `key power` or `key ctrl-alt-delete` rule that takes a
-press is let take it only when the press before it was not taken inside
-ten seconds, so the second press goes on to the bindings as it always
-did (and `status` counts it as floor). A `key down power` or `key down
-ctrl+alt+delete` rule fires, but never takes: the stop keys are taken
-only through their own events, which keep the floor.
+floor is kept, in one place, the kernel's input filter, which is the one
+pipeline every key goes through (rover's rules, then the bindings, which
+hear what the rules let through):
+
+- A `key power`, `key reset` or `key ctrl-alt-delete` rule that takes a
+  press may take it only when the press before it was not taken inside
+  ten seconds, timed on the kernel's own clock with a signed difference,
+  so the second press goes on to the bindings and stops the machine as it
+  always did (`status` counts it as floor).
+- A `key down power`, `key down` with no key, or any other key rule fires
+  on a stop key but never takes it: the stop keys are taken only through
+  their own events.
+- The bindings' Ctrl and Alt follow the physical keys whatever a rule
+  took, so a rule that takes Ctrl or Alt cannot leave Ctrl-Alt-Delete with
+  no modifier held.
+- A rule's `poweroff` and `reboot` are never a slot of the kernel's queue:
+  they have a work item of their own, so a wedged job cannot hold them
+  and a full queue cannot lose them, and a line that never returns is cut
+  by a watchdog that stops the machine sixty seconds after the request.
+- A grab (EVIOCGRAB) does not blind it: kernel/patch/apply makes the input
+  core run its filters ahead of a grab, so the rules, the floor and the
+  bindings hear a grabbed keyboard, and what they take the grab does not.
+- A key device whose driver will not open is deaf, to the rules and the
+  bindings alike, as it always was; the kernel's log says so when it
+  happens. It is outside the floor.
 
 ### Files
 

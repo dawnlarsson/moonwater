@@ -361,6 +361,24 @@ static void rules_pool_copy(char *into, positive room, const struct rover_table 
 }
 
 //      A kernel action of a hit, its arguments resolved now, while the event and the table are in hand.
+/*
+        Poweroff and reboot are never a slot of the queue: a request is one
+        word (the primitive, the rule's name beside it), done by a work item
+        of their own, so a job wedged in the queue's worker (a child that
+        never returns) does not hold the machine's stop behind it, and a full
+        queue does not lose it. The last request asked wins.
+*/
+static p16 rules_stop_asked;
+static char rules_stop_name[ROVER_NAME_MOST + 1];
+static struct work_struct rules_stop_work;
+static struct delayed_work rules_stop_watchdog;
+
+static void rules_stop_locked(p16 primitive, const char *name)
+{
+        WRITE_ONCE(rules_stop_asked, primitive);
+        strscpy(rules_stop_name, name, sizeof(rules_stop_name));
+}
+
 static void rules_queue_locked(const struct rules_live *live, const struct rover_event *event, positive which,
                                p16 rule)
 {
@@ -370,6 +388,15 @@ static void rules_queue_locked(const struct rules_live *live, const struct rover
         struct rules_job *job;
         positive count;
 
+        if (action->id == rules_p_poweroff || action->id == rules_p_reboot)
+        {
+                char name[ROVER_NAME_MOST + 1];
+
+                rules_pool_copy(name, sizeof(name), &live->view, live->view.rule[rule].name);
+                rules_stop_locked(action->id, name);
+                rules_count.queued++;
+                return;
+        }
         if (rules_job_head - rules_job_tail >= RULES_JOBS)
         {
                 rules_count.lost++;
@@ -477,19 +504,6 @@ static void rules_do(const struct rules_job *job)
                         rules_spawn(line, job->name);
                 }
         }
-        else if (id == rules_p_poweroff || id == rules_p_reboot)
-        {
-                bool off = id == rules_p_poweroff;
-
-                if (rules_spawn(off ? "poweroff" : "reboot", job->name))
-                {
-                        pr_warn("[rover] %s: stopping the machine anyway\n", job->name);
-                        if (off)
-                                orderly_poweroff(true);
-                        else
-                                orderly_reboot();
-                }
-        }
         else if (id == rules_p_suspend)
                 rules_spawn("moonwater sleep", job->name);
         else if (id == rules_p_radio_off)
@@ -522,9 +536,55 @@ static void rules_work_run(struct work_struct *work)
         }
 }
 
+/*
+        The machine stopped as the bindings stop it: the line run, and the
+        kernel's own stop when the line fails. A line that never returns is
+        not waited for forever: the watchdog, armed before it runs, stops the
+        machine RULES_STOP_GRACE after the request whatever the line is doing.
+*/
+#define RULES_STOP_GRACE (60 * HZ)
+
+static void rules_stop_force(struct work_struct *work)
+{
+        p16 id = READ_ONCE(rules_stop_asked);
+
+        (void)work;
+        pr_warn("[rover] the machine's stop did not come in %u s: stopping it\n", RULES_STOP_GRACE / HZ);
+        if (id == rules_p_reboot)
+                orderly_reboot();
+        else
+                orderly_poweroff(true);
+}
+
+static void rules_stop_run(struct work_struct *work)
+{
+        char name[ROVER_NAME_MOST + 1];
+        unsigned long flags;
+        p16 id;
+
+        (void)work;
+        raw_spin_lock_irqsave(&rules_lock, flags);
+        id = rules_stop_asked;
+        strscpy(name, rules_stop_name, sizeof(name));
+        raw_spin_unlock_irqrestore(&rules_lock, flags);
+        if (!id)
+                return;
+        mod_delayed_work(system_highpri_wq, &rules_stop_watchdog, RULES_STOP_GRACE);
+        if (rules_spawn(id == rules_p_poweroff ? "poweroff" : "reboot", name))
+        {
+                pr_warn("[rover] %s: stopping the machine anyway\n", name);
+                if (id == rules_p_poweroff)
+                        orderly_poweroff(true);
+                else
+                        orderly_reboot();
+        }
+}
+
 static void rules_irq_run(struct irq_work *work)
 {
         (void)work;
+        if (READ_ONCE(rules_stop_asked))
+                queue_work(system_highpri_wq, &rules_stop_work);
         queue_work(system_highpri_wq, &rules_work);
 }
 
@@ -767,11 +827,60 @@ void moonwater_rules_spark(unsigned int id)
 #define RULES_LINK_DOWN 43u
 #define RULES_SLEEP 44u
 
-//      The floor (README, Safety): a second stop-key press inside ten seconds of one a take dropped is the kernel's.
-#define RULES_FLOOR_NS (10ull * 1000000000ull)
-static p64 rules_floor_last[2];
-
+//      Spark's event of each key, for the keys that are one.
 static u8 rules_spark_key[KEY_CNT];
+
+/*
+        The floor (README, Safety): the power key, Reset and Ctrl-Alt-Delete
+        always work. A rule may take a stop key's press only when the press
+        before it was not taken inside ten seconds, so a second press goes on
+        to the bindings and stops the machine as it always did. Timed on the
+        kernel's own clock when the hook began, not a device's stamp (two
+        devices, or a driver's stamp, may run backwards), with a signed
+        difference; under the rules' lock, since two keyboards may press at
+        once. This is the one floor: the bindings below the filter hear what
+        it lets through, and a key down rule never takes a stop key at all.
+*/
+#define RULES_FLOOR_NS (10ll * 1000000000ll)
+static p64 rules_floor_last[3];
+
+static b32 rules_floor_slot(p16 spark)
+{
+        return spark == SPARK_BIND_POWEROFF ? 0 : spark == SPARK_BIND_RESET ? 1 : spark == SPARK_BIND_CTRL_ALT_DELETE ? 2 : -1;
+}
+
+//      Whether a stop key's press that a rule took may stay taken; a key that is no stop key always may.
+static bool rules_floor(p16 spark, p64 now)
+{
+        b32 slot = rules_floor_slot(spark);
+        unsigned long flags;
+        bool kept = true;
+
+        if (slot < 0)
+                return true;
+        raw_spin_lock_irqsave(&rules_lock, flags);
+        if (rules_floor_last[slot] && (b64)(now - rules_floor_last[slot]) < RULES_FLOOR_NS)
+        {
+                rules_floor_last[slot] = 0;
+                rules_count.floor++;
+                kept = false;
+        }
+        else
+                rules_floor_last[slot] = now;
+        raw_spin_unlock_irqrestore(&rules_lock, flags);
+        return kept;
+}
+
+//      A press that is one of the stop keys: power, reset, or Delete with Ctrl and Alt held.
+static bool rules_stop_press(unsigned int code, p32 mods)
+{
+        p16 spark = rules_spark_key[code];
+
+        return spark == SPARK_BIND_POWEROFF || spark == SPARK_BIND_RESET ||
+               (spark == SPARK_BIND_CTRL_ALT_DELETE &&
+                (mods & (ROVER_CHORD_CTRL | ROVER_CHORD_ALT)) == (ROVER_CHORD_CTRL | ROVER_CHORD_ALT));
+}
+
 
 //      The chord modifiers held, over every keyboard: a count for each, and each handle's own bits.
 static atomic_t rules_held[4];
@@ -908,34 +1017,14 @@ static bool rules_input(struct bind_handle *bind, unsigned int type, unsigned in
                 {
                         rules_event_init(&event, spark, when);
                         if (rules_fire(&event, null, 0, started))
-                        {
-                                //      The floor: a stop key is taken at most once in ten seconds.
-                                p64 *last = spark == SPARK_BIND_POWEROFF ? &rules_floor_last[0]
-                                            : spark == SPARK_BIND_CTRL_ALT_DELETE ? &rules_floor_last[1]
-                                                                                  : null;
-
-                                if (last && READ_ONCE(*last) && when - READ_ONCE(*last) < RULES_FLOOR_NS)
-                                {
-                                        WRITE_ONCE(*last, 0);
-                                        rules_count.floor++;
-                                }
-                                else
-                                {
-                                        if (last)
-                                                WRITE_ONCE(*last, when);
-                                        taken = true;
-                                }
-                        }
+                                taken = rules_floor(spark, started);
                 }
                 if (rules_wanted(value ? RULES_KEY_DOWN : RULES_KEY_UP))
                 {
                         rules_event_init(&event, value ? RULES_KEY_DOWN : RULES_KEY_UP, when);
                         rules_number(&event, 0, (b64)(value ? mods : rules_chord_mods()) << 16 | code);
                         //      The stop keys keep their floor: key down power cannot take what key power may not.
-                        if (rules_fire(&event, null, 0, started) &&
-                            !(rules_spark_key[code] == SPARK_BIND_POWEROFF ||
-                              (rules_spark_key[code] == SPARK_BIND_CTRL_ALT_DELETE &&
-                               (mods & (ROVER_CHORD_CTRL | ROVER_CHORD_ALT)) == (ROVER_CHORD_CTRL | ROVER_CHORD_ALT))))
+                        if (rules_fire(&event, null, 0, started) && !rules_stop_press(code, mods))
                                 taken = true;
                 }
         }
@@ -1385,6 +1474,14 @@ static long rules_do_asked(struct rover_control *request)
         if (primitive->klass == ROVER_DELIBERATE)
                 return -EPERM;
         raw_spin_lock_irqsave(&rules_lock, flags);
+        if (request->primitive == rules_p_poweroff || request->primitive == rules_p_reboot)
+        {
+                rules_stop_locked(request->primitive, "asked");
+                rules_count.queued++;
+                raw_spin_unlock_irqrestore(&rules_lock, flags);
+                irq_work_queue(&rules_irq);
+                return 0;
+        }
         if (rules_job_head - rules_job_tail >= RULES_JOBS)
         {
                 rules_count.lost++;
@@ -1505,6 +1602,8 @@ static void rules_start(void)
         init_waitqueue_head(&rules_wait);
         init_irq_work(&rules_irq, rules_irq_run);
         INIT_WORK(&rules_work, rules_work_run);
+        INIT_WORK(&rules_stop_work, rules_stop_run);
+        INIT_DELAYED_WORK(&rules_stop_watchdog, rules_stop_force);
         rules_states_find();
         rules_p_poweroff = rules_primitive_id("poweroff");
         rules_p_reboot = rules_primitive_id("reboot");
@@ -1564,6 +1663,8 @@ static void rules_stop(void)
         rules_unload();
         irq_work_sync(&rules_irq);
         cancel_work_sync(&rules_work);
+        cancel_work_sync(&rules_stop_work);
+        cancel_delayed_work_sync(&rules_stop_watchdog);
         if (cpu_latency_qos_request_active(&rules_qos))
                 cpu_latency_qos_remove_request(&rules_qos);
         rcu_barrier();

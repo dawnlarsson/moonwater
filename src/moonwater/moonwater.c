@@ -1728,6 +1728,11 @@ static void bind_open(struct work_struct *work)
         struct bind_handle *bind = container_of(work, struct bind_handle, open);
 
         bind->opened = input_open_device(&bind->handle);
+        //      Deaf is said: a device that will not open is outside the floor,
+        //      its power key, Reset and Ctrl-Alt-Delete reach nothing here.
+        if (bind->opened)
+                pr_warn("[moonwater] a key device would not open (%d): its keys reach no rule and no binding\n",
+                        bind->opened);
 }
 
 // Rover's half of the key watch, in rules.c, which is expanded after this file.
@@ -1751,6 +1756,12 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
                 taken = rules_input(bind, type, code, value);
                 if (!taken)
                         bind_event_run(handle, type, code, value);
+                //      The bindings' Ctrl and Alt follow the physical keys
+                //      whatever a rule took, so a taken Ctrl never leaves
+                //      Ctrl-Alt-Delete with no Ctrl held (bind_event_run
+                //      counts them for every event it is given).
+                else if (type == EV_KEY)
+                        bind_mods(bind, code, value);
         }
         moonwater_cost_end(&bind_cost, started);
         return taken;
