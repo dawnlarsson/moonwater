@@ -20283,8 +20283,8 @@ __asm__(
     //       pieces sized by the count, read back from the source, so nothing is
     //       written past the bound or the terminator.
     //
-    ASM_FUNC(string_copy_max_3_15)
 #ifndef KERNEL_MODE
+    ASM_FUNC(string_copy_max_3_15)
     "lea -1(%rdx), %rcx\n   cmp $15, %rcx\n   ja " ASM_LABEL(copy_max_3_15_generic) "  # a bound of zero, or above sixteen, is the generic's\n"
     "mov %rdi, %rax\n   mov %esi, %ecx\n   and $0xfff, %ecx\n   cmp $0xff0, %ecx\n   ja " ASM_LABEL(copy_max_3_15_generic) "\n"
     "movdqu (%rsi), %xmm0\n   pxor %xmm1, %xmm1\n   pcmpeqb %xmm1, %xmm0\n   pmovmskb %xmm0, %ecx\n   or $0x10000, %ecx\n   bsf %ecx, %ecx\n"
@@ -20296,8 +20296,8 @@ __asm__(
     "" ASM_LABEL(copy_max_3_15_4) ":\n   movl (%rsi), %r8d\n   movl -4(%rsi,%rcx), %r9d\n   movl %r8d, (%rdi)\n   movl %r9d, -4(%rdi,%rcx)\n" ASM_RET
     "" ASM_LABEL(copy_max_3_15_2) ":\n   movzwl (%rsi), %r8d\n   movzwl -2(%rsi,%rcx), %r9d\n   movw %r8w, (%rdi)\n   movw %r9w, -2(%rdi,%rcx)\n" ASM_RET
     "" ASM_LABEL(copy_max_3_15_generic) ":\n   jmp string_copy_max\n"
-#endif
     ASM_END(string_copy_max_3_15)
+#endif
     //
     //       string_copy_max_end -- the bounded copy, and where it ended.
     //
@@ -20784,9 +20784,11 @@ ASM_FUNC(positive_to_string)
     //       Size-class variant for 10^8 to 10^12 - 1: the straight-line body in
     //       positive_into_twelve, entered with the terminator mode set.
     //
+#ifndef KERNEL_MODE
     ASM_FUNC(positive_into_string_9_12)
     "mov $2, %r11d\n   jmp " ASM_LABEL(positive_into_twelve) "\n"
     ASM_END(positive_into_string_9_12)
+#endif
     ASM_FUNC(bipolar_into)
     "cmp $9999, %rsi\n   jg " ASM_LABEL(bipolar_into_wide) "\n   test %rsi, %rsi\n   js " ASM_LABEL(bipolar_into_negative) "\n"
     "cmp $99, %rsi\n   ja " ASM_LABEL(bipolar_into_four) "\n   lea digit_pairs(%rip), %r8\n   cmp $10, %rsi\n   jae " ASM_LABEL(bipolar_into_two) "\n"
