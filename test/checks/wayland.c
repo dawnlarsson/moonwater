@@ -1853,6 +1853,138 @@ static void test_frames(void)
         wayland_stop();
 }
 
+static unsigned long wl_buffer_of(struct session *t, long width, long height, unsigned colour, long format);
+
+/* Whether a callback of the client was answered (wl_callback.done on that object). */
+static int wl_done(struct wlc *c, unsigned long callback)
+{
+        for (long at = 0; at < c->events; at++)
+                if (c->ev[at].iface == WLI_wl_callback && c->ev[at].opcode == WLE_wl_callback_done && c->ev[at].object == callback)
+                        return 1;
+        return 0;
+}
+
+/*
+        An SDL 2 OpenGL window opened the way SDL 2.32 opens it (Half-Life 2's trace on box, 2026-11-18): the surface made with
+        its two frame callbacks while the window is hidden, then shown (a null attach and a commit, the xdg_surface and the
+        toplevel, app id, size limits, title, a commit, the wait for the configure), hidden and shown again on the same
+        surface (what SDL does to change shells), a frame callback asked after the last commit, then the first eglSwapBuffers.
+        The registry offers no xdg-decoration: told client_side by it, SDL tore the first toplevel down inside its wait for
+        that toplevel's configure and the wait never ended (no window, the game in wl_display_dispatch forever).
+*/
+static void test_sdl_show(void)
+{
+        struct session s;
+        struct wlc *c;
+        struct wl_event_seen *e;
+        unsigned long gl_frame, damage_frame, sync, first_serial, buffer;
+        long decoration_events = 0;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        c = s.c;
+        WLCHECK(wl_global(c, s.registry, WLI_zxdg_decoration_manager_v1, 1) == 0,
+                "sdl: the registry offers no xdg-decoration (a client that lacks it draws its own header, as this compositor wants)");
+        /* SDL_CreateWindow, hidden: the surface and its two frame callbacks (Mesa's swap queue and SDL's damage), no commit */
+        s.surface = wlc_id(c, WLI_wl_surface, 6);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_surface, s.surface);
+        wlc_send(c, s.surface, WLQ_wl_surface_set_buffer_scale, 1L);
+        gl_frame = wlc_id(c, WLI_wl_callback, 1);
+        damage_frame = wlc_id(c, WLI_wl_callback, 1);
+        wlc_send(c, s.surface, WLQ_wl_surface_frame, gl_frame);
+        wlc_send(c, s.surface, WLQ_wl_surface_frame, damage_frame);
+        WLCHECK(!wl_done(c, gl_frame) && !wl_done(c, damage_frame), "sdl: the hidden window's frame callbacks wait for a commit");
+        /* Wayland_ShowWindow: a null attach and a commit, then the role */
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, 0L, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(wl_done(c, gl_frame) && wl_done(c, damage_frame), "sdl: a bufferless surface with no role answers its frames at the commit");
+        damage_frame = wlc_id(c, WLI_wl_callback, 1);
+        wlc_send(c, s.surface, WLQ_wl_surface_frame, damage_frame);
+        s.xdg = wlc_id(c, WLI_xdg_surface, 6);
+        wlc_send(c, s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, s.xdg, s.surface);
+        s.toplevel = wlc_id(c, WLI_xdg_toplevel, 6);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_get_toplevel, s.toplevel);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_app_id, "hl2_linux");
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_min_size, 640L, 480L);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_max_size, 640L, 480L);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_title, "HALF-LIFE 2 - OpenGL");
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure) == 1 && wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 1,
+                "sdl: the first commit of the toplevel is answered with its configure, then the surface's, in the same batch");
+        for (long at = 0; at < c->events; at++)
+                decoration_events += c->ev[at].iface == WLI_zxdg_toplevel_decoration_v1;
+        WLCHECK(decoration_events == 0, "sdl: and nothing in that batch tells it a decoration mode (%ld)", decoration_events);
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        first_serial = e ? e->u[0] : 0;
+        WLCHECK(e != 0, "sdl: the wait for the configure ends");
+        if (e)
+                wlc_send(c, s.xdg, WLQ_xdg_surface_ack_configure, (long)first_serial);
+        sync = wlc_id(c, WLI_wl_callback, 1);
+        wlc_send(c, 1, WLQ_wl_display_sync, sync);
+        WLCHECK(wl_done(c, sync) && c->errors == 0, "sdl: the show's roundtrip is answered (%s)", c->error_text);
+        /* hidden and shown again on the same surface (SDL changing shells, fullscreen and libdecor): the role objects go */
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, 0L, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_destroy);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_destroy);
+        sync = wlc_id(c, WLI_wl_callback, 1);
+        wlc_send(c, 1, WLQ_wl_display_sync, sync);
+        WLCHECK(wl_done(c, sync) && c->errors == 0, "sdl: a window hidden by destroying its toplevel and xdg_surface is no error (%s)", c->error_text);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, 0L, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        s.xdg = wlc_id(c, WLI_xdg_surface, 6);
+        wlc_send(c, s.wm_base, WLQ_xdg_wm_base_get_xdg_surface, s.xdg, s.surface);
+        s.toplevel = wlc_id(c, WLI_xdg_toplevel, 6);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_get_toplevel, s.toplevel);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_app_id, "hl2_linux");
+        wlc_forget(c);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_title, "HALF-LIFE 2 - OpenGL");
+        e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
+        WLCHECK(e && e->u[0] != first_serial, "sdl: the second toplevel on the same surface is configured anew (serial %lu after %lu)",
+                e ? e->u[0] : 0, first_serial);
+        if (e)
+                wlc_send(c, s.xdg, WLQ_xdg_surface_ack_configure, (long)e->u[0]);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_min_size, 640L, 480L);
+        wlc_send(c, s.toplevel, WLQ_xdg_toplevel_set_max_size, 640L, 480L);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_set_window_geometry, 0L, 0L, 640L, 480L);
+        sync = wlc_id(c, WLI_wl_callback, 1);
+        wlc_send(c, 1, WLQ_wl_display_sync, sync);
+        WLCHECK(wl_done(c, sync) && c->errors == 0, "sdl: the second show's roundtrip is answered (%s)", c->error_text);
+        /* SDL's damage callback asked after the last commit, then Mesa's first swap: the buffer, its damage, the commit */
+        damage_frame = wlc_id(c, WLI_wl_callback, 1);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 640L, 480L);
+        wlc_send(c, s.surface, WLQ_wl_surface_frame, damage_frame);
+        WLCHECK(!wl_done(c, damage_frame), "sdl: a frame callback asked and not committed waits");
+        buffer = wl_buffer_of(&s, 640, 480, 0xff4466aa, WLN_wl_shm_format_xrgb8888);
+        gl_frame = wlc_id(c, WLI_wl_callback, 1);
+        wlc_send(c, s.surface, WLQ_wl_surface_frame, gl_frame);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 640L, 480L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        {
+                int shown = -1, open = 0;
+
+                for (int row = 0; row < FAKE_ROWS; row++)
+                        if (fake.row[row].used)
+                        {
+                                open++;
+                                if (fake.row[row].picture_w == 640 && fake.row[row].pixels[5] == 0xff4466aa)
+                                        shown = row;
+                        }
+                WLCHECK(c->errors == 0 && open == 1 && shown >= 0, "sdl: the first swap's picture is the one window's (%d open, %s)", open,
+                        c->error_text);
+        }
+        wayland_frame();
+        wlc_pump(c);
+        WLCHECK(wl_done(c, damage_frame) && wl_done(c, gl_frame), "sdl: both frame callbacks are answered at the frame drawn");
+        wlc_end(c);
+        leak_check("sdl show");
+        wayland_stop();
+}
+
 /*
         A surface that commits more frame callbacks than it holds ready, with no frame drawn between them: each callback is
         answered by the frame that comes, none is let go without its done (the client waits for it, and a video that waits
@@ -9470,6 +9602,7 @@ int main(int argc, char **argv)
         test_destroy_orders();
         test_shm();
         test_frames();
+        test_sdl_show();
         test_xwm_moves();
         test_xwm_places();
         test_presented_discard_row();

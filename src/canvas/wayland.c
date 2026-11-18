@@ -598,7 +598,6 @@ struct wayland_surface
         // What the window was last told.
         long told_width, told_height, told_states;
         unsigned char told;
-        unsigned int decoration_id;      // its zxdg_toplevel_decoration_v1, or 0
         unsigned char want_maximized, want_fullscreen, grab;
         short want_screen; // the screen set_fullscreen named (its wl_output's), -1 for none
         unsigned int entered;            // the screens it was told it is on, a bit each (WAYLAND_SCREENS of them)
@@ -1972,6 +1971,17 @@ static void wayland_dmabuf_formats(struct wayland_client *c, unsigned long id, l
         What the registry advertises: name n is element n - 1, each at the version this file implements (not the
         table's: the table is what the XML says, this is what is built). A screen is a wl_output global of its own,
         named WAYLAND_OUTPUT_NAME + its number.
+
+        xdg-decoration (zxdg_decoration_manager_v1) is not among them. A window of this compositor has its line and its
+        corners from the compositor and no titlebar: its top is the client's own, and a client moves it by asking
+        (xdg_toplevel.move). That is client-side decoration, which is what a client assumes when the manager is absent, so
+        every toolkit draws the same header without it (GTK never binds it; Qt, Chromium, GLFW, winit, kitty and mpv fall to
+        their own frame). Offered and answered client_side to a client that asked for none, it made SDL (2 and 3) tear its
+        first toplevel down in the decoration's configure and build another under libdecor; SDL 2's
+        Wayland_ShowWindow runs that from inside its wait for the first toplevel's configure, and the flag that wait
+        reads (shell_surface.xdg.initial_configure_seen) lies in a union the libdecor frame was written over, so the
+        wait never ended: Half-Life 2 and every SDL 2 game with libdecor present sat in wl_display_dispatch forever with
+        no window. Without the manager SDL takes libdecor from the start, as on GNOME.
 */
 #define WAYLAND_OUTPUT_NAME 64
 
@@ -1987,7 +1997,6 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_wl_seat, 9},
     {WLI_xdg_wm_base, 6},
     {WLI_zxdg_output_manager_v1, 3},
-    {WLI_zxdg_decoration_manager_v1, 1},
     {WLI_wl_data_device_manager, 3},
     {WLI_zwp_primary_selection_device_manager_v1, 1},
     {WLI_wp_cursor_shape_manager_v1, 2},
@@ -2252,27 +2261,11 @@ static long wayland_surface_unit(const struct wayland_surface *s)
 
 /* ---- the windows ---- */
 
-/*
-        The decoration's mode. A window of this compositor has its line and its corners from the compositor and no
-        titlebar: its top is the client's own, and a client moves it by asking (xdg_toplevel.move). So whatever mode a
-        client asks, it is told the client's: a toolkit that can draws its own header, and one that cannot has none.
-*/
-static void wayland_decoration_send(struct wayland_client *c, struct wayland_surface *s)
-{
-        struct wayland_event e;
-
-        if (!s->decoration_id)
-                return;
-        e = wayland_begin(c, s->decoration_id, WLE_zxdg_toplevel_decoration_v1_configure);
-        wayland_word(&e, WLN_zxdg_toplevel_decoration_v1_mode_client_side);
-        wayland_end(&e);
-}
-
 static long wayland_screen_at(long x, long y);
 
 /*
-        A surface's window, in the order a client expects it: the toplevel's size and states, the decoration's mode,
-        then the xdg_surface's serial. The serial is the one the client must acknowledge; a client that has
+        A surface's window, in the order a client expects it: the toplevel's size and states, then the xdg_surface's
+        serial. The serial is the one the client must acknowledge; a client that has
         WAYLAND_SERIALS unacknowledged is sent no more until it does, so one that never answers cannot be sent
         without end.
 */
@@ -2366,7 +2359,6 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                         wayland_word(&e, (unsigned long)bounds_h);
                         wayland_end(&e);
                 }
-                wayland_decoration_send(c, s);
                 {
                         long cw = ask.width > 0 ? wayland_max(1, wayland_units(ask.width, wayland_surface_unit(s))) : 0;
                         long ch = ask.height > 0 ? wayland_max(1, wayland_units(ask.height, wayland_surface_unit(s))) : 0;
@@ -5885,9 +5877,6 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
         switch (op)
         {
         case WLQ_xdg_toplevel_destroy:
-                if (s->decoration_id)
-                        return wayland_fail(c, s->decoration_id, WLN_zxdg_toplevel_decoration_v1_error_orphaned,
-                                            "the toplevel is destroyed before its decoration");
                 wayland_unhold(c, s);
                 wayland_row_release(c, s);
                 s->role_id = 0;
@@ -6045,52 +6034,6 @@ static int wayland_output_manager_request(struct wayland_client *c, struct wayla
                 }
         }
         (void)self;
-        return WAYLAND_OK;
-}
-
-static int wayland_decoration_manager_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
-{
-        struct wayland_surface *s;
-
-        if (op == WLQ_zxdg_decoration_manager_v1_destroy)
-                return WAYLAND_OK;
-        s = wayland_surface_of(c, a[1].slot);
-        if (!s || s->role != WAYLAND_ROLE_TOPLEVEL)
-                return wayland_fail(c, self->id, WLN_zxdg_toplevel_decoration_v1_error_orphaned, "the toplevel is gone");
-        if (s->decoration_id)
-                return wayland_fail(c, self->id, WLN_zxdg_toplevel_decoration_v1_error_already_constructed,
-                                    "the toplevel has a decoration");
-        if (s->width)
-                return wayland_fail(c, self->id, WLN_zxdg_toplevel_decoration_v1_error_unconfigured_buffer,
-                                    "the toplevel has a buffer");
-        s->decoration_id = c->objects[a[0].slot].id;
-        c->objects[a[0].slot].link = (int)wayland_surface_index(c, s);
-        c->objects[a[0].slot].aux = s->gen;
-        if (s->flags & WAYLAND_SURFACE_SENT)
-                wayland_configure(c, s, 0);
-        return WAYLAND_OK;
-}
-
-static int wayland_decoration_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
-{
-        struct wayland_surface *s = wayland_surface_of(c, self - c->objects);
-
-        if (op == WLQ_zxdg_toplevel_decoration_v1_destroy)
-        {
-                if (s)
-                        s->decoration_id = 0;
-                return WAYLAND_OK;
-        }
-        if (op == WLQ_zxdg_toplevel_decoration_v1_set_mode && a[0].u != WLN_zxdg_toplevel_decoration_v1_mode_client_side &&
-            a[0].u != WLN_zxdg_toplevel_decoration_v1_mode_server_side)
-                return wayland_fail(c, self->id, WLN_zxdg_toplevel_decoration_v1_error_invalid_mode, "no such mode");
-        // Whatever mode is asked, the window is told the client's (wayland_decoration_send).
-        if (s)
-        {
-                wayland_decoration_send(c, s);
-                if (s->flags & WAYLAND_SURFACE_SENT)
-                        wayland_configure(c, s, 0);
-        }
         return WAYLAND_OK;
 }
 
@@ -10398,12 +10341,6 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                         break;
                 case WLI_zxdg_output_manager_v1:
                         status = wayland_output_manager_request(c, o, op, a);
-                        break;
-                case WLI_zxdg_decoration_manager_v1:
-                        status = wayland_decoration_manager_request(c, o, op, a);
-                        break;
-                case WLI_zxdg_toplevel_decoration_v1:
-                        status = wayland_decoration_request(c, o, op, a);
                         break;
                 case WLI_zwp_relative_pointer_manager_v1:
                 case WLI_zwp_relative_pointer_v1:
