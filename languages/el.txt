@@ -1,6 +1,7 @@
 @language el
 @name Ελληνικά
 @translated machine
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
 action_copy	3664	Αντιγραφή
 action_cut	5863	Αποκοπή
 action_paste	0288	Επικόλληση
@@ -36,7 +37,12 @@ editor_write_beside	ec75	δεν ήταν δυνατή η εγγραφή δίπλ
 editor_writes_over_changed	df15	αντικαθιστά την αλλαγή στον δίσκο (το Ctrl+R το διαβάζει ξανά)
 editor_writes_over_readonly	e22f	αντικαθιστά αρχείο μόνο για ανάγνωση
 files_back	4bc2	Πίσω
+files_bin_cross	da73	Ο κάδος είναι σε άλλο δίσκο: το Shift+Delete το διαγράφει οριστικά
+files_bin_emptied	15da	Ο κάδος είναι άδειος
+files_binned	4b0f	%d μετακινήθηκαν στον κάδο: το Ctrl+Z τα επαναφέρει
 files_busy	5ba5	Μια αντιγραφή, μετακίνηση ή διαγραφή είναι σε εξέλιξη
+files_carry_here	fa82	Είναι ήδη σε αυτόν τον φάκελο: τίποτα δεν μετακινείται
+files_carrying	d1fc	Μεταφέρονται %d: το Tab τα αφήνει εδώ, ένα πάτημα σε φάκελο τα αφήνει μέσα, το Escape τα επιστρέφει
 files_changed	df4e	Δεν είναι αυτό που εμφανίστηκε: ο φάκελος διαβάζεται ξανά
 files_chosen	7a7f	Επιλέχθηκαν %1$d από %2$d
 files_chosen_size	621a	%1$d από %2$d επιλεγμένα, %3$s
@@ -50,9 +56,11 @@ files_count	cab8	%d στοιχεία
 files_count_cut	f139	Τα πρώτα %d στοιχεία: ο φάκελος έχει περισσότερα
 files_count_found	283a	Εμφανίζονται %1$d από %2$d
 files_delete_ask	807b	Διαγραφή %1$d: %2$s; Ξανά Delete το κάνει, Escape τα αφήνει
+files_delete_for_good	ec0e	Οριστική διαγραφή %1$d: %2$s; Ξανά Shift+Delete το κάνει, το Escape τα αφήνει
 files_delete_stopped	ef42	Σταμάτησε στο %2$s: %1$d διαγράφηκαν πριν
 files_deleted	8591	%d διαγράφηκαν
 files_deleting	a297	Διαγραφή: %d ως τώρα, Escape σταματά
+files_done	1791	Τέλος
 files_empty	751c	Αυτός ο φάκελος είναι κενός
 files_failed	c564	Δεν ήταν δυνατή η ανάγνωση του φακέλου
 files_find_hint	0ee1	Εύρεση σε αυτόν τον φάκελο
@@ -69,8 +77,13 @@ files_name_taken	cbce	Το όνομα χρησιμοποιείται
 files_new_folder	d127	Νέος φάκελος
 files_not_folder	2663	Αυτό δεν είναι φάκελος
 files_nothing_to_paste	c9d4	Το πρόχειρο δεν έχει αρχεία
+files_nothing_to_redo	b2a4	Τίποτα για επανάληψη
+files_nothing_to_undo	1433	Τίποτα για αναίρεση
 files_reading	64a4	Ανάγνωση του φακέλου
+files_redone	6fd0	%d επαναλήφθηκαν
 files_rename_hint	ad88	Νέο όνομα
+files_restored	4c30	%d επέστρεψαν στη θέση τους
+files_selecting	2d5c	Λειτουργία επιλογής, %d επιλεγμένα: αγγίξτε στοιχεία για προσθήκη ή αφαίρεση, Escape ή Τέλος για ολοκλήρωση
 files_sheet_created	59ac	Δημιουργήθηκε %s
 files_sheet_file	3663	Αρχείο
 files_sheet_folder	7afd	Φάκελος
@@ -87,6 +100,7 @@ files_sheet_size_in	31a1	Μέγεθος %1$s σε %2$d στοιχεία
 files_type_ext	d2c5	Αρχείο %s
 files_type_link	e589	Σύνδεσμος
 files_type_other	e8e6	Ειδικό αρχείο
+files_undone	4da3	%d αναιρέθηκαν
 files_unreadable	986c	Δεν επιτρέπεται η ανάγνωση του φακέλου
 files_up	5940	Πάνω
 installer_apps_about	af1b	Εγκαθίστανται στο νέο σύστημα μόλις γραφτεί.
@@ -164,6 +178,9 @@ launcher_run	61b6	Εκτέλεση %s
 launcher_search_hint	334b	Αναζήτηση προγραμμάτων ή πληκτρολόγηση εντολής
 launcher_sleep	2ca8	Αναστολή
 launcher_sleep_armed	bb08	αναστολή
+menu_bin_empty	1538	Άδειασμα κάδου
+menu_bin_open	8797	Άνοιγμα κάδου
+menu_bin_restore	4799	Επαναφορά
 menu_copy	43e0	Αντιγραφή
 menu_cut	5c17	Αποκοπή
 menu_delete	1e3e	Διαγραφή

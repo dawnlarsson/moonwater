@@ -1,6 +1,7 @@
 @language pt
 @name Português
 @translated machine
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
 action_copy	3664	Copiar
 action_cut	5863	Recortar
 action_paste	0288	Colar
@@ -36,7 +37,12 @@ editor_write_beside	ec75	não foi possível gravar ao lado do arquivo
 editor_writes_over_changed	df15	sobrescreve a alteração no disco (Ctrl+R lê de novo)
 editor_writes_over_readonly	e22f	sobrescreve um arquivo somente leitura
 files_back	4bc2	Voltar
+files_bin_cross	da73	A lixeira está noutro disco: Shift+Delete apaga-o de vez
+files_bin_emptied	15da	A lixeira está vazia
+files_binned	4b0f	%d movidos para a lixeira: Ctrl+Z devolve-os
 files_busy	5ba5	Uma cópia, movimentação ou exclusão está em andamento
+files_carry_here	fa82	Já estão nesta pasta: nada é movido
+files_carrying	d1fc	A levar %d: Tab larga-os aqui, um toque numa pasta larga-os nela, Escape devolve-os
 files_changed	df4e	Não é o que foi listado: a pasta é lida de novo
 files_chosen	7a7f	%1$d de %2$d escolhidos
 files_chosen_size	621a	%1$d de %2$d escolhidos, %3$s
@@ -50,9 +56,11 @@ files_count	cab8	%d itens
 files_count_cut	f139	Os primeiros %d itens: a pasta tem mais
 files_count_found	283a	%1$d de %2$d mostrados
 files_delete_ask	807b	Excluir %1$d: %2$s? Delete de novo exclui, Escape os mantém
+files_delete_for_good	ec0e	Apagar %1$d de vez: %2$s? Shift+Delete outra vez fá-lo, Escape deixa-os
 files_delete_stopped	ef42	Parou em %2$s: %1$d excluídos antes
 files_deleted	8591	%d excluídos
 files_deleting	a297	Excluindo: %d até agora, Escape para
+files_done	1791	Concluído
 files_empty	751c	Esta pasta está vazia
 files_failed	c564	Não foi possível ler esta pasta
 files_find_hint	0ee1	Procurar nesta pasta
@@ -69,8 +77,13 @@ files_name_taken	cbce	Esse nome já existe
 files_new_folder	d127	Nova pasta
 files_not_folder	2663	Isto não é uma pasta
 files_nothing_to_paste	c9d4	A área de transferência não tem arquivos
+files_nothing_to_redo	b2a4	Nada para refazer
+files_nothing_to_undo	1433	Nada para desfazer
 files_reading	64a4	Lendo a pasta
+files_redone	6fd0	%d refeitos
 files_rename_hint	ad88	Novo nome
+files_restored	4c30	%d devolvidos ao seu lugar
+files_selecting	2d5c	Modo de seleção, %d escolhidos: toque em itens para os juntar ou tirar, Escape ou Concluído para acabar
 files_sheet_created	59ac	Criado %s
 files_sheet_file	3663	Arquivo
 files_sheet_folder	7afd	Pasta
@@ -87,6 +100,7 @@ files_sheet_size_in	31a1	Tamanho %1$s em %2$d itens
 files_type_ext	d2c5	Arquivo %s
 files_type_link	e589	Link
 files_type_other	e8e6	Arquivo especial
+files_undone	4da3	%d desfeitos
 files_unreadable	986c	Esta pasta não pode ser lida
 files_up	5940	Subir
 installer_apps_about	af1b	São instaladas no novo sistema depois de escrito.
@@ -164,6 +178,9 @@ launcher_run	61b6	Executar %s
 launcher_search_hint	334b	Procurar programas, ou digitar um comando
 launcher_sleep	2ca8	Suspender
 launcher_sleep_armed	bb08	suspender
+menu_bin_empty	1538	Esvaziar a lixeira
+menu_bin_open	8797	Abrir a lixeira
+menu_bin_restore	4799	Restaurar
 menu_copy	43e0	&Copiar
 menu_cut	5c17	Recor&tar
 menu_delete	1e3e	&Excluir

@@ -2,6 +2,7 @@
 @name اردو
 @translated machine
 @direction rtl
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
 action_copy	3664	کاپی
 action_cut	5863	کٹ
 action_paste	0288	پیسٹ
@@ -37,7 +38,12 @@ editor_write_beside	ec75	فائل کے ساتھ لکھنا ممکن نہ ہوا
 editor_writes_over_changed	df15	ڈسک کی تبدیلی پر لکھتا ہے (Ctrl+R)
 editor_writes_over_readonly	e22f	صرف پڑھنے والی فائل پر لکھتا ہے
 files_back	4bc2	پیچھے
+files_bin_cross	da73	ردی کی ٹوکری دوسری ڈسک پر ہے: Shift+Delete اسے ہمیشہ کے لیے حذف کرتا ہے
+files_bin_emptied	15da	ردی کی ٹوکری خالی ہے
+files_binned	4b0f	%d ردی کی ٹوکری میں منتقل: Ctrl+Z انہیں واپس لاتا ہے
 files_busy	5ba5	نقل، منتقلی یا حذف جاری ہے
+files_carry_here	fa82	یہ پہلے ہی اس فولڈر میں ہیں: کچھ منتقل نہیں ہوتا
+files_carrying	d1fc	%d اٹھائے ہوئے: Tab انہیں یہاں رکھتا ہے، فولڈر پر دبانا انہیں اس میں رکھتا ہے، Escape واپس رکھتا ہے
 files_changed	df4e	یہ وہ نہیں جو فہرست میں تھا: فولڈر دوبارہ پڑھا جا رہا ہے
 files_chosen	7a7f	%2$d میں سے %1$d منتخب
 files_chosen_size	621a	%2$d میں سے %1$d منتخب، %3$s
@@ -51,9 +57,11 @@ files_count	cab8	%d اشیاء
 files_count_cut	f139	پہلی %d اشیاء: فولڈر میں مزید ہیں
 files_count_found	283a	%2$d میں سے %1$d دکھائے گئے
 files_delete_ask	807b	%1$d حذف کریں: %2$s؟ دوبارہ Delete حذف کرتا ہے، Escape چھوڑ دیتا ہے
+files_delete_for_good	ec0e	%1$d ہمیشہ کے لیے حذف کریں: %2$s؟ دوبارہ Shift+Delete حذف کرتا ہے، Escape چھوڑ دیتا ہے
 files_delete_stopped	ef42	%2$s پر رک گیا: اس سے پہلے %1$d حذف ہوئے
 files_deleted	8591	%d حذف ہوئے
 files_deleting	a297	حذف ہو رہا ہے: اب تک %d، Escape روکتا ہے
+files_done	1791	ہو گیا
 files_empty	751c	یہ فولڈر خالی ہے
 files_failed	c564	یہ فولڈر پڑھا نہیں جا سکا
 files_find_hint	0ee1	اس فولڈر میں تلاش کریں
@@ -70,8 +78,13 @@ files_name_taken	cbce	یہ نام لیا جا چکا ہے
 files_new_folder	d127	نیا فولڈر
 files_not_folder	2663	یہ فولڈر نہیں ہے
 files_nothing_to_paste	c9d4	کلپ بورڈ میں کوئی فائل نہیں
+files_nothing_to_redo	b2a4	دوبارہ کرنے کو کچھ نہیں
+files_nothing_to_undo	1433	واپس لینے کو کچھ نہیں
 files_reading	64a4	فولڈر پڑھا جا رہا ہے
+files_redone	6fd0	%d دوبارہ کیے گئے
 files_rename_hint	ad88	نیا نام
+files_restored	4c30	%d اپنی جگہ واپس رکھے گئے
+files_selecting	2d5c	انتخاب موڈ، %d منتخب: شامل کرنے یا ہٹانے کے لیے اشیاء کو چھوئیں، ختم کرنے کے لیے Escape یا ہو گیا
 files_sheet_created	59ac	بنایا %s
 files_sheet_file	3663	فائل
 files_sheet_folder	7afd	فولڈر
@@ -88,6 +101,7 @@ files_sheet_size_in	31a1	سائز %1$s، %2$d اشیاء میں
 files_type_ext	d2c5	%s فائل
 files_type_link	e589	لنک
 files_type_other	e8e6	خاص فائل
+files_undone	4da3	%d واپس لیے گئے
 files_unreadable	986c	اس فولڈر کو پڑھنے کی اجازت نہیں
 files_up	5940	اوپر
 installer_apps_about	af1b	سسٹم لکھے جانے کے بعد یہ نئے سسٹم پر انسٹال ہوتی ہیں۔
@@ -165,6 +179,9 @@ launcher_run	61b6	چلائیں %s
 launcher_search_hint	334b	پروگرام تلاش کریں یا کمانڈ لکھیں
 launcher_sleep	2ca8	سلیپ
 launcher_sleep_armed	bb08	سلیپ
+menu_bin_empty	1538	ردی کی ٹوکری خالی کریں
+menu_bin_open	8797	ردی کی ٹوکری کھولیں
+menu_bin_restore	4799	واپس رکھیں
 menu_copy	43e0	کاپی
 menu_cut	5c17	کٹ
 menu_delete	1e3e	حذف کریں

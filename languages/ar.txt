@@ -2,6 +2,7 @@
 @name العربية
 @translated machine
 @direction rtl
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
 action_copy	3664	نسخ
 action_cut	5863	قص
 action_paste	0288	لصق
@@ -37,7 +38,12 @@ editor_write_beside	ec75	تعذرت الكتابة بجوار الملف
 editor_writes_over_changed	df15	يكتب فوق تغيير القرص (Ctrl+R)
 editor_writes_over_readonly	e22f	يكتب فوق ملف للقراءة فقط
 files_back	4bc2	رجوع
+files_bin_cross	da73	سلة المهملات على قرص آخر: Shift+Delete يحذفه نهائيا
+files_bin_emptied	15da	سلة المهملات فارغة
+files_binned	4b0f	نُقل %d إلى سلة المهملات: Ctrl+Z يعيدها
 files_busy	5ba5	نسخ أو نقل أو حذف قيد التنفيذ
+files_carry_here	fa82	إنها في هذا المجلد بالفعل: لا يُنقل شيء
+files_carrying	d1fc	تحمل %d: Tab يضعها هنا، والضغط على مجلد يضعها فيه، وEscape يعيدها
 files_changed	df4e	ليس ما كان في القائمة: يُقرأ المجلد من جديد
 files_chosen	7a7f	تم اختيار %1$d من %2$d
 files_chosen_size	621a	اختير %1$d من %2$d، %3$s
@@ -51,9 +57,11 @@ files_count	cab8	%d عنصر
 files_count_cut	f139	أول %d عنصر: في المجلد المزيد
 files_count_found	283a	يظهر %1$d من %2$d
 files_delete_ask	807b	حذف %1$d: %2$s؟ Delete مرة أخرى يحذف، Escape يتركها
+files_delete_for_good	ec0e	حذف %1$d نهائيا: %2$s؟ Shift+Delete مرة أخرى يحذف، Escape يتركها
 files_delete_stopped	ef42	توقف عند %2$s: حُذف %1$d قبله
 files_deleted	8591	حُذف %d
 files_deleting	a297	جارٍ الحذف: %d حتى الآن، Escape يوقف
+files_done	1791	تم
 files_empty	751c	هذا المجلد فارغ
 files_failed	c564	تعذرت قراءة هذا المجلد
 files_find_hint	0ee1	بحث في هذا المجلد
@@ -70,8 +78,13 @@ files_name_taken	cbce	هذا الاسم مستخدم
 files_new_folder	d127	مجلد جديد
 files_not_folder	2663	هذا ليس مجلدا
 files_nothing_to_paste	c9d4	لا تحوي الحافظة ملفات
+files_nothing_to_redo	b2a4	لا شيء لإعادته
+files_nothing_to_undo	1433	لا شيء للتراجع عنه
 files_reading	64a4	قراءة المجلد
+files_redone	6fd0	أعيد %d
 files_rename_hint	ad88	اسم جديد
+files_restored	4c30	أعيد %d إلى مكانه
+files_selecting	2d5c	وضع التحديد، %d محدد: المس العناصر لإضافتها أو إزالتها، Escape أو تم للإنهاء
 files_sheet_created	59ac	أُنشئ %s
 files_sheet_file	3663	ملف
 files_sheet_folder	7afd	مجلد
@@ -88,6 +101,7 @@ files_sheet_size_in	31a1	الحجم %1$s في %2$d عناصر
 files_type_ext	d2c5	ملف %s
 files_type_link	e589	رابط
 files_type_other	e8e6	ملف خاص
+files_undone	4da3	تراجع عن %d
 files_unreadable	986c	لا يُسمح بقراءة هذا المجلد
 files_up	5940	للأعلى
 installer_apps_about	af1b	تُثبَّت على النظام الجديد بعد كتابته.
@@ -165,6 +179,9 @@ launcher_run	61b6	تنفيذ %s
 launcher_search_hint	334b	ابحث عن برنامج أو اكتب أمرا
 launcher_sleep	2ca8	سكون
 launcher_sleep_armed	bb08	السكون
+menu_bin_empty	1538	إفراغ سلة المهملات
+menu_bin_open	8797	فتح سلة المهملات
+menu_bin_restore	4799	استعادة
 menu_copy	43e0	نسخ
 menu_cut	5c17	قص
 menu_delete	1e3e	حذف

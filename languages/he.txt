@@ -2,6 +2,7 @@
 @name עברית
 @translated machine
 @direction rtl
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
 action_copy	3664	העתק
 action_cut	5863	גזור
 action_paste	0288	הדבק
@@ -37,7 +38,12 @@ editor_write_beside	ec75	לא ניתן לכתוב לצד הקובץ
 editor_writes_over_changed	df15	יכתוב מעל שינוי הדיסק (Ctrl+R קורא שוב)
 editor_writes_over_readonly	e22f	יכתוב מעל קובץ לקריאה בלבד
 files_back	4bc2	אחורה
+files_bin_cross	da73	סל המחזור בכונן אחר: Shift+Delete מוחק לצמיתות
+files_bin_emptied	15da	סל המחזור ריק
+files_binned	4b0f	%d הועברו לסל המחזור: Ctrl+Z מחזיר אותם
 files_busy	5ba5	העתקה, העברה או מחיקה מתבצעת
+files_carry_here	fa82	הם כבר בתיקייה הזו: שום דבר לא מועבר
+files_carrying	d1fc	נושא %d: Tab מניח אותם כאן, לחיצה על תיקייה מניחה אותם בה, Escape מחזיר אותם
 files_changed	df4e	זה לא מה שהופיע ברשימה: התיקייה נקראת מחדש
 files_chosen	7a7f	נבחרו %1$d מתוך %2$d
 files_chosen_size	621a	%1$d מתוך %2$d נבחרו, %3$s
@@ -51,9 +57,11 @@ files_count	cab8	%d פריטים
 files_count_cut	f139	%d הפריטים הראשונים: בתיקייה יש עוד
 files_count_found	283a	מוצגים %1$d מתוך %2$d
 files_delete_ask	807b	למחוק %1$d: %2$s? Delete שוב מוחק, Escape משאיר
+files_delete_for_good	ec0e	למחוק לצמיתות %1$d: %2$s? Shift+Delete שוב מוחק, Escape משאיר אותם
 files_delete_stopped	ef42	נעצר ב-%2$s: נמחקו %1$d לפניו
 files_deleted	8591	נמחקו %d
 files_deleting	a297	מוחק: %d עד כה, Escape עוצר
+files_done	1791	סיום
 files_empty	751c	התיקייה הזו ריקה
 files_failed	c564	לא ניתן היה לקרוא את התיקייה
 files_find_hint	0ee1	חיפוש בתיקייה זו
@@ -70,8 +78,13 @@ files_name_taken	cbce	השם הזה תפוס
 files_new_folder	d127	תיקייה חדשה
 files_not_folder	2663	זו לא תיקייה
 files_nothing_to_paste	c9d4	בלוח אין קבצים
+files_nothing_to_redo	b2a4	אין מה לבצע שוב
+files_nothing_to_undo	1433	אין מה לבטל
 files_reading	64a4	קורא את התיקייה
+files_redone	6fd0	%d בוצעו שוב
 files_rename_hint	ad88	שם חדש
+files_restored	4c30	%d הוחזרו למקומם
+files_selecting	2d5c	מצב בחירה, %d נבחרו: הקש על פריטים כדי להוסיף או להסיר, Escape או סיום כדי לסיים
 files_sheet_created	59ac	נוצר %s
 files_sheet_file	3663	קובץ
 files_sheet_folder	7afd	תיקייה
@@ -88,6 +101,7 @@ files_sheet_size_in	31a1	גודל %1$s ב־%2$d פריטים
 files_type_ext	d2c5	קובץ %s
 files_type_link	e589	קישור
 files_type_other	e8e6	קובץ מיוחד
+files_undone	4da3	%d בוטלו
 files_unreadable	986c	אין הרשאה לקרוא את התיקייה
 files_up	5940	למעלה
 installer_apps_about	af1b	הן מותקנות במערכת החדשה אחרי שהיא נכתבת.
@@ -165,6 +179,9 @@ launcher_run	61b6	הרץ %s
 launcher_search_hint	334b	חפש תוכנית או הקלד פקודה
 launcher_sleep	2ca8	שינה
 launcher_sleep_armed	bb08	מעבר לשינה
+menu_bin_empty	1538	ריקון סל המחזור
+menu_bin_open	8797	פתיחת סל המחזור
+menu_bin_restore	4799	שחזור
 menu_copy	43e0	העתק
 menu_cut	5c17	גזור
 menu_delete	1e3e	מחק

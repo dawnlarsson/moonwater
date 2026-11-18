@@ -1,6 +1,7 @@
 @language it
 @name Italiano
 @translated machine
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
 action_copy	3664	Copia
 action_cut	5863	Taglia
 action_paste	0288	Incolla
@@ -36,7 +37,12 @@ editor_write_beside	ec75	impossibile scrivere accanto al file
 editor_writes_over_changed	df15	sovrascrive la modifica sul disco (Ctrl+R la rilegge)
 editor_writes_over_readonly	e22f	sovrascrive un file di sola lettura
 files_back	4bc2	Indietro
+files_bin_cross	da73	Il cestino è su un altro disco: Maiusc+Canc lo elimina per sempre
+files_bin_emptied	15da	Il cestino è vuoto
+files_binned	4b0f	%d spostati nel cestino: Ctrl+Z li rimette
 files_busy	5ba5	Una copia, uno spostamento o un'eliminazione è in corso
+files_carry_here	fa82	Sono già in questa cartella: non si sposta nulla
+files_carrying	d1fc	%d trasportati: Tab li lascia qui, una pressione su una cartella li lascia lì, Esc li rimette
 files_changed	df4e	Non è ciò che era elencato: la cartella viene riletta
 files_chosen	7a7f	%1$d di %2$d scelti
 files_chosen_size	621a	%1$d di %2$d scelti, %3$s
@@ -50,9 +56,11 @@ files_count	cab8	%d elementi
 files_count_cut	f139	I primi %d elementi: la cartella ne ha altri
 files_count_found	283a	%1$d di %2$d mostrati
 files_delete_ask	807b	Eliminare %1$d: %2$s? Di nuovo Canc lo fa, Escape li lascia
+files_delete_for_good	ec0e	Eliminare per sempre %1$d: %2$s? Maiusc+Canc di nuovo lo fa, Esc li lascia
 files_delete_stopped	ef42	Fermato a %2$s: %1$d eliminati prima
 files_deleted	8591	%d eliminati
 files_deleting	a297	Eliminazione: %d finora, Escape ferma
+files_done	1791	Fatto
 files_empty	751c	Questa cartella è vuota
 files_failed	c564	Impossibile leggere questa cartella
 files_find_hint	0ee1	Cerca in questa cartella
@@ -69,8 +77,13 @@ files_name_taken	cbce	Questo nome è già usato
 files_new_folder	d127	Nuova cartella
 files_not_folder	2663	Questa non è una cartella
 files_nothing_to_paste	c9d4	Gli appunti non contengono file
+files_nothing_to_redo	b2a4	Niente da ripetere
+files_nothing_to_undo	1433	Niente da annullare
 files_reading	64a4	Lettura della cartella
+files_redone	6fd0	%d ripetuti
 files_rename_hint	ad88	Nuovo nome
+files_restored	4c30	%d rimessi al loro posto
+files_selecting	2d5c	Modalità selezione, %d scelti: tocca gli elementi per aggiungerli o toglierli, Esc o Fatto per finire
 files_sheet_created	59ac	Creato %s
 files_sheet_file	3663	File
 files_sheet_folder	7afd	Cartella
@@ -87,6 +100,7 @@ files_sheet_size_in	31a1	Dimensione %1$s in %2$d elementi
 files_type_ext	d2c5	File %s
 files_type_link	e589	Collegamento
 files_type_other	e8e6	File speciale
+files_undone	4da3	%d annullati
 files_unreadable	986c	Questa cartella non può essere letta
 files_up	5940	Su
 installer_apps_about	af1b	Vengono installate sul nuovo sistema una volta scritto.
@@ -164,6 +178,9 @@ launcher_run	61b6	Esegui %s
 launcher_search_hint	334b	Cerca programmi, oppure scrivi un comando
 launcher_sleep	2ca8	Sospendi
 launcher_sleep_armed	bb08	sospendere
+menu_bin_empty	1538	Svuota il cestino
+menu_bin_open	8797	Apri il cestino
+menu_bin_restore	4799	Ripristina
 menu_copy	43e0	&Copia
 menu_cut	5c17	&Taglia
 menu_delete	1e3e	&Elimina

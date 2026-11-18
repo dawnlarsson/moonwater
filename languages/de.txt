@@ -1,6 +1,7 @@
 @language de
 @name Deutsch
 @translated machine
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
 action_copy	3664	Kopieren
 action_cut	5863	Ausschneiden
 action_paste	0288	Einfügen
@@ -36,7 +37,12 @@ editor_write_beside	ec75	neben der Datei konnte nicht geschrieben werden
 editor_writes_over_changed	df15	überschreibt die Änderung auf dem Datenträger (Ctrl+R liest neu)
 editor_writes_over_readonly	e22f	überschreibt eine schreibgeschützte Datei
 files_back	4bc2	Zurück
+files_bin_cross	da73	Der Papierkorb liegt auf einem anderen Datenträger: Umschalt+Entf löscht endgültig
+files_bin_emptied	15da	Der Papierkorb ist leer
+files_binned	4b0f	%d in den Papierkorb verschoben: Strg+Z holt sie zurück
 files_busy	5ba5	Ein Kopieren, Verschieben oder Löschen läuft
+files_carry_here	fa82	Sie liegen schon in diesem Ordner: nichts wird verschoben
+files_carrying	d1fc	%d getragen: Tab legt sie hier ab, ein Druck auf einen Ordner legt sie hinein, Escape legt sie zurück
 files_changed	df4e	Nicht mehr das Aufgelistete: der Ordner wird neu gelesen
 files_chosen	7a7f	%1$d von %2$d gewählt
 files_chosen_size	621a	%1$d von %2$d gewählt, %3$s
@@ -50,9 +56,11 @@ files_count	cab8	%d Einträge
 files_count_cut	f139	Die ersten %d Einträge: der Ordner hat mehr
 files_count_found	283a	%1$d von %2$d gezeigt
 files_delete_ask	807b	%1$d löschen: %2$s? Nochmal Entf löscht, Escape lässt sie
+files_delete_for_good	ec0e	%1$d endgültig löschen: %2$s? Nochmal Umschalt+Entf löscht, Escape lässt sie
 files_delete_stopped	ef42	Angehalten bei %2$s: %1$d davor gelöscht
 files_deleted	8591	%d gelöscht
 files_deleting	a297	Löschen: %d bisher, Escape hält an
+files_done	1791	Fertig
 files_empty	751c	Dieser Ordner ist leer
 files_failed	c564	Dieser Ordner konnte nicht gelesen werden
 files_find_hint	0ee1	In diesem Ordner suchen
@@ -69,8 +77,13 @@ files_name_taken	cbce	Der Name ist vergeben
 files_new_folder	d127	Neuer Ordner
 files_not_folder	2663	Das ist kein Ordner
 files_nothing_to_paste	c9d4	Die Zwischenablage enthält keine Dateien
+files_nothing_to_redo	b2a4	Nichts zu wiederholen
+files_nothing_to_undo	1433	Nichts rückgängig zu machen
 files_reading	64a4	Ordner wird gelesen
+files_redone	6fd0	%d wiederholt
 files_rename_hint	ad88	Neuer Name
+files_restored	4c30	%d zurückgelegt, wo sie waren
+files_selecting	2d5c	Auswahlmodus, %d gewählt: Elemente antippen zum Hinzufügen oder Entfernen, Escape oder Fertig zum Beenden
 files_sheet_created	59ac	Erstellt %s
 files_sheet_file	3663	Datei
 files_sheet_folder	7afd	Ordner
@@ -87,6 +100,7 @@ files_sheet_size_in	31a1	Größe %1$s in %2$d Einträgen
 files_type_ext	d2c5	%s-Datei
 files_type_link	e589	Verweis
 files_type_other	e8e6	Sonderdatei
+files_undone	4da3	%d rückgängig gemacht
 files_unreadable	986c	Dieser Ordner darf nicht gelesen werden
 files_up	5940	Nach oben
 installer_apps_about	af1b	Sie werden auf dem neuen System installiert, sobald es geschrieben ist.
@@ -164,6 +178,9 @@ launcher_run	61b6	Ausführen %s
 launcher_search_hint	334b	Programme suchen oder einen Befehl eingeben
 launcher_sleep	2ca8	Standby
 launcher_sleep_armed	bb08	in Standby gehen
+menu_bin_empty	1538	Papierkorb leeren
+menu_bin_open	8797	Papierkorb öffnen
+menu_bin_restore	4799	Zurücklegen
 menu_copy	43e0	&Kopieren
 menu_cut	5c17	A&usschneiden
 menu_delete	1e3e	&Löschen

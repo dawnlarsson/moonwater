@@ -1,6 +1,7 @@
 @language uk
 @name Українська
 @translated machine
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
 action_copy	3664	Копіювати
 action_cut	5863	Вирізати
 action_paste	0288	Вставити
@@ -36,7 +37,12 @@ editor_write_beside	ec75	не вдалося записати поруч із ф
 editor_writes_over_changed	df15	перезапише зміну на диску (Ctrl+R читає знову)
 editor_writes_over_readonly	e22f	перезапише файл лише для читання
 files_back	4bc2	Назад
+files_bin_cross	da73	Кошик на іншому диску: Shift+Delete видалить назавжди
+files_bin_emptied	15da	Кошик порожній
+files_binned	4b0f	До кошика переміщено: %d. Ctrl+Z поверне їх
 files_busy	5ba5	Триває копіювання, переміщення або видалення
+files_carry_here	fa82	Вони вже в цій теці: нічого не переміщується
+files_carrying	d1fc	Несете %d: Tab покладе їх сюди, натискання на теку покладе в неї, Escape поверне на місце
 files_changed	df4e	Це вже не те, що було у списку: тека читається знову
 files_chosen	7a7f	Вибрано %1$d з %2$d
 files_chosen_size	621a	Вибрано %1$d з %2$d, %3$s
@@ -50,9 +56,11 @@ files_count	cab8	Об'єктів: %d
 files_count_cut	f139	Перші %d об'єктів: у теці є ще
 files_count_found	283a	Показано %1$d з %2$d
 files_delete_ask	807b	Видалити %1$d: %2$s? Ще раз Delete видаляє, Escape лишає
+files_delete_for_good	ec0e	Видалити назавжди %1$d: %2$s? Ще раз Shift+Delete видалить, Escape залишить
 files_delete_stopped	ef42	Зупинено на %2$s: до цього видалено %1$d
 files_deleted	8591	Видалено: %d
 files_deleting	a297	Видалення: поки %d, Escape зупиняє
+files_done	1791	Готово
 files_empty	751c	Ця тека порожня
 files_failed	c564	Не вдалося прочитати цю теку
 files_find_hint	0ee1	Шукати в цій теці
@@ -69,8 +77,13 @@ files_name_taken	cbce	Це ім'я зайняте
 files_new_folder	d127	Нова тека
 files_not_folder	2663	Це не тека
 files_nothing_to_paste	c9d4	У буфері обміну немає файлів
+files_nothing_to_redo	b2a4	Нічого повторювати
+files_nothing_to_undo	1433	Нічого скасовувати
 files_reading	64a4	Читання теки
+files_redone	6fd0	Повторено: %d
 files_rename_hint	ad88	Нове ім'я
+files_restored	4c30	Повернуто на місце: %d
+files_selecting	2d5c	Режим вибору, вибрано %d: торкайтеся елементів, щоб додати або прибрати, Escape або Готово — завершити
 files_sheet_created	59ac	Створено %s
 files_sheet_file	3663	Файл
 files_sheet_folder	7afd	Тека
@@ -87,6 +100,7 @@ files_sheet_size_in	31a1	Розмір %1$s у %2$d елементах
 files_type_ext	d2c5	Файл %s
 files_type_link	e589	Посилання
 files_type_other	e8e6	Особливий файл
+files_undone	4da3	Скасовано: %d
 files_unreadable	986c	Цю теку не можна читати
 files_up	5940	Вгору
 installer_apps_about	af1b	Вони встановлюються в нову систему після її запису.
@@ -164,6 +178,9 @@ launcher_run	61b6	Виконати %s
 launcher_search_hint	334b	Пошук програм або введення команди
 launcher_sleep	2ca8	Сон
 launcher_sleep_armed	bb08	перейти в сон
+menu_bin_empty	1538	Очистити кошик
+menu_bin_open	8797	Відкрити кошик
+menu_bin_restore	4799	Відновити
 menu_copy	43e0	Копіювати
 menu_cut	5c17	Вирізати
 menu_delete	1e3e	Видалити

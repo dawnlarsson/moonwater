@@ -1,6 +1,7 @@
 @language es
 @name Español
 @translated machine
+# machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore
 action_copy	3664	Copiar
 action_cut	5863	Cortar
 action_paste	0288	Pegar
@@ -36,7 +37,12 @@ editor_write_beside	ec75	no se pudo escribir junto al archivo
 editor_writes_over_changed	df15	sobrescribe el cambio del disco (Ctrl+R lo lee de nuevo)
 editor_writes_over_readonly	e22f	sobrescribe un archivo de solo lectura
 files_back	4bc2	Atrás
+files_bin_cross	da73	La papelera está en otro disco: Mayús+Supr lo elimina para siempre
+files_bin_emptied	15da	La papelera está vacía
+files_binned	4b0f	%d movidos a la papelera: Ctrl+Z los devuelve
 files_busy	5ba5	Hay una copia, un traslado o un borrado en curso
+files_carry_here	fa82	Ya están en esta carpeta: no se mueve nada
+files_carrying	d1fc	Llevando %d: Tab los suelta aquí, una pulsación en una carpeta los suelta en ella, Escape los devuelve
 files_changed	df4e	No es lo que se listó: la carpeta se lee de nuevo
 files_chosen	7a7f	%1$d de %2$d elegidos
 files_chosen_size	621a	%1$d de %2$d elegidos, %3$s
@@ -50,9 +56,11 @@ files_count	cab8	%d elementos
 files_count_cut	f139	Los primeros %d elementos: la carpeta tiene más
 files_count_found	283a	%1$d de %2$d mostrados
 files_delete_ask	807b	¿Eliminar %1$d: %2$s? Suprimir otra vez lo hace, Escape los deja
+files_delete_for_good	ec0e	¿Eliminar %1$d para siempre: %2$s? Mayús+Supr otra vez lo hace, Escape los deja
 files_delete_stopped	ef42	Detenido en %2$s: %1$d eliminados antes
 files_deleted	8591	%d eliminados
 files_deleting	a297	Eliminando: %d hasta ahora, Escape detiene
+files_done	1791	Hecho
 files_empty	751c	Esta carpeta está vacía
 files_failed	c564	No se pudo leer esta carpeta
 files_find_hint	0ee1	Buscar en esta carpeta
@@ -69,8 +77,13 @@ files_name_taken	cbce	Ese nombre ya existe
 files_new_folder	d127	Carpeta nueva
 files_not_folder	2663	Esto no es una carpeta
 files_nothing_to_paste	c9d4	El portapapeles no tiene archivos
+files_nothing_to_redo	b2a4	Nada que rehacer
+files_nothing_to_undo	1433	Nada que deshacer
 files_reading	64a4	Leyendo la carpeta
+files_redone	6fd0	%d rehechos
 files_rename_hint	ad88	Nombre nuevo
+files_restored	4c30	%d devueltos a su sitio
+files_selecting	2d5c	Modo de selección, %d elegidos: toca elementos para añadirlos o quitarlos, Escape o Hecho para terminar
 files_sheet_created	59ac	Creado %s
 files_sheet_file	3663	Archivo
 files_sheet_folder	7afd	Carpeta
@@ -87,6 +100,7 @@ files_sheet_size_in	31a1	Tamaño %1$s en %2$d elementos
 files_type_ext	d2c5	Archivo %s
 files_type_link	e589	Enlace
 files_type_other	e8e6	Archivo especial
+files_undone	4da3	%d deshechos
 files_unreadable	986c	No se permite leer esta carpeta
 files_up	5940	Subir
 installer_apps_about	af1b	Se instalan en el sistema nuevo una vez escrito.
@@ -164,6 +178,9 @@ launcher_run	61b6	Ejecutar %s
 launcher_search_hint	334b	Buscar programas, o escribir un comando
 launcher_sleep	2ca8	Suspender
 launcher_sleep_armed	bb08	suspender
+menu_bin_empty	1538	Vaciar la papelera
+menu_bin_open	8797	Abrir la papelera
+menu_bin_restore	4799	Restaurar
 menu_copy	43e0	&Copiar
 menu_cut	5c17	Cor&tar
 menu_delete	1e3e	&Eliminar

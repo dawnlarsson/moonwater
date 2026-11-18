@@ -36,7 +36,12 @@ editor_write_beside	ec75	could not write beside the file
 editor_writes_over_changed	df15	writes over the change on disk (Ctrl+R reads it again)
 editor_writes_over_readonly	e22f	writes over a read-only file
 files_back	4bc2	Back
+files_bin_cross	da73	The bin is on another disk: Shift+Delete deletes it for good
+files_bin_emptied	15da	The bin is empty
+files_binned	4b0f	%d moved to the bin: Ctrl+Z puts them back
 files_busy	5ba5	A copy, a move or a delete is under way
+files_carry_here	fa82	They are in this folder already: nothing is moved
+files_carrying	d1fc	Carrying %d: Tab drops them here, a press on a folder drops them in it, Escape puts them back
 files_changed	df4e	It is not what was listed: the folder is read again
 files_chosen	7a7f	%1$d of %2$d chosen
 files_chosen_size	621a	%1$d of %2$d chosen, %3$s
@@ -50,9 +55,11 @@ files_count	cab8	%d items
 files_count_cut	f139	The first %d items: the folder has more
 files_count_found	283a	%1$d of %2$d shown
 files_delete_ask	807b	Delete %1$d: %2$s? Delete again does it, Escape leaves them
+files_delete_for_good	ec0e	Delete %1$d for good: %2$s? Shift+Delete again does it, Escape leaves them
 files_delete_stopped	ef42	Stopped at %2$s: %1$d deleted before it
 files_deleted	8591	%d deleted
 files_deleting	a297	Deleting: %d so far, Escape stops
+files_done	1791	Done
 files_empty	751c	This folder is empty
 files_failed	c564	This folder could not be read
 files_find_hint	0ee1	Find in this folder
@@ -69,8 +76,13 @@ files_name_taken	cbce	That name is taken
 files_new_folder	d127	New folder
 files_not_folder	2663	This is not a folder
 files_nothing_to_paste	c9d4	The clipboard holds no files
+files_nothing_to_redo	b2a4	Nothing to do again
+files_nothing_to_undo	1433	Nothing to undo
 files_reading	64a4	Reading the folder
+files_redone	6fd0	%d done again
 files_rename_hint	ad88	New name
+files_restored	4c30	%d put back where they were
+files_selecting	2d5c	Selection mode, %d chosen: tap items to add or take them out, Escape or Done to finish
 files_sheet_created	59ac	Made %s
 files_sheet_file	3663	File
 files_sheet_folder	7afd	Folder
@@ -87,6 +99,7 @@ files_sheet_size_in	31a1	Size %1$s in %2$d items
 files_type_ext	d2c5	%s file
 files_type_link	e589	Link
 files_type_other	e8e6	Special file
+files_undone	4da3	%d undone
 files_unreadable	986c	This folder may not be read
 files_up	5940	Up
 installer_apps_about	af1b	They are installed on the new system once it is written.
@@ -164,6 +177,9 @@ launcher_run	61b6	Run %s
 launcher_search_hint	334b	Search programs, or type a command
 launcher_sleep	2ca8	Sleep
 launcher_sleep_armed	bb08	sleep
+menu_bin_empty	1538	Empty the bin
+menu_bin_open	8797	Open the bin
+menu_bin_restore	4799	Put back
 menu_copy	43e0	&Copy
 menu_cut	5c17	Cu&t
 menu_delete	1e3e	&Delete
