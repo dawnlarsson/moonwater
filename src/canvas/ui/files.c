@@ -61,6 +61,16 @@
         gives it the new name and Escape leaves it; a name that is taken or is no name says so and nothing is renamed. Ctrl+Shift+N
         makes a folder called New folder (New folder 2 and on while the name is taken) with the keys on it, ready for F2.
 
+        Two panes. The folder tree (files_tree_* in the model, the kit's list as a tree) is beside the rows, the folder shown lit in it
+        and kept open to; a node's chevron opens and shuts it and its name shows its folder. The rows are details under the kit's
+        columns (Name, Size, Type, Modified: a title pressed orders by it, an edge held widens a column), large icons or a list of names
+        (Ctrl+1, 2, 3; the kit's tiles). A press of the right button, Shift+F10 or the menu key opens the menu of the rows or of the
+        folder (open, open in the editor, a terminal here, cut, copy, paste, rename, delete, new folder, select all, hidden files, the
+        view, the order, properties); Ctrl+X, Ctrl+C and Ctrl+V move and copy files through the clipboard; Alt+Enter shows a properties
+        sheet. Ctrl+F finds in the folder (a field at the foot whose text keeps the rows to the names that hold it), a letter typed goes
+        to the first name that starts with it, and a press on the rows' ground, or on a row away from its name, draws a rubber band.
+        Tab takes the keys from the rows to the trail and on to the tree.
+
         Dragging. A mouse's press on a row taken past the slop drags the rows out as files (text/uri-list, their paths as text beside):
         dropped on a terminal they are typed as quoted paths, on another program as it takes files. Files dragged over this window are
         copied or moved into the folder row under the pointer, ringed, or into the folder shown, the whole list ringed: Control a copy,
@@ -115,6 +125,7 @@
 #define FILES_MENU_DETAILS 29        // the views: the rows as details under columns,
 #define FILES_MENU_ICONS 30          // as large icons,
 #define FILES_MENU_LIST 31           // or as a list of names, a small symbol before each
+#define FILES_MENU_SORT 32           // and 33, 34, 35: the rows ordered by name, size, type or time (the columns' order)
 #define FILES_VIEW_DETAILS 0
 #define FILES_VIEW_ICONS 1
 #define FILES_VIEW_LIST 2
@@ -1659,6 +1670,11 @@ static fn files_menu_open(b32 on, int x, int y)
                 ui_popmenu_add(menu, WORDS(menu_view_icons), "Ctrl+2", UI_MENU_RADIO | (files.view == FILES_VIEW_ICONS ? UI_MENU_ON : 0), FILES_MENU_ICONS);
                 ui_popmenu_add(menu, WORDS(menu_view_list), "Ctrl+3", UI_MENU_RADIO | (files.view == FILES_VIEW_LIST ? UI_MENU_ON : 0), FILES_MENU_LIST);
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
+                // The order, as the columns' header gives it (the one chosen again turns it round): the menu's way to it from the keys.
+                for (int column = 0; column < 4; column++)
+                        ui_popmenu_add(menu, files.columns.title[column], column == files.columns.sorted ? (files.columns.descending ? "\xe2\x86\x93" : "\xe2\x86\x91") : null,
+                                       UI_MENU_RADIO | (column == files.columns.sorted ? UI_MENU_ON : 0), FILES_MENU_SORT + column);
+                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(menu, WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL);
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(menu, WORDS(menu_properties), null, 0, FILES_MENU_PROPERTIES);
@@ -1739,6 +1755,15 @@ static fn files_menu_do(int id)
         case FILES_MENU_ICONS:
         case FILES_MENU_LIST:
                 files_view(id - FILES_MENU_DETAILS);
+                break;
+        case FILES_MENU_SORT:
+        case FILES_MENU_SORT + 1:
+        case FILES_MENU_SORT + 2:
+        case FILES_MENU_SORT + 3:
+                files.columns.descending = id - FILES_MENU_SORT == files.columns.sorted ? !files.columns.descending : false;
+                files.columns.sorted = id - FILES_MENU_SORT;
+                files_model_sort(m, files_column_sort(files.columns.sorted), files.columns.descending);
+                files_show_cursor();
                 break;
         case FILES_MENU_ALL:
                 if (files_model_count(m))
