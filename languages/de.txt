@@ -48,12 +48,14 @@ files_copied	6570	%d kopiert
 files_copying	c870	Kopiere %1$d von %2$d, %3$s von %4$s: Escape hält an
 files_count	cab8	%d Einträge
 files_count_cut	f139	Die ersten %d Einträge: der Ordner hat mehr
+files_count_found	283a	%1$d von %2$d gezeigt
 files_delete_ask	807b	%1$d löschen: %2$s? Nochmal Entf löscht, Escape lässt sie
 files_delete_stopped	ef42	Angehalten bei %2$s: %1$d davor gelöscht
 files_deleted	8591	%d gelöscht
 files_deleting	a297	Löschen: %d bisher, Escape hält an
 files_empty	751c	Dieser Ordner ist leer
 files_failed	c564	Dieser Ordner konnte nicht gelesen werden
+files_find_hint	0ee1	In diesem Ordner suchen
 files_forward	83ba	Vor
 files_gone	b09c	Dieser Ordner ist weg
 files_link	9abb	Einer Verknüpfung wird nicht gefolgt

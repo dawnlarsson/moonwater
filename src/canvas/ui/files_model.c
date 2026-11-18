@@ -127,6 +127,7 @@ struct files_listing
         p8 address_to names;     // each name's bytes and an end after it
         p32 address_to order;    // the entries in the order they are shown: a place is an index into this
         p32 count, names_used;
+        p32 places;              // the places shown: every entry (count), or those a filter leaves (files_model_filter)
         b32 cut;                 // the folder has more than is held
 };
 
@@ -160,6 +161,8 @@ struct files_model
         int sort;                // FILES_SORT_*
         b32 descending;
         b32 hidden;              // names that start with a dot are listed too
+        p8 filter[FILES_NAME];   // only names with these bytes in them are shown (letters of either case alike), when filter_length is not 0
+        positive filter_length;
         p32 cursor;              // the place the keys are on, FILES_NO none
         p32 anchor;              // the entry (not the place) a range is chosen from, FILES_NO none
         p8 address_to chosen;    // a bit an entry (not a place: an order change keeps it)
@@ -232,13 +235,13 @@ static fn files_model_close(struct files_model address_to m)
 
 static inline p32 files_model_count(const struct files_model address_to m)
 {
-        return m->shown.count;
+        return m->shown.places;
 }
 
 // The entry at a place of the order shown, or null.
 static const struct files_entry address_to files_model_entry(const struct files_model address_to m, p32 place)
 {
-        return place < m->shown.count ? &m->shown.entry[m->shown.order[place]] : null;
+        return place < m->shown.places ? &m->shown.entry[m->shown.order[place]] : null;
 }
 
 // An entry's name: its bytes as the disk has them, with an end after them. Not text: a view writes it through the kit's rule.
@@ -327,6 +330,24 @@ static fn files_listing_sort(struct files_listing address_to l, int sort, b32 de
                 l->order[at] = at;
         if (l->count > 1)
                 qsort_r(l->order, l->count, sizeof(p32), files_order_compare, &order);
+        l->places = l->count;
+}
+
+// The order kept to the entries whose names hold the filter's bytes (letters of either case alike); a filter of none keeps them all.
+static fn files_listing_filter(struct files_listing address_to l, const p8 address_to filter, positive length)
+{
+        p32 kept = 0;
+
+        if (!length)
+                return;
+        for (p32 at = 0; at < l->places; at++)
+        {
+                const struct files_entry address_to entry = &l->entry[l->order[at]];
+
+                if (entry->length >= length && memory_search_ascii_case(l->names + entry->name, entry->length, filter, length))
+                        l->order[kept++] = l->order[at];
+        }
+        l->places = kept;
 }
 
 // The place of the entry with this name in the listing shown, FILES_NO for none.
@@ -334,7 +355,7 @@ static p32 files_model_find(const struct files_model address_to m, const p8 addr
 {
         positive length = string_length((string_address)name);
 
-        for (p32 place = 0; place < m->shown.count; place++)
+        for (p32 place = 0; place < m->shown.places; place++)
         {
                 const struct files_entry address_to entry = &m->shown.entry[m->shown.order[place]];
 
@@ -348,7 +369,7 @@ static p32 files_model_find(const struct files_model address_to m, const p8 addr
 
 static inline b32 files_model_chosen(const struct files_model address_to m, p32 place)
 {
-        p32 entry = place < m->shown.count ? m->shown.order[place] : FILES_NO;
+        p32 entry = place < m->shown.places ? m->shown.order[place] : FILES_NO;
 
         return entry != FILES_NO && (m->chosen[entry >> 3] >> (entry & 7) & 1);
 }
@@ -375,14 +396,14 @@ static fn files_model_choose(struct files_model address_to m, p32 place, int how
 {
         p32 entry;
 
-        if (place >= m->shown.count)
+        if (place >= m->shown.places)
                 return;
         entry = m->shown.order[place];
         if (how == FILES_CHOOSE_RANGE && m->anchor != FILES_NO)
         {
                 p32 from = FILES_NO, low, high;
 
-                for (p32 at = 0; at < m->shown.count && from == FILES_NO; at++)
+                for (p32 at = 0; at < m->shown.places && from == FILES_NO; at++)
                         from = m->shown.order[at] == m->anchor ? at : FILES_NO;
                 from = from == FILES_NO ? place : from;
                 low = from < place ? from : place, high = from < place ? place : from;
@@ -410,32 +431,58 @@ static b32 files_model_move(struct files_model address_to m, bipolar by)
 {
         bipolar to;
 
-        if (!m->shown.count)
+        if (!m->shown.places)
                 return false;
-        to = (m->cursor == FILES_NO ? (by > 0 ? -1 : (bipolar)m->shown.count) : (bipolar)m->cursor) + by;
-        to = to < 0 ? 0 : to >= (bipolar)m->shown.count ? (bipolar)m->shown.count - 1 : to;
+        to = (m->cursor == FILES_NO ? (by > 0 ? -1 : (bipolar)m->shown.places) : (bipolar)m->cursor) + by;
+        to = to < 0 ? 0 : to >= (bipolar)m->shown.places ? (bipolar)m->shown.places - 1 : to;
         if ((p32)to == m->cursor)
                 return false;
         m->cursor = (p32)to, m->revision++;
         return true;
 }
 
-// Another order: the entries are the same, so what is chosen stays chosen and the cursor stays on its entry.
-static fn files_model_sort(struct files_model address_to m, int sort, b32 descending)
+/*
+        The listing shown put in the order asked for and kept to the filter, the cursor on the entry it was on (none when the filter leaves
+        that one out: then the first place). What is chosen is kept: it is of entries, not places.
+*/
+static fn files_model_order(struct files_model address_to m)
 {
-        p32 on = m->cursor < m->shown.count ? m->shown.order[m->cursor] : FILES_NO;
+        p32 on = m->cursor < m->shown.places ? m->shown.order[m->cursor] : FILES_NO;
 
-        m->sort = sort, m->descending = descending;
-        if (m->state != FILES_READY)
-                return; // a listing still being read is put in order when it is whole
-        files_listing_sort(&m->shown, sort, descending);
-        for (p32 place = 0; place < m->shown.count && on != FILES_NO; place++)
+        files_listing_sort(&m->shown, m->sort, m->descending);
+        files_listing_filter(&m->shown, m->filter, m->filter_length);
+        m->cursor = m->shown.places ? 0 : FILES_NO;
+        for (p32 place = 0; place < m->shown.places && on != FILES_NO; place++)
                 if (m->shown.order[place] == on)
                 {
                         m->cursor = place;
                         break;
                 }
         m->revision++;
+}
+
+// Another order: the entries are the same, so what is chosen stays chosen and the cursor stays on its entry.
+static fn files_model_sort(struct files_model address_to m, int sort, b32 descending)
+{
+        m->sort = sort, m->descending = descending;
+        if (m->state != FILES_READY)
+                return; // a listing still being read is put in order when it is whole
+        files_model_order(m);
+}
+
+/*
+        Only the entries whose names hold these bytes shown (letters of either case alike: a search within the folder), or every one
+        again for none; the folder is not read again. A filter is the folder's: another folder shown has none.
+*/
+static fn files_model_filter(struct files_model address_to m, const p8 address_to text, positive length)
+{
+        length = length < FILES_NAME ? length : FILES_NAME - 1;
+        if (length == m->filter_length && !memory_compare(text, m->filter, length))
+                return;
+        memory_copy(m->filter, text, length);
+        m->filter[length] = end, m->filter_length = length;
+        if (m->state == FILES_READY)
+                files_model_order(m);
 }
 
 /* ---- reading ---- */
@@ -450,7 +497,7 @@ static int files_state_of(bipolar error)
 
 static fn files_listing_empty(struct files_listing address_to l)
 {
-        l->count = 0, l->names_used = 0, l->cut = false;
+        l->count = 0, l->names_used = 0, l->cut = false, l->places = 0;
 }
 
 // One record of the walk into a listing: false when the listing is full (it is cut there).
@@ -492,6 +539,7 @@ static b32 files_listing_take(struct files_model address_to m, struct files_list
                 entry->kind = files_kind_of_record(record->d_type), entry->inode = record->d_ino;
         l->order[l->count] = l->count; // as the disk gave them, till the listing is whole
         l->count++;
+        l->places = l->count;
         return true;
 }
 
@@ -513,6 +561,7 @@ static fn files_model_finish(struct files_model address_to m, bipolar error)
                 return;
         }
         files_listing_sort(l, m->sort, m->descending);
+        files_listing_filter(l, m->filter, m->filter_length);
         if (m->reloading)
         {
                 struct files_listing was = m->shown;
@@ -525,7 +574,7 @@ static fn files_model_finish(struct files_model address_to m, bipolar error)
         }
         m->state = FILES_READY, m->error = 0;
         m->cursor = m->came[0] ? files_model_find(m, m->came) : FILES_NO;
-        if (m->cursor == FILES_NO && m->shown.count)
+        if (m->cursor == FILES_NO && m->shown.places)
                 m->cursor = 0;
         m->came[0] = end;
         m->revision++;
@@ -632,6 +681,12 @@ static fn files_keep_put(struct files_model address_to m)
                 files_keep_drop(m, which);
         if (m->state != FILES_READY || m->handle < 0 || bytes > FILES_KEPT_BYTES)
                 return;
+        // A listing kept to a filter is kept whole: the filter is the folder's while it is shown, and is let go with it.
+        if (m->shown.places != m->shown.count)
+        {
+                m->filter_length = 0, m->filter[0] = end;
+                files_model_order(m);
+        }
         for (int at = 0; which < 0 && at < FILES_KEPT; at++)
                 which = m->kept[at].path[0] ? -1 : at;
         if (which < 0)
@@ -671,7 +726,7 @@ static fn files_keep_take(struct files_model address_to m, int which)
         const p8 address_to chosen;
         p32 on;
 
-        m->shown.count = k->count, m->shown.names_used = k->names_used, m->shown.cut = k->cut;
+        m->shown.count = m->shown.places = k->count, m->shown.names_used = k->names_used, m->shown.cut = k->cut;
         if (k->bytes)
         {
                 chosen = files_keep_listing(k, &from);
@@ -708,6 +763,7 @@ static fn files_model_show(struct files_model address_to m, string_address path,
                 file_walk_close(&m->reader);
         m->walking = false, m->reloading = false;
         files_keep_put(m);
+        m->filter_length = 0, m->filter[0] = end;
         if (m->handle >= 0)
                 system_close(m->handle);
         m->handle = handle;
@@ -809,7 +865,7 @@ static int files_model_stale(struct files_model address_to m)
 */
 static int files_model_check(struct files_model address_to m, p32 place, file_facts address_to now)
 {
-        struct files_entry address_to entry = place < m->shown.count ? &m->shown.entry[m->shown.order[place]] : null;
+        struct files_entry address_to entry = place < m->shown.places ? &m->shown.entry[m->shown.order[place]] : null;
         file_facts facts;
         bipolar looked;
 
@@ -1493,7 +1549,7 @@ static b32 files_delete_begin(struct files_model address_to m, struct files_job 
         }
         job->names = (p8 address_to)mapped;
         job->facts = (file_facts address_to)(job->names + (positive)FILES_MOST * FILES_NAME / 8);
-        for (p32 place = 0; place < m->shown.count; place++)
+        for (p32 place = 0; place < m->shown.places; place++)
         {
                 const struct files_entry address_to entry = &m->shown.entry[m->shown.order[place]];
 

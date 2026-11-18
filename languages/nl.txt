@@ -48,12 +48,14 @@ files_copied	6570	%d gekopieerd
 files_copying	c870	Kopiëren %1$d van %2$d, %3$s van %4$s: Escape stopt
 files_count	cab8	%d items
 files_count_cut	f139	De eerste %d items: de map heeft er meer
+files_count_found	283a	%1$d van %2$d getoond
 files_delete_ask	807b	%1$d verwijderen: %2$s? Nogmaals Delete doet het, Escape laat ze
 files_delete_stopped	ef42	Gestopt bij %2$s: %1$d ervoor verwijderd
 files_deleted	8591	%d verwijderd
 files_deleting	a297	Verwijderen: %d tot nu toe, Escape stopt
 files_empty	751c	Deze map is leeg
 files_failed	c564	Deze map kon niet worden gelezen
+files_find_hint	0ee1	Zoeken in deze map
 files_forward	83ba	Vooruit
 files_gone	b09c	Deze map is weg
 files_link	9abb	Een koppeling wordt niet gevolgd

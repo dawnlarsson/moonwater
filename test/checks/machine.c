@@ -4123,6 +4123,35 @@ static fn browser_tree(void)
         browser_remove_in((string_address) "tr");
 }
 
+/*
+        Find in a folder (files_model_filter): only the names that hold the text are shown (letters of either case alike), in the order
+        asked for, what is chosen staying chosen; none shows every entry again, and another folder shown has no filter.
+*/
+static fn browser_filter(struct files_model address_to m)
+{
+        b32 kept, again, gone;
+
+        browser_folder((string_address) "fl");
+        browser_file((string_address) "fl/Alpha.txt", 1, 0);
+        browser_file((string_address) "fl/beta.TXT", 2, 0);
+        browser_file((string_address) "fl/gamma", 3, 0);
+        browser_go(m, (string_address) "fl");
+        files_model_choose(m, browser_at(m, "gamma"), FILES_CHOOSE_ONLY);
+        files_model_filter(m, (const p8 address_to) "txt", 3);
+        kept = browser_is(m, "Alpha.txt beta.TXT ") && files_model_count(m) == 2 && m->shown.count == 3 && m->chosen_count == 1;
+        files_model_filter(m, (const p8 address_to) "ALP", 3);
+        kept = kept && browser_is(m, "Alpha.txt ") && m->cursor == 0;
+        files_model_filter(m, (const p8 address_to) "", 0);
+        again = browser_is(m, "Alpha.txt beta.TXT gamma ") && files_model_chosen(m, browser_at(m, "gamma"));
+        files_model_filter(m, (const p8 address_to) "zzz", 3);
+        gone = files_model_count(m) == 0 && !files_model_entry(m, 0);
+        browser_go(m, (string_address) "");
+        gone = gone && !m->filter_length && files_model_count(m) == m->shown.count;
+        check("browser: a find keeps the rows to the names that hold its text, either case alike, what is chosen staying chosen; none shows them all, and another folder has none",
+              kept && again && gone);
+        browser_remove_in((string_address) "fl");
+}
+
 static fn browser_asks(void)
 {
         static const p8 hostile[] = "asks/b\nad";
@@ -4260,6 +4289,7 @@ b32 main(void)
         browser_ops(address_of model);
         browser_moves();
         browser_tree();
+        browser_filter(address_of model);
         browser_asks();
         browser_apart();
         files_model_close(address_of model);

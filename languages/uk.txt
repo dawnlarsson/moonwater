@@ -48,12 +48,14 @@ files_copied	6570	Скопійовано: %d
 files_copying	c870	Копіювання %1$d з %2$d, %3$s з %4$s: Escape зупиняє
 files_count	cab8	Об'єктів: %d
 files_count_cut	f139	Перші %d об'єктів: у теці є ще
+files_count_found	283a	Показано %1$d з %2$d
 files_delete_ask	807b	Видалити %1$d: %2$s? Ще раз Delete видаляє, Escape лишає
 files_delete_stopped	ef42	Зупинено на %2$s: до цього видалено %1$d
 files_deleted	8591	Видалено: %d
 files_deleting	a297	Видалення: поки %d, Escape зупиняє
 files_empty	751c	Ця тека порожня
 files_failed	c564	Не вдалося прочитати цю теку
+files_find_hint	0ee1	Шукати в цій теці
 files_forward	83ba	Вперед
 files_gone	b09c	Цієї теки більше немає
 files_link	9abb	Перехід за посиланням не виконується

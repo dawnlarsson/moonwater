@@ -48,12 +48,14 @@ files_copied	6570	%d copiados
 files_copying	c870	Copiando %1$d de %2$d, %3$s de %4$s: Escape detiene
 files_count	cab8	%d elementos
 files_count_cut	f139	Los primeros %d elementos: la carpeta tiene más
+files_count_found	283a	%1$d de %2$d mostrados
 files_delete_ask	807b	¿Eliminar %1$d: %2$s? Suprimir otra vez lo hace, Escape los deja
 files_delete_stopped	ef42	Detenido en %2$s: %1$d eliminados antes
 files_deleted	8591	%d eliminados
 files_deleting	a297	Eliminando: %d hasta ahora, Escape detiene
 files_empty	751c	Esta carpeta está vacía
 files_failed	c564	No se pudo leer esta carpeta
+files_find_hint	0ee1	Buscar en esta carpeta
 files_forward	83ba	Adelante
 files_gone	b09c	Esta carpeta ya no está
 files_link	9abb	No se sigue un enlace

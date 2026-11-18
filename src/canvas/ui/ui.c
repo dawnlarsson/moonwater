@@ -7850,12 +7850,14 @@ LANGUAGE_ID(files_copied, "%d copied") \
 LANGUAGE_ID(files_copying, "Copying %1$d of %2$d, %3$s of %4$s: Escape stops") \
 LANGUAGE_ID(files_count, "%d items") \
 LANGUAGE_ID(files_count_cut, "The first %d items: the folder has more") \
+LANGUAGE_ID(files_count_found, "%1$d of %2$d shown") \
 LANGUAGE_ID(files_delete_ask, "Delete %1$d: %2$s? Delete again does it, Escape leaves them") \
 LANGUAGE_ID(files_delete_stopped, "Stopped at %2$s: %1$d deleted before it") \
 LANGUAGE_ID(files_deleted, "%d deleted") \
 LANGUAGE_ID(files_deleting, "Deleting: %d so far, Escape stops") \
 LANGUAGE_ID(files_empty, "This folder is empty") \
 LANGUAGE_ID(files_failed, "This folder could not be read") \
+LANGUAGE_ID(files_find_hint, "Find in this folder") \
 LANGUAGE_ID(files_forward, "Forward") \
 LANGUAGE_ID(files_gone, "This folder is gone") \
 LANGUAGE_ID(files_link, "A link is not followed") \

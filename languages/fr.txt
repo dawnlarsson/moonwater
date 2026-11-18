@@ -48,12 +48,14 @@ files_copied	6570	%d copiés
 files_copying	c870	Copie %1$d sur %2$d, %3$s sur %4$s : Échap arrête
 files_count	cab8	%d éléments
 files_count_cut	f139	Les %d premiers éléments : le dossier en a plus
+files_count_found	283a	%1$d sur %2$d affichés
 files_delete_ask	807b	Supprimer %1$d : %2$s ? Suppr à nouveau le fait, Escape les garde
 files_delete_stopped	ef42	Arrêté à %2$s : %1$d supprimés avant
 files_deleted	8591	%d supprimés
 files_deleting	a297	Suppression : %d pour l'instant, Escape arrête
 files_empty	751c	Ce dossier est vide
 files_failed	c564	Ce dossier n'a pas pu être lu
+files_find_hint	0ee1	Chercher dans ce dossier
 files_forward	83ba	Suivant
 files_gone	b09c	Ce dossier n'existe plus
 files_link	9abb	Un lien n'est pas suivi

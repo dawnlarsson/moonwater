@@ -49,12 +49,14 @@ files_copied	6570	%d הועתקו
 files_copying	c870	מעתיק %1$d מתוך %2$d, %3$s מתוך %4$s: Escape עוצר
 files_count	cab8	%d פריטים
 files_count_cut	f139	%d הפריטים הראשונים: בתיקייה יש עוד
+files_count_found	283a	מוצגים %1$d מתוך %2$d
 files_delete_ask	807b	למחוק %1$d: %2$s? Delete שוב מוחק, Escape משאיר
 files_delete_stopped	ef42	נעצר ב-%2$s: נמחקו %1$d לפניו
 files_deleted	8591	נמחקו %d
 files_deleting	a297	מוחק: %d עד כה, Escape עוצר
 files_empty	751c	התיקייה הזו ריקה
 files_failed	c564	לא ניתן היה לקרוא את התיקייה
+files_find_hint	0ee1	חיפוש בתיקייה זו
 files_forward	83ba	קדימה
 files_gone	b09c	התיקייה הזו כבר לא קיימת
 files_link	9abb	לא עוקבים אחרי קישור

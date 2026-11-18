@@ -48,12 +48,14 @@ files_copied	6570	%d copiados
 files_copying	c870	Copiando %1$d de %2$d, %3$s de %4$s: Escape para
 files_count	cab8	%d itens
 files_count_cut	f139	Os primeiros %d itens: a pasta tem mais
+files_count_found	283a	%1$d de %2$d mostrados
 files_delete_ask	807b	Excluir %1$d: %2$s? Delete de novo exclui, Escape os mantém
 files_delete_stopped	ef42	Parou em %2$s: %1$d excluídos antes
 files_deleted	8591	%d excluídos
 files_deleting	a297	Excluindo: %d até agora, Escape para
 files_empty	751c	Esta pasta está vazia
 files_failed	c564	Não foi possível ler esta pasta
+files_find_hint	0ee1	Procurar nesta pasta
 files_forward	83ba	Avançar
 files_gone	b09c	Esta pasta não existe mais
 files_link	9abb	Um link não é seguido

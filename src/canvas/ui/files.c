@@ -92,6 +92,8 @@
 #define FILES_KEY_C 46
 #define FILES_PART_PAD 6             // logical pixels of a spelled folder's field either side of its words
 #define FILES_ASK_NAMES 3            // the names a delete's question says, of however many it would remove
+#define FILES_KEY_F 33
+#define FILES_TYPE_NS 1000000000ll    // letters typed on the rows within this of each other are one name to go to
 #define FILES_KEY_X 45
 #define FILES_KEY_V 47
 #define FILES_KEY_F10 68
@@ -173,6 +175,14 @@ static struct
         p32 tree_at;             // the tree's node the keys are on there
         p32 tree_shown;          // the tree's node of the folder shown, FILES_NO when it is not in the tree
         b32 pasting;             // the clipboard was asked for files to paste: its answer is a paste into the folder shown
+        // Find in the folder (Ctrl+F): a field at the foot whose text keeps the rows to the names that hold it (files_model_filter).
+        b32 finding, find_keys;
+        struct ui_text finder;
+        struct ui_control finder_field;
+        // Letters typed on the rows: the keys go to the first name that starts with them (typed, with when the last one came).
+        p8 typed[32];
+        positive typed_length;
+        b64 typed_at;
         // A properties sheet open (the menu's popup, as lines): of the rows chosen or the cursor's (sheet_all false), or of the folder
         // shown; its size is measured on the move's thread (measuring) and the sheet is opened again with it when that is done.
         b32 sheet, sheet_folder, measuring;
@@ -379,7 +389,7 @@ static fn files_status_text(void)
                 p64 bytes = 0;
                 char size[16];
 
-                for (p32 place = 0; place < m->shown.count; place++)
+                for (p32 place = 0; place < files_model_count(m); place++)
                 {
                         const struct files_entry address_to entry = files_model_entry(m, place);
 
@@ -389,6 +399,8 @@ static fn files_status_text(void)
                 files_size_text(size, bytes);
                 language_format(into, room, WORDS(files_chosen_size), (int)m->chosen_count, (int)m->shown.count, size);
         }
+        else if (m->state == FILES_READY && m->filter_length)
+                language_format(into, room, WORDS(files_count_found), (int)files_model_count(m), (int)m->shown.count);
         else if (m->state == FILES_READY || (m->state == FILES_READING && m->shown.count))
                 language_format(into, room, m->shown.cut ? WORDS(files_count_cut) : WORDS(files_count), (int)m->shown.count);
 }
@@ -497,6 +509,13 @@ static fn files_layout(void)
                 files.path.edit = files_field();
         }
         files.path.focused = files.editing && files.focused;
+        if (!files.finder_field.kind)
+        {
+                files.finder_field.kind = UI_INPUT, files.finder_field.variant = UI_FIELD_BARE;
+                files.finder_field.edit = &files.finder;
+        }
+        files.finder_field.focused = files.finding && files.find_keys && files.focused;
+        files.finder_field.items[0] = WORDS(files_find_hint);
         files.path.items[0] = files.editing == FILES_EDIT_NAME ? WORDS(files_rename_hint) : null;
         // Every entry is a row of the list, the row the keys are on is the model's cursor, and an empty folder says what it is.
         l->total = (int)files_model_count(m);
@@ -526,7 +545,11 @@ static fn files_layout(void)
                 }
         }
         ui_row(.class = "bar")
+        {
+                if (files.finding)
+                        ui_control(&files.finder_field, .grow = 1, .h = UI_ROW);
                 ui_text(files.big->status, .class = "status");
+        }
         ui_view_end(&files.big->view);
         // A folder shown as it was left has its rows where they were; any other, from the top. And where they are now is the model's
         // to keep with the listing when the folder is left.
@@ -595,7 +618,7 @@ static p32 files_ask_names(char address_to into, positive room)
         p32 count = 0;
 
         into[0] = 0;
-        for (p32 place = 0; place < m->shown.count; place++)
+        for (p32 place = 0; place < files_model_count(m); place++)
         {
                 const struct files_entry address_to entry = files_model_entry(m, place);
 
@@ -1479,7 +1502,7 @@ static fn files_sheet_open(b32 folder, int x, int y)
                 bipolar into = m->handle >= 0 ? system_open_at(m->handle, (string_address) ".", FILE_READ | O_DIRECTORY | O_CLOEXEC) : -1;
 
                 // The sources: the folder shown's own path, else each entry's, chosen or the cursor's.
-                for (p32 place = 0; place < (folder ? 1 : m->shown.count); place++)
+                for (p32 place = 0; place < (folder ? 1 : files_model_count(m)); place++)
                 {
                         const struct files_entry address_to e = folder ? null : files_model_entry(m, place);
                         positive length = string_length((string_address)m->path), name = e ? e->length : 0;
@@ -1583,7 +1606,7 @@ static fn files_menu_open(b32 on, int x, int y)
         {
                 ui_popmenu_add(menu, WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE);
                 ui_popmenu_add(menu, WORDS(menu_new_folder), "Ctrl+Shift+N", 0, FILES_MENU_NEW_FOLDER);
-                ui_popmenu_add(menu, WORDS(menu_select_all), "Ctrl+A", m->shown.count ? 0 : UI_MENU_DISABLED, FILES_MENU_ALL);
+                ui_popmenu_add(menu, WORDS(menu_select_all), "Ctrl+A", files_model_count(m) ? 0 : UI_MENU_DISABLED, FILES_MENU_ALL);
                 ui_popmenu_add(menu, WORDS(menu_show_hidden), "Ctrl+H", UI_MENU_CHECK | (m->hidden ? UI_MENU_ON : 0), FILES_MENU_HIDDEN);
                 ui_popmenu_add(menu, WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL);
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
@@ -1653,10 +1676,10 @@ static fn files_menu_do(int id)
                 files_model_reload(m);
                 break;
         case FILES_MENU_ALL:
-                if (m->shown.count)
+                if (files_model_count(m))
                 {
                         files_model_choose(m, 0, FILES_CHOOSE_ONLY);
-                        files_model_choose(m, m->shown.count - 1, FILES_CHOOSE_RANGE);
+                        files_model_choose(m, files_model_count(m) - 1, FILES_CHOOSE_RANGE);
                 }
                 break;
         }
@@ -1743,6 +1766,70 @@ static b32 files_tree_key(const struct window_event address_to event)
         ui_list_reveal(&files.ui, &files.big->tree_list);
         files.dirty = true;
         return true;
+}
+
+// The find field's text made the model's filter: the rows are those whose names hold it, the cursor on the first of them.
+static fn files_find_take(void)
+{
+        static p8 text[FILES_NAME];
+        positive length = ui_text_string(&files.finder, text, sizeof(text));
+
+        files_model_filter(&files.big->model, text, length < sizeof(text) ? length : sizeof(text) - 1);
+        files.reseat = true, files.big->model.seat = 0;
+        files.dirty = true;
+}
+
+// Finding begun (the field at the foot, with the keys and what it held chosen) or ended (the field gone, every entry shown again).
+static fn files_find(b32 on)
+{
+        if (on)
+        {
+                if (!files.finder.doc.selections && ui_field_open(&files.finder, &files.own, ""))
+                        files.finder.most = FILES_NAME - 1;
+                files.finding = files.find_keys = true;
+                doc_select_set(&files.finder.doc, 0, doc_length(&files.finder.doc));
+        }
+        else
+        {
+                files.finding = files.find_keys = false;
+                ui_text_set(&files.finder, (const p8 address_to) "", 0);
+                files_model_filter(&files.big->model, (const p8 address_to) "", 0);
+        }
+        files.crumb_keys = files.tree_keys = false;
+        files.dirty = true;
+}
+
+// A letter typed on the rows: added to what was typed in the last second (else it starts again), and the cursor to the first name that
+// starts with it (letters of either case alike), from the cursor on and round.
+static fn files_type_ahead(p32 code)
+{
+        struct files_model address_to m = &files.big->model;
+        p32 count = files_model_count(m), start;
+        b64 now = (b64)ui_kit.now;
+        p8 bytes[4];
+        positive length = memory_utf8_encode(bytes, sizeof(bytes), code);
+
+        if (now - files.typed_at > FILES_TYPE_NS)
+                files.typed_length = 0;
+        files.typed_at = now;
+        if (!length || files.typed_length + length > sizeof(files.typed))
+                return;
+        memory_copy(files.typed + files.typed_length, bytes, length);
+        files.typed_length += length;
+        // One letter again and again steps through the names that start with it; more letters keep to the name they began on.
+        start = m->cursor == FILES_NO ? 0 : files.typed_length == length ? m->cursor + 1 : m->cursor;
+        for (p32 k = 0; k < count; k++)
+        {
+                p32 place = (start + k) % count;
+                const struct files_entry address_to entry = files_model_entry(m, place);
+
+                if (entry->length >= files.typed_length && !memory_compare_ascii_case(files_model_name(m, entry), files.typed, files.typed_length))
+                {
+                        files_model_choose(m, place, FILES_CHOOSE_ONLY);
+                        files_show_cursor();
+                        return;
+                }
+        }
 }
 
 static b32 files_key(const struct window_event address_to event)
@@ -1832,6 +1919,22 @@ static b32 files_key(const struct window_event address_to event)
                 files_paste();
                 return true;
         }
+        if (control && key == FILES_KEY_F)
+        {
+                files_find(true);
+                return true;
+        }
+        if (key == UI_KEY_ESCAPE && files.finding)
+        {
+                files_find(false);
+                return true;
+        }
+        // A letter on the rows: the keys go to the first name that starts with what was typed in the last second.
+        if (!control && !alt && event->b > ' ' && event->b != 0x7f && key != UI_KEY_SPACE)
+        {
+                files_type_ahead((p32)event->b);
+                return true;
+        }
         if ((shift && key == FILES_KEY_F10) || key == FILES_KEY_MENU)
         {
                 files_menu_keys();
@@ -1844,10 +1947,10 @@ static b32 files_key(const struct window_event address_to event)
         }
         if (control && key == FILES_KEY_A)
         {
-                if (m->shown.count)
+                if (files_model_count(m))
                 {
                         files_model_choose(m, 0, FILES_CHOOSE_ONLY);
-                        files_model_choose(m, m->shown.count - 1, FILES_CHOOSE_RANGE);
+                        files_model_choose(m, files_model_count(m) - 1, FILES_CHOOSE_RANGE);
                 }
                 files.dirty = true;
                 return true;
@@ -1933,6 +2036,31 @@ static b32 files_event(const struct window_event address_to event)
         {
                 files_edit(FILES_EDIT_PATH);
                 return true;
+        }
+        // The find field: its keys while it has them, a press on it gives them to it; Enter gives them to the rows (what it found stays),
+        // Escape ends the finding (every entry shown again), and its text is the filter as it is typed.
+        else if (files.finding && (files.find_keys || event->type == WINDOW_EVENT_BUTTON))
+        {
+                b32 on = ui_kit.pointer_x >= files.finder.well_left && ui_kit.pointer_x < files.finder.well_right && ui_kit.pointer_y >= files.finder.well_top &&
+                         ui_kit.pointer_y < files.finder.well_bottom;
+
+                if (event->type == WINDOW_EVENT_BUTTON && down && on)
+                        files.find_keys = true;
+                if (files.find_keys)
+                {
+                        asks = ui_field_send(ui, &files.finder, &files.menu, event);
+                        if (asks & UI_TEXT_SUBMIT)
+                                files.find_keys = false;
+                        else if (asks & UI_TEXT_CANCEL)
+                                files_find(false);
+                        else if (asks & UI_TEXT_COMMIT)
+                                files.find_keys = false;
+                        if (asks & ~(p32)(UI_TEXT_SUBMIT | UI_TEXT_CANCEL | UI_TEXT_COMMIT))
+                                files_find_take();
+                        files.dirty |= asks != 0;
+                        if (asks || event->type == WINDOW_EVENT_KEY)
+                                return true;
+                }
         }
         // The band's buttons first: a press on one, and the keys while they are on one (Shift+Tab gives them the keys).
         asks = ui_view_event(ui, &files.big->view, event);
@@ -2091,6 +2219,8 @@ static fn files_draw(unsigned int address_to pixels)
                 files_crumbs_draw();
         if (files.editing)
                 ui_text_overlay(ui, files_field()); // a finger's selection in the field: its handles, over the rows
+        if (files.finding)
+                ui_text_overlay(ui, &files.finder);
         files.seen = files.big->model.revision;
 }
 
@@ -2106,12 +2236,19 @@ static long files_tick(long timeout, long address_to other)
         b64 now = (b64)ui_kit.now, wait;
 
         (void)other;
-        // The field's caret blinks while the path is typed.
+        // The field's caret blinks while the path is typed, and the find field's while it has the keys.
         if (files.editing)
         {
                 b32 redraw = false;
 
                 timeout = ui_text_timeout(&files.ui, files_field(), timeout, &redraw);
+                files.dirty |= redraw;
+        }
+        if (files.finding && files.find_keys)
+        {
+                b32 redraw = false;
+
+                timeout = ui_text_timeout(&files.ui, &files.finder, timeout, &redraw);
                 files.dirty |= redraw;
         }
         // A copy or a move under way: stepped here when it has no thread of its own, the foot counting while it runs, and when it ends
