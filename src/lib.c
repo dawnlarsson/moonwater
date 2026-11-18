@@ -15324,7 +15324,9 @@ __asm__(
     //
     //       memory_swizzle_rb_u32 -- rdi into, rsi from, rdx count, ecx or_mask:
     //       swaps bytes 0 and 2 of each 32-bit word of from and ORs or_mask
-    //       (into may be from).
+    //       (into may be from). With AVX2, eight words a step by one byte
+    //       shuffle (vpshufb) and the OR, where SSE2 takes seven operations a
+    //       four: what is left (fewer than eight) goes the SSE2 way.
     //
     ASM_FUNC(memory_swizzle_rb_u32)
     "test %rdx, %rdx\n   jz 9f\n   cmp $4, %rdx\n   jae 10f\n"
@@ -15334,7 +15336,18 @@ __asm__(
     "or %r9d, %r8d\n   or %r10d, %r8d\n   or %ecx, %r8d\n   mov %r8d, (%rdi, %rax, 4)\n"
     "inc %rax\n   cmp %rax, %rdx\n   jne 5b\n"
     "9:  " ASM_RET
-    "10: movd %ecx, %xmm7\n   pshufd $0, %xmm7, %xmm7\n"
+    "10: "
+    ASM_USERSPACE_WIDE(
+    ASM_NARROW("cpu_has_avx2", "11f")
+    "cmp $8, %rdx\n   jb 11f\n"
+    "vmovd %ecx, %xmm7\n   vpbroadcastd %xmm7, %ymm7\n"
+    "mov $0x0704050603000102, %rax\n   vmovq %rax, %xmm6\n   mov $0x0f0c0d0e0b08090a, %rax\n   vpinsrq $1, %rax, %xmm6, %xmm6\n"
+    "vinserti128 $1, %xmm6, %ymm6, %ymm6\n"
+    "12: vmovdqu (%rsi), %ymm0\n   vpshufb %ymm6, %ymm0, %ymm0\n   vpor %ymm7, %ymm0, %ymm0\n   vmovdqu %ymm0, (%rdi)\n"
+    "add $32, %rsi\n   add $32, %rdi\n   sub $8, %rdx\n   cmp $8, %rdx\n   jae 12b\n"
+    "vzeroupper\n   test %rdx, %rdx\n   jz 9b\n"
+    )
+    "11: movd %ecx, %xmm7\n   pshufd $0, %xmm7, %xmm7\n"
     "mov $0xff00ff00, %eax\n   movd %eax, %xmm6\n   pshufd $0, %xmm6, %xmm6\n"
     "mov $0x00ff00ff, %eax\n   movd %eax, %xmm5\n   pshufd $0, %xmm5, %xmm5\n"
     "cmp $8, %rdx\n   jb 2f\n"
