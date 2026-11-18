@@ -1775,8 +1775,13 @@ static fn chrome_profile(void)
               nodes && nodes < exec && strstr(grant, "chown 0:" BOWL_GROUP_RENDER_TEXT " ") &&
                   strstr(grant, "chmod 0660") && !strstr(grant, "card") && !strstr(grant, "0666") &&
                   bowl_device_groups[array_count(bowl_device_groups) - 1] == BOWL_GROUP_RENDER);
-        check("The browser is started on Wayland, with its own password store and quiet logs, in the bowl it was added to",
-              exec && strstr(start, "--ozone-platform=wayland") && strstr(start, "--password-store=basic") &&
+        positive session_type = chrome_line(chrome ? chrome->session : null, "XDG_SESSION_TYPE=wayland");
+
+        check("The browser is told the session is Wayland's (XDG_SESSION_TYPE), before it starts, and chooses Wayland itself: no --ozone-platform",
+              session_type && session_type < exec && strstr(chrome->session[session_type - 1], "[ -n \"$XDG_SESSION_TYPE\" ] ||") &&
+                  exec && !strstr(start, "--ozone-platform"));
+        check("The browser is started with its own password store and quiet logs, in the bowl it was added to",
+              exec && strstr(start, "--password-store=basic") &&
                   strstr(start, "--log-level=3") && start[string_length(start) - 1] == '"' &&
                   strstr(start, "\"$@\"") && bowl_named_root(BOWL_ROOT_PREFIX "alpine"));
         check("The browser is given no flag against the GPU or the sandbox: it picks its own GPU",

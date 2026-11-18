@@ -3601,6 +3601,18 @@ static bool bowl_sound_offered(void)
 #define BOWL_WAYLAND_VARIABLE "WAYLAND_DISPLAY"
 #define BOWL_WAYLAND_SOCKET "/run/moonwater/wayland-0"
 
+/*
+        The kind of session a program is in, said where Canvas's Wayland socket is offered and the program has no X server
+        (DISPLAY) to go to: XDG_SESSION_TYPE=wayland. It is what a program that can draw both ways asks to choose: Chromium's
+        --ozone-platform-hint=auto (Alpine's /etc/chromium/chromium.conf passes it) takes Wayland only for a session that says
+        so, and without it chose X11 and ended with "Missing X server or $DISPLAY" (Chromium 156 in the alpine bowl, measured on
+        a Haswell machine: the bowl's /usr/bin/chromium with no flags of ours); Qt 6 and GLFW 3.4 choose the same way. A
+        program pointed at an X server (Steam's session, which exports DISPLAY for its Xwayland, and every program of it) is
+        not told, so what it chose before it still chooses; one that has XDG_SESSION_TYPE is not asked again.
+*/
+#define BOWL_SESSION_TYPE_VARIABLE "XDG_SESSION_TYPE"
+#define BOWL_DISPLAY_VARIABLE "DISPLAY"
+
 static bool bowl_wayland_offered(void)
 {
         p8 held[256];
@@ -3651,7 +3663,7 @@ static string_address address_to bowl_environment(
         static string_address mixed[BOWL_ENV_ROOM];
         bool have[BOWL_VARS] = {false};
         bool have_bus = false, have_sound = false, have_wayland = false,
-             have_language = false;
+             have_language = false, have_session_type = false, have_display = false;
         bool offer_bus = bowl_session_bus_offered(),
              offer_sound = bowl_sound_offered(),
              offer_wayland = bowl_wayland_offered();
@@ -3680,6 +3692,10 @@ static string_address address_to bowl_environment(
                         have_sound = true;
                 if (bowl_env_named(inherited[at], BOWL_WAYLAND_VARIABLE))
                         have_wayland = true;
+                if (bowl_env_named(inherited[at], BOWL_SESSION_TYPE_VARIABLE))
+                        have_session_type = true;
+                if (bowl_env_named(inherited[at], BOWL_DISPLAY_VARIABLE))
+                        have_display = true;
                 if (bowl_env_named(inherited[at], BOWL_LANGUAGE_VARIABLE))
                         have_language = true;
 
@@ -3709,10 +3725,11 @@ static string_address address_to bowl_environment(
                 missing += offer_bus && !have_bus;
                 missing += offer_sound && !have_sound;
                 missing += offer_wayland && !have_wayland;
+                missing += offer_wayland && !have_session_type && !have_display;
                 missing += language && !have_language;
                 if (!skipped && !missing)
                         return inherited;
-                if (n + BOWL_ENV_DEFAULTS + (offer_wayland ? 1 : 0) >=
+                if (n + BOWL_ENV_DEFAULTS + (offer_wayland ? 2 : 0) >=
                     BOWL_ENV_ROOM)
                 {
                         if (!skipped)
@@ -3731,6 +3748,8 @@ static string_address address_to bowl_environment(
                 mixed[n++] = (string_address)BOWL_SOUND_VARIABLE "=unix:" BOWL_SOUND_SOCKET;
         if (offer_wayland && !have_wayland)
                 mixed[n++] = (string_address)BOWL_WAYLAND_VARIABLE "=" BOWL_WAYLAND_SOCKET;
+        if (offer_wayland && !have_session_type && !have_display)
+                mixed[n++] = (string_address)BOWL_SESSION_TYPE_VARIABLE "=wayland";
         if (language && !have_language)
                 mixed[n++] = language;
         mixed[n] = null;
@@ -9406,6 +9425,10 @@ static string_address bowl_chrome_session[] = {
     "socket (" BOWL_CHROME_SOCKET "): this image was built with "
     "CONFIG_MOONWATER_WAYLAND=n, or Canvas's desktop is not running (moonwater desktop on)\" >&2; exit 1; }",
     "export WAYLAND_DISPLAY=" BOWL_CHROME_SOCKET " MOONWATER_ASKED=1 BOWL_CAPABILITIES=none",
+    // The session is Wayland's, which is what the browser asks to choose its platform (BOWL_SESSION_TYPE_VARIABLE): said here too for
+    // a person whose environment has a DISPLAY (an Xwayland's), which bowl_environment then does not say it for, so the browser is on
+    // Wayland whatever it was started from, with no --ozone-platform of ours.
+    "[ -n \"$XDG_SESSION_TYPE\" ] || export XDG_SESSION_TYPE=wayland",
     // GTK's settings (the file dialog's, GTK 3 inside the browser) go to memory: the session bus is Moonwater's, which has the
     // portal's Settings and no dconf, and a dconf backend would warn at every write.
     "export GSETTINGS_BACKEND=memory",
@@ -9426,7 +9449,7 @@ static string_address bowl_chrome_session[] = {
     // processor on Linux unless AcceleratedVideoEncoder is asked for (VaapiVideoEncoder, the older name, does nothing in 156);
     // decoding on the card is already its default. A card with no encoder for a codec encodes it on the processor as before.
     "exec bowl " BOWL_ROOT_PREFIX "alpine /usr/bin/chromium "
-    "--ozone-platform=wayland --enable-features=AcceleratedVideoEncoder --password-store=basic --no-first-run "
+    "--enable-features=AcceleratedVideoEncoder --password-store=basic --no-first-run "
     "--no-default-browser-check --log-level=3 \"$@\"",
     null};
 
