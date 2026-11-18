@@ -325,7 +325,7 @@ of events and primitives are kept forever: one is never given to another.
 | kernel (the module's hooks, ids 23–44, written in `schema.list`) | `key down` and `key up` (chord: every key, with the modifiers held), `mouse down` and `mouse up` (button: left right middle side extra forward back task), `pad down` and `pad up` (button: south east c north west z tl tr tl2 tr2 select start mode thumbl thumbr up down left right), `touch down`, `touch up`, `switch on` and `switch off` (which: every EV_SW switch, Linux's order), `power ac`, `power battery`, `battery` (percent, state), `usb added` and `usb removed` (class, vendor, product: int, port: word), `input added` and `input removed` (kind: keyboard mouse touchpad touchscreen pad tablet switch other, name: word), `display connected` and `display disconnected` (connector: word), `link up` and `link down` (interface: word), `sleep` |
 | desktop (the compositor, ids 64–) | `chord` (chord), `fullscreen on` and `fullscreen off` (app: word), `window opened` and `window closed` (app: word), `display added` and `display removed` (connector: word), `button` (name: `launcher`, `volume`, `mic`, `notices`, `tray-double` or `pin`; slot: int 0 to 63, a pin's place on the taskbar; app: word, a pin's program) |
 | rules (id 96) | `cue` (name: word), posted by `emit cue NAME` |
-| runner clocks | `every` (period: duration) and `at` (time: clock), which `every DURATION` and `at CLOCK` are rules on: the runner posts `every` for each period its rules name, at that period, and `at` once a minute with the minute of the day, so the minute's rules are a scan of keys |
+| runner clocks | `every` (period: duration) and `at` (time: clock), which `every DURATION` and `at CLOCK` are rules on: the runner posts `every` for each period its rules name, at that period, and `at` once for each minute of the day the clock passes, so the minute's rules are a scan of keys: a minute a sleep or a step forward went over is posted late (up to a day of them), and one a step back repeats is not posted again. `every` is the runner's monotonic clock, which a sleep does not advance |
 | runner (ids 97–) | `service up`, `service down`, `service failed` (name: word); `setting` (name: word, a registry row's); `boot` (verdict: `live`, `disk` or `ask`; disk: word, the disk's name), once a boot when boot has said what this session's `/root` is, which is what `moonwater_init` was handed as its `$1` |
 
 ### States
@@ -501,7 +501,13 @@ the table before it stays.
   every argument is in its type's range (a percent 0 to 100%, a duration
   at most 24h, an enum below its count).
 - **Cues**: an `emit` chain is cut at depth 4 when it runs, and the
-  compiler refuses a rule that emits its own cue with no condition.
+  compiler refuses a rule with no condition whose filter takes a cue it
+  emits (its name, a pattern that matches it, or no filter at all).
+- **Loops through the machine**: a loop that goes through a file, a state
+  or a kernel event (a `run` that writes the setting its rule hears)
+  starts each round at depth 0, so the runner holds every rule to 64
+  firings a second; past that its actions wait for the next second, and
+  that is said.
 
 **Safe mode** loads the image's own rules and ignores the person's
 files: `moonwater.safe=1` on the kernel's command line, or two loads in a

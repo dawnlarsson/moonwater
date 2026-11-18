@@ -955,8 +955,53 @@ static fn rover_runner_set(p16 id, const struct rover_value address_to value)
 }
 
 //      A hit's actions. kernel_did: the hit is a kernel rule's, whose kernel primitives the kernel has done.
+/*
+        A rule's budget: at most ROVER_BUDGET_MOST firings a second, past
+        which its actions are not done (and that is said once a second). The
+        depth cut bounds emit's own chains; a loop through anything else (a
+        run that writes the setting its rule hears, a when rule whose action
+        changes the state it reads, a kernel event the action makes) starts
+        each round at depth 0, and is bounded by this.
+*/
+#define ROVER_BUDGET_MOST 64u
+static struct
+{
+        p64 second;
+        p32 count;
+        p8 said;
+} rover_runner_budget[ROVER_RULES_MOST];
+
+static bool rover_runner_within(p16 rule)
+{
+        p64 second = clock_monotonic_nanoseconds() / ROVER_SECOND_NS;
+
+        if (rule >= ROVER_RULES_MOST)
+                return false;
+        if (rover_runner_budget[rule].second != second)
+        {
+                rover_runner_budget[rule].second = second;
+                rover_runner_budget[rule].count = 0;
+                rover_runner_budget[rule].said = 0;
+        }
+        if (++rover_runner_budget[rule].count <= ROVER_BUDGET_MOST)
+                return true;
+        if (!rover_runner_budget[rule].said)
+        {
+                positive length;
+
+                rover_runner_budget[rule].said = 1;
+                rover_runner_say(rover_runner.view.head && rule < rover_runner.view.head->rules
+                                     ? (string_address)rover_runner_pool_word(rover_runner.view.rule[rule].name, &length)
+                                     : (string_address) "a rule",
+                                 " fired more than 64 times in a second: its actions wait for the next", null);
+        }
+        return false;
+}
+
 static fn rover_runner_do(const struct rover_event address_to event, const struct rover_hit address_to hit, bool kernel_did)
 {
+        if (!rover_runner_within(hit->rule))
+                return;
         for (positive at = 0; at < hit->count; at++)
         {
                 positive which = (positive)hit->action + at;
@@ -1380,13 +1425,33 @@ static fn rover_runner_clocks(p64 now)
                         rover_runner.every_next[at] = now + rover_runner.every_period[at];
                         rover_runner_post(102, null, 0, (b64)rover_runner.every_period[at]);
                 }
-        if (minute != rover_runner.minute)
+        /*
+                at, once for each minute of the day the clock passes: a minute a
+                sleep or a step forward went over is posted late (up to a day of
+                them), and one a step back repeats is not posted again, since the
+                runner keeps the latest minute it posted and posts only past it.
+        */
+        if (minute > rover_runner.minute)
         {
                 struct rover_event edge;
                 bool day = rover_runner.minute / 1440 != minute / 1440;
+                b64 from = rover_runner.minute && minute - rover_runner.minute <= 1440 ? rover_runner.minute + 1 : minute;
 
                 rover_runner.minute = minute;
-                rover_runner_post(103, null, 0, rover_floor_mod(zoned, 86400) / 60);
+                for (b64 passed = from; passed <= minute; passed++)
+                {
+                        struct rover_event at;
+
+                        memory_zero(&at, sizeof(at));
+                        at.id = 103;
+                        at.when = now;
+                        at.realtime = realtime;
+                        at.count = 1;
+                        at.field[0].number = rover_floor_mod(passed, 1440);
+                        at.field[0].text = rover_nothing;
+                        rover_runner_fire(&at, 0);
+                        rover_runner_drain();
+                }
                 //      The clock moved: the when rules over it (and over the weekday, at a new day) asked again.
                 memory_zero(&edge, sizeof(edge));
                 edge.when = now;

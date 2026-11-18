@@ -487,6 +487,18 @@ static fn machine_load_clash(void)
         rover_load_used = 0;
 }
 
+//      The runner's budget (rover_runner_within): 64 firings of a rule in a second, the 65th waits (R-seams-4).
+static fn machine_runner_budget(void)
+{
+        bool all = true;
+
+        for (positive at = 0; at < 64; at++)
+                all = all && rover_runner_within(7);
+        check("a rule fires 64 times in a second", all);
+        check("and the 65th waits for the next second", !rover_runner_within(7));
+        check("another rule has its own budget", rover_runner_within(8));
+}
+
 static fn machine_stop_self(void)
 {
         p8 held = host_machine_self;
@@ -1946,6 +1958,7 @@ b32 main(void)
         machine_run_scripts();
         machine_runner_children();
         machine_load_clash();
+        machine_runner_budget();
         machine_sntp();
         machine_auto();
         machine_services();
