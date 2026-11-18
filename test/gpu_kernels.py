@@ -4,6 +4,8 @@
     python3 test/gpu_kernels.py ASM INC     assemble ASM with llvm-mc and fail unless INC (what
                                             `build gpu-kernels ASM INC` wrote) holds exactly the
                                             same words, kernel by kernel
+    python3 test/gpu_kernels.py --print ASM the arrays llvm-mc makes of ASM, in the form the
+                                            build writes them (a hand build's artifacts/gpu_kernels.inc)
     python3 test/gpu_kernels.py --print-intel SRC
                                             the array gpu_i915_gen9.inc holds, made from SRC
                                             (src/canvas/gpu_i915.asm) the way `build gpu-i915`
@@ -156,6 +158,15 @@ def kernels(d):
 def arrays(text):
     return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
             for name, body in re.findall(r'static const unsigned int gpu_k_(\w+)\[\] = \{(.*?)\};', text, re.S)]
+
+
+def text(made):
+    lines = []
+    for name, words in made:
+        lines.append('static const unsigned int gpu_k_%s[] = {\n' % name)
+        for i in range(0, len(words), 10):
+            lines.append('    ' + ', '.join('0x%08x' % w for w in words[i:i + 10]) + (',' if i + 10 < len(words) else '};') + '\n')
+    return ''.join(lines)
 
 
 def check_regs(asm):
@@ -840,6 +851,9 @@ def main():
         return
     if len(sys.argv) == 2 and sys.argv[1] == '--probe':
         probe()
+        return
+    if len(sys.argv) == 3 and sys.argv[1] == '--print':
+        sys.stdout.write(text(kernels(build(sys.argv[2]))))
         return
     if len(sys.argv) != 3 or sys.argv[1].startswith('-'):
         sys.exit(__doc__)
