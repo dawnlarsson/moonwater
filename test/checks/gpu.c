@@ -2353,6 +2353,46 @@ static void gpu_fault_rows(void)
         check("fault: the board carries the card's fault text", count && want[0].code == WINDOWS_ISSUE_GPU_FAULT && gpu_text_has(want[0].detail, "card faulted reading 0x203fd75000"));
         compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.hung_at = 0;
         compositor_gpu_state.restart_due = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.cool_steps = 0, compositor_gpu_state.up = 0;
+#ifdef CONFIG_MOONWATER_WAYLAND
+        // 7. Hangs whose fault is in a client's import (row 2's source, client slot 1): the client is barred from the card and the card is kept for the rest,
+        // however many such hangs, below COMPOSITOR_GPU_BLAMED_MOST in a minute; a hang in nobody's buffer is the card's as before, and a new connection in
+        // the slot starts unbarred.
+        {
+                int saved_started = compositor_wl.started;
+                positive saved_va = compositor_wl.source[2].va;
+                b32 kept, barred, others, fresh, card;
+
+                compositor_wl.started = 1;
+                kept = compositor_wl_slots_reach(2) && wayland_rows_reach(2); // the slots first: they give the shim's tables their host
+                wayland.row_client[2] = 1, compositor_wl.barred[1] = 0, compositor_wl.source[2].va = 0x40000000ull;
+                gpu.imports = 1, gpu.imported[0] = 5, gpu.imported_va[0] = 0x40000000ull, gpu.imported_bytes[0] = 8192, gpu.imported_dead[0] = 0;
+                compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.blamed_at = 0, compositor_gpu_state.blamed = 0;
+                for (unsigned int i = 0; i < 3; i++)
+                {
+                        gpu_fault_say(0x40000010ull);
+                        gpu_last_error = 62, gpu_end = GPU_END_HUNG;
+                        compositor_gpu_job_failed();
+                }
+                barred = compositor_wl_card_barred(2) && !compositor_wl_card_barred(3);
+                kept = kept && !compositor_gpu_state.dead && !compositor_gpu_state.hung_off && compositor_gpu_state.restart_due && !compositor_gpu_state.hung_at;
+                compositor_wl.barred[1] = 0;
+                fresh = !compositor_wl_card_barred(2);
+                gpu.imports = 0;
+                gpu_fault_say(0x40000010ull);
+                others = !gpu_fault_import;
+                gpu_last_error = 62, gpu_end = GPU_END_HUNG;
+                compositor_gpu_job_failed();
+                gpu_last_error = 62, gpu_end = GPU_END_HUNG;
+                compositor_gpu_job_failed();
+                card = compositor_gpu_state.hung_off && !compositor_wl_card_barred(2);
+                check("hang: three hangs in a minute in a client's import bar that client from the card and keep the card; one in no import is the card's again",
+                      kept && barred && fresh && others && card);
+                wayland.row_client[2] = -1, compositor_wl.source[2].va = saved_va, compositor_wl.started = saved_started;
+                compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.hung_at = 0;
+                compositor_gpu_state.restart_due = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.cool_steps = 0, compositor_gpu_state.up = 0;
+                compositor_gpu_state.blamed_at = 0, compositor_gpu_state.blamed = 0;
+        }
+#endif
         compositor_gpu = saved_gpu, gpu_last_error = 0, gpu_end = GPU_END_NONE, gpu_map_count = 0, gpu_fault[0] = 0;
 }
 

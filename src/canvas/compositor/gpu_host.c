@@ -43,6 +43,8 @@ static struct
         b64 cool_until;            // the card is not tried again before this monotonic time (0: it is)
         unsigned int cool_steps;   // how many cool-downs there were (a hang's, and a run of refusals')
         b64 hung_at;               // when the last hang was (0: none): a second one within a minute gives the card up for the session (compositor_gpu_job_failed)
+        b64 blamed_at;             // when the first of the hangs blamed on a client in this minute was, and how many there were (compositor_gpu_job_failed)
+        unsigned int blamed;
         int hung_off;              // given up for the session after two hangs: the processor draws the desktop until the session ends
         positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer): the one drawn into now
         positive cache[2], cache_key[2]; // the card's imports of the two scanouts (compositor_plate_swap trades them), and the one to make next
@@ -257,14 +259,37 @@ static int compositor_gpu_held(void)
         kernel's log, or it is two seconds old. A hang (HUNG: the ring did not finish the job in two seconds; WAIT: the wait itself failed) is the card's one
         lesson, not a run of refusals: the processor draws for two seconds, and when the cool-down is over the card is
         started again with a clean table of maps (gpu_recover lets every map go: a present no longer names the addresses the hang read). A second hang within
-        a minute gives the card up for the session, the processor draws until it ends, and the board says so. Any other refused job counts as it always did:
+        a minute gives the card up for the session, the processor draws until it ends, and the board says so; a hang whose fault was in a client's buffer is
+        that client's (compositor_gpu_hang_blamed), not one of the two. Any other refused job counts as it always did:
         three in a row cool the card down, each cool-down longer.
 */
 #define COMPOSITOR_GPU_HUNG_COOL 2000000000ull
 #define COMPOSITOR_GPU_HUNG_WINDOW 60000000000ull
+#define COMPOSITOR_GPU_BLAMED_MOST 4u // hangs blamed on clients in a minute before the card is the one blamed (a client that connects again and again)
+#ifdef CONFIG_MOONWATER_WAYLAND
+static b32 compositor_wl_card_blame(positive import);
+#endif
+// A hang whose fault was in a client's buffer (gpu_fault_import, a row's lent picture, source or layer): that client is barred from the card
+// (compositor_wl_card_blame) and the hang is not the card's, so it does not count toward the session's two; the card cools and starts again as at a
+// first hang. COMPOSITOR_GPU_BLAMED_MOST or more in a minute are taken as the card's.
+static b32 compositor_gpu_hang_blamed(b64 now)
+{
+#ifdef CONFIG_MOONWATER_WAYLAND
+        if (!gpu_fault_import || !compositor_wl_card_blame(gpu_fault_import))
+                return false;
+        if (!compositor_gpu_state.blamed_at || now - compositor_gpu_state.blamed_at >= COMPOSITOR_GPU_HUNG_WINDOW)
+                compositor_gpu_state.blamed_at = now, compositor_gpu_state.blamed = 0;
+        return ++compositor_gpu_state.blamed < COMPOSITOR_GPU_BLAMED_MOST;
+#else
+        (void)now;
+        return false;
+#endif
+}
+
 static void compositor_gpu_job_failed(void)
 {
         b64 now = clock_monotonic_nanoseconds();
+        b32 blamed;
 
         if (gpu_end == GPU_END_LATE || gpu_end == GPU_END_OVERFLOW)
                 return;
@@ -280,7 +305,9 @@ static void compositor_gpu_job_failed(void)
                 return;
         }
         compositor_gpu_state.failures = 0;
-        if (compositor_gpu_state.hung_at && now - compositor_gpu_state.hung_at < COMPOSITOR_GPU_HUNG_WINDOW)
+        blamed = compositor_gpu_hang_blamed(now);
+        gpu_fault_import = 0; // blamed once: a later failure that reads no new fault blames nobody
+        if (!blamed && compositor_gpu_state.hung_at && now - compositor_gpu_state.hung_at < COMPOSITOR_GPU_HUNG_WINDOW)
         {
                 compositor_gpu_state.dead = 1, compositor_gpu_state.dead_why = COMPOSITOR_GPU_WHY_HANG, compositor_gpu_state.hung_off = 1;
                 compositor_gpu_state.cool_until = 0, compositor_gpu_state.restart_due = 0;
@@ -288,7 +315,8 @@ static void compositor_gpu_job_failed(void)
                 log_flush();
                 return;
         }
-        compositor_gpu_state.hung_at = now;
+        if (!blamed)
+                compositor_gpu_state.hung_at = now;
         compositor_gpu_state.cool_until = now + COMPOSITOR_GPU_HUNG_COOL;
         compositor_gpu_state.cool_steps++;
         compositor_gpu_state.restart_due = 1; // started again when the cool-down is over, with no maps (gpu_recover)

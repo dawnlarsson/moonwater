@@ -1621,6 +1621,7 @@ static void gpu_gone_put(positive va, positive bytes, positive from, positive to
 static char gpu_fault[GPU_FAULT_BYTES];
 static unsigned int gpu_faults, gpu_job_error;
 static positive gpu_job_began, gpu_fault_next; // when the job being run was submitted, and when a refused submit may read the log again (monotonic ns)
+static positive gpu_fault_import; // the import the last fault said was in (gpu_fault_say): its address as gpu_import_fd answered it, held or let go of; 0 for none
 
 // Text into a buffer at `at`, with its null kept within room: the end of it.
 static unsigned int gpu_text_put(char *to, unsigned int at, unsigned int room, const char *words)
@@ -2591,6 +2592,7 @@ static void gpu_fault_say(positive at)
         unsigned int n = gpu_text_put(gpu_fault, 0, room, "card faulted reading 0x");
 
         n = gpu_text_num(gpu_fault, n, room, at, 16), n = gpu_text_put(gpu_fault, n, room, ": ");
+        gpu_fault_import = 0;
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 if (at >= gpu_maps[i].va && at - gpu_maps[i].va < gpu_maps[i].bytes)
                 {
@@ -2609,6 +2611,7 @@ static void gpu_fault_say(positive at)
         for (unsigned int i = 0; i < gpu.imports; i++)
                 if (at >= gpu.imported_va[i] && at - gpu.imported_va[i] < gpu.imported_bytes[i])
                 {
+                        gpu_fault_import = gpu.imported_va[i];
                         n = gpu_text_put(gpu_fault, n, room, "held import, handle ");
                         n = gpu_text_num(gpu_fault, n, room, gpu.imported[i], 10);
                         gpu_text_put(gpu_fault, n, room, gpu.imported_dead[i] ? ", released" : ", live");
@@ -2620,6 +2623,7 @@ static void gpu_fault_say(positive at)
 
                 if (gpu_gone[slot].bytes && at >= gpu_gone[slot].va && at - gpu_gone[slot].va < gpu_gone[slot].bytes)
                 {
+                        gpu_fault_import = gpu_gone[slot].import ? gpu_gone[slot].va : 0;
                         n = gpu_text_put(gpu_fault, n, room, gpu_gone[slot].import ? "import" : "map");
                         n = gpu_text_put(gpu_fault, n, room, " handle "), n = gpu_text_num(gpu_fault, n, room, gpu_gone[slot].handle, 10);
                         n = gpu_text_put(gpu_fault, n, room, " dropped "), n = gpu_text_num(gpu_fault, n, room, gpu_tick - gpu_gone[slot].tick, 10);
@@ -2821,6 +2825,7 @@ static void gpu_fault_text(const struct gpu_fault_scan *s)
 
         if (!s->have_at && !s->have_query)
         {
+                gpu_fault_import = 0;
                 n = gpu_text_put(gpu_fault, 0, room, "the card's job ended with error ");
                 n = gpu_text_num(gpu_fault, n, room, gpu_job_error, 10);
                 gpu_text_put(gpu_fault, n, room, ": the kernel's log has no page fault since it was submitted");
@@ -2837,7 +2842,7 @@ static void gpu_fault_text(const struct gpu_fault_scan *s)
         if (s->client[0])
                 n = gpu_text_put(gpu_fault, n, room, "; client "), n = gpu_text_put(gpu_fault, n, room, s->client);
         if (s->again)
-                n = gpu_text_put(gpu_fault, n, room, "; the same fault as the last one read");
+                n = gpu_text_put(gpu_fault, n, room, "; the same fault as the last one read"), gpu_fault_import = 0; // not this job's: nothing to blame
         if (!s->have_at)
                 return;
         n = gpu_text_put(gpu_fault, n, room, " (MAPPING_ERROR ");

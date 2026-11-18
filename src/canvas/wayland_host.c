@@ -108,9 +108,10 @@ static struct
         int *fd;
         int *uid, *pid;
         unsigned char *asked;
+        unsigned char *barred; // a client whose buffer the card hung reading (compositor_wl_card_blame): none of its buffers is the card's again
         long slots;
         long polled; // the slots the loop's poll list was made with (compositor_wl_poll), which a list polled again has, and no more
-        struct wayland_table fd_table, uid_table, pid_table, asked_table, slow_table;
+        struct wayland_table fd_table, uid_table, pid_table, asked_table, slow_table, barred_table;
         int started, handler;
         unsigned long frames;
         // The picture being laid on each window: whether one is begun, the buffer of the table it goes in, what it has touched so
@@ -712,16 +713,17 @@ static int compositor_wl_slots_reach(long slots)
                 return 1;
         wayland_tables_host(&compositor_wl_host);
         compositor_wl.fd_table.unit = compositor_wl.uid_table.unit = compositor_wl.pid_table.unit = sizeof(int);
-        compositor_wl.asked_table.unit = 1, compositor_wl.slow_table.unit = sizeof(positive);
+        compositor_wl.asked_table.unit = compositor_wl.barred_table.unit = 1, compositor_wl.slow_table.unit = sizeof(positive);
         if (!wayland_table_reach(&compositor_wl.fd_table, slots) || !wayland_table_reach(&compositor_wl.uid_table, slots) ||
             !wayland_table_reach(&compositor_wl.pid_table, slots) || !wayland_table_reach(&compositor_wl.asked_table, slots) ||
-            !wayland_table_reach(&compositor_wl.slow_table, slots))
+            !wayland_table_reach(&compositor_wl.slow_table, slots) || !wayland_table_reach(&compositor_wl.barred_table, slots))
                 return 0;
         compositor_wl.fd = (int *)compositor_wl.fd_table.at, compositor_wl.uid = (int *)compositor_wl.uid_table.at;
         compositor_wl.pid = (int *)compositor_wl.pid_table.at, compositor_wl.asked = compositor_wl.asked_table.at;
-        compositor_wl.slow_until = (positive *)compositor_wl.slow_table.at;
+        compositor_wl.slow_until = (positive *)compositor_wl.slow_table.at, compositor_wl.barred = compositor_wl.barred_table.at;
         for (long at = was; at < slots; at++)
-                compositor_wl.fd[at] = -1, compositor_wl.uid[at] = compositor_wl.pid[at] = 0, compositor_wl.asked[at] = 0, compositor_wl.slow_until[at] = 0;
+                compositor_wl.fd[at] = -1, compositor_wl.uid[at] = compositor_wl.pid[at] = 0, compositor_wl.asked[at] = 0, compositor_wl.slow_until[at] = 0,
+                compositor_wl.barred[at] = 0;
         compositor_wl.slots = slots;
         return 1;
 }
@@ -1224,6 +1226,44 @@ static int compositor_wl_sync_start(long client, int fd);
 static int compositor_lent(int row)
 {
         return row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.lent[row].pixels != 0;
+}
+
+/*
+        The card's hang blamed on the client whose buffer it was reading: import is the import the fault was in (gpu_fault_import), and the client is the
+        one whose row shows it (its lent picture, the dma-buf its damage is copied from, or one of its layers). That client is barred from the card for as
+        long as it is connected (compositor_wl_card_barred: its buffers are not imported, so the processor reads what it can map and a tiled picture is not
+        shown), and the card goes on for every other window (compositor_gpu_job_failed). False when no row's client had it: the hang is the card's own.
+*/
+static b32 compositor_wl_card_blame(positive import)
+{
+        long client = -1;
+
+        if (!import || !compositor_wl.started || !compositor_wl.lent || !compositor_wl.source)
+                return false;
+        for (int row = 0; row < (int)compositor_rows_in_use && client < 0; row++)
+        {
+                b32 had = (compositor_lent(row) && compositor_wl.lent[row].import == import) || compositor_wl.source[row].va == import;
+
+                for (unsigned int k = 0; !had && compositor_wl_layers.count && k < compositor_wl_layers.count[row]; k++)
+                        had = compositor_wl_layers.layer[row][k].import == import;
+                if (had)
+                        client = wayland_row_owner(row);
+        }
+        if (client < 0 || client >= compositor_wl.slots)
+                return false;
+        compositor_wl.barred[client] = 1;
+        string_format(log, "compositor: the card hung reading a buffer of the Wayland client of pid %p: its windows are the processor's while it is connected\n",
+                      (positive)compositor_wl.pid[client]),
+            log_flush();
+        return true;
+}
+
+// Whether the row's client is barred from the card (compositor_wl_card_blame): its buffers are not imported.
+static b32 compositor_wl_card_barred(int row)
+{
+        long client = row >= 0 ? wayland_row_owner(row) : -1;
+
+        return client >= 0 && client < compositor_wl.slots && compositor_wl.barred[client];
 }
 
 // A copy of the row's client picture counted for its window (struct windows's client_row_copies), with the counts of all.
@@ -2430,6 +2470,8 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         {
                 if (!gpu_ready())
                         return compositor_wl_lend_refused(picture, 10);
+                if (compositor_wl_card_barred(row))
+                        return compositor_wl_lend_refused(picture, 11);
                 // The import is the buffer's, from its start: the same one while the buffer is the same, else a new one.
                 import = same ? compositor_wl.lent[row].import : gpu_import_fd((int)picture->sync_fd, (positive)picture->map_bytes);
                 if (!import)
@@ -2497,6 +2539,8 @@ static positive compositor_wl_source_import(int row, const struct wayland_pictur
             !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
         {
                 compositor_wl_source_drop(row);
+                if (compositor_wl_card_barred(row))
+                        return 0;
                 compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)need_bytes);
                 compositor_wl.source[row].epoch = gpu_epoch;
                 if (!compositor_wl.source[row].va)
@@ -2645,6 +2689,8 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
             !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
         {
                 compositor_wl_source_drop(row);
+                if (compositor_wl_card_barred(row))
+                        return compositor_wl_tiled_refused(4);
                 compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)bytes);
                 compositor_wl.source[row].epoch = gpu_epoch;
                 if (!compositor_wl.source[row].va)
@@ -3319,7 +3365,7 @@ static int compositor_wl_row_layers(void *context, int row, const struct wayland
                 if (layers[at].row_width != (root ? layers[0].row_width : (long)table->width[row]) ||
                     layers[at].row_height != (root ? layers[0].row_height : (long)table->height[row]))
                         ok = 0, why = 4;
-                else if (layers[at].sync_fd >= 0 && compositor_wl.wc_copy[row])
+                else if (layers[at].sync_fd >= 0 && (compositor_wl.wc_copy[row] || compositor_wl_card_barred(row)))
                         ok = 0, why = 5;
                 else if (!compositor_wl_layer_make(&layers[at], width, height, compositor_radius(&corners), corners.line, old, olds, &made[kept], &why))
                         ok = 0;
@@ -7163,6 +7209,7 @@ static void compositor_wl_accept(void)
                 compositor_wl.fd[slot] = (int)fd;
                 compositor_wl.slow_until[slot] = 0;
                 compositor_wl.asked[slot] = 0;
+                compositor_wl.barred[slot] = 0;
                 compositor_wl.pid[slot] = credentials[0];
                 compositor_wl.uid[slot] = credentials[1];
         }
