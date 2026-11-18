@@ -11014,11 +11014,10 @@ static string_address bowl_steam_session[] = {
     "export FONTCONFIG_FILE=${FONTCONFIG_FILE:-/etc/fonts/fonts.conf} FONTCONFIG_PATH=${FONTCONFIG_PATH:-/etc/fonts}",
     "[ -S " BOWL_STEAM_SOUND " ] && export PULSE_SERVER=unix:" BOWL_STEAM_SOUND,
     "[ -S /run/dbus/system_bus_socket ] || bowl bus >/dev/null 2>&1 || true",
-    // SDL games draw on Canvas directly (SDL 2.0.22 and later read the list, Wayland first, X11 where it is refused): a game through
-    // Xwayland was a frame copied and an event relayed once more for each, and could not be scanned out from its own buffer. The Steam
-    // runtime's SDL (2.32 on the box, which Half-Life 2 loads) has the list; a game with an SDL older than 2.0.22 of its own is set to
-    // x11 in its launch options. Proton's own Wayland driver stays off: Proton games go by Xwayland.
-    "export SDL_VIDEODRIVER=wayland,x11; unset PROTON_ENABLE_WAYLAND",
+    // No video driver is chosen for the games: each takes its own default (SDL 2 X11, SDL 3 Wayland, Proton X11), as it does on any
+    // desktop, and a person's own SDL_VIDEODRIVER or PROTON_ENABLE_WAYLAND is left as it is. Steam's overlay is drawn into an
+    // OpenGL game only through GLX (its renderer hooks glXSwapBuffers and reads the hot-key from X events, and has neither for
+    // EGL on Wayland), so a session that put SDL games on Wayland took Shift+Tab and the FPS corner from every OpenGL one.
     // No udev runs here, so SDL (Steam's own, a game's, Proton's) is told to find the pads by watching /dev/input and /dev: a
     // pad plugged in later and the virtual pad Steam Input makes are seen as their nodes appear (bowl_pad_keeper makes them).
     "export SDL_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_JOYSTICK_DISABLE_UDEV=1 SDL_HIDAPI_UDEV=0",
