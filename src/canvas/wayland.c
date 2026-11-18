@@ -10987,6 +10987,10 @@ WAYLAND_API long wayland_out(long slot, const unsigned char **bytes, const long 
         return *fd_count < c->out_fd_count ? ((struct wayland_outfd *)c->out_fd_table.at)[*fd_count].at : c->out_length;
 }
 
+// A send that took part of the queue, or carried descriptors, or left feedback waiting for room: out of the line of wayland_sent,
+// whose every send of all of a report's events is then a leaf that saves no registers (it saved six, and gave them back, each time).
+static __attribute__((noinline)) void wayland_sent_part(struct wayland_client *c, long slot, long count);
+
 WAYLAND_API void wayland_sent(long slot, long count)
 {
         struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
@@ -11002,6 +11006,11 @@ WAYLAND_API void wayland_sent(long slot, long count)
                         wayland_out_clear(slot);
                 return;
         }
+        wayland_sent_part(c, slot, count);
+}
+
+static __attribute__((noinline)) void wayland_sent_part(struct wayland_client *c, long slot, long count)
+{
         // What is left moved to the front, a word at a time forward (the place a word goes is below where it is read, and every word
         // is read before one is written over it), then its last few bytes.
         {
