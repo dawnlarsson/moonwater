@@ -30907,7 +30907,7 @@ static void check_reclaim_chord(void) {
 /*
         Canvas hears the chords and nothing else.
 
-        KDE's compositor, and ours, read the same mouse and keyboard Canvas
+        Another compositor, and ours, read the same mouse and keyboard Canvas
         does, and Canvas used to hear every report as well: the acceleration
         curve, the shake detector, the desktop's input lock and a wakeup of
         the thread that runs ahead of every ordinary task, for each one. The
@@ -48005,7 +48005,7 @@ def harness_moonwater_cli(argv):
         lines, finished = session(
             "cp /tmp/moonwater /tmp/bowl; mkdir -p /bowls/alpine/var/lib/moonwater\n"
             "ln -s /root /bowls/alpine/var/lib/moonwater/profile; echo on > /root/desktop\n"
-            "timeout 20 /tmp/bowl profile desktop remove > /dev/null 2>&1; echo \"@@ remove $?\"\n"
+            "timeout 20 /tmp/bowl profile chrome remove > /dev/null 2>&1; echo \"@@ remove $?\"\n"
             "echo '@@ kept'; cat /root/desktop; echo '@@end'\n"
             "rm -rf /bowls/alpine /tmp/bowl /root/desktop\n")
         check(finished and block("kept") == ["on"] and "@@ remove 124" not in lines and
@@ -50437,23 +50437,19 @@ int main(int count, char **words)
                               "it": "it", "ar": "ara", "il": "il", "ir": "ir"},
               "every layout moonwater keyboard offers has the XKB name a compositor wants", sorted(dict(pairs).items()))
         #       moonwater desktop is a setting like the keyboard's: bare it says
-        #       what is chosen, a word is saved when it is on, off or a
-        #       profile that is installed, and nothing else is, and a layout is
-        #       said in XKB's name for the session of a bowl to read.
-        script = ("rm -f /root/desktop /bowls/bin/desktop; mkdir -p /bowls/bin\n" +
+        #       what is chosen, a word is saved when it is on or off, and nothing
+        #       else is, and a layout is said in XKB's name for a compositor of a
+        #       bowl to read. A word kept by an earlier Moonwater (a profile's
+        #       session, which it could start instead) is the compositor.
+        script = ("rm -f /root/desktop\n" +
                   say("desktop") + say("desktop off") + "echo \"@@kept $(cat /root/desktop)\"\n" +
-                  say("desktop desktop") + say("desktop nosuch") + say("desktop on extra") +
-                  say("desktop stop") + "echo \"@@kept $(cat /root/desktop)\"\n" +
-                  "printf '#!/bin/sh\\n# bowl profile desktop\\nexit 0\\n' > /bowls/bin/desktop; "
-                  "chmod 755 /bowls/bin/desktop\n" +
-                  say("desktop desktop") + "echo \"@@kept $(cat /root/desktop)\"\n" +
-                  say("desktop") + say("desktop on") + "echo \"@@kept $(cat /root/desktop)\"\n" +
-                  "printf '#!/bin/sh\\nexit 0\\n' > /bowls/bin/desktop\n" + say("desktop desktop") +
-                  "echo \"@@kept $(cat /root/desktop)\"\n" +
+                  say("desktop nosuch") + say("desktop on extra") + "echo \"@@kept $(cat /root/desktop)\"\n" +
+                  say("desktop on") + "echo \"@@kept $(cat /root/desktop)\"\n" +
                   say("desktop rest") + "echo \"@@kept $(cat /root/desktop)\"\n" +
                   "rm -f /root/desktop\n" + say("desktop rest") + "echo \"@@kept $(cat /root/desktop 2> /dev/null || echo none)\"\n" +
+                  "echo desktop > /root/desktop\n" + "echo \"@@stale $(/tmp/moonwater desktop 2>&1)\"\n" +
                   "".join(say(f"keyboard {layout}") + say("keyboard xkb") for layout in ("uk", "sv", "nb", "de", "us")) +
-                  "rm -f /root/desktop /bowls/bin/desktop\n")
+                  "rm -f /root/desktop\n")
         lines, finished = session(script)
         seen = answers(lines)
         kept = [line.split(None, 1)[1] if " " in line else "" for line in lines if line.startswith("@@kept")]
@@ -50462,106 +50458,24 @@ int main(int count, char **words)
               "moonwater desktop says on when nothing was chosen", repr(seen.get("desktop")))
         check(seen.get("desktop off", {}).get("status") == 0 and kept[:1] == ["off"],
               "desktop off is saved", repr((seen.get("desktop off"), kept[:1])))
-        check(seen.get("desktop desktop", {}).get("status") == 1 and
-              any("is not installed" in line for line in seen["desktop desktop"]["out"]) and kept[1:2] == ["off"],
-              "a profile that is not installed is refused and the choice stays", repr((kept[1:2],)))
         check(seen.get("desktop nosuch", {}).get("status") == 1 and
-              any("unknown desktop nosuch" in line for line in seen["desktop nosuch"]["out"]),
-              "a word that is no profile is refused", repr(seen.get("desktop nosuch")))
+              any("unknown desktop nosuch" in line for line in seen["desktop nosuch"]["out"]) and kept[1:2] == ["off"],
+              "a word that is neither on nor off is refused and the choice stays", repr((seen.get("desktop nosuch"), kept[1:2])))
         check(seen.get("desktop on extra", {}).get("status") == 2,
               "a word too many is a usage page", repr(seen.get("desktop on extra")))
-        check(seen.get("desktop stop", {}).get("status") == 1 and
-              any("no desktop session is running" in line for line in seen["desktop stop"]["out"]),
-              "stop with no session is a refusal", repr(seen.get("desktop stop")))
-        check(kept[2:3] == ["desktop"] and kept[3:4] == ["canvas"],
-              "a profile that is installed is chosen, and on puts the default back", repr(kept))
-        check(kept[4:5] == ["canvas"] and seen.get("desktop desktop", {}).get("status") is not None,
-              "a script that is not a profile's is not one", repr(kept))
+        check(kept[2:3] == ["canvas"], "on puts the default back", repr(kept))
         #       desktop rest is off for this start alone: the supervisor's word when the
         #       compositor will not stay up, which was desktop off and kept for every boot.
-        check(seen.get("desktop rest", {}).get("status") == 0 and kept[5:7] == ["canvas", "none"] and
+        check(seen.get("desktop rest", {}).get("status") == 0 and kept[3:5] == ["canvas", "none"] and
               any("until the next start" in line for line in seen["desktop rest"]["out"]),
               "desktop rest keeps nothing: the choice is as it was, and none is made where there was none",
               repr((seen.get("desktop rest"), kept)))
+        check(any(line.startswith("@@stale ") and line.endswith("desktop on") for line in lines),
+              "a word an earlier Moonwater kept that is neither on nor off is the compositor",
+              repr([line for line in lines if line.startswith("@@stale")]))
         names = [lines[at + 1] for at in range(len(lines) - 1) if lines[at] == "@@ keyboard xkb"]
         check(names == ["gb", "se", "no", "de", "us"],
               "keyboard xkb says the layout in XKB's name", repr(names))
-        #       A desktop chosen while the machine's compositor is up ends what the
-        #       machine script kept the pids of, read from a list of 256 bytes. A
-        #       number at the end of a longer list may be the front of one, and was
-        #       ended as the pid it looks like: here a process of the sandbox's own
-        #       (its number written to end at byte 256, a digit after it) is left
-        #       alone by the verb, and one the list names whole is ended.
-        script = ("rm -f /run/moonwater/desktop /run/moonwater/desktop.kids /root/desktop; "
-                  "mkdir -p /run/moonwater /bowls/bin\n"
-                  "printf '#!/bin/sh\\n# bowl profile desktop\\nexit 0\\n' > /bowls/bin/desktop; "
-                  "chmod 755 /bowls/bin/desktop\n"
-                  "sleep 60 & cut=$!; sleep 60 & whole=$!\n"
-                  "printf \"%$((256 - ${#cut}))s%s7\\n\" '' \"$cut\" > /run/moonwater/desktop.kids\n" +
-                  say("desktop desktop") +
-                  "sleep 0.3; echo \"@@ cut $(sed 's/.*) //;s/ .*//' /proc/$cut/stat 2>&1)\"\n"
-                  "printf '%s\\n' \"$whole\" > /run/moonwater/desktop.kids\n" + say("desktop desktop") +
-                  "sleep 0.3; echo \"@@ whole $(sed 's/.*) //;s/ .*//' /proc/$whole/stat 2>&1)\"\n"
-                  "kill -9 $cut $whole; rm -f /bowls/bin/desktop /root/desktop /run/moonwater/desktop.kids\n")
-        lines, finished = session(script)
-        check(finished and "@@ cut S" in lines and not any(line == "@@ whole S" for line in lines),
-              "a number cut at the end of the list of a compositor's company is not a pid to end, a whole one is",
-              repr(lines[-8:]))
-        #       The session a desktop was started as is recorded, and a record that
-        #       cannot be written is said (the session is running, unrecorded).
-        script = ("rm -rf /run/moonwater/desktop /root/desktop; mkdir -p /run/moonwater/desktop /bowls/bin\n"
-                  "printf '#!/bin/sh\\n# bowl profile desktop\\nexit 0\\n' > /bowls/bin/desktop; "
-                  "chmod 755 /bowls/bin/desktop\n" + say("desktop desktop") +
-                  "rm -rf /run/moonwater/desktop /root/desktop /bowls/bin/desktop\n")
-        lines, finished = session(script)
-        seen = answers(lines)
-        check(finished and seen.get("desktop desktop", {}).get("status") == 1 and
-              any("/run/moonwater/desktop" in line for line in seen["desktop desktop"]["out"]),
-              "a started desktop whose session cannot be recorded says so", repr(seen.get("desktop desktop")))
-        #       A session that has been ended leaves no record: its number would be
-        #       the number of whatever the machine gave it next, and stop would end
-        #       that. The session is a real one here (the event shell is /shell, a
-        #       link to the sandbox's sh), a profile that execs a sleep.
-        script = ("rm -rf /run/moonwater/desktop /root/desktop; mkdir -p /run/moonwater /bowls/bin; "
-                  "ln -sf /usr/bin/sh /shell\n"
-                  "printf '#!/bin/sh\\n# bowl profile desktop\\nexec sleep 60\\n' > /bowls/bin/desktop; "
-                  "chmod 755 /bowls/bin/desktop\n" + say("desktop desktop") + "sleep 0.5\n"
-                  "echo \"@@ recorded $(cat /run/moonwater/desktop 2>&1)\"\n" + say("desktop") + say("desktop stop") +
-                  "[ -e /run/moonwater/desktop ] && echo '@@ record left' || echo '@@ record gone'\n"
-                  "rm -f /bowls/bin/desktop /root/desktop /shell\n")
-        lines, finished = session(script)
-        seen = answers(lines)
-        check(finished and any(re.fullmatch(r"@@ recorded \d+", line) for line in lines) and
-              any(line.endswith("running") for line in seen.get("desktop", {}).get("out", [])) and
-              seen.get("desktop stop", {}).get("status") == 0 and "@@ record gone" in lines,
-              "a session that was ended leaves no record of its number", repr(lines[-8:]))
-        #       The KDE session draws Qt Quick on the main thread where GL is
-        #       software (llvmpipe's shader compiler overflows a musl thread's
-        #       128 KiB stack, and plasmashell crashed at every start on arm64),
-        #       and leaves a card that draws as it was. The session runs to
-        #       its last line, where a dbus-run-session of the sandbox's own
-        #       says what it was given.
-        cards = [("a virtio GPU without virgl", "mkdir -p /sys/class/drm/renderD128/device/virtio0; "
-                  "printf '0100000000\\n' > /sys/class/drm/renderD128/device/virtio0/features", "", "basic"),
-                 ("no render node", ":", "", "basic"),
-                 ("a virtio GPU with virgl", "mkdir -p /sys/class/drm/renderD128/device/virtio0; "
-                  "printf '1100000000\\n' > /sys/class/drm/renderD128/device/virtio0/features", "", "unset"),
-                 ("a card of another driver", "mkdir -p /sys/class/drm/renderD128/device", "", "unset"),
-                 ("software with a loop the person chose", ":", "QSG_RENDER_LOOP=threaded ", "threaded")]
-        script = "mkdir -p /tmp/fake; ln -sf /tmp/moonwater /tmp/bowl\n" \
-                 "printf '#!/bin/sh\\necho \"@@loop ${QSG_RENDER_LOOP:-unset}\"\\n' > /tmp/fake/dbus-run-session; " \
-                 "chmod 755 /tmp/fake/dbus-run-session\n"
-        for name, made, preset, want in cards:
-            script += (f"rm -rf /sys/class/drm; {made}\n"
-                       f"{preset}MOONWATER_SESSION=1 HOME=/tmp PATH=/tmp/fake:/usr/bin:/bin "
-                       "timeout 20 /tmp/bowl profile desktop session > /tmp/session.out 2>&1; "
-                       "grep '^@@loop' /tmp/session.out || echo '@@loop none'\n")
-        script += "rm -rf /sys/class/drm /tmp/fake /tmp/bowl /tmp/session.out /tmp/.config\n"
-        lines, finished = session(script)
-        loops = [line.split()[1] for line in lines if line.startswith("@@loop")]
-        check(finished and loops == [want for _, _, _, want in cards],
-              "the desktop session draws Qt Quick on the main thread where GL is software, and only there: " +
-              ", ".join(f"{name} {want}" for name, _, _, want in cards), repr(loops))
         #       The firmware's indications are read before they are written: a
         #       variable that is there and cannot be read whole (five bytes, here)
         #       has bits not known, and is left as it is and said, where it was
@@ -51787,25 +51701,6 @@ int main(int count, char **words)
               counts[2] == "1" and int(counts[3]) > 0,
               "moonwater debug over a table of escape bytes lists its input devices with every name spelled, no escape sent, and exits 0",
               repr((got, counts))[:240])
-        #       The desktop switch ends the compositor and the supervisor the
-        #       machine script recorded, by the pids in their files, which are
-        #       numbers that fit a pid and nothing around their digits as
-        #       settings reads them: "pid123" names no process (it was read as
-        #       its trailing digits), and the switch must not send its signals
-        #       to 123.
-        script = ("rm -f /root/desktop /bowls/bin/desktop; mkdir -p /bowls/bin /run/moonwater\n"
-                  "printf '#!/bin/sh\\n# bowl profile desktop\\nexit 0\\n' > /bowls/bin/desktop; "
-                  "chmod 755 /bowls/bin/desktop\n"
-                  "sleep 60 & victim=$!\n"
-                  "printf 'pid%s\\n' $victim > /run/moonwater/compositor.pid\n"
-                  "printf 'pid%s\\n' $victim > /run/moonwater/supervisor.pid\n" + say("desktop desktop") +
-                  "kill -0 $victim 2>/dev/null && echo '@@victim alive' || echo '@@victim gone'\n"
-                  "kill $victim; rm -f /run/moonwater/compositor.pid /run/moonwater/supervisor.pid "
-                  "/root/desktop /bowls/bin/desktop\n")
-        lines, finished = session(script)
-        check(finished and "@@victim alive" in lines,
-              "moonwater desktop PROFILE leaves alone the process a pid file names with junk before its digits",
-              repr([line for line in lines if line.startswith("@@")]))
         #       The settings a session keeps are read as the other state files
         #       are, through no link: a link at the name is no copy of them, so
         #       the list is the defaults (the image's copy is not reached either).
@@ -53997,7 +53892,7 @@ def harness_moonwater_script(argv):
         ("bind init add echo hi", 0), ("bind init add echo hi", 0), ("bind init mount off", 0),
         ("bind init mount off", 0), ("bind init", 0), ("bind exit add echo bye", 0), ("bind exit add echo bye", 0),
         ("bind exit", 0), ("bind poweroff", 1), ("canvas", 1), ("canvas on", 2), ("canvas off", 2),
-        ("desktop off", 0), ("desktop start", 0), ("desktop stop", 1), ("desktop boot", 0), ("desktop", 0),
+        ("desktop off", 0), ("desktop start", 0), ("desktop rest", 0), ("desktop boot", 0), ("desktop", 0),
         ("latency", 1), ("debug", 0), ("link on", 0), ("link on", 0), ("link key", 0), ("link port 22348", 0),
         ("link add peer1 " + key, 0), ("link add peer1 " + key, 0), ("link allow peer1 run", 0),
         ("link allow peer1 run", 0), ("link group lab SECRETsecret1 allow run", 0),
@@ -54006,7 +53901,7 @@ def harness_moonwater_script(argv):
         ("link pull nobody a b", 1), ("link log nobody", 1), ("link nobody whoami", 1),
         ("setup", 0), ("setup use", 1), ("setup update", 1), ("setup live", 0),
         ("setup install sda yes", 1), ("setup install sda removable yes", 1), ("status", 0), ("help", 0),
-        ("bowl", 2), ("bowl setup alpine", 1), ("bowl profile", 0), ("bowl profile desktop", 1),
+        ("bowl", 2), ("bowl setup alpine", 1), ("bowl profile", 0), ("bowl profile chrome", 1),
         ("bowl udev", 0), ("bowl expose", 2), ("bowl setup nonesuch", 1),
     ]
     #       The two that wait five minutes for a person on another machine,

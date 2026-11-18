@@ -101,8 +101,8 @@ struct launcher_program
         The power buttons, left to right: the ids of what each is called and says when it is armed, and what it starts. The first two are
         the machine's own stop and are always there. The two after them are the session's, and each is there only where the system can
         do it (launcher.session, a bit each, LAUNCHER_SLEEP and LAUNCHER_LOG_OUT): Sleep is `moonwater sleep`, offered where the kernel
-        says it can suspend to memory (launcher_sleeps: the word mem in /sys/power/state), and Log out is `moonwater desktop stop`,
-        which ends the desktop's session and leaves the text console.
+        says it can suspend to memory (launcher_sleeps: the word mem in /sys/power/state), and Log out is `moonwater desktop rest`,
+        which ends the desktop's session and leaves the text console until the next start.
 */
 #define LAUNCHER_POWERS 4
 #define LAUNCHER_ALWAYS 2    // the first of them are the machine's and are always offered
@@ -116,7 +116,7 @@ static const struct launcher_power
 } launcher_powers[LAUNCHER_POWERS] = {{LANGUAGE_launcher_power_off, LANGUAGE_launcher_power_off_armed, "poweroff"},
                                       {LANGUAGE_launcher_restart, LANGUAGE_launcher_restart_armed, "reboot"},
                                       {LANGUAGE_launcher_sleep, LANGUAGE_launcher_sleep_armed, "moonwater sleep"},
-                                      {LANGUAGE_launcher_log_out, LANGUAGE_launcher_log_out_armed, "moonwater desktop stop"}};
+                                      {LANGUAGE_launcher_log_out, LANGUAGE_launcher_log_out_armed, "moonwater desktop rest"}};
 
 // The desktop's own programs, in the order they are listed.
 static const struct launcher_program launcher_programs[] = {

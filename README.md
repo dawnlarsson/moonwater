@@ -281,8 +281,8 @@ moonwater clipboard get [primary]      the copied text: exact to a file or a pip
 moonwater clipboard set [primary] [TEXT]  copy TEXT, or standard input (root)
 moonwater clipboard watch [primary]    a line each time something is copied, the text escaped (root)
 moonwater debug                        what the desktop is doing and why (root): the card, the screens, the windows and their scroll bodies, the pointer, the input devices and the wheel
-moonwater desktop [on|off|PROFILE]     the desktop, now and at every start; off leaves the text console [on]
-moonwater desktop start|stop|rest      begin the chosen desktop now, or end its session; rest is the text console until the next start, the choice kept as it is
+moonwater desktop [on|off]             the desktop, now and at every start; off leaves the text console [on]
+moonwater desktop start|rest           begin the chosen desktop now; rest is the text console until the next start, the choice kept as it is
 moonwater desktop autostart [PROGRAM...|none|default]  the programs the desktop opens when it starts, each an absolute path, in this order; none opens nothing [none]
 moonwater desktop autostart add PROGRAM  open PROGRAM as well when the desktop starts, after the others
 moonwater desktop autostart remove PROGRAM  no longer open PROGRAM when the desktop starts
@@ -328,19 +328,18 @@ moonwater wipe [yes]                   forget /home and /root, keep the machine;
 main page leaves out the rows that only a verb's own page shows, such as `bind poweroff`
 and `link key`.
 
-`moonwater desktop on|off|PROFILE` is the one switch of what is on the screen, kept for
-every start and put in force at once: `on` is the compositor, `off` the text console, a
-profile (`bowl profile desktop` installs KDE) its session. A session has the display
-only once the compositor has let go of it, since nothing else can be the card's master
-while it is, so the compositor ends first and `desktop on` brings it back.
+`moonwater desktop on|off` is the one switch of what is on the screen, kept for
+every start and put in force at once: `on` is the compositor, `off` the text console.
+Another compositor (weston, say) has the display only once the compositor has let go of
+it, since nothing else can be the card's master while it is, so `desktop off` comes
+first and `desktop on` brings the compositor back.
 
 A switch with no word after it says where it stands, to anybody; with one it
 changes it and needs root, and a word it does not take is a usage page (exit 2)
 and not a refusal (exit 1). `bowl` runs other distributions' programs
-(`bowl profile desktop` installs KDE, `bowl profile chrome` Alpine's Chromium as a
-program of Canvas, `bowl profile steam` Arch's Steam with its 32-bit graphics and
-sound, on x86-64, `bowl profile build` what `sh build.sh` needs to build an image
-here: `moonwater desktop` takes none of the three for a session), and
+(`bowl profile chrome` installs Alpine's Chromium as a program of Canvas,
+`bowl profile steam` Arch's Steam with its 32-bit graphics and sound, on x86-64,
+`bowl profile build` what `sh build.sh` needs to build an image here), and
 `main.moonwater.sh` is the machine script that sets a machine up at boot.
 
 `moonwater security` changes what the TLS client (wget, the clock's NTS, names over
@@ -475,7 +474,7 @@ drawn in the Noto Sans Arabic and Noto Sans Hebrew faces the image carries besid
 Chinese, Japanese and Korean ones need a face and shaping that are not there.
 `languages/glossary` fixes the terms, and `languages/keep` the few English literals a converted file keeps.
 
-On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away. The taskbar has a tab with the launcher mark at its start (its left end, or the top of a side taskbar) that opens it beside the tab, above a bottom taskbar, below a top one and to the side of a left or right one, and a press on the tab while it is open puts it away; the logo key pressed and let go alone, with no other key or button between, is a press on that tab. `moonwater taskbar launcher off` takes the tab away, and the logo key alone then does nothing. Under its list are its buttons, Power off and Restart, and after them the session's where the machine can do them: Sleep (`moonwater sleep`, where the kernel offers suspend to memory) and Log out (`moonwater desktop stop`, which ends the desktop's session and leaves the text console). Each asks for a second press before it is done (a key held down is one press, and its repeats confirm nothing), and Shift-Tab puts the keys on them.
+On the desktop, Super and Space open the launcher: a search bar for the desktop's programs, the programs of PATH and shell commands, which the same chord, Escape or a press outside it puts away. The taskbar has a tab with the launcher mark at its start (its left end, or the top of a side taskbar) that opens it beside the tab, above a bottom taskbar, below a top one and to the side of a left or right one, and a press on the tab while it is open puts it away; the logo key pressed and let go alone, with no other key or button between, is a press on that tab. `moonwater taskbar launcher off` takes the tab away, and the logo key alone then does nothing. Under its list are its buttons, Power off and Restart, and after them the session's where the machine can do them: Sleep (`moonwater sleep`, where the kernel offers suspend to memory) and Log out (`moonwater desktop rest`, which ends the desktop's session and leaves the text console until the next start). Each asks for a second press before it is done (a key held down is one press, and its repeats confirm nothing), and Shift-Tab puts the keys on them.
 
 The mixer (`/mixer`, or Mixer in the launcher) shows the sound server's volumes as columns: the output device first, then a strip for each program that has a sound (the streams of one program are one strip), each a disc with the program's letter, its name, its volume, a level meter beside a vertical slider, and a Mute button. Up and Down change the volume of the strip the keys are on by one, Page Up and Page Down by ten, Home and End make it 100 and 0, and M, Space and Enter mute it; Left, Right and Tab go from strip to strip, the wheel over a strip changes it two a notch, and a strip pressed on the slider goes where the hand does. When the strips do not fit, the wheel over the ground, Shift with the wheel and a drag scroll them. It reads the server's page of memory (`/run/moonwater/pulse/state`) and changes volumes over the server's socket, so a volume set on the command line (`moonwater audio volume`), by a program (`pactl`) or in the mixer is one volume; with no server running it says so. The output device's strip says under its volume why that output plays, and is dim and says so when nothing is plugged into it. Two tabs along its top, Playback and Recording (Control with Page Up and Page Down or Tab goes between them), show what plays and what records: Recording has the microphone first, then a strip for each program that records from one (a program that records what plays is none), their volumes and mutes changed the same way; with recording turned off (`moonwater audio capture`) it says so and has an Allow button that turns it on, and with no microphone it says that. `mixer -i` starts on Recording, or shows it in a mixer that is open. The small mixers that open from the tray's cells are glass over what is under them. Escape closes it.
 

@@ -41,7 +41,7 @@ function moonwater_ctrl_alt_delete {
 }
 
 # The compositor is the desktop. Canvas holds the card and fills it with the desktop's colour between
-# one compositor and the next; a desktop that is not the compositor's is what `desktop boot` starts.
+# one compositor and the next; `desktop boot` turns Canvas off where the choice is the text console.
 function moonwater_canvas_on {
   memory_start
   bus_start
@@ -497,9 +497,8 @@ function desktop_supervise {
   rm -f /run/moonwater/supervisor.pid
 }
 
-# The compositor's desktop. The settings can name another (a profile's session,
-# or off, which `desktop boot` carries out) and moonwater.desktop=none keeps the
-# compositor out of the way: Canvas holds the card and nothing draws on it. With
+# The compositor's desktop. The settings can say off (which `desktop boot` carries
+# out) and moonwater.desktop=none keeps the compositor out of the way: Canvas holds the card and nothing draws on it. With
 # no font to draw with there is no desktop to start, and Canvas is turned off for the
 # text console.
 function desktop_start {

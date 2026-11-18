@@ -20642,8 +20642,8 @@ report "no font: no compositor is started" "$(grep '^starts=' "$STUB/out")" "sta
 report "no font: Canvas is turned off for the text console" "$(grep '^off=' "$STUB/out")" "off=1"
 report "no font: and the choice kept is still the desktop, for a start that has one" "$(grep '^kept=' "$STUB/out")" "kept=on off=0"
 
-# J: moonwater.desktop=none keeps the compositor out of the way, and so does a desktop choice that is
-# not the compositor's; neither is a failure and neither turns Canvas off (desktop boot carries out the choice).
+# J: moonwater.desktop=none keeps the compositor out of the way; that is no failure and does not turn Canvas
+# off.
 begin none
 echo "console=ttyS0 moonwater.desktop=none" > "$STUB/cmdline"
 cat > "$STUB/driver.sh" <<'EOF'
@@ -20659,19 +20659,6 @@ report "desktop=none: desktop_start comes back well" "$(grep '^rc=' "$STUB/out")
 report "desktop=none: no compositor is started" "$(grep '^starts=' "$STUB/out")" "starts=0"
 report "desktop=none: Canvas stays on" "$(grep '^off=' "$STUB/out")" "off=0"
 report "desktop=none: no supervisor is left" "$(grep '^pidfile=' "$STUB/out")" "pidfile=no"
-begin profile
-echo kde > "$STUB/desktop"
-cat > "$STUB/driver.sh" <<'EOF'
-. "$STUB/main.sed.sh"
-desktop_start
-echo "rc=$?"
-echo "starts=$(wc -l < "$STUB/starts")"
-echo "off=$(grep -c off "$STUB/calls")"
-EOF
-run_driver
-report "another desktop: desktop_start comes back well" "$(grep '^rc=' "$STUB/out")" "rc=0"
-report "another desktop: the compositor is not started" "$(grep '^starts=' "$STUB/out")" "starts=0"
-report "another desktop: Canvas stays on for its session" "$(grep '^off=' "$STUB/out")" "off=0"
 
 RUNNER
         unshare -Urpf --mount-proc sh "$desktop_work/runner.sh" "$desktop_work/bash" "$desktop_work/cases" \
@@ -20938,37 +20925,11 @@ count() { if [ -n "$p" ]; then sed -n 's/^voluntary_ctxt_switches:[^0-9]*//p' /p
 exec /mnt/drmhold "$@"
 ''')
 
-#       A holder that comes back, as KDE's wrapper brings KWin back when KWin
-#       is killed: three runs of the holder in a loop of one shell, which a
+#       A holder that comes back, as a compositor's wrapper brings it back when
+#       it is killed: three runs of the holder in a loop of one shell, which a
 #       key that ends only the holder would leave holding the card again.
 open(stick + "/respawn", "w").write(r'''n=0
 while [ $n -lt 3 ]; do /mnt/drmhold 6 0 0; n=$((n+1)); done
-''')
-#       A bowl profile that is only a program holding the display, installed
-#       where bowl profile puts one, chosen as the desktop, started, looked at,
-#       and ended from the same shell that started it. The session's own
-#       output goes to its log, so the profile says what it does in a file.
-open(stick + "/profile", "w").write("#!/bin/sh\n# bowl profile desktop\nexec /mnt/drmhold 120 0 0 > /tmp/profile.out 2>&1\n")
-open(stick + "/desk", "w").write(r'''moonwater desktop
-moonwater desktop desktop
-mkdir -p /bowls/bin
-cp /mnt/profile /bowls/bin/desktop
-chmod 755 /bowls/bin/desktop
-moonwater desktop desktop
-sleep 6
-moonwater desktop
-moonwater desktop stop
-sleep 3
-rm -f /run/moonwater/desktop.booted
-moonwater desktop boot
-sleep 6
-moonwater desktop
-moonwater desktop stop
-sleep 3
-moonwater desktop
-moonwater desktop on
-moonwater desktop
-echo desk-done
 ''')
 
 #       The plain boot, the machine as it ships: no console= at all, so
@@ -21282,18 +21243,12 @@ else:
                        ("and the kernel warned about nothing on the way", "0")):
         out.append((name, "not run: no static cc for the helpers", want))
 
-#       The way out of a display that nothing is working at, and the profiles
-#       that start one. Canvas drops every key while another program holds the
-#       card, so what is typed is of no use until it lets go: a program with no
-#       input, or no picture, would have left the machine with a keyboard and
-#       nothing to do with it.
+#       The way out of a display that nothing is working at. Canvas drops
+#       every key while another program holds the card, so what is typed is
+#       of no use until it lets go: a program with no input, or no picture,
+#       would have left the machine with a keyboard and nothing to do with it.
 way_names = ("Control-Alt-Backspace ends a program that holds the display",
-             "and the loop that starts it again with it, not only the one run",
-             "moonwater desktop refuses a profile that is not installed, and takes one that is",
-             "moonwater desktop boot starts the chosen profile, over Canvas, as a boot does",
-             "and moonwater desktop says it is running",
-             "moonwater desktop stop ends its session, and Canvas has the display back",
-             "and moonwater desktop on puts the default back")
+             "and the loop that starts it again with it, not only the one run")
 if holder:
     tag = start_holder("0", "setsid /shell /mnt/respawn")
     started = holder_said(tag, "DRMHOLD master", 15)
@@ -21304,22 +21259,8 @@ if holder:
     masters = len(re.findall(r"DRMHOLD master", shell.run("cat %s" % tag, 10)[0]))
     out.append((way_names[0], ("yes" if back else "no") if started else "the holder did not start", "yes"))
     out.append((way_names[1], str(masters) if started else "the holder did not start", "1"))
-
-    plain, status = shell.run("/shell /mnt/desk", 120)
-    time.sleep(1)
-    profile_said = shell.run("cat /tmp/profile.out", 10)[0]
-    out.append((way_names[2], "yes" if "is not installed" in plain and
-                "desktop desktop\n" in plain else "no: " + repr(plain[:400]), "yes"))
-    out.append((way_names[3], str(len(re.findall(r"DRMHOLD master", profile_said))), "1"))
-    out.append((way_names[4], "yes" if "desktop desktop, running" in plain else "no", "yes"))
-    shot("profile-after", 0.5)
-    vga, white = vga_share("profile-after")
-    out.append((way_names[5], "yes" if "desktop stopped" in plain and white < 50 else "no (%d%% white)" % white, "yes"))
-    out.append((way_names[6], "yes" if re.search(
-        r"desktop stopped.*desktop desktop, not running.*desktop on"
-        r".*desktop on\n.*desk-done", plain, re.S) else "no: " + repr(plain[-300:]), "yes"))
 else:
-    for name, want in zip(way_names, ("yes", "1", "yes", "1", "yes", "yes", "yes")):
+    for name, want in zip(way_names, ("yes", "1")):
         out.append((name, "not run: no static cc for the helpers", want))
 
 #       And the power button with Canvas up, which has its own input handler
@@ -23262,12 +23203,11 @@ else
 fi
 fi
 
-#       Another desktop on a machine that boots to the compositor. The compositor is the card's master, and a program
-#       that wants the display (a bowl's KDE session, weston, sway) cannot become master while it is: KWin said it had no
-#       outputs and Plasma that it had no screen for a panel, on a desktop that otherwise drew perfectly. The session here
-#       is a stand-in installed where `bowl profile` puts one, a program that does what any compositor does first, takes
-#       the master and holds it, and says whether it got it. Every other lane that starts a session boots with
-#       moonwater.desktop=none, which keeps the compositor away, and so never had the two on one card.
+#       Another compositor on a machine that boots to its own. The compositor is the card's master, and a program that
+#       wants the display (weston, sway) cannot become master while it is. The program here is a stand-in, one that does
+#       what any compositor does first, takes the master and holds it, and says whether it got it. Every other lane that
+#       starts one boots with moonwater.desktop=none, which keeps the compositor away, and so never had the two on one
+#       card.
 if [ -z "${CANVAS_ONLY:-}" ] || [ "${CANVAS_ONLY:-}" = k1 ]; then
 PYTHONPATH=$work python3 - "$image" > "$work/k1-answers" 2>"$work/k1-why" <<'PY'
 import os, re, subprocess, sys, time
@@ -23305,18 +23245,13 @@ int main(int argc, char **argv)
 built = subprocess.run(["cc", "-O2", "-static", "-o", stick + "/kmsmaster", work + "/kmsmaster.c"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 names = ("K1.1 with the compositor up the card has a master already: another program cannot take it",
-         "K1.2 moonwater desktop PROFILE ends the compositor and its supervisor before the session starts",
-         "K1.3 the session takes the master of the card, once",
-         "K1.4 the session ended, the card has no master left over: a program takes it",
-         "K1.5 the compositor is not started again behind the session",
-         "K1.6 moonwater desktop on after a session brings the compositor back, and it is the card's master again",
-         "K1.7 moonwater desktop off ends the compositor and Canvas is off, for the text console",
-         "K1.8 and moonwater desktop on from there starts the compositor again")
+         "K1.2 moonwater desktop off ends the compositor and Canvas is off, for the text console",
+         "K1.3 and the card has no master left over: a program takes it",
+         "K1.4 and moonwater desktop on from there starts the compositor again, and it is the card's master again")
 if not built:
-    for name, want in zip(names, ("busy", "yes", "1", "master", "yes", "yes", "yes", "yes")):
+    for name, want in zip(names, ("busy", "yes", "master", "yes")):
         out.append((name, "not run: no static cc for the helper", want))
 else:
-    open(stick + "/profile", "w").write("#!/bin/sh\n# bowl profile desktop\nexec /mnt/kmsmaster 120 > /tmp/profile.out 2>&1\n")
     guest = Guest(desktop(image) + [
         "-drive", "if=none,id=stick,format=raw,file=fat:ro:" + stick + ",readonly=on",
         "-device", "usb-storage,drive=stick,removable=on",
@@ -23337,38 +23272,21 @@ else:
     first = shell.run("/mnt/kmsmaster 1; echo status $?", 15)[0]
     out.append((names[0], "busy" if "kms-busy 16" in first else first.strip()[-60:].replace("\n", " "), "busy"))
 
-    shell.run("mkdir -p /bowls/bin; cp /mnt/profile /bowls/bin/desktop; chmod 755 /bowls/bin/desktop", 10)
-    started = shell.run("moonwater desktop desktop; echo status $?", 60)[0]
-    until(lambda: "kms-master" in shell.run("cat /tmp/profile.out", 10)[0], 30)
-    time.sleep(2)
-    said = shell.run("cat /tmp/profile.out", 10)[0]
-    gone = "gone" in shell.run("[ -e /run/moonwater/supervisor.pid ] || [ -e /run/moonwater/compositor.pid ] || echo gone", 10)[0]
-    out.append((names[1], "yes" if "status 0" in started and compositors() == "0" and gone else
-                "no: %s compositors %s pid files %s" % (started.strip()[-60:], compositors(), "gone" if gone else "left"), "yes"))
-    out.append((names[2], str(len(re.findall(r"kms-master", said))) if "kms-busy" not in said else said.strip()[-40:].replace("\n", " "), "1"))
-
-    time.sleep(3)
-    out.append((names[4], "yes" if compositors() == "0" else "a compositor is back", "yes"))
-    shell.run("moonwater desktop stop", 30)
-    time.sleep(3)
-    after = shell.run("/mnt/kmsmaster 1; echo status $?", 15)[0]
-    out.append((names[3], "master" if "kms-master" in after else after.strip()[-60:].replace("\n", " "), "master"))
-
-    shell.run("moonwater desktop on", 60)
-    until(lambda: compositors() == "1", 60)
-    time.sleep(3)
-    again = shell.run("/mnt/kmsmaster 1; echo status $?", 15)[0]
-    out.append((names[5], "yes" if compositors() == "1" and "kms-busy 16" in again else
-                "compositors %s, %s" % (compositors(), again.strip()[-40:].replace("\n", " ")), "yes"))
     shell.run("moonwater desktop off", 60)
     until(lambda: compositors() == "0", 30)
     time.sleep(2)
     state = shell.run("moonwater canvas | head -1", 10)[0]
-    out.append((names[6], "yes" if compositors() == "0" and "Canvas is off" in state else
+    out.append((names[1], "yes" if compositors() == "0" and "Canvas is off" in state else
                 "compositors %s, %s" % (compositors(), state.strip()[-40:]), "yes"))
+    after = shell.run("/mnt/kmsmaster 1; echo status $?", 15)[0]
+    out.append((names[2], "master" if "kms-master" in after else after.strip()[-60:].replace("\n", " "), "master"))
     shell.run("moonwater desktop on", 60)
     until(lambda: compositors() == "1", 60)
-    out.append((names[7], "yes" if compositors() == "1" else "no compositor", "yes"))
+    time.sleep(3)
+    again = shell.run("/mnt/kmsmaster 1; echo status $?", 15)[0]
+    out.append((names[3], "yes" if compositors() == "1" and "kms-busy 16" in again else
+                "compositors %s, %s" % (compositors(), again.strip()[-40:].replace("\n", " ")), "yes"))
+
     try:
         guest.quit()
         guest.wait(10)
@@ -27169,12 +27087,12 @@ counted
 
 #       What a compositor hears, in a booted guest, from the real packages.
 #
-#       The KDE desktop of a bowl profile came up drawn and deaf: libinput does
+#       A compositor of a bowl came up drawn and deaf: libinput does
 #       not read /dev/input to learn which device is a keyboard, it asks udev,
 #       and nothing here ran one, so every node was "not tagged as a supported
 #       input device" and a compositor from any bowl had no keys and no
 #       pointer. libinput's own tool is the smallest thing that asks as a
-#       compositor does, and Alpine is where the desktop profile's packages
+#       compositor does, and Alpine is where weston's packages
 #       come from, so this lands an Alpine bowl on a blank disk (the network
 #       of QEMU's user stack, a few tens of megabytes), adds eudev and
 #       libinput-tools, and looks at what libinput finds before and after
@@ -27393,7 +27311,7 @@ except Exception:
 #       compositor as the card's master, and nothing else can draw while it is:
 #       weston's commits are refused. moonwater desktop off is what hands the
 #       card over, and has to have done it when it returns; desktop on takes it
-#       back. This is the failure KWin showed as "there are no outputs".
+#       back.
 machine = desktop(image)
 machine[machine.index("-m") + 1] = "3G"
 guest = Guest(machine + [

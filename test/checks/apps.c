@@ -6321,7 +6321,7 @@ static fn check_field_hands(string_address regular)
                 }
                 // The session's buttons: none unless the machine can do it (the kernel's own list has the whole word mem for Sleep), and
                 // with both offered the foot has four, each armed by its first press and started by its second: Sleep is `moonwater
-                // sleep` and Log out `moonwater desktop stop`. A button that is not offered is not there and starts nothing.
+                // sleep` and Log out `moonwater desktop rest`. A button that is not offered is not there and starts nothing.
                 {
                         unsigned int was = launcher.session, runs = launcher.power_runs;
                         string_address words[4];
@@ -6356,13 +6356,13 @@ static fn check_field_hands(string_address regular)
                                launcher.view.group.button[3].x + launcher.view.group.button[3].w <= LAUNCHER_WIDTH &&
                                launcher.view.group.button[0].x >= 0 && launcher.view.group.button[2].x > launcher.view.group.button[1].x;
                         said = launcher_power_words(2, words) == 3 && string_equals(words[2], (string_address) "moonwater sleep") &&
-                               launcher_power_words(3, words) == 3 && string_equals(words[2], (string_address) "moonwater desktop stop") &&
+                               launcher_power_words(3, words) == 3 && string_equals(words[2], (string_address) "moonwater desktop rest") &&
                                string_equals(words[0], (string_address) "/shell") && launcher.view.group.says[2] && launcher.view.group.says[3];
                         launcher.session = LAUNCHER_LOG_OUT;
                         launcher.height = launcher_build(0);
                         refused = launcher.view.group.count == 3 && launcher_power_act(2) && launcher.power_runs == runs && launcher_power_offered(3);
                         check("launcher: with no session action offered the foot has Power off and Restart alone, and a button that is not offered starts nothing", two && refused);
-                        check("launcher: with Sleep and Log out offered the foot has four buttons inside the bar, each said before it is done, Sleep starting moonwater sleep and Log out moonwater desktop stop",
+                        check("launcher: with Sleep and Log out offered the foot has four buttons inside the bar, each said before it is done, Sleep starting moonwater sleep and Log out moonwater desktop rest",
                               four && said);
                         // Four buttons leave the line that says what an armed one will do no room before them: armed, the line is in the room
                         // of the others, after the first button or before the last, wide enough for its words, and the others are veiled (not

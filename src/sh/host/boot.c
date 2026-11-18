@@ -601,8 +601,8 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
 static b32 locale_canvas_display(string_address address_to arguments, positive count);
 
 /*
-        Canvas off: every window closes and the console is the text one. What `moonwater desktop off` does after it has
-        ended the session of a profile; the machine script's own `desktop_stop` runs from the event this fires.
+        Canvas off: every window closes and the console is the text one. What `moonwater desktop off` does; the machine
+        script's own `desktop_stop` runs from the event this fires.
 */
 static b32 host_canvas_off(void)
 {
