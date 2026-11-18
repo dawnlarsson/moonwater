@@ -6952,8 +6952,6 @@ static bool awk_assignment(string_address text, positive length)
         return true;
 }
 
-bool file_is_directory_through(string_address path);
-
 static bool awk_open_next_input()
 {
         awk_array address_to argv = awk_cell_array(address_of awk_globals[awk_where_argv]);

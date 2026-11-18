@@ -1207,8 +1207,6 @@ static identity_table tar_seen_table;
    has letters for, three octal digits for any other control or byte past
    ASCII, and the backslash doubled, so no name can drive the terminal. */
 static bool text_locale_utf8();
-static positive file_terminal_step(const p8 address_to at, positive left,
-                                   bool utf8, bool address_to printable);
 
 static fn tar_quoted(writer output, string_address name)
 {

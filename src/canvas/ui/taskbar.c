@@ -2186,7 +2186,7 @@ static void taskbar_moon_clock(const struct taskbar_view *view, struct ui addres
         none, the kit's symbol for it in the tab's ink, so it follows the theme and dims with a tab put away; for any other program
         that says who it is, its lettered tile; and for a window that says nothing, the window symbol.
 */
-static struct taskbar_picture
+struct taskbar_picture
 {
         const unsigned int *from; // the picture it was made from
         unsigned int seq;         // and that picture's sequence
