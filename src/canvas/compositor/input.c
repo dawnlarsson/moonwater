@@ -4349,6 +4349,7 @@ static struct
         unsigned long long reading;  // the loop's place in the ring, taken when its turn's sends are done (compositor_reader_settle)
         unsigned long long direct, noted; // reports the reader sent itself, and their count the loop last took
         unsigned long long note_at;  // when the reader last knocked for its direct sends
+        unsigned long long late, late_most; // its sends 100 us and more after the device's stamp, and the latest (us)
         unsigned int dropped;        // a record the ring had no room for, to be said as SYN_DROPPED
         unsigned int generation[COMPOSITOR_INPUTS];
         struct compositor_reader_record ring[COMPOSITOR_READER_RING];
@@ -4373,6 +4374,7 @@ static int compositor_reader_running(void)
 
 #ifdef CONFIG_MOONWATER_WAYLAND
 static int compositor_wl_direct_send(long dx, long dy, positive micro); // wayland_host.c: a locked pointer's report sent from the reader
+static int compositor_wl_direct_clean(void); // wayland_host.c: nothing of the loop's is left queued for the client the reader sends to
 #endif
 
 static void compositor_reader_knock(void)
@@ -4425,9 +4427,15 @@ static int compositor_reader_direct(unsigned int at, const struct compositor_inp
                         dy += raw[k].value;
                 else if (raw[k].type != 4u && !(raw[k].type == COMPOSITOR_EV_SYN && raw[k].code == 0)) // EV_MSC; SYN_REPORT
                         return 0;
-        if ((!dx && !dy) || !compositor_wl_direct_send(dx, dy, (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds))
+        positive micro = (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds, late;
+
+        if ((!dx && !dy) || !compositor_wl_direct_send(dx, dy, micro))
                 return 0;
         __atomic_add_fetch(&compositor_reader.direct, 1, __ATOMIC_RELEASE);
+        // The report's time from the device's stamp to its send, for the count of late ones (said when the compositor ends).
+        late = clock_monotonic_nanoseconds() / 1000 - micro;
+        compositor_reader.late_most = late > compositor_reader.late_most && late < 1000000000ull ? late : compositor_reader.late_most;
+        compositor_reader.late += late >= 100;
         return 1;
 #else
         (void)at, (void)raw, (void)count;
@@ -4632,7 +4640,12 @@ static void compositor_reader_take(void)
 // The loop's sends of its turn are out (compositor_wl_wake_input): what it took of the ring is taken, and the reader may send again.
 static void compositor_reader_settle(void)
 {
+#ifdef CONFIG_MOONWATER_WAYLAND
+        // A send that did not all go (the client's socket full) leaves the loop's input for it queued: the reader waits for the rest to go.
+        if (compositor_reader.on && compositor_wl_direct_clean())
+#else
         if (compositor_reader.on)
+#endif
                 __atomic_store_n(&compositor_reader.taken, compositor_reader.reading, __ATOMIC_RELEASE);
 }
 

@@ -6438,6 +6438,7 @@ static void compositor_wl_start(void)
         socket took part of is finished by the loop before its own queue (compositor_wl_direct.rest).
 */
 #define COMPOSITOR_WL_DIRECT_IDS 4
+#define COMPOSITOR_WL_DIRECT_TRIES 2000 // the reader's spins on the loop's hold of the lock, some 20 us
 #if defined(__x86_64__)
 #define COMPOSITOR_WL_SPIN() __asm__ volatile("pause" ::: "memory")
 #elif defined(__aarch64__)
@@ -6505,9 +6506,17 @@ static int compositor_wl_direct_send(long dx, long dy, positive micro)
         unsigned int length = 0;
         long got;
 
-        if (__atomic_exchange_n(&compositor_wl_direct.lock, 1u, __ATOMIC_ACQUIRE))
-                return 0;
-        if (!compositor_wl_direct.valid || compositor_wl_direct.rest_length || wayland_out_dirty(compositor_wl_direct.slot))
+        // The loop holds the lock for a send to this client or a change of what is read here, microseconds: waited for that long at the most
+        // (a loop this thread took the processor from cannot let go of it), then the report is the loop's.
+        for (unsigned int tries = 0; __atomic_exchange_n(&compositor_wl_direct.lock, 1u, __ATOMIC_ACQUIRE); tries++)
+        {
+                if (tries == COMPOSITOR_WL_DIRECT_TRIES)
+                        return 0;
+                COMPOSITOR_WL_SPIN();
+        }
+        // What the loop has queued for the client and not sent (a frame's done, a buffer's release) is not in front of the report: it is
+        // of other objects, and the loop's input for it is all sent (compositor_reader_settle says so only then).
+        if (!compositor_wl_direct.valid || compositor_wl_direct.rest_length)
         {
                 __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
                 return 0;
@@ -6540,6 +6549,11 @@ static int compositor_wl_direct_send(long dx, long dy, positive micro)
         }
         __atomic_store_n(&compositor_wl_direct.lock, 0u, __ATOMIC_RELEASE);
         return got > 0;
+}
+
+static int compositor_wl_direct_clean(void)
+{
+        return !compositor_wl_direct.valid || !wayland_out_dirty(compositor_wl_direct.slot);
 }
 
 // The loop, holding the lock, before the client's own queue: the rest of the reader's send, which goes first. 0 when it is not all out.
@@ -6699,6 +6713,12 @@ static void compositor_wl_flush_held(long slot);
 
 static void compositor_wl_flush(long slot)
 {
+        // Only the socket the input thread sends to is shared with it; a hold it does not know of yet is made known at the next send.
+        if (!compositor_reader.on || (compositor_wl_direct.valid ? compositor_wl_direct.slot != slot : !compositor_wl_locked()))
+        {
+                compositor_wl_flush_held(slot);
+                return;
+        }
         compositor_wl_direct_hold();
         if (compositor_wl_direct_rest(slot))
                 compositor_wl_flush_held(slot);
