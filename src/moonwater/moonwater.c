@@ -813,6 +813,8 @@ struct bind_handle {
         unsigned int mods;
         // rover's (rules.c): the chord modifiers this device holds, and the keys a rule took on their way down
         unsigned int rover_mods;
+        // not the machine's own: a program's (uinput, uhid), heard by no rule and by no stop key's binding
+        bool rover_virtual;
         unsigned long rover_taken[BITS_TO_LONGS(KEY_CNT)];
 };
 
@@ -1738,6 +1740,7 @@ static void bind_open(struct work_struct *work)
 // Rover's half of the key watch, in rules.c, which is expanded after this file.
 static bool rules_input(struct bind_handle *bind, unsigned int type, unsigned int code, int value);
 static void rules_device(struct bind_handle *bind, bool added);
+static bool rules_device_physical(struct input_dev *dev);
 
 /*
         The watch is a filter, so the input core puts it at the head of each
@@ -1753,6 +1756,12 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
         bool taken = false;
 
         if (unlikely(type == EV_KEY || type == EV_SW)) {
+                //      A program's device (uinput, uhid) is no rule's, and
+                //      it stops no machine and closes no lid: its switches
+                //      and stop keys reach no binding either.
+                if (unlikely(bind->rover_virtual) &&
+                    (type == EV_SW || (code < BIND_CODES && spark_bind_is_stop(READ_ONCE(bind_code_event[code])))))
+                        goto counted;
                 taken = rules_input(bind, type, code, value);
                 if (!taken)
                         bind_event_run(handle, type, code, value);
@@ -1763,6 +1772,7 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
                 else if (type == EV_KEY)
                         bind_mods(bind, code, value);
         }
+counted:
         moonwater_cost_end(&bind_cost, started);
         return taken;
 }
@@ -1778,6 +1788,7 @@ static int bind_connect(struct input_handler *handler, struct input_dev *dev,
                 return -ENOMEM;
         bind->handle.dev = dev;
         bind->handle.handler = handler;
+        bind->rover_virtual = !rules_device_physical(dev);
         bind->handle.name = "moonwater-bind";
         bind->opened = -EINPROGRESS;
         INIT_WORK(&bind->open, bind_open);

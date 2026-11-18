@@ -595,6 +595,19 @@ boot reads closed before it moves.
 | `sleep`, `resume` | the pm notifier, PM_SUSPEND_PREPARE and PM_POST_SUSPEND | process |
 | `canvas on`, `canvas off` | `moonwater_bind_fire`, which Canvas calls | process |
 
+**Where an input device comes from.** Only the machine's own devices are
+the rules': one whose chain of parents in the kernel ends at a real bus's
+device (a platform, ACPI, a PCI root; a virtual machine's virtio and USB
+devices are its machine's own). A program's device (uinput, uhid, which
+sysfs puts under `devices/virtual`) fires no rule, writes no state (a
+program's lid switch closes no lid) and is never taken, and its switches
+and stop keys reach no binding either, so a program in the input group
+cannot stop the machine or put it to sleep. It is the compositor's rule
+(WINDOW_EVENT_VIRTUAL), asked of the kernel's devices themselves; a
+program sets a uinput device's bus, name and phys, so none of those is
+asked. Its coming and going is no `input added` or `input removed` either.
+Its other keys go on to every reader as before.
+
 Not heard, and why: rfkill has no in-kernel listener (a change goes to
 `/dev/rfkill` only; the rfkill keys and `SW_RFKILL_ALL` are heard as keys
 and switches), and a thermal trip reaches only netlink and a tracepoint

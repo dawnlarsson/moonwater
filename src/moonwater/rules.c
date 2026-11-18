@@ -977,11 +977,34 @@ static bool rules_button(unsigned int code, int value, p64 when, p64 started)
 }
 
 /*
+        Where an input device comes from. One is the machine's own when the
+        device the kernel hangs it under is a real bus's: its chain of
+        parents ends at a device of no class (a platform, ACPI's, a PCI root),
+        where a program's device (uinput's input device has no parent at all;
+        uhid's hangs under the uhid misc device, a class device) ends at one
+        of a class, which sysfs puts under devices/virtual. The compositor's
+        rule (session.c, WINDOW_EVENT_VIRTUAL), asked of the kernel's own
+        devices rather than of a sysfs link. A program writes a uinput or
+        uhid device's bus, vendor, name and phys, so none of those is asked.
+*/
+static bool rules_device_physical(struct input_dev *dev)
+{
+        struct device *at = &dev->dev;
+
+        while (at->parent)
+                at = at->parent;
+        return at != &dev->dev && !at->class;
+}
+
+/*
         One input event, from bind_filter, in the input core, under the
         device's event lock with interrupts off. Answers whether a rule took
-        it, so no reader ever sees it. A key a rule took on its way down is
-        taken on its repeats and on its way up as well, so a reader is never
-        left with half a press.
+        it, so no reader ever sees it; a key taken on its way down is taken on
+        its repeats and its way up as well. A device that is not the
+        machine's own is heard by no rule: its keys fire none, its switches
+        write no state, and nothing of it is taken (the origin model; a rule
+        cannot tell a program's power key from the person's, so a program's
+        is never one).
 */
 static bool rules_input(struct bind_handle *bind, unsigned int type, unsigned int code, int value)
 {
@@ -990,7 +1013,7 @@ static bool rules_input(struct bind_handle *bind, unsigned int type, unsigned in
         bool taken = false;
         p16 spark;
 
-        if (likely(type != EV_KEY && type != EV_SW) || !rules_map)
+        if (likely(type != EV_KEY && type != EV_SW) || !rules_map || bind->rover_virtual)
                 return false;
         started = ktime_get_ns();
         when = ktime_to_ns(input_get_timestamp(bind->handle.dev)[INPUT_CLK_MONO]);
@@ -1081,7 +1104,8 @@ static void rules_device(struct bind_handle *bind, bool added)
         struct rules_change sets[RULES_SETS];
         positive count = 0;
 
-        if (!rules_map)
+        //      A program's device is no rule's: not even its coming and going, whose name it chose.
+        if (!rules_map || bind->rover_virtual)
                 return;
         if (!added)
         {
