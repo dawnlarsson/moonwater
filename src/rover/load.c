@@ -29,6 +29,7 @@
 #include "../moonwater/rules.c"
 
 #define ROVER_PERSON_RULES "/root/rules"
+#define ROVER_LOADED "/run/moonwater/rover.table" // the table the last load gave the kernel: its number, then its bytes
 #define ROVER_BOOTS_FILE "/root/rules/.boots" // loads that did not stand ROVER_STOOD_NS, a number
 #define ROVER_STOOD_NS (60ull * 1000000000ull)
 #define ROVER_FILES_MOST 64u
@@ -331,6 +332,16 @@ static bipolar rover_load_now(bipolar device, bool say)
                 string_format(log, "rover: table %p loaded from %p files: %p rules, %p of them the kernel's\n",
                               (positive)request.table, (positive)files, (positive)request.rules,
                               (positive)request.kernel_rules);
+        //      What was loaded, for the runner to read the kernel's records by (rover_runner_adopt_loaded).
+        {
+                static p64 words[(ROVER_TABLE_MOST + 8) / 8];
+                p8 address_to bytes = (p8 address_to)words;
+
+                memory_zero(bytes, 8);
+                memory_copy(bytes, &request.table, 4);
+                memory_copy(bytes + 8, rover_built(&rover_load_all), rover_load_all.size);
+                (void)host_write_file(ROVER_LOADED, bytes, 8 + rover_load_all.size, 0600, false);
+        }
         return (bipolar)request.table;
 }
 
@@ -416,7 +427,7 @@ static fn rover_record_event(const struct rover_record address_to record, struct
 {
         memory_zero(event, sizeof(*event));
         event->id = record->event;
-        event->count = record->fields;
+        event->count = record->fields < ROVER_FIELDS ? record->fields : ROVER_FIELDS;
         event->when = record->when;
         event->realtime = (b64)(system_clock_ns(0) / 1000000000);
         for (positive at = 0; at < ROVER_FIELDS && at < record->fields; at++)

@@ -127,12 +127,12 @@ static fn rover_runner_find_everys(void);
 static fn rover_runner_keys(void);
 
 /*
-        The table rover_load_all holds, taken: its view, its runs, its clocks
+        The table of bytes given, taken: its view, its runs, its clocks
         and its chords. A service of the table before keeps its life when the
         new one has a service of its name; one it does not have is stopped.
         table is the kernel's number for the load, 0 when the kernel has none.
 */
-static bool rover_runner_adopt(p32 table)
+static bool rover_runner_adopt_bytes(const p8 address_to bytes, positive size, p32 table)
 {
         static struct rover_running before[ROVER_SERVICES_MOST];
         static p8 names[ROVER_SERVICES_MOST][ROVER_WORD_MOST + 1];
@@ -141,8 +141,7 @@ static bool rover_runner_adopt(p32 table)
         struct rover_refusal refusal;
         struct rover_table view;
 
-        if (rover_load_all.size > sizeof(rover_runner.table_words) ||
-            !rover_check(rover_built(&rover_load_all), rover_load_all.size, &view, &refusal))
+        if (size > sizeof(rover_runner.table_words) || !rover_check(bytes, size, &view, &refusal))
         {
                 rover_runner_say("the table is refused: ", (string_address)refusal.why, null);
                 return false;
@@ -157,8 +156,8 @@ static bool rover_runner_adopt(p32 table)
                 before[at] = rover_runner.service[at];
                 kept[at] = false;
         }
-        rover_runner.size = rover_load_all.size;
-        memory_copy(rover_runner.table_words, rover_built(&rover_load_all), rover_runner.size);
+        rover_runner.size = size;
+        memory_copy(rover_runner.table_words, bytes, rover_runner.size);
         (void)rover_check((const p8 address_to)rover_runner.table_words, rover_runner.size, &rover_runner.view, &refusal);
         memory_zero(rover_runner.runs, sizeof(rover_runner.runs));
         for (positive at = 0; at < rover_runner.view.head->services; at++)
@@ -193,6 +192,38 @@ static bool rover_runner_adopt(p32 table)
         rover_runner_keys();
         rover_runner_find_everys();
         return true;
+}
+
+static bool rover_runner_adopt(p32 table)
+{
+        return rover_runner_adopt_bytes(rover_built(&rover_load_all), rover_load_all.size, table);
+}
+
+/*
+        The table a hand load gave the kernel, as `moonwater rover load` left
+        it in ROVER_LOADED: its load's number, then its bytes. Taken only when
+        the number is the kernel's live one, so the runner reads the kernel's
+        records by the very table the kernel has, never by the files as they
+        are now.
+*/
+static bool rover_runner_adopt_loaded(p32 table)
+{
+        static p64 words[(ROVER_TABLE_MOST + 8) / 8];
+        p8 address_to bytes = (p8 address_to)words;
+        bipolar handle = system_open_at(AT_FDCWD, ROVER_LOADED, FILE_READ | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        bipolar got = handle < 0 ? -1 : system_read_retry((positive)handle, bytes, sizeof(words));
+        file_facts facts;
+        bool owned = handle >= 0 && file_look(handle, (string_address) "", AT_EMPTY_PATH, address_of facts) &&
+                     (facts.mode & MODE_FORMAT) == MODE_FILE && facts.owner == 0 && !(facts.mode & 0077);
+        p32 number;
+
+        if (handle >= 0)
+                system_close(handle);
+        if (!owned || got <= 8)
+                return false;
+        memory_copy(&number, bytes, 4);
+        //      The table starts 8 bytes in, where it keeps its own alignment.
+        return number == table && rover_runner_adopt_bytes(bytes + 8, (positive)got - 8, table);
 }
 
 /*
@@ -1357,8 +1388,9 @@ static fn rover_runner_ring(void)
                         if (rover_load_ask(rover_runner.device, &request) >= 0 && request.table &&
                             request.table != rover_runner.table)
                         {
-                                bool taken = false;
+                                bool taken = rover_runner_adopt_loaded(request.table);
 
+                                //      With no word of what was loaded, the files compiled as they were loaded.
                                 for (p8 how = 1; how <= 2 && !taken; how++)
                                 {
                                         rover_load_asked = how;
@@ -1375,8 +1407,10 @@ static fn rover_runner_ring(void)
                 if (record.table != rover_runner.table)
                         continue;
                 rover_record_event(&record, &event);
+                //      The record's rule and its run of actions held to the table, as anything read from outside is.
                 if (record.kind == ROVER_RECORD_HIT && (record.flags & ROVER_RECORD_USER) &&
-                    record.rule < rover_runner.view.head->rules)
+                    record.rule < rover_runner.view.head->rules &&
+                    (positive)record.action + record.count <= rover_runner.view.head->actions)
                 {
                         struct rover_hit hit = {record.rule, record.action, record.count,
                                                 (p8)!!(record.flags & ROVER_RECORD_ELSE), 0};
