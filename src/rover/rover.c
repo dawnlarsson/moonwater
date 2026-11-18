@@ -1479,6 +1479,15 @@ static const char address_to rover_call_check(const struct rover_table address_t
         row = &rover_functions[asked->function];
         if (asked->count != row->count)
                 return "a call with another count of arguments than its routine takes";
+        //      A bytes argument is two of the six registers rover_called hands on (the schema leaves out a routine past them).
+        {
+                positive registers = 0;
+
+                for (positive at = 0; at < row->count; at++)
+                        registers += row->signature[at] == 'b' ? 2 : 1;
+                if (registers > ROVER_REGISTERS)
+                        return "a call to a routine that takes more than its six registers";
+        }
         for (positive at = 0; at < ROVER_ARGUMENTS; at++)
         {
                 if (at >= asked->count)

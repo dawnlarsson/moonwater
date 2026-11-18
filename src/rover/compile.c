@@ -1527,25 +1527,37 @@ static bool rover_rule_finish(struct rover_build address_to build)
                 return false;
         if (rover_rule_numbers(rule, build->comparison))
                 rule->flags |= ROVER_RULE_NUMBERS;
-        //      A cue that posts itself with nothing to stop it is a loop the runner would cut at depth four.
-        if (rule->event == ROVER_CUE && rule->comparisons == rule->trigger && rule->trigger)
+        //      A cue that posts itself with nothing to stop it is a loop the runner would cut at depth four: a rule on cue
+        //      with no condition past its trigger, whose filter (none, a name, or a pattern) takes a cue it emits.
+        if (rule->event == ROVER_CUE && rule->comparisons == rule->trigger)
         {
-                const struct rover_operand address_to filter = &build->comparison[rule->comparison].b;
+                const struct rover_comparison address_to trigger = rule->trigger ? &build->comparison[rule->comparison] : null;
 
                 for (positive at = 0; at < rule->then; at++)
                 {
                         const struct rover_action address_to action = &build->action[rule->action + at];
                         const struct rover_operand address_to name = &build->argument[action->argument];
                         p16 one, two;
+                        bool takes;
 
-                        if (action->kind != ROVER_EMIT || name->source != ROVER_CONST_WORD ||
-                            build->comparison[rule->comparison].op != ROVER_EQ)
+                        if (action->kind != ROVER_EMIT || name->source != ROVER_CONST_WORD)
                                 continue;
-                        memory_copy(&one, rover_pool(build) + filter->index, 2);
                         memory_copy(&two, rover_pool(build) + name->index, 2);
-                        if (one == two && !memory_compare(rover_pool(build) + filter->index + 2,
-                                                          rover_pool(build) + name->index + 2, one))
-                                return rover_refused(build, "a rule that emits its own cue with no condition never stops",
+                        if (!trigger)
+                                takes = true;
+                        else if (trigger->b.source != ROVER_CONST_WORD || (trigger->op != ROVER_EQ && trigger->op != ROVER_MATCH))
+                                takes = false;
+                        else
+                        {
+                                memory_copy(&one, rover_pool(build) + trigger->b.index, 2);
+                                takes = trigger->op == ROVER_EQ
+                                            ? one == two && !memory_compare(rover_pool(build) + trigger->b.index + 2,
+                                                                            rover_pool(build) + name->index + 2, one)
+                                            : rover_glob(rover_pool(build) + name->index + 2, two,
+                                                         rover_pool(build) + trigger->b.index + 2, one);
+                        }
+                        if (takes)
+                                return rover_refused(build, "a rule that emits a cue its own filter takes, with no condition, never stops",
                                                      null, null);
                 }
         }
@@ -2193,6 +2205,11 @@ static bool rover_compile(struct rover_build address_to build, const p8 address_
                         size--;
                 if (size > ROVER_LINE_MOST)
                         return rover_refused(build, "a line longer than 4096 bytes", null, null);
+                //      No control byte but the tab: a carriage return inside a word is invisible where the rule is read,
+                //      and a NUL ends a note early for any reader of it.
+                for (positive k = 0; k < size; k++)
+                        if ((line[k] < 0x20 && line[k] != '\t') || line[k] == 0x7f)
+                                return rover_refused(build, "a line with a control byte in it (only a tab may be)", null, null);
                 while (depth < size && line[depth] == '\t')
                         depth++;
                 if (depth < size && line[depth] == ' ')
@@ -2248,6 +2265,10 @@ static bool rover_compile(struct rover_build address_to build, const p8 address_
                 return false;
         if (build->pendings && build->block != ROVER_BLOCK_NONE && !rover_note_flush(build, ROVER_SLOT_AFTER))
                 return false;
+        //      Notes with no block to stand by are dropped, and so are their bytes in the pool: a file of comments alone is
+        //      the empty table, as its printing is.
+        if (build->pendings && build->block == ROVER_BLOCK_NONE)
+                build->pool = 4;
         build->pendings = 0;
         return rover_assemble(build);
 }

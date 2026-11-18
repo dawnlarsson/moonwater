@@ -351,6 +351,10 @@ def value_signature(params):
         at += 1
     if len(signature) > 4:
         return None, None
+    #   rover_called hands a routine six registers (ROVER_REGISTERS), a bytes argument taking two of them: a routine that
+    #   needs more is left out, so the call can never write past them.
+    if len(signature) + signature.count('b') > 6:
+        return None, None
     return signature, casts
 
 
@@ -650,6 +654,9 @@ def main():
     made, text = generate()
     if options.print:
         sys.stdout.write(text)
+        return 0
+    #   --why is a diagnostic: it says why each routine is left out (above) and writes nothing.
+    if options.why:
         return 0
     if options.check:
         #   Every image rule file is one the program carries: compile.c names each by ROVER_IMAGE(name).

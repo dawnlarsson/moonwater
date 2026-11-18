@@ -436,7 +436,11 @@ static const struct
     {"rule a\n\ton input added\n\ttool logger $name\n", 3, "not the rule's own word"},
     {"rule a\n\ton lid close\n\ttool logger window.app\n", 3, "not the rule's own word"},
     {"rule a\n\ton lid close\n\tdo open window.app\n", 3, "not the rule's own word"},
-    {"rule a\n\ton cue loop\n\temit cue loop\n", 0, "own cue"},
+    {"rule a\n\ton cue loop\n\temit cue loop\n", 0, "own filter takes"},
+    {"rule a\n\ton cue *\n\temit cue x\n", 0, "own filter takes"},
+    {"rule a\n\ton cue x*\n\temit cue x\n", 0, "own filter takes"},
+    {"rule a\n\ton cue\n\temit cue x\n", 0, "own filter takes"},
+    {"rule a\n\ton lid close\n\tdo log hi\rthere\n", 3, "control byte"},
     {"rule a\n\ton lid close\n\tdo suspend\n\tif lid == open\n", 4, "conditions come first"},
     {"rule a\n\ton lid close\n", 0, "nothing to do"},
     {"rule a\n\ton lid close\n\tdo suspend\n\telse\n", 0, "else with nothing"},
@@ -1269,6 +1273,19 @@ static fn rover_check_red(void)
         check("red: a duration of a nanosecond past a second prints as what reads back",
               rover_round("rule a\n\ton lid close\n\tdo latency 1.000000001s\n") &&
                   rover_round("rule a\n\tevery 1.000000001s\n\tdo log x\n"));
+        //      R-compiler-7: a cue rule with a condition may emit what its filter takes; R-compiler-9: comments alone are the
+        //      empty table, as their printing is.
+        check("red: a cue rule whose condition can stop it may emit a cue its filter takes",
+              rover_compiled("rule a\n\ton cue x*\n\tif lid == open\n\temit cue x\n") &&
+                  rover_compiled("rule a\n\ton cue y*\n\temit cue x\n"));
+        check("red: a file of comments alone round trips to the same table", rover_round("# one\n# two\n"));
+        {
+                static const char nul[] = "# a note\0with a NUL\nrule a\n\ton lid close\n\tdo log x\n";
+
+                check("red: a NUL in a note is refused, at its line",
+                      !rover_compile(&rover_one, (const p8 address_to)nul, sizeof(nul) - 1) && rover_one.line == 1 &&
+                          rover_holds_why("control byte"));
+        }
         //      R-table-7: a when rule over the clock is the runner's, asked at each minute (the change the runner posts).
         if (rover_compiled("rule night\n\twhen clock between 22:00 06:00\n\tdo log night\n"))
         {
