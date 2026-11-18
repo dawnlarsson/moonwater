@@ -5467,6 +5467,65 @@ static void pull_swatch_row(int id, struct ui_row address_to row)
         row->at = -1;
 }
 
+/*
+        Stripes: a list told to tint every second row tints rows 2, 4 and 6 (counted from 1) and not 1, 3 and 5, every third row 3 and 6,
+        in the theme's ink at a low alpha, the accent's where asked, or the app's own tint; the row the keys are on draws its lit fill over
+        its stripe, the same as it is with no stripes.
+*/
+static void stripe_row(int id, struct ui_row address_to row)
+{
+        (void)id;
+        row->label = "";
+}
+
+static fn stripes_draw(struct ui address_to ui, struct ui_list address_to l, unsigned int address_to pixels, int n, int focus, unsigned int address_to at)
+{
+        int row = ui_dev(ui, UI_ROW);
+
+        memory_zero(l, sizeof(*l));
+        l->virtual = true, l->total = 6, l->describe = stripe_row, l->empty = "", l->focus = focus, l->lit = focus >= 0;
+        l->hover = l->down = -1, l->stripe = n;
+        ui_list_place(ui, l, 10, 0, 280, 6 * row);
+        ui_list_layout(ui, l);
+        for (int p = 0; p < 300 * 400; p++)
+                pixels[p] = 0xff202020u;
+        ui_list_draw(ui, l);
+        for (int r = 0; r < 6; r++)
+                at[r] = pixels[(r * row + row / 2) * 300 + 150];
+}
+
+static fn check_kit_stripes(void)
+{
+        static unsigned int pixels[300 * 400], scratch[300 * UI_SCRATCH_ROWS];
+        static struct ui_list l;
+        struct ui ui = terminal.ui;
+        unsigned int at[6], lit_striped, lit_plain, accent;
+        b32 every_second = true, every_third = true;
+
+        ui.pixels = pixels, ui.pitch = 300, ui.width = 300, ui.height = 400, ui.top = 0, ui.bottom = 400, ui.scale = 100, ui.scene = null;
+        ui.scratch = scratch, ui.scratch_width = 300, ui.band_top = ui.band_bottom = 0, ui.glass = false, ui.opaque = true;
+        ui_kit.motion = 0;
+        stripes_draw(&ui, &l, pixels, 2, -1, at);
+        for (int r = 0; r < 6; r++)
+                every_second = every_second && (r % 2 ? at[r] != 0xff202020u : at[r] == 0xff202020u);
+        every_second = every_second && at[1] == at[3] && at[3] == at[5];
+        stripes_draw(&ui, &l, pixels, 3, -1, at);
+        for (int r = 0; r < 6; r++)
+                every_third = every_third && (r % 3 == 2 ? at[r] != 0xff202020u : at[r] == 0xff202020u);
+        check("kit list: stripe 2 tints rows 2, 4 and 6 alike and leaves 1, 3 and 5; stripe 3 tints 3 and 6 alone", every_second && every_third);
+        stripes_draw(&ui, &l, pixels, 2, 1, at);
+        lit_striped = at[1];
+        stripes_draw(&ui, &l, pixels, 0, 1, at);
+        lit_plain = at[1];
+        check("kit list: the row the keys are on draws its lit fill over its stripe, as it does with none", lit_striped == lit_plain && lit_plain != 0xff202020u);
+        memory_zero(&l, sizeof(l));
+        l.stripe_accent = true;
+        accent = ui_list_stripe_colour(&ui, &l);
+        l.stripe_tint = 0x40123456u;
+        check("kit list: a stripe is the theme's ink at a low alpha, the accent's where asked, or the app's own tint",
+              (accent & 0xffffffu) == (ui_role(UI_PRIMARY) & 0xffffffu) && accent >> 24 == UI_LIST_STRIPE_ACCENT && ui_list_stripe_colour(&ui, &l) == 0x40123456u);
+}
+
 static fn check_kit_pull_parts(void)
 {
         static unsigned int pixels[400 * 200], picture[400 * 200], scratch[400 * UI_SCRATCH_ROWS];

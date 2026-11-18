@@ -9795,6 +9795,7 @@ b32 main()
         check_kit_virtual();
         check_kit_pull_hit();
         check_kit_pull_parts();
+        check_kit_stripes();
         check_kit_view_pull();
         check_kit_trail();
         check_kit_graph();

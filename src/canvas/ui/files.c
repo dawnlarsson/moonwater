@@ -590,6 +590,8 @@ static fn files_layout(void)
         ui_columns_layout(ui, &files.columns, l->x, files.head_box.y, l->w);
         // The view: details are rows under the columns, icons and a list are tiles (a symbol over a name, or before it).
         l->columns = files.view == FILES_VIEW_DETAILS ? &files.columns : null;
+        // The details' rows in stripes, every second row tinted, so a row's cells are read across to its name.
+        l->stripe = files.view == FILES_VIEW_DETAILS ? 2 : 0;
         l->tiles = files.view == FILES_VIEW_ICONS ? FILES_TILE_ICON : files.view == FILES_VIEW_LIST ? FILES_TILE_LIST : 0;
         l->tile_h = files.view == FILES_VIEW_LIST ? UI_ROW : 0;
         // The tree's rows scrolled so the folder shown is in sight, once it is shown.

@@ -23593,7 +23593,23 @@ struct ui_list
         // Tiles (a virtual list's icon or list view): its rows laid out as tiles this many logical pixels wide, as many a line as the list
         // is wide, each tile_h tall (0: UI_TILE_H, a symbol over its label; a row high or less, a small symbol before it). 0: rows.
         int tiles, tile_h;
+        // Stripes: every stripe-th row (the stripe-th, the 2 stripe-th and on, counted from 1 down the list) tinted across its span
+        // (ui_list_stripe), under the row's lit fill, its hover, its press and its ring, which all draw over it; 0 or 1 none. The tint is
+        // stripe_tint (straight ARGB, its alpha how much of it) where the app gives one, else the theme's (UI_LIST_STRIPE_INK of the
+        // ink, or UI_LIST_STRIPE_ACCENT of the accent where stripe_accent), so it is a light theme's and a dark one's and a glass's alike.
+        int stripe;
+        unsigned int stripe_tint;
+        b32 stripe_accent;
 };
+
+#define UI_LIST_STRIPE_INK 0x0d    // the alpha of the ink a striped row is tinted with (about 5 percent)
+#define UI_LIST_STRIPE_ACCENT 0x1a // the alpha of the accent, where the stripes are the accent's (about 10 percent)
+
+// Whether the row at this place of the list (its number from 0 down the list) is a striped one: every stripe-th, counted from 1.
+static inline b32 ui_list_striped(const struct ui_list address_to l, int place)
+{
+        return l->stripe > 1 && place >= 0 && place % l->stripe == l->stripe - 1;
+}
 
 static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_row address_to row)
 {
@@ -25211,6 +25227,25 @@ static b32 ui_list_expander_at(struct ui address_to ui, struct ui_list address_t
         return first && x >= first->x - ui_dev(ui, UI_ROW_GAP) && x < last->x + last->w;
 }
 
+// A striped row's tint (straight ARGB): the app's, else the accent's or the ink's at a low alpha, the ink being the glass's on glass.
+static unsigned int ui_list_stripe_colour(const struct ui address_to ui, const struct ui_list address_to l)
+{
+        if (l->stripe_tint)
+                return l->stripe_tint;
+        if (l->stripe_accent)
+                return (unsigned int)UI_LIST_STRIPE_ACCENT << 24 | (ui_role(UI_PRIMARY) & 0xffffffu);
+        return (unsigned int)UI_LIST_STRIPE_INK << 24 | (ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu);
+}
+
+// A striped row's tint across the row's span, square, as the lit fill and the hover layer are: they draw over it.
+static fn ui_list_stripe(struct ui address_to ui, const struct ui_list address_to l, int y, int height)
+{
+        int across, across_w;
+
+        ui_list_across(l, &across, &across_w);
+        ui_kit_fill(ui, &(struct ui_box){across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0}, ui_list_stripe_colour(ui, l), null);
+}
+
 // The list drawn: the headers of the sections in view and their rows, cut to the list's band, and its scrollbar.
 static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 {
@@ -25270,7 +25305,12 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                         if (l->tiles)
                                 ui_list_tile(ui, l, ui_list_id(l, at), y, height);
                         else
+                        {
+                                // A virtual list's row is striped by its number in the whole list, any other's by its place.
+                                if (ui_list_striped(l, l->virtual ? ui_list_id(l, at) : at))
+                                        ui_list_stripe(ui, l, y, height);
                                 ui_list_row(ui, l, ui_list_id(l, at), y, height);
+                        }
                         ui->top = band_top, ui->bottom = band_bottom;
                 }
         }
