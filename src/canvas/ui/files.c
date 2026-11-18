@@ -187,6 +187,7 @@ static struct
         b32 drag_chosen;         // and whether it drags the rows chosen (else that row alone)
         struct ui_columns columns; // the details' header over the rows: Name, Size, Type, Modified, each a press that orders by it
         struct ui_rect head_box;   // where the view put it
+        struct ui_rect side_box;   // the folder tree's pane: the window's glass, its whole height at its start
         struct ui_drop drop;     // a drag of files over the window: dropped, they are copied or moved into the folder it is over
         int drop_row;            // the folder's row the drop goes into, -1 the folder shown
         b64 next_progress;       // when the foot next says how far a copy has gone
@@ -611,33 +612,41 @@ static fn files_layout(void)
         l->focus = m->cursor != FILES_NO ? (int)m->cursor : -1;
         l->empty = files_state_text(m);
         ui_view_begin(&files.big->view, ui, files.width, -files.height);
-        ui_row(.class = "pathbar")
-        {
-                ui_button(WORDS(files_back), .class = "ghost", .on = files_act, .arg = 0);
-                ui_button(WORDS(files_forward), .class = "ghost", .on = files_act, .arg = 1);
-                ui_button(WORDS(files_up), .class = "ghost", .on = files_act, .arg = 2);
-                // The path: the field while it is typed, else the room its crumbs are laid out and drawn in (files_crumbs_lay).
-                if (files.editing && files.editing != FILES_EDIT_PART)
-                        ui_control(&files.path, .grow = 1, .h = UI_ROW);
-                else
-                        ui_host(&files.crumbs_box, .grow = 1, .h = UI_ROW);
-        }
-        // The folder tree, then the header of the columns over the rows: the kit's lists, their words in from their margins.
+        // The folder tree is the window's glass pane, its whole height at the start; the band, the rows and the foot are beside it.
         ui_row(.grow = 1)
         {
-                ui_col(.class = "rows", .w = FILES_TREE_WIDTH, .shrink = 0)
-                        ui_rows(&files.big->tree_list, .class = "list", .grow = 1);
-                ui_col(.class = "rows", .grow = 1)
+                ui_col(.host = &files.side_box, .w = FILES_TREE_WIDTH, .shrink = 0)
                 {
-                        ui_host(&files.head_box, .h = UI_COLUMNS_H, .hidden = files.view != FILES_VIEW_DETAILS);
-                        ui_rows(l, .class = "list", .grow = 1);
+                        ui_host(null, .h = UI_GAP2);
+                        ui_col(.class = "rows", .grow = 1)
+                                ui_rows(&files.big->tree_list, .class = "list", .grow = 1);
                 }
-        }
-        ui_row(.class = "bar")
-        {
-                if (files.finding)
-                        ui_control(&files.finder_field, .grow = 1, .h = UI_ROW);
-                ui_text(files.big->status, .class = "status");
+                ui_col(.grow = 1)
+                {
+                        ui_row(.class = "pathbar")
+                        {
+                                ui_button(WORDS(files_back), .class = "ghost", .on = files_act, .arg = 0);
+                                ui_button(WORDS(files_forward), .class = "ghost", .on = files_act, .arg = 1);
+                                ui_button(WORDS(files_up), .class = "ghost", .on = files_act, .arg = 2);
+                                // The path: the field while it is typed, else the room its crumbs are laid out and drawn in (files_crumbs_lay).
+                                if (files.editing && files.editing != FILES_EDIT_PART)
+                                        ui_control(&files.path, .grow = 1, .h = UI_ROW);
+                                else
+                                        ui_host(&files.crumbs_box, .grow = 1, .h = UI_ROW);
+                        }
+                        // The header of the columns over the rows: the kit's list, its words in from its margins.
+                        ui_col(.class = "rows", .grow = 1)
+                        {
+                                ui_host(&files.head_box, .h = UI_COLUMNS_H, .hidden = files.view != FILES_VIEW_DETAILS);
+                                ui_rows(l, .class = "list", .grow = 1);
+                        }
+                        ui_row(.class = "bar")
+                        {
+                                if (files.finding)
+                                        ui_control(&files.finder_field, .grow = 1, .h = UI_ROW);
+                                ui_text(files.big->status, .class = "status");
+                        }
+                }
         }
         ui_view_end(&files.big->view);
         // A folder shown as it was left has its rows where they were; any other, from the top. And where they are now is the model's
@@ -738,6 +747,24 @@ static p32 files_ask_names(char address_to into, positive room)
                 into[used] = 0;
         }
         return count;
+}
+
+// After a delete the cursor is put on the nearest entry that was not deleted: the first after the cursor that was not chosen, else the
+// last before it, which the listing read again finds by its name.
+static fn files_after_delete(struct files_model address_to m)
+{
+        p32 count = files_model_count(m), at = m->cursor, near = FILES_NO;
+
+        if (at == FILES_NO || at >= count)
+                return;
+        for (p32 k = at + 1; k < count && near == FILES_NO; k++)
+                if (!files_model_chosen(m, k))
+                        near = k;
+        for (p32 k = at; k-- > 0 && near == FILES_NO;)
+                if (!files_model_chosen(m, k))
+                        near = k;
+        if (near != FILES_NO)
+                string_copy_bounded(m->came, (string_address)files_model_name(m, files_model_entry(m, near)), FILES_NAME);
 }
 
 // Delete: the first press asks, saying how many and which; the second, with the listing as it was asked of, begins the delete.
@@ -2423,6 +2450,7 @@ static fn files_draw(unsigned int address_to pixels)
 
         ui_begin(ui, pixels, files.own.table->stride, files.width, files.height);
         files_layout();
+        ui_side_place(ui, files.side_box.x, files.side_box.w);
         l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && !files.crumb_keys && !files.tree_keys;
         files.big->tree_list.lit = files.big->tree_list.focus >= 0, files.big->tree_list.keys = files.focused && files.tree_keys;
         ui_view_draw(ui, &files.big->view, files.focused);
@@ -2515,6 +2543,7 @@ static long files_tick(long timeout, long address_to other)
                         else
                                 language_format(files.big->note, sizeof(files.big->note), WORDS(files_deleted), (int)job->removed);
                         files_job_end(job);
+                        files_after_delete(m);
                         files_model_reload(m);
                 }
                 if (!more || now >= files.next_show)
@@ -2599,7 +2628,8 @@ static struct ui_app files_app = {
         .missing = (string_address) "files: no window: the compositor's desktop is not up\n",
         .title = (string_address) "Files",
         .name = (string_address) "files",
-        .glass = 0, // the kit's surface, as every window that stays is
+        .glass = 0, // the kit's surface, as every window that stays is,
+        .side = true, // with the folder tree its glass pane
         .nofont = (string_address) "files: no font to draw with (-f FONT.ttf), pid ",
         .dirty = &files.dirty,
         .focused = &files.focused,

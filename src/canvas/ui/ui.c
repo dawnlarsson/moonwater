@@ -19,12 +19,15 @@
         under it, and its ground's inks (ui_inks: ink, quiet, lit, ring) are
         what stands out from the tint the compositor gives it.
 
-        Glass is for temporary overlays only: a launcher, a prompt, a
-        notification, a transient popup that goes away on its own or on a key.
-        Every window that stays (settings, the editor, the terminal, a
-        document) is the kit's opaque surface. A temporary overlay is glass
-        because it sits over what is under it and is meant to be read in
-        passing; a window that holds state a person works in is never glass.
+        Glass is for temporary overlays: a launcher, a prompt, a notification,
+        a transient popup that goes away on its own or on a key. Every window
+        that stays (settings, the editor, the terminal, a document) is the
+        kit's opaque surface, and may have a glass side pane, a band of its
+        whole height at its start (ui_side_place: the browser's folder tree,
+        the settings' groups, the installer's steps), the rest of it the
+        surface. A temporary overlay is glass because it sits over what is
+        under it and is meant to be read in passing; what a person works in
+        is on the surface.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -8781,6 +8784,12 @@ struct ui
         int scratch_scale;              // the scale ui_scratch_fit mapped the scratch at, 0 for a scratch the caller gave
         b32 glass;                      // a glass window (WINDOW_GLASS): its pieces are the ground's inks, ui_text_colour and ui_well
         struct ui_scene address_to scene; // when set, a text run is recorded into it and not painted
+        // A window with a glass side pane (ui_app.side, ui_side_place): the window is glass, its picture the kit's surface but for the pane,
+        // a band the window's whole height that is clear, and what is in the pane drawn in the glass's inks (side_ground, the colour the
+        // compositor says the glass came to) while the rest keeps the surface's roles.
+        b32 sided;
+        int side_x, side_w;             // the pane, device pixels across the window (0 wide: none yet)
+        unsigned int side_ground;
 };
 
 // The em of a logical size at the window's scale and the text's, in the font engine's 26.6: the size at the scale alone (bit for bit
@@ -11671,6 +11680,54 @@ static fn ui_kit_inks(struct ui address_to ui)
 {
         if (ui->opaque)
                 ui_inks(ui, ui_kit.to.role[UI_SURFACE] & 0xffffffu);
+}
+
+/*
+        The glass side pane of a window (a folder tree, a column of groups, an installer's steps): a band of the window's whole height,
+        top edge to bottom edge, at the start side (the right reading from the right), that is the glass the compositor makes of what is
+        under the window, frosted and tinted to the theme's side, as a temporary overlay's is; the rest of the window is the kit's opaque
+        surface. The app asks for it (ui_app.side: the window is WINDOW_GLASS, its picture cleared to the surface) and says where the
+        pane is once it is laid out, each picture (ui_side_place, which clears the pane's pixels to nothing: the glass alone). Whatever
+        is drawn inside the pane is drawn in the glass's inks (ui_side_inks: the ground's ink, quiet ink, lit well and ring, a row's lit
+        fill a well of the ink, as a glass window's are), and everything else in the surface's roles; the view (ui_view_draw) changes them
+        by where each element is, so an app's rows, their hover, their press, the row the keys are on and their stripes draw over the
+        glass as they do on a glass menu, and an app gives no ink of its own.
+*/
+static b32 ui_side_holds(const struct ui address_to ui, int x, int w)
+{
+        return ui->sided && ui->side_w > 0 && x >= ui->side_x && x + w <= ui->side_x + ui->side_w;
+}
+
+// The inks for what is drawn now: the glass's inside the pane (on), the surface's outside it.
+static fn ui_side_inks(struct ui address_to ui, b32 on)
+{
+        if (!ui->sided || on == ui->glass)
+                return;
+        ui->glass = on, ui->opaque = !on;
+        if (on)
+                ui_inks(ui, ui->side_ground ? ui->side_ground : UI_GLASS_GROUND);
+        else
+                ui_kit_inks(ui);
+}
+
+// The pane at x, w wide (device pixels, as laid out: an app that lays out reading from the right gives it mirrored), its pixels in the
+// rows the picture may write made clear: the glass alone.
+static fn ui_side_place(struct ui address_to ui, int x, int w)
+{
+        int top = 0, bottom = ui->height;
+
+        if (!ui->sided)
+                return;
+        x = x < 0 ? 0 : x, w = x + w > ui->width ? ui->width - x : w;
+        ui->side_x = x, ui->side_w = w > 0 ? w : 0;
+        if (ui->band_bottom > ui->band_top)
+                top = ui->band_top < 0 ? 0 : ui->band_top, bottom = ui->band_bottom > ui->height ? ui->height : ui->band_bottom;
+        if (ui->side_w <= 0 || bottom <= top)
+                return;
+        if (ui->scene)
+                ui_scene_rect(ui, x, top, x + ui->side_w, bottom, 0, true);
+        else
+                memory_fill_u32_rect(ui->pixels + (unsigned long)top * ui->pitch + (unsigned long)x, (positive)ui->pitch, (positive)ui->side_w, (positive)(bottom - top), 0);
 }
 
 // The theme to turn to: at once the first time, and over .2s --ease after (at once with reduced motion).
@@ -21917,6 +21974,7 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
 
                         ui_view_rows(v, open[depth - 1], &top, &bottom);
                         ui->top = top < 0 ? 0 : top, ui->bottom = bottom > ui->height ? ui->height : bottom;
+                        ui_side_inks(ui, ui_side_holds(ui, box->x, box->w));
                         ui_scroll_pull(ui, s, s->scroll, box->x, box->y, box->w, box->h);
                         ui_scroll_draw(ui, s);
                 }
@@ -21930,6 +21988,8 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
                 if (n->y + n->h + reach <= top || n->y - reach >= bottom)
                         continue;
                 ui->top = top < 0 ? 0 : top, ui->bottom = bottom > ui->height ? ui->height : bottom;
+                // In a window's glass pane an element is drawn in the glass's inks, anywhere else in the surface's.
+                ui_side_inks(ui, ui_side_holds(ui, n->x, n->w));
                 if (item->list)
                         ui_list_draw(ui, item->list);
                 else if (item->control)
@@ -21946,6 +22006,7 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
                         open[depth] = at, after[depth++] = ui_view_after(v, at);
         }
         ui->top = 0, ui->bottom = ui->height;
+        ui_side_inks(ui, false);
         ui_buttons_draw(ui, &v->group, keys);
 }
 
@@ -25590,6 +25651,23 @@ static fn ui_list_stripe(struct ui address_to ui, const struct ui_list address_t
         ui_kit_fill(ui, &(struct ui_box){across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0}, ui_list_stripe_colour(ui, l), null);
 }
 
+// A list's rows in a window with a glass pane keep to their side of its edge: one in the pane runs across the pane, one beside it
+// across the rest of the window, so a row lit, hovered or striped never reaches over the glass from the surface or the other way.
+static fn ui_side_rows(const struct ui address_to ui, struct ui_list address_to l)
+{
+        int x = l->row_w ? l->row_x : l->x, w = l->row_w ? l->row_w : l->w, stop = x + w, a = ui->side_x, b = ui->side_x + ui->side_w;
+
+        if (!ui->sided || ui->side_w <= 0 || stop <= a || x >= b)
+                return;
+        if (l->x >= a && l->x + l->w <= b)
+                x = x < a ? a : x, stop = stop > b ? b : stop;
+        else if (l->x >= b)
+                x = x < b ? b : x;
+        else if (l->x + l->w <= a)
+                stop = stop > a ? a : stop;
+        l->row_x = x, l->row_w = stop - x > 0 ? stop - x : 0;
+}
+
 // The list drawn: the headers of the sections in view and their rows, cut to the list's band, and its scrollbar.
 static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 {
@@ -25600,6 +25678,7 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         int drawn, rest, pointer_y;
 
         ui_scroll_frame(ui, &l->scroll);
+        ui_side_rows(ui, l);
         // A virtual list's places are the rows near where this frame has it scrolled to.
         if (l->virtual)
                 ui_list_window(ui, l);
@@ -26028,6 +26107,7 @@ struct ui_page
         // bar, device pixels.
         struct ui_view address_to view;
         struct ui_rect column_box, column_bar, list_box, body_bar, title_box;
+        struct ui_rect side_box;           // the column's glass pane where the window has one (ui->sided): the window's whole height
         int list_least;                    // the width the list's rows need (ui_list_least, device pixels; 0 none): the column gives way before it
         // Read off those by ui_page_fit, device pixels.
         int top, bottom;                   // the body's band
@@ -26080,6 +26160,49 @@ static fn ui_page_view(struct ui address_to ui, struct ui_page address_to p)
         if (p->search.kind != UI_INPUT)
                 p->search.kind = UI_INPUT, p->search.variant = UI_FIELD_BARE, ui_control_start(&p->search);
         ui_view_begin(p->view, ui, p->width, -p->height);
+        // A window with a glass side pane (ui->sided): the column of groups is the pane, the window's whole height at its start, its
+        // groups under a band as tall as the title's, and the title, the search and the body beside it.
+        if (ui->sided && p->column_on)
+        {
+                ui_row(.grow = 1)
+                {
+                        ui_row(.host = &p->side_box, .shrink = 0)
+                        {
+                                ui_host(null, .w = UI_PAD);
+                                ui_col()
+                                {
+                                        ui_host(null, .h = UI_PAGE_TOP);
+                                        ui_row(.host = &p->column_box, .max_w = most, .grow = 1)
+                                                ui_host(null, .w = ui_share(UI_COLUMN_SHARE), .min_w = UI_COLUMN_LEAST, .max_w = UI_COLUMN_MOST, .shrink = 1);
+                                }
+                                ui_row(.w = UI_COLUMN_GUTTER, .class = "middle")
+                                        ui_host(&p->column_bar, .w = UI_SCROLL_WIDTH);
+                        }
+                        ui_col(.grow = 1)
+                        {
+                                ui_row(.h = UI_PAGE_TOP)
+                                {
+                                        ui_text(p->title, .class = "pagetitle", .host = &p->title_box);
+                                        ui_control(&p->search, .class = "search", .hidden = !p->search.items[0]);
+                                }
+                                ui_row(.grow = 1)
+                                {
+                                        ui_host(null, .w = UI_PAD);
+                                        ui_col(.grow = 1)
+                                        {
+                                                if (p->above)
+                                                        p->above();
+                                                ui_host(&p->list_box, .grow = 1);
+                                        }
+                                        ui_row(.w = UI_PAD, .class = "middle")
+                                                ui_host(&p->body_bar, .w = UI_SCROLL_WIDTH);
+                                }
+                        }
+                }
+                ui_view_end(p->view);
+                return;
+        }
+        p->side_box = (struct ui_rect){0, 0, 0, 0};
         ui_row(.h = UI_PAGE_TOP)
         {
                 ui_text(p->title, .class = "pagetitle", .host = &p->title_box);
@@ -26925,6 +27048,7 @@ static fn ui_page_paint(struct ui address_to ui, struct ui_page address_to p, co
         ui_page_view(ui, p);
         ui->top = 0, ui->bottom = p->height;
         ui_clear(ui);
+        ui_side_place(ui, p->side_box.x, p->side_box.w);
         if (p->card)
         {
                 // The card is in place of the body: what the app draws of it is in the body's band.
@@ -26934,14 +27058,19 @@ static fn ui_page_paint(struct ui address_to ui, struct ui_page address_to p, co
         }
         else
         {
+                // The column is in the glass pane's inks where it is one.
+                ui_side_inks(ui, p->side_box.w > 0);
                 ui_page_groups(ui, p, parts->group_name, parts->groups);
                 ui_page_column(ui, p, parts->column_keys, parts->column_off);
+                ui_side_inks(ui, false);
                 if (parts->between)
                         parts->between(ui);
                 parts->list->lit = parts->list_lit;
                 parts->list->keys = parts->list_keys;
                 ui_list_draw(ui, parts->list);
+                ui_side_inks(ui, p->side_box.w > 0);
                 ui_page_column_bar(ui, p);
+                ui_side_inks(ui, false);
         }
         p->search.focused = parts->keys;
         ui_view_draw(ui, p->view, false);
@@ -27398,6 +27527,7 @@ struct ui_app
         string_address title;
         string_address name;            // what the compositor remembers where it was put by, or none (windows_name)
         unsigned int glass;             // WINDOW_GLASS only for a temporary overlay (a launcher, a prompt, a notification); else the kit's surface
+        b32 side;                       // a window of the kit's surface with a glass side pane (ui_side_place): the window is glass, the rest opaque
         b32 address_to dirty;           // a picture is due: frame paints it
         b32 address_to focused;         // the app's own: the keys are its
         unsigned int address_to ground; // the app's own: the window's ground, as the loop last saw it
@@ -27641,7 +27771,7 @@ static int ui_app_run(struct ui_app address_to app)
         windows_name(app->own, (const char *)app->name);
         // Who the window is, for its tab and its group in the taskbar: the program's name is its app_id ("settings", "files").
         windows_app_id_set(table, row, (const char *)app->name);
-        table->glass[row] = app->glass;
+        table->glass[row] = app->glass | (app->side ? WINDOW_GLASS : 0);
         ui_kit_table = table, ui_kit_row = row, ui_kit_shape = ui_kit_shape_sent = WINDOW_POINTER_ARROW;
         // Every window of the kit takes drops: what of a drag it takes is its widgets' to say (ui_drop_pick).
         __atomic_store_n(&table->drop_ok[row], 1u, __ATOMIC_RELEASE);
@@ -27650,8 +27780,10 @@ static int ui_app_run(struct ui_app address_to app)
         *app->ground = table->ground[row];
         ui_inks(app->ui, *app->ground ? *app->ground : UI_GLASS_GROUND);
         // A window that is not glass is the kit's surface, and its inks are the surface's.
-        app->ui->opaque = !(app->glass & WINDOW_GLASS);
-        app->ui->glass = (app->glass & WINDOW_GLASS) != 0;
+        app->ui->opaque = !(app->glass & WINDOW_GLASS) || app->side;
+        app->ui->glass = (app->glass & WINDOW_GLASS) != 0 && !app->side;
+        // A side pane's glass: its ground is the pane's, and the window's inks are the surface's.
+        app->ui->sided = app->side, app->ui->side_w = 0, app->ui->side_ground = *app->ground;
         ui_kit_inks(app->ui);
         *app->focused = false;
         ui_kit_pass();
@@ -27733,7 +27865,10 @@ static int ui_app_run(struct ui_app address_to app)
                 if (table->ground[row] && table->ground[row] != *app->ground)
                 {
                         *app->ground = table->ground[row];
-                        ui_inks(app->ui, *app->ground);
+                        if (app->ui->sided)
+                                app->ui->side_ground = *app->ground;
+                        else
+                                ui_inks(app->ui, *app->ground);
                         ui_app_changed(app);
                 }
                 // A new theme (the compositor counted it up and knocked): the whole picture turns to it.

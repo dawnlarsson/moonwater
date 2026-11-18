@@ -6693,7 +6693,8 @@ static struct ui_app settings_app = {
         .missing = (string_address) "settings: no window: the compositor's desktop is not up\n",
         .title = (string_address) "Settings",
         .name = (string_address) "settings",
-        .glass = 0, // the kit's surface: the window is the theme's, opaque, as every kit window is
+        .glass = 0, // the kit's surface: the window is the theme's, opaque, as every kit window is,
+        .side = true, // but for its column of groups, the window's glass pane (ui_page_view)
         .font = null,
         .nofont = (string_address) "settings: no font to draw with (-f FONT.ttf), pid ",
         .dirty = &settings.page.dirty,
@@ -6744,7 +6745,7 @@ static b32 settings_main()
                 if (string_equals(program_argument(at), (string_address) "-g"))
                 {
                         gallery.on = 1;
-                        settings_app.glass = 0;
+                        settings_app.glass = 0, settings_app.side = false;
                         settings_app.mono = 1;
                         settings_app.title = (string_address) "Gallery";
                         settings_app.name = (string_address) "gallery";
