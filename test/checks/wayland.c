@@ -7380,6 +7380,34 @@ static void test_games(void)
                 "the hand's counts of a locked pointer are relative motion, with the time in microseconds");
         WLCHECK(wlc_count(ca, WLI_wl_pointer, WLE_wl_pointer_motion) == 0, "and no motion of a place");
 
+        /* Xwayland's warp at each motion of an X game (a hint, then a commit with nothing pending) is quiet: nothing the host shows
+           changes, and the loop's turn need not be whole (compositor_quietshot); a commit with damage or a frame asked is not */
+        {
+                long heard, quiet, heard_now, quiet_now;
+
+                heard = wayland_heard(&quiet);
+                wlc_send(ca, lock_a, WLQ_zwp_locked_pointer_v1_set_cursor_position_hint, 3UL * 256, 4UL * 256);
+                wlc_send(ca, a.k.s.surface, WLQ_wl_surface_commit);
+                wlc_send(ca, lock_a, WLQ_zwp_locked_pointer_v1_set_cursor_position_hint, 5UL * 256, 6UL * 256);
+                wlc_send(ca, a.k.s.surface, WLQ_wl_surface_commit);
+                heard_now = wayland_heard(&quiet_now);
+                WLCHECK(heard_now - heard == 4 && quiet_now - quiet == 4 && ca->errors == 0,
+                        "a lock's hint and a commit with nothing pending are quiet (%ld heard, %ld quiet)", heard_now - heard, quiet_now - quiet);
+                heard = wayland_heard(&quiet);
+                wlc_send(ca, a.k.s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 4L, 4L);
+                wlc_send(ca, a.k.s.surface, WLQ_wl_surface_commit);
+                heard_now = wayland_heard(&quiet_now);
+                WLCHECK(heard_now - heard == 2 && quiet_now == quiet, "a commit of damage is not quiet, nor the damage (%ld heard, %ld quiet)",
+                        heard_now - heard, quiet_now - quiet);
+                heard = wayland_heard(&quiet);
+                wlc_send(ca, a.k.s.surface, WLQ_wl_surface_frame, wlc_id(ca, WLI_wl_callback, 1));
+                wlc_send(ca, a.k.s.surface, WLQ_wl_surface_commit);
+                heard_now = wayland_heard(&quiet_now);
+                WLCHECK(heard_now - heard == 2 && quiet_now == quiet, "a commit that takes a frame callback is not quiet (%ld quiet)", quiet_now - quiet);
+                wlc_pump(ca);
+                wlc_forget(ca);
+        }
+
         /* Alt-Tab to another window ends it, and it holds again when its window has the keys again (persistent); the place the
            client hinted is where the host is told the pointer is, in the window's picture */
         wlc_forget(ca);

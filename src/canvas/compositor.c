@@ -2953,6 +2953,28 @@ static b32 compositor_slingshot(const struct compositor_poll *wanted, const stru
                         return 0;
         return 1;
 }
+
+/*
+        The quiet shot, the slingshot's sibling for a turn the clients alone woke: every descriptor that answered is a Wayland client's
+        socket, and what they sent was quiet (compositor_wl_quiet_read: a lock's hint and a commit with nothing pending, which Xwayland
+        sends at every motion of an X game's warped pointer, 8000 a second from an 8 kHz mouse), so nothing the rest of a turn looks at
+        has changed, and the loop goes back to the poll with the list it polled and the time it would have woken at, as the slingshot
+        does, under the slingshot's other conditions (no card job awaited, no flip near lost, no shaken pointer, the deadline ahead).
+        Measured on hasty-tail (Ivy Bridge, processor compose), gamelat's X client at 8000 reports a second: each report was two turns,
+        the device's a slingshot and Xwayland's a whole turn (the moon's keep, the owed releases, the poll list made again, the window
+        manager's walk of every X window, the clients' whole wake): 11.4k instructions and 12.9k cycles of the loop's thread a report.
+*/
+static b32 compositor_quietshot(const struct compositor_poll *wanted, const struct compositor_slots *slots, positive now, positive until)
+{
+        if (!compositor_wl.started || !slots->wayland_at || slots->fence_at || compositor.cursor.magnify || compositor.cursor.magnified ||
+            (until && now >= until) ||
+            (compositor.flip_pending && (now < compositor.flip_issued || now - compositor.flip_issued >= COMPOSITOR_FLIP_LOST / 2)))
+                return 0;
+        for (unsigned int at = 0; at < slots->count; at++)
+                if (wanted[at].returned && (at <= slots->wayland_at || at > slots->wayland_at + compositor_wl.slots))
+                        return 0;
+        return compositor_wl_quiet_read(wanted + slots->wayland_at);
+}
 #endif
 
 static b32 compositor_main()
@@ -3420,7 +3442,8 @@ static b32 compositor_main()
                         compositor_gpu_input_turn(now);
 #endif
 #ifdef CONFIG_MOONWATER_WAYLAND
-                        if (any && compositor_slingshot(wanted, &slots, awaited, now, until))
+                        if ((any && compositor_slingshot(wanted, &slots, awaited, now, until)) ||
+                            (!any && compositor_quietshot(wanted, &slots, now, until)))
                         {
                                 for (unsigned int at = 0; at < count; at++)
                                         if (wanted[at].returned)

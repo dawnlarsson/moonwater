@@ -6602,6 +6602,41 @@ static unsigned int compositor_wl_poll(struct compositor_poll *wanted, unsigned 
 
 static void compositor_wl_target(void); // the vblank a commit for a time is held against, said to the shim (below)
 
+/*
+        The clients a quiet turn woke (compositor_quietshot) read, each socket the poll answered with POLLIN alone, before the rest of the
+        turn: whether every request they sent was quiet (wayland_heard: a lock's hint, a commit with nothing pending), none of them waits
+        for its GPU, its budget or a hold or went, and what they were answered went out. A read that was not quiet has been dispatched as
+        the turn's wl pass would have, and the turn goes on whole (its pass reads the sockets again and finds nothing).
+*/
+static b32 compositor_wl_quiet_read(const struct compositor_poll *wanted)
+{
+        long heard, quiet, heard_now, quiet_now;
+
+        if (!compositor_wl.started)
+                return 0;
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
+                if (compositor_wl.fd[slot] >= 0 && (wayland_stalled(slot) || (wanted[1 + slot].returned && wanted[1 + slot].returned != COMPOSITOR_POLLIN)))
+                        return 0;
+        compositor_wl_target();
+        heard = wayland_heard(&quiet);
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
+                if (compositor_wl.fd[slot] >= 0 && wanted[1 + slot].returned)
+                        compositor_wl_read(slot);
+        heard_now = wayland_heard(&quiet_now);
+        for (long slot = 0; slot < compositor_wl.slots; slot++)
+        {
+                if (!wanted[1 + slot].returned)
+                        continue;
+                if (compositor_wl.fd[slot] < 0 || wayland_stalled(slot) || wayland_dead(slot))
+                        return 0;
+                if (wayland_out_dirty(slot))
+                        compositor_wl_flush(slot);
+                if (wayland_out_dirty(slot))
+                        return 0;
+        }
+        return heard_now - heard == quiet_now - quiet;
+}
+
 static void compositor_wl_pass(const struct compositor_poll *wanted)
 {
         if (!compositor_wl.started)

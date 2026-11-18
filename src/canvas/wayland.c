@@ -903,6 +903,9 @@ static struct
         char drm_node[64];
         long constraints, hold_row, hold_mode; // live pointer locks and confinements; the window that holds the pointer and how
         long hint_row, hint_x, hint_y;         // where a lock let go of hinted the pointer is: the row and the place in its picture
+        // Requests dispatched, and of them the quiet ones (a lock's hint, a commit with nothing pending: wayland_quiet), over every
+        // client: a read whose requests were all quiet changed nothing the host shows (compositor_wl_quiet_turn).
+        long heard, quiet;
         long counts_row, counts[4], counts_micro; // the hand's counts for the frame of the pointer's next motion: its row (-1: none),
                                                   // dx, dy, the unaccelerated two, the last report's microsecond
         long input_at;                         // the shim's ms of the last input event the compositor gave it (wayland_input_seen): the idle clock
@@ -4764,6 +4767,22 @@ static void wayland_syncobj_take(struct wayland_client *c, struct wayland_surfac
 }
 
 /*
+        A commit with nothing pending, which changes nothing the host shows (wayland.quiet): no buffer attached or let go, no damage, no
+        frame callback or feedback asked for, the alpha, icon, tearing hint and opaque region as they are, no fifo barrier or wait, no
+        time, no sync points, no offset, a window's role past its first configure, no subsurfaces it would lay on again, and no cursor.
+        Xwayland sends one with every lock hint, at each motion an X client's warp makes (xwl_pointer_warp_emulator_set_fake_pos).
+*/
+static int wayland_commit_quiet(struct wayland_client *c, const struct wayland_surface *s, int xdg, int shown)
+{
+        return !s->attach_made && !s->damages && !s->damage_full && !s->callbacks.count && !s->feedbacks.count && !s->pending_barrier &&
+               !s->pending_opaque_set && s->pending_alpha == s->alpha && s->pending_icon == s->icon && s->pending_async == s->async_hint &&
+               !s->pending_fifo && !s->pending_timestamp && !s->pending_sync_acq_set && !s->pending_sync_rel_set && !s->pending_dx &&
+               !s->pending_dy && s->role != WAYLAND_ROLE_CURSOR && s->role != WAYLAND_ROLE_SUBSURFACE &&
+               (!xdg || (s->flags & WAYLAND_SURFACE_SENT)) && !(s->row < 0 && s->readies.count) &&
+               !(shown && s->row >= 0 && (s->flags & WAYLAND_SURFACE_MAPPED) && wayland_has_children(c, wayland_surface_index(c, s)));
+}
+
+/*
         A commit. The pending state becomes the shown one: a buffer attached is copied (the damaged rows of it) into the
         surface's window and released at once, a null buffer unmaps the window, and the frame callbacks the client
         asked for are taken, to be answered when the frame is on the screen. A window's first commit has no buffer and
@@ -4772,7 +4791,7 @@ static void wayland_syncobj_take(struct wayland_client *c, struct wayland_surfac
 static int wayland_commit(struct wayland_client *c, struct wayland_object *self, struct wayland_surface *s)
 {
         long buffer = -1;
-        int xdg = (s->flags & WAYLAND_SURFACE_XDG) != 0, initial = 0;
+        int xdg = (s->flags & WAYLAND_SURFACE_XDG) != 0, initial = 0, quiet;
         // An X window the window manager has said is one is shown as the surface of an xdg toplevel (or popup) is, with no xdg
         // object to configure: the window manager sizes it.
         int shown;
@@ -4880,6 +4899,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         return WAYLAND_STALL;
                 }
         }
+        quiet = wayland_commit_quiet(c, s, xdg, shown);
         wayland_commit_take(c, s);
         if ((s->min_width && s->max_width && s->min_width > s->max_width) ||
             (s->min_height && s->max_height && s->min_height > s->max_height))
@@ -5026,6 +5046,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
         wayland_feedback_take(c, s, s->row >= 0);
         if (s->row < 0 && s->readies.count)
                 wayland_callbacks_done(c, s, wayland.host->now(wayland.host->context));
+        wayland.quiet += quiet;
         return WAYLAND_OK;
 }
 
@@ -9818,6 +9839,9 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                 // set_region is taken: the whole window is what a hold is. A lock's set_cursor_position_hint is kept (at once, not at
                 // the surface's next commit, which the protocol allows the hint to wait for): where the client has drawn the pointer
                 // it holds, and where the pointer is shown when the lock lets it go (wayland_constraint_release).
+                // The hint is quiet (wayland.quiet): it is read only when the lock lets go, which is not a quiet request.
+                if (self->iface == WLI_zwp_locked_pointer_v1 && op == WLQ_zwp_locked_pointer_v1_set_cursor_position_hint)
+                        wayland.quiet++;
                 if (self->iface == WLI_zwp_locked_pointer_v1 && op == WLQ_zwp_locked_pointer_v1_set_cursor_position_hint &&
                     self->link >= 0 && self->link < c->constraint_table.count && c->constraints[self->link].live)
                 {
@@ -10150,6 +10174,7 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
         long begun;
         int status;
 
+        wayland.heard++;
         if (slot < 0)
                 return wayland_fail(c, id, WAYLAND_INVALID_OBJECT, "no such object");
         o = &c->objects[slot];
@@ -10905,6 +10930,13 @@ WAYLAND_API void wayland_sent(long slot, long count)
         wayland_feedback_flush(c);
         if (!c->out_length && !c->dead && !c->feedback_pending)
                 wayland_out_clear(slot);
+}
+
+// The requests dispatched so far, over every client, and in quiet those of them that changed nothing the host shows (wayland.quiet).
+WAYLAND_API long wayland_heard(long *quiet)
+{
+        *quiet = wayland.quiet;
+        return wayland.heard;
 }
 
 // Whether a client has bytes queued or dead state waiting to flush; and how many slots there are to ask of.
