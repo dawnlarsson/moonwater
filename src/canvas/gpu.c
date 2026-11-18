@@ -2254,14 +2254,15 @@ static int gpu_i915_fill_split(positive dst, unsigned int span, unsigned int pit
 
 // The batch for one fill: the state region holds the binding table (entry 0 points at the surface state, the binding table's pointer is
 // the state's own offset), the surface state (the row's bytes, its base the first byte, 32-byte aligned), the interface descriptor, and at
-// 192 the colour dword the CURBE reads. The card's buffer at GPU_VA is the base of every pointer. Writes only words[0..56) and
-// job->state_at[0..256): its state's room. A fill the card cannot write whole is refused (0 words), never done in part.
+// 192 the colour dword the CURBE reads, and for a copy the source's surface state at 256 (its binding table entry 1). The card's buffer
+// at GPU_VA is the base of every pointer. Writes only words[0..56) and job->state_at[0..320): the state's room. A job the card cannot
+// write whole is refused (0 words), never done in part.
+#if !(defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#error "the Intel state is little endian: gpu_i915_put stores the host's word as it is"
+#endif
 static void gpu_i915_put(p8 address_to at, unsigned int offset, unsigned int value)
 {
-        at[offset + 0] = (unsigned char)value;
-        at[offset + 1] = (unsigned char)(value >> 8);
-        at[offset + 2] = (unsigned char)(value >> 16);
-        at[offset + 3] = (unsigned char)(value >> 24);
+        memory_copy(at + offset, &value, sizeof value);
 }
 
 static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
@@ -2271,7 +2272,7 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         const struct gpu_args address_to a = (const struct gpu_args address_to)((p8 address_to)job->state_at + delta);
         p8 address_to state = (p8 address_to)job->state_at;
         struct gpu_i915_split s;
-        unsigned int bw[56], n = 0, xg, sbase, pitch, span, spitch, i;
+        unsigned int n = 0, xg, sbase, pitch, span, spitch;
 
         // Whole or nothing: a fill whose edges the card cannot write (a row's head or tail, or a span under 16 bytes) is refused, and the
         // processor draws all of it. The surface's fields are 14 bits (width and height, minus one, in 13:0 and 29:16) and the pitch 18:
@@ -2329,25 +2330,22 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         // The batch: PIPELINE_SELECT GPGPU (mask 3 << 8), STATE_BASE_ADDRESS with every base at the card's buffer, MEDIA_VFE_STATE, the
         // CURBE and the interface descriptor loaded from the state region, GPGPU_WALKER (SIMD16, xg by rows groups, the right mask full: the
         // span is a multiple of 16), MI_BATCH_BUFFER_END.
-        bw[n++] = 0x69040302u;
-        bw[n++] = 0x61010011u; bw[n++] = 1; bw[n++] = 0; bw[n++] = 1;
-        bw[n++] = (unsigned int)GPU_VA | 1; bw[n++] = (unsigned int)(GPU_VA >> 32);
-        bw[n++] = (unsigned int)GPU_VA | 1; bw[n++] = (unsigned int)(GPU_VA >> 32);
-        bw[n++] = 0; bw[n++] = 0;
-        bw[n++] = (unsigned int)GPU_VA | 1; bw[n++] = (unsigned int)(GPU_VA >> 32);
-        bw[n++] = 0xfffff000u | 1; bw[n++] = 65536u | 1; bw[n++] = 0xfffff000u | 1; bw[n++] = 65536u | 1;
-        bw[n++] = 1; bw[n++] = 0; bw[n++] = 0xfffff000u;
-        bw[n++] = 0x70000007u; bw[n++] = 0; bw[n++] = 0; bw[n++] = (1u << 16) | (1u << 8); bw[n++] = 0; bw[n++] = 1; bw[n++] = 0; bw[n++] = 0; bw[n++] = 0;
-        bw[n++] = 0x70010002u; bw[n++] = 0; bw[n++] = 64; bw[n++] = sbase + 192;
-        bw[n++] = 0x70020002u; bw[n++] = 0; bw[n++] = 32; bw[n++] = sbase + 128;
-        bw[n++] = 0x7105000du; bw[n++] = 0; bw[n++] = 0; bw[n++] = 0; bw[n++] = 1u << 30;
-        bw[n++] = 0; bw[n++] = 0; bw[n++] = xg; bw[n++] = 0; bw[n++] = 0; bw[n++] = a->rows; bw[n++] = 0; bw[n++] = 1;
-        bw[n++] = 0xffffu; bw[n++] = 0xffffffffu;
-        bw[n++] = 0x05000000u;
-        while (n < 56)
-                bw[n++] = 0;
-        for (i = 0; i < 56; i++)
-                words[i] = bw[i];
+        words[n++] = 0x69040302u;
+        words[n++] = 0x61010011u; words[n++] = 1; words[n++] = 0; words[n++] = 1;
+        words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
+        words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
+        words[n++] = 0; words[n++] = 0;
+        words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
+        words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1; words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1;
+        words[n++] = 1; words[n++] = 0; words[n++] = 0xfffff000u;
+        words[n++] = 0x70000007u; words[n++] = 0; words[n++] = 0; words[n++] = (1u << 16) | (1u << 8); words[n++] = 0; words[n++] = 1; words[n++] = 0; words[n++] = 0; words[n++] = 0;
+        words[n++] = 0x70010002u; words[n++] = 0; words[n++] = 64; words[n++] = sbase + 192;
+        words[n++] = 0x70020002u; words[n++] = 0; words[n++] = 32; words[n++] = sbase + 128;
+        words[n++] = 0x7105000du; words[n++] = 0; words[n++] = 0; words[n++] = 0; words[n++] = 1u << 30;
+        words[n++] = 0; words[n++] = 0; words[n++] = xg; words[n++] = 0; words[n++] = 0; words[n++] = a->rows; words[n++] = 0; words[n++] = 1;
+        words[n++] = 0xffffu; words[n++] = 0xffffffffu;
+        words[n++] = 0x05000000u;
+        memory_zero(words + n, (56 - n) * sizeof words[0]);
         return 56;
 }
 

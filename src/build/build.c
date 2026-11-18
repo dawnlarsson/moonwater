@@ -4974,14 +4974,14 @@ static p8 build_gpu_i915_made[1 << 17];
 static positive build_gpu_i915_text(p8 address_to at, positive room, string_address text, unsigned long value, positive digits)
 {
         static const char hex[] = "0123456789abcdef";
-        positive n = 0;
+        positive n = 0, length = text ? string_length(text) : 0, write = room > 1 ? room - 1 : 0;
 
-        for (positive i = 0; text && text[i]; i++)
-        {
-                if (n + 1 < room)
-                        at[n] = (unsigned char)text[i];
-                n++;
-        }
+        //      the text as far as the room goes (the last byte of the room is never written): one copy, not a loop
+        if (write > length)
+                write = length;
+        if (write)
+                memory_copy(at, text, write);
+        n = length;
         for (positive i = digits; i > 0; i--)
         {
                 if (n + 1 < room)
@@ -5000,10 +5000,8 @@ static positive build_gpu_i915_sprintf_open(p8 address_to at, positive room, p8 
         positive k = 0, n = 0;
 
         while (name + k < stop && name[k] != ' ' && name[k] != '\t' && k + 1 < sizeof(buffer))
-        {
-                buffer[k] = (char)name[k];
                 k++;
-        }
+        memory_copy(buffer, name, k);
         buffer[k] = 0;
         n = build_gpu_i915_text(at, room, "static const unsigned int gpu_i915_", 0, 0);
         n += build_gpu_i915_text(at + n, room > n ? room - n : 0, buffer, 0, 0);
