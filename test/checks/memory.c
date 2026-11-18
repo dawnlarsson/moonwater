@@ -2438,7 +2438,7 @@ b32 main(void)
         */
         b32 (address_to compare_itself)(const address_any, const address_any,
                                         positive) = memory_compare;
-        address_any (address_to first_itself)(address_any, b8, positive) =
+        address_any (address_to first_itself)(const address_any, b8, positive) =
                 memory_first_of;
         address_any (address_to last_itself)(address_any, b8, positive) =
                 memory_last_of;

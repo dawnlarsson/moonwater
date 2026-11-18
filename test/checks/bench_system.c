@@ -2590,7 +2590,7 @@ b32 main(void)
 #define COPY_BENCH_TRIES 7
 
 typedef fn (*copy_bench_work)(positive, positive);
-typedef string_address (*copy_bench_call)(string_address, string_address);
+typedef string_address (*copy_bench_call)(string_address, const_string);
 typedef address_any (*copy_bench_traffic_call)(address_any, const address_any,
                                                positive);
 
@@ -2599,7 +2599,7 @@ static p8 copy_bench_source[COPY_BENCH_ROOM] __attribute__((aligned(64)));
 static p8 copy_bench_output[COPY_BENCH_ROOM] __attribute__((aligned(64)));
 
 static __attribute__((noinline, noclone)) string_address
-copy_bench_empty(string_address destination, string_address source)
+copy_bench_empty(string_address destination, const_string source)
 {
         (void)source;
         return destination;
@@ -2607,7 +2607,7 @@ copy_bench_empty(string_address destination, string_address source)
 
 /* Exact scalar semantics; a reference candidate, not a performance floor. */
 static __attribute__((noinline, noclone)) string_address
-copy_bench_scalar(string_address destination, string_address source)
+copy_bench_scalar(string_address destination, const_string source)
 {
         string_address answer = destination;
         p8 byte;

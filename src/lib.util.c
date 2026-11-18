@@ -2879,7 +2879,7 @@ static inline positive memory_copy_clamped(p8 address_to into, positive size,
    nothing, including for a null source. Return whether the complete span
    fitted; callers choose whether truncation is an error or display policy. */
 static inline bool byte_store_append_span(byte_store address_to store,
-                                           address_any data, positive length)
+                                           const address_any data, positive length)
 {
         if (store->used > store->room)
                 return false;
@@ -2892,7 +2892,7 @@ static inline bool byte_store_append_span(byte_store address_to store,
 
 /* Atomic field variant: a short buffer retains its prior bytes and cursor. */
 static inline bool byte_store_append_exact(byte_store address_to store,
-                                            address_any data, positive length)
+                                            const address_any data, positive length)
 {
         if (store->used > store->room || length > store->room - store->used)
                 return false;
@@ -5519,7 +5519,7 @@ static inline fn digest_run(digest_state address_to digest, const p8 address_to 
         }
 }
 
-static inline fn digest_write(digest_state address_to digest, address_any bytes,
+static inline fn digest_write(digest_state address_to digest, const address_any bytes,
                               positive length)
 {
         const p8 address_to data = bytes;
@@ -6880,12 +6880,13 @@ static inline INLINE string_address first_of_set_known(string_address source,
 #endif
 
 #define SEARCH_KNOWN(name, find)                                             \
-static inline INLINE address_any name(address_any block, positive size,     \
-                                      address_any needle,                   \
+static inline INLINE address_any name(const address_any block,             \
+                                      positive size,                        \
+                                      const address_any needle,             \
                                       positive needle_size)                 \
 {                                                                           \
         if (needle_size == 0)                                                \
-                return block;                                               \
+                return (address_any)block;                                  \
         return find(block, ((const p8 address_to)needle)[0], size);          \
 }
 SEARCH_KNOWN(search_known, memory_first_of)
@@ -7811,7 +7812,7 @@ static inline INLINE b32 compare_folded_max_known(string_address first,
         in. Under eight bytes the setup costs more than the compares it would
         save, so that tier is the compares.
 */
-static inline INLINE address_any first_of_known(address_any block, b8 value,
+static inline INLINE address_any first_of_known(const address_any block, b8 value,
                                                 positive size)
 {
         p8 address_to at = (p8 address_to)block;
@@ -24060,7 +24061,7 @@ static bool clock_tz_rule(const char address_to address_to at, p8 which)
         written -- is the whole of what it was given.
 */
 static bool clock_tz_parse_to(string_address text,
-                              string_address address_to rest)
+                              const_string address_to rest)
 {
         const char address_to s = (const char address_to)text;
 
@@ -24093,7 +24094,7 @@ static bool clock_tz_parse_to(string_address text,
                                     CLOCK_TZ_NAME);
                 timezone = clock_std_west;
                 daylight = 0;
-                address_to rest = s;
+                address_to rest = (const_string)s;
                 return true;
         }
         if (s[0] && s[0] != ',')
@@ -24125,14 +24126,14 @@ static bool clock_tz_parse_to(string_address text,
 
 static bool clock_tz_parse(string_address text)
 {
-        string_address rest;
+        const_string rest;
 
         return clock_tz_parse_to(text, address_of rest);
 }
 
 static bool clock_tz_whole(string_address text)
 {
-        string_address rest;
+        const_string rest;
 
         return clock_tz_parse_to(text, address_of rest) && !rest[0];
 }

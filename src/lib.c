@@ -55107,7 +55107,7 @@ __asm__(
 #endif
 #endif
 
-string_address string_copy(string_address destination, string_address source);
+string_address string_copy(string_address destination, const_string source);
 
 //      strcat exactly: the source onto the end of the destination.
 string_address string_append(string_address destination, string_address source);
@@ -55259,7 +55259,7 @@ fn bipolar_to_string(writer write, bipolar number);
 */
 PURE positive string_to_positive(string_address input);
 PURE bipolar string_to_bipolar(string_address input);
-PURE string_address string_find(string_address string, string_address input);
+PURE string_address string_find(const_string string, const_string input);
 
 //      strstr exactly: an empty needle is the front of the haystack.
 PURE string_address string_search(string_address haystack, string_address needle);
@@ -55273,8 +55273,8 @@ PURE string_address string_search(string_address haystack, string_address needle
         says which of the two an architecture got.
 */
 PURE positive string_length(const_string source);
-PURE b32 string_compare(string_address source, string_address input);
-PURE string_address string_first_of(string_address source, p8 character);
+PURE b32 string_compare(const_string source, const_string input);
+PURE string_address string_first_of(const_string source, p8 character);
 
 PURE positive string_span(string_address source, const b8 address_to set);
 PURE positive string_span_max(const_string source, positive bound,
@@ -55546,8 +55546,8 @@ READS_WRITES(1) fn zstd_fast_parse(address_any job);
    x86_64 assembly. */
 READS_WRITES(1) fn zstd_dfast_parse(address_any job);
 PURE positive2 string_hash_33_length(string_address source);
-PURE positive memory_span_byte(address_any block, p8 value, positive size);
-PURE positive memory_span_byte_reverse(address_any block, p8 value,
+PURE positive memory_span_byte(const address_any block, p8 value, positive size);
+PURE positive memory_span_byte_reverse(const address_any block, p8 value,
                                        positive size);
 
 /* A bounded text run: tab or any byte >= space except DEL. NUL and all
@@ -55626,10 +55626,10 @@ positive cells_from_ascii_wide(address_any cells, address_any bytes, positive li
                                positive guarded, p64 attribute, p64 stop);
 // Returns {bytes, characters}, bounded by both size and count. Invalid UTF-8
 // bytes each count once; zero bounds permit a null block without reading it.
-PURE positive2 memory_utf8_span(address_any block, positive size, positive count);
+PURE positive2 memory_utf8_span(const address_any block, positive size, positive count);
 PURE b32 memory_compare_ascii_case(const address_any one, const address_any two,
                                    positive size);
-PURE address_any memory_first_of_ascii_case(address_any block, b8 value,
+PURE address_any memory_first_of_ascii_case(const address_any block, b8 value,
                                             positive size);
 // Select the corpus-rarest search anchors once for a needle that will be
 // searched repeatedly.  x is the rarest offset and y the second rarest;
@@ -55637,7 +55637,7 @@ PURE address_any memory_first_of_ascii_case(address_any block, b8 value,
 // The prepared calls take exactly this result: for a nonempty needle every
 // supplied anchor must be below needle_size.  They do not validate anchors,
 // because doing that on every repeated search would undo preparation's point.
-PURE positive2 memory_search_prepare(address_any needle, positive needle_size,
+PURE positive2 memory_search_prepare(const address_any needle, positive needle_size,
                                      bool ascii_case);
 PURE address_any memory_search_prepared(address_any block, positive size,
                                         const address_any needle,
@@ -55648,8 +55648,8 @@ PURE address_any memory_search_ascii_case_prepared(address_any block, positive s
                                                    positive needle_size,
                                                    positive anchor,
                                                    positive second_anchor);
-PURE address_any memory_search_ascii_case(address_any block, positive size,
-                                          address_any needle, positive needle_size);
+PURE address_any memory_search_ascii_case(const address_any block, positive size,
+                                          const address_any needle, positive needle_size);
 PURE READS(1, 3) address_any memory_last_of(address_any block, b8 value, positive size);
 PURE READS(1, 2) positive2 memory_count_words(const address_any block, positive size,
                                               bool inside);
@@ -56183,12 +56183,12 @@ WRITES(1) READS(2, 3)
 positive memory_offsets_between(p32 address_to positions, address_any block,
                                 positive size, p8 low, p8 high, positive limit);
 WRITES(1) READS(2, 3)
-positive memory_offsets_outside(p32 address_to positions, address_any block,
+positive memory_offsets_outside(p32 address_to positions, const address_any block,
                                 positive size, p8 low, p8 high, positive limit);
 // The same for every byte the 256-entry table marks nonzero.
 WRITES(1) READS(2, 3) READS(4)
-positive memory_offsets_in_set(p32 address_to positions, address_any block,
-                               positive size, address_any table, positive limit);
+positive memory_offsets_in_set(p32 address_to positions, const address_any block,
+                               positive size, const address_any table, positive limit);
 // Swap exactly size bytes between separate ranges. The ranges must be
 // disjoint unless left == right; equal addresses and zero size are no-ops and
 // do not dereference either address.
@@ -58309,7 +58309,7 @@ PURE positive memory_count_records_with_prepared(address_any block, positive siz
 // ### First occurrence of a byte in a block
 // returns: its address, or null when the block does not hold one
 // traditional: memory_first_of
-PURE address_any memory_first_of(address_any block, b8 value, positive size);
+PURE address_any memory_first_of(const address_any block, b8 value, positive size);
 
 /*
         The bounded and the or-end forms, which had no prototype at all.
@@ -58360,8 +58360,8 @@ b32 memory_digits_whole_16_40(const p8 address_to bytes, positive length,
 //      haystack, which is what memmem answers and is not what string_find
 //      does -- see the note there.
 //
-PURE address_any memory_search(address_any block, positive size,
-                               address_any needle, positive needle_size);
+PURE address_any memory_search(const address_any block, positive size,
+                               const address_any needle, positive needle_size);
 
 /*
         The length of the run at the start of a string whose bytes are all in a
@@ -67586,7 +67586,7 @@ __asm__(
         The section sits in lib.c's userspace tail, so no kernel object has
         it; its KERNEL_MODE guards only keep it honest if it moves.
 */
-PURE READS(1, 2) positive2 memory_utf8_valid_span(address_any block, positive size);
+PURE READS(1, 2) positive2 memory_utf8_valid_span(const address_any block, positive size);
 
 //      Keiser--Lemire's error bits, as named in their paper: a sequence too
 //      short or too long, two continuations where one is allowed, the three
@@ -68132,7 +68132,7 @@ __asm__(
         which has no vector it may assume, takes eight bytes a test from a
         naturally aligned word.
 */
-PURE READS(1, 2) positive memory_ascii_span(address_any block, positive size);
+PURE READS(1, 2) positive memory_ascii_span(const address_any block, positive size);
 
 #if X64
 __asm__(
@@ -68536,7 +68536,7 @@ WRITES(1) READS(2, 3) READS(4)
 positive memory_offsets_fields(p32 address_to positions, address_any block,
                                positive size, address_any table, positive limit);
 WRITES(1) READS(2, 3)
-positive memory_offsets_fields_blank(p32 address_to positions, address_any block,
+positive memory_offsets_fields_blank(p32 address_to positions, const address_any block,
                                      positive size, p8 extra, positive limit);
 PURE positive2 memory_nth_of(address_any block, b8 value, positive size, positive n);
 PURE positive2 memory_nth_last_of(address_any block, b8 value, positive size,
@@ -75269,7 +75269,7 @@ __asm__(
 */
 #ifndef KERNEL_MODE
 
-positive string_copy_bounded(string_address destination, string_address source,
+positive string_copy_bounded(string_address destination, const_string source,
                              positive capacity);
 //      The size class of string_copy_bounded for capacities three to sixteen. Callers reach it
 //      through the literal routing in lib.util.c, or name it directly.

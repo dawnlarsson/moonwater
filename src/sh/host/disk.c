@@ -167,7 +167,7 @@ static bipolar host_open_state(bipolar directory, string_address path,
    not asked sixteen times. Only the writers of a whole word come through here:
    a file that is read, changed and written back is under its lock, and the
    machine's key is made by a publish that refuses to replace. */
-static bipolar host_publish_again(string_address path, address_any bytes, positive length,
+static bipolar host_publish_again(string_address path, const address_any bytes, positive length,
                                   positive mode, bool sync, positive behavior)
 {
         bipolar result = file_publish_with(path, bytes, length, mode, sync, behavior);
@@ -190,7 +190,7 @@ static bipolar host_publish_again(string_address path, address_any bytes, positi
    its name: a file another process reads (the wifi SAE list, the scan and
    avoid lists) was truncated in place before, so a reader could see it empty
    and a signal between the truncate and the write left it empty. */
-static bipolar host_write_file(string_address path, p8 address_to bytes,
+static bipolar host_write_file(string_address path, const p8 address_to bytes,
                                positive length, positive mode, bool sync)
 {
         return host_publish_again(path, bytes, length, mode, sync,

@@ -2682,10 +2682,10 @@ b32 main(void)
 static p8 block[MAXIMUM + 16];
 static volatile positive sink;
 
-NOT_INLINED static positive former_span(address_any address, p8 value,
+NOT_INLINED static positive former_span(const address_any address, p8 value,
                                         positive length)
 {
-        p8 address_to bytes = address;
+        const p8 address_to bytes = address;
         positive at = 0;
 
         while (at < length && bytes[at] == value)
@@ -2694,10 +2694,10 @@ NOT_INLINED static positive former_span(address_any address, p8 value,
         return at;
 }
 
-NOT_INLINED static positive former_span_reverse(address_any address, p8 value,
+NOT_INLINED static positive former_span_reverse(const address_any address, p8 value,
                                                 positive length)
 {
-        p8 address_to bytes = address;
+        const p8 address_to bytes = address;
         positive at = length;
 
         while (at && bytes[at - 1] == value)
@@ -2706,7 +2706,7 @@ NOT_INLINED static positive former_span_reverse(address_any address, p8 value,
         return length - at;
 }
 
-typedef positive (*span_call)(address_any, p8, positive);
+typedef positive (*span_call)(const address_any, p8, positive);
 static span_call volatile span_calls[2] = {former_span, memory_span_byte};
 static span_call volatile reverse_span_calls[2] = {
     former_span_reverse, memory_span_byte_reverse};

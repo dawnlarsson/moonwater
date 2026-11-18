@@ -4417,7 +4417,7 @@ static b32 zstd_entropy_chunk(zstd_encoder address_to e, const zstd_enc_seq addr
                 zstd_bw bits;
                 zstd_cstate ls = {0}, os = {0}, ms = {0};
                 zstd_seq_encode job;
-                zstd_enc_seq address_to s;
+                const zstd_enc_seq address_to s;
                 p8 ll_mode, of_mode, ml_mode;
 
                 if (!freq)

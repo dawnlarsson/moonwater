@@ -8409,7 +8409,7 @@ static bipolar file_transfer_exact(positive operation, bipolar handle,
                                    p8 address_to buffer, positive length,
                                    p64 offset);
 
-static COLD bipolar file_publish_with(string_address path, address_any bytes,
+static COLD bipolar file_publish_with(string_address path, const address_any bytes,
                                       positive length, positive mode, bool sync,
                                       positive behavior)
 {
