@@ -268,6 +268,69 @@ static void gpu_i915_set_rows(void)
                 a->count = 2, a->op = 6;
                 gpu.size = gpu_size;
         }
+        {
+                // The scale (op 7): 37 pixels of a 48-pixel source's rows, 23 rows, into a destination 48 pixels a row (whole 64-byte rows), the tables at
+                // GPU_VA + 3072. The walker is ceil(37 / 4) = 10 columns by 23 rows.
+                static unsigned char buffer[8192] __attribute__((aligned(4096)));
+                struct gpu_job job;
+                struct gpu_args address_to a = (struct gpu_args address_to)(buffer + 2048);
+                unsigned int words[64];
+                unsigned int address_to state = (unsigned int address_to)(buffer + 2560);
+                unsigned int n;
+
+                memset(buffer, 0, sizeof buffer);
+                a->d = GPU_VA + 0x2000, a->dp = 48, a->s = GPU_VA + 0x4000, a->sp = 48, a->g = GPU_VA + 3072, a->w = 37, a->rows = 23, a->op = 7;
+                job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
+                job.code = GPU_VA + 3584;
+                n = gpu_i915_gen9_batch(&job, words, 64);
+                check("gpu i915 scale: a scale's batch is the 56 dwords the Gen9 walker takes: ceil(37 / 4) = 10 columns by 23 rows",
+                      n == 56 && words[0] == 0x69040302u && words[29] == 0x70010002u && words[32] == 2560 + 192 && words[44] == 10u && words[47] == 23u);
+                check("gpu i915 scale: the binding table is the destination (entry 0), the source (entry 1) and the tables (entry 2)",
+                      state[0] == 2560 + 64 && state[1] == 2560 + 256 && state[2] == 2560 + 320);
+                check("gpu i915 scale: the CURBE holds the source's pitch (48), w (37) and the destination's pitch (48), in that order",
+                      state[48] == 48u && state[49] == 37u && state[50] == 48u);
+                check("gpu i915 scale: each surface is linear, 16384 bytes wide and high on a pitch of 16384, based at its own address",
+                      state[(64 + 8) / 4] == (16383u | (16383u << 16)) && state[(64 + 12) / 4] == 16383u && state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2000) &&
+                      state[(256 + 32) / 4] == (unsigned int)(GPU_VA + 0x4000) && state[(320 + 32) / 4] == (unsigned int)(GPU_VA + 3072) && state[(320 + 12) / 4] == 16383u);
+                check("gpu i915 scale: the interface descriptor's binding table pointer is the state's table, and its kernel the scale's code",
+                      state[36] == 2560 && state[32] == 3584);
+                a->dp = 38;
+                check("gpu i915 scale: a destination pitch of 38 pixels (152 bytes, not 64) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->dp = 36;
+                check("gpu i915 scale: a destination pitch of 36 pixels holds not the 37 pixels of a row, so it is refused (0 words)",
+                      gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->dp = 48, a->d = GPU_VA + 0x2004;
+                check("gpu i915 scale: a destination base not 16-byte aligned is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->d = GPU_VA + 0x2000, a->s = GPU_VA + 0x4008;
+                check("gpu i915 scale: a source base not 16-byte aligned is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->s = GPU_VA + 0x4000, a->sp = 65536;
+                check("gpu i915 scale: a source pitch past a word is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->sp = 50;
+                check("gpu i915 scale: a source pitch of 50 pixels (200 bytes, not 64) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->sp = 48;
+                a->sp = 48, a->w = 0;
+                check("gpu i915 scale: no columns is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->w = 37, a->rows = 16385;
+                check("gpu i915 scale: more rows than a surface holds is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->rows = 16384, a->dp = 65536;
+                check("gpu i915 scale: a destination of 2^30 pixels is past the 2^26 the card's surfaces address, refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->dp = 4096;
+                check("gpu i915 scale: a destination of 2^26 pixels (4096 by 16384) is the most, and is taken", gpu_i915_gen9_batch(&job, words, 64) == 56);
+                a->dp = 48, a->rows = 23;
+                check("gpu i915 scale: a batch room under 56 dwords is refused (0 words)", gpu_i915_gen9_batch(&job, words, 55) == 0);
+                n = gpu_i915_gen9_batch(&job, words, 64); /* the last call: the dump's words and state */
+#ifdef CHECK_GPU_I915_DUMP
+                // The encoder's words and state for the hardware harness (team-kernels/scale/harness.c, --encdump): GPU_VA, then the 56 batch dwords and the
+                // state's 128 dwords (the state at GPU_VA + 2560 as the job lays it), one line each.
+                string_format(log, "DUMP scale va %p\n", (positive)GPU_VA);
+                for (unsigned int i = 0; i < 56; i++)
+                        string_format(log, "W %p\n", (positive)words[i]);
+                for (unsigned int i = 0; i < 128; i++)
+                        string_format(log, "S %p %p\n", (positive)i, (positive)state[i]);
+                log_flush();
+#endif
+                check("gpu i915 scale: the last batch is 56 dwords", n == 56);
+        }
 }
 
 b32 main(void)

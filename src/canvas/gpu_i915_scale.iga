@@ -1,0 +1,88 @@
+// Gen9 scale (op 7): d[y * dp + x] = s[ytab[y] * sp + xtab[x]] for x below w, y below h, 4 bytes a pixel, 16 bytes a thread
+// (four pixels of one row). Thread group X (r0.1) is the block of four pixels (x0 = 4 gx), group Y (r0.6) the row.
+// The CURBE (r1): r1.0 = sp (the source's pitch in pixels, a word), r1.1 = w, r1.2 = dp (the destination's pitch, a word).
+// Every surface is linear, read and written as a 2D surface 16384 bytes a row (the media block messages want a pitch of
+// whole 64-byte groups, so a byte offset B is addressed as x = B & 16383, y = B >> 14: the table, the source and the
+// destination alike). Tables on binding table entry 2 (byte 4k is entry k): xtab's block at 16 gx, and ytab[gy] at
+// 4 (w + gy), whose block's first dword is it. The source (entry 1) is read one pixel at a time: the block at the byte
+// 4 (ys sp + xs), its first dword the pixel (pixels past the row's end read byte 0, unused). The destination (entry 0)
+// is read as the block at 4 dp gy + 16 gx, the pixels of the row inside w replace its first dwords (the rest keep what
+// they were), and the block is written back whole (a read and a merge, so no partial write is needed). dp is a
+// multiple of 4 (the block is 16-byte aligned in the linear surface, and does not cross its 16384-byte row).
+mul (1|M0)               r2.0<1>:ud    r0.1<0;1,0>:ud    0x10:ud
+mov (1|M0)               r2.1<1>:ud    r0.6<0;1,0>:ud
+mov (8|M0)               r6.0<1>:ud    r0.0<8;8,1>:ud
+mov (1|M0)               r6.2<1>:ud    0xF:ud
+and (1|M0)               r6.0<1>:ud    r2.0<0;1,0>:ud    0x00003fff:ud
+shr (1|M0)               r6.1<1>:ud    r2.0<0;1,0>:ud    14:ud
+send (16|M0)             r5:ud         r6:ud     0xC  0x02190002     // xtab[4 gx ..] (entry 2): r5.0..3
+add (1|M0)               r3.0<1>:ud    r1.1<0;1,0>:ud    r2.1<0;1,0>:ud  // w + gy
+shl (1|M0)               r3.0<1>:ud    r3.0<0;1,0>:ud    2:ud              // 4 (w + gy): ytab[gy]'s byte
+mov (8|M0)               r8.0<1>:ud    r0.0<8;8,1>:ud
+mov (1|M0)               r8.2<1>:ud    0xF:ud
+and (1|M0)               r8.0<1>:ud    r3.0<0;1,0>:ud    0x00003fff:ud
+shr (1|M0)               r8.1<1>:ud    r3.0<0;1,0>:ud    14:ud
+send (16|M0)             r7:ud         r8:ud     0xC  0x02190002     // ytab[gy] (entry 2): r7.0
+mul (1|M0)               r9.0<1>:ud    r7.0<0;1,0>:ud    r1.0<0;1,0>:uw  // t = ys sp
+shr (1|M0)               r3.1<1>:ud    r2.0<0;1,0>:ud    2:ud              // 4 gx
+add (1|M0)               r3.0<1>:d     r1.1<0;1,0>:d     -r3.1<0;1,0>:d  // n = w - 4 gx, the pixels of the row left
+sel (1|M0)    (lt)f0.0   r3.2<1>:d     r3.0<0;1,0>:d     4:d               // k = min(n, 4)
+sel (1|M0)    (ge)f0.0   r3.2<1>:d     r3.2<0;1,0>:d     0:d               // k = max(k, 0)
+// pixel j: B = 4 (t + xs_j) (0 for a column past the row), the block at B (entry 1) read: r(40 + j).0 is the pixel
+add (1|M0)               r60.0<1>:ud   r9.0<0;1,0>:ud    r5.0<0;1,0>:ud
+shl (1|M0)               r60.0<1>:ud   r60.0<0;1,0>:ud   2:ud
+cmp (1|M0)    (le)f0.0   null:d        r3.2<0;1,0>:d     0:d
+(f0.0) mov (1|M0)        r60.0<1>:ud   0:ud
+mov (8|M0)               r30.0<1>:ud   r0.0<8;8,1>:ud
+and (1|M0)               r30.0<1>:ud   r60.0<0;1,0>:ud   0x00003fff:ud
+shr (1|M0)               r30.1<1>:ud   r60.0<0;1,0>:ud   14:ud
+mov (1|M0)               r30.2<1>:ud   0xF:ud
+send (16|M0)             r40:ud        r30:ud    0xC  0x02190001     // pixel 0: r40.0
+add (1|M0)               r61.0<1>:ud   r9.0<0;1,0>:ud    r5.1<0;1,0>:ud
+shl (1|M0)               r61.0<1>:ud   r61.0<0;1,0>:ud   2:ud
+cmp (1|M0)    (le)f0.0   null:d        r3.2<0;1,0>:d     1:d
+(f0.0) mov (1|M0)        r61.0<1>:ud   0:ud
+mov (8|M0)               r31.0<1>:ud   r0.0<8;8,1>:ud
+and (1|M0)               r31.0<1>:ud   r61.0<0;1,0>:ud   0x00003fff:ud
+shr (1|M0)               r31.1<1>:ud   r61.0<0;1,0>:ud   14:ud
+mov (1|M0)               r31.2<1>:ud   0xF:ud
+send (16|M0)             r41:ud        r31:ud    0xC  0x02190001     // pixel 1: r41.0
+add (1|M0)               r62.0<1>:ud   r9.0<0;1,0>:ud    r5.2<0;1,0>:ud
+shl (1|M0)               r62.0<1>:ud   r62.0<0;1,0>:ud   2:ud
+cmp (1|M0)    (le)f0.0   null:d        r3.2<0;1,0>:d     2:d
+(f0.0) mov (1|M0)        r62.0<1>:ud   0:ud
+mov (8|M0)               r32.0<1>:ud   r0.0<8;8,1>:ud
+and (1|M0)               r32.0<1>:ud   r62.0<0;1,0>:ud   0x00003fff:ud
+shr (1|M0)               r32.1<1>:ud   r62.0<0;1,0>:ud   14:ud
+mov (1|M0)               r32.2<1>:ud   0xF:ud
+send (16|M0)             r42:ud        r32:ud    0xC  0x02190001     // pixel 2: r42.0
+add (1|M0)               r63.0<1>:ud   r9.0<0;1,0>:ud    r5.3<0;1,0>:ud
+shl (1|M0)               r63.0<1>:ud   r63.0<0;1,0>:ud   2:ud
+cmp (1|M0)    (le)f0.0   null:d        r3.2<0;1,0>:d     3:d
+(f0.0) mov (1|M0)        r63.0<1>:ud   0:ud
+mov (8|M0)               r33.0<1>:ud   r0.0<8;8,1>:ud
+and (1|M0)               r33.0<1>:ud   r63.0<0;1,0>:ud   0x00003fff:ud
+shr (1|M0)               r33.1<1>:ud   r63.0<0;1,0>:ud   14:ud
+mov (1|M0)               r33.2<1>:ud   0xF:ud
+send (16|M0)             r43:ud        r33:ud    0xC  0x02190001     // pixel 3: r43.0
+// the destination block: B = 4 dp gy + 16 gx (its header x and y), read whole, merged, written whole
+mul (1|M0)               r9.2<1>:ud    r2.1<0;1,0>:ud    r1.4<0;1,0>:uw  // dp gy (dp: CURBE dword 2, word 4: the :uw subregister counts words)
+shl (1|M0)               r9.2<1>:ud    r9.2<0;1,0>:ud    2:ud              // 4 dp gy
+add (1|M0)               r9.2<1>:ud    r9.2<0;1,0>:ud    r2.0<0;1,0>:ud  // + 16 gx
+mov (8|M0)               r4.0<1>:ud    r0.0<8;8,1>:ud
+and (1|M0)               r4.0<1>:ud    r9.2<0;1,0>:ud    0x00003fff:ud
+shr (1|M0)               r4.1<1>:ud    r9.2<0;1,0>:ud    14:ud
+mov (1|M0)               r4.2<1>:ud    0xF:ud
+send (16|M0)             r50:ud        r4:ud     0xC  0x02190000     // the destination's block as it is (entry 0)
+mov (4|M0)               r5.0<1>:ud    r50.0<1;1,0>:ud
+cmp (1|M0)    (gt)f0.0   null:d        r3.2<0;1,0>:d     0:d                // pixel 0 is in the row
+(f0.0) mov (1|M0)        r5.0<1>:ud    r40.0<0;1,0>:ud
+cmp (1|M0)    (gt)f0.0   null:d        r3.2<0;1,0>:d     1:d
+(f0.0) mov (1|M0)        r5.1<1>:ud    r41.0<0;1,0>:ud
+cmp (1|M0)    (gt)f0.0   null:d        r3.2<0;1,0>:d     2:d
+(f0.0) mov (1|M0)        r5.2<1>:ud    r42.0<0;1,0>:ud
+cmp (1|M0)    (gt)f0.0   null:d        r3.2<0;1,0>:d     3:d
+(f0.0) mov (1|M0)        r5.3<1>:ud    r43.0<0;1,0>:ud
+send (16|M0)             acc0:uw       r4:d      0xC  0x060A8000     // the block written whole (entry 0)
+mov (8|M0)               r112.0<1>:ud  r0.0<8;8,1>:ud
+send (16|M0)             null:uw       r112:d    0x27 0x02000010 {EOT}

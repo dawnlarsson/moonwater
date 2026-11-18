@@ -486,3 +486,85 @@ kernel cp
 0x0c800031, 0x20000a40, 0x06000080, 0x060a8000, ; cp, word 1984
 0x00600001, 0x2e000208, 0x008d0000, 0x00000000, ; cp, word 2000
 0x07800031, 0x20000a40, 0x06000e00, 0x82000010, ; cp, word 2016
+; scale (op 7): d[y * dp + x] = s[ytab[y] * sp + xtab[x]] for x below w and y below the rows, 4 bytes a pixel, nearest, the tables made by the
+; processor (xtab's w entries at the CURBE's table base, ytab's rows after them, each the source's index). Four pixels a thread, one 16-byte block
+; of the row. Every surface is read and written linear, as a 2D surface 16384 bytes a row (byte B at x = B & 16383, y = B >> 14), so the pitch
+; of the source is any and the destination's is whole 16-byte groups. The tables are read on binding table entry 2 (block reads), the source on
+; entry 1 one pixel a block (its first dword is the pixel), the destination on entry 0 (read and merged, then written whole, so the last block of a
+; row keeps the bytes past the row). Written in Gen9 assembly, src/canvas/gpu_i915_scale.iga (iga64 -a -p=9); the CURBE is sp (a word), w, dp (a word).
+kernel scale
+0x00000041, 0x20400208, 0x06000004, 0x00000010, ; scale, mul (1|M0) r2.0<1>:ud r0.1<0;1,0>:ud 0x10:ud
+0x00000001, 0x20440208, 0x00000018, 0x00000000, ; scale, mov (1|M0) r2.1<1>:ud r0.6<0;1,0>:ud
+0x00600001, 0x20c00208, 0x008d0000, 0x00000000, ; scale, mov (8|M0) r6.0<1>:ud r0.0<8;8,1>:ud
+0x00000001, 0x20c80608, 0x00000000, 0x0000000f, ; scale, mov (1|M0) r6.2<1>:ud 0xF:ud
+0x00000005, 0x20c00208, 0x06000040, 0x00003fff, ; scale, and (1|M0) r6.0<1>:ud r2.0<0;1,0>:ud 0x3FFF:ud
+0x00000008, 0x20c40208, 0x06000040, 0x0000000e, ; scale, shr (1|M0) r6.1<1>:ud r2.0<0;1,0>:ud 0xE:ud
+0x0c800031, 0x20a00208, 0x060000c0, 0x02190002, ; scale, send (16|M0) r5 r6 0xC 0x02190002
+0x00000040, 0x20600208, 0x02000024, 0x00000044, ; scale, add (1|M0) r3.0<1>:ud r1.1<0;1,0>:ud r2.1<0;1,0>:ud
+0x00000009, 0x20600208, 0x06000060, 0x00000002, ; scale, shl (1|M0) r3.0<1>:ud r3.0<0;1,0>:ud 0x2:ud
+0x00600001, 0x21000208, 0x008d0000, 0x00000000, ; scale, mov (8|M0) r8.0<1>:ud r0.0<8;8,1>:ud
+0x00000001, 0x21080608, 0x00000000, 0x0000000f, ; scale, mov (1|M0) r8.2<1>:ud 0xF:ud
+0x00000005, 0x21000208, 0x06000060, 0x00003fff, ; scale, and (1|M0) r8.0<1>:ud r3.0<0;1,0>:ud 0x3FFF:ud
+0x00000008, 0x21040208, 0x06000060, 0x0000000e, ; scale, shr (1|M0) r8.1<1>:ud r3.0<0;1,0>:ud 0xE:ud
+0x0c800031, 0x20e00208, 0x06000100, 0x02190002, ; scale, send (16|M0) r7 r8 0xC 0x02190002
+0x00000041, 0x21200208, 0x120000e0, 0x00000020, ; scale, mul (1|M0) r9.0<1>:ud r7.0<0;1,0>:ud r1.0<0;1,0>:uw
+0x00000008, 0x20640208, 0x06000040, 0x00000002, ; scale, shr (1|M0) r3.1<1>:ud r2.0<0;1,0>:ud 0x2:ud
+0x00000040, 0x20600a28, 0x0a000024, 0x00004064, ; scale, add (1|M0) r3.0<1>:d r1.1<0;1,0>:d -r3.1<0;1,0>:d
+0x05000002, 0x20680a28, 0x0e000060, 0x00000004, ; scale, sel (1|M0) (lt)f0.0 r3.2<1>:d r3.0<0;1,0>:d 4:d
+0x04000002, 0x20680a28, 0x0e000068, 0x00000000, ; scale, sel (1|M0) (ge)f0.0 r3.2<1>:d r3.2<0;1,0>:d 0:d
+0x00000040, 0x27800208, 0x02000120, 0x000000a0, ; scale, add (1|M0) r60.0<1>:ud r9.0<0;1,0>:ud r5.0<0;1,0>:ud
+0x00000009, 0x27800208, 0x06000780, 0x00000002, ; scale, shl (1|M0) r60.0<1>:ud r60.0<0;1,0>:ud 0x2:ud
+0x06000010, 0x20000a20, 0x0e000068, 0x00000000, ; scale, cmp (1|M0) (le)f0.0 null<1>:d r3.2<0;1,0>:d 0:d
+0x00010001, 0x27800608, 0x00000000, 0x00000000, ; scale, (f0.0) mov (1|M0) r60.0<1>:ud 0x0:ud
+0x00600001, 0x23c00208, 0x008d0000, 0x00000000, ; scale, mov (8|M0) r30.0<1>:ud r0.0<8;8,1>:ud
+0x00000005, 0x23c00208, 0x06000780, 0x00003fff, ; scale, and (1|M0) r30.0<1>:ud r60.0<0;1,0>:ud 0x3FFF:ud
+0x00000008, 0x23c40208, 0x06000780, 0x0000000e, ; scale, shr (1|M0) r30.1<1>:ud r60.0<0;1,0>:ud 0xE:ud
+0x00000001, 0x23c80608, 0x00000000, 0x0000000f, ; scale, mov (1|M0) r30.2<1>:ud 0xF:ud
+0x0c800031, 0x25000208, 0x060003c0, 0x02190001, ; scale, send (16|M0) r40 r30 0xC 0x02190001
+0x00000040, 0x27a00208, 0x02000120, 0x000000a4, ; scale, add (1|M0) r61.0<1>:ud r9.0<0;1,0>:ud r5.1<0;1,0>:ud
+0x00000009, 0x27a00208, 0x060007a0, 0x00000002, ; scale, shl (1|M0) r61.0<1>:ud r61.0<0;1,0>:ud 0x2:ud
+0x06000010, 0x20000a20, 0x0e000068, 0x00000001, ; scale, cmp (1|M0) (le)f0.0 null<1>:d r3.2<0;1,0>:d 1:d
+0x00010001, 0x27a00608, 0x00000000, 0x00000000, ; scale, (f0.0) mov (1|M0) r61.0<1>:ud 0x0:ud
+0x00600001, 0x23e00208, 0x008d0000, 0x00000000, ; scale, mov (8|M0) r31.0<1>:ud r0.0<8;8,1>:ud
+0x00000005, 0x23e00208, 0x060007a0, 0x00003fff, ; scale, and (1|M0) r31.0<1>:ud r61.0<0;1,0>:ud 0x3FFF:ud
+0x00000008, 0x23e40208, 0x060007a0, 0x0000000e, ; scale, shr (1|M0) r31.1<1>:ud r61.0<0;1,0>:ud 0xE:ud
+0x00000001, 0x23e80608, 0x00000000, 0x0000000f, ; scale, mov (1|M0) r31.2<1>:ud 0xF:ud
+0x0c800031, 0x25200208, 0x060003e0, 0x02190001, ; scale, send (16|M0) r41 r31 0xC 0x02190001
+0x00000040, 0x27c00208, 0x02000120, 0x000000a8, ; scale, add (1|M0) r62.0<1>:ud r9.0<0;1,0>:ud r5.2<0;1,0>:ud
+0x00000009, 0x27c00208, 0x060007c0, 0x00000002, ; scale, shl (1|M0) r62.0<1>:ud r62.0<0;1,0>:ud 0x2:ud
+0x06000010, 0x20000a20, 0x0e000068, 0x00000002, ; scale, cmp (1|M0) (le)f0.0 null<1>:d r3.2<0;1,0>:d 2:d
+0x00010001, 0x27c00608, 0x00000000, 0x00000000, ; scale, (f0.0) mov (1|M0) r62.0<1>:ud 0x0:ud
+0x00600001, 0x24000208, 0x008d0000, 0x00000000, ; scale, mov (8|M0) r32.0<1>:ud r0.0<8;8,1>:ud
+0x00000005, 0x24000208, 0x060007c0, 0x00003fff, ; scale, and (1|M0) r32.0<1>:ud r62.0<0;1,0>:ud 0x3FFF:ud
+0x00000008, 0x24040208, 0x060007c0, 0x0000000e, ; scale, shr (1|M0) r32.1<1>:ud r62.0<0;1,0>:ud 0xE:ud
+0x00000001, 0x24080608, 0x00000000, 0x0000000f, ; scale, mov (1|M0) r32.2<1>:ud 0xF:ud
+0x0c800031, 0x25400208, 0x06000400, 0x02190001, ; scale, send (16|M0) r42 r32 0xC 0x02190001
+0x00000040, 0x27e00208, 0x02000120, 0x000000ac, ; scale, add (1|M0) r63.0<1>:ud r9.0<0;1,0>:ud r5.3<0;1,0>:ud
+0x00000009, 0x27e00208, 0x060007e0, 0x00000002, ; scale, shl (1|M0) r63.0<1>:ud r63.0<0;1,0>:ud 0x2:ud
+0x06000010, 0x20000a20, 0x0e000068, 0x00000003, ; scale, cmp (1|M0) (le)f0.0 null<1>:d r3.2<0;1,0>:d 3:d
+0x00010001, 0x27e00608, 0x00000000, 0x00000000, ; scale, (f0.0) mov (1|M0) r63.0<1>:ud 0x0:ud
+0x00600001, 0x24200208, 0x008d0000, 0x00000000, ; scale, mov (8|M0) r33.0<1>:ud r0.0<8;8,1>:ud
+0x00000005, 0x24200208, 0x060007e0, 0x00003fff, ; scale, and (1|M0) r33.0<1>:ud r63.0<0;1,0>:ud 0x3FFF:ud
+0x00000008, 0x24240208, 0x060007e0, 0x0000000e, ; scale, shr (1|M0) r33.1<1>:ud r63.0<0;1,0>:ud 0xE:ud
+0x00000001, 0x24280608, 0x00000000, 0x0000000f, ; scale, mov (1|M0) r33.2<1>:ud 0xF:ud
+0x0c800031, 0x25600208, 0x06000420, 0x02190001, ; scale, send (16|M0) r43 r33 0xC 0x02190001
+0x00000041, 0x21280208, 0x12000044, 0x00000028, ; scale, mul (1|M0) r9.2<1>:ud r2.1<0;1,0>:ud r1.4<0;1,0>:uw
+0x00000009, 0x21280208, 0x06000128, 0x00000002, ; scale, shl (1|M0) r9.2<1>:ud r9.2<0;1,0>:ud 0x2:ud
+0x00000040, 0x21280208, 0x02000128, 0x00000040, ; scale, add (1|M0) r9.2<1>:ud r9.2<0;1,0>:ud r2.0<0;1,0>:ud
+0x00600001, 0x20800208, 0x008d0000, 0x00000000, ; scale, mov (8|M0) r4.0<1>:ud r0.0<8;8,1>:ud
+0x00000005, 0x20800208, 0x06000128, 0x00003fff, ; scale, and (1|M0) r4.0<1>:ud r9.2<0;1,0>:ud 0x3FFF:ud
+0x00000008, 0x20840208, 0x06000128, 0x0000000e, ; scale, shr (1|M0) r4.1<1>:ud r9.2<0;1,0>:ud 0xE:ud
+0x00000001, 0x20880608, 0x00000000, 0x0000000f, ; scale, mov (1|M0) r4.2<1>:ud 0xF:ud
+0x0c800031, 0x26400208, 0x06000080, 0x02190000, ; scale, send (16|M0) r50 r4 0xC 0x02190000
+0x00400001, 0x20a00208, 0x00200640, 0x00000000, ; scale, mov (4|M0) r5.0<1>:ud r50.0<1;1,0>:ud
+0x03000010, 0x20000a20, 0x0e000068, 0x00000000, ; scale, cmp (1|M0) (gt)f0.0 null<1>:d r3.2<0;1,0>:d 0:d
+0x00010001, 0x20a00208, 0x00000500, 0x00000000, ; scale, (f0.0) mov (1|M0) r5.0<1>:ud r40.0<0;1,0>:ud
+0x03000010, 0x20000a20, 0x0e000068, 0x00000001, ; scale, cmp (1|M0) (gt)f0.0 null<1>:d r3.2<0;1,0>:d 1:d
+0x00010001, 0x20a40208, 0x00000520, 0x00000000, ; scale, (f0.0) mov (1|M0) r5.1<1>:ud r41.0<0;1,0>:ud
+0x03000010, 0x20000a20, 0x0e000068, 0x00000002, ; scale, cmp (1|M0) (gt)f0.0 null<1>:d r3.2<0;1,0>:d 2:d
+0x00010001, 0x20a80208, 0x00000540, 0x00000000, ; scale, (f0.0) mov (1|M0) r5.2<1>:ud r42.0<0;1,0>:ud
+0x03000010, 0x20000a20, 0x0e000068, 0x00000003, ; scale, cmp (1|M0) (gt)f0.0 null<1>:d r3.2<0;1,0>:d 3:d
+0x00010001, 0x20ac0208, 0x00000560, 0x00000000, ; scale, (f0.0) mov (1|M0) r5.3<1>:ud r43.0<0;1,0>:ud
+0x0c800031, 0x20000a40, 0x06000080, 0x060a8000, ; scale, send (16|M0) null:uw r4:d 0xC 0x060A8000
+0x00600001, 0x2e000208, 0x008d0000, 0x00000000, ; scale, mov (8|M0) r112.0<1>:ud r0.0<8;8,1>:ud
+0x07800031, 0x20000a40, 0x06000e00, 0x82000010, ; scale, send (16|M0) null:uw r112:d 0x27 0x02000010 {EOT}
