@@ -335,6 +335,13 @@ static const struct
     {"ctrl", ROVER_CHORD_CTRL}, {"alt", ROVER_CHORD_ALT}, {"shift", ROVER_CHORD_SHIFT}, {"super", ROVER_CHORD_SUPER},
 };
 
+/*
+        A run of digits as a number, refused the moment the next digit would
+        take it past what a b64 holds: a literal never wraps into a value it
+        does not say (922337203685477580880 was 80). The compiler's literals
+        and the settings files the runner reads share it.
+*/
+#define ROVER_DIGITS_MOST 9223372036854775807ll
 static bool rover_digits(const p8 address_to text, positive length, positive address_to at, b64 address_to into,
                          positive address_to count)
 {
@@ -343,9 +350,11 @@ static bool rover_digits(const p8 address_to text, positive length, positive add
 
         while (*at < length && text[*at] >= '0' && text[*at] <= '9')
         {
-                if (value > (b64)922337203685477580ll)
+                b64 digit = text[*at] - '0';
+
+                if (value > (ROVER_DIGITS_MOST - digit) / 10)
                         return false;
-                value = value * 10 + (text[*at] - '0');
+                value = value * 10 + digit;
                 (*at)++;
         }
         *into = value;
@@ -454,7 +463,7 @@ static bool rover_literal(struct rover_build address_to build, const struct rove
                 b64 scale = 1;
                 positive from;
 
-                if (word->quoted || !rover_digits(text, length, &at, &whole, &count) || whole > 100000000)
+                if (word->quoted || !rover_digits(text, length, &at, &whole, &count))
                         return rover_refused(build, "", word, " is not a duration, as 500ms or 2s is");
                 part = 0;
                 from = at;
@@ -469,9 +478,15 @@ static bool rover_literal(struct rover_build address_to build, const struct rove
                 for (positive unit = 0; unit < 6; unit++)
                         if (rover_bytes_are(text + at, length - at, rover_unit_names[unit]))
                         {
-                                if ((part * rover_units[unit]) % scale)
+                                b64 one = rover_units[unit];
+
+                                //      Bounded before each multiply: an hour's count of a day's worth wrapped (5124096h
+                                //      was 25 minutes), and so did a fraction of one.
+                                if (whole > ROVER_DURATION_MOST / one)
+                                        return rover_refused(build, "", word, " is longer than a day");
+                                if (one % scale ? (part * one) % scale : 0)
                                         return rover_refused(build, "", word, " is finer than a nanosecond");
-                                *into = whole * rover_units[unit] + part * rover_units[unit] / scale;
+                                *into = whole * one + (one % scale ? part * one / scale : part * (one / scale));
                                 if (*into > ROVER_DURATION_MOST)
                                         return rover_refused(build, "", word, " is longer than a day");
                                 return true;
@@ -2261,9 +2276,22 @@ static fn rover_operand_put(struct rover_text address_to text, const struct rove
                 rover_puts(text, "(");
                 for (positive at = 0; at < asked->count; at++)
                 {
+                        struct rover_operand argument = asked->argument[at];
+
                         if (at)
                                 rover_puts(text, ", ");
-                        rover_operand_put(text, table, event, asked->argument[at]);
+                        //      A call's quoted argument is read with no escapes (rover_read_call), so it is written with
+                        //      none: its bytes between two quotes, as they were read.
+                        if (argument.source == ROVER_CONST_WORD &&
+                            (memory_copy(&length, table->pool + argument.index, 2),
+                             !rover_bare(table->pool + argument.index + 2, length)))
+                        {
+                                rover_puts(text, "\"");
+                                rover_put(text, table->pool + argument.index + 2, length);
+                                rover_puts(text, "\"");
+                        }
+                        else
+                                rover_operand_put(text, table, event, argument);
                 }
                 rover_puts(text, ")");
                 return;

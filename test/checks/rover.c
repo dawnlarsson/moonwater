@@ -1215,7 +1215,7 @@ static bool rover_round(const char address_to text)
 {
         positive size;
 
-        if (!rover_compile(&rover_one, (const p8 address_to)text, string_length((string_address)text)))
+        if (!rover_compiled(text))
                 return false;
         size = rover_one.size;
         memory_copy(rover_printed, rover_built(&rover_one), size);
@@ -1243,6 +1243,20 @@ static fn rover_check_red(void)
                 check("red: a 256th is refused with its reason, not cut to none",
                       !rover_compile(&rover_one, rover_red_text, used) && rover_holds_why("more than 255 actions before its else"));
         }
+        //      R-compiler-2 and 3: a literal never wraps, and a duration is bounded before its unit's multiply.
+        check("red: a literal past what a number holds is refused, not wrapped to its last digits",
+              !rover_compiled("rule a\n\ton lid close\n\tset charge limit 922337203685477580880\n") &&
+                  !rover_compiled("rule a\n\ton lid close\n\tdo backlight 922337203685477580880%\n") &&
+                  !rover_compiled("rule a\n\ton lid close\n\tdo latency 922337203685477580811s\n"));
+        check("red: 5124096h is longer than a day, not 25 minutes",
+              !rover_compiled("rule a\n\ton lid close\n\tdo latency 5124096h\n") && rover_holds_why("longer than a day"));
+        check("red: and 24h is a day", rover_compiled("rule a\n\ton lid close\n\tdo latency 24h\n"));
+        //      R-compiler-4 and 5: what prints reads back as the same table.
+        check("red: a duration of a nanosecond past a second prints as what reads back",
+              rover_round("rule a\n\ton lid close\n\tdo latency 1.000000001s\n") &&
+                  rover_round("rule a\n\tevery 1.000000001s\n\tdo log x\n"));
+        check("red: a call's quoted argument with a backslash prints as it was read",
+              rover_round("rule a\n\ton window opened\n\tif string_length(\"a\\\\b\") > 1\n\tdo log x\n"));
 }
 
 b32 main(void)
