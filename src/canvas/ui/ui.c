@@ -22770,6 +22770,223 @@ static fn ui_icon(struct ui address_to ui, int which, int left, int top, int siz
         }
 }
 
+/*
+        A file's symbol (ui_file_icon): what an entry of a folder is, drawn as the symbols are, from parts on the grid of 24 in halves and not
+        from a file, at 16 device pixels a side in a row and 32 in a tile, every edge on a whole pixel at the size asked, so it is as sharp
+        at every scale. A folder is an outline with a tab, shut or open; a file a page with its corner folded, and what is on the page says
+        what it is: lines of text, a heading over lines (a document), a hill under a sun (a picture), a note (sound), a play mark (a
+        film), a zip (an archive), and a program's page shaded within with a prompt on it (a file one may run, by its mode). At 28 pixels
+        and up a page that has an extension wears it as a label across it, in capitals in a band of the symbol's colour (".C", ".MD"),
+        real text cut to the band. A drive, the home folder and the bin have their own. A link is any of them with a small square at its
+        foot holding an arrow out (UI_FILE_LINKED). The colour is the kind's: a folder's amber, a program's green (each a shade the theme's
+        ground keeps readable), any other the ink it is given.
+*/
+enum
+{
+        UI_FILE_FOLDER,      // a folder, shut
+        UI_FILE_FOLDER_OPEN, // a folder that is open (the tree's node shown, a folder a drag is over)
+        UI_FILE_PLAIN,       // a file of no kind it is known by
+        UI_FILE_TEXT,        // text: source, notes, configuration
+        UI_FILE_IMAGE,       // a picture
+        UI_FILE_AUDIO,       // a sound
+        UI_FILE_VIDEO,       // a film
+        UI_FILE_ARCHIVE,     // an archive or a disk's image
+        UI_FILE_PROGRAM,     // a file one may run (its mode says so): a program or a script
+        UI_FILE_DOCUMENT,    // a document: pages, sheets, slides
+        UI_FILE_DRIVE,       // a disk: the root, a mount
+        UI_FILE_HOME,        // the home folder
+        UI_FILE_TRASH,       // the bin
+        UI_FILE_SPECIAL,     // a device, a pipe, a socket
+        UI_FILE_KINDS
+};
+#define UI_FILE_LINKED 0x100u // with a kind: it is a link to one (the arrow at its foot)
+#define UI_FILE_ROW_ICON 16   // logical pixels a side: a file's symbol before its label in a row
+#define UI_FILE_TILE_ICON 32  // and over it in a tile
+#define UI_FILE_PARTS 12
+#define UI_ICON_SHADE 4 // a part: a filled box at a third of the colour
+
+static const struct ui_icon_part ui_file_parts[UI_FILE_KINDS][UI_FILE_PARTS] = {
+        [UI_FILE_FOLDER] = {{UI_ICON_RING, 4, 8, 20, 15, 0}, {UI_ICON_RING, 4, 13, 44, 40, 0}},
+        [UI_FILE_FOLDER_OPEN] = {{UI_ICON_RING, 4, 8, 20, 15, 0}, {UI_ICON_LINE, 4, 13, 4, 40, 0}, {UI_ICON_LINE, 4, 13, 38, 13, 0}, {UI_ICON_LINE, 38, 13, 38, 21, 0},
+                                 {UI_ICON_LINE, 11, 21, 46, 21, 0}, {UI_ICON_LINE, 46, 21, 40, 40, 0}, {UI_ICON_LINE, 11, 21, 4, 40, 0}, {UI_ICON_LINE, 4, 40, 40, 40, 0}},
+        [UI_FILE_TEXT] = {{UI_ICON_LINE, 15, 21, 33, 21, 0}, {UI_ICON_LINE, 15, 27, 33, 27, 0}, {UI_ICON_LINE, 15, 33, 33, 33, 0}, {UI_ICON_LINE, 15, 39, 26, 39, 0}},
+        [UI_FILE_DOCUMENT] = {{UI_ICON_BOX, 15, 18, 33, 24, 0}, {UI_ICON_LINE, 15, 30, 33, 30, 0}, {UI_ICON_LINE, 15, 36, 30, 36, 0}},
+        [UI_FILE_IMAGE] = {{UI_ICON_BOX, 15, 16, 22, 23, 4}, {UI_ICON_LINE, 14, 38, 21, 28, 0}, {UI_ICON_LINE, 21, 28, 27, 35, 0}, {UI_ICON_LINE, 25, 32, 29, 27, 0},
+                           {UI_ICON_LINE, 29, 27, 35, 38, 0}, {UI_ICON_LINE, 14, 38, 35, 38, 0}},
+        [UI_FILE_AUDIO] = {{UI_ICON_BOX, 14, 32, 22, 40, 4}, {UI_ICON_LINE, 21, 17, 21, 36, 0}, {UI_ICON_LINE, 21, 17, 31, 21, 0}, {UI_ICON_LINE, 31, 21, 31, 25, 0}},
+        [UI_FILE_VIDEO] = {{UI_ICON_LINE, 18, 21, 18, 37, 0}, {UI_ICON_LINE, 18, 21, 31, 29, 0}, {UI_ICON_LINE, 31, 29, 18, 37, 0}},
+        [UI_FILE_ARCHIVE] = {{UI_ICON_BOX, 22, 5, 26, 9, 0}, {UI_ICON_BOX, 22, 11, 26, 15, 0}, {UI_ICON_BOX, 22, 17, 26, 21, 0}, {UI_ICON_RING, 20, 24, 28, 34, 1}},
+        [UI_FILE_PROGRAM] = {{UI_ICON_SHADE, 11, 14, 37, 43, 0}, {UI_ICON_LINE, 15, 23, 21, 28, 0}, {UI_ICON_LINE, 21, 28, 15, 33, 0}, {UI_ICON_LINE, 23, 35, 32, 35, 0}},
+        [UI_FILE_DRIVE] = {{UI_ICON_RING, 4, 15, 44, 35, 3}, {UI_ICON_BOX, 34, 23, 39, 28, 2}, {UI_ICON_LINE, 10, 25, 26, 25, 0}},
+        [UI_FILE_HOME] = {{UI_ICON_LINE, 4, 24, 24, 6, 0}, {UI_ICON_LINE, 24, 6, 44, 24, 0}, {UI_ICON_LINE, 10, 20, 10, 42, 0}, {UI_ICON_LINE, 38, 20, 38, 42, 0},
+                          {UI_ICON_LINE, 10, 42, 38, 42, 0}, {UI_ICON_RING, 20, 30, 28, 42, 0}},
+        [UI_FILE_TRASH] = {{UI_ICON_LINE, 7, 12, 41, 12, 0}, {UI_ICON_RING, 18, 6, 30, 12, 1}, {UI_ICON_LINE, 12, 12, 15, 43, 0}, {UI_ICON_LINE, 36, 12, 33, 43, 0},
+                           {UI_ICON_LINE, 15, 43, 33, 43, 0}, {UI_ICON_LINE, 20, 18, 20, 37, 0}, {UI_ICON_LINE, 28, 18, 28, 37, 0}},
+        [UI_FILE_SPECIAL] = {{UI_ICON_RING, 8, 8, 40, 40, 16}, {UI_ICON_BOX, 20, 20, 28, 28, 4}},
+};
+
+// The page every file kind is drawn on: its outline with the top right corner folded, and the fold.
+static const struct ui_icon_part ui_file_page[7] = {
+        {UI_ICON_LINE, 10, 4, 29, 4, 0}, {UI_ICON_LINE, 29, 4, 38, 13, 0}, {UI_ICON_LINE, 38, 13, 38, 44, 0}, {UI_ICON_LINE, 10, 44, 38, 44, 0},
+        {UI_ICON_LINE, 10, 4, 10, 44, 0}, {UI_ICON_LINE, 29, 4, 29, 13, 0}, {UI_ICON_LINE, 29, 13, 38, 13, 0},
+};
+
+/*
+        Parts on the grid, size to a side from left, top (device pixels), in argb. A stroke along the grid is a box with square ends that
+        reach half its width past its points, so two strokes that meet at a corner close it; one across the grid is the chevron's stroke.
+*/
+static fn ui_icon_draw_parts(struct ui address_to ui, const struct ui_icon_part address_to parts, int count, int left, int top, int size, unsigned int argb)
+{
+        b32 thick = ui_icon_stroke(size), half = thick / 512 * 256;
+
+        for (int at = 0; at < count && parts[at].kind; at++)
+        {
+                const struct ui_icon_part address_to part = &parts[at];
+                struct ui_box box = {ui_icon_at(left, size, part->x0), ui_icon_at(top, size, part->y0), ui_icon_at(left, size, part->x1), ui_icon_at(top, size, part->y1),
+                                     (b32)(part->r * size * 256 / 48), (b32)(part->r * size * 256 / 48)};
+
+                if (part->kind == UI_ICON_BOX)
+                        ui_kit_fill(ui, &box, argb, null);
+                else if (part->kind == UI_ICON_SHADE)
+                        ui_kit_fill(ui, &box, (argb & 0xffffffu) | (argb >> 24) / 3 << 24, null);
+                else if (part->kind == UI_ICON_RING)
+                        ui_kit_ring(ui, &box, thick, argb);
+                else if (box.x0 == box.x1 || box.y0 == box.y1)
+                {
+                        b32 x0 = box.x0 < box.x1 ? box.x0 : box.x1, x1 = box.x0 < box.x1 ? box.x1 : box.x0, y0 = box.y0 < box.y1 ? box.y0 : box.y1, y1 = box.y0 < box.y1 ? box.y1 : box.y0;
+
+                        if (box.y0 == box.y1)
+                                ui_kit_fill(ui, &(struct ui_box){x0 - half, y0 - half, x1 - half + thick, y0 - half + thick, 0, 0}, argb, null);
+                        else
+                                ui_kit_fill(ui, &(struct ui_box){x0 - half, y0 - half, x0 - half + thick, y1 - half + thick, 0, 0}, argb, null);
+                }
+                else
+                        ui_chevron_stroke(ui, box.x0 - thick / 2, box.y0 - thick / 2, box.x1 - thick / 2, box.y1 - thick / 2, thick, argb);
+        }
+}
+
+// The colour of a kind's symbol: a folder's amber and a program's green, a shade of each that reads on the theme's ground (a light
+// theme's darker), and any other kind the ink given.
+static unsigned int ui_file_tone(const struct ui address_to ui, int kind, unsigned int ink)
+{
+        b32 light = ui_kit_light(ui);
+
+        if (kind == UI_FILE_FOLDER || kind == UI_FILE_FOLDER_OPEN)
+                return light ? 0xffa87a00u : 0xffffe055u;
+        if (kind == UI_FILE_PROGRAM)
+                return light ? 0xff1f8a2eu : 0xff6be27au;
+        return ink;
+}
+
+// Whether a kind is drawn on the page (a file's), not on its own outline (a folder's, a drive's).
+static inline b32 ui_file_paged(int kind)
+{
+        return kind >= UI_FILE_PLAIN && kind <= UI_FILE_DOCUMENT;
+}
+
+/*
+        A file's symbol of a kind (UI_FILE_*, with UI_FILE_LINKED for a link), size to a side with its top left at left, top (device pixels).
+        ink is what a kind with no colour of its own is drawn in (the row's words' ink). label is the extension a page wears at 28 pixels and
+        up (".TXT", at most five bytes shown), or none.
+*/
+static fn ui_file_icon(struct ui address_to ui, unsigned int kind_flags, const char address_to label, int left, int top, int size, unsigned int ink)
+{
+        int kind = (int)(kind_flags & 0xffu);
+        unsigned int tone;
+
+        if (kind < 0 || kind >= UI_FILE_KINDS || size <= 0)
+                return;
+        tone = ui_file_tone(ui, kind, ink);
+        if (ui_file_paged(kind))
+                ui_icon_draw_parts(ui, ui_file_page, 7, left, top, size, tone);
+        ui_icon_draw_parts(ui, ui_file_parts[kind], UI_FILE_PARTS, left, top, size, tone);
+        // The extension's label across the page, from just past its left edge: the band in the symbol's colour, its letters in the colour
+        // that stands out from it.
+        if (label && label[0] && size >= ui_dev(ui, 28) && (kind == UI_FILE_PLAIN || kind == UI_FILE_TEXT || kind == UI_FILE_DOCUMENT || kind == UI_FILE_PROGRAM))
+        {
+                char shown[8];
+                int points = 8, x0 = (int)(ui_icon_at(left, size, 4) >> 8), x1 = (int)(ui_icon_at(left, size, 36) >> 8);
+                int y0 = (int)(ui_icon_at(top, size, 28) >> 8), y1 = (int)(ui_icon_at(top, size, 40) >> 8), width;
+
+                string_copy_bounded((string_address)shown, (string_address)label, 6);
+                for (int at = 0; shown[at]; at++)
+                        shown[at] = shown[at] >= 'a' && shown[at] <= 'z' ? (char)(shown[at] - 32) : shown[at];
+                ui_kit_fill(ui, &(struct ui_box){(b32)x0 << 8, (b32)y0 << 8, (b32)x1 << 8, (b32)y1 << 8, 0, 0}, tone, null);
+                width = ui_kit_measure_at(ui, (string_address)shown, UI_LABEL_LARGE, points);
+                ui_kit_text_between_at(ui, x0 + ui_dev(ui, 1), y1 - (y1 - y0 - ui_dev(ui, points) * 7 / 10) / 2, (string_address)shown, UI_LABEL_LARGE, points,
+                                       0xff000000u | window_contrast(tone & 0xffffffu), 0, x0, x1 > x0 + width + ui_dev(ui, 1) ? x0 + width + ui_dev(ui, 1) : x1);
+        }
+        // A link: a square at the foot of the symbol, the ground's colour with an outline, and an arrow out of it.
+        if (kind_flags & UI_FILE_LINKED)
+        {
+                unsigned int ground = ui->glass ? 0xff000000u | ui->ground : ui_role(UI_SURFACE) | 0xff000000u;
+                struct ui_box box = {ui_icon_at(left, size, 0), ui_icon_at(top, size, 28), ui_icon_at(left, size, 20), ui_icon_at(top, size, 48), 0, 0};
+                static const struct ui_icon_part arrow[3] = {{UI_ICON_LINE, 5, 43, 15, 33, 0}, {UI_ICON_LINE, 9, 33, 15, 33, 0}, {UI_ICON_LINE, 15, 33, 15, 39, 0}};
+
+                ui_kit_fill(ui, &box, ground, null);
+                ui_kit_ring(ui, &box, ui_icon_stroke(size), ink);
+                ui_icon_draw_parts(ui, arrow, 3, left, top, size, ink);
+        }
+}
+
+// A name's extension in lower case into into (at most room - 1 bytes), and the text after its last dot, or "" (a dot at the start is a
+// hidden name's, not an extension's).
+static const char address_to ui_file_extension(const char address_to name, char address_to into, int room)
+{
+        const char address_to dot = null;
+        int at = 0;
+
+        for (const char address_to c = name; c && *c; c++)
+                if (*c == '.' && c != name)
+                        dot = c;
+        if (!dot)
+                return into[0] = 0, into;
+        for (const char address_to c = dot + 1; *c && at < room - 1; c++)
+                into[at++] = *c >= 'A' && *c <= 'Z' ? (char)(*c + 32) : *c;
+        into[at] = 0;
+        return into;
+}
+
+/*
+        The kind of a folder's entry from its name and its mode (st_mode: the type in its top bits, the permissions in its low ones): a
+        folder is a folder, a device, a pipe or a socket special; a regular file is its extension's kind where the name has one it is known
+        by, else plain; one anyone may run is a program before any of that. A link's kind is what it names, which the caller looks at (a link it could
+        not follow is plain) and marks UI_FILE_LINKED.
+*/
+static int ui_file_kind(const char address_to name, unsigned int mode)
+{
+        static const struct { const char *words; unsigned char kind; } known[] = {
+                {" txt md markdown rst c h cc cpp cxx hpp hh py sh bash zsh js mjs ts json toml yaml yml ini conf cfg log csv tsv xml html htm css "
+                 "rs go java kt rb pl lua s asm mk cmake diff patch tex sql nix rover ", UI_FILE_TEXT},
+                {" png jpg jpeg gif bmp webp svg ico tif tiff ppm pgm pbm qoi avif heic ", UI_FILE_IMAGE},
+                {" mp3 ogg oga flac wav opus m4a aac mid midi aiff ", UI_FILE_AUDIO},
+                {" mp4 mkv webm avi mov m4v ogv mpg mpeg ", UI_FILE_VIDEO},
+                {" tar gz tgz xz txz zst bz2 zip 7z rar lz4 lzma iso img deb rpm apk cpio jar ", UI_FILE_ARCHIVE},
+                {" pdf doc docx odt rtf epub xls xlsx ods ppt pptx odp ", UI_FILE_DOCUMENT},
+        };
+        unsigned int type = mode & 0170000u;
+        char extension[12], word[16];
+
+        if (type == 0040000u)
+                return UI_FILE_FOLDER;
+        if (type && type != 0100000u)
+                return UI_FILE_SPECIAL;
+        // One anyone may run is a program, whatever its name says (a script's .sh is the text it is as well, and running it is what it is for).
+        if (mode & 0111u)
+                return UI_FILE_PROGRAM;
+        ui_file_extension(name, extension, sizeof(extension));
+        if (extension[0] && string_length((string_address)extension) < sizeof(word) - 3)
+        {
+                word[0] = ' ';
+                string_copy_bounded((string_address)word + 1, (string_address)extension, sizeof(word) - 2);
+                string_append_bounded((string_address)word, (string_address) " ", sizeof(word));
+                for (unsigned int at = 0; at < sizeof(known) / sizeof(known[0]); at++)
+                        if (string_find((string_address)known[at].words, (string_address)word))
+                                return known[at].kind;
+        }
+        return UI_FILE_PLAIN;
+}
+
 // The symbol of a kit program, by the app_id it says (its name: ui_app_run), or -1 for a program that is none of the kit's.
 static int ui_icon_of(const char *app_id)
 {
@@ -23618,6 +23835,8 @@ struct ui_row
         const char address_to cells[UI_COLUMNS_MOST]; // under a list's columns: the words of each column after the first (the label's)
         int indent;                        // levels the label is set in by (a tree's rows), UI_INDENT logical pixels each
         int icon;                          // a tile's symbol, UI_ICON_* + 1 (0 none)
+        unsigned int file;                 // a folder's entry's symbol, UI_FILE_* + 1 with UI_FILE_LINKED (0 none): before its label in a row, over it in a tile
+        const char address_to extension;   // the label a file's symbol wears in a tile (its extension), or none
         const char address_to label;       // at the left
         const char address_to about;       // under the label, in the quiet ink: what the row does (a list whose words wrap)
         const char address_to value;       // at the right
@@ -24979,6 +25198,14 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
 
                 x += k ? gap : pad + set_in;
                 w -= (k ? gap : pad + set_in) + gap;
+                // A folder's entry has its symbol before its label, 16 pixels a side, the label after it.
+                if (!k && row->file && w > 0)
+                {
+                        int size = ui_dev(ui, UI_FILE_ROW_ICON);
+
+                        ui_file_icon(ui, row->file - 1, null, ui_mirror(x, size, left, span), y + (height - size) / 2, size, quiet);
+                        x += size + ui_dev(ui, 8), w -= size + ui_dev(ui, 8);
+                }
                 if (!words || !words[0] || w <= 0)
                         continue;
                 shown = ui_fit(ui, (string_address)words, UI_BODY_MEDIUM, w, cut, sizeof(cut));
@@ -25181,7 +25408,7 @@ static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int
         struct ui_row row;
         int wide = ui_dev(ui, l->tiles), per = ui_list_per(ui, l), x = ui_mirror(l->x + id % per * wide, wide, l->x, l->w);
         int pad = ui_dev(ui, 3), small = height <= ui_dev(ui, UI_ROW), size = small ? ui_dev(ui, 20) : ui_dev(ui, 40), width, at;
-        unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE);
+        unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         char cut[UI_CUT_TEXT];
         string_address shown;
         struct ui_box box = {(b32)(x + pad) << 8, (b32)(y + pad) << 8, (b32)(x + wide - pad) << 8, (b32)(y + height - pad) << 8, 0, 0};
@@ -25198,7 +25425,9 @@ static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int
         {
                 // A small symbol before the label, both on the tile's line.
                 at = ui_dev(ui, 8);
-                if (row.icon)
+                if (row.file)
+                        size = ui_dev(ui, UI_FILE_ROW_ICON), ui_file_icon(ui, row.file - 1, null, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, quiet);
+                else if (row.icon)
                         ui_icon(ui, row.icon - 1, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, 0, strong);
                 at += size + ui_dev(ui, 8);
                 shown = ui_fit(ui, (string_address)(row.label ? row.label : ""), UI_BODY_MEDIUM, wide - at - ui_dev(ui, 8), cut, sizeof(cut));
@@ -25207,7 +25436,11 @@ static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int
                             UI_BODY_MEDIUM, strong, 0);
                 return;
         }
-        if (row.icon)
+        // A file's symbol is 32 pixels a side, its extension on it, in the room a 40 pixel symbol has.
+        if (row.file)
+                size = ui_dev(ui, UI_FILE_TILE_ICON),
+                ui_file_icon(ui, row.file - 1, row.extension, x + (wide - size) / 2, y + ui_dev(ui, 16), size, strong);
+        else if (row.icon)
                 ui_icon(ui, row.icon - 1, x + (wide - size) / 2, y + ui_dev(ui, 12), size, 0, strong);
         shown = ui_fit(ui, (string_address)(row.label ? row.label : ""), UI_LABEL_MEDIUM, wide - 2 * pad - ui_dev(ui, 8), cut, sizeof(cut));
         width = ui_kit_measure(ui, shown, UI_LABEL_MEDIUM);

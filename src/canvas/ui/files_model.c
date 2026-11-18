@@ -113,6 +113,7 @@ struct files_entry
         p16 length;    // the name's bytes
         p8 kind;       // FILES_KIND_*
         p8 looked;     // its size, time and inode are the kernel's: 0 when the look failed and its kind is the directory record's
+        p16 mode;      // its type and permissions (st_mode), a link's those of what it names (0 when that is gone): what its symbol says it is
         p64 size;
         b64 modified;  // seconds since 1970
         p64 inode;
@@ -530,8 +531,11 @@ static b32 files_listing_take(struct files_model address_to m, struct files_list
         l->names_used += (p32)length + 1;
         if (looked == 0)
         {
-                entry->kind = files_kind_of(facts.mode), entry->looked = 1;
+                entry->kind = files_kind_of(facts.mode), entry->looked = 1, entry->mode = (p16)facts.mode;
                 entry->size = facts.size, entry->modified = facts.modified.seconds, entry->inode = facts.inode;
+                // A link's symbol is what it names, looked at through it once; a link to nothing is a link to a plain file.
+                if (entry->kind == FILES_KIND_LINK)
+                        entry->mode = file_look_code(m->reader.handle, (string_address)record->d_name, 0, &facts) == 0 ? (p16)facts.mode : 0;
                 entry->device_major = facts.device_major, entry->device_minor = facts.device_minor;
                 entry->born = facts.created.seconds, entry->born_part = facts.created.nanoseconds;
         }

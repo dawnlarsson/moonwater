@@ -5526,6 +5526,58 @@ static fn check_kit_stripes(void)
               (accent & 0xffffffu) == (ui_role(UI_PRIMARY) & 0xffffffu) && accent >> 24 == UI_LIST_STRIPE_ACCENT && ui_list_stripe_colour(&ui, &l) == 0x40123456u);
 }
 
+/*
+        A file's symbol: its kind from its name and mode (a folder by its mode whatever its name, one anyone may run a program whatever its
+        extension, an extension it is known by in either case, a device special, none plain), and drawn crisp: a shut folder at 16 and at
+        32 pixels a side, at scale 100 and 200, has every pixel it touches the folder's colour whole or the ground (no grey edge), is as
+        wide at 32 as twice at 16 within two pixels (the stroke is one pixel at 16 and two at 32), and stays in its box.
+*/
+static fn check_kit_file_icons(void)
+{
+        static unsigned int pixels[128 * 128], scratch[128 * UI_SCRATCH_ROWS];
+        struct ui ui = terminal.ui;
+        b32 kinds, crisp = true;
+        int wide[2] = {0, 0};
+
+        kinds = ui_file_kind("notes.TXT", 0100644u) == UI_FILE_TEXT && ui_file_kind("photo.png", 0100644u) == UI_FILE_IMAGE &&
+                ui_file_kind("song.flac", 0100644u) == UI_FILE_AUDIO && ui_file_kind("clip.mkv", 0100644u) == UI_FILE_VIDEO &&
+                ui_file_kind("pack.tar.gz", 0100644u) == UI_FILE_ARCHIVE && ui_file_kind("report.pdf", 0100644u) == UI_FILE_DOCUMENT &&
+                ui_file_kind("run.sh", 0100755u) == UI_FILE_PROGRAM && ui_file_kind("tool", 0100700u) == UI_FILE_PROGRAM &&
+                ui_file_kind("dir.png", 0040755u) == UI_FILE_FOLDER && ui_file_kind("null", 0020666u) == UI_FILE_SPECIAL &&
+                ui_file_kind(".profile", 0100644u) == UI_FILE_PLAIN && ui_file_kind("data.xyz", 0100644u) == UI_FILE_PLAIN &&
+                ui_file_kind("Makefile", 0100644u) == UI_FILE_PLAIN;
+        check("file symbols: a kind from the mode and the extension: a folder by its mode, a program by its run bits, text, picture, sound, film, archive, document, special, plain", kinds);
+
+        ui.pixels = pixels, ui.pitch = 128, ui.width = 128, ui.height = 128, ui.top = 0, ui.bottom = 128, ui.scene = null;
+        ui.scratch = scratch, ui.scratch_width = 128, ui.band_top = ui.band_bottom = 0, ui.glass = false, ui.opaque = true;
+        for (int scale = 100; scale <= 200; scale += 100)
+                for (int k = 0; k < 2; k++)
+                {
+                        int size, left = 128, right = -1;
+                        unsigned int tone;
+
+                        ui.scale = scale;
+                        size = ui_dev(&ui, k ? 32 : 16);
+                        tone = ui_file_tone(&ui, UI_FILE_FOLDER, 0xffffffffu);
+                        for (int p = 0; p < 128 * 128; p++)
+                                pixels[p] = 0xff000000u;
+                        ui_file_icon(&ui, UI_FILE_FOLDER, null, 4, 4, size, 0xffffffffu);
+                        for (int p = 0; p < 128 * 128; p++)
+                        {
+                                if (pixels[p] == 0xff000000u)
+                                        continue;
+                                crisp = crisp && (pixels[p] & 0xffffffu) == (tone & 0xffffffu);
+                                left = p % 128 < left ? p % 128 : left, right = p % 128 > right ? p % 128 : right;
+                        }
+                        crisp = crisp && left >= 4 && right < 4 + size;
+                        if (scale == 100)
+                                wide[k] = right - left + 1;
+                }
+        check("file symbols: a shut folder at 16 and 32 pixels, scale 100 and 200, is its colour whole or the ground at every pixel, inside its box, twice as wide at 32 within the stroke",
+              crisp && wide[0] > 0 && (wide[1] - 2 * wide[0] <= 2 && 2 * wide[0] - wide[1] <= 2));
+        ui.scale = 100;
+}
+
 static fn check_kit_pull_parts(void)
 {
         static unsigned int pixels[400 * 200], picture[400 * 200], scratch[400 * UI_SCRATCH_ROWS];

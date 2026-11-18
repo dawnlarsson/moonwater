@@ -247,8 +247,7 @@ static positive files_name_text(char address_to into, positive room, const struc
 {
         positive used = room > 2 ? ui_label_foreign(into, room - 1, files_model_name(m, entry), entry->length) : 0;
 
-        if (room > 2 && (entry->kind == FILES_KIND_DIRECTORY || entry->kind == FILES_KIND_LINK))
-                into[used++] = entry->kind == FILES_KIND_DIRECTORY ? '/' : '@', into[used] = 0;
+        (void)entry;
         return used;
 }
 
@@ -297,6 +296,53 @@ static fn files_type_text(char address_to into, positive room, const struct file
         string_copy_bounded((string_address)into, (string_address)WORDS(files_sheet_file), room);
 }
 
+static b32 files_tree_trash(const p8 address_to name, positive length);
+
+// Whether the folder name in the folder at path is the home folder ($HOME).
+static b32 files_is_home(const p8 address_to path, const p8 address_to name, positive length)
+{
+        static string_address home;
+        positive at;
+
+        if (!home && !(home = getenv((string_address) "HOME")))
+                home = (string_address) "";
+        at = string_length((string_address)path);
+        at = at == 1 ? 0 : at; // the root's folders are "/" and the name
+        return home[0] && !memory_compare(home, path, at) && home[at] == '/' && !memory_compare(home + at + 1, name, length) && !home[at + 1 + length];
+}
+
+// What an entry's symbol is (UI_FILE_*, a link's marked UI_FILE_LINKED): the kit's kind of its name and mode, a folder's open while a
+// drag is over it, and the home folder and the bin their own where they are listed.
+static unsigned int files_symbol(const struct files_model address_to m, const struct files_entry address_to entry)
+{
+        const p8 address_to name = files_model_name(m, entry);
+        p32 mode = entry->looked ? entry->mode : entry->kind == FILES_KIND_DIRECTORY ? 0040000u : entry->kind == FILES_KIND_FILE ? 0100000u : 0;
+        unsigned int kind = (unsigned int)ui_file_kind((const char address_to)name, mode);
+
+        if (kind == UI_FILE_FOLDER && files_is_home(m->path, name, entry->length))
+                kind = UI_FILE_HOME;
+        else if (kind == UI_FILE_FOLDER && files_tree_trash(name, entry->length))
+                kind = UI_FILE_TRASH;
+        return kind | (entry->kind == FILES_KIND_LINK ? UI_FILE_LINKED : 0);
+}
+
+// The extension a file's symbol wears in a tile: its name's last dot on, a dot first not counting, or none.
+static const char address_to files_extension_label(const struct files_model address_to m, const struct files_entry address_to entry)
+{
+        static char label[8];
+        const p8 address_to name = files_model_name(m, entry);
+        char extension[8];
+
+        if (entry->kind == FILES_KIND_DIRECTORY)
+                return null;
+        ui_file_extension((const char address_to)name, extension, sizeof(extension));
+        if (!extension[0] || string_length((string_address)extension) > 4)
+                return null;
+        label[0] = '.';
+        string_copy_bounded((string_address)label + 1, (string_address)extension, sizeof(label) - 1);
+        return label;
+}
+
 // A row, for the kit's list: the entry at that place of the listing (the list is virtual: a row's id is its place), as cells under the
 // columns (its name, a file's size, its type, when it was changed), and a dot before the name of one that is chosen.
 static fn files_describe(int id, struct ui_row address_to row)
@@ -318,11 +364,15 @@ static fn files_describe(int id, struct ui_row address_to row)
         }
         files_type_text(type, sizeof(type), m, entry);
         row->cells[1] = size, row->cells[2] = type, row->cells[3] = when;
-        row->icon = 1 + (entry->kind == FILES_KIND_DIRECTORY ? UI_ICON_FILES
-                         : entry->kind == FILES_KIND_LINK    ? UI_ICON_LINK
-                         : entry->kind == FILES_KIND_FILE    ? UI_ICON_EDITOR
-                                                             : UI_ICON_WINDOW);
+        row->file = 1 + files_symbol(m, entry);
+        row->extension = files_extension_label(m, entry);
         row->mark = files_model_chosen(m, (p32)id) && m->chosen_count > 1;
+}
+
+// Whether a folder's name is a bin's (.Trash, Trash).
+static b32 files_tree_trash(const p8 address_to name, positive length)
+{
+        return (length == 6 && !memory_compare(name, ".Trash", 6)) || (length == 5 && !memory_compare(name, "Trash", 5));
 }
 
 // A node of the folder tree, for its list: its name set in by its depth, a chevron before it unless it was read to have no folders, and
@@ -339,6 +389,19 @@ static fn files_tree_describe(int id, struct ui_row address_to row)
         row->label = label;
         row->indent = n->depth;
         row->expander = n->open ? UI_ROW_EXPANDER_OPEN : n->read && !n->has ? 0 : UI_ROW_EXPANDER_SHUT;
+        // Its symbol: the root a drive, the home folder its own, any other a folder, open where it is open.
+        {
+                static p8 path[FILES_PATH];
+                positive length = files_tree_path(t, (p32)id, path) ? string_length((string_address)path) : 0;
+                static string_address home;
+
+                if (!home && !(home = getenv((string_address) "HOME")))
+                        home = (string_address) "";
+                row->file = 1 + (length == 1 ? UI_FILE_DRIVE
+                                 : length && string_equals((string_address)path, home) ? UI_FILE_HOME
+                                 : files_tree_trash(files_tree_name(t, (p32)id), n->length) ? UI_FILE_TRASH
+                                 : n->open ? UI_FILE_FOLDER_OPEN : UI_FILE_FOLDER);
+        }
 }
 
 static fn files_tree_damaged(int top, int bottom)
