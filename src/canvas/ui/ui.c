@@ -23572,6 +23572,10 @@ struct ui_list
         struct ui_columns address_to columns;  // a details view's: its rows are drawn as cells under these (ui_columns), none else
         b32 tree;                          // a tree's: each row's label set in by its indent, its expander's chevron before it (ui_list_cells)
         b32 beside;                        // a view's list beside another (two panes): its rows run across its own column, not the window
+        // A rubber band over the rows (ui_list_band_*): held while a press drags it, from its press (x0, y0) to the hand, device pixels, the
+        // press's y held to the rows as they scroll under it (band_at: the content's y it was pressed at).
+        b32 band;
+        int band_x0, band_x1, band_y1, band_at;
 };
 
 static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_row address_to row)
@@ -25152,6 +25156,25 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         l->pointer_y = pointer_y;
         // The rows' own span, which a row's band reaches to the window's edge across (row_x, row_w), and the list's where it has none
         ui_scroll_pull(ui, &l->scroll, drawn, l->row_w ? l->row_x : l->x, l->y, l->row_w ? l->row_w : l->w, l->h);
+        // A rubber band: a well of the accent over what it holds, its edge in the accent.
+        if (l->band)
+        {
+                int top = l->y + l->band_at - l->scroll.scroll, bottom = l->band_y1;
+                int left = l->band_x0 < l->band_x1 ? l->band_x0 : l->band_x1, right = l->band_x0 < l->band_x1 ? l->band_x1 : l->band_x0;
+                unsigned int accent = ui_role(UI_PRIMARY) & 0xffffffu;
+                struct ui_box box;
+
+                if (bottom < top)
+                        bottom = top, top = l->band_y1;
+                top = top < l->y ? l->y : top, bottom = bottom > l->y + l->h ? l->y + l->h : bottom;
+                ui->top = l->y, ui->bottom = l->y + l->h;
+                box = (struct ui_box){(b32)left << 8, (b32)top << 8, (b32)(right + 1) << 8, (b32)(bottom + 1) << 8, 0, 0};
+                if (bottom > top && right > left)
+                {
+                        ui_kit_fill(ui, &box, 0x40000000u | accent, null);
+                        ui_kit_ring(ui, &box, ui_q8(ui, 1), 0xff000000u | accent);
+                }
+        }
         // Where a drag over it would be dropped: the kit's focus ring round that row, or round the whole list.
         if (l->drop)
         {
@@ -25193,6 +25216,49 @@ static fn ui_list_let_go(const struct ui address_to ui, struct ui_list address_t
                 ui_kit_ripples_exit(trailing);
         ui_list_damage(ui, l, l->down);
         l->down = -1;
+}
+
+/*
+        A rubber band over a list's rows: begun at a press (ui_list_band_begin), followed by the hand (ui_list_band_follow, which answers
+        whether it moved), and the rows it holds asked for (ui_list_band_rows: the first and last row of the whole list it crosses, false
+        for none). The press's end is held to the rows, so rows scrolled under a band that is held are still in it; ended at the release
+        (ui_list_band_end). A virtual list's rows are one height, so the rows are worked out and not looked for.
+*/
+static fn ui_list_band_begin(struct ui_list address_to l, int x, int y)
+{
+        l->band = true, l->band_x0 = l->band_x1 = x, l->band_y1 = y;
+        l->band_at = y - l->y + l->scroll.scroll;
+}
+
+static b32 ui_list_band_follow(struct ui_list address_to l, int x, int y)
+{
+        b32 moved = x != l->band_x1 || y != l->band_y1;
+
+        if (!l->band)
+                return false;
+        l->band_x1 = x, l->band_y1 = y;
+        return moved;
+}
+
+static b32 ui_list_band_rows(const struct ui address_to ui, const struct ui_list address_to l, int address_to first, int address_to last)
+{
+        int row = ui_dev(ui, UI_ROW), from = l->band_at, to = l->band_y1 - l->y + l->scroll.scroll, swap;
+
+        if (!l->band || !l->virtual || row < 1 || !l->total)
+                return false;
+        if (from > to)
+                swap = from, from = to, to = swap;
+        from = from < 0 ? 0 : from / row, to = to < 0 ? -1 : to / row;
+        to = to >= l->total ? l->total - 1 : to;
+        if (to < from || from >= l->total)
+                return false;
+        *first = from, *last = to;
+        return true;
+}
+
+static fn ui_list_band_end(struct ui_list address_to l)
+{
+        l->band = false;
 }
 
 /*

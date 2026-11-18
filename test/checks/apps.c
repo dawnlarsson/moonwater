@@ -932,6 +932,7 @@ static fn editor_readonly_check(struct ui address_to wui);
 static fn field_check(struct ui address_to wui);
 static fn popmenu_bar_check(struct ui address_to wui);
 static fn drop_check(struct ui address_to wui);
+static fn band_check(struct ui address_to wui);
 
 /*
         An error's underline in a code view is a wave one pixel tall at 100 percent, a row under the text. The line was the scale's
@@ -1009,6 +1010,37 @@ static fn drop_check(struct ui address_to wui)
         memory_zero(&drop, sizeof(drop));
         check("drop: a drag over a target carries where it is and the person's Control (what makes a drop of files a copy)",
               ui_drop_event(&drop, &over) == UI_DROP_OVER && drop.x == 9 && drop.y == 7 && drop.keys == WINDOW_KEY_CONTROL);
+}
+
+/*
+        A rubber band over a virtual list: from its press to the hand it holds the rows it crosses, either way up, kept to the list's rows;
+        its press is held to the rows, so rows scrolled under it while it is held stay in it; and it holds none where it crosses none.
+*/
+static fn band_check(struct ui address_to wui)
+{
+        static struct ui_list l;
+        int first = -1, last = -1, row;
+        b32 down, up, scrolled, none;
+
+        wui->scale = 100;
+        row = ui_dev(wui, UI_ROW);
+        memory_zero(&l, sizeof(l));
+        l.virtual = true, l.total = 50, l.y = 100, l.h = 10 * row;
+        ui_list_band_begin(&l, 10, 100 + row + 2);
+        ui_list_band_follow(&l, 30, 100 + 3 * row + 2);
+        down = ui_list_band_rows(wui, &l, &first, &last) && first == 1 && last == 3;
+        ui_list_band_follow(&l, 30, 100 + 2);
+        up = ui_list_band_rows(wui, &l, &first, &last) && first == 0 && last == 1;
+        l.scroll.scroll = 5 * row;
+        ui_list_band_follow(&l, 30, 100 + 2);
+        scrolled = ui_list_band_rows(wui, &l, &first, &last) && first == 1 && last == 5;
+        ui_list_band_end(&l);
+        none = !ui_list_band_rows(wui, &l, &first, &last);
+        l.total = 0;
+        ui_list_band_begin(&l, 10, 110);
+        none = none && !ui_list_band_rows(wui, &l, &first, &last);
+        check("band: a rubber band holds the rows it crosses either way up, its press held to the rows as they scroll, and none when it is over or crosses none",
+              down && up && scrolled && none);
 }
 
 /*
@@ -1463,6 +1495,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         field_check(&wui);
         popmenu_bar_check(&wui);
         drop_check(&wui);
+        band_check(&wui);
         squiggle_check(&wui);
         ui_over_check();
 }

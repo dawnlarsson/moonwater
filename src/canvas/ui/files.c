@@ -1324,6 +1324,21 @@ static b32 files_act(int which)
         return true;
 }
 
+/* ---- the rubber band ---- */
+
+// Whether a press at (x, y) begins a rubber band: on the rows' ground past the last row, or on a row away from its name (the columns
+// after the first, where the hand would only choose it).
+static b32 files_band_at(int x, int y)
+{
+        struct ui_list address_to l = &files.big->list;
+        int row;
+
+        if (x < l->x || x >= l->x + l->w || y < l->y || y >= l->y + l->h)
+                return false;
+        row = ui_list_hit(&files.ui, l, x, y);
+        return row < 0 || ui_point(x, files.columns.x, files.columns.w) >= files.columns.at[1];
+}
+
 /* ---- the menu and the properties sheet ---- */
 
 // Words from outside for a menu's line: a name's & doubled, which the menu would read as the next letter's key.
@@ -2093,6 +2108,23 @@ static b32 files_event(const struct window_event address_to event)
         case WINDOW_EVENT_KEY:
                 return !down || ui_key_modifier((int)event->a) ? true : files_key(event);
         case WINDOW_EVENT_MOTION:
+                // A rubber band held: the rows it crosses are the ones chosen, the cursor on the row the hand is at.
+                if (l->band)
+                {
+                        int first, last;
+
+                        if (ui_list_band_follow(l, event->a, event->b) && ui_list_band_rows(ui, l, &first, &last))
+                        {
+                                b32 down_band = event->b >= l->y + l->band_at - l->scroll.scroll;
+
+                                files_model_choose(m, (p32)(down_band ? first : last), FILES_CHOOSE_ONLY);
+                                files_model_choose(m, (p32)(down_band ? last : first), FILES_CHOOSE_RANGE);
+                        }
+                        else if (!ui_list_band_rows(ui, l, &first, &last))
+                                files_model_choose_none(m), m->revision++;
+                        files.dirty = true;
+                        break;
+                }
                 // A row pressed and taken past the slop: the rows dragged out, as files, copied or moved; the list's press is the drag's now.
                 if (ui_drag_past(ui, &files.drag, event->a, event->b))
                 {
@@ -2164,6 +2196,34 @@ static b32 files_event(const struct window_event address_to event)
                                 else
                                         files_tree_go((p32)node);
                         }
+                        break;
+                }
+                // A rubber band: a press of the left button on the rows' ground (past the last row) or on a row away from its name (in the
+                // columns after the first) begins one, choosing that row as a click would; its release ends it. A press on a row's name chooses
+                // it and may drag it out (below).
+                if (event->a == UI_POINTER_LEFT && !down && l->band)
+                {
+                        ui_list_band_end(l);
+                        break;
+                }
+                if (event->a == UI_POINTER_LEFT && down && !files.editing && files_band_at(ui_kit.pointer_x, ui_kit.pointer_y))
+                {
+                        int at = ui_list_hit(ui, l, ui_kit.pointer_x, ui_kit.pointer_y);
+
+                        files.crumb_keys = files.tree_keys = false;
+                        if (at >= 0 && (p32)at == files.clicked && (b64)ui_kit.now - files.clicked_at <= ui_click_ns)
+                        {
+                                files.clicked = FILES_NO;
+                                files_open((p32)at);
+                                break;
+                        }
+                        files_model_choose_none(m);
+                        if (at >= 0)
+                                files_model_choose(m, (p32)at, FILES_CHOOSE_ONLY), files.clicked = (p32)at, files.clicked_at = (b64)ui_kit.now;
+                        else
+                                m->cursor = FILES_NO, files.clicked = FILES_NO;
+                        m->revision++;
+                        ui_list_band_begin(l, ui_kit.pointer_x, ui_kit.pointer_y);
                         break;
                 }
                 // The right button: the menu of the row under the pointer (chosen alone first, unless it is among those chosen), or of the
