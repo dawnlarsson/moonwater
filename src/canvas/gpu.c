@@ -14,7 +14,7 @@ static struct { positive va, maps, top; } gpu_window = {GPU_AMD_VA, GPU_AMD_VA_M
 #define GPU_VA (gpu_window.va)
 #define GPU_VA_MAPS (gpu_window.maps)
 #define GPU_VA_END (gpu_window.top) // never past GPU_VA_RECORD
-static positive gpu_map_next = GPU_AMD_VA_MAPS; // where the next map or import is placed (gpu_place): from GPU_VA_MAPS of the window
+static positive gpu_map_next = GPU_AMD_VA_MAPS; // where the next map or import is placed (gpu_place_aligned): from GPU_VA_MAPS of the window
 #define GPU_BASES_AT 40960 // the table of bases a text op names (its word 6, bits 16 to 23: 255 addresses of 8 bytes, number 0 is the buffer's start and is not read)
 #define GPU_DATA 45056 // the pixels start here; before them: packets at 0, arguments after the packets, the kernels from 1024 (or after the arguments), the bases from GPU_BASES_AT
 // The two slots a job is built in, used in turn so that the next job is written while one runs: slot k's packets at GPU_PACKETS * k (the driver's room for a
@@ -234,7 +234,6 @@ typedef char gpu_amd_slots_fit[GPU_SLOTS * GPU_AMD_PACKETS + 256 * GPU_SLOTS <= 
 typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + sizeof(gpu_k_image) + 256 * 9 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
 
 #define gpu_io(dir, n, size, a) (GPU_CONTROL(gpu.fd, GPU_IO(dir, n, size), a) == 0)
-static b32 gpu_wait_asked(p64 *wait);
 #ifndef GPU_WAIT_CS
 #define GPU_WAIT_CS(wait) gpu_wait_asked(wait) // a check puts a fake fence here
 #endif
@@ -1157,20 +1156,6 @@ static long gpu_dmabuf_in(int dmabuf)
         return made < 0 ? made : (long)prime.handle;
 }
 
-// A memfd page made sealed for the udmabuf driver (F_SEAL_SHRINK), its dma-buf: the descriptor, or -errno.
-static long gpu_dmabuf_probe_make(void)
-{
-        long memfd = system_call_2(syscall(memfd_create), (positive) "moonwater-gpu", 1 | 2), made; // MFD_CLOEXEC | MFD_ALLOW_SEALING
-
-        if (memfd < 0)
-                return memfd;
-        system_truncate_handle((int)memfd, 4096);
-        system_call_3(syscall(fcntl), (positive)memfd, 1033, 2); // F_ADD_SEALS, F_SEAL_SHRINK
-        made = gpu_dmabuf_make((int)memfd, 0, 4096);
-        system_close((int)memfd);
-        return made;
-}
-
 static void gpu_say_kernel(void);
 static b32 gpu_idle(void);
 static unsigned int gpu_test_hash(void);
@@ -1183,11 +1168,16 @@ static b32 gpu_image_ok;
 // is refused is served by them (the fallback). A step that fails is kept as gpu_req.route with its error; the card still composes.
 static void gpu_route_probe(void)
 {
-        long made = gpu_dmabuf_probe_make();
+        // A memfd page made sealed for the udmabuf driver (F_SEAL_SHRINK), its dma-buf: the descriptor, or -errno.
+        long memfd = system_call_2(syscall(memfd_create), (positive) "moonwater-gpu", 1 | 2), made = memfd; // MFD_CLOEXEC | MFD_ALLOW_SEALING
         enum gpu_req step = GPU_REQ_UDMABUF;
-        b32 failed = made < 0;
-        unsigned int e = failed ? (unsigned int)-made & 255 : 0;
+        b32 failed;
+        unsigned int e;
 
+        if (memfd >= 0)
+                system_truncate_handle((int)memfd, 4096), system_call_3(syscall(fcntl), (positive)memfd, 1033, 2), made = gpu_dmabuf_make((int)memfd, 0, 4096),
+                system_close((int)memfd); // F_ADD_SEALS, F_SEAL_SHRINK
+        failed = made < 0, e = failed ? (unsigned int)-made & 255 : 0;
         GPU_STEP_FAKE(GPU_REQ_UDMABUF, failed, e);
         if (failed)
         {
@@ -1242,9 +1232,6 @@ static void gpu_stop(void)
 // The first card that is one the kernels are for, with bytes of pixels behind the page of commands, and one context. Every prerequisite is a step (gpu_req):
 // the node, the driver, the family, userptr, a dma-buf through udmabuf and PRIME, the buffer and context, the self-test's picture and the ring that drew it.
 // False if any step is refused, the first kept in gpu_req; a card that another driver or family has is passed over, and not hung by code that is not its own.
-static unsigned int gpu_text_put(char *to, unsigned int at, unsigned int room, const char *words);
-static unsigned int gpu_text_num(char *to, unsigned int at, unsigned int room, positive value, unsigned int base);
-
 // A device's name on its bus ("0000:c5:00.0"), from the text that names the device: the last part of a path (sysfs's link from a node to its device,
 // "../../../0000:c5:00.0"), or a bus as the kernel's DRM says it, with its kind before it ("pci:0000:c5:00.0"). The text is length bytes and no 0 after them
 // is counted on. Into, 0-ended; false, and "", for a text with no name or a name that does not fit.
@@ -1343,6 +1330,16 @@ static positive gpu_nodes_seen(void)
         return seen | 1;
 }
 
+// Whether a file the owner puts in /run/moonwater is there (looked for at each start).
+static b32 gpu_flag(const char *path)
+{
+        long off = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
+
+        if (off >= 0)
+                system_close((int)off);
+        return off >= 0;
+}
+
 static b32 gpu_start(positive bytes)
 {
         positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // the last megabyte is the self-test's
@@ -1359,25 +1356,13 @@ static b32 gpu_start(positive bytes)
         memory_zero(&gpu_req, sizeof(gpu_req));
         gpu.fd = -1, gpu.broken = 0, gpu_bytes = bytes, gpu_lost = 0, gpu_gfx103 = 0, gpu_userptr_ok = 0;
         // The test's switch (/run/moonwater/gpu-nouserptr): the table's pages go by the dma-buf route, and no userptr is asked for them.
+        gpu_userptr_off = gpu_flag("/run/moonwater/gpu-nouserptr"), gpu_userptr_gone = 0;
+        gpu_own_userptr = gpu_flag("/run/moonwater/gpu-own-userptr");
+        gpu_round_off = gpu_flag("/run/moonwater/gpu-round-off");
+        gpu_cut_off = gpu_flag("/run/moonwater/gpu-cut-off");
         {
-                long off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-nouserptr", FILE_READ | O_CLOEXEC);
+                long off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-gfx10", FILE_READ | O_CLOEXEC);
 
-                gpu_userptr_off = off >= 0, gpu_userptr_gone = 0;
-                if (off >= 0)
-                        system_close((int)off);
-                off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-own-userptr", FILE_READ | O_CLOEXEC);
-                gpu_own_userptr = off >= 0;
-                if (off >= 0)
-                        system_close((int)off);
-                off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-round-off", FILE_READ | O_CLOEXEC);
-                gpu_round_off = off >= 0;
-                if (off >= 0)
-                        system_close((int)off);
-                off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-cut-off", FILE_READ | O_CLOEXEC);
-                gpu_cut_off = off >= 0;
-                if (off >= 0)
-                        system_close((int)off);
-                off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-gfx10", FILE_READ | O_CLOEXEC);
                 GPU_WIDE_FAKE(off);
                 gpu_wide = off >= 0;
                 if (off >= 0)
@@ -1601,13 +1586,6 @@ static b32 gpu_req_words(char *into, unsigned int room)
 static struct { positive from, to, va, bytes; unsigned int handle, used; b32 written; b32 dma; b32 handed; unsigned int listed; positive offset; void (*pin)(positive offset, b32 on); } gpu_maps[GPU_MAPS];
 static unsigned int gpu_map_count, gpu_tick, gpu_submit_serial; // the submits made, counted from 1: a fault says whether a map was in the bo list of the last
 
-static void gpu_maps_unpin_all(void)
-{
-        for (unsigned int i = 0; i < gpu_map_count; i++)
-                if (gpu_maps[i].dma && gpu_maps[i].pin)
-                        gpu_maps[i].pin(gpu_maps[i].offset, 0);
-}
-
 // The maps and imports let go of, the last GPU_GONE: a fault's address is named by what it was in, and by why it was let go of and how many ticks ago
 // (gpu_fault_say). Each reason is one way a map or an import leaves the table.
 enum gpu_gone_why
@@ -1688,7 +1666,9 @@ static unsigned int gpu_map_why;
 
 static void gpu_maps_reset(void)
 {
-        gpu_maps_unpin_all();
+        for (unsigned int i = 0; i < gpu_map_count; i++)
+                if (gpu_maps[i].dma && gpu_maps[i].pin)
+                        gpu_maps[i].pin(gpu_maps[i].offset, 0);
         gpu_map_count = 0, gpu_map_next = GPU_VA_MAPS;
 }
 
@@ -1708,11 +1688,6 @@ static positive gpu_place_aligned(positive bytes, positive align)
                         at = (to + align - 1) & ~(align - 1), i = ~0u; // past it, and each held one looked at again
         }
         return at + bytes <= GPU_VA_END ? at : 0;
-}
-
-static positive gpu_place(positive bytes)
-{
-        return gpu_place_aligned(bytes, 4096);
 }
 
 // Where an import is placed: at a whole 64 KiB. A client's tiled buffer is laid out in blocks of 64 KiB whose pipe and bank bits are the address's own
@@ -1929,7 +1904,7 @@ static b32 gpu_map_try(const void *addr, positive size, b32 written)
         }
         if (gpu_map_count == GPU_MAPS)
                 return gpu_map_why = 1, false;
-        if (!(at = gpu_place(to - from)))
+        if (!(at = gpu_place_aligned(to - from, 4096)))
                 return gpu_map_why = 2, false;
         if (first && gpu_map_dmabuf(&region, from, to, at, written))
                 return true;
@@ -2017,7 +1992,6 @@ static positive gpu_va_written(const void *pointer, positive bytes)
         return 0;
 }
 
-static b32 gpu_idle(void);
 static void gpu_unimport(positive at, enum gpu_gone_why why);
 static void gpu_release_import(positive at);
 
@@ -2576,7 +2550,7 @@ static int gpu_done(positive sequence)
 // Whether the buffer is the processor's again: no job is pending (the last one submitted is done, or over with its context).
 static b32 gpu_idle(void)
 {
-        return !gpu.pending || gpu_done(gpu.pending) > 0 || !gpu.pending;
+        return !gpu.pending || gpu_done(gpu.pending) > 0;
 }
 
 // The slot the next job is built in: the first when no job is pending, else the one the pending job is not in, once the job before it (in that slot) is
@@ -2655,35 +2629,23 @@ static void gpu_fault_say(positive at)
 }
 
 // One kernel log record ("prio,seq,usec,flags;text") at the time usec: the usec field, as the kernel log clock's microseconds since boot.
-static positive gpu_kmsg_usec(const char *record)
+// The number in field (from 0) of a kernel log record's head, before its ';' ("prio,seq,usec,flags"): 0 for none.
+static positive gpu_kmsg_field(const char *record, unsigned int field)
 {
-        positive usec = 0;
+        positive value = 0;
         unsigned int commas = 0;
 
         for (const char *at = record; *at && *at != ';'; at++)
         {
                 if (*at == ',')
                         commas++;
-                else if (commas == 2 && *at >= '0' && *at <= '9')
-                        usec = usec * 10 + (positive)(*at - '0');
+                else if (commas == field && *at >= '0' && *at <= '9')
+                        value = value * 10 + (positive)(*at - '0');
         }
-        return usec;
+        return value;
 }
-
-static positive gpu_kmsg_seq(const char *record)
-{
-        positive seq = 0;
-        unsigned int commas = 0;
-
-        for (const char *at = record; *at && *at != ';'; at++)
-        {
-                if (*at == ',')
-                        commas++;
-                else if (commas == 1 && *at >= '0' && *at <= '9')
-                        seq = seq * 10 + (positive)(*at - '0');
-        }
-        return seq;
-}
+#define gpu_kmsg_seq(record) gpu_kmsg_field(record, 1)
+#define gpu_kmsg_usec(record) gpu_kmsg_field(record, 2) // the record's time: the kernel log clock's microseconds since boot
 
 static b32 gpu_kmsg_seq_ready;
 static positive gpu_kmsg_floor_seq, gpu_kmsg_seen_seq, gpu_kmsg_last_since;
@@ -2943,7 +2905,7 @@ static enum gpu_end gpu_late_end(void)
         enum gpu_end over = GPU_END_NONE;
         positive now, began;
 
-        if (gpu.pending && !gpu_end_said && !gpu_idle() && !gpu_end_said)
+        if (gpu.pending && !gpu_end_said && !gpu_idle())
         {
                 now = clock_monotonic_nanoseconds();
                 began = gpu_before.sequence && gpu_done(gpu_before.sequence) == 0 ? gpu_before.began : gpu_job_began;
@@ -3008,8 +2970,6 @@ static b32 gpu_map_named(unsigned int i)
 
 #define GPU_AGAIN 32 // the submits a job is asked again after EAGAIN (gpu_submit)
 static unsigned int gpu_jobs_ours; // the jobs refused as our own (GPU_ERR_OURS), which are never asked again
-static unsigned int gpu_jobs_placed; // the jobs refused for an address the card would not pin there (GPU_ERR_PLACE)
-static void gpu_forget(const void *addr, positive bytes);
 #define GPU_PLACE_STEP (256ull << 20)
 
 // After a refusal of a place (GPU_ERR_PLACE): every map let go of (gpu_forget: made again at its next use, at a new address; its span kept until the card is
@@ -3044,7 +3004,7 @@ static positive gpu_submit(void)
         if (!bos) // no memory for the list of the job's buffers: the job is not made, as one too late is not
                 return gpu_end = GPU_END_LATE, 0;
         // A slot whose job may still run is not the next job's: its packets and arguments are that job's (gpu_slot_take is the caller's way to a free one).
-        if (gpu.pending && (gpu_slot == gpu_pending_slot || (gpu_before.sequence && gpu_done(gpu_before.sequence) == 0)) && gpu.pending)
+        if (gpu.pending && (gpu_slot == gpu_pending_slot || (gpu_before.sequence && gpu_done(gpu_before.sequence) == 0)))
                 return gpu_end = GPU_END_LATE, 0;
         gpu_job_began = began; // (the time a refusal reads the kernel's log from; the pending job's own again if it is refused)
         if (!++gpu_submit_serial) // (counted from 1: 0 is a map no submit has named)
@@ -3073,12 +3033,6 @@ static positive gpu_submit(void)
                 kind = gpu_backend->classify(gpu_last_error); // what the errno is to this driver (struct gpu_backend's mapping)
                 // The card lost the context or its VM (amdgpu: ECANCELED after a reset, ENODEV, EINVAL; i915: EIO, a banned context or a wedged GPU, ENODEV):
                 // nothing this job can do again succeeds: the caller recovers (gpu_recover).
-                if (kind == GPU_ERR_LOST)
-                {
-                        gpu_job_error = gpu_last_error, gpu_fault_note(false);
-                        gpu_lost = 1, gpu_job_began = kept, gpu_submit_took = clock_monotonic_nanoseconds() - began;
-                        return 0;
-                }
                 // EAGAIN: a page of a userptr moved between the kernel's taking it and the submit (a migration or a compaction: on the box at a load of 120 one job in
                 // ten), and the kernel asks for the call again, which takes the pages afresh. Asked again up to GPU_AGAIN times with the processor let go of between: three
                 // calls in a row failed the job, the present was the processor's, a list was refused, and three such jobs in a row cooled the card for two seconds.
@@ -3089,23 +3043,18 @@ static positive gpu_submit(void)
                 }
                 // Our own job, wrong as it is (i915's EINVAL: a batch or an object it will not take): the same words are refused the same way again, so it is
                 // not asked again and the card is not lost; the processor draws, and the refusal is counted as any refused job is (three in a row cool the card).
-                if (kind == GPU_ERR_PLACE)
-                {
-                        gpu_jobs_placed++, gpu_job_error = gpu_last_error, gpu_fault_note(false);
-                        gpu_place_elsewhere();
-                        gpu_job_began = kept, gpu_submit_took = clock_monotonic_nanoseconds() - began;
-                        return 0;
-                }
-                if (kind == GPU_ERR_OURS)
-                {
-                        gpu_jobs_ours++, gpu_job_error = gpu_last_error, gpu_fault_note(false);
-                        gpu_job_began = kept, gpu_submit_took = clock_monotonic_nanoseconds() - began;
-                        return 0;
-                }
                 // A page moved under the job as it was submitted, or a map's pages are gone: asked again, without the maps that are, unless the job reads one.
-                if (++tries == 3 || gpu_drop_unmapped())
+                // The card lost (gpu_lost, the caller recovers), or the job is refused for good: a pinned address that is not ours (gpu_place_elsewhere), our own
+                // job wrong as it is (not asked again, the card is not lost), or the third refusal (or the maps that are gone were read).
+                if (kind == GPU_ERR_LOST || kind == GPU_ERR_PLACE || kind == GPU_ERR_OURS || ++tries == 3 || gpu_drop_unmapped())
                 {
                         gpu_job_error = gpu_last_error, gpu_fault_note(false);
+                        if (kind == GPU_ERR_LOST)
+                                gpu_lost = 1;
+                        else if (kind == GPU_ERR_PLACE)
+                                gpu_place_elsewhere();
+                        else if (kind == GPU_ERR_OURS)
+                                gpu_jobs_ours++;
                         gpu_job_began = kept, gpu_submit_took = clock_monotonic_nanoseconds() - began;
                         return 0;
                 }
@@ -3336,19 +3285,6 @@ static b32 gpu_scene_rect(positive bins_at, positive d_at, unsigned int pitch, u
         return true;
 }
 
-// Submit an additional damage rectangle for a scene already binned into bins_at by gpu_scene.
-static b32 gpu_scene_more(positive bins_at, positive d_at, unsigned int pitch, unsigned int w, unsigned int h, unsigned int dx0,
-                          unsigned int dy0, unsigned int dx1, unsigned int dy1)
-{
-        const unsigned int whole[4] = {0, 0, w, h};
-
-        gpu_last_error = 0, gpu_end = GPU_END_NONE;
-        if (!gpu_idle())
-                return false;
-        gpu_slot_take();
-        return !gpu_scene_rect(bins_at, d_at, pitch, w, h, dx0, dy0, dx1, dy1, whole) || gpu_run();
-}
-
 /*
         A scene drawn without a wait: built in the slot gpu_slot_take gives and binned into the side of [bins_at, the buffer's last megabyte) that no pending job
         reads (two sides, used in turn), then submitted (gpu_submit). The job's sequence, which gpu_done, gpu_fence_fd and gpu_wait_job take; 0 when nothing was
@@ -3515,8 +3451,6 @@ static b32 gpu_image_takes(p64 modifier)
         return gpu_amd_image(d, 0x100000, modifier >> 13 & 1 ? 0x200000 : 0, 1920, 1080, modifier, false, false) != 0;
 }
 
-// One small scene of every kind of op, made from nothing but numbers (a generator for the pictures, the covers and the glyph's bitmap), and the hash of its pixels,
-// 0 if the card did not finish it.
 /*
         The card's idle clock: a job after a pause pays the clock's ramp (measured on the box's 610M: the first fill after half a second idle took a
         median of 2.2 ms, back to back 57 us). gpu_wake runs one tiny job when the card has been idle for longer than GPU_WAKE_IDLE, so that whatever the
@@ -3551,7 +3485,7 @@ static void gpu_wake(void)
 */
 static struct
 {
-        unsigned int ctx, epoch, level, asks, refused, error;
+        unsigned int ctx, epoch, level, asks, error;
         positive took;
 } gpu_clocks_state;
 
@@ -3569,7 +3503,7 @@ static unsigned int gpu_clocks(int fd, unsigned int epoch, unsigned int level)
         e = gpu_backend->clocks(fd, level, &gpu_clocks_state.ctx);
         gpu_clocks_state.took = clock_monotonic_nanoseconds() - began, gpu_clocks_state.asks++;
         if (e)
-                gpu_clocks_state.refused++, gpu_clocks_state.error = e;
+                gpu_clocks_state.error = e;
         else
                 gpu_clocks_state.level = level;
         return e;
@@ -3608,6 +3542,8 @@ static unsigned int gpu_test_textpixel(unsigned int dst, unsigned int ink, unsig
         return gpu_test_overv(dst, b | (g << 8) | (r << 16) | (a << 24));
 }
 
+// One small scene of every kind of op, made from nothing but numbers (a generator for the pictures, the covers and the glyph's bitmap), and the hash of its pixels,
+// 0 if the card did not finish it.
 static unsigned int gpu_test_hash(void)
 {
         enum { W = 256, H = 32, W2 = 64, H2 = 16 };
