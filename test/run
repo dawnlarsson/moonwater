@@ -7968,6 +7968,15 @@ gate_gpu_kernels_llvm()
         gpu_kernels_mutant '{"v_xor_b32", GPUASM_VOP2, 0x1d,' '{"v_xor_b32", GPUASM_VOP2, 0x1c,' test/gpu_stress.asm
 }
 
+#       The Intel kernels (src/canvas/gpu_i915.asm, Gen9) are made by build gpu-i915 into the work directory, checked against IGT's rows
+#       by the checker, and held to what --print-intel makes of the same source: a hand build and the build tool write the same array.
+gate_gpu_i915()
+{
+        build_tool gpu-i915 src/canvas/gpu_i915.asm "$work/gpu_i915_gen9.inc" || return 1
+        python3 test/gpu_kernels.py --target intel-gen9 src/canvas/gpu_i915.asm "$work/gpu_i915_gen9.inc" || return 1
+        python3 test/gpu_kernels.py --print-intel src/canvas/gpu_i915.asm | cmp - "$work/gpu_i915_gen9.inc" || return 1
+}
+
 #       The kernels are written for gfx1036 and let onto the rest of gfx10 where the owner asks (gpu.c's gpu_wide): that they are
 #       the same words for those chips is asked of llvm-mc, which is compared with itself, so any LLVM will do.
 gate_gpu_kernels_chips()
@@ -7997,6 +8006,7 @@ lane_gate()
         job hard gate_row gpu-kernels gate_gpu_kernels
         job maybe gate_row gpu-kernels-llvm gate_gpu_kernels_llvm
         job maybe gate_row gpu-kernels-chips gate_gpu_kernels_chips
+        job hard gate_row gpu-i915 gate_gpu_i915
         job hard gate_row inventory gate_inventory
         job hard gate_row engine lane_differential_oracle
         job hard gate_row host-writes python3 test/differential.py --harness host_writes

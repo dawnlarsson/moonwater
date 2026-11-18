@@ -2213,14 +2213,14 @@ struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, r
 typedef char gpu_slots_fit[sizeof(struct gpu_args) <= 256 ? 1 : -1]; // a slot's arguments in its 256 bytes (gpu_start puts the kernels after the last slot's)
 
 /*
-        The Intel set, Gen9 (graphics version 9). Fill (op 1) only so far, so it is NOT registered: GPU_I915_SETS above stays empty until
+        The Intel set, Gen9 (graphics version 9). Copy (op 0) and fill (op 1) so far, so it is NOT registered: GPU_I915_SETS above stays empty until
         all eight ops (copy, fill, tone, glass, cp, bx, scene, scale) pass on a card and the self-test holds.
 
         A fill is bytes: a surface of 4 * w bytes at 4 * dp bytes a row (a 32-bit pixel is four bytes, little endian), the colour's dword
         the payload. The measured rules (Gen9, subtle-cottage): the surface base is 32-byte aligned and the span a multiple of 16 bytes,
-        since a block writes to the end of its 16-byte group. So the GPU takes each row's 32-byte-aligned interior, the span rounded down
-        to 16 bytes, and the head and tail edges are for the processor (gpu_i915_fill_split); a pitch below the span, or one that is not a
-        multiple of 16, cannot be split and is refused.
+        since a block writes to the end of its 16-byte group. gpu_i915_fill_split reports a row's whole part (the card's interior) and
+        its head and tail; a pitch below the span, or one that is not a multiple of 16, cannot be split and is refused. The batch takes a
+        fill only when it is whole on the card (no head and no tail) and refuses the rest: the processor draws all of a refused fill.
 */
 struct gpu_i915_split
 {
@@ -2252,9 +2252,10 @@ static int gpu_i915_fill_split(positive dst, unsigned int span, unsigned int pit
         return 0;
 }
 
-// The batch for one fill: the state region holds the binding table (entry 0 points at the surface state), the surface state (the
-// interior's rows, its base the interior's first byte), the interface descriptor, and at 192 the colour dword the CURBE reads. The card's
-// buffer at GPU_VA is the base of every pointer. Writes only words[0..56) and job->state_at[0..256): its state's room.
+// The batch for one fill: the state region holds the binding table (entry 0 points at the surface state, the binding table's pointer is
+// the state's own offset), the surface state (the row's bytes, its base the first byte, 32-byte aligned), the interface descriptor, and at
+// 192 the colour dword the CURBE reads. The card's buffer at GPU_VA is the base of every pointer. Writes only words[0..56) and
+// job->state_at[0..256): its state's room. A fill the card cannot write whole is refused (0 words), never done in part.
 static void gpu_i915_put(p8 address_to at, unsigned int offset, unsigned int value)
 {
         at[offset + 0] = (unsigned char)value;
@@ -2270,19 +2271,39 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         const struct gpu_args address_to a = (const struct gpu_args address_to)((p8 address_to)job->state_at + delta);
         p8 address_to state = (p8 address_to)job->state_at;
         struct gpu_i915_split s;
-        unsigned int bw[56], n = 0, xg, sbase, pitch, span, i;
+        unsigned int bw[56], n = 0, xg, sbase, pitch, span, spitch, i;
 
-        if (a->op != 1 || a->x0 || a->y0 || !a->w || !a->rows || room < 56 || !job->state_at || job->state < GPU_VA || job->code < GPU_VA)
+        // Whole or nothing: a fill whose edges the card cannot write (a row's head or tail, or a span under 16 bytes) is refused, and the
+        // processor draws all of it. The surface's fields are 14 bits (width and height, minus one, in 13:0 and 29:16) and the pitch 18:
+        // a row of more than 4096 pixels (16384 bytes), more than 16384 rows or a pitch over 256 KiB is refused, not wrapped.
+        if (a->op > 1 || a->x0 || a->y0 || !a->w || !a->rows || a->w > 4096u || a->rows > 16384u || a->dp > 65536u || room < 56 ||
+            !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63))
                 return 0;
         span = 4u * a->w;
         pitch = 4u * a->dp;
-        if (gpu_i915_fill_split(a->d, span, pitch, &s) || !s.span)
-                return 0;     // refused, or nothing for the GPU: the processor draws it
+        if (gpu_i915_fill_split(a->d, span, pitch, &s) || !s.span || s.head || s.tail)
+                return 0;     // refused, or not a whole fill on the card: the processor draws it
+        // A copy's source: the row's bytes read from a 32-byte-aligned base, at a pitch that holds the row in whole 16-byte groups
+        // (the same rules as the destination: a block is read and written as one group), inside the 14-bit surface fields.
+        spitch = 4u * a->sp;
+        if (a->op == 0 && (a->s < GPU_VA || (a->s & 31) || !a->sp || a->sp > 65536u || spitch < span || (spitch & 15)))
+                return 0;
         xg = s.span / 16;
         sbase = (unsigned int)(job->state - GPU_VA);
 
-        // Binding table, entry 0 = the surface state (relative to the surface base, the card's buffer).
+        // Binding table: entry 0 = the destination's surface state, entry 1 = the source's (both relative to the surface base, the card's buffer).
         gpu_i915_put(state, 0, sbase + 64);
+        gpu_i915_put(state, 4, sbase + 256);
+        if (a->op == 0) {
+                // The source's RENDER_SURFACE_STATE at 256, the same fields as the destination's, its base the card's address of the source.
+                gpu_i915_put(state, 256 + 0, (1u << 29) | (0x140u << 18) | (1u << 8) | (1u << 14) | (1u << 16));
+                gpu_i915_put(state, 256 + 4, 1u << 25);
+                gpu_i915_put(state, 256 + 8, (s.span - 1) | ((a->rows - 1) << 16));
+                gpu_i915_put(state, 256 + 12, spitch - 1);
+                gpu_i915_put(state, 256 + 28, (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16));
+                gpu_i915_put(state, 256 + 32, (unsigned int)a->s);
+                gpu_i915_put(state, 256 + 36, (unsigned int)(a->s >> 32));
+        }
         // RENDER_SURFACE_STATE: type 2D, format R8_UNORM (a byte surface), render cache, 4-row halign and valign; MOCS 1; width and height;
         // pitch in bytes; the channels R4 G5 B6 A7; the base address.
         gpu_i915_put(state, 64 + 0, (1u << 29) | (0x140u << 18) | (1u << 8) | (1u << 14) | (1u << 16));
@@ -2298,7 +2319,7 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         gpu_i915_put(state, 128 + 4, 0);
         gpu_i915_put(state, 128 + 8, 1u << 18);
         gpu_i915_put(state, 128 + 12, 0);
-        gpu_i915_put(state, 128 + 16, sbase);
+        gpu_i915_put(state, 128 + 16, sbase);  // the binding table's pointer: the state's offset of the table at byte 0
         gpu_i915_put(state, 128 + 20, 1u << 16);
         gpu_i915_put(state, 128 + 24, 1);
         gpu_i915_put(state, 128 + 28, 0);
@@ -2333,7 +2354,9 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
 // The set as the table will hold it, once registered: the eight ops in the order of gpu_kernels (copy, fill, tone, glass, cp, bx, scene,
 // scale), the kernels without words marked empty. Not in GPU_I915_SETS.
 static const struct gpu_code gpu_i915_gen9_kernels[] = {
-        {0, 0}, {gpu_i915_fill, sizeof(gpu_i915_fill)}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}};
+        {gpu_i915_copy, sizeof(gpu_i915_copy)}, {gpu_i915_fill, sizeof(gpu_i915_fill)}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}};
+// The Intel set takes the AMD set's self-test hash: it is registered only when its kernels draw the same pixels as the AMD ones (bit-exact,
+// the rule every set meets), so one picture stands for both. A set whose picture differs is not registered (the self-test would refuse it).
 static const struct gpu_set gpu_i915_gen9_set = {gpu_i915_gen9_kernels, 8, 0, GPU_TEST_HASH, gpu_i915_gen9_batch};
 
 // The bins sides of the scenes built without a wait (gpu_scene_submit): the last job that reads each (0 none), the side and the place of the last scene

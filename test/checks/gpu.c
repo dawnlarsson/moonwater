@@ -85,7 +85,8 @@ static void gpu_i915_set_rows(void)
                         check("gpu i915: over every start below 96 and span to 160, the parts tile the fill and the GPU's are aligned", tiled);
                 }
                 {
-                        // the batch for one fill, on a card's buffer at GPU_VA: the arguments 512 bytes before the state, as the slot lays them
+                        // the batch for one fill, on a card's buffer at GPU_VA: the arguments 512 bytes before the state, as the slot lays them.
+                        // A whole fill: 20 pixels (80 bytes) at a 32-byte boundary, on a 512-byte pitch, 4 rows.
                         static unsigned char buffer[4096] __attribute__((aligned(4096)));
                         struct gpu_job job;
                         struct gpu_args address_to a = (struct gpu_args address_to)(buffer + 2048);
@@ -93,29 +94,70 @@ static void gpu_i915_set_rows(void)
                         unsigned int address_to state = (unsigned int address_to)(buffer + 2560);
 
                         memset(buffer, 0, sizeof buffer);
-                        a->d = GPU_VA + 0x2010; /* 16 bytes past a 32-byte boundary: head 16 */
-                        a->dp = 128, a->w = 25, a->rows = 4, a->op = 1, a->v = 0x11223344u;
+                        a->d = GPU_VA + 0x2020, a->dp = 128, a->w = 20, a->rows = 4, a->op = 1, a->v = 0x11223344u;
                         job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
                         job.code = GPU_VA + 3584;
                         n = gpu_i915_gen9_batch(&job, words, 64);
-                        check("gpu i915: a fill's batch is the 56 dwords the Gen9 walker takes", n == 56 && words[0] == 0x69040302u && words[1] == 0x61010011u);
-                        check("gpu i915: the walker's columns are the interior's 80 bytes over 16: five, and the rows are the fill's",
+                        check("gpu i915: a whole fill's batch is the 56 dwords the Gen9 walker takes", n == 56 && words[0] == 0x69040302u && words[1] == 0x61010011u);
+                        check("gpu i915: the walker's columns are the span's 80 bytes over 16: five, and the rows are the fill's",
                               words[44] == 5u && words[47] == 4u && words[37] == 0x7105000du && words[51] == 0xffffffffu);
                         check("gpu i915: the colour dword is the CURBE's first dword, the CURBE reads 64 bytes from the state",
                               state[48] == 0x11223344u && words[29] == 0x70010002u && words[32] == 2560 + 192);
-                        check("gpu i915: the binding table points at the surface state, both in the state region",
-                              state[0] == 2560 + 64 && words[36] == 2560 + 128);
-                        check("gpu i915: the surface base is the interior's first byte, 32-byte aligned",
+                        check("gpu i915: the binding table's entry 0 is the surface state, and the descriptor's table pointer is the table (both in the state)",
+                              state[0] == 2560 + 64 && state[36] == 2560 && words[36] == 2560 + 128);
+                        check("gpu i915: the surface base is the row's first byte, 32-byte aligned",
                               state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2020) && ((state[(64 + 32) / 4]) & 31) == 0);
-                        check("gpu i915: the surface is 80 bytes wide, rows high, on a 512-byte pitch",
+                        check("gpu i915: the surface is 80 bytes wide, 4 rows high, on a 512-byte pitch",
                               state[(64 + 8) / 4] == (79u | (3u << 16)) && state[(64 + 12) / 4] == 511u);
                         a->op = 2;
                         check("gpu i915: an op the set has no kernel for is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
-                        a->op = 1, a->dp = 10;
+                        a->op = 1, a->dp = 16;
                         check("gpu i915: a pitch below the span is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
-                        a->dp = 128, a->d = GPU_VA + 0x2000;
-                        check("gpu i915: a fill whose span is under 16 bytes leaves the GPU nothing (0 words)",
-                              (a->w = 2, gpu_i915_gen9_batch(&job, words, 64)) == 0);
+                        a->dp = 128, a->d = GPU_VA + 0x2010;
+                        check("gpu i915: a fill with a head (16 bytes before the boundary) is refused whole: the processor draws all of it",
+                              gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->d = GPU_VA + 0x2020, a->w = 25;
+                        check("gpu i915: a fill whose span ends inside a 16-byte group (a tail) is refused whole", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->w = 4096, a->dp = 4096;
+                        check("gpu i915: 4096 pixels is the most a row can be (16384 bytes: the surface's 14-bit width) and is taken",
+                              gpu_i915_gen9_batch(&job, words, 64) == 56);
+                        a->w = 4097, a->dp = 4097;
+                        check("gpu i915: 4097 pixels overflows the surface's width field, so it is refused, not wrapped",
+                              gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->w = 20, a->dp = 128, a->rows = 16384;
+                        check("gpu i915: 16384 rows is the most a surface can be (its height field is 14 bits) and is taken",
+                              gpu_i915_gen9_batch(&job, words, 64) == 56);
+                        a->rows = 16385;
+                        check("gpu i915: 16385 rows overflows the height field, so it is refused", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->rows = 4, a->dp = 65536;
+                        check("gpu i915: a pitch of 256 KiB is the most the surface's 18-bit pitch holds and is taken", gpu_i915_gen9_batch(&job, words, 64) == 56);
+                        a->dp = 65537;
+                        check("gpu i915: a pitch over 256 KiB is refused", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->dp = 128;
+                        job.code = GPU_VA + 3590;
+                        check("gpu i915: a kernel that does not start on a 64-byte boundary is refused (the descriptor holds bits 31:6)",
+                              gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        job.code = GPU_VA + 3584;
+                        a->op = 0, a->s = GPU_VA + 0x4000, a->sp = 128, a->w = 20, a->dp = 128, a->d = GPU_VA + 0x2020, a->rows = 4;
+                        check("gpu i915: a copy's batch is 56 dwords; the source is binding table entry 1, its surface state at 256",
+                              gpu_i915_gen9_batch(&job, words, 64) == 56 && state[1] == 2560 + 256 && state[0] == 2560 + 64);
+                        check("gpu i915: the source's surface state: base the source's address, 80 bytes wide, 4 rows, its own 512-byte pitch",
+                              state[(256 + 32) / 4] == (unsigned int)(GPU_VA + 0x4000) && state[(256 + 8) / 4] == (79u | (3u << 16)) && state[(256 + 12) / 4] == 511u);
+                        check("gpu i915: a copy's destination is the same as the fill's: the GPU writes the same five columns on 4 rows",
+                              words[44] == 5u && words[47] == 4u && state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2020));
+                        a->s = GPU_VA + 0x4010;
+                        check("gpu i915: a copy whose source base is not 32-byte aligned is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->s = GPU_VA + 0x4000, a->sp = 16;
+                        check("gpu i915: a copy whose source pitch holds less than the row is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->sp = 21;
+                        check("gpu i915: a copy whose source pitch is not whole 16-byte groups is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->sp = 128, a->s = 0;
+                        check("gpu i915: a copy whose source is not in the card's buffer is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->op = 2, a->s = GPU_VA + 0x4000;
+                        check("gpu i915: an op past the copy and the fill (2, tone) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->op = 1, a->s = 0;
+                        a->w = 2;
+                        check("gpu i915: a fill whose span is under 16 bytes leaves the GPU nothing (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 }
         }
 }

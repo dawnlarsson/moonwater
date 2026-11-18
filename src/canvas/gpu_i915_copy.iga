@@ -1,0 +1,13 @@
+// Gen9 copy (op 0), 16 bytes a thread: the source block read on binding table entry 1 (the media block read, header present,
+// one register back into r5), then the fill's media block write of the same header to entry 0 (the destination), then end of
+// thread. Assemble with: iga64 -a -p=9 src/canvas/gpu_i915_copy.iga -o copy.krn (the words are in src/canvas/gpu_i915.asm).
+// Thread group X (r0.1) is the 16-byte block, group Y (r0.6) the row, as the fill reads them.
+mul (1|M0)               r2.0<1>:ud    r0.1<0;1,0>:ud    0x10:ud
+mov (1|M0)               r2.1<1>:ud    r0.6<0;1,0>:ud
+mov (8|M0)               r4.0<1>:ud    r0.0<8;8,1>:ud
+mov (2|M0)               r4.0<1>:ud    r2.0<2;2,1>:ud
+mov (1|M0)               r4.2<1>:ud    0xF:ud
+send (16|M0)             r5:ud         r4:ud     0xC  0x02190001     // media block read, surface 1 (source), header, response 1 GRF
+send (16|M0)             acc0:uw       r4:d      0xC  0x060A8000     // media block write, surface 0 (destination), as the fill
+mov (8|M0)               r112.0<1>:ud  r0.0<8;8,1>:ud
+send (16|M0)             null:uw       r112:d    0x27 0x02000010 {EOT}

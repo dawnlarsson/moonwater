@@ -5070,13 +5070,17 @@ static b32 build_gpu_i915(string_address input, string_address output)
                         {
                                 unsigned long v = 0;
                                 p8 address_to q = start + 2;
-                                while (q < p && ((*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'f') || (*q >= 'A' && *q <= 'F')))
+                                //      a word is 32 bits: at most eight digits (a longer literal is not a word, and is refused, not wrapped)
+                                while (q < p && q - (start + 2) < 8 && ((*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'f') || (*q >= 'A' && *q <= 'F')))
                                 {
                                         v = v * 16 + (unsigned long)(*q <= '9' ? *q - '0' : ((*q | 0x20) - 'a' + 10));
                                         q++;
                                 }
                                 if (q == start + 2 || v > 0xffffffffUL)
                                         return string_report(log_error, 1, "gpu-i915: not a word in %s, line %lu\n", input, (unsigned long)lines);
+                                //      the output has a line's room of its own: a larger input is refused, never cut short
+                                if (at + 64 >= sizeof(build_gpu_i915_made))
+                                        return string_report(log_error, 1, "gpu-i915: the arrays for %s are larger than the build's buffer\n", input);
                                 if (column == 0)
                                         at += (positive)build_gpu_i915_text(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, "    ", 0, 0);
                                 at += (positive)build_gpu_i915_text(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, "0x", v, 8);
@@ -5106,6 +5110,8 @@ static b32 build_gpu_i915(string_address input, string_address output)
         }
         if (!in_kernel)
                 return string_report(log_error, 1, "gpu-i915: no kernels in %s\n", input);
+        if (at + 64 >= sizeof(build_gpu_i915_made))
+                return string_report(log_error, 1, "gpu-i915: the arrays for %s are larger than the build's buffer\n", input);
         at += (positive)build_gpu_i915_sprintf_close(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at);
         (void)words;
 

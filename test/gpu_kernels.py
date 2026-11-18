@@ -275,6 +275,20 @@ def intel_text(kernels):
     return ''.join(out)
 
 
+# The copy (op 0): src/canvas/gpu_i915_copy.iga assembled by iga64 -a -p=9 (the words the Gen9 copy was verified with on subtle-cottage).
+COPY_GEN9_WORDS = [
+    0x00000041, 0x20400208, 0x06000004, 0x00000010,
+    0x00000001, 0x20440208, 0x00000018, 0x00000000,
+    0x00600001, 0x20800208, 0x008d0000, 0x00000000,
+    0x00200001, 0x20800208, 0x00450040, 0x00000000,
+    0x00000001, 0x20880608, 0x00000000, 0x0000000f,
+    0x0c800031, 0x20a00208, 0x06000080, 0x02190001,
+    0x0c800031, 0x20000a40, 0x06000080, 0x060a8000,
+    0x00600001, 0x2e000208, 0x008d0000, 0x00000000,
+    0x07800031, 0x20000a40, 0x06000e00, 0x82000010,
+]
+
+
 def intel_arrays(text):
     return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
             for name, body in re.findall(r'static const unsigned int gpu_i915_(\w+)\[\] = \{(.*?)\};', text, re.S)]
@@ -282,18 +296,22 @@ def intel_arrays(text):
 
 def intel_check(src, inc):
     kernels = intel_kernels(pathlib.Path(src).read_text())
-    if [n for n, _ in kernels] != ['fill']:
-        sys.exit('%s: the kernels are %s, the Gen9 set has fill only' % (src, [n for n, _ in kernels]))
-    fill = kernels[0][1]
+    if [n for n, _ in kernels] != ['copy', 'fill']:
+        sys.exit('%s: the kernels are %s, the Gen9 set has copy and fill' % (src, [n for n, _ in kernels]))
+    copy = kernels[0][1]
+    if copy != COPY_GEN9_WORDS:
+        sys.exit('%s: copy differs from the iga64 assembly of gpu_i915_copy.iga (%d words, the reviewed kernel has %d)' % (src, len(copy), len(COPY_GEN9_WORDS)))
+    fill = kernels[1][1]
     if fill != IGT_GEN9_FILL_ROWS_1_TO_9:
         bad = [i for i in range(max(len(fill), 36)) if i >= len(fill) or i >= 36 or fill[i] != IGT_GEN9_FILL_ROWS_1_TO_9[i]]
         sys.exit('%s: fill differs from IGT at word %d (%s)' % (src, bad[0], 'missing' if bad[0] >= len(fill) else '%08x vs IGT' % fill[bad[0]]))
     made = intel_arrays(pathlib.Path(inc).read_text())
-    if [n for n, _ in made] != ['fill']:
-        sys.exit('%s: the arrays are %s, the source has fill' % (inc, [n for n, _ in made]))
-    if made[0][1] != fill:
-        sys.exit('%s: the array fill is not the source\'s words' % inc)
-    print('gpu i915 kernels: %s, %d kernel, %d words, fill the same as IGT rows 1 to 9 and as %s' % (src, len(kernels), len(fill), inc))
+    if [n for n, _ in made] != ['copy', 'fill']:
+        sys.exit('%s: the arrays are %s, the source has copy and fill' % (inc, [n for n, _ in made]))
+    for (name, words), want in zip(made, (copy, fill)):
+        if words != want:
+            sys.exit('%s: the array %s is not the source\'s words' % (inc, name))
+    print('gpu i915 kernels: %s, copy the iga64 assembly of gpu_i915_copy.iga, fill the same as IGT rows 1 to 9, both as %s' % (src, inc))
 
 
 def main():
