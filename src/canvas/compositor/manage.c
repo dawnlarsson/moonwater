@@ -1362,14 +1362,13 @@ static int compositor_grid_rests(const int (*screens)[4], unsigned int count, in
         in its row of tiles, so a drop there can take a region. The snap assist is not shown during a drag, only the
         preview: the thumbnails are offered after the drop (compositor_release_as).
 */
-static void compositor_overlays_drag(int row, int x, int y, unsigned int how, int screen)
+static void compositor_overlays_drag(int x, int y)
 {
         unsigned int count;
         const int (*screens)[4] = compositor_screens(&count);
         int at = compositor_screen_at(screens, count, x, y), rests = compositor_grid_rests(screens, count, at, x, y);
         positive now = clock_monotonic_nanoseconds();
 
-        (void)row, (void)how, (void)screen;
         compositor_overlays_damage();
         if (!rests)
                 compositor.grid_since = 0;

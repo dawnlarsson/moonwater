@@ -700,7 +700,7 @@ static unsigned int compositor_rows_made; // the rows whose memory is committed 
         A set of rows, a bit each, with one past them (the doors' slot that is no row, COMPOSITOR_DOOR_MISC): what the masks of a
         bit for each row were, 32 bits that could not name a row past 31. The words walked are those of the rows in use and the
         last (rows_walk); none is ever set past them, so a set copied, emptied or joined to another costs the rows in use and not
-        WINDOWS of them (rows_copy for a copy: an assignment of the struct is every word).
+        WINDOWS of them.
 */
 #define COMPOSITOR_ROW_WORDS ((WINDOWS + 1 + 63) / 64)
 struct compositor_rows
@@ -750,12 +750,6 @@ static inline void rows_take(struct compositor_rows *into, struct compositor_row
 {
         for (unsigned int k = 0, walked = rows_walked(), w; k < walked; k++)
                 w = rows_walk(k), into->word[w] = from->word[w] ? __atomic_exchange_n(&from->word[w], 0ULL, __ATOMIC_ACQ_REL) : 0;
-}
-
-static inline void rows_copy(struct compositor_rows *into, const struct compositor_rows *from)
-{
-        for (unsigned int k = 0, walked = rows_walked(), w; k < walked; k++)
-                w = rows_walk(k), into->word[w] = from->word[w];
 }
 
 static inline void rows_add_atomic(struct compositor_rows *s, long at)

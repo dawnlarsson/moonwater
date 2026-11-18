@@ -53,7 +53,7 @@ static struct
         b64 late_first, late_next; // the late probe: when the first look that found no card was, and when the next look is due
         positive settled;          // a start that failed by what the nodes are (gpu_req.settled): the nodes it saw (gpu_req.nodes), 0 for none. Not started
                                    // again while the nodes are the same (the late probe looks at the nodes, not at the card)
-        positive said;             // the last failed start's outcome said in the log (compositor_gpu_outcome): a start that fails the same way is not said again
+        positive said;             // the last failed start's outcome said in the log (compositor_gpu_failed): a start that fails the same way is not said again
 } compositor_gpu_state;
 
 // The presents the card drew and the processor drew, and the reasons the card was refused (moonwater canvas says them, from the table). A reason
@@ -91,13 +91,6 @@ static void compositor_gpu_publish(void)
 // The prerequisites of the card, as the table and the issue board say them after a start: the first one that failed is an ERROR under "canvas gpu" with its
 // fix (the detail) and the kernel's error; when the card is up, that issue is cleared. The table's record is written either way (moonwater debug).
 typedef char gpu_req_words_fit[sizeof(windows_gpu_req_fixes) / sizeof(windows_gpu_req_fixes[0]) == GPU_REQ_COUNT ? 1 : -1];
-// The detail of a failed step: the machine's own words where gpu.c has them (the driver that has no path and its node, the chip that has no kernels: Settings
-// puts them in its message), else the step's fix.
-static const char *compositor_gpu_req_detail(char *into, unsigned int room)
-{
-        return gpu_req_words(into, room) ? into : (const char *)windows_gpu_req_fixes[gpu_req.first];
-}
-
 static void compositor_gpu_requirements(void)
 {
         char words[WINDOWS_ISSUE_DETAIL];
@@ -106,9 +99,11 @@ static void compositor_gpu_requirements(void)
                 return;
         compositor.table->gpu_req_checked = 1;
         compositor_gpu_publish();
+        // The detail of a failed step: the machine's own words where gpu.c has them (the driver that has no path and its node, the chip that has no kernels:
+        // Settings puts them in its message), else the step's fix.
         if (gpu_req.first)
                 windows_issue_set(compositor.table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_REQUIRES, gpu_req.first, gpu_req.error,
-                                  compositor_gpu_req_detail(words, sizeof(words)));
+                                  gpu_req_words(words, sizeof(words)) ? words : (const char *)windows_gpu_req_fixes[gpu_req.first]);
         else if (gpu_req.route) // the card composes; a refused userptr has no fallback until the dma-buf route works
                 windows_issue_set(compositor.table, "canvas gpu", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_REQUIRES, gpu_req.route, gpu_req.route_error,
                                   windows_gpu_req_fixes[gpu_req.route]);
@@ -166,21 +161,14 @@ static b32 compositor_gpu_late_due(b64 now, b64 *first, b64 *next)
         return true;
 }
 
-// A failed start's outcome as a number (the step, its error, the driver, the chip): the same outcome is the same number, and one is said in the log once
-// (compositor_gpu_failed_say), however often the late probe or a recovery comes to it. Never 0.
-static positive compositor_gpu_outcome(void)
-{
-        positive h = gpu_node_mix(14695981039346656037ull, gpu_req.first, gpu_req.driver);
-
-        return (h ^ ((positive)gpu_req.error << 48 ^ (positive)gpu_req.family << 24 ^ gpu_req.device)) * 1099511628211ull | 1;
-}
-
 // A start that failed: given up (no card, or untrusted), settled where the nodes say it can never start while they stay as they are, the board told, and the
-// outcome said in the log the first time it is this one: the step, its error, its fix and the machine's words for it.
+// outcome said in the log the first time it is this one: the step, its error, its fix and the machine's words for it. The outcome is a number (the step, its
+// error, the driver, the chip): the same outcome is the same number, never 0.
 static void compositor_gpu_failed(void)
 {
         char words[WINDOWS_ISSUE_DETAIL];
-        positive outcome = compositor_gpu_outcome();
+        positive outcome = (gpu_node_mix(14695981039346656037ull, gpu_req.first, gpu_req.driver) ^ ((positive)gpu_req.error << 48 ^ (positive)gpu_req.family << 24 ^ gpu_req.device)) *
+                           1099511628211ull | 1;
         b32 own;
 
         compositor_gpu_state.up = 0, compositor_gpu_state.dead = 1;
@@ -265,7 +253,7 @@ static int compositor_gpu_held(void)
 /*
         A job of the card that failed (gpu_end says how, gpu_last_error why, as this call's answer). A late job (GPU_END_LATE: not done in a tick) has not
         failed: the processor draws this frame, the job stays pending (gpu_idle holds the buffer, and every present after is the processor's while it runs),
-        and nothing is cooled or counted. It becomes a hang only by its end (compositor_gpu_late_check): its fence answers an error, a page fault is in the
+        and nothing is cooled or counted. It becomes a hang only by its end (checked before each present draws): its fence answers an error, a page fault is in the
         kernel's log, or it is two seconds old. A hang (HUNG: the ring did not finish the job in two seconds; WAIT: the wait itself failed) is the card's one
         lesson, not a run of refusals: the processor draws for two seconds, and when the cool-down is over the card is
         started again with a clean table of maps (gpu_recover lets every map go: a present no longer names the addresses the hang read). A second hang within
@@ -306,14 +294,6 @@ static void compositor_gpu_job_failed(void)
         compositor_gpu_state.restart_due = 1; // started again when the cool-down is over, with no maps (gpu_recover)
         string_format(log, "compositor: the GPU hung (%s): the processor draws for two seconds, then the card starts again with no maps\n", gpu_fault);
         log_flush();
-}
-
-// A job the card was late with (gpu.c's gpu_run_job: not done in a tick) is looked at before each present draws: when it has come to a bad end the card is hung
-// as a job that did not finish in two seconds was (compositor_gpu_job_failed); a late job that finishes, or is still within bounds, is nothing.
-static void compositor_gpu_late_check(void)
-{
-        if (gpu_late_end())
-                compositor_gpu_job_failed();
 }
 
 // Why a job the card did not finish is the present's loss: it was late (a job that may still run: busy), overflowed the bin pool, or hung/was refused.
@@ -389,7 +369,6 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
         }
 }
 
-#ifdef MOONWATER_GPU_C
 /*
         A finger's mark as records (compositor_spot_draw): the inner fill's mix of the line's ink over the disc, then the edge's, each cover a table of the
         disc's square (2 radius by 2 radius bytes, rows from its top; the four quarters are the one quarter mirrored, as the processor reads them). Made once
@@ -399,7 +378,7 @@ static unsigned int compositor_gpu_spot_table(int radius, int ring, unsigned int
 {
         int inner = radius - ring, size = 2 * radius;
         unsigned char *table;
-        unsigned int at = compositor_gpu_slot(radius, ring, 16 + edge, (int)alpha, (unsigned int)(size * size), &table);
+        unsigned int at = compositor_gpu_slot_tag(radius, ring, 16 + edge, (int)alpha, 0, (unsigned int)(size * size), &table);
         const unsigned char *outer_mask, *inner_mask;
         unsigned int fill = COMPOSITOR_SPOT_FILL * alpha / 255, ring_cover = COMPOSITOR_SPOT_RING * alpha / 255;
 
@@ -479,7 +458,6 @@ static b32 compositor_gpu_spots(void)
         }
         return true;
 }
-#endif
 
 // The present's damage drawn by the GPU: why it is not, or COMPOSITOR_GPU_WHY_DRAWN when it is.
 /*
@@ -716,7 +694,10 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
 
         if (!compositor_gpu)
                 return COMPOSITOR_GPU_WHY_OFF;
-        compositor_gpu_late_check(); // a job given up on as late has ended badly, or is two seconds old
+        // A job the card was late with (gpu.c's gpu_run_job: not done in a tick) has come to a bad end, or is two seconds old: the card is hung as one that did
+        // not finish in two seconds was (compositor_gpu_job_failed); a late job that finishes, or is still within bounds, is nothing.
+        if (gpu_late_end())
+                compositor_gpu_job_failed();
         compositor_gpu_restart_check(); // a machine that slept, or a gap between presents that is one, starts the card again before this present
         compositor_gpu_lost_check();
         if (compositor_gpu_state.dead)

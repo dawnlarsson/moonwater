@@ -1255,12 +1255,6 @@ static unsigned int compositor_gpu_slot_tag(int r, int b, int corner, int conten
         return g->table[g->kept - 1].at;
 }
 
-// The pool's table for a key whose bytes the key says all of.
-static unsigned int compositor_gpu_slot(int r, int b, int corner, int content, unsigned int size, unsigned char **fill)
-{
-        return compositor_gpu_slot_tag(r, b, corner, content, 0, size, fill);
-}
-
 // The cover table of a corner's square (r by r bytes, rows from the square's top): the line's outside (content 0), or the picture's inside it (content 1), as
 // compositor_corner_rows reads the masks, flipped and mirrored so that the square is read from its own top left. Its place from the buffer's start, 0 for none.
 static unsigned int compositor_gpu_table(int r, int b, int corner, int content)
@@ -1269,7 +1263,7 @@ static unsigned int compositor_gpu_table(int r, int b, int corner, int content)
         const unsigned char *outer = right ? compositor_corner_mirror(r) : compositor_corner_mask(r);
         const unsigned char *inner = ri ? (right ? compositor_corner_mirror(ri) : compositor_corner_mask(ri)) : 0;
         unsigned char *table;
-        unsigned int at = compositor_gpu_slot(r, b, corner, content, (unsigned int)(r * r), &table);
+        unsigned int at = compositor_gpu_slot_tag(r, b, corner, content, 0, (unsigned int)(r * r), &table);
 
         if (!table)
                 return at;
@@ -1302,7 +1296,7 @@ static unsigned int compositor_gpu_table(int r, int b, int corner, int content)
 static unsigned int compositor_gpu_close_table(int side, int half)
 {
         unsigned char *table;
-        unsigned int at = compositor_gpu_slot(side, half, 4, 3, (unsigned int)(side * side), &table);
+        unsigned int at = compositor_gpu_slot_tag(side, half, 4, 3, 0, (unsigned int)(side * side), &table);
 
         for (int y = 0; table && y < side; y++)
                 for (int x = 0; x < side; x++)
@@ -1670,29 +1664,7 @@ static unsigned int compositor_panel_tabs(const struct compositor_frame *band, s
 // The frames a present of `rows` rows may have: two a window (its picture and its line or shadow), the snap preview and the moon's menu a frame
 // each, the moon's glow one a band, the overlays and the layers. The arrays sized by it are the rows' (compositor_rows_make), as many as the rows in use.
 #define COMPOSITOR_FRAMES_FOR(rows) (2 * (unsigned long)(rows) + 3 + 3 * WINDOWS_OUTPUTS + COMPOSITOR_OVERLAYS + COMPOSITOR_LAYERS)
-#define COMPOSITOR_FRAMES COMPOSITOR_FRAMES_FOR(WINDOWS)
 #define COMPOSITOR_PIECES_FOR(rows) (3 * COMPOSITOR_FRAMES_FOR(rows))
-
-/*
-        The scene: inside the target's damage, each window where nothing
-        above it covers it and the desktop where nothing is, every pixel
-        written once and none read. The frames are bottom first.
-
-        The damage is cut into bands at the top and bottom edge of every
-        piece of a window -- a square one is one piece, a round one three,
-        its middle and its two sides between the corners -- so in one band
-        each piece covers the same columns from the band's top to its
-        bottom. The columns are given out from the top piece down: each
-        takes what it covers of the spans still unclaimed and leaves the
-        rest, which are never more than one more than there are pieces.
-        What no piece claims is desktop. The target is drawn on through a
-        clip of the cell, so the picture is the one the windows drawn bottom
-        to top over a desktop would be, but in the corners of round windows,
-        which no piece holds: each of those squares is drawn so, every frame
-        bottom to top, into a scratch of its own, and then copied out. The
-        target is written and never read.
-*/
-#define COMPOSITOR_PIECES COMPOSITOR_PIECES_FOR(WINDOWS)
 
 static unsigned int compositor_corner_scratch[COMPOSITOR_RADIUS_MOST * COMPOSITOR_RADIUS_MOST];
 
@@ -1941,7 +1913,7 @@ static unsigned int compositor_gpu_const(unsigned int alpha)
 {
         struct compositor_gscene *g = &compositor_gscene;
         unsigned char *table;
-        unsigned int at = compositor_gpu_slot(-1, (int)alpha, 12, (int)g->width, g->width, &table);
+        unsigned int at = compositor_gpu_slot_tag(-1, (int)alpha, 12, (int)g->width, 0, g->width, &table);
 
         if (table)
                 memory_fill(table, (int)alpha, (positive)g->width);
@@ -1972,7 +1944,7 @@ static b32 compositor_gpu_const_rect(int x0, int y0, int x1, int y1, unsigned in
 static unsigned int compositor_gpu_shape(int r, int line, int alpha, int corner, int part)
 {
         unsigned char *table;
-        unsigned int at = compositor_gpu_slot(r, line, (part ? 24 : 8) + corner, alpha, (unsigned int)(r * r), &table);
+        unsigned int at = compositor_gpu_slot_tag(r, line, (part ? 24 : 8) + corner, alpha, 0, (unsigned int)(r * r), &table);
         struct compositor_shape s;
         int right = corner & 1, down = (corner & 2) != 0;
 
@@ -2190,6 +2162,25 @@ static int *compositor_lane_edge[9];
 static int (*compositor_lane_span[9])[2];
 static int *compositor_scene_radii;
 
+/*
+        The scene: inside the target's damage, each window where nothing
+        above it covers it and the desktop where nothing is, every pixel
+        written once and none read. The frames are bottom first.
+
+        The damage is cut into bands at the top and bottom edge of every
+        piece of a window -- a square one is one piece, a round one three,
+        its middle and its two sides between the corners -- so in one band
+        each piece covers the same columns from the band's top to its
+        bottom. The columns are given out from the top piece down: each
+        takes what it covers of the spans still unclaimed and leaves the
+        rest, which are never more than one more than there are pieces.
+        What no piece claims is desktop. The target is drawn on through a
+        clip of the cell, so the picture is the one the windows drawn bottom
+        to top over a desktop would be, but in the corners of round windows,
+        which no piece holds: each of those squares is drawn so, every frame
+        bottom to top, into a scratch of its own, and then copied out. The
+        target is written and never read.
+*/
 static void compositor_plan_make(struct compositor_plan *plan, const struct compositor_target *t,
                                  const struct compositor_frame *frames, unsigned int count, const int *radii)
 {

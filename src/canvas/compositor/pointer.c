@@ -982,8 +982,8 @@ static b32 compositor_gpu_cursor(int x, int y, const struct compositor_pointer *
         {
                 unsigned int kept = compositor_gscene.kept, used = compositor_gscene.tables_used;
 
-                at[0] = span > 255 || !made ? 0 : compositor_gpu_slot(span, count, 5, 0, (unsigned int)(span * span), &table[0]);
-                at[1] = span > 255 || !made ? 0 : compositor_gpu_slot(span, count, 5, 1, (unsigned int)(span * span), &table[1]);
+                at[0] = span > 255 || !made ? 0 : compositor_gpu_slot_tag(span, count, 5, 0, 0, (unsigned int)(span * span), &table[0]);
+                at[1] = span > 255 || !made ? 0 : compositor_gpu_slot_tag(span, count, 5, 1, 0, (unsigned int)(span * span), &table[1]);
                 if (!at[0] || !at[1])
                 {
                         compositor_gscene.kept = kept, compositor_gscene.tables_used = used;

@@ -1666,7 +1666,7 @@ static void compositor_preview(int row)
                 how = compositor_target(row, compositor.pointer_x, compositor.pointer_y, box, &screen, &touch);
                 if (how != COMPOSITOR_FLOATING)
                         compositor_screen_part(screens[screen], how, rect);
-                compositor_overlays_drag(row, compositor.pointer_x, compositor.pointer_y, how, screen);
+                compositor_overlays_drag(compositor.pointer_x, compositor.pointer_y);
         }
         else if (row < 0 && compositor.grid_on)
         {
