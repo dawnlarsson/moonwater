@@ -2213,7 +2213,7 @@ struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, r
 typedef char gpu_slots_fit[sizeof(struct gpu_args) <= 256 ? 1 : -1]; // a slot's arguments in its 256 bytes (gpu_start puts the kernels after the last slot's)
 
 /*
-        The Intel set, Gen9 (graphics version 9). Copy (op 0), fill (op 1) and tone (op 2) so far, so it is NOT registered: GPU_I915_SETS above stays empty until
+        The Intel set, Gen9 (graphics version 9). Copy (op 0), fill (op 1), tone (op 2) and glass (op 3) so far, so it is NOT registered: GPU_I915_SETS above stays empty until
         all eight ops (copy, fill, tone, glass, cp, bx, scene, scale) pass on a card and the self-test holds.
 
         A fill is bytes: a surface of 4 * w bytes at 4 * dp bytes a row (a 32-bit pixel is four bytes, little endian), the colour's dword
@@ -2272,12 +2272,12 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         const struct gpu_args address_to a = (const struct gpu_args address_to)((p8 address_to)job->state_at + delta);
         p8 address_to state = (p8 address_to)job->state_at;
         struct gpu_i915_split s;
-        unsigned int n = 0, xg, sbase, pitch, span, spitch;
+        unsigned int n = 0, xg, sbase, pitch, span, spitch, gpitch;
 
         // Whole or nothing: a fill whose edges the card cannot write (a row's head or tail, or a span under 16 bytes) is refused, and the
         // processor draws all of it. The surface's fields are 14 bits (width and height, minus one, in 13:0 and 29:16) and the pitch 18:
         // a row of more than 4096 pixels (16384 bytes), more than 16384 rows or a pitch over 256 KiB is refused, not wrapped.
-        if (a->op > 2 || a->x0 || a->y0 || !a->w || !a->rows || a->w > 4096u || a->rows > 16384u || a->dp > 65536u || room < 56 ||
+        if (a->op > 3 || ((a->x0 || a->y0) && a->op != 3) || !a->w || !a->rows || a->w > 4096u || a->rows > 16384u || a->dp > 65536u || room < 56 ||
             !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63))
                 return 0;
         span = 4u * a->w;
@@ -2287,7 +2287,11 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         // A copy's source: the row's bytes read from a 32-byte-aligned base, at a pitch that holds the row in whole 16-byte groups
         // (the same rules as the destination: a block is read and written as one group), inside the 14-bit surface fields.
         spitch = 4u * a->sp;
-        if (a->op == 0 && (a->s < GPU_VA || (a->s & 31) || !a->sp || a->sp > 65536u || spitch < span || (spitch & 15)))
+        if ((a->op == 0 || a->op == 3) && (a->s < GPU_VA || (a->s & 31) || !a->sp || a->sp > 65536u || spitch < span || (spitch & 15)))
+                return 0;
+        // A glass's ground: the same rules as its picture (a 32-byte-aligned base, a pitch that holds the row in whole 16-byte groups).
+        gpitch = 4u * a->gp;
+        if (a->op == 3 && (a->g < GPU_VA || (a->g & 31) || !a->gp || a->gp > 65536u || gpitch < span || (gpitch & 15)))
                 return 0;
         xg = s.span / 16;
         sbase = (unsigned int)(job->state - GPU_VA);
@@ -2295,7 +2299,7 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         // Binding table: entry 0 = the destination's surface state, entry 1 = the source's (both relative to the surface base, the card's buffer).
         gpu_i915_put(state, 0, sbase + 64);
         gpu_i915_put(state, 4, sbase + 256);
-        if (a->op == 0) {
+        if (a->op == 0 || a->op == 3) {
                 // The source's RENDER_SURFACE_STATE at 256, the same fields as the destination's, its base the card's address of the source.
                 gpu_i915_put(state, 256 + 0, (1u << 29) | (0x140u << 18) | (1u << 8) | (1u << 14) | (1u << 16));
                 gpu_i915_put(state, 256 + 4, 1u << 25);
@@ -2304,6 +2308,17 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
                 gpu_i915_put(state, 256 + 28, (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16));
                 gpu_i915_put(state, 256 + 32, (unsigned int)a->s);
                 gpu_i915_put(state, 256 + 36, (unsigned int)(a->s >> 32));
+        }
+        if (a->op == 3) {
+                // Glass's ground (entry 2) at 320: the same surface state, its base the card's address of the ground, its pitch the ground's.
+                gpu_i915_put(state, 8, sbase + 320);
+                gpu_i915_put(state, 320 + 0, (1u << 29) | (0x140u << 18) | (1u << 8) | (1u << 14) | (1u << 16));
+                gpu_i915_put(state, 320 + 4, 1u << 25);
+                gpu_i915_put(state, 320 + 8, (s.span - 1) | ((a->rows - 1) << 16));
+                gpu_i915_put(state, 320 + 12, gpitch - 1);
+                gpu_i915_put(state, 320 + 28, (4u << 25) | (5u << 22) | (6u << 19) | (7u << 16));
+                gpu_i915_put(state, 320 + 32, (unsigned int)a->g);
+                gpu_i915_put(state, 320 + 36, (unsigned int)(a->g >> 32));
         }
         // RENDER_SURFACE_STATE: type 2D, format R8_UNORM (a byte surface), render cache, 4-row halign and valign; MOCS 1; width and height;
         // pitch in bytes; the channels R4 G5 B6 A7; the base address.
@@ -2326,6 +2341,8 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         gpu_i915_put(state, 128 + 28, 0);
         // The colour dword: the CURBE reads 64 bytes from here (its first dword is the colour).
         gpu_i915_put(state, 192, a->v);
+        if (a->op == 3) // glass: the grain's origin (its parities, the kernel's r1.1 and r1.2)
+                gpu_i915_put(state, 196, a->x0), gpu_i915_put(state, 200, a->y0);
 
         // The batch: PIPELINE_SELECT GPGPU (mask 3 << 8), STATE_BASE_ADDRESS with every base at the card's buffer, MEDIA_VFE_STATE, the
         // CURBE and the interface descriptor loaded from the state region, GPGPU_WALKER (SIMD16, xg by rows groups, the right mask full: the
@@ -2352,7 +2369,7 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
 // The set as the table will hold it, once registered: the eight ops in the order of gpu_kernels (copy, fill, tone, glass, cp, bx, scene,
 // scale), the kernels without words marked empty. Not in GPU_I915_SETS.
 static const struct gpu_code gpu_i915_gen9_kernels[] = {
-        {gpu_i915_copy, sizeof(gpu_i915_copy)}, {gpu_i915_fill, sizeof(gpu_i915_fill)}, {gpu_i915_tone, sizeof(gpu_i915_tone)}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}};
+        {gpu_i915_copy, sizeof(gpu_i915_copy)}, {gpu_i915_fill, sizeof(gpu_i915_fill)}, {gpu_i915_tone, sizeof(gpu_i915_tone)}, {gpu_i915_glass, sizeof(gpu_i915_glass)}, {0, 0}, {0, 0}, {0, 0}, {0, 0}};
 // The Intel set takes the AMD set's self-test hash: it is registered only when its kernels draw the same pixels as the AMD ones (bit-exact,
 // the rule every set meets), so one picture stands for both. A set whose picture differs is not registered (the self-test would refuse it).
 static const struct gpu_set gpu_i915_gen9_set = {gpu_i915_gen9_kernels, 8, 0, GPU_TEST_HASH, gpu_i915_gen9_batch};

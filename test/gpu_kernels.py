@@ -337,6 +337,82 @@ TONE_GEN9_WORDS = [
 ]
 
 
+# The glass (op 3): src/canvas/gpu_i915_glass.iga assembled by iga64 -a -p=9, 71 instructions.
+GLASS_GEN9_WORDS = [
+    0x00000041, 0x20400208, 0x06000004, 0x00000010,
+    0x00000001, 0x20440208, 0x00000018, 0x00000000,
+    0x00600001, 0x20800208, 0x008d0000, 0x00000000,
+    0x00200001, 0x20800208, 0x00450040, 0x00000000,
+    0x00000001, 0x20880608, 0x00000000, 0x0000000f,
+    0x0c800031, 0x20a00208, 0x06000080, 0x02190001,
+    0x0c800031, 0x20c00208, 0x06000080, 0x02190002,
+    0x00000005, 0x22800208, 0x06000024, 0x00000001,
+    0x00000040, 0x22840208, 0x02000018, 0x00000028,
+    0x00000005, 0x22840208, 0x06000284, 0x00000001,
+    0x00000007, 0x22880208, 0x02000280, 0x00000284,
+    0x00000009, 0x22a00208, 0x06000288, 0x00000001,
+    0x00000040, 0x22a00208, 0x020002a0, 0x00000284,
+    0x00000009, 0x22a40208, 0x06000288, 0x00000001,
+    0x00000040, 0x22a40208, 0x060042a4, 0x00000002,
+    0x00000040, 0x22a40208, 0x020002a4, 0x00000284,
+    0x00000001, 0x22c00608, 0x00000000, 0x00000000,
+    0x02000010, 0x20000200, 0x06000020, 0x00000000,
+    0x00010001, 0x22c00608, 0x00000000, 0x00000001,
+    0x00000040, 0x22c40208, 0x060042c0, 0x00000001,
+    0x00000001, 0x22e00208, 0x000002a0, 0x00000000,
+    0x00000001, 0x22e40208, 0x000002a4, 0x00000000,
+    0x00000001, 0x22e80208, 0x000002a0, 0x00000000,
+    0x00000001, 0x22ec0208, 0x000002a4, 0x00000000,
+    0x00400041, 0x23000208, 0x122002e0, 0x000002c4,
+    0x00400041, 0x23200208, 0x122002e0, 0x000002c0,
+    0x00400009, 0x23400208, 0x06200300, 0x00000010,
+    0x00400006, 0x23400208, 0x02200340, 0x00200300,
+    0x00400009, 0x23600208, 0x06200320, 0x00000010,
+    0x00400006, 0x23600208, 0x02200360, 0x00200320,
+    0x00400005, 0x20e00208, 0x062000c0, 0x00ff00ff,
+    0x00400008, 0x21000208, 0x062000c0, 0x00000008,
+    0x00400005, 0x21000208, 0x06200100, 0x00ff00ff,
+    0x00600040, 0x20e01a68, 0x1a8d00e0, 0x008d0340,
+    0x00600040, 0x20e01a68, 0x1a8d00e0, 0x008d4360,
+    0x00600040, 0x21001a68, 0x1a8d0100, 0x008d0300,
+    0x00600040, 0x21001a68, 0x1a8d0100, 0x008d4320,
+    0x04600002, 0x20e01a68, 0x1e8d00e0, 0x00000000,
+    0x05600002, 0x20e01a68, 0x1e8d00e0, 0x00ff00ff,
+    0x04600002, 0x21001a68, 0x1e8d0100, 0x00000000,
+    0x05600002, 0x21001a68, 0x1e8d0100, 0x00ff00ff,
+    0x00400008, 0x21200208, 0x062000a0, 0x00000018,
+    0x00400040, 0x21200208, 0x06204120, 0x000000ff,
+    0x00400005, 0x21400208, 0x062000a0, 0x00ff00ff,
+    0x00400008, 0x21600208, 0x062000a0, 0x00000008,
+    0x00400005, 0x21600208, 0x06200160, 0x00ff00ff,
+    0x00400041, 0x21800208, 0x122000e0, 0x008a0120,
+    0x00400040, 0x21800208, 0x06200180, 0x007f007f,
+    0x00400008, 0x21a00208, 0x06200180, 0x00000008,
+    0x00400005, 0x21a00208, 0x062001a0, 0x00ff00ff,
+    0x00400040, 0x21a00208, 0x022001a0, 0x00200180,
+    0x00400040, 0x21a00208, 0x062001a0, 0x00010001,
+    0x00400008, 0x21a00208, 0x062001a0, 0x00000008,
+    0x00400005, 0x21a00208, 0x062001a0, 0x00ff00ff,
+    0x00400040, 0x21a00208, 0x022001a0, 0x00200140,
+    0x05600002, 0x21a01248, 0x168d01a0, 0x00ff00ff,
+    0x00400041, 0x21c00208, 0x12200100, 0x008a0120,
+    0x00400040, 0x21c00208, 0x062001c0, 0x007f007f,
+    0x00400008, 0x21e00208, 0x062001c0, 0x00000008,
+    0x00400005, 0x21e00208, 0x062001e0, 0x00ff00ff,
+    0x00400040, 0x21e00208, 0x022001e0, 0x002001c0,
+    0x00400040, 0x21e00208, 0x062001e0, 0x00010001,
+    0x00400008, 0x21e00208, 0x062001e0, 0x00000008,
+    0x00400005, 0x21e00208, 0x062001e0, 0x00ff00ff,
+    0x00400040, 0x21e00208, 0x022001e0, 0x00200160,
+    0x05600002, 0x21e01248, 0x168d01e0, 0x00ff00ff,
+    0x00400009, 0x21e00208, 0x062001e0, 0x00000008,
+    0x00400006, 0x20a00208, 0x022001a0, 0x002001e0,
+    0x0c800031, 0x20000a40, 0x06000080, 0x060a8000,
+    0x00600001, 0x2e000208, 0x008d0000, 0x00000000,
+    0x07800031, 0x20000a40, 0x06000e00, 0x82000010,
+]
+
+
 def intel_arrays(text):
     return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
             for name, body in re.findall(r'static const unsigned int gpu_i915_(\w+)\[\] = \{(.*?)\};', text, re.S)]
@@ -344,22 +420,25 @@ def intel_arrays(text):
 
 def intel_check(src, inc):
     kernels = intel_kernels(pathlib.Path(src).read_text())
-    if [n for n, _ in kernels] != ['copy', 'fill', 'tone']:
-        sys.exit('%s: the kernels are %s, the Gen9 set has copy, fill and tone' % (src, [n for n, _ in kernels]))
+    if [n for n, _ in kernels] != ['copy', 'fill', 'tone', 'glass']:
+        sys.exit('%s: the kernels are %s, the Gen9 set has copy, fill, tone and glass' % (src, [n for n, _ in kernels]))
     copy = kernels[0][1]
     if copy != COPY_GEN9_WORDS:
         sys.exit('%s: copy differs from the iga64 assembly of gpu_i915_copy.iga (%d words, the reviewed kernel has %d)' % (src, len(copy), len(COPY_GEN9_WORDS)))
     fill = kernels[1][1]
     tone = kernels[2][1]
+    glass = kernels[3][1]
+    if glass != GLASS_GEN9_WORDS:
+        sys.exit('%s: glass differs from the iga64 assembly of gpu_i915_glass.iga (%d words, the reviewed kernel has %d)' % (src, len(glass), len(GLASS_GEN9_WORDS)))
     if tone != TONE_GEN9_WORDS:
         sys.exit('%s: tone differs from the iga64 assembly of gpu_i915_tone.iga (%d words, the reviewed kernel has %d)' % (src, len(tone), len(TONE_GEN9_WORDS)))
     if fill != IGT_GEN9_FILL_ROWS_1_TO_9:
         bad = [i for i in range(max(len(fill), 36)) if i >= len(fill) or i >= 36 or fill[i] != IGT_GEN9_FILL_ROWS_1_TO_9[i]]
         sys.exit('%s: fill differs from IGT at word %d (%s)' % (src, bad[0], 'missing' if bad[0] >= len(fill) else '%08x vs IGT' % fill[bad[0]]))
     made = intel_arrays(pathlib.Path(inc).read_text())
-    if [n for n, _ in made] != ['copy', 'fill', 'tone']:
-        sys.exit('%s: the arrays are %s, the source has copy, fill and tone' % (inc, [n for n, _ in made]))
-    for (name, words), want in zip(made, (copy, fill, tone)):
+    if [n for n, _ in made] != ['copy', 'fill', 'tone', 'glass']:
+        sys.exit('%s: the arrays are %s, the source has copy, fill, tone and glass' % (inc, [n for n, _ in made]))
+    for (name, words), want in zip(made, (copy, fill, tone, glass)):
         if words != want:
             sys.exit('%s: the array %s is not the source\'s words' % (inc, name))
     print('gpu i915 kernels: %s, copy the iga64 assembly of gpu_i915_copy.iga, fill the same as IGT rows 1 to 9, tone the iga64 assembly, all as %s' % (src, inc))
