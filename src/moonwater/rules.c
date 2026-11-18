@@ -118,6 +118,7 @@ struct rover_ring
 
 #define ROVER_RECORD_EVENT 1u // an event a runner's rule waits for
 #define ROVER_RECORD_HIT 2u   // a rule the kernel fired
+#define ROVER_RECORD_EDGE 3u  // kernel states a runner's when rule reads changed: number[0] is the reads bits
 
 #define ROVER_RECORD_TAKEN 1u // the event was dropped before any reader
 #define ROVER_RECORD_ELSE 2u  // the hit is its else actions
@@ -171,6 +172,7 @@ struct rules_live
         p32 kernel_rules;
         p64 runner[ROVER_EVENTS / 64];
         p64 kernel[ROVER_EVENTS / 64];
+        p64 runner_reads; // the states the runner's when rules read: a change of one is posted as an edge
         struct rcu_head rcu;
 };
 
@@ -254,10 +256,68 @@ static p64 rules_set_locked(positive which, b32 value)
         WRITE_ONCE(*sequence, *sequence + 1);
         smp_wmb();
         WRITE_ONCE(*slot, value);
-        WRITE_ONCE(*(b64 *)(rules_page + ROVER_PAGE_ZONE), -(b64)sys_tz.tz_minuteswest * 60);
         smp_wmb();
         WRITE_ONCE(*sequence, *sequence + 1);
         return 1ull << rules_state_bit[which];
+}
+
+/*
+        The zone's offset east of UTC, from the kernel's sys_tz (which the
+        timezone setting sets), written at start and before every event's
+        rules are asked, so a kernel rule over the clock has it from the first
+        event and not only from the first state that changes.
+*/
+static void rules_zone_locked(void)
+{
+        b64 zone = -(b64)sys_tz.tz_minuteswest * 60;
+        p32 *sequence = (p32 *)(rules_page + 4);
+        b64 *slot = (b64 *)(rules_page + ROVER_PAGE_ZONE);
+
+        if (READ_ONCE(*slot) == zone)
+                return;
+        WRITE_ONCE(*sequence, *sequence + 1);
+        smp_wmb();
+        WRITE_ONCE(*slot, zone);
+        smp_wmb();
+        WRITE_ONCE(*sequence, *sequence + 1);
+}
+
+/*
+        The boot.NAME states: each the value of moonwater.NAME= on the kernel's
+        command line, a word, written once at start; the line does not change
+        after it.
+*/
+static void rules_boot_states(void)
+{
+        const char *line = saved_command_line;
+
+        if (!line)
+                return;
+        for (positive at = 0; at < ROVER_STATES; at++)
+        {
+                const struct rover_state_row *state = rover_states + at;
+                const char *name = state->name, *from;
+                char key[80];
+                positive length = 0;
+                p8 *slot;
+
+                if (state->page != ROVER_PAGE_KERNEL || memory_compare(name, "boot.", 5) ||
+                    !rover_kind_is_word(rover_types[state->type].kind))
+                        continue;
+                snprintf(key, sizeof(key), "moonwater.%s=", name + 5);
+                for (from = line; (from = strstr(from, key)); from++)
+                        if (from == line || from[-1] == ' ')
+                                break;
+                if (!from)
+                        continue;
+                from += string_length((string_address)key);
+                while (from[length] && from[length] != ' ' && length < ROVER_WORD_MOST)
+                        length++;
+                slot = rules_page + state->offset;
+                slot[0] = (p8)length;
+                memory_copy(slot + 1, from, length);
+                slot[1 + length] = 0;
+        }
 }
 
 // ---- the ring ----------------------------------------------------------------
@@ -304,7 +364,7 @@ static void rules_post_locked(const struct rules_live *live, const struct rover_
         WRITE_ONCE(record->sequence, head + 1);
         smp_wmb();
         WRITE_ONCE(rules_ring->table, record->table);
-        if (kind == ROVER_RECORD_EVENT || (flags & ROVER_RECORD_USER))
+        if (kind == ROVER_RECORD_EVENT || kind == ROVER_RECORD_EDGE || (flags & ROVER_RECORD_USER))
                 WRITE_ONCE(rules_ring->user, rules_ring->user + 1);
         WRITE_ONCE(rules_ring->head, head + 1);
         rules_count.posted++;
@@ -738,6 +798,7 @@ static bool rules_fire(struct rover_event *event, const struct rules_change *set
                 event->realtime = ktime_get_real_seconds();
         rcu_read_lock();
         raw_spin_lock_irqsave(&rules_lock, flags);
+        rules_zone_locked();
         for (positive at = 0; at < count; at++)
                 changed |= rules_set_locked(sets[at].which, sets[at].value);
         live = rcu_dereference(rules_now);
@@ -746,6 +807,19 @@ static bool rules_fire(struct rover_event *event, const struct rules_change *set
                 if (event->id)
                         taken = rules_event_locked(live, event, started, &posted, &queued);
                 rules_edges_locked(live, changed, event->when, &posted, &queued);
+                //      The runner's when rules over a kernel state: told the state changed, as an edge record, so it
+                //      asks them now and not at its next turn.
+                if (changed & live->runner_reads)
+                {
+                        struct rover_event edge;
+
+                        memory_zero(&edge, sizeof(edge));
+                        edge.when = event->when;
+                        edge.count = 1;
+                        edge.field[0].number = (b64)changed;
+                        rules_post_locked(live, &edge, ROVER_RECORD_EDGE, 0, null, ktime_get_ns());
+                        posted = true;
+                }
         }
         raw_spin_unlock_irqrestore(&rules_lock, flags);
         rcu_read_unlock();
@@ -1428,6 +1502,8 @@ static long rules_load(struct rover_control *request)
 
                 if (rule->place == ROVER_KERNEL)
                         live->kernel_rules++;
+                if (rule->place == ROVER_RUNNER && (rule->flags & ROVER_RULE_WHEN))
+                        live->runner_reads |= rule->reads;
                 if (set && rule->event && rover_event_find(rule->event) &&
                     rover_event_find(rule->event)->source == ROVER_KERNEL)
                         set[rule->event >> 6] |= 1ull << (rule->event & 63);
@@ -1676,6 +1752,8 @@ static void rules_start(void)
         rules_page = rules_map + ROVER_MAP_STATE;
         rules_ring = (struct rover_ring *)(rules_map + ROVER_MAP_RING);
         *(p32 *)rules_page = 1;
+        rules_zone_locked();
+        rules_boot_states();
         rules_ring->magic = ROVER_RING_MAGIC;
         rules_ring->slots = ROVER_RING_SLOTS;
         rules_ring->record = ROVER_RECORD_BYTES;
