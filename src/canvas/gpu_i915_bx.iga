@@ -1,0 +1,101 @@
+// Gen9 box (op 5, the rectangle part): one plain colour box with no corner radii, laid over each pixel of the 16-byte block as the kit's
+// box layer does (ui_kit_fill_cols, ui_box_spans_radii with rx = ry = 0, ui_spans_cover, ui_kit_put, ui_premultiplied, ui_over). A block
+// is four pixels, X = 4 * X-group (r0.1) + lane, row Y = r0.6. The box is in 256ths of a device pixel, in the CURBE: dword 0 the colour
+// (0xaarrggbb, straight), dword 1 x0, dword 2 x1, dword 3 y0, dword 4 y1. Each row's cover is n * ov: n is the number of the row's
+// sixteen sample lines (at 256 * Y + 16 k + 8) that the box's top and bottom take, ov is the box's overlap of the pixel's 256ths.
+// The pixel's alpha is A * n * ov / 4096 (A * n in r24, the word factor), its premultiplied colour is the straight colour times
+// (alpha + (alpha >> 7)) / 256 per channel, and that is laid over the pixel by the tone's lane formula (as gpu_i915_tone.iga),
+// per lane now: the alpha is 0 leaves the pixel as it was (the formula gives the pixel back for a zero tone: checked for all 256 values).
+// Binding table entry 0: the block is read and written there as the tone's is.
+//
+// Not in this kernel: corner radii (rx or ry above 0: the ellipse insets need a square root per line), holes and clips, and the
+// scene's records (the box op 5 of gpu.c is a scene; this kernel draws one box). Scalars: r20 the CURBE's five dwords, r22 the
+// colour's alpha A, r24 A * n, r25 the colour's blue and red, r26 its green, r41 to r44 the row's sample lines (t, lo, hi, n).
+// Vectors (four lanes): r31 the block's first 256ths, r32 lo, r33 hi, r34 ov, r35 the alpha a, r36 am, r37 rest = 255 - a,
+// r38 the premultiplied blue and red, r39 the premultiplied green with alpha; r10..r14 the tone's lane formula (as the tone's).
+mul (1|M0)               r2.0<1>:ud    r0.1<0;1,0>:ud    0x10:ud
+mov (1|M0)               r2.1<1>:ud    r0.6<0;1,0>:ud
+mov (8|M0)               r4.0<1>:ud    r0.0<8;8,1>:ud
+mov (2|M0)               r4.0<1>:ud    r2.0<2;2,1>:ud
+mov (1|M0)               r4.2<1>:ud    0xF:ud
+send (16|M0)             r5:ud         r4:ud     0xC  0x02190000     // media block read of the destination (entry 0), header, 1 GRF
+mov (8|M0)               r20.0<1>:ud   r1.0<8;8,1>:ud              // the CURBE: colour, x0, x1, y0, y1
+shr (1|M0)               r22.0<1>:ud   r20.0<0;1,0>:ud   24:ud     // A
+and (1|M0)               r25.0<1>:ud   r20.0<0;1,0>:ud   0x00ff00ff:ud   // blue and red
+shr (1|M0)               r26.0<1>:ud   r20.0<0;1,0>:ud   8:ud
+and (1|M0)               r26.0<1>:ud   r26.0<0;1,0>:ud   255:ud    // green
+// the row's sample lines: n = the count of k in 0..15 with y0 <= t + 16 k < y1, t = 256 Y + 8
+shl (1|M0)               r41.0<1>:ud   r0.6<0;1,0>:ud    8:ud
+add (1|M0)               r41.0<1>:ud   r41.0<0;1,0>:ud   8:ud      // t
+add (1|M0)               r42.0<1>:d    r20.3<0;1,0>:d    -r41.0<0;1,0>:d   // y0 - t
+add (1|M0)               r42.0<1>:d    r42.0<0;1,0>:d    15:d
+asr (1|M0)               r42.0<1>:d    r42.0<0;1,0>:d    4:d       // lo = ceil((y0 - t) / 16)
+add (1|M0)               r43.0<1>:d    r20.4<0;1,0>:d    -r41.0<0;1,0>:d   // y1 - t
+add (1|M0)               r43.0<1>:d    r43.0<0;1,0>:d    15:d
+asr (1|M0)               r43.0<1>:d    r43.0<0;1,0>:d    4:d       // hi = ceil((y1 - t) / 16)
+sel (1|M0) (lt)f0.0      r42.0<1>:d    r42.0<0;1,0>:d    16:d
+sel (1|M0) (ge)f0.0      r42.0<1>:d    r42.0<0;1,0>:d    0:d       // lo in 0..16
+sel (1|M0) (lt)f0.0      r43.0<1>:d    r43.0<0;1,0>:d    16:d
+sel (1|M0) (ge)f0.0      r43.0<1>:d    r43.0<0;1,0>:d    0:d       // hi in 0..16
+add (1|M0)               r44.0<1>:d    r43.0<0;1,0>:d    -r42.0<0;1,0>:d   // n = hi - lo
+sel (1|M0) (ge)f0.0      r44.0<1>:d    r44.0<0;1,0>:d    0:d       // n in 0..16
+mul (1|M0)               r24.0<1>:ud   r22.0<0;1,0>:ud   r44.0<0;1,0>:uw   // A * n
+// the lanes' pixels: X = 4 * X-group + lane, first 256ths P0 = 256 X, and the overlap ov = min(x1, P0 + 256) - max(x0, P0), at least 0
+mov (1|M0)               r30.0<1>:ud   0:ud
+mov (1|M0)               r30.1<1>:ud   1:ud
+mov (1|M0)               r30.2<1>:ud   2:ud
+mov (1|M0)               r30.3<1>:ud   3:ud
+shl (1|M0)               r31.0<1>:ud   r0.1<0;1,0>:ud    2:ud
+add (4|M0)               r31.0<1>:ud   r30.0<1;1,0>:ud   r31.0<0;1,0>:ud
+shl (4|M0)               r31.0<1>:ud   r31.0<1;1,0>:ud   8:ud
+sel (4|M0) (ge)f0.0      r32.0<1>:d    r20.1<0;1,0>:d    r31.0<1;1,0>:d    // lo = max(x0, P0)
+add (4|M0)               r33.0<1>:d    r31.0<1;1,0>:d    256:d             // P0 + 256
+sel (4|M0) (lt)f0.0      r33.0<1>:d    r20.2<0;1,0>:d    r33.0<1;1,0>:d    // hi = min(x1, P0 + 256)
+add (4|M0)               r34.0<1>:d    r33.0<1;1,0>:d    -r32.0<1;1,0>:d   // ov = hi - lo
+sel (4|M0) (ge)f0.0      r34.0<1>:d    r34.0<1;1,0>:d    0:d               // ov at least 0
+// the alpha a = (ov * A * n) >> 12 (the cover n * ov over 4096 times A), am = a + (a >> 7), rest = 255 - a
+mul (4|M0)               r35.0<1>:ud   r34.0<1;1,0>:ud   r24.0<0;1,0>:uw
+shr (4|M0)               r35.0<1>:ud   r35.0<1;1,0>:ud   12:ud
+shr (4|M0)               r36.0<1>:ud   r35.0<1;1,0>:ud   7:ud
+add (4|M0)               r36.0<1>:ud   r36.0<1;1,0>:ud   r35.0<1;1,0>:ud
+add (4|M0)               r37.0<1>:d    -r35.0<1;1,0>:d   255:d
+// the premultiplied colour: each channel (c * am + 128) >> 8, blue and red in one dword, green alone, then the alpha beside it
+mul (4|M0)               r38.0<1>:ud   r25.0<0;1,0>:ud   r36.0<2;1,0>:uw
+add (4|M0)               r38.0<1>:ud   r38.0<1;1,0>:ud   0x00800080:ud
+shr (4|M0)               r38.0<1>:ud   r38.0<1;1,0>:ud   8:ud
+and (4|M0)               r38.0<1>:ud   r38.0<1;1,0>:ud   0x00ff00ff:ud
+mul (4|M0)               r39.0<1>:ud   r26.0<0;1,0>:ud   r36.0<2;1,0>:uw
+add (4|M0)               r39.0<1>:ud   r39.0<1;1,0>:ud   128:ud
+shr (4|M0)               r39.0<1>:ud   r39.0<1;1,0>:ud   8:ud
+shl (4|M0)               r40.0<1>:ud   r35.0<1;1,0>:ud   16:ud
+or (4|M0)                r39.0<1>:ud   r39.0<1;1,0>:ud   r40.0<1;1,0>:ud
+// the tone's lane formula over the block: the pixel under, times rest, plus 127, then (x + (x >> 8) + 1) >> 8 per 16-bit lane
+mov (4|M0)               r14.0<1>:ud   r5.0<1;1,0>:ud
+and (4|M0)               r10.0<1>:ud   r14.0<1;1,0>:ud   0x00ff00ff:ud
+shr (4|M0)               r11.0<1>:ud   r14.0<1;1,0>:ud   8:ud
+and (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   0x00ff00ff:ud
+mul (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   r37.0<2;1,0>:uw
+add (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   0x007f007f:ud
+mul (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   r37.0<2;1,0>:uw
+add (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   0x007f007f:ud
+shr (4|M0)               r12.0<1>:ud   r10.0<1;1,0>:ud   8:ud
+and (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   r10.0<1;1,0>:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00010001:ud
+shr (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   8:ud
+and (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00ff00ff:ud
+shr (4|M0)               r13.0<1>:ud   r11.0<1;1,0>:ud   8:ud
+and (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r11.0<1;1,0>:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00010001:ud
+shr (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   8:ud
+and (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   r38.0<1;1,0>:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r39.0<1;1,0>:ud
+sel (8|M0) (lt)f0.0      r12.0<1>:uw   r12.0<8;8,1>:uw   0x00ff:uw
+sel (8|M0) (lt)f0.0      r13.0<1>:uw   r13.0<8;8,1>:uw   0x00ff:uw
+shl (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   8:ud
+or (4|M0)                r5.0<1>:ud    r12.0<1;1,0>:ud   r13.0<1;1,0>:ud
+send (16|M0)             acc0:uw       r4:d      0xC  0x060A8000     // media block write of the destination (entry 0), as the tone
+mov (8|M0)               r112.0<1>:ud  r0.0<8;8,1>:ud
+send (16|M0)             null:uw       r112:d    0x27 0x02000010 {EOT}
