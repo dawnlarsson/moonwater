@@ -40,6 +40,7 @@ files_back	4bc2	אחורה
 files_busy	5ba5	העתקה, העברה או מחיקה מתבצעת
 files_changed	df4e	זה לא מה שהופיע ברשימה: התיקייה נקראת מחדש
 files_chosen	7a7f	נבחרו %1$d מתוך %2$d
+files_chosen_size	621a	%1$d מתוך %2$d נבחרו, %3$s
 files_copied	6570	%d הועתקו
 files_copying	c870	מעתיק %1$d מתוך %2$d, %3$s מתוך %4$s: Escape עוצר
 files_count	cab8	%d פריטים
@@ -62,8 +63,22 @@ files_name_bad	467d	זה לא שם
 files_name_taken	cbce	השם הזה תפוס
 files_new_folder	d127	תיקייה חדשה
 files_not_folder	2663	זו לא תיקייה
+files_nothing_to_paste	c9d4	בלוח אין קבצים
 files_reading	64a4	קורא את התיקייה
 files_rename_hint	ad88	שם חדש
+files_sheet_created	59ac	נוצר %s
+files_sheet_file	3663	קובץ
+files_sheet_folder	7afd	תיקייה
+files_sheet_in	3f9a	ב־%s
+files_sheet_items	cab8	%d פריטים
+files_sheet_link	9772	קישור אל %s
+files_sheet_measuring	c30d	גודל: נמדד
+files_sheet_mode	79bf	הרשאות %1$s (%2$s)
+files_sheet_modified	558d	שונה %s
+files_sheet_other	3921	התקן, צינור או שקע
+files_sheet_owner	8b0c	בעלים %1$d, קבוצה %2$d
+files_sheet_size	eca5	גודל %1$s (%2$s בתים)
+files_sheet_size_in	31a1	גודל %1$s ב־%2$d פריטים
 files_unreadable	986c	אין הרשאה לקרוא את התיקייה
 files_up	5940	למעלה
 installer_apps_about	af1b	הן מותקנות במערכת החדשה אחרי שהיא נכתבת.
@@ -146,10 +161,17 @@ menu_cut	5c17	גזור
 menu_delete	1e3e	מחק
 menu_find	1fa6	חפש
 menu_go_to_line	bc96	עבור לשורה
+menu_new_folder	41cb	תיקייה &חדשה
+menu_open	61a5	&פתח
+menu_open_editor	8ca0	פתח ב&עורך
+menu_open_terminal	6d2a	פתח &מסוף כאן
 menu_paste	6854	הדבק
+menu_properties	c780	&מאפיינים
 menu_redo	ac45	בצע שוב
+menu_rename	9529	&שנה שם
 menu_reset_zoom	1b0f	אפס זום
 menu_select_all	f6f6	בחר הכול
+menu_show_hidden	37bd	הצג קבצים &מוסתרים
 menu_toggle_comment	92ac	החלף הערה
 menu_undo	b9d3	בטל
 menu_zoom_in	5bcf	הגדל זום

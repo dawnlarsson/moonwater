@@ -39,6 +39,7 @@ files_back	4bc2	Indietro
 files_busy	5ba5	Una copia, uno spostamento o un'eliminazione è in corso
 files_changed	df4e	Non è ciò che era elencato: la cartella viene riletta
 files_chosen	7a7f	%1$d di %2$d scelti
+files_chosen_size	621a	%1$d di %2$d scelti, %3$s
 files_copied	6570	%d copiati
 files_copying	c870	Copia %1$d di %2$d, %3$s di %4$s: Esc ferma
 files_count	cab8	%d elementi
@@ -61,8 +62,22 @@ files_name_bad	467d	Questo non è un nome
 files_name_taken	cbce	Questo nome è già usato
 files_new_folder	d127	Nuova cartella
 files_not_folder	2663	Questa non è una cartella
+files_nothing_to_paste	c9d4	Gli appunti non contengono file
 files_reading	64a4	Lettura della cartella
 files_rename_hint	ad88	Nuovo nome
+files_sheet_created	59ac	Creato %s
+files_sheet_file	3663	File
+files_sheet_folder	7afd	Cartella
+files_sheet_in	3f9a	In %s
+files_sheet_items	cab8	%d elementi
+files_sheet_link	9772	Collegamento a %s
+files_sheet_measuring	c30d	Dimensione: in misura
+files_sheet_mode	79bf	Permessi %1$s (%2$s)
+files_sheet_modified	558d	Modificato %s
+files_sheet_other	3921	Dispositivo, pipe o socket
+files_sheet_owner	8b0c	Proprietario %1$d, gruppo %2$d
+files_sheet_size	eca5	Dimensione %1$s (%2$s byte)
+files_sheet_size_in	31a1	Dimensione %1$s in %2$d elementi
 files_unreadable	986c	Questa cartella non può essere letta
 files_up	5940	Su
 installer_apps_about	af1b	Vengono installate sul nuovo sistema una volta scritto.
@@ -145,10 +160,17 @@ menu_cut	5c17	&Taglia
 menu_delete	1e3e	&Elimina
 menu_find	1fa6	Tr&ova
 menu_go_to_line	bc96	&Vai alla riga
+menu_new_folder	41cb	&Nuova cartella
+menu_open	61a5	&Apri
+menu_open_editor	8ca0	Apri nell'&editor
+menu_open_terminal	6d2a	Apri un &terminale qui
 menu_paste	6854	&Incolla
+menu_properties	c780	P&roprietà
 menu_redo	ac45	&Ripeti
+menu_rename	9529	&Rinomina
 menu_reset_zoom	1b0f	Rei&mposta zoom
 menu_select_all	f6f6	Seleziona t&utto
+menu_show_hidden	37bd	Mostra file &nascosti
 menu_toggle_comment	92ac	Attiva/disattiva co&mmento
 menu_undo	b9d3	&Annulla
 menu_zoom_in	5bcf	I&ngrandisci

@@ -39,6 +39,7 @@ files_back	4bc2	Atrás
 files_busy	5ba5	Hay una copia, un traslado o un borrado en curso
 files_changed	df4e	No es lo que se listó: la carpeta se lee de nuevo
 files_chosen	7a7f	%1$d de %2$d elegidos
+files_chosen_size	621a	%1$d de %2$d elegidos, %3$s
 files_copied	6570	%d copiados
 files_copying	c870	Copiando %1$d de %2$d, %3$s de %4$s: Escape detiene
 files_count	cab8	%d elementos
@@ -61,8 +62,22 @@ files_name_bad	467d	Eso no es un nombre
 files_name_taken	cbce	Ese nombre ya existe
 files_new_folder	d127	Carpeta nueva
 files_not_folder	2663	Esto no es una carpeta
+files_nothing_to_paste	c9d4	El portapapeles no tiene archivos
 files_reading	64a4	Leyendo la carpeta
 files_rename_hint	ad88	Nombre nuevo
+files_sheet_created	59ac	Creado %s
+files_sheet_file	3663	Archivo
+files_sheet_folder	7afd	Carpeta
+files_sheet_in	3f9a	En %s
+files_sheet_items	cab8	%d elementos
+files_sheet_link	9772	Enlace a %s
+files_sheet_measuring	c30d	Tamaño: midiendo
+files_sheet_mode	79bf	Permisos %1$s (%2$s)
+files_sheet_modified	558d	Cambiado %s
+files_sheet_other	3921	Dispositivo, tubería o socket
+files_sheet_owner	8b0c	Propietario %1$d, grupo %2$d
+files_sheet_size	eca5	Tamaño %1$s (%2$s bytes)
+files_sheet_size_in	31a1	Tamaño %1$s en %2$d elementos
 files_unreadable	986c	No se permite leer esta carpeta
 files_up	5940	Subir
 installer_apps_about	af1b	Se instalan en el sistema nuevo una vez escrito.
@@ -145,10 +160,17 @@ menu_cut	5c17	Cor&tar
 menu_delete	1e3e	&Eliminar
 menu_find	1fa6	&Buscar
 menu_go_to_line	bc96	&Ir a la línea
+menu_new_folder	41cb	&Nueva carpeta
+menu_open	61a5	&Abrir
+menu_open_editor	8ca0	Abrir en el &editor
+menu_open_terminal	6d2a	Abrir una &terminal aquí
 menu_paste	6854	&Pegar
+menu_properties	c780	&Propiedades
 menu_redo	ac45	&Rehacer
+menu_rename	9529	Cambiar &nombre
 menu_reset_zoom	1b0f	Re&establecer zoom
 menu_select_all	f6f6	Seleccionar t&odo
+menu_show_hidden	37bd	Mostrar archivos &ocultos
 menu_toggle_comment	92ac	Alternar co&mentario
 menu_undo	b9d3	&Deshacer
 menu_zoom_in	5bcf	&Ampliar

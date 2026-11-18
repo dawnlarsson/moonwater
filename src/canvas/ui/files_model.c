@@ -1645,6 +1645,7 @@ static b32 files_job_step(struct files_model address_to m, struct files_job addr
 #define FILES_MOVE_INSIDE 1000        // error: a folder into itself
 #define FILES_MOVE_COPY 1             // what a move does: the values the drag's actions have (WINDOWS_DRAG_COPY, _MOVE)
 #define FILES_MOVE_MOVE 2
+#define FILES_MOVE_MEASURE 3          // or only counts what the sources hold (a properties sheet's size): nothing is made or moved
 
 enum
 {
@@ -1755,7 +1756,7 @@ static b32 files_move_begin(struct files_move address_to job, int how, bipolar i
 
         memory_fill(job, 0, sizeof(*job));
         job->into = into, job->from = job->in = job->out = job->out_folder = -1, job->begun = true;
-        job->how = how == FILES_MOVE_MOVE ? FILES_MOVE_MOVE : FILES_MOVE_COPY;
+        job->how = how == FILES_MOVE_MOVE || how == FILES_MOVE_MEASURE ? how : FILES_MOVE_COPY;
         for (int k = 0; k < FILES_JOB_DEEP; k++)
                 job->made[k] = -1, job->walk[k].handle = -1;
         if (into < 0 || file_look_code(into, (string_address) "", AT_EMPTY_PATH, &job->into_facts) < 0 ||
@@ -2241,6 +2242,11 @@ static b32 files_move_step(struct files_move address_to job)
                 }
                 if (!files_move_take(job, job->next))
                         return false;
+                if (job->how == FILES_MOVE_MEASURE)
+                {
+                        job->copied[job->next++] = 1;
+                        return true;
+                }
                 // A folder into itself, or into a folder inside it, is no copy and no move: nothing of it is made.
                 if ((job->facts.mode & MODE_FORMAT) == MODE_DIRECTORY && files_move_within(job->into, &job->facts))
                 {
@@ -2300,8 +2306,8 @@ static b32 files_move_step(struct files_move address_to job)
                 if (job->next >= job->count)
                 {
                         job->next = 0;
-                        job->phase = counting ? FILES_MOVE_COPYING : FILES_MOVE_OVER;
-                        if (!counting)
+                        job->phase = counting && job->how != FILES_MOVE_MEASURE ? FILES_MOVE_COPYING : FILES_MOVE_OVER;
+                        if (job->phase == FILES_MOVE_OVER)
                                 __atomic_store_n(&job->state, FILES_JOB_DONE, __ATOMIC_RELEASE);
                         return job->phase != FILES_MOVE_OVER;
                 }

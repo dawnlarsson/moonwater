@@ -39,6 +39,7 @@ files_back	4bc2	Terug
 files_busy	5ba5	Er loopt een kopie, verplaatsing of verwijdering
 files_changed	df4e	Niet meer wat er stond: de map wordt opnieuw gelezen
 files_chosen	7a7f	%1$d van %2$d gekozen
+files_chosen_size	621a	%1$d van %2$d gekozen, %3$s
 files_copied	6570	%d gekopieerd
 files_copying	c870	Kopiëren %1$d van %2$d, %3$s van %4$s: Escape stopt
 files_count	cab8	%d items
@@ -61,8 +62,22 @@ files_name_bad	467d	Dat is geen naam
 files_name_taken	cbce	Die naam is al in gebruik
 files_new_folder	d127	Nieuwe map
 files_not_folder	2663	Dit is geen map
+files_nothing_to_paste	c9d4	Het klembord bevat geen bestanden
 files_reading	64a4	De map wordt gelezen
 files_rename_hint	ad88	Nieuwe naam
+files_sheet_created	59ac	Gemaakt %s
+files_sheet_file	3663	Bestand
+files_sheet_folder	7afd	Map
+files_sheet_in	3f9a	In %s
+files_sheet_items	cab8	%d items
+files_sheet_link	9772	Koppeling naar %s
+files_sheet_measuring	c30d	Grootte: wordt gemeten
+files_sheet_mode	79bf	Rechten %1$s (%2$s)
+files_sheet_modified	558d	Gewijzigd %s
+files_sheet_other	3921	Apparaat, pijp of socket
+files_sheet_owner	8b0c	Eigenaar %1$d, groep %2$d
+files_sheet_size	eca5	Grootte %1$s (%2$s bytes)
+files_sheet_size_in	31a1	Grootte %1$s in %2$d items
 files_unreadable	986c	Deze map mag niet worden gelezen
 files_up	5940	Omhoog
 installer_apps_about	af1b	Ze worden op het nieuwe systeem geïnstalleerd zodra het geschreven is.
@@ -145,10 +160,17 @@ menu_cut	5c17	&Knippen
 menu_delete	1e3e	&Verwijderen
 menu_find	1fa6	&Zoeken
 menu_go_to_line	bc96	&Ga naar regel
+menu_new_folder	41cb	&Nieuwe map
+menu_open	61a5	&Openen
+menu_open_editor	8ca0	Openen in de &editor
+menu_open_terminal	6d2a	Hier een &terminal openen
 menu_paste	6854	P&lakken
+menu_properties	c780	&Eigenschappen
 menu_redo	ac45	Op&nieuw
+menu_rename	9529	Naam &wijzigen
 menu_reset_zoom	1b0f	Zoom &herstellen
 menu_select_all	f6f6	&Alles selecteren
+menu_show_hidden	37bd	&Verborgen bestanden tonen
 menu_toggle_comment	92ac	Co&mmentaar wisselen
 menu_undo	b9d3	&Ongedaan maken
 menu_zoom_in	5bcf	&Inzoomen

@@ -39,6 +39,7 @@ files_back	4bc2	Retour
 files_busy	5ba5	Une copie, un déplacement ou une suppression est en cours
 files_changed	df4e	Ce n'est plus ce qui était listé : le dossier est relu
 files_chosen	7a7f	%1$d sur %2$d choisis
+files_chosen_size	621a	%1$d sur %2$d choisis, %3$s
 files_copied	6570	%d copiés
 files_copying	c870	Copie %1$d sur %2$d, %3$s sur %4$s : Échap arrête
 files_count	cab8	%d éléments
@@ -61,8 +62,22 @@ files_name_bad	467d	Ce n'est pas un nom
 files_name_taken	cbce	Ce nom est déjà pris
 files_new_folder	d127	Nouveau dossier
 files_not_folder	2663	Ce n'est pas un dossier
+files_nothing_to_paste	c9d4	Le presse-papiers ne contient aucun fichier
 files_reading	64a4	Lecture du dossier
 files_rename_hint	ad88	Nouveau nom
+files_sheet_created	59ac	Créé %s
+files_sheet_file	3663	Fichier
+files_sheet_folder	7afd	Dossier
+files_sheet_in	3f9a	Dans %s
+files_sheet_items	cab8	%d éléments
+files_sheet_link	9772	Lien vers %s
+files_sheet_measuring	c30d	Taille : mesure en cours
+files_sheet_mode	79bf	Droits %1$s (%2$s)
+files_sheet_modified	558d	Modifié %s
+files_sheet_other	3921	Périphérique, tube ou socket
+files_sheet_owner	8b0c	Propriétaire %1$d, groupe %2$d
+files_sheet_size	eca5	Taille %1$s (%2$s octets)
+files_sheet_size_in	31a1	Taille %1$s en %2$d éléments
 files_unreadable	986c	Ce dossier ne peut pas être lu
 files_up	5940	Monter
 installer_apps_about	af1b	Elles sont installées sur le nouveau système une fois écrit.
@@ -145,10 +160,17 @@ menu_cut	5c17	Co&uper
 menu_delete	1e3e	&Supprimer
 menu_find	1fa6	Rec&hercher
 menu_go_to_line	bc96	Aller à la l&igne
+menu_new_folder	41cb	&Nouveau dossier
+menu_open	61a5	&Ouvrir
+menu_open_editor	8ca0	Ouvrir dans l'&éditeur
+menu_open_terminal	6d2a	Ouvrir un &terminal ici
 menu_paste	6854	Co&ller
+menu_properties	c780	P&ropriétés
 menu_redo	ac45	&Rétablir
+menu_rename	9529	Re&nommer
 menu_reset_zoom	1b0f	Réinitialiser le &zoom
 menu_select_all	f6f6	&Tout sélectionner
+menu_show_hidden	37bd	Afficher les fichiers &cachés
 menu_toggle_comment	92ac	&Basculer le commentaire
 menu_undo	b9d3	&Annuler
 menu_zoom_in	5bcf	Zoom a&vant

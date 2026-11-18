@@ -39,6 +39,7 @@ files_back	4bc2	Wstecz
 files_busy	5ba5	Trwa kopiowanie, przenoszenie lub usuwanie
 files_changed	df4e	To nie to, co było na liście: folder jest czytany ponownie
 files_chosen	7a7f	Wybrano %1$d z %2$d
+files_chosen_size	621a	Wybrano %1$d z %2$d, %3$s
 files_copied	6570	Skopiowano %d
 files_copying	c870	Kopiowanie %1$d z %2$d, %3$s z %4$s: Escape zatrzymuje
 files_count	cab8	Elementy: %d
@@ -61,8 +62,22 @@ files_name_bad	467d	To nie jest nazwa
 files_name_taken	cbce	Ta nazwa jest zajęta
 files_new_folder	d127	Nowy folder
 files_not_folder	2663	To nie jest folder
+files_nothing_to_paste	c9d4	Schowek nie zawiera plików
 files_reading	64a4	Czytanie folderu
 files_rename_hint	ad88	Nowa nazwa
+files_sheet_created	59ac	Utworzono %s
+files_sheet_file	3663	Plik
+files_sheet_folder	7afd	Folder
+files_sheet_in	3f9a	W %s
+files_sheet_items	cab8	Elementy: %d
+files_sheet_link	9772	Dowiązanie do %s
+files_sheet_measuring	c30d	Rozmiar: mierzenie
+files_sheet_mode	79bf	Uprawnienia %1$s (%2$s)
+files_sheet_modified	558d	Zmieniono %s
+files_sheet_other	3921	Urządzenie, potok lub gniazdo
+files_sheet_owner	8b0c	Właściciel %1$d, grupa %2$d
+files_sheet_size	eca5	Rozmiar %1$s (%2$s bajtów)
+files_sheet_size_in	31a1	Rozmiar %1$s w %2$d elementach
 files_unreadable	986c	Tego folderu nie wolno czytać
 files_up	5940	W górę
 installer_apps_about	af1b	Zostaną zainstalowane w nowym systemie po jego zapisaniu.
@@ -145,10 +160,17 @@ menu_cut	5c17	&Wytnij
 menu_delete	1e3e	&Usuń
 menu_find	1fa6	Zna&jdź
 menu_go_to_line	bc96	Prz&ejdź do wiersza
+menu_new_folder	41cb	&Nowy folder
+menu_open	61a5	&Otwórz
+menu_open_editor	8ca0	Otwórz w &edytorze
+menu_open_terminal	6d2a	Otwórz &terminal tutaj
 menu_paste	6854	Wk&lej
+menu_properties	c780	Właś&ciwości
 menu_redo	ac45	&Ponów
+menu_rename	9529	Zmień &nazwę
 menu_reset_zoom	1b0f	&Resetuj powiększenie
 menu_select_all	f6f6	&Zaznacz wszystko
+menu_show_hidden	37bd	Pokaż &ukryte pliki
 menu_toggle_comment	92ac	Przełącz ko&mentarz
 menu_undo	b9d3	&Cofnij
 menu_zoom_in	5bcf	&Powiększ

@@ -40,6 +40,7 @@ files_back	4bc2	رجوع
 files_busy	5ba5	نسخ أو نقل أو حذف قيد التنفيذ
 files_changed	df4e	ليس ما كان في القائمة: يُقرأ المجلد من جديد
 files_chosen	7a7f	تم اختيار %1$d من %2$d
+files_chosen_size	621a	اختير %1$d من %2$d، %3$s
 files_copied	6570	نُسخ %d
 files_copying	c870	نسخ %1$d من %2$d، %3$s من %4$s: Escape يوقف
 files_count	cab8	%d عنصر
@@ -62,8 +63,22 @@ files_name_bad	467d	هذا ليس اسما
 files_name_taken	cbce	هذا الاسم مستخدم
 files_new_folder	d127	مجلد جديد
 files_not_folder	2663	هذا ليس مجلدا
+files_nothing_to_paste	c9d4	لا تحوي الحافظة ملفات
 files_reading	64a4	قراءة المجلد
 files_rename_hint	ad88	اسم جديد
+files_sheet_created	59ac	أُنشئ %s
+files_sheet_file	3663	ملف
+files_sheet_folder	7afd	مجلد
+files_sheet_in	3f9a	في %s
+files_sheet_items	cab8	%d عناصر
+files_sheet_link	9772	رابط إلى %s
+files_sheet_measuring	c30d	الحجم: قيد القياس
+files_sheet_mode	79bf	الأذونات %1$s (%2$s)
+files_sheet_modified	558d	عُدِّل %s
+files_sheet_other	3921	جهاز أو أنبوب أو مقبس
+files_sheet_owner	8b0c	المالك %1$d، المجموعة %2$d
+files_sheet_size	eca5	الحجم %1$s (%2$s بايت)
+files_sheet_size_in	31a1	الحجم %1$s في %2$d عناصر
 files_unreadable	986c	لا يُسمح بقراءة هذا المجلد
 files_up	5940	للأعلى
 installer_apps_about	af1b	تُثبَّت على النظام الجديد بعد كتابته.
@@ -146,10 +161,17 @@ menu_cut	5c17	قص
 menu_delete	1e3e	حذف
 menu_find	1fa6	بحث
 menu_go_to_line	bc96	الانتقال إلى سطر
+menu_new_folder	41cb	مجلد &جديد
+menu_open	61a5	&فتح
+menu_open_editor	8ca0	فتح في &المحرر
+menu_open_terminal	6d2a	فتح &طرفية هنا
 menu_paste	6854	لصق
+menu_properties	c780	&خصائص
 menu_redo	ac45	إعادة
+menu_rename	9529	إعادة &تسمية
 menu_reset_zoom	1b0f	إعادة تعيين التكبير
 menu_select_all	f6f6	تحديد الكل
+menu_show_hidden	37bd	إظهار الملفات &المخفية
 menu_toggle_comment	92ac	تبديل التعليق
 menu_undo	b9d3	تراجع
 menu_zoom_in	5bcf	تكبير

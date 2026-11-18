@@ -40,6 +40,7 @@ files_back	4bc2	پیچھے
 files_busy	5ba5	نقل، منتقلی یا حذف جاری ہے
 files_changed	df4e	یہ وہ نہیں جو فہرست میں تھا: فولڈر دوبارہ پڑھا جا رہا ہے
 files_chosen	7a7f	%2$d میں سے %1$d منتخب
+files_chosen_size	621a	%2$d میں سے %1$d منتخب، %3$s
 files_copied	6570	%d نقل ہوئے
 files_copying	c870	نقل %1$d از %2$d، %3$s از %4$s: Escape روکتا ہے
 files_count	cab8	%d اشیاء
@@ -62,8 +63,22 @@ files_name_bad	467d	یہ نام نہیں ہے
 files_name_taken	cbce	یہ نام لیا جا چکا ہے
 files_new_folder	d127	نیا فولڈر
 files_not_folder	2663	یہ فولڈر نہیں ہے
+files_nothing_to_paste	c9d4	کلپ بورڈ میں کوئی فائل نہیں
 files_reading	64a4	فولڈر پڑھا جا رہا ہے
 files_rename_hint	ad88	نیا نام
+files_sheet_created	59ac	بنایا %s
+files_sheet_file	3663	فائل
+files_sheet_folder	7afd	فولڈر
+files_sheet_in	3f9a	%s میں
+files_sheet_items	cab8	%d اشیاء
+files_sheet_link	9772	%s کا لنک
+files_sheet_measuring	c30d	سائز: ناپا جا رہا ہے
+files_sheet_mode	79bf	اجازتیں %1$s (%2$s)
+files_sheet_modified	558d	تبدیل %s
+files_sheet_other	3921	آلہ، پائپ یا ساکٹ
+files_sheet_owner	8b0c	مالک %1$d، گروپ %2$d
+files_sheet_size	eca5	سائز %1$s (%2$s بائٹ)
+files_sheet_size_in	31a1	سائز %1$s، %2$d اشیاء میں
 files_unreadable	986c	اس فولڈر کو پڑھنے کی اجازت نہیں
 files_up	5940	اوپر
 installer_apps_about	af1b	سسٹم لکھے جانے کے بعد یہ نئے سسٹم پر انسٹال ہوتی ہیں۔
@@ -146,10 +161,17 @@ menu_cut	5c17	کٹ
 menu_delete	1e3e	حذف کریں
 menu_find	1fa6	تلاش
 menu_go_to_line	bc96	لائن پر جائیں
+menu_new_folder	41cb	&نیا فولڈر
+menu_open	61a5	&کھولیں
+menu_open_editor	8ca0	&ایڈیٹر میں کھولیں
+menu_open_terminal	6d2a	یہاں &ٹرمینل کھولیں
 menu_paste	6854	پیسٹ
+menu_properties	c780	&خصوصیات
 menu_redo	ac45	دوبارہ کریں
+menu_rename	9529	نام &تبدیل کریں
 menu_reset_zoom	1b0f	زوم بحال کریں
 menu_select_all	f6f6	سب منتخب کریں
+menu_show_hidden	37bd	&پوشیدہ فائلیں دکھائیں
 menu_toggle_comment	92ac	تبصرہ بدلیں
 menu_undo	b9d3	کالعدم کریں
 menu_zoom_in	5bcf	بڑا کریں

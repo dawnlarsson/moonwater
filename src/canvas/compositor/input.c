@@ -2102,6 +2102,11 @@ static void compositor_button(unsigned int code, int down)
         if (under < 0)
                 return;
 
+        // A right press is the window's as a left one is: it is raised and has the keys, so the menu it opens there has them too (its
+        // arrows, Enter, Escape), where they stayed with the window that had them before and the menu could not be closed by a key.
+        if (code == COMPOSITOR_BTN_RIGHT && !alt && compositor.grab < 0 && !compositor_wl_held())
+                compositor_raise(under), compositor_focus(under);
+
         if ((code == COMPOSITOR_BTN_LEFT || (code == COMPOSITOR_BTN_RIGHT && alt)) && compositor.grab < 0 && !compositor_wl_held())
         {
                 unsigned int edges = compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);

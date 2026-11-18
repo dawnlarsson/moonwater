@@ -39,6 +39,7 @@ files_back	4bc2	Назад
 files_busy	5ba5	Триває копіювання, переміщення або видалення
 files_changed	df4e	Це вже не те, що було у списку: тека читається знову
 files_chosen	7a7f	Вибрано %1$d з %2$d
+files_chosen_size	621a	Вибрано %1$d з %2$d, %3$s
 files_copied	6570	Скопійовано: %d
 files_copying	c870	Копіювання %1$d з %2$d, %3$s з %4$s: Escape зупиняє
 files_count	cab8	Об'єктів: %d
@@ -61,8 +62,22 @@ files_name_bad	467d	Це не ім'я
 files_name_taken	cbce	Це ім'я зайняте
 files_new_folder	d127	Нова тека
 files_not_folder	2663	Це не тека
+files_nothing_to_paste	c9d4	У буфері обміну немає файлів
 files_reading	64a4	Читання теки
 files_rename_hint	ad88	Нове ім'я
+files_sheet_created	59ac	Створено %s
+files_sheet_file	3663	Файл
+files_sheet_folder	7afd	Тека
+files_sheet_in	3f9a	У %s
+files_sheet_items	cab8	Елементів: %d
+files_sheet_link	9772	Посилання на %s
+files_sheet_measuring	c30d	Розмір: вимірюється
+files_sheet_mode	79bf	Права %1$s (%2$s)
+files_sheet_modified	558d	Змінено %s
+files_sheet_other	3921	Пристрій, канал або сокет
+files_sheet_owner	8b0c	Власник %1$d, група %2$d
+files_sheet_size	eca5	Розмір %1$s (%2$s байт)
+files_sheet_size_in	31a1	Розмір %1$s у %2$d елементах
 files_unreadable	986c	Цю теку не можна читати
 files_up	5940	Вгору
 installer_apps_about	af1b	Вони встановлюються в нову систему після її запису.
@@ -145,10 +160,17 @@ menu_cut	5c17	Вирізати
 menu_delete	1e3e	Видалити
 menu_find	1fa6	Знайти
 menu_go_to_line	bc96	Перейти до рядка
+menu_new_folder	41cb	&Нова тека
+menu_open	61a5	&Відкрити
+menu_open_editor	8ca0	Відкрити в &редакторі
+menu_open_terminal	6d2a	Відкрити &термінал тут
 menu_paste	6854	Вставити
+menu_properties	c780	&Властивості
 menu_redo	ac45	Повторити
+menu_rename	9529	&Перейменувати
 menu_reset_zoom	1b0f	Скинути масштаб
 menu_select_all	f6f6	Вибрати все
+menu_show_hidden	37bd	Показати &приховані файли
 menu_toggle_comment	92ac	Закоментувати/розкоментувати
 menu_undo	b9d3	Скасувати
 menu_zoom_in	5bcf	Збільшити

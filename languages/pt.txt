@@ -39,6 +39,7 @@ files_back	4bc2	Voltar
 files_busy	5ba5	Uma cópia, movimentação ou exclusão está em andamento
 files_changed	df4e	Não é o que foi listado: a pasta é lida de novo
 files_chosen	7a7f	%1$d de %2$d escolhidos
+files_chosen_size	621a	%1$d de %2$d escolhidos, %3$s
 files_copied	6570	%d copiados
 files_copying	c870	Copiando %1$d de %2$d, %3$s de %4$s: Escape para
 files_count	cab8	%d itens
@@ -61,8 +62,22 @@ files_name_bad	467d	Isso não é um nome
 files_name_taken	cbce	Esse nome já existe
 files_new_folder	d127	Nova pasta
 files_not_folder	2663	Isto não é uma pasta
+files_nothing_to_paste	c9d4	A área de transferência não tem arquivos
 files_reading	64a4	Lendo a pasta
 files_rename_hint	ad88	Novo nome
+files_sheet_created	59ac	Criado %s
+files_sheet_file	3663	Arquivo
+files_sheet_folder	7afd	Pasta
+files_sheet_in	3f9a	Em %s
+files_sheet_items	cab8	%d itens
+files_sheet_link	9772	Link para %s
+files_sheet_measuring	c30d	Tamanho: medindo
+files_sheet_mode	79bf	Permissões %1$s (%2$s)
+files_sheet_modified	558d	Alterado %s
+files_sheet_other	3921	Dispositivo, pipe ou socket
+files_sheet_owner	8b0c	Dono %1$d, grupo %2$d
+files_sheet_size	eca5	Tamanho %1$s (%2$s bytes)
+files_sheet_size_in	31a1	Tamanho %1$s em %2$d itens
 files_unreadable	986c	Esta pasta não pode ser lida
 files_up	5940	Subir
 installer_apps_about	af1b	São instaladas no novo sistema depois de escrito.
@@ -145,10 +160,17 @@ menu_cut	5c17	Recor&tar
 menu_delete	1e3e	&Excluir
 menu_find	1fa6	&Procurar
 menu_go_to_line	bc96	&Ir para a linha
+menu_new_folder	41cb	&Nova pasta
+menu_open	61a5	&Abrir
+menu_open_editor	8ca0	Abrir no &editor
+menu_open_terminal	6d2a	Abrir um &terminal aqui
 menu_paste	6854	Co&lar
+menu_properties	c780	P&ropriedades
 menu_redo	ac45	&Refazer
+menu_rename	9529	Re&nomear
 menu_reset_zoom	1b0f	&Redefinir zoom
 menu_select_all	f6f6	Selecionar t&udo
+menu_show_hidden	37bd	Mostrar arquivos &ocultos
 menu_toggle_comment	92ac	Alternar co&mentário
 menu_undo	b9d3	&Desfazer
 menu_zoom_in	5bcf	&Aumentar zoom

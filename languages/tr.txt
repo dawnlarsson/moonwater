@@ -39,6 +39,7 @@ files_back	4bc2	Geri
 files_busy	5ba5	Bir kopyalama, taşıma ya da silme sürüyor
 files_changed	df4e	Listelenen bu değil: klasör yeniden okunuyor
 files_chosen	7a7f	%1$d / %2$d seçildi
+files_chosen_size	621a	%2$d içinden %1$d seçildi, %3$s
 files_copied	6570	%d kopyalandı
 files_copying	c870	Kopyalanıyor %1$d / %2$d, %3$s / %4$s: Escape durdurur
 files_count	cab8	%d öğe
@@ -61,8 +62,22 @@ files_name_bad	467d	Bu bir ad değil
 files_name_taken	cbce	Bu ad kullanılıyor
 files_new_folder	d127	Yeni klasör
 files_not_folder	2663	Bu bir klasör değil
+files_nothing_to_paste	c9d4	Panoda dosya yok
 files_reading	64a4	Klasör okunuyor
 files_rename_hint	ad88	Yeni ad
+files_sheet_created	59ac	Oluşturuldu %s
+files_sheet_file	3663	Dosya
+files_sheet_folder	7afd	Klasör
+files_sheet_in	3f9a	Konum %s
+files_sheet_items	cab8	%d öğe
+files_sheet_link	9772	%s bağlantısı
+files_sheet_measuring	c30d	Boyut: ölçülüyor
+files_sheet_mode	79bf	İzinler %1$s (%2$s)
+files_sheet_modified	558d	Değişti %s
+files_sheet_other	3921	Aygıt, boru ya da soket
+files_sheet_owner	8b0c	Sahip %1$d, grup %2$d
+files_sheet_size	eca5	Boyut %1$s (%2$s bayt)
+files_sheet_size_in	31a1	Boyut %1$s, %2$d öğe
 files_unreadable	986c	Bu klasörü okuma izni yok
 files_up	5940	Yukarı
 installer_apps_about	af1b	Sistem yazıldıktan sonra yeni sisteme kurulurlar.
@@ -145,10 +160,17 @@ menu_cut	5c17	K&es
 menu_delete	1e3e	&Sil
 menu_find	1fa6	&Bul
 menu_go_to_line	bc96	S&atıra Git
+menu_new_folder	41cb	&Yeni klasör
+menu_open	61a5	&Aç
+menu_open_editor	8ca0	&Düzenleyicide aç
+menu_open_terminal	6d2a	Burada &uçbirim aç
 menu_paste	6854	Ya&pıştır
+menu_properties	c780	Ö&zellikler
 menu_redo	ac45	&Yinele
+menu_rename	9529	&Yeniden adlandır
 menu_reset_zoom	1b0f	Yakınlaştırmayı Sıfır&la
 menu_select_all	f6f6	&Tümünü Seç
+menu_show_hidden	37bd	&Gizli dosyaları göster
 menu_toggle_comment	92ac	Yo&rumu Aç/Kapat
 menu_undo	b9d3	&Geri Al
 menu_zoom_in	5bcf	&Yakınlaştır

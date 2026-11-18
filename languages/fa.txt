@@ -40,6 +40,7 @@ files_back	4bc2	عقب
 files_busy	5ba5	یک رونوشت، جابه‌جایی یا حذف در جریان است
 files_changed	df4e	این همان چیزی نیست که فهرست شده بود: پوشه دوباره خوانده می‌شود
 files_chosen	7a7f	%1$d از %2$d انتخاب شد
+files_chosen_size	621a	%1$d از %2$d انتخاب شد، %3$s
 files_copied	6570	%d رونوشت شد
 files_copying	c870	رونوشت %1$d از %2$d، %3$s از %4$s: Escape متوقف می‌کند
 files_count	cab8	%d مورد
@@ -62,8 +63,22 @@ files_name_bad	467d	این نام نیست
 files_name_taken	cbce	این نام گرفته شده است
 files_new_folder	d127	پوشه تازه
 files_not_folder	2663	این پوشه نیست
+files_nothing_to_paste	c9d4	کلیپ‌بورد پرونده‌ای ندارد
 files_reading	64a4	خواندن پوشه
 files_rename_hint	ad88	نام تازه
+files_sheet_created	59ac	ساخته %s
+files_sheet_file	3663	پرونده
+files_sheet_folder	7afd	پوشه
+files_sheet_in	3f9a	در %s
+files_sheet_items	cab8	%d مورد
+files_sheet_link	9772	پیوند به %s
+files_sheet_measuring	c30d	اندازه: در حال سنجش
+files_sheet_mode	79bf	مجوزها %1$s (%2$s)
+files_sheet_modified	558d	تغییر %s
+files_sheet_other	3921	دستگاه، لوله یا سوکت
+files_sheet_owner	8b0c	مالک %1$d، گروه %2$d
+files_sheet_size	eca5	اندازه %1$s (%2$s بایت)
+files_sheet_size_in	31a1	اندازه %1$s در %2$d مورد
 files_unreadable	986c	خواندن این پوشه مجاز نیست
 files_up	5940	بالا
 installer_apps_about	af1b	پس از نوشته شدن سیستم جدید روی آن نصب می‌شوند.
@@ -146,10 +161,17 @@ menu_cut	5c17	برش
 menu_delete	1e3e	حذف
 menu_find	1fa6	جستجو
 menu_go_to_line	bc96	رفتن به سطر
+menu_new_folder	41cb	پوشه &جدید
+menu_open	61a5	&باز کردن
+menu_open_editor	8ca0	باز کردن در &ویرایشگر
+menu_open_terminal	6d2a	باز کردن &پایانه در اینجا
 menu_paste	6854	چسباندن
+menu_properties	c780	&ویژگی‌ها
 menu_redo	ac45	انجام دوباره
+menu_rename	9529	&تغییر نام
 menu_reset_zoom	1b0f	بازنشانی بزرگ‌نمایی
 menu_select_all	f6f6	انتخاب همه
+menu_show_hidden	37bd	نمایش پرونده‌های &پنهان
 menu_toggle_comment	92ac	تغییر وضعیت توضیح
 menu_undo	b9d3	واگرد
 menu_zoom_in	5bcf	بزرگ‌نمایی

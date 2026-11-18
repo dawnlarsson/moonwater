@@ -7841,6 +7841,7 @@ LANGUAGE_ID(files_back, "Back") \
 LANGUAGE_ID(files_busy, "A copy, a move or a delete is under way") \
 LANGUAGE_ID(files_changed, "It is not what was listed: the folder is read again") \
 LANGUAGE_ID(files_chosen, "%1$d of %2$d chosen") \
+LANGUAGE_ID(files_chosen_size, "%1$d of %2$d chosen, %3$s") \
 LANGUAGE_ID(files_copied, "%d copied") \
 LANGUAGE_ID(files_copying, "Copying %1$d of %2$d, %3$s of %4$s: Escape stops") \
 LANGUAGE_ID(files_count, "%d items") \
@@ -7863,8 +7864,22 @@ LANGUAGE_ID(files_name_bad, "That is not a name") \
 LANGUAGE_ID(files_name_taken, "That name is taken") \
 LANGUAGE_ID(files_new_folder, "New folder") \
 LANGUAGE_ID(files_not_folder, "This is not a folder") \
+LANGUAGE_ID(files_nothing_to_paste, "The clipboard holds no files") \
 LANGUAGE_ID(files_reading, "Reading the folder") \
 LANGUAGE_ID(files_rename_hint, "New name") \
+LANGUAGE_ID(files_sheet_created, "Made %s") \
+LANGUAGE_ID(files_sheet_file, "File") \
+LANGUAGE_ID(files_sheet_folder, "Folder") \
+LANGUAGE_ID(files_sheet_in, "In %s") \
+LANGUAGE_ID(files_sheet_items, "%d items") \
+LANGUAGE_ID(files_sheet_link, "Link to %s") \
+LANGUAGE_ID(files_sheet_measuring, "Size: measuring") \
+LANGUAGE_ID(files_sheet_mode, "Permissions %1$s (%2$s)") \
+LANGUAGE_ID(files_sheet_modified, "Changed %s") \
+LANGUAGE_ID(files_sheet_other, "Device, pipe or socket") \
+LANGUAGE_ID(files_sheet_owner, "Owner %1$d, group %2$d") \
+LANGUAGE_ID(files_sheet_size, "Size %1$s (%2$s bytes)") \
+LANGUAGE_ID(files_sheet_size_in, "Size %1$s in %2$d items") \
 LANGUAGE_ID(files_unreadable, "This folder may not be read") \
 LANGUAGE_ID(files_up, "Up") \
 LANGUAGE_ID(installer_apps_about, "They are installed on the new system once it is written.") \
@@ -7947,10 +7962,17 @@ LANGUAGE_ID(menu_cut, "Cu&t") \
 LANGUAGE_ID(menu_delete, "&Delete") \
 LANGUAGE_ID(menu_find, "&Find") \
 LANGUAGE_ID(menu_go_to_line, "&Go to Line") \
+LANGUAGE_ID(menu_new_folder, "&New Folder") \
+LANGUAGE_ID(menu_open, "&Open") \
+LANGUAGE_ID(menu_open_editor, "Open in the &Editor") \
+LANGUAGE_ID(menu_open_terminal, "Open a &Terminal Here") \
 LANGUAGE_ID(menu_paste, "&Paste") \
+LANGUAGE_ID(menu_properties, "P&roperties") \
 LANGUAGE_ID(menu_redo, "&Redo") \
+LANGUAGE_ID(menu_rename, "Re&name") \
 LANGUAGE_ID(menu_reset_zoom, "&Reset Zoom") \
 LANGUAGE_ID(menu_select_all, "Select &All") \
+LANGUAGE_ID(menu_show_hidden, "Show &Hidden Files") \
 LANGUAGE_ID(menu_toggle_comment, "Toggle Co&mment") \
 LANGUAGE_ID(menu_undo, "&Undo") \
 LANGUAGE_ID(menu_zoom_in, "Zoom &In") \
@@ -26682,7 +26704,15 @@ static b32 ui_app_present(struct window_row address_to own, int address_to shown
         what is on the desktop. The launcher, the mixer and the notices start
         theirs so. False when it could not be.
 */
+static b32 ui_start_apart_at(bipolar folder, string_address address_to words, positive count);
+
 static b32 ui_start_apart(string_address address_to words, positive count)
+{
+        return ui_start_apart_at(-1, words, count);
+}
+
+// The same, its working folder the one held open at folder (a terminal opened in a folder a file browser shows); -1 the caller's own.
+static b32 ui_start_apart_at(bipolar folder, string_address address_to words, positive count)
 {
         bipolar child = system_fork();
         positive status = 0;
@@ -26696,6 +26726,8 @@ static b32 ui_start_apart(string_address address_to words, positive count)
                 if (system_fork())
                         system_call_1(syscall(exit_group), 0);
                 system_call(syscall(setsid));
+                if (folder >= 0 && (bipolar)system_call_1(syscall(fchdir), (positive)folder) < 0)
+                        system_call_1(syscall(exit_group), 127);
                 quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
                 for (positive at = 0; quiet >= 0 && at < 3; at++)
                         system_call_3(syscall(dup3), (positive)quiet, at, 0);

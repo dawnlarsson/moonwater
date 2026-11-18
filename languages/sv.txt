@@ -39,6 +39,7 @@ files_back	4bc2	Bakåt
 files_busy	5ba5	En kopiering, flytt eller borttagning pågår
 files_changed	df4e	Det är inte det som listades: mappen läses om
 files_chosen	7a7f	%1$d av %2$d valda
+files_chosen_size	621a	%1$d av %2$d valda, %3$s
 files_copied	6570	%d kopierade
 files_copying	c870	Kopierar %1$d av %2$d, %3$s av %4$s: Escape stoppar
 files_count	cab8	%d objekt
@@ -61,8 +62,22 @@ files_name_bad	467d	Det är inget namn
 files_name_taken	cbce	Namnet är upptaget
 files_new_folder	d127	Ny mapp
 files_not_folder	2663	Det här är ingen mapp
+files_nothing_to_paste	c9d4	Urklippet har inga filer
 files_reading	64a4	Läser mappen
 files_rename_hint	ad88	Nytt namn
+files_sheet_created	59ac	Skapad %s
+files_sheet_file	3663	Fil
+files_sheet_folder	7afd	Mapp
+files_sheet_in	3f9a	I %s
+files_sheet_items	cab8	%d objekt
+files_sheet_link	9772	Länk till %s
+files_sheet_measuring	c30d	Storlek: mäts
+files_sheet_mode	79bf	Rättigheter %1$s (%2$s)
+files_sheet_modified	558d	Ändrad %s
+files_sheet_other	3921	Enhet, rör eller uttag
+files_sheet_owner	8b0c	Ägare %1$d, grupp %2$d
+files_sheet_size	eca5	Storlek %1$s (%2$s byte)
+files_sheet_size_in	31a1	Storlek %1$s i %2$d objekt
 files_unreadable	986c	Den här mappen får inte läsas
 files_up	5940	Upp
 installer_apps_about	af1b	De installeras på det nya systemet när det är skrivet.
@@ -145,10 +160,17 @@ menu_cut	5c17	&Klipp ut
 menu_delete	1e3e	&Ta bort
 menu_find	1fa6	&Sök
 menu_go_to_line	bc96	Gå till &rad
+menu_new_folder	41cb	&Ny mapp
+menu_open	61a5	&Öppna
+menu_open_editor	8ca0	Öppna i &redigeraren
+menu_open_terminal	6d2a	Öppna en &terminal här
 menu_paste	6854	Kl&istra in
+menu_properties	c780	&Egenskaper
 menu_redo	ac45	&Gör om
+menu_rename	9529	Byt &namn
 menu_reset_zoom	1b0f	Å&terställ zoom
 menu_select_all	f6f6	&Markera allt
+menu_show_hidden	37bd	Visa &dolda filer
 menu_toggle_comment	92ac	Växla k&ommentar
 menu_undo	b9d3	Å&ngra
 menu_zoom_in	5bcf	&Zooma in

@@ -39,6 +39,7 @@ files_back	4bc2	Назад
 files_busy	5ba5	Идёт копирование, перемещение или удаление
 files_changed	df4e	Это уже не то, что было в списке: папка читается заново
 files_chosen	7a7f	Выбрано %1$d из %2$d
+files_chosen_size	621a	Выбрано %1$d из %2$d, %3$s
 files_copied	6570	Скопировано: %d
 files_copying	c870	Копирование %1$d из %2$d, %3$s из %4$s: Escape останавливает
 files_count	cab8	Объектов: %d
@@ -61,8 +62,22 @@ files_name_bad	467d	Это не имя
 files_name_taken	cbce	Это имя занято
 files_new_folder	d127	Новая папка
 files_not_folder	2663	Это не папка
+files_nothing_to_paste	c9d4	В буфере обмена нет файлов
 files_reading	64a4	Чтение папки
 files_rename_hint	ad88	Новое имя
+files_sheet_created	59ac	Создан %s
+files_sheet_file	3663	Файл
+files_sheet_folder	7afd	Папка
+files_sheet_in	3f9a	В %s
+files_sheet_items	cab8	Элементов: %d
+files_sheet_link	9772	Ссылка на %s
+files_sheet_measuring	c30d	Размер: измеряется
+files_sheet_mode	79bf	Права %1$s (%2$s)
+files_sheet_modified	558d	Изменён %s
+files_sheet_other	3921	Устройство, канал или сокет
+files_sheet_owner	8b0c	Владелец %1$d, группа %2$d
+files_sheet_size	eca5	Размер %1$s (%2$s байт)
+files_sheet_size_in	31a1	Размер %1$s в %2$d элементах
 files_unreadable	986c	Эту папку нельзя читать
 files_up	5940	Вверх
 installer_apps_about	af1b	Они устанавливаются в новую систему после её записи.
@@ -145,10 +160,17 @@ menu_cut	5c17	Вырезать
 menu_delete	1e3e	Удалить
 menu_find	1fa6	Найти
 menu_go_to_line	bc96	Перейти к строке
+menu_new_folder	41cb	&Новая папка
+menu_open	61a5	&Открыть
+menu_open_editor	8ca0	Открыть в &редакторе
+menu_open_terminal	6d2a	Открыть &терминал здесь
 menu_paste	6854	Вставить
+menu_properties	c780	&Свойства
 menu_redo	ac45	Повторить
+menu_rename	9529	&Переименовать
 menu_reset_zoom	1b0f	Сбросить масштаб
 menu_select_all	f6f6	Выделить всё
+menu_show_hidden	37bd	Показать &скрытые файлы
 menu_toggle_comment	92ac	Закомментировать/раскомментировать
 menu_undo	b9d3	Отменить
 menu_zoom_in	5bcf	Увеличить

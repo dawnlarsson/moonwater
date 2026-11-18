@@ -91,6 +91,26 @@
 #define FILES_KEY_C 46
 #define FILES_PART_PAD 6             // logical pixels of a spelled folder's field either side of its words
 #define FILES_ASK_NAMES 3            // the names a delete's question says, of however many it would remove
+#define FILES_KEY_X 45
+#define FILES_KEY_V 47
+#define FILES_KEY_F10 68
+#define FILES_KEY_MENU 127           // the keyboard's menu key (KEY_COMPOSE)
+// The browser's own menu items: after the kit's text menu's (1 to 7), which the path's field has.
+#define FILES_MENU_OPEN 16
+#define FILES_MENU_EDITOR 17
+#define FILES_MENU_TERMINAL 18
+#define FILES_MENU_CUT 19
+#define FILES_MENU_COPY 20
+#define FILES_MENU_PASTE 21
+#define FILES_MENU_RENAME 22
+#define FILES_MENU_DELETE 23
+#define FILES_MENU_NEW_FOLDER 24
+#define FILES_MENU_PROPERTIES 25
+#define FILES_MENU_HIDDEN 26
+#define FILES_MENU_ALL 27
+#define FILES_MENU_SHEET 28          // a line of a properties sheet: chosen, it only closes the sheet
+#define FILES_CLIP_CUT "application/x-moonwater-cut" // beside the files a cut offers: a paste of them moves them
+#define FILES_SHEET_LINES 10                           // a properties sheet's lines
 
 // Everything that is large: one mapping, not the image's bss.
 struct files_big
@@ -103,6 +123,7 @@ struct files_big
         char crumb_words[FILES_TRAIL][FILES_NAME * 3 + 4]; // the trail's folders as the band writes them
         char note[256];                // what the foot says of the last thing done, in the language's words with its numbers and names in
         char status[192];              // the foot's words
+        char sheet[FILES_SHEET_LINES][FILES_NAME * 3 + 64]; // a properties sheet's lines
 };
 
 static struct
@@ -143,7 +164,14 @@ static struct
         int drop_row;            // the folder's row the drop goes into, -1 the folder shown
         b64 next_progress;       // when the foot next says how far a copy has gone
         b32 moving;              // a copy or a move was begun and its end is not said yet
+        b32 pasting;             // the clipboard was asked for files to paste: its answer is a paste into the folder shown
+        // A properties sheet open (the menu's popup, as lines): of the rows chosen or the cursor's (sheet_all false), or of the folder
+        // shown; its size is measured on the move's thread (measuring) and the sheet is opened again with it when that is done.
+        b32 sheet, sheet_folder, measuring;
+        int sheet_x, sheet_y;
 } files;
+
+static struct ui_app files_app;
 
 /* ---- the rows ---- */
 
@@ -238,7 +266,7 @@ static fn files_status_text(void)
         positive room = sizeof(files.big->status);
 
         into[0] = 0;
-        if (files.moving && files_move_running(&files.big->move))
+        if (files.moving && !files.measuring && files_move_running(&files.big->move))
         {
                 const struct files_move address_to job = &files.big->move;
                 char done[16], whole[16];
@@ -256,7 +284,21 @@ static fn files_status_text(void)
         else if (files.said)
                 string_copy_bounded((string_address)into, (string_address)language_text(files.said), room);
         else if (m->state == FILES_READY && m->chosen_count > 1)
-                language_format(into, room, WORDS(files_chosen), (int)m->chosen_count, (int)m->shown.count);
+        {
+                // How many are chosen of how many, and the bytes of the files among them.
+                p64 bytes = 0;
+                char size[16];
+
+                for (p32 place = 0; place < m->shown.count; place++)
+                {
+                        const struct files_entry address_to entry = files_model_entry(m, place);
+
+                        if (entry->kind == FILES_KIND_FILE && files_model_chosen(m, place))
+                                bytes += entry->size;
+                }
+                files_size_text(size, bytes);
+                language_format(into, room, WORDS(files_chosen_size), (int)m->chosen_count, (int)m->shown.count, size);
+        }
         else if (m->state == FILES_READY || (m->state == FILES_READING && m->shown.count))
                 language_format(into, room, m->shown.cut ? WORDS(files_count_cut) : WORDS(files_count), (int)m->shown.count);
 }
@@ -666,17 +708,74 @@ static fn files_uris_free(p8 address_to uris, positive uris_room, p8 address_to 
         array_store_release(paths, paths_room, path_length);
 }
 
-// The rows chosen (the cursor's when none is) copied, as files (files_uris).
-static fn files_rows_copy(void)
+/*
+        The rows chosen (the cursor's when none is) copied, as files (files_uris), or cut: a cut offers them with a word beside
+        (FILES_CLIP_CUT) that makes a browser's paste of them a move, here or in another window; any other program pastes them as it
+        pastes files.
+*/
+static fn files_rows_copy(b32 cut)
 {
-        struct windows_clip_part parts[2];
+        struct windows_clip_part parts[3];
         p8 address_to uris, address_to paths;
         positive uris_room, paths_room;
 
         if (!files_uris(files.big->model.cursor, parts, &uris, &uris_room, &paths, &paths_room))
                 return;
-        windows_clip_offer_parts(&files.own, WINDOWS_CLIP_CLIPBOARD, parts, 2);
+        parts[2] = (struct windows_clip_part){FILES_CLIP_CUT, (const p8 address_to) "cut", 3};
+        windows_clip_offer_parts(&files.own, WINDOWS_CLIP_CLIPBOARD, parts, cut ? 3 : 2);
         files_uris_free(uris, uris_room, paths, paths_room, parts);
+}
+
+// Paste: the clipboard is asked for its files (the answer comes as a WINDOW_EVENT_CLIP, files_clip_event).
+static fn files_paste(void)
+{
+        files.pasting = true;
+        windows_clip_ask(&files.own, WINDOWS_CLIP_CLIPBOARD);
+}
+
+static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how);
+
+/*
+        The clipboard's news. A copy this window offered that was taken or declined is let go of (windows_clip_done). The answer to a paste
+        it asked for: the files it holds (text/uri-list) copied into the folder shown, or moved when they were cut; a clipboard of no files
+        says so in the foot.
+*/
+static b32 files_clip_event(const struct window_event address_to event)
+{
+        p8 address_to bytes, address_to cut, address_to paths = null;
+        unsigned long length, cut_length;
+        positive at = 0, used = 0, room = 0, got;
+        p32 count = 0;
+        static p8 path[FILES_PATH];
+        b32 asked = files.pasting && (event->b == WINDOWS_CLIP_READY || event->b == WINDOWS_CLIP_REFUSED), moves;
+
+        if (event->b == WINDOWS_CLIP_TAKEN || event->b == WINDOWS_CLIP_DECLINED)
+                windows_clip_done((unsigned int)event->a);
+        if (!asked)
+                return true;
+        files.pasting = false, files.dirty = true;
+        if (event->b != WINDOWS_CLIP_READY || windows_clip_read_type(&files.own, (unsigned int)event->a, WINDOWS_CLIP_URIS, &bytes, &length) <= 0)
+        {
+                files.said = LANGUAGE_files_nothing_to_paste;
+                return true;
+        }
+        moves = windows_clip_read_type(&files.own, (unsigned int)event->a, FILES_CLIP_CUT, &cut, &cut_length) > 0;
+        if (moves)
+                windows_clip_free(cut, cut_length);
+        while ((got = ui_uri_next(bytes, (positive)length, &at, path, sizeof(path))) && used + got + 1 <= (positive)FILES_MOVE_MOST * FILES_PATH / 4)
+        {
+                if (!array_store_reserve(paths, room, used, used + got + 1, 4096))
+                        break;
+                memory_copy(paths + used, path, got + 1);
+                used += got + 1, count++;
+        }
+        windows_clip_free(bytes, length);
+        if (count)
+                files_transfer(paths, count, -1, moves ? FILES_MOVE_MOVE : FILES_MOVE_COPY);
+        else
+                files.said = LANGUAGE_files_nothing_to_paste;
+        array_store_release(paths, room, used);
+        return true;
 }
 
 /*
@@ -1085,6 +1184,367 @@ static b32 files_act(int which)
         return true;
 }
 
+/* ---- the menu and the properties sheet ---- */
+
+// Words from outside for a menu's line: a name's & doubled, which the menu would read as the next letter's key.
+static fn files_sheet_words(char address_to into, positive room, const char address_to words)
+{
+        positive used = 0;
+
+        for (positive at = 0; words[at] && used + 2 < room; at++)
+        {
+                if (words[at] == '&')
+                        into[used++] = '&';
+                into[used++] = words[at];
+        }
+        into[used] = 0;
+}
+
+// A moment as a sheet says it: the day, the minute and the second, in the machine's own zone.
+static fn files_sheet_time(char address_to into, b64 seconds)
+{
+        files_time_text(into, seconds);
+        if (into[0])
+        {
+                tm broken;
+                time_t at = (time_t)seconds;
+
+                if (localtime_r(&at, &broken))
+                        into[16] = ':', into[17] = (char)('0' + broken.tm_sec / 10), into[18] = (char)('0' + broken.tm_sec % 10), into[19] = 0;
+        }
+}
+
+/*
+        The lines of a properties sheet, from what is looked at now (not followed): of the folder shown, of the one entry the cursor is on
+        (none chosen), or of the entries chosen together. Its name, what it is (a link with what it names), its size (a folder's, and many
+        entries', what the move's count found, or that it is being measured), the folder it is in, when it was changed and made, its
+        permissions as ls writes them and in octal, and who owns it by number. How many lines.
+*/
+static int files_sheet_fill(void)
+{
+        struct files_model address_to m = &files.big->model;
+        const struct files_entry address_to entry = files_model_entry(m, m->cursor);
+        b32 many = !files.sheet_folder && m->chosen_count > 1;
+        char words[FILES_NAME * 3 + 4], size[16], bytes[24], when[24], mode[12], octal[8];
+        file_facts facts;
+        int lines = 0;
+
+        if (files.sheet_folder ? m->handle < 0 || file_look_code(m->handle, (string_address) "", AT_EMPTY_PATH, &facts) < 0
+                               : !entry || files_model_check(m, m->cursor, &facts) != FILES_SAME)
+                return 0;
+        // The name, or how many.
+        if (many)
+                language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_items), (int)m->chosen_count);
+        else
+        {
+                const p8 address_to name = files.sheet_folder ? m->path : files_model_name(m, entry);
+
+                ui_label_foreign(words, sizeof(words), name, string_length((string_address)name));
+                files_sheet_words(files.big->sheet[lines++], sizeof(files.big->sheet[0]), words);
+        }
+        // What it is.
+        if (!many)
+        {
+                p32 format = facts.mode & MODE_FORMAT;
+
+                if (format == MODE_LINK)
+                {
+                        p8 points[FILES_PATH];
+                        bipolar length = (bipolar)system_call_4(syscall(readlinkat), (positive)m->handle, (positive)files_model_name(m, entry), (positive)points,
+                                                                sizeof(points) - 1);
+                        char named[FILES_NAME * 3 + 4];
+
+                        named[0] = 0;
+                        if (length >= 0)
+                                ui_label_foreign(words, sizeof(words), points, (positive)length), files_sheet_words(named, sizeof(named), words);
+                        language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_link), named);
+                }
+                else
+                        string_copy_bounded((string_address)files.big->sheet[lines++], (string_address)(format == MODE_DIRECTORY ? WORDS(files_sheet_folder)
+                                                                                                      : format == MODE_FILE      ? WORDS(files_sheet_file)
+                                                                                                                                 : WORDS(files_sheet_other)),
+                                            sizeof(files.big->sheet[0]));
+        }
+        // The size: a file's own; a folder's and many entries' as measured.
+        if (!many && (facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+        {
+                files_size_text(size, facts.size);
+                bytes[positive_into((p8 address_to)bytes, (positive)facts.size)] = 0;
+                language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_size), size, bytes);
+        }
+        else if (files.measuring)
+                string_copy_bounded((string_address)files.big->sheet[lines++], (string_address)WORDS(files_sheet_measuring), sizeof(files.big->sheet[0]));
+        else
+        {
+                files_size_text(size, files.big->move.bytes_total);
+                // What a folder holds: the count is of what is in it, not of the folder itself.
+                p32 items = files.big->move.items_total;
+
+                items -= !many && items ? 1 : 0;
+                language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_size_in), size, (int)items);
+        }
+        // Where it is.
+        if (!files.sheet_folder)
+        {
+                char escaped[FILES_NAME * 3 + 4];
+
+                ui_label_foreign(words, sizeof(words), m->path, string_length((string_address)m->path));
+                files_sheet_words(escaped, sizeof(escaped), words);
+                language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_in), escaped);
+        }
+        if (many)
+                return lines;
+        files_sheet_time(when, facts.modified.seconds);
+        language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_modified), when);
+        if (facts.created.seconds)
+        {
+                files_sheet_time(when, facts.created.seconds);
+                language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_created), when);
+        }
+        // The permissions, as ls writes them (the set-id and sticky bits in the execute places) and in octal.
+        for (int bit = 0; bit < 9; bit++)
+                mode[bit] = facts.mode & (0400 >> bit) ? "rwxrwxrwx"[bit] : '-';
+        if (facts.mode & 04000)
+                mode[2] = mode[2] == 'x' ? 's' : 'S';
+        if (facts.mode & 02000)
+                mode[5] = mode[5] == 'x' ? 's' : 'S';
+        if (facts.mode & 01000)
+                mode[8] = mode[8] == 'x' ? 't' : 'T';
+        mode[9] = 0;
+        for (int digit = 0; digit < 4; digit++)
+                octal[digit] = (char)('0' + (facts.mode >> (9 - 3 * digit) & 7));
+        octal[4] = 0;
+        language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_mode), mode, octal);
+        language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_owner), (int)facts.owner, (int)facts.group);
+        return lines;
+}
+
+// The sheet shown as the menu's lines at (x, y) in the window, where it was asked for.
+static fn files_sheet_show(void)
+{
+        struct ui_popmenu address_to menu = &files.menu.menu;
+        int lines = files_sheet_fill();
+
+        if (!lines)
+                return;
+        menu->count = 0;
+        for (int at = 0; at < lines; at++)
+                ui_popmenu_add(menu, files.big->sheet[at], null, at ? 0 : UI_MENU_HEADER, FILES_MENU_SHEET);
+        files.menu.field = null;
+        ui_popmenu_open(&files.menu, &files.own, &files.ui, files.sheet_x, files.sheet_y, 0, 0, WINDOW_POPUP_POINT, false);
+}
+
+/*
+        A properties sheet: of the folder shown (folder), else of the entries chosen or the cursor's, at (x, y) in the window (-1: at the
+        cursor's row). A folder's size, and that of many entries, is counted on the move's thread (files_move with FILES_MOVE_MEASURE) and the
+        sheet shown again when it is whole; while a copy or a move is under way it is not measured.
+*/
+static fn files_sheet_open(b32 folder, int x, int y)
+{
+        struct files_model address_to m = &files.big->model;
+        const struct files_entry address_to entry = files_model_entry(m, m->cursor);
+        b32 measure = folder || (m->chosen_count > 1) || (entry && entry->kind == FILES_KIND_DIRECTORY);
+
+        if (!folder && !entry)
+                folder = true, measure = true;
+        if (x < 0)
+        {
+                struct ui_list address_to l = &files.big->list;
+
+                x = l->x + ui_dev(&files.ui, 40), y = l->y + (m->cursor != FILES_NO ? (int)m->cursor * ui_dev(&files.ui, UI_ROW) - l->scroll.scroll : 0);
+        }
+        files.sheet = true, files.sheet_folder = folder, files.sheet_x = x, files.sheet_y = y, files.measuring = false;
+        if (measure && !files.moving)
+        {
+                p8 address_to list = null;
+                positive used = 0, room = 0;
+                p32 count = 0;
+                bipolar into = m->handle >= 0 ? system_open_at(m->handle, (string_address) ".", FILE_READ | O_DIRECTORY | O_CLOEXEC) : -1;
+
+                // The sources: the folder shown's own path, else each entry's, chosen or the cursor's.
+                for (p32 place = 0; place < (folder ? 1 : m->shown.count); place++)
+                {
+                        const struct files_entry address_to e = folder ? null : files_model_entry(m, place);
+                        positive length = string_length((string_address)m->path), name = e ? e->length : 0;
+
+                        if (!folder && (m->chosen_count > 1 ? !files_model_chosen(m, place) : place != m->cursor))
+                                continue;
+                        if (!array_store_reserve(list, room, used, used + length + name + 2, 4096))
+                                break;
+                        memory_copy(list + used, m->path, length);
+                        if (e)
+                        {
+                                if (length > 1)
+                                        list[used + length++] = '/';
+                                memory_copy(list + used + length, files_model_name(m, e), name);
+                                length += name;
+                        }
+                        list[used + length] = 0;
+                        used += length + 1, count++;
+                }
+                files_move_end(&files.big->move);
+                if (into >= 0 && count && files_move_begin(&files.big->move, FILES_MOVE_MEASURE, into, list, count))
+                {
+                        files_move_start(&files.big->move);
+                        files.moving = files.measuring = true;
+                }
+                else
+                        files_move_end(&files.big->move);
+                array_store_release(list, room, used);
+        }
+        files_sheet_show();
+}
+
+// Something chosen to open with: the editor, a file at a time; a terminal, in the folder (the cursor's, or the folder shown).
+static fn files_open_with(b32 editor)
+{
+        struct files_model address_to m = &files.big->model;
+        const struct files_entry address_to entry = files_model_entry(m, m->cursor);
+        static p8 path[FILES_PATH];
+        string_address face = files_app.font ? files_app.font : (string_address)UI_FONT_REGULAR;
+
+        if (editor)
+        {
+                positive length = string_length((string_address)m->path);
+                string_address words[5] = {(string_address) "/editor", (string_address) "-f", face, (string_address)path, null};
+
+                if (!entry || entry->kind == FILES_KIND_DIRECTORY || length + entry->length + 2 > sizeof(path))
+                        return;
+                memory_copy(path, m->path, length);
+                if (length > 1)
+                        path[length++] = '/';
+                memory_copy(path + length, files_model_name(m, entry), (positive)entry->length + 1);
+                (void)ui_start_apart(words, 4);
+                return;
+        }
+        {
+                string_address words[2] = {(string_address) "/terminal", null};
+                bipolar folder = entry && entry->kind == FILES_KIND_DIRECTORY ? files_drop_folder((int)m->cursor) : files_drop_folder(-1);
+
+                if (folder < 0)
+                {
+                        files.said = LANGUAGE_files_changed;
+                        return;
+                }
+                (void)ui_start_apart_at(folder, words, 1);
+                system_close(folder);
+        }
+}
+
+/*
+        The browser's menu at (x, y) in the window: of the rows (on) or of the folder shown. The rows' is Open, Open in the editor (a
+        file), Open a terminal here (a folder), Cut, Copy, Paste, Rename, Delete and Properties; the folder's Paste, New folder, Select
+        all, Show hidden files (checked when they are), Open a terminal here and Properties. Each item's keys are said beside it.
+*/
+static fn files_menu_open(b32 on, int x, int y)
+{
+        struct files_model address_to m = &files.big->model;
+        struct ui_popmenu address_to menu = &files.menu.menu;
+        const struct files_entry address_to entry = files_model_entry(m, m->cursor);
+        b32 folder = entry && entry->kind == FILES_KIND_DIRECTORY;
+
+        menu->count = 0;
+        files.sheet = false;
+        if (on && entry)
+        {
+                ui_popmenu_add(menu, WORDS(menu_open), "Enter", 0, FILES_MENU_OPEN);
+                if (!folder)
+                        ui_popmenu_add(menu, WORDS(menu_open_editor), null, 0, FILES_MENU_EDITOR);
+                else
+                        ui_popmenu_add(menu, WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL);
+                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(menu, WORDS(menu_cut), "Ctrl+X", 0, FILES_MENU_CUT);
+                ui_popmenu_add(menu, WORDS(menu_copy), "Ctrl+C", 0, FILES_MENU_COPY);
+                ui_popmenu_add(menu, WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE);
+                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(menu, WORDS(menu_rename), "F2", m->chosen_count > 1 ? UI_MENU_DISABLED : 0, FILES_MENU_RENAME);
+                ui_popmenu_add(menu, WORDS(menu_delete), "Delete", 0, FILES_MENU_DELETE);
+                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(menu, WORDS(menu_properties), "Alt+Enter", 0, FILES_MENU_PROPERTIES);
+        }
+        else
+        {
+                ui_popmenu_add(menu, WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE);
+                ui_popmenu_add(menu, WORDS(menu_new_folder), "Ctrl+Shift+N", 0, FILES_MENU_NEW_FOLDER);
+                ui_popmenu_add(menu, WORDS(menu_select_all), "Ctrl+A", m->shown.count ? 0 : UI_MENU_DISABLED, FILES_MENU_ALL);
+                ui_popmenu_add(menu, WORDS(menu_show_hidden), "Ctrl+H", UI_MENU_CHECK | (m->hidden ? UI_MENU_ON : 0), FILES_MENU_HIDDEN);
+                ui_popmenu_add(menu, WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL);
+                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(menu, WORDS(menu_properties), null, 0, FILES_MENU_PROPERTIES);
+                // The folder's own: nothing chosen, the cursor off the rows, so what the items do is the folder's.
+                files_model_choose_none(m);
+                m->cursor = FILES_NO, m->revision++;
+        }
+        files.sheet_folder = !on, files.sheet_x = x, files.sheet_y = y;
+        files.menu.field = null;
+        ui_popmenu_open(&files.menu, &files.own, &files.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
+        files.dirty = true;
+}
+
+// The right button at (x, y): the row there chosen (alone, unless it is one of those chosen) and its menu; no row, the folder's.
+static fn files_menu_at(int x, int y)
+{
+        struct files_model address_to m = &files.big->model;
+        int row = ui_list_hit(&files.ui, &files.big->list, x, y);
+
+        if (files.editing)
+                files_edit(0);
+        if (row >= 0 && files_model_entry(m, (p32)row))
+        {
+                if (!files_model_chosen(m, (p32)row))
+                        files_model_choose(m, (p32)row, FILES_CHOOSE_ONLY);
+                m->cursor = (p32)row, m->revision++;
+        }
+        files_menu_open(row >= 0, x, y);
+}
+
+// Shift+F10 and the menu key: the menu of the row the keys are on, at it; of the folder where there is none.
+static fn files_menu_keys(void)
+{
+        struct files_model address_to m = &files.big->model;
+        struct ui_list address_to l = &files.big->list;
+        int x = l->x + ui_dev(&files.ui, 40), y = l->y + ui_dev(&files.ui, UI_ROW) / 2;
+
+        if (m->cursor != FILES_NO)
+                y += (int)m->cursor * ui_dev(&files.ui, UI_ROW) - l->scroll.scroll;
+        files_menu_open(m->cursor != FILES_NO, x, y);
+}
+
+static fn files_delete(void);
+static fn files_new_folder(void);
+static fn files_open(p32 place);
+
+// An item of the browser's menu, done.
+static fn files_menu_do(int id)
+{
+        struct files_model address_to m = &files.big->model;
+
+        switch (id)
+        {
+        case FILES_MENU_OPEN: files_open(m->cursor); break;
+        case FILES_MENU_EDITOR: files_open_with(true); break;
+        case FILES_MENU_TERMINAL: files_open_with(false); break;
+        case FILES_MENU_CUT: files_rows_copy(true); break;
+        case FILES_MENU_COPY: files_rows_copy(false); break;
+        case FILES_MENU_PASTE: files_paste(); break;
+        case FILES_MENU_RENAME: files_edit(FILES_EDIT_NAME); break;
+        case FILES_MENU_DELETE: files_delete(); break;
+        case FILES_MENU_NEW_FOLDER: files_new_folder(); break;
+        case FILES_MENU_PROPERTIES: files_sheet_open(files.sheet_folder, files.sheet_x, files.sheet_y); break;
+        case FILES_MENU_HIDDEN:
+                m->hidden = !m->hidden;
+                files_model_reload(m);
+                break;
+        case FILES_MENU_ALL:
+                if (m->shown.count)
+                {
+                        files_model_choose(m, 0, FILES_CHOOSE_ONLY);
+                        files_model_choose(m, m->shown.count - 1, FILES_CHOOSE_RANGE);
+                }
+                break;
+        }
+}
+
 static b32 files_key(const struct window_event address_to event)
 {
         struct files_model address_to m = &files.big->model;
@@ -1155,9 +1615,24 @@ static b32 files_key(const struct window_event address_to event)
                 files.dirty = true;
                 return true;
         }
-        if (control && key == FILES_KEY_C)
+        if (control && (key == FILES_KEY_C || key == FILES_KEY_X))
         {
-                files_rows_copy();
+                files_rows_copy(key == FILES_KEY_X);
+                return true;
+        }
+        if (control && key == FILES_KEY_V)
+        {
+                files_paste();
+                return true;
+        }
+        if ((shift && key == FILES_KEY_F10) || key == FILES_KEY_MENU)
+        {
+                files_menu_keys();
+                return true;
+        }
+        if (alt && (key == UI_KEY_ENTER || key == UI_KEY_ENTER_PAD))
+        {
+                files_sheet_open(false, -1, -1);
                 return true;
         }
         if (control && key == FILES_KEY_A)
@@ -1263,6 +1738,8 @@ static b32 files_event(const struct window_event address_to event)
         {
         case WINDOW_EVENT_DRAG:
                 return files_drag_event(event);
+        case WINDOW_EVENT_CLIP:
+                return files_clip_event(event);
         case WINDOW_EVENT_KEY:
                 return !down || ui_key_modifier((int)event->a) ? true : files_key(event);
         case WINDOW_EVENT_MOTION:
@@ -1320,6 +1797,14 @@ static b32 files_event(const struct window_event address_to event)
                 }
                 if (down)
                         files.crumb_keys = false, files.crumb_clicked = -1;
+                // The right button: the menu of the row under the pointer (chosen alone first, unless it is among those chosen), or of the
+                // folder shown where no row is.
+                if (event->a == UI_POINTER_RIGHT)
+                {
+                        if (down)
+                                files_menu_at(ui_kit.pointer_x, ui_kit.pointer_y);
+                        break;
+                }
                 row = ui_list_click(ui, l, event, ui_kit.pointer_x, ui_kit.pointer_y);
                 // The press itself puts the cursor on its row, as the list lights it; a mouse's left press on a row may drag it out.
                 if (down && l->down >= 0 && (p32)l->down != m->cursor)
@@ -1395,7 +1880,16 @@ static long files_tick(long timeout, long address_to other)
 
                 while (!job->worker && files_move_running(job) && (b64)ui_kit_clock() - began < FILES_TURN_NS)
                         files_move_step(job);
-                if (!files_move_running(job))
+                if (!files_move_running(job) && files.measuring)
+                {
+                        // A sheet's size, measured: the sheet again with it, if it is still open.
+                        files.measuring = false;
+                        if (files.sheet && files.menu.open)
+                                files_sheet_show();
+                        files_move_end(job);
+                        files.moving = false;
+                }
+                else if (!files_move_running(job))
                 {
                         files_move_said();
                         files_move_end(job);
@@ -1488,10 +1982,16 @@ static int files_open_window(void)
         return -1;
 }
 
-// An item of the path field's own menu (copy, paste), done to the field.
+// An item of the path field's own menu (copy, paste), done to the field; or of the browser's (files_menu_do).
 static fn files_chose(int id)
 {
-        if (ui_text_menu_do(&files.ui, files.menu.field, id))
+        if (id >= FILES_MENU_OPEN)
+        {
+                files_menu_do(id);
+                files.dirty = true;
+                return;
+        }
+        if (files.menu.field && ui_text_menu_do(&files.ui, files.menu.field, id))
                 files.dirty = true;
 }
 

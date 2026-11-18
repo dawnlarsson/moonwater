@@ -39,6 +39,7 @@ files_back	4bc2	Πίσω
 files_busy	5ba5	Μια αντιγραφή, μετακίνηση ή διαγραφή είναι σε εξέλιξη
 files_changed	df4e	Δεν είναι αυτό που εμφανίστηκε: ο φάκελος διαβάζεται ξανά
 files_chosen	7a7f	Επιλέχθηκαν %1$d από %2$d
+files_chosen_size	621a	%1$d από %2$d επιλεγμένα, %3$s
 files_copied	6570	Αντιγράφηκαν %d
 files_copying	c870	Αντιγραφή %1$d από %2$d, %3$s από %4$s: Escape σταματά
 files_count	cab8	%d στοιχεία
@@ -61,8 +62,22 @@ files_name_bad	467d	Αυτό δεν είναι όνομα
 files_name_taken	cbce	Το όνομα χρησιμοποιείται
 files_new_folder	d127	Νέος φάκελος
 files_not_folder	2663	Αυτό δεν είναι φάκελος
+files_nothing_to_paste	c9d4	Το πρόχειρο δεν έχει αρχεία
 files_reading	64a4	Ανάγνωση του φακέλου
 files_rename_hint	ad88	Νέο όνομα
+files_sheet_created	59ac	Δημιουργήθηκε %s
+files_sheet_file	3663	Αρχείο
+files_sheet_folder	7afd	Φάκελος
+files_sheet_in	3f9a	Στο %s
+files_sheet_items	cab8	%d στοιχεία
+files_sheet_link	9772	Σύνδεσμος προς %s
+files_sheet_measuring	c30d	Μέγεθος: μετριέται
+files_sheet_mode	79bf	Δικαιώματα %1$s (%2$s)
+files_sheet_modified	558d	Αλλάχτηκε %s
+files_sheet_other	3921	Συσκευή, σωλήνας ή υποδοχή
+files_sheet_owner	8b0c	Κάτοχος %1$d, ομάδα %2$d
+files_sheet_size	eca5	Μέγεθος %1$s (%2$s byte)
+files_sheet_size_in	31a1	Μέγεθος %1$s σε %2$d στοιχεία
 files_unreadable	986c	Δεν επιτρέπεται η ανάγνωση του φακέλου
 files_up	5940	Πάνω
 installer_apps_about	af1b	Εγκαθίστανται στο νέο σύστημα μόλις γραφτεί.
@@ -145,10 +160,17 @@ menu_cut	5c17	Αποκοπή
 menu_delete	1e3e	Διαγραφή
 menu_find	1fa6	Εύρεση
 menu_go_to_line	bc96	Μετάβαση στη γραμμή
+menu_new_folder	41cb	&Νέος φάκελος
+menu_open	61a5	Ά&νοιγμα
+menu_open_editor	8ca0	Άνοιγμα στον &επεξεργαστή
+menu_open_terminal	6d2a	Άνοιγμα &τερματικού εδώ
 menu_paste	6854	Επικόλληση
+menu_properties	c780	&Ιδιότητες
 menu_redo	ac45	Επανάληψη
+menu_rename	9529	&Μετονομασία
 menu_reset_zoom	1b0f	Επαναφορά ζουμ
 menu_select_all	f6f6	Επιλογή όλων
+menu_show_hidden	37bd	Εμφάνιση &κρυφών αρχείων
 menu_toggle_comment	92ac	Εναλλαγή σχολίου
 menu_undo	b9d3	Αναίρεση
 menu_zoom_in	5bcf	Μεγέθυνση

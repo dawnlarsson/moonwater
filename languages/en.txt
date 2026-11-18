@@ -39,6 +39,7 @@ files_back	4bc2	Back
 files_busy	5ba5	A copy, a move or a delete is under way
 files_changed	df4e	It is not what was listed: the folder is read again
 files_chosen	7a7f	%1$d of %2$d chosen
+files_chosen_size	621a	%1$d of %2$d chosen, %3$s
 files_copied	6570	%d copied
 files_copying	c870	Copying %1$d of %2$d, %3$s of %4$s: Escape stops
 files_count	cab8	%d items
@@ -61,8 +62,22 @@ files_name_bad	467d	That is not a name
 files_name_taken	cbce	That name is taken
 files_new_folder	d127	New folder
 files_not_folder	2663	This is not a folder
+files_nothing_to_paste	c9d4	The clipboard holds no files
 files_reading	64a4	Reading the folder
 files_rename_hint	ad88	New name
+files_sheet_created	59ac	Made %s
+files_sheet_file	3663	File
+files_sheet_folder	7afd	Folder
+files_sheet_in	3f9a	In %s
+files_sheet_items	cab8	%d items
+files_sheet_link	9772	Link to %s
+files_sheet_measuring	c30d	Size: measuring
+files_sheet_mode	79bf	Permissions %1$s (%2$s)
+files_sheet_modified	558d	Changed %s
+files_sheet_other	3921	Device, pipe or socket
+files_sheet_owner	8b0c	Owner %1$d, group %2$d
+files_sheet_size	eca5	Size %1$s (%2$s bytes)
+files_sheet_size_in	31a1	Size %1$s in %2$d items
 files_unreadable	986c	This folder may not be read
 files_up	5940	Up
 installer_apps_about	af1b	They are installed on the new system once it is written.
@@ -145,10 +160,17 @@ menu_cut	5c17	Cu&t
 menu_delete	1e3e	&Delete
 menu_find	1fa6	&Find
 menu_go_to_line	bc96	&Go to Line
+menu_new_folder	41cb	&New Folder
+menu_open	61a5	&Open
+menu_open_editor	8ca0	Open in the &Editor
+menu_open_terminal	6d2a	Open a &Terminal Here
 menu_paste	6854	&Paste
+menu_properties	c780	P&roperties
 menu_redo	ac45	&Redo
+menu_rename	9529	Re&name
 menu_reset_zoom	1b0f	&Reset Zoom
 menu_select_all	f6f6	Select &All
+menu_show_hidden	37bd	Show &Hidden Files
 menu_toggle_comment	92ac	Toggle Co&mment
 menu_undo	b9d3	&Undo
 menu_zoom_in	5bcf	Zoom &In
