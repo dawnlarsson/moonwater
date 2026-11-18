@@ -25632,13 +25632,17 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         if ((n = p->picture) && row.paint && seen)
                 row.paint(ui, id, n->x, n->y, n->w, n->h);
         baseline = ui_row_baseline(ui, p->label, UI_BODY_MEDIUM);
-        if ((n = p->mark))
+        if ((n = p->mark) && !l->columns && !l->tree) // under columns a row chosen is its well (below), and no dot over its symbol
                 ui_kit_fill(ui, &(struct ui_box){n->x * 256, (n->y + (n->h - n->w) / 2) * 256, (n->x + n->w) * 256, (n->y + (n->h + n->w) / 2) * 256, n->w * 128, n->w * 128},
                             ui_role(UI_PRIMARY), null);
         // Under columns the row is its cells; with an indent (a tree's row) its label is set in by it, with the expander's chevron
         // before it.
         if (l->columns || l->tree)
         {
+                // A row that is one of many chosen is a well of the accent across its span (the row the keys are on is lit over it too).
+                if (row.mark)
+                        ui_kit_fill(ui, &(struct ui_box){across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0},
+                                    0x38000000u | (ui_role(UI_PRIMARY) & 0xffffffu), null);
                 ui_list_cells(ui, l, &row, y, height, ink, quiet);
                 if (trailing)
                         ui_control_draw(ui, trailing);

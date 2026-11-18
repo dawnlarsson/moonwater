@@ -599,6 +599,35 @@ static void check_compositor_dismiss(void)
     compositor_button(COMPOSITOR_BTN_LEFT, 0);
     compositor.press = COMPOSITOR_NONE;
     check("dismiss: a window that did not ask is not asked to go by a press elsewhere", !(table->state[1] & WINDOW_CLOSING) && !(table->state[2] & WINDOW_CLOSING));
+
+    // A press and its release carry the modifiers held: a Control click is a click with Control (a browser adds the row), a Shift one
+    // with Shift (a range). They came with none, so a Control click chose the row alone.
+    {
+        unsigned int had = compositor.input_count, held = compositor.held[0];
+        b32 control = false, shift = false;
+
+        compositor.input_count = had ? had : 1;
+        compositor.held[0] = CK_HELD_LCONTROL;
+        table->event_tail[2] = table->event_head[2];
+        compositor.pointer_x = 230, compositor.pointer_y = 190;
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        compositor.held[0] = CK_HELD_LSHIFT;
+        compositor_button(COMPOSITOR_BTN_LEFT, 1);
+        compositor_button(COMPOSITOR_BTN_LEFT, 0);
+        compositor.press = COMPOSITOR_NONE;
+        for (unsigned int at = table->event_tail[2]; at != table->event_head[2]; at++)
+        {
+            unsigned int cell = at % WINDOWS_EVENTS;
+
+            if (table->event_type[2][cell] != WINDOW_EVENT_BUTTON)
+                continue;
+            control |= (table->event_flags[2][cell] & WINDOW_KEY_CONTROL) != 0;
+            shift |= (table->event_flags[2][cell] & WINDOW_KEY_SHIFT) != 0;
+        }
+        compositor.held[0] = held, compositor.input_count = had;
+        check("buttons: a press and a release carry the modifiers held, Control and Shift", control && shift);
+    }
 }
 
 /*

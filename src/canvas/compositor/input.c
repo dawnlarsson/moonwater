@@ -1820,7 +1820,7 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         // A program's drag is let go with the button that holds it: its drop, or its cancel (the release still the program's).
         compositor_drag_let_go(to);
 #endif
-        compositor_post(to, WINDOW_EVENT_BUTTON, flags, (int)code, 0);
+        compositor_post(to, WINDOW_EVENT_BUTTON, flags | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)), (int)code, 0);
         // A press and a release with no motion between is a click on the window's top, which only raises it:
         // a window at the top of the output, where the snap margin is, would otherwise fill it when clicked.
         if (dragged >= 0 && snap && compositor.drag_moved)
@@ -2004,7 +2004,7 @@ static void compositor_button(unsigned int code, int down)
                 compositor_popups_close(-1, under);
                 compositor.grab = compositor.grab >= 0 ? compositor.grab : under;
                 compositor_pointer_to(under);
-                compositor_post(under, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, (int)code, 0);
+                compositor_post(under, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)), (int)code, 0);
                 if (code - COMPOSITOR_BTN_LEFT < 8)
                 {
                         compositor.button_down |= (unsigned char)(1u << (code - COMPOSITOR_BTN_LEFT));
@@ -2216,10 +2216,11 @@ static void compositor_button(unsigned int code, int down)
             compositor.pointer_y >= compositor.y[under] + (int)compositor.h[under])
                 return;
 
+        // A button's press and its release carry the modifiers held (a Control click adds a row, a Shift click a range).
         compositor.grab = compositor.grab >= 0 ? compositor.grab : under;
         if (!compositor_wl_locked())
                 compositor_pointer_to(under);
-        compositor_post(under, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, (int)code, 0);
+        compositor_post(under, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)), (int)code, 0);
         if (code - COMPOSITOR_BTN_LEFT < 8)
         {
                 compositor.button_down |= (unsigned char)(1u << (code - COMPOSITOR_BTN_LEFT));
