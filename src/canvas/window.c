@@ -923,6 +923,11 @@ struct window_place
 #define WINDOW_LIST_PITCH 7u      // a pitch narrower than its picture
 #define WINDOW_LIST_DAMAGE 8u     // damage that reaches outside its picture
 #define WINDOW_LIST_REASONS 9u
+#define WINDOWS_COPY_TABLE 0 // a picture laid into the table
+#define WINDOWS_COPY_CARD 1  // a rectangle the card read or copied into it
+#define WINDOWS_COPY_CPU 2   // a rectangle the processor copied into it
+#define WINDOWS_COPY_WHOLE 3 // a picture read in place copied whole, or layers laid into it
+
 struct windows
 {
         // The output: its pixels, how many of them one drawn pixel is, a frame in nanoseconds.
@@ -1370,6 +1375,13 @@ struct windows
                 bounds, a seqlock and a premultiplied pixel, whatever the row says.
         */
         char app_id[WINDOWS][WINDOWS_APP_ID];
+        /*
+                What the compositor copied of each window's client pictures (the Wayland shim), by kind (WINDOWS_COPY_*): the pictures laid into
+                the table, the damage rectangles the card read into it (a tiled picture's texture-unit read, a straight picture's owed read, a
+                card blit), the ones the processor copied, and the pictures read in place copied whole (seeds) and layers laid into it. A window
+                shown straight from its client's buffers has none of them; moonwater debug says each window's that has any.
+        */
+        unsigned int client_row_copies[WINDOWS][4];
         unsigned int icon_seq[WINDOWS];
         unsigned int icon[WINDOWS][WINDOWS_ICON * WINDOWS_ICON];
         /*
@@ -1387,7 +1399,7 @@ struct windows
         unsigned int capacity;
 };
 
-#define WINDOWS_ABI 11u // 10 had no variable refresh counts; 9 had no seed counts; 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+#define WINDOWS_ABI 12u // 11 had no per-window copy counts; 10 had no variable refresh counts; 9 had no seed counts; 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
 // The bits of the table's vrr (the rest of the word, from bit 8, is the policy).
 #define WINDOWS_VRR_CAPABLE 1u
 #define WINDOWS_VRR_PROPERTY 2u

@@ -890,6 +890,16 @@ static b32 host_debug(string_address address_to arguments, positive count)
         if (table->client_rects_card || table->client_rects_cpu)
                 host_say(log, "  client rects    %p damage rectangles copied by the card, %p by the processor\n",
                          (positive)table->client_rects_card, (positive)table->client_rects_cpu);
+        //      The same, each window's that has any (a window shown straight, or read in place, has none).
+        for (unsigned int row = 0; row < windows_rows(table); row++)
+        {
+                const unsigned int *c = table->client_row_copies[row];
+
+                if (table->pid[row] && (c[WINDOWS_COPY_TABLE] | c[WINDOWS_COPY_CARD] | c[WINDOWS_COPY_CPU] | c[WINDOWS_COPY_WHOLE]))
+                        host_say(log, "  copies          window %p: %p pictures laid into the table, %p rectangles by the card, %p by the processor, %p whole or layers\n",
+                                 (positive)row, (positive)c[WINDOWS_COPY_TABLE], (positive)c[WINDOWS_COPY_CARD], (positive)c[WINDOWS_COPY_CPU],
+                                 (positive)c[WINDOWS_COPY_WHOLE]);
+        }
         //      Why the client pictures were not read in place by the card (compositor_wl_lend) and their damage not copied by it
         //      (compositor_wl_card_rect): the counts by reason, the nonzero ones, and what the last refused picture was.
         {

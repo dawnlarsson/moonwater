@@ -1215,6 +1215,13 @@ static int compositor_lent(int row)
         return row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.lent[row].pixels != 0;
 }
 
+// A copy of the row's client picture counted for its window (struct windows's client_row_copies), with the counts of all.
+static void compositor_wl_copied(int row, unsigned int kind)
+{
+        if (compositor.table && row >= 0 && row < COMPOSITOR_ROWS)
+                compositor.table->client_row_copies[row][kind & 3]++;
+}
+
 // Whether a fourcc is ARGB's or XRGB's bytes with red and blue the other way round.
 static int compositor_wl_fourcc_swapped(unsigned int fourcc)
 {
@@ -1906,6 +1913,8 @@ static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list
 // A row's layers laid into a picture of the table.
 static void compositor_wl_layers_put(int row, unsigned int *to, unsigned long pitch)
 {
+        if (compositor_wl_layers.count[row])
+                compositor_wl_copied(row, WINDOWS_COPY_WHOLE);
         compositor_wl_layers_put_list(compositor_wl_layers.layer[row], compositor_wl_layers.count[row], to, pitch);
 }
 
@@ -1985,7 +1994,7 @@ static int compositor_wl_card_lay(int row, unsigned int *to, int root)
         if (compositor.table)
         {
                 if (root)
-                        compositor.table->client_seeded[0]++;
+                        compositor.table->client_seeded[0]++, compositor_wl_copied(row, WINDOWS_COPY_WHOLE);
                 compositor.table->client_layers_laid_card += compositor_wl_layers.count[row];
         }
         return 1;
@@ -2030,7 +2039,7 @@ static void compositor_wl_seed(int row, unsigned int which)
                 return;
         }
         if (compositor.table)
-                compositor.table->client_seeded[1]++;
+                compositor.table->client_seeded[1]++, compositor_wl_copied(row, WINDOWS_COPY_WHOLE);
         if (compositor_wl.lent[row].fd >= 0)
                 compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
         if (compositor_lent_swap(row))
@@ -2727,16 +2736,17 @@ static void compositor_wl_straight_drop(int row)
         memory_zero(&compositor_wl.straight[row], sizeof compositor_wl.straight[row]);
 }
 
-static void compositor_wl_straight_pay(int row)
+/*
+        Rows y0 to y1 of the row's straight picture read into the buffer it shows (the texture unit's read), once its client's drawing is done.
+        True when they were.
+*/
+static int compositor_wl_straight_read(int row, long y0, long y1)
 {
         struct wayland_picture whole;
         struct windows *table = compositor.table;
         unsigned int which, *to;
         long w, h;
 
-        if (!compositor_straight(row) || !compositor_wl.straight[row].owed || !table)
-                return;
-        compositor_wl.straight[row].owed = 0;
         memory_copy(&whole, &compositor_wl.straight[row].picture, sizeof whole);
         whole.full = 1, whole.damages = 0, whole.last = 1, whole.blend = 0;
         which = compositor.front[row] & 1u;
@@ -2753,11 +2763,21 @@ static void compositor_wl_straight_pay(int row)
 
                 compositor_call(syscall(ppoll), (positive)&watch, 1, (positive)wait, 0, 0, 0);
         }
-        if (w > 0 && h > 0 && compositor_wl_card_image(row, &whole, to, (unsigned long)compositor_stride(), 0, 0, 0, 0, w, h))
-        {
-                table->client_rects_card++;
-                compositor_wl.laying[row].last = (unsigned char)(which + 1); // the picture is whole in this buffer now
-        }
+        y1 = y1 < h ? y1 : h;
+        y0 = y0 < 0 ? 0 : y0;
+        if (w <= 0 || y1 <= y0 || !compositor_wl_card_image(row, &whole, to, (unsigned long)compositor_stride(), 0, y0, 0, y0, w, y1 - y0))
+                return 0;
+        table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
+        return 1;
+}
+
+static void compositor_wl_straight_pay(int row)
+{
+        if (!compositor_straight(row) || !compositor_wl.straight[row].owed || !compositor.table)
+                return;
+        compositor_wl.straight[row].owed = 0;
+        if (compositor_wl_straight_read(row, 0, compositor_wl.straight[row].picture.height))
+                compositor_wl.laying[row].last = (unsigned char)((compositor.front[row] & 1u) + 1); // the picture is whole in this buffer now
 }
 
 // Every row's owed read made (compositor_wl_straight_pay) but keep's (-1 for none): the present is to compose what it reads.
@@ -2795,8 +2815,16 @@ static int compositor_wl_straight_shown(int row)
                 return 0;
         if (compositor.plane_row != row)
                 return 1;
-        return compositor.plane_rect[0] == compositor.x[row] && compositor.plane_rect[1] == compositor.y[row] &&
-               compositor.plane_rect[2] == compositor.x[row] + (int)compositor.w[row] && compositor.plane_rect[3] == compositor.y[row] + (int)compositor.h[row];
+        // On the overlay: its whole width, the rows with corners above and below it read at each commit (compositor_wl_straight_take).
+        return compositor.plane_rect[0] == compositor.x[row] && compositor.plane_rect[2] == compositor.x[row] + (int)compositor.w[row] &&
+               compositor.plane_rect[1] >= compositor.y[row] && compositor.plane_rect[3] <= compositor.y[row] + (int)compositor.h[row];
+}
+
+// Whether the overlay shows all of the row's window (nothing of it composed round the plane).
+static int compositor_wl_straight_whole(int row)
+{
+        return compositor.plane_row != row ||
+               (compositor.plane_rect[1] == compositor.y[row] && compositor.plane_rect[3] == compositor.y[row] + (int)compositor.h[row]);
 }
 
 /*
@@ -2822,7 +2850,10 @@ static int compositor_wl_straight_take(int row, const struct wayland_picture *pi
         }
         // Shown from its buffers, or hidden under another window that is (straight on the primary plane, the whole screen): either way
         // nothing reads the table's picture until a present composes the window, which reads what it owes first.
-        shown = (compositor_wl_straight_shown(row) ||
+        // A picture whose client's drawing is not done is not taken so on the overlay, whose corner rows are read now (the commit's read
+        // skips it as before, and the next is shown whole).
+        shown = (compositor_wl_straight_whole(row) || picture->explicit_sync || compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd)) &&
+                (compositor_wl_straight_shown(row) ||
                  (compositor.direct_row >= 0 && compositor.direct_row != row && compositor.plane_row != compositor.direct_row)) &&
                 compositor.table && width == (long)compositor.table->width[row] && height == (long)compositor.table->height[row];
         compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
@@ -2848,6 +2879,15 @@ static int compositor_wl_straight_take(int row, const struct wayland_picture *pi
         // A row that was lent a linear buffer is the straight one's now (a read lays over it and lets it go itself).
         if (shown && compositor_lent(row))
                 compositor_wl_unlend(row);
+        // On the overlay over all of the window but its rows with corners, which are composed round it: those rows alone are read (two strips
+        // of the corners' height, where the whole picture was read at every commit), and the rest is owed.
+        if (shown && compositor.plane_row == row && !compositor_wl_straight_whole(row))
+        {
+                long top = compositor.plane_rect[1] - compositor.y[row], bottom = compositor.plane_rect[3] - compositor.y[row];
+
+                compositor_wl_straight_read(row, 0, top);
+                compositor_wl_straight_read(row, bottom, height);
+        }
         return shown ? 2 : 1;
 }
 
@@ -3918,7 +3958,7 @@ static void compositor_wl_table_copy(int row, unsigned int into, unsigned int fr
                 if (src && dst &&
                     (gpu_blit(src, (unsigned int)pitch, dst, (unsigned int)pitch, 0, 0, (unsigned int)cw, (unsigned int)ch) || (gpu_end == GPU_END_LATE && gpu_finish())))
                 {
-                        compositor.table->client_rects_card++;
+                        compositor.table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
                         return;
                 }
                 if (gpu_end != GPU_END_NONE)
@@ -3927,7 +3967,7 @@ static void compositor_wl_table_copy(int row, unsigned int into, unsigned int fr
                         gpu_finish();
         }
 #endif
-        compositor.table->client_rects_cpu++;
+        compositor.table->client_rects_cpu++, compositor_wl_copied(row, WINDOWS_COPY_CPU);
         memory_copy_rect_u32(to, pitch, source, pitch, cw, ch);
 }
 
@@ -4108,9 +4148,9 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 return -1;
                         }
                         if (xst == 2)
-                                table->client_rects_card++;
+                                table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
                         else if (xst > 0)
-                                table->client_rects_cpu++;
+                                table->client_rects_cpu++, compositor_wl_copied(row, WINDOWS_COPY_CPU);
                 }
                 else
                 {
@@ -4153,7 +4193,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                         if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left,
                                                                     bottom - top, 1))
                                         {
-                                                table->client_rects_card++;
+                                                table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
                                                 compositor_wl_laid(row, x + left, y + top, x + right, y + bottom);
                                         }
                                         continue;
@@ -4176,7 +4216,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 }
                                 else if (compositor_wl_card_rect(row, picture, to, pitch, x + left, y + top, left, top, right - left, bottom - top,
                                                                  card_wanted && (right - left) * (bottom - top) >= 32768))
-                                        table->client_rects_card++;
+                                        table->client_rects_card++, compositor_wl_copied(row, WINDOWS_COPY_CARD);
                                 else if (picture->sync_fd >= 0)
                                 {
                                         if (!sync_started)
@@ -4188,7 +4228,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                                 }
                                                 sync_started = 1;
                                         }
-                                        table->client_rects_cpu++;
+                                        table->client_rects_cpu++, compositor_wl_copied(row, WINDOWS_COPY_CPU);
                                         // A GPU's buffer, mapped write-combined: read with the streaming loads that are nine times as fast.
                                         memory_copy_rect_stream_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
                                                                     (const unsigned int *)(picture->pixels + top * picture->stride) + left,
@@ -4197,7 +4237,7 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                                 }
                                 else
                                 {
-                                        table->client_rects_cpu++;
+                                        table->client_rects_cpu++, compositor_wl_copied(row, WINDOWS_COPY_CPU);
                                         memory_copy_rect_u32(to + (unsigned long)(y + top) * pitch + (unsigned long)(x + left), pitch,
                                                              (const unsigned int *)(picture->pixels + top * picture->stride) + left,
                                                              (unsigned long)picture->stride / 4, (unsigned long)(right - left),
@@ -4217,12 +4257,13 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         if (aside)
         {
                 compositor_wl_layers_put_list(over, aside, to, pitch);
+                compositor_wl_copied(row, WINDOWS_COPY_WHOLE);
                 compositor_wl.laying[row].full = 1;
                 compositor_wl.laying[row].touched = 1;
         }
         if (!picture->last)
                 return 0;
-        table->client_copied++;
+        table->client_copied++, compositor_wl_copied(row, WINDOWS_COPY_TABLE);
         if (width != (long)table->width[row] || height != (long)table->height[row] || !compositor_wl.laying[row].touched)
                 compositor_wl.laying[row].full = 1;
         table->width[row] = (unsigned int)width;
@@ -5025,8 +5066,10 @@ static void compositor_wl_query_plane_modifiers(struct wayland_dmabuf_info *info
 }
 
 /*
-        The card's tiled pairs added to what a client is told (while compositor_wl_tiled_now): the display's primary plane's IN_FORMATS for ARGB, XRGB,
-        ABGR and XBGR 8888, each modifier one the card reads (gpu_image_takes). The display's are taken, not every layout the card could read, so that
+        The card's tiled pairs added to what a client is told (while compositor_wl_tiled_now): the display's primary plane's IN_FORMATS for XRGB and
+        XBGR 8888, each modifier one the card reads (gpu_image_takes). Not for ARGB and ABGR: Chromium draws its pages in ARGB, and took the tiles when
+        told them, which made its pages 2.5 to 3 times slower (Speedometer 3.1 on box 11.4 against 31.6, chrome://gpu hardware accelerated either way);
+        games and GL clients draw XRGB (Xwayland's depth-24 windows, Mesa's XRGB configs), whose windows are then scanned out straight. The display's are taken, not every layout the card could read, so that
         a buffer a client makes of them is one a plane can scan out too. On the box (Raphael, DCN 3.1.5) these are the GFX10_RBPLUS 64K_R_X with
         PIPE_XOR_BITS 2 with four kinds of DCC (64 or 128 byte blocks, each retiled or not), 64K_R_X and 64K_S_X without, and GFX9's 64K_S.
 */
@@ -5040,8 +5083,7 @@ static void compositor_wl_dmabuf_tiled_pairs(struct wayland_dmabuf_info *info)
         {
                 unsigned int format = plane.entry[at].format;
 
-                if ((format == COMPOSITOR_WL_FOURCC_ARGB8888 || format == COMPOSITOR_WL_FOURCC_XRGB8888 || format == WAYLAND_FOURCC_ABGR8888 ||
-                     format == WAYLAND_FOURCC_XBGR8888) &&
+                if ((format == COMPOSITOR_WL_FOURCC_XRGB8888 || format == WAYLAND_FOURCC_XBGR8888) &&
                     plane.entry[at].modifier && plane.entry[at].modifier != WAYLAND_MODIFIER_INVALID && compositor_wl_tiled_takes(plane.entry[at].modifier))
                         compositor_wl_dmabuf_add_pair(info, format, plane.entry[at].modifier);
         }
@@ -5073,7 +5115,7 @@ static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info 
         // where offered the modifiers alone it makes the display's retiled DCC. A client that asks for the implicit one is still taken (the shim takes
         // it for any format told).
         for (unsigned long i = 0; i < sizeof base_formats / sizeof base_formats[0]; i++)
-                if (!compositor_wl.dmabuf_tiled || i >= 4)
+                if (!compositor_wl.dmabuf_tiled || (i != 1 && i != 3))
                         compositor_wl_dmabuf_add_pair(info, base_formats[i], WAYLAND_MODIFIER_INVALID);
         {
                 long linear = info->count;

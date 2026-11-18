@@ -5133,7 +5133,7 @@ static fn windows_header(void)
               !windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 32, room + 1) && !windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 32, 0) &&
                   !windows_fits(size, WINDOWS_HEADER, buffer, 64, 64, 32, WINDOWS + 1));
         check("a table of this layout's version is taken, and one of another is refused before any field is read (2 and 3, the 32 rows', among them)",
-              windows_abi_ok(WINDOWS_ABI) && WINDOWS_ABI == 10 && !windows_abi_ok(0) && !windows_abi_ok(9) && !windows_abi_ok(8) && !windows_abi_ok(2) && !windows_abi_ok(3) && !windows_abi_ok(WINDOWS_ABI + 1));
+              windows_abi_ok(WINDOWS_ABI) && WINDOWS_ABI == 12 && !windows_abi_ok(0) && !windows_abi_ok(11) && !windows_abi_ok(10) && !windows_abi_ok(9) && !windows_abi_ok(8) && !windows_abi_ok(2) && !windows_abi_ok(3) && !windows_abi_ok(WINDOWS_ABI + 1));
         check("the layout has rows for more than a million windows, and the struct's per-row fields with them",
               WINDOWS >= (1u << 20) && sizeof(table_at->pid) / sizeof(table_at->pid[0]) == WINDOWS);
         table_at->capacity = room;

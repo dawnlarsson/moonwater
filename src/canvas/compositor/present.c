@@ -1280,10 +1280,10 @@ static void compositor_present_frames(void)
         // The top window on the overlay where it can be: nothing of it composed under the plane.
         int planed[4], plane = !back && !turning ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
 
-        // Composed from here: a straight picture owed to the table is read first, all but the one the overlay is to show whole.
-        compositor_wl_straight_pays(plane >= 0 && planed[0] == compositor.x[plane] && planed[1] == compositor.y[plane] &&
-                                                    planed[2] == compositor.x[plane] + (int)compositor.w[plane] &&
-                                                    planed[3] == compositor.y[plane] + (int)compositor.h[plane]
+        // Composed from here: a straight picture owed to the table is read first, all but the one the overlay is to show across its whole
+        // width (its rows with corners, composed round the plane, were read at its commit: compositor_wl_straight_take).
+        compositor_wl_straight_pays(plane >= 0 && planed[0] == compositor.x[plane] && planed[2] == compositor.x[plane] + (int)compositor.w[plane] &&
+                                                    plane == compositor.plane_row
                                             ? plane
                                             : -1);
 
