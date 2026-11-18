@@ -1180,6 +1180,19 @@ static bool rover_read_arguments(struct rover_build address_to build, struct rov
         return true;
 }
 
+//      An action counted to its run, then or else: a run's count is a byte, so a run of more than 255 is refused rather than cut.
+static bool rover_count_action(struct rover_build address_to build, struct rover_rule address_to rule)
+{
+        p8 address_to count = build->stage == ROVER_STAGE_ELSE ? &rule->otherwise : &rule->then;
+
+        if (*count == 255)
+                return rover_refused(build, build->stage == ROVER_STAGE_ELSE ? "a rule has more than 255 actions after its else"
+                                                                             : "a rule has more than 255 actions before its else",
+                                     null, null);
+        (*count)++;
+        return true;
+}
+
 static bool rover_read_action(struct rover_build address_to build, struct rover_rule address_to rule)
 {
         struct rover_action action;
@@ -1295,11 +1308,7 @@ static bool rover_read_action(struct rover_build address_to build, struct rover_
                 action.count = 1;
                 build->argument[build->arguments++] = side.operand;
                 build->action[build->actions++] = action;
-                if (build->stage == ROVER_STAGE_ELSE)
-                        rule->otherwise++;
-                else
-                        rule->then++;
-                return true;
+                return rover_count_action(build, rule);
         }
         else
         {
@@ -1339,11 +1348,7 @@ static bool rover_read_action(struct rover_build address_to build, struct rover_
                                                      " is no script's name: a word of a-z, 0-9, . _ and -");
         }
         build->action[build->actions++] = action;
-        if (build->stage == ROVER_STAGE_ELSE)
-                rule->otherwise++;
-        else
-                rule->then++;
-        return true;
+        return rover_count_action(build, rule);
 }
 
 /*

@@ -1204,6 +1204,47 @@ static fn rover_check_kernel_events(void)
         memory_zero(rover_page_store, sizeof(rover_page_store));
 }
 
+/*
+        The red team's edges (rover-red/TEAM.md), a row each: what was cut or wrapped silently is refused, and what printed
+        is what reads back.
+*/
+static p8 rover_red_text[16384];
+
+//      A text compiled, printed, and the printing compiled to the same table.
+static bool rover_round(const char address_to text)
+{
+        positive size;
+
+        if (!rover_compile(&rover_one, (const p8 address_to)text, string_length((string_address)text)))
+                return false;
+        size = rover_one.size;
+        memory_copy(rover_printed, rover_built(&rover_one), size);
+        (void)rover_printed_of();
+        return rover_compile(&rover_two, rover_print_text, string_length(rover_print_text)) && rover_two.size == size &&
+               !memory_compare(rover_built(&rover_two), rover_printed, size);
+}
+
+static fn rover_check_red(void)
+{
+        //      R-compiler-1 and 12: a run's count is a byte; 255 actions are taken, 256 refused, then and else alike.
+        {
+                positive used = 0;
+
+                string_copy(rover_red_text, "rule many\n\ton lid close\n");
+                used = string_length(rover_red_text);
+                for (positive k = 0; k < 255; k++, used += 10)
+                        memory_copy(rover_red_text + used, "\tdo log x\n", 10);
+                if (!rover_compile(&rover_one, rover_red_text, used))
+                        string_format(log, "  rover red: line %p: %s\n", (positive)rover_one.line, rover_one.why), log_flush();
+                check("red: 255 actions before the else compile, and run as 255",
+                      rover_compile(&rover_one, rover_red_text, used) && rover_one.rules == 1);
+                memory_copy(rover_red_text + used, "\tdo log x\n", 10);
+                used += 10;
+                check("red: a 256th is refused with its reason, not cut to none",
+                      !rover_compile(&rover_one, rover_red_text, used) && rover_holds_why("more than 255 actions before its else"));
+        }
+}
+
 b32 main(void)
 {
         rover_check_first_of_either();
@@ -1214,6 +1255,7 @@ b32 main(void)
         rover_check_tamper();
         rover_check_evaluator();
         rover_check_kernel_events();
+        rover_check_red();
         return test_report(null);
 }
 
