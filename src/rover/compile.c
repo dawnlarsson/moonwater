@@ -1307,6 +1307,19 @@ static bool rover_read_action(struct rover_build address_to build, struct rover_
         }
         if (!rover_read_arguments(build, rule, &action, first, primitive))
                 return false;
+        //      What root runs is the rule file's own words: no event's field (an app id, a device's name) and no
+        //      state names a program, a script's argument, a tool's operand or a cue (README, Safety).
+        if (action.kind == ROVER_RUN || action.kind == ROVER_TOOL || action.kind == ROVER_EMIT ||
+            (action.kind == ROVER_DO && action.id == 14))
+                for (positive k = 0; k < action.count; k++)
+                {
+                        p8 source = build->argument[action.argument + k].source;
+
+                        if (source != ROVER_CONST_NUMBER && source != ROVER_CONST_WORD)
+                                return rover_refused(build, "", &build->word[first + k],
+                                                     " is not the rule's own word: what root runs, its arguments and a cue "
+                                                     "are the rule file's words, never an event's field or a state");
+                }
         if (action.kind == ROVER_RUN)
         {
                 const p8 address_to name = rover_pool(build) + build->argument[action.argument].index + 2;

@@ -689,6 +689,33 @@ static fn rover_runner_program(string_address first, const struct rover_value ad
                 rover_runner_child(pid);
 }
 
+/*
+        Whether a pin's first word is a program the machine knows, which is all
+        of a pin the runner starts: the pin is made from a window's own
+        process (its /proc cmdline), which the window's program chose, so its
+        words are never root's argv. A kit program, /NAME, or a bowl's
+        launcher, /bowls/bin/NAME, NAME a bare word, that is a regular file
+        (through its link) of root's that no one else may write.
+*/
+static bool rover_runner_pinned(string_address path)
+{
+        string_address name = null;
+        file_facts facts;
+
+        if (string_has_prefix(path, "/bowls/bin/"))
+                name = path + 11;
+        else if (path[0] == '/')
+                name = path + 1;
+        if (!name || !name[0] || string_length(name) > 48)
+                return false;
+        for (string_address at = name; *at; at++)
+                if (!((*at >= 'a' && *at <= 'z') || (*at >= 'A' && *at <= 'Z') || (*at >= '0' && *at <= '9') ||
+                      *at == '-' || *at == '_' || (*at == '.' && at != name)))
+                        return false;
+        return file_look(AT_FDCWD, path, 0, address_of facts) && (facts.mode & MODE_FORMAT) == MODE_FILE &&
+               facts.owner == 0 && !(facts.mode & 0022);
+}
+
 //      A primitive that is not the kernel's (those are asked of it, rover_runner_do).
 static fn rover_runner_primitive(p16 id, const struct rover_value address_to values, positive count)
 {
@@ -740,21 +767,25 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
                                 string_copy_max(held->word[held->count++], (string_address)values[at].text, sizeof(held->word[0]));
                         return;
                 }
-                //      The pinned program the last pin pressed names, opened with no words of the rule's: its own words.
-                if (count == 1 && rover_runner.pins > 1 && string_equals((string_address)values[0].text, rover_runner.pin[0]))
-                {
-                        string_address argv[ROVER_ARGUMENTS + 6];
+                rover_runner_program(path, values, count, 1, "MOONWATER_ASKED=1");
+                return;
+        }
+        case 20: // open pin: the last pin's program, when it is one the machine knows
+        {
+                string_address argv[2] = {null, null};
 
-                        for (positive at = 0; at < rover_runner.pins; at++)
-                                argv[at] = rover_runner.pin[at];
-                        argv[rover_runner.pins] = null;
+                if (!rover_runner.pins || !rover_runner_pinned(rover_runner.pin[0]))
+                {
+                        rover_runner_say("a pin names no program of this machine's (a kit program, or a bowl's in /bowls/bin, "
+                                         "root's alone); not started: ", rover_runner.pins ? rover_runner.pin[0] : (string_address) "", null);
                         rover_runner.pins = 0;
-                        bipolar pid = rover_runner_exec(argv, null, "MOONWATER_ASKED=1");
-                        if (pid > 0)
-                                rover_runner_child(pid);
                         return;
                 }
-                rover_runner_program(path, values, count, 1, "MOONWATER_ASKED=1");
+                argv[0] = rover_runner.pin[0];
+                rover_runner.pins = 0;
+                bipolar pid = rover_runner_exec(argv, null, "MOONWATER_ASKED=1");
+                if (pid > 0)
+                        rover_runner_child(pid);
                 return;
         }
         case 16: // start SERVICE

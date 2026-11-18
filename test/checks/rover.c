@@ -266,8 +266,8 @@ static const char address_to const rover_canonical[] = {
     "\tif string_length($app) > 12 or $app ~ \"*two words*\"\n"
     "\tif memory_count($app, 95) >= 2 and $app !~ steam_*\n"
     "\tif weekday between mon fri\n"
-    "\trun notify-long $app \"a b\"\n"
-    "\ttool logger -t rover $app\n"
+    "\trun notify-long \"a b\"\n"
+    "\ttool logger -t rover opened\n"
     "\temit cue long-name\n"
     "\n"
     "rule cued\n"
@@ -299,7 +299,7 @@ static const char address_to const rover_canonical[] = {
     "\n"
     "rule pinned\n"
     "\ton button pin\n"
-    "\tdo open $app\n"
+    "\tdo open pin\n"
     "\n"
     "rule first-pin\n"
     "\ton button pin 0\n"
@@ -356,7 +356,7 @@ static const char address_to const rover_canonical[] = {
     "\n"
     "rule keyboard-in\n"
     "\ton input added keyboard\n"
-    "\trun note-keyboard $name\n"
+    "\trun note-keyboard\n"
     "\n"
     "rule docked\n"
     "\ton display connected\n"
@@ -412,6 +412,13 @@ static const struct
     {"rule a\n\ton usb added storage 1 2 x y\n\tdo suspend\n", 2, "more than"},
     {"rule a\n\ton fullscreen on\n\tplace kernel\n\tdo suspend\n", 0, "kernel never sees it"},
     {"rule a\n\twhen $app == x\n\tdo suspend\n", 2, "fields are no states"},
+    {"rule a\n\ton window opened\n\tdo open $app\n", 3, "not the rule's own word"},
+    {"rule a\n\ton window opened\n\ttool rm $app\n", 3, "not the rule's own word"},
+    {"rule a\n\ton window opened\n\trun wall-sync $app\n", 3, "not the rule's own word"},
+    {"rule a\n\ton window opened\n\temit cue $app\n", 3, "not the rule's own word"},
+    {"rule a\n\ton input added\n\ttool logger $name\n", 3, "not the rule's own word"},
+    {"rule a\n\ton lid close\n\ttool logger window.app\n", 3, "not the rule's own word"},
+    {"rule a\n\ton lid close\n\tdo open window.app\n", 3, "not the rule's own word"},
     {"rule a\n\ton cue loop\n\temit cue loop\n", 0, "own cue"},
     {"rule a\n\ton lid close\n\tdo suspend\n\tif lid == open\n", 4, "conditions come first"},
     {"rule a\n\ton lid close\n", 0, "nothing to do"},
@@ -897,10 +904,9 @@ static fn rover_check_evaluator(void)
                 event = rover_event_of("window opened", "many_under_scores_here");
                 made = rover_fire(&rover_view, rover_runs, rover_pages, &event, ROVER_DESKTOP, hits, 4);
                 count = made ? rover_arguments(&rover_view, hits[0].action, &event, rover_pages, values) : 0;
-                check("run's arguments are the script, the field and the word",
-                      count == 3 && rover_bytes_are(values[0].text, values[0].length, "notify-long") &&
-                          rover_bytes_are(values[1].text, values[1].length, "many_under_scores_here") &&
-                          rover_bytes_are(values[2].text, values[2].length, "a b"));
+                check("run's arguments are the script and the rule's word",
+                      count == 2 && rover_bytes_are(values[0].text, values[0].length, "notify-long") &&
+                          rover_bytes_are(values[1].text, values[1].length, "a b"));
                 check("a hit's actions are its then run", made && hits[0].count == 3);
         }
 
@@ -925,9 +931,9 @@ static fn rover_check_evaluator(void)
                 struct rover_value values[ROVER_ARGUMENTS];
                 positive made = rover_fire(&rover_view, rover_runs, rover_pages, &event, ROVER_DESKTOP, hits, 4);
 
-                check("open's argument is the pinned program",
-                      made && rover_arguments(&rover_view, hits[0].action, &event, rover_pages, values) == 1 &&
-                          rover_bytes_are(values[0].text, values[0].length, "/usr/bin/foot"));
+                check("open pin takes no word of the event's: the runner starts the pin's program only when it knows it",
+                      made && rover_arguments(&rover_view, hits[0].action, &event, rover_pages, values) == 0 &&
+                          rover_view.action[hits[0].action].id == 20);
                 event.field[0].number = 2; // mic
                 made = rover_fire(&rover_view, rover_runs, rover_pages, &event, ROVER_DESKTOP, hits, 4);
                 check("open with words hands them on, each one",

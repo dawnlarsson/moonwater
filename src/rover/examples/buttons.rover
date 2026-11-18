@@ -25,7 +25,7 @@ rule settings-button
 	on button tray-double
 	do open settings
 
-# A pinned program's task: the program the compositor says, which it left in /run/moonwater/pin.N for desktop_pin.
+# A pinned program's task: its program when the machine knows it (a kit program or a bowl's launcher), never the window's words.
 rule pinned
 	on button pin
-	do open $app
+	do open pin

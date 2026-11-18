@@ -122,6 +122,9 @@ primitive 16 runner any start service:word
 primitive 17 runner any stop service:word
 primitive 18 runner any restart service:word
 primitive 19 runner any "desktop rest"
+# The program of the pin the person pressed last (on button pin): the runner starts it only when it is a kit program
+# or a bowl's launcher, root's and written by root alone, with no word of the window's.
+primitive 20 desktop any "open pin"
 
 # The machine's switches, which set NAME VALUE changes as moonwater's tune
 # verbs do (src/sh/host/tune.c). A value marked deliberate raises the

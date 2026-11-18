@@ -376,6 +376,7 @@ two pages; the C asks it.
 | `log` | kernel | any | text, to the kernel's log |
 | `display off`, `display on` | desktop | any | every screen out (DPMS) and lit again: the runner makes and removes `/run/moonwater/display-off`, which the compositor watches; a key or button pressed, a move or a touch lights them again |
 | `open` | desktop | any | word: an app's name or a program's path, as the launcher opens it; then none or more words, its arguments (`do open mixer -q -a`); one asked before the compositor is up is held, and done when it is |
+| `open pin` | desktop | any | the program of the pin pressed last, when the machine knows it (a kit program or a bowl's launcher, root's alone), with none of the window's words; on `button pin` |
 | `notify` | desktop | any | text, as a notice: on the notices board under `rules`, as a program's notification is, and in the kernel's log |
 
 ### Switches
@@ -412,6 +413,20 @@ Each primitive has a class.
 
 A rule can never raise exposure. That keeps the air gap that radios off by
 default, the USB lock and the firewall's tiers give.
+
+**What root runs is the rule file's own words.** The runner is root, and an
+event's fields and the desktop's states are what other programs say: a
+Wayland client chooses its app id, a USB device its vendor and a keyboard
+its name. So the compiler refuses a field (`$app`, `$name`) or a state as
+any argument of `run` (the script's words), `tool` (its operands), `open`
+(the program and its words) and `emit cue` (the cue's name, which picks the
+rules that run next). A field goes only where it is data: a condition, a
+`log` or `notify` text, a service's name for `start`, `stop` and `restart`
+(which names one of the table's services or nothing). The pin's program is
+not a field either: `open pin` starts the program of the pin the person
+pressed only when it is one the machine knows (a kit program `/NAME` or a
+bowl's launcher `/bowls/bin/NAME`, root's and written by root alone), and
+never with the window's words.
 
 Each function and action is also **bounded** or not. A primitive is
 bounded: the kernel's half queues a request and returns. A function is
