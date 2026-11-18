@@ -157,6 +157,9 @@ static struct
         int dmabuf_tiled, tiled_node_epoch, tiled_node;
         unsigned long tiled_rects, tiled_refused[8];
         positive tiled_ns, tiled_most_ns, tiled_pixels; // the texture unit's reads: wall time waited in all and the longest, and the pixels read
+        positive tiled_seq;      // the last read submitted and not waited for (compositor_wl_card_image), until a reader on the processor has waited for it
+        unsigned long tiled_unwaited; // the reads submitted without a wait
+        int tiled_lent;          // this picture was read so: its buffer is held as a lent one's is, until the frame after it is drawn
         struct
         {
                 unsigned int format;
@@ -1852,6 +1855,8 @@ static void compositor_wl_unlend(int row)
 
 // The lent picture copied into a table buffer, whole, with the layers over it laid on, and then let go of: the row's picture is that buffer's
 // from here on. Its size is the picture's, which the table's buffers hold (a lend is only for a picture of the table's size at most).
+static void compositor_wl_tiled_settle(void);
+
 static void compositor_wl_seed(int row, unsigned int which)
 {
         unsigned int *to;
@@ -1859,6 +1864,7 @@ static void compositor_wl_seed(int row, unsigned int which)
 
         if (!compositor_lent(row))
                 return;
+        compositor_wl_tiled_settle();
         to = (unsigned int *)((char *)compositor.table + compositor.pixels + ((unsigned long)row * 2 + (which & 1u)) * compositor.buffer);
         // The card first, which reads the client's buffer where it is, the layers with it.
         if (compositor_wl_card_lay(row, to, 1))
@@ -2405,6 +2411,16 @@ static int compositor_wl_tiled_refused(unsigned int why)
         return 0;
 }
 
+// A tiled read submitted without a wait (compositor_wl_card_image) waited for, before the processor reads a table's picture it may have written.
+static void compositor_wl_tiled_settle(void)
+{
+#ifdef MOONWATER_GPU_C
+        if (compositor_wl.tiled_seq && gpu_done(compositor_wl.tiled_seq) == 0 && !gpu_finish() && gpu_end != GPU_END_NONE)
+                compositor_gpu_job_failed();
+#endif
+        compositor_wl.tiled_seq = 0;
+}
+
 /*
         A damage rectangle of a tiled picture, w by h at (sx, sy) of it, read by the card's texture unit into the picture being laid at (dx, dy) in the
         table's buffer to (gpu_image over gpu_amd_image's resource). The buffer is imported whole (its planes are in it: the metadata of DCC is plane 1, or
@@ -2484,7 +2500,30 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
         dst_va = gpu_va_written(to, compositor.buffer);
         if (!dst_va && gpu_map_written(to, compositor.buffer))
                 dst_va = gpu_va_written(to, compositor.buffer);
-        if (!dst_va || (!gpu_idle() && !gpu_finish()))
+        if (!dst_va)
+                return compositor_wl_tiled_refused(6);
+        // A window's whole picture (its last and only, laid over nothing): the read is submitted and not waited for. The loop goes on; the present
+        // that shows it is held while the job runs (compositor_card_holds) and the card's jobs after it run after it on the ring; the client's buffer
+        // is held as a lent one's until the frame after it is drawn (row_picture answers WAYLAND_PICTURE_LENT); and the shim's own reads of the
+        // table's picture on the processor wait first (compositor_wl_tiled_settle). Where the loop waited for each read in place, a full 1600 by 900
+        // frame's about 1 ms on box (the card at 600 MHz, busy with the client's drawing), in front of every key and report of that time.
+        if (picture->last && !picture->blend)
+        {
+                positive sequence = gpu_image_go(desc, kind, (unsigned int)sx, (unsigned int)sy, dst_va + 4 * ((positive)dy * pitch + (positive)dx),
+                                                 (unsigned int)pitch, (unsigned int)w, (unsigned int)h);
+
+                if (sequence)
+                {
+                        compositor_wl.tiled_seq = sequence, compositor_wl.tiled_lent = 1, compositor_wl.tiled_unwaited++;
+                        compositor_wl.tiled_pixels += (positive)w * (positive)h;
+                        if ((compositor_wl.tiled_rects++ & 4095) == 0)
+                                compositor_wl_tiled_say("read");
+                        return 1;
+                }
+                if (gpu_lost)
+                        return compositor_wl_tiled_refused(6);
+        }
+        if (!gpu_idle() && !gpu_finish())
                 return compositor_wl_tiled_refused(6);
         began = clock_monotonic_nanoseconds();
         if (gpu_image(desc, kind | (picture->blend ? GPU_IMAGE_OVER : 0), (unsigned int)sx, (unsigned int)sy, dst_va + 4 * ((positive)dy * pitch + (positive)dx),
@@ -3560,6 +3599,8 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
 static void compositor_wl_table_copy(int row, unsigned int into, unsigned int from, unsigned long cw, unsigned long ch)
 {
         unsigned long pitch = (unsigned long)compositor_stride();
+
+        compositor_wl_tiled_settle(); // the buffer copied from may be a tiled read's still
         unsigned int *to = (unsigned int *)((char *)compositor.table + compositor.pixels + ((unsigned long)row * 2 + (into & 1u)) * compositor.buffer);
         const unsigned int *source = (const unsigned int *)((char *)compositor.table + compositor.pixels + ((unsigned long)row * 2 + (from & 1u)) * compositor.buffer);
 
@@ -3592,6 +3633,7 @@ static void compositor_wl_table_copy(int row, unsigned int into, unsigned int fr
 
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)
 {
+        compositor_wl.tiled_lent = 0;
         struct windows *table = compositor.table;
         unsigned long pitch = (unsigned long)compositor_stride();
         long width = picture->row_width, height = picture->row_height;
@@ -3878,7 +3920,8 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         compositor_wl.laying[row].open = 0;
         __atomic_store_n(&table->frame[row], table->frame[row] + 1, __ATOMIC_RELEASE);
         compositor_wl_take(row);
-        return 0;
+        // A read the card may still be making of the client's buffer: the buffer is held as a lent one's is (compositor_wl_card_image).
+        return compositor_wl.tiled_lent ? WAYLAND_PICTURE_LENT : 0;
 }
 
 // A title into the table, as a program writes one: cut to the room on a character's boundary.

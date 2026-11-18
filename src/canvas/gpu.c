@@ -3263,6 +3263,22 @@ static b32 gpu_image(const unsigned int desc[8], unsigned int kind, unsigned int
         return gpu_run();
 }
 
+// gpu_image submitted and not waited for (gpu_go): its sequence, 0 when no slot is free or the job is refused (the caller waits and asks gpu_image). The
+// rectangle is written once the sequence is done (gpu_done): a reader on the processor waits for it first; a job of the card after it runs after it.
+static positive gpu_image_go(const unsigned int desc[8], unsigned int kind, unsigned int x0, unsigned int y0, positive dst, unsigned int dp, unsigned int w,
+                             unsigned int h)
+{
+        struct gpu_args address_to a;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!w || !h || gpu_set != &gpu_amd_rdna2 || gpu_lost || gpu_slot_take() < 0)
+                return 0;
+        a = GPU_ARGS;
+        a->s = 0, a->d = dst, a->g = 0, a->sp = 0, a->dp = dp, a->gp = 0, a->w = w, a->op = 8, a->v = kind & (GPU_IMAGE_OVER | GPU_IMAGE_RAW | GPU_IMAGE_SWAP), a->x0 = x0, a->y0 = y0, a->rows = h, a->tab = 0;
+        memory_copy((p8 address_to)a + 128, desc, 32);
+        return gpu_go();
+}
+
 /*
         The texture unit's resource (gfx10.3's SQ_IMG_RSRC_WORD0 to 7) for a client's picture of four bytes a pixel, as Mesa makes one to sample a buffer it
         imported with a modifier (ac_build_gfx10_texture_descriptor and ac_set_mutable_tex_desc_fields; the fields' places from Mesa's registers/gfx10-rsrc.json):
