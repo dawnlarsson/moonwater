@@ -41,6 +41,10 @@ files_busy	5ba5	نسخ أو نقل أو حذف قيد التنفيذ
 files_changed	df4e	ليس ما كان في القائمة: يُقرأ المجلد من جديد
 files_chosen	7a7f	تم اختيار %1$d من %2$d
 files_chosen_size	621a	اختير %1$d من %2$d، %3$s
+files_column_modified	a6b2	عُدِّل
+files_column_name	7306	الاسم
+files_column_size	8e7c	الحجم
+files_column_type	d06d	النوع
 files_copied	6570	نُسخ %d
 files_copying	c870	نسخ %1$d من %2$d، %3$s من %4$s: Escape يوقف
 files_count	cab8	%d عنصر
@@ -79,6 +83,9 @@ files_sheet_other	3921	جهاز أو أنبوب أو مقبس
 files_sheet_owner	8b0c	المالك %1$d، المجموعة %2$d
 files_sheet_size	eca5	الحجم %1$s (%2$s بايت)
 files_sheet_size_in	31a1	الحجم %1$s في %2$d عناصر
+files_type_ext	d2c5	ملف %s
+files_type_link	e589	رابط
+files_type_other	e8e6	ملف خاص
 files_unreadable	986c	لا يُسمح بقراءة هذا المجلد
 files_up	5940	للأعلى
 installer_apps_about	af1b	تُثبَّت على النظام الجديد بعد كتابته.

@@ -40,6 +40,10 @@ files_busy	5ba5	En kopiering, flytt eller borttagning pågår
 files_changed	df4e	Det är inte det som listades: mappen läses om
 files_chosen	7a7f	%1$d av %2$d valda
 files_chosen_size	621a	%1$d av %2$d valda, %3$s
+files_column_modified	a6b2	Ändrad
+files_column_name	7306	Namn
+files_column_size	8e7c	Storlek
+files_column_type	d06d	Typ
 files_copied	6570	%d kopierade
 files_copying	c870	Kopierar %1$d av %2$d, %3$s av %4$s: Escape stoppar
 files_count	cab8	%d objekt
@@ -78,6 +82,9 @@ files_sheet_other	3921	Enhet, rör eller uttag
 files_sheet_owner	8b0c	Ägare %1$d, grupp %2$d
 files_sheet_size	eca5	Storlek %1$s (%2$s byte)
 files_sheet_size_in	31a1	Storlek %1$s i %2$d objekt
+files_type_ext	d2c5	%s-fil
+files_type_link	e589	Länk
+files_type_other	e8e6	Specialfil
 files_unreadable	986c	Den här mappen får inte läsas
 files_up	5940	Upp
 installer_apps_about	af1b	De installeras på det nya systemet när det är skrivet.

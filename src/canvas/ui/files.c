@@ -160,6 +160,8 @@ static struct
         struct ui_drag drag;     // the rows dragged out (files_uris: their list of files)
         p32 drag_place;          // the row the drag was pressed on
         b32 drag_chosen;         // and whether it drags the rows chosen (else that row alone)
+        struct ui_columns columns; // the details' header over the rows: Name, Size, Type, Modified, each a press that orders by it
+        struct ui_rect head_box;   // where the view put it
         struct ui_drop drop;     // a drag of files over the window: dropped, they are copied or moved into the folder it is over
         int drop_row;            // the folder's row the drop goes into, -1 the folder shown
         b64 next_progress;       // when the foot next says how far a copy has gone
@@ -212,11 +214,56 @@ static positive files_name_text(char address_to into, positive room, const struc
         return used;
 }
 
-// A row, for the kit's list: the entry at that place of the listing (the list is virtual: a row's id is its place). A file's size at its
-// right, when it was changed before that, and a dot before the name of one that is chosen.
+// What kind of thing an entry is, as the Type column says it: a folder, a link, a file by its name's extension (a TXT file), a file.
+static fn files_type_text(char address_to into, positive room, const struct files_model address_to m, const struct files_entry address_to entry)
+{
+        const p8 address_to name = files_model_name(m, entry);
+        positive dot = 0;
+        char extension[16];
+
+        into[0] = 0;
+        if (entry->kind != FILES_KIND_FILE)
+        {
+                string_copy_bounded((string_address)into, (string_address)(entry->kind == FILES_KIND_DIRECTORY ? WORDS(files_sheet_folder)
+                                                                           : entry->kind == FILES_KIND_LINK    ? WORDS(files_type_link)
+                                                                                                               : WORDS(files_type_other)),
+                                    room);
+                return;
+        }
+        // The last dot's words, a dot first not counting (.profile has none), at most a few letters and digits, written in capitals.
+        for (positive at = 1; at < entry->length; at++)
+                if (name[at] == '.')
+                        dot = at;
+        if (dot && entry->length - dot - 1 > 0 && entry->length - dot - 1 < 8)
+        {
+                positive k = 0;
+
+                for (positive at = dot + 1; at < entry->length; at++)
+                {
+                        p8 c = name[at];
+
+                        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')))
+                        {
+                                k = 0;
+                                break;
+                        }
+                        extension[k++] = (char)(c >= 'a' && c <= 'z' ? c - 32 : c);
+                }
+                extension[k] = 0;
+                if (k)
+                {
+                        language_format(into, room, WORDS(files_type_ext), extension);
+                        return;
+                }
+        }
+        string_copy_bounded((string_address)into, (string_address)WORDS(files_sheet_file), room);
+}
+
+// A row, for the kit's list: the entry at that place of the listing (the list is virtual: a row's id is its place), as cells under the
+// columns (its name, a file's size, its type, when it was changed), and a dot before the name of one that is chosen.
 static fn files_describe(int id, struct ui_row address_to row)
 {
-        static char label[FILES_NAME * 3 + 4], size[16], when[24];
+        static char label[FILES_NAME * 3 + 4], size[16], when[24], type[48];
         const struct files_model address_to m = &files.big->model;
         const struct files_entry address_to entry = id >= 0 ? files_model_entry(m, (p32)id) : null;
 
@@ -231,8 +278,15 @@ static fn files_describe(int id, struct ui_row address_to row)
                         files_size_text(size, entry->size);
                 files_time_text(when, entry->modified);
         }
-        row->value = size, row->note = when;
+        files_type_text(type, sizeof(type), m, entry);
+        row->cells[1] = size, row->cells[2] = type, row->cells[3] = when;
         row->mark = files_model_chosen(m, (p32)id) && m->chosen_count > 1;
+}
+
+// The model's order for a column of the header: Name, Size, Type, Modified.
+static int files_column_sort(int column)
+{
+        return column == 1 ? FILES_SORT_SIZE : column == 2 ? FILES_SORT_KIND : column == 3 ? FILES_SORT_TIME : FILES_SORT_NAME;
 }
 
 static fn files_damaged(int top, int bottom)
@@ -413,9 +467,13 @@ static fn files_layout(void)
                 else
                         ui_host(&files.crumbs_box, .grow = 1, .h = UI_ROW);
         }
-        // The rows: the kit's list, its words in from the window's margin and its rows from one edge to the other.
+        // The header of the columns, then the rows: the kit's list, its words in from the window's margin and its rows from one edge to
+        // the other, each as cells under the header's titles.
         ui_col(.class = "rows", .grow = 1)
+        {
+                ui_host(&files.head_box, .h = UI_COLUMNS_H);
                 ui_rows(l, .class = "list", .grow = 1);
+        }
         ui_row(.class = "bar")
                 ui_text(files.big->status, .class = "status");
         ui_view_end(&files.big->view);
@@ -424,6 +482,13 @@ static fn files_layout(void)
         if (files.reseat)
                 ui_scroll_set(&l->scroll, (int)m->seat), files.reseat = false;
         m->seat = l->scroll.scroll;
+        // The columns across the rows' words, in the language's titles; the one the rows are ordered by is the model's order.
+        files.columns.count = 4;
+        files.columns.title[0] = WORDS(files_column_name), files.columns.title[1] = WORDS(files_column_size);
+        files.columns.title[2] = WORDS(files_column_type), files.columns.title[3] = WORDS(files_column_modified);
+        files.columns.at_end[1] = true;
+        ui_columns_layout(ui, &files.columns, l->x, files.head_box.y, l->w);
+        l->columns = &files.columns;
         if (!files.editing || files.editing == FILES_EDIT_PART)
                 files_crumbs_lay();
 }
@@ -1734,6 +1799,21 @@ static b32 files_event(const struct window_event address_to event)
         files.dirty |= (asks & UI_VIEW_DRAW) != 0;
         if (asks & UI_VIEW_TAKEN)
                 return true;
+        // The columns' header: a title pressed orders the rows by it, an edge held makes a column wider or narrower.
+        if (event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON)
+        {
+                p32 took = ui_columns_event(ui, &files.columns, event, event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x,
+                                            event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y);
+
+                if (took & UI_COLUMNS_SORTED)
+                {
+                        files_model_sort(m, files_column_sort(files.columns.sorted), files.columns.descending);
+                        files_show_cursor();
+                }
+                files.dirty |= (took & UI_COLUMNS_DRAW) != 0;
+                if (took & UI_COLUMNS_TAKEN)
+                        return true;
+        }
         switch (event->type)
         {
         case WINDOW_EVENT_DRAG:
@@ -1844,6 +1924,7 @@ static fn files_draw(unsigned int address_to pixels)
         files_layout();
         l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && !files.crumb_keys;
         ui_view_draw(ui, &files.big->view, files.focused);
+        ui_columns_draw(ui, &files.columns);
         if (!files.editing || files.editing == FILES_EDIT_PART)
                 files_crumbs_draw();
         if (files.editing)
@@ -1973,6 +2054,8 @@ static int files_open_window(void)
                 return 1;
         }
         files.clicked = FILES_NO, files.crumb_hover = -1, files.crumb_clicked = -1, files.drop_row = -1;
+        files.columns.width[1] = 90, files.columns.width[2] = 110, files.columns.width[3] = 140;
+        files.columns.sorted = 0, files.columns.hover = files.columns.held = -1;
         files_move_end(&files.big->move);
         if (!files.start || !files_model_go(&files.big->model, files.start))
                 files_model_go(&files.big->model, (string_address) "/");

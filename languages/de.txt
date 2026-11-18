@@ -40,6 +40,10 @@ files_busy	5ba5	Ein Kopieren, Verschieben oder Löschen läuft
 files_changed	df4e	Nicht mehr das Aufgelistete: der Ordner wird neu gelesen
 files_chosen	7a7f	%1$d von %2$d gewählt
 files_chosen_size	621a	%1$d von %2$d gewählt, %3$s
+files_column_modified	a6b2	Geändert
+files_column_name	7306	Name
+files_column_size	8e7c	Größe
+files_column_type	d06d	Art
 files_copied	6570	%d kopiert
 files_copying	c870	Kopiere %1$d von %2$d, %3$s von %4$s: Escape hält an
 files_count	cab8	%d Einträge
@@ -78,6 +82,9 @@ files_sheet_other	3921	Gerät, Pipe oder Socket
 files_sheet_owner	8b0c	Besitzer %1$d, Gruppe %2$d
 files_sheet_size	eca5	Größe %1$s (%2$s Bytes)
 files_sheet_size_in	31a1	Größe %1$s in %2$d Einträgen
+files_type_ext	d2c5	%s-Datei
+files_type_link	e589	Verweis
+files_type_other	e8e6	Sonderdatei
 files_unreadable	986c	Dieser Ordner darf nicht gelesen werden
 files_up	5940	Nach oben
 installer_apps_about	af1b	Sie werden auf dem neuen System installiert, sobald es geschrieben ist.

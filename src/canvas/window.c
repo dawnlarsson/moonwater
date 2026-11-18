@@ -897,8 +897,10 @@ struct window_place
 #define WINDOWS_OSK 16
 
 // The pointer's shape over a program's controls, the compositor's CP_ codes (compositor.c checks they agree): the arrow, the
-// default; the I-beam over a text field or a text well; the hand over a button, a tab, a switch or any other control that is pressed.
+// default; the I-beam over a text field or a text well; the hand over a button, a tab, a switch or any other control that is pressed;
+// the two arrows across over an edge that the hand takes to make something wider or narrower (a column's).
 #define WINDOW_POINTER_ARROW 0u
+#define WINDOW_POINTER_RESIZE 1u
 #define WINDOW_POINTER_TEXT 5u
 #define WINDOW_POINTER_HAND 8u
 

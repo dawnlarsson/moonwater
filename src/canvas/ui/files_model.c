@@ -278,6 +278,17 @@ static int files_name_order(const p8 address_to a, const p8 address_to b)
         return folded < 0 ? -1 : folded > 0;
 }
 
+// Where a name's extension starts (after its last dot, a dot first not counting), or at its end when it has none.
+static const p8 address_to files_name_extension(const p8 address_to name, positive length)
+{
+        positive dot = 0;
+
+        for (positive at = 1; at < length; at++)
+                if (name[at] == '.')
+                        dot = at + 1;
+        return name + (dot ? dot : length);
+}
+
 struct files_order
 {
         const struct files_listing address_to listing;
@@ -301,6 +312,8 @@ static b32 files_order_compare(address_any left, address_any right, address_any 
                 key = a->modified < b->modified ? -1 : 1;
         else if (o->sort == FILES_SORT_KIND && a->kind != b->kind)
                 key = a->kind < b->kind ? -1 : 1;
+        else if (o->sort == FILES_SORT_KIND)
+                key = files_name_order(files_name_extension(o->listing->names + a->name, a->length), files_name_extension(o->listing->names + b->name, b->length));
         if (!key)
                 key = files_name_order(o->listing->names + a->name, o->listing->names + b->name);
         return o->descending ? -key : key;

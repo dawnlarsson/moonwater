@@ -40,6 +40,10 @@ files_busy	5ba5	Bir kopyalama, taşıma ya da silme sürüyor
 files_changed	df4e	Listelenen bu değil: klasör yeniden okunuyor
 files_chosen	7a7f	%1$d / %2$d seçildi
 files_chosen_size	621a	%2$d içinden %1$d seçildi, %3$s
+files_column_modified	a6b2	Değişti
+files_column_name	7306	Ad
+files_column_size	8e7c	Boyut
+files_column_type	d06d	Tür
 files_copied	6570	%d kopyalandı
 files_copying	c870	Kopyalanıyor %1$d / %2$d, %3$s / %4$s: Escape durdurur
 files_count	cab8	%d öğe
@@ -78,6 +82,9 @@ files_sheet_other	3921	Aygıt, boru ya da soket
 files_sheet_owner	8b0c	Sahip %1$d, grup %2$d
 files_sheet_size	eca5	Boyut %1$s (%2$s bayt)
 files_sheet_size_in	31a1	Boyut %1$s, %2$d öğe
+files_type_ext	d2c5	%s dosyası
+files_type_link	e589	Bağlantı
+files_type_other	e8e6	Özel dosya
 files_unreadable	986c	Bu klasörü okuma izni yok
 files_up	5940	Yukarı
 installer_apps_about	af1b	Sistem yazıldıktan sonra yeni sisteme kurulurlar.

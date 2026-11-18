@@ -40,6 +40,10 @@ files_busy	5ba5	Une copie, un déplacement ou une suppression est en cours
 files_changed	df4e	Ce n'est plus ce qui était listé : le dossier est relu
 files_chosen	7a7f	%1$d sur %2$d choisis
 files_chosen_size	621a	%1$d sur %2$d choisis, %3$s
+files_column_modified	a6b2	Modifié
+files_column_name	7306	Nom
+files_column_size	8e7c	Taille
+files_column_type	d06d	Type
 files_copied	6570	%d copiés
 files_copying	c870	Copie %1$d sur %2$d, %3$s sur %4$s : Échap arrête
 files_count	cab8	%d éléments
@@ -78,6 +82,9 @@ files_sheet_other	3921	Périphérique, tube ou socket
 files_sheet_owner	8b0c	Propriétaire %1$d, groupe %2$d
 files_sheet_size	eca5	Taille %1$s (%2$s octets)
 files_sheet_size_in	31a1	Taille %1$s en %2$d éléments
+files_type_ext	d2c5	Fichier %s
+files_type_link	e589	Lien
+files_type_other	e8e6	Fichier spécial
 files_unreadable	986c	Ce dossier ne peut pas être lu
 files_up	5940	Monter
 installer_apps_about	af1b	Elles sont installées sur le nouveau système une fois écrit.

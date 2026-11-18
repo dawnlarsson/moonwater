@@ -40,6 +40,10 @@ files_busy	5ba5	Триває копіювання, переміщення або
 files_changed	df4e	Це вже не те, що було у списку: тека читається знову
 files_chosen	7a7f	Вибрано %1$d з %2$d
 files_chosen_size	621a	Вибрано %1$d з %2$d, %3$s
+files_column_modified	a6b2	Змінено
+files_column_name	7306	Назва
+files_column_size	8e7c	Розмір
+files_column_type	d06d	Тип
 files_copied	6570	Скопійовано: %d
 files_copying	c870	Копіювання %1$d з %2$d, %3$s з %4$s: Escape зупиняє
 files_count	cab8	Об'єктів: %d
@@ -78,6 +82,9 @@ files_sheet_other	3921	Пристрій, канал або сокет
 files_sheet_owner	8b0c	Власник %1$d, група %2$d
 files_sheet_size	eca5	Розмір %1$s (%2$s байт)
 files_sheet_size_in	31a1	Розмір %1$s у %2$d елементах
+files_type_ext	d2c5	Файл %s
+files_type_link	e589	Посилання
+files_type_other	e8e6	Особливий файл
 files_unreadable	986c	Цю теку не можна читати
 files_up	5940	Вгору
 installer_apps_about	af1b	Вони встановлюються в нову систему після її запису.

@@ -7842,6 +7842,10 @@ LANGUAGE_ID(files_busy, "A copy, a move or a delete is under way") \
 LANGUAGE_ID(files_changed, "It is not what was listed: the folder is read again") \
 LANGUAGE_ID(files_chosen, "%1$d of %2$d chosen") \
 LANGUAGE_ID(files_chosen_size, "%1$d of %2$d chosen, %3$s") \
+LANGUAGE_ID(files_column_modified, "Modified") \
+LANGUAGE_ID(files_column_name, "Name") \
+LANGUAGE_ID(files_column_size, "Size") \
+LANGUAGE_ID(files_column_type, "Type") \
 LANGUAGE_ID(files_copied, "%d copied") \
 LANGUAGE_ID(files_copying, "Copying %1$d of %2$d, %3$s of %4$s: Escape stops") \
 LANGUAGE_ID(files_count, "%d items") \
@@ -7880,6 +7884,9 @@ LANGUAGE_ID(files_sheet_other, "Device, pipe or socket") \
 LANGUAGE_ID(files_sheet_owner, "Owner %1$d, group %2$d") \
 LANGUAGE_ID(files_sheet_size, "Size %1$s (%2$s bytes)") \
 LANGUAGE_ID(files_sheet_size_in, "Size %1$s in %2$d items") \
+LANGUAGE_ID(files_type_ext, "%s file") \
+LANGUAGE_ID(files_type_link, "Link") \
+LANGUAGE_ID(files_type_other, "Special file") \
 LANGUAGE_ID(files_unreadable, "This folder may not be read") \
 LANGUAGE_ID(files_up, "Up") \
 LANGUAGE_ID(installer_apps_about, "They are installed on the new system once it is written.") \
@@ -23448,8 +23455,42 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_STRIP_FREE 4
 #define UI_STRIP_UNPARTITIONED 5
 
+/*
+        Columns over a list (a details view): a header of titles, each a press that orders the rows by it (a second press the other way),
+        the ordered one's title in the ink with an arrow after it that says which way, and the edges between titles taken by the hand
+        to make the column before them wider or narrower (never less than UI_COLUMN_LEAST, the first taking what the others leave). A
+        list with columns (ui_list.columns) draws each row's label under the first title and its cells (ui_row.cells) under the others,
+        each cut with dots to its column and a number at its column's end. Reading from the right the columns are turned over: the first
+        is at the right. The app keeps the widths (logical pixels) and the order; the kit lays the header out (ui_columns_layout), draws
+        it (ui_columns_draw) and takes the hand on it (ui_columns_event).
+*/
+#define UI_COLUMNS_MOST 6
+#define UI_COLUMN_LEAST 48 // logical pixels a column keeps at least
+#define UI_COLUMN_EDGE 5   // logical pixels either side of an edge that take the hand
+#define UI_COLUMNS_H 32    // the header's height, logical pixels
+#define UI_COLUMNS_SORTED 1u // ui_columns_event: the order asked for changed (sorted, descending)
+#define UI_COLUMNS_DRAW 2u   // something of the header is to be drawn again (a width, a hover)
+#define UI_COLUMNS_TAKEN 4u  // the event was the header's
+
+struct ui_columns
+{
+        int count;
+        const char address_to title[UI_COLUMNS_MOST];
+        int width[UI_COLUMNS_MOST];       // each column's width, logical pixels; the first's is what the others leave
+        b32 at_end[UI_COLUMNS_MOST];      // its words at its end (a number)
+        int sorted;                       // the column the rows are in the order of, -1 none
+        b32 descending;
+        // The kit's: the header's box, each column's start and width (device pixels, as if read from the left), the title under the
+        // pointer and the edge the hand holds (its column, -1 none) with where the press was and that column's width then.
+        int x, y, w, h;
+        int at[UI_COLUMNS_MOST], wide[UI_COLUMNS_MOST];
+        int hover, held, held_edge, held_sign, held_from, held_width;
+};
+
 struct ui_row
 {
+        const char address_to cells[UI_COLUMNS_MOST]; // under a list's columns: the words of each column after the first (the label's)
+        int indent;                        // levels the label is set in by (a tree's rows), UI_INDENT logical pixels each
         const char address_to label;       // at the left
         const char address_to about;       // under the label, in the quiet ink: what the row does (a list whose words wrap)
         const char address_to value;       // at the right
@@ -23526,6 +23567,7 @@ struct ui_list
         b32 pointer_mouse;                 // that place is a mouse's, which stays over the list while it is still (a finger's hovers nothing)
         int hover_at;                      // where the rows were scrolled to when the hover was last hit: moved since, it is hit again (ui_list_draw)
         struct ui_control address_to controls; // two to a row: the row's own (or its switch) and its trailing control
+        struct ui_columns address_to columns;  // a details view's: its rows are drawn as cells under these (ui_columns), none else
 };
 
 static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_row address_to row)
@@ -24726,6 +24768,189 @@ static fn ui_row_label_about(struct ui address_to ui, struct ui_row_parts addres
         a row has no ring), the row's own control (its hover layer and its ripple, edge to edge, or its switch), and each part the
         row has, drawn in its node.
 */
+#define UI_INDENT 16 // logical pixels a tree's row is set in by for each level
+
+/*
+        A row as cells: under a list's columns its label under the first title and each of its cells under its own, cut with dots to its
+        column (a number at its column's end); with no columns, its label alone across the list. A row with an indent (a tree's) has its
+        label set in by UI_INDENT a level, with its expander's chevron in the room before it (right while shut, down while open). Reading
+        from the right every place is turned over the list's middle.
+*/
+static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to l, const struct ui_row address_to row, int y, int height,
+                        unsigned int ink, unsigned int quiet)
+{
+        const struct ui_columns address_to c = l->columns;
+        int pad = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 8), set_in = ui_dev(ui, UI_INDENT) * row->indent + (row->expander ? ui_dev(ui, UI_INDENT) : 0);
+        int baseline = ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM), count = c ? c->count : 1;
+        int left = c ? c->x : l->x, span = c ? c->w : l->w;
+        char cut[UI_CUT_TEXT];
+
+        if (row->expander)
+        {
+                int size = ui_dev(ui, 4), x = l->x + pad + ui_dev(ui, UI_INDENT) * row->indent + ui_dev(ui, 3);
+
+                ui_chevron_turn(ui, ui_mirror(x, 2 * size + 1, l->x, l->w) + size, y + height / 2, size, quiet,
+                                row->expander == UI_ROW_EXPANDER_OPEN ? UI_ONE : 0, ui_rtl());
+        }
+        for (int k = 0; k < count; k++)
+        {
+                const char address_to words = k ? row->cells[k] : row->label;
+                int x = c ? c->at[k] : l->x, w = c ? c->wide[k] : l->w, width;
+                string_address shown;
+
+                x += k ? gap : pad + set_in;
+                w -= (k ? gap : pad + set_in) + gap;
+                if (!words || !words[0] || w <= 0)
+                        continue;
+                shown = ui_fit(ui, (string_address)words, UI_BODY_MEDIUM, w, cut, sizeof(cut));
+                width = ui_kit_measure(ui, shown, UI_BODY_MEDIUM);
+                if (c && c->at_end[k])
+                        x += w - width;
+                ui_kit_text(ui, ui_mirror(x, width, left, span), baseline, shown, UI_BODY_MEDIUM, k ? quiet : ink, 0);
+        }
+}
+
+// The header's columns placed across [x, x + w) (device pixels): each after the first as wide as the app says (never less than the
+// least), the first what is left (never less than the least either: the last ones then run off the end and are cut).
+static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns address_to c, int x, int y, int w)
+{
+        int others = 0, at = x, least = ui_dev(ui, UI_COLUMN_LEAST);
+
+        c->count = c->count < 1 ? 1 : c->count > UI_COLUMNS_MOST ? UI_COLUMNS_MOST : c->count;
+        c->x = x, c->y = y, c->w = w, c->h = ui_dev(ui, UI_COLUMNS_H);
+        for (int k = 1; k < c->count; k++)
+        {
+                c->width[k] = c->width[k] < UI_COLUMN_LEAST ? UI_COLUMN_LEAST : c->width[k];
+                others += ui_dev(ui, c->width[k]);
+        }
+        for (int k = 0; k < c->count; k++)
+        {
+                c->at[k] = at;
+                c->wide[k] = k ? ui_dev(ui, c->width[k]) : (w - others > least ? w - others : least);
+                at += c->wide[k];
+        }
+}
+
+// The edge a point is on (the number of the column it ends), or -1: the edges between two columns, UI_COLUMN_EDGE either side.
+static int ui_columns_edge(const struct ui address_to ui, const struct ui_columns address_to c, int px, int py)
+{
+        int x = ui_point(px, c->x, c->w), reach = ui_dev(ui, UI_COLUMN_EDGE);
+
+        if (py < c->y || py >= c->y + c->h)
+                return -1;
+        for (int k = 0; k + 1 < c->count; k++)
+        {
+                int edge = c->at[k] + c->wide[k];
+
+                if (x >= edge - reach && x < edge + reach)
+                        return k;
+        }
+        return -1;
+}
+
+// The title a point is on, or -1.
+static int ui_columns_hit(const struct ui_columns address_to c, int px, int py)
+{
+        int x = ui_point(px, c->x, c->w);
+
+        if (py < c->y || py >= c->y + c->h)
+                return -1;
+        for (int k = 0; k < c->count; k++)
+                if (x >= c->at[k] && x < c->at[k] + c->wide[k])
+                        return k;
+        return -1;
+}
+
+static fn ui_columns_draw(struct ui address_to ui, const struct ui_columns address_to c)
+{
+        unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), rule = ui_role(UI_OUTLINE_VARIANT) | 0xff000000u;
+        int pad = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 8), baseline = ui_kit_baseline(ui, c->y + (c->h - ui_dev(ui, 16)) / 2, UI_LABEL_MEDIUM);
+        int line = ui_dev(ui, 1) > 0 ? ui_dev(ui, 1) : 1;
+        char cut[UI_CUT_TEXT], titled[UI_CUT_TEXT];
+
+        for (int k = 0; k < c->count; k++)
+        {
+                int x = c->at[k] + (k ? gap : pad), w = c->wide[k] - (k ? gap : pad) - gap, width;
+                b32 sorted = k == c->sorted;
+                string_address shown;
+
+                // The column the rows are ordered by has its arrow after its title: up rising, down falling.
+                string_copy_bounded((string_address)titled, (string_address)(c->title[k] ? c->title[k] : ""), sizeof(titled) - 8);
+                if (sorted)
+                        string_append_bounded((string_address)titled, (string_address)(c->descending ? " \xe2\x86\x93" : " \xe2\x86\x91"), sizeof(titled));
+                if (w > 0)
+                {
+                        shown = ui_fit(ui, (string_address)titled, UI_LABEL_MEDIUM, w, cut, sizeof(cut));
+                        width = ui_kit_measure(ui, shown, UI_LABEL_MEDIUM);
+                        if (c->at_end[k])
+                                x += w - width;
+                        ui_kit_text(ui, ui_mirror(x, width, c->x, c->w), baseline, shown, UI_LABEL_MEDIUM, sorted || k == c->hover ? strong : quiet, 0);
+                }
+                // The edge after it, a rule a third of the header tall: the one the hand holds or is over in the ink.
+                if (k + 1 < c->count)
+                {
+                        int edge = c->at[k] + c->wide[k], top = c->y + c->h / 3;
+                        int ex = ui_mirror(edge, line, c->x, c->w);
+
+                        ui_kit_fill(ui, &(struct ui_box){(b32)ex << 8, (b32)top << 8, (b32)(ex + line) << 8, (b32)(top + c->h / 3) << 8, 0, 0},
+                                    c->held > 0 && c->held_edge == k ? strong : rule, null);
+                }
+        }
+        ui_kit_fill(ui, &(struct ui_box){(b32)c->x << 8, (b32)(c->y + c->h - line) << 8, (b32)(c->x + c->w) << 8, (b32)(c->y + c->h) << 8, 0, 0}, rule, null);
+}
+
+/*
+        The hand on the header: over an edge the pointer says it resizes, and a press there holds it (the column before it follows the
+        hand, never narrower than the least); a press on a title orders the rows by it, a press on the title they are ordered by turns the
+        order round. UI_COLUMNS_* say what came of it. Events off the header (but the held edge's motion and release) are not its.
+*/
+static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_to c, const struct window_event address_to event, int x, int y)
+{
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+        int was = c->hover, edge;
+
+        if (event->type == WINDOW_EVENT_MOTION && c->held > 0)
+        {
+                int moved = ui_point(x, c->x, c->w) - ui_point(c->held_from, c->x, c->w);
+                int width = c->held_width + c->held_sign * moved * 100 / (ui->scale > 0 ? ui->scale : 100);
+
+                c->width[c->held] = width < UI_COLUMN_LEAST ? UI_COLUMN_LEAST : width;
+                ui_columns_layout(ui, c, c->x, c->y, c->w);
+                ui_kit_shape = WINDOW_POINTER_RESIZE;
+                return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
+        }
+        if (event->type == WINDOW_EVENT_BUTTON && !down && c->held > 0)
+        {
+                c->held = -1;
+                return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
+        }
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                edge = ui_columns_edge(ui, c, x, y);
+                c->hover = edge >= 0 ? -1 : ui_columns_hit(c, x, y);
+                if (edge >= 0)
+                        ui_kit_shape = WINDOW_POINTER_RESIZE;
+                else if (c->hover >= 0)
+                        ui_kit_shape = WINDOW_POINTER_HAND;
+                return c->hover != was ? UI_COLUMNS_DRAW : 0;
+        }
+        if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT || !down || y < c->y || y >= c->y + c->h)
+                return 0;
+        if ((edge = ui_columns_edge(ui, c, x, y)) >= 0)
+        {
+                // The edge's column before it follows the hand; the first's edge moves the second's start instead (the first takes what is
+                // left), so the second grows the other way.
+                c->held_edge = edge, c->held = edge ? edge : 1, c->held_sign = edge ? 1 : -1;
+                c->held_from = x, c->held_width = c->width[c->held];
+                return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
+        }
+        if ((edge = ui_columns_hit(c, x, y)) < 0)
+                return UI_COLUMNS_TAKEN;
+        c->descending = edge == c->sorted ? !c->descending : false;
+        c->sorted = edge;
+        return UI_COLUMNS_SORTED | UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
+}
+
 static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
 {
         struct ui_row row;
@@ -24783,6 +25008,15 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         if ((n = p->mark))
                 ui_kit_fill(ui, &(struct ui_box){n->x * 256, (n->y + (n->h - n->w) / 2) * 256, (n->x + n->w) * 256, (n->y + (n->h + n->w) / 2) * 256, n->w * 128, n->w * 128},
                             ui_role(UI_PRIMARY), null);
+        // Under columns the row is its cells; with an indent (a tree's row) its label is set in by it, with the expander's chevron
+        // before it.
+        if (l->columns || row.indent)
+        {
+                ui_list_cells(ui, l, &row, y, height, ink, quiet);
+                if (trailing)
+                        ui_control_draw(ui, trailing);
+                return;
+        }
         // Where words wrap, the label, the note and the value are their lines (ui_row_text), one where they fit, drawn as below; a label
         // with what its row does under it is one block of both (ui_row_label_about).
         if (p->label_shown && p->wraps && p->about_shown)

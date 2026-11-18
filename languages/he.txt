@@ -41,6 +41,10 @@ files_busy	5ba5	העתקה, העברה או מחיקה מתבצעת
 files_changed	df4e	זה לא מה שהופיע ברשימה: התיקייה נקראת מחדש
 files_chosen	7a7f	נבחרו %1$d מתוך %2$d
 files_chosen_size	621a	%1$d מתוך %2$d נבחרו, %3$s
+files_column_modified	a6b2	שונה
+files_column_name	7306	שם
+files_column_size	8e7c	גודל
+files_column_type	d06d	סוג
 files_copied	6570	%d הועתקו
 files_copying	c870	מעתיק %1$d מתוך %2$d, %3$s מתוך %4$s: Escape עוצר
 files_count	cab8	%d פריטים
@@ -79,6 +83,9 @@ files_sheet_other	3921	התקן, צינור או שקע
 files_sheet_owner	8b0c	בעלים %1$d, קבוצה %2$d
 files_sheet_size	eca5	גודל %1$s (%2$s בתים)
 files_sheet_size_in	31a1	גודל %1$s ב־%2$d פריטים
+files_type_ext	d2c5	קובץ %s
+files_type_link	e589	קישור
+files_type_other	e8e6	קובץ מיוחד
 files_unreadable	986c	אין הרשאה לקרוא את התיקייה
 files_up	5940	למעלה
 installer_apps_about	af1b	הן מותקנות במערכת החדשה אחרי שהיא נכתבת.

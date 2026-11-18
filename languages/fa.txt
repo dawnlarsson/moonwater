@@ -41,6 +41,10 @@ files_busy	5ba5	یک رونوشت، جابه‌جایی یا حذف در جری�
 files_changed	df4e	این همان چیزی نیست که فهرست شده بود: پوشه دوباره خوانده می‌شود
 files_chosen	7a7f	%1$d از %2$d انتخاب شد
 files_chosen_size	621a	%1$d از %2$d انتخاب شد، %3$s
+files_column_modified	a6b2	تغییر
+files_column_name	7306	نام
+files_column_size	8e7c	اندازه
+files_column_type	d06d	نوع
 files_copied	6570	%d رونوشت شد
 files_copying	c870	رونوشت %1$d از %2$d، %3$s از %4$s: Escape متوقف می‌کند
 files_count	cab8	%d مورد
@@ -79,6 +83,9 @@ files_sheet_other	3921	دستگاه، لوله یا سوکت
 files_sheet_owner	8b0c	مالک %1$d، گروه %2$d
 files_sheet_size	eca5	اندازه %1$s (%2$s بایت)
 files_sheet_size_in	31a1	اندازه %1$s در %2$d مورد
+files_type_ext	d2c5	پرونده %s
+files_type_link	e589	پیوند
+files_type_other	e8e6	پرونده ویژه
 files_unreadable	986c	خواندن این پوشه مجاز نیست
 files_up	5940	بالا
 installer_apps_about	af1b	پس از نوشته شدن سیستم جدید روی آن نصب می‌شوند.

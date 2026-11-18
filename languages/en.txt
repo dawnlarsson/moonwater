@@ -40,6 +40,10 @@ files_busy	5ba5	A copy, a move or a delete is under way
 files_changed	df4e	It is not what was listed: the folder is read again
 files_chosen	7a7f	%1$d of %2$d chosen
 files_chosen_size	621a	%1$d of %2$d chosen, %3$s
+files_column_modified	a6b2	Modified
+files_column_name	7306	Name
+files_column_size	8e7c	Size
+files_column_type	d06d	Type
 files_copied	6570	%d copied
 files_copying	c870	Copying %1$d of %2$d, %3$s of %4$s: Escape stops
 files_count	cab8	%d items
@@ -78,6 +82,9 @@ files_sheet_other	3921	Device, pipe or socket
 files_sheet_owner	8b0c	Owner %1$d, group %2$d
 files_sheet_size	eca5	Size %1$s (%2$s bytes)
 files_sheet_size_in	31a1	Size %1$s in %2$d items
+files_type_ext	d2c5	%s file
+files_type_link	e589	Link
+files_type_other	e8e6	Special file
 files_unreadable	986c	This folder may not be read
 files_up	5940	Up
 installer_apps_about	af1b	They are installed on the new system once it is written.

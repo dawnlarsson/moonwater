@@ -40,6 +40,10 @@ files_busy	5ba5	Идёт копирование, перемещение или �
 files_changed	df4e	Это уже не то, что было в списке: папка читается заново
 files_chosen	7a7f	Выбрано %1$d из %2$d
 files_chosen_size	621a	Выбрано %1$d из %2$d, %3$s
+files_column_modified	a6b2	Изменён
+files_column_name	7306	Имя
+files_column_size	8e7c	Размер
+files_column_type	d06d	Тип
 files_copied	6570	Скопировано: %d
 files_copying	c870	Копирование %1$d из %2$d, %3$s из %4$s: Escape останавливает
 files_count	cab8	Объектов: %d
@@ -78,6 +82,9 @@ files_sheet_other	3921	Устройство, канал или сокет
 files_sheet_owner	8b0c	Владелец %1$d, группа %2$d
 files_sheet_size	eca5	Размер %1$s (%2$s байт)
 files_sheet_size_in	31a1	Размер %1$s в %2$d элементах
+files_type_ext	d2c5	Файл %s
+files_type_link	e589	Ссылка
+files_type_other	e8e6	Особый файл
 files_unreadable	986c	Эту папку нельзя читать
 files_up	5940	Вверх
 installer_apps_about	af1b	Они устанавливаются в новую систему после её записи.

@@ -40,6 +40,10 @@ files_busy	5ba5	Hay una copia, un traslado o un borrado en curso
 files_changed	df4e	No es lo que se listó: la carpeta se lee de nuevo
 files_chosen	7a7f	%1$d de %2$d elegidos
 files_chosen_size	621a	%1$d de %2$d elegidos, %3$s
+files_column_modified	a6b2	Modificado
+files_column_name	7306	Nombre
+files_column_size	8e7c	Tamaño
+files_column_type	d06d	Tipo
 files_copied	6570	%d copiados
 files_copying	c870	Copiando %1$d de %2$d, %3$s de %4$s: Escape detiene
 files_count	cab8	%d elementos
@@ -78,6 +82,9 @@ files_sheet_other	3921	Dispositivo, tubería o socket
 files_sheet_owner	8b0c	Propietario %1$d, grupo %2$d
 files_sheet_size	eca5	Tamaño %1$s (%2$s bytes)
 files_sheet_size_in	31a1	Tamaño %1$s en %2$d elementos
+files_type_ext	d2c5	Archivo %s
+files_type_link	e589	Enlace
+files_type_other	e8e6	Archivo especial
 files_unreadable	986c	No se permite leer esta carpeta
 files_up	5940	Subir
 installer_apps_about	af1b	Se instalan en el sistema nuevo una vez escrito.

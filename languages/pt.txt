@@ -40,6 +40,10 @@ files_busy	5ba5	Uma cópia, movimentação ou exclusão está em andamento
 files_changed	df4e	Não é o que foi listado: a pasta é lida de novo
 files_chosen	7a7f	%1$d de %2$d escolhidos
 files_chosen_size	621a	%1$d de %2$d escolhidos, %3$s
+files_column_modified	a6b2	Modificado
+files_column_name	7306	Nome
+files_column_size	8e7c	Tamanho
+files_column_type	d06d	Tipo
 files_copied	6570	%d copiados
 files_copying	c870	Copiando %1$d de %2$d, %3$s de %4$s: Escape para
 files_count	cab8	%d itens
@@ -78,6 +82,9 @@ files_sheet_other	3921	Dispositivo, pipe ou socket
 files_sheet_owner	8b0c	Dono %1$d, grupo %2$d
 files_sheet_size	eca5	Tamanho %1$s (%2$s bytes)
 files_sheet_size_in	31a1	Tamanho %1$s em %2$d itens
+files_type_ext	d2c5	Arquivo %s
+files_type_link	e589	Link
+files_type_other	e8e6	Arquivo especial
 files_unreadable	986c	Esta pasta não pode ser lida
 files_up	5940	Subir
 installer_apps_about	af1b	São instaladas no novo sistema depois de escrito.

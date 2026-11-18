@@ -41,6 +41,10 @@ files_busy	5ba5	نقل، منتقلی یا حذف جاری ہے
 files_changed	df4e	یہ وہ نہیں جو فہرست میں تھا: فولڈر دوبارہ پڑھا جا رہا ہے
 files_chosen	7a7f	%2$d میں سے %1$d منتخب
 files_chosen_size	621a	%2$d میں سے %1$d منتخب، %3$s
+files_column_modified	a6b2	تبدیل
+files_column_name	7306	نام
+files_column_size	8e7c	سائز
+files_column_type	d06d	قسم
 files_copied	6570	%d نقل ہوئے
 files_copying	c870	نقل %1$d از %2$d، %3$s از %4$s: Escape روکتا ہے
 files_count	cab8	%d اشیاء
@@ -79,6 +83,9 @@ files_sheet_other	3921	آلہ، پائپ یا ساکٹ
 files_sheet_owner	8b0c	مالک %1$d، گروپ %2$d
 files_sheet_size	eca5	سائز %1$s (%2$s بائٹ)
 files_sheet_size_in	31a1	سائز %1$s، %2$d اشیاء میں
+files_type_ext	d2c5	%s فائل
+files_type_link	e589	لنک
+files_type_other	e8e6	خاص فائل
 files_unreadable	986c	اس فولڈر کو پڑھنے کی اجازت نہیں
 files_up	5940	اوپر
 installer_apps_about	af1b	سسٹم لکھے جانے کے بعد یہ نئے سسٹم پر انسٹال ہوتی ہیں۔

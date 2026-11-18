@@ -40,6 +40,10 @@ files_busy	5ba5	Trwa kopiowanie, przenoszenie lub usuwanie
 files_changed	df4e	To nie to, co było na liście: folder jest czytany ponownie
 files_chosen	7a7f	Wybrano %1$d z %2$d
 files_chosen_size	621a	Wybrano %1$d z %2$d, %3$s
+files_column_modified	a6b2	Zmieniono
+files_column_name	7306	Nazwa
+files_column_size	8e7c	Rozmiar
+files_column_type	d06d	Typ
 files_copied	6570	Skopiowano %d
 files_copying	c870	Kopiowanie %1$d z %2$d, %3$s z %4$s: Escape zatrzymuje
 files_count	cab8	Elementy: %d
@@ -78,6 +82,9 @@ files_sheet_other	3921	Urządzenie, potok lub gniazdo
 files_sheet_owner	8b0c	Właściciel %1$d, grupa %2$d
 files_sheet_size	eca5	Rozmiar %1$s (%2$s bajtów)
 files_sheet_size_in	31a1	Rozmiar %1$s w %2$d elementach
+files_type_ext	d2c5	Plik %s
+files_type_link	e589	Dowiązanie
+files_type_other	e8e6	Plik specjalny
 files_unreadable	986c	Tego folderu nie wolno czytać
 files_up	5940	W górę
 installer_apps_about	af1b	Zostaną zainstalowane w nowym systemie po jego zapisaniu.

@@ -40,6 +40,10 @@ files_busy	5ba5	Una copia, uno spostamento o un'eliminazione è in corso
 files_changed	df4e	Non è ciò che era elencato: la cartella viene riletta
 files_chosen	7a7f	%1$d di %2$d scelti
 files_chosen_size	621a	%1$d di %2$d scelti, %3$s
+files_column_modified	a6b2	Modificato
+files_column_name	7306	Nome
+files_column_size	8e7c	Dimensione
+files_column_type	d06d	Tipo
 files_copied	6570	%d copiati
 files_copying	c870	Copia %1$d di %2$d, %3$s di %4$s: Esc ferma
 files_count	cab8	%d elementi
@@ -78,6 +82,9 @@ files_sheet_other	3921	Dispositivo, pipe o socket
 files_sheet_owner	8b0c	Proprietario %1$d, gruppo %2$d
 files_sheet_size	eca5	Dimensione %1$s (%2$s byte)
 files_sheet_size_in	31a1	Dimensione %1$s in %2$d elementi
+files_type_ext	d2c5	File %s
+files_type_link	e589	Collegamento
+files_type_other	e8e6	File speciale
 files_unreadable	986c	Questa cartella non può essere letta
 files_up	5940	Su
 installer_apps_about	af1b	Vengono installate sul nuovo sistema una volta scritto.

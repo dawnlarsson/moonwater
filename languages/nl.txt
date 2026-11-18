@@ -40,6 +40,10 @@ files_busy	5ba5	Er loopt een kopie, verplaatsing of verwijdering
 files_changed	df4e	Niet meer wat er stond: de map wordt opnieuw gelezen
 files_chosen	7a7f	%1$d van %2$d gekozen
 files_chosen_size	621a	%1$d van %2$d gekozen, %3$s
+files_column_modified	a6b2	Gewijzigd
+files_column_name	7306	Naam
+files_column_size	8e7c	Grootte
+files_column_type	d06d	Soort
 files_copied	6570	%d gekopieerd
 files_copying	c870	Kopiëren %1$d van %2$d, %3$s van %4$s: Escape stopt
 files_count	cab8	%d items
@@ -78,6 +82,9 @@ files_sheet_other	3921	Apparaat, pijp of socket
 files_sheet_owner	8b0c	Eigenaar %1$d, groep %2$d
 files_sheet_size	eca5	Grootte %1$s (%2$s bytes)
 files_sheet_size_in	31a1	Grootte %1$s in %2$d items
+files_type_ext	d2c5	%s-bestand
+files_type_link	e589	Koppeling
+files_type_other	e8e6	Speciaal bestand
 files_unreadable	986c	Deze map mag niet worden gelezen
 files_up	5940	Omhoog
 installer_apps_about	af1b	Ze worden op het nieuwe systeem geïnstalleerd zodra het geschreven is.

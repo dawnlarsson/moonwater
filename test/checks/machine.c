@@ -4076,7 +4076,7 @@ static fn browser_moves(void)
         inside = files_move_begin(&job, FILES_MOVE_MEASURE, browser_open_folder((string_address) "mv/dst2"), paths, count);
         browser_move_run(&job);
         inside = inside && job.state == FILES_JOB_DONE && job.items_total == 4 && job.bytes_total == 12 && job.items_done == 0 &&
-                 !browser_there((string_address) "mv/dst2/d") && browser_there((string_address) "mv/src/d/sub/y");
+                 !browser_there((string_address) "mv/dst2/d (2)") && browser_there((string_address) "mv/src/d/sub/y");
         files_move_end(&job);
         check("browser: a measure counts what a folder holds (its folders, its files, their bytes) and makes and moves nothing", inside);
         browser_remove_in((string_address) "mv");
