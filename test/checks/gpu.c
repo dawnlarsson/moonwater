@@ -187,7 +187,10 @@ static void gpu_i915_set_rows(void)
                 unsigned int address_to recs = (unsigned int address_to)(buffer + 3072);
                 unsigned int n;
 
+                positive gpu_size = gpu.size;
+
                 memset(buffer, 0, sizeof buffer);
+                gpu.size = sizeof buffer; // the records are read through the buffer: the encoder checks they lie in gpu.size
                 recs[0] = 0, recs[1] = 0, recs[2] = 0, recs[3] = 256, recs[4] = 32, recs[5] = 0x11223344u, recs[6] = recs[7] = 0;
                 recs[8] = 1, recs[9] = 3, recs[10] = 4, recs[11] = 20, recs[12] = 9, recs[13] = 0x80402010u, recs[14] = recs[15] = 0;
                 a->d = GPU_VA + 0x2000, a->dp = 256, a->sp = 256, a->gp = 32, a->w = 256, a->rows = 8, a->op = 6, a->x0 = 0, a->y0 = 0, a->count = 2;
@@ -211,7 +214,10 @@ static void gpu_i915_set_rows(void)
                 check("gpu i915 scene: no records is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 a->count = 16385;
                 check("gpu i915 scene: more records than the surface's height holds is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->count = 300;
+                check("gpu i915 scene: records that run past the GPU buffer are refused (0 words), not read", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 a->count = 2, a->op = 6;
+                gpu.size = gpu_size;
         }
 }
 
