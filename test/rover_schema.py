@@ -28,6 +28,7 @@ CANVAS = ROOT / 'src/canvas/canvas.c'
 LIB = ROOT / 'src/lib.c'
 TOOLS = ROOT / 'src/sh/tools.inc'
 REGISTRY = ROOT / 'src/sh/registry.c'
+TUNE = ROOT / 'src/sh/host/tune.c'
 BOOT_SOURCES = [ROOT / 'src', ROOT / 'main.moonwater.sh']
 OUT = ROOT / 'src/rover/schema.inc'
 DEBUG = False   # --why: say why each routine left out is left out
@@ -117,8 +118,18 @@ class Types:
         return kind
 
 
+def tune_modes():
+    """The power profiles' words, tune.c's tune_modes in its order."""
+    body = re.search(r'static const tune_mode tune_modes\[\] = \{(.*?)\n\};', TUNE.read_text(), re.S)
+    if not body:
+        fail("tune.c's tune_modes is not where it was")
+    return re.findall(r'\{\(string_address\)"([a-z-]+)"', body.group(1))
+
+
 def read_list(types):
     states, events, primitives, ranges = [], [], [], {}
+    global SWITCHES
+    SWITCHES = []
     offsets = {page: PAGE_HEAD for page in PAGES}
     for number, line in enumerate(LIST.read_text().splitlines(), 1):
         if not line.strip() or line.lstrip().startswith('#'):
@@ -140,6 +151,19 @@ def read_list(types):
         elif words[0] == 'primitive':
             args = [(a.split(':', 1)[0], types.take(a.split(':', 1)[1])) for a in words[5:]]
             primitives.append((int(words[1]), words[4], SOURCES.index(words[2]), CLASSES.index(words[3]), args))
+        elif words[0] == 'switch':
+            spelling = words[3].replace('@tune_modes', ','.join(tune_modes()))
+            kind = types.take(spelling)
+            deliberate = -1
+            for extra in words[4:]:
+                key, _, value = extra.partition(':')
+                if key != 'deliberate':
+                    fail('line %d: a switch takes deliberate:VALUE, not %s' % (number, extra))
+                choices = types.rows[kind][3].split(',')
+                if value not in choices:
+                    fail('line %d: %s is none of the switch\'s values' % (number, value))
+                deliberate = choices.index(value)
+            SWITCHES.append((int(words[1]), words[2], kind, deliberate))
         elif words[0] == 'function':
             stated = {}
             for word in words[2:]:
@@ -450,6 +474,11 @@ def records(types, states, events, primitives, functions, tool_names):
         stated = ''.join(' %s=%d:%d' % (c[2], c[3], c[4]) for c in casts if c[0] == 'i')
         lines.append('function id=%d name=%s args=%s returns=int kernel=%s bounded=yes%s' %
                      (number, name, signature, 'yes' if kernel else 'no', stated))
+    for ident, name, kind, deliberate in SWITCHES:
+        line = 'switch id=%d name=%s type=%s runs=runner bounded=yes' % (ident, quote(name), types.spell(kind))
+        if deliberate >= 0:
+            line += ' deliberate=' + types.rows[kind][3].split(',')[deliberate]
+        lines.append(line)
     for number, name in enumerate(tool_names):
         lines.append('tool id=%d name=%s runs=runner bounded=no' % (number, name))
     return ''.join(line + '\n' for line in lines)
@@ -512,6 +541,7 @@ def generate():
            '#define ROVER_PRIMITIVES %d' % len(primitives),
            '#define ROVER_FUNCTIONS %d' % len(functions),
            '#define ROVER_TOOLS %d' % len(tool_names),
+           '#define ROVER_SWITCHES %d' % len(SWITCHES),
            '']
     out.append('static const struct rover_type_row rover_types[ROVER_TYPES] = {')
     for kind, low, high, choices in types.rows:
@@ -576,6 +606,11 @@ def generate():
         highs = ', '.join(c_number(c[4]) if c[0] == 'i' else '0' for c in casts)
         out.append('        {%s, %s, %d, %d, %s, {%s}, {%s}},' % (c_string(name), c_string(signature), len(signature),
                                                               1 if kernel else 0, call, lows, highs))
+    out.append('};')
+    out.append('')
+    out.append('static const struct rover_switch_row rover_switches[ROVER_SWITCHES] = {')
+    for ident, name, kind, deliberate in SWITCHES:
+        out.append('        {%s, %d, %d, %d},' % (c_string(name), ident, kind, deliberate))
     out.append('};')
     out.append('')
     out.append('static const char address_to const rover_tools[ROVER_TOOLS] = {')

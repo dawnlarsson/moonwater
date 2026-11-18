@@ -87,6 +87,7 @@ table it compiles to the same table, byte for byte.
 | `off` | Compiled, checked and shown, but never fired. |
 | `if CONDITION` | A condition. Every `if` line must hold; when one does not, the `else` actions run instead. |
 | `do PRIMITIVE [ARG ...]` | A primitive: one of Moonwater's mechanisms. |
+| `set SWITCH VALUE` | One of the machine's switches, its value typed by the switch: `set brightness 30%`, `set power powersave`, `set cpu boost off`, `set cpu smt on`, `set charge limit 80`, `set airplane on`. |
 | `run SCRIPT [ARG ...]` | A POSIX script leaf, run in userspace, off the fast path. |
 | `tool TOOL [ARG ...]` | One of the shell's built-in tools, run in-process in userspace. |
 | `emit cue NAME` | Post the event `cue NAME`, which another rule's `on cue NAME` hears. |
@@ -368,6 +369,24 @@ two pages; the C asks it.
 | `display off`, `display on` | desktop | any | |
 | `open` | desktop | any | word: an app's name or a program's path, as the launcher opens it; then none or more words, its arguments (`do open mixer -q -a`) |
 | `notify` | desktop | any | text, as a notice |
+
+### Switches
+
+| Switch | Type | Notes |
+|---|---|---|
+| `brightness` | percent | the screen's backlight, as `moonwater brightness` |
+| `power` | enum: tune.c's profiles (`performance`, `balanced`, `powersave`) | as `moonwater power` |
+| `cpu boost`, `cpu smt` | onoff | as `moonwater cpu boost`, `moonwater cpu smt` |
+| `charge limit` | int 20 to 100 | where the battery stops charging, in percent |
+| `airplane` | onoff, `off` deliberate | every radio off; turning them back on is a person's |
+
+A switch's value that raises the machine's exposure is deliberate, as a
+primitive can be: a rule may set airplane on, never off, and takes a
+constant for it, so no state can carry it there. The switches are rows of
+`schema.list`, and the power profiles' words are tune.c's own table. The
+tune verbs keep their own parsing: each takes more than one value (a
+relative brightness, a battery's name, `limit off`, the radios airplane
+keeps), so one table under both would change what each verb accepts.
 
 ## Safety
 

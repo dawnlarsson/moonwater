@@ -351,6 +351,18 @@ static b32 rover_choice(const char address_to choices, const p8 address_to word,
         return -1;
 }
 
+static fn rover_choice_put(struct rover_text address_to text, const char address_to choices, b64 index);
+
+//      An enum's word, into the reason being said.
+static fn rover_choice_put_why(struct rover_build address_to build, const char address_to choices, b64 index)
+{
+        p8 bytes[64];
+        struct rover_text text = {bytes, 0, sizeof(bytes), false};
+
+        rover_choice_put(&text, choices, index);
+        rover_why_bytes(build, bytes, text.used);
+}
+
 static fn rover_choice_put(struct rover_text address_to text, const char address_to choices, b64 index)
 {
         const char address_to at = choices;
@@ -1201,6 +1213,67 @@ static bool rover_read_action(struct rover_build address_to build, struct rover_
                 action.runs = ROVER_RUNNER;
                 first = 2;
         }
+        else if (rover_is(keyword, "set"))
+        {
+                const struct rover_switch_row address_to row = null;
+                positive used = 0;
+                struct rover_side side;
+
+                for (positive take = 2; take >= 1 && !row; take--)
+                        for (positive at = 0; at < ROVER_SWITCHES && !row; at++)
+                        {
+                                const char address_to name = rover_switches[at].name;
+                                positive length = string_length((string_address)name);
+                                const struct rover_word address_to one = &build->word[1];
+
+                                if (1 + take > build->words)
+                                        continue;
+                                if (take == 1 ? rover_bytes_are(one->text, one->length, name)
+                                              : length == one->length + 1 + build->word[2].length &&
+                                                    !memory_compare(name, one->text, one->length) && name[one->length] == ' ' &&
+                                                    !memory_compare(name + one->length + 1, build->word[2].text,
+                                                                    build->word[2].length))
+                                        row = &rover_switches[at], used = take;
+                        }
+                if (!row)
+                        return rover_refused(build, "", &build->word[1], " is no switch (moonwater rover schema lists them)");
+                if (build->words != 2 + used)
+                        return rover_refused(build, row->name, null, " takes one value");
+                if (!rover_read_side(build, &build->word[1 + used], rule, false, &side) ||
+                    !rover_side_resolve(build, &side, row->type))
+                        return false;
+                if (side.operand.source == ROVER_CALL || rover_types[side.type].kind != rover_types[row->type].kind ||
+                    (rover_types[row->type].kind == ROVER_T_ENUM && side.type != row->type))
+                        return rover_refused(build, "", &build->word[1 + used], " is not of the type the switch takes");
+                if (row->deliberate >= 0)
+                {
+                        b64 value = side.operand.source == ROVER_CONST_NUMBER
+                                        ? memory_load_unaligned(b64, rover_pool(build) + side.operand.index)
+                                        : -1;
+
+                        if (side.operand.source != ROVER_CONST_NUMBER || value == row->deliberate)
+                        {
+                                rover_refused(build, row->name, null, " ");
+                                rover_choice_put_why(build, rover_types[row->type].choices, row->deliberate);
+                                rover_why_add(build, " is deliberate: only a person sets it, and a rule names its value");
+                                return false;
+                        }
+                }
+                if (build->arguments == ROVER_OPERANDS_MOST)
+                        return rover_refused(build, "too many arguments for one table", null, null);
+                action.kind = ROVER_SET;
+                action.id = row->id;
+                action.runs = ROVER_RUNNER;
+                action.argument = (p16)build->arguments;
+                action.count = 1;
+                build->argument[build->arguments++] = side.operand;
+                build->action[build->actions++] = action;
+                if (build->stage == ROVER_STAGE_ELSE)
+                        rule->otherwise++;
+                else
+                        rule->then++;
+                return true;
+        }
         else
         {
                 if (!rover_is(&build->word[1], "cue") || build->words != 3)
@@ -1741,7 +1814,8 @@ static bool rover_statement(struct rover_build address_to build)
                 return true;
         }
         if (build->header < 2 && (rover_is(keyword, "if") || rover_is(keyword, "do") || rover_is(keyword, "run") ||
-                                  rover_is(keyword, "tool") || rover_is(keyword, "emit") || rover_is(keyword, "else")))
+                                  rover_is(keyword, "tool") || rover_is(keyword, "emit") || rover_is(keyword, "set") ||
+                                  rover_is(keyword, "else")))
                 return rover_refused(build, "", keyword, " before the rule's on or when");
         if (rover_is(keyword, "if"))
         {
@@ -1751,7 +1825,7 @@ static bool rover_statement(struct rover_build address_to build)
                 return rover_note_flush(build, build->slot++) && rover_read_condition(build, rule, 1);
         }
         if (rover_is(keyword, "do") || rover_is(keyword, "run") || rover_is(keyword, "tool") ||
-            rover_is(keyword, "emit"))
+            rover_is(keyword, "emit") || rover_is(keyword, "set"))
         {
                 if (build->stage < ROVER_STAGE_THEN)
                         build->stage = ROVER_STAGE_THEN;
@@ -1771,7 +1845,7 @@ static bool rover_statement(struct rover_build address_to build)
         if (rover_is(keyword, "rule"))
                 return rover_refused(build, "a rule line stands at the left edge, not inside a rule", null, null);
         return rover_refused(build, "", keyword,
-                             " is no statement: about, on, when, place, limit, once, off, if, do, run, tool, emit or else");
+                             " is no statement: about, on, when, place, limit, once, off, if, do, set, run, tool, emit or else");
 }
 
 /*
@@ -2165,6 +2239,10 @@ static fn rover_action_put(struct rover_text address_to text, const struct rover
                 break;
         case ROVER_EMIT:
                 rover_puts(text, "emit cue");
+                break;
+        case ROVER_SET:
+                rover_puts(text, "set ");
+                rover_puts(text, rover_switch_find(action->id)->name);
                 break;
         }
         for (positive at = first; at < action->count; at++)

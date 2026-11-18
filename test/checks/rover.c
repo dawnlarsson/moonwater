@@ -304,6 +304,20 @@ static const char address_to const rover_canonical[] = {
     "rule first-pin\n"
     "\ton button pin 0\n"
     "\tdo notify \"the first pin\"\n",
+
+    "rule game-power\n"
+    "\ton fullscreen on steam_app_*\n"
+    "\tset power performance\n"
+    "\tset cpu boost on\n"
+    "\n"
+    "rule lid-quiet\n"
+    "\ton lid close\n"
+    "\tif power.source == battery\n"
+    "\tset airplane on\n"
+    "\tset brightness 30%\n"
+    "\tset charge limit 80\n"
+    "\telse\n"
+    "\tset cpu smt off\n",
 };
 
 //      Text that is not canonical, and the one way it prints.
@@ -378,6 +392,12 @@ static const struct
     {"service a\n\tabout \"x\"\n", 0, "no run"},
     {"service a\n\trun /a\n\tfrob\n", 3, "no service statement"},
     {"rule a\n\ton button frob\n\tdo open x\n", 2, "is not one of launcher"},
+    {"rule a\n\ton lid open\n\tset airplane off\n", 3, "airplane off is deliberate"},
+    {"rule a\n\ton lid open\n\tset airplane setting.canvas.gpu\n", 3, "airplane off is deliberate"},
+    {"rule a\n\ton lid open\n\tset power turbo\n", 3, "is not one of performance"},
+    {"rule a\n\ton lid open\n\tset nosuch 1\n", 3, "is no switch"},
+    {"rule a\n\ton lid open\n\tset brightness\n", 3, "takes one value"},
+    {"rule a\n\ton lid open\n\tset charge limit 10\n", 3, "outside the range"},
     {"rule a\n\ton lid close\n\tplace kernel\n\tif setting.canvas.gpu == on\n\tdo suspend\n", 0, "reads a setting"},
     {"rule a\n\ton lid close\n\tif setting.canvas.theme == purple\n\tdo suspend\n", 3, "is not one of light"},
     {"rule a\n\ton button volume\n\tdo open mixer -q -a -i -x\n", 3, "past an action's four arguments"},
@@ -596,6 +616,17 @@ static fn rover_check_tamper(void)
                       !rover_check(bytes, rover_one.size, &view, &refusal) &&
                           string_equals((string_address)refusal.why,
                                         "a deliberate primitive, which only a person may ask for"));
+        }
+        if (rover_compiled("rule a\n\ton lid close\n\tset airplane on\n"))
+        {
+                memory_copy(bytes, rover_built(&rover_one), rover_one.size);
+                rover_check(bytes, rover_one.size, &view, &refusal);
+                b64 off = 0;
+                memory_copy((p8 address_to)view.pool + view.argument[view.action[0].argument].index, &off, 8);
+                check("a table that sets a deliberate value of a switch is refused at load",
+                      !rover_check(bytes, rover_one.size, &view, &refusal) &&
+                          string_equals((string_address)refusal.why,
+                                        "a deliberate value of a switch, which only a person may set"));
         }
         if (rover_compiled("rule a\n\ton lid close\n\tif lid == closed\n\tdo suspend\n"))
         {
@@ -838,6 +869,27 @@ static fn rover_check_evaluator(void)
                       made && rover_arguments(&rover_view, hits[0].action, &event, rover_pages, values) == 4 &&
                           rover_bytes_are(values[3].text, values[3].length, "-i"));
         }
+
+        //      The machine's switches: set NAME VALUE, the runner's, its value typed by the switch.
+        check("the fifth text compiles", rover_compiled(rover_canonical[4]));
+        event = rover_event_of("lid close", null);
+        rover_set("power.source", 1, null);
+        {
+                struct rover_hit hits[4];
+                struct rover_value values[ROVER_ARGUMENTS];
+                positive made = rover_fire(&rover_view, rover_runs, rover_pages, &event, ROVER_KERNEL, hits, 4);
+                const struct rover_action address_to set = rover_view.action + (made ? hits[0].action : 0);
+
+                //      The rule reads the kernel's states, so the kernel asks it; its sets go down the ring to the runner.
+                check("a lid on battery sets three switches, asked in the kernel", made == 1 && hits[0].count == 3);
+                check("airplane on is the switch's on",
+                      set->kind == ROVER_SET && set->id == 6 && set->runs == ROVER_RUNNER &&
+                          rover_arguments(&rover_view, hits[0].action, &event, rover_pages, values) == 1 &&
+                          values[0].number == 1);
+                rover_arguments(&rover_view, (positive)hits[0].action + 2, &event, rover_pages, values);
+                check("the charge limit is its number", values[0].number == 80);
+        }
+        rover_set("power.source", 0, null);
 
         //      Settings and the boot's words: states of their pages, typed by the registry's rows.
         check("the registry's rows are states", rover_state_named((const p8 address_to)"setting.canvas.gpu", 18) &&

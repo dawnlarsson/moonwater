@@ -7,6 +7,7 @@
 #   state NAME PAGE TYPE              a state, at the next offset of its page
 #   event ID SOURCE NAME [FIELD:TYPE ...]
 #   primitive ID RUNS CLASS NAME [ARG:TYPE ...]
+#   switch ID NAME TYPE [deliberate:VALUE]   a switch of the machine's, set with set NAME VALUE
 #
 # TYPE is int:LOW:HIGH, percent, duration, clock, weekday, onoff,
 # enum:WORD,WORD..., chord, word or text; a primitive's last argument may be
@@ -74,6 +75,17 @@ primitive 16 runner any start service:word
 primitive 17 runner any stop service:word
 primitive 18 runner any restart service:word
 primitive 19 runner any "desktop rest"
+
+# The machine's switches, which set NAME VALUE changes as moonwater's tune
+# verbs do (src/sh/host/tune.c). A value marked deliberate raises the
+# machine's exposure and is a person's to set, never a rule's: airplane off
+# turns the radios back on. power's words are tune.c's tune_modes, read there.
+switch 1 brightness percent
+switch 2 power enum:@tune_modes
+switch 3 "cpu boost" onoff
+switch 4 "cpu smt" onoff
+switch 5 "charge limit" int:20:100
+switch 6 airplane onoff deliberate:off
 
 # lib.c's routines with integer arguments, and the values each argument
 # takes: PARAM:LOW:HIGH, by the prototype's names, or total when every value

@@ -110,6 +110,7 @@
 #define ROVER_RUN 2u
 #define ROVER_TOOL 3u
 #define ROVER_EMIT 4u
+#define ROVER_SET 5u // one of the machine's switches set: its id the switch's
 
 #define ROVER_CHORD_SHIFT 1u
 #define ROVER_CHORD_CTRL 2u
@@ -316,6 +317,14 @@ struct rover_function_row
         b64 high[ROVER_ARGUMENTS];
 };
 
+struct rover_switch_row
+{
+        const char address_to name;
+        p16 id;
+        p8 type;
+        b8 deliberate; // the value (an enum's index) a rule may never set, or -1
+};
+
 #ifdef KERNEL_MODE
 #define ROVER_USER_CALL(call) 0
 #else
@@ -446,6 +455,14 @@ static const struct rover_event_row address_to rover_event_find(positive id)
         for (positive at = 0; at < ROVER_EVENT_ROWS; at++)
                 if (rover_event_rows[at].id == id)
                         return &rover_event_rows[at];
+        return null;
+}
+
+static const struct rover_switch_row address_to rover_switch_find(positive id)
+{
+        for (positive at = 0; at < ROVER_SWITCHES; at++)
+                if (rover_switches[at].id == id)
+                        return &rover_switches[at];
         return null;
 }
 
@@ -1486,6 +1503,24 @@ static const char address_to rover_action_check(const struct rover_table address
                 if (action->id != ROVER_CUE || action->count != 1 || action->runs != ROVER_RUNNER)
                         return "an emit of anything but a cue";
                 break;
+        case ROVER_SET:
+        {
+                const struct rover_switch_row address_to row = rover_switch_find(action->id);
+                b32 want = row && rover_kind_is_word(rover_types[row->type].kind) ? 2 : 1;
+
+                if (!row || action->count != 1 || action->runs != ROVER_RUNNER)
+                        return "a set of a switch the schema does not have";
+                if (argument[0].source == ROVER_CALL || (why = rover_operand_check(table, argument[0], want, kernel, false)))
+                        return why ? why : "a call as an action's argument";
+                if (!rover_constant_ok(table, argument[0], row->type))
+                        return "an argument outside its type's range";
+                //      A switch with a deliberate value takes a constant, and never that one.
+                if (row->deliberate >= 0 &&
+                    (argument[0].source != ROVER_CONST_NUMBER ||
+                     memory_load_unaligned(b64, table->pool + argument[0].index) == row->deliberate))
+                        return "a deliberate value of a switch, which only a person may set";
+                return null;
+        }
         default:
                 return "an action of no kind";
         }
