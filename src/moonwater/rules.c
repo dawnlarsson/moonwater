@@ -846,13 +846,23 @@ static void rules_event_init(struct rover_event *event, p16 id, p64 when)
         event->when = when ? when : ktime_get_ns();
 }
 
-static inline void rules_word(struct rover_event *event, positive field, const char *text)
-{
-        positive length = text ? string_length((string_address)text) : 0;
+/*
+        A word field, as one length everywhere (R-table-5): the device's
+        string, which may be any length, is copied into the caller's room,
+        clamped to what a ring record holds and ended there, so a comparison,
+        a routine that asks only the address (string_length) and the record
+        all see the same at most 55 bytes. strnlen, so a long name is never
+        walked past the room in the input filter.
+*/
+#define RULES_WORD_ROOM (ROVER_RECORD_WORD_MOST + 1)
 
-        if (length > ROVER_RECORD_WORD_MOST)
-                length = ROVER_RECORD_WORD_MOST;
-        event->field[field].text = (const p8 *)(text ? text : "");
+static inline void rules_word(struct rover_event *event, positive field, const char *text, char *room)
+{
+        positive length = text ? strnlen(text, ROVER_RECORD_WORD_MOST) : 0;
+
+        memory_copy(room, text ? text : "", length);
+        room[length] = 0;
+        event->field[field].text = (const p8 *)room;
         event->field[field].length = (p32)length;
         if (event->count <= field)
                 event->count = (p8)(field + 1);
@@ -1176,6 +1186,7 @@ static p8 rules_input_kind(struct input_dev *dev)
 static void rules_device(struct bind_handle *bind, bool added)
 {
         struct input_dev *dev = bind->handle.dev;
+        char word[RULES_WORD_ROOM];
         struct rover_event event;
         struct rules_change sets[RULES_SETS];
         positive count = 0;
@@ -1199,7 +1210,7 @@ static void rules_device(struct bind_handle *bind, bool added)
                         }
         rules_event_init(&event, added ? RULES_INPUT_ADDED : RULES_INPUT_REMOVED, 0);
         rules_number(&event, 0, rules_input_kind(dev));
-        rules_word(&event, 1, dev->name);
+        rules_word(&event, 1, dev->name, word);
         rules_fire(&event, sets, count, event.when);
 }
 
@@ -1321,6 +1332,7 @@ static b64 rules_usb_class(struct usb_device *udev)
 static int rules_usb_notify(struct notifier_block *nb, unsigned long what, void *data)
 {
         struct usb_device *udev = data;
+        char word[RULES_WORD_ROOM];
         struct rover_event event;
         struct rules_change set;
         bool added = what == USB_DEVICE_ADD;
@@ -1338,7 +1350,7 @@ static int rules_usb_notify(struct notifier_block *nb, unsigned long what, void 
         rules_number(&event, 0, rules_usb_class(udev));
         rules_number(&event, 1, le16_to_cpu(udev->descriptor.idVendor));
         rules_number(&event, 2, le16_to_cpu(udev->descriptor.idProduct));
-        rules_word(&event, 3, dev_name(&udev->dev));
+        rules_word(&event, 3, dev_name(&udev->dev), word);
         rules_fire(&event, &set, 1, event.when);
         return NOTIFY_OK;
 }
@@ -1356,6 +1368,7 @@ static p32 rules_links;
 static int rules_link_notify(struct notifier_block *nb, unsigned long what, void *data)
 {
         struct net_device *dev = netdev_notifier_info_to_dev(data);
+        char word[RULES_WORD_ROOM];
         struct rover_event event;
         struct rules_change set;
         bool up, was;
@@ -1382,7 +1395,7 @@ static int rules_link_notify(struct notifier_block *nb, unsigned long what, void
         }
         set = (struct rules_change){RS_LINKS, (b32)rules_links};
         rules_event_init(&event, up ? RULES_LINK_UP : RULES_LINK_DOWN, 0);
-        rules_word(&event, 0, dev->name);
+        rules_word(&event, 0, dev->name, word);
         rules_fire(&event, &set, 1, event.when);
         return NOTIFY_DONE;
 }
@@ -1394,13 +1407,14 @@ static struct notifier_block rules_link_nb = {.notifier_call = rules_link_notify
 //      From Canvas's DRM client hotplug: the counts after it, and one connector that came or went.
 void moonwater_rules_display(unsigned int count, unsigned int external, const char *connector, _Bool connected)
 {
+        char word[RULES_WORD_ROOM];
         struct rover_event event;
         struct rules_change sets[2] = {{RS_DISPLAYS, (b32)(count > 16 ? 16 : count)},
                                        {RS_EXTERNAL, (b32)(external > 16 ? 16 : external)}};
 
         rules_event_init(&event, connector ? (connected ? RULES_DISPLAY_CONNECTED : RULES_DISPLAY_DISCONNECTED) : 0, 0);
         if (connector)
-                rules_word(&event, 0, connector);
+                rules_word(&event, 0, connector, word);
         rules_fire(&event, sets, 2, event.when);
 }
 
