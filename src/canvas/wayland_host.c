@@ -149,6 +149,13 @@ static struct
         int dmabuf_table;               // the file of format and modifier pairs the feedback names, rebuilt when changed
         long dmabuf_table_size;
         long dmabuf_entry_count;
+        // Whether the pairs told name the card's tiled and compressed layouts (compositor_wl_tiled_now when they were made), the card's epoch and
+        // the answer the render node's match with the card's node was found for, and the tiled pictures' rectangles the card read and the ones
+        // refused, by why (compositor_wl_card_image: 0 the card not composing, 1 none now, 2 a transform or a viewport that is not a crop at the
+        // corner, 3 a plane that is not plane 0's buffer, 4 an import refused, 5 a resource refused, 6 the job failed, 7 a card that does not read it).
+        int dmabuf_tiled, tiled_node_epoch, tiled_node;
+        unsigned long tiled_rects, tiled_refused[8];
+        positive tiled_ns, tiled_most_ns, tiled_pixels; // the texture unit's reads: wall time waited in all and the longest, and the pixels read
         struct
         {
                 unsigned int format;
@@ -1949,16 +1956,17 @@ static void compositor_wl_fd_ident(long fd, unsigned long *dev, unsigned long *i
 static int compositor_wl_needs_xform_ordered(const struct wayland_picture *picture, long width, long height, int swapped)
 {
         unsigned int fourcc = picture->fourcc;
-        int order = swapped && compositor_wl_fourcc_swapped(fourcc);
+        int order = (swapped & 1) && compositor_wl_fourcc_swapped(fourcc);
 
         if (fourcc && fourcc != COMPOSITOR_WL_FOURCC_ARGB8888 && fourcc != COMPOSITOR_WL_FOURCC_XRGB8888 && !order)
                 return 1;
         if (picture->format != WLN_wl_shm_format_argb8888 && picture->format != WLN_wl_shm_format_xrgb8888 &&
             !(order && (unsigned long)picture->format == (unsigned long)fourcc))
                 return 1;
-        if (picture->transform || picture->y_invert || picture->plane_count > 1)
+        // (swapped & 2: a tiled picture the card reads through its texture unit, whose planes are its metadata and whose modifier is its layout)
+        if (picture->transform || picture->y_invert || (picture->plane_count > 1 && !(swapped & 2)))
                 return 1;
-        if (picture->modifier && picture->modifier != WAYLAND_MODIFIER_INVALID)
+        if (picture->modifier && picture->modifier != WAYLAND_MODIFIER_INVALID && !(swapped & 2))
                 return 1;
         //      A viewport's source at the buffer's corner, of whole pixels and shown at its own size, is the buffer's top left as it is: the
         //      window is the part of it at the window's place in the surface (dest_x, dest_y: its geometry, inside the shadow a toolkit draws
@@ -2279,6 +2287,190 @@ static positive compositor_wl_source_import(int row, const struct wayland_pictur
 }
 
 /*
+        Tiled and compressed pictures. A client that draws with the card draws fastest in the card's own layout (amdgpu's 64 KiB tiles, and DCC, the
+        colour compression its render backends write and its texture unit reads): linear, which the processor can read, is a layout the card writes
+        slowly and never compresses. So while the card composes and its texture unit's read passed its test (gpu_image_takes), the pairs a client is
+        told (compositor_wl_dmabuf_info) are the display's tiled ones as well (the primary plane's IN_FORMATS for ARGB, XRGB, ABGR and XBGR 8888, each
+        one the card reads), and a buffer of one of them is the card's alone: it is not mapped (compositor_wl_dmabuf_map), its picture has no pixels,
+        and each damage rectangle of it is read by the texture unit into the row's picture in the table (compositor_wl_card_image), linear, so that
+        everything after (the scene, a present the processor draws, the planes of linear rows) is as it was. When the card stops composing, or is lost,
+        the pairs are told again without them (compositor_wl_dmabuf_refresh): the processor, an Intel card and a machine with the GPU off are told of
+        linear alone, as before.
+*/
+
+// Whether a picture is tiled: a dma-buf of a modifier other than linear and the implicit one (whose layout is the buffer's own word, as before).
+static int compositor_wl_tiled(const struct wayland_picture *picture)
+{
+        return picture->sync_fd >= 0 && picture->modifier && picture->modifier != WAYLAND_MODIFIER_INVALID;
+}
+
+static unsigned long compositor_wl_dev(unsigned long major, unsigned long minor);
+
+// Whether the card reads a tiled picture of this modifier (gpu_image_takes); never without the card.
+static int compositor_wl_tiled_takes(unsigned long modifier)
+{
+#ifdef MOONWATER_GPU_C
+        return gpu_image_takes((p64)modifier);
+#else
+        (void)modifier;
+        return 0;
+#endif
+}
+
+// Whether tiled pictures are what the card reads now: the setting has the card compose, it is up and not given up, its texture unit's read passed
+// at its start, and the render node the clients are told to draw on is the card's own (a client's tiles are its card's layout, which only that card
+// reads). The node's match is found once a start of the card (gpu_epoch), the rest is a few loads: it is asked at every wake.
+static int compositor_wl_tiled_now(void)
+{
+#ifdef MOONWATER_GPU_C
+        // (the display's primary plane is found by the planes' first look, compositor_overlay_ready: its IN_FORMATS are the pairs told)
+        if (!compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead || !compositor_wl.render || compositor.card < 0 || !compositor.primary ||
+            !gpu_image_takes(0))
+                return 0;
+        if (compositor_wl.tiled_node_epoch != (int)gpu_epoch + 1)
+        {
+                unsigned char info[256];
+
+                memory_zero(info, sizeof info);
+                compositor_wl.tiled_node = 0;
+                // AT_EMPTY_PATH, STATX_BASIC_STATS: the card's node's device (stx_rdev_major at 128, stx_rdev_minor at 132).
+                if (gpu.fd >= 0 && compositor_call(syscall(statx), (positive)gpu.fd, (positive)"", 0x1000, 0x7ff, (positive)info, 0) >= 0)
+                        compositor_wl.tiled_node = compositor_wl_dev(*(unsigned int *)(info + 128), *(unsigned int *)(info + 132)) == compositor_wl.render;
+                compositor_wl.tiled_node_epoch = (int)gpu_epoch + 1;
+        }
+        return compositor_wl.tiled_node;
+#else
+        return 0;
+#endif
+}
+
+// The log's word on the tiled pictures read: at the first rectangle, then every 4096th, and at the first refusal of each kind.
+static void compositor_wl_tiled_say(const char *what)
+{
+        string_format(log, "compositor: tiled pictures (%s): %p rectangles read by the texture unit (%p pixels, %p us waited, the longest %p us); refused: %p not composing, %p blend, "
+                           "%p transform, %p plane, %p import, %p resource, %p job, %p layout\n",
+                      (string_address)what, (positive)compositor_wl.tiled_rects, compositor_wl.tiled_pixels, compositor_wl.tiled_ns / 1000, compositor_wl.tiled_most_ns / 1000,
+                      (positive)compositor_wl.tiled_refused[0], (positive)compositor_wl.tiled_refused[1],
+                      (positive)compositor_wl.tiled_refused[2], (positive)compositor_wl.tiled_refused[3], (positive)compositor_wl.tiled_refused[4],
+                      (positive)compositor_wl.tiled_refused[5], (positive)compositor_wl.tiled_refused[6], (positive)compositor_wl.tiled_refused[7]);
+        log_flush();
+}
+
+static int compositor_wl_tiled_refused(unsigned int why)
+{
+        if (compositor_wl.tiled_refused[why & 7]++ == 0)
+                compositor_wl_tiled_say("a refusal");
+        return 0;
+}
+
+/*
+        A damage rectangle of a tiled picture, w by h at (sx, sy) of it, read by the card's texture unit into the picture being laid at (dx, dy) in the
+        table's buffer to (gpu_image over gpu_amd_image's resource). The buffer is imported whole (its planes are in it: the metadata of DCC is plane 1, or
+        plane 2 for a retiled one), and the import is held for the row while the buffer is the one copied from (compositor_wl.source), as a linear
+        dma-buf's is. The job is waited for (a card still busy is waited for first: the processor cannot read this picture, so there is no other copy to
+        make). A blended picture (a subsurface laid over its window's) is laid over as the processor lays one (the kernel's over). Refused, and counted
+        (compositor_wl.tiled_refused): a card not composing, a transform, a plane in another
+        buffer, an import or a resource refused, a job that failed. A refused rectangle is not laid: the window keeps what it showed there.
+*/
+static int compositor_wl_card_image(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch, long dx, long dy, long sx,
+                                    long sy, long w, long h)
+{
+#ifdef MOONWATER_GPU_C
+        unsigned long stride = (unsigned long)picture->stride, dev = 0, ino = 0;
+        unsigned int desc[8], meta_plane = 0;
+        positive dst_va, base, meta = 0, began;
+        long bytes;
+
+        if (!gpu_ready() || !compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead || compositor_gpu_held())
+                return compositor_wl_tiled_refused(0);
+        if (!gpu_image_takes(picture->modifier))
+                return compositor_wl_tiled_refused(7);
+        if (compositor_wl_needs_xform_ordered(picture, picture->row_width, picture->row_height, 3))
+                return compositor_wl_tiled_refused(2);
+        if (picture->modifier >> 13 & 1)
+                meta_plane = picture->modifier >> 14 & 1 ? 2u : 1u;
+        compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
+        if (meta_plane)
+        {
+                unsigned long plane_dev = 0, plane_ino = 0;
+
+                if ((long)meta_plane >= picture->plane_count)
+                        return compositor_wl_tiled_refused(3);
+                if (picture->plane_fd[meta_plane] != picture->sync_fd)
+                        compositor_wl_fd_ident(picture->plane_fd[meta_plane], &plane_dev, &plane_ino);
+                else
+                        plane_dev = dev, plane_ino = ino;
+                if (plane_dev != dev || plane_ino != ino || !ino)
+                        return compositor_wl_tiled_refused(3);
+        }
+        bytes = compositor_call(syscall(lseek), (positive)picture->sync_fd, 0, 2, 0, 0, 0);
+        if (bytes <= 0)
+                return compositor_wl_tiled_refused(4);
+        if (compositor_wl.source[row].fd != picture->sync_fd || compositor_wl.source[row].size != bytes || compositor_wl.source[row].dev != dev ||
+            compositor_wl.source[row].ino != ino || compositor_wl.source[row].map ||
+            !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
+        {
+                compositor_wl_source_drop(row);
+                compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)bytes);
+                compositor_wl.source[row].epoch = gpu_epoch;
+                if (!compositor_wl.source[row].va)
+                        return compositor_wl_tiled_refused(4);
+                {
+                        static int said;
+
+                        if (said++ < 12)
+                                string_format(log, "compositor: tiled import %p bytes at %p (fd %p): modifier %p, %p planes, offsets %p %p %p, strides %p %p %p, %px%p\n",
+                                              (positive)bytes, (positive)compositor_wl.source[row].va, (positive)picture->sync_fd, (positive)picture->modifier,
+                                              (positive)picture->plane_count, (positive)picture->plane_offset[0], (positive)picture->plane_offset[1],
+                                              (positive)picture->plane_offset[2], (positive)picture->plane_stride[0], (positive)picture->plane_stride[1],
+                                              (positive)picture->plane_stride[2], (positive)picture->width, (positive)picture->height),
+                                    log_flush();
+                }
+                compositor_wl.source[row].map = 0;
+                compositor_wl.source[row].fd = picture->sync_fd;
+                compositor_wl.source[row].size = bytes;
+                compositor_wl.source[row].dev = dev;
+                compositor_wl.source[row].ino = ino;
+        }
+        base = compositor_wl.source[row].va + (positive)picture->plane_offset[0];
+        if (meta_plane)
+                meta = compositor_wl.source[row].va + (positive)picture->plane_offset[meta_plane];
+        if ((stride & 3) || (positive)picture->plane_offset[0] >= (positive)bytes || (meta_plane && (positive)picture->plane_offset[meta_plane] >= (positive)bytes) ||
+            !gpu_amd_image(desc, base, meta, (unsigned int)(stride / 4), (unsigned int)picture->height, (p64)picture->modifier,
+                           compositor_wl_fourcc_swapped(picture->fourcc)))
+                return compositor_wl_tiled_refused(5);
+        dst_va = gpu_va_written(to, compositor.buffer);
+        if (!dst_va && gpu_map_written(to, compositor.buffer))
+                dst_va = gpu_va_written(to, compositor.buffer);
+        if (!dst_va || (!gpu_idle() && !gpu_finish()))
+                return compositor_wl_tiled_refused(6);
+        began = clock_monotonic_nanoseconds();
+        if (gpu_image(desc, (unsigned int)sx, (unsigned int)sy, dst_va + 4 * ((positive)dy * pitch + (positive)dx), (unsigned int)pitch, (unsigned int)w,
+                      (unsigned int)h, picture->blend != 0))
+        {
+                positive took = clock_monotonic_nanoseconds() - began;
+
+                compositor_wl.tiled_ns += took, compositor_wl.tiled_pixels += (positive)w * (positive)h;
+                compositor_wl.tiled_most_ns = took > compositor_wl.tiled_most_ns ? took : compositor_wl.tiled_most_ns;
+                if ((compositor_wl.tiled_rects++ & 4095) == 0)
+                        compositor_wl_tiled_say("read");
+                return 1;
+        }
+        if (gpu_end == GPU_END_LATE && gpu_finish())
+        {
+                compositor_wl.tiled_rects++;
+                return 1;
+        }
+        if (gpu_end != GPU_END_NONE)
+                compositor_gpu_job_failed();
+        return compositor_wl_tiled_refused(6);
+#else
+        (void)row, (void)picture, (void)to, (void)pitch, (void)dx, (void)dy, (void)sx, (void)sy, (void)w, (void)h;
+        return compositor_wl_tiled_refused(0);
+#endif
+}
+
+/*
         A damage rectangle copied by the card instead of the processor: the rectangle sw by sh at (sx, sy) of the client's buffer, into the picture
         being laid at (dx, dy) in the table's buffer to. The card reads the buffer where the processor would: a pool's pages through a read-only map,
         or a dma-buf through its import, which is held for the buffer while it is the one the damage is copied from (compositor_wl.source), and it
@@ -2295,6 +2487,8 @@ static int compositor_wl_card_rect(int row, const struct wayland_picture *pictur
         positive src_va, dst_va;
         volatile unsigned int probe;
 
+        if (w > 0 && h > 0 && compositor_wl_tiled(picture))
+                return compositor_wl_card_image(row, picture, to, pitch, dx, dy, sx, sy, w, h);
         if (!wanted || w <= 0 || h <= 0)
                 return compositor_wl_card_refused(0);
         if (!gpu_ready())
@@ -4379,15 +4573,20 @@ static void compositor_wl_query_plane_modifiers(struct wayland_dmabuf_info *info
                         {
                                 unsigned int id, length;
                                 p64 data;
-                        } blob = {(unsigned int)prop_vals[i], sizeof blob_buf, (p64)blob_buf};
+                        } blob = {(unsigned int)prop_vals[i], 0, (p64)blob_buf};
 
-                        if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, &blob) == 0 && blob.length >= 24 &&
-                            blob.length <= sizeof blob_buf)
+                        // The kernel copies a blob only to a length that is the blob's own (drm_mode_getblob_ioctl), and says that length
+                        // otherwise: asked once for it, then for the bytes. (Asked with the buffer's size, nothing was copied, and the pairs
+                        // were read out of whatever the stack held: no plane's pairs were ever found.)
+                        if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, &blob) == 0 && blob.length >= 24 && blob.length <= sizeof blob_buf &&
+                            system_control(compositor.card, COMPOSITOR_GETPROPBLOB, &blob) == 0)
                         {
-                                unsigned int fmt_count = *(unsigned int *)(blob_buf + 4);
-                                unsigned int fmt_off = *(unsigned int *)(blob_buf + 8);
-                                unsigned int mod_count = *(unsigned int *)(blob_buf + 12);
-                                unsigned int mod_off = *(unsigned int *)(blob_buf + 16);
+                                // struct drm_format_modifier_blob: version, flags, count_formats, formats_offset, count_modifiers, modifiers_offset
+                                // (u32 each), then struct drm_format_modifier's of 24 bytes: the formats' mask (u64), its first format (u32), pad, the modifier.
+                                unsigned int fmt_count = *(unsigned int *)(blob_buf + 8);
+                                unsigned int fmt_off = *(unsigned int *)(blob_buf + 12);
+                                unsigned int mod_count = *(unsigned int *)(blob_buf + 16);
+                                unsigned int mod_off = *(unsigned int *)(blob_buf + 20);
 
                                 if (fmt_off + fmt_count * 4u <= blob.length && mod_off + mod_count * 24u <= blob.length)
                                 {
@@ -4411,6 +4610,30 @@ static void compositor_wl_query_plane_modifiers(struct wayland_dmabuf_info *info
         }
 }
 
+/*
+        The card's tiled pairs added to what a client is told (while compositor_wl_tiled_now): the display's primary plane's IN_FORMATS for ARGB, XRGB,
+        ABGR and XBGR 8888, each modifier one the card reads (gpu_image_takes). The display's are taken, not every layout the card could read, so that
+        a buffer a client makes of them is one a plane can scan out too. On the box (Raphael, DCN 3.1.5) these are the GFX10_RBPLUS 64K_R_X with
+        PIPE_XOR_BITS 2 with four kinds of DCC (64 or 128 byte blocks, each retiled or not), 64K_R_X and 64K_S_X without, and GFX9's 64K_S.
+*/
+static void compositor_wl_dmabuf_tiled_pairs(struct wayland_dmabuf_info *info)
+{
+        static struct wayland_dmabuf_info plane;
+
+        plane.count = 0;
+        compositor_wl_query_plane_modifiers(&plane);
+        for (long at = 0; at < plane.count; at++)
+        {
+                unsigned int format = plane.entry[at].format;
+
+                if ((format == COMPOSITOR_WL_FOURCC_ARGB8888 || format == COMPOSITOR_WL_FOURCC_XRGB8888 || format == WAYLAND_FOURCC_ABGR8888 ||
+                     format == WAYLAND_FOURCC_XBGR8888) &&
+                    plane.entry[at].modifier && plane.entry[at].modifier != WAYLAND_MODIFIER_INVALID && compositor_wl_tiled_takes(plane.entry[at].modifier))
+                        compositor_wl_dmabuf_add_pair(info, format, plane.entry[at].modifier);
+        }
+        string_format(log, "compositor: the primary plane %p takes %p pairs of the wanted formats\n", (positive)compositor.primary, (positive)plane.count), log_flush();
+}
+
 static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info *info)
 {
         static const unsigned int base_formats[] = {
@@ -4430,8 +4653,22 @@ static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info 
         info->count = 0;
         for (unsigned long i = 0; i < sizeof base_formats / sizeof base_formats[0]; i++)
                 compositor_wl_dmabuf_add_pair(info, base_formats[i], 0);
+        compositor_wl.dmabuf_tiled = compositor_wl_tiled_now();
+        // The implicit modifier (the buffer's own word on its layout) is not told for a format the card's tiled pairs are told for: Mesa's EGL takes
+        // a tranche that holds it as leave to allocate implicitly, and radeonsi's implicit shared buffer has no DCC (64K_R_X alone was all it made),
+        // where offered the modifiers alone it makes the display's retiled DCC. A client that asks for the implicit one is still taken (the shim takes
+        // it for any format told).
         for (unsigned long i = 0; i < sizeof base_formats / sizeof base_formats[0]; i++)
-                compositor_wl_dmabuf_add_pair(info, base_formats[i], WAYLAND_MODIFIER_INVALID);
+                if (!compositor_wl.dmabuf_tiled || i >= 4)
+                        compositor_wl_dmabuf_add_pair(info, base_formats[i], WAYLAND_MODIFIER_INVALID);
+        {
+                long linear = info->count;
+
+                if (compositor_wl.dmabuf_tiled)
+                        compositor_wl_dmabuf_tiled_pairs(info);
+                if (compositor_wl.started)
+                        string_format(log, "compositor: dma-buf pairs told: %p linear and implicit, %p tiled\n", (positive)linear, (positive)(info->count - linear)), log_flush();
+        }
         info->tranches = 1;
         info->tranche[0].device = info->device;
         info->tranche[0].flags = compositor.card >= 0 && compositor.primary ? 1 : 0;
@@ -4468,6 +4705,14 @@ static void compositor_wl_dmabuf_refresh(void)
 
         if (!compositor_wl.started)
                 return;
+        // The card took to reading tiled pictures, or stopped (it came up, was given up, turned on or off, lost and started again): every
+        // client is told the pairs again, so that its next buffers are of a layout the path that composes now can read.
+        if (compositor_wl_tiled_now() != compositor_wl.dmabuf_tiled)
+        {
+                compositor_wl_render_node();
+                wayland_dmabuf_changed();
+                return;
+        }
         // A hardware render node that is still there, as the same device, with syncobj settled, cannot be improved on: one statx, not a walk of
         // sysfs and /dev/dri with an open and ioctls a node (a drm uevent is a connector poll or a client's reset, not a card that came).
         if (compositor_wl.render && compositor_wl.render_hw && compositor_wl.render_path[0] &&
@@ -4540,8 +4785,11 @@ static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
         unsigned long none = 0, on[32];
         long extent, got;
 
+        int tiled = size < 0;
+
         (void)context;
         memory_zero(on, sizeof on);
+        size = tiled ? -size : size;
         if (size < 1 || compositor_call(syscall(fstatfs), (positive)fd, (positive)on, 0, 0, 0, 0) < 0 || on[0] != 0x444d4142ul)
                 return 0;
         if (compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&none, 0, 0, 0) != -22)
@@ -4549,6 +4797,17 @@ static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
         extent = compositor_call(syscall(lseek), (positive)fd, 0, 2, 0, 0, 0);
         if (extent >= 0 && extent < size)
                 return 0;
+        // A tiled or compressed buffer is read by the card's texture unit alone (compositor_wl_card_image): the processor has nothing to read
+        // in it, so it is not mapped, only found to be one the card imports.
+        if (tiled)
+        {
+                positive import = gpu_ready() ? gpu_import_fd((int)fd, (positive)(extent > 0 ? extent : size)) : 0;
+
+                if (!import)
+                        return 0;
+                gpu_release_import(import);
+                return WAYLAND_DMABUF_UNMAPPED;
+        }
         got = compositor_call(syscall(mmap), 0, (positive)size, 1, 1, (positive)fd, 0);
         if (got < 0 && got > -4096)
         {
@@ -6576,6 +6835,8 @@ static void compositor_wl_wake(void)
                 wayland_screens_changed();
         }
         wayland_idle_tick();
+        if (compositor_wl_tiled_now() != compositor_wl.dmabuf_tiled)
+                compositor_wl_dmabuf_refresh();
         compositor_wl_table();
         if (stats.rows > 0)
                 wayland_scales_sweep();

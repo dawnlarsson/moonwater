@@ -25,6 +25,7 @@ static const p32 gpu_model_floats[9] = {0x3f000000u, 0xbf000000u, 0x3f800000u, 0
 static int gpu_model_valu(const struct gpu_model_insn address_to in, const struct gpu_model_name address_to row);
 static int gpu_model_vmem(const struct gpu_model_insn address_to in, const struct gpu_model_name address_to row);
 static int gpu_model_ds(const struct gpu_model_insn address_to in);
+static int gpu_model_image(const struct gpu_model_insn address_to in);
 
 static int gpu_model_refused(int code, const char *what, unsigned int reg, b32 vector)
 {
@@ -288,6 +289,7 @@ static int gpu_model_wave(unsigned int x, unsigned int y, const p32 address_to u
                 case GM_SOPC: e = gpu_model_salu(in, row); break;
                 case GM_SMEM: e = gpu_model_smem(in, row); break;
                 case GM_DS: e = gpu_model_ds(in); break;
+                case GM_MIMG: e = gpu_model_image(in); break;
                 case GM_GLD:
                 case GM_GST: e = gpu_model_vmem(in, row); break;
                 default: e = gpu_model_valu(in, row); break;

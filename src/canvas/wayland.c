@@ -352,7 +352,8 @@ struct wayland_host
         // when the client holds it.
         // dma-bufs. dmabuf_info is what is taken (0 for nothing, which keeps zwp_linux_dmabuf_v1 from being offered), dmabuf_table the
         // file of format and modifier pairs the feedback names (the host's: the shim never closes it, -1 for none), dmabuf_map a
-        // descriptor that is a dma-buf of at least size bytes, mapped read-only (0 for a refusal; the descriptor stays the caller's).
+        // descriptor that is a dma-buf of at least size bytes, mapped read-only (0 for a refusal; the descriptor stays the caller's), or
+        // for a size below zero (a buffer of tiles, -size bytes) only found to be one the host's card reads: WAYLAND_DMABUF_UNMAPPED or 0.
         // The pointer held by a client's window: mode 1 is locked (the hand's counts are the client's, unaccelerated, through
         // wayland_pointer_relative, and the pointer is not drawn or moved), 2 is confined to the window, 0 is free. One at a time.
         void (*pointer_hold)(void *context, long row, long mode);
@@ -8767,7 +8768,9 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
                 return -2;
         pool = wayland_client_take(c, &c->pool_table);
         buffer = pool >= 0 ? wayland_client_take(c, &c->buffer_table) : -1;
-        at = buffer >= 0 ? wayland.host->dmabuf_map(wayland.host->context, fds[0], need) : 0;
+        // A buffer of a modifier that is a layout of tiles (not linear, nor the implicit one) has nothing the processor can read: the host is
+        // asked to take it unmapped (a size below zero), and its pictures are the card's to read (no pixels).
+        at = buffer >= 0 ? wayland.host->dmabuf_map(wayland.host->context, fds[0], modifier && modifier != WAYLAND_MODIFIER_INVALID ? -need : need) : 0;
         if (!at)
         {
                 if (buffer >= 0)

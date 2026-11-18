@@ -139,6 +139,8 @@ b32 main(void)
                               (positive)gpu_req.first, (positive)gpu_req.error);
                 return test_report(null);
         }
+        // The texture unit's read (op 8) drew its test at the start (gpu_image_test, a linear picture through an image resource, straight and swapped).
+        check("gpu: the card's texture unit reads a picture through an image resource as it is and with red and blue the other way (gpu_image_test)", gpu_image_ok);
         src = (unsigned int address_to)((p8 address_to)gpu.at + src_at), dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at);
         gnd = (unsigned int address_to)((p8 address_to)gpu.at + gnd_at), a = GPU_ARGS;
         tones[4] = gpu_random() | 0x80000000u;

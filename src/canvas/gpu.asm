@@ -1359,6 +1359,56 @@ scale:
 	s_endpgm
 .size scale, .-scale
 
+; op 8: a picture read through the texture unit, d[y * dp + x] = image(x0 + x, y0 + y) for x below w: the image's resource (its eight words at 0x80 of the
+; arguments, gpu_amd_image) says its layout, so a client's tiled or compressed (DCC) buffer is read as the card's own sampler reads it, and written out linear.
+; The four channels come back as floats of the bytes over 255, each made a byte again by 255.5 and a truncation (b + b / 510 is in [b, b + 1) for every byte).
+; v nonzero (0x2c) lays the picture over d as a premultiplied picture is laid (overv, the scene's image over), instead of copying it.
+.globl image
+.p2align 8
+.type image,@function
+image:
+	s_load_dwordx2	s[10:11], s[4:5], 0x8
+	s_load_dword	s15, s[4:5], 0x1c
+	s_load_dword	s16, s[4:5], 0x24
+	s_load_dwordx2	s[12:13], s[4:5], 0x30
+	s_load_dword	s20, s[4:5], 0x2c
+	s_load_dwordx8	s[24:31], s[4:5], 0x80
+	v_lshl_or_b32	v1, s6, 6, v0
+	s_waitcnt	lgkmcnt(0)
+	v_cmp_gt_u32	vcc, s16, v1
+	s_and_saveexec_b64 s[0:1], vcc
+	s_cbranch_execz	.unit_done
+	v_add_nc_u32	v4, s12, v1
+	s_add_u32	s17, s13, s7
+	v_mov_b32	v5, s17
+	image_load	v[6:9], v[4:5], s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
+	s_mul_i32	s19, s7, s15
+	v_add_nc_u32	v3, s19, v1
+	v_lshlrev_b32	v3, 2, v3
+	s_waitcnt	vmcnt(0)
+	v_mul_f32	v6, 0x437f8000, v6
+	v_mul_f32	v7, 0x437f8000, v7
+	v_mul_f32	v8, 0x437f8000, v8
+	v_mul_f32	v9, 0x437f8000, v9
+	v_cvt_u32_f32	v6, v6
+	v_cvt_u32_f32	v7, v7
+	v_cvt_u32_f32	v8, v8
+	v_cvt_u32_f32	v9, v9
+	v_lshl_or_b32	v2, v7, 8, v6
+	v_lshl_or_b32	v2, v8, 16, v2
+	v_lshl_or_b32	v2, v9, 24, v2
+	s_cmp_eq_u32	s20, 0
+	s_cbranch_scc1	.unit_store
+	global_load_dword v10, v3, s[10:11]
+	s_mov_b32	s75, 0x00ff00ff
+	s_waitcnt	vmcnt(0)
+	overv	v2, v10, v2
+.unit_store:
+	global_store_dword v3, v2, s[10:11]
+.unit_done:
+	s_endpgm
+.size image, .-image
+
 .rodata
 .p2align 6
 .macro kernel name, vgprs, sgprs
@@ -1382,3 +1432,4 @@ kernel tone, 10, 28
 kernel glass, 16, 32
 kernel scene, 88, 106
 kernel scale, 8, 24
+kernel image, 42, 76

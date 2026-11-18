@@ -17,7 +17,12 @@
                           .size .macro/.endm (\name in the body) .irp/.endr
                           and the .amdhsa_kernel block
             instructions  the SALU, SMEM, VALU (32-bit and VOP3 encodings),
-                          packed, DS and global forms the table below lists
+                          packed, DS and global forms the table below lists,
+                          and image_load in the one form the kernels write:
+                          four channels of a 2D image at whole coordinates,
+                          dmask:0xf dim:SQ_RSRC_IMG_2D unorm, which must be
+                          written so (the image's own layout, tiled or
+                          compressed, is the resource's to say)
             operands      s5 s[8:11] v3 v[5:8] vcc exec null, inline
                           constants, one 32-bit literal, labels in branches
 
@@ -73,7 +78,8 @@ enum
         GPUASM_VOP3P,
         GPUASM_DS,
         GPUASM_GLD,
-        GPUASM_GST
+        GPUASM_GST,
+        GPUASM_MIMG
 };
 
 /*
@@ -88,6 +94,7 @@ enum
             n destination of the carry (a pair, vcc, exec or null)
             b base address (a pair, or off)  o byte offset (of a load)
             l label                      w wait counters
+            r an image's resource (eight scalar registers from a multiple of four)
 
         VOP1, VOP2 and VOPC rows are for both encodings: the short one when
         the operands fit it (the second source a vector register, a VOPC's
@@ -198,6 +205,7 @@ static const gpuasm_op gpuasm_ops[] = {
         {"global_load_dwordx4", GPUASM_GLD, 0x0e, "d4v1b2"},
         {"global_store_dword", GPUASM_GST, 0x1c, "v1v1b2"},
         {"global_store_dwordx4", GPUASM_GST, 0x1e, "v1v4b2"},
+        {"image_load", GPUASM_MIMG, 0x00, "d4v2r8"},
 };
 
 //      The instructions that take clamp, which LLVM says instruction by instruction.
@@ -857,6 +865,7 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         positive force = 0;
         bool clamp = false;
         bool offset_given = false;
+        positive image_words = 0;
         bool off;
         bool literal = false;
         b64 offset = 0;
@@ -908,6 +917,12 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                 word.length = rest.length - start;
                 if (gpuasm_is(word, "clamp") && !clamp)
                         clamp = true;
+                else if (op->form == GPUASM_MIMG && !(image_words & 1) && gpuasm_is(word, "unorm"))
+                        image_words |= 1;
+                else if (op->form == GPUASM_MIMG && !(image_words & 2) && gpuasm_is(word, "dim:SQ_RSRC_IMG_2D"))
+                        image_words |= 2;
+                else if (op->form == GPUASM_MIMG && !(image_words & 4) && gpuasm_is(word, "dmask:0xf"))
+                        image_words |= 4;
                 else if (word.length > 7 && !memory_compare(word.at, "offset:", 7) && !offset_given)
                 {
                         gpuasm_span number = {word.at + 7, word.length - 7};
@@ -923,6 +938,8 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         }
         if (offset_given && form != GPUASM_GLD && form != GPUASM_GST)
                 return gpuasm_fail_span("an offset on an instruction that has none:", mnemonic);
+        if (form == GPUASM_MIMG && image_words != 7)
+                return gpuasm_fail_span("dmask:0xf dim:SQ_RSRC_IMG_2D unorm, and nothing else, on", mnemonic);
         if (clamp)
         {
                 bool takes = false;
@@ -973,6 +990,12 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                         ok = gpuasm_source(part[at], 's', size, false, o + at);
                         if (ok && !o[at].vector)
                                 ok = gpuasm_fail_span("a vector register is wanted", part[at]);
+                }
+                else if (kind == 'r')
+                {
+                        ok = gpuasm_destination(part[at], 'p', size, o + at);
+                        if (ok && (o[at].code > 100 || (o[at].code & 3)))
+                                ok = gpuasm_fail_span("eight scalar registers from a multiple of four are wanted", part[at]);
                 }
                 else if (kind == 'b' && off)
                         o[at].code = 125;
@@ -1112,6 +1135,13 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
                 w0 = 0xd8000000u | (p32)op->code << 18;
                 w1 = (o[1].code - 256) | (o[2].code - 256) << 8 | o[0].code << 24;
         }
+        else if (form == GPUASM_MIMG)
+        {
+                // MIMG: the dimension at bit 3 (1: 2D), dmask at 8, unorm at 12, the opcode at 18; the address, the data and the resource
+                // (in fours of scalar registers) in the second word.
+                w0 = 0xf0000000u | (p32)op->code << 18 | 1u << 12 | 0xfu << 8 | 1u << 3;
+                w1 = (o[1].code - 256) | o[0].code << 8 | (o[2].code >> 2) << 16;
+        }
         else if (form == GPUASM_GLD)
         {
                 w0 = 0xdc008000u | (p32)op->code << 18 | ((p32)offset & 0xfff);
@@ -1148,7 +1178,7 @@ static bool gpuasm_instruction(gpuasm_span mnemonic, gpuasm_span rest)
         if (!gpuasm_emit(w0))
                 return false;
         if (form == GPUASM_VOP3 || form == GPUASM_VOP3B || form == GPUASM_VOP3P || form == GPUASM_SMEM ||
-            form == GPUASM_DS || form == GPUASM_GLD || form == GPUASM_GST)
+            form == GPUASM_DS || form == GPUASM_GLD || form == GPUASM_GST || form == GPUASM_MIMG)
                 if (!gpuasm_emit(w1))
                         return false;
         if (literal && !gpuasm_emit(value))

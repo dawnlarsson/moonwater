@@ -25,7 +25,8 @@ enum gpu_model_form
         GM_VOP3P,
         GM_DS,
         GM_GLD,
-        GM_GST
+        GM_GST,
+        GM_MIMG
 };
 
 // gpuasm's table row for row (src/build/gpuasm.c, gpuasm_ops: the mnemonic, the encoding, the opcode there, the operands' shape), and
@@ -67,10 +68,11 @@ static const struct gpu_model_name
     {"v_mad_u64_u32", GM_VOP3B, 0x176, "d2n2s1s1s2"}, {"v_add_co_u32", GM_VOP3B, 0x30f, "d1n2s1s1"}, {"v_add_co_ci_u32", GM_VOP2C, 0x28, "d1m2s1v1k2"},
     {"v_pk_min_u16", GM_VOP3P, 0x0d, "d1s1s1"},    {"v_pk_sub_u16", GM_VOP3P, 0x0b, "d1s1s1"},    {"ds_bpermute_b32", GM_DS, 0xb3, "d1v1v1"},
     {"global_load_ubyte", GM_GLD, 0x08, "d1v1b2"}, {"global_load_dword", GM_GLD, 0x0c, "d1v1b2"}, {"global_load_dwordx4", GM_GLD, 0x0e, "d4v1b2"},
-    {"global_store_dword", GM_GST, 0x1c, "v1v1b2"}, {"global_store_dwordx4", GM_GST, 0x1e, "v1v4b2"}, {"s_nop", GM_SOPP, 0x00, ""},
+    {"global_store_dword", GM_GST, 0x1c, "v1v1b2"}, {"global_store_dwordx4", GM_GST, 0x1e, "v1v4b2"}, {"image_load", GM_MIMG, 0x00, "d4v2r8"},
+    {"s_nop", GM_SOPP, 0x00, ""},
 };
 #define GM_IDS (sizeof(gpu_model_names) / sizeof(gpu_model_names[0]))
-#define GM_NAMED 93 // the rows of gpuasm's table (the last row, s_nop, is the padding's)
+#define GM_NAMED 94 // the rows of gpuasm's table (the last row, s_nop, is the padding's)
 
 // gpuasm_clamps: the rows that take clamp.
 static const char *const gpu_model_clamps[] = {"v_cvt_f32_u32", "v_cvt_u32_f32", "v_rcp_f32", "v_sqrt_f32", "v_add_nc_u32", "v_sub_nc_u32", "v_subrev_nc_u32", "v_mul_u32_u24",
@@ -121,6 +123,8 @@ static b32 gpu_model_class(p8 letter, unsigned int size, p32 code, b32 packed, b
         case 'd':
         case 'v':
                 return vector;
+        case 'r':
+                return code + size - 1 <= 105 && !(code & 3);
         case 'p':
                 return size == 1 ? code <= 105 : size == 2 ? gpu_model_pair(code) : code + size - 1 <= 105 && !(code & 3);
         case 'm':
@@ -254,6 +258,14 @@ static int gpu_model_decode(const p32 address_to at, unsigned int room, positive
                         out->op[2] = (p16)gpu_model_field(w1, 16, 7), out->imm = (b32)(w0 << 20) >> 20;
                         fixed = (w0 & 0x0203f000u) | (p64)((w1 & 0x800000u) | (store ? w1 & 0xff000000u : w1 & 0xff00u)) << 32, want = 0x8000u; // global; no dlc, lds, glc, slc or nv
                 }
+                else if (head == 0x3c)
+                {
+                        // MIMG, as gpuasm writes image_load: 2D (dim 1 at bit 3), dmask 0xf, unorm, no glc, slc, dlc, tfe, lwe, a16, d16 or nsa;
+                        // the address, the data and the resource's first register over four in the second word, no sampler.
+                        id = gpu_model_find(GM_MIMG, (p16)gpu_model_field(w0, 18, 7));
+                        out->op[0] = (p16)(256 + gpu_model_field(w1, 8, 8)), out->op[1] = (p16)(256 + (w1 & 0xff)), out->op[2] = (p16)(gpu_model_field(w1, 16, 5) * 4);
+                        fixed = (w0 & ~(0x7fu << 18)) | (p64)(w1 & 0xffe00000u) << 32, want = 0xf0001f08u;
+                }
                 else
                         return gpu_model_unknown(w0, pc, "an encoding gpuasm does not make");
                 if (id < 0)
@@ -365,6 +377,7 @@ static unsigned int gpu_model_encode(const struct gpu_model_insn address_to in, 
                 break;
         case GM_VOP3P: out[0] = 0xcc000000u | code << 16 | clamp | 1u << 14 | ((p32)o[0] - 256), out[1] = o[1] | (p32)o[2] << 9 | 128u << 18 | 3u << 27, words = 2; break;
         case GM_DS: out[0] = 0xd8000000u | code << 18, out[1] = ((p32)o[1] - 256) | ((p32)o[2] - 256) << 8 | ((p32)o[0] - 256) << 24, words = 2; break;
+        case GM_MIMG: out[0] = 0xf0001f08u | code << 18, out[1] = ((p32)o[1] - 256) | ((p32)o[0] - 256) << 8 | ((p32)o[2] >> 2) << 16, words = 2; break;
         case GM_GLD:
                 out[0] = 0xdc008000u | code << 18 | ((p32)in->imm & 0xfff), out[1] = ((p32)o[1] - 256) | (p32)o[2] << 16 | ((p32)o[0] - 256) << 24, words = 2;
                 break;

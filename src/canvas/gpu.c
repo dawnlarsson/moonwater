@@ -221,16 +221,17 @@ static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover sta
 #include "../../artifacts/gpu_i915_gen9.inc"
 #endif
 
-// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024, in the order of the ops that run them (4 and 5 the clang scenes, 6 the scene by hand for a width and a pitch of a multiple of 4, 7 a picture scaled by tables).
+// Every kernel (rsrc1, rsrc2, then the code), put 256-aligned in the buffer from byte 1024, in the order of the ops that run them (4 and 5 the clang scenes, 6 the scene by hand for a width and a pitch of a multiple of 4, 7 a picture scaled by tables, 8 a picture read through the texture unit).
 struct gpu_code { const unsigned int *words; unsigned int size; };
 static const struct gpu_code gpu_kernels[] = {
     {gpu_k_copy, sizeof(gpu_k_copy)}, {gpu_k_fill, sizeof(gpu_k_fill)}, {gpu_k_tone, sizeof(gpu_k_tone)}, {gpu_k_glass, sizeof(gpu_k_glass)},
-    {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}, {gpu_k_scene, sizeof(gpu_k_scene)}, {gpu_k_scale, sizeof(gpu_k_scale)}};
+    {gpu_cp, sizeof(gpu_cp)}, {gpu_bx, sizeof(gpu_bx)}, {gpu_k_scene, sizeof(gpu_k_scene)}, {gpu_k_scale, sizeof(gpu_k_scale)},
+    {gpu_k_image, sizeof(gpu_k_image)}};
 #define GPU_KERNELS (sizeof(gpu_kernels) / sizeof(gpu_kernels[0]))
 #define GPU_KERNEL_OF(op) (op) // the table is in the order of the ops
 static unsigned int gpu_kernel_at[GPU_KERNELS];
 typedef char gpu_amd_slots_fit[GPU_SLOTS * GPU_AMD_PACKETS + 256 * GPU_SLOTS <= 1024 ? 1 : -1]; // amdgpu's packets and arguments end where its kernels begin
-typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + 256 * 8 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
+typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gpu_k_tone) + sizeof(gpu_k_glass) + sizeof(gpu_cp) + sizeof(gpu_bx) + sizeof(gpu_k_scene) + sizeof(gpu_k_scale) + sizeof(gpu_k_image) + 256 * 9 <= GPU_BASES_AT - 1024 ? 1 : -1]; // they end before the bases begin
 
 #define gpu_io(dir, n, size, a) (GPU_CONTROL(gpu.fd, GPU_IO(dir, n, size), a) == 0)
 static b32 gpu_wait_asked(p64 *wait);
@@ -1173,6 +1174,10 @@ static long gpu_dmabuf_probe_make(void)
 static void gpu_say_kernel(void);
 static b32 gpu_idle(void);
 static unsigned int gpu_test_hash(void);
+static b32 gpu_image_test(void);
+// The texture unit's read (op 8, gpu_image) drew its own test right at the last start (gpu_image_test): a client's tiled or compressed buffer may be offered
+// and read only while this holds (gpu_image_takes). Not a step of the card's: a card that fails it composes as before, and its clients are told of linear alone.
+static b32 gpu_image_ok;
 
 // The dma-buf route's own prerequisites (udmabuf, then PRIME), checked once the card is up: a card whose userptr works does not need them, and one whose userptr
 // is refused is served by them (the fallback). A step that fails is kept as gpu_req.route with its error; the card still composes.
@@ -1226,6 +1231,7 @@ static void gpu_stop(void)
         if (gpu.fd >= 0)
                 system_close(gpu.fd);
         memory_zero(&gpu, sizeof(gpu));
+        gpu_image_ok = 0;
         if (gpu_import_at_room)
                 gpu_imports_room(0); // the import table's arrays pointed at their reservation again (its room kept, empty)
         gpu.fd = -1, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_before.sequence = 0, gpu_slot = gpu_pending_slot = 0;
@@ -1537,6 +1543,7 @@ static b32 gpu_start(positive bytes)
                         gpu.broken = 1;
                         break;
                 }
+                gpu_image_ok = gpu_set == &gpu_amd_rdna2 && gpu_image_test();
                 if ((gpu_req.mask & (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME)) != (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME))
                         gpu_route_probe();
                 gpu_kmsg_drain();
@@ -1687,20 +1694,32 @@ static void gpu_maps_reset(void)
 
 // Addresses for bytes, none of a map's or an import's that is held: after the last ones handed out, or, where they would end past GPU_VA_END (a long
 // session's maps made and let go of), the first gap from the start; 0 for none.
-static positive gpu_place(positive bytes)
+static positive gpu_place_aligned(positive bytes, positive align)
 {
         positive at = gpu_map_next + bytes <= GPU_VA_END ? gpu_map_next : GPU_VA_MAPS;
 
+        at = (at + align - 1) & ~(align - 1);
         for (unsigned int i = 0; i < gpu_map_count + gpu.imports; i++)
         {
                 positive from = i < gpu_map_count ? gpu_maps[i].va : gpu.imported_va[i - gpu_map_count];
                 positive to = from + (i < gpu_map_count ? gpu_maps[i].bytes : gpu.imported_bytes[i - gpu_map_count]); // a forgotten map keeps its span
 
                 if (at < to && from < at + bytes)
-                        at = to, i = ~0u; // past it, and each held one looked at again
+                        at = (to + align - 1) & ~(align - 1), i = ~0u; // past it, and each held one looked at again
         }
         return at + bytes <= GPU_VA_END ? at : 0;
 }
+
+static positive gpu_place(positive bytes)
+{
+        return gpu_place_aligned(bytes, 4096);
+}
+
+// Where an import is placed: at a whole 64 KiB. A client's tiled buffer is laid out in blocks of 64 KiB whose pipe and bank bits are the address's own
+// (the swizzle XORs them in), so the texture unit reads one that starts inside a block at addresses outside it: an import at 0x2002c65000 (a page past a block)
+// was read at 0x2002c64000, a page below its first, the card faulted (TCP, a permission fault) and its ring was reset. Mesa gives such a buffer an address of
+// its block's alignment; so does this, for every import (a linear one loses nothing by it but address space).
+#define GPU_IMPORT_ALIGN 65536ull
 
 // The card lost its state (gpu_run's submit said so: a reset that took the context, or a VM that is gone, a resume that left it dead): every map and
 // import let go of (the kernel frees them with the descriptor), and the card started again as at the first start: a new context, the self-test. False if it does
@@ -2078,7 +2097,7 @@ static positive gpu_import_at(unsigned int handle, positive bytes)
         positive whole = (bytes + 4095) & ~4095ull, at;
 
         // Room for one more import: the table grown (the memory refuses, and the import is refused as a full table's was).
-        at = gpu_imports_room(gpu.imports + 1) ? gpu_place(whole) : 0;
+        at = gpu_imports_room(gpu.imports + 1) ? gpu_place_aligned(whole, GPU_IMPORT_ALIGN) : 0;
         if (!at || gpu_backend->bind(handle, at, whole, true) != 0)
                 return gpu_close(handle), 0;
         gpu.imported_va[gpu.imports] = at, gpu.imported_bytes[gpu.imports] = whole, gpu.imported_dead[gpu.imports] = 0, gpu.imported_holds[gpu.imports] = 1;
@@ -3198,6 +3217,85 @@ static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp
         return gpu_run();
 }
 
+/*
+        A picture the card reads through its texture unit (op 8): the resource's eight words desc (gpu_amd_image) at byte 128 of the slot's arguments, the
+        rectangle w by h from (x0, y0) of it written linear into dst, dp pixels a row (over: laid over what dst holds as a premultiplied picture is, the
+        scene's image over, instead of copied). The unit undoes the picture's tiling and its compression (DCC) as it does
+        for the card's own sampling, so a client that draws in the card's own layout is read as it drew. gpu_run waits, as gpu_blit's does.
+*/
+static b32 gpu_image(const unsigned int desc[8], unsigned int x0, unsigned int y0, positive dst, unsigned int dp, unsigned int w, unsigned int h, b32 over)
+{
+        struct gpu_args address_to a;
+
+        gpu_last_error = 0, gpu_end = GPU_END_NONE;
+        if (!w || !h || !gpu_idle() || gpu_set != &gpu_amd_rdna2)
+                return false;
+        gpu_slot_take(), a = GPU_ARGS;
+        a->s = 0, a->d = dst, a->g = 0, a->sp = 0, a->dp = dp, a->gp = 0, a->w = w, a->op = 8, a->v = over ? 1u : 0u, a->x0 = x0, a->y0 = y0, a->rows = h, a->tab = 0;
+        memory_copy((p8 address_to)a + 128, desc, 32);
+        return gpu_run();
+}
+
+/*
+        The texture unit's resource (gfx10.3's SQ_IMG_RSRC_WORD0 to 7) for a client's picture of four bytes a pixel, as Mesa makes one to sample a buffer it
+        imported with a modifier (ac_build_gfx10_texture_descriptor and ac_set_mutable_tex_desc_fields; the fields' places from Mesa's registers/gfx10-rsrc.json):
+        the picture's first byte at va (its plane 0), width the row's pitch in pixels (the unit makes the tiled layout's pitch of it, which is the client's
+        when it is a whole number of the 64 KiB block's 128 pixels: the caller holds it to that), height its rows; format 8_8_8_8 UNORM (56) with the
+        channels as they lie (ARGB8888's bytes B, G, R, A out as they are; ABGR8888's red and blue selected the other way, so both come out in ARGB's order),
+        type 2D (9), one level, PERF_MOD 4 and RESOURCE_LEVEL 1 as Mesa sets them on gfx10. The swizzle mode is the modifier's tile (Mesa's
+        ac_get_modifier_swizzle_mode: the modifier's TILE field is the hardware's SW_MODE). A modifier with DCC names its metadata at meta: the plane the
+        sampler reads, which is plane 2 (the pipe-aligned copy) when DCC_RETILE is set and plane 1 otherwise (Mesa's ac_surface_get_plane_offset), and it
+        sets COMPRESSION_EN, META_PIPE_ALIGNED (1 for the retiled copy; else the modifier's DCC_PIPE_ALIGN, as ac_modifier_fill_dcc_params makes it),
+        MAX_COMPRESSED_BLOCK_SIZE (the modifier's), MAX_UNCOMPRESSED_BLOCK_SIZE 256 bytes (2) and ALPHA_IS_ON_MSB (1: ac_alpha_is_on_msb is true for
+        B8G8R8A8 and R8G8B8A8 and their X forms on gfx10.3, whose component swaps are ALT and STD), and the metadata's address (bits 8 to 15 in word 6,
+        16 to 47 in word 7). The tile swizzle (a pipe and bank xor in the address's low bits) is 0: Mesa gives a shared buffer none.
+        Linear (modifier 0) is the resource of the self-test, the pitch then also in DEPTH (gfx10.3's custom pitch: Mesa writes it there for a linear 2D
+        image) and so the width a multiple of 64. False for what this does not read: a modifier not AMD's, a tile version not GFX9's or GFX10_RBPLUS's (an
+        RDNA1 card's GFX10 version is the card's own layout too, but its words here are unverified), a tile other than 64K_S (9), 64K_D (10), 64K_S_X (25)
+        or 64K_R_X (27), an address not of whole 256-byte blocks, a size past the unit's 16384.
+*/
+#define GPU_MOD_AMD 2ull
+static b32 gpu_amd_image(unsigned int desc[8], positive va, positive meta, unsigned int width, unsigned int height, p64 modifier, b32 swapped)
+{
+        unsigned int tile = 0, dcc = 0, retile = 0, piped = 0, block = 0;
+
+        if (!width || !height || width > 16384 || height > 16384 || (va & 255))
+                return false;
+        if (modifier)
+        {
+                unsigned int version = (unsigned int)(modifier & 0xff);
+
+                if (modifier >> 56 != GPU_MOD_AMD || (version != 1 && version != 3))
+                        return false;
+                tile = (unsigned int)(modifier >> 8 & 0x1f), dcc = (unsigned int)(modifier >> 13 & 1), retile = (unsigned int)(modifier >> 14 & 1);
+                piped = retile ? 1u : (unsigned int)(modifier >> 15 & 1), block = (unsigned int)(modifier >> 18 & 3);
+                if ((tile != 9 && tile != 10 && tile != 25 && tile != 27) || (width & 127) || (dcc && (!meta || (meta & 255) || block > 1)))
+                        return false;
+        }
+        else if (width & 63)
+                return false;
+        desc[0] = (unsigned int)(va >> 8);
+        desc[1] = (unsigned int)(va >> 40 & 0xff) | 56u << 20 | ((width - 1) & 3) << 30;
+        desc[2] = ((width - 1) >> 2 & 0xfff) | (height - 1) << 14 | 1u << 31;
+        desc[3] = (swapped ? 6u | 5u << 3 | 4u << 6 : 4u | 5u << 3 | 6u << 6) | 7u << 9 | tile << 20 | 9u << 28;
+        desc[4] = modifier ? 0 : width - 1;
+        desc[5] = 4u << 20;
+        desc[6] = dcc ? 2u << 15 | block << 17 | piped << 19 | 1u << 21 | 1u << 22 | (unsigned int)(meta >> 8 & 0xff) << 24 : 0;
+        desc[7] = dcc ? (unsigned int)(meta >> 16) : 0;
+        return true;
+}
+
+// Whether the card reads a client's picture of this modifier now: the texture unit's read drew its test at this start, and the modifier is one
+// gpu_amd_image makes a resource of (a GFX10_RBPLUS tile only on a card of GFX 10.3: the families GPU_FAMILIES lets in, or a Navi 2x of family 143).
+static b32 gpu_image_takes(p64 modifier)
+{
+        unsigned int d[8];
+
+        if (!gpu_image_ok || gpu.broken || gpu.fd < 0 || (modifier && (modifier & 0xff) == 3 && !GPU_FAMILIES(gpu.family) && !gpu_gfx103))
+                return false;
+        return gpu_amd_image(d, 0x100000, modifier >> 13 & 1 ? 0x200000 : 0, 1920, 1080, modifier, false);
+}
+
 // One small scene of every kind of op, made from nothing but numbers (a generator for the pictures, the covers and the glyph's bitmap), and the hash of its pixels,
 // 0 if the card did not finish it.
 /*
@@ -3410,6 +3508,38 @@ static unsigned int gpu_test_hash(void)
                 if (pic[i] != want[i])
                         ok = false;
         return ok ? hash : (hash ^ 2u);
+}
+
+
+/*
+        The texture unit's read held to what it must give (op 8 over a linear resource: the one layout the processor can make and check): 64 by 4 pixels of
+        numbers read whole, then a rectangle of them from (3, 1) with the red and blue selected the other way (an ABGR picture's resource), each pixel compared.
+        True when both are what they must be; the card's buffer's last megabyte is the self-test's, and the card is idle here (the self-test waited).
+*/
+static b32 gpu_image_test(void)
+{
+        positive base = gpu.size - (1 << 20), src_at = base + 131072, dst_at = base + 262144;
+        unsigned int address_to src = (unsigned int address_to)((p8 address_to)gpu.at + src_at), address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at);
+        unsigned int desc[8], seed = 777u;
+        b32 ok;
+
+        for (unsigned int i = 0; i < 64 * 4; i++)
+                seed = seed * 1664525u + 1013904223u, src[i] = seed;
+        memory_zero(dst, 64 * 4 * 4);
+        if (!gpu_amd_image(desc, GPU_VA + src_at, 0, 64, 4, 0, false) || !gpu_image(desc, 0, 0, GPU_VA + dst_at, 64, 64, 4, false))
+                return false;
+        ok = !memory_compare(dst, src, 64 * 4 * 4);
+        memory_zero(dst, 64 * 4 * 4);
+        if (!ok || !gpu_amd_image(desc, GPU_VA + src_at, 0, 64, 4, 0, true) || !gpu_image(desc, 3, 1, GPU_VA + dst_at, 64, 50, 3, false))
+                return false;
+        for (unsigned int y = 0; y < 3 && ok; y++)
+                for (unsigned int x = 0; x < 50 && ok; x++)
+                {
+                        unsigned int c = src[(y + 1) * 64 + x + 3];
+
+                        ok = dst[y * 64 + x] == ((c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16);
+                }
+        return ok;
 }
 
 #endif

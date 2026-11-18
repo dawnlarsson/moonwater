@@ -241,7 +241,8 @@ b32 main()
                 const unsigned int *words;
                 unsigned int size;
         } kernels[] = {{"copy", gpu_k_copy, sizeof(gpu_k_copy)}, {"fill", gpu_k_fill, sizeof(gpu_k_fill)},     {"tone", gpu_k_tone, sizeof(gpu_k_tone)},
-                       {"glass", gpu_k_glass, sizeof(gpu_k_glass)}, {"scene", gpu_k_scene, sizeof(gpu_k_scene)}, {"scale", gpu_k_scale, sizeof(gpu_k_scale)}};
+                       {"glass", gpu_k_glass, sizeof(gpu_k_glass)}, {"scene", gpu_k_scene, sizeof(gpu_k_scene)}, {"scale", gpu_k_scale, sizeof(gpu_k_scale)},
+                       {"image", gpu_k_image, sizeof(gpu_k_image)}};
         unsigned int hash, instructions = 0, stop = 0, total = 0;
         b32 same, all = true;
 
@@ -253,7 +254,7 @@ b32 main()
         same = same && sizeof(gpu_model_clamps) / sizeof(gpu_model_clamps[0]) == sizeof(gpuasm_clamps) / sizeof(gpuasm_clamps[0]);
         for (unsigned int k = 0; same && k < sizeof(gpuasm_clamps) / sizeof(gpuasm_clamps[0]); k++)
                 same = string_equals((string_address)gpu_model_clamps[k], gpuasm_clamps[k]);
-        check("gpu model: the decoder's table is gpuasm's, its 92 rows of mnemonic, encoding, opcode and operands and its clamps, and s_nop", same);
+        check("gpu model: the decoder's table is gpuasm's, its 94 rows of mnemonic, encoding, opcode and operands and its clamps, and s_nop", same);
 
         // Every instruction of every kernel gpuasm made (artifacts/gpu_kernels.inc) decodes, and is made again as the words it was.
         for (unsigned int k = 0; k < sizeof(kernels) / sizeof(kernels[0]); k++)
@@ -264,8 +265,8 @@ b32 main()
                         string_format(log, "  gpu model: %s stops at word %p: %s\n", kernels[k].name, (positive)stop, gpu_model.fault.text);
                 all = all && back && (kernels[k].words[0] & ~63u) == 0xe0ac0000u && kernels[k].words[1] == 0x18cu, total += instructions;
         }
-        string_format(log, "gpu model: %p instructions of the six kernels decoded and made again\n", (positive)total);
-        check("gpu model: every word of copy, fill, tone, glass, scene and scale decodes to an instruction of gpuasm's, and goes there and back unchanged", all && total > 1000);
+        string_format(log, "gpu model: %p instructions of the seven kernels decoded and made again\n", (positive)total);
+        check("gpu model: every word of copy, fill, tone, glass, scene, scale and image decodes to an instruction of gpuasm's, and goes there and back unchanged", all && total > 1000);
         {
                 static p8 text[1 << 20];
                 bipolar got = file_slurp((string_address) "test/gpu_stress.asm", text, sizeof(text));
@@ -624,6 +625,66 @@ b32 main()
                       !wrong && pixels > 0);
                 model_coverage("copy", 0, &ran, &of);
                 model_coverage("scale", 7, &ran, &of);
+        }
+
+        // The texture unit's read (op 8): gpu.c's own test of it (the one a card is held to at its start) passes on the model, every pixel of a picture read
+        // through a linear resource is the picture's, straight and with red and blue the other way; a tiled or compressed resource is not the model's to read.
+        {
+                positive from_at = GPU_DATA + (2 << 20), into_at = GPU_DATA + (3 << 20);
+                unsigned int address_to from = (unsigned int address_to)((p8 address_to)gpu.at + from_at), address_to into = (unsigned int address_to)((p8 address_to)gpu.at + into_at);
+                static unsigned int want[256 * 64];
+                unsigned int desc[8], seed = 0x2545f491u, wrong = 0, ran = 0, of = 0;
+                b32 tested, read, refused;
+
+                gpu_model_card_reset();
+                tested = gpu_image_test() && !gpu_model.fault.code;
+                check("gpu model: gpu_image_test (the texture unit's read a card is held to at its start) passes on the model card", tested);
+                gpu_model_card_reset();
+                for (unsigned int i = 0; i < 256 * 64; i++)
+                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, from[i] = seed, into[i] = 0x5a5a5a5au;
+                read = gpu_amd_image(desc, GPU_VA + from_at, 0, 256, 64, 0, false) && gpu_image(desc, 5, 7, GPU_VA + into_at, 200, 190, 50, false) && !gpu_model.fault.code;
+                for (unsigned int y = 0; read && y < 50; y++)
+                        for (unsigned int x = 0; x < 190; x++)
+                                wrong += into[y * 200 + x] != from[(y + 7) * 256 + x + 5];
+                read = read && gpu_amd_image(desc, GPU_VA + from_at, 0, 256, 64, 0, true) && gpu_image(desc, 60, 0, GPU_VA + into_at, 256, 196, 64, false) && !gpu_model.fault.code;
+                for (unsigned int y = 0; read && y < 64; y++)
+                        for (unsigned int x = 0; x < 196; x++)
+                        {
+                                unsigned int c = from[y * 256 + x + 60];
+
+                                wrong += into[y * 256 + x] != ((c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16);
+                        }
+                check("gpu model: the image kernel reads a linear picture's rectangle through its resource as it is, and as ABGR with red and blue the other way, pixel for pixel",
+                      read && !wrong);
+                // Laid over: each pixel the scene's image over of the picture's (premultiplied: the colours held under the alpha) on what was there.
+                for (unsigned int i = 0; i < 256 * 64; i++)
+                {
+                        unsigned int a = from[i] >> 24, c = from[i];
+
+                        from[i] = a << 24 | ((c >> 16 & 0xff) * a / 255) << 16 | ((c >> 8 & 0xff) * a / 255) << 8 | (c & 0xff) * a / 255;
+                        seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, into[i] = seed;
+                        want[i] = into[i];
+                }
+                gpu_model_card_reset();
+                read = gpu_amd_image(desc, GPU_VA + from_at, 0, 256, 64, 0, false) && gpu_image(desc, 9, 2, GPU_VA + into_at, 256, 230, 60, true) && !gpu_model.fault.code;
+                wrong = 0;
+                for (unsigned int y = 0; read && y < 64; y++)
+                        for (unsigned int x = 0; x < 256; x++)
+                                wrong += into[y * 256 + x] != (x < 230 && y < 60 ? gpu_test_overv(want[y * 256 + x], from[(y + 2) * 256 + x + 9]) : want[y * 256 + x]);
+                check("gpu model: laid over, the image kernel's pixel is the scene's image over (gpu_test_overv) of the picture on what the picture had, and nothing past the rectangle",
+                      read && !wrong);
+                model_coverage("image", 8, &ran, &of);
+                gpu_model_card_reset();
+                refused = gpu_amd_image(desc, GPU_VA + from_at, GPU_VA + into_at, 256, 64, 0x0200000000533b03ull, false);
+                refused = refused && (gpu_image(desc, 0, 0, GPU_VA + into_at, 256, 64, 4, false), gpu_model.fault.code == GPU_MODEL_UNMODELLED);
+                check("gpu model: a resource of a tiled, compressed picture (64K_R_X with DCC) is refused by the model as unmodelled, not read as linear", refused);
+                check("gpu model: gpu_amd_image refuses a modifier not AMD's, another tile, a pitch not of whole 64 KiB blocks, DCC with no metadata, and a block of 256 bytes",
+                      !gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0100000000000001ull, false) && !gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0200000000401503ull, false) &&
+                          !gpu_amd_image(desc, 0x100000, 0, 1900, 1080, 0x0200000000401b03ull, false) && !gpu_amd_image(desc, 0x100000, 0, 1920, 1080, 0x0200000000533b03ull, false) &&
+                          !gpu_amd_image(desc, 0x100000, 0x200000, 1920, 1080, 0x0200000000533b03ull | 2ull << 18, false) &&
+                          gpu_amd_image(desc, 0x100000, 0x234500, 1920, 1080, 0x0200000000537b03ull, false) && desc[6] >> 19 == (1u << 0 | 1u << 2 | 1u << 3 | 0x45u << 5) &&
+                          desc[7] == 0x23 && (desc[3] >> 20 & 0x1f) == 27);
+                gpu_model_card_reset();
         }
 
         // The scene kernels a compiler made (gpu_cp and gpu_bx, ops 4 and 5, for widths that are not a multiple of 4) are in forms gpuasm does not make: the model does not run them.
