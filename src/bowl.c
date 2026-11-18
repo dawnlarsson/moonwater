@@ -8305,6 +8305,7 @@ static b32 bowl_udev(positive count)
 #define BOWL_BUS_UPSTREAM BOWL_BUS_DIRECTORY "/root_bus_socket"
 #define BOWL_BUS_PIDFILE BOWL_BUS_DIRECTORY "/pid"
 #define BOWL_BUS_RELAY BOWL_BUS_DIRECTORY "/relay.pid"
+#define BOWL_BUS_ROOT BOWL_BUS_DIRECTORY "/bowl" // the bowl the daemon was started from (bowl_bus_accounts)
 #define BOWL_BUS_LOG BOWL_BUS_DIRECTORY "/services.log"
 #define BOWL_BUS_CONFIG BOWL_BUS_DIRECTORY "/bowl-system.conf"
 #define BOWL_BUS_SERVICES BOWL_BUS_DIRECTORY "/system-services"
@@ -8559,11 +8560,78 @@ static fn bowl_bus_services(string_address root)
         }
 }
 
-/* A package added to a bowl whose bus is running: its services are served. */
+/*
+        The accounts of the running bus, made again with what a package added to a bowl since it started. The bus refuses
+        a connection from an id it has no name for, and its passwd and group are every bowl's as they were when it started
+        (bowl_accounts_prepare): so a service installed later that drops to an account of its own was cut off at its first
+        message. Measured on box: polkit added to the steam bowl beside a running bus made its user polkitd (102), and
+        polkitd, started by the bus for UPower, said "Error getting system bus: The connection is closed" and ended, and
+        upowerd aborted ("failed to get polkit authority"); a client of uid 102 had no answer to Hello. The files the bus
+        has are its own (bound over its /etc, writable, the names it was given removed), reached through its root in /proc
+        and written over in place, with the bowl it was started from first, as it was then; the daemon reads them at each
+        connection. Accounts are only ever added, so the file only grows. A bus that left no name of its bowl (one started by an
+        older binary) is given the bowl the package came to first.
+*/
+static fn bowl_bus_accounts(string_address root)
+{
+        p8 text[BOWL_ACCOUNTS_ROOM * 2];
+        p8 chosen[BOWL_PATH_LIMIT];
+        p8 pid_text[32];
+        p8 path[BOWL_PATH_LIMIT];
+        p8 target[BOWL_PATH_LIMIT];
+        bipolar got = file_read_once_at(AT_FDCWD, BOWL_BUS_PIDFILE, pid_text, sizeof(pid_text) - 1);
+        bipolar named = file_read_once_at(AT_FDCWD, BOWL_BUS_ROOT, chosen, sizeof(chosen) - 1);
+        positive taken = 0;
+        positive pid;
+        positive used;
+
+        if (got <= 0)
+                return;
+        pid_text[got] = end;
+        if (named <= 0)
+        {
+                named = (bipolar)string_length(root);
+                if ((positive)named >= sizeof(chosen))
+                        return;
+                memory_copy(chosen, root, (positive)named);
+        }
+        chosen[named] = end;
+        pid = string_digits_max(pid_text, (positive)got, address_of taken);
+        if (!taken || pid < 2 || !bowl_named_root(chosen))
+                return;
+        bowl_accounts_made = 0;
+        bowl_accounts_prepare(chosen, true);
+        for (positive at = 0; at < array_count(bowl_accounts); at++)
+        {
+                bipolar handle;
+
+                if (!(bowl_accounts_made & (1 << at)) || !bowl_accounts_path(path, sizeof(path), bowl_accounts[at].name))
+                        continue;
+                got = file_read_once_at(AT_FDCWD, path, text, sizeof(text));
+                system_remove_at(AT_FDCWD, path, 0);
+                memory_copy(target, "/proc/", 6);
+                used = 6 + positive_into_string(target + 6, pid);
+                if (got <= 0 || used + 6 + string_length(bowl_accounts[at].path) >= sizeof(target))
+                        continue;
+                memory_copy(target + used, "/root", 5);
+                memory_copy(target + used + 5, bowl_accounts[at].path, string_length(bowl_accounts[at].path) + 1);
+                handle = system_open_at(AT_FDCWD, target, FILE_READ_WRITE | O_NOFOLLOW | O_CLOEXEC);
+                if (handle < 0)
+                        continue;
+                if (system_write_all((positive)handle, text, (positive)got) == got)
+                        system_call_2(syscall(ftruncate), (positive)handle, (positive)got);
+                system_close(handle);
+        }
+        bowl_accounts_made = 0;
+}
+
+/* A package added to a bowl whose bus is running: its services are served, as the accounts they run as. */
 static fn bowl_bus_refresh(string_address root)
 {
-        if (bowl_bus_running())
-                bowl_bus_services(root);
+        if (!bowl_bus_running())
+                return;
+        bowl_bus_services(root);
+        bowl_bus_accounts(root);
 }
 
 /* A directory emptied of its files, for the next run of the bus to fill. */
@@ -8945,6 +9013,9 @@ static b32 bowl_bus(positive count, string_address address_to arguments)
                 return bowl_refuse("cannot write the system bus's configuration\n");
 
         bowl_bus_clear(BOWL_BUS_SERVICES);
+        bowl_quiet = true;
+        bowl_write_bytes(BOWL_BUS_ROOT, chosen, string_length(chosen));
+        bowl_quiet = false;
         bowl_bus_services(chosen);
         if (file_walk_open(address_of walk, AT_FDCWD, BOWL_ROOT_DIRECTORY))
         {
@@ -9472,7 +9543,8 @@ static string_address bowl_chrome_names[] = {
         daemon, checked against Arch's file lists). Not listed, and not
         pulled: gamemode (an optional launch wrapper that starts a daemon of
         its own), PipeWire, NetworkManager, any systemd unit, any display
-        manager or seat daemon.
+        manager or seat daemon. The one daemon listed is UPower's, which
+        nothing starts but the system bus, when a client first asks it.
 
         The sizes are Arch's Installed Size of the packages that a bootstrap
         bowl does not already hold, 234 of the 345 in the closure, read from
@@ -9507,6 +9579,11 @@ static string_address bowl_steam_arch[] = {
     // Steam's launcher looks up helpers (zenity) with `which`, which Arch's base lacks,
     // and dbus provides /run/dbus/system_bus_socket for Chromium/CEF.
     "which", "zenity", "dbus",
+    // The power supplies, which Steam's CEF asks the system bus for (org.freedesktop.UPower GetDisplayDevice and
+    // EnumerateDevices, three calls a start, each a ServiceUnknown error in its log with no daemon to answer): upowerd
+    // reads /sys/class/power_supply, started by the bus when first asked (bowl bus), with polkit, which it asks for its
+    // authority before it answers. 11 MiB with libimobiledevice, which upower links.
+    "upower",
     null};
 
 // Nothing of the bowl's /usr/bin by name: the session is the way in.

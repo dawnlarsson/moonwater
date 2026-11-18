@@ -1528,6 +1528,11 @@ static fn steam_profile(void)
                       zenity && zenity < wrapped && zenity < run);
         }
         {
+                check("The steam profile has UPower, which Steam's CEF asks the system bus for, and dbus, the bus",
+                      chrome_has(part ? part->packages : null, "upower") &&
+                          chrome_has(part ? part->packages : null, "dbus"));
+        }
+        {
                 p8 arch_root[256];
                 p8 debian_root[256];
                 p8 bare_root[256];
