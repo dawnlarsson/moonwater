@@ -927,6 +927,17 @@ static void compositor_wl_close(void *context, long fd)
         system_close((int)fd);
 }
 
+// A chroma plane's mapping (an NV12 picture's plane 1, mapped for one draw) noted as a pool's is, so that a buffer cut under the read is zeros
+// (compositor_wl_bus) and not the compositor's end; the extent was checked first (compositor_wl_dmabuf_holds), so this is the second guard. False when
+// it cannot be noted: the mapping is let go of and the picture drawn without its colour, as one with no plane 1 is.
+static int compositor_wl_uv_noted(long got, unsigned long size)
+{
+        if (compositor_wl_map_note((unsigned long)got, size))
+                return 1;
+        compositor_call(syscall(munmap), (positive)got, (positive)size, 0, 0, 0, 0);
+        return 0;
+}
+
 /*
         A pool whose file was cut under the compositor: the signal handler of SIGBUS. The faulting address names the pool;
         zero pages are mapped over all of it, so the read that faulted goes on and finds zeros, and the pool is marked.
@@ -3836,7 +3847,7 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
                 {
                         long got = compositor_call(syscall(mmap), 0, (positive)uv_map_size, 1, 1, (positive)picture->plane_fd[1], 0);
 
-                        if (got >= 0 || got <= -4096)
+                        if ((got >= 0 || got <= -4096) && compositor_wl_uv_noted(got, uv_map_size))
                         {
                                 uv_map_got = got;
                                 uv_base = (const unsigned char *)got + picture->plane_offset[1];
@@ -3848,7 +3859,7 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
                 {
                         long got = compositor_call(syscall(mmap), 0, (positive)uv_map_size, 1, 1, (positive)picture->sync_fd, 0);
 
-                        if (got >= 0 || got <= -4096)
+                        if ((got >= 0 || got <= -4096) && compositor_wl_uv_noted(got, uv_map_size))
                         {
                                 uv_map_got = got;
                                 uv_base = (const unsigned char *)got + picture->plane_offset[1];
@@ -3931,7 +3942,7 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
                 }
         }
         if (uv_map_got)
-                compositor_call(syscall(munmap), (positive)uv_map_got, (positive)uv_map_size, 0, 0, 0, 0);
+                compositor_wl_map_forget((unsigned long)uv_map_got), compositor_call(syscall(munmap), (positive)uv_map_got, (positive)uv_map_size, 0, 0, 0, 0);
         if (compositor_wl_cut(picture->pixels))
                 return -1;
         compositor_wl_laid(row, dx0 + ox1, dy0 + oy1, dx0 + ox2, dy0 + oy2);
