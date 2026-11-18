@@ -1441,6 +1441,48 @@ static fn steam_profile(void)
         positive fallback = chrome_line(steam ? steam->session : null, "-ne 125");
         positive gl_probe = chrome_line(steam ? steam->session : null, "gl=software; for node in /sys/class/drm/renderD*;");
         positive sw_export = chrome_line(steam ? steam->session : null, "export LIBGL_ALWAYS_SOFTWARE=");
+        positive overlay_gl = chrome_line(steam ? steam->session : null,
+                                          "export LD_PRELOAD='/usr/local/$LIB/steam-overlay-gl.so'${LD_PRELOAD:+:$LD_PRELOAD}");
+        check("The session preloads steam-overlay-gl.so by $LIB (lib, lib32) ahead of what was preloaded, when the bowl holds it, before Steam starts",
+              overlay_gl && overlay_gl < wrapped && overlay_gl < run &&
+                  strstr(steam->session[overlay_gl - 1], "[ -r " BOWL_ROOT_PREFIX "arch/usr/local/lib/steam-overlay-gl.so ] && "));
+        {
+                const struct bowl_profile address_to chrome_profile = bowl_find_profile("chrome");
+
+                check("Only the steam profile holds the overlay library",
+                      steam && steam->overlay_gl && chrome_profile && !chrome_profile->overlay_gl);
+        }
+#if X64
+        {
+                // Each library is an ELF shared object of its machine (ET_DYN; i386 class 1 machine 3, x86_64 class 2
+                // machine 62) and names the four calls it stands in front of.
+                static const char *const hooks[] = {"glBegin", "glDrawArrays", "glDrawElements", "glPopAttrib"};
+                const p8 *const images[] = {bowl_steam_overlay_gl_32, bowl_steam_overlay_gl_64};
+                const positive sizes[] = {sizeof(bowl_steam_overlay_gl_32), sizeof(bowl_steam_overlay_gl_64)};
+                bool right = true;
+
+                for (positive which = 0; which < 2; which++)
+                {
+                        const p8 *image = images[which];
+
+                        right &= sizes[which] > 64 && image[0] == 0x7f && image[1] == 'E' && image[2] == 'L' &&
+                                 image[3] == 'F' && image[4] == which + 1 && image[16] == 3 &&
+                                 image[18] == (which ? 62 : 3) && image[19] == 0;
+                        for (positive hook = 0; hook < 4; hook++)
+                        {
+                                positive length = string_length(hooks[hook]);
+                                bool named = false;
+
+                                for (positive at = 0; !named && at + length + 1 <= sizes[which]; at++)
+                                        named = image[at + length] == 0 && !memory_compare(image + at, hooks[hook], length) &&
+                                                (at == 0 || image[at - 1] == 0);
+                                right &= named;
+                        }
+                }
+                check("The overlay libraries are i386 and x86_64 shared objects that stand in front of glBegin, glDrawArrays, glDrawElements and glPopAttrib",
+                      right);
+        }
+#endif
         check("The session looks for Canvas's socket before it starts anything, and says how to turn the shim on",
               socket == 1 && chrome_count(steam->session[0], "echo ") == 1);
         check("The session names the socket as an absolute path, and marks the launch as the person's",
