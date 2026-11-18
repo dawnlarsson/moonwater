@@ -255,6 +255,9 @@ struct wayland_picture
         long fragile;
         // Surface alpha/format transparency hint for the whole window (1 when window has alpha not covered by opaque_region).
         long transparent;
+        // Where the window is opaque all the same (transparent 1): the rectangle of its opaque region it is sure of, in the window's pixels
+        // (cut to the window, rounded inward), 0 wide where none is known. A toolkit's window with round corners is opaque but for them.
+        long opaque_x, opaque_y, opaque_w, opaque_h;
         // Buffer transform (wl_output_transform 0..7) and y_invert flag (zwp_linux_buffer_params_v1 flags & 1).
         long transform, y_invert;
         // Viewport source rectangle in 1/256 buffer-local surface pixels (src_width 0 for whole buffer) and scaled destination pixels (0 for none).
@@ -2860,6 +2863,29 @@ static inline int wayland_surface_is_opaque(const struct wayland_surface *s, con
 }
 
 /*
+        Where a window picture that is not opaque (transparent) is all the same: the rectangle of its surface's opaque region it is sure of
+        (wayland_region_add_exact's, inside the region) in the window's pixels (the window wx, wy, ww by wh in the surface's), rounded inward
+        and cut to the window, for a picture shown as it is (no viewport, no turn); none where it is not known. Chromium's is all of its window
+        but the rows of its round top corners (16, 18, 793 by 980 of a window at 16, 10, 793 by 988), which the compositor's corners cover:
+        the rest may go on an overlay plane unblended.
+*/
+static void wayland_picture_opaque(struct wayland_picture *picture, const struct wayland_surface *s, long transform, long scale120, long wx,
+                                   long wy, long ww, long wh)
+{
+        long x1, y1, x2, y2;
+
+        picture->opaque_x = picture->opaque_y = picture->opaque_w = picture->opaque_h = 0;
+        if (!picture->transparent || s->opaque.width <= 0 || s->opaque.height <= 0 || transform || s->source_width > 0 || s->dest_width > 0)
+                return;
+        x1 = wayland_max(wayland_pixels_ceil(s->opaque.x, scale120) - wx, 0);
+        y1 = wayland_max(wayland_pixels_ceil(s->opaque.y, scale120) - wy, 0);
+        x2 = wayland_min(wayland_pixels_floor(s->opaque.x + s->opaque.width, scale120) - wx, ww);
+        y2 = wayland_min(wayland_pixels_floor(s->opaque.y + s->opaque.height, scale120) - wy, wh);
+        if (x2 > x1 && y2 > y1)
+                picture->opaque_x = x1, picture->opaque_y = y1, picture->opaque_w = x2 - x1, picture->opaque_h = y2 - y1;
+}
+
+/*
         Whether a surface's viewport only crops its buffer: a source at the buffer's corner, of whole pixels at a buffer scale of one, shown at its
         own size (no destination, or the source's), the buffer neither turned nor flipped; tw and th the surface's size in pixels. Such a surface
         is its buffer's top left as it is: a buffer of the crop's size with the buffer's pitch (wayland_fill_picture_meta makes its picture so).
@@ -3287,6 +3313,8 @@ static long wayland_root_again(struct wayland_client *c, struct wayland_surface 
         picture.row_width = window->width;
         picture.row_height = window->height;
         picture.transparent = !wayland_surface_is_opaque(root, b);
+        wayland_picture_opaque(&picture, root, root->transform, root->scale120 > 0 ? root->scale120 : WAYLAND_UNIT, window->x, window->y,
+                               window->width, window->height);
         picture.fragile = root->xsurface != 0 && !c->pools[b->pool].dmabuf;
         picture.full = 1;
         picture.last = 1;
@@ -3970,27 +3998,34 @@ static void wayland_region_add_exact(struct wayland_region *r, struct wayland_re
         {
                 long rx2 = r->rect.x + r->rect.width, ry2 = r->rect.y + r->rect.height;
 
+                struct wayland_rect joined = r->rect;
+
                 if (nx <= r->rect.x && ny <= r->rect.y && nx2 >= rx2 && ny2 >= ry2)
                         r->rect = add;
                 else if (r->rect.x <= nx && r->rect.y <= ny && rx2 >= nx2 && ry2 >= ny2)
                 {
                 }
-                else if (ny <= r->rect.y && ny2 >= ry2 && nx <= rx2 && nx2 >= r->rect.x)
+                else
                 {
-                        long x1 = wayland_min(r->rect.x, nx), x2 = wayland_max(rx2, nx2);
-
-                        r->rect.x = x1;
-                        r->rect.width = x2 - x1;
+                        // The two side by side over the old one's height, or one over the other across its width, when the new one spans
+                        // that and they meet: then the largest of the old, the new and that. Joined whenever they could be, a band of
+                        // round corners' rows (Chromium's opaque region: 24, 10, 777 by 8, then 16, 18, 793 by 980) narrowed the body
+                        // under it to the band's width, and the window was taken as not opaque at its sides.
+                        if (ny <= r->rect.y && ny2 >= ry2 && nx <= rx2 && nx2 >= r->rect.x)
+                        {
+                                joined.x = wayland_min(r->rect.x, nx);
+                                joined.width = wayland_max(rx2, nx2) - joined.x;
+                        }
+                        else if (nx <= r->rect.x && nx2 >= rx2 && ny <= ry2 && ny2 >= r->rect.y)
+                        {
+                                joined.y = wayland_min(r->rect.y, ny);
+                                joined.height = wayland_max(ry2, ny2) - joined.y;
+                        }
+                        if (nw * nh > joined.width * joined.height)
+                                r->rect = add;
+                        else
+                                r->rect = joined;
                 }
-                else if (nx <= r->rect.x && nx2 >= rx2 && ny <= ry2 && ny2 >= r->rect.y)
-                {
-                        long y1 = wayland_min(r->rect.y, ny), y2 = wayland_max(ry2, ny2);
-
-                        r->rect.y = y1;
-                        r->rect.height = y2 - y1;
-                }
-                else if (nw * nh > r->rect.width * r->rect.height)
-                        r->rect = add;
         }
 }
 
@@ -4412,6 +4447,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         picture.row_height = wh;
         picture.blend = 0;
         picture.transparent = !wayland_surface_is_opaque_at(s, b, s->pending_scale, s->pending_transform);
+        wayland_picture_opaque(&picture, s, s->pending_transform, scale120, wx, wy, ww, wh);
         // An X window's shm buffer is its server's, which may draw on in a pixmap it has committed; a glamor dma-buf pixmap is double-buffered
         // and synchronized by fences/syncobjs.
         picture.fragile = s->xsurface != 0 && !p->dmabuf;

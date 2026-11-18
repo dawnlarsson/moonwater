@@ -62,6 +62,7 @@ struct fake_row
         int used, kind, parent;
         long x, y, width, height;
         long picture_w, picture_h, pictures;
+        long transparent, opaque[4]; // the last picture's: not opaque, and where it is all the same (x, y, width, height in the window)
         long states, closing, width_asked, height_asked, scale;
         char title[128];
         unsigned pixels[FAKE_W * FAKE_H];
@@ -239,6 +240,8 @@ static int fake_row_picture(void *context, int row, const struct wayland_picture
         r->height = picture->row_height;
         r->picture_w = picture->row_width;
         r->picture_h = picture->row_height;
+        r->transparent = picture->transparent;
+        r->opaque[0] = picture->opaque_x, r->opaque[1] = picture->opaque_y, r->opaque[2] = picture->opaque_w, r->opaque[3] = picture->opaque_h;
         if (picture->pixels)
         {
                 long count = picture->full || !picture->damages ? 1 : picture->damages;
@@ -5903,6 +5906,64 @@ static unsigned long wl_buffer_pattern(struct session *t, long width, long heigh
 #define PATTERN(x, y) (0xff000000u | (unsigned)((y) << 8) | (unsigned)(x))
 
 /* The window is its geometry: the margin a toolkit draws round it is not shown, and what is pointed at and placed by is the geometry's. */
+/*
+        A window opaque but for its round top corners (Chromium's opaque region: a band of the top rows less the corners, then the rest of the
+        window under it, of a buffer with a shadow round it): the picture is not opaque, and the host is told the rectangle of it that is, in the
+        window's pixels, so it may show that part unblended (an overlay plane). The region's rectangle is the larger of the two and not the band
+        joined to the body at the band's width, which narrowed it at both sides; a region of the buffer outside the window is cut to the window.
+*/
+static void test_opaque_rect(void)
+{
+        struct session s;
+        struct wlc *c;
+        unsigned long region, buffer;
+
+        wl_reset();
+        wayland_start(&fake_host);
+        session_open(&s);
+        session_window(&s, 0xff000000);
+        c = s.c;
+        region = wlc_id(c, WLI_wl_region, 1);
+        wlc_send(c, s.xdg, WLQ_xdg_surface_set_window_geometry, 4L, 2L, 32L, 26L);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_region, region);
+        wlc_send(c, region, WLQ_wl_region_add, 6L, 2L, 28L, 2L);
+        wlc_send(c, region, WLQ_wl_region_add, 4L, 4L, 32L, 24L);
+        wlc_send(c, s.surface, WLQ_wl_surface_set_opaque_region, region);
+        wlc_send(c, region, WLQ_wl_region_destroy);
+        buffer = wl_buffer_of(&s, 40, 30, 0xff336699u, WLN_wl_shm_format_argb8888);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 40L, 30L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(c->errors == 0 && fake.row[0].picture_w == 32 && fake.row[0].picture_h == 26 && fake.row[0].transparent,
+                "a window with round top corners outside its opaque region is not opaque (%ldx%ld, %ld)", fake.row[0].picture_w,
+                fake.row[0].picture_h, fake.row[0].transparent);
+        WLCHECK(fake.row[0].opaque[0] == 0 && fake.row[0].opaque[1] == 2 && fake.row[0].opaque[2] == 32 && fake.row[0].opaque[3] == 24,
+                "and is told opaque below its corners' rows, all its width, in its own pixels (%ld %ld %ld %ld)", fake.row[0].opaque[0],
+                fake.row[0].opaque[1], fake.row[0].opaque[2], fake.row[0].opaque[3]);
+
+        /* a region past the window (over its shadow) is cut to it; a window all opaque is told no rectangle */
+        region = wlc_id(c, WLI_wl_region, 1);
+        wlc_send(c, s.compositor, WLQ_wl_compositor_create_region, region);
+        wlc_send(c, region, WLQ_wl_region_add, 0L, 6L, 40L, 10L);
+        wlc_send(c, s.surface, WLQ_wl_surface_set_opaque_region, region);
+        wlc_send(c, region, WLQ_wl_region_destroy);
+        buffer = wl_buffer_of(&s, 40, 30, 0xff336699u, WLN_wl_shm_format_argb8888);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 40L, 30L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(fake.row[0].transparent && fake.row[0].opaque[0] == 0 && fake.row[0].opaque[1] == 4 && fake.row[0].opaque[2] == 32 &&
+                    fake.row[0].opaque[3] == 10,
+                "an opaque region over the shadow is cut to the window (%ld %ld %ld %ld)", fake.row[0].opaque[0], fake.row[0].opaque[1],
+                fake.row[0].opaque[2], fake.row[0].opaque[3]);
+        buffer = wl_buffer_of(&s, 40, 30, 0xff336699u, WLN_wl_shm_format_xrgb8888);
+        wlc_send(c, s.surface, WLQ_wl_surface_attach, buffer, 0L, 0L);
+        wlc_send(c, s.surface, WLQ_wl_surface_damage_buffer, 0L, 0L, 40L, 30L);
+        wlc_send(c, s.surface, WLQ_wl_surface_commit);
+        WLCHECK(!fake.row[0].transparent && fake.row[0].opaque[2] == 0, "an opaque window is told no rectangle (%ld, %ld)", fake.row[0].transparent,
+                fake.row[0].opaque[2]);
+        wlc_end(c);
+}
+
 static void test_geometry(void)
 {
         struct session s;
@@ -9222,6 +9283,7 @@ int main(int argc, char **argv)
         test_subsurface_count();
         test_tree_cost();
         test_geometry();
+        test_opaque_rect();
         test_cursor();
         test_cursor_picture();
         test_layers();
