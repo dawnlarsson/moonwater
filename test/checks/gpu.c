@@ -111,6 +111,10 @@ static void gpu_i915_set_rows(void)
                       gpu_i915_fill_split(0, 256, 128, &s) == -1);
                 check("gpu i915: a pitch that is not a multiple of 16 is refused",
                       gpu_i915_fill_split(0, 100, 510, &s) == -1);
+                check("gpu i915: a pitch that is a multiple of 16 bytes but not 64 is refused (the card loses rows at 80, 96, 112 bytes)",
+                      gpu_i915_fill_split(0, 100, 80, &s) == -1 && gpu_i915_fill_split(0, 100, 96, &s) == -1 && gpu_i915_fill_split(0, 100, 112, &s) == -1);
+                check("gpu i915: a pitch of 64 bytes (and of 128) is taken",
+                      gpu_i915_fill_split(0, 64, 64, &s) == 0 && gpu_i915_fill_split(0, 64, 128, &s) == 0);
                 check("gpu i915: a span under 16 bytes is all edge: nothing for the GPU, the whole span to the processor",
                       gpu_i915_fill_split(16, 10, 512, &s) == 0 && s.span == 0 && s.head == 10 && s.tail == 0);
                 check("gpu i915: a span under 16 bytes that crosses a 16-byte boundary is all edge too",
@@ -207,6 +211,8 @@ static void gpu_i915_set_rows(void)
                         check("gpu i915: a copy whose source pitch holds less than the row is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->sp = 21;
                         check("gpu i915: a copy whose source pitch is not whole 16-byte groups is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->sp = 20;
+                        check("gpu i915: a copy whose source pitch is 80 bytes (16 but not 64) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->sp = 128, a->s = 0;
                         check("gpu i915: a copy whose source is not in the card's buffer is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->op = 2, a->v = 0x80402010u;

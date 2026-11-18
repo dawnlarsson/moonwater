@@ -2234,7 +2234,7 @@ static int gpu_i915_fill_split(positive dst, unsigned int span, unsigned int pit
 {
         positive d32, stop, e16;
 
-        if (!span || pitch < span || (pitch & 15))
+        if (!span || pitch < span || (pitch & 63))
                 return -1;
         d32 = (dst + 31) & ~(positive)31;
         stop = dst + span;
@@ -2368,11 +2368,11 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         // A copy's source: the row's bytes read from a 32-byte-aligned base, at a pitch that holds the row in whole 16-byte groups
         // (the same rules as the destination: a block is read and written as one group), inside the 14-bit surface fields.
         spitch = 4u * a->sp;
-        if ((a->op == 0 || a->op == 3) && (a->s < GPU_VA || (a->s & 31) || !a->sp || a->sp > 65536u || spitch < span || (spitch & 15)))
+        if ((a->op == 0 || a->op == 3) && (a->s < GPU_VA || (a->s & 31) || !a->sp || a->sp > 65536u || spitch < span || (spitch & 63)))
                 return 0;
         // A glass's ground: the same rules as its picture (a 32-byte-aligned base, a pitch that holds the row in whole 16-byte groups).
         gpitch = 4u * a->gp;
-        if (a->op == 3 && (a->g < GPU_VA || (a->g & 31) || !a->gp || a->gp > 65536u || gpitch < span || (gpitch & 15)))
+        if (a->op == 3 && (a->g < GPU_VA || (a->g & 31) || !a->gp || a->gp > 65536u || gpitch < span || (gpitch & 63)))
                 return 0;
         xg = s.span / 16;
         sbase = (unsigned int)(job->state - GPU_VA);
@@ -2466,7 +2466,7 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
         if (room < 56 || !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63))
                 return 0;
         if (!a->count || a->count > 16384u || a->ops < GPU_VA || (a->ops & 63) || !a->sp || (a->sp & 3) || a->sp > 4096u || !a->gp || a->gp > 16384u ||
-            !a->dp || a->dp > 65536u || (a->dp & 3) || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA)
+            !a->dp || a->dp > 65536u || (a->dp & 15) || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA)
                 return 0;
         // The records (8 words, 32 bytes each) are read through the CPU mapping of the buffer: they must lie inside it.
         if ((a->ops - GPU_VA) + 32ull * a->count > gpu.size)
