@@ -1289,9 +1289,15 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         driver powers the graphics block off when it is idle (GFXOFF) and runs it at 600 MHz, and the first job after a pause pays for its waking, in
         the client's drawing of the frame that answers a key as much as in the present that composes it. So a key, a move, a wheel or a finger holds the
         card at compositor_gpu_clocks.level (gpu_clocks: the driver's hold, on a context of its own, which the kernel lets go of if the compositor dies)
-        until COMPOSITOR_GPU_CLOCKS_HOLD after the last of them; at rest the driver chooses again, as before. The level is
-        AMDGPU_CTX_STABLE_PSTATE_MIN_SCLK: the block kept awake at its lowest clock, which at rest measured as the driver's own choice does (10.6 W
-        against 10.7 W for the package), where the peak clock cost 14 W more. The driver takes milliseconds to answer, so the asks go to a thread
+        until COMPOSITOR_GPU_CLOCKS_HOLD after the last of them; at rest the driver chooses again, as before. The level held is none
+        (COMPOSITOR_GPU_CLOCKS_LEVEL 0): input wakes the card's idle clock with a tiny job (gpu_wake, only when it has been idle a while) and the
+        driver chooses the clock itself, as it does at rest. The level was AMDGPU_CTX_STABLE_PSTATE_MIN_SCLK, the block kept awake at its lowest
+        clock (min = max = the lowest, smu_v13_0_5): the level is the device's, so every client's drawing was held there too, and while someone
+        plays input never stops. Half-Life 2 on box (d2_coast_01, the harbor, a live uinput walk with turns, strafes and shots, team tools/gamerig.sh)
+        ran at 66.8 fps (frame p99 34.7 ms, sclk 600 MHz for 25 of 46 s) with mouse-to-photon 112 ms p50, 135 p99; with no hold 113.9 fps (p99
+        11.1 ms, 2200 MHz all the run) and 38.0 ms p50, 45.8 p99; held at the peak (AMDGPU_CTX_STABLE_PSTATE_PEAK) 114.5 fps and 35.0 ms, for 14 W
+        more at the desktop. The menu, which reads no input, never showed it (175 fps). The hold stays for the owner's experiments (a level
+        compiled in), and the driver takes milliseconds to answer, so the asks go to a thread
         of their own (compositor_gpu_clocks_run, started at the first; with none to be had, asked in place), and the loop only says what it wants:
         once the turn's input is forwarded and written to the clients' sockets (compositor_gpu_input_turn), so that nothing of it ever waits, and
         the block wakes while the client reads the input; the hold ends at its time (compositor_gpu_clocks_at, compositor_gpu_clocks_tick). Where the
@@ -1300,7 +1306,7 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         dead, or the owner's file /run/moonwater/gpu-clocks-off (looked for at the start).
 */
 #define COMPOSITOR_GPU_CLOCKS_HOLD 500000000ull
-#define COMPOSITOR_GPU_CLOCKS_LEVEL 2u
+#define COMPOSITOR_GPU_CLOCKS_LEVEL 0u
 static struct
 {
         unsigned int level;  // the level input holds (0: none, the owner's file)

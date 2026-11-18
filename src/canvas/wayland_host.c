@@ -2802,18 +2802,19 @@ static void compositor_wl_straight_pays(int keep)
 }
 
 /*
-        The row shown straight read from the table by the processor (a film of the screen): the straight picture read into the buffer it shows
-        and waited for, owed or not. The screen is the client's buffer, the last one taken: a commit read into the table is laid into the buffer
-        the row does not show yet, and the film read the one before it there (an older frame, or a half laid one, at a return to straight).
+        The row shown straight read from the table by the processor (a film of the screen): rows y0 to y1 of its straight picture (the window's own
+        rows, the film's rectangle) read into the buffer it shows and waited for, owed or not, and nothing else of it: the screen is the client's
+        buffer, the last one taken, and a commit read into the table goes into the buffer the row does not show yet, so the film read the one
+        before it there (an older frame, or a half laid one, at a return to straight). The rest stays as owed as it was, read whole when a present
+        composes it. A film of a small rectangle (the game rig's patch) so reads that patch and no more: a whole picture a frame was the card's own
+        work a frame on a 2-CU iGPU a game already holds at 100 percent.
 */
-static void compositor_wl_straight_settle(int row)
+static void compositor_wl_straight_settle(int row, long y0, long y1)
 {
-        if (compositor_straight(row))
-        {
-                compositor_wl.straight[row].owed = 1;
-                compositor_wl_straight_pay(row);
+        if (!compositor_straight(row))
+                return;
+        if (compositor_wl_straight_read(row, y0, y1))
                 compositor_wl_tiled_settle();
-        }
 }
 
 /*

@@ -2729,7 +2729,10 @@ static void gpu_clocks_rows(void)
         gpu_kernel.on = 1;
         gpu.fd = GPU_KERNEL_FD, gpu.ctx = 1, gpu.at = 0, gpu_last_job = 0; // no wake job can run (gpu_wake wants a buffer and a job before it)
         compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.dead = 0;
-        compositor_gpu_clocks.level = COMPOSITOR_GPU_CLOCKS_LEVEL, compositor_gpu_clocks.held = 0, compositor_gpu_clocks.refused = 0, compositor_gpu_clocks.input = 0;
+        // The default holds no level (the driver chooses the clock; a held minimum capped a game at 600 MHz): the rows below are the hold's mechanism,
+        // as with a level compiled in, the minimum-clock one.
+        check("gpu clocks: by default input holds no level of the card's clock", COMPOSITOR_GPU_CLOCKS_LEVEL == 0);
+        compositor_gpu_clocks.level = 2u, compositor_gpu_clocks.held = 0, compositor_gpu_clocks.refused = 0, compositor_gpu_clocks.input = 0;
         compositor_gpu_clocks.inline_asks = 1; // asked in place: the rows read each answer at once (the thread answers the same words)
 
         compositor_gpu_input_turn(t);

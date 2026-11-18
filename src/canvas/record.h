@@ -707,7 +707,7 @@ static void compositor_film_plane(unsigned int *out, int x, int y, int w, int h)
         x2 = compositor.plane_rect[2] < x + w ? compositor.plane_rect[2] : x + w, y2 = compositor.plane_rect[3] < y + h ? compositor.plane_rect[3] : y + h;
         if (x2 <= x1 || y2 <= y1)
                 return;
-        compositor_wl_straight_settle(row); // a straight picture is in the table once read there
+        compositor_wl_straight_settle(row, y1 - compositor.y[row], y2 - compositor.y[row]); // the filmed rows of a straight picture, read into the table
         from = compositor_lent_pixels(row, &pitch);
         if (!from)
         {
@@ -781,7 +781,7 @@ static void compositor_film_frame(unsigned long long when)
                         unsigned long lent_pitch = 0;
                         const unsigned int *lent;
 
-                        compositor_wl_straight_settle(direct); // a straight picture is in the table once read there
+                        compositor_wl_straight_settle(direct, y, y + h); // the filmed rows of a straight picture, read into the table
                         lent = compositor_lent_pixels(direct, &lent_pitch);
 
                         if (lent)
