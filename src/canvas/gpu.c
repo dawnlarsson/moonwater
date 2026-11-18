@@ -711,11 +711,8 @@ _Static_assert(sizeof(struct gpu_i915_param) == 16 && sizeof(struct gpu_i915_cre
 #define GPU_I915_HANDLES (GPU_IMPORTS_MOST + 64 + 1024) // the table of bound ranges, by handle (the kernel gives the lowest free one: as many as the buffers held)
 
 // The kernels' sets by family: none yet. A family's set is written in its own assembly and added here as {first family, last family, &set}; until then every
-// i915 card stops at GPU_REQ_FAMILY and the processor draws. A check names sets of its own (GPU_I915_SETS) to run the row without one.
-#ifndef GPU_I915_SETS
-#define GPU_I915_SETS
-#endif
-static const struct { unsigned int from, to; const struct gpu_set *set; } gpu_i915_sets[] = {GPU_I915_SETS{0, 0, 0}};
+// i915 card stops at GPU_REQ_FAMILY and the processor draws.
+static const struct { unsigned int from, to; const struct gpu_set *set; } gpu_i915_sets[] = {{0, 0, 0}};
 
 /*
         The chips, by the PCI device id CHIPSET_ID answers (the kernel's include/drm/intel/pciids.h, the tables intel-probe classified with): family is the
@@ -2291,6 +2288,15 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
         memory_zero(words + n, (56 - n) * sizeof words[0]);
 }
 
+// A job's batch arguments, read through the state's mapping (their card address is the state's plus their distance from it), when the batch can be
+// written: room for its 56 words, and the state and the code on the card (the code 64-byte aligned). Null otherwise: the processor draws the job.
+static const struct gpu_args address_to gpu_i915_args(const struct gpu_job *job, unsigned int room)
+{
+        if (room < 56 || !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63))
+                return 0;
+        return (const struct gpu_args address_to)((p8 address_to)job->state_at + (long)(job->arguments - job->state));
+}
+
 /*
         The Intel scale (op 7, the kernel gpu_i915_scale): d[y * dp + x] = s[ytab[y] * sp + xtab[x]] for x below w and y below the rows, 4 bytes a pixel,
         nearest, the tables the processor made at a->g (w entries of xtab, then the rows' ytab, each the source's index). Four pixels a thread, the walker
@@ -2303,14 +2309,11 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
 */
 static unsigned int gpu_i915_scale_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
-        const long delta = (long)(job->arguments - job->state);
-        const struct gpu_args address_to a = (const struct gpu_args address_to)((p8 address_to)job->state_at + delta);
+        const struct gpu_args address_to a = gpu_i915_args(job, room);
         p8 address_to state = (p8 address_to)job->state_at;
         unsigned int sbase, xg;
 
-        if (room < 56 || !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63))
-                return 0;
-        if (!a->w || a->w > 65535u || !a->rows || a->rows > 16384u || !a->sp || a->sp > 65535u || !a->dp || a->dp > 65535u || (a->dp & 15) || a->dp < a->w ||
+        if (!a || !a->w || a->w > 65535u || !a->rows || a->rows > 16384u || !a->sp || a->sp > 65535u || !a->dp || a->dp > 65535u || (a->dp & 15) || a->dp < a->w ||
             (a->sp & 15) || (positive)a->dp * a->rows > (1ull << 26) || a->s < GPU_VA || a->d < GPU_VA || a->g < GPU_VA || (a->s & 15) || (a->d & 15) || (a->g & 15))
                 return 0;
         xg = (a->w + 3) / 4;
@@ -2341,14 +2344,12 @@ static unsigned int gpu_i915_scale_batch(const struct gpu_job *job, unsigned int
 // rows 16384, a pitch of 65536 pixels), a destination or bins not aligned as above.
 static unsigned int gpu_i915_cp_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
-        const long delta = (long)(job->arguments - job->state);
-        const struct gpu_args address_to a = (const struct gpu_args address_to)((p8 address_to)job->state_at + delta);
+        const struct gpu_args address_to a = gpu_i915_args(job, room);
         p8 address_to state = (p8 address_to)job->state_at;
         unsigned int blocks, cw, ch, sbase, pitch;
 
-        if (a->x0 || a->y0 || !a->w || !a->gp || a->w > 4096u || a->gp > 16384u || !a->dp || a->dp > 65536u || (a->dp & 15) || a->dp < a->w ||
-            room < 56 || !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63) || a->d < GPU_VA || (a->d & 31) ||
-            a->g < GPU_VA || (a->g & 63))
+        if (!a || a->x0 || a->y0 || !a->w || !a->gp || a->w > 4096u || a->gp > 16384u || !a->dp || a->dp > 65536u || (a->dp & 15) || a->dp < a->w ||
+            a->d < GPU_VA || (a->d & 31) || a->g < GPU_VA || (a->g & 63))
                 return 0;
         blocks = (a->w + 3) >> 2, cw = (a->w + 63) >> 6, ch = (a->gp + 63) >> 6;
         pitch = 4u * a->dp;
@@ -2382,15 +2383,12 @@ static unsigned int gpu_i915_cp_batch(const struct gpu_job *job, unsigned int ad
 */
 static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
-        const long delta = (long)(job->arguments - job->state);
-        const struct gpu_args address_to a = (const struct gpu_args address_to)((p8 address_to)job->state_at + delta);
+        const struct gpu_args address_to a = gpu_i915_args(job, room);
         p8 address_to state = (p8 address_to)job->state_at;
         unsigned int sbase, xg, rows, px0, py0, px1, py1, i;
         positive base, pitch;
 
-        if (room < 56 || !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63))
-                return 0;
-        if (!a->count || a->count > 16384u || a->ops < GPU_VA || (a->ops & 63) || !a->sp || (a->sp & 3) || a->sp > 4096u || !a->gp || a->gp > 16384u ||
+        if (!a || !a->count || a->count > 16384u || a->ops < GPU_VA || (a->ops & 63) || !a->sp || (a->sp & 3) || a->sp > 4096u || !a->gp || a->gp > 16384u ||
             !a->dp || a->dp > 65536u || (a->dp & 15) || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA)
                 return 0;
         // The records (8 words, 32 bytes each) are read through the CPU mapping of the buffer: they must lie inside it.
@@ -2398,7 +2396,7 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
                 return 0;
         px0 = a->x0 << 6, py0 = a->y0 << 2;
         px1 = px0 + a->w < a->sp ? px0 + a->w : a->sp;
-        py1 = py0 + 4 * a->rows < a->gp ? py0 + 4 * a->rows : a->gp;
+        py1 = (positive)py0 + 4 * (positive)a->rows < a->gp ? py0 + 4 * a->rows : a->gp; // in 64 bits: 4 * a->rows wraps at 2^30 rows
         if (px0 >= px1 || py0 >= py1 || ((px1 - px0) & 3))
                 return 0;
         base = a->d + 4 * ((positive)py0 * a->dp + px0);
@@ -2437,31 +2435,32 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
 // The batch for one job, by op: 0 copy, 1 fill, 2 tone and 3 glass take the byte surface (the whole rows, or refused: the processor draws a
 // refused job), 4 the scene's cp, 6 the scene and 7 the scale have encoders of their own (above). The state region holds the binding table (entry 0
 // the destination's surface state, entry 1 the source's, entry 2 the glass ground's), the surface states, the interface descriptor and at 192 the colour
-// dword (or, for a glass, the grain's origin); the card's buffer at GPU_VA is the base of every pointer. Writes words[0..56) and job->state_at[0..320):
+// dword (or, for a glass, the grain's origin); the card's buffer at GPU_VA is the base of every pointer. Writes words[0..56) and job->state_at[0..360):
 // the state's room. 0 words is a refusal.
 static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
         // The arguments are in the same mapped buffer as the state: their CPU address is the state's, plus their card distance from it.
-        const long delta = (long)(job->arguments - job->state);
-        const struct gpu_args address_to a = (const struct gpu_args address_to)((p8 address_to)job->state_at + delta);
+        const struct gpu_args address_to a = gpu_i915_args(job, room);
         p8 address_to state = (p8 address_to)job->state_at;
         struct gpu_i915_split s;
         unsigned int xg, sbase, pitch, span, spitch, gpitch;
 
+        if (!a)
+                return 0;
         if (a->op == 4)
                 return gpu_i915_cp_batch(job, words, room);
         if (a->op == 6)
                 return gpu_i915_scene_batch(job, words, room);
         if (a->op == 7)
                 return gpu_i915_scale_batch(job, words, room);
-        // Whole or nothing: a fill whose edges the card cannot write (a row's head or tail, or a span under 16 bytes) is refused, and the
-        // processor draws all of it. The surface's fields are 14 bits (width and height, minus one, in 13:0 and 29:16) and the pitch 18:
-        // a row of more than 4096 pixels (16384 bytes), more than 16384 rows or a pitch over 256 KiB is refused, not wrapped.
-        if (a->op > 3 || ((a->x0 || a->y0) && a->op != 3) || !a->w || !a->rows || a->w > 4096u || a->rows > 16384u || a->dp > 65536u || room < 56 ||
-            !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63))
+        // The surface's fields are 14 bits (width and height, minus one, in 13:0 and 29:16) and the pitch 18: a row of more than 4096 pixels
+        // (16384 bytes), more than 16384 rows or a pitch over 256 KiB is refused, not wrapped.
+        if (a->op > 3 || ((a->x0 || a->y0) && a->op != 3) || !a->w || !a->rows || a->w > 4096u || a->rows > 16384u || a->dp > 65536u)
                 return 0;
         span = 4u * a->w;
         pitch = 4u * a->dp;
+        // Whole or nothing: a fill whose edges the card cannot write (a row's head or tail, or a span under 16 bytes) is refused, and the
+        // processor draws all of it.
         if (gpu_i915_fill_split(a->d, span, pitch, &s) || !s.span || s.head || s.tail)
                 return 0;     // refused, or not a whole fill on the card: the processor draws it
         // A copy's source (and a glass's picture): the row's bytes read from a 32-byte-aligned base, at a pitch that holds the row in whole 64-byte

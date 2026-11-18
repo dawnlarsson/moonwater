@@ -4970,56 +4970,48 @@ static b32 build_gpu_kernels(string_address input, string_address output)
 static p8 build_gpu_i915_source[1 << 16];
 static p8 build_gpu_i915_made[1 << 17];
 
-//      Copies text, then `digits` hex digits of value (0: none), into at, for as much of room as there is; the bytes written.
-static positive build_gpu_i915_text(p8 address_to at, positive room, string_address text, unsigned long value, positive digits)
+//      Appends text to the output at at, as much of it as the output holds (a caller refuses an output that comes to the end); the new end.
+static positive build_gpu_i915_put(positive at, string_address text)
+{
+        positive room = sizeof(build_gpu_i915_made) - at, length = string_length(text);
+
+        if (length > room)
+                length = room;
+        memory_copy(build_gpu_i915_made + at, text, length);
+        return at + length;
+}
+
+//      A word: 0x and its eight hex digits.
+static positive build_gpu_i915_word(positive at, unsigned long value)
 {
         static const char hex[] = "0123456789abcdef";
-        positive n = 0, length = text ? string_length(text) : 0, write = room > 1 ? room - 1 : 0;
+        char word[] = "0x00000000";
 
-        //      the text as far as the room goes (the last byte of the room is never written): one copy, not a loop
-        if (write > length)
-                write = length;
-        if (write)
-                memory_copy(at, text, write);
-        n = length;
-        for (positive i = digits; i > 0; i--)
-        {
-                if (n + 1 < room)
-                        at[n] = (unsigned char)hex[(value >> (4 * (i - 1))) & 15];
-                n++;
-        }
-        if (room && n >= room)
-                return room - 1;
-        return n;
+        for (positive i = 0; i < 8; i++)
+                word[9 - i] = hex[(value >> (4 * i)) & 15];
+        return build_gpu_i915_put(at, word);
 }
 
 //      `static const unsigned int gpu_i915_NAME[] = {` with NAME the word(s) from name up to end's blank or end.
-static positive build_gpu_i915_sprintf_open(p8 address_to at, positive room, p8 address_to name, p8 address_to stop)
+static positive build_gpu_i915_open(positive at, p8 address_to name, p8 address_to stop)
 {
         char buffer[160];
-        positive k = 0, n = 0;
+        positive k = 0;
 
         while (name + k < stop && name[k] != ' ' && name[k] != '\t' && k + 1 < sizeof(buffer))
                 k++;
         memory_copy(buffer, name, k);
         buffer[k] = 0;
-        n = build_gpu_i915_text(at, room, "static const unsigned int gpu_i915_", 0, 0);
-        n += build_gpu_i915_text(at + n, room > n ? room - n : 0, buffer, 0, 0);
-        n += build_gpu_i915_text(at + n, room > n ? room - n : 0, "[] = {\n", 0, 0);
-        return n;
-}
-
-//      The end of a kernel's array.
-static positive build_gpu_i915_sprintf_close(p8 address_to at, positive room)
-{
-        return build_gpu_i915_text(at, room, "\n};\n", 0, 0);
+        at = build_gpu_i915_put(at, "static const unsigned int gpu_i915_");
+        at = build_gpu_i915_put(at, buffer);
+        return build_gpu_i915_put(at, "[] = {\n");
 }
 
 static b32 build_gpu_i915(string_address input, string_address output)
 {
         string_address temporary = build_join(output, ".gpu_i915_tmp.", build_number((positive)system_call_1(syscall(getpid), 0)), null);
         bipolar got;
-        positive at = 0, lines = 0, words = 0, in_kernel = 0, column = 0;
+        positive at = 0, lines = 0, in_kernel = 0, column = 0;
         p8 address_to line, address_to stop;
 
         refuse_if(!build_is_type(input, S_IFREG), 1, "gpu-i915: no such file: %s\n", input);
@@ -5031,7 +5023,6 @@ static b32 build_gpu_i915(string_address input, string_address output)
         for (line = build_gpu_i915_source; *line; line = stop)
         {
                 p8 address_to p = line;
-                positive n = 0;
 
                 stop = line;
                 while (*stop && *stop != '\n')
@@ -5052,9 +5043,11 @@ static b32 build_gpu_i915(string_address input, string_address output)
                         p8 address_to name = start + 7;
                         while (name < p && *name == ' ')
                                 name++;
+                        if (name >= p)
+                                return string_report(log_error, 1, "gpu-i915: a kernel with no name in %s, line %lu\n", input, (unsigned long)lines);
                         if (in_kernel)
-                                at += (positive)build_gpu_i915_sprintf_close(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at);
-                        at += (positive)build_gpu_i915_sprintf_open(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, name, p);
+                                at = build_gpu_i915_put(at, "\n};\n");
+                        at = build_gpu_i915_open(at, name, p);
                         in_kernel = 1;
                         column = 0;
                         continue;
@@ -5080,19 +5073,17 @@ static b32 build_gpu_i915(string_address input, string_address output)
                                 if (at + 64 >= sizeof(build_gpu_i915_made))
                                         return string_report(log_error, 1, "gpu-i915: the arrays for %s are larger than the build's buffer\n", input);
                                 if (column == 0)
-                                        at += (positive)build_gpu_i915_text(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, "    ", 0, 0);
-                                at += (positive)build_gpu_i915_text(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, "0x", v, 8);
-                                words++;
-                                n++;
+                                        at = build_gpu_i915_put(at, "    ");
+                                at = build_gpu_i915_word(at, v);
                                 column++;
                                 start = q;
                                 if (column == 10)
                                 {
-                                        at += (positive)build_gpu_i915_text(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, ",\n", 0, 0);
+                                        at = build_gpu_i915_put(at, ",\n");
                                         column = 0;
                                 }
                                 else
-                                        at += (positive)build_gpu_i915_text(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at, ", ", 0, 0);
+                                        at = build_gpu_i915_put(at, ", ");
                                 while (start < p && (*start == ',' || *start == ' ' || *start == '\t'))
                                         start++;
                                 continue;
@@ -5104,14 +5095,12 @@ static b32 build_gpu_i915(string_address input, string_address output)
                         }
                         return string_report(log_error, 1, "gpu-i915: not a word in %s, line %lu\n", input, (unsigned long)lines);
                 }
-                (void)n;
         }
         if (!in_kernel)
                 return string_report(log_error, 1, "gpu-i915: no kernels in %s\n", input);
         if (at + 64 >= sizeof(build_gpu_i915_made))
                 return string_report(log_error, 1, "gpu-i915: the arrays for %s are larger than the build's buffer\n", input);
-        at += (positive)build_gpu_i915_sprintf_close(build_gpu_i915_made + at, sizeof(build_gpu_i915_made) - at);
-        (void)words;
+        at = build_gpu_i915_put(at, "\n};\n");
 
         build_tool("mkdir", "-p", build_directory_of(output), null);
         if (!build_write_file(temporary, (string_address)build_gpu_i915_made, at))

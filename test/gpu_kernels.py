@@ -800,36 +800,30 @@ SCALE_GEN9_WORDS = [
 ]
 
 
+# The order of the Intel set's kernels in the source, and the words the source's kernels are held to: each the iga64 assembly of its .iga (fill is IGT's,
+# above). bx has words and no encoder yet; the array the build writes for it is checked like the rest.
+INTEL_ORDER = ['copy', 'fill', 'tone', 'glass', 'bx', 'scene', 'cp', 'scale']
+INTEL_LITERALS = {'copy': COPY_GEN9_WORDS, 'tone': TONE_GEN9_WORDS, 'glass': GLASS_GEN9_WORDS, 'scene': SCENE_GEN9_WORDS, 'cp': CP_GEN9_WORDS,
+                  'bx': BX_GEN9_WORDS, 'scale': SCALE_GEN9_WORDS}
+
+
 def intel_check(src, inc):
-    kernels = intel_kernels(pathlib.Path(src).read_text())
-    if [n for n, _ in kernels] != ['copy', 'fill', 'tone', 'glass', 'bx', 'scene', 'cp', 'scale']:
-        sys.exit('%s: the kernels are %s, the Gen9 set has copy, fill, tone, glass, bx, scene, cp and scale' % (src, [n for n, _ in kernels]))
-    copy = kernels[0][1]
-    if copy != COPY_GEN9_WORDS:
-        sys.exit('%s: copy differs from the iga64 assembly of gpu_i915_copy.iga (%d words, the reviewed kernel has %d)' % (src, len(copy), len(COPY_GEN9_WORDS)))
-    fill = kernels[1][1]
-    tone = kernels[2][1]
-    glass = kernels[3][1]
-    if glass != GLASS_GEN9_WORDS:
-        sys.exit('%s: glass differs from the iga64 assembly of gpu_i915_glass.iga (%d words, the reviewed kernel has %d)' % (src, len(glass), len(GLASS_GEN9_WORDS)))
-    if tone != TONE_GEN9_WORDS:
-        sys.exit('%s: tone differs from the iga64 assembly of gpu_i915_tone.iga (%d words, the reviewed kernel has %d)' % (src, len(tone), len(TONE_GEN9_WORDS)))
-    if kernels[5][1] != SCENE_GEN9_WORDS:
-        sys.exit('%s: scene differs from the iga64 assembly of gpu_i915_scene.iga (%d words, the reviewed kernel has %d)' % (src, len(kernels[5][1]), len(SCENE_GEN9_WORDS)))
-    if kernels[6][1] != CP_GEN9_WORDS:
-        sys.exit('%s: cp differs from the iga64 assembly of gpu_i915_cp.iga (%d words, the reviewed kernel has %d)' % (src, len(kernels[6][1]), len(CP_GEN9_WORDS)))
-    if kernels[7][1] != SCALE_GEN9_WORDS:
-        sys.exit('%s: scale differs from the iga64 assembly of gpu_i915_scale.iga (%d words, the reviewed kernel has %d)' % (src, len(kernels[7][1]), len(SCALE_GEN9_WORDS)))
-    if kernels[4][1] != BX_GEN9_WORDS:
-        sys.exit('%s: bx differs from the iga64 assembly of gpu_i915_bx.iga (%d words, the reviewed kernel has %d)' % (src, len(kernels[4][1]), len(BX_GEN9_WORDS)))
+    listed = intel_kernels(pathlib.Path(src).read_text())
+    kernels = dict(listed)
+    if [n for n, _ in listed] != INTEL_ORDER:
+        sys.exit('%s: the kernels are %s, the Gen9 set has %s' % (src, [n for n, _ in listed], ', '.join(INTEL_ORDER)))
+    for name, lit in INTEL_LITERALS.items():
+        if kernels[name] != lit:
+            sys.exit('%s: %s differs from the iga64 assembly of gpu_i915_%s.iga (%d words, the reviewed kernel has %d)' % (src, name, name, len(kernels[name]), len(lit)))
+    fill = kernels['fill']
     if fill != IGT_GEN9_FILL_ROWS_1_TO_9:
         bad = [i for i in range(max(len(fill), 36)) if i >= len(fill) or i >= 36 or fill[i] != IGT_GEN9_FILL_ROWS_1_TO_9[i]]
         sys.exit('%s: fill differs from IGT at word %d (%s)' % (src, bad[0], 'missing' if bad[0] >= len(fill) else '%08x vs IGT' % fill[bad[0]]))
     made = intel_arrays(pathlib.Path(inc).read_text())
-    if [n for n, _ in made] != ['copy', 'fill', 'tone', 'glass', 'bx', 'scene', 'cp', 'scale']:
-        sys.exit('%s: the arrays are %s, the source has copy, fill, tone, glass, bx, scene, cp and scale' % (inc, [n for n, _ in made]))
-    for (name, words), want in zip(made, (copy, fill, tone, glass, kernels[4][1], kernels[5][1], kernels[6][1], kernels[7][1])):
-        if words != want:
+    if [n for n, _ in made] != INTEL_ORDER:
+        sys.exit('%s: the arrays are %s, the source has %s' % (inc, [n for n, _ in made], ', '.join(INTEL_ORDER)))
+    for name, words in made:
+        if words != kernels[name]:
             sys.exit('%s: the array %s is not the source\'s words' % (inc, name))
     print('gpu i915 kernels: %s, copy the iga64 assembly of gpu_i915_copy.iga, fill the same as IGT rows 1 to 9, tone, glass, bx and cp the iga64 assembly, all as %s' % (src, inc))
 
