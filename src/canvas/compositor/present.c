@@ -25,6 +25,7 @@
         The windows go bottom to top, and the tabs over all of them.
 */
 static void compositor_present_frames(void);
+static void compositor_dark_set(void); // kms.c: the screens put out again after a mode set, while display-off holds
 
 // A present: a dma-buf a window shows is read by the card or the processor, and its reads are bracketed by the kernel's sync for the
 // processor's (compositor_wl_lent_sync: the bracket for each window's dma-buf picture read in place, as a copy of one is).
@@ -299,6 +300,7 @@ static void compositor_present_tell(const unsigned short (*clip)[4], unsigned in
                                                       0, 0, 0, 1, compositor.mode};
 
                         system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
+                        compositor_dark_set();
                         compositor.on_screen = compositor.fb;
                         compositor_flip_refused = 0;
                         compositor_flip_done();
@@ -326,6 +328,7 @@ static void compositor_present_tell(const unsigned short (*clip)[4], unsigned in
                                               0, 0, 0, 1, compositor.mode};
 
                 system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
+                compositor_dark_set();
                 compositor.on_screen = compositor.fb;
                 compositor_flip_done();
         }

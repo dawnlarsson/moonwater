@@ -1610,9 +1610,11 @@ static int compositor_vrr_set(int on)
 #define COMPOSITOR_DARK_FILE "/run/moonwater/display-off"
 static void compositor_dark(int dark)
 {
-        if (compositor.dark == dark)
+        int was = compositor.dark;
+
+        if (was == dark && (!dark || compositor.dark_applied))
                 return;
-        compositor.dark = dark;
+        compositor.dark = dark, compositor.dark_applied = dark;
         for (unsigned int at = 0; at < compositor.outputs && at < WINDOWS_OUTPUTS; at++)
         {
                 unsigned long value;
@@ -1628,8 +1630,18 @@ static void compositor_dark(int dark)
         }
         if (!dark)
                 compositor_damage_space();
-        compositor_kmsg(dark ? (string_address) "compositor: display off" : (string_address) "compositor: display on", 0,
-                        (string_address) "");
+        if (was != dark)
+                compositor_kmsg(dark ? (string_address) "compositor: display off" : (string_address) "compositor: display on", 0,
+                                (string_address) "");
+}
+
+// A mode set (a take of the screens, a crtc set where a flip was refused) has the kernel light each screen it sets (DPMS on): while display-off
+// holds they are put out again, where the screens stayed lit with the file there until the next key.
+static void compositor_dark_set(void)
+{
+        compositor.dark_applied = 0;
+        if (compositor.dark)
+                compositor_dark(1);
 }
 
 // Whether the file is there, looked at the start and at each change of it: opened as the other switch files are

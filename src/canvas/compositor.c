@@ -996,6 +996,7 @@ static struct
         int screen[WINDOWS_OUTPUTS][4];
         unsigned int outputs, layout;
         int dark; // the screens put out by a display off: /run/moonwater/display-off is there (compositor_dark)
+        int dark_applied; // and DPMS off was set on them since the last mode set lit them (compositor_dark_set)
         /*
                 What every window's buffer is made for, for the session: stride the pixels a row of it (the
                 widest screen connected when the compositor started) and most_w by most_h the largest a window
@@ -1894,7 +1895,7 @@ static void compositor_space_retake(void)
         if (wake && system_control(compositor.card, COMPOSITOR_SET_MASTER, 0) != 0)
                 compositor_kmsg((string_address) "compositor: wake: the card's master could not be had again", 0, (string_address) "");
         if (compositor.card >= 0)
-                status = compositor_space_take(0);
+                status = compositor_space_take(0), compositor_dark_set(); // the take's mode sets lit every screen: out again while display-off holds
         else
         {
                 compositor.retrain = 0;

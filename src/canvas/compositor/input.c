@@ -4555,7 +4555,9 @@ static int compositor_reader_direct(unsigned int at, const struct compositor_inp
         long dx = 0, dy = 0;
         int key = -1, value = 0;
 
-        if (compositor.touchpad[at] || compositor.touchscreen[at] || compositor.wakeonly[at] ||
+        // While the screens are out (display off) every record goes to the loop, whose take lights them (compositor_dark_woken): a key or a
+        // locked pointer's motion sent from here reached the client with the screens left dark and the file there.
+        if (compositor.touchpad[at] || compositor.touchscreen[at] || compositor.wakeonly[at] || __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) ||
             __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) != compositor_reader.handed_out || compositor_reader.dropped)
                 return 0;
         for (unsigned int k = 0; k < count; k++)

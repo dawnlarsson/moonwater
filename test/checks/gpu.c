@@ -4144,6 +4144,31 @@ static void under_ready_rows(void)
         compositor.under[1] = kept_under, compositor_under_bytes[1] = kept_bytes, compositor.width = kept_width, compositor.height = kept_height;
 }
 
+// Display off (kms.c compositor_dark): while the screens are out the input thread sends nothing straight to a client (compositor_reader_direct), so
+// every key and locked motion reaches the loop, whose take lights them; and a mode set while they are out (compositor_dark_set) puts them out again,
+// where the early return on dark == dark left them lit with display-off in force.
+static void display_off_rows(void)
+{
+        struct compositor_input_event key[2] = {{.type = COMPOSITOR_EV_KEY, .code = 30, .value = 1}, {.type = COMPOSITOR_EV_SYN, .code = 0}};
+        int saved_dark = compositor.dark, saved_applied = compositor.dark_applied, saved_card = compositor.card;
+        unsigned int saved_outputs = compositor.outputs;
+        b32 direct, reput, kept;
+
+        compositor.card = -1, compositor.outputs = 0;
+        compositor.dark = 1, compositor.dark_applied = 1;
+        direct = !compositor_reader_direct(0, key, 2);
+        compositor.dark_applied = 1;
+        compositor_dark_set();
+        reput = compositor.dark == 1 && compositor.dark_applied == 1;
+        compositor.dark = 0, compositor.dark_applied = 0;
+        compositor_dark_set();
+        kept = compositor.dark == 0 && compositor.dark_applied == 0;
+        check("display off: a key while the screens are out goes to the loop, not straight to the client; a mode set while they are out puts them out again, "
+              "and one while they are lit leaves them lit",
+              direct && reput && kept);
+        compositor.dark = saved_dark, compositor.dark_applied = saved_applied, compositor.card = saved_card, compositor.outputs = saved_outputs;
+}
+
 // The X window manager's socket (xwm.c, S-c3-2): one connection for each wrapper (a second from the same pid takes the first one's place), and a
 // connection whose wrapper has no child on the Wayland socket by COMPOSITOR_XWM_BIND_NS is closed: a program of uid 1000 that only holds the
 // socket holds no slot. Over an abstract socket of the check's own, with this process as the wrapper.
@@ -5302,6 +5327,7 @@ b32 main(void)
         dirty_rows();
         close_ask_rows();
         xwm_socket_rows();
+        display_off_rows();
         grab_protocol_rows();
         fullscreen_rows();
         gpu_i915_rows();
