@@ -314,7 +314,7 @@ static enum gpu_end gpu_end;    // the last call's
 static enum gpu_end gpu_found;  // the bad end gpu_idle came on of a job whose end was not said, until gpu_late_end has said it
 static b32 gpu_end_said;        // the end of the pending jobs has been said: it is not said again
 static positive gpu_fault_poll; // when the kernel's log is next looked at for a page fault of the pending job (monotonic ns)
-static b32 gpu_patient;         // the self-test waits the hang's two seconds for its job, not a tick: a card just opened is slow to its first
+static b32 gpu_patient;         // the self-test waits the hang's two seconds for its job, not a tick: a card just opened is slow to its first (2: GPU_RECOVER_NS, gpu_patience)
 static struct { positive sequence, began; } gpu_before; // the job before the pending one, in the other slot, while it is not seen done (0: none)
 static unsigned int gpu_slot, gpu_pending_slot; // the slot the last job was built in (GPU_ARGS is its arguments), and the pending job's
 #define GPU_LATE_NS 16000000ull      // a job not done this long after it was submitted is late: a tick (the heaviest whole-screen job measured, 8K, is 5.5 ms)
@@ -3076,11 +3076,21 @@ static positive gpu_submit(void)
 }
 
 // A job run and waited for a tick (the hang's two seconds for the self-test: gpu_patient); false if it did not finish (then gpu_idle holds the buffer until it has).
+// A self-test after the card was started again (gpu_patient 2, gpu_test_hash's when gpu_recovered: a reset, a resume, a late look after a recovery that failed)
+// waits GPU_RECOVER_NS a pass: it runs
+// on the compositor's loop, so a card that does not answer after its reset held every key, report and client for both passes' two seconds; one that misses it
+// is no card for now, which the late look starts again.
+#define GPU_RECOVER_NS 500000000ull
+static positive gpu_patience(void)
+{
+        return gpu_patient == 2 ? GPU_RECOVER_NS : gpu_patient ? GPU_HANG_NS : GPU_LATE_NS;
+}
+
 static b32 gpu_run_job(void)
 {
         if (!gpu_idle() || !gpu_submit())
                 return false;
-        return gpu_wait_job(gpu_patient ? GPU_HANG_NS : GPU_LATE_NS);
+        return gpu_wait_job(gpu_patience());
 }
 
 // A job run and waited for (gpu_run_job), timed: the count and the total wait the metrics publish.
@@ -3633,7 +3643,9 @@ static unsigned int gpu_test_hash(void)
                 n++;
         }
         memory_zero(pic, W * H * 4);
-        patient = gpu_patient, gpu_patient = 1; // the first job of a card just opened is waited for as long as a hang is (the card is slow to it); a late self-test would be no card
+        // The first job of a card just opened is waited for as long as a hang is (the card is slow to it); a late self-test would be no card. One started again
+        // waits GPU_RECOVER_NS (gpu_run_job), since that start is on the loop.
+        patient = gpu_patient, gpu_patient = gpu_recovered ? 2 : 1;
         done = gpu_scene(ops_at, n, bins_at, pic_at, W, W, H, 0, 0, W, H);
         if (!done)
                 return gpu_patient = patient, 0;

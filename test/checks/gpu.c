@@ -2353,6 +2353,19 @@ static void gpu_fault_rows(void)
         check("fault: the board carries the card's fault text", count && want[0].code == WINDOWS_ISSUE_GPU_FAULT && gpu_text_has(want[0].detail, "card faulted reading 0x203fd75000"));
         compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.hung_at = 0;
         compositor_gpu_state.restart_due = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.cool_steps = 0, compositor_gpu_state.up = 0;
+        // 6b. A self-test after the card was started again waits half a second a pass on the loop, not the hang's two seconds (gpu_patience).
+        {
+                b32 saved_patient = gpu_patient;
+                unsigned int saved_recovered = gpu_recovered;
+                positive first, again, tick;
+
+                gpu_recovered = 0, gpu_patient = 0, tick = gpu_patience();
+                gpu_patient = gpu_recovered ? 2 : 1, first = gpu_patience();
+                gpu_recovered = 1, gpu_patient = gpu_recovered ? 2 : 1, again = gpu_patience();
+                check("gpu recover: the first start's self-test waits a hang's two seconds, one after a restart half a second, a frame's job a tick",
+                      first == GPU_HANG_NS && again == GPU_RECOVER_NS && tick == GPU_LATE_NS && again < GPU_HANG_NS);
+                gpu_patient = saved_patient, gpu_recovered = saved_recovered;
+        }
 #ifdef CONFIG_MOONWATER_WAYLAND
         // 7. Hangs whose fault is in a client's import (row 2's source, client slot 1): the client is barred from the card and the card is kept for the rest,
         // however many such hangs, below COMPOSITOR_GPU_BLAMED_MOST in a minute; a hang in nobody's buffer is the card's as before, and a new connection in
