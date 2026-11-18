@@ -582,6 +582,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Turned right	7a49	Obrócony w prawo
 =UDP out	4fd0	UDP wychodzące
 =Upside down	9dc1	Do góry nogami
+=Variable refresh rate	06a4	Zmienna częstotliwość odświeżania
 =Volume (percent, or default)	f6e3	Głośność (procent lub default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Co robi przesunięcie od tej krawędzi
@@ -612,6 +613,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =fast	02af	szybko
 =forest	2a60	leśny
 =full	b33c	pełny
+=games	2b9c	gry
 =graphite	dc8d	grafitowy
 =green	ecbc	zielony
 =high	b9fd	wysoko

@@ -640,6 +640,18 @@ static void compositor_pace_set(const char *word)
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
 }
 
+// canvas vrr: the policy of the screen's variable refresh (kms.c's compositor_vrr) (on when nothing is kept), and the screen set by it.
+static void compositor_vrr_read(void)
+{
+        char word[16];
+        long kept = 0;
+
+        compositor_word(SETTING_VRR_PATH, word, sizeof(word));
+        compositor_setting_kept(SETTING_VRR_PATH, word, &kept);
+        compositor_vrr.policy = kept >= 0 && kept <= 2 ? (unsigned int)kept : 0u;
+        compositor_vrr_keep();
+}
+
 static void compositor_theme_read(void)
 {
         char word[16];
@@ -664,6 +676,8 @@ static void compositor_theme_read(void)
         compositor_word(SETTING_CARET_THICKNESS_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_CARET_THICKNESS_PATH, word, &thick);
         compositor_caret_publish((unsigned int)blink + 1, (unsigned int)thick + 1);
+        // canvas vrr: the screen's variable refresh (kms.c), read with the look, as every change of /root and the start read it.
+        compositor_vrr_read();
         // English when nothing is kept, and when what is kept is not a code (default).
         compositor_word(SETTING_LANGUAGE_PATH, word, sizeof(word));
         compositor_language_publish(windows_language_code(word, string_length((string_address)word)));

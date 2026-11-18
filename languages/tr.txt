@@ -582,6 +582,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =Turned right	7a49	Sağa döndürülmüş
 =UDP out	4fd0	Giden UDP
 =Upside down	9dc1	Baş aşağı
+=Variable refresh rate	06a4	Değişken yenileme hızı
 =Volume (percent, or default)	f6e3	Ses düzeyi (yüzde veya default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Bu kenardan içeri kaydırmanın ne yaptığı
@@ -612,6 +613,7 @@ ui_field_full	fe02	daha fazlası sığmaz
 =fast	02af	hızlı
 =forest	2a60	orman
 =full	b33c	tam
+=games	2b9c	oyunlar
 =graphite	dc8d	grafit
 =green	ecbc	yeşil
 =high	b9fd	yüksek

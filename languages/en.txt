@@ -582,6 +582,7 @@ ui_field_full	fe02	that is as much as it holds
 =Turned right	7a49	Turned right
 =UDP out	4fd0	UDP out
 =Upside down	9dc1	Upside down
+=Variable refresh rate	06a4	Variable refresh rate
 =Volume (percent, or default)	f6e3	Volume (percent, or default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	What a swipe in from this edge does
@@ -612,6 +613,7 @@ ui_field_full	fe02	that is as much as it holds
 =fast	02af	fast
 =forest	2a60	forest
 =full	b33c	full
+=games	2b9c	games
 =graphite	dc8d	graphite
 =green	ecbc	green
 =high	b9fd	high

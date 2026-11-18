@@ -6877,8 +6877,9 @@ static void compositor_wl_presented(void)
 
 /*
         The card completed a flip: the frame it showed is answered with the card's own stamp (the vblank the card read), flagged
-        as the hardware's: vsync, hw_clock and hw_completion. A flip whose stamp did not come is answered by the clock, flagless.
-        The sequence is the card's, when it sent one.
+        as the hardware's: vsync, hw_clock and hw_completion. A flip whose stamp did not come is answered by the clock, flagless;
+        an asynchronous one (a window that allows tearing, flipped mid-frame: compositor_card_events) by the clock as it landed,
+        hw_completion alone, for it was no vsync and its stamp is not its time. The sequence is the card's, when it sent one.
 */
 static void compositor_wl_flip_presented(void)
 {
@@ -6901,8 +6902,8 @@ static void compositor_wl_flip_presented(void)
         if (compositor.flip_stamped && compositor.flip_when)
                 compositor_wl_answer_stamp(compositor.flip_when, compositor.flip_seq);
         else
-                wayland_presented((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor_wl_refresh(), compositor_wl.presents++, 0ul,
-                                  compositor_wl.zero_row);
+                wayland_presented((unsigned long)clock_monotonic_nanoseconds(), (unsigned long)compositor_wl_refresh(), compositor_wl.presents++,
+                                  compositor.flip_tore ? 4ul : 0ul, compositor_wl.zero_row);
         compositor_wl_flush_all();
 }
 

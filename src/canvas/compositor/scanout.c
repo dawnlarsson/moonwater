@@ -448,6 +448,10 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
         }
         compositor_flip_refused = 0;
         compositor.flip_pending = 1;
+        compositor.vrr_kick = 0; // the pointer's place goes up with this flip
+        compositor.flip_async = (flip.flags & COMPOSITOR_FLIP_ASYNC) != 0;
+        if (compositor.flip_async && compositor.table)
+                compositor.table->flips_async++;
         compositor.flip_issued = clock_monotonic_nanoseconds();
         compositor.flip_row = row;
         compositor.flip_buffer = which;
@@ -718,7 +722,15 @@ static unsigned int compositor_card_events(const p8 *events, long got)
                                 continue;
                         }
                         landed++;
-                        if (length >= 28)
+                        /*
+                                An asynchronous flip (a window that allows tearing, shown straight) lands mid-frame, and its event's stamp is
+                                the vblank before it, or the flip's own time on another card: neither the vblank the presents are paced by
+                                (compositor_present_due, compositor_late) nor when the picture came on the screen, which is now. Its stamp
+                                is passed over, so flip_when stays the last vblank a flip landed on, and the flip is said shown by the clock.
+                        */
+                        compositor.flip_tore = compositor.flip_async;
+                        compositor.flip_async = 0;
+                        if (length >= 28 && !compositor.flip_tore)
                         {
                                 memory_copy(address_of sec, events + at + 16, 4);
                                 memory_copy(address_of usec, events + at + 20, 4);

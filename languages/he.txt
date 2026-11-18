@@ -583,6 +583,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Turned right	7a49	מסובב ימינה
 =UDP out	4fd0	UDP יוצא
 =Upside down	9dc1	הפוך
+=Variable refresh rate	06a4	קצב רענון משתנה
 =Volume (percent, or default)	f6e3	עוצמת שמע (אחוזים או default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	מה עושה החלקה פנימה מהקצה הזה
@@ -613,6 +614,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =fast	02af	מהיר
 =forest	2a60	ירוק יער
 =full	b33c	מלא
+=games	2b9c	משחקים
 =graphite	dc8d	גרפיט
 =green	ecbc	ירוק
 =high	b9fd	גבוה

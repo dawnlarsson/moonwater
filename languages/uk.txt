@@ -582,6 +582,7 @@ ui_field_full	fe02	більше не вміщається
 =Turned right	7a49	Повернуто праворуч
 =UDP out	4fd0	Вихідний UDP
 =Upside down	9dc1	Догори дриґом
+=Variable refresh rate	06a4	Змінна частота оновлення
 =Volume (percent, or default)	f6e3	Гучність (відсотки або default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Що робить жест від цього краю
@@ -612,6 +613,7 @@ ui_field_full	fe02	більше не вміщається
 =fast	02af	швидко
 =forest	2a60	лісовий
 =full	b33c	повний
+=games	2b9c	ігри
 =graphite	dc8d	графітовий
 =green	ecbc	зелений
 =high	b9fd	високо

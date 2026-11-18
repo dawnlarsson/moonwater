@@ -582,6 +582,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =Turned right	7a49	Pivoté à droite
 =UDP out	4fd0	UDP sortant
 =Upside down	9dc1	À l'envers
+=Variable refresh rate	06a4	Fréquence de rafraîchissement variable
 =Volume (percent, or default)	f6e3	Volume (pourcentage ou default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Ce que fait un balayage depuis ce bord
@@ -612,6 +613,7 @@ ui_field_full	fe02	c'est tout ce que ce champ peut contenir
 =fast	02af	rapide
 =forest	2a60	forêt
 =full	b33c	complète
+=games	2b9c	jeux
 =graphite	dc8d	graphite
 =green	ecbc	vert
 =high	b9fd	élevé

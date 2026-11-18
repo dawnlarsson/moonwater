@@ -74,6 +74,7 @@ moonwater canvas windows remember [on|off]  a window opens where the hand last p
 # Display
 moonwater brightness [N%|+N|-N]        the screen backlight
 moonwater canvas modes [largest|preferred]  which mode a screen is driven at [largest]
+moonwater canvas vrr [on|games|off]    a screen that can waits for each frame, so it is shown when drawn; games: only a fullscreen window [on]
 
 
 # Input

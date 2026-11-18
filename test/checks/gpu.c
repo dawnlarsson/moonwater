@@ -4389,6 +4389,112 @@ static void fullscreen_rows(void)
         memory_copy(&compositor, kept_comp, sizeof(compositor));
 }
 
+/*
+        Variable refresh and tearing: when the screen is set to variable refresh (kms.c's compositor_vrr_wants: the policy, a screen that can,
+        one screen, every frame a flip, and for games a window shown straight), when a present is due (present.c's compositor_present_at: at
+        once for a window that allows tearing, by the rule otherwise, and at once by the rule for an idle screen, which a screen at variable
+        refresh then shows at once), what an asynchronous flip's event leaves of the vblank the presents are paced by (compositor_card_events),
+        and the pointer's kick (compositor_vrr_moved, compositor_vrr_kick).
+*/
+static void vrr_rows(void)
+{
+        {
+                b32 rule = true;
+
+                for (unsigned int policy = 0; policy < 4; policy++)
+                        for (int capable = 0; capable < 2; capable++)
+                                for (unsigned int outputs = 0; outputs < 3; outputs++)
+                                        for (int flipping = 0; flipping < 2; flipping++)
+                                                for (int direct = 0; direct < 2; direct++)
+                                                {
+                                                        int want = capable && outputs == 1 && flipping && (policy == 0 || (policy == 1 && direct));
+
+                                                        rule &= compositor_vrr_wants(policy, capable, outputs, flipping, direct) == want;
+                                                }
+                check("vrr: on wherever the screen can, the screens are one and every frame is a flip; games only with a window shown straight; off never",
+                      rule);
+                check("vrr: a screen that cannot is never set, whatever the policy and the frames", !compositor_vrr_wants(0, 0, 1, 1, 1));
+                check("vrr: nor two screens, whose one scanout spans their crtcs and flips on one", !compositor_vrr_wants(0, 1, 2, 1, 1));
+                check("vrr: nor frames composed into the buffer on the screen (a window on a plane, a turned screen, DIRTYFB): no flip ends the wait",
+                      !compositor_vrr_wants(0, 1, 1, 0, 0) && !compositor_vrr_wants(1, 1, 1, 0, 1));
+                check("vrr: games is on for a window shown straight and off for the desktop", compositor_vrr_wants(1, 1, 1, 1, 1) && !compositor_vrr_wants(1, 1, 1, 1, 0));
+        }
+        {
+                unsigned int steady = 0, early = 0;
+                int on = 0;
+
+                for (unsigned int present = 1; present < COMPOSITOR_VRR_STEADY; present++)
+                        early += (unsigned int)compositor_vrr_step(1, on, &steady);
+                on = compositor_vrr_step(1, on, &steady);
+                check("vrr: set on only once COMPOSITOR_VRR_STEADY presents in a row wanted it, not before", early == 0 && on == 1);
+                check("vrr: and kept on while wanted", compositor_vrr_step(1, on, &steady) == 1 && steady == COMPOSITOR_VRR_STEADY);
+                on = compositor_vrr_step(0, on, &steady);
+                check("vrr: set off at the first present that does not want it (a frame with no flip waits for the least rate)", on == 0 && steady == 0);
+                check("vrr: and on again only after another steady run", compositor_vrr_step(1, on, &steady) == 0 && steady == 1);
+        }
+        {
+                positive period = 6944444ull, v = 9000000000ull, lead = 3000000ull;
+                positive was_presented = compositor.presented, was_period = compositor.period, was_when = compositor.flip_when;
+
+                compositor.presented = v - period + 100000ull, compositor.period = period, compositor.flip_when = v;
+                check("tearing: a present for a window that allows tearing is due at once, whatever the vblank and the lead",
+                      compositor_present_at(1, 0, v + 50000ull) == v + 50000ull && compositor_present_at(1, lead, v + 1) == v + 1);
+                check("tearing: every other present keeps the rule, the lead before the vblank after the last",
+                      compositor_present_at(0, lead, v + 50000ull) == v + period - lead &&
+                          compositor_present_at(0, lead, v + 50000ull) == compositor_present_due(compositor.presented, period, v, lead, v + 50000ull));
+                compositor.presented = v - 10 * period, compositor.flip_when = v - 9 * period;
+                check("vrr: a present for an idle screen is due at once by the same rule (a screen at variable refresh then shows it at once)",
+                      compositor_present_at(0, lead, v) == v);
+                compositor.presented = was_presented, compositor.period = was_period, compositor.flip_when = was_when;
+        }
+        {
+                // struct drm_event_vblank: type 2, length 32, the user data, tv_sec, tv_usec, the sequence and the crtc.
+                static struct windows *vrr_table_scratch;
+                struct windows *const vrr_table_at = windows_scratch_table(&vrr_table_scratch);
+                struct windows *kept = compositor.table;
+                struct compositor_rows held = compositor.held_rows, dropping = compositor.dropping;
+                positive serial = compositor.flip_serial, when = compositor.flip_when, vblank = 9000000000ull;
+                int pending = compositor.flip_pending, stamped = compositor.flip_stamped, tore = compositor.flip_tore;
+                unsigned int sequence = compositor.flip_seq;
+                p8 event[32];
+                unsigned int type = COMPOSITOR_EVENT_FLIP_COMPLETE, length = 32, sec = 9, usec = 3000, seq = 77;
+                positive mine = 41;
+
+                compositor.table = vrr_table_at, compositor.held_rows = compositor.dropping = rows_from(0);
+                memory_zero(event, sizeof(event));
+                memory_copy(event, &type, 4), memory_copy(event + 4, &length, 4), memory_copy(event + 8, &mine, 8);
+                memory_copy(event + 16, &sec, 4), memory_copy(event + 20, &usec, 4), memory_copy(event + 24, &seq, 4);
+                compositor.flip_serial = mine, compositor.flip_pending = 1, compositor.flip_async = 1, compositor.flip_when = vblank;
+                check("tearing: an asynchronous flip's event lets go of the flip", compositor_card_events(event, 32) == 1 && compositor.flip_pending == 0);
+                check("tearing: and leaves the vblank the presents are paced by, its stamp no vblank, the flip said shown by the clock",
+                      compositor.flip_when == vblank && compositor.flip_tore == 1 && compositor.flip_async == 0 && compositor.flip_stamped == 0);
+                compositor.flip_pending = 1, compositor.flip_async = 0;
+                check("tearing: a flip at the vblank, after it, is paced by its stamp again",
+                      compositor_card_events(event, 32) == 1 && compositor.flip_when == 9000000000ull + 3000000ull && compositor.flip_tore == 0 &&
+                          compositor.flip_seq == 77);
+                compositor.table = kept, compositor.held_rows = held, compositor.dropping = dropping, compositor.flip_serial = serial;
+                compositor.flip_when = when, compositor.flip_pending = pending, compositor.flip_stamped = stamped, compositor.flip_tore = tore;
+                compositor.flip_seq = sequence, compositor.flip_async = 0;
+        }
+        {
+                int on = compositor_vrr.on, kick = compositor.vrr_kick, pending = compositor.flip_pending;
+
+                compositor_vrr.on = 0, compositor.vrr_kick = 0;
+                compositor_vrr_moved();
+                check("vrr: off, a move of the pointer kicks nothing", compositor.vrr_kick == 0);
+                compositor_vrr.on = 1;
+                compositor_vrr_moved();
+                check("vrr: on, a move of the pointer on its plane asks for a kick", compositor.vrr_kick == 1);
+                compositor.flip_pending = 1;
+                compositor_vrr_kick();
+                check("vrr: with a flip in flight the kick waits for its landing, which carries the pointer or kicks then", compositor.vrr_kick == 1);
+                compositor_vrr.on = 0;
+                compositor_vrr_kick();
+                check("vrr: set off, a kick that waited is dropped", compositor.vrr_kick == 0);
+                compositor_vrr.on = on, compositor.vrr_kick = kick, compositor.flip_pending = pending;
+        }
+}
+
 // EWMH/XDG grab protocols: maximized vs fullscreen row_facts, immediate float past button slop on client move, and XWM _NET_SUPPORTED / _NET_WM_MOVERESIZE.
 static void grab_protocol_rows(void)
 {
@@ -4770,6 +4876,7 @@ b32 main(void)
         descriptor_rows();
         frame_dated_rows();
         present_due_rows();
+        vrr_rows();
         under_ready_rows();
         plate_wanted_rows();
         scanout_refused_rows();

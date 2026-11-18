@@ -579,6 +579,18 @@ static b32 host_debug(string_address address_to arguments, positive count)
         host_say(log, "  frame           %p us (%p Hz), the vblanks measure %p us%s\n", (positive)table->period / 1000,
                  table->period ? (positive)((1000000000ull + table->period / 2) / table->period) : (positive)0,
                  (positive)table->period_seen / 1000, table->period_seen ? (string_address) "" : (string_address) " (no flip measured yet)");
+        //      Variable refresh (canvas vrr): whether the screen can, whether it is on, the policy, and what it cost; and the flips for tearing.
+        {
+                static const char *const policies[3] = {"on", "games", "off"};
+                unsigned int vrr = table->vrr, policy = vrr >> 8 < 3 ? vrr >> 8 : 0;
+
+                host_say(log, "  vrr             %s, %s (canvas vrr %s)%s; %p pointer kicks, the last set took %p us; %p flips for tearing\n",
+                         (vrr & WINDOWS_VRR_CAPABLE) ? (string_address) "the screen can" : (string_address) "the screen cannot",
+                         (vrr & WINDOWS_VRR_ON) ? (string_address) "on" : (string_address) "off", (string_address)policies[policy],
+                         !(vrr & WINDOWS_VRR_PROPERTY) ? (string_address) ", the crtc has no VRR_ENABLED"
+                         : (vrr & WINDOWS_VRR_REFUSED) ? (string_address) ", the card refused it" : (string_address) "",
+                         (positive)table->vrr_kicks, (positive)table->vrr_set_us, (positive)table->flips_async);
+        }
         //      The windows the table holds, each where the compositor put it: its row, its title (a program's, so
         //      spelled), its place in the space and the size of its picture.
         for (unsigned int row = 0; row < windows_rows(table); row++)

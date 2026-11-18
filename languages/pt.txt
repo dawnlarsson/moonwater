@@ -582,6 +582,7 @@ ui_field_full	fe02	não cabe mais que isso
 =Turned right	7a49	Girada para a direita
 =UDP out	4fd0	UDP de saída
 =Upside down	9dc1	De cabeça para baixo
+=Variable refresh rate	06a4	Taxa de atualização variável
 =Volume (percent, or default)	f6e3	Volume (porcentagem ou default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	O que faz deslizar a partir desta borda
@@ -612,6 +613,7 @@ ui_field_full	fe02	não cabe mais que isso
 =fast	02af	rápido
 =forest	2a60	floresta
 =full	b33c	completo
+=games	2b9c	jogos
 =graphite	dc8d	grafite
 =green	ecbc	verde
 =high	b9fd	alto

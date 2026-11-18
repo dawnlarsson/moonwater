@@ -1203,6 +1203,13 @@ struct windows
         // The frame period the card's vblanks measure, ns (the stamps of two flips over the vblanks between them, eased; 0 before two have landed),
         // beside period, which is the fastest screen's mode's: moonwater debug says both.
         unsigned int period_seen;
+        /*
+                Variable refresh (kms.c's compositor_vrr) for moonwater debug: vrr is WINDOWS_VRR_ bits (the screen's connector says it can, the
+                crtc has VRR_ENABLED, it is set on, the card refused setting it) and the policy (canvas vrr: 0 on, 1 games, 2 off) in bits 8
+                and up; vrr_kicks the flips of the screen's own picture made only so a pointer moved on its plane is shown at once, vrr_set_us
+                how long the last setting of VRR_ENABLED took, and flips_async the flips asked asynchronous for a window that allows tearing.
+        */
+        unsigned int vrr, vrr_kicks, vrr_set_us, flips_async;
         unsigned int gpu_node_pick; // why the render node is the one it is: 1 the display's own device, 2 another device than the display's, 0 no display's bus known
         char gpu_node_bus[32], gpu_display_bus[32]; // the chosen node's bus and the display's ("pci:..."), "" when not known
         unsigned int gpu_req_checked, gpu_req_first, gpu_req_error, gpu_req_mask, gpu_req_mode, gpu_req_owner, gpu_req_route, gpu_req_route_error; // the prerequisites (gpu.c's gpu_req): whether they were checked, the first that failed (0 none), its error, the bits that passed, the node's mode and owner
@@ -1377,7 +1384,12 @@ struct windows
         unsigned int capacity;
 };
 
-#define WINDOWS_ABI 10u // 9 had no seed counts; 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+#define WINDOWS_ABI 11u // 10 had no variable refresh counts; 9 had no seed counts; 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+// The bits of the table's vrr (the rest of the word, from bit 8, is the policy).
+#define WINDOWS_VRR_CAPABLE 1u
+#define WINDOWS_VRR_PROPERTY 2u
+#define WINDOWS_VRR_ON 4u
+#define WINDOWS_VRR_REFUSED 8u
 
 // Whether a table's layout is the one this program was built against.
 static inline int windows_abi_ok(unsigned int abi)

@@ -56,6 +56,8 @@
 
             present-early     compositor.c's start, once: every present by the old rule, early in its period (compositor_late.early)
             present-wait      compositor.c's start, once: every job of the card's present waited for in place (compositor_card.nowait 0)
+            vrr-capable       compositor.c's start, once: the screen taken as able to run at variable refresh whatever its connector
+                              says (kms.c's compositor_vrr.said), for a driver that does not say, or a test of the path
             lists-off         gpu_host.c, compositor_lists_switch, every 512th present: while it is there no window is drawn from its list
             lists-wait        compositor.c's start, once: a list's render is waited for in place, as it was (compositor_card.lists_nowait 0);
                               without it the render goes to the card without a wait
@@ -986,6 +988,11 @@ static struct
         positive flip_serial; // the number the flip in flight was asked with (its event's user data): an event with another is a flip given up on
         unsigned int flip_seq;
         int flip_stamped;    // whether flip_when came with the event (a card that stamps its vblanks)
+        // Whether the flip in flight was asked asynchronous (a window that allows tearing, shown straight: compositor_flip), and whether the one
+        // that landed last was: its event's stamp is not a vblank the presents can be paced by, nor the time its picture came on the screen.
+        int flip_async, flip_tore;
+        // The pointer moved on its plane at variable refresh with no flip since: the screen's picture is flipped again for it (kms.c's compositor_vrr).
+        int vrr_kick;
         /*
                 The tabs over a window shown straight, on an overlay plane where the card has one
                 (compositor_overlay_ready: overlay_state 0 not yet asked, 1 found, -1 none or refused): the
@@ -3028,6 +3035,14 @@ static b32 compositor_main()
                 if (off >= 0)
                         compositor.games = ~0ul, system_close(off);
         }
+        // Variable refresh for a screen whose connector does not say it can, where the machine's owner says it can (kms.c's compositor_vrr).
+        {
+                bipolar said = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/vrr-capable", FILE_READ | O_CLOEXEC);
+
+                compositor_vrr.said = said >= 0;
+                if (said >= 0)
+                        system_close(said);
+        }
 #ifdef MOONWATER_GPU_C
         // The card's present without a wait, unless the owner asks for every job waited for in place, as it was (/run/moonwater/present-wait).
         {
@@ -3326,8 +3341,16 @@ static b32 compositor_main()
 
                         // The flip's event wakes the loop; else the present is made when it is due (compositor_present_due).
                         frame = waiting ? waiting
-                                        : compositor_present_due(compositor.presented, compositor.period, compositor.flip_when,
-                                                                 compositor_present_lead(), now);
+                                        : compositor_present_at(compositor_tearing(), compositor_tearing() ? 0 : compositor_present_lead(), now);
+                        until = !until || frame < until ? frame : until;
+                }
+                // A pointer moved on its plane at variable refresh with nothing to draw: its kick is due when a present would be (compositor_vrr_kick).
+                else if (compositor.vrr_kick && !compositor.damages && !compositor_card_holds())
+                {
+                        positive waiting = compositor_flip_wait(now);
+                        positive frame = waiting ? waiting
+                                                 : compositor_present_at(compositor_tearing(), compositor_tearing() ? 0 : compositor_present_lead(), now);
+
                         until = !until || frame < until ? frame : until;
                 }
 #ifdef MOONWATER_GPU_C
@@ -3548,10 +3571,11 @@ static b32 compositor_main()
                 // of the frame has used the frame up.
                 if (compositor.damages && !compositor.flip_pending && !compositor_card_holds())
                 {
-                        positive stamp = clock_monotonic_nanoseconds(), lead = compositor_present_lead();
+                        int tearing = compositor_tearing();
+                        positive stamp = clock_monotonic_nanoseconds(), lead = tearing ? 0 : compositor_present_lead();
 
                         // Due by the rule the wait above was made with, so the loop never wakes for a present it then does not make.
-                        if (stamp >= compositor_present_due(compositor.presented, compositor.period, compositor.flip_when, lead, stamp) &&
+                        if (stamp >= compositor_present_at(tearing, lead, stamp) &&
                             !compositor_flip_wait(stamp))
                         {
                                 positive after_present;
@@ -3559,6 +3583,9 @@ static b32 compositor_main()
                                 // A present late in its period is paced by the card's vblank and is dated as made; any other when it was due.
                                 compositor_late_begin(lead, stamp);
                                 compositor.presented = compositor_late.aim ? stamp : compositor_frame_dated(compositor.presented, compositor.period, stamp);
+                                // Variable refresh as the path of the frames wants it (one screen flipping, or a window shown straight), set
+                                // with no flip in flight: a change is a commit of its own, which waits for one.
+                                compositor_vrr_keep();
                                 compositor_card.looped = 1; // the loop's present: its jobs may go without a wait (compositor_card)
 #ifdef CONFIG_MOONWATER_WAYLAND
                                 // What the clients committed is this frame's; what they commit from here is the next one's (wayland_latch).
@@ -3613,6 +3640,16 @@ static b32 compositor_main()
                 }
 #endif
 
+                // The pointer's kick at variable refresh: the screen's picture flipped again, when a present would be due and none was made.
+                if (compositor.vrr_kick && !compositor.damages && !compositor.flip_pending && !compositor_card_holds())
+                {
+                        int tearing = compositor_tearing();
+                        positive stamp = clock_monotonic_nanoseconds();
+
+                        if (stamp >= compositor_present_at(tearing, tearing ? 0 : compositor_present_lead(), stamp) && !compositor_flip_wait(stamp))
+                                compositor_vrr_kick();
+                }
+
                 // One knock a window a pass, however much it was given.
                 compositor_knock();
                 // Rows made while few are free (compositor_rows_spare), so the next window finds one.
@@ -3622,6 +3659,7 @@ static b32 compositor_main()
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_stop();
 #endif
+        compositor_vrr_off();
         compositor_table_drop();
         string_format(log, "compositor: %p pixels composed, the plane was given %p shapes and %p moves and refused %p times\n",
                       (positive)compositor.painted, (positive)compositor.cursor.paints, (positive)compositor.cursor.moves,

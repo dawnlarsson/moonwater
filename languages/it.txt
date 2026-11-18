@@ -582,6 +582,7 @@ ui_field_full	fe02	non ce ne sta di più
 =Turned right	7a49	Ruotato a destra
 =UDP out	4fd0	UDP in uscita
 =Upside down	9dc1	Capovolto
+=Variable refresh rate	06a4	Frequenza di aggiornamento variabile
 =Volume (percent, or default)	f6e3	Volume (percentuale o default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Cosa fa uno scorrimento da questo bordo
@@ -612,6 +613,7 @@ ui_field_full	fe02	non ce ne sta di più
 =fast	02af	veloce
 =forest	2a60	foresta
 =full	b33c	completo
+=games	2b9c	giochi
 =graphite	dc8d	grafite
 =green	ecbc	verde
 =high	b9fd	alto

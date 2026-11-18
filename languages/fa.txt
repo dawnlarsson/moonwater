@@ -583,6 +583,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Turned right	7a49	چرخیده به راست
 =UDP out	4fd0	UDP خروجی
 =Upside down	9dc1	وارونه
+=Variable refresh rate	06a4	نرخ تازه‌سازی متغیر
 =Volume (percent, or default)	f6e3	بلندی صدا (درصد یا default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	کشیدن از این لبه چه می‌کند
@@ -613,6 +614,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =fast	02af	سریع
 =forest	2a60	سبز جنگلی
 =full	b33c	کامل
+=games	2b9c	بازی‌ها
 =graphite	dc8d	گرافیتی
 =green	ecbc	سبز
 =high	b9fd	زیاد

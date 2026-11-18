@@ -582,6 +582,7 @@ ui_field_full	fe02	meer past er niet in
 =Turned right	7a49	Naar rechts gedraaid
 =UDP out	4fd0	UDP uitgaand
 =Upside down	9dc1	Ondersteboven
+=Variable refresh rate	06a4	Variabele vernieuwingsfrequentie
 =Volume (percent, or default)	f6e3	Volume (procent of default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Wat vegen vanaf deze rand doet
@@ -612,6 +613,7 @@ ui_field_full	fe02	meer past er niet in
 =fast	02af	snel
 =forest	2a60	woud
 =full	b33c	volledig
+=games	2b9c	games
 =graphite	dc8d	grafiet
 =green	ecbc	groen
 =high	b9fd	hoog

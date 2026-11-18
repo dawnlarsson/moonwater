@@ -582,6 +582,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Turned right	7a49	Στραμμένη δεξιά
 =UDP out	4fd0	Εξερχόμενο UDP
 =Upside down	9dc1	Ανάποδα
+=Variable refresh rate	06a4	Μεταβλητός ρυθμός ανανέωσης
 =Volume (percent, or default)	f6e3	Ένταση (ποσοστό ή default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Τι κάνει μια σάρωση από αυτό το άκρο
@@ -612,6 +613,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =fast	02af	γρήγορα
 =forest	2a60	δάσος
 =full	b33c	πλήρες
+=games	2b9c	παιχνίδια
 =graphite	dc8d	γραφίτης
 =green	ecbc	πράσινο
 =high	b9fd	υψηλά

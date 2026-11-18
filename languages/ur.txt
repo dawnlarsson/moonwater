@@ -583,6 +583,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Turned right	7a49	دائیں گھمایا گیا
 =UDP out	4fd0	باہر جانے والا UDP
 =Upside down	9dc1	الٹا
+=Variable refresh rate	06a4	متغیر ریفریش ریٹ
 =Volume (percent, or default)	f6e3	آواز کی بلندی (فیصد یا default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	اس کنارے سے سوائپ کیا کرتا ہے
@@ -613,6 +614,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =fast	02af	تیز
 =forest	2a60	جنگلی سبز
 =full	b33c	مکمل
+=games	2b9c	گیمز
 =graphite	dc8d	گریفائٹ
 =green	ecbc	سبز
 =high	b9fd	زیادہ

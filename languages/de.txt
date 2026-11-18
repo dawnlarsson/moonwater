@@ -582,6 +582,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =Turned right	7a49	Nach rechts gedreht
 =UDP out	4fd0	UDP ausgehend
 =Upside down	9dc1	Auf dem Kopf
+=Variable refresh rate	06a4	Variable Bildwiederholrate
 =Volume (percent, or default)	f6e3	Lautstärke (Prozent oder default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Was ein Wischen von diesem Rand bewirkt
@@ -612,6 +613,7 @@ ui_field_full	fe02	mehr passt nicht hinein
 =fast	02af	Schnell
 =forest	2a60	Wald
 =full	b33c	Voll
+=games	2b9c	Spiele
 =graphite	dc8d	Graphit
 =green	ecbc	Grün
 =high	b9fd	Hoch

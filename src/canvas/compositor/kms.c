@@ -42,6 +42,7 @@ static void compositor_place(int row, int x, int y);
 static void compositor_room(const int *screen, int *room);
 static void compositor_arrange_rect(int row, unsigned int how, const int *rect);
 static void compositor_room_follow(void);
+static void compositor_vrr_forget(void);
 
 // The displays file as the compositor has it: its lines, read when the screens are taken (compositor_displays_read),
 // and how many.
@@ -1286,6 +1287,7 @@ static b32 compositor_space_take(int first)
         for (unsigned int at = 0; at < compositor.outputs; at++)
                 compositor.output[at].shows = 0;
         compositor.cursor.plane.scale = 0;
+        compositor_vrr_forget();
         if (!first)
                 compositor_cursor_move();
         return 0;
@@ -1476,6 +1478,200 @@ static b32 compositor_card_open(void)
                 said = 1;
                 compositor_screen_wait(COMPOSITOR_SCREEN_LOOK);
         }
+}
+
+/*
+        Variable refresh (adaptive sync, FreeSync, VRR): a screen that can waits for the next frame instead of drawing at a fixed rate, so a
+        frame is on the glass as soon as it is flipped, within the panel's range, where at a fixed rate it waited for the next vblank, 0 to a
+        period (0 to 6.9 ms at 144 Hz, 3.5 ms on average, on every key and every frame); and a game whose frames come at less than the mode's
+        rate shows each when it is done, with no frame shown twice as a stutter. The connector says whether its screen can (vrr_capable, which
+        its driver sets from the monitor's range and the link) and the crtc is told the frames are fit for it (VRR_ENABLED); the driver keeps
+        the rate in the panel's range itself, and repeats a frame below its least rate (amdgpu's low framerate compensation), so the compositor
+        needs no range of its own: the mode's period stays the soonest a frame can follow the last, which is what the presents are paced by
+        (compositor_present_due, which needs nothing else: compositor_present_at).
+
+        It is on only where every frame is a flip the screen can wait for: one screen (on more, the scanout spans the crtcs and only one of them
+        flips), the plates flipping or a window shown straight. A frame composed into the buffer on the screen (a window on a plane, a screen
+        Canvas turns, a card told by DIRTYFB) has no flip to end the wait, and at variable refresh would be shown at the panel's least rate.
+        The policy is canvas vrr: on (the standard: every app's input is shown a vblank's wait sooner), games (only while a window is shown
+        straight from its buffer: a fullscreen game or video, for a panel whose brightness swings with its rate, which the kernel's documents
+        warn some do when the rate changes much and often, as a desktop's does between idle and typing) and off.
+
+        The pointer is on its own plane, and a move of it is no flip: amdgpu pulls the primary plane into a commit at variable refresh for its
+        refresh to come at once, but not for the cursor's legacy updates (amdgpu_dm_crtc_helper_atomic_check), so a pointer moved over an idle
+        desktop was shown at the panel's least rate, 48 Hz on a 48-144 Hz panel. A move with nothing else to draw is a kick (compositor.vrr_kick):
+        the screen's own picture flipped again when a present would be due, which costs a flip and no compose, and none at all when a present
+        flips first (compositor_flip clears it). Each kick and each setting of the property is counted for moonwater debug (the table's vrr_*).
+        The machine's owner says a screen can whatever its connector says with the file /run/moonwater/vrr-capable (looked for at the start): a
+        driver that does not say, or a test of the path on a screen that cannot (amdgpu takes VRR_ENABLED for one and changes nothing).
+*/
+#define COMPOSITOR_OBJECT_CRTC 0xccccccccu // DRM_MODE_OBJECT_CRTC
+#define COMPOSITOR_OBJ_SETPROPERTY COMPOSITOR_DRM(0xbau, 24u)
+#define COMPOSITOR_VRR_STEADY 16u
+static struct
+{
+        unsigned int policy;          // canvas vrr: 0 on, 1 games, 2 off (the registry's order)
+        unsigned int crtc, connector; // what the properties were read for (0: to read again, as a take of the screens asks)
+        unsigned int prop;            // the crtc's VRR_ENABLED, 0 for none
+        int capable;                  // the connector's vrr_capable
+        int on;                       // VRR_ENABLED as the crtc has it (read with the property, then as set)
+        int refused;                  // the card refused setting it: not asked again until the properties are read again
+        int said;                     // the owner says the screen can whatever its connector says (/run/moonwater/vrr-capable, looked for at the start)
+        unsigned int steady;          // the presents in a row that wanted it on: it is set on after COMPOSITOR_VRR_STEADY of them
+} compositor_vrr;
+
+// The id of an object's property called name, and its value; 0 when the object has none, or the card will not say.
+static unsigned int compositor_object_prop(unsigned int object, unsigned int type, const char *name, unsigned long *value)
+{
+        unsigned int ids[64];
+        unsigned long values[64];
+        struct
+        {
+                unsigned long props, values;
+                unsigned int count, object, type;
+        } got = {(unsigned long)ids, (unsigned long)values, 64, object, type};
+
+        *value = 0;
+        if (!object || system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, address_of got) != 0 || got.count > 64)
+                return 0;
+        for (unsigned int at = 0; at < got.count; at++)
+        {
+                struct
+                {
+                        unsigned long values, enums;
+                        unsigned int id, flags;
+                        char name[32];
+                        unsigned int count_values, count_enums;
+                } property = {0, 0, ids[at], 0, {0}, 0, 0};
+
+                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
+                        continue;
+                property.name[sizeof(property.name) - 1] = 0;
+                if (string_equals((string_address)property.name, (string_address)name))
+                {
+                        *value = values[at];
+                        return ids[at];
+                }
+        }
+        return 0;
+}
+
+// Whether the screen is to run at variable refresh: the policy (0 on, 1 games, 2 off), a screen that can, the screens one, every frame a flip
+// the screen waits for (flipping), and for games a window shown straight (direct).
+static int compositor_vrr_wants(unsigned int policy, int capable, unsigned int outputs, int flipping, int direct)
+{
+        if (!capable || outputs != 1 || !flipping || policy >= 2)
+                return 0;
+        return policy == 0 || direct;
+}
+
+// What the crtc is to have, from what the present wants (want) and what it has (on): off at once, and on once COMPOSITOR_VRR_STEADY presents
+// in a row wanted it (steady, counted here).
+static int compositor_vrr_step(int want, int on, unsigned int *steady)
+{
+        *steady = want ? *steady + (*steady < COMPOSITOR_VRR_STEADY) : 0;
+        return want && (on > 0 || *steady >= COMPOSITOR_VRR_STEADY);
+}
+
+// The table's word for moonwater debug: WINDOWS_VRR_ bits and the policy from bit 8.
+static void compositor_vrr_publish(void)
+{
+        if (!compositor.table)
+                return;
+        compositor.table->vrr = (compositor_vrr.capable ? WINDOWS_VRR_CAPABLE : 0u) | (compositor_vrr.prop ? WINDOWS_VRR_PROPERTY : 0u) |
+                                (compositor_vrr.on > 0 ? WINDOWS_VRR_ON : 0u) | (compositor_vrr.refused ? WINDOWS_VRR_REFUSED : 0u) |
+                                compositor_vrr.policy << 8;
+}
+
+// VRR_ENABLED set to on (0 or 1), with no flip in flight (the set is a commit of its own, which would wait for it); false when the card refused.
+static int compositor_vrr_set(int on)
+{
+        struct
+        {
+                unsigned long value;
+                unsigned int prop, object, type, pad;
+        } set = {(unsigned long)on, compositor_vrr.prop, compositor_vrr.crtc, COMPOSITOR_OBJECT_CRTC, 0};
+        positive began = clock_monotonic_nanoseconds();
+
+        if (system_control(compositor.card, COMPOSITOR_OBJ_SETPROPERTY, address_of set) != 0)
+                return 0;
+        compositor_vrr.on = on;
+        if (compositor.table)
+                compositor.table->vrr_set_us = (unsigned int)((clock_monotonic_nanoseconds() - began) / 1000);
+        return 1;
+}
+
+/*
+        The screen's variable refresh as the policy and the presents want it, before each present and at a change of the setting: the properties
+        read when the screen's crtc or connector is another than they were read for (and again after every take of the screens), and the crtc
+        set only when what it has is not what is wanted, so a crtc another program left on is set off where it is not wanted. Off at once, for a
+        frame with no flip at variable refresh waits for the panel's least rate; on only after COMPOSITOR_VRR_STEADY presents in a row that
+        wanted it (a ninth of a second at 144 Hz), so frames that go on and off a plane do not set the crtc at every present, each set being a
+        commit of its own. Not while a flip is in flight: the next present asks again.
+*/
+static void compositor_vrr_keep(void)
+{
+        unsigned long value;
+        int want, flipping;
+
+        if (compositor.card < 0 || !compositor.crtc)
+                return;
+        if (compositor_vrr.crtc != compositor.crtc || compositor_vrr.connector != compositor.connector)
+        {
+                compositor_vrr.crtc = compositor.crtc, compositor_vrr.connector = compositor.connector;
+                compositor_vrr.capable = (compositor_object_prop(compositor.connector, COMPOSITOR_OBJECT_CONNECTOR, "vrr_capable", &value) && value) ||
+                                         compositor_vrr.said;
+                compositor_vrr.prop = compositor_object_prop(compositor.crtc, COMPOSITOR_OBJECT_CRTC, "VRR_ENABLED", &value);
+                compositor_vrr.on = compositor_vrr.prop && value;
+                compositor_vrr.refused = 0;
+        }
+        flipping = compositor.direct_row >= 0 || (compositor_plate_wanted(compositor_turning_software()) && compositor_spare.fb);
+        want = compositor_vrr_wants(compositor_vrr.policy, compositor_vrr.capable, (unsigned int)compositor_output_count(), flipping,
+                                    compositor.direct_row >= 0);
+        want = compositor_vrr_step(want, compositor_vrr.on, &compositor_vrr.steady);
+        if (compositor_vrr.prop && !compositor_vrr.refused && want != compositor_vrr.on && !compositor.flip_pending)
+                compositor_vrr.refused = !compositor_vrr_set(want);
+        if (compositor_vrr.on <= 0)
+                compositor.vrr_kick = 0;
+        compositor_vrr_publish();
+}
+
+// The compositor ends: a crtc it set on is set off, so the console or the next desktop is not left waiting for flips it never makes.
+static void compositor_vrr_off(void)
+{
+        if (compositor.card >= 0 && compositor_vrr.prop && compositor_vrr.on > 0 && compositor_vrr.crtc == compositor.crtc)
+                compositor_vrr_set(0);
+}
+
+// A take of the screens: the properties read again at the next present, for a screen plugged in where another was is another screen.
+static void compositor_vrr_forget(void)
+{
+        compositor_vrr.crtc = compositor_vrr.connector = 0;
+}
+
+// The pointer moved on its plane: at variable refresh the screen is flipped again for it, unless a present flips first (compositor_flip).
+static void compositor_vrr_moved(void)
+{
+        if (compositor_vrr.on > 0)
+                compositor.vrr_kick = 1;
+}
+
+/*
+        The kick, when a present would be due (the loop): the picture on the screen flipped to again, the compositor's own or a window's shown
+        straight (its row and the buffer its present flipped to), with no compose. Not with a flip in flight: its landing is the next chance.
+*/
+static void compositor_vrr_kick(void)
+{
+        int row = compositor.direct_row;
+
+        if (compositor_vrr.on <= 0)
+                compositor.vrr_kick = 0;
+        if (!compositor.vrr_kick || compositor.flip_pending || !compositor.on_screen)
+                return;
+        compositor.vrr_kick = 0;
+        if ((row >= 0 || compositor.on_screen == compositor.fb) &&
+            compositor_flip(compositor.on_screen, row, row >= 0 ? compositor.front[row] : 0) && compositor.table)
+                compositor.table->vrr_kicks++;
 }
 
 /*
@@ -1963,7 +2159,10 @@ static void compositor_cursor_move(void)
         inset = compositor_cursor_inset(compositor_pointer_span(&now, &hot_x, &hot_y));
         if ((compositor.cursor.plane_on && !memory_compare(&now, &compositor.cursor.plane, sizeof(now))) || compositor_cursor_paint(&now) == 0)
                 if (compositor_cursor_planes(compositor_drawn_x() - hot_x + inset, compositor_drawn_y() - hot_y + inset) == 0)
+                {
+                        compositor_vrr_moved();
                         return;
+                }
 
         // The card will not take it: the pointer is drawn from here on.
         compositor_cursor_planes_off();

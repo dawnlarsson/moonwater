@@ -6391,7 +6391,7 @@ static fn check_settings_groups(void)
         } families[] = {
             {{"name"}, "Machine"}, {{"canvas", "background"}, "Canvas"}, {{"canvas", "theme"}, "Canvas"},
             {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"}, {{"canvas", "border"}, "Canvas"},
-            {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Canvas"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"},
+            {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Canvas"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"}, {{"canvas", "vrr"}, "Display"},
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
             {{"canvas", "wheel"}, "Input"}, {{"canvas", "trackpad"}, "Scrolling"}, {{"canvas", "scroll"}, "Scrolling"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
             {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
@@ -6420,7 +6420,7 @@ static fn check_settings_groups(void)
             {"Resize border width (pixels, or default)", "Canvas"},
             {"Open windows where they were last put", "Canvas"},
             {"Clipboard", "Canvas"}, {"GPU rendering (alpha)", "Canvas"}, {"Clipboard history (copies kept)", "Canvas"},
-            {"Screen", "Display"}, {"Screen modes", "Display"}, {"Brightness", "Display"}};
+            {"Screen", "Display"}, {"Screen modes", "Display"}, {"Variable refresh rate", "Display"}, {"Brightness", "Display"}};
         const int count = (int)(sizeof(names) / sizeof(names[0]));
         b32 order = settings_groups() == count + 1, family = true, by_name = true, listed = true, apart = true, found = true,
             every = true, bare = true, screens = true;

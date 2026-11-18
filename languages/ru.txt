@@ -582,6 +582,7 @@ ui_field_full	fe02	больше не помещается
 =Turned right	7a49	Повёрнут вправо
 =UDP out	4fd0	Исходящий UDP
 =Upside down	9dc1	Перевёрнут
+=Variable refresh rate	06a4	Переменная частота обновления
 =Volume (percent, or default)	f6e3	Громкость (проценты или default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Что делает жест от этого края
@@ -612,6 +613,7 @@ ui_field_full	fe02	больше не помещается
 =fast	02af	быстро
 =forest	2a60	лесной
 =full	b33c	полное
+=games	2b9c	игры
 =graphite	dc8d	графитовый
 =green	ecbc	зелёный
 =high	b9fd	высоко

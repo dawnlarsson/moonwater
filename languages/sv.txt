@@ -582,6 +582,7 @@ ui_field_full	fe02	mer ryms inte
 =Turned right	7a49	Vriden åt höger
 =UDP out	4fd0	UDP utåt
 =Upside down	9dc1	Upp och ned
+=Variable refresh rate	06a4	Variabel uppdateringsfrekvens
 =Volume (percent, or default)	f6e3	Volym (procent eller default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Vad ett svep in från den här kanten gör
@@ -612,6 +613,7 @@ ui_field_full	fe02	mer ryms inte
 =fast	02af	snabb
 =forest	2a60	skog
 =full	b33c	full
+=games	2b9c	spel
 =graphite	dc8d	grafit
 =green	ecbc	grön
 =high	b9fd	hög

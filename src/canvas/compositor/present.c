@@ -233,6 +233,25 @@ static positive compositor_present_lead(void)
 }
 
 /*
+        A window that allows tearing (wp_tearing_control's async hint, which Xwayland sets for an X client's PresentOptionAsync) and is shown
+        straight from its buffer is flipped asynchronously (compositor_flip): the card puts its frame up mid-scanout, at once, so a present for
+        it waits for no vblank and is due now, and is late for none (no lead: compositor_late_begin aims at no vblank). Every other present
+        keeps the rule (compositor_present_due), under variable refresh too, which needs no rule of its own: a present due at once (nothing
+        drawn for a period) is shown at once by a screen that waits for its frame, where at a fixed rate it waited for the next vblank, 0 to a
+        period, and one due the lead before the soonest the screen can draw again (the mode's period after the last flip, the fastest the
+        panel goes) is shown then, as at a fixed rate. A composed frame never tears: the hint is honoured only where the window is the frame.
+*/
+static int compositor_tearing(void)
+{
+        return compositor.card >= 0 && compositor.direct_row >= 0 && compositor_wl_row_async(compositor.direct_row);
+}
+
+static positive compositor_present_at(int tearing, positive lead, positive now)
+{
+        return tearing ? now : compositor_present_due(compositor.presented, compositor.period, compositor.flip_when, lead, now);
+}
+
+/*
         A present's end, once its pixels are in compositor.fb: the screens told what changed (one DIRTYFB, or each screen's), the screens Canvas
         turns given their part (compositor_turn_frame), the overlay taken off where the frame is the compositor's own screen again, and the frame
         shown: the plate composed into flipped to (flip_own), or the compositor's own screen flipped back to (back), with what a refused flip does.

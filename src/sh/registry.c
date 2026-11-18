@@ -137,6 +137,7 @@
 #define SETTING_PREDICT_TOUCH_PATH "/root/canvas.predict.touch"
 #define SETTING_CLIPBOARD_PATH "/root/canvas.clipboard"
 #define SETTING_GPU_PATH "/root/canvas.gpu"
+#define SETTING_VRR_PATH "/root/canvas.vrr"
 #define SETTING_CLIPBOARD_HISTORY_PATH "/root/canvas.clipboard.history"
 // The sound server's (src/audio/service.c reads the first three again twice a second and writes the volume and the mute back when
 // a program changes them; the machine script reads the last when it starts the server).
@@ -424,6 +425,14 @@ static const struct settings_row settings_rows[] = {
      .help = "how big the screen draws things, in percent of its size: 50, 75, 100, 125, 150 or 200 [100]", .output = SETTINGS_OUT_SCALE},
     {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0,
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
+    //  Variable refresh (kms.c's compositor_vrr): a screen that can (its connector's vrr_capable) waits for each frame, so a key or a frame
+    //  is shown when it is drawn and not at the next fixed vblank. On by default, for every window; games keeps it to a window shown
+    //  straight from its buffer (fullscreen), for a panel whose brightness flickers as its rate swings; a screen that cannot is never set.
+    SETTING_PLAIN_ROW(null, "Variable refresh rate", SETTINGS_CHOICE, 0, ("canvas", "vrr"), "vrr ", "on games off",
+                      .path = SETTING_VRR_PATH, .standard = "on", .reset = "on",
+                      .refusal = "vrr is on, games or off, not %s\n",
+                      .usage = "canvas vrr [on|games|off]",
+                      .help = "a screen that can waits for each frame, so it is shown when drawn; games: only a fullscreen window [on]"),
     {null, "Brightness", SETTINGS_STEP, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, "-10 +10", 0,
      .usage = "brightness [N%|+N|-N]", .help = "the screen backlight"},
     //  The menu names each layout once; gb, sv and nb, which the help names as well, are the same layouts as uk, se

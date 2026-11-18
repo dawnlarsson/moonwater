@@ -583,6 +583,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Turned right	7a49	مدار لليمين
 =UDP out	4fd0	UDP الصادر
 =Upside down	9dc1	مقلوب
+=Variable refresh rate	06a4	معدل التحديث المتغير
 =Volume (percent, or default)	f6e3	مستوى الصوت (نسبة مئوية أو default)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	ما يفعله السحب من هذه الحافة
@@ -613,6 +614,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =fast	02af	سريع
 =forest	2a60	أخضر الغابة
 =full	b33c	كامل
+=games	2b9c	الألعاب
 =graphite	dc8d	جرافيت
 =green	ecbc	أخضر
 =high	b9fd	مرتفع
