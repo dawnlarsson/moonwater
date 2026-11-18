@@ -2213,7 +2213,7 @@ struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, r
 typedef char gpu_slots_fit[sizeof(struct gpu_args) <= 256 ? 1 : -1]; // a slot's arguments in its 256 bytes (gpu_start puts the kernels after the last slot's)
 
 /*
-        The Intel set, Gen9 (graphics version 9). Copy (op 0) and fill (op 1) so far, so it is NOT registered: GPU_I915_SETS above stays empty until
+        The Intel set, Gen9 (graphics version 9). Copy (op 0), fill (op 1) and tone (op 2) so far, so it is NOT registered: GPU_I915_SETS above stays empty until
         all eight ops (copy, fill, tone, glass, cp, bx, scene, scale) pass on a card and the self-test holds.
 
         A fill is bytes: a surface of 4 * w bytes at 4 * dp bytes a row (a 32-bit pixel is four bytes, little endian), the colour's dword
@@ -2276,7 +2276,7 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         // Whole or nothing: a fill whose edges the card cannot write (a row's head or tail, or a span under 16 bytes) is refused, and the
         // processor draws all of it. The surface's fields are 14 bits (width and height, minus one, in 13:0 and 29:16) and the pitch 18:
         // a row of more than 4096 pixels (16384 bytes), more than 16384 rows or a pitch over 256 KiB is refused, not wrapped.
-        if (a->op > 1 || a->x0 || a->y0 || !a->w || !a->rows || a->w > 4096u || a->rows > 16384u || a->dp > 65536u || room < 56 ||
+        if (a->op > 2 || a->x0 || a->y0 || !a->w || !a->rows || a->w > 4096u || a->rows > 16384u || a->dp > 65536u || room < 56 ||
             !job->state_at || job->state < GPU_VA || job->code < GPU_VA || ((job->code - GPU_VA) & 63))
                 return 0;
         span = 4u * a->w;
@@ -2354,7 +2354,7 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
 // The set as the table will hold it, once registered: the eight ops in the order of gpu_kernels (copy, fill, tone, glass, cp, bx, scene,
 // scale), the kernels without words marked empty. Not in GPU_I915_SETS.
 static const struct gpu_code gpu_i915_gen9_kernels[] = {
-        {gpu_i915_copy, sizeof(gpu_i915_copy)}, {gpu_i915_fill, sizeof(gpu_i915_fill)}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}};
+        {gpu_i915_copy, sizeof(gpu_i915_copy)}, {gpu_i915_fill, sizeof(gpu_i915_fill)}, {gpu_i915_tone, sizeof(gpu_i915_tone)}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}};
 // The Intel set takes the AMD set's self-test hash: it is registered only when its kernels draw the same pixels as the AMD ones (bit-exact,
 // the rule every set meets), so one picture stands for both. A set whose picture differs is not registered (the self-test would refuse it).
 static const struct gpu_set gpu_i915_gen9_set = {gpu_i915_gen9_kernels, 8, 0, GPU_TEST_HASH, gpu_i915_gen9_batch};

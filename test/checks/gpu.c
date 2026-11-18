@@ -109,7 +109,7 @@ static void gpu_i915_set_rows(void)
                               state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2020) && ((state[(64 + 32) / 4]) & 31) == 0);
                         check("gpu i915: the surface is 80 bytes wide, 4 rows high, on a 512-byte pitch",
                               state[(64 + 8) / 4] == (79u | (3u << 16)) && state[(64 + 12) / 4] == 511u);
-                        a->op = 2;
+                        a->op = 3;
                         check("gpu i915: an op the set has no kernel for is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->op = 1, a->dp = 16;
                         check("gpu i915: a pitch below the span is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
@@ -153,8 +153,12 @@ static void gpu_i915_set_rows(void)
                         check("gpu i915: a copy whose source pitch is not whole 16-byte groups is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->sp = 128, a->s = 0;
                         check("gpu i915: a copy whose source is not in the card's buffer is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
-                        a->op = 2, a->s = GPU_VA + 0x4000;
-                        check("gpu i915: an op past the copy and the fill (2, tone) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        a->op = 2, a->v = 0x80402010u;
+                        check("gpu i915: a tone's batch is 56 dwords, one surface (the destination), its colour in the CURBE",
+                              gpu_i915_gen9_batch(&job, words, 64) == 56 && state[48] == 0x80402010u && state[0] == 2560 + 64 && state[(64 + 32) / 4] == (unsigned int)(GPU_VA + 0x2020));
+                        check("gpu i915: the tone walks the same five columns on 4 rows as the fill and the copy", words[44] == 5u && words[47] == 4u);
+                        a->op = 3, a->v = 0;
+                        check("gpu i915: an op past the copy, the fill and the tone (3, glass) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                         a->op = 1, a->s = 0;
                         a->w = 2;
                         check("gpu i915: a fill whose span is under 16 bytes leaves the GPU nothing (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);

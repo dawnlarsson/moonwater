@@ -289,6 +289,54 @@ COPY_GEN9_WORDS = [
 ]
 
 
+# The tone (op 2): src/canvas/gpu_i915_tone.iga assembled by iga64 -a -p=9, 43 instructions.
+TONE_GEN9_WORDS = [
+    0x00000041, 0x20400208, 0x06000004, 0x00000010,
+    0x00000001, 0x20440208, 0x00000018, 0x00000000,
+    0x00600001, 0x20800208, 0x008d0000, 0x00000000,
+    0x00200001, 0x20800208, 0x00450040, 0x00000000,
+    0x00000001, 0x20880608, 0x00000000, 0x0000000f,
+    0x0c800031, 0x20a00208, 0x06000080, 0x02190000,
+    0x00000001, 0x22800208, 0x00000020, 0x00000000,
+    0x00000008, 0x22a00208, 0x06000280, 0x00000018,
+    0x00000040, 0x22c00208, 0x060042a0, 0x000000ff,
+    0x00000005, 0x22e00208, 0x06000280, 0x00ff00ff,
+    0x00000008, 0x23200208, 0x06000280, 0x00000008,
+    0x00000005, 0x23200208, 0x06000320, 0x00ff00ff,
+    0x00400001, 0x21c00208, 0x002000a0, 0x00000000,
+    0x00400005, 0x21400208, 0x062000a0, 0x00ff00ff,
+    0x00400008, 0x21600208, 0x062000a0, 0x00000008,
+    0x00400005, 0x21600208, 0x06200160, 0x00ff00ff,
+    0x00400041, 0x21400208, 0x12200140, 0x000002c0,
+    0x00400040, 0x21400208, 0x06200140, 0x007f007f,
+    0x00400041, 0x21600208, 0x12200160, 0x000002c0,
+    0x00400040, 0x21600208, 0x06200160, 0x007f007f,
+    0x00400008, 0x21800208, 0x06200140, 0x00000008,
+    0x00400005, 0x21800208, 0x06200180, 0x00ff00ff,
+    0x00400040, 0x21800208, 0x02200180, 0x00200140,
+    0x00400040, 0x21800208, 0x06200180, 0x00010001,
+    0x00400008, 0x21800208, 0x06200180, 0x00000008,
+    0x00400005, 0x21800208, 0x06200180, 0x00ff00ff,
+    0x00400008, 0x21a00208, 0x06200160, 0x00000008,
+    0x00400005, 0x21a00208, 0x062001a0, 0x00ff00ff,
+    0x00400040, 0x21a00208, 0x022001a0, 0x00200160,
+    0x00400040, 0x21a00208, 0x062001a0, 0x00010001,
+    0x00400008, 0x21a00208, 0x062001a0, 0x00000008,
+    0x00400005, 0x21a00208, 0x062001a0, 0x00ff00ff,
+    0x00400040, 0x21800208, 0x02200180, 0x000002e0,
+    0x00400040, 0x21a00208, 0x022001a0, 0x00000320,
+    0x05600002, 0x21801248, 0x168d0180, 0x00ff00ff,
+    0x05600002, 0x21a01248, 0x168d01a0, 0x00ff00ff,
+    0x00400009, 0x21a00208, 0x062001a0, 0x00000008,
+    0x00400006, 0x20a00208, 0x02200180, 0x002001a0,
+    0x01400010, 0x20000200, 0x060002a0, 0x00000000,
+    0x00410001, 0x20a00208, 0x002001c0, 0x00000000,
+    0x0c800031, 0x20000a40, 0x06000080, 0x060a8000,
+    0x00600001, 0x2e000208, 0x008d0000, 0x00000000,
+    0x07800031, 0x20000a40, 0x06000e00, 0x82000010,
+]
+
+
 def intel_arrays(text):
     return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
             for name, body in re.findall(r'static const unsigned int gpu_i915_(\w+)\[\] = \{(.*?)\};', text, re.S)]
@@ -296,22 +344,25 @@ def intel_arrays(text):
 
 def intel_check(src, inc):
     kernels = intel_kernels(pathlib.Path(src).read_text())
-    if [n for n, _ in kernels] != ['copy', 'fill']:
-        sys.exit('%s: the kernels are %s, the Gen9 set has copy and fill' % (src, [n for n, _ in kernels]))
+    if [n for n, _ in kernels] != ['copy', 'fill', 'tone']:
+        sys.exit('%s: the kernels are %s, the Gen9 set has copy, fill and tone' % (src, [n for n, _ in kernels]))
     copy = kernels[0][1]
     if copy != COPY_GEN9_WORDS:
         sys.exit('%s: copy differs from the iga64 assembly of gpu_i915_copy.iga (%d words, the reviewed kernel has %d)' % (src, len(copy), len(COPY_GEN9_WORDS)))
     fill = kernels[1][1]
+    tone = kernels[2][1]
+    if tone != TONE_GEN9_WORDS:
+        sys.exit('%s: tone differs from the iga64 assembly of gpu_i915_tone.iga (%d words, the reviewed kernel has %d)' % (src, len(tone), len(TONE_GEN9_WORDS)))
     if fill != IGT_GEN9_FILL_ROWS_1_TO_9:
         bad = [i for i in range(max(len(fill), 36)) if i >= len(fill) or i >= 36 or fill[i] != IGT_GEN9_FILL_ROWS_1_TO_9[i]]
         sys.exit('%s: fill differs from IGT at word %d (%s)' % (src, bad[0], 'missing' if bad[0] >= len(fill) else '%08x vs IGT' % fill[bad[0]]))
     made = intel_arrays(pathlib.Path(inc).read_text())
-    if [n for n, _ in made] != ['copy', 'fill']:
-        sys.exit('%s: the arrays are %s, the source has copy and fill' % (inc, [n for n, _ in made]))
-    for (name, words), want in zip(made, (copy, fill)):
+    if [n for n, _ in made] != ['copy', 'fill', 'tone']:
+        sys.exit('%s: the arrays are %s, the source has copy, fill and tone' % (inc, [n for n, _ in made]))
+    for (name, words), want in zip(made, (copy, fill, tone)):
         if words != want:
             sys.exit('%s: the array %s is not the source\'s words' % (inc, name))
-    print('gpu i915 kernels: %s, copy the iga64 assembly of gpu_i915_copy.iga, fill the same as IGT rows 1 to 9, both as %s' % (src, inc))
+    print('gpu i915 kernels: %s, copy the iga64 assembly of gpu_i915_copy.iga, fill the same as IGT rows 1 to 9, tone the iga64 assembly, all as %s' % (src, inc))
 
 
 def main():

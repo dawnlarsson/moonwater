@@ -1,0 +1,50 @@
+// Gen9 tone (op 2): the premultiplied tone v (CURBE dword 0) laid over each pixel of the 16-byte block, as ui_over lays it:
+// a pixel under a tone of alpha 0 is left as it was (the predicated move); otherwise each channel is the under channel times
+// (255 - alpha) (x = u * rest + 127, then q = (x + (x >> 8) + 1) >> 8 per 16-bit lane), plus the tone's channel, clamped at 255
+// per lane (sel.lt). The multiply takes the rest as a word (dword by word is the EU's multiply). Thread group X (r0.1) is the
+// block, group Y (r0.6) the row. The block is read and written on binding table entry 0; the scalars are r20 the tone, r21 its
+// alpha, r22 255 - alpha, r23 the tone's red and blue, r25 its green and alpha. Checked on subtle-cottage against ui_over for
+// eight tones, including alpha 0, alpha 255 and the clamp: bit-exact.
+mul (1|M0)               r2.0<1>:ud    r0.1<0;1,0>:ud    0x10:ud
+mov (1|M0)               r2.1<1>:ud    r0.6<0;1,0>:ud
+mov (8|M0)               r4.0<1>:ud    r0.0<8;8,1>:ud
+mov (2|M0)               r4.0<1>:ud    r2.0<2;2,1>:ud
+mov (1|M0)               r4.2<1>:ud    0xF:ud
+send (16|M0)             r5:ud         r4:ud     0xC  0x02190000     // media block read of the destination (entry 0), header, 1 GRF
+mov (1|M0)               r20.0<1>:ud   r1.0<0;1,0>:ud
+shr (1|M0)               r21.0<1>:ud   r20.0<0;1,0>:ud   24:ud
+add (1|M0)               r22.0<1>:ud   -r21.0<0;1,0>:ud  255:ud
+and (1|M0)               r23.0<1>:ud   r20.0<0;1,0>:ud   0x00ff00ff:ud
+shr (1|M0)               r25.0<1>:ud   r20.0<0;1,0>:ud   8:ud
+and (1|M0)               r25.0<1>:ud   r25.0<0;1,0>:ud   0x00ff00ff:ud
+mov (4|M0)               r14.0<1>:ud   r5.0<1;1,0>:ud
+and (4|M0)               r10.0<1>:ud   r5.0<1;1,0>:ud    0x00ff00ff:ud
+shr (4|M0)               r11.0<1>:ud   r5.0<1;1,0>:ud    8:ud
+and (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   0x00ff00ff:ud
+mul (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   r22.0<0;1,0>:uw
+add (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   0x007f007f:ud
+mul (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   r22.0<0;1,0>:uw
+add (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   0x007f007f:ud
+shr (4|M0)               r12.0<1>:ud   r10.0<1;1,0>:ud   8:ud
+and (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   r10.0<1;1,0>:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00010001:ud
+shr (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   8:ud
+and (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00ff00ff:ud
+shr (4|M0)               r13.0<1>:ud   r11.0<1;1,0>:ud   8:ud
+and (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r11.0<1;1,0>:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00010001:ud
+shr (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   8:ud
+and (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   r23.0<0;1,0>:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r25.0<0;1,0>:ud
+sel (8|M0) (lt)f0.0           r12.0<1>:uw   r12.0<8;8,1>:uw   0x00ff:uw
+sel (8|M0) (lt)f0.0           r13.0<1>:uw   r13.0<8;8,1>:uw   0x00ff:uw
+shl (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   8:ud
+or (4|M0)                r5.0<1>:ud    r12.0<1;1,0>:ud   r13.0<1;1,0>:ud
+cmp (4|M0)   (eq)f0.0    null:ud       r21.0<0;1,0>:ud   0:ud
+(f0.0) mov (4|M0)        r5.0<1>:ud    r14.0<1;1,0>:ud
+send (16|M0)             acc0:uw       r4:d      0xC  0x060A8000     // media block write of the destination (entry 0), as the fill
+mov (8|M0)               r112.0<1>:ud  r0.0<8;8,1>:ud
+send (16|M0)             null:uw       r112:d    0x27 0x02000010 {EOT}
