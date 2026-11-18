@@ -1742,9 +1742,14 @@ static fn chrome_profile(void)
                 check("A bowl's program is offered the language the person chose, as LANGUAGE and a code of two letters, and English or nothing or a word that is no code offers none",
                       right);
         }
-        check("A program is given its capabilities unless the environment it is started with says none",
-              bowl_capabilities_wanted(null) && bowl_capabilities_wanted(plain) && bowl_capabilities_wanted(kept) &&
-                  bowl_capabilities_wanted(longer) && !bowl_capabilities_wanted(cleared));
+        static string_address keep[] = {"BOWL_CAPABILITIES=keep", null};
+        check("A program is given its capabilities only when the environment it is started with asks (all or keep), so bubblewrap and "
+              "glycin under it run in a bowl",
+              !bowl_capabilities_wanted(null) && !bowl_capabilities_wanted(plain) && bowl_capabilities_wanted(kept) &&
+                  bowl_capabilities_wanted(keep) && !bowl_capabilities_wanted(longer) && !bowl_capabilities_wanted(cleared));
+        check("Only the word none keeps other bowls' launchers off the PATH: no word, another word and all do not",
+              bowl_capabilities_refused(cleared) && !bowl_capabilities_refused(null) && !bowl_capabilities_refused(plain) &&
+                  !bowl_capabilities_refused(kept) && !bowl_capabilities_refused(longer));
         {
                 static string_address with_expose[] = {"BOWL_CAPABILITIES=none", "PATH=/usr/local/bin:/bin:/usr/bin:" BOWL_EXPOSE_DIRECTORY ":/", "HOME=/root", null};
                 static string_address slashes[] = {"BOWL_CAPABILITIES=none", "PATH=" BOWL_EXPOSE_DIRECTORY "/:/usr/bin://:/opt/bin", null};

@@ -4005,30 +4005,37 @@ typedef struct { p32 effective; p32 permitted; p32 inheritable; } bowl_cap_data;
 #define BOWL_PR_CAP_AMBIENT_CLEAR_ALL 4
 
 /*
-        Whether the program is given its namespace's capabilities across
-        exec, which BOWL_CAPABILITIES=none in the environment it is started
-        with says it is not. The capabilities are for the programs that make
-        a mount view of their own (a launcher of another bowl) and they are
-        what a program that refuses to run with any (bubblewrap says
-        "Unexpected capabilities but not setuid") finds: GTK 3 loads its
-        icons through glycin, which runs its loader under bubblewrap, and a
-        browser's file chooser ended in an abort of the whole browser. A
-        program that starts no such view asks for none, and what it starts
-        has none to be refused for; asking can only take privilege away, so
-        whoever starts the program may.
+        Whether the program is given its namespace's capabilities across exec, which it is only when the environment it is
+        started with asks (BOWL_CAPABILITIES=all or keep). A program that refuses to run with any finds none: bubblewrap says
+        "Unexpected capabilities but not setuid", and GTK 3 and 4 load their icons through glycin, which runs its image
+        loader under bubblewrap, so every GTK program of a bowl that drew an SVG icon ended in an abort
+        (Gtk:ERROR ensure_surface_for_gicon: "Loader process exited early with status 1"), a browser's file chooser the
+        whole browser. The capabilities were kept for the programs that make a mount view of their own (a launcher of
+        another bowl), and such a launch makes a user namespace of its own instead (bowl_own_namespace), so nothing the
+        bowl starts needs them. Asking for them can only give privilege a program of the bowl did not have.
+
+        BOWL_CAPABILITIES=none is the sessions' word for more: the program is also not to find the launchers of other
+        bowls on its PATH (bowl_capabilities_refused, bowl_without_exposed_path).
 */
 static bool bowl_capabilities_wanted(string_address address_to environment)
 {
         string_address asked = bowl_env_value(environment, "BOWL_CAPABILITIES");
 
-        return !asked || !string_equals(asked, "none");
+        return asked && (string_equals(asked, "all") || string_equals(asked, "keep"));
+}
+
+static bool bowl_capabilities_refused(string_address address_to environment)
+{
+        string_address asked = bowl_env_value(environment, "BOWL_CAPABILITIES");
+
+        return asked && string_equals(asked, "none");
 }
 
 /*
         Whether a PATH component names the bowl wrapper directory (/bowls/bin)
-        or the host root (/): neither can enter another bowl when
-        capabilities are cleared, and trying one prints "[Bowl] ..." to
-        stdout instead of missing cleanly on stderr.
+        or the host root (/): neither is on the PATH of a launch that says
+        none, where a launcher of another bowl tried by a script printed
+        "[Bowl] ..." to stdout instead of missing cleanly on stderr.
 */
 static bool bowl_path_is_bowl_entry(string_address at, positive length)
 {
@@ -4056,7 +4063,7 @@ static string_address address_to bowl_without_exposed_path(
         b32 path_at = -1;
         bool stripped = false, any = false;
 
-        if (!environment || bowl_capabilities_wanted(environment))
+        if (!environment || !bowl_capabilities_refused(environment))
                 return environment;
         while (environment[count])
         {
@@ -4345,6 +4352,36 @@ static fn bowl_become_user(void)
         bowl_fill_valid = false;
 }
 
+#define BOWL_CAP_SYS_ADMIN 21
+
+/*
+        A launch from inside a bowl by a program that holds no capability (it was started with BOWL_CAPABILITIES=none, or
+        by a program that was): its own user namespace, the ids it has mapped to themselves, in which it may make the mount
+        view the launch is. The view is made as it is from a launch that kept its capabilities, inside the last one; what
+        the program of the launch is given is what it would have had (bowl_keep_capabilities is not asked again, so a
+        launch that had none passes none on). A namespace the machine refuses leaves the launch to fail as it did.
+*/
+static fn bowl_own_namespace(void)
+{
+        bowl_cap_header header = {BOWL_CAP_VERSION_3, 0};
+        bowl_cap_data data[2] = {{0}};
+        positive uid = (positive)system_call(syscall(geteuid));
+        positive gid = (positive)system_call(syscall(getegid));
+
+        if (system_call_2(syscall(capget), (positive)address_of header, (positive)data) >= 0 &&
+            (data[0].effective & (1u << BOWL_CAP_SYS_ADMIN)))
+                return;
+        if (system_call_1(syscall(unshare), CLONE_NEWUSER) < 0)
+                return;
+        if (ul_namespace_write("/proc/self/setgroups", "deny", 4, "bowl") ||
+            ul_namespace_map("/proc/self/uid_map", uid, uid, 1, "bowl") ||
+            ul_namespace_map("/proc/self/gid_map", gid, gid, 1, "bowl"))
+        {
+                bowl_refuse("cannot map the ids of its own namespace\n");
+                exit(1);
+        }
+}
+
 #define BOWL_RLIMIT_NOFILE 7
 #define BOWL_RLIMIT_MEMLOCK 8
 #define BOWL_NOFILE_TARGET ((p64)524288)
@@ -4411,6 +4448,8 @@ static b32 bowl_launch(string_address root, string_address program,
                                                   : (p32)system_call(syscall(geteuid)));
                 bowl_become_user();
         }
+        else if (!isolated && !bowl_pad_root)
+                bowl_own_namespace();
         environment = bowl_environment(file_environment_all());
         environment = bowl_without_exposed_path(environment);
         if (!bowl_capabilities_wanted(environment))
@@ -4441,7 +4480,7 @@ static b32 bowl_launch(string_address root, string_address program,
             ? CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID : CLONE_NEWNS);
         if (failed)
         {
-                if (!isolated && !bowl_capabilities_wanted(file_environment_all()))
+                if (!isolated && bowl_capabilities_refused(file_environment_all()))
                         bowl_quiet = true;
                 return bowl_launch_failed(native_shell,
                     isolated ? "cannot make isolated views"
@@ -9409,16 +9448,15 @@ static const struct bowl_component bowl_graphics_components[] = {
         node everywhere else (a render node carries no display control), and
         a machine whose programs run as root has what it had.
 
-        The browser is started with BOWL_CAPABILITIES=none. Bowl keeps a
-        program's capabilities of its namespace across exec, for the
-        programs that make a mount view of another bowl's program, and
-        bubblewrap refuses to run with any. GTK 3's file chooser loads its
+        The browser is started with BOWL_CAPABILITIES=none. A program of a
+        bowl has no capabilities of its namespace (bowl_capabilities_wanted),
+        and bubblewrap refuses to run with any: GTK 3's file chooser loads its
         icons through glycin, which runs its image loader under bubblewrap,
-        and the first click on "Choose file" (or Save as) aborted the
-        browser. Cleared, the chooser opens and the browser exits cleanly
-        (measured at both tiers). Chromium's own sandbox is made of user
-        namespaces and needs no capability; what the browser gives up is
-        starting a program of another bowl by its name.
+        and when bowl kept them the first click on "Choose file" (or Save as)
+        aborted the browser. Chromium's own sandbox is made of user
+        namespaces and needs no capability. The word none says more than the
+        default: the browser is not to find the launchers of other bowls on
+        its PATH.
 */
 #define BOWL_CHROME_SOCKET "/run/moonwater/wayland-0"
 
@@ -10485,7 +10523,8 @@ bowl_chrome_pwrite_install(const struct bowl_profile address_to profile)
         The session. It runs in the machine's shell with the arguments the
         launcher was given, which Steam takes. Canvas's socket is checked
         first, and the launch is the person's (MOONWATER_ASKED gives the first
-        window the keys). The bowl's capabilities are cleared: Steam Runtime's
+        window the keys). The bowl's capabilities stay cleared (BOWL_CAPABILITIES=none,
+        which also keeps other bowls' launchers off Steam's PATH): Steam Runtime's
         container is bubblewrap, which refuses to run with any. GTK (zenity,
         Steam's file dialogs) keeps its settings in memory, since the session
         bus has no dconf. Sound goes to Moonwater's server where it is up.
