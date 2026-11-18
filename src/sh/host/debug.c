@@ -939,14 +939,15 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 static const string_address layer[] = {"the shim made none", "landing or glass", "the root asked again", "the root copied",
                                                        "another window size", "the processor composes it", "cannot be gathered", "an X window's pool",
                                                        "a round corner", "its buffer, pool or map", "no room", "drawn scaled or not in place"};
-                unsigned int any = table->client_layers_laid | table->client_layers_gathered[0] | table->client_layers_gathered[1];
+                unsigned int any = table->client_layers_laid | table->client_layers_gathered[0] | table->client_layers_gathered[1] |
+                                   table->client_layers_laid_card;
 
                 for (unsigned int at = 0; at < 12; at++)
                         any |= table->client_layers_refused[at];
                 if (any)
                 {
-                        host_say(log, "  client layers   %p laid into the table by the processor, %p gathered by the card, %p by the processor;",
-                                 (positive)table->client_layers_laid, (positive)table->client_layers_gathered[0],
+                        host_say(log, "  client layers   %p laid into the table by the processor, %p by the card; %p gathered by the card, %p by the processor;",
+                                 (positive)table->client_layers_laid, (positive)table->client_layers_laid_card, (positive)table->client_layers_gathered[0],
                                  (positive)table->client_layers_gathered[1]);
                         for (unsigned int at = 0; at < 12; at++)
                                 if (table->client_layers_refused[at])
@@ -954,6 +955,11 @@ static b32 host_debug(string_address address_to arguments, positive count)
                         host_say(log, "\n");
                 }
         }
+        //      A picture read in place copied whole into the table (a window that changed size, a landing, glass, write-combined reads): by the
+        //      card, and by the processor.
+        if (table->client_seeded[0] || table->client_seeded[1])
+                host_say(log, "  client seeded   %p pictures read in place copied whole into the table by the card, %p by the processor\n",
+                         (positive)table->client_seeded[0], (positive)table->client_seeded[1]);
         //      A lent dma-buf the processor read in place (its write-combined mapping): the presents it did, and the rows copied once for it.
         if (table->client_wc_presents || table->client_wc_seeded)
                 host_say(log, "  client wc       %p presents the processor read a client's dma-buf in place, %p rows copied into the table for it\n",

@@ -1338,6 +1338,9 @@ struct windows
         // The card's clocks held while input arrives (compositor_gpu_clocks): the level input holds (0: none), whether it is held now, the asks of the driver
         // since the start, the last ask's time in microseconds, and the errno of the last one refused (0: none).
         unsigned int metric_clocks_level, metric_clocks_held, metric_clocks_asks, metric_clocks_took, metric_clocks_error;
+        // The layers the card laid into a picture of the table (compositor_wl_card_lay), and a client's picture read in place copied whole into
+        // the table (compositor_wl_seed: a window that changed size, a landing, glass, write-combined reads), by the card ([0]) and the processor ([1]).
+        unsigned int client_layers_laid_card, client_seeded[2];
         // The program's: the least size its window can be laid out at, logical pixels at the scale it is drawn at (0: none). The compositor
         // makes the window no smaller than it whatever the hand, a divider, a tile or a snap asks (compositor_least); WINDOW_MIN_WIDTH by
         // WINDOW_MIN_HEIGHT holds for every window whatever it says.
@@ -1374,7 +1377,7 @@ struct windows
         unsigned int capacity;
 };
 
-#define WINDOWS_ABI 9u // 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+#define WINDOWS_ABI 10u // 9 had no seed counts; 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
 
 // Whether a table's layout is the one this program was built against.
 static inline int windows_abi_ok(unsigned int abi)

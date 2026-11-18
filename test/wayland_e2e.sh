@@ -724,15 +724,15 @@ fi
 # A window's subsurfaces turned, flipped, cropped at an offset and scaled (test/wayland_gather.py): each a layer gathered into a picture of its
 # own (the card's op 7 by tables with the GPU, the processor's walk of the same tables without), every pixel where Weston and the viewporter put
 # it, a translucent one turned laid over the window as premultiplied alpha is, a turned one's commit alone shown, and none laid into the table;
-# y-inverted dma-bufs (udmabuf), one turned too; then two windows whose own buffers are turned or cropped and scaled, laid by the card where it
+# y-inverted dma-bufs (udmabuf), one turned too; then three windows whose own buffers are turned (one ABGR) or cropped and scaled, laid by the card where it
 # composes (rows NOT RUN without udmabuf or a card).
 out=$(python3 -I "$(dirname "$0")/wayland_gather.py" "$work/scan.img" "$work/bin/moonwater" 2>&1)
 echo "$out" | while read -r verdict rest; do
         case $verdict in ok | FAIL | NOT) echo "$verdict $rest" ;; esac
 done
 failures=$((failures + $(echo "$out" | grep -c '^FAIL')))
-if ! alive || [ "$(echo "$out" | grep -c -e '^ok' -e '^NOT RUN')" != 16 ]; then
-        row FAIL "the client with turned and scaled subsurfaces and windows ran its sixteen rows and the compositor goes on" "$(echo "$out" | tail -2) $(tail -3 "$work/compositor.log")"
+if ! alive || [ "$(echo "$out" | grep -c -e '^ok' -e '^NOT RUN')" != 17 ]; then
+        row FAIL "the client with turned and scaled subsurfaces and windows ran its seventeen rows and the compositor goes on" "$(echo "$out" | tail -2) $(tail -3 "$work/compositor.log")"
 fi
 
 # A pool on a file whose pages the client serves itself and never does (FUSE, test/wayland_held.py): the pool is refused, and the compositor

@@ -1701,6 +1701,92 @@ static void compositor_wl_layers_put(int row, unsigned int *to, unsigned long pi
         compositor_wl_layers_put_list(compositor_wl_layers.layer[row], compositor_wl_layers.count[row], to, pitch);
 }
 
+/*
+        A row's pictures laid into a picture of the table by the card (to, the window's first pixel at the table's pitch): its lent picture first when
+        root is 1 (copied whole, red and blue turned where they are the other way round), then each of its layers over it in order (copied, or laid
+        over what is under it when it blends), each read where its client keeps it (a dma-buf by its import, a pool by its pages) and a gathered
+        one from its picture; one scene of the card's (records of image and image-over, 4 and 11, the swap bit on their kind), which gpu_scene waits
+        for. Where the processor copies the lent picture into the table (compositor_wl_seed: a window that changes size, glass, a landing, the
+        processor's write-combined reads) and lays the layers into it (compositor_wl_layers_put), it streamed a client's write-combined dma-buf
+        across the bus: a 1920 by 1080 window is milliseconds of it at every step of a resize. 0 when the card cannot (not composing, busy, a
+        picture or a layer it has no address for, a pitch the scene does not take), and the processor lays them as before.
+*/
+static int compositor_wl_card_lay(int row, unsigned int *to, int root)
+{
+#ifdef MOONWATER_GPU_C
+        unsigned long pitch = (unsigned long)compositor_stride();
+        unsigned int *op = (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_OPS_AT), n = 0, w, h, w4;
+        positive to_va, src;
+
+        // Not while a present's jobs are on the card: they read the records and bins the scene writes (compositor_card_holds).
+        if (!compositor_wl_card_composes() || !gpu_ready() || !gpu_idle() || compositor_card_holds() || !gpu.at || (pitch & 3) || !compositor.table)
+                return 0;
+        w = root ? (unsigned int)compositor_wl.lent[row].width : compositor.table->width[row];
+        h = root ? (unsigned int)compositor_wl.lent[row].height : compositor.table->height[row];
+        w4 = (w + 3) & ~3u;
+        if (!w || !h || w4 > pitch || (root && !compositor_lent(row)))
+                return 0;
+        if (root)
+        {
+                const unsigned int *pixels = compositor_wl.lent[row].pixels;
+                positive bytes = (positive)(h - 1) * compositor_wl.lent[row].pitch * 4 + (positive)w * 4;
+
+                src = compositor_wl.lent[row].fd >= 0 ? compositor_lent_va(row) : gpu_va_bytes(pixels, bytes);
+                if (!src || compositor_wl.lent[row].pitch >= 1ul << 29)
+                        return 0;
+                op[0] = 4u | (compositor_lent_swap(row) ? 0x80u : 0u), op[1] = op[2] = 0, op[3] = w, op[4] = h;
+                op[5] = (unsigned int)src, op[6] = (unsigned int)(src >> 32), op[7] = (unsigned int)compositor_wl.lent[row].pitch;
+                n++;
+        }
+        for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
+        {
+                const struct compositor_wl_layer *l = &compositor_wl_layers.layer[row][k];
+                unsigned int *r = op + 8 * n, at_pitch = (unsigned int)l->pitch;
+
+                if (l->gather)
+                {
+                        const struct compositor_wl_gathered *g = l->at < WAYLAND_LAYERS ? &compositor_wl_layers.gathered[row][l->at] : 0;
+
+                        src = g && g->filled && g->id == l->id ? compositor_wl_live(g->va, g->epoch) : 0;
+                        at_pitch = (unsigned int)l->width;
+                }
+                else
+                        src = l->fd >= 0 ? compositor_wl_live(l->va, l->epoch) : gpu_va_bytes(l->pixels, compositor_wl_layer_bytes(l));
+                if (!src || l->x < 0 || l->y < 0 || (unsigned int)(l->x + l->width) > w || (unsigned int)(l->y + l->height) > h)
+                        return 0;
+                r[0] = (l->blend ? 11u : 4u) | (l->swap ? 0x80u : 0u), r[1] = (unsigned int)l->x, r[2] = (unsigned int)l->y;
+                r[3] = (unsigned int)(l->x + l->width), r[4] = (unsigned int)(l->y + l->height);
+                r[5] = (unsigned int)src, r[6] = (unsigned int)(src >> 32), r[7] = at_pitch;
+                n++;
+        }
+        if (!n)
+                return 0;
+        if (!(to_va = gpu_va_written(to, compositor.buffer)) && (!gpu_map_written(to, compositor.buffer) || !(to_va = gpu_va_written(to, compositor.buffer))))
+                return 0;
+        if (to_va & 15)
+                return 0;
+        if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, n, COMPOSITOR_GPU_BINS_AT, to_va, (unsigned int)pitch, w4, h, 0, 0, w4, h))
+        {
+                if (gpu.pending)
+                        gpu_finish();
+                if (gpu_lost)
+                        compositor_gpu_recover();
+                compositor_gpu_job_failed();
+                return 0;
+        }
+        if (compositor.table)
+        {
+                if (root)
+                        compositor.table->client_seeded[0]++;
+                compositor.table->client_layers_laid_card += compositor_wl_layers.count[row];
+        }
+        return 1;
+#else
+        (void)row, (void)to, (void)root;
+        return 0;
+#endif
+}
+
 // The lent picture let go of: its import (a dma-buf's) released, and the row's picture the table's again, with nothing in it of the client's;
 // the layers over it go with it (the shim lays what it shows of them again).
 static void compositor_wl_unlend(int row)
@@ -1725,6 +1811,15 @@ static void compositor_wl_seed(int row, unsigned int which)
         if (!compositor_lent(row))
                 return;
         to = (unsigned int *)((char *)compositor.table + compositor.pixels + ((unsigned long)row * 2 + (which & 1u)) * compositor.buffer);
+        // The card first, which reads the client's buffer where it is, the layers with it.
+        if (compositor_wl_card_lay(row, to, 1))
+        {
+                compositor_wl.laying[row].last = (unsigned char)((which & 1u) + 1);
+                compositor_wl_unlend(row);
+                return;
+        }
+        if (compositor.table)
+                compositor.table->client_seeded[1]++;
         if (compositor_wl.lent[row].fd >= 0)
                 compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
         if (compositor_lent_swap(row))
@@ -1767,9 +1862,13 @@ static void compositor_wl_layers_lay(int row)
         if (compositor_lent(row))
                 compositor_wl_seed(row, compositor.front[row]);
         else
-                compositor_wl_layers_put(row, (unsigned int *)((char *)compositor.table + compositor.pixels +
-                                                               ((unsigned long)row * 2 + (compositor.front[row] & 1u)) * compositor.buffer),
-                                         (unsigned long)compositor_stride());
+        {
+                unsigned int *to = (unsigned int *)((char *)compositor.table + compositor.pixels +
+                                                    ((unsigned long)row * 2 + (compositor.front[row] & 1u)) * compositor.buffer);
+
+                if (!compositor_wl_card_lay(row, to, 0))
+                        compositor_wl_layers_put(row, to, (unsigned long)compositor_stride());
+        }
         compositor_wl_layers_drop(row);
 }
 
@@ -2860,9 +2959,10 @@ static void compositor_wl_convert_row(unsigned int *dst, const unsigned int *src
         the card, where the processor walks it (compositor_wl_blit_xform): the part of it in the window as a gathered layer would read it (its tables,
         compositor_wl_gather_column and _line, made into memory of the compositor's own the card reads, compositor_wl_tables), op 7 over them with a
         source pitch of 1, from the client's buffer (a pool's pages through a read map, a dma-buf through the row's import, compositor_wl.source) into
-        the picture through its written map. gpu_blit waits for the job, so the picture is laid when this answers 1. Refused (0, and the processor
-        walks it): the card not composing or busy, a blend (op 7 copies), red and blue the other way round (op 7 moves bytes, the table holds
-        ARGB), a picture the card cannot gather (compositor_wl_gatherable), a pool cut under the read, a map or an import refused, or the job failed.
+        the picture through its written map. One whose red and blue are the other way round is gathered aside, after the tables, and laid from
+        there by a scene of one record with the swap bit, as a lent picture is read. gpu_blit and gpu_scene wait for their jobs, so the picture is
+        laid when this answers 1. Refused (0, and the processor walks it): the card not composing or busy, a blend (op 7 copies), a picture the
+        card cannot gather (compositor_wl_gatherable), a pool cut under the read, a map or an import refused, or a job that failed.
 */
 static struct compositor_wl_gathered compositor_wl_tables;
 
@@ -2876,8 +2976,12 @@ static int compositor_wl_card_gather(int row, const struct wayland_picture *pict
         unsigned int *cols, *lines;
         volatile unsigned int probe;
 
-        // Red and blue the other way round are turned by the processor's walk: op 7 moves the bytes as they are, and the table's are ARGB.
-        if (!compositor_wl_card_composes() || picture->blend || compositor_wl_fourcc_swapped(picture->fourcc) || picture->width <= 0 || picture->height <= 0 || (stride & 3) ||
+        int swap = compositor_wl_fourcc_swapped(picture->fourcc);
+        positive aside = 0;
+
+        // Red and blue the other way round are gathered aside and laid by a scene's record that turns them (op 7 moves the bytes as they are, and
+        // the table holds ARGB), which reads the records a present's jobs may still read (compositor_card_holds).
+        if (!compositor_wl_card_composes() || picture->blend || (swap && compositor_card_holds()) || picture->width <= 0 || picture->height <= 0 || (stride & 3) ||
             stride < (unsigned long)picture->width * 4 || !compositor_wl_gatherable(picture, &tw, &th) || !gpu_ready() || !gpu_idle())
                 return 0;
         x1 = picture->dest_x < 0 ? 0 : picture->dest_x, y1 = picture->dest_y < 0 ? 0 : picture->dest_y;
@@ -2916,7 +3020,9 @@ static int compositor_wl_card_gather(int row, const struct wayland_picture *pict
                         return 0;
                 src = base + (picture->pixels && picture->map ? (positive)(picture->pixels - picture->map) : (positive)picture->plane_offset[0]);
         }
-        if (!compositor_wl_gathered_room(&compositor_wl_tables, 4 * ((positive)l.width + (positive)l.height)))
+        // The tables, and after them (16-byte aligned) the gathered picture of one turned aside, at a pitch of its width made a multiple of 4.
+        aside = (4 * ((positive)l.width + (positive)l.height) + 15) & ~15ull;
+        if (!compositor_wl_gathered_room(&compositor_wl_tables, aside + (swap ? 4 * (((positive)l.width + 3) & ~3ull) * (positive)l.height : 0)))
                 return 0;
         cols = compositor_wl_tables.memory, lines = cols + l.width;
         for (long x = 0; x < l.width; x++)
@@ -2929,8 +3035,32 @@ static int compositor_wl_card_gather(int row, const struct wayland_picture *pict
                 return 0;
         if (!(dst = gpu_va_written(to, compositor.buffer)) && (!gpu_map_written(to, compositor.buffer) || !(dst = gpu_va_written(to, compositor.buffer))))
                 return 0;
-        if (gpu_blit(src, 1, dst + 4 * ((positive)y1 * pitch + (positive)x1), (unsigned int)pitch, tables, 7, (unsigned int)l.width, (unsigned int)l.height) ||
-            (gpu_end == GPU_END_LATE && gpu_finish()))
+        if (swap)
+        {
+                unsigned int *op = (unsigned int *)((unsigned char *)gpu.at + COMPOSITOR_GPU_OPS_AT), w4 = ((unsigned int)width + 3) & ~3u;
+                positive at = tables + aside;
+
+                if (w4 > pitch || (pitch & 3) || (dst & 15))
+                        return 0;
+                if (gpu_blit(src, 1, at, ((unsigned int)l.width + 3) & ~3u, tables, 7, (unsigned int)l.width, (unsigned int)l.height) ||
+                    (gpu_end == GPU_END_LATE && gpu_finish()))
+                {
+                        op[0] = 4u | 0x80u, op[1] = (unsigned int)x1, op[2] = (unsigned int)y1, op[3] = (unsigned int)x2, op[4] = (unsigned int)y2;
+                        op[5] = (unsigned int)at, op[6] = (unsigned int)(at >> 32), op[7] = ((unsigned int)l.width + 3) & ~3u;
+                        if (gpu_scene(COMPOSITOR_GPU_OPS_AT, 1, COMPOSITOR_GPU_BINS_AT, dst, (unsigned int)pitch, w4, (unsigned int)height, (unsigned int)x1,
+                                      (unsigned int)y1, (unsigned int)x2, (unsigned int)y2))
+                        {
+                                compositor_wl_laid(row, x1, y1, x2, y2);
+                                return 1;
+                        }
+                        if (gpu.pending)
+                                gpu_finish();
+                        if (gpu_lost)
+                                compositor_gpu_recover();
+                }
+        }
+        else if (gpu_blit(src, 1, dst + 4 * ((positive)y1 * pitch + (positive)x1), (unsigned int)pitch, tables, 7, (unsigned int)l.width, (unsigned int)l.height) ||
+                 (gpu_end == GPU_END_LATE && gpu_finish()))
         {
                 compositor_wl_laid(row, x1, y1, x2, y2);
                 return 1;
@@ -3184,6 +3314,46 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
         return 1;
 }
 
+/*
+        A row's picture copied from one of its two buffers in the table into the other (cw by ch of it, the window's first pixel on), before a
+        commit's damage is laid into that one: the last picture laid whole, or the one shown. The card copies it when it composes and is idle and
+        the picture is at least COMPOSITOR_WL_CARD_COPY_PIXELS (the processor's copy of less costs less than the card's job, B3's measure), through
+        the written maps of the table's buffers that the card's copies of damage use; the processor otherwise. Counted with the damage
+        rectangles (client rects), the card's and the processor's.
+*/
+static void compositor_wl_table_copy(int row, unsigned int into, unsigned int from, unsigned long cw, unsigned long ch)
+{
+        unsigned long pitch = (unsigned long)compositor_stride();
+        unsigned int *to = (unsigned int *)((char *)compositor.table + compositor.pixels + ((unsigned long)row * 2 + (into & 1u)) * compositor.buffer);
+        const unsigned int *source = (const unsigned int *)((char *)compositor.table + compositor.pixels + ((unsigned long)row * 2 + (from & 1u)) * compositor.buffer);
+
+        if (!cw || !ch)
+                return;
+#ifdef MOONWATER_GPU_C
+        if (cw * ch >= COMPOSITOR_WL_CARD_COPY_PIXELS && compositor_wl_card_composes() && gpu_ready() && gpu_idle())
+        {
+                positive src = gpu_va_written(source, compositor.buffer), dst = gpu_va_written(to, compositor.buffer);
+
+                if (!src && gpu_map_written(source, compositor.buffer))
+                        src = gpu_va_written(source, compositor.buffer);
+                if (!dst && gpu_map_written(to, compositor.buffer))
+                        dst = gpu_va_written(to, compositor.buffer);
+                if (src && dst &&
+                    (gpu_blit(src, (unsigned int)pitch, dst, (unsigned int)pitch, 0, 0, (unsigned int)cw, (unsigned int)ch) || (gpu_end == GPU_END_LATE && gpu_finish())))
+                {
+                        compositor.table->client_rects_card++;
+                        return;
+                }
+                if (gpu_end != GPU_END_NONE)
+                        compositor_gpu_job_failed();
+                if (!gpu_idle())
+                        gpu_finish();
+        }
+#endif
+        compositor.table->client_rects_cpu++;
+        memory_copy_rect_u32(to, pitch, source, pitch, cw, ch);
+}
+
 static int compositor_wl_row_picture(void *context, int row, const struct wayland_picture *picture)
 {
         struct windows *table = compositor.table;
@@ -3289,19 +3459,10 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
                         unsigned long cw = table->width[row] < (unsigned int)width ? table->width[row] : (unsigned long)width;
                         unsigned long ch = table->height[row] < (unsigned int)height ? table->height[row] : (unsigned long)height;
 
-                        memory_copy_rect_u32((unsigned int *)((char *)table + compositor.pixels +
-                                                              ((unsigned long)row * 2 + compositor_wl.laying[row].which) * compositor.buffer),
-                                             pitch,
-                                             (const unsigned int *)((char *)table + compositor.pixels + ((unsigned long)row * 2 + from) * compositor.buffer),
-                                             pitch, cw, ch);
+                        compositor_wl_table_copy(row, compositor_wl.laying[row].which, from, cw, ch);
                 }
                 else if (pinned && !covers)
-                        memory_copy_rect_u32((unsigned int *)((char *)table + compositor.pixels +
-                                                              ((unsigned long)row * 2 + compositor_wl.laying[row].which) * compositor.buffer),
-                                             pitch,
-                                             (const unsigned int *)((char *)table + compositor.pixels +
-                                                                    ((unsigned long)row * 2 + shown) * compositor.buffer),
-                                             pitch, (unsigned long)width, (unsigned long)height);
+                        compositor_wl_table_copy(row, compositor_wl.laying[row].which, shown, (unsigned long)width, (unsigned long)height);
                 // A row that was shown in place: the table's buffer is made the picture's first (a copy of the whole of it, unless this picture
                 // covers the window), so the copies below lay over what the window showed, and the window is drawn whole.
                 if (compositor_lent(row))

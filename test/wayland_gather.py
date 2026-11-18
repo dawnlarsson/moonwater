@@ -10,7 +10,8 @@
 #   a turned one's commit alone (desynchronized) of another buffer: the screen has the new picture;
 #   none of them was laid into the window's picture (the debug page's client layers line);
 #   y-inverted dma-bufs made by /dev/udmabuf, one turned 90 too: each pixel where it belongs;
-#   two windows whose own buffers are turned, or cropped and scaled by their viewport: laid into their pictures by the card where it composes.
+#   three windows whose own buffers are turned (one ABGR), or cropped and scaled by their viewport: laid into their pictures by the card where it
+#   composes, by the processor's walk where it does not.
 #
 # One line a row, "ok NAME" or "FAIL NAME detail"; the exit status is the number of failures.
 import array, os, select, socket, struct, subprocess, sys, time
@@ -368,10 +369,11 @@ def rects():
     return card, cpu, drawn
 
 
-windows = [('a window whose own buffer is flipped and turned 90', 5, None, None), ('a window whose own viewport crops at an offset and scales it',
-                                                                                    0, (4 * 256, 2 * 256, 40 * 256, 28 * 256), (100, 70))]
+windows = [('a window whose own buffer is flipped and turned 90', 5, None, None, 1),
+           ('a window whose own viewport crops at an offset and scales it', 0, (4 * 256, 2 * 256, 40 * 256, 28 * 256), (100, 70), 1),
+           ('a window of an ABGR buffer turned 180', 2, None, None, 0x34324241)]
 counted = rects()
-for name, transform, crop, size in windows:
+for name, transform, crop, size, form in windows:
     own, own_shell, own_top = new(), new(), new()
     send(compositor, 0, struct.pack('<I', own))
     send(wm, 2, struct.pack('<II', own_shell, own))
@@ -390,7 +392,7 @@ for name, transform, crop, size in windows:
     for obj, op, body in events(0.5):
         if obj == own_shell and op == 0:
             send(own_shell, 4, body[:4])
-    fd, buffer = pool(BW, BH, [bordered(x, y) + (0xff,) for y in range(BH) for x in range(BW)], 1)
+    fd, buffer = pool(BW, BH, [bordered(x, y) + (0xff,) for y in range(BH) for x in range(BW)], form)
     send(own, 1, struct.pack('<Iii', buffer, 0, 0))
     send(own, 9, struct.pack('<iiii', 0, 0, BW, BH))
     send(own, 6)
@@ -435,6 +437,6 @@ if counted is None:
 elif done[2] == counted[2]:
     print('NOT RUN the card laid the turned windows: the card drew no present (no -G, or no card)')
 else:
-    row(done[0] - counted[0] >= 2 and done[1] == counted[1], 'the card laid both windows\' pictures, the processor neither (moonwater debug counts them)',
+    row(done[0] - counted[0] >= 3 and done[1] == counted[1], 'the card laid the three windows\' pictures, the processor none (moonwater debug counts them)',
         'card %d then %d, processor %d then %d' % (counted[0], done[0], counted[1], done[1]))
 sys.exit(failures)
