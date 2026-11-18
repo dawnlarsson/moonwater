@@ -1286,6 +1286,34 @@ static fn rover_check_red(void)
                       !rover_compile(&rover_one, (const p8 address_to)nul, sizeof(nul) - 1) && rover_one.line == 1 &&
                           rover_holds_why("control byte"));
         }
+        //      R-table-2 and 3: the loader recomputes reads and holds a state operand to the schema's row and shape.
+        {
+                struct rover_refusal refusal;
+
+                if (rover_compiled("rule low\n\twhen battery.percent < 10%\n\tdo log low\n"))
+                {
+                        struct rover_rule address_to rule = (struct rover_rule address_to)rover_view.rule;
+                        struct rover_comparison address_to comparison = (struct rover_comparison address_to)rover_view.comparison;
+                        p64 reads = rule[0].reads;
+                        p16 offset = comparison[0].a.index;
+
+                        rule[0].reads = 0;
+                        check("red: a when rule whose reads were cleared is refused at load",
+                              !rover_check(rover_built(&rover_one), rover_one.size, &rover_view, &refusal) &&
+                                  rover_bytes_are(refusal.why, string_length((string_address)refusal.why),
+                                                  "a rule whose reads are not what its comparisons and arguments read"));
+                        rule[0].reads = reads;
+                        comparison[0].a.index = (p16)(offset + 4 * 1000 > 4000 ? 4000 : offset + 4);
+                        check("red: a state operand at an offset no state is at is refused",
+                              !rover_check(rover_built(&rover_one), rover_one.size, &rover_view, &refusal));
+                        comparison[0].a.index = offset;
+                        comparison[0].a.source = ROVER_STATE_WORD;
+                        check("red: a number state read as a word is refused",
+                              !rover_check(rover_built(&rover_one), rover_one.size, &rover_view, &refusal));
+                }
+                else
+                        check("red: a low battery when rule compiles", false);
+        }
         //      R-table-7: a when rule over the clock is the runner's, asked at each minute (the change the runner posts).
         if (rover_compiled("rule night\n\twhen clock between 22:00 06:00\n\tdo log night\n"))
         {

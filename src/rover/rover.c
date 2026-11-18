@@ -1374,6 +1374,58 @@ static bool rover_constant_ok(const struct rover_table address_to table, struct 
         kernel rule, the kernel's own: no desktop state, no routine the
         kernel has no body of.
 */
+//      A rule's reads are 64 bits, two of them the clock's: a state's bit is its number modulo the other 62, so two
+//      states may share one, which costs a when rule a look at a change it does not read and never misses one.
+#define ROVER_READS_BIT(state) (1ull << ((state) % 62))
+#define ROVER_READS_CLOCK (1ull << 62)
+#define ROVER_READS_WEEKDAY (1ull << 63)
+
+//      The schema's state at a page's offset, or null.
+static const struct rover_state_row address_to rover_state_at(p8 page, p16 offset)
+{
+        for (positive at = 0; at < ROVER_STATES; at++)
+                if (rover_states[at].page == page && rover_states[at].offset == offset)
+                        return &rover_states[at];
+        return null;
+}
+
+//      What an operand reads, as a reads mask: a state's bit, the clock's, the weekday's, a call's arguments'.
+static p64 rover_operand_reads(const struct rover_table address_to table, struct rover_operand operand)
+{
+        const struct rover_state_row address_to state;
+        p64 reads = 0;
+
+        switch (operand.source)
+        {
+        case ROVER_STATE_NUMBER:
+        case ROVER_STATE_WORD:
+                state = rover_state_at(operand.page, operand.index);
+                return state ? ROVER_READS_BIT((positive)(state - rover_states)) : 0;
+        case ROVER_CLOCK:
+                return ROVER_READS_CLOCK;
+        case ROVER_WEEKDAY:
+                return ROVER_READS_WEEKDAY;
+        case ROVER_CALL:
+                if (operand.index < table->head->calls)
+                        for (positive at = 0; at < table->call[operand.index].count && at < ROVER_ARGUMENTS; at++)
+                                if (table->call[operand.index].argument[at].source != ROVER_CALL)
+                                        reads |= rover_operand_reads(table, table->call[operand.index].argument[at]);
+                return reads;
+        }
+        return 0;
+}
+
+//      A run of comparisons' reads, and of actions' arguments when actions is given.
+static p64 rover_comparisons_reads(const struct rover_table address_to table, positive first, positive count)
+{
+        p64 reads = 0;
+
+        for (positive at = first; at < first + count; at++)
+                reads |= rover_operand_reads(table, table->comparison[at].a) | rover_operand_reads(table, table->comparison[at].b) |
+                         rover_operand_reads(table, table->comparison[at].c);
+        return reads;
+}
+
 static const char address_to rover_operand_check(const struct rover_table address_to table,
                                                   struct rover_operand operand, b32 want, bool kernel,
                                                   bool in_call)
@@ -1408,6 +1460,15 @@ static const char address_to rover_operand_check(const struct rover_table addres
                 if ((operand.index & 3) || operand.index < ROVER_PAGE_HEAD ||
                     (p32)operand.index + (operand.source == ROVER_STATE_WORD ? ROVER_WORD_SLOT : 4) > ROVER_PAGE_BYTES)
                         return "a state outside its page";
+                //      A state of the schema's, read as its type is: a number comparison never reads a word's length byte.
+                {
+                        const struct rover_state_row address_to state = rover_state_at(operand.page, operand.index);
+
+                        if (!state)
+                                return "a state the schema does not have at that offset";
+                        if (rover_kind_is_word(rover_types[state->type].kind) != (operand.source == ROVER_STATE_WORD))
+                                return "a state read as another shape than its type";
+                }
                 return null;
         case ROVER_FIELD:
                 return operand.index < ROVER_FIELDS ? null : "a field past the fourth";
@@ -1680,6 +1741,21 @@ static const char address_to rover_rule_check(const struct rover_table address_t
                 return "a take on a rule outside the kernel";
         if ((why = rover_take_refused(rule, rover_key_of(rule, table->comparison, table->pool))))
                 return why;
+        //      The reads mask is what the comparisons and the actions' arguments read, recomputed here: a table with a bit
+        //      cleared would never ask a when rule at the change that makes it true.
+        {
+                p64 reads = rover_comparisons_reads(table, rule->comparison, rule->comparisons);
+
+                for (positive at = 0; at < (positive)rule->then + rule->otherwise; at++)
+                {
+                        const struct rover_action address_to action = table->action + rule->action + at;
+
+                        for (positive k = 0; k < action->count; k++)
+                                reads |= rover_operand_reads(table, table->argument[action->argument + k]);
+                }
+                if (reads != rule->reads)
+                        return "a rule whose reads are not what its comparisons and arguments read";
+        }
         return null;
 }
 
@@ -1751,6 +1827,8 @@ static const char address_to rover_service_check(const struct rover_table addres
                 if ((why = rover_comparison_check(table, comparison, false)))
                         return why;
         }
+        if (rover_comparisons_reads(table, service->comparison, service->comparisons) != service->reads)
+                return "a service whose reads are not what its if lines read";
         return null;
 }
 

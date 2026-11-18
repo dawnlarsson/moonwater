@@ -32,11 +32,9 @@
 #define ROVER_SOURCE_MOST 65536u
 #define ROVER_WHY_MOST 240u
 #define ROVER_SLOT_AFTER 0xffffu
-#define ROVER_READS_CLOCK (1ull << 62)
 #define ROVER_EVENT_EVERY 102u
 #define ROVER_EVENT_AT 103u
 #define ROVER_EVERY_LEAST 1000000000ll // a second
-#define ROVER_READS_WEEKDAY (1ull << 63)
 
 //      The base types every schema has, at the front of its type rows (test/rover_schema.py puts them there).
 #define ROVER_TYPE_INT 0u
@@ -50,9 +48,6 @@
 #define ROVER_TYPE_TEXT 8u
 #define ROVER_TYPE_WORDS 9u
 
-//      A rule's reads are 64 bits, two of them the clock's: a state's bit is its number modulo the other 62, so two
-//      states may share one, which costs a when rule a look at a change it does not read and never misses one.
-#define ROVER_READS_BIT(state) (1ull << ((state) % 62))
 
 //      One word of a line: where it is, how long, and whether it was quoted
 //      (its bytes then are the decoded copy, in the line's scratch).
@@ -2281,14 +2276,6 @@ static fn rover_pool_put(struct rover_text address_to text, const struct rover_t
 
         memory_copy(&length, table->pool + at, 2);
         rover_put(text, table->pool + at + 2, length);
-}
-
-static const struct rover_state_row address_to rover_state_at(p8 page, p16 offset)
-{
-        for (positive at = 0; at < ROVER_STATES; at++)
-                if (rover_states[at].page == page && rover_states[at].offset == offset)
-                        return &rover_states[at];
-        return null;
 }
 
 static fn rover_operand_put(struct rover_text address_to text, const struct rover_table address_to table,
