@@ -1,0 +1,102 @@
+// Gen9 scene (op 6): the fill and the tone records only, drawn in order over one 16-byte block (four pixels) of one row. Each
+// thread is one block: its group X (r0.1) and row Y (r0.6) from the walker, at the pixel x = px0 + 4 X and y = py0 + Y (CURBE
+// dwords 1 and 2; CURBE dword 0 is the record count). The block is read on binding table entry 0 and written back on it after
+// every record, in order, as the processor's scene draws them. Binding table entry 1 is the records: count of them, 32 bytes
+// each, two a row of a surface 64 bytes a row (pitch 64; a pitch of 32 reads its odd rows as zeros on the card, measured on
+// subtle-cottage): record k is a media block read of 32 bytes at x 32 (k & 1), row k >> 1. Its words: 0 kind (0 a fill, 1
+// a tone over), 1 x0, 2 y0, 3 x1, 4 y1 (the rectangle [x0, x1) by [y0, y1) in pixels), 5 the colour.
+//
+// Per record, for the four pixels (exec size 4): a fill writes the colour where the pixel is in the rectangle; a tone lays the
+// colour over the pixel as ui_over does (tone.iga's formula, on the running pixel) where the pixel is in the rectangle and the
+// colour's alpha is not 0 (an alpha of 0 leaves the pixel). The rectangle test is on sign bits: x - x0, x1 - 1 - x and the row's
+// terms are OR-ed, so a term is negative exactly when the pixel is outside, and one signed compare with 0 per lane sets the
+// flags f0.0 (the fill) and f1.0 (the tone). f0.1 is the loop's flag, compared at SIMD16 with its scalars broadcast, so every
+// channel of the jump's predicate agrees. Lane ids 0..3 are four scalar movs. The encoder takes only records of kind 0 or 1, a count from 1 to 16384, and the alignments the card takes; anything else is the processor's.
+mov (1|M0)               r33.0<1>:ud   0:ud
+mov (1|M0)               r33.1<1>:ud   1:ud
+mov (1|M0)               r33.2<1>:ud   2:ud
+mov (1|M0)               r33.3<1>:ud   3:ud
+mov (1|M0)               r28.0<1>:ud   r1.0<0;1,0>:ud
+mov (1|M0)               r28.1<1>:ud   0:ud
+shl (1|M0)               r24.0<1>:ud   r0.1<0;1,0>:ud  2:ud
+add (1|M0)               r24.0<1>:ud   r24.0<0;1,0>:ud r1.1<0;1,0>:ud
+add (1|M0)               r26.0<1>:ud   r0.6<0;1,0>:ud  r1.2<0;1,0>:ud
+shl (1|M0)               r2.0<1>:ud    r0.1<0;1,0>:ud  4:ud
+mov (1|M0)               r2.1<1>:ud    r0.6<0;1,0>:ud
+mov (8|M0)               r4.0<1>:ud    r0.0<8;8,1>:ud
+mov (2|M0)               r4.0<1>:ud    r2.0<2;2,1>:ud
+mov (1|M0)               r4.2<1>:ud    0xF:ud
+send (16|M0)             r5:ud         r4:ud     0xC  0x02190000
+mov (4|M0)               r14.0<1>:ud   r5.0<1;1,0>:ud
+add (4|M0)               r34.0<1>:ud   r33.0<1;1,0>:ud r24.0<0;1,0>:ud
+loop:
+mov (8|M0)               r32.0<1>:ud   r0.0<8;8,1>:ud
+and (1|M0)               r44.0<1>:ud   r28.1<0;1,0>:ud   1:ud
+shl (1|M0)               r44.0<1>:ud   r44.0<0;1,0>:ud   5:ud
+mov (1|M0)               r32.0<1>:ud   r44.0<0;1,0>:ud
+shr (1|M0)               r45.0<1>:ud   r28.1<0;1,0>:ud   1:ud
+mov (1|M0)               r32.1<1>:ud   r45.0<0;1,0>:ud
+mov (1|M0)               r32.2<1>:ud   0x1F:ud
+send (16|M0)             r30:ud        r32:ud    0xC  0x02190001
+mov (1|M0)               r20.0<1>:ud   r30.5<0;1,0>:ud
+shr (1|M0)               r21.0<1>:ud   r20.0<0;1,0>:ud   24:ud
+add (1|M0)               r22.0<1>:ud   -r21.0<0;1,0>:ud  255:ud
+and (1|M0)               r23.0<1>:ud   r20.0<0;1,0>:ud   0x00ff00ff:ud
+shr (1|M0)               r25.0<1>:ud   r20.0<0;1,0>:ud   8:ud
+and (1|M0)               r25.0<1>:ud   r25.0<0;1,0>:ud   0x00ff00ff:ud
+and (4|M0)               r10.0<1>:ud   r14.0<1;1,0>:ud   0x00ff00ff:ud
+shr (4|M0)               r11.0<1>:ud   r14.0<1;1,0>:ud   8:ud
+and (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   0x00ff00ff:ud
+mul (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   r22.0<0;1,0>:uw
+add (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   0x007f007f:ud
+mul (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   r22.0<0;1,0>:uw
+add (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   0x007f007f:ud
+shr (4|M0)               r12.0<1>:ud   r10.0<1;1,0>:ud   8:ud
+and (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   r10.0<1;1,0>:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00010001:ud
+shr (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   8:ud
+and (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00ff00ff:ud
+shr (4|M0)               r13.0<1>:ud   r11.0<1;1,0>:ud   8:ud
+and (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r11.0<1;1,0>:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00010001:ud
+shr (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   8:ud
+and (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00ff00ff:ud
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   r23.0<0;1,0>:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r25.0<0;1,0>:ud
+sel (8|M0) (lt)f0.0           r12.0<1>:uw   r12.0<8;8,1>:uw   0x00ff:uw
+sel (8|M0) (lt)f0.0           r13.0<1>:uw   r13.0<8;8,1>:uw   0x00ff:uw
+shl (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   8:ud
+or (4|M0)                r5.0<1>:ud    r12.0<1;1,0>:ud   r13.0<1;1,0>:ud
+add (1|M0)               r43.0<1>:ud   -r30.0<0;1,0>:ud  0:ud
+or (1|M0)                r40.0<1>:ud   r30.0<0;1,0>:ud   r43.0<0;1,0>:ud
+xor (1|M0)               r41.0<1>:ud   r30.0<0;1,0>:ud   1:ud
+add (1|M0)               r43.0<1>:ud   -r41.0<0;1,0>:ud  0:ud
+or (1|M0)                r41.0<1>:ud   r41.0<0;1,0>:ud   r43.0<0;1,0>:ud
+add (1|M0)               r42.0<1>:ud   r21.0<0;1,0>:ud   0xFFFFFFFF:ud
+or (1|M0)                r40.1<1>:ud   r41.0<0;1,0>:ud   r42.0<0;1,0>:ud
+add (1|M0)               r42.0<1>:ud   r26.0<0;1,0>:ud   -r30.2<0;1,0>:ud
+add (1|M0)               r41.0<1>:ud   r30.4<0;1,0>:ud   -r26.0<0;1,0>:ud
+add (1|M0)               r41.0<1>:ud   r41.0<0;1,0>:ud   0xFFFFFFFF:ud
+or (1|M0)                r40.2<1>:ud   r42.0<0;1,0>:ud   r41.0<0;1,0>:ud
+add (4|M0)               r35.0<1>:ud   r34.0<1;1,0>:ud   -r30.1<0;1,0>:ud
+add (4|M0)               r36.0<1>:ud   r30.3<0;1,0>:ud   -r34.0<1;1,0>:ud
+add (4|M0)               r36.0<1>:ud   r36.0<1;1,0>:ud   0xFFFFFFFF:ud
+or (4|M0)                r37.0<1>:ud   r35.0<1;1,0>:ud   r36.0<1;1,0>:ud
+or (4|M0)                r37.0<1>:ud   r37.0<1;1,0>:ud   r40.2<0;1,0>:ud
+or (4|M0)                r37.0<1>:ud   r37.0<1;1,0>:ud   r40.0<0;1,0>:ud
+or (4|M0)                r38.0<1>:ud   r35.0<1;1,0>:ud   r36.0<1;1,0>:ud
+or (4|M0)                r38.0<1>:ud   r38.0<1;1,0>:ud   r40.2<0;1,0>:ud
+or (4|M0)                r38.0<1>:ud   r38.0<1;1,0>:ud   r40.1<0;1,0>:ud
+cmp (4|M0)   (ge)f0.0    null:d        r37.0<1;1,0>:d  0:d
+cmp (4|M0)   (ge)f1.0    null:d        r38.0<1;1,0>:d  0:d
+(f1.0) mov (4|M0)        r14.0<1>:ud   r5.0<1;1,0>:ud
+(f0.0) mov (4|M0)        r14.0<1>:ud   r20.0<0;1,0>:ud
+add (1|M0)               r28.1<1>:ud   r28.1<0;1,0>:ud   1:ud
+cmp (16|M0)  (lt)f0.1    null:ud       r28.1<0;1,0>:ud r28.0<0;1,0>:ud
+(W&f0.1) jmpi loop
+mov (4|M0)               r5.0<1>:ud    r14.0<1;1,0>:ud
+mov (8|M0)               r112.0<1>:ud r0.0<8;8,1>:ud
+send (16|M0)             acc0:uw       r4:d      0xC  0x060A8000
+send (16|M0)             null:uw       r112:d    0x27 0x02000010 {EOT}

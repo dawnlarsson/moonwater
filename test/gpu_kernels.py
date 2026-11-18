@@ -413,6 +413,98 @@ GLASS_GEN9_WORDS = [
 ]
 
 
+# The scene (op 6): src/canvas/gpu_i915_scene.iga assembled by iga64 -a -p=9, 87 instructions.
+SCENE_GEN9_WORDS = [
+    0x00000001, 0x24200608, 0x00000000, 0x00000000,
+    0x00000001, 0x24240608, 0x00000000, 0x00000001,
+    0x00000001, 0x24280608, 0x00000000, 0x00000002,
+    0x00000001, 0x242c0608, 0x00000000, 0x00000003,
+    0x00000001, 0x23800208, 0x00000020, 0x00000000,
+    0x00000001, 0x23840608, 0x00000000, 0x00000000,
+    0x00000009, 0x23000208, 0x06000004, 0x00000002,
+    0x00000040, 0x23000208, 0x02000300, 0x00000024,
+    0x00000040, 0x23400208, 0x02000018, 0x00000028,
+    0x00000009, 0x20400208, 0x06000004, 0x00000004,
+    0x00000001, 0x20440208, 0x00000018, 0x00000000,
+    0x00600001, 0x20800208, 0x008d0000, 0x00000000,
+    0x00200001, 0x20800208, 0x00450040, 0x00000000,
+    0x00000001, 0x20880608, 0x00000000, 0x0000000f,
+    0x0c800031, 0x20a00208, 0x06000080, 0x02190000,
+    0x00400001, 0x21c00208, 0x002000a0, 0x00000000,
+    0x00400040, 0x24400208, 0x02200420, 0x00000300,
+    0x00600001, 0x24000208, 0x008d0000, 0x00000000,
+    0x00000005, 0x25800208, 0x06000384, 0x00000001,
+    0x00000009, 0x25800208, 0x06000580, 0x00000005,
+    0x00000001, 0x24000208, 0x00000580, 0x00000000,
+    0x00000008, 0x25a00208, 0x06000384, 0x00000001,
+    0x00000001, 0x24040208, 0x000005a0, 0x00000000,
+    0x00000001, 0x24080608, 0x00000000, 0x0000001f,
+    0x0c800031, 0x23c00208, 0x06000400, 0x02190001,
+    0x00000001, 0x22800208, 0x000003d4, 0x00000000,
+    0x00000008, 0x22a00208, 0x06000280, 0x00000018,
+    0x00000040, 0x22c00208, 0x060042a0, 0x000000ff,
+    0x00000005, 0x22e00208, 0x06000280, 0x00ff00ff,
+    0x00000008, 0x23200208, 0x06000280, 0x00000008,
+    0x00000005, 0x23200208, 0x06000320, 0x00ff00ff,
+    0x00400005, 0x21400208, 0x062001c0, 0x00ff00ff,
+    0x00400008, 0x21600208, 0x062001c0, 0x00000008,
+    0x00400005, 0x21600208, 0x06200160, 0x00ff00ff,
+    0x00400041, 0x21400208, 0x12200140, 0x000002c0,
+    0x00400040, 0x21400208, 0x06200140, 0x007f007f,
+    0x00400041, 0x21600208, 0x12200160, 0x000002c0,
+    0x00400040, 0x21600208, 0x06200160, 0x007f007f,
+    0x00400008, 0x21800208, 0x06200140, 0x00000008,
+    0x00400005, 0x21800208, 0x06200180, 0x00ff00ff,
+    0x00400040, 0x21800208, 0x02200180, 0x00200140,
+    0x00400040, 0x21800208, 0x06200180, 0x00010001,
+    0x00400008, 0x21800208, 0x06200180, 0x00000008,
+    0x00400005, 0x21800208, 0x06200180, 0x00ff00ff,
+    0x00400008, 0x21a00208, 0x06200160, 0x00000008,
+    0x00400005, 0x21a00208, 0x062001a0, 0x00ff00ff,
+    0x00400040, 0x21a00208, 0x022001a0, 0x00200160,
+    0x00400040, 0x21a00208, 0x062001a0, 0x00010001,
+    0x00400008, 0x21a00208, 0x062001a0, 0x00000008,
+    0x00400005, 0x21a00208, 0x062001a0, 0x00ff00ff,
+    0x00400040, 0x21800208, 0x02200180, 0x000002e0,
+    0x00400040, 0x21a00208, 0x022001a0, 0x00000320,
+    0x05600002, 0x21801248, 0x168d0180, 0x00ff00ff,
+    0x05600002, 0x21a01248, 0x168d01a0, 0x00ff00ff,
+    0x00400009, 0x21a00208, 0x062001a0, 0x00000008,
+    0x00400006, 0x20a00208, 0x02200180, 0x002001a0,
+    0x00000040, 0x25600208, 0x060043c0, 0x00000000,
+    0x00000006, 0x25000208, 0x020003c0, 0x00000560,
+    0x00000007, 0x25200208, 0x060003c0, 0x00000001,
+    0x00000040, 0x25600208, 0x06004520, 0x00000000,
+    0x00000006, 0x25200208, 0x02000520, 0x00000560,
+    0x00000040, 0x25400208, 0x060002a0, 0xffffffff,
+    0x00000006, 0x25040208, 0x02000520, 0x00000540,
+    0x00000040, 0x25400208, 0x02000340, 0x000043c8,
+    0x00000040, 0x25200208, 0x020003d0, 0x00004340,
+    0x00000040, 0x25200208, 0x06000520, 0xffffffff,
+    0x00000006, 0x25080208, 0x02000540, 0x00000520,
+    0x00400040, 0x24600208, 0x02200440, 0x000043c4,
+    0x00400040, 0x24800208, 0x020003cc, 0x00204440,
+    0x00400040, 0x24800208, 0x06200480, 0xffffffff,
+    0x00400006, 0x24a00208, 0x02200460, 0x00200480,
+    0x00400006, 0x24a00208, 0x022004a0, 0x00000508,
+    0x00400006, 0x24a00208, 0x022004a0, 0x00000500,
+    0x00400006, 0x24c00208, 0x02200460, 0x00200480,
+    0x00400006, 0x24c00208, 0x022004c0, 0x00000508,
+    0x00400006, 0x24c00208, 0x022004c0, 0x00000504,
+    0x04400010, 0x20000a20, 0x0e2004a0, 0x00000000,
+    0x04400010, 0x20000a22, 0x0e2004c0, 0x00000000,
+    0x00410001, 0x21c0020a, 0x002000a0, 0x00000000,
+    0x00410001, 0x21c00208, 0x00000280, 0x00000000,
+    0x00000040, 0x23840208, 0x06000384, 0x00000001,
+    0x05800010, 0x20000201, 0x02000384, 0x00000380,
+    0x00010020, 0x34000005, 0x0e001400, 0xfffffbe0,
+    0x00400001, 0x20a00208, 0x002001c0, 0x00000000,
+    0x00600001, 0x2e000208, 0x008d0000, 0x00000000,
+    0x0c800031, 0x20000a40, 0x06000080, 0x060a8000,
+    0x07800031, 0x20000a40, 0x06000e00, 0x82000010,
+]
+
+
 def intel_arrays(text):
     return [(name, [int(w, 16) for w in re.findall(r'0x[0-9a-f]+', body)])
             for name, body in re.findall(r'static const unsigned int gpu_i915_(\w+)\[\] = \{(.*?)\};', text, re.S)]
@@ -506,8 +598,8 @@ BX_GEN9_WORDS = [
 
 def intel_check(src, inc):
     kernels = intel_kernels(pathlib.Path(src).read_text())
-    if [n for n, _ in kernels] != ['copy', 'fill', 'tone', 'glass', 'bx']:
-        sys.exit('%s: the kernels are %s, the Gen9 set has copy, fill, tone, glass and bx' % (src, [n for n, _ in kernels]))
+    if [n for n, _ in kernels] != ['copy', 'fill', 'tone', 'glass', 'bx', 'scene']:
+        sys.exit('%s: the kernels are %s, the Gen9 set has copy, fill, tone, glass, bx and scene' % (src, [n for n, _ in kernels]))
     copy = kernels[0][1]
     if copy != COPY_GEN9_WORDS:
         sys.exit('%s: copy differs from the iga64 assembly of gpu_i915_copy.iga (%d words, the reviewed kernel has %d)' % (src, len(copy), len(COPY_GEN9_WORDS)))
@@ -518,15 +610,17 @@ def intel_check(src, inc):
         sys.exit('%s: glass differs from the iga64 assembly of gpu_i915_glass.iga (%d words, the reviewed kernel has %d)' % (src, len(glass), len(GLASS_GEN9_WORDS)))
     if tone != TONE_GEN9_WORDS:
         sys.exit('%s: tone differs from the iga64 assembly of gpu_i915_tone.iga (%d words, the reviewed kernel has %d)' % (src, len(tone), len(TONE_GEN9_WORDS)))
+    if kernels[5][1] != SCENE_GEN9_WORDS:
+        sys.exit('%s: scene differs from the iga64 assembly of gpu_i915_scene.iga (%d words, the reviewed kernel has %d)' % (src, len(kernels[5][1]), len(SCENE_GEN9_WORDS)))
     if kernels[4][1] != BX_GEN9_WORDS:
         sys.exit('%s: bx differs from the iga64 assembly of gpu_i915_bx.iga (%d words, the reviewed kernel has %d)' % (src, len(kernels[4][1]), len(BX_GEN9_WORDS)))
     if fill != IGT_GEN9_FILL_ROWS_1_TO_9:
         bad = [i for i in range(max(len(fill), 36)) if i >= len(fill) or i >= 36 or fill[i] != IGT_GEN9_FILL_ROWS_1_TO_9[i]]
         sys.exit('%s: fill differs from IGT at word %d (%s)' % (src, bad[0], 'missing' if bad[0] >= len(fill) else '%08x vs IGT' % fill[bad[0]]))
     made = intel_arrays(pathlib.Path(inc).read_text())
-    if [n for n, _ in made] != ['copy', 'fill', 'tone', 'glass', 'bx']:
-        sys.exit('%s: the arrays are %s, the source has copy, fill, tone, glass and bx' % (inc, [n for n, _ in made]))
-    for (name, words), want in zip(made, (copy, fill, tone, glass, kernels[4][1])):
+    if [n for n, _ in made] != ['copy', 'fill', 'tone', 'glass', 'bx', 'scene']:
+        sys.exit('%s: the arrays are %s, the source has copy, fill, tone, glass, bx and scene' % (inc, [n for n, _ in made]))
+    for (name, words), want in zip(made, (copy, fill, tone, glass, kernels[4][1], kernels[5][1])):
         if words != want:
             sys.exit('%s: the array %s is not the source\'s words' % (inc, name))
     print('gpu i915 kernels: %s, copy the iga64 assembly of gpu_i915_copy.iga, fill the same as IGT rows 1 to 9, tone, glass and bx the iga64 assembly, all as %s' % (src, inc))

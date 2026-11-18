@@ -177,6 +177,42 @@ static void gpu_i915_set_rows(void)
                         check("gpu i915: a fill whose span is under 16 bytes leaves the GPU nothing (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
                 }
         }
+        {
+                // The scene (op 6): two records (a fill and a tone) on a 256 by 32 picture at a 256-pixel pitch, the records at GPU_VA + 3072 (64-byte aligned).
+                static unsigned char buffer[8192] __attribute__((aligned(4096)));
+                struct gpu_job job;
+                struct gpu_args address_to a = (struct gpu_args address_to)(buffer + 2048);
+                unsigned int words[64];
+                unsigned int address_to state = (unsigned int address_to)(buffer + 2560);
+                unsigned int address_to recs = (unsigned int address_to)(buffer + 3072);
+                unsigned int n;
+
+                memset(buffer, 0, sizeof buffer);
+                recs[0] = 0, recs[1] = 0, recs[2] = 0, recs[3] = 256, recs[4] = 32, recs[5] = 0x11223344u, recs[6] = recs[7] = 0;
+                recs[8] = 1, recs[9] = 3, recs[10] = 4, recs[11] = 20, recs[12] = 9, recs[13] = 0x80402010u, recs[14] = recs[15] = 0;
+                a->d = GPU_VA + 0x2000, a->dp = 256, a->sp = 256, a->gp = 32, a->w = 256, a->rows = 8, a->op = 6, a->x0 = 0, a->y0 = 0, a->count = 2;
+                a->ops = GPU_VA + 3072;
+                job.arguments = GPU_VA + 2048, job.state = GPU_VA + 2560, job.state_at = (unsigned int address_to)(buffer + 2560);
+                job.code = GPU_VA + 3584;
+                n = gpu_i915_gen9_batch(&job, words, 64);
+                check("gpu i915 scene: two records make the 56 dwords of the walker, over 64 blocks by 32 rows",
+                      n == 56 && words[0] == 0x69040302u && words[29] == 0x70010002u && words[32] == 2560 + 192 && words[44] == 64u && words[47] == 32u);
+                check("gpu i915 scene: the CURBE holds the count, then the first pixel's x and y (0 and 0)",
+                      state[48] == 2u && state[49] == 0u && state[50] == 0u);
+                check("gpu i915 scene: entry 1 is the records (two a 64-byte row, so one row: height 0, width and pitch 63), based on the first record",
+                      state[1] == 2560 + 256 && state[(256 + 8) / 4] == 63u && state[(256 + 12) / 4] == 63u && state[(256 + 32) / 4] == (unsigned int)(GPU_VA + 3072));
+                a->count = 3;
+                check("gpu i915 scene: three records are two rows (height 1)", gpu_i915_gen9_batch(&job, words, 64) == 56 && state[(256 + 8) / 4] == (63u | (1u << 16)));
+                a->count = 2, recs[8] = 2;
+                check("gpu i915 scene: a record that is not a fill or a tone (kind 2, a box) is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                recs[8] = 1, a->ops = GPU_VA + 3072 + 8;
+                check("gpu i915 scene: records not 64-byte aligned are refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->ops = GPU_VA + 3072, a->count = 0;
+                check("gpu i915 scene: no records is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->count = 16385;
+                check("gpu i915 scene: more records than the surface's height holds is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                a->count = 2, a->op = 6;
+        }
 }
 
 b32 main(void)
