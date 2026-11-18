@@ -38,9 +38,11 @@
 
 #include "installer_model.c"
 
-#define INSTALLER_WIDTH 800 // logical pixels
+#define INSTALLER_WIDTH 900 // logical pixels
 #define INSTALLER_HEIGHT 660
-#define INSTALLER_COLUMN 640           // what a step says, in the middle of the window
+#define INSTALLER_COLUMN 640           // what a step says, in the middle of the room beside the steps
+#define INSTALLER_SIDE 200             // the steps' glass pane, the window's whole height at its start
+#define INSTALLER_STEP_ROW 48          // a step's row in it
 #define INSTALLER_CARD_H 96            // an app's card
 #define INSTALLER_LOOK_NS 1000000000ll // the network looked at this often
 #define INSTALLER_WIFI_NS 4000000000ll // and the networks heard asked again this often, while the Network step shows
@@ -97,7 +99,8 @@ struct installer_big
 {
         struct ui_view view;
         struct ui_list list;                        // the step's choices: the languages, the layouts, the networks or the drives
-        struct ui_rect stepper, field_box, pass_box, card_box[3], icon_box[3], tick_box[3];
+        struct ui_rect stepper, side_box, field_box, pass_box, card_box[3], icon_box[3], tick_box[3];
+        int step_hover;                             // the step's row under the pointer, -1 none
         struct ui_text field;                       // the keyboard's try-it field
         struct ui_text pass;                        // a network's passphrase
         struct ui_control try_it, pass_c, modes, meter, callout;
@@ -131,6 +134,7 @@ static struct
         b32 x86;
         b32 hand;          // the event being taken is a key or a press of a device of the machine's (no WINDOW_EVENT_VIRTUAL)
         b32 listed;        // the drives were listed
+        b32 network_seen;  // the Network step was shown (and is done once passed, online or not)
         int chosen;        // the drive chosen, by its place in drives, -1 none
         // The command running: its process and output, what it is for, which of the plan it is and how many there are, and whether one failed.
         bipolar child;
@@ -418,6 +422,38 @@ static fn installer_choose_drive(int at)
         installer.dirty = true;
 }
 
+/*
+        The step Next goes to: the one after, but past Network while the machine is online (a default route), which is done by being so;
+        the person can still press Network among the steps to look at the networks. A link that drops before Install puts it back in the way.
+*/
+static int installer_next_step(void)
+{
+        int next = installer.step + 1;
+
+        return next == INSTALLER_STEP_NETWORK && installer.choice.online ? INSTALLER_STEP_DISK : next;
+}
+
+// Whether step k shows as done among the steps: a step passed, and Network while the machine is online and it is not the step shown, or
+// once it was shown and passed (Skip); one passed by because it was online is not done once the link is gone.
+static b32 installer_step_done(int k)
+{
+        int current = installer.step < INSTALLER_STEPS ? installer.step : INSTALLER_STEPS - 1;
+
+        if (installer.step == INSTALLER_STEP_DONE)
+                return true;
+        if (k == INSTALLER_STEP_NETWORK && k != current)
+                return installer.choice.online || (k < current && installer.network_seen);
+        return k < current;
+}
+
+// Whether a press on step k goes to it: a step done, before the install runs (Network done by being online too, once Keyboard is passed).
+static b32 installer_step_reachable(int k)
+{
+        if (installer.step > INSTALLER_STEP_REVIEW || k == installer.step || k < 0 || k >= INSTALLER_STEPS)
+                return false;
+        return k < installer.step || (k == INSTALLER_STEP_NETWORK && installer.choice.online && installer.step > INSTALLER_STEP_KEYBOARD);
+}
+
 // A step gone to: its list's rows made, and what a step needs on arriving (the drives listed, the networks asked).
 static fn installer_go(int step)
 {
@@ -446,7 +482,7 @@ static fn installer_go(int step)
                         installer_list();
         }
         if (step == INSTALLER_STEP_NETWORK)
-                installer.next_look = installer.next_wifi = 0;
+                installer.next_look = installer.next_wifi = 0, installer.network_seen = true;
         installer.dirty = true;
 }
 
@@ -693,11 +729,19 @@ static fn installer_layout(void)
         }
 
         ui_view_begin(&big->view, ui, installer.width, -installer.height);
+        // The steps are the window's glass pane, its whole height at its start; what a step says is beside them.
+        ui_row(.grow = 1)
+        {
+        ui_col(.host = &big->side_box, .w = INSTALLER_SIDE, .shrink = 0)
+        {
+                ui_host(null, .h = UI_PAGE_TOP);
+                ui_host(&big->stepper, .grow = 1);
+        }
         ui_col(.class = "inset", .grow = 1)
         {
-                ui_host(&big->stepper, .h = 64);
+                ui_host(null, .h = UI_GAP2);
                 ui_row(.class = "middle", .grow = 1)
-                        ui_col(.w = INSTALLER_COLUMN, .class = "gap3")
+                        ui_col(.grow = 1, .max_w = INSTALLER_COLUMN, .class = "gap3")
                         {
                                 ui_text(head, .class = "title", .size = 24);
                                 if (about)
@@ -836,6 +880,7 @@ static fn installer_layout(void)
                                 }
                         }
         }
+        }
         ui_view_end(&big->view);
 }
 
@@ -852,7 +897,7 @@ static b32 installer_act(int which)
                 break;
         case 1:
                 if (installer_can_next())
-                        installer_go(installer.step + 1);
+                        installer_go(installer_next_step());
                 break;
         case 2:
                 installer_install();
@@ -910,9 +955,10 @@ static fn installer_checkmark(struct ui address_to ui, int x, int y, int size, b
 }
 
 /*
-        The stepper: a circle a step across the top, a line between each two; a step done is the accent filled with a check in the ink
-        on it, the step it is at the accent's ring with its number in the accent and its name in the ink, a step to come a ring and its
-        number in the quiet ink. The names are under the circles.
+        The steps, down the glass pane, a row each: a step done is the accent's circle with a check in the ink on it, the step shown the
+        accent's ring with its number in the accent, its row lit (the list's lit fill, a well of the glass's ink) and its name in the ink,
+        a step to come a ring and its number in the quiet ink. A step a press goes to (ui: installer_step_reachable) has the ink's hover
+        layer under the pointer. Reading from the right the rows are turned over the pane: the circle at the right.
 */
 static fn installer_stepper(struct ui address_to ui)
 {
@@ -920,43 +966,89 @@ static fn installer_stepper(struct ui address_to ui)
                                                             LANGUAGE_installer_step_network,  LANGUAGE_installer_step_disk,
                                                             LANGUAGE_installer_step_apps,     LANGUAGE_installer_step_install};
         struct ui_rect r = installer.big->stepper;
-        int current = installer.step < INSTALLER_STEPS ? installer.step : INSTALLER_STEPS - 1, d = ui_dev(ui, 26);
-        int left = r.x + (r.w - ui_dev(ui, INSTALLER_COLUMN)) / 2, wide = ui_dev(ui, INSTALLER_COLUMN);
-        unsigned int accent = ui_role(UI_PRIMARY), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), strong = ui_text_colour(ui, UI_ON_SURFACE);
-        unsigned int line = ui_role(UI_OUTLINE_VARIANT);
+        int current = installer.step < INSTALLER_STEPS ? installer.step : INSTALLER_STEPS - 1, d = ui_dev(ui, 26), row = ui_dev(ui, INSTALLER_STEP_ROW);
+        int pad = ui_dev(ui, UI_INSET);
+        unsigned int accent = ui_role(UI_PRIMARY), quiet, strong;
+        unsigned int line;
 
-        if (left < r.x)
-                left = r.x, wide = r.w;
+        ui_side_inks(ui, true);
+        quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), strong = ui_text_colour(ui, UI_ON_SURFACE), line = ui_well(ui, UI_OUTLINE_VARIANT, 40);
         if (installer.step == INSTALLER_STEP_DONE)
                 current = INSTALLER_STEPS;
         for (int k = 0; k < INSTALLER_STEPS; k++)
         {
-                int cx = left + wide * (2 * k + 1) / (2 * INSTALLER_STEPS), top = r.y + ui_dev(ui, 4), nx = left + wide * (2 * k + 3) / (2 * INSTALLER_STEPS);
-                struct ui_box circle = {(cx - d / 2) * 256, top * 256, (cx - d / 2 + d) * 256, (top + d) * 256, d * 128, d * 128};
+                int top = r.y + k * row, cx = ui_mirror(r.x + pad, d, r.x, r.w) + d / 2, cy = top + row / 2;
+                struct ui_box circle = {(cx - d / 2) * 256, (cy - d / 2) * 256, (cx - d / 2 + d) * 256, (cy - d / 2 + d) * 256, d * 128, d * 128};
+                struct ui_box band = {r.x * 256, top * 256, (r.x + r.w) * 256, (top + row) * 256, 0, 0};
                 const char address_to name = language_text(steps[k]);
-                int baseline = ui_kit_baseline(ui, top + d + ui_dev(ui, 6), UI_LABEL_MEDIUM), width = ui_kit_measure(ui, (string_address)name, UI_LABEL_MEDIUM);
+                int baseline = ui_kit_baseline(ui, top + (row - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM), width = ui_kit_measure(ui, (string_address)name, UI_BODY_MEDIUM);
                 char number[4] = {(char)('1' + k), 0, 0, 0};
+                b32 done = installer_step_done(k);
 
+                if (top >= r.y + r.h)
+                        break;
+                if (k == current)
+                        ui_kit_fill(ui, &band, ui_kit_lit(ui), null);
+                else if (k == installer.big->step_hover && installer_step_reachable(k))
+                        ui_kit_fill(ui, &band, 0x14000000u | (strong & 0xffffffu), null);
+                // The line down from a step to the next, in the accent once the step is done.
                 if (k + 1 < INSTALLER_STEPS)
-                        ui_kit_fill(ui, &(struct ui_box){(cx + d / 2 + ui_dev(ui, 6)) * 256, (top + d / 2) * 256 - 128, (nx - d / 2 - ui_dev(ui, 6)) * 256,
-                                                        (top + d / 2) * 256 + 128 + (ui_dev(ui, 1) - 1) * 256, 0, 0},
-                                    k < current ? accent : line, null);
-                if (k < current)
+                        ui_kit_fill(ui, &(struct ui_box){cx * 256 - 128, (cy + d / 2 + ui_dev(ui, 3)) * 256, cx * 256 + 128 + (ui_dev(ui, 1) - 1) * 256,
+                                                        (cy + row - d / 2 - ui_dev(ui, 3)) * 256, 0, 0},
+                                    done ? accent : line, null);
+                if (done && k != current)
                 {
                         ui_kit_fill(ui, &circle, accent, null);
-                        installer_checkmark(ui, cx - d / 2, top, d, UI_ONE, ui_role(UI_ON_PRIMARY));
+                        installer_checkmark(ui, cx - d / 2, cy - d / 2, d, UI_ONE, ui_role(UI_ON_PRIMARY));
                 }
                 else
                 {
                         int nw = ui_kit_measure(ui, (string_address)number, UI_LABEL_LARGE);
 
                         ui_kit_ring(ui, &circle, ui_q8(ui, 2), k == current ? accent : line);
-                        ui_kit_text_clip(ui, cx - nw / 2, ui_kit_baseline(ui, top + (d - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE), (string_address)number, UI_LABEL_LARGE,
+                        ui_kit_text_clip(ui, cx - nw / 2, ui_kit_baseline(ui, cy - ui_dev(ui, 10), UI_LABEL_LARGE), (string_address)number, UI_LABEL_LARGE,
                                          k == current ? accent : quiet, 0, ui->width);
                 }
-                ui_kit_text_clip(ui, cx - width / 2, baseline, (string_address)name, UI_LABEL_MEDIUM, k == current ? accent : k < current ? strong : quiet, 0,
-                                 ui->width);
+                ui_kit_text_clip(ui, ui_mirror(r.x + pad + d + ui_dev(ui, 12), width, r.x, r.w), baseline, (string_address)name, UI_BODY_MEDIUM,
+                                 k == current || done ? strong : quiet, 0, ui->width);
         }
+        ui_side_inks(ui, false);
+}
+
+// The step's row of the pane a point is on, or -1.
+static int installer_step_at(int x, int y)
+{
+        struct ui_rect r = installer.big->stepper;
+        int row = ui_dev(&installer.ui, INSTALLER_STEP_ROW), k;
+
+        if (x < r.x || x >= r.x + r.w || y < r.y || y >= r.y + r.h || row <= 0)
+                return -1;
+        k = (y - r.y) / row;
+        return k < INSTALLER_STEPS ? k : -1;
+}
+
+// The pointer over the steps: the hover follows it, a press on a step done goes to it (the left button, released on the same step).
+static b32 installer_steps_event(const struct window_event address_to event)
+{
+        struct installer_big address_to big = installer.big;
+        int x = event->type == WINDOW_EVENT_MOTION ? (int)event->a : ui_kit.pointer_x, y = event->type == WINDOW_EVENT_MOTION ? (int)event->b : ui_kit.pointer_y;
+        int k = installer_step_at(x, y);
+
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                if (k != big->step_hover)
+                        big->step_hover = k, installer.dirty = true;
+                return false;
+        }
+        if (event->type != WINDOW_EVENT_BUTTON || k < 0)
+                return false;
+        if ((event->flags & WINDOW_KEY_DOWN) && installer_step_reachable(k))
+        {
+                if (installer.step == INSTALLER_STEP_REVIEW && k < INSTALLER_STEP_REVIEW)
+                        installer.failed = false;
+                installer_go(k);
+        }
+        return true;
 }
 
 // A field's well: a box with a hairline, the accent's ring of two when it has the keys.
@@ -1045,6 +1137,9 @@ static fn installer_draw(unsigned int address_to pixels)
         memory_zero(big->card_box, sizeof(big->card_box));
         big->field_box.w = big->pass_box.w = 0;
         installer_layout();
+        ui_side_place(ui, big->side_box.x, big->side_box.w);
+        // The lists of a step (the languages, the layouts, the networks, the drives) in stripes, every second row tinted.
+        l->stripe = 2;
         l->lit = l->focus >= 0, l->keys = installer.focused && !big->view.group.keys && !big->field.focused && !big->pass.focused;
         if (installer.step == INSTALLER_STEP_APPS)
                 installer_cards_ground(ui);
@@ -1172,6 +1267,8 @@ static b32 installer_event_take(const struct window_event address_to event)
         if (event->type == WINDOW_EVENT_KEY && down && event->a == UI_KEY_ESCAPE && installer.step != INSTALLER_STEP_RUN)
                 return false;
         if (installer.step == INSTALLER_STEP_APPS && installer_cards_event(event))
+                return true;
+        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && installer_steps_event(event))
                 return true;
         asks = ui_view_event(ui, &big->view, event);
         if (asks & UI_VIEW_QUIT)
@@ -1317,7 +1414,7 @@ static fn installer_begin(void)
         installer.x86 = 0;
 #endif
         installer.big->hover_card = installer.big->press_card = installer.big->focus_card = -1;
-        installer.big->net_chosen = -1;
+        installer.big->net_chosen = -1, installer.big->step_hover = -1;
         installer_settings();
         installer_go(INSTALLER_STEP_LANGUAGE);
 }
@@ -1346,7 +1443,8 @@ static struct ui_app installer_app = {
         .missing = (string_address) "installer: no window: the compositor's desktop is not up\n",
         .title = (string_address) "Install Moonwater",
         .name = (string_address) "installer",
-        .glass = WINDOW_GLASS, // the desktop's own glass: the first thing a live boot shows, over the wallpaper
+        .glass = 0, // the kit's surface, as every window that stays is,
+        .side = true, // with its steps the desktop's own glass beside it: the first thing a live boot shows, over the wallpaper
         .nofont = (string_address) "installer: no font to draw with (-f FONT.ttf), pid ",
         .dirty = &installer.dirty,
         .focused = &installer.focused,

@@ -28,7 +28,7 @@
 #undef SHARED_counted
 
 #define ICHECK_ROOT "/tmp/moonwater-installer-check"
-#define ICHECK_W 800
+#define ICHECK_W 900
 #define ICHECK_H 660
 
 static fn icheck_write(string_address path, string_address text)
@@ -230,6 +230,21 @@ static fn icheck_window(void)
               string_equals((string_address)installer.choice.keyboard, (string_address) "uk") && installer.choice.keyboard_changed);
         installer_act(1);
         check("installer steps: Network is passed offline (Skip)", installer.step == INSTALLER_STEP_NETWORK && installer_can_next());
+        // Online: Network shows done among the steps, live, and Next from Keyboard goes past it; a press on it still goes to it; offline again
+        // it is a step to come and in the way.
+        installer.choice.online = true;
+        check("installer steps: online, Network shows done while another step is shown, and is not done while it is shown",
+              !installer_step_done(INSTALLER_STEP_NETWORK) && (installer_act(0), installer.step == INSTALLER_STEP_KEYBOARD) &&
+                  installer_step_done(INSTALLER_STEP_NETWORK) && !installer_step_done(INSTALLER_STEP_DISK));
+        installer_act(1);
+        check("installer steps: online, Next from Keyboard goes past Network to Disk", installer.step == INSTALLER_STEP_DISK);
+        check("installer steps: online, a press on Network goes to it from Disk; a step to come is not pressed",
+              installer_step_reachable(INSTALLER_STEP_NETWORK) && installer_step_reachable(INSTALLER_STEP_LANGUAGE) && !installer_step_reachable(INSTALLER_STEP_APPS) &&
+                  !installer_step_reachable(INSTALLER_STEP_DISK));
+        installer.choice.online = false, installer.network_seen = false;
+        check("installer steps: the link gone, Network is no longer done, and Next from Keyboard stops on it",
+              !installer_step_done(INSTALLER_STEP_NETWORK) &&
+                  (installer_go(INSTALLER_STEP_KEYBOARD), installer_act(1), installer.step == INSTALLER_STEP_NETWORK));
         installer_act(1);
         check("installer disk: the boot drive is not listed", installer.big->drive_count == 2 &&
                                                                  !string_equals((string_address)installer.big->drives[0].name, (string_address) "sdb") &&
@@ -530,15 +545,19 @@ static fn icheck_steps(string_address dir, int dark)
 
         icheck_dark = dark;
         big = installer.big;
-        installer.ui.glass = 1;
-        ui_inks(&installer.ui, icheck_ground[dark]);
+        // The window is the kit's surface with its steps a glass pane (ui_app.side), as installer_app asks.
+        installer.ui.glass = 0, installer.ui.opaque = 1, installer.ui.sided = 1, installer.ui.side_ground = icheck_ground[dark];
         installer.width = ICHECK_W, installer.height = ICHECK_H;
         installer.focused = true;
         installer.x86 = true;
         ui_kit_theme(dark ? UI_THEME_DARK : UI_THEME_LIGHT, UI_ACCENT_DAWN, 0);
-        ui_inks(&installer.ui, icheck_ground[dark]);
+        ui_kit_inks(&installer.ui);
 
         icheck_draw(dir, (string_address) "1-language");
+        // The same window reading from the right: the steps' glass pane at the right edge, the circles at its right.
+        ui_kit.rtl = 1;
+        icheck_draw(dir, (string_address) "1-language-rtl");
+        ui_kit.rtl = 0;
         installer_act(1);
         icheck_draw(dir, (string_address) "2-keyboard");
         installer_act(1);
