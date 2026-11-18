@@ -4250,6 +4250,34 @@ static void display_off_rows(void)
         compositor.dark = saved_dark, compositor.dark_applied = saved_applied, compositor.card = saved_card, compositor.outputs = saved_outputs;
 }
 
+// The X window manager's atoms by their numbers (compositor_xwm_atom_index, H-c3-1): every atom of a list of thousands found by the index as the walk
+// found it, the first record of an atom two records have, none for one not there, and an interned name's atom found once its reply gives it.
+static void xwm_atom_rows(void)
+{
+        __typeof__(compositor_xwm_slots[0]) *kept = compositor_xwm_at, *x = &compositor_xwm_slots[COMPOSITOR_XWM_SLOTS - 1]; // (compositor_xwm is a macro here)
+        __typeof__(compositor_xwm_slots[0]) saved = *x;
+        b32 found = true;
+        long named, dup;
+
+        *x = compositor_xwm_fresh;
+        compositor_xwm_at = x;
+        for (unsigned int k = 1; k <= 5000; k++)
+                compositor_xwm_atom_add(k * 7919u, 0, 0, 0);
+        for (unsigned int k = 1; k <= 5000; k++)
+                found = found && compositor_xwm_atom_index(k * 7919u) == (long)k - 1;
+        named = compositor_xwm_atom_add(0, (const unsigned char *)"UTF8_STRING", 11, 0);
+        found = found && compositor_xwm_atom_index(3u) < 0 && compositor_xwm_atom_index(0) < 0;
+        compositor_xwm_interned((const unsigned char[32]){1, 0, 0, 0, 0, 0, 0, 0, 7919u * 3 & 0xff, 7919u * 3 >> 8 & 0xff, 7919u * 3 >> 16 & 0xff, 0},
+                                32, &(struct compositor_xwm_pending){.slot = (unsigned int)named});
+        dup = compositor_xwm_atom_index(7919u * 3);
+        check("xwm atoms: 5000 atoms each found by the index at their record, none for one not there, the first record of an atom two have, an interned "
+              "name's found by its reply's atom",
+              found && named == 5000 && dup == 2 && x->atoms_indexed == 5001);
+        wayland_table_drop(&x->atom_table), wayland_table_drop(&x->atom_index), wayland_table_drop(&x->name_table);
+        *x = saved;
+        compositor_xwm_at = kept;
+}
+
 // The X window manager's socket (xwm.c, S-c3-2): one connection for each wrapper (a second from the same pid takes the first one's place), and a
 // connection whose wrapper has no child on the Wayland socket by COMPOSITOR_XWM_BIND_NS is closed: a program of uid 1000 that only holds the
 // socket holds no slot. Over an abstract socket of the check's own, with this process as the wrapper.
@@ -5408,6 +5436,7 @@ b32 main(void)
         dirty_rows();
         close_ask_rows();
         xwm_socket_rows();
+        xwm_atom_rows();
         display_off_rows();
         reader_own_rows();
         clip_most_rows();

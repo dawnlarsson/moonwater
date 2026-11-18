@@ -99,6 +99,7 @@
 #define COMPOSITOR_XWM_IN (XWM_REPLY_MAX + 4096)     // what the server has sent and no message is whole yet: one whole message and more
 #define COMPOSITOR_XWM_OUT 131072                    // what is queued for the server (a selection's piece of 32 KiB and more); a queue that would overflow closes the connection
 #define COMPOSITOR_XWM_SETUP_NS 5000000000ull        // a connection that has not finished its setup in this long is closed
+#define COMPOSITOR_XWM_TARGETS_MOST 64               // the types of an X copy or drag taken, and their names asked: no toolkit offers more
 #define COMPOSITOR_XWM_BIND_NS 15000000000ull        // nor one whose X server is not a Wayland client by then (the wrapper waits 5 s for it)
 #define COMPOSITOR_XWM_ATOMS 61
 #define COMPOSITOR_XWM_A_PROTOCOLS 0
@@ -372,6 +373,8 @@ struct compositor_xwm
         unsigned int xfixes_opcode, xfixes_event, setting, next_requestor;
         struct compositor_xwm_selection sel[3];
         struct wayland_table atom_table, name_table, in_table, out_table, type_table;
+        struct wayland_table atom_index; // the atoms by their number (each bucket a record's slot and one: compositor_xwm_atom_index)
+        long atoms_indexed;
         struct compositor_xwm_atom *atom;
         struct compositor_xwm_in *ins;
         struct compositor_xwm_out *outs;
@@ -1573,6 +1576,50 @@ static int compositor_xwm_same(const unsigned char *a, const unsigned char *b, u
 
 /* ---- the atoms and their names: a table that grows, the names in one that grows beside it ---- */
 
+/*
+        The atoms indexed by their numbers (open addressing, a power of two of buckets, each a record's slot and one), as the windows are: a server
+        names atoms in lists (a selection's TARGETS, a drag's types), and a walk of the whole table for each was the square of the list on the loop.
+        A record's atom is put in once it is known (at its making, or at its InternAtom's reply) and is never taken out: the table only grows, and
+        is let go of with the connection. At half full the index is made again at twice the buckets.
+*/
+static void compositor_xwm_atom_put(struct wayland_table *index, long slot)
+{
+        unsigned int *bucket = (unsigned int *)index->at;
+        unsigned long b = compositor_xwm_hash(compositor_xwm_at->atom[slot].atom, index->count);
+
+        while (bucket[b])
+                b = (b + 1) & (unsigned long)(index->count - 1);
+        bucket[b] = (unsigned int)(slot + 1);
+}
+
+// The record at slot, its atom now known, put in the index (made again when half full); without the memory it is left out and found by the walk.
+static void compositor_xwm_atom_indexed(long slot)
+{
+        struct compositor_xwm *x = compositor_xwm_at;
+
+        if (!x->atom[slot].atom)
+                return;
+        if (2 * (x->atoms_indexed + 1) > x->atom_index.count)
+        {
+                struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
+
+                wayland_tables_host(&compositor_wl_host);
+                if (!wayland_table_reach(&grown, x->atom_index.count ? 2 * x->atom_index.count : 64))
+                {
+                        x->atoms_indexed = -1; // no index: every look is the walk (compositor_xwm_atom_index)
+                        wayland_table_drop(&x->atom_index);
+                        return;
+                }
+                for (long at = 0; at < x->atom_table.count; at++)
+                        if (at != slot && x->atom[at].atom)
+                                compositor_xwm_atom_put(&grown, at);
+                wayland_table_drop(&x->atom_index);
+                x->atom_index = grown;
+        }
+        compositor_xwm_atom_put(&x->atom_index, slot);
+        x->atoms_indexed++;
+}
+
 static long compositor_xwm_atom_add(unsigned int atom, const unsigned char *name, unsigned long length, int known)
 {
         struct compositor_xwm *x = compositor_xwm_at;
@@ -1594,15 +1641,33 @@ static long compositor_xwm_atom_add(unsigned int atom, const unsigned char *name
         if (length)
                 memory_copy(x->name_table.at + x->name_bytes, name, (positive)length);
         x->name_bytes += (long)length;
+        if (x->atoms_indexed >= 0)
+                compositor_xwm_atom_indexed(at);
         return at;
 }
 
+// The record of an atom, or -1: the first record that has it (an atom interned by name may also be one named by a list before), by the index's
+// chain, which holds every record with it; by the walk where the index could not be made.
 static long compositor_xwm_atom_index(unsigned int atom)
 {
-        for (long at = 0; atom && at < compositor_xwm_at->atom_table.count; at++)
-                if (compositor_xwm_at->atom[at].atom == atom)
-                        return at;
-        return -1;
+        struct compositor_xwm *x = compositor_xwm_at;
+        long buckets = x->atom_index.count, found = -1;
+        const unsigned int *bucket = (const unsigned int *)x->atom_index.at;
+
+        if (!atom)
+                return -1;
+        if (x->atoms_indexed < 0)
+        {
+                for (long at = 0; at < x->atom_table.count; at++)
+                        if (x->atom[at].atom == atom)
+                                return at;
+                return -1;
+        }
+        for (unsigned long b = buckets ? compositor_xwm_hash(atom, buckets) : 0, n = 0; buckets && n < (unsigned long)buckets && bucket[b];
+             n++, b = (b + 1) & (unsigned long)(buckets - 1))
+                if (x->atom[bucket[b] - 1].atom == atom && (found < 0 || (long)bucket[b] - 1 < found))
+                        found = (long)bucket[b] - 1;
+        return found;
 }
 
 static long compositor_xwm_atom_named(const unsigned char *name, unsigned long length)
@@ -1663,8 +1728,12 @@ static void compositor_xwm_interned(const unsigned char *in, long size, const st
         }
         if ((long)p->slot < x->atom_table.count && r.atom)
         {
+                b32 had = x->atom[p->slot].atom != 0;
+
                 x->atom[p->slot].atom = r.atom;
                 x->atom[p->slot].known = 1;
+                if (!had && x->atoms_indexed >= 0)
+                        compositor_xwm_atom_indexed((long)p->slot);
         }
 }
 
@@ -2145,6 +2214,10 @@ static void compositor_xwm_in_reply(const unsigned char *msg, long size, const s
                 {
                         unsigned int atom = xwm_get32(r.value + k);
 
+                        // The first COMPOSITOR_XWM_TARGETS_MOST (no toolkit offers more): each is named of the server, so a list of thousands filled
+                        // the queue to the server and broke the connection.
+                        if (in->targets.count >= COMPOSITOR_XWM_TARGETS_MOST)
+                                break;
                         if (!atom || !wayland_table_reach(&in->targets, in->targets.count + 1))
                                 continue;
                         ((unsigned int *)in->targets.at)[in->targets.count - 1] = atom;
@@ -3470,7 +3543,7 @@ static void compositor_xwm_dnd_reply(const unsigned char *in, long size, const s
         {
                 unsigned char req[32];
 
-                for (unsigned long k = 0; in && r.format == XWM_FORMAT_32 && k + 4 <= r.value_len; k += 4)
+                for (unsigned long k = 0; in && r.format == XWM_FORMAT_32 && k + 4 <= r.value_len && x->xdrag.types.count < COMPOSITOR_XWM_TARGETS_MOST; k += 4)
                         if (xwm_get32(r.value + k) && wayland_table_reach(&x->xdrag.types, x->xdrag.types.count + 1))
                         {
                                 ((unsigned int *)x->xdrag.types.at)[x->xdrag.types.count - 1] = xwm_get32(r.value + k);
@@ -4212,9 +4285,10 @@ static void compositor_xwm_close_rows(void)
         wayland_table_drop(&x->in_table);
         wayland_table_drop(&x->out_table);
         wayland_table_drop(&x->atom_table);
+        wayland_table_drop(&x->atom_index);
         wayland_table_drop(&x->name_table);
         wayland_table_drop(&x->type_table);
-        x->ins = 0, x->outs = 0, x->atom = 0, x->name_bytes = 0;
+        x->ins = 0, x->outs = 0, x->atom = 0, x->name_bytes = 0, x->atoms_indexed = 0;
         for (int which = 0; which < 3; which++)
         {
                 x->sel[which].atom = x->sel[which].owned_time = x->sel[which].x_owner = 0;
