@@ -1747,23 +1747,37 @@ static void gpu_drop(unsigned int i, enum gpu_gone_why why)
 static unsigned int gpu_map_probe, gpu_map_said;
 static char gpu_said[256];
 
+/*
+        The kernel's log, from its oldest record (/dev/kmsg, not waited for): its descriptor, -1 for none. gpu_kmsg_next gives its records one a read
+        ("prio,seq,usec,flags;text", its NUL after it), the first 8192 of a walk, and 0 at the end, when it closes the log (handle -1). The one walk of
+        gpu_say_kernel, gpu_kmsg_drain and gpu_fault_read.
+*/
+#define gpu_kmsg_open() ((long)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC))
+static char *gpu_kmsg_next(long *handle, unsigned int *records)
+{
+        static char record[8192];
+        bipolar got = *handle >= 0 && (*records)++ < 8192 ? system_read_once(*handle, record, sizeof(record) - 1) : 0;
+
+        if (got > 0)
+                return record[got] = 0, record;
+        if (*handle >= 0)
+                system_close(*handle), *handle = -1;
+        return 0;
+}
+
 static void gpu_say_kernel(void)
 {
-        static char record[8192], last[3][90];
-        unsigned int kept = 0, at;
-        long handle = (long)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        static char last[3][90];
+        unsigned int kept = 0, at, records = 0;
+        long handle = gpu_kmsg_open();
+        char *record;
 
         if (handle < 0)
                 return;
-        for (unsigned int records = 0; records < 8192; records++)
+        while ((record = gpu_kmsg_next(&handle, &records)))
         {
-                bipolar got = system_read_once(handle, record, sizeof(record) - 1);
-                char *text, *finish;
+                char *text = (char *)string_find((string_address)record, (string_address) ";"), *finish;
 
-                if (got <= 0)
-                        break;
-                record[got] = 0;
-                text = (char *)string_find((string_address)record, (string_address) ";");
                 if (!text)
                         continue;
                 text++;
@@ -1774,7 +1788,6 @@ static void gpu_say_kernel(void)
                         continue;
                 string_copy_bounded((string_address)last[kept++ % 3], (string_address)text, sizeof(last[0]));
         }
-        system_close(handle);
         gpu_said[0] = 0;
         for (unsigned int i = kept > 3 ? kept - 3 : 0; i < kept; i++)
         {
@@ -2673,30 +2686,19 @@ static positive gpu_kmsg_floor_seq, gpu_kmsg_seen_seq, gpu_kmsg_last_since;
 
 static void gpu_kmsg_drain(void)
 {
-        static char record[8192];
-        long handle = (long)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
+        long handle = gpu_kmsg_open();
+        unsigned int records = 0;
+        char *record;
 
-        gpu_kmsg_last_since = 0;
-        if (handle < 0)
+        gpu_kmsg_last_since = 0, gpu_kmsg_seq_ready = handle >= 0;
+        while ((record = gpu_kmsg_next(&handle, &records)))
         {
-                gpu_kmsg_seq_ready = 0;
-                return;
-        }
-        gpu_kmsg_seq_ready = 1;
-        for (unsigned int records = 0; records < 8192; records++)
-        {
-                bipolar got = system_read_once(handle, record, sizeof(record) - 1);
-                positive seq;
+                positive seq = gpu_kmsg_seq(record);
 
-                if (got <= 0)
-                        break;
-                record[got] = 0;
-                seq = gpu_kmsg_seq(record);
-                if (seq > gpu_kmsg_seen_seq)
-                        gpu_kmsg_seen_seq = seq;
+                gpu_kmsg_seen_seq = seq > gpu_kmsg_seen_seq ? seq : gpu_kmsg_seen_seq;
         }
-        gpu_kmsg_floor_seq = gpu_kmsg_seen_seq;
-        system_close(handle);
+        if (gpu_kmsg_seq_ready)
+                gpu_kmsg_floor_seq = gpu_kmsg_seen_seq;
 }
 
 // The hexadecimal number after the key in a log line ("in page starting at address 0x" then the digits): true when there is one.
@@ -2794,8 +2796,9 @@ static unsigned int gpu_fault_query(struct gpu_fault_scan *out)
 #endif
 static void gpu_fault_read(positive since, struct gpu_fault_scan *out)
 {
-        static char record[8192];
+        unsigned int records = 0;
         long handle;
+        char *record;
 
         memory_zero(out, sizeof(*out));
         GPU_LOG_FAKE(since, out);
@@ -2805,16 +2808,12 @@ static void gpu_fault_read(positive since, struct gpu_fault_scan *out)
                         gpu_kmsg_floor_seq = gpu_kmsg_seen_seq;
                 gpu_kmsg_last_since = since;
         }
-        handle = out->have_at ? -1 : (long)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC);
-        for (unsigned int records = 0; handle >= 0 && records < 8192; records++)
+        handle = out->have_at ? -1 : gpu_kmsg_open();
+        while ((record = gpu_kmsg_next(&handle, &records)))
         {
-                bipolar got = system_read_once(handle, record, sizeof(record) - 1);
                 char *text;
                 positive seq, ns;
 
-                if (got <= 0)
-                        break;
-                record[got] = 0;
                 seq = gpu_kmsg_seq(record);
                 if (seq > gpu_kmsg_seen_seq)
                         gpu_kmsg_seen_seq = seq;
@@ -2824,8 +2823,6 @@ static void gpu_fault_read(positive since, struct gpu_fault_scan *out)
                         continue;
                 gpu_fault_line(text + 1, out);
         }
-        if (handle >= 0)
-                system_close(handle);
         gpu_fault_query(out);
 }
 
