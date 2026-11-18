@@ -283,6 +283,8 @@ static void rules_post_locked(const struct rules_live *live, const struct rover_
         record->fields = event->count;
         record->word_field = ROVER_RECORD_NONE;
         record->word_length = 0;
+        //      The whole word, not the bytes this one covers: the slot's last record must not show through after its NUL.
+        memory_zero(record->word, sizeof(record->word));
         for (positive at = 0; at < ROVER_FIELDS; at++)
         {
                 record->number[at] = at < event->count && !event->field[at].text ? event->field[at].number : 0;
