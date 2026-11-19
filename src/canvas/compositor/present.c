@@ -844,6 +844,8 @@ static void compositor_kmsg(string_address text, positive value, string_address 
         What became of the wallpaper, in the kernel's log (dmesg): "compositor: wallpaper moon 1920x1080 made in 850 ms" or
         "compositor: wallpaper plain because ...", once for each change, so a screen with no wallpaper says why.
 */
+static int compositor_wall_pictured; // the wallpaper made last has a picture on a screen (it says so, not moon)
+
 static void compositor_wall_say(const char *why, int width, int height, positive ms)
 {
         char line[120];
@@ -851,7 +853,7 @@ static void compositor_wall_say(const char *why, int width, int height, positive
 
         if (!why)
         {
-                string_copy((string_address)line, (string_address) "compositor: wallpaper moon ");
+                string_copy((string_address)line, compositor_wall_pictured ? (string_address) "compositor: wallpaper picture " : (string_address) "compositor: wallpaper moon ");
                 at = string_length((string_address)line);
                 at += positive_into_string((p8 *)line + at, (positive)width);
                 line[at++] = 'x';
@@ -1055,6 +1057,9 @@ static void compositor_wall_take(void)
                         compositor_damage(job->squares[at][0], job->squares[at][1], job->squares[at][2], job->squares[at][3]);
                 return;
         }
+        compositor_wall_pictured = 0;
+        for (int at = 0; at < (job->count ? job->count : 1) && at < COMPOSITOR_WALL_SCREENS; at++)
+                compositor_wall_pictured |= job->picture[at][0] != 0;
         compositor_wall_say(null, compositor_wall_w, compositor_wall_h, job->took / 1000000);
         compositor_damage(0, 0, compositor.width, compositor.height);
 }
