@@ -1432,7 +1432,9 @@ static b32 host_answer(bool update, string_address disk)
 
 //      The files of the settings table's plain rows are added when a wipe runs
 //      (host_wipe_table), after the files named here by hand.
-static string_address host_wipe_keep[128] = {
+// Room for the hand-named files, every row of the registry and every discovery switch: wipe must never run with a keep list that
+// was cut short, since a name that does not fit is a setting it deletes (host_wipe_table refuses a list that does not fit).
+static string_address host_wipe_keep[96 + SETTINGS_ROWS + array_count(discovery_switches)] = {
     HOST_WIPE_KEEP("/root/rules"),
     HOST_WIPE_KEEP(NET_WIFI_LIST),
     HOST_WIPE_KEEP(RADIO_RULES_PATH),
@@ -1499,25 +1501,37 @@ static string_address host_wipe_keep[128] = {
     "terminal",
     //  The text fields' and text areas' keymap (ui.c's UI_TEXT_KEYS_PATH), which the text widgets keep.
     "canvas.text.keys",
+    //  The per-program volumes the sound server remembers (src/audio, AUDIO_APPS_PATH), which no plain row names.
+    "audio.apps",
     null,
 };
 
-static fn host_wipe_table(void)
+// The keep list whole, or false when a name would not fit (then wipe deletes nothing).
+static b32 host_wipe_table(void)
 {
         positive used = 0;
 
         while (host_wipe_keep[used])
                 used++;
-        for (positive at = 0; at < SETTINGS_ROWS && used + 1 < array_count(host_wipe_keep); at++)
+        for (positive at = 0; at < SETTINGS_ROWS; at++)
                 //      Only a row under /root names a file wipe keeps: one kept
                 //      anywhere else is not in what wipe empties to begin with.
                 if (settings_rows[at].how == SETTING_PLAIN && settings_rows[at].path &&
                     string_has_prefix(settings_rows[at].path, "/root/"))
+                {
+                        if (used + 1 >= array_count(host_wipe_keep))
+                                return false;
                         host_wipe_keep[used++] = (string_address)settings_rows[at].path + sizeof("/root/") - 1;
+                }
         //      And discovery's switches, a word each in /root (discovery_switches).
-        for (positive at = 0; at < array_count(discovery_switches) && used + 1 < array_count(host_wipe_keep); at++)
+        for (positive at = 0; at < array_count(discovery_switches); at++)
+        {
+                if (used + 1 >= array_count(host_wipe_keep))
+                        return false;
                 host_wipe_keep[used++] = discovery_switches[at].leaf;
+        }
         host_wipe_keep[used] = null;
+        return true;
 }
 
 static b32 host_wipe_path(string_address path, positive mode,
@@ -1568,7 +1582,13 @@ static b32 host_wipe(bool said_yes)
                 return 1;
         lock = radio_lock(true);
 
-        host_wipe_table();
+        if (!host_wipe_table())
+        {
+                radio_unlock(lock);
+                host_release();
+                host_say(log, host_label "nothing forgotten: the list of settings to keep did not fit\n");
+                return 1;
+        }
         failed = host_wipe_path("/home", 0755, null) ||
                  host_wipe_path("/root", 0700, host_wipe_keep);
 
