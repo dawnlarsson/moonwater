@@ -142,6 +142,8 @@
 #define FILES_VIEW_DETAILS 0
 #define FILES_VIEW_ICONS 1
 #define FILES_VIEW_LIST 2
+#define FILES_BAND 32                // logical pixels of the path's band and the finder's field
+#define FILES_ROW 28                 // logical pixels of a row of the details, the list and the tree: denser than the kit's 40
 #define FILES_TILE_ICON 104          // logical pixels of a tile in the icon view,
 #define FILES_TILE_LIST 232          // and of a name in the list view (a row high)
 #define FILES_KEY_1 2
@@ -678,6 +680,7 @@ static fn files_layout(void)
         if (!l->describe)
         {
                 l->virtual = true, l->beside = true, l->hold_on = true;
+                l->row_h = FILES_ROW;
                 l->describe = files_describe;
                 l->damaged = files_damaged;
                 l->hover = l->down = -1;
@@ -687,6 +690,7 @@ static fn files_layout(void)
                 struct ui_list address_to t = &files.big->tree_list;
 
                 t->virtual = true, t->tree = true, t->beside = true;
+                t->row_h = FILES_ROW;
                 t->describe = files_tree_describe;
                 t->damaged = files_tree_damaged;
                 t->hover = t->down = -1;
@@ -721,16 +725,16 @@ static fn files_layout(void)
                                 ui_rows(&files.big->tree_list, .class = "list", .grow = 1);
                 ui_side_body()
                 {
-                        ui_row(.class = "pathbar")
+                        ui_row(.class = "pathbar", .h = FILES_BAND + UI_GAP2 * 2)
                         {
                                 ui_button(WORDS(files_back), .class = "ghost", .on = files_act, .arg = 0);
                                 ui_button(WORDS(files_forward), .class = "ghost", .on = files_act, .arg = 1);
                                 ui_button(WORDS(files_up), .class = "ghost", .on = files_act, .arg = 2);
                                 // The path: the field while it is typed, else the room its crumbs are laid out and drawn in (files_crumbs_lay).
                                 if (files.editing && files.editing != FILES_EDIT_PART)
-                                        ui_control(&files.path, .grow = 1, .h = UI_ROW);
+                                        ui_control(&files.path, .grow = 1, .h = FILES_BAND);
                                 else
-                                        ui_host(&files.crumbs_box, .grow = 1, .h = UI_ROW);
+                                        ui_host(&files.crumbs_box, .grow = 1, .h = FILES_BAND);
                         }
                         // The header of the columns over the rows: the kit's list, its words in from its margins.
                         ui_col(.class = "rows", .grow = 1)
@@ -741,7 +745,7 @@ static fn files_layout(void)
                         ui_row(.class = "bar")
                         {
                                 if (files.finding)
-                                        ui_control(&files.finder_field, .grow = 1, .h = UI_ROW);
+                                        ui_control(&files.finder_field, .grow = 1, .h = FILES_BAND);
                                 ui_text(files.big->status, .class = "status");
                                 if (files.selecting)
                                         ui_button(WORDS(files_done), .class = "ghost", .on = files_act, .arg = 3);
@@ -765,7 +769,7 @@ static fn files_layout(void)
         // The details' rows in stripes, every second row tinted, so a row's cells are read across to its name.
         l->stripe = files.view == FILES_VIEW_DETAILS ? 2 : 0;
         l->tiles = files.view == FILES_VIEW_ICONS ? FILES_TILE_ICON : files.view == FILES_VIEW_LIST ? FILES_TILE_LIST : 0;
-        l->tile_h = files.view == FILES_VIEW_LIST ? UI_ROW : 0;
+        l->tile_h = files.view == FILES_VIEW_LIST ? FILES_ROW : 0;
         // The tree's rows scrolled so the folder shown is in sight, once it is shown.
         if (files.tree_reseat && files.big->tree_list.h > 0)
         {
@@ -2392,7 +2396,7 @@ static fn files_sheet_open(b32 folder, int x, int y)
         {
                 struct ui_list address_to l = &files.big->list;
 
-                x = l->x + ui_dev(&files.ui, 40), y = l->y + (m->cursor != FILES_NO ? (int)m->cursor * ui_dev(&files.ui, UI_ROW) - l->scroll.scroll : 0);
+                x = l->x + ui_dev(&files.ui, 40), y = l->y + (m->cursor != FILES_NO ? (int)m->cursor * ui_list_pitch(&files.ui, l) - l->scroll.scroll : 0);
         }
         files.sheet = true, files.sheet_folder = folder, files.sheet_x = x, files.sheet_y = y, files.measuring = false;
         if (measure && !files.moving)
@@ -2563,10 +2567,10 @@ static fn files_menu_keys(void)
 {
         struct files_model address_to m = &files.big->model;
         struct ui_list address_to l = &files.big->list;
-        int x = l->x + ui_dev(&files.ui, 40), y = l->y + ui_dev(&files.ui, UI_ROW) / 2;
+        int x = l->x + ui_dev(&files.ui, 40), y = l->y + ui_list_pitch(&files.ui, l) / 2;
 
         if (m->cursor != FILES_NO)
-                y += (int)m->cursor * ui_dev(&files.ui, UI_ROW) - l->scroll.scroll;
+                y += (int)m->cursor * ui_list_pitch(&files.ui, l) - l->scroll.scroll;
         files_menu_open(m->cursor != FILES_NO, x, y);
 }
 

@@ -25346,6 +25346,7 @@ struct ui_list
         b32 keys;                          // the keys are in it and the window has them: a field of a row has its caret
         int focus;                         // the row the keys are on, -1 none
         b32 wrap;                          // a row's words that do not fit the room it gives them wrap, and the row is as tall as they are (else they are cut with dots)
+        int row_h;                         // a row's height, logical pixels at a text size of 100 (0: UI_ROW): a dense list (a file browser's) has shorter rows
         unsigned int revision;             // counted up when a row's words changed (ui_list_row_changed): what a least worked out of them is kept against
         // A virtual list (ui_list_window): of `total` rows, any number, each a row high and numbered from 0 in order, so id[] and count are the
         // kit's and a row's id (what describe is asked, what focus, hover and down hold, what a click answers) is its number in the whole list.
@@ -25438,9 +25439,15 @@ static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_
         A virtual list's unit and its width in them: a row is a row high, one to a line; a tile is its height high, as many to a line as
         the list's width holds. Every place, every hit and every reveal of a virtual list is worked out from these.
 */
+// A row of the list, device pixels: its own height where it has one (grown with the text as UI_ROW is), else the kit's.
+static inline int ui_list_pitch(const struct ui address_to ui, const struct ui_list address_to l)
+{
+        return l->row_h > 0 ? ui_dev(ui, ui_text_percent > 100 ? l->row_h * ui_text_percent / 100 : l->row_h) : ui_dev(ui, UI_ROW);
+}
+
 static inline int ui_list_unit(const struct ui address_to ui, const struct ui_list address_to l)
 {
-        int unit = ui_dev(ui, l->tiles ? (l->tile_h ? l->tile_h : UI_TILE_H) : UI_ROW);
+        int unit = l->tiles ? ui_dev(ui, l->tile_h ? l->tile_h : UI_TILE_H) : ui_list_pitch(ui, l);
 
         return unit < 1 ? 1 : unit;
 }
@@ -25579,7 +25586,7 @@ static fn ui_list_layout(struct ui address_to ui, struct ui_list address_to l)
                 // its strip are (ui_row_drive_height). A row that folds is its share of that: a line under an option that is opening or shutting
                 // (the app's spring).
                 l->whole[at] = row.kind == UI_ROW_SHARE ? ui_dev(ui, UI_ROW) * UI_ROW_SHARE_HIGH / UI_ROW_LEAST
-                               : l->wrap && !row.tall && ui->regular ? ui_row_whole(ui, l, l->id[at], &row) : ui_dev(ui, UI_ROW);
+                               : l->wrap && !row.tall && ui->regular ? ui_row_whole(ui, l, l->id[at], &row) : ui_list_pitch(ui, l);
                 l->tall[at] = (int)ui_qmul(row.reveal < 0 ? 0 : row.reveal > UI_ONE ? UI_ONE : row.reveal, row.tall ? ui_row_drive_height(ui, &row) : l->whole[at]);
                 y += l->tall[at];
         }
@@ -25680,7 +25687,7 @@ static fn ui_list_damage(const struct ui address_to ui, const struct ui_list add
 static fn ui_list_damage_all(const struct ui address_to ui, const struct ui_list address_to l)
 {
         if (l->damaged)
-                l->damaged(l->y - ui_dev(ui, UI_ROW), l->y + l->h + ui_dev(ui, UI_ROW));
+                l->damaged(l->y - ui_list_pitch(ui, l), l->y + l->h + ui_list_pitch(ui, l));
 }
 
 /*
@@ -25800,7 +25807,7 @@ static b32 ui_list_move(const struct ui address_to ui, struct ui_list address_to
 // Up and Down go a line of tiles (a page is lines), and Left and Right go along a line the way it is read.
 static b32 ui_list_key(const struct ui address_to ui, struct ui_list address_to l, int key, b32 address_to moved)
 {
-        int across = l->tiles ? ui_list_per(ui, l) : 1, page = l->scroll.view / (l->tiles ? ui_list_unit(ui, l) : ui_dev(ui, UI_ROW)) - 1, by;
+        int across = l->tiles ? ui_list_per(ui, l) : 1, page = l->scroll.view / ui_list_unit(ui, l) - 1, by;
 
         page = page < 1 ? 1 : page;
         // Centred lines do not stand under each other: Up and Down go to the tile nearest across in the line above or below.
@@ -27113,7 +27120,7 @@ static b32 ui_list_expander_at(struct ui address_to ui, struct ui_list address_t
 
         ui_list_describe(l, id, &row);
         if (row.expander)
-                ui_row_tree(ui, l, id, &row, ui_dev(ui, UI_ROW), false), first = ui_row_parts.expander;
+                ui_row_tree(ui, l, id, &row, ui_list_pitch(ui, l), false), first = ui_row_parts.expander;
         last = first && ui_row_parts.badge ? ui_row_parts.badge : first;
         return first && x >= first->x - ui_dev(ui, UI_ROW_GAP) && x < last->x + last->w;
 }
@@ -27201,7 +27208,7 @@ static fn ui_side_rows(const struct ui address_to ui, struct ui_list address_to 
 static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
 {
         UI_CALL();
-        int row_height = ui_dev(ui, UI_ROW), room = l->w - 2 * ui_dev(ui, UI_INSET);
+        int row_height = ui_list_pitch(ui, l), room = l->w - 2 * ui_dev(ui, UI_INSET);
         char cut[UI_CUT_TEXT];
 
         int drawn, rest, pointer_y;
@@ -27468,7 +27475,7 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
                 // A step goes back from a press before the middle of its value and marks, as the row lays them out (ui_row_tree).
                 if (row.kind == UI_ROW_STEP && row.value)
                 {
-                        ui_row_tree(ui, l, id, &row, ui_dev(ui, UI_ROW), true);
+                        ui_row_tree(ui, l, id, &row, ui_list_pitch(ui, l), true);
                         if (ui_point(x, l->x, l->w) - l->x < ui_row_parts.value_box->x + ui_row_parts.value_box->w / 2)
                                 l->way = -1;
                 }
