@@ -3651,10 +3651,11 @@ static fn link_stamps_save(void)
 {
         if (!link_self.stamps_dirty)
                 return;
-        link_self.stamps_dirty = false;
-        (void)link_file_replace(LINK_STAMPS_PATH, link_self.stamp,
-                                link_self.stamps * sizeof(link_stamp_entry),
-                                false);
+        //      Clean only once written: a write that failed is made again the next turn, not when a stamp next moves.
+        if (link_file_replace(LINK_STAMPS_PATH, link_self.stamp,
+                              link_self.stamps * sizeof(link_stamp_entry),
+                              false) >= 0)
+                link_self.stamps_dirty = false;
 }
 
 /*      A stamp is the peer's own clock. One dated past a day ahead of this

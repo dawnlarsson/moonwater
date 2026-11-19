@@ -414,7 +414,10 @@ static fn installer_apply(const char address_to verb, const char address_to valu
 {
         string_address words[4] = {installer.moonwater, (string_address)verb, (string_address)value, null};
 
-        (void)ui_start_apart(words, 3);
+        //      A verb that could not be started is said on the step, as Restart's is: the session keeps what it had.
+        if (!ui_start_apart(words, 3))
+                string_copy_bounded((string_address)installer.big->note, (string_address)WORDS(settings_cannot_run),
+                                    sizeof(installer.big->note));
 }
 
 /* ---- the model of the steps ---- */

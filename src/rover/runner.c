@@ -576,6 +576,11 @@ static fn rover_runner_verb(b32 (address_to verb)(string_address address_to, pos
 {
         bipolar pid = system_fork();
 
+        if (pid < 0)
+        {
+                rover_runner_say("a verb could not be started (no process to be had): moonwater ", words[0], null);
+                return;
+        }
         if (pid > 0)
         {
                 rover_runner_child(pid);
@@ -992,7 +997,9 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
         switch (id)
         {
         case 12: // display off: the compositor puts every screen out (DPMS) while the file is there, and a person lights them
-                (void)host_write_file("/run/moonwater/display-off", (const p8 address_to) "", 0, 0644, false);
+                if (host_write_file("/run/moonwater/display-off", (const p8 address_to) "", 0, 0644, false) < 0)
+                        rover_runner_say("display off: /run/moonwater/display-off could not be written, the screens stay on",
+                                         null, null);
                 return;
         case 13: // display on
                 (void)system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)(string_address) "/run/moonwater/display-off", 0);
@@ -1244,6 +1251,8 @@ static fn rover_runner_do(const struct rover_event address_to event, const struc
                         }
                         if (pid > 0)
                                 rover_runner_child(pid);
+                        else if (pid < 0)
+                                rover_runner_say("a tool could not be started (no process to be had): ", argv[0], null);
                         break;
                 }
                 case ROVER_EMIT:
@@ -1350,7 +1359,10 @@ static fn rover_runner_keys(void)
                 rover_put(&out, name.bytes, name.used);
                 rover_puts(&out, "\n");
         }
-        (void)host_write_file(ROVER_KEYS_FILE, text, out.used, 0644, false);
+        //      The compositor reads its chords from this file: one not written leaves it the old table, which is said.
+        if (host_write_file(ROVER_KEYS_FILE, text, out.used, 0644, false) < 0)
+                rover_runner_say("the chords could not be written to " ROVER_KEYS_FILE ": the desktop keeps the ones before",
+                                 null, null);
         //      The FIFO is made once and kept open across loads: made again at every load, the old descriptor was left
         //      open and a key said between the unlink and the mknod found no FIFO at all.
         if (rover_runner.fire > 0)

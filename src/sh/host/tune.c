@@ -1167,8 +1167,11 @@ static fn tune_flag_on(tune_flag address_to flag, string_address path)
 
 static fn tune_flag_back(tune_flag address_to flag)
 {
-        if (flag->changed)
-                (void)tune_write(flag->path, (string_address)flag->was);
+        bipolar failed;
+
+        if (flag->changed && (failed = tune_write(flag->path, (string_address)flag->was)) < 0)
+                host_say(log_error, host_label "%s could not be put back to %s: %s\n", flag->path,
+                         (string_address)flag->was, file_reason(failed));
 }
 
 /* What a sleep leaves in /root/sleep.log, awake or not, and the switches it

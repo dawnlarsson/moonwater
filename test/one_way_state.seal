@@ -8,8 +8,13 @@ bit AUDIO_STATE_OUT_NO_MIXER	the state page is built whole each time it is publi
 bit AWK_HAS_NUMBER	a cell's state is assigned whole when its value is replaced; the bit says what the value it has is
 bit AWK_HAS_TEXT	a cell's state is assigned whole when its value is replaced; the bit says what the value it has is
 bit AWK_STRNUM	a cell's state is assigned whole when its value is replaced; the bit says what the value it has is
+bit CK_KEY_TAB	keys_refused is copied whole from the always-refused set at each direct session's start (wayland_host.c), then the session's own bits are ORed in
 bit COLUMN_NOEXTREME	a column's properties from the command line, for the one run
 bit COLUMN_ORDERED	a column's properties from the command line, for the one run
+bit COMPOSITOR_BTN_LEFT	the bits are a key state read whole from the device for the one pass; button_down's bits are cleared as each button goes up
+bit COMPOSITOR_XWM_A_XDND_ASK	xdrag.listed is assigned 0 when a drag starts and before each XdndActionList is read into it (xwm.c)
+bit COMPOSITOR_XWM_A_XDND_COPY	xdrag.listed is assigned 0 when a drag starts and before each XdndActionList is read into it (xwm.c)
+bit COMPOSITOR_XWM_A_XDND_MOVE	xdrag.listed is assigned 0 when a drag starts and before each XdndActionList is read into it (xwm.c)
 bit COMPOSITOR_XWM_OVERRIDE	what an X window is, for the record's life: state is assigned 0 when the record is given to a window (compositor_xwm_find)
 bit COMPOSITOR_XWM_POPUPTYPE	what an X window is, for the record's life: state is assigned 0 when the record is given to a window (compositor_xwm_find)
 bit COMPOSITOR_XWM_PROPS_READ	what an X window is, for the record's life: state is assigned 0 when the record is given to a window (compositor_xwm_find)
@@ -33,6 +38,7 @@ bit DOC_MOD_SUPER	the modifiers of one key binding as it is parsed
 bit EDIT_HARDWARE_EIGHT	a termios word made raw; the saved word is written back whole at the end
 bit EXPAND_IFS_BLANK	the table of IFS's bytes, each entry assigned whole before the bit is added
 bit FORMAT_FLAG_LEFT	a flag of one parsed conversion, on the stack of its format
+bit GPU_I915_FENCE_OUT	a word of one execbuffer request, built on the stack for the call
 bit GREP_MANY_END	the automaton of one pattern set, built once for the run
 bit GREP_MANY_OUT	the automaton of one pattern set, built once for the run
 bit LAUNCHER_SLEEP	the word is set whole at each reading of what the kernel can do (launcher_session_read) and the bit is that reading's
@@ -47,6 +53,7 @@ bit ROVER_RULE_NUMBERS	a rule's record is zeroed when its rule line is read (rov
 bit ROVER_RULE_OFF	a rule's record is zeroed when its rule line is read (rover_read_rule) and built once from its lines; the table is never edited, only compiled again
 bit ROVER_RULE_ONCE	a rule's record is zeroed when its rule line is read (rover_read_rule) and built once from its lines; the table is never edited, only compiled again
 bit ROVER_RULE_PLACED	a rule's record is zeroed when its rule line is read (rover_read_rule) and built once from its lines; the table is never edited, only compiled again
+bit ROVER_RULE_TAKE	a compiled rule's flags, set as its words are compiled; a rule is compiled whole and never changed after
 bit ROVER_RULE_WHEN	a rule's record is zeroed when its rule line is read (rover_read_rule) and built once from its lines; the table is never edited, only compiled again
 bit ROVER_SERVICE_OFF	a service's record is zeroed when its service line is read (rover_read_service) and built once from its lines; the table is never edited, only compiled again
 bit ROVER_SPAN_NUMBERS	a rule's record is zeroed when its rule line is read (rover_read_rule) and built once from its lines; the table is never edited, only compiled again
@@ -109,6 +116,8 @@ field src/canvas/ui/editor.c:dirty	cleared by the kit through the app's pointer 
 field src/canvas/ui/editor.c:leaving	the editor's end: the process exits on it
 field src/canvas/ui/files.c:dirty	cleared by the kit through the app's pointer (ui.c, *app->dirty), not in this file
 field src/canvas/ui/identify.c:dirty	cleared by the kit through the app's pointer (ui.c), not in this file
+field src/canvas/ui/installer.c:dirty	the kit takes it back: the installer hands &installer.dirty to its view, which sets it false when it has drawn (ui.c)
+field src/canvas/ui/installer.c:masked	the passphrase field is a passphrase for its life; the field is opened again at each step that has one
 field src/canvas/ui/launcher.c:asked_beside	an option of the command line (-a), for the process
 field src/canvas/ui/launcher.c:dirty	cleared by the kit through the app's pointer (ui.c), not in this file
 field src/canvas/ui/mixer.c:dirty	cleared by the kit through the app's pointer (ui.c), not in this file
@@ -152,3 +161,4 @@ field src/waterlink/service.c:exited	a session's end, in its own record
 field src/waterlink/service.c:finished	a session's end, in its own record
 field src/waterlink/service.c:linked	a peer's entry in a list read afresh each pass
 field src/waterlink/service.c:refused	a session's own record, zeroed when the session begins
+field src/waterlink/stream.c:fell_back	auto falls back to TCP once for the life of the service: UDP that went unanswered for LINK_TCP_AUTO is not tried again (waterlink's choice; a restart of the service tries UDP)
