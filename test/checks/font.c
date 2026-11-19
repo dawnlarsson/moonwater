@@ -1117,7 +1117,7 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2560, 10240, 2560, 0};
 
                 snap_load(stem, 4, turned);
-                font_snap(&engine, &face, size, snap_standard(1229), 0, null, null, 0);
+                font_snap(&engine, &face, size, snap_standard(1229), 0, 0, null, null, 0);
                 p8 snapped = true;
                 for (p32 i = 0; i < 4; i++)
                         snapped = snapped && engine.points[i].x == (stem[2 * (turned ? 3 - i : i)] == 1331 ? 1024 : 2048);
@@ -1138,7 +1138,7 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2816, 10240, 2816, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(1485), 0, null, null, 0);
+                font_snap(&engine, &face, size, snap_standard(1485), 0, 0, null, null, 0);
                 check("snap: a 1.45 px stem is the whole pixel nearest its centre",
                       engine.points[0].x == 2048 && engine.points[2].x == 3072);
         }
@@ -1150,7 +1150,7 @@ static fn check_snap()
                                        2560, 9216, 2560, 1024, 4000, 1024, 4000, 0};
 
                 snap_load(bracket, 8, false);
-                font_snap(&engine, &face, size, snap_standard(1229), 0, null, null, 0);
+                font_snap(&engine, &face, size, snap_standard(1229), 0, 0, null, null, 0);
                 check("snap: a bracket's stem snaps and its arms' ends stay",
                       engine.points[0].x == 1024 && engine.points[4].x == 2048 && engine.points[2].x == 4000 &&
                           engine.points[7].x == 4000);
@@ -1168,7 +1168,7 @@ static fn check_snap()
                 engine.contour[1].last = 7;
                 for (p32 i = 0; i < 8; i++)
                         engine.points[i] = (font_point){two[2 * i], two[2 * i + 1], 1};
-                font_snap(&engine, &face, size, snap_standard(1229), 0, null, null, 0);
+                font_snap(&engine, &face, size, snap_standard(1229), 0, 0, null, null, 0);
                 check("snap: a counter half a pixel wide is not shut",
                       engine.points[4].x == 3072 && engine.points[6].x == 4096 && engine.points[2].x < 3072 &&
                           engine.points[0].x < engine.points[2].x);
@@ -1180,14 +1180,14 @@ static fn check_snap()
                 const b32 stem[] = {1331, 0, 1331, 10240, 2150, 10240, 2150, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(819), 0, null, null, 0);
+                font_snap(&engine, &face, size, snap_standard(819), 0, 0, null, null, 0);
                 check("snap: a 0.8 px stem is a whole pixel", engine.points[0].x == 1024 && engine.points[2].x == 2048);
         }
         {
                 const b32 stem[] = {1331, 0, 1331, 10240, 1945, 10240, 1945, 0};
 
                 snap_load(stem, 4, false);
-                font_snap(&engine, &face, size, snap_standard(614), 0, null, null, 0);
+                font_snap(&engine, &face, size, snap_standard(614), 0, 0, null, null, 0);
                 check("snap: a 0.6 px stem keeps its width with an edge on a pixel",
                       engine.points[0].x == 1434 && engine.points[2].x == 2048);
         }
@@ -1323,7 +1323,7 @@ static fn check_bars()
                 const b32 bar[] = {0, 3379, 0, 4608, 10240, 4608, 10240, 3379};
 
                 snap_load(bar, 4, false);
-                font_bars(&engine, &face, size, snap_standard(1229), lines, 2, 0);
+                font_bars(&engine, &face, size, snap_standard(1229), lines, 2, 0, 0);
                 check("bars: a 1.2 px bar at 3.3 px is the row from 3 to 4",
                       engine.points[0].y == 3072 && engine.points[1].y == 4096 && engine.points[2].y == 4096 &&
                           engine.points[3].y == 3072);
@@ -1332,7 +1332,7 @@ static fn check_bars()
                 const b32 bar[] = {0, 5939, 0, 7168, 10240, 7168, 10240, 5939};
 
                 snap_load(bar, 4, false);
-                font_bars(&engine, &face, size, snap_standard(1229), lines, 2, 0);
+                font_bars(&engine, &face, size, snap_standard(1229), lines, 2, 0, 0);
                 check("bars: a bar on the x-height keeps it and takes a whole pixel below",
                       engine.points[1].y == 7168 && engine.points[0].y == 6144);
         }
@@ -1484,10 +1484,10 @@ static fn check_invariants(void)
         //      Flat edges off the grid, counters lost, glyphs out of their cell: a face's dark cells, light
         //      cells and drawn text.
         static const p32 ceiling[4][3][3] = {
-            {{116, 24, 11}, {78, 21, 4}, {76, 24, 0}},
-            {{158, 29, 0}, {172, 23, 0}, {158, 26, 0}},
-            {{82, 10, 0}, {78, 14, 0}, {89, 13, 0}},
-            {{126, 27, 0}, {109, 16, 0}, {112, 17, 0}},
+            {{84, 24, 0}, {47, 21, 0}, {44, 24, 0}},
+            {{122, 29, 0}, {125, 21, 0}, {116, 23, 0}},
+            {{64, 10, 0}, {61, 14, 0}, {61, 13, 0}},
+            {{74, 26, 0}, {55, 16, 0}, {57, 17, 0}},
         };
         static const string_address paths[3] = {"dark cells", "light cells", "drawn text"};
         static p8 file[1 << 20];
@@ -1764,6 +1764,101 @@ static fn check_dots(void)
         check("dots: the two dots of an umlaut stay two", pairs && !fused);
         check("dots: the dot of a dotted zero is whole and in the middle of its counter, with air round it", zeros && !loose);
         check("dots: a dotted zero is no more than a pixel wider than O, and in its cell", zeros && !wider);
+}
+
+/*
+        Uniform stem and bar weights, and consistent ascender heights:
+          top bars    capital letters (B D E F I J P R T Z 5 7) and ascenders
+                      (f l) never snap thicker than the face's rounded bar
+                      width from 8 to 32 px, dark or light, across all four
+                      shipped faces;
+          ascenders   f and l match d's fitted top pixel at every size from
+                      8 to 32 px in IBM Plex Mono Regular and Bold;
+          false pairs vertical stems of r and a and horizontal bars of 4, $
+                      and ~ never pair across counters or serifs into stems
+                      or bars wider than the face's rounded weight.
+*/
+static fn check_thickness(void)
+{
+        static const string_address faces[4] = {"fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf",
+                                                "fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf",
+                                                "fonts/inter/Inter-Regular.ttf", "fonts/inter/Inter-Bold.ttf"};
+        static const p8 bar_glyphs[] = "BDEFHIJPRT57fl";
+        positive thick_bars = 0, tall_mismatch = 0, false_stems = 0;
+
+        font_start(&dots_engine, null, 0, 0);
+        for (p32 f = 0; f < 4; f++)
+        {
+                bipolar got = file_slurp_regular_at(AT_FDCWD, faces[f], dots_file, sizeof(dots_file), 0);
+                font_face face;
+
+                if (got <= 0 || font_load(&face, dots_file, (positive)got, 0) != 0)
+                        continue;
+                b32 standard = font_stem_standard(&dots_engine, &face);
+                b32 zones[FONT_ZONES];
+                font_face_measure(&dots_engine, &face, zones);
+
+                for (p32 px = 8; px <= 32; px++)
+                {
+                        p32 size = px * 64;
+                        b64 scale = (b64)size * (FONT_ONE / 64);
+                        b64 norm_v = font_divide((b64)standard * scale, (b64)face.units << FONT_EXACT);
+                        b64 norm_h = font_divide((b64)zones[3] * scale, (b64)face.units << FONT_EXACT);
+                        b64 round_v = font_round(norm_v) < FONT_ONE ? FONT_ONE : font_round(norm_v);
+                        b64 round_h = font_round(norm_h) < FONT_ONE ? FONT_ONE : font_round(norm_h);
+                        b64 x_height = font_divide((b64)(face.x_height > 0 ? face.x_height : face.units / 2) * scale, face.units);
+
+                        for (p32 style = 5; style <= 7; style += 2)
+                        {
+                                if (f < 2)
+                                {
+                                        font_bitmap bd, bf, bl;
+                                        if (font_shape(&dots_engine, &face, font_glyph(&face, 'd'), size, 0, style, &bd) == 0 &&
+                                            font_shape(&dots_engine, &face, font_glyph(&face, 'f'), size, 0, style, &bf) == 0 &&
+                                            font_shape(&dots_engine, &face, font_glyph(&face, 'l'), size, 0, style, &bl) == 0)
+                                                tall_mismatch += bf.top != bd.top || bl.top != bd.top;
+                                }
+                                for (p32 k = 0; bar_glyphs[k]; k++)
+                                {
+                                        font_bitmap box;
+                                        if (font_shape(&dots_engine, &face, font_glyph(&face, bar_glyphs[k]), size, 0, style, &box) != 0)
+                                                continue;
+                                        font_swap_axes(&dots_engine);
+                                        font_run run[2 * FONT_STEMS];
+                                        b64 stem[2 * FONT_STEMS];
+                                        p32 runs = font_runs(&dots_engine, FONT_ONE / 32, x_height / FONT_ROUND_BAR / 4, run);
+                                        p32 stems = font_stems(run, runs, norm_h * 3 / 2, stem, x_height / FONT_ROUND_BAR);
+                                        for (p32 s = 0; s < stems; s++)
+                                        {
+                                                b64 w = stem[2 * s + 1] - stem[2 * s];
+                                                if (w >= round_h + FONT_ONE / 2)
+                                                        thick_bars++;
+                                        }
+                                        font_swap_axes(&dots_engine);
+                                }
+                                if (f == 0)
+                                {
+                                        static const p8 vglyphs[] = "ra";
+                                        for (p32 k = 0; vglyphs[k]; k++)
+                                        {
+                                                font_bitmap box;
+                                                if (font_shape(&dots_engine, &face, font_glyph(&face, vglyphs[k]), size, 0, style, &box) != 0)
+                                                        continue;
+                                                font_run run[2 * FONT_STEMS];
+                                                b64 stem[2 * FONT_STEMS];
+                                                p32 runs = font_runs(&dots_engine, FONT_ONE / 32, x_height / FONT_ROUND_RUN / 4, run);
+                                                p32 stems = font_stems(run, runs, norm_v * 3 / 2, stem, x_height / FONT_ROUND_RUN);
+                                                for (p32 s = 0; s < stems; s++)
+                                                        if (stem[2 * s + 1] - stem[2 * s] >= round_v + FONT_ONE / 2)
+                                                                false_stems++;
+                                        }
+                                }
+                        }
+                }
+        }
+        check("thickness: capital and ascender bars stay at the face's rounded bar weight from 8 to 32 px", !thick_bars);
+        check("thickness: f and l match d's fitted ascender height from 8 to 32 px", !tall_mismatch);
+        check("thickness: r and a vertical stems stay at the face's rounded stem weight", !false_stems);
 }
 
 /*
@@ -4123,10 +4218,12 @@ static p64 line_hash(p64 hash, const p32 address_to pixels, positive count)
         Upright text is the bytes it was before text could be turned: every
         line above, hashed, against the hash the engine made then, the same
         on all three machines; made again when dots were set on the
-        stems under them, and again when a counter between two stems on a tie
-        was held to within three quarters of a pixel of the font's.
+        stems under them, when a counter between two stems on a tie
+        was held to within three quarters of a pixel of the font's, and when
+        ascender fitting, top-bar thickness preservation and stem/bar weight
+        uniformity were fixed.
 */
-#define LINE_UPRIGHT 3148764226013648621ull
+#define LINE_UPRIGHT 8821402309694946517ull
 
 static fn check_upright(void)
 {
@@ -4722,6 +4819,7 @@ b32 main()
         check_polarity(&two);
         check_invariants();
         check_dots();
+        check_thickness();
         check_upright();
         check_turned();
         check_cells(&small_engine, &two);
