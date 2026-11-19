@@ -27836,31 +27836,64 @@ static b32 ui_start_apart(string_address address_to words, positive count)
         return ui_start_apart_at(-1, words, count);
 }
 
-// The same, its working folder the one held open at folder (a terminal opened in a folder a file browser shows); -1 the caller's own.
+/*
+        The same, its working folder the one held open at folder (a terminal opened in a folder a file browser shows); -1 the
+        caller's own. False when the program was not started: the first fork, the second (a negative answer is a failure,
+        not a parent: it was taken as one, and a failed fork answered true with nothing run), the folder or the exec. The
+        grandchild says why down a pipe closed on exec, so a started program closes it and says nothing.
+*/
 static b32 ui_start_apart_at(bipolar folder, string_address address_to words, positive count)
 {
-        bipolar child = system_fork();
+        b32 told[2];
+        bipolar child, got;
         positive status = 0;
+        b32 failed = 0;
 
-        if (child < 0)
+        if (system_call_2(syscall(pipe2), (positive)told, O_CLOEXEC) < 0)
                 return false;
+        child = system_fork();
+        if (child < 0)
+        {
+                system_close(told[0]);
+                system_close(told[1]);
+                return false;
+        }
         if (child == 0)
         {
-                bipolar quiet;
+                bipolar quiet, grandchild;
+                b32 why;
 
-                if (system_fork())
+                system_close(told[0]);
+                grandchild = system_fork();
+                if (grandchild < 0)
+                {
+                        why = (b32)grandchild;
+                        (void)system_write_once(told[1], &why, sizeof(why));
+                        system_call_1(syscall(exit_group), 1);
+                }
+                if (grandchild > 0)
                         system_call_1(syscall(exit_group), 0);
                 system_call(syscall(setsid));
                 if (folder >= 0 && (bipolar)system_call_1(syscall(fchdir), (positive)folder) < 0)
+                {
+                        why = -20; // ENOTDIR
+                        (void)system_write_once(told[1], &why, sizeof(why));
                         system_call_1(syscall(exit_group), 127);
+                }
                 quiet = system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
                 for (positive at = 0; quiet >= 0 && at < 3; at++)
                         system_call_3(syscall(dup3), (positive)quiet, at, 0);
-                (void)shell_exec_file(words[0], words, count, window_asked_environment());
+                why = (b32)shell_exec_file(words[0], words, count, window_asked_environment());
+                if (why >= 0)
+                        why = -2;
+                (void)system_write_once(told[1], &why, sizeof(why));
                 system_call_1(syscall(exit_group), 127);
         }
+        system_close(told[1]);
         system_wait4_retry(child, address_of status, 0, null);
-        return true;
+        got = system_read_once(told[0], &failed, sizeof(failed));
+        system_close(told[0]);
+        return got != (bipolar)sizeof(failed);
 }
 
 // The kit's frame: the app's picture at its size, into the buffer the compositor is not reading (ui_app_present). An app's own frame instead, when it names one.

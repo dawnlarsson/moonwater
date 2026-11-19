@@ -916,7 +916,10 @@ static b32 installer_act(int which)
         {
                 string_address words[4] = {(string_address) "/shell", (string_address) "-c", (string_address) "reboot", null};
 
-                (void)ui_start_apart(words, 3);
+                //      A restart that could not be started is said where the person pressed it, not left as nothing.
+                if (!ui_start_apart(words, 3))
+                        string_copy_bounded((string_address)installer.big->note, (string_address)WORDS(settings_cannot_run),
+                                            sizeof(installer.big->note));
                 break;
         }
         case 6:

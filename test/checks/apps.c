@@ -1640,6 +1640,15 @@ static fn text_widget_check(string_address inter, string_address mono)
         editor_edge_check(&wui);
         editor_readonly_check(&wui);
         field_check(&wui);
+        //      A start apart says when nothing was started (B-h8-1): a failed fork read as the parent answered true with
+        //      nothing run, and the exec's failure went to /dev/null.
+        {
+                string_address none[2] = {(string_address) "/no/such/program", null};
+                string_address some[2] = {(string_address) "/terminal", null};
+
+                check("a start apart of a program that is not there answers false", !ui_start_apart(none, 1));
+                check("and of one that runs, true", ui_start_apart(some, 1));
+        }
         popmenu_bar_check(&wui);
         drop_check(&wui);
         band_check(&wui);

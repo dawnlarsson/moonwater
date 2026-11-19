@@ -25,6 +25,7 @@
 #define BOWL_DEFAULT_PATH "/fixture/bin"
 #include "../../src/canvas/terminfo.c"
 static fn host_terminal_opening() {}
+static bool shell_exec_file_ends = true; // a start that ran ends its child, as an exec would
 // A start ends here in the fixture, and a check reads what was asked: the program's words, a line in /tmp/mw-launcher-started.
 static bipolar shell_exec_file(string_address path, string_address address_to arguments, positive count,
                                string_address address_to environment)
@@ -32,7 +33,10 @@ static bipolar shell_exec_file(string_address path, string_address address_to ar
         char line[256] = "";
         bipolar handle;
 
-        (void)path, (void)environment;
+        (void)environment;
+        //      A program that is not there fails as an exec does, and says nothing.
+        if (string_equals(path, (string_address) "/no/such/program"))
+                return -2;
         for (positive at = 0; at < count && at < 8; at++)
         {
                 string_append_bounded((string_address)line, arguments[at], sizeof(line));
@@ -45,6 +49,10 @@ static bipolar shell_exec_file(string_address path, string_address address_to ar
                 system_write_once(handle, line, string_length((string_address)line));
                 system_close(handle);
         }
+        //      In a child of ui_start_apart the start is done, as an exec would end it; anywhere else the fixture answers
+        //      as before.
+        if (shell_exec_file_ends)
+                system_call_1(syscall(exit_group), 0);
         return -1;
 }
 static fn kill_name(positive number, p8 address_to into) { positive_into_string(into, number); }

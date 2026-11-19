@@ -661,8 +661,13 @@ static bool host_detach(p32 keep, p32 keep_too)
                                       (positive)address_of status, 0, 0);
                 return false;
         }
-        if (system_fork())
-                system_call_1(syscall(exit), 0);
+        //      The second fork: a negative answer is a failure, not the parent's turn to go (it was taken as one).
+        {
+                bipolar grandchild = system_fork();
+
+                if (grandchild != 0)
+                        system_call_1(syscall(exit), grandchild < 0 ? 1 : 0);
+        }
 
         system_call(syscall(setsid));
         quiet = system_open_at(AT_FDCWD, "/dev/null", FILE_READ_WRITE | O_CLOEXEC);
