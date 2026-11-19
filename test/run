@@ -245,7 +245,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http"
+asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine rover snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues"
 
@@ -367,6 +367,7 @@ describe()
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         proof)    echo "the network parsers proved: whole-domain exhaustion and CBMC bounded model checking" ;;
         mutation) echo "every decision in the network code flipped once, and the checks that notice" ;;
+        mutation_wayland) echo "the Wayland shim's mutation proofs (test/wayland_mutations.py): the defects the security passes fixed, put back one at a time into wayland.c against CHECK_wayland, with the unmutated tree green first; the survivors pinned" ;;
         ring0)    echo "a hostile program's ioctls, images and root requests against a booted kernel, and what its sanitizers say; then the same image booted with /dev/spark's registration failed, init running without it (NOT RUN on an image without fault injection)" ;;
         sound)    echo "the sound server heard: the image booted with an Intel HDA card whose output is a wav file, a second of 440 Hz played through moonwater audio test, and the tone measured in the file (a codec starts muted; a server that leaves it so plays into silence) (NOT RUN without qemu-system-x86_64, python3, a wav audio backend or an image)" ;;
         tier)     echo "a security tier's image, booted: the sysctls init wrote, the mount flags, lockdown, the W+X check and the IOMMU the tier asked for, /dev/uinput's mode and vm.max_map_count (MOONWATER_TIER names the tier)" ;;
@@ -418,7 +419,7 @@ seam_apart()
         case $1 in
         net) echo "net wifi fuzz msan proof mutation" ;;
         tools) echo "scale" ;;
-        desktop) echo "desktop chrome gpulists gpuanim" ;;
+        desktop) echo "desktop chrome gpulists gpuanim mutation_wayland" ;;
         image) echo "ring0 tier input usb firewall sound" ;;
         engine) echo "gate" ;;
         *) ;;
@@ -5890,6 +5891,36 @@ lane_mutation()
                 ${MOONWATER_MUTATION_FUNCTIONS:+--functions "$MOONWATER_MUTATION_FUNCTIONS"} \
                 ${MOONWATER_MUTATION_JOURNAL:+--journal "$MOONWATER_MUTATION_JOURNAL"}
 }
+
+#       The mutation proofs of the desktop's engines and of lib.c's audio routines: each harness
+#       (test/NAME_mutations.py) builds and runs the unmutated tree first and stops there (2) when
+#       that is not green, then puts back each defect its list names, one at a time, and asks the
+#       check to turn red. A mutant that does not build, or whose text is no longer in the source,
+#       proved nothing and is a survivor. The count of survivors is pinned here: more fails, and
+#       fewer fails too, saying to lower the pin, so it may only fall. Minutes to an hour each, so
+#       they run only when named; Linux only (the checks are Linux programs).
+mutation_proof()
+{
+        mutation_name=$1
+        mutation_most=$2
+        shift 2
+        if [ "$(uname -s)" != Linux ]; then
+                echo "  mutation_$mutation_name NOT RUN -- the checks are Linux programs"
+                return 2
+        fi
+        mutation_out=$(mktemp) || return 1
+        "$@" --most "$mutation_most" > "$mutation_out" 2>&1
+        mutation_status=$?
+        sed -n '/^FAIL \|SURVIVED\|NOT APPLIED\|NOT FOUND\|BUILD ERROR\|DID NOT BUILD\|^baseline\|^mutations /p' "$mutation_out" | sed 's/^/    /'
+        rm -f "$mutation_out"
+        case $mutation_status in
+        0) tally "mutation-$mutation_name" 1 1 ;;
+        2) tally "mutation-$mutation_name" 0 1; note "mutation_$mutation_name: the unmutated tree is not green, so nothing was counted"; return 1 ;;
+        *) tally "mutation-$mutation_name" 0 1; note "mutation_$mutation_name: survivors are not the pinned $mutation_most"; return 1 ;;
+        esac
+}
+
+lane_mutation_wayland() { mutation_proof wayland 0 python3 test/wayland_mutations.py; }
 
 lane_proof()
 {

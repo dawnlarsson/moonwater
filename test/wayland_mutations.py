@@ -2,17 +2,28 @@
 """Mutation proofs for the Wayland shim, src/canvas/wayland.c.
 
 Each mutation is one edit to a copy of the shim, built into CHECK_wayland (test/checks.c) with the compiler in CC (cc by
-default); the check must turn red. A mutation that survives is a hole in the check. The mutations are the defects the
+default) as lane_wayland builds it (linked with src/lib.c's object, built with -DSTANDARD_NO_ENTRY); the check must turn red.
+The unmutated tree is built and run first, and must be green, or nothing is counted (exit 2): a mutant is only a proof
+against a check that passes without it. A mutant that does not build, and one whose text is not in the shim once, is a
+survivor: it proved nothing. A mutation that survives is a hole in the check. The mutations are the defects the
 security pass of 2026-11-04 fixed, put back (each named by the commit that fixed it).
 
-    python3 test/wayland_mutations.py [NAME...]          from the tree's root; a build and a run each, a few seconds
+    python3 test/wayland_mutations.py [--most N] [NAME...]   from the tree's root; a build and a run each, a few seconds
+
+--most N is the pin (sh test/run mutation_wayland): more than N survivors fails, and fewer fails too, saying to lower it,
+so the pin may only fall.
 """
 import concurrent.futures, os, shutil, subprocess, sys, tempfile
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 work = tempfile.mkdtemp(prefix='wayland-mutations-')
-only = sys.argv[1:]
+argv = sys.argv[1:]
+most = 0
+if argv[:1] == ['--most']:
+    most, argv = int(argv[1]), argv[2:]
+only = argv
 cc = os.environ.get('CC', 'cc')
+assembler = ['-fno-integrated-as'] if 'clang' in subprocess.run([cc, '--version'], capture_output=True, text=True).stdout else []
 
 M = [
     # ab981848: a copy of a run made the window's rectangle again, a walk of every surface and its chain.
@@ -23,18 +34,18 @@ M = [
      "        (void)window;\n"),
     # 0976821d: a copy's pipe end in the output queue is the shim's, closed once sent or when its client goes.
     ("the queue's own descriptors are never closed",
-     "                if (c->out_fd_owned[at])\n",
-     "                if (c->out_fd_owned[at] && 0)\n"),
+     "        for (long at = 0; at < sent; at++)\n                if (f[at].owned)\n",
+     "        for (long at = 0; at < sent; at++)\n                if (f[at].owned && 0)\n"),
     # The budget: a client's copies per window of time, past which its commits wait as for a GPU.
     ("no budget",
-     "        if (!wayland_budget_left(c))\n        {\n                c->stalled_fd = -1;",
+     "        if (!wayland_budget_left(wayland_root_of(c, s)))\n        {\n                c->stalled_fd = -1;",
      "        if (0)\n        {\n                c->stalled_fd = -1;"),
     ("a commit past the budget is never resumed",
-     "        if (c->stalled_fd < 0 ? !wayland_budget_left(c)",
-     "        if (c->stalled_fd < 0 ? 1"),
+     "? c->budget_surface >= 0 && c->surfaces[c->budget_surface].live && !wayland_budget_left(&c->surfaces[c->budget_surface])",
+     "? 1"),
     ("a picture's copy is not counted",
-     "        c->budget_used += picture.full ? wayland_min(b->width, ww) * wayland_min(b->height, wh) : 0;\n",
-     "\n"),
+     "                s->budget_used += picture.full ? wayland_min(tw, ww) * wayland_min(th, wh) : 0;\n",
+     "                ;\n"),
     ("the compositor's own take-away of fullscreen is not kept for the next show",
      "        if (!(facts.states & WAYLAND_STATE_FULLSCREEN))\n                        s->want_fullscreen = 0;\n",
      "        if (0)\n                        s->want_fullscreen = 0;\n"),
@@ -47,34 +58,56 @@ M = [
 ]
 
 
-def one(index, name, old, new):
-    place = os.path.join(work, str(index))
-    os.makedirs(os.path.join(place, 'src/canvas'))
-    os.makedirs(os.path.join(place, 'test'))
-    shutil.copy(os.path.join(root, 'test/checks.c'), os.path.join(place, 'test/checks.c'))
-    shutil.copytree(os.path.join(os.path.dirname(os.path.join(root, 'test/checks.c')), "checks"),  # test/checks.c's parts (test/split.py)
-                    os.path.join(os.path.dirname(os.path.join(place, 'test/checks.c')), "checks"))
-    shutil.copy(os.path.join(root, 'src/canvas/wayland_protocol.inc'), os.path.join(place, 'src/canvas/wayland_protocol.inc'))
-    text = open(os.path.join(root, 'src/canvas/wayland.c')).read()
-    if text.count(old) != 1:
-        return name, 'NOT APPLIED (the text is not there once)'
-    open(os.path.join(place, 'src/canvas/wayland.c'), 'w').write(text.replace(old, new))
+shim = os.path.join(root, 'src/canvas/wayland.c')
+text = open(shim).read()
+library = os.path.join(work, 'lib.o')
+
+
+def build_and_run(place, source):
+    """The tree as links with the shim's text as given, CHECK_wayland built as lane_wayland builds it, and run."""
+    os.makedirs(place)
+    subprocess.run(['cp', '-as', os.path.join(root, 'src'), os.path.join(place, 'src')], check=True)
+    subprocess.run(['cp', '-as', os.path.join(root, 'test'), os.path.join(place, 'test')], check=True)
+    os.unlink(os.path.join(place, 'src/canvas/wayland.c'))
+    open(os.path.join(place, 'src/canvas/wayland.c'), 'w').write(source)
     binary = os.path.join(place, 'check')
     built = subprocess.run([cc, '-std=gnu11', '-O2', '-w', '-D_GNU_SOURCE', '-DCHECK_wayland', '-DCONFIG_MOONWATER_WAYLAND',
-                            os.path.join(place, 'test/checks.c'), '-o', binary], capture_output=True, text=True)
+                            os.path.join(place, 'test/checks.c'), library, '-o', binary], capture_output=True, text=True)
     if built.returncode:
-        return name, 'red (did not build)'
-    ran = subprocess.run([binary, '2000'], capture_output=True, text=True, timeout=600)
-    return name, 'red' if ran.returncode else 'SURVIVED'
+        return 'build', built.stderr.strip()[-300:]
+    try:
+        ran = subprocess.run([binary], capture_output=True, text=True, errors='replace', timeout=600, cwd=root)
+    except subprocess.TimeoutExpired:
+        return 'red', 'hang'
+    fails = [l.strip() for l in ran.stdout.splitlines() if 'FAIL' in l]
+    return ('red', fails[0][:110] if fails else 'exit %d' % ran.returncode) if ran.returncode or fails else ('green', '')
 
 
+def one(index, name, old, new):
+    if text.count(old) != 1:
+        return name, 'NOT APPLIED', 'the text is there %d times' % text.count(old)
+    state, detail = build_and_run(os.path.join(work, str(index)), text.replace(old, new))
+    shutil.rmtree(os.path.join(work, str(index)), ignore_errors=True)
+    return name, {'build': 'BUILD ERROR', 'red': 'red', 'green': 'SURVIVED'}[state], detail
+
+
+made = subprocess.run([cc, '-O2', '-w'] + assembler + ['-DSTANDARD_NO_ENTRY', '-c', os.path.join(root, 'src/lib.c'), '-o', library],
+                      capture_output=True, text=True)
+state, detail = ('build', made.stderr.strip()[-300:]) if made.returncode else build_and_run(os.path.join(work, 'base'), text)
+if state != 'green':
+    print('baseline red: the unmutated tree %s: %s' % ('did not build' if state == 'build' else 'fails CHECK_wayland', detail))
+    shutil.rmtree(work, ignore_errors=True)
+    sys.exit(2)
 chosen = [(i, m) for i, m in enumerate(M) if not only or m[0] in only]
-with concurrent.futures.ThreadPoolExecutor(8) as pool:
+with concurrent.futures.ThreadPoolExecutor(int(os.environ.get('MUTATION_JOBS', '8'))) as pool:
     results = list(pool.map(lambda pair: one(pair[0], *pair[1]), chosen))
-survivors = 0
-for name, verdict in results:
-    print(('ok   ' if verdict.startswith('red') else 'FAIL ') + name + ': ' + verdict)
-    survivors += not verdict.startswith('red')
 shutil.rmtree(work, ignore_errors=True)
-print('%d of %d mutations turn CHECK_wayland red' % (len(results) - survivors, len(results)))
-sys.exit(survivors != 0)
+survivors = [name for name, verdict, _ in results if verdict != 'red']
+for name, verdict, detail in results:
+    print(('ok   ' if verdict == 'red' else 'FAIL ') + name + ': ' + verdict + (' (' + detail + ')' if detail else ''))
+print('mutations wayland: %d, killed %d, survived %d, pinned at most %d' % (len(results), len(results) - len(survivors), len(survivors), most))
+if only:
+    sys.exit(0 if not survivors else 1)
+if len(survivors) < most:
+    print('mutations wayland: %d survive and the pin is %d: lower the pin to %d' % (len(survivors), most, len(survivors)))
+sys.exit(len(survivors) != most)
