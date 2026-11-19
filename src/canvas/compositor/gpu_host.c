@@ -1226,7 +1226,7 @@ static int compositor_card_list_submit(int row, unsigned int made, positive pict
         if (!sequence)
         {
                 if (gpu_end == GPU_END_LATE && !gpu_lost)
-                        return compositor_list_why = COMPOSITOR_LIST_CARD, 0;
+                        return compositor_list_busy = true, compositor_list_why = COMPOSITOR_LIST_CARD, 0;
                 if (gpu_lost)
                         compositor_gpu_recover();
                 compositor_gpu_job_failed();
@@ -1263,8 +1263,12 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
         // Not while a present's jobs are on the card (compositor_card): its records and tables are the card's until they are done. Nor while any job runs, a
         // list's drawn without a wait among them: its records, its row's base and its picture are that job's.
-        if (!compositor_gpu || compositor_gpu_state.dead || compositor_gpu_held() || compositor_card.on || !compositor_gpu_up() || !gpu_idle())
+        compositor_list_busy = false;
+        if (!compositor_gpu || compositor_gpu_state.dead || compositor_gpu_held() || !compositor_gpu_up())
                 return compositor_list_why = COMPOSITOR_LIST_CARD, 0;
+        // Busy, which passes: the take waits for the card (compositor_lists_take), where off or gone it refuses.
+        if (compositor_card.on || !gpu_idle())
+                return compositor_list_busy = true, compositor_list_why = COMPOSITOR_LIST_CARD, 0;
         if (ui_draw_list_open(list, list_bytes, &view) != 1 || (int)view.width != width || (int)view.height != height)
                 return compositor_list_why = COMPOSITOR_LIST_OPEN, 0;
         made = compositor_gpu_list_ops(view.ops, view.count, view.cover_at, view.cover_used, list_bytes, width, height, slot,

@@ -1184,6 +1184,7 @@ enum compositor_list_why
         COMPOSITOR_LIST_COUNT
 };
 static enum compositor_list_why compositor_list_why;
+static b32 compositor_list_busy; // the last COMPOSITOR_LIST_CARD was the card's being busy (a present's or a list's job on it), not its being off or gone
 static unsigned int compositor_list_counts[COMPOSITOR_LIST_COUNT];
 
 #ifdef MOONWATER_GPU_C

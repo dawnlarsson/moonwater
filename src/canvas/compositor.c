@@ -1089,6 +1089,7 @@ static struct
         unsigned int (*scan_fb)[2], (*scan_handle)[2], on_screen, flip_buffer;
         unsigned int *taken_held, (*patched)[2];
         struct compositor_rows held_rows, dropping, reclaim;
+        struct compositor_rows list_later; // rows whose list waits for the card to be idle (compositor_lists_take), taken again then
         int screen_stale; // the compositor's own screen holds nothing current: drawn whole before it is shown again
         unsigned int memfd_failed; // the step the table's memfd was refused at, said in the table's refused
         unsigned int *under[2];
@@ -2620,6 +2621,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor_popup_parent, COMPOSITOR_ROWS_ROW) \
         X(compositor_owner, COMPOSITOR_ROWS_ROW) \
         X(compositor_listed, COMPOSITOR_ROWS_ROW) \
+        X(compositor_list_waits, COMPOSITOR_ROWS_ROW) \
         X(compositor_clip.offer_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_clip.ask_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_clip.gesture, COMPOSITOR_ROWS_ROW) \
@@ -3567,6 +3569,9 @@ static b32 compositor_main()
                 // The moon's next step of its turn, while it turns.
                 if (compositor.band)
                         compositor_deadline(&until, taskbar_moon_due(now));
+                // A list waiting on the card: looked at again a millisecond on, if no fence wakes the loop first.
+                if (rows_any(&compositor.list_later))
+                        compositor_deadline(&until, now + 1000000ull);
                 // The next turn of an app being started, while one is.
                 if (compositor.band)
                         compositor_deadline(&until, taskbar_starting_due());
@@ -3768,6 +3773,9 @@ static b32 compositor_main()
                 // Asked every turn one is awaited, the sync_file readable or not: a deadline is the clock's, and a fence's error is a done answer.
                 if (fence_at)
                         compositor_card_tick();
+                // A list that waited on a busy card whose end no fence brings (a job of no present): taken once the card is idle.
+                if (rows_any(&compositor.list_later) && !compositor_card.on && gpu_idle())
+                        compositor_lists_later();
 #endif
                 if (clip_at && wanted[clip_at].returned)
                         compositor_clip_cli();

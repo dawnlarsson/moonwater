@@ -2152,6 +2152,15 @@ static int compositor_gpu_list_render(int row, const unsigned int *list, unsigne
         list in the mode without lists, clears a refusal, so the program's next frame is tried as a list again.
 */
 static unsigned char *compositor_listed; // the row's picture in buffer 0 is the card's drawing of its last list (so a partial list is a change over it)
+/*
+        A list that comes while the card is busy (a present's jobs on it, or a list's) waits for it, where it was refused: a refusal has the program paint
+        the whole frame in pixels and its next list be whole, and at a card's idle clock (the Deck's 200 MHz, a present's job 2.4 ms) the lists of every
+        window were refused that way most of the time they changed. The take answers not now, the row is put in list_later, and the card's tick takes it
+        again once the card is idle (compositor_lists_later). COMPOSITOR_LIST_WAITS such turns in a row and it is refused as before, so a card that stays
+        busy never holds a window's frame back.
+*/
+#define COMPOSITOR_LIST_WAITS 4
+static unsigned char *compositor_list_waits;
 static unsigned int compositor_list_invalids[WINDOW_LIST_REASONS];
 
 // A list window_list_check refused, counted by its reason in the table's list_invalid, and for one of another size the list's picture and the
@@ -2197,6 +2206,8 @@ static int compositor_lists_take(int row, unsigned int width, unsigned int heigh
         invalid = window_list_check(list, (int)width, (int)height, &view);
         if (invalid == WINDOW_LIST_PUBLISHING)
                 return -1;
+        unsigned int seen_before = table->list_seen[row];
+
         table->list_seen[row] = gen;
         // A list that is not one to render is refused, and counted by which of window_list_check's tests it failed.
         if (invalid != WINDOW_LIST_VALID)
@@ -2214,15 +2225,26 @@ static int compositor_lists_take(int row, unsigned int width, unsigned int heigh
                 goto refused;
         }
         compositor_list_why = COMPOSITOR_LIST_INVALID;
+        compositor_list_busy = false;
         if (compositor_gpu_list_render(row, (const unsigned int *)list, compositor_buffer(row, 0), table->stride, (int)width, (int)height, damage) == 1)
         {
+                compositor_list_waits[row] = 0;
                 compositor_list_counts[COMPOSITOR_LIST_DRAWN]++;
                 table->list_why[COMPOSITOR_LIST_DRAWN] = compositor_list_counts[COMPOSITOR_LIST_DRAWN];
                 compositor_listed[row] = 1;
                 __atomic_store_n(&table->list_state[row], 1u, __ATOMIC_RELEASE);
                 return 1;
         }
+        // The card busy: not now, the list's generation not seen, and the row taken again when the card is idle.
+        if (compositor_list_why == COMPOSITOR_LIST_CARD && compositor_list_busy && compositor_list_waits[row] < COMPOSITOR_LIST_WAITS)
+        {
+                compositor_list_waits[row]++;
+                table->list_seen[row] = seen_before;
+                rows_add(&compositor.list_later, row);
+                return -1;
+        }
 refused:
+        compositor_list_waits[row] = 0;
         compositor_list_counts[compositor_list_why]++;
         table->list_why[compositor_list_why] = compositor_list_counts[compositor_list_why];
         compositor_listed[row] = 0;

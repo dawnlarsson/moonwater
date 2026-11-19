@@ -684,12 +684,28 @@ static void compositor_card_lists_settle(b32 hung)
         flight (a list's given up on as late) is let go of when it is done, or its end said, and a list's drawn without a wait gives its row back then
         (compositor_card_lists_settle). Nothing here waits.
 */
+static void compositor_take(int row);
+
+// The rows whose list waited for the card taken again, now that it is idle (compositor_lists_take).
+static void compositor_lists_later(void)
+{
+        struct compositor_rows later;
+
+        if (!rows_any(&compositor.list_later))
+                return;
+        rows_take(&later, &compositor.list_later);
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                if (rows_has(&later, row))
+                        compositor_take(row);
+}
+
 static void compositor_card_tick(void)
 {
         if (!compositor_card.on && !gpu.pending)
         {
                 compositor_card_lists_settle(false); // no job pending: every list's done, or the card started again
                 compositor_card_fence_close();
+                compositor_lists_later();
                 return;
         }
         if (gpu_late_end() != GPU_END_NONE) // past its deadline, a page fault in the kernel's log, or its fence an error: the hang path
