@@ -8,8 +8,11 @@
 #           sh test/run -j 16 --changed the same, up to 16 lanes at once
 #           sh test/run --list          what the lanes are
 #           sh test/run --plan --changed   the lanes that would run, and none run
-#           sh test/run --all           every lane this machine can run (asked
-#                                       for on purpose; a terminal asks again)
+#           sh test/run --all           every lane of the lanes= list (asked for
+#                                       on purpose; a terminal asks again). The
+#                                       asked_lanes -- images, cards, hours of
+#                                       mutation or fuzz, the gate -- are not in
+#                                       it: only their own names run them
 #           sh test/run --gate          the pre-land gate, minutes and not hours
 #           sh test/run --gate --watch REPO   the gate on each commit REPO's
 #                                       main gains, a line of verdict for each
@@ -247,7 +250,7 @@ fi
 #       kernel/profile/sec_sanitize.
 asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland mutation_dbus mutation_audio mutation_ui mutation_audiolib stop locks"
 
-lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine rover snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues"
+lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine rover snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues installer"
 
 describe()
 {
@@ -344,6 +347,7 @@ describe()
         rover) echo "rover, the rules: the schema against the code, the round trip, refusals, the load-time check against every byte flipped, and the evaluator" ;;
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
+        installer) echo "the installer with no screen: the drives read from a made sysfs tree, the plan an install is asked for, the window's steps, and the layout and image written to a file and read back (CHECK_installer)" ;;
         browser) echo "the file browser's model with no window: a folder read in steps, its order, its selection, the way back, hostile names, links not followed, a folder that changes under its listing" ;;
         font) echo "the text engine: exact coverage of fonts written in the check, hostile fonts against a guard page, and FreeType and the exact area when both and a font are here" ;;
         font_shape) echo "the text engine's right to left half: the bidirectional algorithm against samples of the Unicode tests, Arabic and Hebrew shaping against HarfBuzz's glyphs, mixed lines, carets, and hostile layout tables against a guard page" ;;
@@ -413,7 +417,7 @@ seam_lanes()
         shell) echo "shell builtins audit" ;;
         tools) echo "text files misc util_linux awk table regex reuse_shell snapshot checksum sensors" ;;
         machine) echo "machine rover cli script bowl storage_io storage_format" ;;
-        desktop) echo "term edit editing font font_shape canvas sleep wayland audio dbus issues osk band browser" ;;
+        desktop) echo "term edit editing font font_shape canvas sleep wayland audio dbus issues osk band browser gpumodel installer" ;;
         image) echo "kit switches boot install" ;;
         engine) echo "differential_oracle" ;;
         *) return 1 ;;
@@ -454,10 +458,10 @@ seam_of_path()
         programs/utilities.c | programs/monitor.sh) echo tools ;;
         src/sh/registry.c) echo machine desktop ;;
         src/sh/host.c | src/sh/host/* | src/sh/storage.c | src/sh/system.c | src/bowl.c | \
-        src/sh/host_words.h | src/sh/splash_mark.c | src/rover/*) echo machine ;;
+        src/sh/host_words.h | src/sh/splash_mark.c | src/sh/ssh.c | src/rover/*) echo machine ;;
         src/sh/languages.c | languages/*) echo machine desktop ;;
         src/sh/edit.c | src/canvas/* | src/audio/* | src/dbus/* | fonts/*) echo desktop ;;
-        src/moonwater/* | src/build/* | kernel/* | build.sh) echo image ;;
+        src/moonwater/* | src/build/* | src/diag/* | kernel/* | build.sh) echo image ;;
         test/checks.c | test/checks/* | test/run | test/differential.py) echo suite ;;
         test/codec_floor/*) echo compress ;;
         test/assembly/* | test/insns | test/insn_sizes | test/insn_sizes.c) echo lib ;;
@@ -465,7 +469,7 @@ seam_of_path()
         test/function_audit.seal) echo - ;;
         test/*) echo engine ;;
         README.md | incident_response.md | THIRD-PARTY | .gitignore | .vscode/* | \
-        .github/*) echo - ;;
+        docs/* | .github/*) echo - ;;
         *) echo '?' ;;
         esac
 }
@@ -4176,6 +4180,9 @@ lane_snapshot() { freestanding_checks_lane snapshot snapshot; }
 #
 lane_sensors() { freestanding_checks_lane sensors sensors; }
 lane_browser() { freestanding_checks_lane browser browser; }
+#       The installer (src/canvas/ui/installer.c) with no screen: the drive listing from a made sysfs tree, the plan
+#       an install is asked for, the window's steps and the write path to a 3 GiB file (test/checks/installer.c).
+lane_installer() { freestanding_checks_lane installer installer; }
 
 #
 #       src/canvas/font.c, the text engine the compositor and its clients
@@ -7161,15 +7168,15 @@ lane_wayland()
 #       settings and the mixer started the same way in two sessions, once with canvas gpu on (their rows are drawn from their lists,
 #       none refused) and once with it off; the two screens are compared pixel for pixel, the table's list state is read, and the
 #       setting is toggled while they run, with an applet killed mid-publish. Under a minute and a half on the box, five runs the
-#       same. Needs a render node (renderD128): without one the card composes nothing and the lane says so and passes.
+#       same. Needs a render node (renderD128): without one the card composes nothing and the lane is NOT RUN (a skip counted as a pass
+#       read as a card that composed).
 lane_gpulists()
 (
         work=$(mktemp -d) || exit 1
         trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
         if [ ! -c /dev/dri/renderD128 ]; then
-                echo "gpulists: no render node here, the card composes nothing: skipped"
-                tally gpulists 1 1
-                return 0
+                echo "  gpulists     NOT RUN -- no render node here (renderD128), so the card composes nothing"
+                exit 2
         fi
         if ! freestanding programs/shell.c "$work/shell" "" -DCONFIG_MOONWATER_WAYLAND; then
                 note "gpulists: the shell binary did not build"
@@ -7198,9 +7205,8 @@ lane_gpuanim()
         if [ -z "${GPU_ANIM_WORK:-}" ]; then trap 'rm -rf "$work"' EXIT; fi
         trap 'exit 130' INT; trap 'exit 143' TERM
         if [ ! -c /dev/dri/renderD128 ]; then
-                echo "gpuanim: no render node here, the card composes nothing: skipped"
-                tally gpuanim 1 1
-                return 0
+                echo "  gpuanim     NOT RUN -- no render node here (renderD128), so the card composes nothing"
+                exit 2
         fi
         if ! freestanding programs/shell.c "$work/shell" "" -DCONFIG_MOONWATER_WAYLAND; then
                 note "gpuanim: the shell binary did not build"
@@ -28264,7 +28270,7 @@ python3 test/differential.py --harness scale "$@"
 #       absolute number that is not. A Linux host target runs directly.
 #
 
-benchmarks="floor baseline rover numbers bases hex hex-decode translate-rect translate-planes blend-rect mix-rect copy-strip average-ahead glass fill-rect over-tone copy-changed copy-rect transpose runs sweep-coverage first-differs saturate tint mix escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max bounded-classes string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines routine compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train ranged audiolib dbus fill-sizes small-sizes"
+benchmarks="floor baseline rover numbers bases hex hex-decode translate-rect translate-planes blend-rect mix-rect copy-strip average-ahead glass fill-rect over-tone copy-changed copy-rect transpose runs resample sweep-coverage first-differs saturate sum-swap invert tint mix escape spelled codec fixed table padded input-bases fields human human-nearest hash-33 span-byte utf8-valid net-parsers net-hot cells-ascii fill-u32 fill-u64 paths reverse writer-field writer-text text-hot prefix-known translate delete squeeze offsets record-scans ascii-case ascii-case-fold line-break bounded-fold ascii-convert ascii-search grep-search grep-count last-of words clock scan-literal random allocator lock pool ordered tree reserve storage-read compare-max bounded-classes string-copy stream-get stream-write format-bounds startup montgomery limbs shell tools grep-sets awk find boot-time engines routine compression compression-floor cksum-crc cksum-digests unicode-width link tensor matrix train ranged audiolib dbus fill-sizes small-sizes"
 
 #       One benchmark's section and one line about it. A name with no section
 #       is one of the drivers below, which time a whole binary against the
@@ -30010,7 +30016,7 @@ run: an empty command line is every lane of every seam, which is hours. Say what
     sh test/run -j 8 --changed        the seams this tree has changed from main
     sh test/run -j 8 --seam net       one seam's lanes (sh test/run --seams lists them)
     sh test/run net machine           lanes by name (sh test/run --list)
-    sh test/run --all                 every lane, asked for on purpose
+    sh test/run --all                 every lane but the asked ones, asked for on purpose
 TEXT
         exit 2
 fi
