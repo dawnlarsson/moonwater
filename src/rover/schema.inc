@@ -706,7 +706,7 @@ static b64 rover_call_string_compare(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64
         (void)r3;
         (void)r4;
         (void)r5;
-        return (b64)string_compare((string_address)(positive)r0, (string_address)(positive)r1);
+        return (b64)string_compare((const_string)(positive)r0, (const_string)(positive)r1);
 }
 #ifndef KERNEL_MODE
 static b64 rover_call_string_compare_folded(b64 r0, b64 r1, b64 r2, b64 r3, b64 r4, b64 r5)

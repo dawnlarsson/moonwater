@@ -460,6 +460,24 @@ static fn machine_runner_children(void)
                         break;
                 system_call_2(syscall(nanosleep), (positive)&pause, 0);
         }
+        //      Each kept child carries its program's name, for the line its failure is said in (E-h10-5).
+        {
+                bipolar pid = system_fork();
+                bool named = false;
+
+                if (pid == 0)
+                        system_call_1(syscall(exit), 3);
+                string_copy_max(rover_runner_naming, (string_address) "failing-rule-program", sizeof(rover_runner_naming));
+                rover_runner_child(pid);
+                for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
+                        named = named || (rover_runner.children[at] == pid &&
+                                          string_equals((string_address)rover_runner.child_name[at], "failing-rule-program"));
+                check("a child the runner keeps carries its program's name", named);
+                (void)system_wait4_retry(pid, null, 0, null);
+                for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
+                        if (rover_runner.children[at] == pid)
+                                rover_runner.children[at] = 0;
+        }
         check("a hundred children of the runner are all reaped, none dropped and left a zombie",
               !left && system_wait4_retry(-1, null, 1, null) < 0);
 }

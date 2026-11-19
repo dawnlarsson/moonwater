@@ -73,6 +73,7 @@ static struct
         const p8 address_to pages[ROVER_PAGES];
         struct rover_running service[ROVER_SERVICES_MOST];
         bipolar children[ROVER_CHILDREN_MOST];
+        p8 child_name[ROVER_CHILDREN_MOST][48]; // each child's program, for the line its failure is said in
         struct rover_event queue[ROVER_QUEUE_MOST]; // cues and the runner's own events, done after the one in hand
         p8 queue_text[ROVER_QUEUE_MOST][ROVER_WORD_MOST + 1];
         positive queued;
@@ -123,6 +124,7 @@ static fn rover_runner_say(string_address first, string_address second, string_a
 static const p8 address_to rover_runner_pool_word(p32 at, positive address_to length);
 static fn rover_runner_child(bipolar pid);
 static fn rover_runner_leaving(bipolar pid);
+static p8 rover_runner_naming[48] = "a program"; // the program the next child kept is, for the line its failure is said in
 static fn rover_runner_find_everys(void);
 static fn rover_runner_keys(void);
 
@@ -420,12 +422,31 @@ static p64 rover_runner_kernel_page(void)
 
 // ---- children --------------------------------------------------------------
 
+/*
+        The runner's children reaped, and one that failed said: an exit
+        other than 0 (127 is an exec that failed) or a signal, with its pid
+        and its program, which was said nowhere before.
+*/
 static fn rover_runner_reap(void)
 {
         for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
-                if (rover_runner.children[at] &&
-                    system_wait4_retry(rover_runner.children[at], null, 1 /* WNOHANG */, null) != 0)
-                        rover_runner.children[at] = 0;
+        {
+                b32 status = 0;
+                bipolar pid = rover_runner.children[at];
+
+                if (!pid || system_wait4_retry(pid, &status, 1 /* WNOHANG */, null) == 0)
+                        continue;
+                rover_runner.children[at] = 0;
+                if (status)
+                {
+                        p8 number[24], code[24];
+
+                        number[positive_into_string(number, (positive)pid)] = 0;
+                        code[positive_into_string(code, (status & 0x7f) ? (positive)(status & 0x7f) : (positive)((status >> 8) & 0xff))] = 0;
+                        rover_runner_say((string_address)rover_runner.child_name[at],
+                                         (status & 0x7f) ? " was ended by signal " : " exited with status ", (string_address)code);
+                }
+        }
 }
 
 /*
@@ -442,6 +463,8 @@ static fn rover_runner_child(bipolar pid)
                         if (!rover_runner.children[at])
                         {
                                 rover_runner.children[at] = pid;
+                                string_copy_max(rover_runner.child_name[at], (string_address)rover_runner_naming,
+                                                sizeof(rover_runner.child_name[at]));
                                 return;
                         }
                 rover_runner_reap();
@@ -501,8 +524,10 @@ static bipolar rover_runner_exec(string_address address_to argv, string_address 
         static string_address environment[256];
         string_address address_to inherited = program_environment_list();
         positive used = 0;
-        bipolar pid = system_fork();
+        bipolar pid;
 
+        string_copy_max(rover_runner_naming, argv[0], sizeof(rover_runner_naming));
+        pid = system_fork();
         if (pid)
                 return pid;
         while (inherited && inherited[used] && used < array_count(environment) - 2)
@@ -1100,6 +1125,8 @@ static fn rover_runner_do(const struct rover_event address_to event, const struc
                 {
                         //      The tool is an applet of /shell, which answers to its name.
                         string_address argv[ROVER_ARGUMENTS + 2] = {(string_address)rover_tools[action->id]};
+
+                        string_copy_max(rover_runner_naming, (string_address)rover_tools[action->id], sizeof(rover_runner_naming));
                         for (positive k = 0; k < count; k++)
                                 argv[k + 1] = (string_address)values[k].text;
                         argv[count + 1] = null;
@@ -1210,6 +1237,10 @@ static fn rover_runner_keys(void)
                 rover_puts(&out, "\n");
         }
         (void)host_write_file(ROVER_KEYS_FILE, text, out.used, 0644, false);
+        //      The FIFO is made once and kept open across loads: made again at every load, the old descriptor was left
+        //      open and a key said between the unlink and the mknod found no FIFO at all.
+        if (rover_runner.fire > 0)
+                return;
         (void)system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)ROVER_KEYS_FIRE, 0);
         (void)system_call_4(syscall(mknodat), (positive)AT_FDCWD, (positive)ROVER_KEYS_FIRE, 0010600, 0);
         rover_runner.fire = system_open_at(AT_FDCWD, ROVER_KEYS_FIRE, 2 /* O_RDWR */ | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
