@@ -851,6 +851,10 @@ static bool rover_read_side(struct rover_build address_to build, const struct ro
         }
         if (!word->quoted && (state = rover_state_named(word->text, word->length)))
         {
+                //      The desktop page's states have no writer yet (the compositor keeps no page): a table to run refuses
+                //      a rule that reads one, which would read nothing.
+                if (build->live && state->page == ROVER_PAGE_DESKTOP)
+                        return rover_refused(build, "", word, " is written by nothing yet: the compositor keeps no page of its states");
                 bool text = rover_kind_is_word(rover_types[state->type].kind);
 
                 side->operand.source = text ? ROVER_STATE_WORD : ROVER_STATE_NUMBER;

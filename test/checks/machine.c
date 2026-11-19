@@ -544,6 +544,29 @@ static fn machine_runner_budget(void)
         check("another rule has its own budget", rover_runner_within(8));
 }
 
+//      The compositor's lines (rover_runner_line): a chord's name is the chord event, a button's word the button event.
+static fn machine_runner_lines(void)
+{
+        static const p8 chord_line[] = "key_ctrl_shift_20";
+        static const p8 volume_line[] = "volume_button";
+        static const p8 unknown_line[] = "key_nothing_here";
+
+        rover_runner.queued = 0;
+        rover_runner.key_count = 1;
+        string_copy(rover_runner.keys[0].name, "key_ctrl_shift_20");
+        rover_runner.keys[0].chord = 0x50014;
+        rover_runner_line(chord_line, sizeof(chord_line) - 1);
+        check("a chord's line is the chord event with its chord",
+              rover_runner.queued == 1 && rover_runner.queue[0].id == 64 && rover_runner.queue[0].field[0].number == 0x50014);
+        rover_runner_line(volume_line, sizeof(volume_line) - 1);
+        check("a button's word is the button event, the volume cell's number",
+              rover_runner.queued == 2 && rover_runner.queue[1].id == 71 && rover_runner.queue[1].field[0].number == 1);
+        rover_runner_line(unknown_line, sizeof(unknown_line) - 1);
+        check("a line that is no chord or button the rules have is nothing", rover_runner.queued == 2);
+        rover_runner.queued = 0;
+        rover_runner.key_count = 0;
+}
+
 static fn machine_stop_self(void)
 {
         p8 held = host_machine_self;
@@ -2004,6 +2027,7 @@ b32 main(void)
         machine_runner_children();
         machine_load_clash();
         machine_runner_budget();
+        machine_runner_lines();
         machine_sntp();
         machine_auto();
         machine_services();

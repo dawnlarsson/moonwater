@@ -3492,7 +3492,10 @@ static void taskbar_pin_start(int tab, positive now)
                         system_write_all((b32)handle, "\n", 1);
                 }
                 system_close(handle);
-                positive_into_string((p8 *)name + 10, number);
+                at = 10 + positive_into_string((p8 *)name + 10, number);
+                //      Then the pin's place on the taskbar, which the rules hear as the button's slot.
+                name[at++] = ' ';
+                name[at + positive_into_string((p8 *)name + at, (positive)which)] = 0;
                 taskbar_pins.started[which] = now;
                 compositor_script_say(name);
                 return;

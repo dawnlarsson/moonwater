@@ -537,6 +537,8 @@ static bipolar rover_runner_exec(string_address address_to argv, string_address 
 
         string_copy_max(rover_runner_naming, argv[0], sizeof(rover_runner_naming));
         pid = system_fork();
+        if (pid < 0)
+                rover_runner_on_desktop = false; // no child to mark
         if (pid)
                 return pid;
         while (inherited && inherited[used] && used < array_count(environment) - 2)
@@ -590,7 +592,8 @@ static fn rover_runner_verb(b32 (address_to verb)(string_address address_to, pos
 
 // ---- services --------------------------------------------------------------
 
-static fn rover_runner_post(p16 id, const p8 address_to word, positive length, b64 number)
+//      An event on the queue: false when the queue was full and it was dropped (said), so no caller writes to the tail.
+static bool rover_runner_post(p16 id, const p8 address_to word, positive length, b64 number)
 {
         struct rover_event address_to event;
         positive at = rover_runner.queued;
@@ -598,7 +601,7 @@ static fn rover_runner_post(p16 id, const p8 address_to word, positive length, b
         if (at == ROVER_QUEUE_MOST)
         {
                 rover_runner_say("an event is dropped: the runner's queue is full", null, null);
-                return;
+                return false;
         }
         event = &rover_runner.queue[at];
         memory_zero(event, sizeof(*event));
@@ -623,6 +626,7 @@ static fn rover_runner_post(p16 id, const p8 address_to word, positive length, b
                 event->field[0].text = rover_nothing;
         }
         rover_runner.queued++;
+        return true;
 }
 
 static const p8 address_to rover_runner_pool_word(p32 at, positive address_to length)
@@ -636,7 +640,7 @@ static fn rover_runner_service_event(p16 id, positive which)
         positive length;
         const p8 address_to name = rover_runner_pool_word(rover_runner.view.service[which].name, &length);
 
-        rover_runner_post(id, name, length, 0);
+        (void)rover_runner_post(id, name, length, 0);
 }
 
 static b32 rover_runner_service_named(const p8 address_to name, positive length)
@@ -774,8 +778,14 @@ static fn rover_runner_ended(positive which)
         rover_runner_service_event(98, which);
         if (stopped)
                 return;
+        //      A long life's end starts the count again and is no short life itself: four short lives in a row, not three
+        //      after a long one.
         if (now - running->started >= (p64)service->short_ms * 1000000)
+        {
                 running->shorts = 0;
+                running->retry = now;
+                return;
+        }
         running->shorts++;
         if (running->shorts >= service->lives)
         {
@@ -813,6 +823,10 @@ static fn rover_runner_services(void)
                         rover_runner_ended(which);
                         continue;
                 }
+                //      A service given up is let start again once it stops being wanted (desktop rest turns Canvas off, and
+                //      moonwater desktop on turns it on), as desktop.c promises: given up was for good.
+                if (!wanted && running->failed)
+                        running->failed = 0, running->shorts = 0, running->retry = 0;
                 if (running->pid && !wanted)
                         rover_runner_stop(which);
                 if (running->stopping && now - running->stopping >= ROVER_STOP_GRACE_NS)
@@ -984,9 +998,8 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
                         string_copy_max(path, (string_address)values[0].text, sizeof(path));
                 else if (!string_join(path, sizeof(path), "/", (string_address)values[0].text))
                         return;
-                //      A window wants the desktop: before the compositor's table is there the open is held, and done
-                //      when it is (rover_runner_held).
-                (void)facts;
+                //      A window wants the desktop: before the compositor is up the open is held, and done when it is
+                //      (rover_runner_held).
                 if (!rover_runner_desktop_up())
                 {
                         //      Held only while the boot's first desktop is coming: an open asked while a desktop that was up
@@ -1217,8 +1230,8 @@ static fn rover_runner_do(const struct rover_event address_to event, const struc
                 case ROVER_EMIT:
                         if (event->depth + 1 < ROVER_EMIT_DEPTH)
                         {
-                                rover_runner_post(ROVER_CUE, values[0].text, values[0].length, 0);
-                                rover_runner.queue[rover_runner.queued - 1].depth = event->depth + 1;
+                                if (rover_runner_post(ROVER_CUE, values[0].text, values[0].length, 0))
+                                        rover_runner.queue[rover_runner.queued - 1].depth = event->depth + 1;
                         }
                         else
                                 rover_runner_say("a cue past depth four is not posted: ", (string_address)values[0].text, null);
@@ -1289,8 +1302,13 @@ static fn rover_runner_keys(void)
                 b64 chord;
                 struct rover_text name = {rover_runner.keys[rover_runner.key_count].name, 0, 47, false};
 
-                if (row->event != 64 || !row->trigger || rover_runner.key_count == ROVER_KEYS_MOST)
+                if (row->event != 64 || !row->trigger)
                         continue;
+                if (rover_runner.key_count == ROVER_KEYS_MOST)
+                {
+                        rover_runner_say("a chord rule past the 32 the desktop hears is not heard", null, null);
+                        continue;
+                }
                 chord = memory_load_unaligned(b64, rover_runner.view.pool + rover_runner.view.comparison[row->comparison].b.index);
                 rover_puts(&name, "key");
                 for (positive k = 0; k < array_count(rover_modifiers); k++)
@@ -1355,13 +1373,13 @@ static fn rover_runner_line(const p8 address_to line, positive length)
         for (positive at = 0; at < rover_runner.key_count; at++)
                 if (rover_bytes_are(line, length, (const char address_to)rover_runner.keys[at].name))
                 {
-                        rover_runner_post(64, null, 0, rover_runner.keys[at].chord);
+                        (void)rover_runner_post(64, null, 0, rover_runner.keys[at].chord);
                         return;
                 }
         for (positive at = 0; buttons[at]; at++)
                 if (rover_bytes_are(line, length, buttons[at]))
                 {
-                        rover_runner_post(71, null, 0, (b64)at);
+                        (void)rover_runner_post(71, null, 0, (b64)at);
                         return;
                 }
         if (length > 10 && !memory_compare(line, "pin_start_", 10))
@@ -1369,7 +1387,14 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                 p8 slot_text[ROVER_PIN_DIGITS + 1], path[48];
                 bipolar got;
 
-                if (!rover_runner_pin_number(line, length, slot_text) ||
+                positive slot = 0, digits_end = 10;
+
+                //      pin_start_N SLOT: the start's number, then the pin's place on the taskbar.
+                while (digits_end < length && line[digits_end] != ' ')
+                        digits_end++;
+                for (positive at = digits_end + 1; at < length && line[at] >= '0' && line[at] <= '9' && slot < 64; at++)
+                        slot = slot * 10 + (positive)(line[at] - '0');
+                if (!rover_runner_pin_number(line, digits_end, slot_text) ||
                     !string_join(path, sizeof(path), "/run/moonwater/pin.", (string_address)slot_text))
                         return;
                 //      The pin's words, a line each, made new by the compositor: the program is the first, and the open
@@ -1402,7 +1427,8 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                         newline[0] = 0;
                         word = (p8 address_to)newline + 1;
                 }
-                rover_runner_post(71, rover_runner.pin_text, string_length(rover_runner.pin[0]), 5);
+                if (!rover_runner_post(71, rover_runner.pin_text, string_length(rover_runner.pin[0]), 5))
+                        return;
                 struct rover_event address_to event = &rover_runner.queue[rover_runner.queued - 1];
                 //      button's fields: name pin, the slot, the program.
                 event->count = 3;
@@ -1410,7 +1436,7 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                 event->field[0].number = 5;
                 event->field[0].text = rover_nothing;
                 event->field[0].length = 0;
-                event->field[1].number = 0; // the line names the start, not the pin's place on the taskbar
+                event->field[1].number = (b64)(slot < 64 ? slot : 63);
                 event->field[1].text = rover_nothing;
                 event->field[1].length = 0;
         }
@@ -1555,9 +1581,6 @@ static fn rover_runner_ring(void)
 //      The opens held for the desktop, done once its table is there.
 static fn rover_runner_held(void)
 {
-        file_facts facts;
-
-        (void)facts;
         if (!rover_runner.helds || !rover_runner_desktop_up())
                 return;
         for (positive at = 0; at < rover_runner.helds; at++)
@@ -1585,7 +1608,7 @@ static fn rover_runner_clocks(p64 now)
                 if (now >= rover_runner.every_next[at])
                 {
                         rover_runner.every_next[at] = now + rover_runner.every_period[at];
-                        rover_runner_post(102, null, 0, (b64)rover_runner.every_period[at]);
+                        (void)rover_runner_post(102, null, 0, (b64)rover_runner.every_period[at]);
                 }
         /*
                 at, once for each minute of the day the clock passes: a minute a
@@ -1656,8 +1679,9 @@ static fn rover_runner_boot_event(const p8 address_to word)
                 {
                         string_address disk = string_first_of(word, ' ');
 
-                        rover_runner_post(101, disk ? (const p8 address_to)(disk + 1) : null,
-                                          disk ? string_length(disk + 1) : 0, (b64)at);
+                        if (!rover_runner_post(101, disk ? (const p8 address_to)(disk + 1) : null,
+                                               disk ? string_length(disk + 1) : 0, (b64)at))
+                                return;
                         struct rover_event address_to event = &rover_runner.queue[rover_runner.queued - 1];
                         //      boot's fields: the verdict, and the disk's name.
                         event->count = 2;
@@ -1707,8 +1731,12 @@ static fn rover_runner_verdict(void)
                 the keyboard, the installer) were held for.
         */
         {
+                positive boots = rover_load_boots();
                 bipolar table = rover_load_now(rover_runner.device, true);
                 p64 changed;
+
+                //      The load at the verdict is this boot's second, not another boot: the count is the start's.
+                rover_load_boots_put(boots);
                 struct rover_event edge;
 
                 if (table > 0 && table != (bipolar)rover_runner.table)
@@ -1784,7 +1812,7 @@ static fn rover_runner_watched(void)
                                                                 sizeof(row) - used);
                                                 used += string_length((string_address)settings_rows[k].read[w]);
                                         }
-                                        rover_runner_post(100, row, used, 0);
+                                        (void)rover_runner_post(100, row, used, 0);
                                         rover_runner_drain();
                                         struct rover_event edge;
                                         memory_zero(&edge, sizeof(edge));

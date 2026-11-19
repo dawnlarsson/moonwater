@@ -291,22 +291,6 @@ static void compositor_game_slice(void)
 #define COMPOSITOR_KEYS_FIRE "/run/moonwater/keys.fire"
 static const char *compositor_keys_fire = COMPOSITOR_KEYS_FIRE; // and a check's own
 
-static const struct
-{
-        const char *name;
-        unsigned char code;
-} compositor_key_names[] = {
-    {"escape", 1}, {"1", 2}, {"2", 3}, {"3", 4}, {"4", 5}, {"5", 6}, {"6", 7}, {"7", 8}, {"8", 9}, {"9", 10},
-    {"0", 11}, {"minus", 12}, {"equal", 13}, {"backspace", 14}, {"tab", 15}, {"q", 16}, {"w", 17}, {"e", 18},
-    {"r", 19}, {"t", 20}, {"y", 21}, {"u", 22}, {"i", 23}, {"o", 24}, {"p", 25}, {"leftbrace", 26},
-    {"rightbrace", 27}, {"enter", 28}, {"a", 30}, {"s", 31}, {"d", 32}, {"f", 33}, {"g", 34}, {"h", 35},
-    {"j", 36}, {"k", 37}, {"l", 38}, {"semicolon", 39}, {"apostrophe", 40}, {"grave", 41}, {"backslash", 43},
-    {"z", 44}, {"x", 45}, {"c", 46}, {"v", 47}, {"b", 48}, {"n", 49}, {"m", 50}, {"comma", 51}, {"dot", 52},
-    {"slash", 53}, {"space", 57}, {"f1", 59}, {"f2", 60}, {"f3", 61}, {"f4", 62}, {"f5", 63}, {"f6", 64},
-    {"f7", 65}, {"f8", 66}, {"f9", 67}, {"f10", 68}, {"f11", 87}, {"f12", 88}, {"home", 102}, {"up", 103},
-    {"pageup", 104}, {"left", 105}, {"right", 106}, {"end", 107}, {"down", 108}, {"pagedown", 109},
-    {"insert", 110}, {"delete", 111},
-};
 
 static struct
 {
@@ -327,15 +311,8 @@ static unsigned int compositor_key_word(const char *word, unsigned int length, u
                 if (string_length((string_address)modifiers[at].name) == length &&
                     !memory_compare(modifiers[at].name, word, length))
                         return modifiers[at].flag;
-        for (unsigned int at = 0; at < sizeof(compositor_key_names) / sizeof(compositor_key_names[0]); at++)
-                if (string_length((string_address)compositor_key_names[at].name) == length &&
-                    !memory_compare(compositor_key_names[at].name, word, length))
-                {
-                        *code = compositor_key_names[at].code;
-                        return 0;
-                }
-        //      Linux's key number itself, which the rover runner writes (it knows every key rover names, f13 to f24,
-        //      the keypad, the media keys, print), so the two tables of names cannot disagree.
+        //      The key is Linux's number, which the rover runner writes (it knows every key rover names, f13 to f24,
+        //      the keypad, the media keys, print): the compositor keeps no table of names to disagree with rover's.
         if (length && length <= 3)
         {
                 unsigned int number = 0;

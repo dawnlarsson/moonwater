@@ -1292,6 +1292,9 @@ static fn rover_check_red(void)
                       !rover_compile(&rover_one, (const p8 address_to)text, sizeof(text) - 1) && rover_holds_why("posted by nothing yet"));
                 check("red: and takes a chord, which the compositor posts",
                       rover_compile(&rover_one, (const p8 address_to)"rule t\n\ton chord ctrl+shift+t\n\tdo open terminal\n", 48));
+                check("red: and refuses a rule that reads a desktop state, which nothing writes yet",
+                      !rover_compile(&rover_one, (const p8 address_to)"rule g\n\ton lid close\n\tif window.fullscreen\n\tdo log x\n", 53) &&
+                          rover_holds_why("written by nothing yet"));
                 rover_one.live = false;
         }
         //      R-compiler-7: a cue rule with a condition may emit what its filter takes; R-compiler-9: comments alone are the
