@@ -952,26 +952,43 @@ static b32 rules_floor_slot(p16 spark)
         return spark == SPARK_BIND_POWEROFF ? 0 : spark == SPARK_BIND_RESET ? 1 : spark == SPARK_BIND_CTRL_ALT_DELETE ? 2 : -1;
 }
 
-//      Whether a stop key's press that a rule took may stay taken; a key that is no stop key always may.
-static bool rules_floor(p16 spark, p64 now)
+/*
+        Whether this stop key's press is the floor's: the press before it was
+        taken inside ten seconds. Asked before the rules are (E-h10-4): a press
+        that is the floor's is not shown to the rules at all, so the rule that
+        took the first press does not queue its stop a second time beside the
+        bindings' own. Counted, and the window closed, when it is.
+*/
+static bool rules_floor_owed(p16 spark, p64 now)
 {
         b32 slot = rules_floor_slot(spark);
         unsigned long flags;
-        bool kept = true;
+        bool owed = false;
 
         if (slot < 0)
-                return true;
+                return false;
         raw_spin_lock_irqsave(&rules_lock, flags);
         if (rules_floor_last[slot] && (b64)(now - rules_floor_last[slot]) < RULES_FLOOR_NS)
         {
                 rules_floor_last[slot] = 0;
                 rules_count.floor++;
-                kept = false;
+                owed = true;
         }
-        else
-                rules_floor_last[slot] = now;
         raw_spin_unlock_irqrestore(&rules_lock, flags);
-        return kept;
+        return owed;
+}
+
+//      A stop key's press a rule took: the floor's window opens from it.
+static fn rules_floor_taken(p16 spark, p64 now)
+{
+        b32 slot = rules_floor_slot(spark);
+        unsigned long flags;
+
+        if (slot < 0)
+                return;
+        raw_spin_lock_irqsave(&rules_lock, flags);
+        rules_floor_last[slot] = now;
+        raw_spin_unlock_irqrestore(&rules_lock, flags);
 }
 
 //      A press that is one of the stop keys: power, reset, or Delete with Ctrl and Alt held.
@@ -1139,11 +1156,14 @@ static bool rules_input(struct bind_handle *bind, unsigned int type, unsigned in
                 if (spark == SPARK_BIND_CTRL_ALT_DELETE &&
                     (mods & (ROVER_CHORD_CTRL | ROVER_CHORD_ALT)) != (ROVER_CHORD_CTRL | ROVER_CHORD_ALT))
                         spark = 0;
-                if (spark && rules_wanted(spark))
+                if (spark && rules_wanted(spark) && !rules_floor_owed(spark, started))
                 {
                         rules_event_init(&event, spark, when);
                         if (rules_fire(&event, null, 0, started))
-                                taken = rules_floor(spark, started);
+                        {
+                                rules_floor_taken(spark, started);
+                                taken = true;
+                        }
                 }
                 if (rules_wanted(value ? RULES_KEY_DOWN : RULES_KEY_UP))
                 {
