@@ -1566,10 +1566,10 @@ static b32 files_delete_begin(struct files_model address_to m, struct files_job 
                         continue;
                 if (job->count >= FILES_MOST / 8 || used + entry->length + 1 > (positive)FILES_MOST * FILES_NAME / 8)
                         break;
-                string_copy_bounded(job->at, (string_address)files_model_name(m, entry), FILES_NAME);
                 if (files_model_check(m, place, &job->facts[job->count]) != FILES_SAME)
                 {
                         files_job_end(job);
+                        string_copy_bounded(job->at, (string_address)files_model_name(m, entry), FILES_NAME);
                         job->state = FILES_JOB_FAILED, job->error = -ERROR_NO_ENTRY;
                         return false;
                 }
@@ -1577,7 +1577,6 @@ static b32 files_delete_begin(struct files_model address_to m, struct files_job 
                 used += (positive)entry->length + 1;
                 job->count++;
         }
-        job->at[0] = end;
         job->state = job->count ? FILES_JOB_RUNNING : FILES_JOB_DONE;
         return job->count != 0;
 }
@@ -2813,13 +2812,25 @@ static const p8 address_to files_base_name(const p8 address_to path)
         return base;
 }
 
+static inline positive files_uri_byte(p8 address_to into, p8 c)
+{
+        static const char hex[] = "0123456789ABCDEF";
+
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' || c == '.' || c == '~')
+        {
+                into[0] = c;
+                return 1;
+        }
+        into[0] = '%', into[1] = (p8)hex[c >> 4], into[2] = (p8)hex[c & 15];
+        return 3;
+}
+
 /*
         The entry at path (absolute) put in the bin, its info saying it was deleted at when ("YYYY-MM-DDThh:mm:ss"): FILES_DID with the
         name it has in BIN/files in named (FILES_NAME), FILES_DID_CROSS where the bin is on another filesystem, FILES_DID_FAILED else.
 */
 static int files_bin_put(const p8 address_to bin, const p8 address_to path, const char address_to when, p8 address_to named)
 {
-        static const char hex[] = "0123456789ABCDEF";
         p8 files_dir[FILES_PATH], into[FILES_PATH], info[FILES_PATH], text[FILES_PATH * 3 + 96];
         positive used = 0;
         b32 numbered;
@@ -2849,10 +2860,7 @@ static int files_bin_put(const p8 address_to bin, const p8 address_to path, cons
         }
         memory_copy(text, "[Trash Info]\nPath=", 18), used = 18;
         for (const p8 address_to c = path; *c && used + 4 < sizeof(text) - 64; c++)
-                if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '/' || *c == '.' || *c == '-' || *c == '_' || *c == '~')
-                        text[used++] = *c;
-                else
-                        text[used++] = '%', text[used++] = (p8)hex[*c >> 4], text[used++] = (p8)hex[*c & 15];
+                used += files_uri_byte(text + used, *c);
         memory_copy(text + used, "\nDeletionDate=", 14), used += 14;
         for (const char address_to c = when; *c && used + 2 < sizeof(text); c++)
                 text[used++] = (p8)*c;
@@ -3005,11 +3013,7 @@ static struct
 
 static p32 files_git_hash(const p8 address_to text, positive length)
 {
-        p32 hash = 2166136261u;
-
-        for (positive k = 0; k < length; k++)
-                hash = (hash ^ text[k]) * 16777619u;
-        return hash;
+        return hash_fnv1a(2166136261u, text, length);
 }
 
 // An ignore file's lines read into the rules: rooted says the folder shown is the folder the file is in.

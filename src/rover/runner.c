@@ -394,6 +394,7 @@ static p64 rover_runner_kernel_page(void)
         if (!rover_runner.map)
                 return 0;
         sequence = (const volatile p32 address_to)(rover_runner.map + 4);
+        bool ok = false;
         for (positive tries = 0; tries < 16; tries++)
         {
                 p32 before = *sequence;
@@ -404,8 +405,13 @@ static p64 rover_runner_kernel_page(void)
                 memory_copy(fresh, (const void address_to)rover_runner.map, ROVER_PAGE_BYTES);
                 __atomic_thread_fence(__ATOMIC_ACQUIRE);
                 if (*sequence == before)
+                {
+                        ok = true;
                         break;
+                }
         }
+        if (!ok)
+                return 0;
         for (positive at = 0; at < rover_runner.boots; at++)
         {
                 const struct rover_state_row address_to state = &rover_states[rover_runner.boot[at]];
@@ -1458,7 +1464,7 @@ static fn rover_runner_line(const p8 address_to line, positive length)
                         newline[0] = 0;
                         word = (p8 address_to)newline + 1;
                 }
-                if (!rover_runner_post(71, rover_runner.pin_text, string_length(rover_runner.pin[0]), 5))
+                if (!rover_runner.pins || !rover_runner_post(71, rover_runner.pin_text, string_length(rover_runner.pin[0]), 5))
                         return;
                 struct rover_event address_to event = &rover_runner.queue[rover_runner.queued - 1];
                 //      button's fields: name pin, the slot, the program.
@@ -1944,13 +1950,14 @@ static b32 rover_runner_run(bipolar device)
                         continue;
                 if (wait[0].returned & SYSTEM_POLL_READ)
                 {
-                        p32 event;
+                        p32 event = 0;
+                        bipolar got = system_read_once(rover_runner.kernel_pipe[0], &event, 4);
 
                         //      The machine's wait: 0 when the machine is stopping, MOONWATER_ROVER when the ring has records.
-                        if (system_read_once(rover_runner.kernel_pipe[0], &event, 4) == 4 && (event == ~0u || !event))
+                        if (got == 0 || (got == 4 && (event == ~0u || !event)))
                                 break;
                         //      A stop the kernel handed here (an event its bindings give the machine): done.
-                        if (event <= SPARK_BIND_EVENTS && spark_bind_is_stop(event))
+                        if (got == 4 && event <= SPARK_BIND_EVENTS && spark_bind_is_stop(event))
                         {
                                 for (positive at = 0; at < rover_runner.view.head->services; at++)
                                         rover_runner_stop(at);

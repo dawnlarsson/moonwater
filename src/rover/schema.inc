@@ -5,7 +5,7 @@
         78 types, 98 states, 60 events, 20 primitives, 60 functions (25 of them in the kernel), 203 tools.
 */
 
-#define ROVER_SCHEMA_HASH 0x871b6293u
+#define ROVER_SCHEMA_HASH 0x39d9d8d1u
 #define ROVER_TYPES 78
 #define ROVER_STATES 98
 #define ROVER_EVENT_ROWS 60
@@ -130,9 +130,9 @@ static const struct rover_state_row rover_states[ROVER_STATES] = {
         {"setting.canvas.border.grip", 2, 40, 192},
         {"setting.canvas.windows.remember", 2, 5, 196},
         {"setting.canvas.clipboard", 2, 5, 200},
-        {"setting.canvas.gpu", 2, 5, 204},
-        {"setting.canvas.clipboard.history", 2, 41, 208},
-        {"setting.canvas.vrr", 2, 42, 212},
+        {"setting.canvas.clipboard.history", 2, 41, 204},
+        {"setting.canvas.vrr", 2, 42, 208},
+        {"setting.canvas.gpu", 2, 5, 212},
         {"setting.keyboard.onscreen", 2, 43, 216},
         {"setting.keyboard.repeat.delay", 2, 44, 220},
         {"setting.keyboard.repeat.rate", 2, 45, 224},
@@ -1070,9 +1070,9 @@ static const char rover_schema_text[] =
         "state name=setting.canvas.border.grip page=settings offset=192 type=int:2:16\n"
         "state name=setting.canvas.windows.remember page=settings offset=196 type=onoff\n"
         "state name=setting.canvas.clipboard page=settings offset=200 type=onoff\n"
-        "state name=setting.canvas.gpu page=settings offset=204 type=onoff\n"
-        "state name=setting.canvas.clipboard.history page=settings offset=208 type=int:0:32\n"
-        "state name=setting.canvas.vrr page=settings offset=212 type=enum:on,games,off\n"
+        "state name=setting.canvas.clipboard.history page=settings offset=204 type=int:0:32\n"
+        "state name=setting.canvas.vrr page=settings offset=208 type=enum:on,games,off\n"
+        "state name=setting.canvas.gpu page=settings offset=212 type=onoff\n"
         "state name=setting.keyboard.onscreen page=settings offset=216 type=enum:auto,off,on\n"
         "state name=setting.keyboard.repeat.delay page=settings offset=220 type=int:100:2000\n"
         "state name=setting.keyboard.repeat.rate page=settings offset=224 type=int:1:100\n"

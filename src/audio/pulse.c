@@ -1687,93 +1687,38 @@ static void pulse_drop(struct pulse *p, long slot)
 
 /* ---- introspection ---- */
 
-static void pulse_fill_sink(struct pulse *p, struct wire_w *w, struct pulse_client *c, long slot)
+static void pulse_fill_device(struct wire_w *w, struct pulse_client *c, unsigned long slot, const char *name,
+                              const char *description, unsigned long rate, const unsigned long *volume, int muted,
+                              unsigned long monitor_of, const char *monitor_name, long latency, unsigned long flags,
+                              const char *device_class, unsigned long state, int format_version)
 {
-        struct pulse_sink *s = p->sink + slot;
-        static const signed char stereo[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT};
-        char monitor[PULSE_NAME + 16];
-        struct pulse_props props = {0};
-        long latency = pulse_sink_latency_us(p, slot);
-
-        pulse_copy(monitor, sizeof(monitor), s->name);
-        pulse_copy(monitor + wire_len(monitor), (long)sizeof(monitor) - wire_len(monitor), ".monitor");
-        wire_w_u32(w, (unsigned long)slot);
-        wire_w_string(w, s->name);
-        wire_w_string(w, s->description);
-        pulse_w_sample_spec(w, AUDIO_FORMAT_F32LE, 2, s->rate);
-        pulse_w_channel_map(w, stereo, 2);
-        wire_w_u32(w, PULSE_INVALID);
-        pulse_w_cvolume(w, s->volume, 2);
-        wire_w_bool(w, s->muted);
-        wire_w_u32(w, (unsigned long)slot);
-        wire_w_string(w, monitor);
-        pulse_w_64(w, 'U', latency);
-        wire_w_string(w, "moonwater audio");
-        wire_w_u32(w, 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40); // HW_VOLUME_CTRL is not set: the volume is the mixer's, in software
-        if (c->version >= 13)
-        {
-                pulse_props_set(&props, "device.description", (const unsigned char *)s->description, wire_len(s->description) + 1);
-                pulse_props_set(&props, "device.class", (const unsigned char *)"sound", 6);
-                pulse_w_proplist(w, &props);
-                pulse_w_64(w, 'U', 0);
-        }
-        if (c->version >= 15)
-        {
-                int busy = 0;
-
-                for (int i = 0; i < p->stream_slots; i++)
-                        busy |= p->stream[i].used && !p->stream[i].dying && p->stream[i].sink == slot;
-                pulse_w_volume(w, AUDIO_VOLUME_NORM);              // base volume
-                wire_w_u32(w, s->suspended ? 2 : busy ? 0 : 1);   // running, idle or suspended
-                wire_w_u32(w, 256);                               // volume steps
-                wire_w_u32(w, PULSE_INVALID);                     // card
-        }
-        if (c->version >= 16)
-        {
-                wire_w_u32(w, 0); // no ports
-                wire_w_string(w, 0);
-        }
-        if (c->version >= 21)
-        {
-                pulse_w_u8(w, 1);
-                pulse_w_format_info(w);
-        }
-}
-
-static void pulse_fill_source(struct pulse *p, struct wire_w *w, struct pulse_client *c, long slot)
-{
-        const struct pulse_source *s = p->source + slot;
         static const signed char stereo[2] = {AUDIO_POSITION_FRONT_LEFT, AUDIO_POSITION_FRONT_RIGHT};
         struct pulse_props props = {0};
-        long latency = pulse_delay_us(s->delay_frames, s->rate);
-        int busy = 0;
 
-        for (int i = 0; i < p->record_slots; i++)
-                busy |= p->record[i].used && p->record[i].source == slot && !p->record[i].corked;
-        wire_w_u32(w, (unsigned long)slot);
-        wire_w_string(w, s->name);
-        wire_w_string(w, s->description);
-        pulse_w_sample_spec(w, AUDIO_FORMAT_F32LE, 2, s->rate);
+        wire_w_u32(w, slot);
+        wire_w_string(w, name);
+        wire_w_string(w, description);
+        pulse_w_sample_spec(w, AUDIO_FORMAT_F32LE, 2, rate);
         pulse_w_channel_map(w, stereo, 2);
         wire_w_u32(w, PULSE_INVALID);
-        pulse_w_cvolume(w, s->volume, 2);
-        wire_w_bool(w, s->muted);
-        wire_w_u32(w, s->capture ? PULSE_INVALID : (unsigned long)s->sink);
-        wire_w_string(w, s->capture ? 0 : p->sink[s->sink].name);
+        pulse_w_cvolume(w, volume, 2);
+        wire_w_bool(w, muted);
+        wire_w_u32(w, monitor_of);
+        wire_w_string(w, monitor_name);
         pulse_w_64(w, 'U', latency);
         wire_w_string(w, "moonwater audio");
-        wire_w_u32(w, s->capture ? 0x2 | 0x4 | 0x10 : 0x1 | 0x2 | 0x4 | 0x8 | 0x10);
+        wire_w_u32(w, flags);
         if (c->version >= 13)
         {
-                pulse_props_set(&props, "device.description", (const unsigned char *)s->description, wire_len(s->description) + 1);
-                pulse_props_set(&props, "device.class", (const unsigned char *)(s->capture ? "sound" : "monitor"), s->capture ? 6 : 8);
+                pulse_props_set(&props, "device.description", (const unsigned char *)description, wire_len(description) + 1);
+                pulse_props_set(&props, "device.class", (const unsigned char *)device_class, wire_len(device_class) + 1);
                 pulse_w_proplist(w, &props);
                 pulse_w_64(w, 'U', 0);
         }
         if (c->version >= 15)
         {
                 pulse_w_volume(w, AUDIO_VOLUME_NORM);
-                wire_w_u32(w, busy ? 0 : 1); // running, or idle
+                wire_w_u32(w, state);
                 wire_w_u32(w, 256);
                 wire_w_u32(w, PULSE_INVALID);
         }
@@ -1782,11 +1727,40 @@ static void pulse_fill_source(struct pulse *p, struct wire_w *w, struct pulse_cl
                 wire_w_u32(w, 0);
                 wire_w_string(w, 0);
         }
-        if (c->version >= 22)
+        if (c->version >= format_version)
         {
                 pulse_w_u8(w, 1);
                 pulse_w_format_info(w);
         }
+}
+
+static void pulse_fill_sink(struct pulse *p, struct wire_w *w, struct pulse_client *c, long slot)
+{
+        struct pulse_sink *s = p->sink + slot;
+        char monitor[PULSE_NAME + 16];
+        int busy = 0;
+
+        pulse_copy(monitor, sizeof(monitor), s->name);
+        pulse_copy(monitor + wire_len(monitor), (long)sizeof(monitor) - wire_len(monitor), ".monitor");
+        for (int i = 0; i < p->stream_slots; i++)
+                busy |= p->stream[i].used && !p->stream[i].dying && p->stream[i].sink == slot;
+        pulse_fill_device(w, c, (unsigned long)slot, s->name, s->description, s->rate, s->volume, s->muted,
+                          (unsigned long)slot, monitor, pulse_sink_latency_us(p, slot),
+                          0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40, "sound", s->suspended ? 2 : busy ? 0 : 1, 21);
+}
+
+static void pulse_fill_source(struct pulse *p, struct wire_w *w, struct pulse_client *c, long slot)
+{
+        const struct pulse_source *s = p->source + slot;
+        int busy = 0;
+
+        for (int i = 0; i < p->record_slots; i++)
+                busy |= p->record[i].used && p->record[i].source == slot && !p->record[i].corked;
+        pulse_fill_device(w, c, (unsigned long)slot, s->name, s->description, s->rate, s->volume, s->muted,
+                          s->capture ? PULSE_INVALID : (unsigned long)s->sink, s->capture ? 0 : p->sink[s->sink].name,
+                          pulse_delay_us(s->delay_frames, s->rate),
+                          s->capture ? 0x2 | 0x4 | 0x10 : 0x1 | 0x2 | 0x4 | 0x8 | 0x10,
+                          s->capture ? "sound" : "monitor", busy ? 0 : 1, 22);
 }
 
 static void pulse_fill_client(struct pulse *p, struct wire_w *w, struct pulse_client *c, struct pulse_client *of)
@@ -2190,7 +2164,6 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
         }
         if (!pulse_r_eof(r))
                 return PULSE_DEAD;
-        (void)muted_set;
         if (volume_channels != channels)
                 return pulse_error(p, c, tag, PULSE_ERR_INVALID);
         if (sink_name && sink_name[0] && sink_index != PULSE_INVALID)
@@ -2226,7 +2199,8 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
                 {
                         for (long i = 0; i < channels; i++)
                                 s->volume[i] = remembered;
-                        s->muted = mute_remembered;
+                        if (!muted_set)
+                                s->muted = mute_remembered;
                 }
         }
         // The program's own application properties (its client's) go with its stream when it gave none of its own.
@@ -2265,33 +2239,40 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
         return err;
 }
 
-static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, unsigned long command, unsigned long tag, struct wire_r *r)
+static int pulse_command_set_level(struct pulse *p, struct pulse_client *c, unsigned long command, unsigned long tag, struct wire_r *r, int is_mute)
 {
         unsigned long index = wire_r_u32(r), volume[PULSE_CHANNEL_MAX];
         const char *name = 0;
-        long n;
-        int isnull;
+        long n = 0;
+        int mute = 0, isnull;
+        int is_sink = command == PULSE_COMMAND_SET_SINK_VOLUME || command == PULSE_COMMAND_SET_SINK_MUTE;
+        int is_source = command == PULSE_COMMAND_SET_SOURCE_VOLUME || command == PULSE_COMMAND_SET_SOURCE_MUTE;
+        int is_input = command == PULSE_COMMAND_SET_SINK_INPUT_VOLUME || command == PULSE_COMMAND_SET_SINK_INPUT_MUTE;
 
-        if (command == PULSE_COMMAND_SET_SINK_VOLUME || command == PULSE_COMMAND_SET_SOURCE_VOLUME)
+        if (is_sink || is_source)
                 name = pulse_r_string(r, &isnull);
-        n = pulse_r_cvolume(r, volume);
+        if (is_mute)
+                mute = wire_r_bool(r);
+        else
+                n = pulse_r_cvolume(r, volume);
         if (!pulse_r_eof(r))
                 return PULSE_DEAD;
         PULSE_NEED_AUTH();
-        if (n < 1)
+        if (!is_mute && n < 1)
                 return pulse_error(p, c, tag, PULSE_ERR_INVALID);
-        if (command == PULSE_COMMAND_SET_SINK_INPUT_VOLUME)
+        if (is_input)
         {
                 struct pulse_stream *s = pulse_input_of(p, index);
 
-                if (!s)
+                if (!s || !pulse_may(c, s->uid))
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (!pulse_may(c, s->uid))
-                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
-                if (n != s->map_channels)
+                if (!is_mute && n != s->map_channels)
                         return pulse_error(p, c, tag, PULSE_ERR_INVALID);
-                for (long i = 0; i < n; i++)
-                        s->volume[i] = volume[i];
+                if (is_mute)
+                        s->muted = mute;
+                else
+                        for (long i = 0; i < n; i++)
+                                s->volume[i] = volume[i];
                 pulse_stream_apply(s);
                 if (p->host.remember)
                 {
@@ -2299,54 +2280,53 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
                         struct pulse_client *owner = s->client >= 0 ? p->client[s->client] : 0;
 
                         if (owner && pulse_app_key(owner, key, sizeof(key)))
-                                p->host.remember(p->host.context, key, volume[0], s->muted);
+                                p->host.remember(p->host.context, key, s->volume[0], s->muted);
                 }
                 pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
         }
-        else if (command == PULSE_COMMAND_SET_SINK_VOLUME)
+        else if (is_sink || is_source)
         {
-                long sink;
+                long slot;
 
                 if (!c->root)
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a sink that is not there
-                sink = pulse_find_sink(p, index, name);
-                if (sink < 0)
+                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);
+                slot = is_sink ? pulse_find_sink(p, index, name) : pulse_find_source(p, index, name);
+                if (slot < 0)
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (n != 2)
+                if (!is_mute && n != 2)
                         return pulse_error(p, c, tag, PULSE_ERR_INVALID);
-                p->sink[sink].volume[0] = volume[0];
-                p->sink[sink].volume[1] = volume[1];
-                pulse_event(p, PULSE_FACILITY_SINK, PULSE_EVENT_CHANGE, (unsigned long)sink);
-                pulse_changed(p, PULSE_CHANGED_SINK_VOLUME, sink);
+                if (is_sink)
+                {
+                        if (is_mute)
+                                p->sink[slot].muted = mute;
+                        else
+                                p->sink[slot].volume[0] = volume[0], p->sink[slot].volume[1] = volume[1];
+                        pulse_event(p, PULSE_FACILITY_SINK, PULSE_EVENT_CHANGE, (unsigned long)slot);
+                        pulse_changed(p, PULSE_CHANGED_SINK_VOLUME, slot);
+                }
+                else
+                {
+                        if (is_mute)
+                                p->source[slot].muted = mute;
+                        else
+                                p->source[slot].volume[0] = volume[0], p->source[slot].volume[1] = volume[1];
+                        pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)slot);
+                        pulse_changed(p, PULSE_CHANGED_SOURCE_VOLUME, slot);
+                }
         }
-        else if (command == PULSE_COMMAND_SET_SOURCE_VOLUME)
-        {
-                long source;
-
-                if (!c->root)
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a source that is not there
-                source = pulse_find_source(p, index, name);
-                if (source < 0)
-                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (n != 2)
-                        return pulse_error(p, c, tag, PULSE_ERR_INVALID);
-                p->source[source].volume[0] = volume[0];
-                p->source[source].volume[1] = volume[1];
-                pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)source);
-                pulse_changed(p, PULSE_CHANGED_SOURCE_VOLUME, source);
-        }
-        else if (command == PULSE_COMMAND_SET_SOURCE_OUTPUT_VOLUME)
+        else if (command == PULSE_COMMAND_SET_SOURCE_OUTPUT_VOLUME || command == PULSE_COMMAND_SET_SOURCE_OUTPUT_MUTE)
         {
                 struct pulse_record *rec = pulse_output_of(p, index);
 
-                if (!rec)
+                if (!rec || !pulse_may(c, rec->uid))
                         return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (!pulse_may(c, rec->uid))
-                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
-                if (n != rec->map_channels)
+                if (!is_mute && n != rec->map_channels)
                         return pulse_error(p, c, tag, PULSE_ERR_INVALID);
-                for (long i = 0; i < n; i++)
-                        rec->volume[i] = volume[i];
+                if (is_mute)
+                        rec->muted = mute;
+                else
+                        for (long i = 0; i < n; i++)
+                                rec->volume[i] = volume[i];
                 pulse_record_apply(rec);
                 pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);
         }
@@ -2355,79 +2335,14 @@ static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, uns
         return pulse_ack(p, c, tag);
 }
 
+static int pulse_command_set_volume(struct pulse *p, struct pulse_client *c, unsigned long command, unsigned long tag, struct wire_r *r)
+{
+        return pulse_command_set_level(p, c, command, tag, r, 0);
+}
+
 static int pulse_command_set_mute(struct pulse *p, struct pulse_client *c, unsigned long command, unsigned long tag, struct wire_r *r)
 {
-        unsigned long index = wire_r_u32(r);
-        const char *name = 0;
-        int mute, isnull;
-
-        if (command == PULSE_COMMAND_SET_SINK_MUTE || command == PULSE_COMMAND_SET_SOURCE_MUTE)
-                name = pulse_r_string(r, &isnull);
-        mute = wire_r_bool(r);
-        if (!pulse_r_eof(r))
-                return PULSE_DEAD;
-        PULSE_NEED_AUTH();
-        if (command == PULSE_COMMAND_SET_SINK_INPUT_MUTE)
-        {
-                struct pulse_stream *s = pulse_input_of(p, index);
-
-                if (!s)
-                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (!pulse_may(c, s->uid))
-                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
-                s->muted = mute;
-                pulse_stream_apply(s);
-                if (p->host.remember)
-                {
-                        char key[PULSE_VALUE + 16];
-                        struct pulse_client *owner = s->client >= 0 ? p->client[s->client] : 0;
-
-                        if (owner && pulse_app_key(owner, key, sizeof(key)))
-                                p->host.remember(p->host.context, key, s->volume[0], mute);
-                }
-                pulse_event_to(p, PULSE_FACILITY_SINK_INPUT, PULSE_EVENT_CHANGE, s->index, s->uid);
-        }
-        else if (command == PULSE_COMMAND_SET_SINK_MUTE)
-        {
-                long sink;
-
-                if (!c->root)
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a sink that is not there
-                sink = pulse_find_sink(p, index, name);
-                if (sink < 0)
-                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                p->sink[sink].muted = mute;
-                pulse_event(p, PULSE_FACILITY_SINK, PULSE_EVENT_CHANGE, (unsigned long)sink);
-                pulse_changed(p, PULSE_CHANGED_SINK_VOLUME, sink);
-        }
-        else if (command == PULSE_COMMAND_SET_SOURCE_MUTE)
-        {
-                long source;
-
-                if (!c->root)
-                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a source that is not there
-                source = pulse_find_source(p, index, name);
-                if (source < 0)
-                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                p->source[source].muted = mute;
-                pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)source);
-                pulse_changed(p, PULSE_CHANGED_SOURCE_VOLUME, source);
-        }
-        else if (command == PULSE_COMMAND_SET_SOURCE_OUTPUT_MUTE)
-        {
-                struct pulse_record *rec = pulse_output_of(p, index);
-
-                if (!rec)
-                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-                if (!pulse_may(c, rec->uid))
-                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there
-                rec->muted = mute;
-                pulse_record_apply(rec);
-                pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);
-        }
-        else
-                return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);
-        return pulse_ack(p, c, tag);
+        return pulse_command_set_level(p, c, command, tag, r, 1);
 }
 
 /* ---- the commands on record streams ---- */

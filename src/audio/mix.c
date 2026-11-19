@@ -533,7 +533,9 @@ AUDIO_API int audio_ring_seek(struct audio_ring *ring, long mode, long long offs
 // What was played is gone: the read count moves on, and the cursor never stays behind it.
 AUDIO_API void audio_ring_drop(struct audio_ring *ring, unsigned long n)
 {
-        ring->read += n;
+        unsigned long avail = ring->limit > ring->read ? ring->limit - ring->read : 0;
+
+        ring->read += n > avail ? avail : n;
         if (ring->write < ring->read)
                 ring->write = ring->read;
 }

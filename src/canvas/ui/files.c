@@ -1045,7 +1045,6 @@ static fn files_part_complete(void)
 static b32 files_uris(p32 place, struct windows_clip_part address_to parts, p8 address_to address_to uris, positive address_to uris_room,
                       p8 address_to address_to paths, positive address_to paths_room)
 {
-        static const char hex[] = "0123456789ABCDEF";
         struct files_model address_to m = &files.big->model;
         positive uri_length = 0, path_length = 0;
         b32 any_chosen = files_model_chosen(m, place);
@@ -1069,12 +1068,8 @@ static b32 files_uris(p32 place, struct windows_clip_part address_to parts, p8 a
 
                         if (k == folder && folder == 1)
                                 continue; // the root's own slash is the path's first
-                        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' || c == '.' || c == '~')
-                                (*uris)[uri_length++] = c;
-                        else
-                                (*uris)[uri_length++] = '%', (*uris)[uri_length++] = (p8)hex[c >> 4], (*uris)[uri_length++] = (p8)hex[c & 15];
-                        if (!(k == folder && folder == 1))
-                                (*paths)[path_length++] = c;
+                        uri_length += files_uri_byte(*uris + uri_length, c);
+                        (*paths)[path_length++] = c;
                 }
                 (*uris)[uri_length++] = '\r', (*uris)[uri_length++] = '\n';
                 (*paths)[path_length++] = '\n';
@@ -1573,7 +1568,6 @@ static fn files_carry_drop(int row)
 */
 static b32 files_carry_offer(void)
 {
-        static const char hex[] = "0123456789ABCDEF";
         struct windows_clip_part parts[2];
         p8 address_to uris = null, address_to text = null;
         positive uris_room = 0, text_room = 0, uris_used = 0, text_used = 0;
@@ -1593,14 +1587,7 @@ static b32 files_carry_offer(void)
                         break;
                 memory_copy(uris + uris_used, "file://", 7), uris_used += 7;
                 for (positive k = 0; k < length; k++)
-                {
-                        p8 c = path[k];
-
-                        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' || c == '.' || c == '~')
-                                uris[uris_used++] = c;
-                        else
-                                uris[uris_used++] = '%', uris[uris_used++] = (p8)hex[c >> 4], uris[uris_used++] = (p8)hex[c & 15];
-                }
+                        uris_used += files_uri_byte(uris + uris_used, path[k]);
                 uris[uris_used++] = '\r', uris[uris_used++] = '\n';
                 memory_copy(text + text_used, path, length), text_used += length, text[text_used++] = '\n';
         }

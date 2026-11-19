@@ -2787,55 +2787,8 @@ static fn settings_say(string_address text)
 */
 static b32 settings_start(string_address address_to words, positive count, const char address_to input)
 {
-        int ends[2] = {-1, -1}, feeds[2] = {-1, -1};
-        positive length = input ? string_length((string_address)input) : 0;
-        bipolar child;
-
-        // Only this program's end does not block: the verb's standard output and error are the other end, and a
-        // verb that writes more than the pipe holds would be told EAGAIN, not made to wait. F_SETFL is 4.
-        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+        if (!ui_start_piped(words, count, input, &settings.child, &settings.output))
                 return false;
-        system_call_3(syscall(fcntl), (positive)ends[0], 4, O_NONBLOCK);
-        // What it reads is written before it starts, whole, to a pipe that holds it, and closed: a line and then its end.
-        if (length && (system_call_2(syscall(pipe2), (positive)feeds, O_CLOEXEC) != 0 ||
-                       system_write_once((b32)feeds[1], input, length) != (bipolar)length ||
-                       system_write_once((b32)feeds[1], "\n", 1) != 1))
-        {
-                system_close(ends[0]);
-                system_close(ends[1]);
-                if (feeds[0] >= 0)
-                        system_close(feeds[0]);
-                if (feeds[1] >= 0)
-                        system_close(feeds[1]);
-                return false;
-        }
-        if (feeds[1] >= 0)
-                system_close(feeds[1]);
-
-        child = system_fork();
-        if (child == 0)
-        {
-                bipolar quiet = feeds[0] >= 0 ? feeds[0] : system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
-
-                if (quiet >= 0)
-                        system_call_3(syscall(dup3), (positive)quiet, 0, 0);
-                system_call_3(syscall(dup3), (positive)ends[1], 1, 0);
-                system_call_3(syscall(dup3), (positive)ends[1], 2, 0);
-                // As its own: not reading from where this program writes.
-                (void)shell_exec_file(words[0], words, count, window_asked_environment());
-                system_call_1(syscall(exit), 127);
-        }
-        system_close(ends[1]);
-        if (feeds[0] >= 0)
-                system_close(feeds[0]);
-        if (child < 0)
-        {
-                system_close(ends[0]);
-                return false;
-        }
-
-        settings.child = child;
-        settings.output = ends[0];
         settings.ending = 0;
         settings.exited = 0;
         settings.said_length = 0;
@@ -3433,17 +3386,11 @@ static fn settings_size_text(unsigned long long bytes, char address_to into, pos
 */
 static b32 settings_name_says(const char address_to name, const char address_to word)
 {
-        positive length = string_length((string_address)word);
+        positive length = string_length((string_address)word), name_len = string_length((string_address)name);
 
-        for (; length && *name; name++)
-        {
-                positive at = 0;
-
-                while (at < length && name[at] && ((name[at] | (name[at] >= 'A' && name[at] <= 'Z' ? 32 : 0)) == (word[at] | (word[at] >= 'A' && word[at] <= 'Z' ? 32 : 0))))
-                        at++;
-                if (at == length)
+        for (positive at = 0; length && at + length <= name_len; at++)
+                if (!memory_compare_ascii_case(name + at, word, length))
                         return true;
-        }
         return false;
 }
 

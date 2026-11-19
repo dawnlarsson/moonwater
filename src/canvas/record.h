@@ -494,8 +494,7 @@ static void compositor_record_capture(unsigned long long when)
                 return;
         }
         cur = &compositor_record_shots[compositor_record_taken % 3];
-        for (unsigned int y = 0; y < height; y++)
-                memory_copy(cur->pixels + (unsigned long)y * width, compositor.scanout + (unsigned long)y * stride, (unsigned long)width * 4);
+        memory_copy_rect_u32(cur->pixels, width, compositor.scanout, stride, width, height);
         cur->when = when;
         // The frame's number is the present's (since the compositor started), so two recordings never write the same file.
         cur->seq = (unsigned int)compositor_records_all;
@@ -526,11 +525,9 @@ static void compositor_record_capture(unsigned long long when)
 static void compositor_record_reset(void)
 {
         compositor_record_taken = compositor_record_written = compositor_record_refused_size = 0;
-        for (unsigned int c = 0; c < COMPOSITOR_RECORD_CLASSES; c++)
-                compositor_record_class_written[c] = 0;
+        memory_zero(compositor_record_class_written, sizeof compositor_record_class_written);
         compositor_record_ring_at = compositor_record_ring_count = compositor_record_event_count = 0;
-        for (unsigned int c = 0; c < COMPOSITOR_RECORD_CLASSES; c++)
-                compositor_record_classed[c] = 0;
+        memory_zero(compositor_record_classed, sizeof compositor_record_classed);
 }
 
 /*

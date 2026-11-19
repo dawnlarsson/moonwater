@@ -4143,7 +4143,7 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
                 }
                 else if (picture->map && (unsigned long)picture->map_bytes >= uv_map_size)
                         uv_base = picture->map + picture->plane_offset[1];
-                else if (picture->sync_fd >= 0)
+                else if (picture->sync_fd >= 0 && compositor_wl_dmabuf_holds(picture->sync_fd, uv_map_size))
                 {
                         long got = compositor_call(syscall(mmap), 0, (positive)uv_map_size, 1, 1, (positive)picture->sync_fd, 0);
 
@@ -4812,10 +4812,8 @@ static long compositor_wl_screens(void *context, struct wayland_screen *screens,
                 screens[at].scale = compositor_output_scale((int)at) > 0 ? compositor_output_scale((int)at) : compositor.scale;
                 screens[at].refresh = compositor.period ? (long)(1000000000000ull / compositor.period) : 60000;
                 screens[at].physical_width = screens[at].physical_height = 0;
-                for (long index = 0; index < 16; index++)
-                        screens[at].name[index] = 0;
-                for (long index = 0; name[index] && index < 15; index++)
-                        screens[at].name[index] = name[index];
+                memory_zero(screens[at].name, 16);
+                string_copy_bounded((string_address)screens[at].name, (string_address)name, 16);
                 if (!screens[at].name[0])
                 {
                         screens[at].name[0] = 'C';
@@ -5156,7 +5154,7 @@ static int compositor_wl_render_classify(const char *path, unsigned long *out_de
                         if (compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_VIRTGPU_GETPARAM, (positive)param, 0, 0, 0) == 0 && val)
                                 rank = 2;
                         else
-                                rank = 2; // virtio_gpu prime/dumb render node is still preferred over vgem
+                                rank = 1;
                 }
                 else
                         rank = 2;
@@ -5173,11 +5171,7 @@ static int compositor_wl_render_classify(const char *path, unsigned long *out_de
 
 static void compositor_wl_render_adopt(const char *path, unsigned long dev, int hw, int syncobj, int fd)
 {
-        char *dst = compositor_wl.render_path;
-
-        for (unsigned long i = 0; i < sizeof compositor_wl.render_path - 1 && path[i]; i++)
-                *dst++ = path[i];
-        *dst = 0;
+        string_copy_bounded((string_address)compositor_wl.render_path, (string_address)path, sizeof compositor_wl.render_path);
         compositor_wl.render_hw = hw;
         compositor_wl.syncobj_ok = syncobj;
         if (compositor_wl.syncobj_drm_fd >= 0 && compositor_wl.syncobj_drm_fd != fd)
@@ -5245,11 +5239,7 @@ static unsigned long compositor_wl_render_node(void)
                         best_dev = device;
                         best_syncobj = syncobj;
                         best_fd = fd;
-                        for (unsigned long i = 0; i < sizeof best_path - 1 && path[i]; i++)
-                        {
-                                best_path[i] = path[i];
-                                best_path[i + 1] = 0;
-                        }
+                        string_copy_bounded((string_address)best_path, (string_address)path, sizeof best_path);
                         if (rank >= 2)
                                 break;
                 }
@@ -5280,25 +5270,6 @@ static void compositor_wl_dmabuf_add_pair(struct wayland_dmabuf_info *info, unsi
         info->entry[info->count].format = format;
         info->entry[info->count].modifier = modifier;
         info->count++;
-}
-
-static int compositor_wl_fourcc_wanted(unsigned int fourcc)
-{
-        switch (fourcc)
-        {
-        case WAYLAND_FOURCC_ARGB8888:
-        case WAYLAND_FOURCC_XRGB8888:
-        case WAYLAND_FOURCC_ABGR8888:
-        case WAYLAND_FOURCC_XBGR8888:
-        case WAYLAND_FOURCC_ARGB2101010:
-        case WAYLAND_FOURCC_XRGB2101010:
-        case WAYLAND_FOURCC_ABGR2101010:
-        case WAYLAND_FOURCC_XBGR2101010:
-        case WAYLAND_FOURCC_NV12:
-                return 1;
-        default:
-                return 0;
-        }
 }
 
 static void compositor_wl_query_plane_modifiers(struct wayland_dmabuf_info *info)
@@ -5372,7 +5343,7 @@ static void compositor_wl_query_plane_modifiers(struct wayland_dmabuf_info *info
                                                 unsigned long mod = *(const unsigned long *)(mods + m * 24u + 16u);
 
                                                 for (unsigned int bit = 0; bit < 64 && off + bit < fmt_count; bit++)
-                                                        if ((mask & (1UL << bit)) && compositor_wl_fourcc_wanted(fmts[off + bit]))
+                                                        if ((mask & (1UL << bit)) && wayland_fourcc_supported(fmts[off + bit]))
                                                                 compositor_wl_dmabuf_add_pair(info, fmts[off + bit], mod);
                                         }
                                 }

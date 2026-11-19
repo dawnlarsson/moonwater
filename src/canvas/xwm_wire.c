@@ -637,9 +637,7 @@ XWM_API long xwm_enc_query_extension(unsigned char *out, unsigned long cap, cons
         return n;
 }
 
-/* Composite QueryVersion: twelve bytes, the client's version (the protocol's answer is the one the server can give). The major
-   opcode is the one QueryExtension gave; an extension's opcode is at least XWM_EXT_MAJOR_FIRST. */
-XWM_API long xwm_enc_composite_query_version(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int client_major, unsigned int client_minor)
+static long xwm_enc_ext_version(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned char minor_opcode, unsigned int client_major, unsigned int client_minor)
 {
         long n;
 
@@ -648,10 +646,17 @@ XWM_API long xwm_enc_composite_query_version(unsigned char *out, unsigned long c
         n = xwm_request_start(out, cap, 12, major_opcode);
         if (n < 0)
                 return n;
-        out[1] = XWM_COMPOSITE_QUERY_VERSION;
+        out[1] = minor_opcode;
         xwm_put32(out + 4, client_major);
         xwm_put32(out + 8, client_minor);
         return n;
+}
+
+/* Composite QueryVersion: twelve bytes, the client's version (the protocol's answer is the one the server can give). The major
+   opcode is the one QueryExtension gave; an extension's opcode is at least XWM_EXT_MAJOR_FIRST. */
+XWM_API long xwm_enc_composite_query_version(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int client_major, unsigned int client_minor)
+{
+        return xwm_enc_ext_version(out, cap, major_opcode, XWM_COMPOSITE_QUERY_VERSION, client_major, client_minor);
 }
 
 /* Composite RedirectSubwindows: the window's children are redirected to offscreen pixmaps, Manual (the window manager composes
@@ -897,17 +902,7 @@ XWM_API long xwm_enc_change_window_attributes(unsigned char *out, unsigned long 
 /* XFIXES QueryVersion: twelve bytes, the version the window manager speaks; a server takes no other XFIXES request before it. */
 XWM_API long xwm_enc_xfixes_query_version(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int client_major, unsigned int client_minor)
 {
-        long n;
-
-        if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255)
-                return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 12, major_opcode);
-        if (n < 0)
-                return n;
-        out[1] = XWM_XFIXES_QUERY_VERSION;
-        xwm_put32(out + 4, client_major);
-        xwm_put32(out + 8, client_minor);
-        return n;
+        return xwm_enc_ext_version(out, cap, major_opcode, XWM_XFIXES_QUERY_VERSION, client_major, client_minor);
 }
 
 /* XFIXES SelectSelectionInput: the window is told of the selection's owner changing, its owner's window going and its owner's
@@ -1472,8 +1467,8 @@ XWM_API int xwm_parse_event(const unsigned char *buf, unsigned long len, struct 
         case XWM_EVENT_ENTER:
         case XWM_EVENT_LEAVE:
                 out->kind = type == XWM_EVENT_ENTER ? XWM_EV_ENTER : XWM_EV_LEAVE;
-                out->event = xwm_get32(buf + 8);
-                out->mode = buf[26];
+                out->event = xwm_get32(buf + 12);
+                out->mode = buf[30];
                 break;
         case XWM_EVENT_SELECTION_CLEAR:
                 out->kind = XWM_EV_SELECTION_CLEAR;

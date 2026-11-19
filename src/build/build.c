@@ -4128,6 +4128,22 @@ typedef struct build_tool_entry
 static build_tool_entry build_tool_table[BUILD_TOOL_ROOM];
 static positive build_tool_count;
 
+static positive build_registry_words(build_lines address_to walk, p8 address_to store,
+                                     string_address address_to words, bool strip_quote)
+{
+        positive length = walk->length;
+        p8 address_to flat = build_text_take(length + 1);
+
+        for (positive which = 0; which < length; which++)
+        {
+                p8 byte = walk->line[which];
+
+                flat[which] = (byte == '(' || byte == ')' || byte == ',' || (strip_quote && byte == '"')) ? ' ' : byte;
+        }
+        flat[length] = end;
+        return build_words_of((string_address)flat, length, words, BUILD_ARGUMENT_ROOM, store, BUILD_WORD_ROOM);
+}
+
 static bool build_tools_read()
 {
         build_lines walk;
@@ -4135,49 +4151,20 @@ static bool build_tools_read()
 
         if (build_tool_count)
                 return true;
-
-        if (file_slurp(build_setting_get("tool_registry"), build_file_two,
-                        BUILD_FILE_ROOM) < 0)
+        if (file_slurp(build_setting_get("tool_registry"), build_file_two, BUILD_FILE_ROOM) < 0)
                 return false;
-
         store = build_text_take(BUILD_WORD_ROOM);
         build_lines_open(address_of walk, (string_address)build_file_two);
-
-        while (build_lines_next(address_of walk) &&
-               build_tool_count < BUILD_TOOL_ROOM)
+        while (build_lines_next(address_of walk) && build_tool_count < BUILD_TOOL_ROOM)
         {
                 string_address words[BUILD_ARGUMENT_ROOM];
-                positive parts;
-                positive length = walk.length;
-                p8 address_to flat = build_text_take(length + 1);
 
-                //      The shell split on "[(),[:space:]]+", so the separators
-                //      are turned into blanks and the ordinary word splitter
-                //      does the rest.
-                for (positive which = 0; which < length; which++)
-                {
-                        p8 byte = walk.line[which];
-
-                        flat[which] = (byte == '(' || byte == ')' || byte == ',')
-                                              ? ' '
-                                              : byte;
-                }
-
-                flat[length] = end;
-                parts = build_words_of((string_address)flat, length,
-                                       (string_address address_to)words,
-                                       BUILD_ARGUMENT_ROOM, store,
-                                       BUILD_WORD_ROOM);
-
-                if (parts < 3 || !word_is(words[0], "SHELL_TOOL"))
+                if (build_registry_words(address_of walk, store, words, false) < 3 || !word_is(words[0], "SHELL_TOOL"))
                         continue;
-
-                build_tool_table[build_tool_count].category =
-                        build_join(words[1], null);
+                build_tool_table[build_tool_count].category = build_join(words[1], null);
                 build_tool_table[build_tool_count].name = build_join(words[2], null);
                 build_tool_count++;
         }
-
         return true;
 }
 
@@ -4207,57 +4194,28 @@ static bool build_builtins_read()
 
         if (build_builtins_ready)
                 return true;
-
-        if (file_slurp(build_setting_get("builtin_registry"), build_file_two,
-                        BUILD_FILE_ROOM) < 0)
+        if (file_slurp(build_setting_get("builtin_registry"), build_file_two, BUILD_FILE_ROOM) < 0)
                 return false;
-
         store = build_text_take(BUILD_WORD_ROOM);
         build_lines_open(address_of walk, (string_address)build_file_two);
-
-        while (build_lines_next(address_of walk) &&
-               build_builtin_count < BUILD_BUILTIN_ROOM)
+        while (build_lines_next(address_of walk) && build_builtin_count < BUILD_BUILTIN_ROOM)
         {
                 string_address words[BUILD_ARGUMENT_ROOM];
                 positive parts;
-                positive length = walk.length;
-                p8 address_to flat = build_text_take(length + 1);
 
-                //      Only rows as the table writes them, four spaces in;
-                //      the macro definitions above it start at the margin.
-                if (length < 17 || memory_compare(walk.line, "    SHELL_BUILTIN", 17))
+                if (walk.length < 17 || memory_compare(walk.line, "    SHELL_BUILTIN", 17))
                         continue;
-
-                for (positive which = 0; which < length; which++)
-                {
-                        p8 byte = walk.line[which];
-
-                        flat[which] = (byte == '(' || byte == ')' || byte == ',' ||
-                                       byte == '"')
-                                              ? ' '
-                                              : byte;
-                }
-
-                flat[length] = end;
-                parts = build_words_of((string_address)flat, length,
-                                       (string_address address_to)words,
-                                       BUILD_ARGUMENT_ROOM, store,
-                                       BUILD_WORD_ROOM);
-
+                parts = build_registry_words(address_of walk, store, words, true);
                 if (parts == 3 && word_is(words[0], "SHELL_BUILTIN_CORE"))
                         build_builtin_core++;
                 else if (parts == 4 && word_is(words[0], "SHELL_BUILTIN"))
                 {
-                        build_builtin_table[build_builtin_count].key =
-                                build_join(words[1], null);
-                        build_builtin_table[build_builtin_count].name =
-                                build_join(words[2], null);
+                        build_builtin_table[build_builtin_count].key = build_join(words[1], null);
+                        build_builtin_table[build_builtin_count].name = build_join(words[2], null);
                         build_builtin_count++;
                 }
         }
-
         build_builtins_ready = build_builtin_count > 0;
-
         return build_builtins_ready;
 }
 
@@ -4949,15 +4907,12 @@ static b32 build_gpu_kernels(string_address input, string_address output)
         //      The source's FNV-1a 64 first (GPU_KERNELS_ASM_HASH), which gpu.c holds to src/canvas/gpu_asm.hash: kernels made of another
         //      gpu.asm than the tree's are a compile error.
         {
-                static const char digits[] = "0123456789abcdef";
                 char line[160] = "#define GPU_KERNELS_ASM_HASH 0x0000000000000000ull // the FNV-1a 64 of the gpu.asm these were made of\n";
-                unsigned long long hash = 0xcbf29ce484222325ull;
+                p8 raw[8];
                 bipolar handle;
 
-                for (bipolar k = 0; k < got; k++)
-                        hash = (hash ^ build_gpu_source[k]) * 0x100000001b3ull;
-                for (unsigned int k = 0; k < 16; k++)
-                        line[31 + 15 - k] = digits[hash >> (4 * k) & 15];
+                network_store_64(raw, hash_fnv1a64(0xcbf29ce484222325ull, build_gpu_source, (positive)got));
+                memory_into_hex(line + 31, raw, 8);
                 handle = system_open_at_mode(AT_FDCWD, temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
                 refuse_if(handle < 0, 1, "gpu-kernels: cannot write %s\n", temporary);
                 refuse_if(system_write_once(handle, line, string_length((string_address)line)) < 0 ||
@@ -5000,11 +4955,11 @@ static positive build_gpu_i915_put(positive at, string_address text)
 //      A word: 0x and its eight hex digits.
 static positive build_gpu_i915_word(positive at, unsigned long value)
 {
-        static const char hex[] = "0123456789abcdef";
         char word[] = "0x00000000";
+        p8 raw[4];
 
-        for (positive i = 0; i < 8; i++)
-                word[9 - i] = hex[(value >> (4 * i)) & 15];
+        network_store_32(raw, (p32)value);
+        memory_into_hex(word + 2, raw, 4);
         return build_gpu_i915_put(at, word);
 }
 

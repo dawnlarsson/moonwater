@@ -1385,6 +1385,8 @@ unsigned long long wire_arguments(const unsigned char *kinds, const unsigned cha
 unsigned long long wire_event(unsigned char *into, unsigned long long object, unsigned long long opcode, const unsigned int *words,
                               unsigned long long count);
 int bits_trailing_zeros(unsigned long long value);
+void memory_zero(void *destination, unsigned long size);
+unsigned long memory_into_hex(void *destination, const void *source, unsigned long size);
 #define WIRE_NONE 1
 #define WIRE_WORD 2
 #define WIRE_TEXT 4
@@ -1905,24 +1907,7 @@ static inline long wayland_surface_index(struct wayland_client *c, const struct 
 
 static inline void wayland_zero(void *dst, unsigned long bytes)
 {
-#ifdef LIBRARY_THREAD_RUNTIME
         memory_zero(dst, bytes);
-#else
-        unsigned char *p = (unsigned char *)dst;
-
-        if (bytes >= 8 && (((unsigned long)p) & 7) == 0)
-        {
-                unsigned long *w = (unsigned long *)p;
-                unsigned long words = bytes >> 3;
-
-                for (unsigned long at = 0; at < words; at++)
-                        w[at] = 0;
-                p += words << 3;
-                bytes &= 7;
-        }
-        for (unsigned long at = 0; at < bytes; at++)
-                p[at] = 0;
-#endif
 }
 
 static void wayland_timeline_unref(struct wayland_client *c, long idx)
@@ -4010,10 +3995,8 @@ static int wayland_compositor_request(struct wayland_client *c, long op, struct 
         s = &c->surfaces[slot];
         {
                 unsigned int gen = s->gen;
-                unsigned char *clear = (unsigned char *)s;
 
-                for (unsigned long at = 0; at < sizeof *s; at++)
-                        clear[at] = 0;
+                memory_zero(s, sizeof *s);
                 s->gen = gen;
         }
         s->live = 1;
@@ -5710,12 +5693,7 @@ static int wayland_wm_base_request(struct wayland_client *c, struct wayland_obje
                 slot = wayland_client_take(c, &c->positioner_table);
                 if (slot < 0)
                         return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for the positioner");
-                {
-                        unsigned char *clear = (unsigned char *)&c->positioners[slot];
-
-                        for (unsigned long at = 0; at < sizeof c->positioners[slot]; at++)
-                                clear[at] = 0;
-                }
+                memory_zero(&c->positioners[slot], sizeof c->positioners[slot]);
                 c->positioners[slot].live = 1;
                 c->positioners[slot].id = c->objects[a[0].slot].id;
                 c->objects[a[0].slot].link = (int)slot;
@@ -6982,8 +6960,7 @@ WAYLAND_API void wayland_keyboard_to(long row)
 
                 // A window is entered with no key held and the locks the compositor says: whatever was held went with the window
                 // that had the keys, whose release the compositor sent there.
-                for (long key = 0; key < 16; key++)
-                        wayland.keys[key] = 0;
+                memory_zero(wayland.keys, sizeof wayland.keys);
                 wayland.mods[0] = wayland.mods[1] = wayland.mods[3] = 0;
                 wayland.mods[2] = (unsigned long)wayland.host->locks(wayland.host->context);
                 for (long at = 0; at < count; at++)
@@ -9075,7 +9052,7 @@ static int wayland_drm_request(struct wayland_client *c, struct wayland_object *
                         return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_format, "unsupported prime format");
                 if (a[5].i < 0 || a[6].i <= 0 || a[6].i > (1L << 20) ||
                     (format != WAYLAND_FOURCC_NV12 && (a[6].i < width * 4 || (a[6].i & 3))) ||
-                    (format == WAYLAND_FOURCC_NV12 && ((width & 1) || (height & 1) || a[7].i < 0 || a[8].i < width)))
+                    (format == WAYLAND_FOURCC_NV12 && ((width & 1) || (height & 1) || a[7].i < 0 || a[8].i < width || a[8].i > (1L << 20))))
                         return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_format, "invalid prime stride or offset");
                 made = wayland_dmabuf_alloc_buffer(c, (unsigned long)width, (unsigned long)height, format, 0, plane_count, fds, offsets,
                                                    strides, WAYLAND_MODIFIER_INVALID, a[0].slot);
@@ -9696,16 +9673,11 @@ static int wayland_token_free(void)
 
 static int wayland_token_make(struct wayland_token *t)
 {
-        static const char digits[] = "0123456789abcdef";
         unsigned char bytes[16];
 
         if (!wayland.host->random(wayland.host->context, bytes, (long)sizeof bytes))
                 return 0;
-        for (int at = 0; at < 16; at++)
-        {
-                t->text[2 * at] = digits[bytes[at] >> 4];
-                t->text[2 * at + 1] = digits[bytes[at] & 15];
-        }
+        memory_into_hex(t->text, bytes, 16);
         t->text[32] = 0;
         return 1;
 }
@@ -10487,24 +10459,13 @@ WAYLAND_API void wayland_stats_get(struct wayland_stats *into)
 
 WAYLAND_API int wayland_start(const struct wayland_host *host)
 {
-        unsigned char *clear = (unsigned char *)&wayland;
-
         if (wayland.host || !host || !host->alloc || !host->release || !host->map || !host->remap || !host->unmap ||
             !host->close || !host->row_open || !host->row_close || !host->row_picture || !host->row_title || !host->row_do ||
             !host->row_facts || !host->screens || !host->now || !host->keymap || !host->repeat || !host->seat || !host->locks ||
             !host->clip_type || !host->clip_pull || !host->clip_abort || !host->clip_push || !host->clip_clear || !host->dmabuf_info ||
             !host->dmabuf_table || !host->dmabuf_map || !host->pointer_hold || !host->random)
                 return -1;
-        // The rows of a shim started before are let go of by the host they were made by.
-        if (wayland.host)
-        {
-                wayland_client_slots_drop();
-                wayland_table_drop(&wayland.row_client_table);
-                wayland_table_drop(&wayland.row_surface_table);
-                wayland_table_drop(&wayland.row_percent_table);
-        }
-        for (unsigned long at = 0; at < sizeof wayland; at++)
-                clear[at] = 0;
+        memory_zero(&wayland, sizeof wayland);
         wayland.pointer_row = wayland.pointer_surface = wayland.keyboard_row = -1;
         wayland.drag.client = wayland.drag.source = wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
         wayland.drag.xtarget = -1;

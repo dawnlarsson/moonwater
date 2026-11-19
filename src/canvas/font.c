@@ -3402,32 +3402,40 @@ static p8 font_matches(const font_shaper address_to s, const font_matcher addres
         }
 }
 
+static p8 font_scan_step(font_shaper address_to s, const font_item address_to it, const font_matcher address_to m,
+                         p32 i, p8 context, p32 props, p8 address_to stop)
+{
+        p32 skip;
+        p8 wanted = context || (it->mask & s->lookup_mask) != 0;
+
+        if (s->ops-- <= 0)
+        {
+                s->failed = true;
+                *stop = true;
+                return false;
+        }
+        skip = font_skip_of(s, it, context, props);
+        if (skip == 1)
+                return false;
+        if (wanted && (m ? font_matches(s, m, i, it->glyph) : skip == 0))
+                return true;
+        if (skip == 0)
+                *stop = true;
+        return false;
+}
+
 //      The glyph after *at that is the i'th of a rule, or any glyph the lookup keeps with no matcher, in info.
 static p8 font_scan_next(font_shaper address_to s, const font_matcher address_to m, p32 i, p8 context, p32 address_to at,
                            p32 props)
 {
-        for (p32 k = *at + 1; k < s->len; k++)
-        {
-                const font_item address_to it = &s->info[k];
-                p32 skip;
-                p8 wanted = context || (it->mask & s->lookup_mask) != 0;
+        p8 stop = false;
 
-                if (s->ops-- <= 0)
-                {
-                        s->failed = true;
-                        return false;
-                }
-                skip = font_skip_of(s, it, context, props);
-                if (skip == 1)
-                        continue;
-                if (wanted && (m ? font_matches(s, m, i, it->glyph) : skip == 0))
+        for (p32 k = *at + 1; k < s->len && !stop; k++)
+                if (font_scan_step(s, &s->info[k], m, i, context, props, &stop))
                 {
                         *at = k;
                         return true;
                 }
-                if (skip == 0)
-                        return false;
-        }
         return false;
 }
 
@@ -3435,28 +3443,14 @@ static p8 font_scan_next(font_shaper address_to s, const font_matcher address_to
 static p8 font_scan_prev(font_shaper address_to s, const font_matcher address_to m, p32 i, p8 context, p32 address_to at,
                            p32 props)
 {
-        for (p32 k = *at; k > 0; k--)
-        {
-                const font_item address_to it = &s->out[k - 1];
-                p32 skip;
-                p8 wanted = context || (it->mask & s->lookup_mask) != 0;
+        p8 stop = false;
 
-                if (s->ops-- <= 0)
-                {
-                        s->failed = true;
-                        return false;
-                }
-                skip = font_skip_of(s, it, context, props);
-                if (skip == 1)
-                        continue;
-                if (wanted && (m ? font_matches(s, m, i, it->glyph) : skip == 0))
+        for (p32 k = *at; k > 0 && !stop; k--)
+                if (font_scan_step(s, &s->out[k - 1], m, i, context, props, &stop))
                 {
                         *at = k - 1;
                         return true;
                 }
-                if (skip == 0)
-                        return false;
-        }
         return false;
 }
 

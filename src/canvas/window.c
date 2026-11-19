@@ -3998,7 +3998,7 @@ static int window_name_valid(const char *name)
 
         if (!((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= '0' && name[0] <= '9')))
                 return 0;
-        for (; name[at] && at < WINDOWS_NAME; at++)
+        for (; at < WINDOWS_NAME && name[at]; at++)
                 if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
                         return 0;
         return at < WINDOWS_NAME;
@@ -4548,7 +4548,7 @@ static int place_screen_name_valid(const char *name)
 {
         unsigned int at = 0;
 
-        for (; name[at] && at < WINDOWS_NAME; at++)
+        for (; at < WINDOWS_NAME && name[at]; at++)
                 if (!((name[at] >= 'a' && name[at] <= 'z') || (name[at] >= 'A' && name[at] <= 'Z') ||
                       (name[at] >= '0' && name[at] <= '9') || name[at] == '-'))
                         return 0;
@@ -5297,6 +5297,9 @@ static unsigned long windows_clip_word(const unsigned char *at, unsigned int byt
 
 static int windows_clip_same(const char *a, unsigned long a_length, const char *b)
 {
+#ifdef STANDARD_MODERN_C
+        return string_length((string_address)b) == a_length && !memory_compare_ascii_case(a, b, a_length);
+#else
         unsigned long at = 0;
 
         for (; at < a_length && b[at]; at++)
@@ -5307,6 +5310,7 @@ static int windows_clip_same(const char *a, unsigned long a_length, const char *
                         return 0;
         }
         return at == a_length && !b[at];
+#endif
 }
 
 /*

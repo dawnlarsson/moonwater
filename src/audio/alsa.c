@@ -1153,7 +1153,7 @@ AUDIO_API long audio_mixer_prepare(long card, int which, struct audio_mixer_repo
                         if (audio_sys_ioctl((int)fd, AUDIO_CTL_ELEM_READ, &now) == 0 && now.value.integer[0] == 0)
                         {
                                 if (!report->left_off)
-                                        for (long i = 0; i < 47 && ids[k].name[i]; i++)
+                                        for (long i = 0; i < 44 && ids[k].name[i]; i++)
                                                 report->first_off[i] = (char)ids[k].name[i];
                                 report->left_off++;
                         }

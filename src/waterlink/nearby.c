@@ -1281,41 +1281,6 @@ static p8 link_nearby_send(p8 address_to packet, positive length,
             length);
 }
 
-/*
-        Why discovery has not linked a machine, as a number for a status or
-        doctor to keep and the words it prints. Linked is a greeting that
-        opened; a one-use code that turned one away is a code refused; a send
-        that found no route is no route; anything else is no reply on the port
-        (discovery hears nothing it can answer, and cannot tell a machine that
-        is off from one that does not know this key). Bad key is never said
-        here: discovery never reads a reply, and the reply that does not verify
-        is the client's to say.
-*/
-static __attribute__((unused)) positive link_discovery_reason(void)
-{
-        if (link_nearby.linked)
-                return LINK_REASON_LINKED;
-        if (link_nearby.refused_code)
-                return LINK_REASON_CODE_REFUSED;
-        if (link_nearby.no_route)
-                return LINK_REASON_NO_ROUTE;
-        return LINK_REASON_NO_REPLY;
-}
-
-/* The words for a reason, as the link's other reasons print them. */
-static __attribute__((unused)) string_address link_discovery_reason_text(positive reason)
-{
-        static const string_address texts[] = {
-            "linked",
-            "no route to the address",
-            "no reply on the link port (it is off, unreachable, or does not know this machine's key)",
-            "reply but bad key: the machine there is not the one paired",
-            "code refused: it was used already, or by another machine",
-        };
-
-        return reason < array_count(texts) ? (string_address)texts[reason] : (string_address)"unknown reason";
-}
-
 static p8 link_nearby_announce(p32 ttl)
 {
         p8 packet[DISCOVERY_MDNS_MAX];

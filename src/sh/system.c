@@ -586,6 +586,9 @@ static COLD fn system_kernel_defaults(void)
         makes udmabuf's at boot. The tier lane reads the uinput mode back, so
         a change to it is a red row and not a silent one.
 */
+#define SYSTEM_NOFILE_TARGET BOWL_NOFILE_TARGET
+#define SYSTEM_MEMLOCK_TARGET BOWL_MEMLOCK_TARGET
+
 static COLD fn system_resource_limits(void)
 {
         bowl_raise_rlimit(BOWL_RLIMIT_NOFILE, BOWL_NOFILE_TARGET);

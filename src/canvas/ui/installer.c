@@ -137,7 +137,7 @@ static struct
         int chosen;        // the drive chosen, by its place in drives, -1 none
         // The command running: its process and output, what it is for, which of the plan it is and how many there are, and whether one failed.
         bipolar child;
-        bipolar output;
+        b32 output;
         int job, at, commands;
         b32 failed;
         b64 next_look, next_wifi;
@@ -154,46 +154,10 @@ static struct ui_app installer_app;
 */
 static b32 installer_start(string_address address_to words, positive count, int job, const char address_to input)
 {
-        int ends[2] = {-1, -1}, feeds[2] = {-1, -1};
-        positive length = input ? string_length((string_address)input) : 0;
-        bipolar child;
-
-        if (installer.output >= 0 || installer.child > 0 || system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+        if (installer.output >= 0 || installer.child > 0 ||
+            !ui_start_piped(words, count, input, &installer.child, &installer.output))
                 return false;
-        system_call_3(syscall(fcntl), (positive)ends[0], 4, O_NONBLOCK);
-        if (length && (system_call_2(syscall(pipe2), (positive)feeds, O_CLOEXEC) != 0 ||
-                       system_write_once((b32)feeds[1], input, length) != (bipolar)length || system_write_once((b32)feeds[1], "\n", 1) != 1))
-        {
-                system_close(ends[0]), system_close(ends[1]);
-                if (feeds[0] >= 0)
-                        system_close(feeds[0]);
-                if (feeds[1] >= 0)
-                        system_close(feeds[1]);
-                return false;
-        }
-        if (feeds[1] >= 0)
-                system_close(feeds[1]);
-        child = system_fork();
-        if (child == 0)
-        {
-                bipolar quiet = feeds[0] >= 0 ? feeds[0] : system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
-
-                if (quiet >= 0)
-                        system_call_3(syscall(dup3), (positive)quiet, 0, 0);
-                system_call_3(syscall(dup3), (positive)ends[1], 1, 0);
-                system_call_3(syscall(dup3), (positive)ends[1], 2, 0);
-                (void)shell_exec_file(words[0], words, count, window_asked_environment());
-                system_call_1(syscall(exit), 127);
-        }
-        system_close(ends[1]);
-        if (feeds[0] >= 0)
-                system_close(feeds[0]);
-        if (child < 0)
-        {
-                system_close(ends[0]);
-                return false;
-        }
-        installer.child = child, installer.output = ends[0], installer.job = job;
+        installer.job = job;
         installer.big->said_length = 0, installer.big->said[0] = 0;
         return true;
 }

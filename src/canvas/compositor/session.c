@@ -502,13 +502,13 @@ static unsigned int compositor_snap_ink(void)
                 for (int step = 0; step <= 48 && !ink; step++)
                 {
                         if (ui_contrast(ui_mix(at, percent, ground), ground) >= COMPOSITOR_SNAP_READ)
-                                ink = (at & 0xffffffu) | (percent * 255 + 50) / 100 << 24;
+                                ink = (at & 0xffffffu) | ((unsigned int)(percent * 255 + 50) / 100u) << 24;
                         else
                                 at = ui_mix(at, 95, pole);
                 }
         }
         if (!ink)
-                ink = (selection & 0xffffffu) | COMPOSITOR_SNAP_PERCENT_MOST * 255 / 100 << 24;
+                ink = (selection & 0xffffffu) | (COMPOSITOR_SNAP_PERCENT_MOST * 255u / 100u) << 24;
         made_ground = ground, made_selection = selection, made_ink = ink;
         return ink;
 }

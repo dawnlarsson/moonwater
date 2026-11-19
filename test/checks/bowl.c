@@ -3089,9 +3089,9 @@ static p8 secret_refused(string_address what, p8 group)
         b32 answer;
         bipolar got;
 
-        system_call_2(syscall(dup2), (positive)file, 2);
+        system_call_3(syscall(dup3), (positive)file, 2, 0);
         answer = group ? link_group_join(link, 2) : host_wifi(wifi, 5);
-        system_call_2(syscall(dup2), (positive)kept, 2);
+        system_call_3(syscall(dup3), (positive)kept, 2, 0);
         system_close((positive)kept);
         system_close((positive)file);
         got = file_read_once_at(AT_FDCWD, "/tmp/moonwater-secret-said", said, sizeof said - 1);

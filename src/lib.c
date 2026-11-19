@@ -55227,6 +55227,10 @@ positive memory_blend_u32_rect(p32 address_to into, positive into_stride,
                                const p8 address_to from, positive from_stride,
                                positive width, positive height,
                                const p32 address_to table);
+positive memory_blend_u32_rect_baseline(p32 address_to into, positive into_stride,
+                                        const p8 address_to from, positive from_stride,
+                                        positive width, positive height,
+                                        const p32 address_to table);
 // count pixels of into, each laid over by one tone (0xaarrggbb): the ui_over of a run of one colour. A tone of alpha 0
 // changes nothing; otherwise each channel is the tone's plus the pixel's times (255 - alpha) / 255, rounded as ui_div255
 // rounds, clamped at 255. A premultiplied tone (each colour at most its alpha) is the case the kit makes. Nothing past

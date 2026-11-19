@@ -122,12 +122,14 @@ static int compositor_frost(const struct compositor_frame *frames, unsigned int 
         int aw = tw * block, ah = th * block;
         int cx0 = ax < 0 ? 0 : ax, cx1 = ax + aw > compositor.width ? compositor.width : ax + aw;
         int cy0 = 0, cy1 = compositor.height;
-        unsigned int *strip = compositor_scratch(&compositor.frost, &compositor.frost_bytes,
-                                                 ((unsigned long)aw * COMPOSITOR_GLASS_BAND + (unsigned long)tw * th) * 4);
-        unsigned int *small;
+        unsigned int *strip, *small;
         unsigned long bytes;
 
-        if (!strip || sw <= 0 || sh <= 0)
+        if (sw <= 0 || sh <= 0)
+                return 0;
+        strip = compositor_scratch(&compositor.frost, &compositor.frost_bytes,
+                                   ((unsigned long)aw * COMPOSITOR_GLASS_BAND + (unsigned long)tw * th) * 4);
+        if (!strip)
                 return 0;
         small = strip + (unsigned long)aw * COMPOSITOR_GLASS_BAND;
 
@@ -287,9 +289,12 @@ static int compositor_blur(unsigned int *into, const struct compositor_frame *fr
         int shift = COMPOSITOR_GLASS_LEVELS, margin = COMPOSITOR_GLASS_LEVELS;
         int sx = compositor_floor_shift(x0, shift) - margin, sy = compositor_floor_shift(y0, shift) - margin;
         int sw = compositor_ceil_shift(x1, shift) + margin - sx, sh = compositor_ceil_shift(y1, shift) + margin - sy;
-        unsigned int *top = compositor_scratch(&compositor.blur, &compositor.blur_bytes, (unsigned long)sw * sh * 4);
+        unsigned int *top;
 
-        if (x1 <= x0 || y1 <= y0 || !top || !compositor_frost(frames, count, sx, sy, sw, sh, top, (unsigned long)sw))
+        if (x1 <= x0 || y1 <= y0)
+                return 0;
+        top = compositor_scratch(&compositor.blur, &compositor.blur_bytes, (unsigned long)sw * sh * 4);
+        if (!top || !compositor_frost(frames, count, sx, sy, sw, sh, top, (unsigned long)sw))
                 return 0;
         {
                 unsigned long pitch;

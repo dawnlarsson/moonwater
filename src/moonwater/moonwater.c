@@ -72,12 +72,6 @@ static const struct {
           (unsigned char)offset_of(struct moonwater_overlay, end_line) },
 };
 
-static inline unsigned short moonwater_overlay_line(const struct moonwater_overlay *overlay,
-                                                    unsigned char off)
-{
-        return *(const unsigned short *)((const unsigned char *)overlay + off);
-}
-
 static inline unsigned short moonwater_bind_line(const struct moonwater_overlay *overlay,
                                                  unsigned int event)
 {

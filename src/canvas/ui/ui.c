@@ -8478,11 +8478,7 @@ static inline b32 language_rtl(void)
 
 static unsigned int language_hash(const char address_to text)
 {
-        unsigned int hash = 2166136261u;
-
-        for (; *text; text++)
-                hash = (hash ^ (p8)*text) * 16777619u;
-        return hash;
+        return hash_fnv1a(2166136261u, text, string_length((string_address)text));
 }
 
 static const char address_to language_keyed_of(const char address_to english)
@@ -9883,14 +9879,6 @@ static int ui_advance(struct ui address_to ui, const font_face address_to const 
 static int ui_run_in(struct ui address_to ui, const font_face address_to const address_to faces, int x, int baseline,
                      string_address text, int size, unsigned int colour, unsigned int alpha, int low, int high,
                      unsigned int stroke);
-
-static int ui_run(struct ui address_to ui, int x, int baseline, string_address text, int size, b32 bold,
-                  unsigned int colour, unsigned int alpha, int low, int high)
-{
-        const font_face address_to faces[2] = {bold && ui->bold ? ui->bold : ui->regular, ui->regular};
-
-        return ui_run_in(ui, faces, x, baseline, text, size, colour, alpha, low, high, 0);
-}
 
 /*
         The walk of a run's rows and columns (ui_run_in's, after its scratch is drawn): each row in the band, each column from
@@ -11712,18 +11700,6 @@ static inline int ui_mirror(int x, int w, int left, int width)
 static inline int ui_point(int x, int left, int width)
 {
         return ui_rtl() ? 2 * left + width - 1 - x : x;
-}
-
-// A box w wide that is `in` from the start edge of the container [left, left + width): the left one reading from the left, the right one from the right.
-static inline int ui_start_x(int left, int width, int in, int w)
-{
-        return ui_rtl() ? left + width - in - w : left + in;
-}
-
-// And `in` from its end edge.
-static inline int ui_end_x(int left, int width, int in, int w)
-{
-        return ui_rtl() ? left + in : left + width - in - w;
 }
 
 static fn ui_kit_settle(void);
@@ -17312,79 +17288,18 @@ static void ui_moon_sample_slopes(const struct ui_moon_map address_to map, int l
         }
 }
 
-// The moon's phase at a time, seconds since 1970 (UTC): its age in its mean month (29.530588853 days) since the new moon of 6 January
-// 2000 at 18:14, as a share of the month (Q30). Near enough to the sky's to show the night's moon; not an ephemeris.
-static b64 ui_moon_phase_at(long long seconds)
-{
-        long long month = 2551442877ll; // the mean month in milliseconds
-        long long since = ((seconds - 947182440ll) * 1000) % month;
-
-        since = since < 0 ? since + month : since;
-        return (b64)((since << UI_Q) / month); // under 2^32 times 2^30: a long holds it
-}
-
 /*
         The light the sphere sends to the eye at a point of its face (x right, y up, z toward the eye; on the unit sphere), the body turned
         by turn: its albedo from the map at the level, its normal moved by the map's slopes, Lommel-Seeliger's law with a little of
         Lambert's in the sun (sun in the body's frame), earthshine on the dark side. 0 to about 1.
 */
-static decimal ui_moon_light(const struct ui_moon_map address_to map, int level, decimal x, decimal y, decimal z, decimal ct, decimal st,
-                             const decimal sun[3], decimal earth)
+static decimal ui_moon_shade(const struct ui_moon_map address_to map, int level, decimal bx, decimal by, decimal bz, decimal z,
+                             decimal longitude, decimal latitude, decimal cl, decimal sl, decimal clg, const decimal sun[3], decimal earth)
 {
-        decimal bx = x * ct + z * st, bz = -x * st + z * ct, by = y;
-        decimal longitude = arc_tangent_two(bx, bz), latitude = arc_sine(by > 1 ? 1 : by < -1 ? -1 : by);
         int w = map->width >> level, h = w / 2;
         decimal u = (longitude + UI_MOON_PI) / (2 * UI_MOON_PI) * w, v = (UI_MOON_PI / 2 - latitude) / UI_MOON_PI * h;
-        decimal albedo, sampled[3], cl = square_root(1 - by * by);
-        decimal n[3], len, mu0, mu, light;
+        decimal albedo, sampled[3], n[3], len, mu0, mu, light;
 
-        ui_moon_sample_slopes(map, level, u, v, sampled);
-        albedo = sampled[0];
-        {
-                // The slopes in height per radian east and north, and the normal leant from them (the eye's frame turned with the body).
-                decimal per = w / (2 * UI_MOON_PI), d_east = sampled[1] * per / (cl > 0.05 ? cl : 0.05), d_north = sampled[2] * per;
-                decimal sl = sine(longitude), clg = cosine(longitude), sb = by;
-                decimal east[3] = {clg, 0, -sl}, north[3] = {-sb * sl, cl, -sb * clg};
-
-                d_east *= 2.5, d_north *= 2.5; // the relief made a little plainer, as the low sun of a photograph's terminator makes it
-                n[0] = bx - d_east * east[0] - d_north * north[0];
-                n[1] = by - d_east * east[1] - d_north * north[1];
-                n[2] = bz - d_east * east[2] - d_north * north[2];
-                len = square_root(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-                n[0] /= len, n[1] /= len, n[2] /= len;
-        }
-        // mu is read on the sphere's own normal at the eye, so the limb keeps its edge; mu0 on the leant one, so the relief shows.
-        mu = z > 0.02 ? z : 0.02;
-        mu0 = n[0] * sun[0] + n[1] * sun[1] + n[2] * sun[2];
-        {
-                // Where the sphere itself turns from the sun, soft over its last few hundredths, so the relief does not light the night side.
-                decimal smooth = bx * sun[0] + by * sun[1] + bz * sun[2];
-                decimal edge = smooth <= -0.03 ? 0 : smooth >= 0.06 ? 1 : (smooth + 0.03) / 0.09;
-
-                light = mu0 > 0 ? albedo * (0.85 * 2 * mu0 / (mu0 + mu) + 0.15 * mu0) * edge : 0;
-        }
-        return light + albedo * earth * mu;
-}
-
-/*
-        The light at a point of the sphere whose place the table has made once (ui_moon_sphere): x, y, z in the eye's frame, its longitude
-        before the turn (lon0) and the cosine of its latitude. Turned by t about the axis, its longitude is lon0 + t and its latitude is
-        the same, so the arc tangent, the arc sine, and the sine and cosine of the longitude ui_moon_light takes at every sample are
-        the table's and two products; the rest is ui_moon_light's, step for step.
-*/
-static decimal ui_moon_light_at(const struct ui_moon_map address_to map, int level, decimal x, decimal y, decimal z, decimal lon0, decimal cl, decimal t,
-                                decimal ct, decimal st, const decimal sun[3], decimal earth)
-{
-        decimal bx = x * ct + z * st, bz = -x * st + z * ct, by = y;
-        decimal longitude = lon0 + t, latitude;
-        int w = map->width >> level, h = w / 2;
-        decimal u, v, albedo, sampled[3];
-        decimal n[3], len, mu0, mu, light, sl, clg;
-
-        longitude = longitude > UI_MOON_PI ? longitude - 2 * UI_MOON_PI : longitude <= -UI_MOON_PI ? longitude + 2 * UI_MOON_PI : longitude;
-        latitude = arc_tangent_two(by, cl);
-        u = (longitude + UI_MOON_PI) / (2 * UI_MOON_PI) * w, v = (UI_MOON_PI / 2 - latitude) / UI_MOON_PI * h;
-        sl = cl > 1e-9 ? bx / cl : 0, clg = cl > 1e-9 ? bz / cl : 1;
         ui_moon_sample_slopes(map, level, u, v, sampled);
         albedo = sampled[0];
         {
@@ -17407,6 +17322,27 @@ static decimal ui_moon_light_at(const struct ui_moon_map address_to map, int lev
                 light = mu0 > 0 ? albedo * (0.85 * 2 * mu0 / (mu0 + mu) + 0.15 * mu0) * edge : 0;
         }
         return light + albedo * earth * mu;
+}
+
+static decimal ui_moon_light(const struct ui_moon_map address_to map, int level, decimal x, decimal y, decimal z, decimal ct, decimal st,
+                             const decimal sun[3], decimal earth)
+{
+        decimal bx = x * ct + z * st, bz = -x * st + z * ct, by = y;
+        decimal longitude = arc_tangent_two(bx, bz), latitude = arc_sine(by > 1 ? 1 : by < -1 ? -1 : by);
+
+        return ui_moon_shade(map, level, bx, by, bz, z, longitude, latitude, square_root(1 - by * by), sine(longitude), cosine(longitude),
+                             sun, earth);
+}
+
+static decimal ui_moon_light_at(const struct ui_moon_map address_to map, int level, decimal x, decimal y, decimal z, decimal lon0, decimal cl, decimal t,
+                                decimal ct, decimal st, const decimal sun[3], decimal earth)
+{
+        decimal bx = x * ct + z * st, bz = -x * st + z * ct, by = y;
+        decimal longitude = lon0 + t;
+
+        longitude = longitude > UI_MOON_PI ? longitude - 2 * UI_MOON_PI : longitude <= -UI_MOON_PI ? longitude + 2 * UI_MOON_PI : longitude;
+        return ui_moon_shade(map, level, bx, by, bz, z, longitude, arc_tangent_two(by, cl), cl, cl > 1e-9 ? bx / cl : 0,
+                             cl > 1e-9 ? bz / cl : 1, sun, earth);
 }
 
 /*
@@ -22456,10 +22392,8 @@ static string_address ui_fit_at(struct ui address_to ui, string_address text, in
         }
         if (ui_cuts && length < UI_CUT_TEXT)
         {
-                unsigned int hash = 2166136261u;
+                unsigned int hash = hash_fnv1a(2166136261u, text, length);
 
-                for (positive at = 0; at < length; at++)
-                        hash = (hash ^ (unsigned char)text[at]) * 16777619u;
                 hash = (((hash ^ (unsigned int)type) * 16777619u ^ (unsigned int)room) * 16777619u ^ (unsigned int)ui->scale) * 16777619u;
                 hash = (hash ^ (unsigned int)ui_rtl()) * 16777619u;
                 hash = (hash ^ ui_text_percent) * 16777619u;
@@ -23190,10 +23124,8 @@ static int ui_icon_of(const char *app_id)
 */
 static unsigned int ui_icon_tone(const char *name)
 {
-        unsigned int hash = 2166136261u, hue, x;
+        unsigned int hash = name ? hash_fnv1a(2166136261u, name, string_length((string_address)name)) : 2166136261u, hue, x;
 
-        for (unsigned int at = 0; name && name[at]; at++)
-                hash = (hash ^ (unsigned char)name[at]) * 16777619u;
         // Around the wheel at half the colour's strength: chroma 100 about a lightness of 90, so the least of a colour is 40 and the most 140: white on any of them is over three to one.
         hue = hash % 360u, x = 100u * (60u - (hue % 120u > 60u ? hue % 120u - 60u : 60u - hue % 120u)) / 60u;
         switch (hue / 60u)
@@ -29381,6 +29313,53 @@ static b32 ui_start_apart_at(bipolar folder, string_address address_to words, po
         got = system_read_once(told[0], &failed, sizeof(failed));
         system_close(told[0]);
         return got != (bipolar)sizeof(failed);
+}
+
+static b32 ui_start_piped(string_address address_to words, positive count, const char address_to input,
+                          bipolar address_to out_child, int address_to out_fd)
+{
+        int ends[2] = {-1, -1}, feeds[2] = {-1, -1};
+        positive length = input ? string_length((string_address)input) : 0;
+        bipolar child;
+
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+                return false;
+        system_call_3(syscall(fcntl), (positive)ends[0], 4, O_NONBLOCK);
+        if (length && (system_call_2(syscall(pipe2), (positive)feeds, O_CLOEXEC) != 0 ||
+                       system_write_once((b32)feeds[1], input, length) != (bipolar)length ||
+                       system_write_once((b32)feeds[1], "\n", 1) != 1))
+        {
+                system_close(ends[0]), system_close(ends[1]);
+                if (feeds[0] >= 0)
+                        system_close(feeds[0]);
+                if (feeds[1] >= 0)
+                        system_close(feeds[1]);
+                return false;
+        }
+        if (feeds[1] >= 0)
+                system_close(feeds[1]);
+        child = system_fork();
+        if (child == 0)
+        {
+                bipolar quiet = feeds[0] >= 0 ? feeds[0] : system_open_at(AT_FDCWD, (string_address) "/dev/null", FILE_READ | O_CLOEXEC);
+
+                if (quiet >= 0)
+                        system_call_3(syscall(dup3), (positive)quiet, 0, 0);
+                system_call_3(syscall(dup3), (positive)ends[1], 1, 0);
+                system_call_3(syscall(dup3), (positive)ends[1], 2, 0);
+                (void)shell_exec_file(words[0], words, count, window_asked_environment());
+                system_call_1(syscall(exit), 127);
+        }
+        system_close(ends[1]);
+        if (feeds[0] >= 0)
+                system_close(feeds[0]);
+        if (child < 0)
+        {
+                system_close(ends[0]);
+                return false;
+        }
+        *out_child = child, *out_fd = ends[0];
+        return true;
 }
 
 // The kit's frame: the app's picture at its size, into the buffer the compositor is not reading (ui_app_present). An app's own frame instead, when it names one.

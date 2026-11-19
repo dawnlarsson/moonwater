@@ -2155,7 +2155,7 @@ riscv_alignment_audit()
         alignment_image="$work/riscv-alignment.elf"
         alignment_error="$work/riscv-alignment.err"
 
-        if ! "$@" -O2 -static -nostdlib -nostartfiles $harness_atomics \
+        if ! "$@" -O2 -static -nostdlib -nostartfiles \
                 -fno-stack-protector -fno-builtin -w \
                 -march=rv64imafd_zicsr_zicntr -mabi=lp64d \
                 -DSTANDARD_NO_PLATFORM -T src/build/spark.ld -Wl,-e,string_length \
@@ -6379,7 +6379,7 @@ riscv_default_startup()
                 return 2
         }
 
-        if ! "$startup_cross" -O2 -static -nostdlib -nostartfiles $harness_atomics \
+        if ! "$startup_cross" -O2 -static -nostdlib -nostartfiles \
                 -fno-stack-protector -fno-builtin \
                 -march=rv64imafd_zicsr_zicntr -mabi=lp64d -w \
                 -Wl,-e,_start -Wl,--build-id=none \

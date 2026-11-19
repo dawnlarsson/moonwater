@@ -10198,10 +10198,10 @@ static void xw_test_events(void)
         memset(e, 0, 32); e[0] = 10; e[1] = 3; xw_u(e, 4, 0x400001, 4); e[8] = 1;
         r = xwm_parse_event(e, 32, &v);
         XWCHECK(r == XWM_OK && v.kind == XWM_EV_FOCUS_OUT && v.mode == 1 && v.detail == 3, "FocusOut: its mode and its detail");
-        memset(e, 0, 32); e[0] = 7; xw_u(e, 4, 0x5a1, 4); xw_u(e, 8, 0x400001, 4);
+        memset(e, 0, 32); e[0] = 7; xw_u(e, 4, 0x5a1, 4); xw_u(e, 12, 0x400001, 4);
         r = xwm_parse_event(e, 32, &v);
         XWCHECK(r == XWM_OK && v.kind == XWM_EV_ENTER && v.event == 0x400001, "EnterNotify: the event window");
-        memset(e, 0, 32); e[0] = 8; xw_u(e, 8, 0x400001, 4); e[26] = 2;
+        memset(e, 0, 32); e[0] = 8; xw_u(e, 12, 0x400001, 4); e[30] = 2;
         r = xwm_parse_event(e, 32, &v);
         XWCHECK(r == XWM_OK && v.kind == XWM_EV_LEAVE && v.mode == 2, "LeaveNotify: its mode");
 

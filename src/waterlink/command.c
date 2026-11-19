@@ -1676,24 +1676,21 @@ static b32 link_group_pick(string_address namespace,
 }
 
 //      The grants a verb of the group's was given after its words, or what
-//      a carried group gives: all four. False, said, for one that is none.
-static p8 link_group_allowed(string_address address_to words, positive count,
-                             p32 address_to may)
+//      a carried group gives: all four. 0, or a refusal.
+static b32 link_group_allowed(string_address address_to words, positive count,
+                              p32 address_to may)
 {
         p8 good = true;
 
         address_to may = LINK_GROUP_MAY;
         if (!count)
-                return true;
+                return 0;
         if (!string_equals(words[0], "allow") || count == 1)
-        {
-                host_usage();
-                return false;
-        }
+                return host_usage();
         address_to may = link_grants_of(words + 1, count - 1, address_of good);
         if (!good)
-                host_refuse("a grant is one of shell run files log\n");
-        return good;
+                return host_refuse("a grant is one of shell run files log\n");
+        return 0;
 }
 
 static fn link_group_say(string_address namespace, p32 may)
@@ -1733,8 +1730,9 @@ static b32 link_group_new(string_address address_to words, positive count)
         scope_exit(crypto_forget(key, sizeof key); crypto_forget(text, sizeof text));
         if (count && !string_equals(words[0], "allow"))
                 namespace = words[at++];
-        if (!link_group_allowed(words + at, count - at, address_of may))
-                return 1;
+        refused = link_group_allowed(words + at, count - at, address_of may);
+        if (refused)
+                return refused;
         if (!namespace)
         {
                 link_groups groups;
@@ -1858,8 +1856,9 @@ static b32 link_group_add(string_address address_to words, positive count)
         if (!link_group_text_parse((string_address)made, name, key))
                 return host_refuse("that is not a group's key: NAME:KEY, as moonwater "
                                    "link group key prints it\n");
-        if (!link_group_allowed(words + 1, count - 1, address_of may))
-                return 1;
+        refused = link_group_allowed(words + 1, count - 1, address_of may);
+        if (refused)
+                return refused;
         refused = link_group_store((string_address)name, key, may, address_of replaced);
         if (refused)
                 return refused;
@@ -1911,8 +1910,9 @@ static b32 link_group_stamp(string_address address_to words, positive count)
                 if (!link_group_text_parse((string_address)made, name, key))
                         return host_refuse("that is not a group's key: NAME:KEY, as "
                                            "moonwater link group key prints it\n");
-                if (!link_group_allowed(words + 2, count - 2, address_of may))
-                        return 1;
+                refused = link_group_allowed(words + 2, count - 2, address_of may);
+                if (refused)
+                        return refused;
         }
         else
         {
@@ -3008,7 +3008,6 @@ static b32 link_modem_key_verb(void)
 {
         p8 key[32];
         p8 text[65];
-        static const char digits[] = "0123456789abcdef";
         bipolar got = link_secret_at(LINK_MODEM_PATH, key, true);
 
         scope_exit(crypto_forget(key, sizeof key));
@@ -3016,11 +3015,7 @@ static b32 link_modem_key_verb(void)
                 return host_refuse("%s is not a modem key: it must be a 32-byte "
                                    "file only root can read\n", LINK_MODEM_PATH);
         return_if(got < 0, host_fail(LINK_MODEM_PATH, got));
-        for (positive at = 0; at < 32; at++)
-        {
-                text[2 * at] = digits[((p8)key[at] >> 4) & 15];
-                text[2 * at + 1] = digits[(p8)key[at] & 15];
-        }
+        memory_into_hex(text, key, 32);
         text[64] = 0;
         host_say(log, "%s\n", (string_address)text);
         return 0;

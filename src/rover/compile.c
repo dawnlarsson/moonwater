@@ -1630,25 +1630,34 @@ static bool rover_duration_ms(struct rover_build address_to build, const struct 
         return true;
 }
 
-//      A service's statements in their order, the way a rule's header keeps its own.
-static bool rover_service_slot(struct rover_build address_to build, p8 slot)
+static bool rover_header_slot(struct rover_build address_to build, p8 slot, bool service)
 {
-        static const char address_to const order =
+        static const char address_to const service_order =
             "a service goes about, run, needs, ready, log, restart, give-up, off, then its if lines";
+        static const char address_to const rule_order =
+            "the header goes about, on or when, place, limit, once, off, take";
 
         if (build->stage != ROVER_STAGE_HEADER)
-                return rover_refused(build, "", &build->word[0], " comes before a service's if lines");
+                return rover_refused(build, "", &build->word[0],
+                                     service ? " comes before a service's if lines"
+                                             : " belongs to the header, which comes before the conditions and actions");
         if (slot <= build->header)
         {
                 rover_refused(build, "", &build->word[0], slot == build->header ? " is said twice" : " is out of order: ");
                 if (slot != build->header)
-                        rover_why_add(build, order);
+                        rover_why_add(build, service ? service_order : rule_order);
                 return false;
         }
         if (slot > 2 && build->header < 2)
-                return rover_refused(build, "", &build->word[0], " before the service's run");
+                return rover_refused(build, "", &build->word[0], service ? " before the service's run" : " before the rule's on or when");
         build->header = slot;
         return rover_note_flush(build, slot);
+}
+
+//      A service's statements in their order, the way a rule's header keeps its own.
+static bool rover_service_slot(struct rover_build address_to build, p8 slot)
+{
+        return rover_header_slot(build, slot, true);
 }
 
 static bool rover_service_statement(struct rover_build address_to build)
@@ -1791,6 +1800,20 @@ static bool rover_block_finish(struct rover_build address_to build)
         return rover_rule_finish(build);
 }
 
+static bool rover_name_valid(const struct rover_word address_to name)
+{
+        if (name->quoted || !name->length || name->length > ROVER_NAME_MOST)
+                return false;
+        for (positive at = 0; at < name->length; at++)
+        {
+                p8 c = name->text[at];
+
+                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
+                        return false;
+        }
+        return true;
+}
+
 static bool rover_read_service(struct rover_build address_to build)
 {
         static const p32 waits[3] = ROVER_SERVICE_WAITS;
@@ -1803,13 +1826,8 @@ static bool rover_read_service(struct rover_build address_to build)
                 return rover_refused(build, "a service after a rule: a file's services come before its rules", null, null);
         if (build->words != 2 || name->quoted || !name->length || name->length > ROVER_NAME_MOST)
                 return rover_refused(build, "service takes one word, its name", null, null);
-        for (positive at = 0; at < name->length; at++)
-        {
-                p8 c = name->text[at];
-
-                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
-                        return rover_refused(build, "", name, " is no service name: at most 48 bytes of a-z, 0-9, . _ and -");
-        }
+        if (!rover_name_valid(name))
+                return rover_refused(build, "", name, " is no service name: at most 48 bytes of a-z, 0-9, . _ and -");
         for (positive at = 0; at < build->services; at++)
         {
                 p16 length = memory_load_unaligned(p16, rover_pool(build) + build->service[at].name);
@@ -1846,20 +1864,12 @@ static bool rover_read_rule(struct rover_build address_to build)
                 return false;
         if (build->words != 2)
                 return rover_refused(build, "rule takes one word, its name", null, null);
-        if (name->quoted || !name->length || name->length > ROVER_NAME_MOST)
+        if (!rover_name_valid(name))
                 return rover_refused(build, "", name, " is no rule name: at most 48 bytes of a-z, 0-9, . _ and -");
-        for (positive at = 0; at < name->length; at++)
-        {
-                p8 c = name->text[at];
-
-                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
-                        return rover_refused(build, "", name, " is no rule name: at most 48 bytes of a-z, 0-9, . _ and -");
-        }
         for (positive at = 0; at < build->rules; at++)
         {
-                p16 length;
+                p16 length = memory_load_unaligned(p16, rover_pool(build) + build->rule[at].name);
 
-                memory_copy(&length, rover_pool(build) + build->rule[at].name, 2);
                 if (length == name->length && !memory_compare(rover_pool(build) + build->rule[at].name + 2, name->text,
                                                               length))
                         return rover_refused(build, "", name, " is the name of a rule above");
@@ -1883,22 +1893,7 @@ static bool rover_read_rule(struct rover_build address_to build)
 //      A header statement in its place: about, the trigger, place, limit, once, off, take.
 static bool rover_header(struct rover_build address_to build, p8 slot)
 {
-        static const char address_to const order = "the header goes about, on or when, place, limit, once, off, take";
-
-        if (build->stage != ROVER_STAGE_HEADER)
-                return rover_refused(build, "", &build->word[0],
-                                     " belongs to the header, which comes before the conditions and actions");
-        if (slot <= build->header)
-        {
-                rover_refused(build, "", &build->word[0], slot == build->header ? " is said twice" : " is out of order: ");
-                if (slot != build->header)
-                        rover_why_add(build, order);
-                return false;
-        }
-        if (slot > 2 && build->header < 2)
-                return rover_refused(build, "", &build->word[0], " before the rule's on or when");
-        build->header = slot;
-        return rover_note_flush(build, slot);
+        return rover_header_slot(build, slot, false);
 }
 
 static bool rover_statement(struct rover_build address_to build)

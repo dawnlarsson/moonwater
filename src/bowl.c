@@ -3337,7 +3337,6 @@ static fn bowl_session_identity(void)
                            ":\naudio:x:29:\nvideo:x:44:\n" BOWL_INPUT_GROUP_LINE
                            "render:x:105:\nnogroup:x:65534:\n"},
         };
-        static const p8 digits[] = "0123456789abcdef";
         p8 raw[16];
         p8 id[33];
 
@@ -3353,11 +3352,7 @@ static fn bowl_session_identity(void)
 
         if (!system_random_fill(raw, sizeof(raw), 0))
         {
-                for (positive at = 0; at < sizeof(raw); at++)
-                {
-                        id[at * 2] = digits[raw[at] >> 4];
-                        id[at * 2 + 1] = digits[raw[at] & 15];
-                }
+                memory_into_hex(id, raw, sizeof(raw));
                 id[32] = '\n';
                 bowl_write_bytes("/etc/machine-id", id, sizeof(id));
         }
@@ -7731,6 +7726,8 @@ static fn bowl_link_in(string_address root, string_address path,
         cut = string_length(full);
         while (cut && full[cut - 1] != '/')
                 cut--;
+        if (!cut)
+                return;
         full[cut - 1] = end;
         if (bowl_mkdir_parents(full) < 0)
                 return;
@@ -13067,7 +13064,7 @@ bowl_profile_held(string_address root, string_address address_to packages,
                 return;
 
         while ((entry = file_walk_next(address_of walk)))
-                for (positive at = 0; packages[at] && at < BOWL_PROFILE_ARGV; at++)
+                for (positive at = 0; at < BOWL_PROFILE_ARGV && packages[at]; at++)
                         if (!held[at] && bowl_entry_is(entry->d_name, packages[at]))
                                 held[at] = true;
 
@@ -13118,7 +13115,7 @@ bowl_profile_note_packages(string_address root, string_address name,
         marker = bowl_profile_marker_open(root, name, FILE_APPEND);
         return_if(marker < 0, bowl_fail(marker_path, marker));
 
-        for (positive at = 0; packages[at] && at < BOWL_PROFILE_ARGV; at++)
+        for (positive at = 0; at < BOWL_PROFILE_ARGV && packages[at]; at++)
                 bowl_profile_note_package(marker, packages[at], held[at]);
         system_close(marker);
         return 0;
@@ -13144,7 +13141,7 @@ static bool bowl_profile_recorded_line(string_address line,
                 stop++;
         if (line[stop] != ' ')
                 return true;
-        for (positive which = 0; packages[which] && which < BOWL_PROFILE_ARGV; which++)
+        for (positive which = 0; which < BOWL_PROFILE_ARGV && packages[which]; which++)
                 if (string_length(packages[which]) == stop - at &&
                     !string_compare_max(line + at, packages[which], stop - at) &&
                     string_equals(line + stop + 1, "added"))
@@ -13152,25 +13149,19 @@ static bool bowl_profile_recorded_line(string_address line,
         return true;
 }
 
-/* Reads a profile's marker for the packages its install added. recorded says whether the marker has any package line at all:
-   a marker from before packages were recorded has none, and the remove takes every package of the list, as it always did. */
-static fn __attribute__((__noinline__))
-bowl_profile_recorded(string_address root, string_address name,
-                      string_address address_to packages, bool address_to added,
-                      bool address_to recorded)
+static bipolar bowl_profile_marker_lines(string_address root, string_address name,
+                                         fn (*visit)(string_address line, address_any context),
+                                         address_any context)
 {
         p8 chunk[4096];
         p8 line[BOWL_SHEBANG_LIMIT];
         positive have = 0;
         bool whole = true;
-        bipolar handle;
+        bipolar handle = bowl_profile_marker_open(root, name, FILE_READ);
         bipolar got;
 
-        address_to recorded = false;
-        handle = bowl_profile_marker_open(root, name, FILE_READ);
         if (handle < 0)
-                return;
-
+                return handle;
         while ((got = system_read_retry((positive)handle, chunk, sizeof(chunk))) > 0)
                 for (bipolar at = 0; at < got; at++)
                 {
@@ -13184,12 +13175,39 @@ bowl_profile_recorded(string_address root, string_address name,
                         }
                         line[have] = end;
                         if (whole)
-                                bowl_profile_recorded_line(line, packages, added, recorded);
+                                visit(line, context);
                         have = 0;
                         whole = true;
                 }
-
         system_close(handle);
+        return 0;
+}
+
+struct bowl_recorded_ctx
+{
+        string_address address_to packages;
+        bool address_to added;
+        bool address_to recorded;
+};
+
+static fn bowl_recorded_visit(string_address line, address_any context)
+{
+        struct bowl_recorded_ctx address_to c = context;
+
+        bowl_profile_recorded_line(line, c->packages, c->added, c->recorded);
+}
+
+/* Reads a profile's marker for the packages its install added. recorded says whether the marker has any package line at all:
+   a marker from before packages were recorded has none, and the remove takes every package of the list, as it always did. */
+static fn __attribute__((__noinline__))
+bowl_profile_recorded(string_address root, string_address name,
+                      string_address address_to packages, bool address_to added,
+                      bool address_to recorded)
+{
+        struct bowl_recorded_ctx ctx = {packages, added, recorded};
+
+        address_to recorded = false;
+        (void)bowl_profile_marker_lines(root, name, bowl_recorded_visit, address_of ctx);
 }
 
 /*
@@ -13226,13 +13244,27 @@ static p32 bowl_profile_generation(const struct bowl_profile address_to profile)
 /* The generation line for a number: "generation" and eight hex digits, the line's end included; length 20. */
 static fn bowl_generation_line(p8 address_to line, p32 generation)
 {
-        static const p8 digits[] = "0123456789abcdef";
+        p8 raw[4];
 
         memory_copy(line, BOWL_GENERATION_WORD, sizeof(BOWL_GENERATION_WORD) - 1);
-        for (positive at = 0; at < 8; at++)
-                line[sizeof(BOWL_GENERATION_WORD) - 1 + at] = digits[(generation >> (28 - 4 * at)) & 15];
+        network_store_32(raw, generation);
+        memory_into_hex(line + sizeof(BOWL_GENERATION_WORD) - 1, raw, 4);
         line[sizeof(BOWL_GENERATION_WORD) + 7] = '\n';
         line[sizeof(BOWL_GENERATION_WORD) + 8] = end;
+}
+
+struct bowl_generation_ctx
+{
+        string_address want;
+        bool same;
+};
+
+static fn bowl_generation_visit(string_address line, address_any context)
+{
+        struct bowl_generation_ctx address_to c = context;
+
+        if (string_has_prefix(line, BOWL_GENERATION_WORD))
+                c->same = string_equals(line, c->want);
 }
 
 /* Whether a bowl's marker for the profile ends at this generation: the last generation line it holds is the number. */
@@ -13240,37 +13272,11 @@ static bool __attribute__((__noinline__))
 bowl_profile_generation_is(string_address root, string_address name, p32 generation)
 {
         p8 want[sizeof(BOWL_GENERATION_WORD) + 9];
-        p8 chunk[4096];
-        p8 line[32];
-        positive have = 0;
-        bool whole = true;
-        bool same = false;
-        bipolar handle = bowl_profile_marker_open(root, name, FILE_READ);
-        bipolar got;
+        struct bowl_generation_ctx ctx = {want, false};
 
-        if (handle < 0)
-                return false;
         bowl_generation_line(want, generation);
         want[string_length(want) - 1] = end;
-        while ((got = system_read_retry((positive)handle, chunk, sizeof(chunk))) > 0)
-                for (bipolar at = 0; at < got; at++)
-                {
-                        if (chunk[at] != '\n')
-                        {
-                                if (have + 1 < sizeof(line))
-                                        line[have++] = chunk[at];
-                                else
-                                        whole = false;
-                                continue;
-                        }
-                        line[have] = end;
-                        if (whole && string_has_prefix(line, BOWL_GENERATION_WORD))
-                                same = string_equals(line, want);
-                        have = 0;
-                        whole = true;
-                }
-        system_close(handle);
-        return same;
+        return bowl_profile_marker_lines(root, name, bowl_generation_visit, address_of ctx) == 0 && ctx.same;
 }
 
 /* The bowls a profile is in, each told the generation it is now at. */
@@ -13520,40 +13526,17 @@ static fn bowl_profile_drop(string_address root, string_address name)
                 system_remove_at(AT_FDCWD, link, 0);
 }
 
+static fn bowl_unexpose_visit(string_address line, address_any context)
+{
+        bowl_profile_drop((string_address)context, line);
+}
+
 static b32 bowl_profile_unexpose(string_address root, string_address profile,
                                   string_address marker)
 {
-        p8 chunk[4096];
-        p8 name[BOWL_SHEBANG_LIMIT];
-        positive have = 0;
-        bool whole = true;
-        bipolar handle = bowl_profile_marker_open(root, profile, FILE_READ);
-        bipolar got;
+        bipolar handle = bowl_profile_marker_lines(root, profile, bowl_unexpose_visit, (address_any)root);
 
-        if (handle < 0)
-                return handle == -ERROR_NO_ENTRY ? 0 : bowl_fail(marker, handle);
-
-        while ((got = system_read_retry((positive)handle, chunk,
-                                        sizeof(chunk))) > 0)
-                for (bipolar at = 0; at < got; at++)
-                {
-                        if (chunk[at] != '\n')
-                        {
-                                if (have + 1 < sizeof(name))
-                                        name[have++] = chunk[at];
-                                else
-                                        whole = false;
-                                continue;
-                        }
-                        name[have] = end;
-                        if (whole)
-                                bowl_profile_drop(root, name);
-                        have = 0;
-                        whole = true;
-                }
-
-        system_close(handle);
-        return 0;
+        return handle < 0 && handle != -ERROR_NO_ENTRY ? bowl_fail(marker, handle) : 0;
 }
 
 /*
@@ -13670,7 +13653,7 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
                                               part->packages, added,
                                               address_of recorded);
                         for (positive at = 0;
-                             part->packages[at] && at < BOWL_PROFILE_ARGV &&
+                             at < BOWL_PROFILE_ARGV && part->packages[at] &&
                              count + 1 < BOWL_PROFILE_ARGV;
                              at++)
                                 if ((!recorded || added[at]) &&

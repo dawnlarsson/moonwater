@@ -253,11 +253,10 @@ static positive discovery_address_text(const p8 address_to address,
 
 static positive discovery_name_text(const p8 address_to name, p8 address_to text)
 {
-        static const p8 hex[] = "0123456789abcdef";
         positive used = 0;
 
         text[used++] = DISCOVERY_QUOTE;
-        for (positive at = 0; name[at] && at < 16; at++)
+        for (positive at = 0; at < 16 && name[at]; at++)
         {
                 p8 c = name[at];
 
@@ -268,8 +267,8 @@ static positive discovery_name_text(const p8 address_to name, p8 address_to text
                 }
                 text[used++] = '\\';
                 text[used++] = 'x';
-                text[used++] = hex[c >> 4];
-                text[used++] = hex[c & 15];
+                memory_into_hex(text + used, &c, 1);
+                used += 2;
         }
         text[used++] = DISCOVERY_QUOTE;
         text[used] = end;

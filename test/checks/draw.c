@@ -235,7 +235,7 @@ static void iss_rows_gpu(void)
         gpu_at->gpu_family = 0, gpu_at->gpu_state = WINDOWS_GPU_COOLING, gpu_at->gpu_steps = 2;
         count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: cooling down after hangs is a warning with the count", iss_wanted_has(count, WINDOWS_ISSUE_GPU_COOLING) && iss_want[iss_wanted_has(count, WINDOWS_ISSUE_GPU_COOLING) - 1].a == 2);
-        gpu_at->gpu_state = WINDOWS_GPU_UP, gpu_at->gpu_steps = 0, gpu_at->list_tried[0] = 100, gpu_at->list_lost[0][0] = 4, gpu_at->pid[0] = 7;
+        gpu_at->gpu_state = WINDOWS_GPU_UP, gpu_at->gpu_steps = 0, gpu_at->rows = 1, gpu_at->capacity = 1, gpu_at->list_tried[0] = 100, gpu_at->list_lost[0][0] = 4, gpu_at->pid[0] = 7;
         count = windows_gpu_wanted(gpu_at, iss_want, WINDOWS_GPU_CODES);
         check("gpu issues: lost frames under a tenth of those tried raise none", !iss_wanted_has(count, WINDOWS_ISSUE_GPU_LOST));
         gpu_at->list_lost[0][0] = 20;
