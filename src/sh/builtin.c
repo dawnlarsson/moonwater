@@ -23780,12 +23780,12 @@ static COLD bool bind_line(string_address line, positive keymap)
         return true;
 }
 
-static COLD fn bind_list_functions(writer write, positive keymap)
+static COLD fn bind_list_all_functions(writer write, positive keymap, bool where)
 {
         bind_entry entries[BIND_ENTRIES];
         positive count = bind_effective(entries, keymap == 0);
 
-        write("\n", string_length("\n"));
+        write("\n", 1);
 
         for (positive at = 0; at < BIND_FUNCTIONS; at++)
         {
@@ -23793,60 +23793,28 @@ static COLD fn bind_list_functions(writer write, positive keymap)
                 positive found = bind_keys_of(bind_functions[at], entries, count,
                                               keys);
 
-                if (!found)
+                if (!where)
                 {
-                        write("# ", string_length("# "));
-                        write(bind_functions[at], string_length(bind_functions[at]));
-                        write(" (not bound)\n", string_length(" (not bound)\n"));
+                        if (!found)
+                                string_format(write, "# %s (not bound)\n", bind_functions[at]);
+                        for (positive each = 0; each < found; each++)
+                                string_format(write, "\"%s\": %s\n", keys[each], bind_functions[at]);
                         continue;
                 }
-
-                for (positive each = 0; each < found; each++)
-                {
-                        write("\"", 1);
-                        write(keys[each], string_length(keys[each]));
-                        write("\": ", string_length("\": "));
-                        write(bind_functions[at], string_length(bind_functions[at]));
-                        write("\n", string_length("\n"));
-                }
-        }
-}
-
-static COLD fn bind_list_where(writer write, positive keymap)
-{
-        bind_entry entries[BIND_ENTRIES];
-        positive count = bind_effective(entries, keymap == 0);
-
-        write("\n", string_length("\n"));
-
-        for (positive at = 0; at < BIND_FUNCTIONS; at++)
-        {
-                string_address keys[BIND_ENTRIES];
-                positive found = bind_keys_of(bind_functions[at], entries, count,
-                                              keys);
-
-                write(bind_functions[at], string_length(bind_functions[at]));
                 if (!found)
                 {
-                        write(" is not bound to any keys\n", string_length(" is not bound to any keys\n"));
+                        string_format(write, "%s is not bound to any keys\n", bind_functions[at]);
                         continue;
                 }
-                write(" can be found on ", string_length(" can be found on "));
+                string_format(write, "%s can be found on ", bind_functions[at]);
                 for (positive each = 0; each < found && each < 5; each++)
-                {
-                        if (each)
-                                write(", ", string_length(", "));
-                        write("\"", 1);
-                        write(keys[each], string_length(keys[each]));
-                        write("\"", 1);
-                }
+                        string_format(write, "%s\"%s\"", each ? ", " : "", keys[each]);
                 //      Only the first five, and a mark that there are more.
-                if (found > 5)
-                        write(", ...\n", string_length(", ...\n"));
-                else
-                        write(".\n", string_length(".\n"));
+                write(found > 5 ? ", ...\n" : ".\n", found > 5 ? 6 : 2);
         }
 }
+#define bind_list_functions(write, keymap) bind_list_all_functions((write), (keymap), false)
+#define bind_list_where(write, keymap) bind_list_all_functions((write), (keymap), true)
 
 static COLD fn bind_list_kind(writer write, positive keymap, p8 kind, bool spoken)
 {

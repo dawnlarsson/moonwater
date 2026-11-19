@@ -27492,12 +27492,7 @@ static string_address grep_many_scan(const grep_many address_to many,
         return null;
 }
 
-typedef struct
-{
-        // Where the stretch began, which is a record's first byte.
-        string_address at, past, begin;
-        b32 row;
-} grep_many_lane;
+typedef rx_lane grep_many_lane;
 
 /*
         What a lane does with a cell that is not a row: the record it ended
@@ -27505,12 +27500,14 @@ typedef struct
         Under a word a string is only where the record might be, and the
         record is asked in full.
 */
-static fn grep_many_event(const grep_many address_to many,
-                          grep_many_lane address_to lane, b32 cell,
-                          string_address address_to hit)
+static int grep_many_event(address_any ctx,
+                           grep_many_lane address_to lane, b32 cell,
+                           string_address address_to hit, b32 address_to start_out)
 {
+        const grep_many address_to many = (const grep_many address_to)ctx;
         positive node = (positive)~cell;
 
+        (void)start_out;
         *hit = null;
 
         if (!((many->flags[node] & GREP_MANY_OUT) &&
@@ -27525,7 +27522,7 @@ static fn grep_many_event(const grep_many address_to many,
 
                         // Past the rows at the span's end, or back on them:
                         // either way the lane goes on from where it is.
-                        return;
+                        return RX_LANE_GO;
                 }
 
                 // The byte that ended the string is where `at` stands.
@@ -27550,178 +27547,19 @@ static fn grep_many_event(const grep_many address_to many,
                                 *hit = null;
                 }
         }
+        return RX_LANE_GO;
 }
 
-/*
-        The records of a span, walked four stretches at a time as the
-        machine's are: one byte of a walk waits for the load that named its
-        row, and four walks that share nothing keep four in flight. Only
-        where the answer is a count or a list of records that hold a string,
-        and a word, whose records the strings only choose; a line is the
-        scan's, and positive maximum says so. The stretches begin and end at
-        records, which end every state, so what each finds is in order.
-*/
 static positive grep_many_lanes(const grep_many address_to many, string_address at,
                                 string_address past, rx_dfa_hits address_to out,
                                 string_address address_to block)
 {
-        const p8 address_to classes = many->classes;
-        const b32 address_to rows = many->rows;
-        const string_address base = at;
-        grep_many_lane lane[RX_DFA_LANES];
-        positive total = 0;
-        string_address cut = at;
-
         *block = past;
-
         if (many->boundary == REGEX_BOUNDARY_LINE || many->empty)
                 return positive_max;
-
-        if (out)
-        {
-                memory_fill(out->count, 0, sizeof(out->count));
-
-                if ((positive)(past - at) > RX_DFA_LANES * RX_DFA_LANE_BLOCK)
-                {
-                        string_address from = at + RX_DFA_LANES * RX_DFA_LANE_BLOCK - 1;
-                        string_address stop = (string_address)memory_first_of(
-                            from, many->delimiter, (positive)(past - from));
-
-                        past = stop ? stop + 1 : past;
-                }
-
-                *block = past;
-        }
-
-        for (positive k = 0; k < RX_DFA_LANES; k++)
-        {
-                string_address next = past;
-
-                if (k < RX_DFA_LANES - 1)
-                {
-                        string_address target = at + (positive)(past - at) / RX_DFA_LANES * (k + 1);
-                        string_address stop;
-
-                        if (target < cut)
-                                target = cut;
-
-                        stop = (string_address)memory_first_of(target, many->delimiter,
-                                                               (positive)(past - target));
-                        next = stop ? stop + 1 : past;
-                }
-
-                lane[k] = (grep_many_lane){.at = cut, .past = next, .begin = cut, .row = 0};
-                cut = next;
-        }
-
-        for (;;)
-        {
-                positive m = positive_max, live = 0;
-                positive mask = (1u << RX_DFA_LANES) - 1;
-                b32 n[RX_DFA_LANES] = {0};
-
-                for (positive k = 0; k < RX_DFA_LANES; k++)
-                {
-                        positive left = (positive)(lane[k].past - lane[k].at);
-
-                        m = left < m ? left : m;
-                        live += left != 0;
-                }
-
-                if (!live)
-                        break;
-
-                if (m)
-                {
-                        string_address a0 = lane[0].at, a1 = lane[1].at, a2 = lane[2].at,
-                                       a3 = lane[3].at;
-                        b32 r0 = lane[0].row, r1 = lane[1].row, r2 = lane[2].row,
-                            r3 = lane[3].row;
-                        b32 n0 = 0, n1 = 0, n2 = 0, n3 = 0;
-                        bool stopped = false;
-
-                        while (m--)
-                        {
-                                n0 = rows[r0 + classes[*a0]];
-                                n1 = rows[r1 + classes[*a1]];
-                                n2 = rows[r2 + classes[*a2]];
-                                n3 = rows[r3 + classes[*a3]];
-
-                                if ((n0 | n1 | n2 | n3) < 0)
-                                {
-                                        stopped = true;
-                                        break;
-                                }
-
-                                a0++, a1++, a2++, a3++;
-                                r0 = n0, r1 = n1, r2 = n2, r3 = n3;
-                        }
-
-                        lane[0].at = a0, lane[1].at = a1, lane[2].at = a2, lane[3].at = a3;
-                        lane[0].row = r0, lane[1].row = r1, lane[2].row = r2, lane[3].row = r3;
-
-                        if (!stopped)
-                                continue;
-
-                        n[0] = n0, n[1] = n1, n[2] = n2, n[3] = n3;
-                }
-                else
-                {
-                        positive one = 0;
-                        grep_many_lane address_to l;
-                        b32 next = 0;
-
-                        while (lane[one].at == lane[one].past)
-                                one++;
-
-                        l = lane + one;
-
-                        while (l->at < l->past && (next = rows[l->row + classes[*l->at]]) >= 0)
-                        {
-                                l->row = next;
-                                l->at++;
-                        }
-
-                        if (l->at == l->past)
-                                continue;
-
-                        n[one] = next;
-                        mask = 1u << one;
-                }
-
-                for (positive k = 0; k < RX_DFA_LANES; k++)
-                {
-                        grep_many_lane address_to l = lane + k;
-                        string_address hit;
-
-                        if (!(mask >> k & 1))
-                                continue;
-
-                        if (n[k] >= 0)
-                        {
-                                l->row = n[k];
-                                l->at++;
-                                continue;
-                        }
-
-                        grep_many_event(many, l, n[k], address_of hit);
-
-                        if (!hit)
-                                continue;
-
-                        total++;
-
-                        if (out)
-                        {
-                                if (out->count[k] == RX_DFA_LANE_HITS)
-                                        return positive_max;
-
-                                out->at[k][out->count[k]++] = (p32)(hit - base);
-                        }
-                }
-        }
-
-        return total;
+        return rx_dfa_lanes_run(many->classes, many->rows, many->delimiter, 0,
+                                at, past, out, block, grep_many_event,
+                                (address_any)many);
 }
 
 /*

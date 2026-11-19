@@ -6572,7 +6572,7 @@ static b32 history_edit(writer write, string_address editor, positive first,
         b32 editor_status;
         bool wrote = true;
 
-        refuse_if(!history_edit_directory(path), 1, "fc: cannot make private edit directory\n", 0);
+        refuse_if(!history_edit_directory(path), 1, "fc: cannot make private edit directory\n");
 
         directory = system_open_at(
             AT_FDCWD, path,
@@ -6700,8 +6700,7 @@ failed:
                 system_close(handle);
         history_edit_cleanup(directory, (string_address)path);
         byte_store_release(address_of edited);
-        return string_report(log_error, 1, "fc: cannot edit history safely\n",
-                             0);
+        return string_report(log_error, 1, "fc: cannot edit history safely\n");
 }
 
 fn shell_fc(writer write)

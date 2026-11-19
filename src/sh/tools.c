@@ -29620,9 +29620,10 @@ static fn ul_lsblk_json_out(p32 address_to columns, positive column_count)
 
 static const argument_option ul_lsblk_options[] = {
     {"noempty", 'A'}, {"discard", 'D'}, {"json", 'J'}, {"output-all", 'O'}, {"pairs", 'P'},
-    {"scsi", 'S'}, {"all", 'a'}, {"bytes", 'b'}, {"nodeps", 'd'}, {"fs", 'f'}, {"ascii", 'i'},
-    {"list", 'l'}, {"perms", 'm'}, {"noheadings", 'n'}, {"output", 'o', ARGUMENT_REQUIRED},
-    {"paths", 'p'}, {"raw", 'r'}, {"topology", 't'}, {"zoned", 'z'},
+    {"scsi", 'S', 0, 1}, {"all", 'a'}, {"bytes", 'b'}, {"nodeps", 'd'},
+    {"fs", 'f', 0, 1}, {"ascii", 'i'},
+    {"list", 'l'}, {"perms", 'm', 0, 1}, {"noheadings", 'n'}, {"output", 'o', ARGUMENT_REQUIRED},
+    {"paths", 'p'}, {"raw", 'r'}, {"topology", 't', 0, 1}, {"zoned", 'z'},
     {"sysroot", 's', ARGUMENT_REQUIRED}, {"ct", 'c', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"ct-filter", 'C', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
     {"highlight", 'g', ARGUMENT_REQUIRED | ARGUMENT_LONG_ONLY},
@@ -29680,7 +29681,9 @@ static fn ul_lsblk_counter(string_address text, positive name_length,
 
 static b32 util_linux_lsblk()
 {
-        ul_taking("lsblk", ul_lsblk_options, "[options] [device ...]");
+        p8 preset = 0;
+        ul_taking("lsblk", ul_lsblk_options, "[options] [device ...]",
+                  .selection = address_of preset);
         static const argument_exclusive_pair lsblk_formats[] = {
             {'J', (string_address)"json"}, {'P', (string_address)"pairs"},
             {'r', (string_address)"raw"}};
@@ -29732,17 +29735,15 @@ static b32 util_linux_lsblk()
             UL_LSBLK_VENDOR, UL_LSBLK_MODEL, UL_LSBLK_REV,
             UL_LSBLK_TRAN,
         };
-        const p8 address_to chosen =
-            taking.flags & FILE_FLAG('f') ? fs_defaults :
-            taking.flags & FILE_FLAG('m') ? perm_defaults :
-            taking.flags & FILE_FLAG('t') ? topology_defaults :
-            taking.flags & FILE_FLAG('S') ? scsi_defaults : defaults;
-        positive chosen_count =
-            taking.flags & FILE_FLAG('f') ? array_count(fs_defaults) :
-            taking.flags & FILE_FLAG('m') ? array_count(perm_defaults) :
-            taking.flags & FILE_FLAG('t') ? array_count(topology_defaults) :
-            taking.flags & FILE_FLAG('S') ? array_count(scsi_defaults) :
-                                             array_count(defaults);
+        const p8 address_to chosen = defaults;
+        positive chosen_count = array_count(defaults);
+        switch (preset)
+        {
+        case 'f': chosen = fs_defaults; chosen_count = array_count(fs_defaults); break;
+        case 'm': chosen = perm_defaults; chosen_count = array_count(perm_defaults); break;
+        case 't': chosen = topology_defaults; chosen_count = array_count(topology_defaults); break;
+        case 'S': chosen = scsi_defaults; chosen_count = array_count(scsi_defaults); break;
+        }
         ul_columns_take("lsblk", ul_lsblk_columns, UL_LSBLK_COLUMNS,
                         chosen, chosen_count,
                         file_option_value(address_of taking, 'o'));

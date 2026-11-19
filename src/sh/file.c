@@ -32695,10 +32695,10 @@ typedef struct
 static shred_source shred_random;
 static bool shred_fatal;
 
-static bool shred_source_read(p8 address_to into, positive length)
+static bool shred_source_read_from(shred_source address_to source,
+                                   string_address tool, bool address_to fatal,
+                                   p8 address_to into, positive length)
 {
-        shred_source address_to source = address_of shred_random;
-
         if (source->handle < 0)
         {
                 shred_random_fill(address_of source->state, into, length);
@@ -32713,21 +32713,23 @@ static bool shred_source_read(p8 address_to into, positive length)
                                                         source->buffer,
                                                         sizeof(source->buffer));
 
+                        source->at = 0;
+                        source->have = 0;
                         if (got <= 0)
                         {
-                                shred_fatal = true;
+                                address_to fatal = true;
                                 if (got == 0)
-                                        return string_report(log_error, false,
-                                                             "shred: '%w': end of file\n",
-                                                             writer_terminal_quoted_name,
-                                                             source->name);
-                                return string_report(log_error, false,
-                                                     "shred: '%w': read error: %s\n",
-                                                     writer_terminal_quoted_name,
-                                                     source->name, file_reason(got));
+                                        string_format(log_error, "%s: '%w': end of file\n",
+                                                      tool, writer_terminal_quoted_name,
+                                                      source->name);
+                                else
+                                        string_format(log_error, "%s: '%w': read error: %s\n",
+                                                      tool, writer_terminal_quoted_name,
+                                                      source->name, file_reason(got));
+                                log_flush();
+                                return false;
                         }
                         source->have = (positive)got;
-                        source->at = 0;
                 }
 
                 positive take = source->have - source->at;
@@ -32743,6 +32745,12 @@ static bool shred_source_read(p8 address_to into, positive length)
         return true;
 }
 
+static bool shred_source_read(p8 address_to into, positive length)
+{
+        return shred_source_read_from(address_of shred_random, "shred",
+                                      address_of shred_fatal, into, length);
+}
+
 /*
         A fair choice among CHOICES from the source's bytes, which is
         gnulib's randint: bytes are appended to a number until its range
@@ -32750,9 +32758,10 @@ static bool shred_source_read(p8 address_to into, positive length)
         thrown back keeping what it still says, and what a fair draw leaves
         over is carried to the next one.
 */
-static bool shred_choose(p64 choices, p64 address_to out)
+static bool shred_choose_from(shred_source address_to source,
+                              string_address tool, bool address_to fatal,
+                              p64 choices, p64 address_to out)
 {
-        shred_source address_to source = address_of shred_random;
         p64 top = choices - 1;
         p64 number = source->number;
         p64 ceiling = source->ceiling;
@@ -32771,7 +32780,7 @@ static bool shred_choose(p64 choices, p64 address_to out)
                                 count++;
                         } while (grown < top);
 
-                        if (!shred_source_read(bytes, count))
+                        if (!shred_source_read_from(source, tool, fatal, bytes, count))
                                 return false;
 
                         count = 0;
@@ -32804,6 +32813,12 @@ static bool shred_choose(p64 choices, p64 address_to out)
                 number = reduced;
                 ceiling = unusable - 1;
         }
+}
+
+static bool shred_choose(p64 choices, p64 address_to out)
+{
+        return shred_choose_from(address_of shred_random, "shred",
+                                 address_of shred_fatal, choices, out);
 }
 
 /*
@@ -33684,122 +33699,28 @@ static bool shuf_range(string_address text, positive address_to low,
 */
 static bool shuf_sourced;
 static bool shuf_source_dead;
-static bipolar shuf_source_handle;
-static string_address shuf_source_name;
-static p64 shuf_source_number;
-static p64 shuf_source_maximum;
-static positive shuf_source_have;
-static positive shuf_source_at;
-static p8 shuf_source_block[4096];
-
-static bool shuf_source_read(p8 address_to into, positive wanted)
-{
-        while (wanted)
-        {
-                if (shuf_source_at == shuf_source_have)
-                {
-                        bipolar got = system_read_retry((positive)shuf_source_handle,
-                                                        (string_address)shuf_source_block,
-                                                        sizeof(shuf_source_block));
-
-                        shuf_source_at = 0;
-                        shuf_source_have = 0;
-
-                        if (got <= 0)
-                        {
-                                if (got < 0)
-                                        string_format(log_error, "shuf: '%w': read error: %s\n",
-                                                      writer_terminal_quoted_name,
-                                                      shuf_source_name, file_reason(got));
-                                else
-                                        string_format(log_error, "shuf: '%w': end of file\n",
-                                                      writer_terminal_quoted_name,
-                                                      shuf_source_name);
-                                log_flush();
-                                shuf_source_dead = true;
-                                return false;
-                        }
-
-                        shuf_source_have = (positive)got;
-                }
-
-                positive take = shuf_source_have - shuf_source_at;
-
-                if (take > wanted)
-                        take = wanted;
-                memory_copy(into, shuf_source_block + shuf_source_at, take);
-                shuf_source_at += take;
-                into += take;
-                wanted -= take;
-        }
-
-        return true;
-}
-
-static positive shuf_source_genmax(p64 genmax)
-{
-        p64 number = shuf_source_number;
-        p64 maximum = shuf_source_maximum;
-        p64 choices = genmax + 1;
-
-        for (;;)
-        {
-                if (maximum < genmax)
-                {
-                        p8 bytes[8];
-                        positive count = 0;
-                        p64 reach = maximum;
-
-                        do
-                        {
-                                reach = (reach << 8) + 255;
-                                count++;
-                        } while (reach < genmax);
-
-                        if (!shuf_source_read(bytes, count))
-                                return 0;
-
-                        count = 0;
-
-                        do
-                        {
-                                number = (number << 8) + bytes[count];
-                                maximum = (maximum << 8) + 255;
-                                count++;
-                        } while (maximum < genmax);
-                }
-
-                if (maximum == genmax)
-                {
-                        shuf_source_number = 0;
-                        shuf_source_maximum = 0;
-                        return (positive)number;
-                }
-
-                p64 excess = maximum - genmax;
-                p64 unusable = excess % choices;
-                p64 last_usable = maximum - unusable;
-                p64 reduced = number % choices;
-
-                if (number <= last_usable)
-                {
-                        shuf_source_number = number / choices;
-                        shuf_source_maximum = excess / choices;
-                        return (positive)reduced;
-                }
-
-                number = reduced;
-                maximum = unusable - 1;
-        }
-}
+static shred_source shuf_random;
+#define shuf_source_handle (shuf_random.handle)
+#define shuf_source_name (shuf_random.name)
+#define shuf_source_number (shuf_random.number)
+#define shuf_source_maximum (shuf_random.ceiling)
+#define shuf_source_have (shuf_random.have)
+#define shuf_source_at (shuf_random.at)
 
 static positive shuf_uniform(file_random_state address_to random,
                              positive bound)
 {
+        p64 out = 0;
+
         if (bound < 2)
                 return 0;
         if (shuf_sourced)
-                return shuf_source_dead ? 0 : shuf_source_genmax(bound - 1);
+                return shuf_source_dead ||
+                       !shred_choose_from(address_of shuf_random, "shuf",
+                                          address_of shuf_source_dead, bound,
+                                          address_of out)
+                           ? 0
+                           : (positive)out;
 
         p64 width = (p64)bound;
         p64 threshold = (0 - width) % width;

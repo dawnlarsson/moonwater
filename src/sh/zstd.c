@@ -5155,6 +5155,40 @@ zstd_same_start(p8 address_to a, p8 address_to b, positive bytes)
         return ((memory_load_unaligned(p32, a) ^ memory_load_unaligned(p32, b)) & mask) == 0;
 }
 
+static __attribute__((always_inline)) inline bool
+zstd_bt_step(p8 address_to const ip, p8 address_to const match, positive length,
+             p32 address_to const next, p32 address_to address_to smaller,
+             p32 address_to address_to larger, positive address_to common_smaller,
+             positive address_to common_larger, p32 address_to candidate,
+             p32 oldest, p32 address_to dummy)
+{
+        if (match[length] < ip[length])
+        {
+                **smaller = *candidate;
+                *common_smaller = length;
+                if (*candidate <= oldest)
+                {
+                        *smaller = dummy;
+                        return false;
+                }
+                *smaller = next + 1;
+                *candidate = next[1];
+        }
+        else
+        {
+                **larger = *candidate;
+                *common_larger = length;
+                if (*candidate <= oldest)
+                {
+                        *larger = dummy;
+                        return false;
+                }
+                *larger = next;
+                *candidate = next[0];
+        }
+        return true;
+}
+
 /* Puts index cur into its tree; answers how far the caller may step before
    the next position goes in (a long repeat need not go in byte by byte). */
 static p32 zstd_bt_insert(zstd_encoder address_to e, p8 address_to ip,
@@ -5194,30 +5228,10 @@ static p32 zstd_bt_insert(zstd_encoder address_to e, p8 address_to ip,
                 }
                 if (length == room)
                         break;
-                if (match[length] < ip[length])
-                {
-                        address_to smaller = candidate;
-                        common_smaller = length;
-                        if (candidate <= oldest)
-                        {
-                                smaller = address_of dummy;
-                                break;
-                        }
-                        smaller = next + 1;
-                        candidate = next[1];
-                }
-                else
-                {
-                        address_to larger = candidate;
-                        common_larger = length;
-                        if (candidate <= oldest)
-                        {
-                                larger = address_of dummy;
-                                break;
-                        }
-                        larger = next;
-                        candidate = next[0];
-                }
+                if (!zstd_bt_step(ip, match, length, next, address_of smaller, address_of larger,
+                                  address_of common_smaller, address_of common_larger,
+                                  address_of candidate, oldest, address_of dummy))
+                        break;
         }
         address_to smaller = 0;
         address_to larger = 0;
@@ -5345,30 +5359,10 @@ static positive zstd_opt_matches(zstd_encoder address_to e, p8 address_to ip,
                         if (length > ZSTD_OPT_NUM || length == room)
                                 break;
                 }
-                if (match[length] < ip[length])
-                {
-                        address_to smaller = candidate;
-                        common_smaller = length;
-                        if (candidate <= oldest)
-                        {
-                                smaller = address_of dummy;
-                                break;
-                        }
-                        smaller = next + 1;
-                        candidate = next[1];
-                }
-                else
-                {
-                        address_to larger = candidate;
-                        common_larger = length;
-                        if (candidate <= oldest)
-                        {
-                                larger = address_of dummy;
-                                break;
-                        }
-                        larger = next;
-                        candidate = next[0];
-                }
+                if (!zstd_bt_step(ip, match, length, next, address_of smaller, address_of larger,
+                                  address_of common_smaller, address_of common_larger,
+                                  address_of candidate, oldest, address_of dummy))
+                        break;
         }
         address_to smaller = 0;
         address_to larger = 0;
@@ -5411,30 +5405,10 @@ static fn zstd_dubt_sort(zstd_encoder address_to e, p32 cur, p8 address_to iend,
                 length += zstd_common(ip + length, match + length, room - length);
                 if (length == room)
                         break;
-                if (match[length] < ip[length])
-                {
-                        address_to smaller = candidate;
-                        common_smaller = length;
-                        if (candidate <= bt_low)
-                        {
-                                smaller = address_of dummy;
-                                break;
-                        }
-                        smaller = next + 1;
-                        candidate = next[1];
-                }
-                else
-                {
-                        address_to larger = candidate;
-                        common_larger = length;
-                        if (candidate <= bt_low)
-                        {
-                                larger = address_of dummy;
-                                break;
-                        }
-                        larger = next;
-                        candidate = next[0];
-                }
+                if (!zstd_bt_step(ip, match, length, next, address_of smaller, address_of larger,
+                                  address_of common_smaller, address_of common_larger,
+                                  address_of candidate, bt_low, address_of dummy))
+                        break;
         }
         address_to smaller = 0;
         address_to larger = 0;
@@ -5532,30 +5506,10 @@ static positive zstd_bt_best(zstd_encoder address_to e, p8 address_to ip,
                         if (length == room)
                                 break;
                 }
-                if (match[length] < ip[length])
-                {
-                        address_to smaller = candidate;
-                        common_smaller = length;
-                        if (candidate <= bt_low)
-                        {
-                                smaller = address_of dummy;
-                                break;
-                        }
-                        smaller = next + 1;
-                        candidate = next[1];
-                }
-                else
-                {
-                        address_to larger = candidate;
-                        common_larger = length;
-                        if (candidate <= bt_low)
-                        {
-                                larger = address_of dummy;
-                                break;
-                        }
-                        larger = next;
-                        candidate = next[0];
-                }
+                if (!zstd_bt_step(ip, match, length, next, address_of smaller, address_of larger,
+                                  address_of common_smaller, address_of common_larger,
+                                  address_of candidate, bt_low, address_of dummy))
+                        break;
         }
         address_to smaller = 0;
         address_to larger = 0;

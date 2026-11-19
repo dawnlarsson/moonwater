@@ -1119,15 +1119,6 @@ static bool ssh_installed(void)
         return bowl_profile_marked(SSH_BOWL, SSH_PROFILE) && ssh_digests_read(address_of digests);
 }
 
-// A program the record holds, by the view's name: its digest, or null.
-static const ssh_digest address_to ssh_digest_of(const ssh_digests address_to digests, string_address view)
-{
-        for (positive at = 0; at < digests->count; at++)
-                if (string_equals((string_address)digests->files[at].view, view))
-                        return &digests->files[at];
-        return null;
-}
-
 /*
         What an ELF program or library names: the loader (PT_INTERP) and its
         DT_NEEDED libraries. Little-endian ELF64 only, which is every machine

@@ -3146,9 +3146,10 @@ enum { RX_LANE_GO, RX_LANE_RESET, RX_LANE_GAVE_UP };
 
 /* What the serial walk does with a cell that is not a row, for the stretch
    whose next byte is at lane->at. A record that matched is `*hit`. */
-static int rx_lane_event(rx_dfa_cache *cache, rx_lane *lane, b32 next,
-                         string_address *hit)
+static int rx_lane_event(address_any ctx, rx_lane *lane, b32 next,
+                         string_address *hit, b32 *start_out)
 {
+        rx_dfa_cache *cache = (rx_dfa_cache *)ctx;
         const rx_dfa *dfa = cache->dfa;
         b32 start = cache->start * (b32)dfa->class_count;
         *hit = null;
@@ -3159,7 +3160,10 @@ static int rx_lane_event(rx_dfa_cache *cache, rx_lane *lane, b32 next,
                 if (next == RX_DFA_FULL)
                         return RX_LANE_GAVE_UP;
                 if (cache->resets != resets)
+                {
+                        *start_out = cache->start * (b32)dfa->class_count;
                         return RX_LANE_RESET;
+                }
                 if (next >= 0)
                 {
                         lane->row = next;
@@ -3183,13 +3187,13 @@ static int rx_lane_event(rx_dfa_cache *cache, rx_lane *lane, b32 next,
         return RX_LANE_GO;
 }
 
-static positive rx_dfa_lanes(rx_dfa_cache *cache, string_address at,
-                             string_address past, rx_dfa_hits *out,
-                             string_address *block)
+typedef int (*rx_lane_event_fn)(address_any, rx_lane *, b32, string_address *, b32 *);
+
+static positive rx_dfa_lanes_run(const p8 *classes, const b32 *trans, p8 delimiter,
+                                 b32 start, string_address at, string_address past,
+                                 rx_dfa_hits *out, string_address *block,
+                                 rx_lane_event_fn on_event, address_any ctx)
 {
-        const rx_dfa *dfa = cache->dfa;
-        const p8 *classes = dfa->classes;
-        const b32 *trans = cache->trans;
         const string_address base = at;
         rx_lane lane[RX_DFA_LANES];
         positive total = 0;
@@ -3200,12 +3204,11 @@ static positive rx_dfa_lanes(rx_dfa_cache *cache, string_address at,
                 {
                         string_address from = at + RX_DFA_LANES * RX_DFA_LANE_BLOCK - 1;
                         string_address stop = (string_address)memory_first_of(
-                            from, dfa->delimiter, (positive)(past - from));
+                            from, delimiter, (positive)(past - from));
                         past = stop ? stop + 1 : past;
                 }
         }
         *block = past;
-        b32 start = cache->start * (b32)dfa->class_count;
         string_address cut = at;
         for (positive k = 0; k < RX_DFA_LANES; k++)
         {
@@ -3216,7 +3219,7 @@ static positive rx_dfa_lanes(rx_dfa_cache *cache, string_address at,
                         if (target < cut)
                                 target = cut;
                         string_address stop = (string_address)memory_first_of(
-                            target, dfa->delimiter, (positive)(past - target));
+                            target, delimiter, (positive)(past - target));
                         next = stop ? stop + 1 : past;
                 }
                 lane[k] = (rx_lane){.at = cut, .past = next, .begin = cut, .row = start};
@@ -3294,7 +3297,7 @@ static positive rx_dfa_lanes(rx_dfa_cache *cache, string_address at,
                                 l->at++;
                                 continue;
                         }
-                        int event = rx_lane_event(cache, l, n[k], &hit);
+                        int event = on_event(ctx, l, n[k], &hit, &start);
                         if (event == RX_LANE_GAVE_UP)
                                 return positive_max;
                         reset = event == RX_LANE_RESET;
@@ -3310,20 +3313,29 @@ static positive rx_dfa_lanes(rx_dfa_cache *cache, string_address at,
                 }
                 if (reset)
                 {
-                        start = cache->start * (b32)dfa->class_count;
                         for (positive k = 0; k < RX_DFA_LANES; k++)
                         {
                                 rx_lane *l = lane + k;
                                 if (l->at == l->past)
                                         continue;
                                 string_address before = (string_address)memory_last_of(
-                                    l->begin, dfa->delimiter, (positive)(l->at - l->begin));
+                                    l->begin, delimiter, (positive)(l->at - l->begin));
                                 l->at = before ? before + 1 : l->begin;
                                 l->row = start;
                         }
                 }
         }
         return total;
+}
+
+static positive rx_dfa_lanes(rx_dfa_cache *cache, string_address at,
+                             string_address past, rx_dfa_hits *out,
+                             string_address *block)
+{
+        const rx_dfa *dfa = cache->dfa;
+        return rx_dfa_lanes_run(dfa->classes, cache->trans, dfa->delimiter,
+                                cache->start * (b32)dfa->class_count,
+                                at, past, out, block, rx_lane_event, cache);
 }
 
 static rx_pool address_to regex_pool_held;

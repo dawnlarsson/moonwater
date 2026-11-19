@@ -644,24 +644,40 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
         asked for (setting_tray_valid) and kept in /root as a line, and the compositor, which watches /root, draws it
         at once and again each minute. Bare it says what is kept, the standard when nothing is.
 */
-static b32 locale_taskbar_tray_status(void)
+static b32 locale_taskbar_line_status(string_address label, string_address path,
+                                      string_address reset_word, string_address fallback,
+                                      bool (*valid)(const char *, positive *))
 {
-        p8 text[SETTING_TRAY_MOST + 16];
-        bipolar got = host_read_state(SETTING_TASKBAR_TRAY_PATH, text, sizeof(text) - 1);
+        p8 text[SETTING_PINS_MOST + 16];
+        bipolar got = host_read_state(path, text, sizeof(text) - 1);
 
         text[got > 0 ? got : 0] = end;
         while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == '\r'))
                 text[--got] = end;
         if (got < 0 && got != -ENOENT && !bowl_is_root())
         {
-                host_say(log, host_label "tray " LOCALE_NEEDS_ROOT "\n");
+                host_say(log, host_label "%s " LOCALE_NEEDS_ROOT "\n", label);
                 return 0;
         }
-        host_say(log, host_label "tray %s\n",
-                 text[0] && !string_equals((string_address)text, "default") && setting_tray_valid((const char *)text, null)
+        host_say(log, host_label "%s %s\n", label,
+                 text[0] && !string_equals((string_address)text, reset_word) &&
+                         valid((const char *)text, null)
                      ? (string_address)text
-                     : (string_address)SETTING_TASKBAR_TRAY_STANDARD);
+                     : fallback);
         return 0;
+}
+
+static b32 locale_taskbar_tray_status(void)
+{
+        return locale_taskbar_line_status("tray", SETTING_TASKBAR_TRAY_PATH, "default",
+                                          (string_address)SETTING_TASKBAR_TRAY_STANDARD,
+                                          setting_tray_valid);
+}
+
+static b32 locale_taskbar_pinned_status(void)
+{
+        return locale_taskbar_line_status("pinned", SETTING_TASKBAR_PINNED_PATH, "none",
+                                          (string_address) "none", setting_pins_valid);
 }
 
 static b32 locale_taskbar_tray(string_address address_to arguments, positive count)
@@ -705,25 +721,6 @@ static b32 locale_taskbar_tray(string_address address_to arguments, positive cou
         typed as it is or quoted whole. It is judged whole before root is asked for, and kept in /root as a line, which the compositor,
         which watches /root, takes at once. Bare it says what is kept: the line, or none.
 */
-static b32 locale_taskbar_pinned_status(void)
-{
-        p8 text[SETTING_PINS_MOST + 16];
-        bipolar got = host_read_state(SETTING_TASKBAR_PINNED_PATH, text, sizeof(text) - 1);
-
-        text[got > 0 ? got : 0] = end;
-        while (got > 0 && (text[got - 1] == '\n' || text[got - 1] == '\r'))
-                text[--got] = end;
-        if (got < 0 && got != -ENOENT && !bowl_is_root())
-        {
-                host_say(log, host_label "pinned " LOCALE_NEEDS_ROOT "\n");
-                return 0;
-        }
-        host_say(log, host_label "pinned %s\n",
-                 text[0] && !string_equals((string_address)text, "none") && setting_pins_valid((const char *)text, null) ? (string_address)text
-                                                                                                                      : (string_address) "none");
-        return 0;
-}
-
 static b32 locale_taskbar_pinned(string_address address_to arguments, positive count)
 {
         p8 text[SETTING_PINS_MOST + 16];
