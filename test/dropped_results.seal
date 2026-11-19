@@ -6,12 +6,12 @@ functions 16
 # file, the function it is in, the function dropped and how many times there, a tab, why the drop is
 # right. A drop with no line fails, and a line with no drop. voids and unreviewed may only fall.
 voids 358
-unreviewed 270
+unreviewed 255
 void src/bowl.c bowl_profile_keep bowl_mkdir 1	unreviewed
 void src/bowl.c bowl_profile_keep system_call_2 1	unreviewed
 void src/bowl.c bowl_profile_locales bowl_setup_isolated 1	unreviewed
 void src/bowl.c bowl_raise_rlimit system_call_4 2	unreviewed
-void src/bowl.c bowl_signature_read byte_reader_skip 1	unreviewed
+void src/bowl.c bowl_signature_read byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
 void src/canvas/compositor/session.c compositor_woke compositor_slept 1	unreviewed
 void src/canvas/screen.c term_session shell_exec_file 2	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/canvas/ui/files.c files_open_with ui_start_apart 1	unreviewed
@@ -42,26 +42,26 @@ void src/net/discovery.c discovery_stun_send socket_send 1	unreviewed
 void src/net/discovery.c socket_control_find byte_reader_skip 1	unreviewed
 void src/net/net.c dhcp_ask socket_send 1	unreviewed
 void src/net/net.c dhcp_frame_vouched byte_reader_skip 1	unreviewed
-void src/net/net.c dhcp_unframe byte_reader_skip 1	unreviewed
-void src/net/net.c dns_answer_address byte_reader_skip 1	unreviewed
+void src/net/net.c dhcp_unframe byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
+void src/net/net.c dns_answer_address byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
 void src/net/net.c dns_copy_name byte_reader_skip 2	unreviewed
 void src/net/net.c dns_message_at byte_reader_skip 1	unreviewed
 void src/net/net.c dns_query_tls socket_option_set 1	unreviewed
-void src/net/net.c dns_records_end byte_reader_skip 1	unreviewed
-void src/net/net.c dns_reply_identity byte_reader_skip 2	unreviewed
+void src/net/net.c dns_records_end byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
+void src/net/net.c dns_reply_identity byte_reader_skip 2	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
 void src/net/net.c dns_reply_result byte_reader_skip 2	unreviewed
 void src/net/net.c netlink_attributes byte_reader_skip 1	unreviewed
 void src/net/net.c netlink_receive_one socket_receive 1	unreviewed
 void src/net/net.c nts_cookies_take byte_reader_skip 1	unreviewed
-void src/net/net.c nts_reply byte_reader_skip 2	unreviewed
-void src/net/net.c tls_asn1_enter byte_reader_skip 1	unreviewed
-void src/net/net.c tls_asn1_length byte_reader_skip 1	unreviewed
-void src/net/net.c tls_asn1_skip byte_reader_skip 1	unreviewed
-void src/net/net.c tls_asn1_take byte_reader_skip 1	unreviewed
-void src/net/net.c tls_check_cert_verify byte_reader_skip 1	unreviewed
+void src/net/net.c nts_reply byte_reader_skip 2	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
+void src/net/net.c tls_asn1_enter byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
+void src/net/net.c tls_asn1_length byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
+void src/net/net.c tls_asn1_skip byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
+void src/net/net.c tls_asn1_take byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
+void src/net/net.c tls_check_cert_verify byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
 void src/net/net.c tls_der_named_bits byte_reader_skip 1	unreviewed
 void src/net/net.c tls_der_value byte_reader_skip 1	unreviewed
-void src/net/net.c tls_new_session_ticket_valid byte_reader_skip 1	unreviewed
+void src/net/net.c tls_new_session_ticket_valid byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
 void src/rover/load.c rover_load_boots_put host_write_file 1	unreviewed
 void src/rover/load.c rover_load_boots_put system_call_3 1	unreviewed
 void src/rover/load.c rover_load_now host_write_file 1	unreviewed
@@ -157,15 +157,15 @@ void src/sh/host/locale.c locale_nts_save host_write_file 1	unreviewed
 void src/sh/host/locale.c locale_zone_own unsetenv 1	unreviewed
 void src/sh/host/locale.c sntp_exchange sntp_transmit_stamp 2	unreviewed
 void src/sh/host/locale.c sntp_query_at socket_option_set 2	unreviewed
-void src/sh/host/nl80211.c wifi_assoc_status_read byte_reader_skip 2	unreviewed
+void src/sh/host/nl80211.c wifi_assoc_status_read byte_reader_skip 2	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
 void src/sh/host/nl80211.c wifi_sae_budget host_write_file 1	unreviewed
-void src/sh/host/nl80211.c wifi_sae_frame_read byte_reader_skip 2	unreviewed
+void src/sh/host/nl80211.c wifi_sae_frame_read byte_reader_skip 2	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
 void src/sh/host/radio.c radio_avoid_add host_write_file 1	unreviewed
 void src/sh/host/radio.c radio_avoid_add radio_station_number 1	unreviewed
 void src/sh/host/radio.c radio_broker host_write_file 1	unreviewed
 void src/sh/host/radio.c radio_broker system_wait4_retry 1	unreviewed
 void src/sh/host/radio.c radio_last_set host_write_file 1	unreviewed
-void src/sh/host/radio.c radio_rsn_security byte_reader_skip 1	unreviewed
+void src/sh/host/radio.c radio_rsn_security byte_reader_skip 1	the reader fails for good when a skip runs past its bytes, and the function asks it (byte_reader_ok/end) after the skips: a short record is refused there
 void src/sh/host/radio.c radio_rules_put radio_station_number 1	unreviewed
 void src/sh/host/radio.c radio_scan_note host_write_file 1	unreviewed
 void src/sh/host/radio.c radio_scan_note radio_station_number 1	unreviewed
