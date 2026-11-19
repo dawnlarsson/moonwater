@@ -1036,6 +1036,9 @@ static void bind_run(struct bind_row *row)
         //      a press that did what it is bound to is not news.
         shown = (int)string_length(spawn.command);
 
+        //      A stop is stamped at each step, so one that is slow says where its time went.
+        if (poweroff || reboot)
+                pr_info("[moonwater] %s: %s, the line starts\n", name, spawn.command);
         kernel_sigaction(SIGCHLD, SIG_DFL);
         pid = user_mode_thread(bind_spawn_enter, &spawn, SIGCHLD);
         if (pid > 0) {
@@ -1045,6 +1048,8 @@ static void bind_run(struct bind_row *row)
         } else
                 ret = pid ? pid : -EAGAIN;
         kernel_sigaction(SIGCHLD, SIG_IGN);
+        if (poweroff || reboot)
+                pr_info("[moonwater] %s: the line answered %d\n", name, ret);
 
         if (!ret)
                 goto done;

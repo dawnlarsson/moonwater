@@ -606,9 +606,11 @@ static void rules_work_run(struct work_struct *work)
 */
 #define RULES_STOP_GRACE (60 * HZ)
 
+static p16 rules_stop_doing;
+
 static void rules_stop_force(struct work_struct *work)
 {
-        p16 id = READ_ONCE(rules_stop_asked);
+        p16 id = READ_ONCE(rules_stop_doing);
 
         (void)work;
         pr_warn("[rover] the machine's stop did not come in %u s: stopping it\n", RULES_STOP_GRACE / HZ);
@@ -618,21 +620,36 @@ static void rules_stop_force(struct work_struct *work)
                 orderly_poweroff(true);
 }
 
+/*
+        The request is taken as it is read (E-h10-3): it was left set, so every
+        later kernel action raised the irq_work that queued the stop again and
+        armed the watchdog again. The watchdog keeps what it stops by in
+        rules_stop_doing. Each step is stamped in the kernel's log, so a stop
+        that is slow says where its time went.
+*/
 static void rules_stop_run(struct work_struct *work)
 {
         char name[ROVER_NAME_MOST + 1];
         unsigned long flags;
+        p64 started = ktime_get_ns();
+        int ret;
         p16 id;
 
         (void)work;
         raw_spin_lock_irqsave(&rules_lock, flags);
         id = rules_stop_asked;
+        rules_stop_asked = 0;
         strscpy(name, rules_stop_name, sizeof(name));
         raw_spin_unlock_irqrestore(&rules_lock, flags);
         if (!id)
                 return;
+        WRITE_ONCE(rules_stop_doing, id);
+        pr_info("[rover] %s: %s, the line starts\n", name, id == rules_p_poweroff ? "poweroff" : "reboot");
         mod_delayed_work(system_highpri_wq, &rules_stop_watchdog, RULES_STOP_GRACE);
-        if (rules_spawn(id == rules_p_poweroff ? "poweroff" : "reboot", name))
+        ret = rules_spawn(id == rules_p_poweroff ? "poweroff" : "reboot", name);
+        pr_info("[rover] %s: the line answered %d after %llu ms\n", name, ret,
+                (unsigned long long)((ktime_get_ns() - started) / 1000000));
+        if (ret)
         {
                 pr_warn("[rover] %s: stopping the machine anyway\n", name);
                 if (id == rules_p_poweroff)
