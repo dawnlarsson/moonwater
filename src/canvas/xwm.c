@@ -1455,12 +1455,18 @@ static void compositor_xwm_fullscreen(struct compositor_xwm_window *w, int on)
                 c.mask = XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT;
                 c.x = compositor_xwm_to_x(w->row >= 0 && compositor.showing[w->row] ? compositor.x[w->row] : 0, 0);
                 c.y = compositor_xwm_to_x(w->row >= 0 && compositor.showing[w->row] ? compositor.y[w->row] : 0, 1);
-                c.width = w->row >= 0 && compositor.showing[w->row] && compositor.w[w->row] > 0
-                              ? compositor.w[w->row]
-                              : (compositor.width > 0 ? (unsigned int)compositor.width : 1);
-                c.height = w->row >= 0 && compositor.showing[w->row] && compositor.h[w->row] > 0
-                               ? compositor.h[w->row]
-                               : (compositor.height > 0 ? (unsigned int)compositor.height : 1);
+                // The size the row is asked to be now (its screen's, set by compositor_fullscreen_row), not the picture's: compositor.w and
+                // .h are the size it was drawn at until the client draws at the new one, so the X window was told its old size with
+                // _NET_WM_STATE_FULLSCREEN, and stayed that small whenever no later sync of the row said the screen's (Black Mesa: a game
+                // sure it was fullscreen, drawn in a little rectangle of the screen).
+                {
+                        b32 asked = w->row >= 0 && compositor.showing[w->row] && compositor.table && compositor.table->want_width[w->row] > 0 &&
+                                    compositor.table->want_height[w->row] > 0;
+                        b32 shown = w->row >= 0 && compositor.showing[w->row] && compositor.w[w->row] > 0 && compositor.h[w->row] > 0;
+
+                        c.width = asked ? compositor.table->want_width[w->row] : shown ? compositor.w[w->row] : (compositor.width > 0 ? (unsigned int)compositor.width : 1);
+                        c.height = asked ? compositor.table->want_height[w->row] : shown ? compositor.h[w->row] : (compositor.height > 0 ? (unsigned int)compositor.height : 1);
+                }
                 compositor_xwm_configure(w->id, &c);
                 w->sent_x = c.x, w->sent_y = c.y, w->sent_w = c.width, w->sent_h = c.height;
                 compositor_xwm_net_state(w->id, (int)w->state);
