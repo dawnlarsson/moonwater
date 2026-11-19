@@ -4608,6 +4608,15 @@ static void compositor_wl_row_title(void *context, int row, const char *text, lo
         compositor_take(row);
 }
 
+// The app_id a client's toplevel says into its row of the table, as a kit program writes its own (windows_app_id_set takes one word of
+// printable bytes, and refuses the rest): the panel finds the app of the registry a window is by it (ui_apps_match), its picture and its pin.
+static void compositor_wl_row_app(void *context, int row, const char *app_id)
+{
+        (void)context;
+        if (row >= 0 && row < (int)WINDOWS && compositor.table && windows_app_id_set(compositor.table, (unsigned int)row, app_id))
+                compositor_take(row);
+}
+
 // The cursor_asked value for a pointer the client hid (set_cursor with no surface).
 #define COMPOSITOR_WL_HIDDEN 0xffu
 
@@ -7029,6 +7038,7 @@ static const struct wayland_host compositor_wl_host = {
     compositor_wl_unreserve,
     compositor_wl_xreceive,
     compositor_wl_xdrag,
+    compositor_wl_row_app,
 };
 
 /* The window manager of Xwayland (xwm.c): its socket, its connection and its window table, all in fixed storage. */

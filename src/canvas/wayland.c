@@ -397,6 +397,9 @@ struct wayland_host
         // WAYLAND_XDRAG_LEAVE, WAYLAND_XDRAG_DROP; and WAYLAND_XDRAG_END (x: 1 finished, 0 not) when a drag of the X side's ends, or a
         // Wayland one that was over an X window.
         long (*xdrag)(void *context, long what, long row, long x, long y);
+        // row_app: the app_id a toplevel says, for its row (what the panel matches a window to its app by), as it sets it and as its
+        // row opens with one; none (a host that does not ask) is no call.
+        void (*row_app)(void *context, int row, const char *app_id);
 };
 #define WAYLAND_XDRAG_OVER 1
 #define WAYLAND_XDRAG_LEAVE 2
@@ -4500,6 +4503,8 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 // The tab says the title, or what the program is called when it has set none.
                 if (s->title[0] || s->app_id[0])
                         wayland.host->row_title(wayland.host->context, s->row, s->title[0] ? s->title : s->app_id, 0);
+                if (s->app_id[0] && wayland.host->row_app)
+                        wayland.host->row_app(wayland.host->context, s->row, s->app_id);
                 if (wayland.host->row_facts(wayland.host->context, s->row, &facts) >= 0)
                         wayland_surface_screens(c, s, wayland_screen_at(facts.x, facts.y));
         }
@@ -5906,6 +5911,8 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
                 wayland_text(s->app_id, a[0].text, a[0].length);
                 if (row >= 0 && !s->title[0])
                         wayland.host->row_title(wayland.host->context, row, s->app_id, 0);
+                if (row >= 0 && wayland.host->row_app)
+                        wayland.host->row_app(wayland.host->context, (int)row, s->app_id);
                 return WAYLAND_OK;
         case WLQ_xdg_toplevel_show_window_menu:
                 return WAYLAND_OK;

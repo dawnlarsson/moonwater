@@ -195,6 +195,8 @@
 #define COMPOSITOR_XWM_PROP_XDND_WORDS 21     // its XdndActionDescription (window: the source)
 #define COMPOSITOR_XWM_PROP_STEAM 22          // _MOONWATER_STEAM_OVERLAY of a window (the game's pid)
 #define COMPOSITOR_XWM_PROP_STEAM_OPEN 23     // _MOONWATER_STEAM_OVERLAY_OPEN of that window
+#define COMPOSITOR_XWM_PROP_CLASS 24          // WM_CLASS: the instance and the class, two strings (a window's app_id: compositor_xwm_app)
+#define COMPOSITOR_XWM_XA_WM_CLASS 67         // a predefined atom
 #define COMPOSITOR_XWM_DND_REPLY(what) (((what) >= COMPOSITOR_XWM_PROP_XDND_AWARE && (what) <= COMPOSITOR_XWM_PROP_XDND_SYNC) || \
                                         ((what) >= COMPOSITOR_XWM_PROP_XDND_PROXY && (what) <= COMPOSITOR_XWM_PROP_XDND_WORDS))
 #define COMPOSITOR_XWM_PROTO_DELETE 1u
@@ -268,6 +270,7 @@ struct compositor_xwm_window
         unsigned int steam_told;       // when the overlay's state was last told (milliseconds): an open one beats every second
         unsigned int dirty;            // the shim has not the window's latest title
         char title[COMPOSITOR_XWM_TITLE];
+        char app[WINDOWS_APP_ID];      // its WM_CLASS's class (else its instance), the app_id its row is given (compositor_xwm_app)
 };
 
 struct compositor_xwm_pending
@@ -933,6 +936,7 @@ static void compositor_xwm_pending_done(void)
 }
 
 static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int add);
+static void compositor_xwm_app(struct compositor_xwm_window *w);
 
 static void compositor_xwm_ask_title(struct compositor_xwm_window *w)
 {
@@ -1066,6 +1070,28 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                 w->steam_pid = r.format == XWM_FORMAT_32 && r.value_len >= 4 ? xwm_get32(r.value) : 0;
                 if (w->steam_pid && !w->owner)
                         compositor_xwm_ask_owner(w->id);
+        }
+        else if (p->what == COMPOSITOR_XWM_PROP_CLASS)
+        {
+                // WM_CLASS is the instance and the class, each ended by a null: the class is the app's name (Steam), as a desktop entry's
+                // StartupWMClass says it, and the instance stands in where there is no class. One word of printable ASCII, or none.
+                unsigned long at = 0, start = 0, length = 0;
+
+                if (r.format == XWM_FORMAT_8)
+                {
+                        while (at < r.value_len && r.value[at])
+                                at++;
+                        if (at + 1 < r.value_len && r.value[at + 1])
+                                start = at + 1;
+                        for (length = 0; start + length < r.value_len && r.value[start + length] && length < WINDOWS_APP_ID - 1; length++)
+                                if (r.value[start + length] <= ' ' || r.value[start + length] >= 0x7f)
+                                        break;
+                        if (start + length < r.value_len && r.value[start + length])
+                                length = 0;
+                }
+                memory_copy(w->app, r.value + start, length);
+                w->app[length] = 0;
+                compositor_xwm_app(w);
         }
         else if (p->what == COMPOSITOR_XWM_PROP_STEAM_OPEN)
         {
@@ -1335,6 +1361,14 @@ static int compositor_xwm_covers(const struct compositor_xwm_window *w)
         return -1;
 }
 
+// A window's class as its row's app_id, once it has both (the panel matches it to its app by it: ui_apps_match).
+static void compositor_xwm_app(struct compositor_xwm_window *w)
+{
+        if (w->row >= 0 && w->row < COMPOSITOR_ROWS && w->app[0] && compositor.table &&
+            windows_app_id_set(compositor.table, (unsigned int)w->row, w->app))
+                compositor_take(w->row);
+}
+
 static void compositor_xwm_resolve(struct compositor_xwm_window *w)
 {
         long row;
@@ -1375,6 +1409,7 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
         if (row < 0 || w->row == (int)row)
                 return;
         w->row = (int)row;
+        compositor_xwm_app(w);
         compositor_xwm_owned(w);
         if (w->state & COMPOSITOR_XWM_FULLSCREEN)
                 compositor_fullscreen_on((int)row, covers >= 0 ? covers : compositor_xwm_covers(w));
@@ -3791,6 +3826,7 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_WM_HINTS, COMPOSITOR_XWM_XA_WM_HINTS, 0);
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_NORMAL_HINTS, COMPOSITOR_XWM_XA_WM_NORMAL_HINTS, 0);
                 compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_STATE, compositor_xwm_at->atoms[COMPOSITOR_XWM_A_NET_STATE], COMPOSITOR_XWM_ATOM_TYPE);
+                compositor_xwm_ask(e->window, COMPOSITOR_XWM_PROP_CLASS, COMPOSITOR_XWM_XA_WM_CLASS, COMPOSITOR_XWM_XA_STRING);
                 if (!w->owner)
                         compositor_xwm_ask_owner(e->window);
                 // The type is asked last: its reply says the others have come.
