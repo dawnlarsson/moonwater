@@ -2322,6 +2322,36 @@ static void gpu_fault_rows(void)
         gpu_fault_say(0x1234ull);
         check("gpu fault: an address in no map the table made is named as none", gpu_text_has(gpu_fault, "in no map or import the table ever made"));
 
+        // 2b. The log's tail kept open (gpu_kmsg_tail, E-h4-2): a fault's read takes the records written since its last read, and keeps the first fault
+        // after the floor across reads; a record at or under the floor is not one. A pipe stands for the log, one record at a time.
+        {
+                int ends[2] = {-1, -1};
+                long kept_tail = gpu_kmsg_tail;
+                b32 kept_ready = gpu_kmsg_seq_ready;
+                positive kept_floor = gpu_kmsg_floor_seq, kept_seen = gpu_kmsg_seen_seq, kept_since = gpu_kmsg_last_since;
+                struct gpu_fault_scan scan;
+                static const char old_fault[] = "3,9,5000,-;amdgpu: in page starting at address 0x0000100000000000 from client 0x1b\n";
+                static const char new_fault[] = "3,11,6000,-;amdgpu: in page starting at address 0x0000203fd75000 from client 0x1b\n";
+                b32 below, found, kept_across;
+
+                compositor_call(syscall(pipe2), (positive)ends, 0x800 | 0x80000, 0, 0, 0, 0);
+                gpu_kmsg_tail = ends[0], gpu_kmsg_seq_ready = 1, gpu_kmsg_floor_seq = 10, gpu_kmsg_seen_seq = 10, gpu_kmsg_last_since = 77;
+                gpu_fault_pending_new = 1;
+                system_write_once(ends[1], old_fault, sizeof old_fault - 1);
+                gpu_fault_read(77, &scan);
+                below = !scan.have_at;
+                system_write_once(ends[1], new_fault, sizeof new_fault - 1);
+                gpu_fault_read(77, &scan);
+                found = scan.have_at && scan.at == 0x203fd75000ull && gpu_kmsg_seen_seq == 11;
+                gpu_fault_read(77, &scan);
+                kept_across = scan.have_at && scan.at == 0x203fd75000ull;
+                check("gpu fault: the log's tail is read from where it was, a record under the floor is no fault, and the first after it is kept across reads",
+                      below && found && kept_across);
+                system_close(ends[0]), system_close(ends[1]);
+                gpu_kmsg_tail = kept_tail, gpu_kmsg_seq_ready = kept_ready, gpu_kmsg_floor_seq = kept_floor, gpu_kmsg_seen_seq = kept_seen;
+                gpu_kmsg_last_since = kept_since, gpu_fault_pending_new = 1;
+        }
+
         // 3. The kernel's log: a record's time, the address after its key (hexadecimal), the status words.
         check("gpu fault: a kernel log record's time is its third field (microseconds)", gpu_kmsg_usec("6,1234,5000000,-;amdgpu: x") == 5000000);
         check("gpu fault: the page fault's address is read after its key, in hexadecimal",

@@ -1765,11 +1765,16 @@ static char gpu_said[256];
         gpu_say_kernel, gpu_kmsg_drain and gpu_fault_read.
 */
 #define gpu_kmsg_open() ((long)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC))
+// A read that answers EPIPE (-32) is the log's records overwritten under the reader (the ring wrapped during the walk): the kernel moved the
+// reader to its oldest record, and the next read goes on from there (devkmsg_read), so it is read again, not taken for the end (E-h4-1).
 static char *gpu_kmsg_next(long *handle, unsigned int *records)
 {
         static char record[8192];
-        bipolar got = *handle >= 0 && (*records)++ < 8192 ? system_read_once(*handle, record, sizeof(record) - 1) : 0;
+        bipolar got;
 
+        do
+                got = *handle >= 0 && (*records)++ < 8192 ? system_read_once(*handle, record, sizeof(record) - 1) : 0;
+        while (got == -32);
         if (got > 0)
                 return record[got] = 0, record;
         if (*handle >= 0)
@@ -2696,14 +2701,38 @@ static positive gpu_kmsg_field(const char *record, unsigned int field)
 static b32 gpu_kmsg_seq_ready;
 static positive gpu_kmsg_floor_seq, gpu_kmsg_seen_seq, gpu_kmsg_last_since;
 
+/*
+        The log kept open at its end from the card's start (gpu_kmsg_tail): a fault's read (gpu_fault_read) reads only the records written since its
+        last read, from the newest it had, and keeps the first fault after the floor across its reads (gpu_fault_pending), where it opened the log
+        and walked it from the oldest record every poll, at most the oldest 8192 of them, so a log larger than that never had its newest read (E-h4-2).
+*/
+static long gpu_kmsg_tail = -1;
+static b32 gpu_fault_pending_new; // the tail was opened again: what the reads found before is another log's
+
+// The tail's next record, or 0 once there is none now (EAGAIN): the log stays open, at its end.
+static char *gpu_kmsg_more(unsigned int *records)
+{
+        static char record[8192];
+        bipolar got;
+
+        do
+                got = gpu_kmsg_tail >= 0 && (*records)++ < 8192 ? system_read_once(gpu_kmsg_tail, record, sizeof(record) - 1) : 0;
+        while (got == -32);
+        return got > 0 ? (record[got] = 0, record) : 0;
+}
+
 static void gpu_kmsg_drain(void)
 {
-        long handle = gpu_kmsg_open();
         unsigned int records = 0;
         char *record;
 
-        gpu_kmsg_last_since = 0, gpu_kmsg_seq_ready = handle >= 0;
-        while ((record = gpu_kmsg_next(&handle, &records)))
+        if (gpu_kmsg_tail >= 0)
+                system_close(gpu_kmsg_tail);
+        gpu_kmsg_tail = gpu_kmsg_open();
+        gpu_fault_pending_new = 1;
+        gpu_kmsg_last_since = 0, gpu_kmsg_seq_ready = gpu_kmsg_tail >= 0;
+        // Read to the end, which is where the tail stays (a log of more than 8192 records then: the reads after go on from where this one stopped).
+        while ((record = gpu_kmsg_more(&records)))
         {
                 positive seq = gpu_kmsg_seq(record);
 
@@ -2765,6 +2794,7 @@ struct gpu_fault_scan
         char client[24];
 };
 static struct gpu_fault_scan gpu_fault_last; // the last fault read (gpu_fault_note)
+static struct gpu_fault_scan gpu_fault_pending; // the first fault after the floor that the tail's reads have found (gpu_fault_read)
 
 // One line of the kernel's log: the first page fault's address, then the words after it.
 static void gpu_fault_line(const char *text, struct gpu_fault_scan *out)
@@ -2814,11 +2844,29 @@ static void gpu_fault_read(positive since, struct gpu_fault_scan *out)
 
         memory_zero(out, sizeof(*out));
         GPU_LOG_FAKE(since, out);
+        if (gpu_fault_pending_new)
+                memory_zero(&gpu_fault_pending, sizeof gpu_fault_pending), gpu_fault_pending_new = 0;
         if (gpu_kmsg_seq_ready && since != gpu_kmsg_last_since)
         {
                 if (gpu_kmsg_last_since)
-                        gpu_kmsg_floor_seq = gpu_kmsg_seen_seq;
+                        gpu_kmsg_floor_seq = gpu_kmsg_seen_seq, memory_zero(&gpu_fault_pending, sizeof gpu_fault_pending);
                 gpu_kmsg_last_since = since;
+        }
+        // The tail: the records since the last read, each after the floor read into what this floor's reads have found; that is the answer.
+        if (!out->have_at && gpu_kmsg_tail >= 0 && gpu_kmsg_seq_ready)
+        {
+                while ((record = gpu_kmsg_more(&records)))
+                {
+                        char *text = (char *)string_find((string_address)record, (string_address) ";");
+                        positive seq = gpu_kmsg_seq(record);
+
+                        gpu_kmsg_seen_seq = seq > gpu_kmsg_seen_seq ? seq : gpu_kmsg_seen_seq;
+                        if (text && seq > gpu_kmsg_floor_seq)
+                                gpu_fault_line(text + 1, &gpu_fault_pending);
+                }
+                memory_copy(out, &gpu_fault_pending, sizeof(*out));
+                gpu_fault_query(out);
+                return;
         }
         handle = out->have_at ? -1 : gpu_kmsg_open();
         while ((record = gpu_kmsg_next(&handle, &records)))
