@@ -4943,6 +4943,39 @@ static void pt_test_requests(void)
         PTCHECK(pt_engine.streams_made == pt_engine.streams_freed, "freed");
 }
 
+/*
+        SDL 2 as Black Mesa runs it (its PulseAudio backend): a whole mix buffer of 4096 bytes written each time the stream may take
+        one, a tlength of four of them asked with the latency adjusted, minreq and prebuf the server's. The card's share is taken off
+        tlength (16384 less 1536), so the program writes three buffers (12288 bytes) and stops short of tlength by less than one:
+        a prebuf of the whole tlength was never reached, the stream never played, no request came again, and the game was silent
+        (box: the stream not corked, 69.7 ms of it queued, 12288 bytes at 44100 Hz, never playing).
+*/
+static void pt_test_sdl_chunks(void)
+{
+        long slot;
+        unsigned long channel, index, missing, written = 0;
+        static unsigned char out[AUDIO_BLOCK * 4];
+
+        pt_make_source();
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        slot = pt_connect(1000, 99, 35, "SDL buffers");
+        pt_card_us = 8000;
+        PTCHECK(pt_create(slot, 35, 20, 16384, PULSE_INVALID, PULSE_INVALID, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "an SDL stream");
+        while (missing - written >= 4096)
+        {
+                pt_data(slot, channel, pt_source, 4096, 0, 0);
+                written += 4096;
+        }
+        PTCHECK(written == 12288 && missing == 16384 - 1536, "it writes whole buffers while one fits: %lu of the %lu asked", written, missing);
+        pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 64);
+        PTCHECK(!pt_engine.stream[0].underrun, "and it plays from what it wrote (prebuf %lu)", pt_engine.stream[0].prebuf);
+        pulse_client_close(&pt_engine, slot);
+        for (int block = 0; block < 4; block++)
+                pulse_sink_mix(&pt_engine, 0, out, AUDIO_FORMAT_S16LE, 2, 64);
+        pt_card_us = 0;
+}
+
 // A stream corked and uncorked a little short of its prebuf plays on from what it holds: a cork does not ask for the prebuf again. Re-armed,
 // it waited for a fill that the program, asked for less than its minreq, does not write, and it never started (the shortfall here is 512 bytes,
 // under the minreq of 1024).
@@ -5052,15 +5085,15 @@ static void pt_test_latency(void)
         slot = pt_connect(1000, 99, 35, "Latency");
         pt_card_us = 8000; // a card kept 384 frames ahead: 1536 bytes of a stereo 16-bit stream at 48000
         // SDL at 1024 frames: tlength 4096, the rest the server's. minreq a quarter (1024); the card's 1536 off, but not under the card's
-        // and two minreq (3584, 18.7 ms): 26.7 ms in all where it was 29.3; prebuf the whole tlength.
+        // and two minreq (3584, 18.7 ms): 26.7 ms in all where it was 29.3; prebuf PulseAudio's, tlength less minreq and a frame.
         PTCHECK(pt_create(slot, 35, 20, 4096, PULSE_INVALID, PULSE_INVALID, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "an SDL stream");
         pt_create_attributes(20, &tlength, &prebuf, &minreq, &configured);
-        PTCHECK(tlength == 3584 && minreq == 1024 && prebuf == 3584 && missing == 3584 && configured == 8000 && pt_card_asked == 21333,
+        PTCHECK(tlength == 3584 && minreq == 1024 && prebuf == 3584 - 1024 + 4 && missing == 3584 && configured == 8000 && pt_card_asked == 21333,
                 "SDL's latency is its own: tlength %lu minreq %lu prebuf %lu missing %lu, the card's %lld us (asked about %ld us)", tlength, minreq, prebuf, missing, configured, pt_card_asked);
         // Chromium: tlength three buffers of 1024 frames, minreq half of one. 64 ms in all: 56 queued and the card's 8.
         PTCHECK(pt_create(slot, 35, 21, 12288, PULSE_INVALID, 2048, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a Chromium stream");
         pt_create_attributes(21, &tlength, &prebuf, &minreq, &configured);
-        PTCHECK(tlength == 12288 - 1536 && minreq == 2048 && prebuf == 12288 - 1536 && configured == 8000, "Chromium's: tlength %lu minreq %lu prebuf %lu", tlength, minreq, prebuf);
+        PTCHECK(tlength == 12288 - 1536 && minreq == 2048 && prebuf == 12288 - 1536 - 2048 + 4 && configured == 8000, "Chromium's: tlength %lu minreq %lu prebuf %lu", tlength, minreq, prebuf);
         // A default stream: 200 ms, a request of 20 ms (not a quarter, 50 ms).
         PTCHECK(pt_create(slot, 35, 22, PULSE_INVALID, PULSE_INVALID, PULSE_INVALID, &channel, &index, &missing, 0, 0x10000, 1, AUDIO_FORMAT_S16LE, 2, 48000, 0) == 0, "a default stream");
         pt_create_attributes(22, &tlength, &prebuf, &minreq, &configured);
@@ -10027,6 +10060,7 @@ int main(void)
         pt_test_requests();
         pt_test_restart();
         pt_test_latency();
+        pt_test_sdl_chunks();
         pt_test_control();
         pt_test_volume();
         pt_test_dying();

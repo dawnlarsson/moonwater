@@ -1919,10 +1919,14 @@ static struct pulse_stream *pulse_stream_free_slot(struct pulse *p)
           the card's (host.latency) is taken off it, keeping at least the card's and two minreq (the room to answer a request
           while the card is refilled). SDL, Chromium and every libpulse program that asks for a latency set the flag, and were
           played the card's 5 to 8 ms later than they asked (SDL at 1024 frames 29.3 ms for 21.3, Chromium 72 ms for 64).
-        - prebuf, what must be queued before the stream plays: by default, and at most, tlength. PulseAudio's is tlength less
-          minreq and a frame; here a stream that starts takes the card's share at once, and a program that is late to its
-          requests (16 busy loops on the four cores of hasty-tail, SDL at 512 frames) underran 57 to 107 times in 5 s with
-          PulseAudio's and once with the whole tlength.
+        - prebuf, what must be queued before the stream plays: by default PulseAudio's, tlength less minreq and a frame, and at most
+          tlength. The whole tlength (as it was here) is a level a program that writes in chunks of its own may never reach: it is
+          asked for tlength and writes whole chunks while a chunk fits, so it stops short of tlength by less than a chunk and waits
+          for a request that comes only once the stream plays. Black Mesa (SDL 2's PulseAudio backend: tlength and minreq one
+          mix buffer, ADJUST_LATENCY, a write of a whole buffer each time one fits) sat silent that way, its stream in underrun
+          forever and SDL in ppoll. tlength less minreq and a frame is below what any such program has written when it stops.
+          (The whole tlength had fewer underruns for a program late to its requests, 16 busy loops on hasty-tail's four cores:
+          once in 5 s against 57 to 107; silence is the worse of the two.)
 
         The card's share is kept to be told to the program (the configured latency of its sink).
 */
@@ -1958,7 +1962,9 @@ static void pulse_playback_attributes(struct pulse *p, struct pulse_stream *s, u
                         tlength = s->maxlength;
                 tlength -= tlength % frame;
         }
-        if (prebuf == PULSE_INVALID || prebuf > tlength)
+        if (prebuf == PULSE_INVALID)
+                prebuf = tlength > minreq ? tlength - minreq + frame : frame;
+        if (prebuf > tlength)
                 prebuf = tlength;
         prebuf -= prebuf % frame;
         s->tlength = tlength;
