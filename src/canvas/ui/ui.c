@@ -8168,6 +8168,7 @@ LANGUAGE_ID(installer_wifi_password, "Password for %s") \
 LANGUAGE_ID(installer_wifi_saved, "Saved") \
 LANGUAGE_ID(launcher_power_off, "Power off") \
 LANGUAGE_ID(launcher_power_off_armed, "power off") \
+LANGUAGE_ID(launcher_recent, "Recent") \
 LANGUAGE_ID(launcher_restart, "Restart") \
 LANGUAGE_ID(launcher_restart_armed, "restart") \
 LANGUAGE_ID(launcher_run, "Run %s") \
@@ -23275,7 +23276,8 @@ static fn ui_icon_tile(struct ui address_to ui, int left, int top, int size, con
         copy; larger, the nearest (memory_resample_u32_rect). ui_icon_picture lays one such over the picture a row at a time, each row the
         library's premultiplied over (memory_glass_over_u32 with no grain), cut to the rows and columns the ui may write.
 */
-#define UI_ICON_MOST 64 // the largest a picture is drawn, each way
+#define UI_ICON_MOST 64     // the largest a window's picture is drawn, each way
+#define UI_PICTURE_MOST 128 // the largest any picture is laid over the window (ui_icon_picture), each way: an app's (ui_apps_picture) too
 
 static fn ui_icon_scale(unsigned int address_to into, int size, const unsigned int address_to from)
 {
@@ -23309,10 +23311,10 @@ static fn ui_icon_scale(unsigned int address_to into, int size, const unsigned i
 
 static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, const unsigned int address_to picture)
 {
-        static const unsigned int plain[128]; // no grain
-        unsigned int under[UI_ICON_MOST];
+        static const unsigned int plain[UI_PICTURE_MOST]; // no grain
+        unsigned int under[UI_PICTURE_MOST];
 
-        if (size <= 0 || size > UI_ICON_MOST || left < 0 || left + size > ui->width)
+        if (size <= 0 || size > UI_PICTURE_MOST || left < 0 || left + size > ui->width)
                 return;
         if (ui->scene)
                 ui->scene->lost = UI_LOST_CELL_TEXT;
@@ -23325,6 +23327,1330 @@ static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, 
                 memory_copy(under, into, (positive)size * 4);
                 memory_glass_over_u32(into, picture + row * size, under, (positive)size, plain);
         }
+}
+
+/*
+        A square picture of any side made (premultiplied 0xaarrggbb both): smaller, each pixel the mean of the
+        pixels under it; the same, a copy; larger, the nearest (memory_resample_u32_rect). ui_icon_scale is this from a window's icon.
+*/
+static fn ui_picture_scale(unsigned int address_to into, int size, const unsigned int address_to from, int side)
+{
+        if (size <= 0 || side <= 0)
+                return;
+        if (size >= side)
+        {
+                memory_resample_u32_rect(into, (positive)size, (positive)size, (positive)size, from, (positive)side, (positive)side, (positive)side,
+                                         (positive)size, (positive)size, 0, 0);
+                return;
+        }
+        for (int y = 0; y < size; y++)
+        {
+                int y0 = y * side / size, y1 = (y + 1) * side / size;
+
+                for (int x = 0; x < size; x++)
+                {
+                        int x0 = x * side / size, x1 = (x + 1) * side / size;
+                        unsigned int sum[4] = {0, 0, 0, 0}, count = (unsigned int)((x1 - x0) * (y1 - y0));
+
+                        for (int sy = y0; sy < y1; sy++)
+                                for (int sx = x0; sx < x1; sx++)
+                                {
+                                        unsigned int pixel = from[sy * side + sx];
+
+                                        sum[0] += pixel >> 24, sum[1] += pixel >> 16 & 255, sum[2] += pixel >> 8 & 255, sum[3] += pixel & 255;
+                                }
+                        into[y * size + x] = (sum[0] + count / 2) / count << 24 | (sum[1] + count / 2) / count << 16 | (sum[2] + count / 2) / count << 8 | (sum[3] + count / 2) / count;
+                }
+        }
+}
+
+/* ---- apps: the registry ---- */
+
+/*
+        The programs a person starts by name and picture, as one list the launcher, the panel and the settings read: the kit's own
+        (ui_kit_programs) and every program a bowl holds that says it is one, by the desktop entry of the freedesktop.org Desktop Entry
+        Specification each package puts in its /usr/share/applications (and /usr/local/share/applications) of the bowl. An entry is
+        its file's name less .desktop (its id, which is the app_id its windows say by the specification's own advice, and what a pin
+        names), its Name in the language where the file has one, the words a search finds it by (GenericName, Keywords, the program's
+        own name and the names of its launchers), the window key (StartupWMClass, else the id: what a running window's app_id or X
+        class is matched by, ui_apps_match), its picture (Icon, ui_apps_picture) and what starts it.
+
+        What starts it is a launcher of /bowls/bin and never the entry's words: the name of the Exec's program (past an env and its
+        assignments) is looked for there, and the entry is the machine's only where that launcher is a regular file of root's that no one
+        else may write and it is this bowl's (its line names a program of this bowl's root) or a profile's session (`# bowl profile`).
+        So the program is started as typing its name starts it, through the bowl, and a pin of it is the launcher the runner may start
+        (rover's open pin: a kit program or a launcher of /bowls/bin, root's alone). An entry with none is not listed. The Exec's other
+        words (its field codes taken out, %% a %) are kept for the launcher, which starts the launcher with them; a pin starts it bare.
+
+        Not listed: a file that is not root's alone, not of Type Application, NoDisplay or Hidden true, an OnlyShowIn that does not
+        name Moonwater or a NotShowIn that does, no Name, no Exec, or an id a pin could not keep (letters, digits and _ . + -). Two bowls
+        with an entry of one id: the first bowl's (by name) is the one. Terminal true is kept: the launcher starts it in a terminal and
+        it is not pinned.
+
+        It is read again when it may have changed (ui_apps_fresh): the directories' times are kept, and a look at them at most once in
+        UI_APPS_LOOK_NS finds a bowl or an entry added or taken away.
+*/
+#define UI_APPS_MOST 192
+#define UI_APP_NAME 64
+#define UI_APP_WORDS 192
+#define UI_APP_PATH 160
+#define UI_APP_ARGS 8                   // the Exec's words after its program that are kept
+#define UI_APP_PICTURE UI_PICTURE_MOST  // the most a picture is kept at, each way
+#define UI_APPS_DIRS 24                 // the directories looked at for a change: /bowls and two in each bowl
+#define UI_APPS_LOOK_NS 2000000000ll
+#define UI_APPS_ENTRY_MOST (96 * 1024)  // the bytes of a desktop file that are read
+#define UI_APPS_BOWLS "/bowls"
+#define UI_APPS_DESKTOP "Moonwater"     // what OnlyShowIn and NotShowIn name this desktop by (XDG_CURRENT_DESKTOP)
+
+// The kit's own programs, in the order they are listed: what each is called (English, the language's by language_of), the words that
+// also name it, its program, which takes -f for its face, and whether it draws in the monospace face.
+static const struct ui_kit_program
+{
+        const char address_to label;
+        const char address_to words;
+        const char address_to command;
+        unsigned char mono;
+} ui_kit_programs[] = {
+#if MOONWATER_UI_SETTINGS // its tool is in the table only with the switch on (ui/ui.c's switches): a row that is listed starts
+        {"Settings", "settings preferences options", "/settings", 0},
+#endif
+        {"Terminal", "terminal shell console", "/terminal", 1},
+        {"Kernel log", "kernel log klog dmesg messages", "/klog", 1},
+#if MOONWATER_UI_MIXER
+        {"Mixer", "mixer sound volume audio", "/mixer", 0},
+#endif
+#if MOONWATER_UI_FILES
+        {"Files", "files folders browser directory", "/files", 0},
+#endif
+#if MOONWATER_UI_INSTALLER // last, and listed only where the launcher offers it
+        {"Install Moonwater", "install installer disk drive", "/installer", 0},
+#endif
+};
+#define UI_KIT_PROGRAMS (sizeof(ui_kit_programs) / sizeof(ui_kit_programs[0]))
+
+struct ui_app_entry
+{
+        char id[WINDOWS_APP_ID];      // the desktop file's name less .desktop; a kit program's name
+        char name[UI_APP_NAME];       // what it is called (a kit program's: its English, said in the language as it is drawn)
+        char words[UI_APP_WORDS];     // what else names it, a blank apart
+        char key[WINDOWS_APP_ID];     // the window key: StartupWMClass, else the id
+        char launch[UI_APP_PATH];     // what starts it: /NAME, a kit program, or /bowls/bin/NAME
+        char source[UI_APP_PATH];     // the desktop file it is from (a kit program's: its program)
+        char icon[UI_APP_PATH];       // its Icon, as the entry says it
+        char root[UI_APP_PATH];       // the bowl it is from (/bowls/NAME), "" the kit's
+        char profile[48];             // the bowl profile its launcher is the session of (chrome, steam), "" none
+        char args[UI_APP_ARGS][UI_APP_PATH]; // the Exec's words after its program, field codes taken out
+        unsigned char arg_count;
+        b32 terminal;                 // Terminal=true: started in a terminal, and not pinned
+        int kit;                      // a kit program: its place in ui_kit_programs + 1, 0 none
+        // The picture, made on the first ask (ui_apps_picture): UI_APP_PICTURE each way at most, premultiplied; tried once.
+        b32 tried;
+        int side;
+        unsigned int address_to picture;
+        // The last size it was asked at, and that picture.
+        int cached_side;
+        unsigned int address_to cached;
+};
+
+static struct
+{
+        struct ui_app_entry address_to app; // UI_APPS_MOST, mapped at the first read
+        int count;
+        b32 read;
+        b64 looked;                         // when the directories were last looked at (the monotonic clock)
+        unsigned int generation;            // counted up at each read that changed what is listed
+        int dirs;
+        char dir[UI_APPS_DIRS][UI_APP_PATH];
+        b64 dir_time[UI_APPS_DIRS];         // each one's modification, ns (-1: not there)
+} ui_apps;
+
+// The directory of bowls, which a check points at a tree of its own, and whose a desktop file and a launcher must be (root's; a check's own).
+static const char address_to ui_apps_bowls = UI_APPS_BOWLS;
+static unsigned int ui_apps_owner = 0;
+
+// The statx a look needs: its type, mode and owner, and its modification time.
+struct ui_apps_facts
+{
+        p32 mask, block;
+        p64 attributes;
+        p32 links, owner, group;
+        p16 mode, spare;
+        p64 inode, size, blocks, attributes_mask;
+        struct { b64 seconds; p32 nanoseconds; b32 pad; } accessed, created, changed, modified;
+        p8 rest[128];
+};
+_Static_assert(sizeof(struct ui_apps_facts) == 256, "statx writes 256 bytes");
+
+static b32 ui_apps_look(bipolar directory, const char address_to path, b32 follow, struct ui_apps_facts address_to facts)
+{
+        memory_zero(facts, sizeof(*facts));
+        return system_stat_at(directory, path, follow ? 0 : AT_SYMLINK_NOFOLLOW, 0x7ff, facts) == 0;
+}
+
+// A file's or a directory's modification in ns, -1 when it is not there.
+static b64 ui_apps_time(const char address_to path)
+{
+        struct ui_apps_facts facts;
+
+        if (!ui_apps_look(AT_FDCWD, path, true, &facts))
+                return -1;
+        return facts.modified.seconds * 1000000000ll + facts.modified.nanoseconds;
+}
+
+// Whether a byte may be in an id: what an app_id and a pin's first word take.
+static b32 ui_apps_id_byte(unsigned char byte)
+{
+        return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '_' || byte == '.' ||
+               byte == '+' || byte == '-';
+}
+
+/*
+        A desktop entry, read: the keys of its [Desktop Entry] group this list needs, each as the specification says it is read. A line
+        is a comment (#), a group's header ([...]) or Key=Value with blanks about the = ignored; Key[LOCALE] is the key in a language,
+        taken here for the language's two or three letters alone (Name[de]), the whole value of the key without one otherwise. A string's
+        escapes are \s \n \t \r and \\; a list's items end with ;, \; being one inside an item. A boolean is true or false.
+*/
+struct ui_desktop
+{
+        char name[UI_APP_NAME], generic[UI_APP_NAME], exec[512], icon[UI_APP_PATH], key[WINDOWS_APP_ID], keywords[UI_APP_WORDS];
+        b32 application, terminal, hidden, no_display, shown;
+        b32 name_local, generic_local, keywords_local; // the value is the language's, which another line without one does not replace
+};
+
+// A value's escapes undone into into (room bytes, a null after): \s \n \t \r \\, and \; kept as it is where list (a list's items are
+// split after). What does not fit is cut on a character's boundary.
+static fn ui_desktop_value(char address_to into, positive room, const char address_to from, positive size, b32 list)
+{
+        positive made = 0;
+
+        for (positive at = 0; at < size && made + 1 < room; at++)
+        {
+                char c = from[at];
+
+                if (c == '\\' && at + 1 < size)
+                {
+                        char next = from[++at];
+
+                        c = next == 's' ? ' ' : next == 'n' ? '\n' : next == 't' ? '\t' : next == 'r' ? '\r' : next == '\\' ? '\\' : next;
+                        if (next == ';' && list)
+                        {
+                                if (made + 2 >= room)
+                                        break;
+                                into[made++] = '\\';
+                        }
+                        else if (next != 's' && next != 'n' && next != 't' && next != 'r' && next != '\\' && next != ';')
+                        {
+                                // Not an escape the specification has: the backslash is kept, as it was written.
+                                if (made + 2 >= room)
+                                        break;
+                                into[made++] = '\\';
+                        }
+                }
+                into[made++] = c;
+        }
+        // Cut short in a character: back to the byte that begins it, and that byte too where the character is not whole.
+        if (made + 1 >= room)
+        {
+                positive lead = made;
+
+                while (lead && ((unsigned char)into[lead - 1] & 0xc0) == 0x80)
+                        lead--;
+                if (lead && (unsigned char)into[lead - 1] >= 0xc0)
+                {
+                        unsigned char byte = (unsigned char)into[lead - 1];
+                        positive length = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : 2;
+
+                        if (made - (lead - 1) < length)
+                                made = lead - 1;
+                }
+        }
+        into[made] = 0;
+}
+
+// Whether a list's value (a; b;) has an item that is word.
+static b32 ui_desktop_lists(const char address_to value, positive size, const char address_to word)
+{
+        positive length = string_length((string_address)word);
+
+        for (positive at = 0; at < size;)
+        {
+                positive stop = at;
+
+                while (stop < size && value[stop] != ';')
+                        stop += value[stop] == '\\' && stop + 1 < size ? 2 : 1;
+                if (stop - at == length && !memory_compare(value + at, word, length))
+                        return true;
+                at = stop + 1;
+        }
+        return false;
+}
+
+static b32 ui_desktop_true(const char address_to value, positive size)
+{
+        return (size == 4 && !memory_compare(value, "true", 4)) || (size == 1 && value[0] == '1');
+}
+
+/*
+        The entry in text (size bytes), its localised keys taken in the language of code (windows_language_code's packing: two or three
+        letters, a byte each from the low end; 0 English): false when it has no [Desktop Entry] group first.
+*/
+static b32 ui_desktop_parse(const char address_to text, positive size, unsigned int code, struct ui_desktop address_to out)
+{
+        char tongue[4] = {0, 0, 0, 0};
+        b32 in = false, seen = false;
+
+        memory_zero(out, sizeof(*out));
+        out->shown = true;
+        for (int at = 0; at < 3 && code >> (8 * at) & 255; at++)
+                tongue[at] = (char)(code >> (8 * at) & 255);
+        for (positive at = 0; at < size;)
+        {
+                positive line = at, stop = at, key, key_end, value, value_end, locale = 0, locale_end = 0;
+
+                while (stop < size && text[stop] != '\n')
+                        stop++;
+                at = stop + 1;
+                value_end = stop;
+                if (value_end > line && text[value_end - 1] == '\r')
+                        value_end--;
+                while (line < value_end && (text[line] == ' ' || text[line] == '\t'))
+                        line++;
+                if (line >= value_end || text[line] == '#')
+                        continue;
+                if (text[line] == '[')
+                {
+                        // A group's header: the keys are the first group's, which is the entry's.
+                        b32 entry = value_end - line >= 15 && !memory_compare(text + line, "[Desktop Entry]", 15);
+
+                        if (!seen && !entry)
+                                return false;
+                        in = entry && !seen;
+                        seen = true;
+                        continue;
+                }
+                if (!in)
+                        continue;
+                key = line, key_end = line;
+                while (key_end < value_end && text[key_end] != '=' && text[key_end] != '[' && text[key_end] != ' ' && text[key_end] != '\t')
+                        key_end++;
+                value = key_end;
+                if (value < value_end && text[value] == '[')
+                {
+                        locale = value + 1;
+                        while (value < value_end && text[value] != ']')
+                                value++;
+                        locale_end = value;
+                        if (value < value_end)
+                                value++;
+                }
+                while (value < value_end && (text[value] == ' ' || text[value] == '\t'))
+                        value++;
+                if (value >= value_end || text[value] != '=')
+                        continue;
+                value++;
+                while (value < value_end && (text[value] == ' ' || text[value] == '\t'))
+                        value++;
+                {
+                        positive length = key_end - key, said = value_end - value;
+                        const char address_to v = text + value;
+                        b32 tongued = false;
+
+                        if (locale)
+                        {
+                                // Only the language's own (Name[de]): a country's (Name[de_AT]) or a modifier's is another language's.
+                                positive tongue_length = string_length((string_address)tongue);
+
+                                if (!tongue_length || locale_end - locale != tongue_length || memory_compare(text + locale, tongue, tongue_length))
+                                        continue;
+                                tongued = true;
+                        }
+#define UI_DESKTOP_KEY(word) (length == sizeof(word) - 1 && !memory_compare(text + key, word, sizeof(word) - 1))
+                        if (UI_DESKTOP_KEY("Name") && (tongued || !out->name_local))
+                                ui_desktop_value(out->name, sizeof(out->name), v, said, false), out->name_local |= tongued;
+                        else if (UI_DESKTOP_KEY("GenericName") && (tongued || !out->generic_local))
+                                ui_desktop_value(out->generic, sizeof(out->generic), v, said, false), out->generic_local |= tongued;
+                        else if (UI_DESKTOP_KEY("Keywords") && (tongued || !out->keywords_local))
+                                ui_desktop_value(out->keywords, sizeof(out->keywords), v, said, true), out->keywords_local |= tongued;
+                        else if (tongued)
+                                continue;
+                        else if (UI_DESKTOP_KEY("Type"))
+                                out->application = said == 11 && !memory_compare(v, "Application", 11);
+                        else if (UI_DESKTOP_KEY("Exec"))
+                                ui_desktop_value(out->exec, sizeof(out->exec), v, said, false);
+                        else if (UI_DESKTOP_KEY("Icon"))
+                                ui_desktop_value(out->icon, sizeof(out->icon), v, said, false);
+                        else if (UI_DESKTOP_KEY("StartupWMClass"))
+                                ui_desktop_value(out->key, sizeof(out->key), v, said, false);
+                        else if (UI_DESKTOP_KEY("Terminal"))
+                                out->terminal = ui_desktop_true(v, said);
+                        else if (UI_DESKTOP_KEY("Hidden"))
+                                out->hidden = ui_desktop_true(v, said);
+                        else if (UI_DESKTOP_KEY("NoDisplay"))
+                                out->no_display = ui_desktop_true(v, said);
+                        else if (UI_DESKTOP_KEY("OnlyShowIn"))
+                                out->shown &= ui_desktop_lists(v, said, UI_APPS_DESKTOP);
+                        else if (UI_DESKTOP_KEY("NotShowIn"))
+                                out->shown &= !ui_desktop_lists(v, said, UI_APPS_DESKTOP);
+#undef UI_DESKTOP_KEY
+                }
+        }
+        return seen;
+}
+
+/*
+        An Exec value (its string escapes undone) as its words, into words (count at most, each room bytes): a word is bytes up to a
+        blank, or a part in double quotes in which \" \` \$ and \\ are the quote, the backquote, the dollar and the backslash. The field
+        codes are taken out: %f %F %u %U %d %D %n %N %v %m %i %c %k, a word that is only one of them going whole, and %% is a %. How many
+        words; -1 for a value the specification says is not one (a quote left open, a field code of another letter).
+*/
+static int ui_desktop_exec(const char address_to exec, char (address_to words)[UI_APP_PATH], int count)
+{
+        int made = 0;
+
+        for (positive at = 0; exec[at];)
+        {
+                char word[UI_APP_PATH];
+                positive used = 0;
+                b32 any = false, coded = false;
+
+                while (exec[at] == ' ' || exec[at] == '\t')
+                        at++;
+                if (!exec[at])
+                        break;
+                while (exec[at] && exec[at] != ' ' && exec[at] != '\t')
+                {
+                        char c = exec[at];
+
+                        if (c == '"')
+                        {
+                                for (at++; exec[at] && exec[at] != '"'; at++)
+                                {
+                                        c = exec[at];
+                                        if (c == '\\' && (exec[at + 1] == '"' || exec[at + 1] == '`' || exec[at + 1] == '$' || exec[at + 1] == '\\'))
+                                                c = exec[++at];
+                                        if (used + 1 < sizeof(word))
+                                                word[used++] = c;
+                                }
+                                if (exec[at] != '"')
+                                        return -1;
+                                at++, any = true;
+                                continue;
+                        }
+                        if (c == '%')
+                        {
+                                char code = exec[at + 1];
+
+                                at += 2;
+                                if (code == '%')
+                                {
+                                        if (used + 1 < sizeof(word))
+                                                word[used++] = '%';
+                                        any = true;
+                                        continue;
+                                }
+                                if (!code || !string_first_of((string_address) "fFuUdDnNvmick", code))
+                                        return -1;
+                                coded = true;
+                                continue;
+                        }
+                        if (used + 1 < sizeof(word))
+                                word[used++] = c;
+                        any = true, at++;
+                }
+                // A word that was a field code alone goes; one with words of its own round a code keeps them.
+                if (!any || (coded && !used))
+                        continue;
+                word[used] = 0;
+                if (made < count)
+                        string_copy_bounded((p8 address_to)words[made], (string_address)word, UI_APP_PATH);
+                made++;
+        }
+        return made < count ? made : count;
+}
+
+// The last part of a path.
+static const char address_to ui_apps_base(const char address_to path)
+{
+        const char address_to last = path;
+
+        for (const char address_to at = path; *at; at++)
+                if (*at == '/' && at[1])
+                        last = at + 1;
+        return last;
+}
+
+/*
+        The launcher of /bowls/bin a bowl's program of this name is started by, into into: true where it is a regular file of root's no
+        one else may write and it is the bowl's at root (its line names a program under root) or a profile's session script, whose
+        profile's name is written to profile ("" for none).
+*/
+static b32 ui_apps_launcher(const char address_to root, const char address_to name, char address_to into, positive room, char address_to profile,
+                            positive profile_room)
+{
+        struct ui_apps_facts facts;
+        char line[256];
+        bipolar handle, got;
+        positive length = string_length((string_address)root);
+
+        profile[0] = 0;
+        if (!name[0] || name[0] == '.' || string_first_of((string_address)name, '/'))
+                return false;
+        string_copy_bounded((p8 address_to)into, (string_address)ui_apps_bowls, room);
+        string_append_bounded((p8 address_to)into, (string_address) "/bin/", room);
+        string_append_bounded((p8 address_to)into, (string_address)name, room);
+        if (!ui_apps_look(AT_FDCWD, into, false, &facts) || (facts.mode & 0170000u) != 0100000u || facts.owner != ui_apps_owner || (facts.mode & 0022))
+                return false;
+        handle = system_open_at(AT_FDCWD, (string_address)into, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (handle < 0)
+                return false;
+        got = system_read_once(handle, line, sizeof(line) - 1);
+        system_close(handle);
+        if (got <= 0)
+                return false;
+        line[got] = 0;
+        // A bowl's launcher: #!/bowl @ROOT/PROGRAM, ROOT this bowl's.
+        if (!memory_compare(line, "#!/bowl @", 9))
+                return !memory_compare(line + 9, root, length) && line[9 + length] == '/';
+        // A profile's session: #!/bin/sh, then # bowl profile NAME.
+        if (!memory_compare(line, "#!/bin/sh\n# bowl profile ", 25))
+        {
+                positive at = 25, made = 0;
+
+                while (line[at] && line[at] != '\n' && made + 1 < profile_room)
+                        profile[made++] = line[at++];
+                profile[made] = 0;
+                return true;
+        }
+        return false;
+}
+
+// A word appended to an entry's words, a blank before it, in lower case where it is ASCII; not again where it is there already.
+static fn ui_apps_word(struct ui_app_entry address_to app, const char address_to word, positive size)
+{
+        positive have = string_length((string_address)app->words);
+        char lower[UI_APP_NAME];
+
+        if (!size || size >= sizeof(lower))
+                return;
+        for (positive at = 0; at < size; at++)
+                lower[at] = word[at] >= 'A' && word[at] <= 'Z' ? (char)(word[at] + 32) : word[at];
+        lower[size] = 0;
+        for (positive at = 0; at < have;)
+        {
+                positive stop = at;
+
+                while (stop < have && app->words[stop] != ' ')
+                        stop++;
+                if (stop - at == size && !memory_compare(app->words + at, lower, size))
+                        return;
+                at = stop + 1;
+        }
+        if (have + (have ? 1 : 0) + size + 1 > sizeof(app->words))
+                return;
+        if (have)
+                app->words[have++] = ' ';
+        memory_copy(app->words + have, lower, size + 1);
+}
+
+// Every item of a list's value (a;b;), and every word of a text, as words of the entry.
+static fn ui_apps_words(struct ui_app_entry address_to app, const char address_to text)
+{
+        for (positive at = 0; text[at];)
+        {
+                positive stop = at;
+
+                while (text[stop] && text[stop] != ';' && text[stop] != ' ' && !(text[stop] == '\\' && text[stop + 1] == ';'))
+                        stop++;
+                ui_apps_word(app, text + at, stop - at);
+                at = stop + (text[stop] == '\\' ? 2 : text[stop] ? 1 : 0);
+        }
+}
+
+static int ui_apps_find(const char address_to id);
+
+/*
+        One desktop file of a bowl, read and listed when it is one of the machine's (the rules above). root is the bowl (/bowls/NAME),
+        directory the applications directory it is in, opened, and file its name there.
+*/
+static fn ui_apps_entry(const char address_to root, bipolar directory, const char address_to folder, const char address_to file, unsigned int code)
+{
+        struct ui_app_entry address_to app;
+        struct ui_desktop desktop;
+        struct ui_apps_facts facts;
+        char words[UI_APP_ARGS + 8][UI_APP_PATH], profile[48];
+        const char address_to program;
+        positive length = string_length((string_address)file);
+        bipolar handle, got;
+        p8 address_to text;
+        int count, first = 0;
+
+        if (ui_apps.count >= UI_APPS_MOST || length <= 8 || length - 8 >= WINDOWS_APP_ID || memory_compare(file + length - 8, ".desktop", 8))
+                return;
+        for (positive at = 0; at < length - 8; at++)
+                if (!ui_apps_id_byte((unsigned char)file[at]))
+                        return;
+        app = &ui_apps.app[ui_apps.count];
+        memory_zero(app, sizeof(*app));
+        memory_copy(app->id, file, length - 8);
+        if (ui_apps_find(app->id) >= 0)
+                return;
+        // Root's alone, a regular file, read through the directory and never through a link.
+        if (!ui_apps_look(directory, file, false, &facts) || (facts.mode & 0170000u) != 0100000u || facts.owner != ui_apps_owner || (facts.mode & 0022) ||
+            facts.size > UI_APPS_ENTRY_MOST)
+                return;
+        handle = system_open_at(directory, (string_address)file, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (handle < 0)
+                return;
+        text = (p8 address_to)memory_checked(UI_APPS_ENTRY_MOST);
+        got = text ? system_read_retry((positive)handle, text, UI_APPS_ENTRY_MOST) : -1;
+        system_close(handle);
+        if (got > 0 && !ui_desktop_parse((const char address_to)text, (positive)got, code, &desktop))
+                got = -1;
+        if (text)
+                memory_free(text, UI_APPS_ENTRY_MOST);
+        if (got <= 0 || !desktop.application || desktop.hidden || desktop.no_display || !desktop.shown || !desktop.name[0] || !desktop.exec[0])
+                return;
+        count = ui_desktop_exec(desktop.exec, words, (int)(sizeof(words) / sizeof(words[0])));
+        // An env and its assignments before the program are the entry's, and not what is started.
+        if (count > 0 && string_equals((string_address)ui_apps_base(words[0]), (string_address) "env"))
+                for (first = 1; first < count && string_first_of((string_address)words[first], '=') && words[first][0] != '-'; first++)
+                        ;
+        if (count <= first)
+                return;
+        program = ui_apps_base(words[first]);
+        if (!ui_apps_launcher(root, program, app->launch, sizeof(app->launch), profile, sizeof(profile)))
+                return;
+        for (int at = first + 1; at < count && app->arg_count < UI_APP_ARGS; at++)
+                string_copy_bounded((p8 address_to)app->args[app->arg_count++], (string_address)words[at], UI_APP_PATH);
+        string_copy_bounded((p8 address_to)app->name, (string_address)desktop.name, sizeof(app->name));
+        string_copy_bounded((p8 address_to)app->key, (string_address)(desktop.key[0] ? desktop.key : app->id), sizeof(app->key));
+        string_copy_bounded((p8 address_to)app->icon, (string_address)desktop.icon, sizeof(app->icon));
+        string_copy_bounded((p8 address_to)app->root, (string_address)root, sizeof(app->root));
+        string_copy_bounded((p8 address_to)app->source, (string_address)folder, sizeof(app->source));
+        string_append_bounded((p8 address_to)app->source, (string_address) "/", sizeof(app->source));
+        string_append_bounded((p8 address_to)app->source, (string_address)file, sizeof(app->source));
+        app->terminal = desktop.terminal;
+        // Found by its id, its program's name and its launcher's, the profile it is the session of, and what the entry says of it.
+        ui_apps_word(app, app->id, string_length((string_address)app->id));
+        ui_apps_word(app, program, string_length((string_address)program));
+        ui_apps_word(app, ui_apps_base(app->launch), string_length((string_address)ui_apps_base(app->launch)));
+        ui_apps_word(app, profile, string_length((string_address)profile));
+        string_copy_bounded((p8 address_to)app->profile, (string_address)profile, sizeof(app->profile));
+        ui_apps_words(app, desktop.generic);
+        ui_apps_words(app, desktop.keywords);
+        ui_apps.count++;
+}
+
+// The kit's programs, first in the list: each by its program's name.
+static fn ui_apps_kit(void)
+{
+        for (positive at = 0; at < UI_KIT_PROGRAMS && ui_apps.count < UI_APPS_MOST; at++)
+        {
+                struct ui_app_entry address_to app = &ui_apps.app[ui_apps.count++];
+
+                memory_zero(app, sizeof(*app));
+                string_copy_bounded((p8 address_to)app->id, (string_address)ui_kit_programs[at].command + 1, sizeof(app->id));
+                string_copy_bounded((p8 address_to)app->key, (string_address)app->id, sizeof(app->key));
+                string_copy_bounded((p8 address_to)app->name, (string_address)ui_kit_programs[at].label, sizeof(app->name));
+                string_copy_bounded((p8 address_to)app->launch, (string_address)ui_kit_programs[at].command, sizeof(app->launch));
+                string_copy_bounded((p8 address_to)app->source, (string_address)ui_kit_programs[at].command, sizeof(app->source));
+                string_copy_bounded((p8 address_to)app->words, (string_address)ui_kit_programs[at].words, sizeof(app->words));
+                app->kit = (int)at + 1;
+        }
+}
+
+// A directory of a bowl kept for a look at its time.
+static fn ui_apps_watch(const char address_to path)
+{
+        if (ui_apps.dirs >= UI_APPS_DIRS)
+                return;
+        string_copy_bounded((p8 address_to)ui_apps.dir[ui_apps.dirs], (string_address)path, UI_APP_PATH);
+        ui_apps.dir_time[ui_apps.dirs++] = ui_apps_time(path);
+}
+
+// The entry names of a directory into names (a null after each, room bytes) and where each begins into order (UI_APPS_NAMES at most),
+// sorted by the byte so that a read finds the same first entry of an id every time: how many.
+#define UI_APPS_NAMES 512
+
+static positive ui_apps_names(bipolar directory, char address_to names, positive room, unsigned int address_to order)
+{
+        char buffer[4096];
+        positive used = 0, count = 0;
+
+        for (;;)
+        {
+                bipolar got = system_read_directory(directory, buffer, sizeof(buffer));
+
+                if (got <= 0)
+                        break;
+                for (positive at = 0; at < (positive)got;)
+                {
+                        const struct linux_dirent64 address_to record = (const struct linux_dirent64 address_to)(buffer + at);
+                        positive length;
+
+                        if (record->d_reclen < 20 || at + record->d_reclen > (positive)got)
+                                break;
+                        at += record->d_reclen;
+                        length = string_length((string_address)record->d_name);
+                        if (record->d_name[0] == '.' || used + length + 1 > room || count >= UI_APPS_NAMES)
+                                continue;
+                        memory_copy(names + used, record->d_name, length + 1);
+                        order[count++] = (unsigned int)used;
+                        used += length + 1;
+                }
+        }
+        for (positive at = 1; at < count; at++)
+        {
+                unsigned int held = order[at];
+                positive place = at;
+
+                while (place > 0 && string_compare((string_address)names + held, (string_address)names + order[place - 1]) < 0)
+                        order[place] = order[place - 1], place--;
+                order[place] = held;
+        }
+        return count;
+}
+
+// Read every directory again: the kit's programs, then each bowl's entries, the bowls by name. The language is the kit's now.
+static fn ui_apps_read(void)
+{
+        static const char address_to const folders[] = {"/usr/share/applications", "/usr/local/share/applications"};
+        char address_to bowls = null, address_to entries = null;
+        unsigned int bowl_order[UI_APPS_NAMES], entry_order[UI_APPS_NAMES];
+        positive bowl_count, room = 64 * 1024;
+        bipolar handle;
+
+        if (!ui_apps.app && !(ui_apps.app = (struct ui_app_entry address_to)memory_checked(UI_APPS_MOST * sizeof(struct ui_app_entry))))
+                return;
+        for (int at = 0; at < ui_apps.count; at++)
+        {
+                if (ui_apps.app[at].picture)
+                        memory_free(ui_apps.app[at].picture, (positive)UI_APP_PICTURE * UI_APP_PICTURE * 4);
+                if (ui_apps.app[at].cached)
+                        memory_free(ui_apps.app[at].cached, (positive)UI_APP_PICTURE * UI_APP_PICTURE * 4);
+        }
+        ui_apps.count = 0, ui_apps.dirs = 0, ui_apps.read = true, ui_apps.generation++;
+        ui_apps_kit();
+        ui_apps_watch(ui_apps_bowls);
+        handle = system_open_at(AT_FDCWD, (string_address)ui_apps_bowls, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        if (handle < 0)
+                return;
+        bowls = (char address_to)memory_checked(room * 2);
+        if (!bowls)
+        {
+                system_close(handle);
+                return;
+        }
+        entries = bowls + room;
+        bowl_count = ui_apps_names(handle, bowls, room, bowl_order);
+        system_close(handle);
+        for (positive at = 0; at < bowl_count; at++)
+        {
+                const char address_to bowl = bowls + bowl_order[at];
+                char root[UI_APP_PATH], folder[UI_APP_PATH];
+
+                if (string_equals((string_address)bowl, (string_address) "bin"))
+                        continue;
+                string_copy_bounded((p8 address_to)root, (string_address)ui_apps_bowls, sizeof(root));
+                string_append_bounded((p8 address_to)root, (string_address) "/", sizeof(root));
+                string_append_bounded((p8 address_to)root, (string_address)bowl, sizeof(root));
+                for (positive which = 0; which < 2; which++)
+                {
+                        positive count;
+                        bipolar directory;
+
+                        string_copy_bounded((p8 address_to)folder, (string_address)root, sizeof(folder));
+                        string_append_bounded((p8 address_to)folder, (string_address)folders[which], sizeof(folder));
+                        ui_apps_watch(folder);
+                        // Inside the bowl: a link on the way that leads out of it is followed inside it, as the bowl reads it.
+                        {
+                                bipolar inside = system_open_at(AT_FDCWD, (string_address)root, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+
+                                if (inside < 0)
+                                        continue;
+                                directory = system_open_resolved(inside, (string_address)folders[which], FILE_READ | O_DIRECTORY | O_CLOEXEC,
+                                                                 SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
+                                system_close(inside);
+                        }
+                        if (directory < 0)
+                                continue;
+                        count = ui_apps_names(directory, entries, room, entry_order);
+                        for (positive each = 0; each < count; each++)
+                                ui_apps_entry(root, directory, folder, entries + entry_order[each], language.code);
+                        system_close(directory);
+                }
+        }
+        memory_free(bowls, room * 2);
+}
+
+// The list read again when one of its directories has changed since it was read, looked at no more than once in UI_APPS_LOOK_NS:
+// true when it was read again (what a caller made of it is to be made again).
+static b32 ui_apps_fresh(b64 now)
+{
+        if (!ui_apps.read)
+        {
+                ui_apps.looked = now;
+                ui_apps_read();
+                return true;
+        }
+        if (now - ui_apps.looked < UI_APPS_LOOK_NS && now >= ui_apps.looked)
+                return false;
+        ui_apps.looked = now;
+        for (int at = 0; at < ui_apps.dirs; at++)
+                if (ui_apps_time(ui_apps.dir[at]) != ui_apps.dir_time[at])
+                {
+                        ui_apps_read();
+                        return true;
+                }
+        // A bowl added: its directory was not looked at, and /bowls itself changed (which the first of them is).
+        return false;
+}
+
+static int ui_apps_find(const char address_to id)
+{
+        for (int at = 0; id && id[0] && at < ui_apps.count; at++)
+                if (string_equals((string_address)ui_apps.app[at].id, (string_address)id))
+                        return at;
+        return -1;
+}
+
+// Whether two words are the same but for the case of their ASCII letters.
+static b32 ui_apps_same(const char address_to a, const char address_to b)
+{
+        positive length = string_length((string_address)a);
+
+        return length && length == string_length((string_address)b) && !memory_compare_ascii_case((address_any)a, (address_any)b, length);
+}
+
+/*
+        The entry a window is of, by what it says it is: its app_id (a Wayland client's) or its class (an X window's WM_CLASS), which is
+        the entry's window key or its id, the case of either aside (Steam's class is Steam, its file steam.desktop). -1 for none.
+*/
+static int ui_apps_match(const char address_to window)
+{
+        if (!window || !window[0])
+                return -1;
+        for (int at = 0; at < ui_apps.count; at++)
+                if (ui_apps_same(ui_apps.app[at].key, window))
+                        return at;
+        for (int at = 0; at < ui_apps.count; at++)
+                if (ui_apps_same(ui_apps.app[at].id, window))
+                        return at;
+        return -1;
+}
+
+/* ---- apps: their pictures ---- */
+
+/*
+        A PNG file (the W3C's Portable Network Graphics), decoded to premultiplied 0xaarrggbb: grey, grey and alpha, RGB, RGBA and a
+        palette (with tRNS's alpha), of 1, 2, 4, 8 and 16 bits as the colour type allows, not interlaced, at most UI_PNG_MOST each way.
+        Its IDAT chunks are one zlib stream, inflated by gzip's inflater (gzip.c, the shell's) from memory; each row is then unfiltered
+        (None, Sub, Up, Average and Paeth) and its pixels made. Answers the pixels (a mapping of width * height * 4 bytes, memory_free's),
+        null for a file it does not take.
+*/
+#define UI_PNG_MOST 1024
+
+static positive ui_png_inflate(const p8 address_to from, positive size, p8 address_to into, positive room)
+{
+        gzip_inflater address_to z;
+        positive made = 0;
+        bipolar done;
+
+        // The zlib header: deflate, no dictionary, its check.
+        if (size < 6 || (from[0] & 15) != 8 || (from[0] >> 4) > 7 || (from[1] & 32) || ((positive)from[0] << 8 | from[1]) % 31)
+                return 0;
+        if (!(z = gzip_inflater_new()))
+                return 0;
+        byte_input_open_memory(address_of z->input, (p8 address_to)from + 2, size - 2, (p8 address_to)(z + 1), GZIP_DECODE_IN);
+        for (;;)
+        {
+                done = gzip_inflate_blocks(z);
+                if (done < 0 || made + z->fill > room)
+                        break;
+                memory_copy(into + made, z->out, z->fill);
+                made += z->fill;
+                if (done)
+                        break;
+                gzip_inflate_slide(z);
+        }
+        gzip_inflater_free(z);
+        return done > 0 ? made : 0;
+}
+
+static inline unsigned int ui_png_premultiply(unsigned int r, unsigned int g, unsigned int b, unsigned int a)
+{
+        return a << 24 | (r * a + 127) / 255 << 16 | (g * a + 127) / 255 << 8 | (b * a + 127) / 255;
+}
+
+static unsigned int address_to ui_png_decode(const p8 address_to file, positive size, int address_to width_out, int address_to height_out)
+{
+        static const p8 signature[8] = {137, 'P', 'N', 'G', 13, 10, 26, 10};
+        p8 palette[256 * 4];
+        positive at = 8, zsize = 0, room, made, stride, channels, bits_per_pixel, bytes_per_pixel;
+        p8 address_to zdata = null, address_to raw = null;
+        unsigned int address_to pixels = null;
+        unsigned int width = 0, height = 0, depth = 0, colour = 0, colours = 0;
+        b32 header = false, ended = false;
+        int key_r = -1, key_g = -1, key_b = -1;
+
+        if (size < 8 + 25 || memory_compare(file, signature, 8))
+                return null;
+        for (int each = 0; each < 256; each++)
+                palette[each * 4] = palette[each * 4 + 1] = palette[each * 4 + 2] = 0, palette[each * 4 + 3] = 255;
+        // The chunks: IHDR first, every IDAT gathered into one stream, PLTE and tRNS kept, the rest passed by.
+        zdata = (p8 address_to)memory_checked(size);
+        if (!zdata)
+                return null;
+        while (at + 12 <= size && !ended)
+        {
+                positive length = (positive)file[at] << 24 | (positive)file[at + 1] << 16 | (positive)file[at + 2] << 8 | file[at + 3];
+                const p8 address_to type = file + at + 4, address_to data = file + at + 8;
+
+                if (length > size - at - 12)
+                        goto refused;
+                if (!header && memory_compare(type, "IHDR", 4))
+                        goto refused;
+                if (!memory_compare(type, "IHDR", 4))
+                {
+                        if (length != 13 || header)
+                                goto refused;
+                        width = (unsigned int)data[0] << 24 | (unsigned int)data[1] << 16 | (unsigned int)data[2] << 8 | data[3];
+                        height = (unsigned int)data[4] << 24 | (unsigned int)data[5] << 16 | (unsigned int)data[6] << 8 | data[7];
+                        depth = data[8], colour = data[9];
+                        // Deflate, the adaptive filters, and no interlace.
+                        if (data[10] || data[11] || data[12] || !width || !height || width > UI_PNG_MOST || height > UI_PNG_MOST)
+                                goto refused;
+                        if (!((colour == 0 && (depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16)) ||
+                              (colour == 3 && (depth == 1 || depth == 2 || depth == 4 || depth == 8)) ||
+                              ((colour == 2 || colour == 4 || colour == 6) && (depth == 8 || depth == 16))))
+                                goto refused;
+                        header = true;
+                }
+                else if (!memory_compare(type, "PLTE", 4))
+                {
+                        if (length % 3 || length / 3 > 256)
+                                goto refused;
+                        colours = (unsigned int)(length / 3);
+                        for (unsigned int each = 0; each < colours; each++)
+                                palette[each * 4] = data[each * 3], palette[each * 4 + 1] = data[each * 3 + 1], palette[each * 4 + 2] = data[each * 3 + 2];
+                }
+                else if (!memory_compare(type, "tRNS", 4))
+                {
+                        if (colour == 3)
+                                for (positive each = 0; each < length && each < 256; each++)
+                                        palette[each * 4 + 3] = data[each];
+                        else if (colour == 0 && length >= 2)
+                                key_r = key_g = key_b = data[0] << 8 | data[1];
+                        else if (colour == 2 && length >= 6)
+                                key_r = data[0] << 8 | data[1], key_g = data[2] << 8 | data[3], key_b = data[4] << 8 | data[5];
+                }
+                else if (!memory_compare(type, "IDAT", 4))
+                {
+                        memory_copy(zdata + zsize, data, length);
+                        zsize += length;
+                }
+                else if (!memory_compare(type, "IEND", 4))
+                        ended = true;
+                at += length + 12;
+        }
+        if (!header || !zsize || (colour == 3 && !colours))
+                goto refused;
+        channels = colour == 0 ? 1 : colour == 2 ? 3 : colour == 3 ? 1 : colour == 4 ? 2 : 4;
+        bits_per_pixel = channels * depth;
+        bytes_per_pixel = bits_per_pixel < 8 ? 1 : bits_per_pixel / 8;
+        stride = ((positive)width * bits_per_pixel + 7) / 8;
+        room = (stride + 1) * height;
+        raw = (p8 address_to)memory_checked(room + stride);
+        pixels = (unsigned int address_to)memory_checked((positive)width * height * 4);
+        if (!raw || !pixels)
+                goto refused;
+        made = ui_png_inflate(zdata, zsize, raw + stride, room);
+        if (made < room)
+                goto refused;
+        // Unfiltered in place, each row against the one before it, and its pixels made.
+        for (unsigned int y = 0; y < height; y++)
+        {
+                p8 address_to row = raw + stride + (positive)y * (stride + 1), address_to line = row + 1;
+                // The row before, unfiltered where it is (a row of zeros before the first: raw's first stride bytes).
+                const p8 address_to above = y ? line - (stride + 1) : raw;
+                p8 filter = row[0];
+
+                if (filter > 4)
+                        goto refused;
+                for (positive x = 0; x < stride; x++)
+                {
+                        unsigned int left = x >= bytes_per_pixel ? line[x - bytes_per_pixel] : 0, up = above[x],
+                                     corner = x >= bytes_per_pixel ? above[x - bytes_per_pixel] : 0;
+
+                        if (filter == 1)
+                                line[x] = (p8)(line[x] + left);
+                        else if (filter == 2)
+                                line[x] = (p8)(line[x] + up);
+                        else if (filter == 3)
+                                line[x] = (p8)(line[x] + (left + up) / 2);
+                        else if (filter == 4)
+                        {
+                                int p = (int)left + (int)up - (int)corner, pa = p > (int)left ? p - (int)left : (int)left - p,
+                                    pb = p > (int)up ? p - (int)up : (int)up - p, pc = p > (int)corner ? p - (int)corner : (int)corner - p;
+
+                                line[x] = (p8)(line[x] + (pa <= pb && pa <= pc ? left : pb <= pc ? up : corner));
+                        }
+                }
+                for (unsigned int x = 0; x < width; x++)
+                {
+                        unsigned int r, g, b, a = 255, sample;
+
+                        if (depth < 8)
+                        {
+                                positive bit = (positive)x * depth;
+
+                                sample = (unsigned int)(line[bit / 8] >> (8 - depth - bit % 8)) & ((1u << depth) - 1);
+                                if (colour == 3)
+                                        r = palette[sample * 4], g = palette[sample * 4 + 1], b = palette[sample * 4 + 2], a = palette[sample * 4 + 3];
+                                else
+                                {
+                                        a = (int)sample == key_r ? 0 : 255;
+                                        r = g = b = sample * 255 / ((1u << depth) - 1);
+                                }
+                        }
+                        else
+                        {
+                                const p8 address_to p = line + (positive)x * bytes_per_pixel;
+                                positive wide = depth == 16 ? 2 : 1;
+
+#define UI_PNG_AT(k) (p[(k) * wide])
+#define UI_PNG_WORD(k) (depth == 16 ? (int)(p[(k) * 2] << 8 | p[(k) * 2 + 1]) : (int)p[k])
+                                if (colour == 3)
+                                        r = palette[p[0] * 4], g = palette[p[0] * 4 + 1], b = palette[p[0] * 4 + 2], a = palette[p[0] * 4 + 3];
+                                else if (colour == 0 || colour == 4)
+                                {
+                                        r = g = b = UI_PNG_AT(0);
+                                        a = colour == 4 ? UI_PNG_AT(1) : UI_PNG_WORD(0) == key_r ? 0 : 255;
+                                }
+                                else
+                                {
+                                        r = UI_PNG_AT(0), g = UI_PNG_AT(1), b = UI_PNG_AT(2);
+                                        a = colour == 6 ? UI_PNG_AT(3)
+                                            : UI_PNG_WORD(0) == key_r && UI_PNG_WORD(1) == key_g && UI_PNG_WORD(2) == key_b ? 0 : 255;
+                                }
+#undef UI_PNG_AT
+#undef UI_PNG_WORD
+                        }
+                        pixels[(positive)y * width + x] = ui_png_premultiply(r, g, b, a);
+                }
+        }
+        memory_free(zdata, size);
+        memory_free(raw, room + stride);
+        *width_out = (int)width, *height_out = (int)height;
+        return pixels;
+refused:
+        if (zdata)
+                memory_free(zdata, size);
+        if (raw)
+                memory_free(raw, room + stride);
+        if (pixels)
+                memory_free(pixels, (positive)width * height * 4);
+        return null;
+}
+
+/*
+        An entry's picture file, by its Icon as the Icon Theme Specification finds one without a theme of its own: an absolute path is
+        that file (a .png); a name is the hicolor theme's apps picture of the size nearest the most kept, larger first, then the pixmaps
+        directory's. Every one is opened inside its bowl (a link on the way is followed inside it). A scalable (SVG) picture is not
+        drawn here, and the entry has its tile. The file's bytes into a mapping (memory_free's, *size bytes), or null.
+*/
+#define UI_PNG_FILE_MOST (4 * 1024 * 1024)
+
+static p8 address_to ui_apps_picture_file(const struct ui_app_entry address_to app, positive address_to size)
+{
+        static const unsigned short sides[] = {128, 96, 64, 256, 72, 48, 512, 32, 24, 22, 16};
+        char path[UI_APP_PATH * 2], name[UI_APP_PATH];
+        bipolar inside, handle = -1;
+        positive length = string_length((string_address)app->icon);
+        p8 address_to bytes;
+        bipolar got;
+
+        if (!app->root[0] || !length || (inside = system_open_at(AT_FDCWD, (string_address)app->root, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
+                return null;
+        if (app->icon[0] == '/')
+        {
+                if (length > 4 && !memory_compare(app->icon + length - 4, ".png", 4))
+                        handle = system_open_resolved(inside, (string_address)app->icon, FILE_READ | O_CLOEXEC | O_NONBLOCK,
+                                                      SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
+        }
+        else if (!string_first_of((string_address)app->icon, '/'))
+        {
+                // A name with .png, .svg or .xpm is the name before it, as the specification's older entries say it.
+                string_copy_bounded((p8 address_to)name, (string_address)app->icon, sizeof(name));
+                if (length > 4 && name[length - 4] == '.')
+                        name[length - 4] = 0;
+                for (positive at = 0; at <= sizeof(sides) / sizeof(sides[0]) && handle < 0; at++)
+                {
+                        if (at < sizeof(sides) / sizeof(sides[0]))
+                        {
+                                char digits[8];
+
+                                positive_into_string((p8 address_to)digits, sides[at]);
+                                string_copy_bounded((p8 address_to)path, (string_address) "usr/share/icons/hicolor/", sizeof(path));
+                                string_append_bounded((p8 address_to)path, (string_address)digits, sizeof(path));
+                                string_append_bounded((p8 address_to)path, (string_address) "x", sizeof(path));
+                                string_append_bounded((p8 address_to)path, (string_address)digits, sizeof(path));
+                                string_append_bounded((p8 address_to)path, (string_address) "/apps/", sizeof(path));
+                        }
+                        else
+                                string_copy_bounded((p8 address_to)path, (string_address) "usr/share/pixmaps/", sizeof(path));
+                        string_append_bounded((p8 address_to)path, (string_address)name, sizeof(path));
+                        string_append_bounded((p8 address_to)path, (string_address) ".png", sizeof(path));
+                        handle = system_open_resolved(inside, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK,
+                                                      SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
+                }
+        }
+        system_close(inside);
+        if (handle < 0)
+                return null;
+        bytes = (p8 address_to)memory_checked(UI_PNG_FILE_MOST);
+        got = bytes ? system_read_retry((positive)handle, bytes, UI_PNG_FILE_MOST) : -1;
+        system_close(handle);
+        if (got <= 0)
+        {
+                if (bytes)
+                        memory_free(bytes, UI_PNG_FILE_MOST);
+                return null;
+        }
+        *size = (positive)got;
+        return bytes;
+}
+
+/*
+        An entry's picture at size each way (premultiplied, size * size pixels), made from its file the first time it is asked (as large
+        as UI_APP_PICTURE, the longer side that, the shorter centred) and kept at the last size asked: null where it has none (a kit
+        program, which draws its symbol, no file, one that is not a PNG this decodes, or a size past UI_APP_PICTURE).
+*/
+static const unsigned int address_to ui_apps_picture(int which, int size)
+{
+        struct ui_app_entry address_to app;
+
+        if (which < 0 || which >= ui_apps.count || size <= 0 || size > UI_APP_PICTURE)
+                return null;
+        app = &ui_apps.app[which];
+        if (!app->tried)
+        {
+                positive bytes = 0;
+                p8 address_to file;
+                unsigned int address_to decoded = null, address_to square = null;
+                int width = 0, height = 0;
+
+                app->tried = true;
+                if ((file = ui_apps_picture_file(app, &bytes)))
+                {
+                        decoded = ui_png_decode(file, bytes, &width, &height);
+                        memory_free(file, UI_PNG_FILE_MOST);
+                }
+                if (decoded)
+                {
+                        int side = width > height ? width : height, kept = side > UI_APP_PICTURE ? UI_APP_PICTURE : side;
+
+                        square = (unsigned int address_to)memory_checked((positive)side * side * 4);
+                        app->picture = (unsigned int address_to)memory_checked((positive)UI_APP_PICTURE * UI_APP_PICTURE * 4);
+                        if (square && app->picture)
+                        {
+                                for (int y = 0; y < height; y++)
+                                        memory_copy(square + (positive)(y + (side - height) / 2) * side + (side - width) / 2, decoded + (positive)y * width,
+                                                    (positive)width * 4);
+                                ui_picture_scale(app->picture, kept, square, side);
+                                app->side = kept;
+                        }
+                        else if (app->picture)
+                                memory_free(app->picture, (positive)UI_APP_PICTURE * UI_APP_PICTURE * 4), app->picture = null;
+                        if (square)
+                                memory_free(square, (positive)side * side * 4);
+                        memory_free(decoded, (positive)width * height * 4);
+                }
+        }
+        if (!app->picture)
+                return null;
+        if (app->cached_side != size)
+        {
+                if (!app->cached && !(app->cached = (unsigned int address_to)memory_checked((positive)UI_APP_PICTURE * UI_APP_PICTURE * 4)))
+                        return null;
+                ui_picture_scale(app->cached, size, app->picture, app->side);
+                app->cached_side = size;
+        }
+        return app->cached;
+}
+
+/* ---- apps: starting one, and pinning one ---- */
+
+/*
+        The words that start an entry, into words (a null after them): a kit program with the face it draws in (-f, and -b for the
+        monospace bold); a bowl's with its launcher and the Exec's own words; one that says Terminal=true in a terminal (-x) with those.
+        regular, mono and bold are the faces (any may be null). How many.
+*/
+#define UI_APP_START_WORDS (UI_APP_ARGS + 10)
+
+static positive ui_apps_words_of(int which, string_address address_to words, const char address_to regular, const char address_to mono,
+                                 const char address_to bold)
+{
+        const struct ui_app_entry address_to app = &ui_apps.app[which];
+        b32 draws_mono = app->terminal || (app->kit && ui_kit_programs[app->kit - 1].mono);
+        const char address_to face = draws_mono ? (mono ? mono : regular) : regular;
+        positive count = 0;
+
+        if (app->kit || app->terminal)
+        {
+                words[count++] = app->terminal ? (string_address) "/terminal" : (string_address)app->launch;
+                if (face)
+                        words[count++] = (string_address) "-f", words[count++] = (string_address)face;
+                if (draws_mono && bold)
+                        words[count++] = (string_address) "-b", words[count++] = (string_address)bold;
+        }
+        if (app->terminal)
+                words[count++] = (string_address) "-x";
+        if (!app->kit)
+        {
+                words[count++] = (string_address)app->launch;
+                for (int at = 0; at < app->arg_count; at++)
+                        words[count++] = (string_address)app->args[at];
+        }
+        words[count] = null;
+        return count;
+}
+
+// Whether an entry may be pinned: a kit program, or a bowl's that is a window of its own (not one in a terminal).
+static b32 ui_apps_pinnable(int which)
+{
+        return which >= 0 && which < ui_apps.count && !ui_apps.app[which].terminal;
+}
+
+// The file the pins are kept in under root (the machine's /, a check's own directory).
+static fn ui_apps_pins_path(const char address_to root, char address_to path, positive room)
+{
+        string_copy_bounded((p8 address_to)path, (string_address)root, room);
+        string_append_bounded((p8 address_to)path, (string_address)SETTING_TASKBAR_PINNED_PATH, room);
+}
+
+/*
+        The pins' line (`taskbar pinned`, registry.c) with an entry pinned (on) or not, written back to its file under root: an entry is
+        kept as its id, the file it is read from and its launcher (the line's three words; the id is what is pinned, and the other two
+        are a record of what it was), and one that is not pinned any more goes with every entry of its id. Entries the line had of other
+        programs stay as they are. 1 when the file was written, 0 when nothing changed, -1 when it could not be (no room in the line,
+        SETTING_PINS_ENTRIES of them, or the file).
+*/
+static int ui_apps_pin(const char address_to root, int which, b32 on)
+{
+        char path[160], line[SETTING_PINS_MOST + 16], made[SETTING_PINS_MOST + 16], word[SETTING_PINS_WORD];
+        const struct ui_app_entry address_to app;
+        positive at = 0, used = 0;
+        int entries = 0, kind, word_at = 0;
+        b32 skip = false, had = false, first = true;
+        bipolar handle, got = 0;
+
+        if (which < 0 || which >= ui_apps.count || (on && !ui_apps_pinnable(which)))
+                return -1;
+        app = &ui_apps.app[which];
+        ui_apps_pins_path(root, path, sizeof(path));
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (handle >= 0)
+        {
+                got = system_read_once(handle, line, sizeof(line) - 1);
+                system_close(handle);
+        }
+        line[got > 0 ? got : 0] = 0;
+        for (bipolar end_at = got - 1; end_at >= 0 && (line[end_at] == '\n' || line[end_at] == '\r'); end_at--)
+                line[end_at] = 0;
+        if (string_equals((string_address)line, (string_address) "none") || !setting_pins_valid(line, null))
+                line[0] = 0;
+        made[0] = 0;
+        // Each entry of the line copied, but the ones of this id; then this one, where it is pinned.
+        for (;;)
+        {
+                kind = setting_pins_next(line, &at, word, sizeof(word));
+                if (kind == SETTING_PINS_WORD_NEXT)
+                {
+                        if (word_at++ == 0)
+                        {
+                                skip = string_equals((string_address)word, (string_address)app->id) || ui_apps_match(word) == which;
+                                had |= skip;
+                                if (!skip)
+                                {
+                                        if (!first && (used + 2 >= sizeof(made)))
+                                                return -1;
+                                        if (!first)
+                                                made[used++] = ' ', made[used++] = ';', made[used] = 0;
+                                        first = false, entries++;
+                                }
+                        }
+                        if (!skip && !setting_pins_quote(made, &used, sizeof(made), word))
+                                return -1;
+                        continue;
+                }
+                word_at = 0;
+                if (kind != SETTING_PINS_SEPARATOR)
+                        break;
+        }
+        if (on == had)
+                return 0;
+        if (on)
+        {
+                if (entries >= SETTING_PINS_ENTRIES)
+                        return -1;
+                if (!first)
+                {
+                        if (used + 2 >= sizeof(made))
+                                return -1;
+                        made[used++] = ' ', made[used++] = ';', made[used] = 0;
+                }
+                if (!setting_pins_quote(made, &used, sizeof(made), app->id) || !setting_pins_quote(made, &used, sizeof(made), app->source) ||
+                    !setting_pins_quote(made, &used, sizeof(made), app->launch))
+                        return -1;
+                first = false;
+        }
+        if (first)
+                string_copy_bounded((p8 address_to)made, (string_address) "none", sizeof(made)), used = 4;
+        if (!string_equals((string_address)made, (string_address) "none") && !setting_pins_valid(made, null))
+                return -1;
+        made[used++] = '\n';
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+        if (handle < 0)
+                return -1;
+        got = system_write_all((b32)handle, made, used);
+        system_close(handle);
+        return got < 0 ? -1 : 1;
+}
+
+// Whether an entry is pinned in the pins' file under root: an entry of the line names its id (or a window key it is matched by).
+static b32 ui_apps_pinned(const char address_to root, int which)
+{
+        char path[160], line[SETTING_PINS_MOST + 16], word[SETTING_PINS_WORD];
+        positive at = 0;
+        int kind, word_at = 0;
+        bipolar handle, got = 0;
+
+        if (which < 0 || which >= ui_apps.count)
+                return false;
+        ui_apps_pins_path(root, path, sizeof(path));
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (handle >= 0)
+        {
+                got = system_read_once(handle, line, sizeof(line) - 1);
+                system_close(handle);
+        }
+        line[got > 0 ? got : 0] = 0;
+        for (bipolar end_at = got - 1; end_at >= 0 && (line[end_at] == '\n' || line[end_at] == '\r'); end_at--)
+                line[end_at] = 0;
+        if (!setting_pins_valid(line, null))
+                return false;
+        while ((kind = setting_pins_next(line, &at, word, sizeof(word))) == SETTING_PINS_WORD_NEXT || kind == SETTING_PINS_SEPARATOR)
+        {
+                if (kind == SETTING_PINS_SEPARATOR)
+                {
+                        word_at = 0;
+                        continue;
+                }
+                if (word_at++ == 0 && (string_equals((string_address)word, (string_address)ui_apps.app[which].id) || ui_apps_match(word) == which))
+                        return true;
+        }
+        return false;
 }
 
 /*
@@ -24052,6 +25378,10 @@ struct ui_row
         // control would be, the row at least picture logical pixels tall (as tall as its words where they are taller). paint draws it.
         int picture, picture_w;
         fn (*paint)(struct ui address_to ui, int id, int x, int y, int w, int h);
+        // A tile's own picture, in the place of its symbol: what the app answers for the row at a side (premultiplied, side * side, or
+        // null for none: an app's, ui_apps_picture), and where it has none the lettered tile of tile_name (ui_icon_tile) before the symbol.
+        const unsigned int address_to (address_to tile_picture)(int id, int side);
+        const char address_to tile_name;
 };
 
 struct ui_list
@@ -24472,20 +25802,27 @@ static b32 ui_list_move(const struct ui address_to ui, struct ui_list address_to
         return l->focus != before;
 }
 
-// Up, Down, Home, End, Page Up and Page Down in a list (a page is a view of rows less one): true when the key was one.
+// Up, Down, Home, End, Page Up and Page Down in a list (a page is a view of rows less one): true when the key was one. Over tiles
+// Up and Down go a line of tiles (a page is lines), and Left and Right go along a line the way it is read.
 static b32 ui_list_key(const struct ui address_to ui, struct ui_list address_to l, int key, b32 address_to moved)
 {
-        int page = l->scroll.view / ui_dev(ui, UI_ROW) - 1, by;
+        int across = l->tiles ? ui_list_per(ui, l) : 1, page = l->scroll.view / (l->tiles ? ui_list_unit(ui, l) : ui_dev(ui, UI_ROW)) - 1, by;
 
         page = page < 1 ? 1 : page;
         switch (key)
         {
-        case UI_KEY_UP: by = -1; break;
-        case UI_KEY_DOWN: by = 1; break;
+        case UI_KEY_UP: by = -across; break;
+        case UI_KEY_DOWN: by = across; break;
+        case UI_KEY_LEFT:
+        case UI_KEY_RIGHT:
+                if (!l->tiles)
+                        return false;
+                by = ui_arrow(key);
+                break;
         case UI_KEY_HOME: by = -(l->virtual ? l->total : l->count); break;
         case UI_KEY_END: by = l->virtual ? l->total : l->count; break;
-        case UI_KEY_PAGE_UP: by = -page; break;
-        case UI_KEY_PAGE_DOWN: by = page; break;
+        case UI_KEY_PAGE_UP: by = -page * across; break;
+        case UI_KEY_PAGE_DOWN: by = page * across; break;
         default: return false;
         }
         *moved = ui_list_move(ui, l, by);
@@ -25594,6 +26931,7 @@ static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int
         unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         char cut[UI_CUT_TEXT];
         string_address shown;
+        const unsigned int address_to picture;
         struct ui_box box = {(b32)(x + pad) << 8, (b32)(y + pad) << 8, (b32)(x + wide - pad) << 8, (b32)(y + height - pad) << 8, 0, 0};
 
         ui_list_describe(l, id, &row);
@@ -25604,11 +26942,17 @@ static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int
                 ui_kit_fill(ui, &box, 0x18000000u | (strong & 0xffffffu), null);
         if (row.mark)
                 ui_kit_ring(ui, &box, ui_q8(ui, 2), ui_role(UI_PRIMARY) | 0xff000000u);
+        // The app's picture where it has one, else its lettered tile where it names one: either is the tile's symbol.
+        picture = row.tile_picture ? row.tile_picture(id, size) : null;
         if (small)
         {
                 // A small symbol before the label, both on the tile's line.
                 at = ui_dev(ui, 8);
-                if (row.file)
+                if (picture)
+                        ui_icon_picture(ui, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, picture);
+                else if (row.tile_name)
+                        ui_icon_tile(ui, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, row.tile_name);
+                else if (row.file)
                         size = ui_dev(ui, UI_FILE_ROW_ICON), ui_file_icon(ui, row.file - 1, null, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, quiet);
                 else if (row.icon)
                         ui_icon(ui, row.icon - 1, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, 0, strong);
@@ -25620,7 +26964,11 @@ static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int
                 return;
         }
         // A file's symbol is 32 pixels a side, its extension on it, in the room a 40 pixel symbol has.
-        if (row.file)
+        if (picture)
+                ui_icon_picture(ui, x + (wide - size) / 2, y + ui_dev(ui, 12), size, picture);
+        else if (row.tile_name)
+                ui_icon_tile(ui, x + (wide - size) / 2, y + ui_dev(ui, 12), size, row.tile_name);
+        else if (row.file)
                 size = ui_dev(ui, UI_FILE_TILE_ICON),
                 ui_file_icon(ui, row.file - 1, row.extension, x + (wide - size) / 2, y + ui_dev(ui, 16), size, strong);
         else if (row.icon)

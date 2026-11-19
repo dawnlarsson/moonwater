@@ -4,6 +4,7 @@
 @direction rtl
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
+# machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
 action_copy	3664	کپی
 action_cut	5863	برش
 action_paste	0288	چسباندن
@@ -172,6 +173,7 @@ installer_wifi_password	ca99	گذرواژه برای %s
 installer_wifi_saved	79e4	ذخیره‌شده
 launcher_power_off	ae2f	خاموش کردن
 launcher_power_off_armed	a48f	خاموش کردن
+launcher_recent	88fe	اخیر
 launcher_restart	ed8c	راه‌اندازی مجدد
 launcher_restart_armed	11ec	راه‌اندازی مجدد
 launcher_run	61b6	اجرا %s

@@ -1043,6 +1043,9 @@ static b64 kit_seen_draw(font_engine address_to e, const font_face address_to co
 #define font_draw kit_seen_draw
 #endif
 #if MOONWATER_UI_ANY
+#define GZIP_CORE_ONLY // the kit's app pictures are PNG files, inflated by the shell's inflater
+#include "../../src/sh/gzip.c"
+#undef GZIP_CORE_ONLY
 #include "../../src/canvas/ui/ui.c"
 // A menu's row as its tree laid it out: the height of its first item's element, which is a row in every menu a check makes.
 static int popmenu_row(const struct ui_popmenu address_to m)

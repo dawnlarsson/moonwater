@@ -4026,7 +4026,7 @@ static void check_icons(void)
                 kept &= (y >= 20 && y < 24) || icon_field[y * ICON_FIELD + x] == 0x101010u;
         drawn = icon_count(icon_field, 16, 0, &whole, &outside);
         ui = icon_ui(icon_other);
-        ui_icon_picture(&ui, ICON_FIELD - 8, 16, 16, scaled), ui_icon_picture(&ui, -1, 16, 16, scaled), ui_icon_picture(&ui, 16, 16, UI_ICON_MOST + 1, scaled);
+        ui_icon_picture(&ui, ICON_FIELD - 8, 16, 16, scaled), ui_icon_picture(&ui, -1, 16, 16, scaled), ui_icon_picture(&ui, 16, 16, UI_PICTURE_MOST + 1, scaled);
         check("icons: a picture is cut to the rows the ui may write, and one that would pass the picture's side or is too large is not drawn",
               kept && drawn > 0 && icon_count(icon_other, 16, 0, &whole, &outside) == 0);
     }

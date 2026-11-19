@@ -2182,8 +2182,9 @@ static void taskbar_moon_clock(const struct taskbar_view *view, struct ui addres
 /*
         A tab's icon, in the element the band's tree has for it (the first in the tab): the window's own picture where it has one, made
         the element's size once and kept until the picture or the size changes (taskbar_pictures, by the window's row of the table;
-        ui_icon_scale), and laid over the tab's glass a row at a time by the library's over (ui_icon_picture); for a kit program with
-        none, the kit's symbol for it in the tab's ink, so it follows the theme and dims with a tab put away; for any other program
+        ui_icon_scale), and laid over the tab's glass a row at a time by the library's over (ui_icon_picture); for one with none that is
+        an app of the registry with a picture (a bowl's, by its window key: ui_apps_match, ui_apps_picture), that picture; for a kit
+        program, the kit's symbol for it in the tab's ink, so it follows the theme and dims with a tab put away; for any other program
         that says who it is, its lettered tile; and for a window that says nothing, the window symbol.
 */
 struct taskbar_picture
@@ -2223,6 +2224,17 @@ static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tr
                 }
                 ui_icon_picture(&ui, x, y, side, kept->pixels);
                 return;
+        }
+        // A window with no picture of its own that is an app of the registry (by its window key), and a pinned app with no window: the
+        // app's picture, as the launcher shows it.
+        {
+                const unsigned int address_to picture = side <= UI_PICTURE_MOST ? ui_apps_picture(ui_apps_match(app), side) : null;
+
+                if (picture)
+                {
+                        ui_icon_picture(&ui, x, y, side, picture);
+                        return;
+                }
         }
         symbol = ui_icon_of(app);
         if (symbol < 0 && app && app[0])
@@ -2661,15 +2673,16 @@ static void taskbar_arrange_set(int moon, int tasks, int newest, int order, unsi
 }
 
 /*
-        A program pinned to the taskbar: the app_id its windows say, what its task says while it has none, and the words it is kept as
-        (`taskbar pinned`: the app_id, the executable it ran as when it was pinned, for the record, and the words it is started with),
-        a null after each. The programs pinned are taskbar_pins (below); a menu keeps the one it may pin.
+        A program pinned to the taskbar: an app of the registry (ui_apps), by its id and the key its windows say, what its task says while
+        it has none (its name), and the words it is kept as (`taskbar pinned`: its id, the desktop file it is from and its launcher, the one
+        it is started by), a null after each. The programs pinned are taskbar_pins (below); a menu keeps the one it may pin.
 */
 #define TASKBAR_PIN_TITLE 32
 
 struct taskbar_pin
 {
-        char app[WINDOWS_APP_ID];
+        char app[WINDOWS_APP_ID];      // the app's id in the registry (ui_apps)
+        char key[WINDOWS_APP_ID];      // and its window key, which a window of it says
         char title[TASKBAR_PIN_TITLE];
         unsigned short count;                  // words
         unsigned short at[SETTING_PINS_WORDS]; // where each begins in text
@@ -3107,18 +3120,21 @@ static int taskbar_stop_run(unsigned int pid)
 /*
         The programs pinned to the taskbar. They are the line of `taskbar pinned` (registry.c, setting_pins_valid), read when the taskbar's
         settings are (taskbar_settings_set: the compositor reads them when it starts and when a file of /root is written, so the verb, the
-        Settings row and the menu below agree). A pinned program that has no window (no row of the table says its app_id) is a task of its
-        own after the windows', drawn as a window that is put away is and with the app_id's last part for its title (taskbar_pins_tabs, called
-        where the compositor makes the view of a band), and a press on it starts the program (taskbar_pin_start); its menu has Unpin alone.
+        Settings row, the launcher's menu and the menu below agree), and each names an app of the kit's registry (ui_apps) by its first
+        word, its id: the rest of an entry is a record of what it was (the desktop file, the launcher), and an entry whose first word is no
+        app's id is taken for the app whose window key it is (an older line's app_id), or is not shown. So a pin is an app the machine knows
+        and never a window's words: what starts it is the registry's launcher, a kit program or a launcher of /bowls/bin that root keeps.
 
-        A program is pinned from a window of it, by what the system says of its process: the app_id the window says; the executable (the
-        link /proc/PID/exe); and the words it was started with (/proc/PID/cmdline), the first made a path from / (the executable's, when it
-        was started as a bare name). A kit program (its executable is / and its app_id) is kept as that alone, since the machine script starts
-        it with the faces it draws in. A program whose mount view is not the compositor's (a bowl's) is kept as the launcher bowl exposed it
-        by, /bowls/bin and the name of the first word, which starts it as typing it would; one that has none is not pinned. Nothing is pinned
-        from a process that is a system one, from words with a byte below a blank, or from more than the line holds. Starting it is the script's:
-        the words are left a line each in a file of /run/moonwater (taskbar_run_root) made new and not through a link, and the script is told its number
-        (pin_start_N), which it reads, removes and starts the words with, as the words they are and no more.
+        A pinned app that has no window (no row of the table says its app_id or class, ui_apps_match's key) is a task of its own after the
+        windows', drawn as a window that is put away is, titled by the app's name and shown with its picture (taskbar_pins_tabs, called where
+        the compositor makes the view of a band), and a press on it starts the app (taskbar_pin_start); its menu has Unpin alone. A running
+        one is its windows' tasks: the same app, matched by the key. Pin to taskbar is in a window's menu when its key is an app's that may be
+        pinned (ui_apps_pinnable: not one that runs in a terminal), and the line is written by ui_apps_pin. Starting it is the script's: the
+        launcher is left in a file of /run/moonwater (taskbar_run_root) made new and not through a link, and the script is told its number
+        (pin_start_N), which it reads, removes and starts (rover's open pin, which starts only a kit program or a launcher of /bowls/bin).
+
+        The registry is looked at again with each view of the band at most once in UI_APPS_LOOK_NS (ui_apps_fresh), and the pins taken again
+        when it changed: an app installed after its pin was kept shows when it is there, and one removed goes from the band.
 */
 static struct
 {
@@ -3132,7 +3148,6 @@ static struct
 } taskbar_pins;
 
 static const char *taskbar_run_root = "/run/moonwater";
-static const char *taskbar_bowl_bin = "/bowls/bin/"; // where the launchers a bowl exposed are
 #define TASKBAR_PIN_AGAIN (3ull * 1000000000ull)
 
 static const char *taskbar_pin_word(const struct taskbar_pin *pin, int at)
@@ -3153,86 +3168,75 @@ static bool taskbar_pin_put(struct taskbar_pin *pin, positive *used, const char 
         return true;
 }
 
-// A pin's title: the last part of its app_id (org.mozilla.firefox is firefox).
-static void taskbar_pin_title(struct taskbar_pin *pin)
+// The pin of an app of the registry: its id, its window key and its name, and its words (its id, the file it is from, its launcher).
+static bool taskbar_pin_of(int which, struct taskbar_pin *pin)
 {
-        const char *last = pin->app;
+        const struct ui_app_entry *app;
+        positive used = 0;
 
-        for (const char *each = pin->app; *each; each++)
-                if (*each == '.' && each[1])
-                        last = each + 1;
-        string_copy_bounded((p8 *)pin->title, (string_address)last, sizeof(pin->title));
+        memory_zero(pin, sizeof(*pin));
+        if (!ui_apps_pinnable(which))
+                return false;
+        app = &ui_apps.app[which];
+        string_copy_bounded((p8 *)pin->app, (string_address)app->id, sizeof(pin->app));
+        string_copy_bounded((p8 *)pin->key, (string_address)app->key, sizeof(pin->key));
+        string_copy_bounded((p8 *)pin->title, (string_address)(app->kit ? language_of(ui_kit_programs[app->kit - 1].label) : app->name), sizeof(pin->title));
+        return taskbar_pin_put(pin, &used, app->id) && taskbar_pin_put(pin, &used, app->source) && taskbar_pin_put(pin, &used, app->launch);
 }
 
-// The pinned programs as a line says them (none, or a line that is none, has none).
+// Whether a window that says app (its app_id, or an X window's class) is a pinned app's.
+static bool taskbar_pin_runs(const struct taskbar_pin *pin, const char *app)
+{
+        return app && app[0] && (ui_apps_same(app, pin->key) || ui_apps_same(app, pin->app));
+}
+
+static int taskbar_pin_find(const char *app)
+{
+        for (int each = 0; each < taskbar_pins.count; each++)
+                if (string_equals((string_address)taskbar_pins.pin[each].app, (string_address)app))
+                        return each;
+        return -1;
+}
+
+// The pinned programs as a line says them (none, or a line that is none, has none): each entry's app of the registry, once.
 static void taskbar_pins_set(const char *line)
 {
         char word[SETTING_PINS_WORD];
-        positive at = 0, used = 0;
-        struct taskbar_pin *pin = &taskbar_pins.pin[0];
+        positive at = 0;
+        int first = 1;
 
         taskbar_pins.count = 0;
         taskbar.stale = 1;
         if (!line || !line[0] || string_equals((string_address)line, (string_address) "none") || !setting_pins_valid(line, null))
                 return;
-        memory_zero(pin, sizeof(*pin));
+        ui_apps_fresh((b64)ui_kit_time());
         for (;;)
         {
                 int kind = setting_pins_next(line, &at, word, sizeof(word));
 
+                if (kind == SETTING_PINS_WORD_NEXT && first)
+                {
+                        int which = ui_apps_find(word);
+
+                        which = which >= 0 ? which : ui_apps_match(word);
+                        first = 0;
+                        if (which >= 0 && taskbar_pins.count < SETTING_PINS_ENTRIES && taskbar_pin_find(ui_apps.app[which].id) < 0 &&
+                            taskbar_pin_of(which, &taskbar_pins.pin[taskbar_pins.count]))
+                                taskbar_pins.count++;
+                        continue;
+                }
                 if (kind == SETTING_PINS_WORD_NEXT)
-                {
-                        taskbar_pin_put(pin, &used, word);
                         continue;
-                }
-                if (pin->count >= 3)
-                {
-                        string_copy_bounded((p8 *)pin->app, (string_address)taskbar_pin_word(pin, 0), sizeof(pin->app));
-                        taskbar_pin_title(pin);
-                        taskbar_pins.count++;
-                }
-                if (kind == SETTING_PINS_END || taskbar_pins.count >= SETTING_PINS_ENTRIES)
+                first = 1;
+                if (kind != SETTING_PINS_SEPARATOR)
                         break;
-                pin = &taskbar_pins.pin[taskbar_pins.count];
-                memory_zero(pin, sizeof(*pin)), used = 0;
         }
-}
-
-// The line the pinned programs are kept as, into line (none when there are none), with extra in the place of the one of its app_id, or after them
-// when none has it, and with the one named drop (when there is no extra) left out: false when it does not fit, or is not a line.
-static bool taskbar_pins_line(char *line, positive room, const struct taskbar_pin *extra, const char *drop)
-{
-        positive at = 0;
-        int written = 0;
-
-        line[0] = 0;
-        for (int each = 0; each <= taskbar_pins.count; each++)
-        {
-                const struct taskbar_pin *pin = each < taskbar_pins.count ? &taskbar_pins.pin[each] : extra;
-
-                if (!pin || (each < taskbar_pins.count && ((extra && string_equals((string_address)pin->app, (string_address)extra->app)) ||
-                                                           (drop && string_equals((string_address)pin->app, (string_address)drop)))))
-                        continue;
-                if (written++)
-                {
-                        if (at + 2 >= room)
-                                return false;
-                        line[at++] = ' ', line[at++] = ';';
-                }
-                for (int word = 0; word < pin->count; word++)
-                        if (!setting_pins_quote(line, &at, room, taskbar_pin_word(pin, word)))
-                                return false;
-        }
-        if (!written)
-                string_copy_bounded((p8 *)line, (string_address) "none", room);
-        return string_equals((string_address)line, (string_address) "none") || setting_pins_valid(line, null);
 }
 
 // The file of the programs pinned, under the root the settings are kept in (a check's own directory in a check).
 static void taskbar_pins_path(char *path, positive room)
 {
-        string_copy_bounded((p8 *)path, (string_address)compositor_settings_root, room);
-        string_append_bounded((p8 *)path, (string_address)SETTING_TASKBAR_PINNED_PATH, room);
+        ui_apps_pins_path(compositor_settings_root, path, room);
 }
 
 // The programs pinned as the file has them.
@@ -3254,174 +3258,14 @@ static void taskbar_pins_read(void)
         taskbar_pins_set(text);
 }
 
-// A line of pinned programs kept in their file and taken as the pinned programs, the tasks made again: false, and nothing changed, when the file
-// could not be written.
-static bool taskbar_pins_keep(const char *line)
+// An app of the registry pinned (on) or not, kept in the file and taken as the pinned programs, the tasks made again.
+static void taskbar_pin_keep(int which, bool on)
 {
-        char path[160], text[SETTING_PINS_MOST + 16];
-        positive length = string_length((string_address)line);
-        bipolar handle;
-        bool kept = false;
-
-        string_copy_bounded((p8 *)text, (string_address)line, sizeof(text) - 1);
-        text[length++] = '\n';
-        taskbar_pins_path(path, sizeof(path));
-        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
-        if (handle >= 0)
+        if (ui_apps_pin(compositor_settings_root, which, on) > 0)
         {
-                kept = system_write_all((b32)handle, text, length) >= 0;
-                system_close(handle);
-        }
-        if (kept)
-        {
-                taskbar_pins_set(line);
+                taskbar_pins_read();
                 compositor_tabs_changed();
         }
-        return kept;
-}
-
-static int taskbar_pin_find(const char *app)
-{
-        for (int each = 0; each < taskbar_pins.count; each++)
-                if (string_equals((string_address)taskbar_pins.pin[each].app, (string_address)app))
-                        return each;
-        return -1;
-}
-
-// Whether pin may be pinned: there is room for one more, or it replaces one, and the line they make is a line.
-static bool taskbar_pin_fits(const struct taskbar_pin *pin)
-{
-        char line[SETTING_PINS_MOST + 16];
-
-        return (taskbar_pin_find(pin->app) >= 0 || taskbar_pins.count < SETTING_PINS_ENTRIES) && taskbar_pins_line(line, sizeof(line), pin, null);
-}
-
-// Pin pinned (taking the place of the one of its app_id) and kept.
-static void taskbar_pin_add(const struct taskbar_pin *pin)
-{
-        char line[SETTING_PINS_MOST + 16];
-
-        if (taskbar_pin_fits(pin) && taskbar_pins_line(line, sizeof(line), pin, null))
-                taskbar_pins_keep(line);
-}
-
-// The program of an app_id no longer pinned, and kept so.
-static void taskbar_pin_remove(const char *app)
-{
-        char line[SETTING_PINS_MOST + 16];
-
-        if (taskbar_pin_find(app) >= 0 && taskbar_pins_line(line, sizeof(line), null, app))
-                taskbar_pins_keep(line);
-}
-
-// What the system says at path under a process's own directory of the table of /proc (taskbar_proc_root): the bytes of a file into text, or the
-// target of a link, as many as room - 1; the length, 0 for none.
-static positive taskbar_pin_text(unsigned int pid, const char *leaf, char *text, positive room, bool link)
-{
-        char path[160];
-        positive at;
-        long got = 0;
-
-        string_copy_bounded((p8 *)path, (string_address)taskbar_proc_root, sizeof(path));
-        at = string_length((string_address)path);
-        path[at++] = '/';
-        at += positive_into_string((p8 *)path + at, (positive)pid);
-        path[at++] = '/';
-        string_copy_bounded((p8 *)path + at, (string_address)leaf, sizeof(path) - at);
-        if (link)
-                got = (long)compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)path, (positive)text, room - 1, 0, 0);
-        else
-        {
-                bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
-
-                if (handle >= 0)
-                {
-                        got = system_read_once(handle, text, room - 1);
-                        system_close(handle);
-                }
-        }
-        got = got < 0 ? 0 : got;
-        text[got] = 0;
-        return (positive)got;
-}
-
-/*
-        The pin of the window of row, which has the process pid: false with the program not to be pinned (the reasons above). A
-        launcher /bowls/bin has is the one a process of another mount view is pinned by.
-*/
-static bool taskbar_pin_capture(int row, unsigned int pid, struct taskbar_pin *pin)
-{
-        char exe[256], cmdline[2048], mine[64], theirs[64], rooted[256];
-        const char *app = row >= 0 && row < COMPOSITOR_ROWS ? compositor.app_id[row] : "";
-        positive used = 0, length, at = 0, base = 0;
-        bool kit, apart;
-
-        memory_zero(pin, sizeof(*pin));
-        if (!app[0] || string_length((string_address)app) >= sizeof(pin->app))
-                return false;
-        // The app_id is what setting_pins_valid takes for one: letters, digits and _ . + -
-        for (positive each = 0; app[each]; each++)
-                if (!setting_pins_bare((unsigned char)app[each]) || app[each] == '/' || app[each] == ':' || app[each] == '=' || app[each] == '@' ||
-                    app[each] == '%' || app[each] == ',')
-                        return false;
-        if (!taskbar_pin_text(pid, "exe", exe, sizeof(exe), true) || exe[0] != '/')
-                return false;
-        string_copy_bounded((p8 *)pin->app, (string_address)app, sizeof(pin->app));
-        taskbar_pin_title(pin);
-        taskbar_pin_put(pin, &used, app);
-        taskbar_pin_put(pin, &used, exe);
-        kit = exe[0] == '/' && string_equals((string_address)exe + 1, (string_address)app);
-        if (kit)
-        {
-                string_copy_bounded((p8 *)rooted, (string_address) "/", sizeof(rooted));
-                string_append_bounded((p8 *)rooted, (string_address)app, sizeof(rooted));
-                return taskbar_pin_put(pin, &used, rooted);
-        }
-        // A command line that fills what is read of it may be cut, and is not kept.
-        length = taskbar_pin_text(pid, "cmdline", cmdline, sizeof(cmdline), false);
-        if (!length || length >= sizeof(cmdline) - 1)
-                return false;
-        // Another mount view than the compositor's: a bowl's. (The compositor's own is the real one, whatever the table of /proc is.)
-        {
-                long own = (long)compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive) "/proc/self/ns/mnt", (positive)mine, sizeof(mine) - 1, 0, 0);
-
-                mine[own > 0 ? own : 0] = 0;
-                apart = own > 0 && taskbar_pin_text(pid, "ns/mnt", theirs, sizeof(theirs), true) && !string_equals((string_address)mine, (string_address)theirs);
-        }
-        for (positive word = 0; at < length; word++)
-        {
-                const char *text = cmdline + at;
-                positive size = string_length((string_address)text);
-
-                for (positive each = 0; each < size; each++)
-                        if ((unsigned char)text[each] < 0x20 || (unsigned char)text[each] == 0x7f)
-                                return false;
-                at += size + 1;
-                if (word == 0)
-                {
-                        // The first word an absolute path, the executable's when it was started as a bare name; or the launcher of a bowl.
-                        for (positive each = 0; each < size; each++)
-                                base = text[each] == '/' ? each + 1 : base;
-                        if (apart)
-                        {
-                                int found;
-
-                                string_copy_bounded((p8 *)rooted, (string_address)taskbar_bowl_bin, sizeof(rooted));
-                                string_append_bounded((p8 *)rooted, (string_address)text + base, sizeof(rooted));
-                                found = (int)system_open_at(AT_FDCWD, (string_address)rooted, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
-                                if (found < 0 || !text[base])
-                                        return false;
-                                system_close(found);
-                                if (!taskbar_pin_put(pin, &used, rooted))
-                                        return false;
-                        }
-                        else if (!taskbar_pin_put(pin, &used, text[0] == '/' ? text : exe))
-                                return false;
-                }
-                else if (!taskbar_pin_put(pin, &used, text))
-                        return false;
-        }
-        return pin->count >= 3;
 }
 
 // The tasks of the pinned programs that have no window, put after the windows' in a view (the arrays are the compositor's, one entry a row, and
@@ -3432,6 +3276,9 @@ static unsigned int taskbar_pins_tabs(struct taskbar_view *view, unsigned int ro
         unsigned int added = 0;
 
         taskbar_pins.ghosts = 0;
+        // The registry as the bowls have it now (looked at no more than once in UI_APPS_LOOK_NS): what is pinned is taken again when it changed.
+        if (compositor.band_at == 0 && ui_apps_fresh((b64)ui_kit_time()))
+                taskbar_pins_read();
         if (!taskbar_pins.count || compositor.band_at != 0 || !compositor.table)
                 return 0;
         for (int each = 0; each < taskbar_pins.count && added < room; each++)
@@ -3441,7 +3288,7 @@ static unsigned int taskbar_pins_tabs(struct taskbar_view *view, unsigned int ro
                 unsigned int at = view->count + added;
 
                 for (int row = 0; row < COMPOSITOR_ROWS && !running; row++)
-                        running = compositor.showing[row] && string_equals((string_address)compositor.app_id[row], (string_address)pin->app);
+                        running = compositor.showing[row] && taskbar_pin_runs(pin, compositor.app_id[row]);
                 if (running)
                         continue;
                 view->titles[at] = pin->title, view->apps[at] = pin->app, view->icons[at] = null, view->icon_seqs[at] = 0;
@@ -3552,20 +3399,28 @@ static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab)
                         language_format(taskbar_menu.stop, sizeof(taskbar_menu.stop), WORDS(taskbar_tab_stop_windows), (long)windows);
                 ui_popmenu_add(&taskbar_menu.menu, windows > 1 ? taskbar_menu.stop : WORDS(taskbar_tab_stop), null, 0, TASKBAR_MENU_STOP);
         }
-        // Pinned already (by its app_id): Unpin. Else Pin where the program can be, from a process that is no system one.
-        if (compositor.app_id[row][0] && taskbar_pin_find(compositor.app_id[row]) >= 0)
+        // The app of the registry the window is (its app_id or class is the app's window key): Unpin where it is pinned, else Pin where
+        // it may be, with room for one more. A window that is no app's has neither: nothing of a window's own words is ever pinned.
         {
-                string_copy_bounded((p8 *)taskbar_menu.pin.app, (string_address)compositor.app_id[row], sizeof(taskbar_menu.pin.app));
-                ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_unpin), null, 0, TASKBAR_MENU_UNPIN);
+                int which = ui_apps_match(compositor.app_id[row]), pinned = -1;
+
+                for (int each = 0; each < taskbar_pins.count && pinned < 0; each++)
+                        if (taskbar_pin_runs(&taskbar_pins.pin[each], compositor.app_id[row]))
+                                pinned = each;
+                if (pinned >= 0)
+                {
+                        string_copy_bounded((p8 *)taskbar_menu.pin.app, (string_address)taskbar_pins.pin[pinned].app, sizeof(taskbar_menu.pin.app));
+                        ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
+                        ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_unpin), null, 0, TASKBAR_MENU_UNPIN);
+                }
+                else if (which >= 0 && taskbar_pins.count < SETTING_PINS_ENTRIES && taskbar_pin_of(which, &taskbar_menu.pin))
+                {
+                        ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
+                        ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_pin), null, 0, TASKBAR_MENU_PIN);
+                }
+                else
+                        memory_zero(&taskbar_menu.pin, sizeof(taskbar_menu.pin));
         }
-        else if (members && taskbar_pin_capture(row, pid, &taskbar_menu.pin) && taskbar_pin_fits(&taskbar_menu.pin))
-        {
-                ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_pin), null, 0, TASKBAR_MENU_PIN);
-        }
-        else
-                memory_zero(&taskbar_menu.pin, sizeof(taskbar_menu.pin));
         return taskbar_menu_place(view, x, y, w, h);
 }
 
@@ -3578,7 +3433,7 @@ static void taskbar_tab_chose(int id)
 
         if (id == TASKBAR_MENU_UNPIN)
         {
-                taskbar_pin_remove(taskbar_menu.pin.app);
+                taskbar_pin_keep(ui_apps_find(taskbar_menu.pin.app), false);
                 return;
         }
         if (!taskbar_tab_row_is(row, pid))
@@ -3587,8 +3442,9 @@ static void taskbar_tab_chose(int id)
                 compositor_close(row);
         else if (id == TASKBAR_MENU_STOP)
                 taskbar_stop_run(pid);
-        else if (id == TASKBAR_MENU_PIN && taskbar_menu.pin.app[0] && string_equals((string_address)compositor.app_id[row], (string_address)taskbar_menu.pin.app))
-                taskbar_pin_add(&taskbar_menu.pin);
+        else if (id == TASKBAR_MENU_PIN && taskbar_menu.pin.app[0] && ui_apps_match(compositor.app_id[row]) >= 0 &&
+                 ui_apps_match(compositor.app_id[row]) == ui_apps_find(taskbar_menu.pin.app))
+                taskbar_pin_keep(ui_apps_find(taskbar_menu.pin.app), true);
 }
 
 // The clock format the menu's clock item turns to (`time format`'s word), and the band's clock turned to it.

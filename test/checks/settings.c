@@ -532,6 +532,10 @@ static fn check_launcher(void)
         launcher.regular = "/fonts/ui.ttf";
         launcher.mono = "/fonts/mono.ttf";
         launcher.mono_bold = "/fonts/mono-bold.ttf";
+        launcher.menu_app = -1, launcher.generation = ~0u;
+        // The registry of the kit's programs alone: no bowl is there.
+        ui_apps_bowls = "/tmp/mw-launcher-no-bowls", ui_apps.read = false;
+        ui_apps_fresh(1);
 
         check("launcher: a plain word is not a command line",
               !launcher_command_line("") && !launcher_command_line("ls") && !launcher_command_line("htop") &&
@@ -569,8 +573,9 @@ static fn check_launcher(void)
                   !launcher_hidden_name("ls") && !launcher_hidden_name("setting"));
 
         launcher_type_text("");
-        check("launcher: with nothing typed the list is the desktop's programs",
-              launcher_list_is("w:Settings,w:Terminal,w:Kernel log,w:Mixer,w:Files,"));
+        check("launcher: with nothing typed there are no rows, and the grid is the desktop's programs in their order",
+              launcher_list_is("") && launcher.app_count == 5 && launcher.apps[0] == 0 && launcher.apps[1] == 1 && launcher.apps[2] == 2 &&
+                  launcher.apps[3] == 3 && launcher.apps[4] == 4);
         launcher_type_text("ls");
         check("launcher: a plain word lists the names it is, then starts, then is inside, the shorter first, and the command last",
               launcher_list_is("p:ls,p:lsof,p:lsblk,p:xls,p:also,p:false,c,") && launcher.list.focus == 0);
@@ -651,8 +656,8 @@ static fn check_launcher(void)
         launcher_pressed(FIELD_KEY_BACKSPACE, WINDOW_KEY_CONTROL);
         check("launcher: Control-Backspace takes the last word", launcher_holds("ls -l -"));
         launcher_pressed(FIELD_KEY_BACKSPACE, WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT);
-        check("launcher: Control-Shift-Backspace clears the field to the caret, and the list is the desktop's",
-              launcher_holds("") && launcher.text[0] == 0 && launcher.entries == launcher_offered_count());
+        check("launcher: Control-Shift-Backspace clears the field to the caret, and the grid is the desktop's",
+              launcher_holds("") && launcher.text[0] == 0 && !launcher.entries && launcher.app_count == (int)launcher_offered_count());
         check("launcher: Escape closes it", !launcher_pressed(FIELD_KEY_ESCAPE, 0));
         launcher_type_text("caf");
         launcher_typed(0xe9);
@@ -709,17 +714,28 @@ static fn check_launcher(void)
                   string_equals(words[6], (string_address) "/shell") && string_equals(words[7], (string_address) "-c") &&
                   string_equals(words[8], (string_address) "ls -l | head") && !words[9]);
         launcher_type_text("");
-        count = launcher_words(&launcher.entry[0], words, full, sizeof(full));
-        check("launcher: the settings are a window of their own in the bar's face",
-              count == 3 && string_equals(words[0], (string_address) "/settings") && string_equals(words[1], (string_address) "-f") &&
-                  string_equals(words[2], (string_address) "/fonts/ui.ttf") && !words[3]);
-        count = launcher_words(&launcher.entry[2], words, full, sizeof(full));
-        check("launcher: the kernel log is a window drawn in the monospace face",
-              count == 5 && string_equals(words[0], (string_address) "/klog") && string_equals(words[2], (string_address) "/fonts/mono.ttf") &&
-                  string_equals(words[4], (string_address) "/fonts/mono-bold.ttf"));
+        {
+                struct launcher_entry settings = {LAUNCHER_WINDOW, 0}, klog = {LAUNCHER_WINDOW, 2};
+
+                count = launcher_words(&settings, words, full, sizeof(full));
+                check("launcher: the settings are a window of their own in the bar's face",
+                      count == 3 && string_equals(words[0], (string_address) "/settings") && string_equals(words[1], (string_address) "-f") &&
+                          string_equals(words[2], (string_address) "/fonts/ui.ttf") && !words[3]);
+                count = launcher_words(&klog, words, full, sizeof(full));
+                check("launcher: the kernel log is a window drawn in the monospace face",
+                      count == 5 && string_equals(words[0], (string_address) "/klog") && string_equals(words[2], (string_address) "/fonts/mono.ttf") &&
+                          string_equals(words[4], (string_address) "/fonts/mono-bold.ttf"));
+        }
         launcher.height = 0;
+        launcher.width = LAUNCHER_WIDTH * launcher.ui.scale / 100;
         launcher_changed();
-        check("launcher: the picture's height follows the list, and has the power row under it", launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 5 * UI_ROW + UI_GAP2 + UI_ROW);
+        {
+                int per = launcher_per(), lines = (launcher.app_count + per - 1) / per;
+
+                check("launcher: the picture's height follows the grid's lines of tiles, and has the power row under it",
+                      launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + lines * UI_TILE_H + UI_GAP2 + UI_ROW);
+        }
+        launcher_type_text("ls");
 #ifdef UI_TARGET
         // A finger: a row shown pressed as it lands and run only as it lifts there; slid off the row, nothing is run.
         {
@@ -1039,7 +1055,11 @@ static fn check_launcher_anchor(void)
         launcher.height = 0;
         launcher.width = 560;
         launcher_changed();
-        kept = launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + 5 * UI_ROW + UI_GAP2 + UI_ROW;
+        {
+                int per = launcher_per(), lines = (launcher.app_count + per - 1) / per;
+
+                kept = launcher.app_count > 0 && launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + lines * UI_TILE_H + UI_GAP2 + UI_ROW;
+        }
         launcher.anchor.button[1] = 100;
         launcher.anchor.screen[1] = 0;
         kept &= launcher_most_height() == 100;

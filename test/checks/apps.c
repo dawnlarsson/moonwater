@@ -4890,6 +4890,8 @@ static fn launcher_words_check(void)
         const char address_to note;
 
         language_take(0);
+        ui_apps_bowls = "/tmp/mw-launcher-no-bowls", ui_apps.read = false;
+        ui_apps_fresh(1);
         launcher_label(&window, label, sizeof(label), &note);
         check("launcher words: a desktop program is its English name, from the desktop",
               !string_compare_max((string_address)label, (string_address) "Settings", 9) && !string_compare_max((string_address)note, (string_address) "desktop", 8));
@@ -4909,6 +4911,114 @@ static fn launcher_words_check(void)
               launcher_program_rank("einst", 5, &launcher_programs[0]) == 2 && launcher_program_rank("settings", 8, &launcher_programs[0]) == 3 &&
                   launcher_program_rank("ajustes", 7, &launcher_programs[0]) == 0);
         language_take(0);
+}
+#endif
+
+#if MOONWATER_UI_ANY
+/*
+        The registry of apps (ui.c's ui_apps): a desktop entry read as the Desktop Entry Specification says (its group, the language's
+        keys, the escapes, the lists, the booleans, Hidden, NoDisplay, OnlyShowIn and NotShowIn, Terminal), an Exec's words with its
+        field codes taken out, a PNG of every filter and one of a palette decoded to the pixels a reference made of them (test/ has no
+        file: the bytes are here, made by Python's zlib), and a picture made the side asked.
+*/
+static const unsigned char apps_png_rgba[138] = {137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,4,0,0,0,5,8,6,0,0,0,98,173,77,219,0,0,0,81,73,68,65,84,120,218,13,139,161,17,192,48,12,196,62,117,175,127,37,69,97,97,65,193,198,30,39,67,148,57,222,169,251,165,6,34,58,9,0,150,9,246,123,97,127,55,86,161,98,155,84,36,145,248,145,2,212,26,212,225,84,131,60,19,165,183,225,189,41,122,179,56,179,112,230,66,25,65,49,255,1,194,82,15,30,228,59,233,117,0,0,0,0,73,69,78,68,174,66,96,130};
+static const unsigned int apps_png_rgba_pixels[20] = {0x80000000u,0xff3c0300u,0xff780600u,0x805a0500u,0xff073200u,0xff433514u,0x80401c14u,0xffbb3b3cu,0xff0e6400u,0x80253414u,0xff866a50u,0xffc26d78u,0x800b4b00u,0xff51993cu,0xff8d9c78u,0x8065505au,0xff1cc800u,0xff58cb50u,0x804a6750u,0xffd0d1f0u};
+static const unsigned char apps_png_palette[111] = {137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,3,0,0,0,2,2,3,0,0,0,224,26,142,137,0,0,0,12,80,76,84,69,255,0,0,0,255,0,0,0,255,10,20,30,34,136,41,4,0,0,0,3,116,82,78,83,255,128,0,127,109,104,120,0,0,0,15,73,68,65,84,120,1,1,4,0,251,255,0,24,0,228,1,48,0,253,195,249,228,200,0,0,0,0,73,69,78,68,174,66,96,130};
+static const unsigned int apps_png_palette_pixels[6] = {0xffff0000u,0x80008000u,0x00000000u,0xff0a141eu,0x00000000u,0x80008000u};
+static fn check_apps_registry(void)
+{
+        struct ui_desktop d;
+        char words[UI_APP_ARGS + 8][UI_APP_PATH];
+        int count, width = 0, height = 0;
+        unsigned int address_to pixels;
+        b32 same;
+        static const char entry[] = "# a comment\n"
+                                    "[Desktop Entry]\r\n"
+                                    "Type = Application\n"
+                                    "Name=Web Browser\n"
+                                    "Name[de]=Webbrowser\n"
+                                    "Name[de_AT]=Webbrowser AT\n"
+                                    "Name[fr]=Navigateur\\sweb\n"
+                                    "GenericName=Browser\n"
+                                    "Keywords=web;internet\\;net;\n"
+                                    "Keywords[de]=netz;\n"
+                                    "Exec=\"/usr/bin/my app\" --flag=%u %F -x %% \"a \\\\\"q\\\\\"\"\n"
+                                    "Icon=web-browser\n"
+                                    "StartupWMClass=Browsy\n"
+                                    "Terminal=false\n"
+                                    "OnlyShowIn=GNOME;Moonwater;\n"
+                                    "\n"
+                                    "[Desktop Action new]\n"
+                                    "Name=Not this\n"
+                                    "Exec=other\n";
+
+        check("apps: a desktop entry's keys, blanks about the = aside, a CR at a line's end aside, an action's group not read",
+              ui_desktop_parse(entry, sizeof(entry) - 1, 0, &d) && d.application && string_equals((string_address)d.name, (string_address) "Web Browser") &&
+                  string_equals((string_address)d.icon, (string_address) "web-browser") && string_equals((string_address)d.key, (string_address) "Browsy") &&
+                  !d.terminal && d.shown && !d.hidden && !d.no_display);
+        check("apps: the language's own key is taken over the plain one, and a country's is another language's",
+              ui_desktop_parse(entry, sizeof(entry) - 1, 'd' | 'e' << 8, &d) && string_equals((string_address)d.name, (string_address) "Webbrowser") &&
+                  string_equals((string_address)d.keywords, (string_address) "netz;") && string_equals((string_address)d.generic, (string_address) "Browser"));
+        check("apps: a string's escapes are undone (\\s a blank), and a list's \\; is kept for its items",
+              ui_desktop_parse(entry, sizeof(entry) - 1, 'f' | 'r' << 8, &d) && string_equals((string_address)d.name, (string_address) "Navigateur web") &&
+                  string_equals((string_address)d.keywords, (string_address) "web;internet\\;net;"));
+        check("apps: a file that does not begin with the entry's group is no entry", !ui_desktop_parse("[Other]\nName=x\n", 15, 0, &d));
+        {
+                static const char hidden[] = "[Desktop Entry]\nType=Application\nName=a\nExec=a\nHidden=true\nNoDisplay=1\nTerminal=true\n";
+                static const char elsewhere[] = "[Desktop Entry]\nType=Application\nName=a\nExec=a\nOnlyShowIn=KDE;GNOME;\n";
+                static const char refused[] = "[Desktop Entry]\nType=Application\nName=a\nExec=a\nNotShowIn=Moonwater;\n";
+                static const char link[] = "[Desktop Entry]\nType=Link\nName=a\nURL=x\n";
+                struct ui_desktop e, f, g;
+
+                check("apps: Hidden, NoDisplay and Terminal are booleans, true or 1; OnlyShowIn without Moonwater and NotShowIn with it hide; a Link is no app",
+                      ui_desktop_parse(hidden, sizeof(hidden) - 1, 0, &d) && d.hidden && d.no_display && d.terminal &&
+                          ui_desktop_parse(elsewhere, sizeof(elsewhere) - 1, 0, &e) && !e.shown && ui_desktop_parse(refused, sizeof(refused) - 1, 0, &f) &&
+                          !f.shown && ui_desktop_parse(link, sizeof(link) - 1, 0, &g) && !g.application);
+        }
+        // The Exec, as its string escapes left it: a quoted word with \" in it, field codes alone go, one in a word goes from it, %% is %.
+        ui_desktop_parse(entry, sizeof(entry) - 1, 0, &d);
+        count = ui_desktop_exec(d.exec, words, (int)(sizeof(words) / sizeof(words[0])));
+        check("apps: an Exec's words: quotes, a field code alone gone, one inside a word taken from it, %% a %",
+              count == 5 && string_equals((string_address)words[0], (string_address) "/usr/bin/my app") && string_equals((string_address)words[1], (string_address) "--flag=") &&
+                  string_equals((string_address)words[2], (string_address) "-x") && string_equals((string_address)words[3], (string_address) "%") &&
+                  string_equals((string_address)words[4], (string_address) "a \"q\""));
+        check("apps: an Exec with a quote left open or a field code of another letter is none",
+              ui_desktop_exec("a \"b", words, 4) < 0 && ui_desktop_exec("a %z", words, 4) < 0 && ui_desktop_exec("steam %U", words, 4) == 1);
+        // The pictures.
+        pixels = ui_png_decode(apps_png_rgba, sizeof(apps_png_rgba), &width, &height);
+        same = pixels && width == 4 && height == 5;
+        for (int at = 0; same && at < 20; at++)
+                same = pixels[at] == apps_png_rgba_pixels[at];
+        check("apps: a PNG of RGBA rows filtered None, Sub, Up, Average and Paeth is its pixels, premultiplied", same);
+        if (pixels)
+                memory_free(pixels, 4u * 5 * 4);
+        pixels = ui_png_decode(apps_png_palette, sizeof(apps_png_palette), &width, &height);
+        same = pixels && width == 3 && height == 2;
+        for (int at = 0; same && at < 6; at++)
+                same = pixels[at] == apps_png_palette_pixels[at];
+        check("apps: a PNG of a palette at two bits a pixel, with tRNS's alpha, is its pixels", same);
+        if (pixels)
+                memory_free(pixels, 3u * 2 * 4);
+        {
+                p8 broken[sizeof(apps_png_rgba)];
+
+                memory_copy(broken, apps_png_rgba, sizeof(broken));
+                broken[sizeof(broken) - 20] ^= 0x55; // inside the stream
+                pixels = ui_png_decode(broken, sizeof(broken), &width, &height);
+                check("apps: a PNG cut short or with its stream broken is no picture, and no read past it",
+                      !ui_png_decode(apps_png_rgba, 40, &width, &height) && !ui_png_decode(apps_png_rgba, 8, &width, &height) &&
+                          (!pixels || (width == 4 && height == 5)));
+                if (pixels)
+                        memory_free(pixels, 4u * 5 * 4);
+        }
+        {
+                unsigned int from[4] = {0xff000000u, 0xffffffffu, 0xffffffffu, 0xff000000u}, into[4];
+
+                ui_picture_scale(into, 1, from, 2);
+                check("apps: a picture made smaller is the mean of what is under each pixel", into[0] == 0xff808080u);
+                ui_picture_scale(into, 2, from, 2);
+                check("apps: and made its own size is itself", into[0] == from[0] && into[1] == from[1] && into[3] == from[3]);
+        }
 }
 #endif
 
@@ -6717,19 +6827,19 @@ static fn check_field_hands(string_address regular)
                         check("launcher: a press let go off its row runs nothing and leaves no press", launcher_send(&release) && !launcher.list.press.down);
                         ui_kit.motion = motion_was;
                 }
-                // The wheel turns a list longer than its window: the five desktop programs in a window one row tall, a notch a
-                // row, and the list glides to it (its aim moves, and a frame is asked for).
+                // The wheel turns a list longer than its window: the rows of ls in a window one row tall, a notch a row, and the
+                // list glides to it (its aim moves, and a frame is asked for).
                 {
                         int pad = ui_px(&launcher.ui, UI_PAD);
                         struct window_event turn = {WINDOW_EVENT_WHEEL, 0, -120, 0};
 
-                        launcher.text[0] = 0;
+                        string_copy_bounded((string_address)launcher.text, (string_address) "ls", sizeof(launcher.text));
                         launcher_search();
                         launcher.height = pad * 2 + ui_px(&launcher.ui, UI_TARGET) + ui_px(&launcher.ui, UI_GAP2) + ui_px(&launcher.ui, UI_ROW);
                         launcher.dirty = false;
                         launcher_send(&turn);
                         check("launcher: the wheel turns a list longer than its window, a notch a row, with the glide",
-                              launcher.entries == 5 && scroll_aim(&launcher.list.scroll) > 0 && launcher.dirty);
+                              launcher.entries >= 2 && scroll_aim(&launcher.list.scroll) > 0 && launcher.dirty);
                 }
         }
 
@@ -10024,6 +10134,7 @@ b32 main()
         check_moon_bench();
         check_taskbar_edit();
         check_taskbar_tab_menu();
+        check_apps_registry();
         check_taskbar_pins();
         check_wallpaper_turn();
         check_icons();

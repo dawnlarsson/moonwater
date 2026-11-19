@@ -2,11 +2,25 @@
         The launcher, as a window on the compositor in userspace.
 
         A search bar in the middle of the screen: one field with the keys in it
-        at once, and under it a short list of what the text names. The desktop's
-        own programs come first (the settings, a terminal, the kernel log), then
-        the programs found on PATH whose names start with or contain what was
-        typed, the nearest names first, and last a row that runs the text itself
-        as a shell command, so the bar is also a shell prompt.
+        at once. With nothing typed, under it are the apps as a grid of their
+        pictures and names (the kit's registry, ui_apps: the desktop's own
+        programs first, then every program a bowl installed that says it is one,
+        by name), and under that Recent, the apps started last from here. Once
+        something is typed it is a short list of what the text names: the apps
+        it names (by name, and by the words their entries give), then the
+        programs found on PATH whose names start with or contain what was typed,
+        the nearest names first, and last a row that runs the text itself as a
+        shell command, so the bar is also a shell prompt.
+
+        An app is started as its own window, never in a terminal: a kit program
+        with its face, a bowl's through its launcher of /bowls/bin with the words
+        its entry gives, detached and asked for (the compositor gives its first
+        window the keys, window.c's asked record). Only an app whose entry says
+        Terminal=true, a program of PATH and a typed command open a terminal.
+        The arrows go across the grid and down into Recent, Enter starts the one
+        the keys are on, and a right press (or Shift-F10, or the menu key) on an
+        app opens its menu: Pin to taskbar, or Unpin, which keeps it in the
+        panel's pins (ui_apps_pin) by its id.
 
         The field is the kit's (the text engine's field): a caret placed by the
         hand, a drag, a double and a triple click, Shift and the arrows, Control
@@ -17,7 +31,7 @@
         Up and Down (or Control-P and Control-N) move in the list, Tab takes the
         highlighted name into the field, and Enter runs the highlighted row:
 
-            a desktop program    is started as a window of its own;
+            an app               is started as a window of its own;
             a program of PATH    runs in a new terminal window, its words
                                  never seen by a shell;
             the command          is run by the machine's shell (shell -c) in a
@@ -83,19 +97,22 @@
 #define LAUNCHER_WORDS 16
 #define LAUNCHER_FULL (LAUNCHER_PATH + LAUNCHER_NAME + 2) // a directory of PATH, its slash and a name
 
+#define LAUNCHER_TILE 88         // logical pixels: a tile of the grid across (its height is the kit's, UI_TILE_H)
+#define LAUNCHER_GRID_LINES 3    // lines of tiles the grid shows at most: more scroll
+#define LAUNCHER_RECENT 8        // apps kept as started last
+#define LAUNCHER_RECENT_PATH "/root/launcher.recent" // under the root the settings are kept in: an app's id a line, the last first
+#define LAUNCHER_MENU_PIN 100    // the app menu's items (the field's are the kit's, 1 to 7)
+#define LAUNCHER_MENU_UNPIN 101
+
 // What a row starts.
-#define LAUNCHER_WINDOW 1u  // a program of the desktop: a window of its own
+#define LAUNCHER_WINDOW 1u  // an app (the registry's: a kit program or a bowl's): a window of its own
 #define LAUNCHER_PROGRAM 2u // a program of PATH: in a terminal
 #define LAUNCHER_COMMAND 3u // the text: the shell's, in a terminal
 
-
-struct launcher_program
-{
-        const char address_to label;
-        const char address_to words;   // what else names it, a blank apart
-        const char address_to command; // the program, which takes -f for its face
-        unsigned char mono;            // it is drawn in the monospace face
-};
+// The kit's own programs are the registry's first entries, in this order (ui_kit_programs): an app's index is a kit program's place.
+#define launcher_program ui_kit_program
+#define launcher_programs ui_kit_programs
+#define LAUNCHER_PROGRAMS UI_KIT_PROGRAMS
 
 /*
         The power buttons, left to right: the ids of what each is called and says when it is armed, and what it starts. The first two are
@@ -114,28 +131,8 @@ static const struct launcher_power
                                       {LANGUAGE_launcher_restart, LANGUAGE_launcher_restart_armed, "reboot"},
                                       {LANGUAGE_launcher_sleep, LANGUAGE_launcher_sleep_armed, "moonwater sleep"}};
 
-// The desktop's own programs, in the order they are listed.
-static const struct launcher_program launcher_programs[] = {
-#if MOONWATER_UI_SETTINGS // its tool is in the table only with the switch on (ui/ui.c's switches): a row that is listed starts
-    {"Settings", "settings preferences options", "/settings", 0},
-#endif
-    {"Terminal", "terminal shell console", "/terminal", 1},
-    {"Kernel log", "kernel log klog dmesg messages", "/klog", 1},
-#if MOONWATER_UI_MIXER
-    {"Mixer", "mixer sound volume audio", "/mixer", 0},
-#endif
-#if MOONWATER_UI_FILES
-    {"Files", "files folders browser directory", "/files", 0},
-#endif
-#if MOONWATER_UI_INSTALLER // last, and listed only where launcher_offered says
-    {"Install Moonwater", "install installer disk drive", "/installer", 0},
-#endif
-};
-
-#define LAUNCHER_PROGRAMS (sizeof(launcher_programs) / sizeof(launcher_programs[0]))
-
 /*
-        Whether a desktop program is listed: every one, but the installer where this session keeps a drive inside the machine. Boot's
+        Whether an app is listed: every one, but the installer where this session keeps a drive inside the machine. Boot's
         verdict (/run/moonwater/verdict) says live or ask on a stick, and disk NAME where an install's data is kept; a NAME that says it is
         removable, or is on a USB bus, is a stick made with setup install, which is an installer's place too. Asked once a start.
 */
@@ -145,8 +142,8 @@ static b32 launcher_offered(positive at)
         char verdict[64], path[160], text[8], link[256];
         bipolar got;
 
-        if (!string_equals((string_address)launcher_programs[at].command, (string_address) "/installer"))
-                return true;
+        if (at >= (positive)ui_apps.count || !string_equals((string_address)ui_apps.app[at].launch, (string_address) "/installer"))
+                return at < (positive)ui_apps.count;
         if (offer >= 0)
                 return offer;
         offer = 0;
@@ -175,12 +172,12 @@ static b32 launcher_offered(positive at)
         return offer;
 }
 
-// How many desktop programs are listed with nothing typed.
+// How many apps the grid has with nothing typed.
 static positive launcher_offered_count(void)
 {
         positive count = 0;
 
-        for (positive at = 0; at < LAUNCHER_PROGRAMS; at++)
+        for (positive at = 0; at < (positive)ui_apps.count; at++)
                 count += launcher_offered(at) != 0;
         return count;
 }
@@ -212,6 +209,18 @@ static struct
         struct launcher_entry entry[LAUNCHER_ROWS];
         positive entries;
         struct ui_list list; // the rows, the kit's: its focus is the highlighted row
+
+        // With nothing typed: the apps of the grid (the registry's entries offered, the kit's first, then by name) and the ones started
+        // last that are still there, each the kit's list of tiles; recents is the one the keys are in (else the grid), and menu_app
+        // the app a menu was opened for (-1 none).
+        unsigned short apps[UI_APPS_MOST];
+        int app_count;
+        unsigned short recent[LAUNCHER_RECENT];
+        int recent_count;
+        struct ui_list grid, recents;
+        b32 in_recents;
+        int menu_app;
+        unsigned int generation; // the registry's read the apps are of
 
         // The names read from PATH, LAUNCHER_NAME bytes each, and the directory each came from: one mapping.
         char address_to names;
@@ -342,6 +351,24 @@ static unsigned int launcher_program_rank(const char address_to text, positive l
         return said > best ? said : best;
 }
 
+// How well a text names an app: a kit program as above, a bowl's by its name and the words its entry gives.
+static unsigned int launcher_app_rank(const char address_to text, positive length, int which)
+{
+        const struct ui_app_entry address_to app = &ui_apps.app[which];
+
+        if (app->kit)
+                return launcher_program_rank(text, length, &launcher_programs[app->kit - 1]);
+        return launcher_names_rank(text, length, app->name, app->words);
+}
+
+// What an app is called here: a kit program in the language, a bowl's as its entry says it in the language it was read in.
+static const char address_to launcher_app_name(int which)
+{
+        const struct ui_app_entry address_to app = &ui_apps.app[which];
+
+        return app->kit ? language_of(launcher_programs[app->kit - 1].label) : app->name;
+}
+
 // The better rank first, then the shorter name, then the earlier in the alphabet.
 static b32 launcher_before(unsigned int rank, const char address_to name, unsigned int other_rank,
                            const char address_to other)
@@ -360,7 +387,11 @@ static const char address_to launcher_name(positive index)
         return launcher.names + index * LAUNCHER_NAME;
 }
 
-// A name that is not a program of its own: the desktop's names, which the list already has, and the system's machinery.
+/*
+        A name that is not a program of its own: the system's machinery, and the names of PATH an app is started by, which the list has
+        as the app (a kit program's, and a bowl's launcher and the profile it is the session of: chrome, chromium-browser and steam are
+        their apps, not a terminal's programs).
+*/
 static b32 launcher_hidden_name(const char address_to name)
 {
         for (positive at = 0; launcher_hidden[at]; at++)
@@ -369,19 +400,55 @@ static b32 launcher_hidden_name(const char address_to name)
         for (positive at = 0; at < LAUNCHER_PROGRAMS; at++)
                 if (string_equals((string_address)name, (string_address)launcher_programs[at].command + 1))
                         return true;
+        for (int at = 0; at < ui_apps.count; at++)
+                if (!ui_apps.app[at].kit && !ui_apps.app[at].terminal &&
+                    (string_equals((string_address)name, (string_address)ui_apps_base(ui_apps.app[at].launch)) ||
+                     string_equals((string_address)name, (string_address)ui_apps.app[at].profile)))
+                        return true;
         return false;
+}
+
+/*
+        The apps of the grid, into launcher.apps: the kit's programs offered, in their order, then the bowls' by name (the case of a
+        letter aside). Made again when the registry has been read again.
+*/
+static fn launcher_apps_make(void)
+{
+        int count = 0;
+
+        for (int at = 0; at < ui_apps.count && count < UI_APPS_MOST; at++)
+                if (launcher_offered((positive)at))
+                {
+                        const char address_to name = launcher_app_name(at);
+                        int place = count++;
+
+                        // The kit's stay first, as they are; a bowl's goes in by its name among the bowls' before it.
+                        while (place > 0 && !ui_apps.app[at].kit && !ui_apps.app[launcher.apps[place - 1]].kit)
+                        {
+                                const char address_to other = launcher_app_name(launcher.apps[place - 1]);
+                                positive a = string_length((string_address)name), b = string_length((string_address)other);
+                                b32 order = memory_compare_ascii_case((address_any)name, (address_any)other, a < b ? a : b);
+
+                                if (order > 0 || (!order && a >= b))
+                                        break;
+                                launcher.apps[place] = launcher.apps[place - 1], place--;
+                        }
+                        launcher.apps[place] = (unsigned short)at;
+                }
+        launcher.app_count = count;
+        launcher.generation = ui_apps.generation;
 }
 
 /*
         The rows for the text in the field, into launcher.entry:
 
-            no text             the desktop's programs;
-            a plain word        the desktop's programs it names, then the names
-                                of PATH it names (the nearest LAUNCHER_ROWS - 1),
-                                then the command row;
+            no text             none: the grid of the apps, and Recent;
+            a plain word        the apps it names, then the names of PATH it names
+                                (the nearest LAUNCHER_ROWS - 1), then the command
+                                row;
             a command line      the command row, first, but where the text is the
-                                whole name of a desktop program; then the desktop
-                                programs it names, and the command row last.
+                                whole name of an app; then the apps it names, and
+                                the command row last.
 
         The command row is always there for a text, and the highlight starts at
         the first row.
@@ -390,31 +457,26 @@ static fn launcher_search(void)
 {
         positive length = string_length((string_address)launcher.text), found = 0, count = 0;
         b32 line = launcher_command_line(launcher.text), first;
-        unsigned int programs[LAUNCHER_PROGRAMS], ranks[LAUNCHER_ROWS];
+        unsigned int programs[UI_APPS_MOST], ranks[LAUNCHER_ROWS];
         unsigned short best[LAUNCHER_ROWS];
 
         launcher.list.focus = 0;
         launcher.entries = 0;
+        if (launcher.generation != ui_apps.generation)
+                launcher_apps_make();
 
         if (!length)
         {
                 launcher.named_length = 0;
-                for (positive at = 0; at < LAUNCHER_PROGRAMS; at++)
-                        if (launcher_offered(at))
-                        {
-                                launcher.entry[count].kind = LAUNCHER_WINDOW;
-                                launcher.entry[count++].index = (unsigned short)at;
-                        }
-                launcher.entries = count;
                 return;
         }
 
-        for (positive at = 0; at < LAUNCHER_PROGRAMS; at++)
-                programs[at] = launcher_offered(at) ? launcher_program_rank(launcher.text, length, &launcher_programs[at]) : 0;
+        for (int at = 0; at < ui_apps.count; at++)
+                programs[at] = launcher_offered((positive)at) ? launcher_app_rank(launcher.text, length, at) : 0;
 
-        // A command line leads with the command row, unless the text is the whole name of a desktop program.
+        // A command line leads with the command row, unless the text is the whole name of an app.
         first = line;
-        for (positive at = 0; at < LAUNCHER_PROGRAMS; at++)
+        for (int at = 0; at < ui_apps.count; at++)
                 if (programs[at] == 3)
                         first = false;
         if (first)
@@ -423,8 +485,9 @@ static fn launcher_search(void)
                 launcher.entry[count++].index = 0;
         }
 
+        // The apps, the nearest first, with the room for the command row kept where it is last.
         for (unsigned int rank = 3; rank > 0; rank--)
-                for (positive at = 0; at < LAUNCHER_PROGRAMS && count < LAUNCHER_ROWS; at++)
+                for (int at = 0; at < ui_apps.count && count < LAUNCHER_ROWS - (first ? 0u : 1u); at++)
                         if (programs[at] == rank)
                         {
                                 launcher.entry[count].kind = LAUNCHER_WINDOW;
@@ -492,10 +555,12 @@ static fn launcher_search(void)
 
 /*
         The words a row starts, into words (a null after them), as many as
-        there are: a desktop program (its program, and the face it draws in),
-        a program of PATH (a terminal, and the program by its full name), the
-        command (a terminal, and the machine's shell given the text). Answers
-        how many, with full holding a name that was made.
+        there are: an app (the registry's words for it: a kit program and the
+        face it draws in, a bowl's launcher and its entry's words, in a terminal
+        only where the entry says Terminal), a program of PATH (a terminal, and
+        the program by its full name), the command (a terminal, and the
+        machine's shell given the text). Answers how many, with full holding a
+        name that was made.
 */
 static positive launcher_words(const struct launcher_entry address_to entry, string_address address_to words, char address_to full,
                                positive room)
@@ -503,10 +568,12 @@ static positive launcher_words(const struct launcher_entry address_to entry, str
         positive count = 0;
         const char address_to mono = launcher.mono ? launcher.mono : launcher.regular;
         b32 terminal = entry->kind != LAUNCHER_WINDOW;
-        b32 draws_mono = terminal || launcher_programs[entry->index].mono;
+        b32 draws_mono = terminal;
 
-        words[count++] = terminal ? (string_address) "/terminal"
-                                  : (string_address)launcher_programs[entry->index].command;
+        if (!terminal)
+                return entry->index < ui_apps.count ? ui_apps_words_of(entry->index, words, launcher.regular, launcher.mono, launcher.mono_bold)
+                                                    : (words[0] = null, 0);
+        words[count++] = (string_address) "/terminal";
         if (draws_mono ? mono : launcher.regular)
         {
                 words[count++] = (string_address) "-f";
@@ -680,7 +747,92 @@ static fn launcher_scan(const char address_to variable)
 
 /* ---- starting ---- */
 
-// The row's start: false when nothing could be started, and the launcher stays up.
+/*
+        The apps started last, as their file keeps them (an id a line, the last first, LAUNCHER_RECENT at most): those the registry still
+        has and the grid offers go into launcher.recent. launcher_recent_add puts one first and keeps the file.
+*/
+static fn launcher_recent_path(char address_to path, positive room)
+{
+        string_copy_bounded((p8 address_to)path, (string_address)compositor_settings_root, room);
+        string_append_bounded((p8 address_to)path, (string_address)LAUNCHER_RECENT_PATH, room);
+}
+
+static positive launcher_recent_text(char address_to text, positive room)
+{
+        char path[160];
+        bipolar handle, got = 0;
+
+        launcher_recent_path(path, sizeof(path));
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (handle >= 0)
+        {
+                got = system_read_once(handle, text, room - 1);
+                system_close(handle);
+        }
+        text[got > 0 ? got : 0] = 0;
+        return got > 0 ? (positive)got : 0;
+}
+
+static fn launcher_recent_read(void)
+{
+        char text[LAUNCHER_RECENT * (WINDOWS_APP_ID + 1) + 1];
+        positive length = launcher_recent_text(text, sizeof(text));
+
+        launcher.recent_count = 0;
+        for (positive at = 0; at < length && launcher.recent_count < LAUNCHER_RECENT;)
+        {
+                positive stop = at;
+                int which;
+
+                while (stop < length && text[stop] != '\n')
+                        stop++;
+                text[stop] = 0;
+                which = ui_apps_find(text + at);
+                if (which >= 0 && launcher_offered((positive)which))
+                {
+                        b32 again = false;
+
+                        for (int seen = 0; seen < launcher.recent_count; seen++)
+                                again |= launcher.recent[seen] == which;
+                        if (!again)
+                                launcher.recent[launcher.recent_count++] = (unsigned short)which;
+                }
+                at = stop + 1;
+        }
+}
+
+static fn launcher_recent_add(int which)
+{
+        char text[LAUNCHER_RECENT * (WINDOWS_APP_ID + 1) + 1], made[sizeof(text) + WINDOWS_APP_ID + 1], path[160];
+        positive length = launcher_recent_text(text, sizeof(text)), used = 0, lines = 1;
+        bipolar handle;
+
+        string_copy_bounded((p8 address_to)made, (string_address)ui_apps.app[which].id, sizeof(made));
+        string_append_bounded((p8 address_to)made, (string_address) "\n", sizeof(made));
+        used = string_length((string_address)made);
+        for (positive at = 0; at < length && lines < LAUNCHER_RECENT;)
+        {
+                positive stop = at;
+
+                while (stop < length && text[stop] != '\n')
+                        stop++;
+                if (stop > at && stop - at < WINDOWS_APP_ID && !(stop - at == string_length((string_address)ui_apps.app[which].id) &&
+                                                                   !memory_compare(text + at, ui_apps.app[which].id, stop - at)))
+                {
+                        memory_copy(made + used, text + at, stop - at);
+                        used += stop - at, made[used++] = '\n', lines++;
+                }
+                at = stop + 1;
+        }
+        launcher_recent_path(path, sizeof(path));
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (handle < 0)
+                return;
+        system_write_all((b32)handle, made, used);
+        system_close(handle);
+}
+
+// The row's start: false when nothing could be started, and the launcher stays up. An app started is the first of Recent.
 static b32 launcher_run(int row)
 {
         string_address words[LAUNCHER_WORDS];
@@ -690,7 +842,39 @@ static b32 launcher_run(int row)
         if (row < 0 || (positive)row >= launcher.entries)
                 return false;
         count = launcher_words(&launcher.entry[row], words, full, sizeof(full));
-        return ui_start_apart(words, count);
+        if (!count || !ui_start_apart(words, count))
+                return false;
+        if (launcher.entry[row].kind == LAUNCHER_WINDOW)
+                launcher_recent_add(launcher.entry[row].index);
+        return true;
+}
+
+// An app of the grid or of Recent started, as its row would be.
+static b32 launcher_start_app(int which)
+{
+        struct launcher_entry entry = {LAUNCHER_WINDOW, (unsigned short)which};
+        string_address words[LAUNCHER_WORDS];
+        char full[LAUNCHER_FULL];
+        positive count;
+
+        if (which < 0 || which >= ui_apps.count)
+                return false;
+        count = launcher_words(&entry, words, full, sizeof(full));
+        if (!count || !ui_start_apart(words, count))
+                return false;
+        launcher_recent_add(which);
+        return true;
+}
+
+// The app the keys are on with nothing typed: the grid's, or Recent's; -1 none.
+static int launcher_app_focused(void)
+{
+        const struct ui_list address_to l = launcher.in_recents ? &launcher.recents : &launcher.grid;
+        int count = launcher.in_recents ? launcher.recent_count : launcher.app_count;
+
+        if (l->focus < 0 || l->focus >= count)
+                return -1;
+        return launcher.in_recents ? launcher.recent[l->focus] : launcher.apps[l->focus];
 }
 
 /*
@@ -771,6 +955,40 @@ static fn launcher_power_row(void)
 }
 
 static struct ui_text address_to launcher_field(void);
+static fn launcher_damaged(int top, int bottom);
+static fn launcher_grid_describe(int id, struct ui_row address_to row);
+static fn launcher_recent_describe(int id, struct ui_row address_to row);
+static int launcher_per(void);
+
+// The grid and Recent: the kit's tiles (a picture or a symbol over a name), a list each, made before the first build; the one the keys are
+// on is lit, and Recent is a line.
+static fn launcher_tiles_ready(void)
+{
+        if (!launcher.grid.describe)
+        {
+                launcher.grid.virtual = launcher.recents.virtual = true;
+                launcher.grid.tiles = launcher.recents.tiles = LAUNCHER_TILE;
+                launcher.grid.describe = launcher_grid_describe, launcher.recents.describe = launcher_recent_describe;
+                launcher.grid.damaged = launcher.recents.damaged = launcher_damaged;
+                launcher.grid.hover = launcher.grid.down = launcher.recents.hover = launcher.recents.down = -1;
+                launcher.recents.focus = -1;
+        }
+        launcher.grid.total = launcher.app_count;
+        launcher.recents.total = launcher.recent_count < launcher_per() ? launcher.recent_count : launcher_per();
+        launcher.grid.lit = !launcher.in_recents && !launcher.text[0];
+        launcher.recents.lit = launcher.in_recents && !launcher.text[0];
+}
+
+// How many tiles a line of the grid holds: the grid's own count once it is laid out, else what the bar's width in from its margin holds.
+static int launcher_per(void)
+{
+        int scale = launcher.ui.scale > 0 ? launcher.ui.scale : 100, per;
+
+        if (launcher.grid.w > 0)
+                return ui_list_per(&launcher.ui, &launcher.grid);
+        per = (launcher.width * 100 / scale - 2 * UI_PAD) / LAUNCHER_TILE;
+        return per < 1 ? 1 : per;
+}
 
 // The bar as a tree, every size and look a class's: the field across the top, then the rows and the power row in from the margin.
 // The field is the kit's, bare (no label), an element: it runs edge to edge, as the list's rows do, from the panel's top to where
@@ -788,11 +1006,19 @@ static fn launcher_view(void)
                 search->edit = launcher_field();
         }
         search->focused = launcher.focused && !launcher.view.group.keys;
+        launcher_tiles_ready();
         ui_control(search, .class = "head");
         ui_col(.class = "inset")
         {
                 long rows = ui_value(&launcher.entries);
+                b32 typed = launcher.text[0] != 0;
+                int per = launcher_per(), lines = (launcher.app_count + per - 1) / per;
 
+                lines = lines > LAUNCHER_GRID_LINES ? LAUNCHER_GRID_LINES : lines;
+                // Nothing typed: the grid of the apps, and under it Recent, a line of the ones started last.
+                ui_rows(&launcher.grid, .class = "list", .h = lines * UI_TILE_H, .hidden = typed || !lines);
+                ui_text(WORDS(launcher_recent), .class = "caption", .hidden = typed || !launcher.recent_count);
+                ui_rows(&launcher.recents, .class = "list", .h = UI_TILE_H, .hidden = typed || !launcher.recent_count);
                 ui_rows(&launcher.list, .class = "list", .h = (int)rows * UI_ROW, .hidden = !rows);
                 launcher_power_row();
         }
@@ -852,13 +1078,90 @@ static fn launcher_take(void)
 static b32 launcher_asked(p32 asks)
 {
         if (asks & UI_TEXT_SUBMIT)
-                return !launcher_run(launcher.list.focus);
+                return launcher.text[0] ? !launcher_run(launcher.list.focus) : !launcher_start_app(launcher_app_focused());
         if (asks & UI_TEXT_CANCEL)
                 return false;
         if (asks & UI_TEXT_CHANGED)
                 launcher_take();
         if (asks)
                 launcher.dirty = true;
+        return true;
+}
+
+/*
+        The menu of an app (the grid's, Recent's or a row's): Pin to taskbar where it is not pinned and may be, Unpin where it is, at a
+        point of the bar (device pixels). It is the bar's popup, which the field's menu is too: what is chosen comes to launcher_chose.
+*/
+static b32 launcher_app_menu(int which, int x, int y, b32 touch)
+{
+        b32 pinned;
+
+        if (which < 0 || which >= ui_apps.count)
+                return false;
+        pinned = ui_apps_pinned(compositor_settings_root, which);
+        if (!pinned && !ui_apps_pinnable(which))
+                return false;
+        launcher.menu.menu.count = 0;
+        launcher.menu.field = null;
+        ui_popmenu_add(&launcher.menu.menu, pinned ? WORDS(taskbar_tab_unpin) : WORDS(taskbar_tab_pin), null, 0,
+                       pinned ? LAUNCHER_MENU_UNPIN : LAUNCHER_MENU_PIN);
+        launcher.menu_app = which;
+        return ui_popmenu_open(&launcher.menu, &launcher.own, &launcher.ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
+}
+
+// Where an app's tile is, for a menu opened from the keys: the middle of the tile the keys are on, as the list last laid it out.
+static fn launcher_tile_point(const struct ui_list address_to l, int at, int address_to x, int address_to y)
+{
+        int per = ui_list_per(&launcher.ui, l), wide = ui_dev(&launcher.ui, l->tiles), high = ui_list_unit(&launcher.ui, l);
+
+        *x = ui_mirror(l->x + at % per * wide, wide, l->x, l->w) + wide / 2;
+        *y = l->y + at / per * high - l->scroll.scroll + high / 2;
+}
+
+/*
+        A key over the grid and Recent, with nothing typed: the arrows go along the tiles (Left and Right the way a line is read, Up and
+        Down a line, the kit's ui_list_key), Down from the grid's last line goes into Recent and Up from Recent back to the grid's last
+        line, and Shift-F10 or the menu key opens the app's menu. True when the key was one of these.
+*/
+static b32 launcher_grid_key(const struct window_event address_to event)
+{
+        struct ui_list address_to l = launcher.in_recents ? &launcher.recents : &launcher.grid;
+        int key = (int)event->a, per = launcher_per(), focus;
+        b32 moved = false;
+
+        if (launcher.text[0] || !launcher.app_count)
+                return false;
+        if ((key == 68 && (event->flags & WINDOW_KEY_SHIFT)) || key == 127)
+        {
+                int x, y, which = launcher_app_focused();
+
+                launcher_tile_point(l, l->focus < 0 ? 0 : l->focus, &x, &y);
+                launcher_app_menu(which, x, y, false);
+                return true;
+        }
+        if (key != UI_KEY_UP && key != UI_KEY_DOWN && key != UI_KEY_LEFT && key != UI_KEY_RIGHT)
+                return false;
+        focus = l->focus < 0 ? 0 : l->focus;
+        if (!launcher.in_recents && key == UI_KEY_DOWN && launcher.recent_count && focus / per == (launcher.app_count - 1) / per)
+        {
+                launcher.in_recents = true;
+                launcher.recents.focus = focus % per < launcher.recents.total ? focus % per : launcher.recents.total - 1;
+        }
+        else if (launcher.in_recents && key == UI_KEY_UP)
+        {
+                int line = (launcher.app_count - 1) / per * per;
+
+                launcher.in_recents = false;
+                launcher.grid.focus = line + focus % per < launcher.app_count ? line + focus % per : launcher.app_count - 1;
+                ui_list_reveal(&launcher.ui, &launcher.grid);
+        }
+        else
+        {
+                if (l->focus < 0)
+                        l->focus = 0;
+                ui_list_key(&launcher.ui, l, key, &moved);
+        }
+        launcher.dirty = true;
         return true;
 }
 
@@ -876,6 +1179,9 @@ static b32 launcher_key(const struct window_event address_to event)
                 return true;
         if (!(event->flags & WINDOW_KEY_DOWN))
                 return true;
+        // With nothing typed the arrows are the grid's: the field has no text to move in.
+        if (launcher_grid_key(event))
+                return true;
         if ((asks = ui_field_send(&launcher.ui, launcher_field(), &launcher.menu, event)))
                 return launcher_asked(asks);
         if (event->a == UI_KEY_UP || event->a == UI_KEY_DOWN ||
@@ -892,7 +1198,7 @@ static b32 launcher_key(const struct window_event address_to event)
                 // The highlighted name into the field, where it is a name.
                 const struct launcher_entry address_to entry = &launcher.entry[launcher.list.focus];
                 const char address_to name = entry->kind == LAUNCHER_PROGRAM ? launcher_name(entry->index)
-                                             : entry->kind == LAUNCHER_WINDOW ? language_of(launcher_programs[entry->index].label)
+                                             : entry->kind == LAUNCHER_WINDOW ? launcher_app_name(entry->index)
                                                                               : null;
 
                 if (name)
@@ -907,6 +1213,13 @@ static b32 launcher_key(const struct window_event address_to event)
 // An item of the field's context menu, done to the field.
 static fn launcher_chose(int id)
 {
+        // An app's menu: pinned or not, kept in the pins' file, which the panel reads when it changes.
+        if (id == LAUNCHER_MENU_PIN || id == LAUNCHER_MENU_UNPIN)
+        {
+                ui_apps_pin(compositor_settings_root, launcher.menu_app, id == LAUNCHER_MENU_PIN);
+                launcher.dirty = true;
+                return;
+        }
         launcher_asked(ui_text_menu_do(&launcher.ui, launcher.menu.field, id));
 }
 
@@ -916,6 +1229,55 @@ static fn launcher_damaged(int top, int bottom)
 {
         (void)top, (void)bottom;
         launcher.dirty = true;
+}
+
+// A tile of an app: its name under its picture, a kit program's symbol where it has one, or the lettered tile of its name.
+static const unsigned int address_to launcher_grid_picture(int id, int side)
+{
+        return id >= 0 && id < launcher.app_count ? ui_apps_picture(launcher.apps[id], side) : null;
+}
+
+static const unsigned int address_to launcher_recent_picture(int id, int side)
+{
+        return id >= 0 && id < launcher.recent_count ? ui_apps_picture(launcher.recent[id], side) : null;
+}
+
+static fn launcher_tile(int which, struct ui_row address_to row)
+{
+        const struct ui_app_entry address_to app = &ui_apps.app[which];
+        int symbol = app->kit ? ui_icon_of(app->id) : -1;
+
+        // A name the entry chose is words from outside: a control byte in it is seen, and a mark that turns the letters round does nothing.
+        static char names[2 * UI_LIST_MOST][UI_APP_NAME + 8];
+        static unsigned int next;
+        char address_to label = names[next++ % (2 * UI_LIST_MOST)];
+        const char address_to name = launcher_app_name(which);
+
+        if (app->kit)
+                string_copy_bounded((p8 address_to)label, (string_address)name, UI_APP_NAME + 8);
+        else
+                ui_label_foreign(label, UI_APP_NAME + 8, (const p8 address_to)name, string_length((string_address)name));
+        row->label = label;
+        if (symbol >= 0)
+                row->icon = symbol + 1;
+        else
+                row->tile_name = app->kit ? app->id : app->name;
+}
+
+static fn launcher_grid_describe(int id, struct ui_row address_to row)
+{
+        if (id < 0 || id >= launcher.app_count)
+                return;
+        launcher_tile(launcher.apps[id], row);
+        row->tile_picture = launcher_grid_picture;
+}
+
+static fn launcher_recent_describe(int id, struct ui_row address_to row)
+{
+        if (id < 0 || id >= launcher.recent_count)
+                return;
+        launcher_tile(launcher.recent[id], row);
+        row->tile_picture = launcher_recent_picture;
 }
 
 // The bar laid out: the rows the list has, and the tree, which puts the field and the rows where they go.
@@ -935,6 +1297,40 @@ static fn launcher_layout(void)
         // the field; a list longer than the window scrolls (the wheel, and the keys reveal).
         launcher.list.lit = true;
         launcher_build(launcher.height);
+}
+
+// The pointer over the grid and Recent (nothing typed): false when what it did closes the bar (an app started).
+static b32 launcher_tiles_event(const struct window_event address_to event)
+{
+        struct ui_list address_to lists[2] = {&launcher.grid, &launcher.recents};
+        int x = event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x, y = event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y;
+
+        for (int which = 0; which < 2; which++)
+        {
+                struct ui_list address_to l = lists[which];
+                b32 moved = event->type == WINDOW_EVENT_MOTION && (event->a != l->pointer_x || event->b != l->pointer_y);
+                int tile = ui_list_hit(&launcher.ui, l, x, y), clicked;
+
+                if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT)
+                {
+                        if (tile >= 0 && (event->flags & WINDOW_KEY_DOWN))
+                                launcher_app_menu(which ? launcher.recent[tile] : launcher.apps[tile], x, y, ui_kit_touch);
+                        continue;
+                }
+                clicked = ui_list_click(&launcher.ui, l, event, x, y);
+                if (l->press.down && l->press.dragged)
+                        launcher.dirty = true;
+                else if (tile >= 0 && moved && (tile != l->focus || launcher.in_recents != (b32)which))
+                {
+                        l->focus = tile, launcher.in_recents = which;
+                        launcher.dirty = true;
+                }
+                if (event->type == WINDOW_EVENT_BUTTON)
+                        launcher.dirty = true;
+                if (clicked >= 0)
+                        return !launcher_start_app(which ? launcher.recent[clicked] : launcher.apps[clicked]);
+        }
+        return true;
 }
 
 static b32 launcher_event(const struct window_event address_to event)
@@ -963,6 +1359,17 @@ static b32 launcher_event(const struct window_event address_to event)
             (asks = ui_field_send(&launcher.ui, launcher_field(), &launcher.menu, event)) &&
             !(event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL)))
                 return launcher_asked(asks);
+        // With nothing typed the pointer is the grid's and Recent's: the tile it moves onto is the one the keys are on, a click starts
+        // it, and a right press opens its menu.
+        if (event->type != WINDOW_EVENT_KEY && !launcher.text[0])
+                return launcher_tiles_event(event);
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && (event->flags & WINDOW_KEY_DOWN))
+        {
+                row = ui_list_hit(&launcher.ui, &launcher.list, ui_kit.pointer_x, ui_kit.pointer_y);
+                if (row >= 0 && (positive)row < launcher.entries && launcher.entry[row].kind == LAUNCHER_WINDOW)
+                        launcher_app_menu(launcher.entry[row].index, ui_kit.pointer_x, ui_kit.pointer_y, ui_kit_touch);
+                return true;
+        }
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
@@ -1005,10 +1412,16 @@ static fn launcher_label(const struct launcher_entry address_to entry, char addr
 {
         *note = "";
         into[0] = 0;
-        if (entry->kind == LAUNCHER_WINDOW)
+        if (entry->kind == LAUNCHER_WINDOW && entry->index < ui_apps.count)
         {
-                string_copy_bounded((string_address)into, (string_address)language_of(launcher_programs[entry->index].label), room);
-                *note = language_of("desktop");
+                // A kit program is the desktop's; a bowl's app says the bowl it is from (its name is the entry's: words from outside).
+                const struct ui_app_entry address_to app = &ui_apps.app[entry->index];
+
+                if (app->kit)
+                        string_copy_bounded((string_address)into, (string_address)launcher_app_name(entry->index), room);
+                else
+                        ui_label_foreign(into, room, (const p8 address_to)app->name, string_length((string_address)app->name));
+                *note = app->kit ? language_of("desktop") : ui_apps_base(app->root);
         }
         else if (entry->kind == LAUNCHER_PROGRAM)
         {
@@ -1105,6 +1518,10 @@ static int launcher_open(void)
 
         ui_app_size(&launcher_app, (unsigned int)ui_px(&launcher.ui, LAUNCHER_WIDTH), 0);
         ui_anchor_take(&launcher.anchor, launcher.own.table, launcher.asked_beside);
+        // The apps, as the bowls have them now, and the ones started last: the grid is the first picture's.
+        ui_apps_fresh(ui_kit_time());
+        launcher_apps_make();
+        launcher_recent_read();
         launcher_changed();
         if (launcher.anchor.anchored)
                 // Beside the panel's button, asked as a placement, which is read with the first picture.
@@ -1173,6 +1590,7 @@ static b32 launcher_main()
         string_address regular = (string_address) UI_FONT_REGULAR;
 
         memory_zero(&launcher, sizeof(launcher));
+        launcher.menu_app = -1, launcher.generation = ~0u;
         launcher_session_read(LAUNCHER_POWER_STATE);
         ui_buffers_start(&launcher.buffers);
 

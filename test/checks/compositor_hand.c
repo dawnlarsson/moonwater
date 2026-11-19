@@ -2234,88 +2234,89 @@ static void check_taskbar_pins(void)
     check("taskbar pinned: a word with blanks, a quote, a semicolon, nothing or a backslash is written in quotes and read back as it was", quoted);
     check("taskbar pinned: at most 16 programs and 2048 bytes", many_ok && long_ok);
 
-    // The programs as a line says them, and the line they make: the same, the title the last part of the app_id.
-    taskbar_pins_set("org.mozilla.firefox /usr/lib/firefox/firefox /usr/lib/firefox/firefox --new-window 'a b' ; settings /settings /settings");
-    check("taskbar pinned: a line is two programs, their words and their titles", taskbar_pins.count == 2 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "org.mozilla.firefox") &&
-          string_equals((string_address)taskbar_pins.pin[0].title, (string_address) "firefox") && taskbar_pins.pin[0].count == 5 &&
-          string_equals((string_address)taskbar_pin_word(&taskbar_pins.pin[0], 3), (string_address) "--new-window") &&
-          string_equals((string_address)taskbar_pin_word(&taskbar_pins.pin[0], 4), (string_address) "a b") && string_equals((string_address)taskbar_pins.pin[1].title, (string_address) "settings"));
-    taskbar_pins_line(line, sizeof(line), null, null);
-    check("taskbar pinned: the line they make is the line they came from", string_equals((string_address)line, (string_address) "org.mozilla.firefox /usr/lib/firefox/firefox /usr/lib/firefox/firefox --new-window 'a b' ; settings /settings /settings"));
+    // A line says the apps of the registry it names: by the id, an older line's app_id taken for the window key it is, an entry of no
+    // app not shown; the registry is a fixture's (two bowls under the check's own /bowls, set up below).
     taskbar_pins_set("a /b /c ; a b");
     check("taskbar pinned: a line with a fault is none of them, and so is none", !taskbar_pins.count);
     taskbar_pins_set("none");
     check("taskbar pinned: none is none", !taskbar_pins.count);
 
-    // The fake system: /proc, the settings and /run under a directory of the check's own.
+    // The fake system: /proc, the settings, /run and the bowls under a directory of the check's own.
     string_copy((string_address)root, (string_address) "/tmp/moonwater-check-pins-");
     positive_into_string((p8 *)root + string_length((string_address)root), (positive)system_call(syscall(getpid)));
     tab_remove_tree(root);
     tab_make_dir(root);
-    for (int each = 0; each < 5; each++)
+    for (int each = 0; each < 13; each++)
     {
-        static const char *const names[5] = {"/proc", "/root", "/run", "/bin", "/proc/self"};
+        static const char *const names[13] = {"/proc", "/root", "/run", "/bowls", "/bowls/bin", "/bowls/alpine", "/bowls/alpine/usr", "/bowls/alpine/usr/share",
+                                              "/bowls/alpine/usr/share/applications", "/bowls/arch", "/bowls/arch/usr", "/bowls/arch/usr/share",
+                                              "/bowls/arch/usr/share/applications"};
 
         string_copy((string_address)path, (string_address)root), string_append_bounded((string_address)path, (string_address)names[each], sizeof(path));
         tab_make_dir(path);
     }
     string_copy((string_address)second, (string_address)root), string_append_bounded((string_address)second, (string_address) "/proc", sizeof(second));
     {
-        static char proc_root[112], run_root[112], bowl_bin[112], settings_root[112];
-        char own[64];
-        long got = (long)compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive) "/proc/self/ns/mnt", (positive)own, sizeof(own) - 1, 0, 0);
+        static char proc_root[112], run_root[112], settings_root[112], bowls[112];
+        static const struct { const char *at, *text; } files[] = {
+            // Chromium: started by its bowl's launcher of the Exec's program; Steam: its class is Steam, its launcher a profile's session;
+            // htop runs in a terminal and is not pinned; a hidden entry and one whose program has no launcher are not listed.
+            {"/bowls/alpine/usr/share/applications/chromium.desktop", "[Desktop Entry]\nType=Application\nName=Chromium\nExec=chromium-browser %U\nIcon=chromium\n"},
+            {"/bowls/alpine/usr/share/applications/htop.desktop", "[Desktop Entry]\nType=Application\nName=htop\nExec=htop\nTerminal=true\n"},
+            {"/bowls/alpine/usr/share/applications/hidden.desktop", "[Desktop Entry]\nType=Application\nName=Hidden\nExec=htop\nNoDisplay=true\n"},
+            {"/bowls/alpine/usr/share/applications/lost.desktop", "[Desktop Entry]\nType=Application\nName=Lost\nExec=lost\n"},
+            {"/bowls/arch/usr/share/applications/steam.desktop", "[Desktop Entry]\nType=Application\nName=Steam\nExec=/usr/bin/steam %U\nStartupWMClass=Steam\n"},
+            {"/bowls/bin/steam", "#!/bin/sh\n# bowl profile steam\nexec bowl profile steam session \"$@\"\n"},
+        };
 
-        own[got > 0 ? got : 0] = 0;
         string_copy((string_address)proc_root, (string_address)second);
         string_copy((string_address)run_root, (string_address)root), string_append_bounded((string_address)run_root, (string_address) "/run", sizeof(run_root));
-        string_copy((string_address)bowl_bin, (string_address)root), string_append_bounded((string_address)bowl_bin, (string_address) "/bin/", sizeof(bowl_bin));
         string_copy((string_address)settings_root, (string_address)root);
-        taskbar_proc_root = proc_root, taskbar_run_root = run_root, taskbar_bowl_bin = bowl_bin, compositor_settings_root = settings_root;
-        // Processes: 61 a program as it was started (a bare name, arguments with a blank and a quote), 62 a kit program, 63 and 64 a bowl's,
-        // 65 with a newline in an argument, 66 started by a relative path, 67 whose command line is longer than is read, 68 with none.
-        tab_fake_process(proc_root, 61, "firefox", 40, "/usr/lib/firefox/firefox", "firefox\0--new-window\0a b\0it's\0", 30, own);
-        tab_fake_process(proc_root, 62, "settings", 1, "/settings", "/settings\0-f\0/x.ttf\0", 20, own);
-        tab_fake_process(proc_root, 63, "bowlapp", 40, "/usr/bin/bowlapp", "bowlapp\0--x\0", 12, "mnt:[1]");
-        tab_fake_process(proc_root, 64, "lostapp", 40, "/usr/bin/lostapp", "/usr/bin/lostapp\0", 17, "mnt:[1]");
-        tab_fake_process(proc_root, 65, "newline", 40, "/usr/bin/newline", "newline\0a\nb\0", 12, own);
-        tab_fake_process(proc_root, 66, "tool", 40, "/opt/tool/tool", "./tool\0go\0", 10, own);
-        tab_fake_process(proc_root, 68, "none", 40, "/usr/bin/none", null, 0, own);
+        string_copy((string_address)bowls, (string_address)root), string_append_bounded((string_address)bowls, (string_address) "/bowls", sizeof(bowls));
+        taskbar_proc_root = proc_root, taskbar_run_root = run_root, compositor_settings_root = settings_root;
+        ui_apps_bowls = bowls, ui_apps_owner = (unsigned int)system_call(syscall(getuid)), ui_apps.read = false;
+        for (unsigned int each = 0; each < sizeof(files) / sizeof(files[0]); each++)
         {
-            static char big[2400];
-
-            for (int each = 0; each < 2200; each++)
-                big[each] = each % 8 == 7 ? 0 : 'a';
-            tab_fake_process(proc_root, 67, "huge", 40, "/usr/bin/huge", big, 2200, own);
+            string_copy((string_address)path, (string_address)root), string_append_bounded((string_address)path, (string_address)files[each].at, sizeof(path));
+            tab_make_file(path, files[each].text, string_length((string_address)files[each].text));
         }
-        string_copy((string_address)path, (string_address)bowl_bin), string_append_bounded((string_address)path, (string_address) "bowlapp", sizeof(path));
-        tab_make_file(path, "#!/bowl @/bowls/arch /usr/bin/bowlapp\n", 38);
+        // The launchers name their bowl's program: chromium-browser and htop of alpine's.
+        for (int each = 0; each < 2; each++)
+        {
+            char text[200];
+
+            string_copy((string_address)text, (string_address) "#!/bowl @"), string_append_bounded((string_address)text, (string_address)bowls, sizeof(text));
+            string_append_bounded((string_address)text, (string_address)(each ? "/alpine/usr/bin/htop\n" : "/alpine/usr/bin/chromium-browser\n"), sizeof(text));
+            string_copy((string_address)path, (string_address)bowls), string_append_bounded((string_address)path, (string_address)(each ? "/bin/htop" : "/bin/chromium-browser"), sizeof(path));
+            tab_make_file(path, text, string_length((string_address)text));
+        }
+        tab_fake_process(proc_root, 61, "chromium", 40, "/usr/lib/chromium/chromium", "chromium\0--type=x\0", 18, "mnt:[1]");
     }
-    taskbar_pins_set("none");
-    string_copy((string_address)compositor.app_id[5], (string_address) "firefox"), string_copy((string_address)compositor.app_id[6], (string_address) "settings");
-    string_copy((string_address)compositor.app_id[7], (string_address) "bowlapp"), string_copy((string_address)compositor.app_id[8], (string_address) "lostapp");
-    string_copy((string_address)compositor.app_id[9], (string_address) "newline"), string_copy((string_address)compositor.app_id[10], (string_address) "tool");
-    string_copy((string_address)compositor.app_id[11], (string_address) "huge"), string_copy((string_address)compositor.app_id[12], (string_address) "none");
-    string_copy((string_address)compositor.app_id[13], (string_address) "a/b");
+    ui_apps_fresh((b64)clock_monotonic_nanoseconds());
     {
-        static const char *const native[] = {"firefox", "/usr/lib/firefox/firefox", "/usr/lib/firefox/firefox", "--new-window", "a b", "it's"};
-        static const char *const kit[] = {"settings", "/settings", "/settings"};
-        const char *bowl[4] = {"bowlapp", "/usr/bin/bowlapp", "", "--x"};
-        static const char *const relative[] = {"tool", "/opt/tool/tool", "/opt/tool/tool", "go"};
-        char launcher[200];
+        int chromium = ui_apps_find("chromium"), steam = ui_apps_find("steam"), htop = ui_apps_find("htop");
+        char want[200];
 
-        string_copy((string_address)launcher, (string_address)taskbar_bowl_bin), string_append_bounded((string_address)launcher, (string_address) "bowlapp", sizeof(launcher));
-        bowl[2] = launcher;
-        check("taskbar pinned: a program is pinned by its app_id, its executable and its command line, the first word its executable's when it was a bare name",
-              taskbar_pin_capture(5, 61, &pin) && tab_words_are(&pin, 6, native) && string_equals((string_address)pin.title, (string_address) "firefox"));
-        check("taskbar pinned: a kit program is pinned as its path alone", taskbar_pin_capture(6, 62, &pin) && tab_words_are(&pin, 3, kit));
-        check("taskbar pinned: a program of another mount view is pinned by the launcher its bowl exposed, and by none when it has none",
-              taskbar_pin_capture(7, 63, &pin) && tab_words_are(&pin, 4, bowl) && !taskbar_pin_capture(8, 64, &other));
-        check("taskbar pinned: a command line with a byte below a blank, one that is cut, one that is not there and an app_id that is none are not pinned",
-              !taskbar_pin_capture(9, 65, &other) && !taskbar_pin_capture(11, 67, &other) && !taskbar_pin_capture(12, 68, &other) && !taskbar_pin_capture(13, 61, &other));
-        check("taskbar pinned: a program started by a relative path is pinned by its executable", taskbar_pin_capture(10, 66, &pin) && tab_words_are(&pin, 4, relative));
+        string_copy((string_address)want, (string_address)ui_apps_bowls), string_append_bounded((string_address)want, (string_address) "/bin/chromium-browser", sizeof(want));
+        check("apps: a bowl's entry is listed by its file's name, started by its bowl's launcher of the Exec's program; a hidden one and one with no launcher are not",
+              chromium >= 0 && string_equals((string_address)ui_apps.app[chromium].launch, (string_address)want) && !ui_apps.app[chromium].arg_count &&
+                  string_equals((string_address)ui_apps.app[chromium].name, (string_address) "Chromium") && ui_apps_find("hidden") < 0 && ui_apps_find("lost") < 0);
+        check("apps: a window is matched to its app by its window key or its id, the case aside (Steam's class, chromium's app_id), and a window of none to none",
+              steam >= 0 && ui_apps_match("Steam") == steam && ui_apps_match("steam") == steam && ui_apps_match("chromium") == chromium &&
+                  ui_apps_match("firefox") < 0 && ui_apps_match("") < 0 && ui_apps_match("settings") == ui_apps_find("settings") && ui_apps.app[ui_apps_find("settings")].kit);
+        check("apps: a profile's session script is a launcher, and its profile is a word of the app; one that runs in a terminal is listed and not pinned",
+              steam >= 0 && string_equals((string_address)ui_apps.app[steam].profile, (string_address) "steam") && htop >= 0 && ui_apps.app[htop].terminal &&
+                  !ui_apps_pinnable(htop) && ui_apps_pinnable(chromium));
     }
+    taskbar_pins_set("chromium /x /y ; settings /settings /settings ; nosuch /a /b ; Steam /usr/lib/steam/steam /bowls/bin/steam --x");
+    check("taskbar pinned: a line's entries are the registry's apps they name, by id or by an older line's window key, titled by their names; one of no app is not shown",
+          taskbar_pins.count == 3 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "chromium") &&
+              string_equals((string_address)taskbar_pins.pin[0].title, (string_address) "Chromium") && string_equals((string_address)taskbar_pins.pin[1].app, (string_address) "settings") &&
+              string_equals((string_address)taskbar_pins.pin[2].app, (string_address) "steam") && taskbar_pins.pin[2].count == 3 &&
+              string_equals((string_address)taskbar_pin_word(&taskbar_pins.pin[2], 2), (string_address)ui_apps.app[ui_apps_find("steam")].launch));
+    taskbar_pins_set("none");
 
-    // The menu on the fixture of the tray's, with one window (61, firefox).
+    // The menu on the fixture of the tray's, with one window (61, chromium).
     compositor_zero();
     taskbar_classic();
     compositor.focus = compositor.hover = compositor.grab = compositor.drag = COMPOSITOR_NONE;
@@ -2339,7 +2340,7 @@ static void check_taskbar_pins(void)
     table->width[1] = 50;
     table->height[1] = 60;
     glass_paint(1, 0, 0, 50, 60, 0x404041u, true);
-    windows_app_id_set(table, 1, "firefox");
+    windows_app_id_set(table, 1, "chromium");
     table->pid[1] = 61;
     compositor_identity_take(1);
     compositor_present();
@@ -2351,7 +2352,7 @@ static void check_taskbar_pins(void)
     tab = -1;
     for (unsigned int each = 0; each < view.count; each++)
         tab = compositor.listed[each] == 1 ? (int)each : tab;
-    // A right press on firefox's tab: Exit, Force stop, and Pin to taskbar.
+    // A right press on chromium's tab: Exit, Force stop, and Pin to taskbar.
     if (tab >= 0 && taskbar_slot(&view, tab, &x, &y, &w, &h))
     {
         compositor.pointer_x = x + w / 2, compositor.pointer_y = y + h / 2;
@@ -2359,21 +2360,25 @@ static void check_taskbar_pins(void)
         compositor_button(COMPOSITOR_BTN_RIGHT, 1);
         compositor_button(COMPOSITOR_BTN_RIGHT, 0);
     }
-    check("taskbar pinned: a window's menu has Pin to taskbar after Exit and Force stop", taskbar_menu.open && taskbar_menu.menu.count == 4 &&
+    check("taskbar pinned: a window of an app has Pin to taskbar after Exit and Force stop", taskbar_menu.open && taskbar_menu.menu.count == 4 &&
           taskbar_menu.menu.items[0].id == TASKBAR_MENU_EXIT && taskbar_menu.menu.items[1].id == TASKBAR_MENU_STOP && taskbar_menu.menu.items[3].id == TASKBAR_MENU_PIN &&
           string_equals((string_address)taskbar_menu.menu.items[3].label, (string_address) "Pin to taskbar"));
     if (taskbar_menu.open)
         compositor_menu_chose(TASKBAR_MENU_PIN);
     {
-        char kept[SETTING_PINS_MOST + 16];
+        char kept[SETTING_PINS_MOST + 16], want[SETTING_PINS_MOST + 16];
         bipolar got;
+        int chromium = ui_apps_find("chromium");
 
         taskbar_pins_path(path, sizeof(path));
         got = file_slurp_regular_at(AT_FDCWD, (string_address)path, (p8 *)kept, sizeof(kept) - 1, 0);
         kept[got > 0 ? got : 0] = 0;
-        check("taskbar pinned: Pin to taskbar keeps the program in the file of the verb, as the line it is, and as the pinned program",
-              got > 0 && string_equals((string_address)kept, (string_address) "firefox /usr/lib/firefox/firefox /usr/lib/firefox/firefox --new-window 'a b' 'it'\\''s'\n") &&
-              taskbar_pins.count == 1 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "firefox"));
+        string_copy((string_address)want, (string_address) "chromium "), string_append_bounded((string_address)want, (string_address)ui_apps.app[chromium].source, sizeof(want));
+        string_append_bounded((string_address)want, (string_address) " ", sizeof(want)), string_append_bounded((string_address)want, (string_address)ui_apps.app[chromium].launch, sizeof(want));
+        string_append_bounded((string_address)want, (string_address) "\n", sizeof(want));
+        check("taskbar pinned: Pin to taskbar keeps the app in the file of the verb by its id, its desktop file and its launcher, none of the window's words",
+              got > 0 && string_equals((string_address)kept, (string_address)want) && taskbar_pins.count == 1 &&
+                  string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "chromium"));
     }
     // With its window there the program has no task of its own; its window's menu says Unpin from taskbar.
     view = compositor_band_view();
@@ -2385,18 +2390,31 @@ static void check_taskbar_pins(void)
         compositor_button(COMPOSITOR_BTN_RIGHT, 1);
         compositor_button(COMPOSITOR_BTN_RIGHT, 0);
     }
-    check("taskbar pinned: a pinned program with a window has no task of its own, and its window's menu says Unpin from taskbar",
+    check("taskbar pinned: a pinned app with a window is that window's task, and its window's menu says Unpin from taskbar",
           ghost == 1 && taskbar_menu.open && taskbar_menu.menu.count == 4 && taskbar_menu.menu.items[3].id == TASKBAR_MENU_UNPIN &&
               string_equals((string_address)taskbar_menu.menu.items[3].label, (string_address) "Unpin from taskbar"));
     compositor_menu_close();
 
-    // The window gone (another program in its row): the pinned program is a task after the windows', drawn as one put away.
-    windows_app_id_set(table, 1, "other");
+    // A window that is no app of the registry has no Pin: nothing of a window's own is pinned.
+    windows_app_id_set(table, 1, "firefox");
     compositor_identity_take(1);
     view = compositor_band_view();
-    check("taskbar pinned: with no window of its app_id a pinned program is a task after the windows', away, titled by its program",
-          view.count == 2 && compositor.listed[1] == TASKBAR_GHOST && (view.marks[1] & COMPOSITOR_TAB_AWAY) && string_equals((string_address)view.titles[1], (string_address) "firefox") &&
-              string_equals((string_address)view.apps[1], (string_address) "firefox") && taskbar_pin_of_tab(1) == 0);
+    if (tab >= 0 && taskbar_slot(&view, tab, &x, &y, &w, &h))
+    {
+        compositor.pointer_x = x + w / 2, compositor.pointer_y = y + h / 2;
+        compositor_pointer_clamp();
+        compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+        compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+    }
+    check("taskbar pinned: a window that is no app's has Exit and Force stop and no Pin", taskbar_menu.open && taskbar_menu.menu.count == 2 &&
+          taskbar_menu.menu.items[1].id == TASKBAR_MENU_STOP);
+    compositor_menu_close();
+
+    // The window gone (another program in its row): the pinned program is a task after the windows', drawn as one put away.
+    view = compositor_band_view();
+    check("taskbar pinned: with no window of its key a pinned app is a task after the windows', away, titled by its name",
+          view.count == 2 && compositor.listed[1] == TASKBAR_GHOST && (view.marks[1] & COMPOSITOR_TAB_AWAY) && string_equals((string_address)view.titles[1], (string_address) "Chromium") &&
+              string_equals((string_address)view.apps[1], (string_address) "chromium") && taskbar_pin_of_tab(1) == 0);
     ghost = taskbar_slot(&view, 1, &x, &y, &w, &h);
     check("taskbar pinned: that task has its place in the band", ghost);
     if (ghost)
@@ -2410,10 +2428,10 @@ static void check_taskbar_pins(void)
           taskbar_menu.menu.items[0].id == TASKBAR_MENU_UNPIN);
     compositor_menu_close();
 
-    // A left press on it starts the program: its words a line each in a file new to the run directory, and not again at once.
+    // A left press on it starts the app: its launcher, a line in a file new to the run directory, and not again at once.
     if (ghost)
     {
-        char started[200], buffer[1024], content[400];
+        char started[200], buffer[1024], content[400], want[200];
         bipolar handle, got;
         int files = 0, again = 0;
 
@@ -2454,8 +2472,9 @@ static void check_taskbar_pins(void)
         }
         if (handle >= 0)
             system_close(handle);
-        check("taskbar pinned: a left press on the task of a pinned program that has no window leaves its words, a line each, in a new file, and once", files == 1 &&
-              string_equals((string_address)content, (string_address) "/usr/lib/firefox/firefox\n--new-window\na b\nit's\n") && !again);
+        string_copy((string_address)want, (string_address)ui_apps_bowls), string_append_bounded((string_address)want, (string_address) "/bin/chromium-browser\n", sizeof(want));
+        check("taskbar pinned: a left press on the task of a pinned app that has no window leaves its launcher alone in a new file, and once", files == 1 &&
+              string_equals((string_address)content, (string_address)want) && !again);
     }
 
     // Unpin from the task, and the file says none; and the file read as the settings are (the pinned programs are what it says).
@@ -2473,18 +2492,35 @@ static void check_taskbar_pins(void)
         taskbar_pins_path(path, sizeof(path));
         got = file_slurp_regular_at(AT_FDCWD, (string_address)path, (p8 *)kept, sizeof(kept) - 1, 0);
         kept[got > 0 ? got : 0] = 0;
-        check("taskbar pinned: Unpin from taskbar takes the program from the line, which says none, and the task goes", !taskbar_pins.count &&
+        check("taskbar pinned: Unpin from taskbar takes the app from the line, which says none, and the task goes", !taskbar_pins.count &&
               string_equals((string_address)kept, (string_address) "none\n") && compositor_band_view().count == 1);
     }
+    // An X window's class is its key: Steam's window is Steam's app, pinned from its menu, and its pin survives a read of the file again.
+    windows_app_id_set(table, 1, "Steam");
+    compositor_identity_take(1);
+    view = compositor_band_view();
+    if (tab >= 0 && taskbar_slot(&view, tab, &x, &y, &w, &h))
+    {
+        compositor.pointer_x = x + w / 2, compositor.pointer_y = y + h / 2;
+        compositor_pointer_clamp();
+        compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+        compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+    }
+    if (taskbar_menu.open && taskbar_menu.menu.count == 4 && taskbar_menu.menu.items[3].id == TASKBAR_MENU_PIN)
+        compositor_menu_chose(TASKBAR_MENU_PIN);
+    taskbar_pins_set("none");
+    taskbar_settings_set("bottom", "primary", "");
+    check("taskbar pinned: an X window of Steam's class pins Steam's app, and the pin is read back from the file as the settings are (a restart)",
+          taskbar_pins.count == 1 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "steam") && compositor_band_view().count == 1);
     tab_make_file(path, "settings /settings /settings\n", 29);
     taskbar_settings_set("bottom", "primary", "");
     check("taskbar pinned: the settings read the file, so the verb and the menu agree", taskbar_pins.count == 1 && string_equals((string_address)taskbar_pins.pin[0].app, (string_address) "settings"));
-    // A window that is no program's own (pid 1, the machine's) is not pinned from.
-    (void)pids;
+    (void)pids, (void)pin, (void)other;
     taskbar_pins_set("none");
 
     tab_remove_tree(root);
-    taskbar_proc_root = "/proc", taskbar_run_root = "/run/moonwater", taskbar_bowl_bin = "/bowls/bin/", compositor_settings_root = "";
+    taskbar_proc_root = "/proc", taskbar_run_root = "/run/moonwater", compositor_settings_root = "";
+    ui_apps_bowls = UI_APPS_BOWLS, ui_apps_owner = 0, ui_apps.read = false;
     taskbar_signal = taskbar_signal_send;
     taskbar_standard();
 }
