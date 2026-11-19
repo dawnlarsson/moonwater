@@ -1292,7 +1292,26 @@ static int rules_power_each(struct power_supply *psy, void *data)
 }
 
 //      Every supply read again at the notifier, which a supply's change work calls: no polling.
+/*
+        Two supplies' change works can run at once on the system workqueue, and
+        each reads every supply and compares with the page: one at a time, so
+        a change is said once and its event is not lost between them. A
+        sleeping lock: the power supply notifier is a blocking chain, called
+        from the supply's work with no lock of its held (and the start's read
+        is process context too).
+*/
+static DEFINE_MUTEX(rules_power_lock);
+
+static void rules_power_read_locked(void);
+
 static void rules_power_read(void)
+{
+        mutex_lock(&rules_power_lock);
+        rules_power_read_locked();
+        mutex_unlock(&rules_power_lock);
+}
+
+static void rules_power_read_locked(void)
 {
         struct rules_power_seen seen = {0};
         struct rules_change sets[3];
