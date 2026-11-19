@@ -69,6 +69,7 @@
 #define SETTINGS_OUT_NOTICES 6u // the kernel's own notices: the value is their count, and the row's lines are each one (settings.c)
 #define SETTINGS_OUT_SIZE 7u    // the screen's resolution: every size it lists, the preferred marked (the table's output_size)
 #define SETTINGS_OUT_PRIMARY 8u // whether the screen is the primary: the table's index 0, the taskbar's and where a window opens
+#define SETTINGS_OUT_WALLPAPER 9u // the screen's wallpaper: the picture of every screen's, or its own (/root/wallpapers/NAME.png)
 
 // The words of a verb, at most: canvas cursor shake delay.
 #define SETTING_WORDS 4
@@ -424,6 +425,8 @@ static const struct settings_row settings_rows[] = {
      .help = "how big the screen draws things, in percent of its size: 50, 75, 100, 125, 150 or 200 [100]", .output = SETTINGS_OUT_SCALE},
     {null, "Primary display", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,
      .help = "the screen the taskbar is on and windows open on, wherever it is laid", .output = SETTINGS_OUT_PRIMARY},
+    {null, "Wallpaper of this screen", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "wallpaper", "picture"}, null, null, {"canvas", "wallpaper", "picture"}, null, 0,
+     .help = "the wallpaper every screen has, or a picture of its own, which Set as Wallpaper in Files gives it", .output = SETTINGS_OUT_WALLPAPER},
     {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0,
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
     //  Variable refresh (kms.c's compositor_vrr): a screen that can (its connector's vrr_capable) waits for each frame, so a key or a frame

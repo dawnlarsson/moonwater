@@ -199,6 +199,7 @@ menu_rename	9529	Byt &namn
 menu_reset_zoom	1b0f	Å&terställ zoom
 menu_select_all	f6f6	&Markera allt
 menu_set_wallpaper	1a27	Använd som &skrivbordsbild
+menu_set_wallpaper_of	aa60	Använd som skrivbordsbild för %s
 menu_show_hidden	37bd	Visa &dolda filer
 menu_toggle_comment	92ac	Växla k&ommentar
 menu_undo	b9d3	Å&ngra
@@ -371,6 +372,9 @@ settings_type_passphrase	ca95	skriv lösenordet: Enter ansluter, Escape lämnar
 settings_unknown	9fb9	okänt
 settings_verb_hint	05aa	VERB [ARGUMENT]
 settings_virtual_refused	4202	en virtuell enhet kan inte slå på detta: använd ett tangentbord eller en mus som är ansluten till datorn, eller moonwater ssh i en root-terminal
+settings_wall_hint	ccf0	Välj en PNG i Filer och sedan Använd som skrivbordsbild för den här skärmen
+settings_wall_own	2b4f	Egen bild
+settings_wall_same	d736	Samma som alla skärmar
 taskbar_tab_exit	44a5	Avsluta
 taskbar_tab_pin	d57f	Fäst i aktivitetsfältet
 taskbar_tab_stop	3684	Tvinga stopp
@@ -753,5 +757,6 @@ settings_size_refused	20a9	Skärmen tog inte %d × %d: tillbaka till %s
 =separate	bb18	separata
 =Resolution	18af	Upplösning
 =Primary display	924b	Primär skärm
+=Wallpaper of this screen	2c92	Skrivbordsbild för den här skärmen
 =Graphics	9fa8	Grafik
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Var Canvas ritar: på GPU:n eller processorn. Vad kortet gör nu står under

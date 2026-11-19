@@ -200,6 +200,7 @@ menu_rename	9529	&تغییر نام
 menu_reset_zoom	1b0f	بازنشانی بزرگ‌نمایی
 menu_select_all	f6f6	انتخاب همه
 menu_set_wallpaper	1a27	تنظیم به عنوان &پس‌زمینه
+menu_set_wallpaper_of	aa60	تنظیم به عنوان پس‌زمینهٔ %s
 menu_show_hidden	37bd	نمایش پرونده‌های &پنهان
 menu_toggle_comment	92ac	تغییر وضعیت توضیح
 menu_undo	b9d3	واگرد
@@ -372,6 +373,9 @@ settings_type_passphrase	ca95	گذرواژه را تایپ کنید: Enter مت�
 settings_unknown	9fb9	نامشخص
 settings_verb_hint	05aa	فعل [آرگومان‌ها]
 settings_virtual_refused	4202	دستگاه مجازی نمی‌تواند این را روشن کند: صفحه‌کلید یا موشواره‌ی خود دستگاه، یا moonwater ssh در پایانه root
+settings_wall_hint	ccf0	یک PNG در فایل‌ها انتخاب کنید، سپس آن را پس‌زمینهٔ این صفحه کنید
+settings_wall_own	2b4f	تصویر خودش
+settings_wall_same	d736	مانند همهٔ صفحه‌ها
 taskbar_tab_exit	44a5	خروج از برنامه
 taskbar_tab_pin	d57f	سنجاق به نوار وظیفه
 taskbar_tab_stop	3684	توقف اجباری
@@ -754,5 +758,6 @@ settings_size_refused	20a9	صفحه %d × %d را نپذیرفت: بازگشت �
 =separate	bb18	جدا
 =Resolution	18af	وضوح
 =Primary display	924b	صفحه اصلی
+=Wallpaper of this screen	2c92	پس‌زمینهٔ این صفحه
 =Graphics	9fa8	گرافیک
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Canvas کجا می‌کشد: روی GPU یا پردازنده. کاری که کارت اکنون می‌کند زیر آن است

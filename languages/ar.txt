@@ -200,6 +200,7 @@ menu_rename	9529	إعادة &تسمية
 menu_reset_zoom	1b0f	إعادة تعيين التكبير
 menu_select_all	f6f6	تحديد الكل
 menu_set_wallpaper	1a27	تعيين &خلفية لسطح المكتب
+menu_set_wallpaper_of	aa60	تعيين خلفية لـ %s
 menu_show_hidden	37bd	إظهار الملفات &المخفية
 menu_toggle_comment	92ac	تبديل التعليق
 menu_undo	b9d3	تراجع
@@ -372,6 +373,9 @@ settings_type_passphrase	ca95	اكتب كلمة المرور: Enter يتصل، E
 settings_unknown	9fb9	غير معروف
 settings_verb_hint	05aa	الفعل [الوسائط]
 settings_virtual_refused	4202	لا يمكن لجهاز افتراضي تشغيل هذا: استخدم لوحة مفاتيح أو فأرة موصولة بالجهاز، أو moonwater ssh في طرفية الجذر
+settings_wall_hint	ccf0	اختر ملف PNG في الملفات، ثم عيّنه خلفية لهذه الشاشة
+settings_wall_own	2b4f	صورتها الخاصة
+settings_wall_same	d736	مثل كل الشاشات
 taskbar_tab_exit	44a5	خروج
 taskbar_tab_pin	d57f	تثبيت في شريط المهام
 taskbar_tab_stop	3684	إيقاف إجباري
@@ -754,5 +758,6 @@ settings_size_refused	20a9	لم تقبل الشاشة %d × %d: عودة إلى 
 =separate	bb18	منفصلة
 =Resolution	18af	الدقة
 =Primary display	924b	الشاشة الرئيسية
+=Wallpaper of this screen	2c92	خلفية هذه الشاشة
 =Graphics	9fa8	الرسوميات
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	أين يرسم Canvas: على GPU أو المعالج. ما تفعله البطاقة الآن تحته

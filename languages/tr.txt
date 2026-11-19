@@ -199,6 +199,7 @@ menu_rename	9529	&Yeniden adlandır
 menu_reset_zoom	1b0f	Yakınlaştırmayı Sıfır&la
 menu_select_all	f6f6	&Tümünü Seç
 menu_set_wallpaper	1a27	&Duvar kağıdı yap
+menu_set_wallpaper_of	aa60	%s için duvar kağıdı yap
 menu_show_hidden	37bd	&Gizli dosyaları göster
 menu_toggle_comment	92ac	Yo&rumu Aç/Kapat
 menu_undo	b9d3	&Geri Al
@@ -371,6 +372,9 @@ settings_type_passphrase	ca95	parolayı yazın: Enter bağlanır, Escape bırak�
 settings_unknown	9fb9	bilinmiyor
 settings_verb_hint	05aa	FİİL [ARGÜMANLAR]
 settings_virtual_refused	4202	sanal bir aygıt bunu açamaz: makineye takılı bir klavye veya fare kullanın ya da bir root terminalinde moonwater ssh
+settings_wall_hint	ccf0	Dosyalar’da bir PNG seçin, sonra bu ekranın duvar kağıdı yapın
+settings_wall_own	2b4f	Kendi resmi
+settings_wall_same	d736	Tüm ekranlarla aynı
 taskbar_tab_exit	44a5	Çık
 taskbar_tab_pin	d57f	Görev çubuğuna sabitle
 taskbar_tab_stop	3684	Zorla durdur
@@ -753,5 +757,6 @@ settings_size_refused	20a9	Ekran %d × %d boyutunu almadı: %s boyutuna dönüld
 =separate	bb18	ayrı
 =Resolution	18af	Çözünürlük
 =Primary display	924b	Birincil ekran
+=Wallpaper of this screen	2c92	Bu ekranın duvar kağıdı
 =Graphics	9fa8	Grafik
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Canvas nerede çizer: GPU'da mı işlemcide mi. Kartın şu an ne yaptığı altında

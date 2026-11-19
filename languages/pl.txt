@@ -199,6 +199,7 @@ menu_rename	9529	Zmień &nazwę
 menu_reset_zoom	1b0f	&Resetuj powiększenie
 menu_select_all	f6f6	&Zaznacz wszystko
 menu_set_wallpaper	1a27	Ustaw jako &tapetę
+menu_set_wallpaper_of	aa60	Ustaw jako tapetę %s
 menu_show_hidden	37bd	Pokaż &ukryte pliki
 menu_toggle_comment	92ac	Przełącz ko&mentarz
 menu_undo	b9d3	&Cofnij
@@ -371,6 +372,9 @@ settings_type_passphrase	ca95	wpisz hasło: Enter łączy, Escape zostawia
 settings_unknown	9fb9	nieznane
 settings_verb_hint	05aa	CZASOWNIK [ARGUMENTY]
 settings_virtual_refused	4202	urządzenie wirtualne nie może tego włączyć: użyj klawiatury lub myszy podłączonej do komputera albo moonwater ssh w terminalu roota
+settings_wall_hint	ccf0	Wybierz plik PNG w Plikach, a potem Ustaw jako tapetę tego ekranu
+settings_wall_own	2b4f	Własny obraz
+settings_wall_same	d736	Jak na każdym ekranie
 taskbar_tab_exit	44a5	Zakończ
 taskbar_tab_pin	d57f	Przypnij do paska zadań
 taskbar_tab_stop	3684	Wymuś zatrzymanie
@@ -753,5 +757,6 @@ settings_size_refused	20a9	Ekran nie przyjął %d × %d: powrót do %s
 =separate	bb18	osobno
 =Resolution	18af	Rozdzielczość
 =Primary display	924b	Ekran główny
+=Wallpaper of this screen	2c92	Tapeta tego ekranu
 =Graphics	9fa8	Grafika
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Gdzie Canvas rysuje: na GPU czy na procesorze. Co karta robi teraz, jest poniżej

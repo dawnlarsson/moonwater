@@ -196,6 +196,7 @@ menu_rename	9529	Re&name
 menu_reset_zoom	1b0f	&Reset Zoom
 menu_select_all	f6f6	Select &All
 menu_set_wallpaper	1a27	Set as &Wallpaper
+menu_set_wallpaper_of	aa60	Set as Wallpaper of %s
 menu_show_hidden	37bd	Show &Hidden Files
 menu_toggle_comment	92ac	Toggle Co&mment
 menu_undo	b9d3	&Undo
@@ -368,6 +369,9 @@ settings_type_passphrase	ca95	type its passphrase: Enter joins it, Escape leaves
 settings_unknown	9fb9	unknown
 settings_verb_hint	05aa	VERB [ARGUMENTS]
 settings_virtual_refused	4202	a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal
+settings_wall_hint	ccf0	Choose a PNG in Files, then Set as Wallpaper of this screen
+settings_wall_own	2b4f	Its own picture
+settings_wall_same	d736	Same as every screen
 taskbar_tab_exit	44a5	Exit
 taskbar_tab_pin	d57f	Pin to taskbar
 taskbar_tab_stop	3684	Force stop
@@ -750,5 +754,6 @@ settings_size_refused	20a9	The screen did not take %d × %d: back to %s
 =separate	bb18	separate
 =Resolution	18af	Resolution
 =Primary display	924b	Primary display
+=Wallpaper of this screen	2c92	Wallpaper of this screen
 =Graphics	9fa8	Graphics
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Where Canvas draws: on the GPU, or the processor. What the card does now is under it

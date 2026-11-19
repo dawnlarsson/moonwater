@@ -199,6 +199,7 @@ menu_rename	9529	&Μετονομασία
 menu_reset_zoom	1b0f	Επαναφορά ζουμ
 menu_select_all	f6f6	Επιλογή όλων
 menu_set_wallpaper	1a27	Ορισμός ως &ταπετσαρία
+menu_set_wallpaper_of	aa60	Ορισμός ως ταπετσαρία της %s
 menu_show_hidden	37bd	Εμφάνιση &κρυφών αρχείων
 menu_toggle_comment	92ac	Εναλλαγή σχολίου
 menu_undo	b9d3	Αναίρεση
@@ -371,6 +372,9 @@ settings_type_passphrase	ca95	πληκτρολογήστε τον κωδικό: 
 settings_unknown	9fb9	άγνωστο
 settings_verb_hint	05aa	ΡΗΜΑ [ΟΡΙΣΜΑΤΑ]
 settings_virtual_refused	4202	εικονική συσκευή δεν μπορεί να το ανοίξει: πληκτρολόγιο ή ποντίκι του υπολογιστή, ή moonwater ssh σε τερματικό root
+settings_wall_hint	ccf0	Επιλέξτε ένα PNG στα Αρχεία και μετά Ορισμός ως ταπετσαρία αυτής της οθόνης
+settings_wall_own	2b4f	Δική της εικόνα
+settings_wall_same	d736	Ίδια με όλες τις οθόνες
 taskbar_tab_exit	44a5	Έξοδος
 taskbar_tab_pin	d57f	Καρφίτσωμα στη γραμμή εργασιών
 taskbar_tab_stop	3684	Αναγκαστική διακοπή
@@ -753,5 +757,6 @@ settings_size_refused	20a9	Η οθόνη δεν δέχτηκε το %d × %d: π
 =separate	bb18	χωριστές
 =Resolution	18af	Ανάλυση
 =Primary display	924b	Κύρια οθόνη
+=Wallpaper of this screen	2c92	Ταπετσαρία αυτής της οθόνης
 =Graphics	9fa8	Γραφικά
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Πού σχεδιάζει το Canvas: στη GPU ή στον επεξεργαστή. Τι κάνει τώρα η κάρτα είναι από κάτω

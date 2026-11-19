@@ -200,6 +200,7 @@ menu_rename	9529	نام &تبدیل کریں
 menu_reset_zoom	1b0f	زوم بحال کریں
 menu_select_all	f6f6	سب منتخب کریں
 menu_set_wallpaper	1a27	&وال پیپر بنائیں
+menu_set_wallpaper_of	aa60	%s کا وال پیپر بنائیں
 menu_show_hidden	37bd	&پوشیدہ فائلیں دکھائیں
 menu_toggle_comment	92ac	تبصرہ بدلیں
 menu_undo	b9d3	کالعدم کریں
@@ -372,6 +373,9 @@ settings_type_passphrase	ca95	پاس ورڈ لکھیں: Enter منسلک کرت�
 settings_unknown	9fb9	نامعلوم
 settings_verb_hint	05aa	فعل [آرگیومنٹس]
 settings_virtual_refused	4202	ایک ورچوئل ڈیوائس اسے آن نہیں کر سکتی: مشین سے جڑا کی بورڈ یا ماؤس استعمال کریں، یا root ٹرمینل میں moonwater ssh
+settings_wall_hint	ccf0	فائلوں میں ایک PNG چنیں، پھر اسے اس اسکرین کا وال پیپر بنائیں
+settings_wall_own	2b4f	اپنی تصویر
+settings_wall_same	d736	تمام اسکرینوں جیسا
 taskbar_tab_exit	44a5	باہر نکلیں
 taskbar_tab_pin	d57f	ٹاسک بار پر پن کریں
 taskbar_tab_stop	3684	زبردستی بند کریں
@@ -754,5 +758,6 @@ settings_size_refused	20a9	اسکرین نے %d × %d نہیں لیا: واپس 
 =separate	bb18	الگ
 =Resolution	18af	ریزولوشن
 =Primary display	924b	بنیادی اسکرین
+=Wallpaper of this screen	2c92	اس اسکرین کا وال پیپر
 =Graphics	9fa8	گرافکس
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Canvas کہاں بناتا ہے: GPU پر یا پروسیسر پر۔ کارڈ ابھی کیا کر رہا ہے نیچے ہے

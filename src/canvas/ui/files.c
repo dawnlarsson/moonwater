@@ -133,6 +133,8 @@
 #define FILES_MENU_BIN_EMPTY 43      // everything in it deleted for good, asked first
 #define FILES_MENU_RESTORE 44        // what is chosen in it put back where it was
 #define FILES_MENU_WALLPAPER 45      // a PNG made the wallpaper of every screen (moonwater canvas wallpaper picture)
+#define FILES_MENU_WALLPAPER_OF 46   // and on to 46 + FILES_WALL_SCREENS: of one screen, by its name
+#define FILES_WALL_SCREENS 8
 #define FILES_KEY_Z 44
 #define FILES_FLASH_NS 450000000ll // a drop's things lit where they landed
 #define FILES_SPRING_NS 900000000ll  // a drag held this long over a folder opens it, so the drop can go further in
@@ -2486,14 +2488,18 @@ static b32 files_is_png(struct files_model address_to m, const struct files_entr
         return length > 4 && name[length - 4] == '.' && (name[length - 3] | 32) == 'p' && (name[length - 2] | 32) == 'n' && (name[length - 1] | 32) == 'g';
 }
 
-// The PNG the keys are on made the wallpaper of every screen: moonwater canvas wallpaper picture PATH, which keeps a copy of it.
-static fn files_wallpaper(void)
+// The screens the menu offers a picture to, by name, and its items' words, as the table said them when it opened.
+static char files_wall_names[FILES_WALL_SCREENS][WINDOWS_OUTPUT_NAME], files_wall_labels[FILES_WALL_SCREENS][96];
+
+// The PNG the keys are on made the wallpaper of every screen (screen -1), or of one the menu named: moonwater canvas wallpaper picture
+// PATH [NAME], which keeps a copy of it.
+static fn files_wallpaper(int screen)
 {
         struct files_model address_to m = &files.big->model;
         const struct files_entry address_to entry = files_model_entry(m, m->cursor);
         static p8 path[FILES_PATH];
-        string_address words[6] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "picture",
-                                   (string_address)path, null};
+        string_address words[7] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "picture",
+                                   (string_address)path, screen >= 0 && screen < FILES_WALL_SCREENS ? (string_address)files_wall_names[screen] : null, null};
         positive length = string_length((string_address)m->path);
 
         if (!entry || entry->kind == FILES_KIND_DIRECTORY || !files_is_png(m, entry) || length + entry->length + 2 > sizeof(path))
@@ -2502,7 +2508,7 @@ static fn files_wallpaper(void)
         if (length > 1)
                 path[length++] = '/';
         memory_copy(path + length, files_model_name(m, entry), (positive)entry->length + 1);
-        (void)ui_start_apart(words, 5);
+        (void)ui_start_apart(words, words[5] ? 6 : 5);
 }
 
 /*
@@ -2525,7 +2531,18 @@ static fn files_menu_open(b32 on, int x, int y)
                 if (!folder)
                         ui_popmenu_add(menu, WORDS(menu_open_editor), null, 0, FILES_MENU_EDITOR);
                 if (!folder && files_is_png(m, entry))
+                {
+                        unsigned int screens = ui_kit_table ? __atomic_load_n(&ui_kit_table->outputs, __ATOMIC_ACQUIRE) : 0;
+
                         ui_popmenu_add(menu, WORDS(menu_set_wallpaper), null, 0, FILES_MENU_WALLPAPER);
+                        // With more than one screen, each of them by its name as well.
+                        for (unsigned int at = 0; screens > 1 && screens <= WINDOWS_OUTPUTS && at < screens && at < FILES_WALL_SCREENS; at++)
+                        {
+                                string_copy_bounded((p8 *)files_wall_names[at], (string_address)ui_kit_table->output_name[at], sizeof(files_wall_names[at]));
+                                language_format(files_wall_labels[at], sizeof(files_wall_labels[at]), WORDS(menu_set_wallpaper_of), files_wall_names[at]);
+                                ui_popmenu_add(menu, files_wall_labels[at], null, 0, FILES_MENU_WALLPAPER_OF + (int)at);
+                        }
+                }
                 if (folder)
                         ui_popmenu_add(menu, WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL);
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
@@ -2623,11 +2640,16 @@ static fn files_menu_do(int id)
 {
         struct files_model address_to m = &files.big->model;
 
+        if (id >= FILES_MENU_WALLPAPER_OF && id < FILES_MENU_WALLPAPER_OF + FILES_WALL_SCREENS)
+        {
+                files_wallpaper(id - FILES_MENU_WALLPAPER_OF);
+                return;
+        }
         switch (id)
         {
         case FILES_MENU_OPEN: files_open(m->cursor); break;
         case FILES_MENU_EDITOR: files_open_with(true); break;
-        case FILES_MENU_WALLPAPER: files_wallpaper(); break;
+        case FILES_MENU_WALLPAPER: files_wallpaper(-1); break;
         case FILES_MENU_TERMINAL: files_open_with(false); break;
         case FILES_MENU_CUT: files_rows_copy(true); break;
         case FILES_MENU_COPY: files_rows_copy(false); break;

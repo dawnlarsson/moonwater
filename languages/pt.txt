@@ -199,6 +199,7 @@ menu_rename	9529	Re&nomear
 menu_reset_zoom	1b0f	&Redefinir zoom
 menu_select_all	f6f6	Selecionar t&udo
 menu_set_wallpaper	1a27	Definir como &fundo
+menu_set_wallpaper_of	aa60	Definir como fundo de %s
 menu_show_hidden	37bd	Mostrar arquivos &ocultos
 menu_toggle_comment	92ac	Alternar co&mentário
 menu_undo	b9d3	&Desfazer
@@ -371,6 +372,9 @@ settings_type_passphrase	ca95	digite a senha: Enter conecta, Escape deixa
 settings_unknown	9fb9	desconhecido
 settings_verb_hint	05aa	VERBO [ARGUMENTOS]
 settings_virtual_refused	4202	um dispositivo virtual não pode ativar isto: use um teclado ou rato ligado à máquina, ou moonwater ssh num terminal root
+settings_wall_hint	ccf0	Escolha um PNG em Ficheiros e depois Definir como fundo deste ecrã
+settings_wall_own	2b4f	A sua própria imagem
+settings_wall_same	d736	Igual a todos os ecrãs
 taskbar_tab_exit	44a5	Sair
 taskbar_tab_pin	d57f	Fixar na barra de tarefas
 taskbar_tab_stop	3684	Forçar parada
@@ -753,5 +757,6 @@ settings_size_refused	20a9	O ecrã não aceitou %d × %d: volta para %s
 =separate	bb18	separadas
 =Resolution	18af	Resolução
 =Primary display	924b	Ecrã principal
+=Wallpaper of this screen	2c92	Fundo deste ecrã
 =Graphics	9fa8	Gráficos
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Onde o Canvas desenha: na GPU ou no processador. O que a placa faz agora está por baixo

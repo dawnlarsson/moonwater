@@ -722,7 +722,21 @@ struct settings_map
         int shown_x[WINDOWS_OUTPUTS], shown_y[WINDOWS_OUTPUTS];
         struct ui_rect panel;            // the panel, and the graph's
         struct ui_control identify, fit; // the buttons across its top
+        // Each screen's wallpaper, small, drawn on its node: what it was made from (settings_map_wall), so it is made again only for a change.
+        unsigned int wall_key[WINDOWS_OUTPUTS];
+        int wall_w[WINDOWS_OUTPUTS], wall_h[WINDOWS_OUTPUTS];
 };
+
+/*
+        A screen's wallpaper on the map, as the compositor makes it (compositor_wall_make): its own picture (/root/wallpapers/NAME.png),
+        else the picture of every screen while canvas wallpaper is picture, else the moon (taskbar_wall_draw, the compositor's own) or
+        the background colour, at SETTINGS_WALL_W pixels across and the screen's shape.
+*/
+#define SETTINGS_WALL_W 192
+#define SETTINGS_WALL_H 192
+#define SETTINGS_WALL_DIR "/root/wallpapers"
+#define SETTINGS_WALL_FILE_MOST (64ul << 20)
+static unsigned int settings_wall_pixels[WINDOWS_OUTPUTS][SETTINGS_WALL_W * SETTINGS_WALL_H];
 
 static struct
 {
@@ -1658,6 +1672,171 @@ static fn settings_map_follow(unsigned int count)
         }
 }
 
+// A path's type (the S_IFMT bits, 0 for none) and its change time folded to a word, a link not followed.
+static unsigned int settings_wall_look(const char address_to path, unsigned int address_to stamp)
+{
+        // struct statx: stx_mode at 28 (u16), stx_mtime at 112 (i64 seconds, u32 nanoseconds).
+        p8 info[256] = {0};
+
+        if (system_call_5(syscall(statx), (positive)AT_FDCWD, (positive)path, 0x100, 0x41, (positive)info) < 0)
+                return 0;
+        if (stamp)
+                *stamp = (unsigned int)(memory_load_unaligned(b64, info + 112) * 1000003) ^ memory_load_unaligned(p32, info + 120);
+        return memory_load_unaligned(p16, info + 28) & 0170000u;
+}
+
+// A small file of /root's first word into word (room bytes), "" for none.
+static fn settings_wall_word(const char address_to path, char address_to word, positive room)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC), got = 0;
+
+        word[0] = 0;
+        if (handle < 0)
+                return;
+        got = system_read_once(handle, word, room - 1);
+        system_close(handle);
+        word[got > 0 ? got : 0] = 0;
+        for (positive at = 0; word[at]; at++)
+                if (word[at] == '\n' || word[at] == ' ' || word[at] == '\r')
+                {
+                        word[at] = 0;
+                        break;
+                }
+}
+
+// The screen's own picture's file into path, where it has one.
+static b32 settings_wall_own(const char address_to name, char address_to path, positive room)
+{
+        if (!name || !name[0] || string_length((string_address)SETTINGS_WALL_DIR "/") + string_length((string_address)name) + 5 > room)
+                return false;
+        string_copy((string_address)path, (string_address)SETTINGS_WALL_DIR "/");
+        string_append_bounded((string_address)path, (string_address)name, room);
+        string_append_bounded((string_address)path, (string_address) ".png", room);
+        return settings_wall_look(path, null) == 0100000u;
+}
+
+// A PNG's file covering w by h pixels at into (each the mean of the picture's under it): false for one the kit cannot read.
+static b32 settings_wall_picture(const char address_to path, unsigned int address_to into, int w, int h)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        p8 address_to file;
+        positive got = 0, vis_w, vis_h, ox, oy;
+        unsigned int address_to picture = null;
+        int width = 0, height = 0;
+
+        if (handle < 0)
+                return false;
+        file = (p8 address_to)memory_checked(SETTINGS_WALL_FILE_MOST);
+        while (file && got < SETTINGS_WALL_FILE_MOST)
+        {
+                bipolar read = system_read_once(handle, file + got, SETTINGS_WALL_FILE_MOST - got);
+
+                if (read <= 0)
+                        break;
+                got += (positive)read;
+        }
+        system_close(handle);
+        if (!file)
+                return false;
+        if (got >= 24 && got < SETTINGS_WALL_FILE_MOST)
+        {
+                positive pw = (positive)file[16] << 24 | (positive)file[17] << 16 | (positive)file[18] << 8 | file[19];
+                positive ph = (positive)file[20] << 24 | (positive)file[21] << 16 | (positive)file[22] << 8 | file[23];
+
+                if (pw && ph && pw <= 16384 && ph <= 16384 && pw * ph <= (48ul << 20))
+                        picture = ui_png_decode_most(file, got, &width, &height, 16384);
+        }
+        memory_free(file, SETTINGS_WALL_FILE_MOST);
+        if (!picture)
+                return false;
+        if ((positive)width * (positive)h > (positive)height * (positive)w)
+                vis_h = (positive)height, vis_w = (positive)height * (positive)w / (positive)h, ox = ((positive)width - vis_w) / 2, oy = 0;
+        else
+                vis_w = (positive)width, vis_h = (positive)width * (positive)h / (positive)w, ox = 0, oy = ((positive)height - vis_h) / 2;
+        vis_w = vis_w ? vis_w : 1, vis_h = vis_h ? vis_h : 1;
+        for (int y = 0; y < h; y++)
+        {
+                positive y0 = oy + (positive)y * vis_h / (positive)h, y1 = oy + ((positive)y + 1) * vis_h / (positive)h;
+
+                y1 = y1 > y0 ? y1 : y0 + 1;
+                for (int x = 0; x < w; x++)
+                {
+                        positive x0 = ox + (positive)x * vis_w / (positive)w, x1 = ox + ((positive)x + 1) * vis_w / (positive)w, r = 0, g = 0, b = 0, n;
+
+                        x1 = x1 > x0 ? x1 : x0 + 1;
+                        n = (y1 - y0) * (x1 - x0);
+                        for (positive sy = y0; sy < y1; sy++)
+                                for (positive sx = x0; sx < x1; sx++)
+                                {
+                                        unsigned int pixel = picture[sy * (positive)width + sx];
+
+                                        r += pixel >> 16 & 255, g += pixel >> 8 & 255, b += pixel & 255;
+                                }
+                        into[y * w + x] = 0xff000000u | (unsigned int)(r / n) << 16 | (unsigned int)(g / n) << 8 | (unsigned int)(b / n);
+                }
+        }
+        memory_free(picture, (positive)width * (positive)height * 4);
+        return true;
+}
+
+// The screen at the table's index at, width by height, as its wallpaper on the node: made again only when what it is made of changed.
+static fn settings_map_wall(struct windows address_to table, unsigned int at, struct ui_graph_node address_to n, int width, int height)
+{
+        char kind[16], dark_word[16], maria[8], glow[24], ground[16], path[96];
+        unsigned int key = 2166136261u, stamp = 0, dark = !(table->themed && table->theme == UI_THEME_LIGHT);
+        // The accent the moon's glow is in, as the taskbar's (taskbar_accent): a grey one is the standard blue.
+        unsigned int accent = table->themed ? table->accent & 0xffffffu : 0;
+        int ar = (int)(accent >> 16 & 255), ag = (int)(accent >> 8 & 255), ab = (int)(accent & 255);
+        int most = ar > ag ? (ar > ab ? ar : ab) : (ag > ab ? ag : ab), least = ar < ag ? (ar < ab ? ar : ab) : (ag < ab ? ag : ab);
+        int w = SETTINGS_WALL_W, h = width > 0 ? SETTINGS_WALL_W * height / width : 1;
+        b32 own, picture;
+
+        if (h > SETTINGS_WALL_H)
+                h = SETTINGS_WALL_H, w = height > 0 ? SETTINGS_WALL_H * width / height : 1;
+        w = w < 1 ? 1 : w, h = h < 1 ? 1 : h;
+        settings_wall_word("/root/canvas.wallpaper", kind, sizeof(kind));
+        settings_wall_word("/root/canvas.wallpaper.dark", dark_word, sizeof(dark_word));
+        settings_wall_word("/root/canvas.wallpaper.maria", maria, sizeof(maria));
+        settings_wall_word("/root/canvas.wallpaper.glow", glow, sizeof(glow));
+        settings_wall_word("/root/canvas.background", ground, sizeof(ground));
+        own = settings_wall_own(table->output_name[at], path, sizeof(path));
+        picture = own || (string_equals((string_address)kind, "picture") &&
+                          (string_copy((string_address)path, (string_address)SETTINGS_WALL_DIR "/all.png"), settings_wall_look(path, null) == 0100000u));
+        if (picture)
+                settings_wall_look(path, &stamp);
+        for (const char address_to word = kind; *word; word++)
+                key = (key ^ (p8)*word) * 16777619u;
+        for (const char address_to word = picture ? path : ""; *word; word++)
+                key = (key ^ (p8)*word) * 16777619u;
+        key = (key ^ stamp) * 16777619u, key = (key ^ dark) * 16777619u, key = (key ^ (unsigned int)w << 12 ^ (unsigned int)h) * 16777619u;
+        accent = most - least < 40 ? 0x5b7fa6u : accent;
+        key = (key ^ accent ^ (p8)dark_word[0] << 24 ^ (p8)glow[1] << 16 ^ (p8)maria[0] << 8 ^ (p8)maria[1] ^ (p8)ground[1] << 4 ^ (p8)ground[3]) * 16777619u;
+        if (key != settings.map.wall_key[at] || settings.map.wall_w[at] != w || settings.map.wall_h[at] != h)
+        {
+                unsigned int address_to into = settings_wall_pixels[at];
+                long colour = ground[0] && !string_equals((string_address)ground, "default") ? window_colour_parse((string_address)ground) : -1;
+
+                settings.map.wall_key[at] = key, settings.map.wall_w[at] = w, settings.map.wall_h[at] = h;
+                if (!picture || !settings_wall_picture(path, into, w, h))
+                {
+                        if (string_equals((string_address)kind, "plain"))
+                                memory_fill_u32_rect(into, (positive)w, (positive)w, (positive)h, (unsigned int)(colour < 0 ? 0x1e1e1e : colour) | 0xff000000u);
+                        else
+                        {
+                                int rect[4] = {0, 0, 0, 0}, seas = maria[0] ? (int)string_to_bipolar((string_address)maria) : 45;
+
+                                memory_fill_u32_rect(into, (positive)w, (positive)w, (positive)h, 0xff000000u);
+                                taskbar_wall_draw(into, w, w, h, (int)dark, !string_equals((string_address)dark_word, "inverted"), seas >= 20 && seas <= 80 ? seas : 45,
+                                                  string_equals((string_address)glow, "none") ? 0 : string_equals((string_address)glow, "glow-and-edges") ? 2 : 1,
+                                                  accent, 0, 0, rect);
+                                for (int k = 0; k < w * h; k++)
+                                        into[k] |= 0xff000000u;
+                        }
+                }
+        }
+        n->picture = settings_wall_pixels[at], n->picture_w = settings.map.wall_w[at], n->picture_h = settings.map.wall_h[at];
+}
+
 /*
         The screens the table lists, as the map's nodes, numbered as the dropdown numbers them: how many, 0 when it lists none or too
         many. A node is a screen's rectangle on the desk (the table's, its turn taken), its number in the middle and its name and size
@@ -1689,6 +1868,7 @@ static unsigned int settings_map_load(unsigned int address_to number)
                 n->label = settings.map.number[at];
                 n->line[0] = table->output_model[at][0] ? table->output_model[at] : table->output_name[at];
                 n->line[1] = settings.map.size[at];
+                settings_map_wall(table, at, n, width, height);
         }
         if (settings.map.sent && (caught || settings.map.sent_count != count || (positive)ui_kit.now - settings.map.sent_at > SETTINGS_MAP_HOLD_NS))
                 settings.map.sent = false;
@@ -1952,6 +2132,12 @@ static const char address_to settings_output_text(int row, int chosen)
         }
         if (settings_rows[row].output == SETTINGS_OUT_PRIMARY)
                 return chosen == 0 ? WORDS(settings_primary_yes) : WORDS(settings_primary_no);
+        if (settings_rows[row].output == SETTINGS_OUT_WALLPAPER)
+        {
+                char path[96];
+
+                return settings_wall_own(table->output_name[chosen], path, sizeof(path)) ? WORDS(settings_wall_own) : WORDS(settings_wall_same);
+        }
         if (settings_rows[row].output == SETTINGS_OUT_REFRESH)
         {
                 rates = settings_rates_of(chosen);
@@ -4794,6 +4980,11 @@ static b32 settings_output_choice(const struct settings_row address_to which, po
                 string_copy_bounded((string_address)into, (string_address)(index ? WORDS(settings_primary_no) : WORDS(settings_primary_yes)), room);
                 return true;
         }
+        if (which->output == SETTINGS_OUT_WALLPAPER && chosen >= 0 && index < 2)
+        {
+                string_copy_bounded((string_address)into, (string_address)(index ? WORDS(settings_wall_own) : WORDS(settings_wall_same)), room);
+                return true;
+        }
         return false;
 }
 
@@ -4903,6 +5094,25 @@ static fn settings_output_apply(int row, const char address_to label)
         if (chosen < 0)
         {
                 settings_say((string_address)WORDS(settings_no_screen));
+                return;
+        }
+        // The wallpaper: the same as every screen's takes the screen's own picture away (canvas wallpaper picture none NAME); a picture of
+        // its own is chosen in Files, which has the file.
+        if (which->output == SETTINGS_OUT_WALLPAPER)
+        {
+                char path[96];
+                b32 own = settings_wall_own(table->output_name[chosen], path, sizeof(path));
+
+                if (at == 1 && !own)
+                        settings_say((string_address)WORDS(settings_wall_hint));
+                else if ((at == 1) == own)
+                        settings_say((string_address)WORDS(settings_already_set));
+                else
+                {
+                        length = settings_map_add(value, sizeof(value), 0, "none ");
+                        settings_map_add(value, sizeof(value), length, table->output_name[chosen]);
+                        settings_change(row, value);
+                }
                 return;
         }
         length = settings_map_add(value, sizeof(value), 0, table->output_name[chosen]);

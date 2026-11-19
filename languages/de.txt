@@ -199,6 +199,7 @@ menu_rename	9529	&Umbenennen
 menu_reset_zoom	1b0f	&Zoom zurücksetzen
 menu_select_all	f6f6	Alles &auswählen
 menu_set_wallpaper	1a27	Als &Hintergrundbild festlegen
+menu_set_wallpaper_of	aa60	Als Hintergrundbild von %s festlegen
 menu_show_hidden	37bd	&Versteckte Dateien zeigen
 menu_toggle_comment	92ac	Kommentar u&mschalten
 menu_undo	b9d3	&Rückgängig
@@ -371,6 +372,9 @@ settings_type_passphrase	ca95	das Passwort eingeben: Enter verbindet, Escape lä
 settings_unknown	9fb9	unbekannt
 settings_verb_hint	05aa	VERB [ARGUMENTE]
 settings_virtual_refused	4202	ein virtuelles Gerät kann dies nicht einschalten: eine am Gerät angeschlossene Tastatur oder Maus verwenden, oder moonwater ssh in einem Root-Terminal
+settings_wall_hint	ccf0	Wählen Sie eine PNG-Datei in Dateien und dann „Als Hintergrundbild dieses Bildschirms festlegen“
+settings_wall_own	2b4f	Eigenes Bild
+settings_wall_same	d736	Wie alle Bildschirme
 taskbar_tab_exit	44a5	Beenden
 taskbar_tab_pin	d57f	An Taskleiste anheften
 taskbar_tab_stop	3684	Beenden erzwingen
@@ -753,5 +757,6 @@ settings_size_refused	20a9	Der Bildschirm hat %d × %d nicht angenommen: zurück
 =separate	bb18	getrennt
 =Resolution	18af	Auflösung
 =Primary display	924b	Primärer Bildschirm
+=Wallpaper of this screen	2c92	Hintergrundbild dieses Bildschirms
 =Graphics	9fa8	Grafik
 =Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Wo Canvas zeichnet: auf der GPU oder dem Prozessor. Was die Karte gerade tut, steht darunter

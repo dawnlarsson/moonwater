@@ -8200,6 +8200,7 @@ LANGUAGE_ID(menu_rename, "Re&name") \
 LANGUAGE_ID(menu_reset_zoom, "&Reset Zoom") \
 LANGUAGE_ID(menu_select_all, "Select &All") \
 LANGUAGE_ID(menu_set_wallpaper, "Set as &Wallpaper") \
+LANGUAGE_ID(menu_set_wallpaper_of, "Set as Wallpaper of %s") \
 LANGUAGE_ID(menu_show_hidden, "Show &Hidden Files") \
 LANGUAGE_ID(menu_toggle_comment, "Toggle Co&mment") \
 LANGUAGE_ID(menu_undo, "&Undo") \
@@ -8385,6 +8386,9 @@ LANGUAGE_ID(settings_unknown, "unknown") \
 LANGUAGE_ID(settings_used_of, "%1$s / %2$s") \
 LANGUAGE_ID(settings_verb_hint, "VERB [ARGUMENTS]") \
 LANGUAGE_ID(settings_virtual_refused, "a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal") \
+LANGUAGE_ID(settings_wall_hint, "Choose a PNG in Files, then Set as Wallpaper of this screen") \
+LANGUAGE_ID(settings_wall_own, "Its own picture") \
+LANGUAGE_ID(settings_wall_same, "Same as every screen") \
 LANGUAGE_ID(taskbar_tab_exit, "Exit") \
 LANGUAGE_ID(taskbar_tab_pin, "Pin to taskbar") \
 LANGUAGE_ID(taskbar_tab_stop, "Force stop") \
@@ -20592,6 +20596,8 @@ struct ui_graph_node
         const char address_to label;   // the words in its middle, the app's and safe to draw; null for none
         const char address_to line[2]; // a smaller line under them each (a name, a size), null for none
         unsigned char ins, outs;       // its ports, down its left side and down its right
+        const unsigned int address_to picture; // opaque 0xffrrggbb, picture_w by picture_h, drawn over its face (a screen's wallpaper); null none
+        int picture_w, picture_h;
 };
 
 struct ui_graph_edge
@@ -21228,6 +21234,28 @@ static fn ui_graph_face(struct ui address_to ui, const struct ui_graph address_t
         if (k == g->hover && !lit)
                 face = ui_mix(ui_role(UI_ON_SURFACE) | 0xff000000u, 8, face);
         ui_kit_fill(ui, &box, face, panel);
+        // Its picture, covering the face inside its rounding, cut to the panel and the band drawn: pixels the recorder does not see.
+        if (n->picture && n->picture_w > 0 && n->picture_h > 0 && x1 - x0 > 2 * radius && y1 - y0 > 2 * radius)
+        {
+                int inset = radius / 2, px0 = x0 + inset, py0 = y0 + inset, px1 = x1 - inset, py1 = y1 - inset;
+                int cx0 = px0 > g->x ? px0 : g->x, cx1 = px1 < g->x + g->w ? px1 : g->x + g->w, cy0 = py0 > ui->top ? py0 : ui->top;
+                int cy1 = py1 < ui->bottom ? py1 : ui->bottom;
+
+                cx0 = cx0 < 0 ? 0 : cx0, cx1 = cx1 > ui->width ? ui->width : cx1, cy0 = cy0 < 0 ? 0 : cy0, cy1 = cy1 > ui->height ? ui->height : cy1;
+                cy0 = cy0 > g->y ? cy0 : g->y, cy1 = cy1 < g->y + g->h ? cy1 : g->y + g->h;
+                if (ui->scene && cx1 > cx0 && cy1 > cy0)
+                        ui->scene->lost = UI_LOST_NOTHING;
+                for (int y = cy0; y < cy1; y++)
+                {
+                        const unsigned int address_to from = n->picture + (long)((b64)(y - py0) * n->picture_h / (py1 - py0)) * n->picture_w;
+                        unsigned int address_to into = ui->pixels + (long)y * (long)ui->pitch;
+
+                        if (!ui_in_band(ui, y))
+                                continue;
+                        for (int x = cx0; x < cx1; x++)
+                                into[x] = from[(b64)(x - px0) * n->picture_w / (px1 - px0)];
+                }
+        }
         if (n->flags & UI_GRAPH_MARKED)
         {
                 struct ui_box bar = ui_graph_rect(x0 > g->x ? x0 : g->x, y0, x1 < g->x + g->w ? x1 : g->x + g->w, y0 + (ui_dev(ui, 3) > 1 ? ui_dev(ui, 3) : 1), 0);
@@ -21253,6 +21281,14 @@ static fn ui_graph_face(struct ui address_to ui, const struct ui_graph address_t
                 used += rows[at], shown = at + 1;
         }
         ui->top = y0 > top ? y0 : top, ui->bottom = y1 < bottom ? y1 : bottom;
+        // Over a picture the words are on a piece of the face, so they read whatever the picture is.
+        if (n->picture && shown && x1 - x0 > 4 * pad)
+        {
+                int line0 = y0 + (y1 - y0 - used) / 2;
+                struct ui_box scrim = ui_graph_rect(x0 + pad, line0 - pad / 2, x1 - pad, line0 + used + pad / 2, radius);
+
+                ui_kit_fill(ui, &scrim, (face & 0xffffffu) | 0xc8000000u, &box);
+        }
         for (int at = 0, line = y0 + (y1 - y0 - used) / 2; at < shown; at++)
         {
                 int wide, low = x0 > g->x ? x0 : g->x, high = x1 < g->x + g->w ? x1 : g->x + g->w, left;
