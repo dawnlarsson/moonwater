@@ -93,7 +93,9 @@ static struct
         p64 every_period[8];
         positive everys;
         b64 minute; // the last minute an at was posted for
-        bool verdict_seen;
+        bool verdict_seen;   // boot's verdict is settled (live or disk): /root is the session's
+        bool verdict_posted; // the boot event was posted (at the first word, ask included)
+        p8 compositor_font[256]; // /root/font's first line when the compositor was started
         p8 pin_text[1024];                       // the pinned program's words, the last pin pressed
         string_address pin[ROVER_ARGUMENTS + 5];
         positive pins;
@@ -703,6 +705,10 @@ static fn rover_runner_start(positive which)
                 argv[at] = (string_address)rover_runner_pool_word(rover_runner.view.argument[service->argument + at].index,
                                                                   &length);
         argv[count] = null;
+        //      The face the compositor starts with, to know at the verdict whether the disk's /root names another.
+        if (rover_runner_service_is(which, "compositor") &&
+            host_read_word("/root/font", rover_runner.compositor_font, sizeof(rover_runner.compositor_font)) < 0)
+                rover_runner.compositor_font[0] = 0;
         //      A ready path left by the life before is no word of this one's: removed before the start.
         if (service->ready)
                 (void)system_remove_at(AT_FDCWD, (string_address)rover_runner_pool_word(service->ready, &length), 0);
@@ -1633,15 +1639,56 @@ static fn rover_runner_find_everys(void)
 }
 
 //      The boot's verdict, once: live, disk NAME or ask, as /run/moonwater/verdict says it.
+//      The boot event, once a boot: the verdict (live, disk or ask) and the disk's name.
+static fn rover_runner_boot_event(const p8 address_to word)
+{
+        static const char address_to const verdicts[3] = {"live", "disk", "ask"};
+
+        for (positive at = 0; at < 3; at++)
+                if (string_has_prefix((string_address)word, (string_address)verdicts[at]))
+                {
+                        string_address disk = string_first_of(word, ' ');
+
+                        rover_runner_post(101, disk ? (const p8 address_to)(disk + 1) : null,
+                                          disk ? string_length(disk + 1) : 0, (b64)at);
+                        struct rover_event address_to event = &rover_runner.queue[rover_runner.queued - 1];
+                        //      boot's fields: the verdict, and the disk's name.
+                        event->count = 2;
+                        event->field[1] = event->field[0];
+                        event->field[0].number = (b64)at;
+                        event->field[0].text = rover_nothing;
+                        event->field[0].length = 0;
+                        if (!disk)
+                                event->field[1].text = rover_nothing;
+                        return;
+                }
+}
+
 static fn rover_runner_verdict(void)
 {
         p8 word[HOST_NAME_ROOM + 16];
-        static const char address_to const verdicts[3] = {"live", "disk", "ask"};
+
+        bool ask;
 
         if (rover_runner.verdict_seen || host_read_word(ROVER_VERDICT, word, sizeof(word)) < 0)
                 return;
+        ask = string_has_prefix((string_address)word, "ask");
+        /*
+                ask is boot holding while a person is asked which disk: the boot
+                event is posted at it (the installer's rule waits for it), but
+                /root is not settled until the answer, which boot writes as disk
+                NAME or live once it has bound the disk over /root. The re-read
+                below waits for that word.
+        */
+        if (!rover_runner.verdict_posted)
+        {
+                rover_runner.verdict_posted = true;
+                host_restore_session(!ask, false);
+                rover_runner_boot_event(word);
+        }
+        if (ask)
+                return;
         rover_runner.verdict_seen = true;
-        host_restore_session(!string_has_prefix((string_address)word, "ask "), false);
         /*
                 /root is the session's from here, a disk's mounted over the
                 image's when boot took one: the person's rules on it loaded, the
@@ -1670,9 +1717,21 @@ static fn rover_runner_verdict(void)
                 {
                         struct rover_running address_to running = &rover_runner.service[at];
 
+                        //      The compositor started on the image's /root: told to read the disk's again, or, when the
+                        //      disk's /root/font names another face than it started with, started again with it (the
+                        //      machine script's desktop_settled did both).
                         if (running->pid > 0 && string_has_prefix((string_address)word, "disk") &&
                             rover_runner_service_is(at, "compositor"))
-                                (void)system_call_2(syscall(kill), (positive)running->pid, 10 /* SIGUSR1 */);
+                        {
+                                p8 font[256];
+
+                                if (host_read_word("/root/font", font, sizeof(font)) < 0)
+                                        font[0] = 0;
+                                if (!string_equals((string_address)font, (string_address)rover_runner.compositor_font))
+                                        rover_runner_stop(at);
+                                else
+                                        (void)system_call_2(syscall(kill), (positive)running->pid, 10 /* SIGUSR1 */);
+                        }
                         if (running->up_owed)
                         {
                                 running->up_owed = 0;
@@ -1681,24 +1740,6 @@ static fn rover_runner_verdict(void)
                         }
                 }
         }
-        for (positive at = 0; at < 3; at++)
-                if (string_has_prefix((string_address)word, (string_address)verdicts[at]))
-                {
-                        string_address disk = string_first_of(word, ' ');
-
-                        rover_runner_post(101, disk ? (const p8 address_to)(disk + 1) : null,
-                                          disk ? string_length(disk + 1) : 0, (b64)at);
-                        struct rover_event address_to event = &rover_runner.queue[rover_runner.queued - 1];
-                        //      boot's fields: the verdict, and the disk's name.
-                        event->count = 2;
-                        event->field[1] = event->field[0];
-                        event->field[0].number = (b64)at;
-                        event->field[0].text = rover_nothing;
-                        event->field[0].length = 0;
-                        if (!disk)
-                                event->field[1].text = rover_nothing;
-                        return;
-                }
 }
 
 static fn rover_runner_watched(void)
