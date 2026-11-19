@@ -101991,6 +101991,10 @@ def harness_class_gates(argv):
 
     # ---- tests ---------------------------------------------------------------------------------------------------
     listed = subprocess.run(['git', '-C', str(ROOT), 'ls-files', 'test'], capture_output=True, text=True).stdout.split()
+    if not listed:
+        # A tree from git archive, with no repository: every file under test/ but what a run leaves (caches, bytecode).
+        listed = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / 'test').rglob('*')
+                        if p.is_file() and '__pycache__' not in p.parts and not p.name.endswith('.pyc'))
     files = set(listed)
     roots = {'test/run'}
     for outside in ('build.sh', 'src/build/build.c'):
