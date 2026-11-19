@@ -3335,7 +3335,7 @@ static b32 compositor_main()
                 bipolar off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-clocks-off", FILE_READ | O_CLOEXEC);
 
                 if (off >= 0)
-                        compositor_gpu_clocks.level = 0, system_close(off);
+                        compositor_gpu_clocks.level = 0, compositor_gpu_clocks.game_off = 1, system_close(off);
         }
         // A window's list drawn by a job of the card the loop does not wait for, unless the owner asks for it waited for in place, as it was
         // (/run/moonwater/lists-wait). Waited for, every list a kit program drew (a terminal's frame, the settings') stopped the loop for its job,
@@ -3387,6 +3387,8 @@ static b32 compositor_main()
                 int lowest = 1;
 
                 compositor_call(syscall(sched_setscheduler), 0, 1, (positive)&lowest, 0, 0, 0); // SCHED_FIFO
+                compositor_pin_ccd0();
+                compositor_pin_irqs_ccd0();
         }
 
         status = headless ? compositor_headless(headless, file) : compositor_card_open();

@@ -81,6 +81,141 @@ static void compositor_hold_drop(positive now)
         with its descriptors. Off, for the machine's owner: /run/moonwater/game-hold-off at the start.
 */
 
+// Hold amd_pstate/intel_pstate energy_performance_preference at "performance" while a fullscreen game runs on AC power,
+// restoring the saved preference on exit so desktop power is untouched.
+static char compositor_game_epp_saved[32];
+static int compositor_game_epp_active;
+
+static void compositor_num_path(char *out, const char *pre, unsigned int num, const char *post)
+{
+        char digits[12];
+        unsigned int n = 0;
+
+        while (*pre)
+                *out++ = *pre++;
+        do
+                digits[n++] = (char)('0' + (num % 10u));
+        while (num /= 10u);
+        while (n)
+                *out++ = digits[--n];
+        while (*post)
+                *out++ = *post++;
+        *out = 0;
+}
+
+static void compositor_game_epp(int on)
+{
+        const char *want;
+        unsigned long len;
+
+        if (on == compositor_game_epp_active)
+                return;
+        if (on)
+        {
+                if (!compositor_game_epp_saved[0])
+                        compositor_word("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference", compositor_game_epp_saved, sizeof(compositor_game_epp_saved));
+                if (!compositor_game_epp_saved[0] || string_equals((string_address)compositor_game_epp_saved, (string_address) "performance"))
+                        return;
+                want = "performance";
+        }
+        else
+        {
+                if (!compositor_game_epp_saved[0])
+                        return;
+                want = compositor_game_epp_saved;
+        }
+        len = (unsigned long)string_length((string_address)want);
+        for (unsigned int cpu = 0; cpu < 64; cpu++)
+        {
+                char path[96];
+                long fd;
+
+                compositor_num_path(path, "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/energy_performance_preference");
+                fd = system_open_at(AT_FDCWD, (string_address)path, O_WRONLY | O_CLOEXEC);
+                if (fd < 0)
+                        break;
+                system_write_once((int)fd, want, len);
+                system_close((int)fd);
+        }
+        compositor_game_epp_active = on;
+}
+
+// On multi-CCD machines (>= 9 CPUs, e.g. Ryzen 16-core/32-thread), pin the current latency-critical thread (compositor loop
+// or input reader) to CCD0 (CPUs 0-7) so /dev/spark, compositor, and GPU/USB IRQs share a single L3 cache with zero cross-CCD bounces.
+static void compositor_pin_ccd0(void)
+{
+        long probe = system_open_at(AT_FDCWD, (string_address) "/sys/devices/system/cpu/cpu8/online", FILE_READ | O_CLOEXEC);
+        unsigned long mask[2] = {0xfful, 0ul};
+
+        if (probe < 0)
+                return;
+        system_close((int)probe);
+        compositor_call(syscall(sched_setaffinity), 0, sizeof(mask), (positive)mask, 0, 0, 0);
+}
+
+// Route xhci_hcd (USB mouse/keyboard) and amdgpu (vblank/fence) IRQs to CCD0 (CPUs 0-7) on multi-CCD machines.
+static void compositor_pin_irqs_ccd0(void)
+{
+        long probe = system_open_at(AT_FDCWD, (string_address) "/sys/devices/system/cpu/cpu8/online", FILE_READ | O_CLOEXEC);
+        static char buf[32768];
+        long fd, got;
+
+        if (probe < 0)
+                return;
+        system_close((int)probe);
+        fd = system_open_at(AT_FDCWD, (string_address) "/proc/interrupts", FILE_READ | O_CLOEXEC);
+        if (fd < 0)
+                return;
+        got = (long)compositor_call(syscall(read), (positive)fd, (positive)buf, sizeof(buf) - 1, 0, 0, 0);
+        system_close((int)fd);
+        if (got <= 0)
+                return;
+        buf[got] = 0;
+        for (long at = 0; at < got;)
+        {
+                long line = at, stop = at;
+
+                while (stop < got && buf[stop] != '\n')
+                        stop++;
+                at = stop + 1;
+                // Check if this line is an xhci_hcd or amdgpu IRQ.
+                {
+                        int match = 0;
+                        unsigned int irq = 0;
+                        long p = line;
+
+                        for (long k = line; k + 6 <= stop; k++)
+                                if ((k + 8 <= stop && memory_compare(buf + k, "xhci_hcd", 8) == 0) ||
+                                    (k + 6 <= stop && memory_compare(buf + k, "amdgpu", 6) == 0))
+                                {
+                                        match = 1;
+                                        break;
+                                }
+                        if (!match)
+                                continue;
+                        while (p < stop && buf[p] == ' ')
+                                p++;
+                        if (p >= stop || buf[p] < '0' || buf[p] > '9')
+                                continue;
+                        while (p < stop && buf[p] >= '0' && buf[p] <= '9')
+                                irq = irq * 10u + (unsigned int)(buf[p++] - '0');
+                        if (p < stop && buf[p] == ':' && irq > 0 && irq < 4096)
+                        {
+                                char path[64];
+                                long ifd;
+
+                                compositor_num_path(path, "/proc/irq/", irq, "/smp_affinity");
+                                ifd = system_open_at(AT_FDCWD, (string_address)path, O_WRONLY | O_CLOEXEC);
+                                if (ifd >= 0)
+                                {
+                                        system_write_once((int)ifd, "000000ff", 8);
+                                        system_close((int)ifd);
+                                }
+                        }
+                }
+        }
+}
+
 static void compositor_game_watch(void)
 {
         int game = compositor.games != ~0ul && compositor_fullscreen_up();
@@ -92,6 +227,8 @@ static void compositor_game_watch(void)
                 return;
         if (!game)
         {
+                compositor_gpu_game_clocks(0);
+                compositor_game_epp(0);
                 system_close(compositor.game);
                 compositor.game = -1;
                 return;
@@ -113,6 +250,11 @@ static void compositor_game_watch(void)
                 us |= string_equals((string_address)status, (string_address) "Discharging");
         }
         system_write_once(compositor.game, &us, sizeof(us));
+        if (!us)
+        {
+                compositor_game_epp(1);
+                compositor_gpu_game_clocks(1);
+        }
         compositor.games++;
 }
 
@@ -4989,6 +5131,7 @@ static fn compositor_reader_run(address_any context)
 
         (void)context;
         compositor_call(syscall(sched_setscheduler), 0, 1, (positive)&priority, 0, 0, 0); // SCHED_FIFO: refused, it stays the loop's
+        compositor_pin_ccd0();
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
                 watched[at] = -1;
         // Open Moonwater's /dev/spark direct zero-evdev input ring when available (non-fatal on stock kernels / tests).
