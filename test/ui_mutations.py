@@ -6,14 +6,32 @@ Each mutation is one edit to a copy of one of those files, built into CHECK_term
 A mutation that survives is a hole in the check. The mutant's tree is the real one with the one file changed (symbolic links for every other),
 so a build costs the check's compile and nothing else.
 
-    python3 test/ui_mutations.py [NAME...]       from the tree's root; 6 builds at a time, about 5 minutes
+The unmutated tree is built and run first and must be green, or nothing is counted (exit 2).  A mutant that does not
+build, or whose text is not in its file once, is a survivor: it proved nothing.  The check is built as test/run's
+freestanding() builds it for this machine (x86_64, arm64 or riscv64), with the compiler in CC (gcc by default).
+
+    python3 test/ui_mutations.py [--most N] [NAME...]   from the tree's root; 6 builds at a time (UI_MUTATION_JOBS), about 5 minutes
+
+--most N is the pin (sh test/run mutation_ui): more than N survivors fails, and fewer fails too, saying to lower it.
+UI_MUTATION_MEASURE=1 counts against a red baseline, to measure a pin while the check is red: a mutant is killed by a
+FAIL line the baseline does not have. Such a run never passes (it exits 2 after its count).
 
 The control client's mutations (src/audio/control.c) are test/audio_mutations.py's, checked in CHECK_audio_pulse.
 """
-import concurrent.futures, os, shutil, subprocess, sys, tempfile
+import concurrent.futures, os, platform, shutil, subprocess, sys, tempfile
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-only = sys.argv[1:]
+argv = sys.argv[1:]
+most = 0
+if argv[:1] == ['--most']:
+    most, argv = int(argv[1]), argv[2:]
+only = argv
+compiler = os.environ.get("CC", "gcc")
+# freestanding()'s floor for each machine, and clang's defer statement when it takes it
+machine_flags = {"x86_64": ["-march=x86-64"], "aarch64": ["-mno-outline-atomics"], "arm64": ["-mno-outline-atomics"],
+                 "riscv64": ["-march=rv64imafd_zicsr_zicntr", "-mabi=lp64d"]}.get(platform.machine(), [])
+if "clang" in subprocess.run([compiler, "--version"], capture_output=True, text=True).stdout:
+    machine_flags = [f for f in machine_flags if f != "-mno-outline-atomics"] + ["-fdefer-ts"]
 work = tempfile.mkdtemp(prefix='audio-ui-mutations-')
 fonts = ["fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf", "fonts/ibm-plex-mono/IBMPlexMono-Bold.ttf", "fonts/inter/Inter-Regular.ttf", "fonts/inter/Inter-Bold.ttf"]
 
@@ -215,6 +233,39 @@ M = [
 check = os.path.join(root, "test/checks.c")
 
 
+def build_and_run(d, path, text):
+    """The tree as links, the one file a copy holding the text given; CHECK_terminal built and run."""
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    subprocess.run(["cp", "-as", os.path.join(root, "src"), d + "/src"], check=True)
+    subprocess.run(["cp", "-as", os.path.join(root, "test"), d + "/test"], check=True)
+    os.unlink(os.path.join(d, path))
+    open(os.path.join(d, path), "w").write(text)
+    os.symlink(os.path.join(root, "artifacts"), d + "/artifacts") if os.path.exists(os.path.join(root, "artifacts")) else None
+    exe = d + "/check"
+    cc = subprocess.run([compiler, "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector", "-fno-builtin"] + machine_flags + ["-w", "-T",
+                         os.path.join(root, "src/build/spark.ld"), "-Wl,-e,_start", "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments", "-DCHECK_terminal",
+                         "-fwhole-program", "-o", exe, d + "/test/checks.c"], capture_output=True, text=True, errors="replace", cwd=root)
+    if cc.returncode:
+        return ("BUILD ERROR", cc.stderr.strip()[-300:])
+    try:
+        r = subprocess.run([exe] + fonts, capture_output=True, text=True, errors="replace", timeout=300, cwd=root)
+    except subprocess.TimeoutExpired:
+        return ("RED", "hang")
+    # The launcher's checks read a file in /tmp that mutants running side by side all append to: their failures are the race's and not the mutant's.
+    fails = [l.strip() for l in r.stdout.splitlines() if "FAIL" in l and not l.strip().startswith("FAIL launcher")]
+    if baseline_fails is not None:
+        fails = [l for l in fails if l not in baseline_fails]
+        if not fails and (r.returncode == 0 or r.returncode == baseline_code):
+            return ("SURVIVED", "")
+    elif r.returncode == 0 and not fails:
+        return ("SURVIVED", "")
+    if baseline_fails is None and record is not None:
+        record.extend(fails)
+        record.append(r.returncode)
+    return ("RED", ("%d failing" % len(fails) if fails else "crashed (%d)" % r.returncode) + (" | " + fails[0][:110] if fails else ""))
+
+
 def run(index):
     path, name, old, new = M[index]
     if only and name not in only:
@@ -223,41 +274,36 @@ def run(index):
     if text.count(old) != 1:
         return (name, "NOT APPLIED", "%d times" % text.count(old))
     d = os.path.join(work, "m%d" % index)
-    os.makedirs(d + "/test")
-    # the tree as links, the one file a copy with the edit
-    subprocess.run(["cp", "-as", os.path.join(root, "src"), d + "/src"], check=True)
-    os.unlink(os.path.join(d, path))
-    open(os.path.join(d, path), "w").write(text.replace(old, new, 1))
-    os.symlink(os.path.join(root, "artifacts"), d + "/artifacts") if os.path.exists(os.path.join(root, "artifacts")) else None
-    os.symlink(check, d + "/test/checks.c")
-    for split_part in os.listdir(os.path.join(os.path.dirname(check), "checks")):  # test/checks.c's parts (test/split.py)
-        os.makedirs(os.path.join(os.path.dirname(d + "/test/checks.c"), "checks"), exist_ok=True)
-        os.symlink(os.path.join(os.path.dirname(check), "checks", split_part),
-                   os.path.join(os.path.dirname(d + "/test/checks.c"), "checks", split_part))
-    exe = d + "/check"
-    cc = subprocess.run(["gcc", "-O2", "-static", "-nostdlib", "-nostartfiles", "-fno-stack-protector", "-fno-builtin", "-march=x86-64", "-w", "-T",
-                         os.path.join(root, "src/build/spark.ld"), "-Wl,-e,_start", "-Wl,--build-id=none", "-Wl,--no-warn-rwx-segments", "-DCHECK_terminal",
-                         "-fwhole-program", "-o", exe, d + "/test/checks.c"], capture_output=True, text=True, errors="replace", cwd=root)
-    if cc.returncode:
-        return (name, "BUILD ERROR", cc.stderr[:300])
-    try:
-        r = subprocess.run([exe] + fonts, capture_output=True, text=True, errors="replace", timeout=300, cwd=root)
-    except subprocess.TimeoutExpired:
-        return (name, "RED (hang)", "")
-    # The launcher's checks read a file in /tmp that mutants running side by side all append to: their failures are the race's and not the mutant's.
-    fails = [l.strip() for l in r.stdout.splitlines() if "FAIL" in l and not l.strip().startswith("FAIL launcher")]
+    status, detail = build_and_run(d, path, text.replace(old, new, 1))
     shutil.rmtree(d, ignore_errors=True)
-    if r.returncode == 0 and not fails:
-        return (name, "SURVIVED", "")
-    return (name, "RED", ("%d failing" % len(fails) if fails else "crashed (%d)" % r.returncode) + (" | " + fails[0][:110] if fails else ""))
+    return (name, status, detail)
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+baseline_fails, baseline_code, record = None, 0, []
+status, detail = build_and_run(os.path.join(work, "base"), U, open(os.path.join(root, U)).read())
+shutil.rmtree(os.path.join(work, "base"), ignore_errors=True)
+measuring = False
+if status != "SURVIVED":
+    print("baseline red: the unmutated tree %s: %s" % ("did not build" if status == "BUILD ERROR" else "fails CHECK_terminal", detail))
+    if status == "BUILD ERROR" or not os.environ.get("UI_MUTATION_MEASURE"):
+        shutil.rmtree(work, ignore_errors=True)
+        sys.exit(2)
+    measuring = True
+    baseline_code, baseline_fails = record[-1], set(record[:-1])
+    for line in sorted(baseline_fails):
+        print("baseline " + line)
+with concurrent.futures.ThreadPoolExecutor(max_workers=int(os.environ.get("UI_MUTATION_JOBS", "6"))) as pool:
     results = [r for r in pool.map(run, range(len(M))) if r]
-survived = 0
+shutil.rmtree(work, ignore_errors=True)
+survivors = [name for name, status, _ in results if status != "RED"]
 for name, status, detail in results:
     print("%-52s %-12s %s" % (name, status, detail))
-    survived += status in ("SURVIVED", "NOT APPLIED", "BUILD ERROR")
-print("mutations: %d, red: %d, survived or unusable: %d" % (len(results), len(results) - survived, survived))
-shutil.rmtree(work, ignore_errors=True)
-sys.exit(1 if survived else 0)
+print("mutations ui: %d, killed %d, survived %d, pinned at most %d" % (len(results), len(results) - len(survivors), len(survivors), most))
+if measuring:
+    print("mutations ui: measured against a red baseline (%d failures of its own), so not a pass" % len(baseline_fails))
+    sys.exit(2)
+if only:
+    sys.exit(1 if survivors else 0)
+if len(survivors) < most:
+    print("mutations ui: %d survive and the pin is %d: lower the pin to %d" % (len(survivors), most, len(survivors)))
+sys.exit(len(survivors) != most)
