@@ -6,24 +6,42 @@ CHECK_audiolib for the machine the edited body belongs to and run under the cpu 
 AVX2 with FMA and the SSE2 floor itself; arm64 and riscv64 under qemu-user, riscv64 with V at two vector lengths and without);
 the check must turn red.  A mutation that survives is a hole in the check.
 
-    python3 test/audiolib_mutations.py [NAME...]        from the tree's root; 8 builds at a time
+The unmutated lib.c is built and run first on every machine a chosen mutant is for, under every cpu that machine's
+mutants run under, and must be green, or nothing is counted (exit 2).  A mutant that does not build, or whose text is not
+in lib.c, is a survivor: it proved nothing.  The host's own machine runs natively and the other two under qemu-user, as
+test/run's target_tools runs them (an x86_64 host builds x86_64 with gcc, an arm64 one arm64 with gcc, and so on).
+
+    python3 test/audiolib_mutations.py [--most N] [NAME...]   from the tree's root; 8 builds at a time (AUDIOLIB_MUTATION_JOBS)
+
+--most N is the pin (sh test/run mutation_audiolib): more than N survivors fails, and fewer fails too, saying to lower it.
 
 Last run: see the commit that changed this line.
 """
-import concurrent.futures, os, subprocess, sys, tempfile
+import concurrent.futures, os, platform, shutil, subprocess, sys, tempfile
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 work = tempfile.mkdtemp(prefix='audiolib-mutations-')
-only = sys.argv[1:]
+argv = sys.argv[1:]
+most = 0
+if argv[:1] == ['--most']:
+    most, argv = int(argv[1]), argv[2:]
+only = argv
+host = {'x86_64': 'x86_64', 'amd64': 'x86_64', 'aarch64': 'arm64', 'arm64': 'arm64', 'riscv64': 'riscv64'}.get(platform.machine())
 
-COMPILER = {'x86_64': ['gcc', '-march=x86-64'],
+COMPILER = {'x86_64': ['x86_64-linux-gnu-gcc', '-march=x86-64'],
             'arm64': ['aarch64-linux-gnu-gcc', '-mno-outline-atomics'],
             'riscv64': ['riscv64-linux-gnu-gcc', '-march=rv64imafd_zicsr_zicntr', '-mabi=lp64d']}
-RUN = {'x86_64': [[]],
+RUN = {'x86_64': [['qemu-x86_64', '-cpu', 'Nehalem']],
        'arm64': [['qemu-aarch64']],
        'riscv64': [['qemu-riscv64', '-cpu', 'rv64'], ['qemu-riscv64', '-cpu', 'rv64,v=true,vlen=128'],
                    ['qemu-riscv64', '-cpu', 'rv64,v=true,vlen=512'],
                    ['qemu-riscv64', '-cpu', 'rv64,v=true,vlen=1024,rvv_ta_all_1s=true,rvv_ma_all_1s=true']]}
+
+# The host's own machine is built by its gcc and run natively (x86_64's run walks AVX2 with FMA and the SSE2 floor itself).
+if host in COMPILER:
+    COMPILER[host][0] = 'gcc'
+    if host != 'riscv64':
+        RUN[host] = [[]]
 
 # (machine, name, old text, new text); the old text is replaced wherever it stands in the machine's block.
 M = [
@@ -437,8 +455,12 @@ M = [
 ]
 
 
-def build_and_run(index):
-    machine, name, old, new = M[index]
+def build_and_run(index, text=None):
+    """Mutant index built into CHECK_audiolib and run under each of its machine's cpus; index -1 - k is the unmutated lib.c on machine k."""
+    if index >= 0:
+        machine, name, old, new = M[index]
+    else:
+        machine, name, old, new = list(COMPILER)[-1 - index], 'baseline', '', ''
     tree = os.path.join(work, str(index))
     os.makedirs(os.path.join(tree, 'src'))
     os.makedirs(os.path.join(tree, 'test'))
@@ -446,42 +468,63 @@ def build_and_run(index):
         if entry != 'lib.c':
             os.symlink(os.path.join(root, 'src', entry), os.path.join(tree, 'src', entry))
     os.symlink(os.path.join(root, 'test', 'checks.c'), os.path.join(tree, 'test', 'checks.c'))
-    for split_part in os.listdir(os.path.join(os.path.dirname(os.path.join(root, 'test', 'checks.c')), "checks")):  # test/checks.c's parts (test/split.py)
-        os.makedirs(os.path.join(os.path.dirname(os.path.join(tree, 'test', 'checks.c')), "checks"), exist_ok=True)
-        os.symlink(os.path.join(os.path.dirname(os.path.join(root, 'test', 'checks.c')), "checks", split_part),
-                   os.path.join(os.path.dirname(os.path.join(tree, 'test', 'checks.c')), "checks", split_part))
+    # test/checks/ as a directory of links, not a link to the directory: its files include ../../src/lib.c, which through a
+    # linked directory is the real tree's lib.c and not the mutant's
+    subprocess.run(['cp', '-as', os.path.join(root, 'test', 'checks'), os.path.join(tree, 'test', 'checks')], check=True)
     text = open(os.path.join(root, 'src', 'lib.c')).read()
-    if text.count(old) == 0:
+    if index >= 0 and text.count(old) == 0:
         return name, 'NOT FOUND', ''
-    open(os.path.join(tree, 'src', 'lib.c'), 'w').write(text.replace(old, new))
+    open(os.path.join(tree, 'src', 'lib.c'), 'w').write(text.replace(old, new) if index >= 0 else text)
     binary = os.path.join(tree, 'check')
     command = COMPILER[machine][:1] + ['-O2', '-static', '-nostdlib', '-nostartfiles', '-fno-stack-protector', '-fno-builtin'] + COMPILER[machine][1:] + [
         '-w', '-T', os.path.join(root, 'src/build/spark.ld'), '-Wl,-e,_start', '-Wl,--build-id=none', '-Wl,--no-warn-rwx-segments',
         '-DCHECK_audiolib', '-o', binary, os.path.join(tree, 'test', 'checks.c')]
-    built = subprocess.run(command, capture_output=True, text=True)
+    try:
+        built = subprocess.run(command, capture_output=True, text=True)
+    except FileNotFoundError:
+        shutil.rmtree(tree, ignore_errors=True)
+        return name, 'DID NOT BUILD', 'no ' + command[0]
     if built.returncode:
-        return name, 'DID NOT BUILD', built.stderr[-400:]
+        shutil.rmtree(tree, ignore_errors=True)
+        return name, 'DID NOT BUILD', built.stderr.strip()[-400:]
     for runner in RUN[machine]:
         try:
             ran = subprocess.run(runner + [binary], capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired as late:
             said = [line for line in (late.stdout or b'').decode(errors='replace').splitlines() if 'FAIL' in line]
+            shutil.rmtree(tree, ignore_errors=True)
             return name, 'killed (timeout)', (' '.join(runner[1:]) + ': ' + said[0].strip()) if said else ''
         if ran.returncode != 0 or 'FAIL' in ran.stdout:
             said = [line for line in ran.stdout.splitlines() if 'FAIL' in line] or ran.stdout.strip().splitlines() or ['(' + str(ran.returncode) + ')']
+            shutil.rmtree(tree, ignore_errors=True)
             return name, 'killed', ' '.join(runner[1:]) + ': ' + said[0].strip()
+    shutil.rmtree(tree, ignore_errors=True)
     return name, 'SURVIVED', ''
 
 
 def main():
     chosen = [i for i, m in enumerate(M) if not only or any(o in m[1] for o in only)]
-    survived = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    machines = sorted(set(M[i][0] for i in chosen), key=list(COMPILER).index)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        bases = list(pool.map(build_and_run, [-1 - list(COMPILER).index(m) for m in machines]))
+    for machine, (_, state, detail) in zip(machines, bases):
+        if state != 'SURVIVED':
+            print('baseline red: the unmutated lib.c on %s %s: %s' % (machine, 'did not build' if state == 'DID NOT BUILD' else 'fails CHECK_audiolib', detail))
+            return 2
+    survivors = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=int(os.environ.get('AUDIOLIB_MUTATION_JOBS', '8'))) as pool:
         for name, state, detail in pool.map(build_and_run, chosen):
             print('%-12s %s %s' % (state, name, detail))
-            survived += state in ('SURVIVED', 'NOT FOUND', 'DID NOT BUILD')
-    print('%d mutations, %d not killed' % (len(chosen), survived))
-    return 1 if survived else 0
+            if state in ('SURVIVED', 'NOT FOUND', 'DID NOT BUILD'):
+                survivors.append(name)
+    print('mutations audiolib: %d, killed %d, survived %d, pinned at most %d' % (len(chosen), len(chosen) - len(survivors), len(survivors), most))
+    if only:
+        return 1 if survivors else 0
+    if len(survivors) < most:
+        print('mutations audiolib: %d survive and the pin is %d: lower the pin to %d' % (len(survivors), most, len(survivors)))
+    return 0 if len(survivors) == most else 1
 
 
-sys.exit(main())
+status = main()
+shutil.rmtree(work, ignore_errors=True)
+sys.exit(status)

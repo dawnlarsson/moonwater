@@ -245,7 +245,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland mutation_dbus mutation_audio mutation_ui"
+asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland mutation_dbus mutation_audio mutation_ui mutation_audiolib"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine rover snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues"
 
@@ -367,6 +367,7 @@ describe()
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         proof)    echo "the network parsers proved: whole-domain exhaustion and CBMC bounded model checking" ;;
         mutation) echo "every decision in the network code flipped once, and the checks that notice" ;;
+        mutation_audiolib) echo "lib.c's audio routines' mutation proofs (test/audiolib_mutations.py): an instruction, a lane or a constant of a body changed on each of three machines against CHECK_audiolib, with the unmutated tree green first; the survivors pinned" ;;
         mutation_ui) echo "the UI kit's mutation proofs (test/ui_mutations.py): edits to ui.c, the mixer, the taskbar, the launcher, the terminal and the compositor's input one at a time against CHECK_terminal, with the unmutated tree green first; the survivors pinned" ;;
         mutation_audio) echo "the audio stack's mutation proofs (test/audio_mutations.py): edits to mix.c, alsa.c, pulse.c, control.c, state.c, wire.c, service.c and bowl.c's PULSE_SERVER, one at a time against their CHECK_audio_* and bowl_session, with the unmutated tree green first; the survivors pinned" ;;
         mutation_dbus) echo "the session bus's mutation proofs (test/dbus_mutations.py): checks taken out of dbus.c and bounds moved, one at a time against CHECK_dbus, with the unmutated tree green first; the survivors pinned" ;;
@@ -420,6 +421,7 @@ seam_lanes()
 seam_apart()
 {
         case $1 in
+        lib) echo "mutation_audiolib" ;;
         net) echo "net wifi fuzz msan proof mutation" ;;
         tools) echo "scale" ;;
         desktop) echo "desktop chrome gpulists gpuanim mutation_ui mutation_audio mutation_dbus mutation_wayland" ;;
@@ -5937,6 +5939,20 @@ lane_mutation_ui()
         gpu_kernels_ready || return 1
         build_tool gpu-i915 src/canvas/gpu_i915.asm artifacts/gpu_i915_gen9.inc > /dev/null || return 1
         mutation_proof ui 40 python3 test/ui_mutations.py
+}
+
+#       What survives depends on the host: an arm64 one runs arm64 natively and x86_64 under qemu-x86_64 at its Nehalem
+#       floor, which never reaches the AVX2 and AVX-512 bodies, so their mutants survive there. The pin is an arm64
+#       host's (Lima, 2026-11-19: 385 mutants, 261 killed, 124 survivors, 72 of them NOT FOUND); another host has its
+#       own count to measure (python3 test/audiolib_mutations.py) and pin here.
+lane_mutation_audiolib()
+{
+        case $host_arch in
+        arm64) mutation_proof audiolib 124 python3 test/audiolib_mutations.py ;;
+        *)
+                echo "  mutation_audiolib NOT RUN -- its pin is an arm64 host's; measure this host's and pin it beside"
+                return 2 ;;
+        esac
 }
 
 lane_proof()
