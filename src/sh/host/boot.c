@@ -221,9 +221,17 @@ static fn host_events_boot(host_settings address_to settings)
         host_setting setting;
         positive at = 0;
 
-        if (!settings || !host_settings_count(settings, SPARK_SETTINGS_INIT) ||
-            system_fork())
+        bipolar runner;
+
+        if (!settings || !host_settings_count(settings, SPARK_SETTINGS_INIT))
                 return;
+        //      A fork that failed is no runner at all, and boot goes on without its rules: said, not left as nothing.
+        if ((runner = system_fork()) != 0)
+        {
+                if (runner < 0)
+                        host_fail("the rules' runner", runner);
+                return;
+        }
 
         //      The runner, from here on: its own session, outliving boot.
         system_call(syscall(setsid));

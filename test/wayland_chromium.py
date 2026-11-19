@@ -173,6 +173,25 @@ def theme(port, root, log):
             time.sleep(0.4)
             now = dark(cdp)
         row(now == want, "with the theme %s the browser's prefers-color-scheme: dark is %s, with no restart" % (word, str(want).lower()), str(now))
+    # A directory bound over the settings' one after the bus started, as boot mounts the disk's /root over the image's: the
+    # bus must see the new directory's theme and hear changes made in it (it watched the one underneath, af8f2b579).
+    if os.environ.get("CHROMIUM_REBIND"):
+        fresh = os.path.join(os.environ.get("TRIAL_DIR", "/tmp"), "rebound-root")
+        os.makedirs(fresh, exist_ok=True)
+        with open(os.path.join(fresh, "canvas.theme"), "w") as f:
+            f.write("dark\n")
+        bound = os.system("mount --bind %s %s" % (fresh, root)) == 0
+        row(bound, "a directory is bound over the settings' directory while the bus and the browser run", "mount --bind")
+        for word, want in (("dark", True), ("light", False)):
+            if word == "light":
+                with open(os.path.join(root, "canvas.theme"), "w") as f:
+                    f.write("light\n")
+            end = time.time() + 12
+            now = dark(cdp)
+            while time.time() < end and now != want:
+                time.sleep(0.4)
+                now = dark(cdp)
+            row(now == want, "after the bind, the theme %s in the new directory is the browser's (dark is %s)" % (word, str(want).lower()), str(now))
     text = open(log, errors="replace").read() if os.path.exists(log) else ""
     # The system bus (UPower, logind) is not Moonwater's to give; the session bus is, and it is there.
     errors = [line for line in text.splitlines() if "Failed to connect to the bus" in line and "system_bus_socket" not in line]

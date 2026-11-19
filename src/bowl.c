@@ -9129,6 +9129,12 @@ static b32 bowl_bus(positive count, string_address address_to arguments)
         if (child == 0)
                 bowl_bus_accept(listener);
         socket_close((b32)listener);
+        //      No relay is no system bus: said so, where "the system bus is running" was said with no process behind it.
+        if (child < 0)
+        {
+                bowl_bus_stop();
+                return bowl_fail("the system bus's relay", child);
+        }
         if (child > 0)
         {
                 pid_text[positive_into_string(pid_text, (positive)child)] = end;

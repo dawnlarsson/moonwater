@@ -248,7 +248,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland mutation_dbus mutation_audio mutation_ui mutation_audiolib stop locks"
+asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland mutation_dbus mutation_audio mutation_ui mutation_audiolib stop locks chromium_theme"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine rover snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues installer"
 
@@ -319,7 +319,7 @@ describe()
         stack)    echo "what each function puts on the stack, and what a deep walk costs" ;;
         differential_oracle) echo "the differential engine's own checks: comparison, covering arrays, ledger and shrinking" ;;
         clang)    echo "the shell built by clang for three machines and run, as gcc builds it: lib.c and the code the programs share take only what both compilers take (NOT RUN without clang, a cross ld or qemu-user)" ;;
-        gate)     echo "the pre-land gate: the gcc, arm64, riscv64 and clang shells and CHECK_terminal built, the audit seal, the GPU's kernels assembled by the build and held to LLVM's (NOT RUN without an LLVM that writes the same words), the compositor's GPU path with no card under it (CHECK_gpu_kit: its rows that need a card NOT RUN without one), the inventory, the engine's self-test, host_writes and the moonwater command's pages and refusals" ;;
+        gate)     echo "the pre-land gate: the gcc, arm64, riscv64 and clang shells and CHECK_terminal built, the audit seal, the dropped results with every (void) of a status and its reason, the one-way state, the GPU's kernels assembled by the build and held to LLVM's (NOT RUN without an LLVM that writes the same words), the compositor's GPU path with no card under it (CHECK_gpu_kit: its rows that need a card NOT RUN without one), the inventory, the engine's self-test, host_writes and the moonwater command's pages and refusals" ;;
         text)     echo "the text utilities against GNU coreutils, every option combination the grammar reaches, and tr's threaded pieces on one processor and on all" ;;
         files)    echo "the file utilities against coreutils, by output and by effect on the directory" ;;
         misc)     echo "the utilities that are neither text nor files -- dd, diff, ps, the checksums, the process wrappers -- against the system's own" ;;
@@ -347,6 +347,7 @@ describe()
         rover) echo "rover, the rules: the schema against the code, the round trip, refusals, the load-time check against every byte flipped, and the evaluator" ;;
         snapshot) echo "process records, truncated tails and sentinel bounds on three machines" ;;
         sensors) echo "monitor's clocks, temperatures, fans, power and battery against generated sysfs trees" ;;
+        chromium_theme) echo "Chromium on the shim following the theme as it changes, and after a directory is bound over /root, through the session bus (NOT RUN without MOONWATER_CHROMIUM_ROOT, a root with Chromium)" ;;
         installer) echo "the installer with no screen: the drives read from a made sysfs tree, the plan an install is asked for, the window's steps, and the layout and image written to a file and read back (CHECK_installer)" ;;
         browser) echo "the file browser's model with no window: a folder read in steps, its order, its selection, the way back, hostile names, links not followed, a folder that changes under its listing" ;;
         font) echo "the text engine: exact coverage of fonts written in the check, hostile fonts against a guard page, and FreeType and the exact area when both and a font are here" ;;
@@ -430,7 +431,7 @@ seam_apart()
         lib) echo "mutation_audiolib" ;;
         net) echo "net wifi fuzz msan proof mutation" ;;
         tools) echo "scale" ;;
-        desktop) echo "desktop chrome gpulists gpuanim mutation_ui mutation_audio mutation_dbus mutation_wayland" ;;
+        desktop) echo "desktop chrome gpulists gpuanim mutation_ui mutation_audio mutation_dbus mutation_wayland chromium_theme" ;;
         image) echo "ring0 tier input usb firewall sound stop locks" ;;
         engine) echo "gate" ;;
         *) ;;
@@ -4180,6 +4181,45 @@ lane_snapshot() { freestanding_checks_lane snapshot snapshot; }
 #
 lane_sensors() { freestanding_checks_lane sensors sensors; }
 lane_browser() { freestanding_checks_lane browser browser; }
+#       A setting changed while a real browser runs, and the same after a directory is bound over /root (test/wayland_chromium.py
+#       theme, through test/wayland_trial.sh): Chromium on the shim with the session bus, the theme set dark, light, dark and light,
+#       matchMedia read back each time; then a directory bound over the settings' one, as boot mounts the disk's /root over the
+#       image's, and its theme and a change in it read back. Chromium stayed dark on a light desktop because the bus watched the
+#       /root under the mount (af8f2b579). Needs a root with Chromium (MOONWATER_CHROMIUM_ROOT, an Arch or Debian root:
+#       MOONWATER_CHROMIUM names the program in it, chromium by default), unshare and python3: NOT RUN without them.
+lane_chromium_theme()
+(
+        chromium_root=${MOONWATER_CHROMIUM_ROOT:-}
+        if [ -z "$chromium_root" ] || [ ! -d "$chromium_root" ] || ! command -v python3 > /dev/null 2>&1 || ! unshare -rmpf true 2> /dev/null; then
+                echo "  chromium_theme NOT RUN -- no root with Chromium (MOONWATER_CHROMIUM_ROOT), python3 or unshare"
+                exit 2
+        fi
+        work=$(mktemp -d) || exit 1
+        trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+        if ! freestanding programs/shell.c "$work/shell" "" -DCONFIG_MOONWATER_WAYLAND; then
+                note "chromium_theme: the shell did not build"
+                tally chromium-theme-build 0 1
+                exit 1
+        fi
+        port=${MOONWATER_CHROMIUM_PORT:-9333}
+        TRIAL_DIR=$work/trial TRIAL_BUS=1 TRIAL_THEME=dark CHROMIUM_REBIND=1 \
+                unshare -rmpf sh test/wayland_trial.sh "$work/shell" "$chromium_root" theme "$root/test/wayland_chromium.py" theme "$port" /root \
+                "$work/trial/theme.log" -- "${MOONWATER_CHROMIUM:-chromium}" --ozone-platform=wayland --no-sandbox \
+                --remote-debugging-port="$port" --user-data-dir=/tmp/chromium-theme --no-first-run about:blank \
+                > "$work/lane.out" 2>&1
+        theme_at=0
+        theme_status=0
+        while IFS= read -r theme_line; do
+                case $theme_line in
+                "ok "*) theme_at=$((theme_at + 1)); tally "chromium-theme-$theme_at" 1 1 ;;
+                "FAIL "*) theme_at=$((theme_at + 1)); tally "chromium-theme-$theme_at" 0 1; theme_status=1; note "chromium_theme: $theme_line" ;;
+                "COMPOSITOR DIED") tally chromium-theme-compositor 0 1; theme_status=1; note "chromium_theme: the compositor died" ;;
+                esac
+        done < "$work/trial/theme.probe"
+        [ "$theme_at" -gt 0 ] || { tally chromium-theme-ran 0 1; note "chromium_theme ran no row:"; tail -n 8 "$work/lane.out" "$work/trial/theme.log" 2> /dev/null | sed 's/^/    /'; exit 1; }
+        exit "$theme_status"
+)
+
 #       The installer (src/canvas/ui/installer.c) with no screen: the drive listing from a made sysfs tree, the plan
 #       an install is asked for, the window's steps and the write path to a 3 GiB file (test/checks/installer.c).
 lane_installer() { freestanding_checks_lane installer installer; }
@@ -8090,6 +8130,11 @@ lane_gate()
         job hard gate_row gpu-model-kit gate_gpu_model_kit
         job hard gate_row issues gate_issues
         job hard gate_row seal python3 test/function_audit.py --check
+        # The source lints of lane_kit that take seconds: in no gate, dropped_results rose from 66 to 79 sites and
+        # one_way_state found ten unlisted bits and fields between 11-15 and 11-19 with every gate green.
+        job hard gate_row dropped python3 -I test/dropped_results.py --check
+        job hard gate_row one-way python3 -I test/one_way_state.py --check
+        job hard gate_row class-gates python3 test/differential.py --harness class_gates
         job hard gate_row types gate_types
         job hard gate_row gpu-kernels gate_gpu_kernels
         job maybe gate_row gpu-kernels-llvm gate_gpu_kernels_llvm
@@ -10491,6 +10536,10 @@ link-to-file=|0|*|l:644:/x v:644:keep|umask 022; printf keep > v; ln -s v l|-q|-
         else
                 note "wget rows against GNU wget: NOT RUN -- no GNU wget"
         fi
+
+        #       The expansion rows of src/sh/expand.c (test/checks/expand_rows.sh), each held to the value bash gives.
+        sh test/checks/expand_rows.sh "$shell_binary" > "$work/expand-rows.out" 2>&1
+        verdict expand-rows builtins_failed '$(grep FAIL "$work/expand-rows.out" | head -5)$(tail -n 1 "$work/expand-rows.out")'
 
         differential_domain builtins || builtins_failed=1
         return "$builtins_failed"
@@ -15266,6 +15315,16 @@ kit_harness python3 test/dropped_results.py --check
 #       A bit ORed in and never taken out, or a lifecycle's field set true and never false: given its other end, or listed
 #       with why it has none (test/one_way_state.seal).
 kit_harness python3 test/one_way_state.py --check
+#       Classes of bug that shipped with every check green, each a rule over the source (differential.py's
+#       harness_class_gates): fork results, blocking waits, walks of the window table, rover's keys against the
+#       compositor's, events with no producer, signals with no sender, text naming what was removed, test files
+#       nothing runs.
+kit_harness python3 test/differential.py --harness class_gates
+#       Checks that were in the tree and in no lane (rootcause and d4 found them by reachability, which class_gates
+#       now holds): kernel/patch/apply's two edits, build.sh --host against stubs, the audit's generator table.
+kit_harness sh test/checks/apply_edits.sh
+kit_harness sh test/checks/build_publish.sh
+kit_harness python3 test/checks/function_audit_keys.py
 kit_harness build_tool switches check
 kit_harness python3 test/differential.py --harness floodlight
 kit_harness python3 test/differential.py --harness surface_coreutils_gap
@@ -15904,7 +15963,12 @@ if [ -n "$machine_claim_line" ] && [ -n "$machine_wait_line" ] &&
 else
         machine_claim_first=no
 fi
-same 'the machine process claims its attach before anything can stop it' \
+#       The rows below that read src/ are lints: they hold where a call is written and in what order,
+#       and prove nothing of what a run does (a row of this kind called Ctrl-Alt-Delete covered while every
+#       stop took ten seconds). Each says lint: in its name, and class_gates fails a row that reads the
+#       source without saying so. What the code does when it runs is the stop, locks, machine and rover
+#       lanes'.
+same 'lint: the machine process claims its attach before anything can stop it' \
         '1:yes' "$machine_claims:$machine_claim_first"
 
 #       init retires the machine for the rest of the boot on 0 and on 1,
@@ -15923,7 +15987,7 @@ machine_run_fails=$(printf '%s\n' "$machine_run_body" |
         grep -c 'return host_fail(')
 machine_run_failed=$(printf '%s\n' "$machine_run_body" |
         grep -c 'return HOST_MACHINE_FAILED;')
-same 'a machine that could not start is not a machine init has retired' \
+same 'lint: a machine that could not start is not a machine init has retired' \
         '0:3' "$machine_run_fails:$machine_run_failed"
 
 #       The restores after a disk are one sequence in one function, and the
@@ -15936,7 +16000,7 @@ same 'a machine that could not start is not a machine init has retired' \
 #       for the name.
 restore_body=$(cat src/sh/host.c src/sh/host/*.c | awk '/^static fn host_restore_session\(bool radio, bool name\)$/,/^}$/')
 restore_order=$(printf '%s\n' "$restore_body" | grep -o '[a-z]*_restore()' | tr '\n' ' ')
-same 'the restores after a disk are run in one order' \
+same 'lint: the restores after a disk are run in one order' \
         'radio_restore() usb_restore() name_restore() locale_restore() dns_restore() tune_restore() ' \
         "$restore_order"
 take_body=$(cat src/sh/host.c src/sh/host/*.c | awk '/^static b32 host_take\(host_install address_to install, bool update\)$/,/^}$/')
@@ -15952,7 +16016,7 @@ if [ -n "$release_line" ] && [ -n "$restore_line" ] && [ "$release_line" -lt "$r
 else
         restore_after_release=no
 fi
-same 'a take and the machine process call the one sequence and spell none of it' \
+same 'lint: a take and the machine process call the one sequence and spell none of it' \
         '0:1:1:yes' "$restore_spelled:$restore_take:$restore_machine:$restore_after_release"
 
 #       The machine process says it sourced the script before the restores,
@@ -15968,7 +16032,7 @@ if [ -n "$sourced_line" ] && [ -n "$restores_line" ] && [ "$sourced_line" -lt "$
 else
         sourced_first=no
 fi
-same 'the machine process says it sourced the script before it restores, and says when it cannot' \
+same 'lint: the machine process says it sourced the script before it restores, and says when it cannot' \
         '1:yes' "$sourced_said:$sourced_first"
 
 #       reboot(2)'s words are defined once, in shell.c, with the values the
@@ -15981,7 +16045,7 @@ same 'the machine process says it sourced the script before it restores, and say
 #       image and times Ctrl-Alt-Delete, the shell's reboot and the power key.
 reboot_defs=$(LC_ALL=C grep -h '^#define \(HOST_\)\{0,1\}REBOOT_' src/sh/*.c src/moonwater/moonwater.c |
         LC_ALL=C sort | tr '\n' ' ')
-same 'reboot(2)'"'"'s magic words and commands are defined once, with the kernel'"'"'s values' \
+same 'lint: reboot(2)'"'"'s magic words and commands are defined once, with the kernel'"'"'s values' \
         '#define REBOOT_MAGIC 0xfee1dead #define REBOOT_MAGIC_SECOND 672274793 #define REBOOT_POWER_OFF 0x4321fedc #define REBOOT_RESTART 0x01234567 ' \
         "$reboot_defs"
 reboot_calls=$(grep -c 'syscall(reboot), REBOOT_MAGIC, REBOOT_MAGIC_SECOND, command' src/sh/builtin.c)
@@ -16016,7 +16080,7 @@ if [ -n "$machine_reload_line" ] && [ -n "$machine_named_line" ] &&
 else
         machine_reload_first=no
 fi
-same 'an edited script is taken up before the event it changed is named' \
+same 'lint: an edited script is taken up before the event it changed is named' \
         'yes:0' "$machine_reload_first:$machine_stale"
 
 #       Re-sourcing has to be allowed to replace the bodies it locked. The
@@ -16043,7 +16107,7 @@ fi
 #       that is the only thing the next event can compare the kernel against.
 machine_sourced=$(grep -c 'host_machine_sourced_overlay = host_machine.overlay;' \
         src/moonwater/moonwater.c)
-same 'a reload gives the lock back, re-sources, and takes it again' \
+same 'lint: a reload gives the lock back, re-sources, and takes it again' \
         'yes:1' "$machine_reload_holds:$machine_sourced"
 
 #       An owned event this process cannot run is a key that does nothing:
@@ -16059,7 +16123,7 @@ machine_emit_body=$(awk '/^static fn host_machine_emit\(positive event_slot, uns
 machine_missed=$(printf '%s\n' "$machine_emit_body" | grep -c 'host_machine_missed(name);')
 machine_plain=$(printf '%s\n' "$machine_emit_body" |
         grep -c 'else if (!host_machine_try(name, name, extra))')
-same 'an owned event with no function to run says so' '2:1' \
+same 'lint: an owned event with no function to run says so' '2:1' \
         "$machine_missed:$machine_plain"
 
 #       A machine that named its own failure has not settled. Running for a
@@ -16070,7 +16134,7 @@ same 'an owned event with no function to run says so' '2:1' \
 #       rest of the boot.
 init_settle=$(grep -c 'if (code != HOST_MACHINE_FAILED &&' src/sh/system.c)
 init_retires=$(grep -c 'if (code == 0 || code == 1)' src/sh/system.c)
-same 'a named machine failure never clears the retirement count' '1:1' \
+same 'lint: a named machine failure never clears the retirement count' '1:1' \
         "$init_settle:$init_retires"
 
 hook_return=$(grep -c 'return build_run("sh", "-c", value, null);' \
@@ -16091,7 +16155,7 @@ same 'build hooks gate success' '1:2' "$hook_return:$hook_gates"
 memory_raw=$(grep -rnE '(= |\))memory\(' --include='*.c' src \
         | grep -v '^src/lib\.util\.c:' \
         | grep -cv '(positive)memory(UTILITY_ARENA_BYTES)' || true)
-same 'every mapping is taken through memory_checked' '0' "$memory_raw"
+same 'lint: every mapping is taken through memory_checked' '0' "$memory_raw"
 
 group config
 common_path=$(pwd)/src/build/host.sh

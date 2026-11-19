@@ -101766,6 +101766,370 @@ def harness_text_tables(argv):
               "every official vector (%d): %s" % (len(lines), run.stdout.strip()))
     return check.verdict("text tables", "text_tables")
 
+def harness_class_gates(argv):
+    """Classes of bug that shipped on 2026-11-18 with every check green, each held by a rule over the source.
+
+    The root-cause team (rootcause/notes r3, r4, r6; the dead-features map d4) found each of these behind a bug a
+    person met on real hardware. Each gate reads the tree, names every site that breaks its rule, and fails on one
+    that is not listed below with its reason; a listed site that is no longer found fails too, so the lists may
+    only shrink.
+
+      fork      a fork's answer is tested for -1 before it is taken for a child or a parent: an `if (system_fork())`
+                or a pid compared with 0 alone reads a failed fork (-1) as the parent of a child that does not exist
+                (the installer's Restart said it restarted, B-h8-1)
+      wait      no blocking wait4 (flags 0) in the desktop's or the runner's programs, which have a loop a person
+                waits on, outside the teardown and the double fork listed (the 10 s stops of 3294fcd4b; Settings
+                stuck on a verb's child, B-h8-2/3)
+      windows   no loop over every row of the window table (`< WINDOWS`) outside window.c, which owns the table's
+                walk: the table is a million rows of a sparse file (the 3.48 GiB of intel2-e37's OOM)
+      keys      the names rover writes into /run/moonwater/keys are ones the compositor reads: the modifiers' words
+                are the compositor's, every key is a number in its range, the caps and the file's room are the same
+                on both sides (70 of rover's key names were dropped by the compositor's own table, R-r3-3)
+      events    every event of rover's schema whose source is the runner or the desktop has a place that posts it
+                (C-r4-4: a rule on an event that is never posted is a rule that never runs, and compiles)
+      signals   every signal a program of ours takes as a word (SIGUSR1, SIGUSR2) has a sender in the tree, or a
+                person at a shell named as its sender
+      gone      no text in src names what was removed: the machine script (main.moonwater.sh, rover replaced it)
+                and `moonwater bind`
+      rows      a row of test/run that reads the source says lint: in its name: it holds where text is written and
+                proves no run (the Ctrl-Alt-Delete row read the call's text while every stop took ten seconds)
+      tests     every file under test/ is reached from test/run (by its name, or from a file test/run reaches), or
+                listed with why (rootcause found nine reached by nothing: five mutation harnesses among them)
+    """
+    ROOT = HARNESS_ROOT
+    check = Checks()
+
+    def code(text):
+        """Comments and strings out, lines kept."""
+        text = re.sub(r'/\*.*?\*/', lambda m: re.sub(r'[^\n]', ' ', m.group(0)), text, flags=re.S)
+        text = re.sub(r'//[^\n]*', '', text)
+        text = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', text)
+        return re.sub(r"'(?:\\.|[^'\\\n])+'", "' '", text)
+
+    def sources(*globs):
+        for pattern in globs:
+            for path in sorted(ROOT.glob(pattern)):
+                if path.name != 'lib.c':
+                    yield path.relative_to(ROOT).as_posix(), path.read_text(errors='replace')
+
+    HEADS = re.compile(r'^[A-Za-z_][\w \t*]*?\b([a-z_][a-z0-9_]*)\s*\((?:[^;{}()]|\((?:[^;{}()]|\([^;{}()]*\))*\))*\)'
+                       r'[ \t]*(?:[A-Z_]+[ \t]*)*\n\{', re.M)
+
+    class Lazy:
+        """A file's function heads (the tree's style: the name at the line's start, its brace at the next's), found the
+           first time a site in it asks; a site is in the last one before it. #if branches cannot unbalance it."""
+        def __init__(self, text):
+            self.text, self.heads = text, None
+
+        def walk(self):
+            if self.heads is None:
+                self.heads = [(m.start(), m.group(1)) for m in HEADS.finditer(self.text)]
+            return self.heads
+
+        def name(self, at):
+            heads = self.walk()
+            found = bisect.bisect_right(heads, (at, '~')) - 1
+            return heads[found][1] if found >= 0 else '-'
+
+        def end(self, at):
+            heads = self.walk()
+            found = bisect.bisect_right(heads, (at, '~'))
+            return heads[found][0] if found < len(heads) else len(self.text)
+
+    def where(spans, at):
+        return spans.name(at)
+
+    def gate(name, found, allowed):
+        """found: {key: line}; allowed: {key: reason}."""
+        for key in sorted(found):
+            check(key in allowed, '%s: %s (line %s) breaks the rule and is not listed with a reason' % (name, key, found[key]))
+        for key in sorted(set(allowed) - set(found)):
+            check(False, '%s: %s is listed and no longer found: take it out of the list' % (name, key))
+        for key, reason in allowed.items():
+            check(bool(reason.strip()), '%s: %s is listed with no reason' % (name, key))
+        print('  %-8s %d sites, %d listed with a reason' % (name, len(found), len(allowed)))
+
+    # ---- fork ----------------------------------------------------------------------------------------------------
+    FORKS = r'(?:system_fork\s*\(\s*\)|\bfork\s*\(\s*\)|system_child_fork\s*\([^;]*?\)|locale_child_fork\s*\([^;]*?\))'
+    found = {}
+    for path, text in sources('src/**/*.c'):
+        text = code(text)
+        spans = Lazy(text)
+        for m in re.finditer(FORKS, text):
+            if re.match(r'\s*\(', text[m.end():]) or re.search(r'(?:#\s*define|static\s+\w+)\s+\w*\s*$', text[max(0, m.start() - 40):m.start()]):
+                continue
+            line = text.count('\n', 0, m.start()) + 1
+            row = text[text.rfind('\n', 0, m.start()) + 1:m.start()]
+            # The wrappers themselves: a macro that is the fork, the library's error-setting entry for it.
+            if row.lstrip().startswith('#') or 'ERROR_ENTRY' in text[max(0, m.start() - 60):m.start()]:
+                continue
+            function = where(spans, m.start())
+            before = text[max(0, m.start() - 80):m.start()]
+            taken = re.search(r'([a-z_][a-z0-9_.>-]*)\s*=\s*(?:[^=;]*\?\s*)?$', before)
+            if re.search(r'\breturn\s*$', before):
+                continue
+            if not taken or taken.group(1) in ('', ):
+                found['%s %s inline' % (path, function)] = line
+                continue
+            variable = re.escape(taken.group(1))
+            body_end = spans.end(m.start())
+            after = text[m.end():body_end]
+            negative = re.search(r'\b%s\s*(?:<\s*0\b|<=\s*0\b|==\s*-1\b|>=\s*0\b)|\b0\s*>\s*%s\b' % (variable, variable), after)
+            # Handed to the caller (return child; return forked > 0), which is then the one that tests it.
+            handed = re.search(r'\breturn\b[^;]*\b%s\b' % variable, after)
+            if not negative and not handed:
+                found['%s %s %s' % (path, function, taken.group(1))] = line
+    FORK_LISTED = CLASS_GATES_FORK
+    gate('fork', found, FORK_LISTED)
+
+    # ---- wait ----------------------------------------------------------------------------------------------------
+    found = {}
+    for path, text in sources('src/rover/*.c', 'src/canvas/**/*.c', 'src/audio/*.c', 'src/dbus/*.c', 'src/waterlink/service.c'):
+        text = code(text)
+        spans = Lazy(text)
+        for m in re.finditer(r'system_wait4_retry\s*\(([^;]*?),\s*0\s*,\s*(?:null|0)\s*\)|syscall\(wait4\)\s*,([^;]*?),\s*0\s*,\s*0\s*\)', text):
+            line = text.count('\n', 0, m.start()) + 1
+            key = '%s %s' % (path, where(spans, m.start()))
+            found.setdefault(key, line)
+    gate('wait', found, CLASS_GATES_WAIT)
+
+    # ---- windows -------------------------------------------------------------------------------------------------
+    found = {}
+    for path, text in sources('src/**/*.c'):
+        if path == 'src/canvas/window.c':
+            continue
+        text = code(text)
+        spans = Lazy(text)
+        for m in re.finditer(r'\b(?:for|while)\s*\((?:[^()]|\([^()]*\))*<\s*WINDOWS\b', text):
+            found.setdefault('%s %s' % (path, where(spans, m.start())), text.count('\n', 0, m.start()) + 1)
+    gate('windows', found, CLASS_GATES_WINDOWS)
+
+    # ---- keys ----------------------------------------------------------------------------------------------------
+    compile_c = (ROOT / 'src/rover/compile.c').read_text()
+    runner_c = (ROOT / 'src/rover/runner.c').read_text()
+    input_c = (ROOT / 'src/canvas/compositor/input.c').read_text()
+    table = re.search(r'\}\s*rover_keys\[\]\s*=\s*\{(.*?)\n\};', compile_c, re.S)
+    codes = [int(c) for c in re.findall(r'\{"[^"]+",\s*(\d+)\}', table.group(1))] if table else []
+    check(len(codes) > 100, 'keys: rover_keys read from compile.c (%d keys)' % len(codes))
+    check(all(0 < c < 0x300 for c in codes), 'keys: every rover key is a number the compositor takes (1 to 0x2ff)')
+    mods = re.search(r'\}\s*rover_modifiers\[\]\s*=\s*\{(.*?)\};', compile_c, re.S)
+    rover_mods = set(re.findall(r'\{"([a-z]+)"', mods.group(1))) if mods else set()
+    word = re.search(r'compositor_key_word\(.*?\n\}', input_c, re.S)
+    comp_mods = set(re.findall(r'\{"([a-z]+)",\s*WINDOW_KEY_', word.group(0))) if word else set()
+    check(rover_mods and rover_mods <= comp_mods,
+          'keys: the modifiers rover writes (%s) are words the compositor reads (%s)' % (sorted(rover_mods), sorted(comp_mods)))
+    check(word and not re.search(r'"(?:f1[3-9]|print|kp\d|mute|volumeup|escape|space)"', word.group(0)),
+          'keys: the compositor keeps no table of key names to disagree with rover\'s (the runner writes numbers)')
+    most = re.search(r'#define ROVER_KEYS_MOST (\d+)', runner_c)
+    room = re.search(r'#define COMPOSITOR_KEYS (\d+)', input_c) or re.search(r'#define COMPOSITOR_KEYS (\d+)',
+                                                                             (ROOT / 'src/canvas/compositor.c').read_text())
+    check(most and room and most.group(1) == room.group(1),
+          'keys: the runner writes at most as many chords as the compositor keeps (%s, %s)' %
+          (most and most.group(1), room and room.group(1)))
+    writer = re.search(r'static fn rover_runner_keys\(void\)\s*\{\s*static p8 text\[(\d+)\]', runner_c)
+    reader = re.search(r'static void compositor_keys_read\(void\).*?static char text\[(\d+)\]', input_c, re.S)
+    check(writer and reader and writer.group(1) == reader.group(1),
+          'keys: the keys file the runner writes fits what the compositor reads (%s, %s bytes)' %
+          (writer and writer.group(1), reader and reader.group(1)))
+
+    # ---- events --------------------------------------------------------------------------------------------------
+    schema = (ROOT / 'src/rover/schema.list').read_text()
+    rover = ''.join(text for _, text in sources('src/rover/*.c'))
+    defines = dict(re.findall(r'#define (ROVER_[A-Z_]+) (\d+)u?\b', rover))
+    found = {}
+    for event, source, name in re.findall(r'^event (\d+) (runner|desktop) ("[^"]+"|\S+)', schema, re.M):
+        named = [k for k, v in defines.items() if v == event]
+        ids = [event] + named
+        posted = any(re.search(r'(?:rover_runner_post|rover_runner_service_event)\(\s*%s\b|\.id\s*=\s*%s\s*;' % (i, i), rover) for i in ids)
+        if not posted:
+            found['%s %s' % (event, name.strip('"'))] = source
+    gate('events', found, CLASS_GATES_EVENTS)
+
+    # ---- signals -------------------------------------------------------------------------------------------------
+    found = {}
+    tree = list(sources('src/**/*.c'))
+    for path, text in tree:
+        stripped = code(text)
+        for signal, number in (('SIGUSR1', 10), ('SIGUSR2', 12)):
+            if re.search(r'\b(?:[A-Z]+_)?%s\b' % signal, stripped) and re.search(r'mask|sigaction|signal_install|signalfd|handler|taken ==', stripped):
+                found['%s %s' % (path, signal)] = 1
+    for key, (sender, pattern) in CLASS_GATES_SIGNAL_SENDERS.items():
+        if sender != 'person':
+            check(re.search(pattern, (ROOT / sender).read_text()) is not None,
+                  'signals: %s: its sender %s still sends it (%s)' % (key, sender, pattern))
+    gate('signals', found, {k: '%s: %s' % v for k, v in CLASS_GATES_SIGNAL_SENDERS.items()})
+
+    # ---- gone ----------------------------------------------------------------------------------------------------
+    found = {}
+    for path, text in tree + list(sources('src/**/*.h')):
+        for m in re.finditer(r'main\.moonwater\.sh|moonwater bind\b', text):
+            found.setdefault('%s %s' % (path, m.group(0)), text.count('\n', 0, m.start()) + 1)
+    gate('gone', found, CLASS_GATES_GONE)
+
+    # ---- rows ----------------------------------------------------------------------------------------------------
+    #   A row of test/run that reads the source (a grep, sed, awk or cat of src/, or of a body cut from it) proves
+    #   where text is written and nothing of a run: its name says lint:, so nobody reads it as coverage.
+    found = {}
+    run_lines = (ROOT / 'test/run').read_text().split('\n')
+    cut, start = set(), 0
+    for i, line in enumerate(run_lines):
+        if re.match(r'^(?:lane_[a-z0-9_]+|[a-z_]+)\(\)', line):
+            start = i
+        m = re.match(r'^\s*([a-z_]+_body)=\$\(', line)
+        if m and 'src/' in ' '.join(run_lines[i:i + 4]):
+            cut.add(m.group(1))
+        m = re.match(r"^\s*same '((?:[^']|'\"'\"')*)'", line)
+        if not m:
+            continue
+        block = '\n'.join(run_lines[start:i])
+        reads = re.search(r'(?:grep|sed|awk|cat)\b[^\n]*\bsrc/', block) or \
+            any(re.search(r'\$\{?%s\b' % b, block) for b in cut)
+        if reads and not m.group(1).startswith('lint: '):
+            found['test/run %s' % m.group(1)] = i + 1
+        start = i + 1
+    gate('rows', found, {})
+
+    # ---- tests ---------------------------------------------------------------------------------------------------
+    listed = subprocess.run(['git', '-C', str(ROOT), 'ls-files', 'test'], capture_output=True, text=True).stdout.split()
+    files = set(listed)
+    roots = {'test/run'}
+    for outside in ('build.sh', 'src/build/build.c'):
+        if (ROOT / outside).exists():
+            roots.add(outside)
+    by_leaf = collections.defaultdict(set)
+    for path in files:
+        by_leaf[path.split('/')[-1]].add(path)
+    reached, queue = set(roots), list(roots)
+    while queue:
+        here = queue.pop()
+        text = (ROOT / here).read_text(errors='replace')
+        if here == 'test/differential.py':
+            # This harness and its lists name the files it allows; that is not a reach.
+            begin = text.find('def harness_class_gates(')
+            end = text.find('# The end of the class gates' + "' lists.", begin)
+            text = text[:begin] + text[end:] if begin >= 0 and end >= 0 else text
+        words = set(re.findall(r'[\w.+-]+(?:/[\w.+-]+)*', text))
+        named = set()
+        for w in words:
+            named |= by_leaf.get(w.split('/')[-1], set()) if '/' not in w or w in files or w.split('/')[-1] in by_leaf else set()
+        for path in named - reached:
+            reached.add(path)
+            if not re.search(r'\.(?:png|ppm|ttf|bin|gz|xz|zst|html)$', path):
+                queue.append(path)
+    found = {}
+    for path in sorted(files - reached):
+        prefix = next((k for k in CLASS_GATES_TESTS if k.endswith('/') and path.startswith(k)), path)
+        found[prefix] = found.get(prefix, 0) + 1
+    gate('tests', found, CLASS_GATES_TESTS)
+
+    return check.verdict('class gates', 'class_gates')
+
+
+# The sites each class gate allows, and why. A line comes out when its site is fixed; a new site is fixed, or comes in
+# with its reason (and a reviewer's eye).
+CLASS_GATES_FORK = {
+    'src/sh/net.c net_discovery_soon child':
+        'a discovery pass that could not fork is not made this time and is asked again at the next link or turn '
+        '(net_discovery_soon runs each), and nothing waits on it',
+    'src/sh/net.c net_discovery_soon inline':
+        'the double fork: a second fork that fails ends the middle child as one that worked does, and the pass is '
+        'asked again soon',
+    'src/bowl.c bowl_bus_accept child':
+        "one client of the system bus's relay: a fork that fails drops that connection (its socket closes), which the "
+        'client sees, and the relay goes on accepting',
+    'src/bowl.c bowl_bus_accept inline':
+        'the double fork of bowl_bus_accept: a second fork that fails ends the middle child, and the connection with it',
+    'src/bowl.c bowl_pad_keeper_start inline':
+        "the double fork: a second fork that fails ends the middle child, so no keeper reads the go pipe and the "
+        "pad's first write to it fails (EPIPE), which bowl_pad_go's writer hears",
+    'src/sh/host/disk.c host_detach child':
+        'tested as `if (child)`, and inside it only a child > 0 is waited for: -1 answers false like any parent, the '
+        'caller hears the detach failed; the second fork tests its -1 itself',
+    'src/waterlink/host_darwin.c host_detach child':
+        'the Mac half of host_detach, the same shape: -1 answers false to the caller, the second fork tests its -1',
+    'src/sh/host/radio.c radio_restore inline':
+        'child > 0 is kept as the restoring child; 0 and -1 both restore here (-1 is "no child to be had", as the '
+        'comment above says), and only 0 exits after',
+    'src/waterlink/command.c link_serve_start inline':
+        'a fork that fails leaves no listener, and both callers see it: link on waits on the ready pipe '
+        '(link_wait_started, "the listener did not start") and the machine keeper starts it again with back-off '
+        '(link_keep_machine)',
+}
+
+CLASS_GATES_WAIT = {
+    'src/canvas/screen.c term_reap':
+        'teardown: the wait after SIGKILL, once 80 tries of WNOHANG over two seconds have not seen the child go',
+    'src/canvas/ui/ui.c ui_start_apart_at':
+        'the double fork: the wait is for the middle child, which forks once and exits at once (exit_group)',
+    'src/rover/runner.c rover_runner_ended':
+        'called for a service whose end was seen (its pidfd readable, or reaped): the wait takes a child that has '
+        'ended and returns at once',
+    'src/rover/runner.c rover_runner_child':
+        'KNOWN, not right: at a thousand children the runner says so and waits for the oldest, which stops the '
+        'loop for as long as that child lives (a runaway rule is the only way there); a WNOHANG reap and a refusal '
+        'of the 1001st is the fix',
+}
+
+CLASS_GATES_WINDOWS = {
+    'src/sh/host.c host_window_list':
+        'moonwater windows: reads pid[] and frame[] of each row, the two word arrays (4 MiB each) and never a '
+        "row's pictures; once, for a person who asked",
+    'src/sh/host.c host_window_move':
+        'the same walk of pid[] to find the window named, once for a person who asked',
+}
+
+CLASS_GATES_EVENTS = {
+    '65 fullscreen on': 'KNOWN, not posted: the compositor says no fullscreen line down the FIFO, so a rule on it '
+                        'compiles and never runs (C-r4-4, rover and canvas)',
+    '66 fullscreen off': 'KNOWN, not posted (C-r4-4): as fullscreen on',
+    '67 window opened': 'KNOWN, not posted (C-r4-4): the compositor says no window line down the FIFO',
+    '68 window closed': 'KNOWN, not posted (C-r4-4): as window opened',
+    '69 display added': 'KNOWN, not posted (C-r4-4): the compositor says no display line; the kernel event 40 '
+                        '(display connected) is posted and is what a rule takes today',
+    '70 display removed': 'KNOWN, not posted (C-r4-4): as display added; the kernel event 41 is posted',
+}
+
+# signal -> (its sender: a file of the tree, or person), the pattern that sends it there
+CLASS_GATES_SIGNAL_SENDERS = {
+    'src/canvas/compositor.c SIGUSR1':
+        ('src/rover/runner.c', r'syscall\(kill\), \(positive\)running->pid, 10 /\* SIGUSR1 \*/'),
+    'src/canvas/compositor.c SIGUSR2':
+        ('src/sh/host/desktop.c', r'syscall\(kill\), compositor, DESKTOP_SIGUSR2'),
+    'src/lib.util.c SIGUSR1': ('person', "the C library's name for the signal, for the programs built on it (dd's "
+                                         "statistics: a person's kill -USR1)"),
+    'src/lib.util.c SIGUSR2': ('person', "the C library's name for the signal, for the programs built on it"),
+}
+
+CLASS_GATES_GONE = {
+    'src/sh/host.c main.moonwater.sh':
+        'KNOWN, live: HOST_MACHINE_SCRIPT, which `moonwater link group join` still writes a group line into '
+        '(waterlink/command.c), and which nothing runs since rover replaced the machine script: a group joined '
+        'with a secret is not joined at the next boot (posted on team/BOARD.md)',
+    'src/waterlink/host_darwin.c main.moonwater.sh':
+        "KNOWN: the Mac link client's list of the state files it keeps, the machine script among them (as above)",
+}
+
+CLASS_GATES_TESTS = {
+    'test/perf/': 'the performance kit run by hand on a machine with a screen (frame pacing, key latency, resize '
+                  'storms, films): measurements, not checks; test/perf/stages.README.txt says how',
+    'test/profile_shell': 'a developer tool: profiles a shell build under perf, with test/floor_shell.S',
+    'test/floor_shell.S': "profile_shell's floor body, read by it",
+    'test/chrome_pwrite_shim.c': "built by hand into a Chromium bowl on musl 1.2.6 (its header says how and why)",
+    'test/chrome_wayland_bench.html': 'the page the Chromium benches open by hand on the box (team notes); not a check',
+    'test/bowl_packages.py': "network only: every package a bowl profile names, asked of the distributions' indexes "
+                             'as they are today; run by hand before a profile list changes (its docstring)',
+    'test/kit_crowd.sh': 'a stress run as root with a memory cgroup v1: N kit windows against one compositor; by hand',
+    'test/wayland_toolkit.py': 'GTK 4 and Qt 6 following the theme, read off the screen: needs libadwaita and Qt on '
+                               'the machine; by hand until a lane has them',
+    'test/codec_floor/reference/deflate_decode_span.c':
+        "C reference of lib.c's deflate_decode_span that no check includes now; the floor checks compare the codec "
+        'with its own C (a lead: include it in CHECK_compression_floor or delete it)',
+    'test/codec_floor/reference/lzma_decode_span.c': 'as deflate_decode_span.c, for lzma_decode_span',
+    'test/codec_floor/reference/lzma_range_decode.c': 'as deflate_decode_span.c, for lzma_range_decode',
+    'test/codec_floor/reference/span.h': "the two references' shared header",
+}
+# The end of the class gates' lists.
+
 
 HARNESS_CHECKS = {
     "g_tables": harness_g_tables,
@@ -101796,6 +102160,7 @@ HARNESS_CHECKS = {
     "floodlight": harness_floodlight,
     "image_nodes": harness_image_nodes,
     "canvas_seam": harness_canvas_seam,
+    "class_gates": harness_class_gates,
     "canvas_scale": harness_canvas_scale,
     "font_reference": harness_font_reference,
     "bowl_session": harness_bowl_session,
