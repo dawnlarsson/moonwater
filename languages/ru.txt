@@ -2,6 +2,7 @@
 @name Русский
 @translated machine
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
+# machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 action_copy	3664	Копировать
 action_cut	5863	Вырезать
 action_paste	0288	Вставить
@@ -405,6 +406,19 @@ tray_settings	8728	Настройки
 ui_confirm_again	b3ff	нажмите ещё раз для подтверждения: 
 ui_field_digits	f52b	число состоит из цифр
 ui_field_full	fe02	больше не помещается
+settings_no_sizes	0f7e	Экран не сообщает размеров
+settings_primary_no	a970	Не основной
+settings_primary_other	0b14	Сделайте основным другой экран, чтобы сменить его
+settings_primary_yes	7f79	Основной
+settings_refused_size	1332	%s (%d × %d не предлагается)
+settings_size_ask	7773	%d × %d: выберите «Оставить» в разделе «Разрешение», иначе возврат через %d с
+settings_size_back	6c84	Не оставлено: возврат к %s
+settings_size_best	5165	%d × %d (рекомендуется)
+settings_size_keep	d1e7	Оставить %d × %d (возврат через %d с)
+settings_size_kept	7101	Оставлено %d × %d
+settings_size_own	810e	его собственный размер
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Экран не принял %d × %d: возврат к %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Круг под каждым пальцем на сенсорном экране
@@ -731,3 +745,7 @@ ui_field_full	fe02	больше не помещается
 =Taskbar distance from the edge (pixels)	845c	Отступ панели задач от края (пиксели)
 =grouped	8b7d	вместе
 =separate	bb18	раздельно
+=Resolution	18af	Разрешение
+=Primary display	924b	Основной экран
+=Graphics	9fa8	Графика
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Где рисует Canvas: на GPU или на процессоре. Что делает карта сейчас — ниже

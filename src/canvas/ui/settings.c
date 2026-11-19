@@ -1791,6 +1791,129 @@ static unsigned int settings_rates_of(int chosen)
         return rates > WINDOWS_OUTPUT_HZ ? WINDOWS_OUTPUT_HZ : rates;
 }
 
+/*
+        The Resolution row: every size the chosen screen lists (the table's output_size, the most pixels first), the one it marks
+        preferred said so, as many as a menu holds less the one a change waiting to be kept takes at its top.
+
+        A size chosen is a change the screen may not show well, or at all: it is sent (canvas display NAME mode WxH) and then is
+        to be kept, the menu's first item saying so with the seconds left (Keep 1920x1080, back in 12 s). Unless it is kept within
+        SETTINGS_KEEP_NS, or when the compositor says the screen did not take it (the table's WINDOWS_REFUSED_SIZE for that ask),
+        the size it had before is sent back: its own line's size, or preferred when its line asked none. Kept by connector name in
+        the displays file, so a screen plugged in again, or the next boot, is at the size kept.
+*/
+#define SETTINGS_KEEP_NS 15000000000ull
+#define SETTINGS_SIZES_SHOWN (UI_MENU_ITEMS - 1)
+
+static struct
+{
+        b32 on;                          // a size sent waits to be kept
+        char name[WINDOWS_OUTPUT_NAME];  // the screen's connector
+        unsigned int width, height;      // the size sent
+        unsigned int old_w, old_h;       // the size its line asked before (0 by 0: none, preferred)
+        positive due;                    // when it goes back
+        b32 seen;                        // the table has shown the screen at the size sent
+} settings_resize;
+
+static unsigned int settings_sizes_of(int chosen)
+{
+        unsigned int sizes = settings.own.table->output_sizes[chosen];
+
+        sizes = sizes > WINDOWS_OUTPUT_SIZES ? WINDOWS_OUTPUT_SIZES : sizes;
+        return sizes > SETTINGS_SIZES_SHOWN ? SETTINGS_SIZES_SHOWN : sizes;
+}
+
+// Whether a size sent waits to be kept on the chosen screen: the Resolution menu then starts with the item that keeps it.
+static b32 settings_keep_here(int chosen)
+{
+        return settings_resize.on && chosen >= 0 &&
+               string_equals((string_address)settings_resize.name, (string_address)settings.own.table->output_name[chosen]);
+}
+
+static positive settings_size_label(const struct windows address_to table, int chosen, unsigned int index, char address_to into, positive room)
+{
+        unsigned int w = table->output_size[chosen][index][0], h = table->output_size[chosen][index][1];
+
+        return language_format(into, room, index == table->output_size_preferred[chosen] ? WORDS(settings_size_best) : WORDS(settings_size_plain),
+                               (long)w, (long)h);
+}
+
+// The seconds a size sent has left to be kept, rounded up.
+static positive settings_keep_left(void)
+{
+        positive now = (positive)ui_kit.now;
+
+        return settings_resize.due > now ? (settings_resize.due - now + 999999999ull) / 1000000000ull : 0;
+}
+
+static fn settings_change(int row, const char address_to value);
+
+// The size the screen had sent back, and said: a size not kept in time, or one the screen did not take (refused).
+static fn settings_keep_back(b32 refused)
+{
+        char value[SETTINGS_TYPED], back[32], line[SETTINGS_STATUS];
+        positive length;
+        int row = settings_output_row(SETTINGS_OUT_SIZE);
+
+        settings_resize.on = false;
+        if (row < 0)
+                return;
+        length = settings_map_add(value, sizeof(value), 0, settings_resize.name);
+        length = settings_map_add(value, sizeof(value), length, " mode ");
+        if (settings_resize.old_w)
+        {
+                positive at = settings_map_number(back, sizeof(back), 0, (long)settings_resize.old_w);
+
+                at = settings_map_add(back, sizeof(back), at, "x");
+                settings_map_number(back, sizeof(back), at, (long)settings_resize.old_h);
+        }
+        else
+                settings_map_add(back, sizeof(back), 0, "preferred");
+        settings_map_add(value, sizeof(value), length, back);
+        settings_change(row, value);
+        if (refused)
+                language_format(line, sizeof(line), WORDS(settings_size_refused), (long)settings_resize.width, (long)settings_resize.height,
+                                settings_resize.old_w ? back : WORDS(settings_size_own));
+        else
+                language_format(line, sizeof(line), WORDS(settings_size_back), settings_resize.old_w ? back : WORDS(settings_size_own));
+        settings_say((string_address)line);
+        ui_page_redraw(&settings.page);
+}
+
+/*
+        A size waiting to be kept, looked at from the window's timers: sent back when its time is up or the compositor says the screen
+        did not take it, its row drawn again each second so the seconds count down. Answers the time to the next look, -1 for none.
+*/
+static long settings_keep_tick(void)
+{
+        struct windows address_to table = settings.own.table;
+        positive now = (positive)ui_kit.now, left;
+
+        if (!settings_resize.on || !table)
+                return -1;
+        for (unsigned int at = 0; at < table->outputs && at < WINDOWS_OUTPUTS; at++)
+        {
+                if (!string_equals((string_address)table->output_name[at], (string_address)settings_resize.name))
+                        continue;
+                if (table->output_mode_w[at] == settings_resize.width && table->output_mode_h[at] == settings_resize.height)
+                        settings_resize.seen = true;
+                // The line asks the size sent and the screen is at another: the compositor did not take it.
+                else if (table->output_asked_w[at] == settings_resize.width && table->output_asked_h[at] == settings_resize.height &&
+                         (table->output_refused[at] & WINDOWS_REFUSED_SIZE))
+                {
+                        settings_keep_back(true);
+                        return -1;
+                }
+        }
+        if (now >= settings_resize.due)
+        {
+                settings_keep_back(false);
+                return -1;
+        }
+        ui_page_redraw(&settings.page);
+        left = (settings_resize.due - now) % 1000000000ull;
+        return (long)(left ? left : 1000000000ull);
+}
+
 // What a Display row shows for the chosen screen now: its label, its turn's word, or its rate's.
 static const char address_to settings_output_text(int row, int chosen)
 {
@@ -1808,6 +1931,27 @@ static const char address_to settings_output_text(int row, int chosen)
                 settings_scale_label(percent, percent == settings_scale_suggested(table, chosen), settings_shown_rate, sizeof(settings_shown_rate));
                 return settings_shown_rate;
         }
+        if (settings_rows[row].output == SETTINGS_OUT_SIZE)
+        {
+                unsigned int w = table->output_mode_w[chosen], h = table->output_mode_h[chosen];
+
+                if (settings_keep_here(chosen))
+                {
+                        language_format(settings_shown_rate, sizeof(settings_shown_rate), WORDS(settings_size_keep), (long)settings_resize.width,
+                                        (long)settings_resize.height, (long)settings_keep_left());
+                        return settings_shown_rate;
+                }
+                for (unsigned int at = 0; at < settings_sizes_of(chosen); at++)
+                        if (table->output_size[chosen][at][0] == w && table->output_size[chosen][at][1] == h)
+                        {
+                                settings_size_label(table, chosen, at, settings_shown_rate, sizeof(settings_shown_rate));
+                                return settings_shown_rate;
+                        }
+                language_format(settings_shown_rate, sizeof(settings_shown_rate), WORDS(settings_size_plain), (long)w, (long)h);
+                return settings_shown_rate;
+        }
+        if (settings_rows[row].output == SETTINGS_OUT_PRIMARY)
+                return chosen == 0 ? WORDS(settings_primary_yes) : WORDS(settings_primary_no);
         if (settings_rows[row].output == SETTINGS_OUT_REFRESH)
         {
                 rates = settings_rates_of(chosen);
@@ -1848,6 +1992,12 @@ static const char address_to settings_row_text(int row, int chosen)
         {
                 language_format(settings_noted, sizeof(settings_noted), WORDS(settings_refused_turn), shown,
                                 settings_turn_label(table->output_asked_turn[chosen]));
+                return settings_noted;
+        }
+        if (output == SETTINGS_OUT_SIZE && (refused & WINDOWS_REFUSED_SIZE) && !settings_keep_here(chosen))
+        {
+                language_format(settings_noted, sizeof(settings_noted), WORDS(settings_refused_size), shown, (long)table->output_asked_w[chosen],
+                                (long)table->output_asked_h[chosen]);
                 return settings_noted;
         }
         if (output == SETTINGS_OUT_SCREEN && (refused & WINDOWS_REFUSED_PLACE))
@@ -4676,6 +4826,27 @@ static b32 settings_output_choice(const struct settings_row address_to which, po
                 settings_rate_label(table->output_hz[chosen][index], index == 0, into, room);
                 return true;
         }
+        if (which->output == SETTINGS_OUT_SIZE && chosen >= 0)
+        {
+                b32 keep = settings_keep_here(chosen);
+
+                if (keep && index == 0)
+                {
+                        language_format(into, room, WORDS(settings_size_keep), (long)settings_resize.width, (long)settings_resize.height,
+                                        (long)settings_keep_left());
+                        return true;
+                }
+                index -= keep;
+                if (index >= settings_sizes_of(chosen))
+                        return false;
+                settings_size_label(table, chosen, (unsigned int)index, into, room);
+                return true;
+        }
+        if (which->output == SETTINGS_OUT_PRIMARY && chosen >= 0 && index < 2)
+        {
+                string_copy_bounded((string_address)into, (string_address)(index ? WORDS(settings_primary_no) : WORDS(settings_primary_yes)), room);
+                return true;
+        }
         return false;
 }
 
@@ -4742,7 +4913,14 @@ static void settings_describe_output(int id, struct ui_row address_to row)
                 row->kind = UI_ROW_PLAIN, row->dim = true, row->value = WORDS(settings_no_rates);
                 return;
         }
-        if ((output == SETTINGS_OUT_REFRESH && settings_rates_of(chosen) == 1) || (output == SETTINGS_OUT_SCREEN && settings_map_count() == 1))
+        if (output == SETTINGS_OUT_SIZE && !settings_sizes_of(chosen))
+        {
+                row->kind = UI_ROW_PLAIN, row->dim = true, row->value = WORDS(settings_no_sizes);
+                return;
+        }
+        if ((output == SETTINGS_OUT_REFRESH && settings_rates_of(chosen) == 1) || (output == SETTINGS_OUT_SCREEN && settings_map_count() == 1) ||
+            (output == SETTINGS_OUT_SIZE && settings_sizes_of(chosen) == 1 && !settings_keep_here(chosen)) ||
+            (output == SETTINGS_OUT_PRIMARY && settings_map_count() == 1))
                 row->kind = UI_ROW_PLAIN;
         row->value = settings_row_text(id, chosen);
 }
@@ -4781,6 +4959,63 @@ static fn settings_output_apply(int row, const char address_to label)
                 return;
         }
         length = settings_map_add(value, sizeof(value), 0, table->output_name[chosen]);
+        if (which->output == SETTINGS_OUT_SIZE)
+        {
+                b32 keep = settings_keep_here(chosen);
+                unsigned int w, h;
+                char line[SETTINGS_STATUS];
+
+                // The first item while a size waits keeps it.
+                if (keep && at == 0)
+                {
+                        settings_resize.on = false;
+                        language_format(line, sizeof(line), WORDS(settings_size_kept), (long)settings_resize.width, (long)settings_resize.height);
+                        settings_say((string_address)line);
+                        ui_page_redraw(&settings.page);
+                        return;
+                }
+                at -= keep;
+                if (at < 0 || at >= (int)settings_sizes_of(chosen))
+                        return;
+                w = table->output_size[chosen][at][0], h = table->output_size[chosen][at][1];
+                if (w == table->output_mode_w[chosen] && h == table->output_mode_h[chosen] && !keep)
+                {
+                        settings_say((string_address)WORDS(settings_already_set));
+                        return;
+                }
+                // The size it had before is the one a size not kept goes back to; a size chosen while another waits keeps the first one's.
+                if (!keep)
+                        settings_resize.old_w = table->output_asked_w[chosen], settings_resize.old_h = table->output_asked_h[chosen];
+                string_copy_bounded((string_address)settings_resize.name, (string_address)table->output_name[chosen], sizeof(settings_resize.name));
+                settings_resize.width = w, settings_resize.height = h;
+                settings_resize.due = (positive)ui_kit.now + SETTINGS_KEEP_NS, settings_resize.seen = false, settings_resize.on = true;
+                length = settings_map_add(value, sizeof(value), length, " mode ");
+                length = settings_map_number(value, sizeof(value), length, (long)w);
+                length = settings_map_add(value, sizeof(value), length, "x");
+                settings_map_number(value, sizeof(value), length, (long)h);
+                settings_change(row, value);
+                language_format(line, sizeof(line), WORDS(settings_size_ask), (long)w, (long)h, (long)(SETTINGS_KEEP_NS / 1000000000ull));
+                settings_say((string_address)line);
+                ui_page_redraw(&settings.page);
+                return;
+        }
+        if (which->output == SETTINGS_OUT_PRIMARY)
+        {
+                if ((at == 0) == (chosen == 0))
+                {
+                        settings_say((string_address)WORDS(settings_already_set));
+                        return;
+                }
+                // A screen is made the primary; one is not made less than primary except by making another the primary.
+                if (at != 0)
+                {
+                        settings_say((string_address)WORDS(settings_primary_other));
+                        return;
+                }
+                settings_map_add(value, sizeof(value), length, " primary");
+                settings_change(row, value);
+                return;
+        }
         // The value the screen has already sends nothing, and says so.
         if ((which->output == SETTINGS_OUT_TURN && settings_turns[at].degrees == (int)table->output_turn[chosen]) ||
             (which->output == SETTINGS_OUT_SCALE && at < (int)(sizeof(settings_scales) / sizeof(settings_scales[0])) &&
@@ -6668,6 +6903,13 @@ static long settings_tick(long timeout, long address_to other)
                                               : settings_editing() >= 0 ? &settings.edit : &settings.filter_edit;
 
                 timeout = ui_field_tick(&settings.ui, &settings.page, t, timeout, gallery.on ? t->focused : settings.focused);
+        }
+        // A size sent and waiting to be kept counts down, and goes back when its time is up (settings_keep_tick).
+        {
+                long keep = settings_keep_tick();
+
+                if (keep >= 0 && (timeout < 0 || keep < timeout))
+                        timeout = keep;
         }
         // Children left (settings_leave) are asked once a second whether they have exited.
         if (settings_left_reap() && (timeout < 0 || timeout > SETTINGS_BOARD_NS))

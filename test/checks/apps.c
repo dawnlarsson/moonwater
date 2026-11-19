@@ -393,6 +393,95 @@ static void display_frames(void)
         language_take(0);
 }
 
+/*
+        The Display group's rows under the map (display-rows-*.ppm), scrolled to the Resolution row: one screen at its own size of the
+        sizes it lists; two screens, the second chosen, not the primary, at a size it was asked; a screen whose sizes are only the
+        no-EDID list a driver gives a connector it has not read (1024x768 and under, none marked its own), asked a size it does not
+        list; and a size chosen waiting to be kept, its seconds counting down. Then the Graphics part at the group's end: the GPU row.
+*/
+static void display_rows_frames(void)
+{
+        static const struct
+        {
+                string_address name;
+                unsigned int screens, kind; // kind: 0 a panel's EDID, 1 two screens, 2 the no-EDID list, 3 a size waiting to be kept
+        } shots[] = {
+                {"display-rows-one", 1, 0},
+                {"display-rows-two", 2, 1},
+                {"display-rows-noedid", 1, 2},
+                {"display-rows-keep", 1, 3},
+        };
+        static const unsigned short panel[][2] = {{1920, 1080}, {1680, 1050}, {1280, 1024}, {1440, 900}, {1280, 720}, {1024, 768}, {800, 600}, {640, 480}};
+        static const unsigned short noedid[][2] = {{1024, 768}, {800, 600}, {848, 480}, {640, 480}};
+
+        for (positive at = 0; at < sizeof(shots) / sizeof(shots[0]) + 1; at++)
+        {
+                struct windows address_to table;
+                int row;
+                b32 gpu = at == sizeof(shots) / sizeof(shots[0]);
+                unsigned int kind = gpu ? 0 : shots[at].kind;
+
+                fold_setup(100, false, 0);
+                table = windows_scratch_table(&fold_table_scratch);
+                table->outputs = gpu ? 1 : shots[at].screens, table->scale = 100;
+                table->output_w[0] = 1920, table->output_h[0] = 1080;
+                memory_copy(table->output_name[0], "HDMI-A-2", 9);
+                if (kind != 2)
+                        memory_copy(table->output_model[0], "DELL P2419H", 12);
+                {
+                        const unsigned short (*sizes)[2] = kind == 2 ? noedid : panel;
+                        unsigned int count = kind == 2 ? 4 : 8;
+
+                        for (unsigned int n = 0; n < count; n++)
+                                table->output_size[0][n][0] = sizes[n][0], table->output_size[0][n][1] = sizes[n][1];
+                        table->output_sizes[0] = count, table->output_size_preferred[0] = kind == 2 ? count : 0;
+                }
+                table->output_mode_w[0] = kind == 2 ? 1024 : 1920, table->output_mode_h[0] = kind == 2 ? 768 : 1080;
+                if (kind == 2)
+                {
+                        table->output_w[0] = 1024, table->output_h[0] = 768;
+                        table->output_asked_w[0] = 1920, table->output_asked_h[0] = 1080, table->output_refused[0] = WINDOWS_REFUSED_SIZE;
+                }
+                table->output_rates[0] = 2, table->output_hz[0][0] = 60, table->output_hz[0][1] = 50, table->output_now[0] = 60;
+                table->output_asked_scale[0] = 100, table->output_asked_scale[1] = 100;
+                if (kind == 1)
+                {
+                        table->output_x[1] = 1920, table->output_w[1] = 1280, table->output_h[1] = 1024;
+                        memory_copy(table->output_name[1], "DP-1", 5);
+                        table->output_sizes[1] = 3, table->output_size_preferred[1] = 0;
+                        table->output_size[1][0][0] = 1280, table->output_size[1][0][1] = 1024;
+                        table->output_size[1][1][0] = 1024, table->output_size[1][1][1] = 768;
+                        table->output_size[1][2][0] = 800, table->output_size[1][2][1] = 600;
+                        table->output_mode_w[1] = 1280, table->output_mode_h[1] = 1024;
+                        table->output_asked_w[1] = 1280, table->output_asked_h[1] = 1024;
+                        table->output_rates[1] = 1, table->output_hz[1][0] = 75, table->output_now[1] = 75;
+                }
+                settings_resize.on = kind == 3;
+                if (kind == 3)
+                {
+                        memory_copy(settings_resize.name, "HDMI-A-2", 9);
+                        settings_resize.width = 1280, settings_resize.height = 720;
+                        settings_resize.due = (positive)ui_kit.now + 12000000000ull;
+                }
+                row = gpu ? fold_row : settings_output_row(SETTINGS_OUT_SIZE);
+                settings_group_choose(settings_group_of(row));
+                settings.map.display = kind == 1 ? 1 : 0, settings.map.keys = false, settings.map.sent = false, settings.map.shown = 0;
+                ui_graph_start(&settings.map.graph);
+                settings.list.focus = row;
+                settings_rebuild();
+                {
+                        int place = ui_list_at(&settings.list, row);
+
+                        if (place >= 0)
+                                settings.list.scroll.scroll = settings.list.top[place] - ui_dev(&settings.ui, UI_ROW);
+                        ui_scroll_clamp(&settings.list.scroll);
+                }
+                fold_shot(gpu ? (string_address) "display-rows-gpu" : shots[at].name);
+                ui_graph_let_go(&settings.map.graph);
+                settings_resize.on = false;
+        }
+}
+
 b32 main()
 {
         compositor_rows_make(compositor_rows_in_use); // the compositor's rows, made before any check reads one
@@ -844,6 +933,7 @@ b32 main()
         fold_checks();
         fold_frames();
         display_frames();
+        display_rows_frames();
         // The launcher, dark, with ls typed: the kit's field, and the kit's list under it with the pointer over its third row.
         {
                 static char names[6][LAUNCHER_NAME];
@@ -9959,6 +10049,7 @@ b32 main()
                               program_argument_count() > 4 ? program_argument(4) : null);
         check_rtl_mirror();
         check_display_section();
+        check_display_modes();
         check_battery();
 #endif
 #if MOONWATER_UI_SETTINGS && MOONWATER_UI_LAUNCHER

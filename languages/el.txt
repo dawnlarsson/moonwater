@@ -2,6 +2,7 @@
 @name Ελληνικά
 @translated machine
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
+# machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 action_copy	3664	Αντιγραφή
 action_cut	5863	Αποκοπή
 action_paste	0288	Επικόλληση
@@ -405,6 +406,19 @@ tray_settings	8728	Ρυθμίσεις
 ui_confirm_again	b3ff	πατήστε ξανά για επιβεβαίωση: 
 ui_field_digits	f52b	ένας αριθμός αποτελείται από ψηφία
 ui_field_full	fe02	δεν χωράει περισσότερο
+settings_no_sizes	0f7e	Η οθόνη δεν αναφέρει μεγέθη
+settings_primary_no	a970	Όχι κύρια
+settings_primary_other	0b14	Κάντε κύρια μια άλλη οθόνη για να την αλλάξετε
+settings_primary_yes	7f79	Κύρια
+settings_refused_size	1332	%s (το %d × %d δεν προσφέρεται)
+settings_size_ask	7773	%d × %d: επιλέξτε Διατήρηση στην Ανάλυση, αλλιώς επιστρέφει σε %d δ
+settings_size_back	6c84	Δεν διατηρήθηκε: πίσω στο %s
+settings_size_best	5165	%d × %d (προτεινόμενο)
+settings_size_keep	d1e7	Διατήρηση %d × %d (πίσω σε %d δ)
+settings_size_kept	7101	Διατηρήθηκε %d × %d
+settings_size_own	810e	το δικό της μέγεθος
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Η οθόνη δεν δέχτηκε το %d × %d: πίσω στο %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Ένας κύκλος κάτω από κάθε δάχτυλο σε οθόνη αφής
@@ -731,3 +745,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Taskbar distance from the edge (pixels)	845c	Απόσταση της γραμμής εργασιών από την άκρη (εικονοστοιχεία)
 =grouped	8b7d	ομαδοποιημένες
 =separate	bb18	χωριστές
+=Resolution	18af	Ανάλυση
+=Primary display	924b	Κύρια οθόνη
+=Graphics	9fa8	Γραφικά
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Πού σχεδιάζει το Canvas: στη GPU ή στον επεξεργαστή. Τι κάνει τώρα η κάρτα είναι από κάτω

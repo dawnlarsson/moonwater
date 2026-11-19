@@ -2,6 +2,7 @@
 @name Polski
 @translated machine
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
+# machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 action_copy	3664	Kopiuj
 action_cut	5863	Wytnij
 action_paste	0288	Wklej
@@ -405,6 +406,19 @@ tray_settings	8728	Ustawienia
 ui_confirm_again	b3ff	naciśnij ponownie, aby potwierdzić: 
 ui_field_digits	f52b	liczba składa się z cyfr
 ui_field_full	fe02	więcej się nie zmieści
+settings_no_sizes	0f7e	Ekran nie podaje rozmiarów
+settings_primary_no	a970	Nie główny
+settings_primary_other	0b14	Ustaw inny ekran jako główny, aby go zmienić
+settings_primary_yes	7f79	Główny
+settings_refused_size	1332	%s (%d × %d nie jest oferowana)
+settings_size_ask	7773	%d × %d: wybierz Zachowaj w Rozdzielczości, inaczej powrót za %d s
+settings_size_back	6c84	Nie zachowano: powrót do %s
+settings_size_best	5165	%d × %d (zalecana)
+settings_size_keep	d1e7	Zachowaj %d × %d (powrót za %d s)
+settings_size_kept	7101	Zachowano %d × %d
+settings_size_own	810e	jego własny rozmiar
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Ekran nie przyjął %d × %d: powrót do %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Okrąg pod każdym palcem na ekranie dotykowym
@@ -731,3 +745,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Taskbar distance from the edge (pixels)	845c	Odległość paska zadań od krawędzi (piksele)
 =grouped	8b7d	zgrupowane
 =separate	bb18	osobno
+=Resolution	18af	Rozdzielczość
+=Primary display	924b	Ekran główny
+=Graphics	9fa8	Grafika
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Gdzie Canvas rysuje: na GPU czy na procesorze. Co karta robi teraz, jest poniżej

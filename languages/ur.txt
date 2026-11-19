@@ -3,6 +3,7 @@
 @translated machine
 @direction rtl
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
+# machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 action_copy	3664	کاپی
 action_cut	5863	کٹ
 action_paste	0288	پیسٹ
@@ -406,6 +407,19 @@ tray_settings	8728	ترتیبات
 ui_confirm_again	b3ff	دوبارہ دبائیں: 
 ui_field_digits	f52b	نمبر ہندسوں پر مشتمل ہوتا ہے
 ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
+settings_no_sizes	0f7e	اسکرین کوئی سائز فہرست نہیں کرتی
+settings_primary_no	a970	بنیادی نہیں
+settings_primary_other	0b14	بدلنے کے لیے کسی اور اسکرین کو بنیادی بنائیں
+settings_primary_yes	7f79	بنیادی
+settings_refused_size	1332	%s (%d × %d پیش نہیں)
+settings_size_ask	7773	%d × %d: ریزولوشن میں رکھیں چنیں، ورنہ %d سیکنڈ میں واپس
+settings_size_back	6c84	نہیں رکھا: واپس %s
+settings_size_best	5165	%d × %d (تجویز کردہ)
+settings_size_keep	d1e7	%d × %d رکھیں (%d سیکنڈ میں واپس)
+settings_size_kept	7101	%d × %d رکھا
+settings_size_own	810e	اس کا اپنا سائز
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	اسکرین نے %d × %d نہیں لیا: واپس %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	ٹچ اسکرین پر ہر انگلی کے نیچے ایک دائرہ
@@ -732,3 +746,7 @@ ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
 =Taskbar distance from the edge (pixels)	845c	ٹاسک بار کا کنارے سے فاصلہ (پکسل)
 =grouped	8b7d	اکٹھے
 =separate	bb18	الگ
+=Resolution	18af	ریزولوشن
+=Primary display	924b	بنیادی اسکرین
+=Graphics	9fa8	گرافکس
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Canvas کہاں بناتا ہے: GPU پر یا پروسیسر پر۔ کارڈ ابھی کیا کر رہا ہے نیچے ہے

@@ -5171,6 +5171,178 @@ static b32 drive_part_says(int at, const char address_to label, const char addre
         note with its strip; a drive with no partition table is one unpartitioned segment; a USB device's line has no segments
         and reads as it always did, and a press on it is a port's, not a note's.
 */
+/*
+        A screen's size, kept by name in the displays file and chosen on the Displays page, and the primary screen.
+
+        The file: mode=WxH and primary=yes read, written back the same and judged; a screen made the primary is the only one. The
+        compositor: every size a screen lists, each once and the most pixels first, the preferred marked; a size asked that the
+        screen is not at said refused in the table; and the screen whose line says primary=yes laid first, wherever it is on the desk.
+        The page: the Resolution row lists the sizes with the screen's own marked and shows the one it is at; a size chosen is sent
+        by name and waits to be kept, the menu's first item keeping it, and goes back to the size before when its time is up or when
+        the compositor says the screen did not take it. The Primary display row makes the chosen screen the primary.
+*/
+static fn check_display_modes(void)
+{
+        struct windows address_to saved = settings.own.table;
+        static struct windows *table_scratch;
+        struct windows *const table_at = windows_scratch_table(&table_scratch);
+        struct windows_display list[4], change = {0};
+        char text[SETTINGS_VALUE], out[512], work[512];
+        int size_row = settings_output_row(SETTINGS_OUT_SIZE), primary_row = settings_output_row(SETTINGS_OUT_PRIMARY), made;
+        unsigned int count;
+
+        // The file.
+        count = windows_displays_read("HDMI-A-2 mode=1920x1080 primary=yes\nDP-1 mode=preferred\nDP-2 mode=12x\n", list, 4);
+        check("display modes: a line's mode=WxH and primary=yes are read",
+              count == 3 && list[0].width == 1920 && list[0].height == 1080 && list[0].primary && !list[0].bad);
+        check("display modes: mode=preferred is no size asked, and a malformed size is bad",
+              list[1].width == 0 && !list[1].bad && !list[1].primary && (list[2].bad & WINDOWS_DISPLAY_MODE));
+        made = (int)windows_displays_write(out, sizeof(out), list, 1);
+        check("display modes: a line written back says its mode and that it is the primary",
+              made > 0 && string_equals((string_address)out, (string_address) "HDMI-A-2 rotation=0 refresh=preferred mode=1920x1080 primary=yes\n"));
+        made = windows_displays_primary(out, work, sizeof(out), "HDMI-A-2 mode=1920x1080 primary=yes\nDP-1 rotation=90\n", "DP-1");
+        count = made > 0 ? windows_displays_read(out, list, 4) : 0;
+        check("display modes: a screen made the primary is the only one, and the one that was keeps its other fields",
+              count == 2 && !list[0].primary && list[0].width == 1920 &&
+                  windows_display_of(list, count, "DP-1", 4) && windows_display_of(list, count, "DP-1", 4)->primary &&
+                  windows_display_of(list, count, "DP-1", 4)->rotation == 90);
+        change.width = 1280, change.height = 720;
+        made = windows_displays_set(out, sizeof(out), "", "eDP-1", WINDOWS_DISPLAY_MODE, &change);
+        check("display modes: a screen with no line gets one of its size alone", made > 0 && string_equals((string_address)out,
+              (string_address) "eDP-1 rotation=0 refresh=preferred mode=1280x720\n"));
+        {
+                unsigned int w = 1, h = 1;
+
+                check("display modes: a size is WIDTHxHEIGHT of whole numbers, and preferred is none",
+                      windows_display_size("3840x2160", 9, &w, &h) && w == 3840 && h == 2160 && windows_display_size("preferred", 9, &w, &h) && !w &&
+                          !windows_display_size("0x10", 4, &w, &h) && !windows_display_size("1920", 4, &w, &h) && !windows_display_size("99999x1", 7, &w, &h));
+        }
+
+        // The compositor: the sizes a screen lists, and what it says of a size asked.
+        {
+                static struct compositor_connected found;
+                struct compositor_mode modes[6] = {{0}};
+                static struct windows *made_scratch;
+                struct windows *const made_at = windows_scratch_table(&made_scratch);
+                int rects[WINDOWS_OUTPUTS][4];
+                unsigned char order[WINDOWS_OUTPUTS];
+                unsigned int lit;
+
+                memory_zero(&found, sizeof(found));
+                modes[0].hdisplay = 1920, modes[0].vdisplay = 1080, modes[0].vrefresh = 60, modes[0].type = COMPOSITOR_MODE_PREFERRED;
+                modes[1].hdisplay = 1920, modes[1].vdisplay = 1080, modes[1].vrefresh = 50;
+                modes[2].hdisplay = 2560, modes[2].vdisplay = 1440, modes[2].vrefresh = 60;
+                modes[3].hdisplay = 1024, modes[3].vdisplay = 768, modes[3].vrefresh = 60;
+                modes[4].hdisplay = 1920, modes[4].vdisplay = 1080, modes[4].vrefresh = 30, modes[4].flags = 16u; // interlaced
+                modes[5].hdisplay = 1280, modes[5].vdisplay = 1024, modes[5].vrefresh = 60;
+                compositor_sizes_take(&found, 0, modes, 6);
+                check("display modes: a screen's sizes are each once, the most pixels first, and the preferred is marked",
+                      found.size_count[0] == 4 && found.sizes[0][0][0] == 2560 && found.sizes[0][1][0] == 1920 && found.sizes[0][2][0] == 1280 &&
+                          found.sizes[0][3][0] == 1024 && found.size_preferred[0] == 1);
+
+                memory_zero(compositor_display, sizeof(compositor_display));
+                memory_copy(compositor_display[0].name, "HDMI-A-2", 9);
+                compositor_display[0].width = 2560, compositor_display[0].height = 1440, compositor_display[0].scale = 100;
+                compositor_displays = 1;
+                compositor.output[0].mode.hdisplay = 1920, compositor.output[0].mode.vdisplay = 1080;
+                compositor_table_refusals(made_at, 0, "HDMI-A-2");
+                check("display modes: a size asked that the screen is not at is refused in the table, with the size asked",
+                      (made_at->output_refused[0] & WINDOWS_REFUSED_SIZE) && made_at->output_asked_w[0] == 2560 && made_at->output_asked_h[0] == 1440);
+                compositor.output[0].mode.hdisplay = 2560, compositor.output[0].mode.vdisplay = 1440;
+                compositor_table_refusals(made_at, 0, "HDMI-A-2");
+                check("display modes: the size asked, taken, is refused nothing", !(made_at->output_refused[0] & WINDOWS_REFUSED_SIZE));
+
+                // Two screens side by side, the second named the primary: it is laid first, and stays where it is.
+                memory_zero(&found, sizeof(found));
+                found.count = 2;
+                memory_copy(found.name[0], "DP-1", 5), memory_copy(found.name[1], "HDMI-A-2", 9);
+                found.size[0][0] = 1920, found.size[0][1] = 1080, found.size[1][0] = 1280, found.size[1][1] = 1024;
+                compositor_display[0].primary = 1;
+                lit = compositor_space_lay(&found, 0, rects, order);
+                check("display modes: the screen whose line says primary=yes is laid first, and keeps its place on the desk",
+                      lit == 2 && order[0] == 1 && order[1] == 0 && rects[1][0] != rects[0][0]);
+                compositor_display[0].primary = 0;
+                lit = compositor_space_lay(&found, 0, rects, order);
+                check("display modes: with no screen the primary, the first laid is", lit == 2 && order[0] == 0);
+                compositor_displays = 0;
+                memory_zero(compositor_display, sizeof(compositor_display));
+                memory_zero(&compositor.output[0].mode, sizeof(compositor.output[0].mode));
+        }
+
+        // The page.
+        windows_scratch_zero(table_at);
+        table_at->outputs = 2, table_at->output_width = 1920, table_at->output_height = 1080, table_at->scale = 100;
+        table_at->output_x[0] = 0, table_at->output_w[0] = 1920, table_at->output_h[0] = 1080;
+        table_at->output_x[1] = 1920, table_at->output_w[1] = 1024, table_at->output_h[1] = 768;
+        memory_copy(table_at->output_name[0], "HDMI-A-2", 9), memory_copy(table_at->output_name[1], "DP-1", 5);
+        table_at->output_sizes[0] = 3, table_at->output_size_preferred[0] = 0;
+        table_at->output_size[0][0][0] = 1920, table_at->output_size[0][0][1] = 1080;
+        table_at->output_size[0][1][0] = 1280, table_at->output_size[0][1][1] = 720;
+        table_at->output_size[0][2][0] = 1024, table_at->output_size[0][2][1] = 768;
+        table_at->output_mode_w[0] = 1024, table_at->output_mode_h[0] = 768;
+        table_at->output_mode_w[1] = 1024, table_at->output_mode_h[1] = 768;
+        settings.own.table = table_at;
+        settings.map.display = 0;
+        settings.child = 1, settings.queued = 0, settings_resize.on = false;
+        check("display modes: the Resolution and Primary display rows are rows of the Display section", size_row >= 0 && primary_row >= 0 &&
+              settings_group_of(size_row) == settings_group_of(settings_output_row(SETTINGS_OUT_SCREEN)) &&
+              settings_group_of(primary_row) == settings_group_of(size_row));
+        check("display modes: the Resolution dropdown lists every size the screen lists, its own marked recommended",
+              settings_options(&settings_rows[size_row]) == 3 && settings_choice(&settings_rows[size_row], 0, text, sizeof(text)) &&
+                  string_equals((string_address)text, (string_address) "1920 × 1080 (recommended)") &&
+                  settings_choice(&settings_rows[size_row], 2, text, sizeof(text)) && string_equals((string_address)text, (string_address) "1024 × 768"));
+        check("display modes: the Resolution row shows the size the screen is at",
+              string_equals((string_address)settings_shown_value(size_row), (string_address) "1024 × 768"));
+        settings_output_apply(size_row, "1920 × 1080 (recommended)");
+        check("display modes: a size chosen is sent by the screen's name, and waits to be kept",
+              settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "HDMI-A-2 mode 1920x1080") &&
+                  settings_resize.on && settings_resize.width == 1920 && settings_resize.old_w == 0);
+        check("display modes: while it waits, the dropdown's first item keeps it, with the seconds left",
+              settings_options(&settings_rows[size_row]) == 4 && settings_choice(&settings_rows[size_row], 0, text, sizeof(text)) &&
+                  string_equals((string_address)text, (string_address) "Keep 1920 × 1080 (back in 15 s)"));
+        settings.queued = 0;
+        settings_output_apply(size_row, "Keep 1920 × 1080 (back in 15 s)");
+        check("display modes: the keep item keeps it, and sends nothing", !settings_resize.on && settings.queued == 0);
+
+        // Not kept in time: the size before goes back (preferred, as the line asked none).
+        settings_output_apply(size_row, "1280 × 720");
+        settings.queued = 0;
+        settings_resize.due = (positive)ui_kit.now;
+        (void)settings_keep_tick();
+        check("display modes: a size not kept in time goes back to the size the line asked before",
+              !settings_resize.on && settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "HDMI-A-2 mode preferred"));
+        settings.queued = 0;
+
+        // Refused by the screen: back at once, and a line that asked a size goes back to that size.
+        table_at->output_asked_w[0] = 1280, table_at->output_asked_h[0] = 720;
+        settings_output_apply(size_row, "1920 × 1080 (recommended)");
+        settings.queued = 0;
+        table_at->output_asked_w[0] = 1920, table_at->output_asked_h[0] = 1080, table_at->output_refused[0] = WINDOWS_REFUSED_SIZE;
+        (void)settings_keep_tick();
+        check("display modes: a size the compositor says the screen did not take goes back at once, to the size asked before",
+              !settings_resize.on && settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "HDMI-A-2 mode 1280x720"));
+        check("display modes: a size refused is said on the Resolution row, with the size asked",
+              string_equals((string_address)settings_row_text(size_row, 0), (string_address) "1024 × 768 (1920 × 1080 is not offered)"));
+        settings.queued = 0, table_at->output_refused[0] = 0;
+
+        // The primary: the table's first screen is, another is made so by name.
+        check("display modes: the Primary display row says the table's first screen is the primary",
+              string_equals((string_address)settings_shown_value(primary_row), (string_address) "Primary"));
+        settings.map.display = 1;
+        check("display modes: and that another is not", string_equals((string_address)settings_shown_value(primary_row), (string_address) "Not primary"));
+        settings_output_apply(primary_row, "Primary");
+        check("display modes: making a screen the primary sends its name", settings.queued == 1 &&
+              string_equals((string_address)settings.queue[0].value, (string_address) "DP-1 primary"));
+        settings.queued = 0;
+        settings.map.display = 0;
+        settings_output_apply(primary_row, "Not primary");
+        check("display modes: the primary is not made less than primary on its own: another is made the primary", settings.queued == 0);
+
+        settings.child = 0, settings.queued = 0, settings_resize.on = false;
+        settings.map.display = -1;
+        settings.own.table = saved;
+}
+
 static fn check_settings_device_strip(void)
 {
         static const char text[] = "  vda drive 2048 MB view only\n"
@@ -6457,7 +6629,7 @@ static fn check_settings_groups(void)
         } families[] = {
             {{"name"}, "Machine"}, {{"canvas", "background"}, "Canvas"}, {{"canvas", "theme"}, "Canvas"},
             {{"canvas", "motion"}, "Canvas"}, {{"canvas", "caret"}, "Canvas"}, {{"canvas", "text"}, "Canvas"}, {{"canvas", "windows"}, "Canvas"}, {{"canvas", "border"}, "Canvas"},
-            {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Canvas"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"}, {{"canvas", "vrr"}, "Display"},
+            {{"canvas", "clipboard"}, "Canvas"}, {{"canvas", "gpu"}, "Display"}, {{"canvas", "display"}, "Display"}, {{"canvas", "modes"}, "Display"}, {{"canvas", "vrr"}, "Display"},
             {{"brightness"}, "Display"}, {{"keyboard"}, "Input"}, {{"mouse"}, "Input"}, {{"canvas", "cursor"}, "Input"},
             {{"canvas", "wheel"}, "Input"}, {{"canvas", "trackpad"}, "Scrolling"}, {{"canvas", "scroll"}, "Scrolling"}, {{"canvas", "predict"}, "Input"}, {{"canvas", "touch"}, "Input"}, {{"audio"}, "Sound"},
             {{"taskbar"}, "Taskbar"}, {{"timezone"}, "Time"}, {{"ntp"}, "Time"}, {{"time"}, "Time"}, {{"wired"}, "Network"},
@@ -6485,8 +6657,9 @@ static fn check_settings_groups(void)
             {"Caret blink speed", "Canvas"}, {"Caret thickness", "Canvas"}, {"Text size (percent, or default)", "Canvas"},
             {"Resize border width (pixels, or default)", "Canvas"},
             {"Open windows where they were last put", "Canvas"},
-            {"Clipboard", "Canvas"}, {"GPU rendering (alpha)", "Canvas"}, {"Clipboard history (copies kept)", "Canvas"},
-            {"Screen", "Display"}, {"Screen modes", "Display"}, {"Variable refresh rate", "Display"}, {"Brightness", "Display"}};
+            {"Clipboard", "Canvas"}, {"Clipboard history (copies kept)", "Canvas"},
+            {"Screen", "Display"}, {"Resolution", "Display"}, {"Primary display", "Display"}, {"Screen modes", "Display"},
+            {"Variable refresh rate", "Display"}, {"Brightness", "Display"}, {"GPU rendering (alpha)", "Display"}};
         const int count = (int)(sizeof(names) / sizeof(names[0]));
         b32 order = settings_groups() == count + 1, family = true, by_name = true, listed = true, apart = true, found = true,
             every = true, bare = true, screens = true;

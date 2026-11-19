@@ -67,6 +67,8 @@
 #define SETTINGS_OUT_NOTE 4u
 #define SETTINGS_OUT_SCALE 5u
 #define SETTINGS_OUT_NOTICES 6u // the kernel's own notices: the value is their count, and the row's lines are each one (settings.c)
+#define SETTINGS_OUT_SIZE 7u    // the screen's resolution: every size it lists, the preferred marked (the table's output_size)
+#define SETTINGS_OUT_PRIMARY 8u // whether the screen is the primary: the table's index 0, the taskbar's and where a window opens
 
 // The words of a verb, at most: canvas cursor shake delay.
 #define SETTING_WORDS 4
@@ -396,16 +398,6 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "Clipboard", SETTINGS_SWITCH, 0, ("canvas", "clipboard"), "clipboard ", null,
                       .path = SETTING_CLIPBOARD_PATH, .standard = "on",
                       .usage = "canvas clipboard [on|off]", .help = "copy and paste between windows; off empties the clipboard [on]"),
-#ifndef SHELL_NO_GPU
-    //  Canvas draws and composes on the GPU where it has a driver for it (src/canvas/gpu.c) and on the processor where it
-    //  has none. On by default: the GPU is the robust default, and every failure (no kernels, a refused map, a hang, a lost card)
-    //  falls back to the processor for that job or the session, with one notice. Not in the image
-    //  when the build says CONFIG_MOONWATER_GPU=n.
-    SETTING_PLAIN_ROW(null, "GPU rendering (alpha)", SETTINGS_SWITCH, 0, ("canvas", "gpu"), "gpu ", null,
-                      .path = SETTING_GPU_PATH, .standard = "on",
-                      .usage = "canvas gpu [on|off]",
-                      .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [on]"),
-#endif
     SETTING_PLAIN_ROW(null, "Clipboard history (copies kept)", SETTINGS_SLIDER, 0, ("canvas", "clipboard", "history"), "history ", null,
                       .type = SETTING_NUMBER, .path = SETTING_CLIPBOARD_HISTORY_PATH,
                       .standard = "0", .unit = "copies", .low = 0, .high = 32,
@@ -419,10 +411,14 @@ static const struct settings_row settings_rows[] = {
      .help = "which way up the screen is", .output = SETTINGS_OUT_TURN},
     {null, "Turned by the screen", SETTINGS_INFO, 0, 0, {null}, null, null, {null}, null, 0,
      .help = "who turns the picture: the screen itself, or Moonwater (slower)", .output = SETTINGS_OUT_NOTE},
+    {null, "Resolution", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,
+     .help = "the size the screen is driven at: every size it lists, its own marked; a change is kept only when confirmed", .output = SETTINGS_OUT_SIZE},
     {null, "Refresh rate", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,
      .help = "how many times a second the screen is drawn: the rates it supports, the best marked", .output = SETTINGS_OUT_REFRESH},
     {null, "Scale of this screen", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,
      .help = "how big the screen draws things, in percent of its size: 50, 75, 100, 125, 150 or 200 [100]", .output = SETTINGS_OUT_SCALE},
+    {null, "Primary display", SETTINGS_CHOICE, 0, SETTINGS_SPLIT, {"canvas", "display"}, null, null, {"canvas", "display"}, null, 0,
+     .help = "the screen the taskbar is on and windows open on, wherever it is laid", .output = SETTINGS_OUT_PRIMARY},
     {null, "Screen modes", SETTINGS_CHOICE, 0, 0, {"canvas", "modes"}, "modes ", null, {"canvas", "modes"}, "largest preferred", 0,
      .usage = "canvas modes [largest|preferred]", .help = "which mode a screen is driven at [largest]"},
     //  Variable refresh (kms.c's compositor_vrr): a screen that can (its connector's vrr_capable) waits for each frame, so a key or a frame
@@ -435,6 +431,19 @@ static const struct settings_row settings_rows[] = {
                       .help = "a screen that can waits for each frame, so it is shown when drawn; games: only a fullscreen window [on]"),
     {null, "Brightness", SETTINGS_STEP, 1, 0, {"brightness"}, "brightness ", null, {"brightness"}, "-10 +10", 0,
      .usage = "brightness [N%|+N|-N]", .help = "the screen backlight"},
+#ifndef SHELL_NO_GPU
+    //  In the Display group, as its Graphics part: the card that draws the screens, its status and why it is off (the board's
+    //  issues under the row) beside the screens it draws. Canvas draws and composes on the GPU where it has a driver for it (src/canvas/gpu.c) and on the processor where it
+    //  has none. On by default: the GPU is the robust default, and every failure (no kernels, a refused map, a hang, a lost card)
+    //  falls back to the processor for that job or the session, with one notice. Not in the image
+    //  when the build says CONFIG_MOONWATER_GPU=n.
+    SETTING_PLAIN_ROW(null, "GPU rendering (alpha)", SETTINGS_SWITCH, 0, ("canvas", "gpu"), "gpu ", null,
+                      .path = SETTING_GPU_PATH, .standard = "on",
+                      .usage = "canvas gpu [on|off]",
+                      .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [on]",
+                      .part = "Graphics",
+                      .about = "Where Canvas draws: on the GPU, or the processor. What the card does now is under it"),
+#endif
     //  The menu names each layout once; gb, sv and nb, which the help names as well, are the same layouts as uk, se
     //  and no (locale_keyboards in host.c, the compositor's table), kept as typed, so the menu leaves them out.
     {"Input", "Keyboard", SETTINGS_CHOICE, 0, 0, {"keyboard"}, "keyboard ", null, {"keyboard"}, "us uk de se no dk fi fr es it ar il ir", 0,

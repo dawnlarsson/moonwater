@@ -3,6 +3,7 @@
 @translated machine
 @direction rtl
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
+# machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 action_copy	3664	کپی
 action_cut	5863	برش
 action_paste	0288	چسباندن
@@ -406,6 +407,19 @@ tray_settings	8728	تنظیمات
 ui_confirm_again	b3ff	دوباره فشار دهید: 
 ui_field_digits	f52b	عدد از رقم‌ها تشکیل می‌شود
 ui_field_full	fe02	بیش از این جا ندارد
+settings_no_sizes	0f7e	صفحه هیچ اندازه‌ای فهرست نمی‌کند
+settings_primary_no	a970	اصلی نیست
+settings_primary_other	0b14	برای تغییر، صفحه دیگری را اصلی کنید
+settings_primary_yes	7f79	اصلی
+settings_refused_size	1332	%s (%d × %d ارائه نمی‌شود)
+settings_size_ask	7773	%d × %d: نگه‌داشتن را زیر وضوح انتخاب کنید، وگرنه پس از %d ثانیه برمی‌گردد
+settings_size_back	6c84	نگه داشته نشد: بازگشت به %s
+settings_size_best	5165	%d × %d (پیشنهادی)
+settings_size_keep	d1e7	نگه‌داشتن %d × %d (بازگشت پس از %d ثانیه)
+settings_size_kept	7101	%d × %d نگه داشته شد
+settings_size_own	810e	اندازه خودش
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	صفحه %d × %d را نپذیرفت: بازگشت به %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	دایره‌ای زیر هر انگشت روی صفحه لمسی
@@ -732,3 +746,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Taskbar distance from the edge (pixels)	845c	فاصلهٔ نوار وظیفه از لبه (پیکسل)
 =grouped	8b7d	گروه‌شده
 =separate	bb18	جدا
+=Resolution	18af	وضوح
+=Primary display	924b	صفحه اصلی
+=Graphics	9fa8	گرافیک
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Canvas کجا می‌کشد: روی GPU یا پردازنده. کاری که کارت اکنون می‌کند زیر آن است

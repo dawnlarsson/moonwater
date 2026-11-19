@@ -2,6 +2,7 @@
 @name Nederlands
 @translated machine
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
+# machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 action_copy	3664	Kopiëren
 action_cut	5863	Knippen
 action_paste	0288	Plakken
@@ -405,6 +406,19 @@ tray_settings	8728	Instellingen
 ui_confirm_again	b3ff	druk nogmaals om te bevestigen: 
 ui_field_digits	f52b	een getal bestaat uit cijfers
 ui_field_full	fe02	meer past er niet in
+settings_no_sizes	0f7e	Het scherm noemt geen formaten
+settings_primary_no	a970	Niet primair
+settings_primary_other	0b14	Maak een ander scherm primair om het te verplaatsen
+settings_primary_yes	7f79	Primair
+settings_refused_size	1332	%s (%d × %d wordt niet aangeboden)
+settings_size_ask	7773	%d × %d: kies Behouden onder Resolutie, anders terug over %d s
+settings_size_back	6c84	Niet behouden: terug naar %s
+settings_size_best	5165	%d × %d (aanbevolen)
+settings_size_keep	d1e7	%d × %d behouden (terug over %d s)
+settings_size_kept	7101	%d × %d behouden
+settings_size_own	810e	zijn eigen formaat
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Het scherm nam %d × %d niet aan: terug naar %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Een cirkel onder elke vinger op een aanraakscherm
@@ -731,3 +745,7 @@ ui_field_full	fe02	meer past er niet in
 =Taskbar distance from the edge (pixels)	845c	Afstand van de taakbalk tot de rand (pixels)
 =grouped	8b7d	gegroepeerd
 =separate	bb18	apart
+=Resolution	18af	Resolutie
+=Primary display	924b	Primair scherm
+=Graphics	9fa8	Graphics
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Waar Canvas tekent: op de GPU of de processor. Wat de kaart nu doet staat eronder

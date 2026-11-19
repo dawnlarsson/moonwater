@@ -3,6 +3,7 @@
 @translated machine
 @direction rtl
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
+# machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 action_copy	3664	نسخ
 action_cut	5863	قص
 action_paste	0288	لصق
@@ -406,6 +407,19 @@ tray_settings	8728	الإعدادات
 ui_confirm_again	b3ff	اضغط مرة أخرى للتأكيد: 
 ui_field_digits	f52b	العدد يتكون من أرقام
 ui_field_full	fe02	هذا أقصى ما يتسع له
+settings_no_sizes	0f7e	لا تسرد الشاشة أي أحجام
+settings_primary_no	a970	ليست رئيسية
+settings_primary_other	0b14	اجعل شاشة أخرى الرئيسية لتغييرها
+settings_primary_yes	7f79	رئيسية
+settings_refused_size	1332	%s (%d × %d غير متاح)
+settings_size_ask	7773	%d × %d: اختر إبقاء تحت الدقة، وإلا تعود بعد %d ث
+settings_size_back	6c84	لم يُبقَ: عودة إلى %s
+settings_size_best	5165	%d × %d (موصى به)
+settings_size_keep	d1e7	إبقاء %d × %d (عودة بعد %d ث)
+settings_size_kept	7101	أُبقي %d × %d
+settings_size_own	810e	حجمها الخاص
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	لم تقبل الشاشة %d × %d: عودة إلى %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	دائرة تحت كل إصبع على شاشة اللمس
@@ -732,3 +746,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Taskbar distance from the edge (pixels)	845c	بعد شريط المهام عن الحافة (بكسل)
 =grouped	8b7d	مجمّعة
 =separate	bb18	منفصلة
+=Resolution	18af	الدقة
+=Primary display	924b	الشاشة الرئيسية
+=Graphics	9fa8	الرسوميات
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	أين يرسم Canvas: على GPU أو المعالج. ما تفعله البطاقة الآن تحته

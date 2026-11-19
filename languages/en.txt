@@ -404,6 +404,19 @@ tray_settings	8728	Settings
 ui_confirm_again	b3ff	press again to confirm: 
 ui_field_digits	f52b	a number is digits
 ui_field_full	fe02	that is as much as it holds
+settings_no_sizes	0f7e	The screen lists no sizes
+settings_primary_no	a970	Not primary
+settings_primary_other	0b14	Make another screen the primary to move it
+settings_primary_yes	7f79	Primary
+settings_refused_size	1332	%s (%d × %d is not offered)
+settings_size_ask	7773	%d × %d: choose Keep under Resolution, or it goes back in %d s
+settings_size_back	6c84	Not kept: back to %s
+settings_size_best	5165	%d × %d (recommended)
+settings_size_keep	d1e7	Keep %d × %d (back in %d s)
+settings_size_kept	7101	Kept %d × %d
+settings_size_own	810e	its own size
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	The screen did not take %d × %d: back to %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	A circle under each finger on a touch screen
@@ -730,3 +743,7 @@ ui_field_full	fe02	that is as much as it holds
 =Taskbar distance from the edge (pixels)	845c	Taskbar distance from the edge (pixels)
 =grouped	8b7d	grouped
 =separate	bb18	separate
+=Resolution	18af	Resolution
+=Primary display	924b	Primary display
+=Graphics	9fa8	Graphics
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Where Canvas draws: on the GPU, or the processor. What the card does now is under it

@@ -3,6 +3,7 @@
 @translated machine
 @direction rtl
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
+# machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 action_copy	3664	העתק
 action_cut	5863	גזור
 action_paste	0288	הדבק
@@ -406,6 +407,19 @@ tray_settings	8728	הגדרות
 ui_confirm_again	b3ff	לחץ שוב לאישור: 
 ui_field_digits	f52b	מספר הוא ספרות
 ui_field_full	fe02	זה המקסימום שהוא מכיל
+settings_no_sizes	0f7e	המסך לא מציג גדלים
+settings_primary_no	a970	לא ראשי
+settings_primary_other	0b14	הפכו מסך אחר לראשי כדי להחליף אותו
+settings_primary_yes	7f79	ראשי
+settings_refused_size	1332	%s (%d × %d לא מוצע)
+settings_size_ask	7773	%d × %d: בחרו השאר תחת רזולוציה, אחרת חוזר בעוד %d שנ׳
+settings_size_back	6c84	לא נשמר: חזרה אל %s
+settings_size_best	5165	%d × %d (מומלץ)
+settings_size_keep	d1e7	השאר %d × %d (חזרה בעוד %d שנ׳)
+settings_size_kept	7101	נשמר %d × %d
+settings_size_own	810e	הגודל שלו
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	המסך לא קיבל %d × %d: חזרה אל %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	עיגול מתחת לכל אצבע במסך מגע
@@ -732,3 +746,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Taskbar distance from the edge (pixels)	845c	מרחק שורת המשימות מהקצה (פיקסלים)
 =grouped	8b7d	מקובצות
 =separate	bb18	נפרדות
+=Resolution	18af	רזולוציה
+=Primary display	924b	מסך ראשי
+=Graphics	9fa8	גרפיקה
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	היכן Canvas מצייר: על ה-GPU או על המעבד. מה הכרטיס עושה עכשיו מופיע מתחת

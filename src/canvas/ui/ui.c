@@ -8294,6 +8294,19 @@ LANGUAGE_ID(settings_mode_preferred, "Recommended") \
 LANGUAGE_ID(settings_name_chars, "a name is letters, digits and hyphens") \
 LANGUAGE_ID(settings_name_long, "a name is under 32 characters") \
 LANGUAGE_ID(settings_no_rates, "The screen lists no rates") \
+LANGUAGE_ID(settings_no_sizes, "The screen lists no sizes") \
+LANGUAGE_ID(settings_primary_no, "Not primary") \
+LANGUAGE_ID(settings_primary_other, "Make another screen the primary to move it") \
+LANGUAGE_ID(settings_primary_yes, "Primary") \
+LANGUAGE_ID(settings_refused_size, "%s (%d × %d is not offered)") \
+LANGUAGE_ID(settings_size_ask, "%d × %d: choose Keep under Resolution, or it goes back in %d s") \
+LANGUAGE_ID(settings_size_back, "Not kept: back to %s") \
+LANGUAGE_ID(settings_size_best, "%d × %d (recommended)") \
+LANGUAGE_ID(settings_size_keep, "Keep %d × %d (back in %d s)") \
+LANGUAGE_ID(settings_size_kept, "Kept %d × %d") \
+LANGUAGE_ID(settings_size_own, "its own size") \
+LANGUAGE_ID(settings_size_plain, "%d × %d") \
+LANGUAGE_ID(settings_size_refused, "The screen did not take %d × %d: back to %s") \
 LANGUAGE_ID(settings_no_screen, "No screen is connected") \
 LANGUAGE_ID(settings_not_here, "not on this machine") \
 LANGUAGE_ID(settings_not_shown, "%d more not shown") \

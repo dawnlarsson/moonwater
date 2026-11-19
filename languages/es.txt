@@ -2,6 +2,7 @@
 @name Español
 @translated machine
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
+# machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 action_copy	3664	Copiar
 action_cut	5863	Cortar
 action_paste	0288	Pegar
@@ -405,6 +406,19 @@ tray_settings	8728	Ajustes
 ui_confirm_again	b3ff	pulse de nuevo para confirmar: 
 ui_field_digits	f52b	un número son dígitos
 ui_field_full	fe02	no cabe más
+settings_no_sizes	0f7e	La pantalla no ofrece tamaños
+settings_primary_no	a970	No principal
+settings_primary_other	0b14	Haz principal otra pantalla para cambiarla
+settings_primary_yes	7f79	Principal
+settings_refused_size	1332	%s (%d × %d no se ofrece)
+settings_size_ask	7773	%d × %d: elige Conservar en Resolución, o vuelve en %d s
+settings_size_back	6c84	No conservado: vuelve a %s
+settings_size_best	5165	%d × %d (recomendado)
+settings_size_keep	d1e7	Conservar %d × %d (vuelve en %d s)
+settings_size_kept	7101	Conservado %d × %d
+settings_size_own	810e	su propio tamaño
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	La pantalla no aceptó %d × %d: vuelve a %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Un círculo bajo cada dedo en una pantalla táctil
@@ -731,3 +745,7 @@ ui_field_full	fe02	no cabe más
 =Taskbar distance from the edge (pixels)	845c	Distancia de la barra de tareas al borde (píxeles)
 =grouped	8b7d	agrupadas
 =separate	bb18	separadas
+=Resolution	18af	Resolución
+=Primary display	924b	Pantalla principal
+=Graphics	9fa8	Gráficos
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Dónde dibuja Canvas: en la GPU o en el procesador. Lo que hace la tarjeta ahora está debajo
