@@ -1851,7 +1851,8 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
 
         struct spark_input_ring *ring = READ_ONCE(spark_input_page);
 
-        if (ring && READ_ONCE(ring->active) && !bind->rover_virtual)
+        if (ring && READ_ONCE(ring->active) && !bind->rover_virtual &&
+            !test_bit(BTN_TOOL_FINGER, handle->dev->keybit) && !test_bit(ABS_MT_POSITION_X, handle->dev->absbit))
         {
                 if (type == EV_REL && (code == REL_X || code == REL_Y))
                 {

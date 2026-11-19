@@ -431,7 +431,12 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
         // Leaving hardware-scaled direct scanout: restore 1:1 primary plane geometry atomically in this flip.
         if (compositor.scaled_direct && compositor.card >= 0)
         {
-                if (compositor_atomic_primary(fb, row, which, compositor.width, compositor.height, 0, 0, compositor.width, compositor.height))
+                unsigned int scount;
+                const int (*screens)[4] = compositor_screens(&scount);
+                int pw = scount > 1 ? screens[0][2] : compositor.width;
+                int ph = scount > 1 ? screens[0][3] : compositor.height;
+
+                if (compositor_atomic_primary(fb, row, which, pw, ph, 0, 0, pw, ph))
                         return 1;
                 compositor.scaled_direct = 0;
         }
@@ -960,19 +965,42 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
         __atomic_store_n(&table->spoiled_height[row][which], rect[3] - rect[1], __ATOMIC_RELEASE);
 }
 
+// Primary output bounds eligible for direct scanout: whole space on 1 screen, or output 0 when unrotated at (0,0) with all damage inside it.
+static int compositor_primary_bounds(int *ox, int *oy, int *ow, int *oh)
+{
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+
+        if (count <= 1)
+        {
+                *ox = 0, *oy = 0, *ow = compositor.width, *oh = compositor.height;
+                return 1;
+        }
+        if (compositor.output[0].turned || screens[0][0] != 0 || screens[0][1] != 0)
+                return 0;
+        *ox = screens[0][0], *oy = screens[0][1], *ow = screens[0][2], *oh = screens[0][3];
+        for (unsigned int at = 0; at < compositor.damages; at++)
+        {
+                const int *d = compositor.damage[at];
+
+                if (d[0] < *ox || d[1] < *oy || d[2] > *ox + *ow || d[3] > *oy + *oh)
+                        return 0;
+        }
+        return 1;
+}
+
 static int compositor_overlay_ready(void);
 
-// The window the card can show straight: the top one, opaque, square and filling the output at the size it drew, with
+// The window the card can show straight: the top one, opaque, square and filling the primary output at the size it drew (or hardware-scaled), with
 // nothing over it but the tabs, a pointer on its own plane or none (hidden), and a framebuffer of its buffer; -1 when there is none.
 static int compositor_direct_candidate(const struct compositor_frame *frames, const unsigned int *rows, unsigned int windows)
 {
-        int row;
+        int row, ox, oy, ow, oh;
 
-        // On more than one screen every frame is composed: a flip, the overlay and the window's framebuffer are one
-        // crtc's, and the scanout is the whole space.
         // A pointer drawn into the scene is over the window, unless it is hidden (a game's, which asked for none): then nothing is.
         if (compositor.card < 0 || (compositor_cursor_in_scene() && compositor.cursor.drawn) || !windows ||
-            compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw || compositor_output_count() > 1 ||
+            compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw ||
+            !compositor_primary_bounds(&ox, &oy, &ow, &oh) ||
             compositor_spots_any(0))
                 return -1;
         row = rows[windows - 1];
@@ -984,8 +1012,8 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
                 return -1;
         // Glass is the window's WINDOW_GLASS (compositor.glassy): the row's other flags (a client's NO_CLOSE and NO_GRAB) are no glass.
         // Undersized fullscreen client buffers (e.g. 1024x768 on 1920x1080) are eligible for hardware primary-plane scaling when atomic is ready.
-        if (compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
-            compositor.w[row] != (unsigned int)compositor.width || compositor.h[row] != (unsigned int)compositor.height ||
+        if (compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != ox || compositor.y[row] != oy ||
+            compositor.w[row] != (unsigned int)ow || compositor.h[row] != (unsigned int)oh ||
             ((compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row]) &&
              !(compositor.fullscreen[row] && compositor_client_scans(row) && !compositor.scale_plane_refused &&
                compositor.picture_w[row] && compositor.picture_h[row] && compositor_overlay_ready())) ||

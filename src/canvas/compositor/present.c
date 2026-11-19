@@ -1244,20 +1244,21 @@ static void compositor_present_frames(void)
         // Not while the display is DPMS-off, a flip is in flight, or the card still has jobs that write or read what this present would.
         if (!compositor.damages || compositor.dark || compositor.flip_pending || compositor_card_holds())
                 return;
-        // Direct-scanout fast-path for steady-state fullscreen games: bypasses frame list building, glass, runs, taskbar, and occluded windows.
-        if (compositor.direct_row >= 0 && !compositor_turning() && compositor.card >= 0 && compositor_output_count() <= 1 &&
+        // Direct-scanout fast-path for steady-state fullscreen games (single or multi-monitor primary): bypasses frame list building, glass, runs, taskbar, and occluded windows.
+        if (compositor.direct_row >= 0 && !compositor_turning() && compositor.card >= 0 &&
             compositor.stacked > 0 && (int)compositor.stack[compositor.stacked - 1] == compositor.direct_row &&
             !(compositor_cursor_in_scene() && compositor.cursor.drawn) &&
             compositor.drag < 0 && compositor.resize < 0 && !compositor.preview_draw && !compositor.overlay_on &&
             !compositor_spots_any(0) && !compositor_overlays_shown() && taskbar_shift() >= UI_ONE &&
             !compositor_record_until)
         {
-                int row = compositor.direct_row, menu[4];
+                int row = compositor.direct_row, menu[4], ox, oy, ow, oh;
 
-                if (!taskbar_menu_rect(menu) && compositor_client_scans(row) && !compositor_wl_row_blend(row) &&
+                if (compositor_primary_bounds(&ox, &oy, &ow, &oh) &&
+                    !taskbar_menu_rect(menu) && compositor_client_scans(row) && !compositor_wl_row_blend(row) &&
                     !compositor.glassy[row] && !compositor.landing[row] && !compositor.glide[row] && !compositor.asking[row] &&
-                    compositor.x[row] == 0 && compositor.y[row] == 0 &&
-                    compositor.w[row] == (unsigned int)compositor.width && compositor.h[row] == (unsigned int)compositor.height &&
+                    compositor.x[row] == ox && compositor.y[row] == oy &&
+                    compositor.w[row] == (unsigned int)ow && compositor.h[row] == (unsigned int)oh &&
                     ((compositor.picture_w[row] == compositor.w[row] && compositor.picture_h[row] == compositor.h[row]) ||
                      (!compositor.scale_plane_refused && compositor.fullscreen[row] && compositor.picture_w[row] && compositor.picture_h[row])) &&
                     compositor_present_direct(row, 0, 0))

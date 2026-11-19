@@ -4926,9 +4926,8 @@ static unsigned int compositor_spark_want; // 1 while a locked-pointer game want
 
 static unsigned int compositor_reader_spark_drain(struct spark_input_ring *ring, positive *last_ns)
 {
-#ifdef CONFIG_MOONWATER_WAYLAND
         unsigned long long tail, head;
-        unsigned int count = 0;
+        unsigned int count = 0, forwarded = 0;
 
         if (!ring)
                 return 0;
@@ -4942,23 +4941,41 @@ static unsigned int compositor_reader_spark_drain(struct spark_input_ring *ring,
 
                 tail++;
                 __atomic_store_n(&ring->tail, tail, __ATOMIC_RELEASE);
-                if ((dx || dy) && compositor_wl_direct_send(dx, dy, micro))
+                if (dx || dy)
                 {
                         positive now = clock_monotonic_nanoseconds();
-                        positive late = now / 1000 - micro;
 
-                        __atomic_add_fetch(&compositor_reader.direct, 1, __ATOMIC_RELEASE);
-                        compositor_reader.late_most = late > compositor_reader.late_most && late < 1000000000ull ? late : compositor_reader.late_most;
-                        compositor_reader.late += late >= 100;
                         *last_ns = now;
+#ifdef CONFIG_MOONWATER_WAYLAND
+                        if (compositor_wl_direct_send(dx, dy, micro))
+                        {
+                                positive late = now / 1000 - micro;
+
+                                __atomic_add_fetch(&compositor_reader.direct, 1, __ATOMIC_RELEASE);
+                                compositor_reader.late_most = late > compositor_reader.late_most && late < 1000000000ull ? late : compositor_reader.late_most;
+                                compositor_reader.late += late >= 100;
+                                count++;
+                                continue;
+                        }
+#endif
+                        // Unlocked pointer (desktop, browser, Steam, menus, RTS/MOBA, native apps): push straight into the reader ring (zero evdev / zero read() syscalls).
+                        {
+                                struct compositor_input_event ev = {(long)(micro / 1000000ull), (long)(micro % 1000000ull), COMPOSITOR_EV_REL, 0, 0};
+
+                                if (dx)
+                                        ev.code = COMPOSITOR_REL_X, ev.value = dx, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                if (dy)
+                                        ev.code = COMPOSITOR_REL_Y, ev.value = dy, compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                ev.type = COMPOSITOR_EV_SYN, ev.code = 0, ev.value = 0;
+                                compositor_reader_put(COMPOSITOR_INPUTS, 0, &ev);
+                                forwarded = 1;
+                        }
                 }
                 count++;
         }
+        if (forwarded)
+                compositor_reader_knock();
         return count;
-#else
-        (void)ring, (void)last_ns;
-        return 0;
-#endif
 }
 
 static fn compositor_reader_run(address_any context)
@@ -4987,7 +5004,11 @@ static fn compositor_reader_run(address_any context)
                     ((struct spark_input_ring *)mapped)->version == SPARK_INPUT_VERSION &&
                     ((struct spark_input_ring *)mapped)->mask == SPARK_INPUT_SLOTS - 1u &&
                     system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 1, (positive)spark_fd, (positive)&ev) == 0)
+                {
                         spark_ring = (struct spark_input_ring *)mapped;
+                        // Default ON for everyone and everything (locked games, desktop cursor, Steam, browsers, native apps).
+                        __atomic_store_n(&spark_ring->active, 1u, __ATOMIC_RELEASE);
+                }
                 else
                 {
                         if (!(mapped < 0 && mapped > -4096))
@@ -5003,13 +5024,11 @@ static fn compositor_reader_run(address_any context)
 
                 if (spark_ring)
                 {
-                        unsigned int want = __atomic_load_n(&compositor_spark_want, __ATOMIC_ACQUIRE);
-
-                        if (spark_ring->active != want)
-                                __atomic_store_n(&spark_ring->active, want, __ATOMIC_RELEASE);
+                        if (!__atomic_load_n(&spark_ring->active, __ATOMIC_RELAXED))
+                                __atomic_store_n(&spark_ring->active, 1u, __ATOMIC_RELEASE);
                         compositor_reader_spark_drain(spark_ring, &spark_last);
                         // Adaptive 15 us spin-poll while high-rate (4-8 kHz) mouse reports are actively streaming, avoiding epoll wakeup jitter.
-                        if (want && spark_last)
+                        if (spark_last)
                         {
                                 positive now = clock_monotonic_nanoseconds();
 
@@ -5192,6 +5211,15 @@ static void compositor_reader_take(void)
                         if (record->raw.type == COMPOSITOR_READER_GONE)
                                 break;
                 }
+                // /dev/spark direct zero-evdev physical mouse report: bypasses evdev slot lookup.
+                if (device == COMPOSITOR_INPUTS)
+                {
+                        compositor_post_physical = 1;
+                        moved = compositor_input_take(COMPOSITOR_INPUTS, raw, (bipolar)(count * sizeof raw[0]), 0);
+                        compositor_input_end(COMPOSITOR_INPUTS, moved);
+                        compositor_post_physical = 0;
+                        continue;
+                }
                 // An open let go of since (its generation is old), or a slot that holds no device, says nothing now.
                 if (device >= compositor.input_count || compositor.inputs[device] < 0 ||
                     generation != __atomic_load_n(&compositor_reader.generation[device], __ATOMIC_ACQUIRE))
@@ -5330,14 +5358,16 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
         struct compositor_report_event events[64];
         positive count;
 
+        int is_spark = at >= COMPOSITOR_INPUTS;
+
 #ifdef MOONWATER_GPU_C
         // Input keeps the card awake for what answers it, asked once the turn's input is forwarded (compositor_gpu_input_turn)
-        if (!compositor.wakeonly[at])
+        if (is_spark || !compositor.wakeonly[at])
                 compositor_gpu_wake();
 #endif
 
         // It woke the loop, and that was all it was for.
-        if (compositor.wakeonly[at])
+        if (!is_spark && compositor.wakeonly[at])
         {
                 compositor_sling_only = 0;
                 return moved;
@@ -5360,7 +5390,7 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                 // A locked pointer's counts and the end of their report are all a slingshot turn may hold (EV_MSC, 4, a scan code, says
                 // nothing either); a touch screen's and a touchpad's are worked into gestures, a key, a button and a wheel are the
                 // compositor's to look at (its keys, a click's focus, a stream).
-                if (compositor.touchscreen[at] || compositor.touchpad[at] || !compositor_wl_locked() ||
+                if ((!is_spark && (compositor.touchscreen[at] || compositor.touchpad[at])) || !compositor_wl_locked() ||
                     !((event->type == COMPOSITOR_EV_REL && event->code < 2) || (event->type == COMPOSITOR_EV_SYN && event->code == 0) ||
                       event->type == 4u))
                         compositor_sling_only = 0;
@@ -5370,7 +5400,7 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                         compositor_wl_input();
 #endif
                 // The touch trace (window.c): a touch-down looks for its switch, and each raw event of a touch screen or a pad is a line.
-                if (compositor.touchscreen[at] || compositor.touchpad[at])
+                if (!is_spark && (compositor.touchscreen[at] || compositor.touchpad[at]))
                 {
                         // A finger down is BTN_TOUCH, or, on a screen that reports slots only (a virtio multitouch device sends no BTN_TOUCH), a tracking id.
                         if ((event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOUCH && event->value) ||
@@ -5386,7 +5416,7 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                         compositor.motion_ts = compositor.motion_ts ? compositor.motion_ts : now;
 
                 // A touch screen's events are its fingers', taken when its report is over.
-                if (compositor.touchscreen[at])
+                if (!is_spark && compositor.touchscreen[at])
                 {
                         if (event->type == COMPOSITOR_EV_SYN && event->code == 0)
                                 compositor_touch_report(at, now);
@@ -5556,6 +5586,6 @@ static void compositor_input_end(unsigned int at, int moved)
                 compositor_motion();
         compositor_stamp_now = 0;
 
-        if (!compositor.wakeonly[at])
+        if (at >= COMPOSITOR_INPUTS || !compositor.wakeonly[at])
                 compositor_hold_touch(clock_monotonic_nanoseconds());
 }
