@@ -3259,7 +3259,8 @@ static int compositor_wl_layer_nv12(const struct wayland_picture *picture, long 
         if (picture->plane_count != 2 || picture->plane_fd[1] < 0 || (picture->modifier && picture->modifier != WAYLAND_MODIFIER_INVALID) ||
             (picture->transform & 1) || picture->transform < 0 || picture->transform > 7 || picture->width < 2 || picture->height < 2 ||
             picture->width > WAYLAND_DIMENSION || picture->height > WAYLAND_DIMENSION || picture->stride < picture->width ||
-            picture->plane_stride[1] < (unsigned long)picture->width || picture->stride >= 65536 || picture->plane_stride[1] >= 65536)
+            picture->plane_stride[1] < (unsigned long)(picture->width + (picture->width & 1)) || picture->stride >= 65536 ||
+            picture->plane_stride[1] >= 65536)
                 return 0;
         if (picture->src_width > 0 && (picture->src_height <= 0 || picture->src_x < 0 || picture->src_y < 0 || picture->src_width > WAYLAND_DIMENSION * 256 ||
                                        picture->src_height > WAYLAND_DIMENSION * 256 || picture->src_x > WAYLAND_DIMENSION * 256 ||
@@ -3270,7 +3271,8 @@ static int compositor_wl_layer_nv12(const struct wayland_picture *picture, long 
         if (!ino || plane_dev != dev || plane_ino != ino)
                 return 0;
         luma_end = picture->plane_offset[0] + (unsigned long)picture->stride * (unsigned long)picture->height;
-        chroma_end = picture->plane_offset[1] + picture->plane_stride[1] * (unsigned long)(picture->height / 2);
+        // An odd height has a last chroma row of its own (row (height - 1) / 2), and an odd width a last pair whose V byte is past the width.
+        chroma_end = picture->plane_offset[1] + picture->plane_stride[1] * (unsigned long)((picture->height + 1) / 2);
         extent = luma_end > chroma_end ? luma_end : chroma_end;
         size = compositor_call(syscall(lseek), (positive)picture->sync_fd, 0, 2, 0, 0, 0); // SEEK_END: a dma-buf's size
         if (size <= 0 || extent > (unsigned long)size)
@@ -4101,6 +4103,9 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
         }
         if (fourcc == WAYLAND_FOURCC_NV12)
         {
+                // A pair is two bytes from an even column: an odd width's last pair reads one byte past the width, so a stride must hold it.
+                if (uv_stride < (unsigned long)(bw + (bw & 1)))
+                        return -1;
                 uv_map_size = picture->plane_offset[1] + uv_stride * (unsigned long)((bh + 1) / 2);
                 // A plane of its own is read only when it is a dma-buf that holds every byte read of it: any other file a client hands
                 // (a memfd, a regular file) shorter than that raises SIGBUS in the reads below, which no pool's handler covers.
