@@ -1283,6 +1283,7 @@ static inline int ui_edge_judge(int side, int x0, int y0, int x, int y, int slop
 // A window's tab: lit while it has the keys, dim while it is put away.
 #define COMPOSITOR_TAB_LIT 1u
 #define COMPOSITOR_TAB_AWAY 2u
+#define COMPOSITOR_TAB_STARTING 4u // an app started from the launcher or a pin whose window is not up yet: its task turns
 // The taskbar's own scale (`taskbar scale`, percent of the screen's) and padding (`taskbar padding`, logical pixels at that scale: the room
 // round the text inside each tab, either side of it): the range of each, and what each is when nothing is kept. The gap between the band's
 // items and at its ends is not set: it is the kit's gap between pieces that go together (UI_GAP1, which taskbar.c holds it to), at the scale.
@@ -1387,6 +1388,8 @@ static int taskbar_sliding(positive now);
 static int taskbar_moving(positive now);
 static int taskbar_moon_tick(positive now, int launcher);
 static positive taskbar_moon_due(positive now);
+static bool taskbar_starting_keep(positive now);
+static positive taskbar_starting_due(void);
 static void taskbar_moon_hover(int band);
 static void taskbar_moon_seen(positive now);
 static void taskbar_moon_damaged(int band, const int *rect);
@@ -1482,6 +1485,8 @@ static inline int taskbar_sliding(positive now) { (void)now; return 0; }
 static inline int taskbar_moving(positive now) { (void)now; return 0; }
 static inline int taskbar_moon_tick(positive now, int launcher) { (void)now, (void)launcher; return 0; }
 static inline positive taskbar_moon_due(positive now) { (void)now; return 0; }
+static inline bool taskbar_starting_keep(positive now) { (void)now; return false; }
+static inline positive taskbar_starting_due(void) { return 0; }
 static inline void taskbar_moon_hover(int band) { (void)band; }
 static inline void taskbar_moon_seen(positive now) { (void)now; }
 static inline void taskbar_moon_damaged(int band, const int *rect) { (void)band, (void)rect; }
@@ -27925,7 +27930,9 @@ static fn ui_page_fit(struct ui address_to ui, struct ui_page address_to p, stru
         p->column_bottom = p->side_box.w > 0 ? p->column_box.y + p->column_box.h : p->bottom;
         p->left = box->x, p->right = box->x + box->w;
         p->column_w = p->column_on ? p->column_box.w : 0;
-        p->seam = p->column_on ? ui_mirror(bar->x + bar->w / 2, 0, bar->x, bar->w) : 0;
+        // The seam: the middle of the column's bar, or where the column is a glass side pane, the pane's own edge, so a group's row is the
+        // pane's whole width (flush with the body) and not short of it by half the bar's gutter.
+        p->seam = !p->column_on ? 0 : p->side_box.w > 0 ? (ui_rtl() ? p->side_box.x : p->side_box.x + p->side_box.w) : ui_mirror(bar->x + bar->w / 2, 0, bar->x, bar->w);
         p->column_scroll.x = bar->x, p->column_scroll.content = p->column.count * ui_dev(ui, UI_ROW);
         card->x = p->body_bar.x, card->content = card_content;
         for (int k = 0; k < 2; k++)
@@ -29249,6 +29256,12 @@ static b32 ui_app_present(struct window_row address_to own, int address_to shown
         theirs so. False when it could not be.
 */
 static b32 ui_start_apart_at(bipolar folder, string_address address_to words, positive count);
+
+// An app of the registry (its id) was started: the taskbar shows its task turning until a window of it is up (windows_starting_set).
+static fn ui_app_starting(const char address_to id)
+{
+        windows_starting_set(ui_kit_table, id, clock_monotonic_nanoseconds());
+}
 
 static b32 ui_start_apart(string_address address_to words, positive count)
 {

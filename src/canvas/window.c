@@ -654,6 +654,8 @@ struct windows_issue
 #define WINDOWS_EVENTS 64
 #define WINDOWS_TITLE 32
 #define WINDOWS_APP_ID 64       // a window's app_id, its null with it
+#define WINDOWS_STARTING 4      // the apps being started the table holds at once (the oldest gives way)
+#define WINDOWS_STARTING_NS 30000000000ull // how long an app's task turns at most with no window of it up
 #define WINDOWS_ICON 32         // a window's icon is this many pixels each way
 #define WINDOWS_ICON_MOST 1024u // the largest picture an icon is made from, each way
 // The screens one desktop spans, at most: as many as a card can drive at once, its CRTCs, which the kernel numbers in 32-bit masks (an
@@ -1414,6 +1416,15 @@ struct windows
                 finds every row below it taken knocks the grow door for more. Both are last in the struct, so a program of an older
                 layout finds the pixels moved (WINDOWS_HEADER) and refuses the table too.
         */
+        /*
+                The apps being started: the launcher writes the registry's id of an app it started (and the taskbar of a pinned one it
+                started), with the monotonic clock's time it did, for the taskbar to show the app's task turning until a window of it is
+                up or WINDOWS_STARTING_NS has passed. A slot whose time is 0 is free. Its time is cleared before its word is written and
+                written after (windows_starting_set), so a reader that finds the same time either side of its copy has the word whole
+                (windows_starting_read); a program's words to whoever reads them, as app_id is.
+        */
+        char starting[WINDOWS_STARTING][WINDOWS_APP_ID];
+        unsigned long long starting_at[WINDOWS_STARTING];
         unsigned int abi;
         unsigned int rows;
         // The rows the pictures and the lists have room for (at most WINDOWS): the pictures are 2 * capacity buffers from WINDOWS_HEADER
@@ -1421,7 +1432,7 @@ struct windows
         unsigned int capacity;
 };
 
-#define WINDOWS_ABI 12u // 11 had no per-window copy counts; 10 had no variable refresh counts; 9 had no seed counts; 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+#define WINDOWS_ABI 13u // 12 had no apps being started; 11 had no per-window copy counts; 10 had no variable refresh counts; 9 had no seed counts; 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
 // The bits of the table's vrr (the rest of the word, from bit 8, is the policy).
 #define WINDOWS_VRR_CAPABLE 1u
 #define WINDOWS_VRR_PROPERTY 2u
@@ -3816,6 +3827,70 @@ static unsigned int windows_app_id_read(const struct windows *table, unsigned in
         }
         into[length] = 0;
         return length;
+}
+
+// The app being started in slot, copied into into (WINDOWS_APP_ID bytes) whole and held to one word: its time, 0 for a free slot or a copy a
+// writer was in.
+static unsigned long long windows_starting_read(const struct windows *table, unsigned int slot, char *into)
+{
+        unsigned long long stamp;
+        unsigned int length = 0;
+
+        into[0] = 0;
+        if (!table || slot >= WINDOWS_STARTING || !(stamp = __atomic_load_n(&table->starting_at[slot], __ATOMIC_ACQUIRE)))
+                return 0;
+        for (; length < WINDOWS_APP_ID - 1; length++)
+        {
+                char byte = ((const volatile char *)table->starting[slot])[length];
+
+                if (!byte)
+                        break;
+                into[length] = (unsigned char)byte <= ' ' || byte == 127 ? '?' : byte;
+        }
+        into[length] = 0;
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        return length && __atomic_load_n(&table->starting_at[slot], __ATOMIC_ACQUIRE) == stamp ? stamp : 0;
+}
+
+// The app id started at now (the monotonic clock): in the slot that has it already, else a free one, else the oldest's.
+static void windows_starting_set(struct windows *table, const char *id, unsigned long long now)
+{
+        unsigned int length = 0, slot = 0;
+        unsigned long long oldest = ~0ull;
+        char held[WINDOWS_APP_ID];
+
+        if (!table || !id || !now)
+                return;
+        while (length < WINDOWS_APP_ID - 1 && id[length] && (unsigned char)id[length] > ' ' && id[length] != 127)
+                length++;
+        if (!length || id[length])
+                return;
+        for (unsigned int at = 0; at < WINDOWS_STARTING; at++)
+        {
+                unsigned long long stamp = windows_starting_read(table, at, held);
+
+                if (stamp && string_equals((string_address)held, (string_address)id))
+                {
+                        slot = at;
+                        break;
+                }
+                if (stamp < oldest)
+                        oldest = stamp, slot = at;
+        }
+        __atomic_store_n(&table->starting_at[slot], 0ull, __ATOMIC_RELEASE);
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        for (unsigned int at = WINDOWS_APP_ID; at-- > length;)
+                ((volatile char *)table->starting[slot])[at] = 0;
+        for (unsigned int at = length; at-- > 0;)
+                ((volatile char *)table->starting[slot])[at] = id[at];
+        __atomic_store_n(&table->starting_at[slot], now, __ATOMIC_RELEASE);
+}
+
+// The app in slot is up, or has been too long: the slot is free.
+static void windows_starting_done(struct windows *table, unsigned int slot)
+{
+        if (table && slot < WINDOWS_STARTING)
+                __atomic_store_n(&table->starting_at[slot], 0ull, __ATOMIC_RELEASE);
 }
 
 // A premultiplied pixel held to being one: each colour no more than its alpha.

@@ -3562,6 +3562,9 @@ static b32 compositor_main()
                 // The moon's next step of its turn, while it turns.
                 if (compositor.band)
                         compositor_deadline(&until, taskbar_moon_due(now));
+                // The next turn of an app being started, while one is.
+                if (compositor.band)
+                        compositor_deadline(&until, taskbar_starting_due());
                 if (compositor.band || compositor.theme_word == 2)
                 {
                         timespec real = {0, 0};
@@ -3814,6 +3817,7 @@ static b32 compositor_main()
                 // The taskbar's place for this frame, before the frame is drawn: a slide is one step a pass.
                 compositor_taskbar_slide(now);
                 compositor_moon_keep(now);
+                compositor_starting_keep(now);
                 // The wallpaper: one asked for, or one made on its thread taken.
                 compositor_wall_keep();
 

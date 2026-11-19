@@ -862,6 +862,8 @@ static b32 launcher_start_app(int which)
         count = launcher_words(&entry, words, full, sizeof(full));
         if (!count || !ui_start_apart(words, count))
                 return false;
+        // The taskbar shows its task turning until a window of it is up: a start that takes seconds does not look like nothing happened.
+        ui_app_starting(ui_apps.app[which].id);
         launcher_recent_add(which);
         return true;
 }

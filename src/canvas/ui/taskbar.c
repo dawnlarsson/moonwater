@@ -2249,6 +2249,28 @@ static void taskbar_tab_rounded(struct ui address_to ui, int x, int y, int side,
         ui_icon_picture(ui, x, y, side, cut);
 }
 
+// An app being started: the kit's spinner over its task's picture, the picture's size, turning on the monotonic clock.
+static void taskbar_tab_turning(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n)
+{
+        ui_tree_ready(t);
+        const struct ui_node address_to band = &t->node[1];
+        int x = n->x - band->x, y = n->y - band->y, side = n->w < n->h ? n->w : n->h, scale = taskbar_scaled(view->scale);
+        struct ui_control spin;
+        struct ui ui;
+        b32 motion = ui_kit.motion;
+
+        if (side <= 0 || x < 0 || y < 0 || x + side > band->w || y + side > band->h || scale <= 0)
+                return;
+        memory_zero(&ui, sizeof(ui));
+        ui.pixels = view->pixels, ui.pitch = (unsigned long)band->w, ui.width = band->w, ui.height = band->h, ui.top = 0, ui.bottom = band->h;
+        ui.scale = scale, ui.scene = view->scene, ui.engine = view->engine, ui.regular = view->face;
+        memory_zero(&spin, sizeof(spin));
+        spin.kind = UI_SPINNER, spin.w = side * 100 / scale, spin.x = x * 100 / scale, spin.y = y * 100 / scale;
+        ui_kit.now = ui_kit_clock(), ui_kit.motion = !taskbar.glides;
+        ui_spinner_draw(&ui, &spin);
+        ui_kit.motion = motion;
+}
+
 static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, const struct ui_node address_to tab,
                              int which, unsigned int ink)
 {
@@ -2484,7 +2506,11 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 
                         // Each only where the tab has the room for it whole: a tab too short for its icon and its padding draws none of what does not fit.
                         if (icon && icon->x >= n->x && icon->y >= n->y && icon->x + icon->w <= n->x + n->w && icon->y + icon->h <= n->y + n->h)
+                        {
                                 taskbar_tab_icon(view, t, icon, n, which, ink);
+                                if (view->marks[which] & COMPOSITOR_TAB_STARTING)
+                                        taskbar_tab_turning(view, t, icon);
+                        }
                         if (label && label->w > 0 && label->h > 0 && label->x >= n->x && label->y >= n->y && label->x + label->w <= n->x + n->w &&
                             label->y + label->h <= n->y + n->h && view->titles && view->titles[which] && view->titles[which][0])
                                 taskbar_say(view, t, label, view->titles[which], ink, ground);
@@ -3326,6 +3352,95 @@ static void taskbar_pin_keep(int which, bool on)
         }
 }
 
+/*
+        The apps being started (the table's starting slots, windows_starting_set: the launcher's and a pin's): each app of the registry that
+        has no window up yet, until WINDOWS_STARTING_NS has passed, is a task that turns. A pinned one turns in its pin's task; any other is
+        a task of its own after the pins', titled by the app's name. A slot is let go of when a window of its app is up or its time is past.
+*/
+#define TASKBAR_STARTING_FRAME 33000000ull // the turn drawn again this often while an app is being started (monotonic ns)
+
+static struct
+{
+        int count;                                    // the apps being started now,
+        char id[WINDOWS_STARTING][WINDOWS_APP_ID];    // each one's registry id,
+        char title[WINDOWS_STARTING][TASKBAR_PIN_TITLE]; // its name,
+        b32 pinned[WINDOWS_STARTING];                 // and whether a pin's task is its
+        positive drawn;                               // when the turn was last drawn
+} taskbar_starting;
+
+// Whether a window up now is the app's (its id, or its window key).
+static bool taskbar_app_up(const struct ui_app_entry address_to app)
+{
+        for (int row = 0; row < COMPOSITOR_ROWS; row++)
+                if (compositor.showing[row] && (ui_apps_same(compositor.app_id[row], app->key) || ui_apps_same(compositor.app_id[row], app->id)))
+                        return true;
+        return false;
+}
+
+// The apps being started taken from the table at now: whether what is shown of them changed.
+static bool taskbar_starting_take(positive now)
+{
+        char ids[WINDOWS_STARTING][WINDOWS_APP_ID], held[WINDOWS_APP_ID];
+        int count = 0;
+        bool changed;
+
+        for (unsigned int slot = 0; compositor.table && slot < WINDOWS_STARTING; slot++)
+        {
+                unsigned long long stamp = windows_starting_read(compositor.table, slot, held);
+                int which;
+
+                if (!stamp)
+                        continue;
+                which = ui_apps_find(held);
+                if (which < 0 || now - stamp > WINDOWS_STARTING_NS || taskbar_app_up(&ui_apps.app[which]))
+                {
+                        windows_starting_done(compositor.table, slot);
+                        continue;
+                }
+                string_copy_bounded((p8 *)ids[count++], (string_address)held, WINDOWS_APP_ID);
+        }
+        changed = count != taskbar_starting.count;
+        for (int each = 0; each < count && !changed; each++)
+                changed = !string_equals((string_address)ids[each], (string_address)taskbar_starting.id[each]);
+        if (!changed)
+                return false;
+        taskbar_starting.count = count;
+        for (int each = 0; each < count; each++)
+        {
+                const struct ui_app_entry address_to app = &ui_apps.app[ui_apps_find(ids[each])];
+
+                string_copy_bounded((p8 *)taskbar_starting.id[each], (string_address)ids[each], WINDOWS_APP_ID);
+                string_copy_bounded((p8 *)taskbar_starting.title[each],
+                                    (string_address)(app->kit ? language_of(ui_kit_programs[app->kit - 1].label) : app->name), TASKBAR_PIN_TITLE);
+        }
+        return true;
+}
+
+// Whether the pinned app is being started: its task turns.
+static bool taskbar_pin_starting(const struct taskbar_pin *pin)
+{
+        for (int each = 0; each < taskbar_starting.count; each++)
+                if (string_equals((string_address)taskbar_starting.id[each], (string_address)pin->app))
+                        return taskbar_starting.pinned[each] = true;
+        return false;
+}
+
+// When the turn is next to be drawn (the monotonic clock), or 0 while no app is being started.
+static positive taskbar_starting_due(void)
+{
+        return taskbar_starting.count ? taskbar_starting.drawn + TASKBAR_STARTING_FRAME : 0;
+}
+
+// Asked on every pass of the compositor's loop before a frame: whether the band is to be made again, for a change in the apps being started
+// or the next step of the turn.
+static bool taskbar_starting_keep(positive now)
+{
+        if (!taskbar_starting_take(now) && !(taskbar_starting.count && now >= taskbar_starting_due()))
+                return false;
+        taskbar_starting.drawn = now;
+        return true;
+}
+
 // The tasks of the pinned programs that have no window, put after the windows' in a view (the arrays are the compositor's, one entry a row, and
 // room is how many more entries they have): each is drawn as a window put away is, titled by its program. How many were added; only the first
 // band has them.
@@ -3337,8 +3452,10 @@ static unsigned int taskbar_pins_tabs(struct taskbar_view *view, unsigned int ro
         // The registry as the bowls have it now (looked at no more than once in UI_APPS_LOOK_NS): what is pinned is taken again when it changed.
         if (compositor.band_at == 0 && ui_apps_fresh((b64)ui_kit_time()))
                 taskbar_pins_read();
-        if (!taskbar_pins.count || compositor.band_at != 0 || !compositor.table)
+        if (compositor.band_at != 0 || !compositor.table)
                 return 0;
+        for (int each = 0; each < taskbar_starting.count; each++)
+                taskbar_starting.pinned[each] = false;
         for (int each = 0; each < taskbar_pins.count && added < room; each++)
         {
                 const struct taskbar_pin *pin = &taskbar_pins.pin[each];
@@ -3350,8 +3467,21 @@ static unsigned int taskbar_pins_tabs(struct taskbar_view *view, unsigned int ro
                 if (running)
                         continue;
                 view->titles[at] = pin->title, view->apps[at] = pin->app, view->icons[at] = null, view->icon_seqs[at] = 0;
-                marks[at] = COMPOSITOR_TAB_AWAY, lengths[at] = compositor_title_length(pin->title, TASKBAR_PIN_TITLE), rows[at] = TASKBAR_GHOST;
+                marks[at] = (unsigned char)(COMPOSITOR_TAB_AWAY | (taskbar_pin_starting(pin) ? COMPOSITOR_TAB_STARTING : 0));
+                lengths[at] = compositor_title_length(pin->title, TASKBAR_PIN_TITLE), rows[at] = TASKBAR_GHOST;
                 taskbar_pins.ghost_tab[taskbar_pins.ghosts] = (int)at, taskbar_pins.ghost_pin[taskbar_pins.ghosts++] = each;
+                added++;
+        }
+        // An app being started that no pin is: a task of its own, turning, which a press does nothing to and which has no menu.
+        for (int each = 0; each < taskbar_starting.count && added < room; each++)
+        {
+                unsigned int at = view->count + added;
+
+                if (taskbar_starting.pinned[each])
+                        continue;
+                view->titles[at] = taskbar_starting.title[each], view->apps[at] = taskbar_starting.id[each], view->icons[at] = null, view->icon_seqs[at] = 0;
+                marks[at] = COMPOSITOR_TAB_AWAY | COMPOSITOR_TAB_STARTING;
+                lengths[at] = compositor_title_length(taskbar_starting.title[each], TASKBAR_PIN_TITLE), rows[at] = TASKBAR_GHOST;
                 added++;
         }
         return added;
@@ -3402,6 +3532,7 @@ static void taskbar_pin_start(int tab, positive now)
                 name[at++] = ' ';
                 name[at + positive_into_string((p8 *)name + at, (positive)which)] = 0;
                 taskbar_pins.started[which] = now;
+                windows_starting_set(compositor.table, pin->app, now);
                 compositor_script_say(name);
                 return;
         }

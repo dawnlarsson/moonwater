@@ -472,6 +472,14 @@ static void compositor_taskbar_slide(positive now)
                 compositor_taskbar_damage(before);
 }
 
+// The apps being started, asked on every pass of the loop before a frame: the band made again when what is shown of them changed, and
+// each TASKBAR_STARTING_FRAME while one turns.
+static void compositor_starting_keep(positive now)
+{
+        if (compositor.band && compositor.table && taskbar_starting_keep(now))
+                compositor_tabs_changed();
+}
+
 /*
         The moon's motion, asked on every pass of the loop before a frame: a step of its turn, or its growth toward the pointer over it and
         the launcher, damages the moon's square on each band as far as it grows, and that alone; the band's other plates are not made
