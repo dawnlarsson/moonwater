@@ -168,8 +168,6 @@ installer_wifi_off	a42c	O Wi-Fi está desligado.
 installer_wifi_on	0c01	Ligar o Wi-Fi
 installer_wifi_password	ca99	Palavra-passe de %s
 installer_wifi_saved	79e4	Guardada
-launcher_log_out	d8b5	Sair
-launcher_log_out_armed	8615	sair
 launcher_power_off	ae2f	Desligar
 launcher_power_off_armed	a48f	desligar
 launcher_restart	ed8c	Reiniciar

@@ -168,8 +168,6 @@ installer_wifi_off	a42c	Wifi staat uit.
 installer_wifi_on	0c01	Wifi aanzetten
 installer_wifi_password	ca99	Wachtwoord voor %s
 installer_wifi_saved	79e4	Opgeslagen
-launcher_log_out	d8b5	Afmelden
-launcher_log_out_armed	8615	afmelden
 launcher_power_off	ae2f	Uitschakelen
 launcher_power_off_armed	a48f	uitschakelen
 launcher_restart	ed8c	Opnieuw opstarten

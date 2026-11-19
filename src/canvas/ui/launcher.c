@@ -99,15 +99,12 @@ struct launcher_program
 
 /*
         The power buttons, left to right: the ids of what each is called and says when it is armed, and what it starts. The first two are
-        the machine's own stop and are always there. The two after them are the session's, and each is there only where the system can
-        do it (launcher.session, a bit each, LAUNCHER_SLEEP and LAUNCHER_LOG_OUT): Sleep is `moonwater sleep`, offered where the kernel
-        says it can suspend to memory (launcher_sleeps: the word mem in /sys/power/state), and Log out is `moonwater desktop rest`,
-        which ends the desktop's session and leaves the text console until the next start.
+        the machine's own stop and are always there. The third, Sleep, is `moonwater sleep`, there only where the kernel says it can
+        suspend to memory (launcher.session's LAUNCHER_SLEEP, launcher_sleeps: the word mem in /sys/power/state).
 */
-#define LAUNCHER_POWERS 4
+#define LAUNCHER_POWERS 3
 #define LAUNCHER_ALWAYS 2    // the first of them are the machine's and are always offered
-#define LAUNCHER_SLEEP 1u    // launcher.session's bits: the third button,
-#define LAUNCHER_LOG_OUT 2u  // and the fourth
+#define LAUNCHER_SLEEP 1u    // launcher.session's bit: the third button
 #define LAUNCHER_POWER_STATE "/sys/power/state"
 static const struct launcher_power
 {
@@ -115,8 +112,7 @@ static const struct launcher_power
         const char address_to command;
 } launcher_powers[LAUNCHER_POWERS] = {{LANGUAGE_launcher_power_off, LANGUAGE_launcher_power_off_armed, "poweroff"},
                                       {LANGUAGE_launcher_restart, LANGUAGE_launcher_restart_armed, "reboot"},
-                                      {LANGUAGE_launcher_sleep, LANGUAGE_launcher_sleep_armed, "moonwater sleep"},
-                                      {LANGUAGE_launcher_log_out, LANGUAGE_launcher_log_out_armed, "moonwater desktop rest"}};
+                                      {LANGUAGE_launcher_sleep, LANGUAGE_launcher_sleep_armed, "moonwater sleep"}};
 
 // The desktop's own programs, in the order they are listed.
 static const struct launcher_program launcher_programs[] = {
@@ -246,7 +242,7 @@ static struct
         // (what a check counts).
         struct ui_view view;
         unsigned int power_runs;
-        unsigned int session; // the session's buttons that are offered: LAUNCHER_SLEEP, LAUNCHER_LOG_OUT (launcher_session_read)
+        unsigned int session; // the buttons past the first two that are offered: LAUNCHER_SLEEP (launcher_session_read)
 } launcher;
 
 /* ---- the model: what a text names, and what a row starts ---- */
@@ -714,7 +710,7 @@ static positive launcher_power_words(int which, string_address address_to words)
 
 // A power button pressed again to confirm: the shell starts what it is, and the bar goes (false) once it has. Kept (true) when
 // there is no such button, or when nothing could be started.
-// Whether a power button is offered: the machine's two always, a session's only with its bit.
+// Whether a power button is offered: the machine's two always, Sleep only with its bit.
 static b32 launcher_power_offered(int which)
 {
         return which >= 0 && which < LAUNCHER_POWERS && (which < LAUNCHER_ALWAYS || (launcher.session >> (which - LAUNCHER_ALWAYS) & 1));
@@ -737,14 +733,14 @@ static b32 launcher_sleeps(const char address_to text, positive length)
         return false;
 }
 
-// The session's buttons this machine can do, read once as the bar starts: Log out wherever there is a desktop to end (the launcher is a
-// window of one), Sleep where the kernel offers it. A file that is not there, or cannot be read, offers no sleep.
+// Whether this machine can sleep, read once as the bar starts: Sleep where the kernel offers it. A file that is not there, or cannot be
+// read, offers no sleep.
 static fn launcher_session_read(const char address_to state_path)
 {
         char text[128];
         bipolar handle = system_open_at(AT_FDCWD, (string_address)state_path, FILE_READ), got = 0;
 
-        launcher.session = LAUNCHER_LOG_OUT;
+        launcher.session = 0;
         if (handle < 0)
                 return;
         got = system_read_once(handle, text, sizeof(text));

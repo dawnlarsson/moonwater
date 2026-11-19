@@ -168,8 +168,6 @@ installer_wifi_off	a42c	Wi-Fi kapalı.
 installer_wifi_on	0c01	Wi-Fi'yi aç
 installer_wifi_password	ca99	%s için parola
 installer_wifi_saved	79e4	Kayıtlı
-launcher_log_out	d8b5	Oturumu kapat
-launcher_log_out_armed	8615	oturumu kapat
 launcher_power_off	ae2f	Kapat
 launcher_power_off_armed	a48f	kapat
 launcher_restart	ed8c	Yeniden başlat

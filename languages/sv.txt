@@ -168,8 +168,6 @@ installer_wifi_off	a42c	Wifi är av.
 installer_wifi_on	0c01	Slå på wifi
 installer_wifi_password	ca99	Lösenord för %s
 installer_wifi_saved	79e4	Sparat
-launcher_log_out	d8b5	Logga ut
-launcher_log_out_armed	8615	logga ut
 launcher_power_off	ae2f	Stäng av
 launcher_power_off_armed	a48f	stäng av
 launcher_restart	ed8c	Starta om

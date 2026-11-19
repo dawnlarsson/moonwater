@@ -168,8 +168,6 @@ installer_wifi_off	a42c	Le Wi-Fi est désactivé.
 installer_wifi_on	0c01	Activer le Wi-Fi
 installer_wifi_password	ca99	Mot de passe de %s
 installer_wifi_saved	79e4	Enregistré
-launcher_log_out	d8b5	Se déconnecter
-launcher_log_out_armed	8615	se déconnecter
 launcher_power_off	ae2f	Éteindre
 launcher_power_off_armed	a48f	éteindre
 launcher_restart	ed8c	Redémarrer

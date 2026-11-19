@@ -168,8 +168,6 @@ installer_wifi_off	a42c	Το Wi-Fi είναι κλειστό.
 installer_wifi_on	0c01	Άνοιγμα Wi-Fi
 installer_wifi_password	ca99	Κωδικός για το %s
 installer_wifi_saved	79e4	Αποθηκευμένο
-launcher_log_out	d8b5	Αποσύνδεση
-launcher_log_out_armed	8615	αποσύνδεση
 launcher_power_off	ae2f	Τερματισμός
 launcher_power_off_armed	a48f	τερματισμός
 launcher_restart	ed8c	Επανεκκίνηση

@@ -168,8 +168,6 @@ installer_wifi_off	a42c	Wi-Fi jest wyłączone.
 installer_wifi_on	0c01	Włącz Wi-Fi
 installer_wifi_password	ca99	Hasło do %s
 installer_wifi_saved	79e4	Zapisana
-launcher_log_out	d8b5	Wyloguj
-launcher_log_out_armed	8615	wylogować
 launcher_power_off	ae2f	Wyłącz
 launcher_power_off_armed	a48f	wyłącz
 launcher_restart	ed8c	Uruchom ponownie

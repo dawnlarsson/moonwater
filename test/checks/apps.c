@@ -6503,18 +6503,18 @@ static fn check_field_hands(string_address regular)
                                               (ui_role(UI_PRIMARY) & 0xffffffu));
                         }
                 }
-                // The session's buttons: none unless the machine can do it (the kernel's own list has the whole word mem for Sleep), and
-                // with both offered the foot has four, each armed by its first press and started by its second: Sleep is `moonwater
-                // sleep` and Log out `moonwater desktop rest`. A button that is not offered is not there and starts nothing.
+                // Sleep: not there unless the machine can do it (the kernel's own list has the whole word mem), and offered the foot
+                // has three, each armed by its first press and started by its second: Sleep is `moonwater sleep`. A button that is not
+                // offered is not there and starts nothing.
                 {
                         unsigned int was = launcher.session, runs = launcher.power_runs;
                         string_address words[4];
-                        b32 read, two, four, said, refused;
+                        b32 read, two, three, said;
 
                         read = launcher_sleeps("freeze mem disk\n", 16) && launcher_sleeps("mem", 3) && !launcher_sleeps("freeze disk\n", 12) &&
                                !launcher_sleeps("memory\n", 7) && !launcher_sleeps("xmem \n", 6) && !launcher_sleeps("", 0);
                         launcher_session_read("/tmp/mw-no-such-power-state");
-                        read = read && launcher.session == LAUNCHER_LOG_OUT;
+                        read = read && launcher.session == 0;
                         // And as the bar reads it: a list that is there and has no mem offers no Sleep, and one that has it offers it.
                         for (int which = 0; which < 2; which++)
                         {
@@ -6527,61 +6527,23 @@ static fn check_field_hands(string_address regular)
                                         system_close(made);
                                 }
                                 launcher_session_read("/tmp/mw-launcher-power-state");
-                                read = read && made >= 0 && launcher.session == (which ? (LAUNCHER_SLEEP | LAUNCHER_LOG_OUT) : LAUNCHER_LOG_OUT);
+                                read = read && made >= 0 && launcher.session == (which ? LAUNCHER_SLEEP : 0u);
                         }
                         check("launcher: Sleep is offered only where the kernel's list of sleeps has the whole word mem, and a list that cannot be read offers none", read);
                         launcher.session = 0;
                         launcher.height = launcher_build(0);
                         two = launcher.view.group.count == 2 && !launcher_power_offered(2) && !launcher_power_offered(3) && launcher_power_act(2) &&
                               launcher.power_runs == runs;
-                        launcher.session = LAUNCHER_SLEEP | LAUNCHER_LOG_OUT;
+                        launcher.session = LAUNCHER_SLEEP;
                         launcher.height = launcher_build(0);
-                        four = launcher.view.group.count == 4 && launcher_power_offered(2) && launcher_power_offered(3) &&
-                               launcher.view.group.button[3].x + launcher.view.group.button[3].w <= LAUNCHER_WIDTH &&
-                               launcher.view.group.button[0].x >= 0 && launcher.view.group.button[2].x > launcher.view.group.button[1].x;
+                        three = launcher.view.group.count == 3 && launcher_power_offered(2) && !launcher_power_offered(3) &&
+                                launcher.view.group.button[2].x + launcher.view.group.button[2].w <= LAUNCHER_WIDTH &&
+                                launcher.view.group.button[0].x >= 0 && launcher.view.group.button[2].x > launcher.view.group.button[1].x;
                         said = launcher_power_words(2, words) == 3 && string_equals(words[2], (string_address) "moonwater sleep") &&
-                               launcher_power_words(3, words) == 3 && string_equals(words[2], (string_address) "moonwater desktop rest") &&
-                               string_equals(words[0], (string_address) "/shell") && launcher.view.group.says[2] && launcher.view.group.says[3];
-                        launcher.session = LAUNCHER_LOG_OUT;
-                        launcher.height = launcher_build(0);
-                        refused = launcher.view.group.count == 3 && launcher_power_act(2) && launcher.power_runs == runs && launcher_power_offered(3);
-                        check("launcher: with no session action offered the foot has Power off and Restart alone, and a button that is not offered starts nothing", two && refused);
-                        check("launcher: with Sleep and Log out offered the foot has four buttons inside the bar, each said before it is done, Sleep starting moonwater sleep and Log out moonwater desktop rest",
-                              four && said);
-                        // Four buttons leave the line that says what an armed one will do no room before them: armed, the line is in the room
-                        // of the others, after the first button or before the last, wide enough for its words, and the others are veiled (not
-                        // drawn, and a press there is no button's) until it is dropped, when all four are back.
-                        {
-                                struct ui_buttons address_to group = &launcher.view.group;
-                                char line_words[UI_CONFIRM_TEXT];
-                                int scale = launcher.ui.scale > 0 ? launcher.ui.scale : 100, need;
-                                b32 first, last, back;
-
-                                launcher.session = LAUNCHER_SLEEP | LAUNCHER_LOG_OUT;
-                                launcher.height = launcher_build(0);
-                                ui_buttons_press(group, 0);
-                                launcher.height = launcher_build(0);
-                                ui_confirm_line(line_words, sizeof(line_words), group->says[0]);
-                                need = ui_kit_measure(&launcher.ui, (string_address)line_words, group->line.variant);
-                                first = group->confirm.armed && group->button[0].w > 0 && !group->button[1].w && !group->button[2].w && !group->button[3].w &&
-                                        group->line.x >= group->button[0].x + group->button[0].w && group->line.w * scale / 100 + 1 >= need;
-                                for (int k = 0; k < group->count; k++)
-                                        first = first && ui_control_hit(&launcher.ui, &group->button[k], ui_dev(&launcher.ui, group->line.x + group->line.w / 2),
-                                                                        ui_dev(&launcher.ui, group->button[0].y + group->button[0].h / 2)) < 0;
-                                ui_confirm_drop(&group->confirm);
-                                ui_buttons_press(group, 3);
-                                launcher.height = launcher_build(0);
-                                ui_confirm_line(line_words, sizeof(line_words), group->says[3]);
-                                need = ui_kit_measure(&launcher.ui, (string_address)line_words, group->line.variant);
-                                last = group->confirm.armed && group->button[3].w > 0 && !group->button[0].w && !group->button[1].w && !group->button[2].w &&
-                                       group->line.x + group->line.w <= group->button[3].x && group->line.w * scale / 100 + 1 >= need;
-                                ui_confirm_drop(&group->confirm);
-                                group->keys = 0;
-                                launcher.height = launcher_build(0);
-                                back = group->button[0].w > 0 && group->button[1].w > 0 && group->button[2].w > 0 && group->button[3].w > 0;
-                                check("launcher: with four buttons an armed one's line is in the room of the others, after the first or before the last, wide enough for its words, the others veiled till it is dropped",
-                                      first && last && back);
-                        }
+                               string_equals(words[0], (string_address) "/shell") && launcher.view.group.says[2];
+                        check("launcher: with no Sleep offered the foot has Power off and Restart alone, and a button that is not offered starts nothing", two);
+                        check("launcher: with Sleep offered the foot has three buttons inside the bar, each said before it is done, Sleep starting moonwater sleep, and no Log out",
+                              three && said);
                         launcher.session = was;
                         launcher.height = launcher_build(0);
                 }

@@ -169,8 +169,6 @@ installer_wifi_off	a42c	شبكة Wi-Fi متوقفة.
 installer_wifi_on	0c01	تشغيل Wi-Fi
 installer_wifi_password	ca99	كلمة مرور %s
 installer_wifi_saved	79e4	محفوظة
-launcher_log_out	d8b5	تسجيل الخروج
-launcher_log_out_armed	8615	تسجيل الخروج
 launcher_power_off	ae2f	إيقاف التشغيل
 launcher_power_off_armed	a48f	إيقاف التشغيل
 launcher_restart	ed8c	إعادة التشغيل

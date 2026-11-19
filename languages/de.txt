@@ -168,8 +168,6 @@ installer_wifi_off	a42c	WLAN ist aus.
 installer_wifi_on	0c01	WLAN einschalten
 installer_wifi_password	ca99	Passwort für %s
 installer_wifi_saved	79e4	Gespeichert
-launcher_log_out	d8b5	Abmelden
-launcher_log_out_armed	8615	abmelden
 launcher_power_off	ae2f	Ausschalten
 launcher_power_off_armed	a48f	ausschalten
 launcher_restart	ed8c	Neu starten

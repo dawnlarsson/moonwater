@@ -169,8 +169,6 @@ installer_wifi_off	a42c	Wi-Fi خاموش است.
 installer_wifi_on	0c01	روشن کردن Wi-Fi
 installer_wifi_password	ca99	گذرواژه برای %s
 installer_wifi_saved	79e4	ذخیره‌شده
-launcher_log_out	d8b5	خروج
-launcher_log_out_armed	8615	خروج
 launcher_power_off	ae2f	خاموش کردن
 launcher_power_off_armed	a48f	خاموش کردن
 launcher_restart	ed8c	راه‌اندازی مجدد

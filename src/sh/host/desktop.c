@@ -347,8 +347,8 @@ no_memory:
 }
 
 /* moonwater desktop [on|off|start|rest]: the choice kept and put in force now. rest is off put in force and not kept: the
-   text console until the next start or `desktop on`, for a desktop that would not stay up on this boot, and the launcher's
-   Log out. The machine script's supervisor said `desktop off` after four quick ends of the compositor, which is kept, so one
+   text console until the next start or `desktop on`, for a desktop that would not stay up on this boot (and rover's desktop
+   rest). The machine script's supervisor said `desktop off` after four quick ends of the compositor, which is kept, so one
    bad boot (a card that came up late, a full disk) left every later one on the text console until somebody typed `desktop
    on`. */
 static b32 host_desktop(string_address address_to arguments, positive count)
