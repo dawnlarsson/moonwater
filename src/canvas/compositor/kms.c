@@ -2330,26 +2330,50 @@ static int compositor_cursor_inset(int span)
 
 // A picture painted into the buffer of the plane that is not showing, which is the one shown from here on: paints counts
 // them, and a screen's plane given the newest wears paints.
-static int compositor_cursor_paint(const struct compositor_pointer *p)
+/*
+        The plane's buffers are mapped once each and kept so (a stretching pointer is painted every frame it moves: a map, a zeroing and an
+        unmap of the card's memory each time were most of the main loop's pointer cost on the Deck), and the shape is drawn into a cached
+        scratch and written to the buffer whole, since the dumb buffer is write-combined: the draw's blending read it back uncached.
+*/
+static unsigned int compositor_cursor_scratch[CP_PLANE * CP_PLANE];
+
+static unsigned int *compositor_cursor_mapped(int which)
 {
-        struct compositor_map_dumb map = {.handle = compositor.cursor.handle[compositor.cursor.back]};
+        struct compositor_map_dumb map = {.handle = compositor.cursor.handle[which]};
         long mapped;
 
+        if (compositor.cursor.mapped[which])
+                return compositor.cursor.mapped[which];
         if (system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0)
-                return -1;
-
+                return null;
         mapped = compositor_call(syscall(mmap), 0, CP_PLANE * CP_PLANE * 4, 3, 1, (positive)compositor.card, map.offset);
         if (mapped < 0 && mapped > -4096)
-                return -1;
+                return null;
+        return compositor.cursor.mapped[which] = (unsigned int *)mapped;
+}
 
-        memory_zero((void *)mapped, CP_PLANE * CP_PLANE * 4);
+// A buffer's mapping let go, before its handle is.
+static void compositor_cursor_unmap(int which)
+{
+        if (compositor.cursor.mapped[which])
+                compositor_call(syscall(munmap), (positive)compositor.cursor.mapped[which], CP_PLANE * CP_PLANE * 4, 0, 0, 0, 0);
+        compositor.cursor.mapped[which] = null;
+}
+
+static int compositor_cursor_paint(const struct compositor_pointer *p)
+{
+        unsigned int *mapped = compositor_cursor_mapped(compositor.cursor.back);
+
+        if (!mapped)
+                return -1;
+        memory_zero(compositor_cursor_scratch, sizeof(compositor_cursor_scratch));
         {
-                struct compositor_target t = {(unsigned int *)mapped, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
+                struct compositor_target t = {compositor_cursor_scratch, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
                 int hot_x, hot_y, inset = compositor_cursor_inset(compositor_pointer_span(p, &hot_x, &hot_y));
 
                 compositor_cursor_draw(&t, hot_x - inset, hot_y - inset, p, compositor_cursor_ink(0, 0xff000000u), compositor_cursor_ink(1, 0xff000000u));
         }
-        compositor_call(syscall(munmap), (positive)mapped, CP_PLANE * CP_PLANE * 4, 0, 0, 0, 0);
+        memory_copy(mapped, compositor_cursor_scratch, sizeof(compositor_cursor_scratch));
 
         compositor.cursor.back ^= 1;
         compositor.cursor.paints++;
@@ -2517,6 +2541,7 @@ static void compositor_cursor_move(void)
                 {
                         unsigned int close[2] = {compositor.cursor.handle[i], 0};
 
+                        compositor_cursor_unmap(i);
                         system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
                         compositor.cursor.handle[i] = 0;
                 }

@@ -1247,6 +1247,7 @@ static struct
         struct
         {
                 unsigned int handle[2]; // the plane's two buffers, 0 when it has none
+                unsigned int *mapped[2]; // each one mapped, kept for its life (compositor_cursor_paint), null before its first paint
                 int back;               // the one that is not showing
                 int plane_on;           // the plane shows a picture, and
                 struct compositor_pointer plane, drawn_as; // the one it wears; and the one the pointer drawn into the scanout is of
