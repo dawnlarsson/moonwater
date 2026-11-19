@@ -182,6 +182,35 @@ if command -v unshare > /dev/null 2>&1 && unshare -U --map-user=1000 --map-group
         fi
 fi
 
+# The settings' directory mounted over after the bus started (an installed machine's data partition on /root, 2026-11-19): the bus
+# watches the new one, reads its theme, says the change, and hears the next one. Before, it kept the directory under the mount: dark for
+# ever on a light desktop, and the browser with it.
+echo dark > /root/canvas.theme
+sleep 1.5
+mkdir -p "$work/data"
+echo light > "$work/data/canvas.theme"
+if command -v gdbus > /dev/null 2>&1; then
+        gdbus monitor --address "$address" --dest org.freedesktop.portal.Desktop > "$work/monitor2.out" 2>&1 &
+        mpid=$!
+        sleep 1
+fi
+mount --bind "$work/data" /root || row FAIL "a directory is mounted over the settings' one" "mount --bind"
+sleep 2.5
+out=$(busctl --address="$address" call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.Settings ReadOne ss org.freedesktop.appearance color-scheme 2>&1)
+[ "$out" = "v u 2" ] && row ok "a settings directory mounted over the bus's own after it started is read: the theme there is light, color-scheme 2" ||
+        row FAIL "a settings directory mounted over the bus's own after it started is read" "$out"
+if [ -n "${mpid:-}" ]; then
+        kill $mpid 2> /dev/null
+        wait $mpid 2> /dev/null
+        grep -q "SettingChanged.*color-scheme.*uint32 2" "$work/monitor2.out" && row ok "and SettingChanged says color-scheme 2" ||
+                row FAIL "and SettingChanged says color-scheme 2" "$(tail -3 "$work/monitor2.out")"
+fi
+echo dark > /root/canvas.theme
+sleep 1.5
+out=$(busctl --address="$address" call org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.Settings ReadOne ss org.freedesktop.appearance color-scheme 2>&1)
+[ "$out" = "v u 1" ] && row ok "and a change written there is heard: the theme dark, color-scheme 1" || row FAIL "and a change written there is heard" "$out"
+umount /root 2> /dev/null
+
 # The bus ends when asked, and takes its socket with it.
 kill -TERM $bpid 2> /dev/null
 i=0

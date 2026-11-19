@@ -53,7 +53,11 @@ static struct
         int dirty;
         long last_settings;
         int auto_theme;
-} sessionbus = {-1, -1, -1, {0}, "/root", SESSIONBUS_PATH, 1, 0, 0};
+        // The settings' directory the watch is on, by its device and inode, and when it was last looked at (sessionbus_rewatch).
+        unsigned long watched_ino;
+        unsigned int watched_major, watched_minor;
+        long last_rewatch;
+} sessionbus = {-1, -1, -1, {0}, "/root", SESSIONBUS_PATH, 1, 0, 0, 0, 0, 0, 0};
 
 static long sessionbus_call(positive number, positive a, positive b, positive c, positive d, positive e, positive f)
 {
@@ -598,8 +602,21 @@ static void sessionbus_flush(long slot)
                 sessionbus_drop(slot);
 }
 
+// The settings' directory as it is now: its inode and device (statx's stx_ino at 32, stx_dev_major at 136 and minor at 140), 0 when it is not.
+static unsigned long sessionbus_root_identity(unsigned int *major, unsigned int *minor)
+{
+        p8 facts[256];
+
+        *major = *minor = 0;
+        if (system_stat_at(AT_FDCWD, (string_address)sessionbus.root, 0, 0x100u, facts) < 0) // STATX_INO
+                return 0;
+        *major = *(unsigned int *)(facts + 136), *minor = *(unsigned int *)(facts + 140);
+        return *(unsigned long *)(facts + 32);
+}
+
 static void sessionbus_watch(void)
 {
+        sessionbus.watched_ino = sessionbus_root_identity(&sessionbus.watched_major, &sessionbus.watched_minor);
         sessionbus.inotify = (int)sessionbus_call(syscall(inotify_init1), 0x800 | 0x80000, 0, 0, 0, 0, 0);
         if (sessionbus.inotify >= 0 &&
             sessionbus_call(syscall(inotify_add_watch), (positive)sessionbus.inotify, (positive)sessionbus.root,
@@ -608,6 +625,32 @@ static void sessionbus_watch(void)
                 system_close(sessionbus.inotify);
                 sessionbus.inotify = -1;
         }
+}
+
+/*
+        The watch made again where the settings' directory is another one than the one watched: an installed machine's /root is its data
+        partition, mounted over the root file system's /root, and the bus that started before the mount watched the directory under it, read
+        there no canvas.theme (so dark), and never heard a change of the files Settings writes on the mounted one: the portal said dark to every
+        browser on a light desktop (box, image e4c4d0e2a: /root/canvas.theme light, the bus's color-scheme 1, its watch on device 3 where /root
+        was the NVMe partition's). Looked at once a second; a directory that changed is watched anew and its settings read again, which tells
+        the programs (SettingChanged) what changed.
+*/
+static void sessionbus_rewatch(long now)
+{
+        unsigned int major, minor;
+        unsigned long ino;
+
+        if (now - sessionbus.last_rewatch < 1000)
+                return;
+        sessionbus.last_rewatch = now;
+        ino = sessionbus_root_identity(&major, &minor);
+        if (ino == sessionbus.watched_ino && major == sessionbus.watched_major && minor == sessionbus.watched_minor)
+                return;
+        if (sessionbus.inotify >= 0)
+                system_close(sessionbus.inotify);
+        sessionbus.inotify = -1;
+        sessionbus_watch();
+        sessionbus.dirty = 1;
 }
 
 static void sessionbus_drain_watch(void)
@@ -726,6 +769,7 @@ static b32 sessionbus_main()
                         }
                 }
                 now = sessionbus_now(0);
+                sessionbus_rewatch(now);
                 if (sessionbus.dirty || (sessionbus.auto_theme && now - sessionbus.last_settings > SESSIONBUS_TICK_MS) ||
                     (sessionbus.inotify < 0 && now - sessionbus.last_settings > 1000))
                         sessionbus_settings();
