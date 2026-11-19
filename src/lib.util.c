@@ -659,17 +659,21 @@ static inline INLINE p64 hex_digits_word(p64 value)
 /* Word, prefix and suffix tests against a literal.  The length is the
    literal's own, so no site counts it by hand and none can count it wrong.
    memory_is_word and memory_has_suffix take an exact span; string_has_prefix
-   stops at the text's NUL like string_compare_max does. */
+   stops at the text's NUL like string_compare_max does. Each takes a string
+   literal alone ("" literal will not compile with anything else): a pointer's
+   sizeof is 8, and rover's boot event compared 7 bytes of "ask" with a NUL in
+   them, so a verdict of ask or disk was never posted and the installer never
+   opened on a boot that asked. */
 #define memory_is_word(bytes, length, literal)                               \
         ((length) == sizeof(literal) - 1 &&                                  \
-         !memory_compare((bytes), literal, sizeof(literal) - 1))
+         !memory_compare((bytes), "" literal, sizeof(literal) - 1))
 #define memory_has_suffix(bytes, length, literal)                            \
         ({ positive _suffix_have = (length);                                 \
            _suffix_have >= sizeof(literal) - 1 &&                            \
                !memory_compare((bytes) + _suffix_have - (sizeof(literal) - 1),\
-                               literal, sizeof(literal) - 1); })
+                               "" literal, sizeof(literal) - 1); })
 #define string_has_prefix(text, literal)                                     \
-        (!string_compare_max((text), literal, sizeof(literal) - 1))
+        (!string_compare_max((text), "" literal, sizeof(literal) - 1))
 
 /* a - b, floored at zero: the saturating difference every width and room
    computation wants, spelled once. */

@@ -1709,27 +1709,23 @@ static fn rover_runner_find_everys(void)
 //      The boot event, once a boot: the verdict (live, disk or ask) and the disk's name.
 static fn rover_runner_boot_event(const p8 address_to word)
 {
-        static const char address_to const verdicts[3] = {"live", "disk", "ask"};
+        //      Each verdict a literal of its own: string_has_prefix measures its literal, and a pointer's would be 8.
+        b64 verdict = string_has_prefix((string_address)word, "live") ? 0 : string_has_prefix((string_address)word, "disk") ? 1
+                    : string_has_prefix((string_address)word, "ask")  ? 2 : -1;
 
-        for (positive at = 0; at < 3; at++)
-                if (string_has_prefix((string_address)word, (string_address)verdicts[at]))
-                {
-                        string_address disk = string_first_of(word, ' ');
+        string_address disk = string_first_of(word, ' ');
 
-                        if (!rover_runner_post(101, disk ? (const p8 address_to)(disk + 1) : null,
-                                               disk ? string_length(disk + 1) : 0, (b64)at))
-                                return;
-                        struct rover_event address_to event = &rover_runner.queue[rover_runner.queued - 1];
-                        //      boot's fields: the verdict, and the disk's name.
-                        event->count = 2;
-                        event->field[1] = event->field[0];
-                        event->field[0].number = (b64)at;
-                        event->field[0].text = rover_nothing;
-                        event->field[0].length = 0;
-                        if (!disk)
-                                event->field[1].text = rover_nothing;
-                        return;
-                }
+        if (verdict < 0 || !rover_runner_post(101, disk ? (const p8 address_to)(disk + 1) : null, disk ? string_length(disk + 1) : 0, verdict))
+                return;
+        struct rover_event address_to event = &rover_runner.queue[rover_runner.queued - 1];
+        //      boot's fields: the verdict, and the disk's name.
+        event->count = 2;
+        event->field[1] = event->field[0];
+        event->field[0].number = verdict;
+        event->field[0].text = rover_nothing;
+        event->field[0].length = 0;
+        if (!disk)
+                event->field[1].text = rover_nothing;
 }
 
 static fn rover_runner_verdict(void)
