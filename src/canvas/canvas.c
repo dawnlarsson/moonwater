@@ -436,7 +436,7 @@ static struct desktop
 static DEFINE_MUTEX(canvas_list_lock);
 static LIST_HEAD(canvas_list);
 
-static void canvas_thread_start(void);
+static _Bool canvas_thread_start(void);
 static void canvas_thread_stop(void);
 static void canvas_thread_wake(void);
 
@@ -2186,10 +2186,17 @@ static struct workqueue_struct *canvas_plug_wq;
 
 static void canvas_claimed_forget(struct drm_device *dev);
 
+// Made once: the take-over (under canvas_control_lock), a hotplug (under a card's clientlist_mutex) and a change of
+// modes (no lock) can each be first, and only one queue is kept; the one a racing caller made is let go.
 static void canvas_plug_ensure(void)
 {
-        if (!canvas_plug_wq)
-                canvas_plug_wq = alloc_ordered_workqueue("moonwater/plug", 0);
+        struct workqueue_struct *made;
+
+        if (READ_ONCE(canvas_plug_wq))
+                return;
+        made = alloc_ordered_workqueue("moonwater/plug", 0);
+        if (made && cmpxchg(&canvas_plug_wq, null, made))
+                destroy_workqueue(made);
 }
 
 static void canvas_plug_work(struct work_struct *work)
@@ -2316,6 +2323,10 @@ static int client_hotplug(struct drm_client_dev *client)
 {
         struct canvas *canvas = canvas_from_client(client);
 
+        // The DRM core's call, made with the card's client list held (drm_client_register and
+        // drm_client_dev_hotplug): canvas_rules_hotplug takes canvas_list_lock after it, the lock order's.
+        lockdep_assert_held(&client->dev->clientlist_mutex);
+
         canvas_rules_hotplug(canvas);
 
         /*
@@ -2420,11 +2431,23 @@ static struct canvas *canvas_take_over(struct drm_device *dev)
         canvas_plug_ensure();
         INIT_WORK(&canvas->plug, canvas_plug_work);
 
+        /*
+                A first card with no thread is not taken: the thread is what
+                takes the console's keyboard (canvas_keyboard_take) and hears
+                the chords, so a card attached without it left the console's
+                keyboard live under a desktop, typing into the root shell of
+                the console behind it.
+        */
         mutex_lock(&canvas_list_lock);
         first = list_empty(&canvas_list);
         list_add_tail(&canvas->link, &canvas_list);
-        if (first)
-                canvas_thread_start();
+        if (first && !canvas_thread_start())
+        {
+                list_del(&canvas->link);
+                mutex_unlock(&canvas_list_lock);
+                drm_client_release(&canvas->client); // frees canvas (client_free)
+                return null;
+        }
         mutex_unlock(&canvas_list_lock);
 
         return canvas;
@@ -2520,7 +2543,11 @@ static unsigned int canvas_settled_at;
 
         One bit per minor, which is the whole of DRM's minor space.
 */
-static u64 canvas_claimed;
+// A bit a card minor (0 to 63), set and cleared with the atomic bit operations: canvas_claim sets one under
+// canvas_control_lock and a driver's unregister clears one under its card's clientlist_mutex, so a plain |= and &=
+// could each undo the other.
+static unsigned long canvas_claimed;
+static_assert(BITS_PER_LONG >= 64, "a card minor up to 63 is a bit of canvas_claimed");
 
 static void canvas_firmware_yield(void);
 
@@ -2533,7 +2560,7 @@ static void canvas_claimed_forget(struct drm_device *dev)
 
         minor = dev->primary->index;
         if (minor >= 0 && minor < 64)
-                canvas_claimed &= ~BIT_ULL(minor);
+                clear_bit(minor, &canvas_claimed);
 }
 
 static _Bool canvas_has_native(void)
@@ -2582,7 +2609,7 @@ static int canvas_claim(const char *path, unsigned int minor,
         struct canvas *canvas;
         struct drm_device *dev;
 
-        if (canvas_claimed & BIT_ULL(minor))
+        if (test_bit(minor, &canvas_claimed))
                 return -EBUSY;
 
         filp = filp_open(path, O_RDWR, 0);
@@ -2653,7 +2680,7 @@ static int canvas_claim(const char *path, unsigned int minor,
         canvas = canvas_take_over(dev);
 
         if (canvas)
-                canvas_claimed |= BIT_ULL(minor);
+                set_bit(minor, &canvas_claimed);
 
         /*
                 Closed before the client is registered, and drm_client_init has
@@ -2696,7 +2723,7 @@ static unsigned int canvas_claim_range(struct canvas_control *on,
 
         for (minor = 0; minor < 64; minor++)
         {
-                if (canvas_claimed & BIT_ULL(minor))
+                if (test_bit(minor, &canvas_claimed))
                         continue;
 
                 positive_into_string(
@@ -2848,7 +2875,8 @@ static long canvas_turn_off(void)
         struct drm_device *released[8];
         unsigned int count = 0;
 
-        mutex_lock(&canvas_control_lock);
+        if (mutex_lock_killable(&canvas_control_lock))
+                return -EINTR;
 
         if (!canvas_is_on())
         {
@@ -2897,7 +2925,7 @@ static long canvas_turn_off(void)
                         drm_dev_put(dev);
         }
 
-        canvas_claimed = 0;
+        WRITE_ONCE(canvas_claimed, 0);
 
         // The kernel's console takes each screen back.
         for (unsigned int i = 0; i < count; i++)
@@ -2920,7 +2948,8 @@ static long canvas_turn_on(struct canvas_control *answer)
 {
         unsigned int taken, refused = 0;
 
-        mutex_lock(&canvas_control_lock);
+        if (mutex_lock_killable(&canvas_control_lock))
+                return -EINTR;
 
         if (canvas_is_on())
         {
@@ -2946,12 +2975,20 @@ static long canvas_turn_on(struct canvas_control *answer)
 }
 
 /* What Canvas holds, for `moonwater canvas`. */
-static void canvas_state(struct canvas_control *answer)
+/*
+        The waits a request from a program makes are killable: a lock held by
+        something that does not let go (a commit the driver never finishes,
+        under desktop.lock) left the asker in state D, where its SIGKILL is
+        not taken, and the program that started it (the settings) waiting on
+        a child nothing could end. A killed wait answers -EINTR.
+*/
+static long canvas_state(struct canvas_control *answer)
 {
         struct canvas *canvas;
         struct output *output;
 
-        mutex_lock(&canvas_list_lock);
+        if (mutex_lock_killable(&canvas_list_lock))
+                return -EINTR;
         list_for_each_entry(canvas, &canvas_list, link)
                 if (!answer->cards++)
                         strscpy(answer->driver, canvas->client.dev->driver->name,
@@ -2960,7 +2997,8 @@ static void canvas_state(struct canvas_control *answer)
 
         answer->running = answer->cards != 0;
 
-        rt_mutex_lock(&desktop.lock);
+        if (rt_mutex_lock_killable(&desktop.lock))
+                return -EINTR;
 
         // Asked now and not as the thread last found it: a program that took
         // the display a moment ago is held to be holding it.
@@ -2995,6 +3033,7 @@ static void canvas_state(struct canvas_control *answer)
         }
 
         rt_mutex_unlock(&desktop.lock);
+        return 0;
 }
 
 /*
@@ -3016,7 +3055,8 @@ static long canvas_scale_set(unsigned int setting)
         if (setting > SPARK_CANVAS_SCALE_MOST)
                 return -EINVAL;
 
-        guard(rt_mutex)(&desktop.lock);
+        if (rt_mutex_lock_killable(&desktop.lock))
+                return -EINTR;
 
         canvas_scale_setting = setting;
         canvas_scale_origin = SPARK_CANVAS_ORIGIN_SET;
@@ -3024,6 +3064,7 @@ static long canvas_scale_set(unsigned int setting)
         if (!list_empty(&desktop.outputs))
                 desktop_rescale(setting ? setting : canvas_scale_auto(null, &dpi));
 
+        rt_mutex_unlock(&desktop.lock);
         return 0;
 }
 
@@ -3037,8 +3078,6 @@ static long canvas_modes_set(unsigned int modes)
         if (READ_ONCE(canvas_modes_largest) == (modes == SPARK_CANVAS_MODES_LARGEST))
                 return 0;
 
-        WRITE_ONCE(canvas_modes_largest, modes == SPARK_CANVAS_MODES_LARGEST);
-
         /*
                 Each card's plug work is queued here, and client_hotplug is not
                 called: it starts with canvas_rules_hotplug, which takes
@@ -3050,7 +3089,10 @@ static long canvas_modes_set(unsigned int modes)
                 nothing for rover's display counts either.
         */
         canvas_plug_ensure();
-        mutex_lock(&canvas_list_lock);
+        if (mutex_lock_killable(&canvas_list_lock))
+                return -EINTR;
+        // Under the lock, so a killed wait changes nothing.
+        WRITE_ONCE(canvas_modes_largest, modes == SPARK_CANVAS_MODES_LARGEST);
         list_for_each_entry(canvas, &canvas_list, link)
         {
                 canvas->retarget = true;
@@ -3854,7 +3896,7 @@ static int canvas_loop(void *unused)
         return 0;
 }
 
-static void canvas_thread_start(void)
+static _Bool canvas_thread_start(void)
 {
         /*
                 A thread rather than a workqueue.
@@ -3881,7 +3923,7 @@ static void canvas_thread_start(void)
         if (IS_ERR(thread))
         {
                 pr_info("[moonwater canvas] " "no thread for input\n");
-                return;
+                return false;
         }
 
         rcu_assign_pointer(canvas_thread, thread);
@@ -3900,6 +3942,7 @@ static void canvas_thread_start(void)
         }
         else
                 pointer_handler_registered = true;
+        return true;
 }
 
 /*
@@ -3972,7 +4015,8 @@ static long report_canvas(struct canvas_control __user *out)
         else if (request == SPARK_CANVAS_SET_MODES)
                 answer = canvas_modes_set(asked_modes);
 
-        canvas_state(&control);
+        if (canvas_state(&control))
+                return answer ? answer : -EINTR;
 
         if (copy_to_user(out, &control, sizeof(control)))
                 return -EFAULT;
