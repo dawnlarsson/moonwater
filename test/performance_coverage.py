@@ -930,8 +930,6 @@ cover('correctness_only', 'test/differential.py', 'canvas_cell_1_1 canvas_cell2_
 # The five byte class lookup, against the generic: the eleven five byte names, every empty slot of its table and an occupied one.
 cover('correctness_only', 'test/checks.c#CHECK_verify', 'byte_class_index_5_5',
       'the five byte names of the classes, the empty slots and an occupied slot of its table, against the generic; no timing claim')
-cover('unmeasured', None, 'f32_pair_clip_2_3',
-      'size classes named by their callers (src/sh/text.c, the audio library); no row of their own was found')
 
 
 def validate():

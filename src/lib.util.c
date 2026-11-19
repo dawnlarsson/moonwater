@@ -67,7 +67,7 @@
         emits a jump to an allocator that is not there. */
 #ifndef LIB_SKIP_UMBRELLA
 #define STANDARD_MODERN_C_COMPILER_MEMORY
-#endif
+#endif // LIB_SKIP_UMBRELLA
 
 #include "lib.c"
 /*
@@ -731,6 +731,7 @@ static inline INLINE PURE positive memory_span_without_byte(
    site; matching suffixes enter the reverse assembly span, where whole blocks
    replace the repeated decrement loop. Parenthesizing the name still reaches
    the routine directly for verification and benchmarking. */
+#ifndef LIB_SKIP_UMBRELLA
 #define memory_span_byte_reverse(block, byte, size)                           \
         ({ address_any _reverse_block = (block);                             \
            p8 _reverse_byte = (byte);                                        \
@@ -741,6 +742,7 @@ static inline INLINE PURE positive memory_span_without_byte(
                ? (memory_span_byte_reverse)(_reverse_block, _reverse_byte,   \
                                             _reverse_size)                   \
                : 0; })
+#endif // LIB_SKIP_UMBRELLA
 
 /* How many slashes end a path of length bytes, never counting the first
    byte: "/" and "//" keep their root, and a path of nought has none, where

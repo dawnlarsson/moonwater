@@ -1055,10 +1055,10 @@ cover('folds_already', 'divisor', 'positive_divide_wide',
 # message, a commit's damage, a device's records), and the counts with them.
 cover('nothing_to_fold', None, '''
 automaton_scan automaton_step wire_message wire_slot wire_arguments wire_event rects_clip rects_point rects_point_w
-bins_count bins_place bins_skip bins_starts evdev_decode hash_fnv_u32 pointer_gain pointer_scale ring_post
+bins_count bins_place bins_skip bins_starts evdev_decode hash_fnv1a hash_fnv_u32 pointer_gain pointer_scale ring_post
 ''', 'pointers into memory the caller owns and counts read from it at run time; no call site hands one a literal')
 cover('nothing_to_fold', None, '''
-byte_class_index_5_5 canvas_cell_1_1 canvas_cell2_1_1 f32_pair_clip_2_3 f32_pair_to_s16_1_2 f32_pair_to_s16_3_3 f32_pair_to_s16_5_7
+byte_class_index_5_5 canvas_cell_1_1 canvas_cell2_1_1 f32_pair_to_s16_1_2 f32_pair_to_s16_3_3 f32_pair_to_s16_5_7
 ''', 'size-class entries: a caller names the class when its count is known to fall in it; the class is the entry, nothing folds')
 cover('nothing_to_fold', None, 'montgomery_multiply',
      'the modulus, its inverse and the limb count come from a crypto_field or '
