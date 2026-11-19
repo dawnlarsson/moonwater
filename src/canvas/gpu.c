@@ -3035,6 +3035,9 @@ __attribute__((unused)) static b32 gpu_finish(void)
         return gpu_wait_job(GPU_HANG_NS);
 }
 
+// Held across every step of a multi-step present (compositor_card_go / multi-rect gpu_scene): gpu_run and gpu_go do not clear handed until the last step is submitted.
+static b32 gpu_handed_hold;
+
 // No record waits for a job any more (the maps' addresses are no longer handed out to one): the marks of the lookups are cleared.
 static void gpu_handed_clear(void)
 {
@@ -3222,7 +3225,7 @@ static b32 gpu_run(void)
         took = clock_monotonic_nanoseconds() - began;
         gpu_jobs++, gpu_job_ns += took, gpu_jobs_waited++, gpu_jobs_kind[kind]++, gpu_job_ns_kind[kind] += took;
         gpu_job_submit_ns += gpu_submit_took, gpu_job_wait_ns += took > gpu_submit_took ? took - gpu_submit_took : 0;
-        if (!gpu.pending) // a job given up on may still read the maps: their addresses stay handed out until it is done (gpu_idle)
+        if (!gpu.pending && !gpu_handed_hold) // a job given up on may still read the maps: their addresses stay handed out until it is done (gpu_idle)
                 gpu_handed_clear();
         return done;
 }
@@ -3235,7 +3238,7 @@ static positive gpu_go(void)
         positive sequence = gpu_submit();
 
         gpu_jobs++, gpu_jobs_unwaited++, gpu_jobs_kind[kind]++;
-        if (sequence)
+        if (sequence && !gpu_handed_hold)
                 gpu_handed_clear();
         return sequence;
 }

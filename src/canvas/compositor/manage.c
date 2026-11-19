@@ -24,6 +24,8 @@ static void compositor_stack_remove(int row)
 
         memory_copy(compositor.stack + at, compositor.stack + at + 1, (compositor.stacked - at - 1) * sizeof(*compositor.stack));
         compositor.stacked--;
+        if (!++compositor.stack_gen)
+                compositor.stack_gen++;
 }
 
 // On top of the others; an override-redirect X window stays over a window raised (compositor_row_xoverride).
@@ -36,6 +38,8 @@ static void compositor_raise(int row)
 
         compositor_stack_remove(row);
         compositor.stack[compositor.stacked++] = (unsigned int)row;
+        if (!++compositor.stack_gen)
+                compositor.stack_gen++;
         compositor_damage_row(row);
         for (unsigned int at = 0; !compositor_row_xoverride(row) && at + 1 + over < compositor.stacked; at++)
         {

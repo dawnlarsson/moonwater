@@ -877,6 +877,27 @@ XWM_API long xwm_enc_selection_notify(unsigned char *out, unsigned long cap, uns
         return XWM_EVENT_SIZE;
 }
 
+/* A synthetic ConfigureNotify, as the 32 bytes SendEvent carries (ICCCM 4.1.5): sent when a ConfigureRequest is denied or modified. */
+XWM_API long xwm_enc_configure_notify(unsigned char *out, unsigned long cap, unsigned int window, int x, int y, unsigned int width, unsigned int height, unsigned int border, int override)
+{
+        if (!out || !window)
+                return XWM_ERR_ARG;
+        if (cap < XWM_EVENT_SIZE)
+                return XWM_ERR_SPACE;
+        xwm_zero(out, XWM_EVENT_SIZE);
+        out[0] = XWM_EVENT_CONFIGURE_NOTIFY;
+        xwm_put32(out + 4, window);
+        xwm_put32(out + 8, window);
+        xwm_put32(out + 12, 0);
+        xwm_put16(out + 16, (unsigned int)x);
+        xwm_put16(out + 18, (unsigned int)y);
+        xwm_put16(out + 20, width);
+        xwm_put16(out + 22, height);
+        xwm_put16(out + 24, border);
+        out[26] = (unsigned char)(override != 0);
+        return XWM_EVENT_SIZE;
+}
+
 /* ChangeWindowAttributes: a value for each bit of the mask, in the order of the bits, as many as the mask has. */
 XWM_API long xwm_enc_change_window_attributes(unsigned char *out, unsigned long cap, unsigned int window, unsigned int mask, const unsigned int *values, unsigned long count)
 {

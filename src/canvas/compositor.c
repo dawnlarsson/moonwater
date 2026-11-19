@@ -1073,8 +1073,9 @@ static struct
         */
         int overlay_state, overlay_on, overlay_rect[4];
         // A window on the overlay where it does not fill the output (plane_row, -1 for none): what of it the overlay
-        // shows on the output (plane_rect), and the framebuffer it shows (plane_fb, 0 for none).
-        int plane_row, plane_rect[4];
+        // shows on the output (plane_rect), and the framebuffer it shows (plane_fb, 0 for none). leaving_row holds a
+        // row that just left direct/overlay scanout until its flip away lands (compositor_flip_done).
+        int plane_row, leaving_row, plane_rect[4];
         unsigned int plane_fb;
         // plane_gone: the window on the overlay closed (compositor_leave), its framebuffer still scanned at plane_rect until the next present
         // takes the overlay off or gives it to another window. overlay_owed: the overlay's disable was refused (compositor_overlay_off), and
@@ -1142,7 +1143,7 @@ static struct
         char (*name)[WINDOWS_NAME]; // what it is remembered by, taken with its first picture; none for nothing
         unsigned int *moved;      // the row's moved, as it was last taken
         unsigned int *stack;    // bottom first
-        unsigned int stacked, next_made;
+        unsigned int stacked, stack_gen, next_made;
 
         // The tabs: the rows that have one in their order, what each shows, and the band drawn with the font.
         unsigned int *listed;
@@ -3423,7 +3424,7 @@ static b32 compositor_main()
         compositor_font(font ? font : ui_faces()->text[0] ? (string_address)ui_faces()->text : null);
 
         compositor.signals = compositor_signals();
-        compositor.direct_row = compositor.flip_row = compositor.plane_row = -1;
+        compositor.direct_row = compositor.flip_row = compositor.plane_row = compositor.leaving_row = -1;
         compositor.on_screen = compositor.fb;
         status = compositor_table();
         if (status < 0 || compositor.signals < 0)
@@ -3818,8 +3819,9 @@ static b32 compositor_main()
                 compositor_taskbar_slide(now);
                 compositor_moon_keep(now);
                 compositor_starting_keep(now);
-                // The wallpaper: one asked for, or one made on its thread taken.
-                compositor_wall_keep();
+                // The wallpaper: one asked for, or one made on its thread taken. Never forget/unmap it while a card present is in flight.
+                if (!compositor_card_holds())
+                        compositor_wall_keep();
 
                 // Dated when it starts: a card that holds the call for the rest
                 // of the frame has used the frame up.

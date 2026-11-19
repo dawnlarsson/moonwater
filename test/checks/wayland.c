@@ -594,7 +594,7 @@ static const struct wayland_host fake_host = {
     fake_row_picture, fake_row_title, fake_row_do, fake_row_facts, fake_screens, fake_now, fake_keymap, fake_repeat, fake_seat,
     fake_locks, fake_pointer_hold, fake_dmabuf_info, fake_dmabuf_table, fake_dmabuf_map, fake_clip_type, fake_clip_pull, fake_clip_abort, fake_clip_push,
     fake_clip_clear, fake_dmabuf_ready, fake_random, 0, 0, // no row_layers (test_layers gives one) and no row_busy (test_row_busy)
-    fake_reserve, fake_commit, fake_unreserve, 0, 0}; // no bridge to X (test_bridge gives one)
+    fake_reserve, fake_commit, fake_unreserve, 0, 0, 0}; // no bridge to X (test_bridge gives one), no row_app
 
 /* ---- a client that builds its requests from the table ---- */
 
@@ -10090,6 +10090,18 @@ static void xw_test_send_event(void)
         ev[0] = 33;
         XWCHECK(xwm_enc_send_event(out, 43, 0, 0x00400001, 0, ev, 32) == XWM_ERR_SPACE, "SendEvent into 43 bytes is refused");
         xw_test_input_event(ev);
+        {
+                struct xwm_event parsed;
+
+                n = xwm_enc_configure_notify(ev, sizeof ev, 0x00400001u, 240, 0, 1440, 1080, 0, 0);
+                XWCHECK(n == 32 && xwm_parse_event(ev, 32, &parsed) == XWM_OK && parsed.kind == XWM_EV_CONFIGURE_NOTIFY &&
+                        parsed.window == 0x00400001u && parsed.x == 240 && parsed.y == 0 && parsed.width == 1440 && parsed.height == 1080 && !parsed.override,
+                        "ConfigureNotify synthetic event encodes and parses back with exact window and geometry");
+                XWCHECK(xwm_enc_configure_notify(ev, 31, 0x00400001u, 0, 0, 100, 100, 0, 0) == XWM_ERR_SPACE,
+                        "ConfigureNotify into 31 bytes is refused");
+                XWCHECK(xwm_enc_configure_notify(ev, sizeof ev, 0, 0, 0, 100, 100, 0, 0) == XWM_ERR_ARG,
+                        "ConfigureNotify with window 0 is refused");
+        }
 }
 
 /* Every encoder into a buffer of exactly its size writes it, and into one byte less answers XWM_ERR_SPACE (the buffers are

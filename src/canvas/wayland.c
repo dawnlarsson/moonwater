@@ -3952,6 +3952,8 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
 */
 static void wayland_scale_tell(struct wayland_client *c, struct wayland_surface *s, long percent)
 {
+        if (c->xspace)
+                percent = 100;
         long scale120 = wayland_percent120(percent), whole = wayland_max(1, (wayland_min(((long)(percent)), 800) + 99) / 100), slot;
         struct wayland_event e;
 
@@ -6323,7 +6325,6 @@ static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surfa
         }
         wayland.pointer_row = is ? row : -1;
         wayland.pointer_surface = is ? wayland_surface_index(now, is) : -1;
-        wayland_constraints_update();
         if (is)
         {
                 unsigned long serial = wayland_input_serial(now);
@@ -6333,6 +6334,7 @@ static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surfa
                 for (long at = 0; at < count; at++)
                         wayland_pointer_enter_one(now, slots[at], is, serial, sx, sy);
         }
+        wayland_constraints_update();
 }
 
 WAYLAND_API void wayland_pointer_to(long row, long x, long y)
@@ -9403,7 +9405,10 @@ static void wayland_constraints_update(void)
                         struct wayland_surface *surface = con->live && con->surface ? &c->surfaces[con->surface - 1] : 0;
                         struct wayland_surface *root = surface && surface->live ? wayland_root_of(c, surface) : 0;
 
-                        if (root && root->row >= 0 && root->row == wayland.pointer_row && root->row == wayland.keyboard_row &&
+                        if (root && root->row >= 0 && root->row == wayland.pointer_row &&
+                            (root->row == wayland.keyboard_row ||
+                             ((root->role == WAYLAND_ROLE_POPUP || (root->xsurface && root->xpopup)) &&
+                              wayland.keyboard_row >= 0 && wayland.row_client[wayland.keyboard_row] == slot)) &&
                             root->row != wayland.unheld_row)
                         {
                                 client = slot;

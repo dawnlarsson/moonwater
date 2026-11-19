@@ -133,6 +133,8 @@ struct compositor_frame
         // A layer of its row's window (a client's subsurface read where it keeps it, compositor_wl_layers_frames): a frame after the row's own,
         // with the row in rows[] as the window's own frame has, and nothing of a window but its picture (no line, corners, buttons or runs).
         int layer;
+        // Solid opaque fill colour (0xaarrggbb) when !builtin && !pixels (e.g. black letterbox/pillarbox behind an aspect-fitted fullscreen window).
+        unsigned int fill;
 };
 
 /*
@@ -816,9 +818,13 @@ static void compositor_blit_scaled_blend(const struct compositor_target *t, cons
 // What is inside a frame's line, through the target's clip: a window's pixels, or one of the panel's tabs.
 static void compositor_contents(const struct compositor_target *t, const struct compositor_frame *frame)
 {
-        // A frame with no picture is its line and corners only (a grid tile's border): it has no contents to draw.
+        // A frame with no picture is its line and corners only (a grid tile's border), unless it carries a solid backdrop fill.
         if (!frame->builtin && !frame->pixels)
+        {
+                if (frame->fill)
+                        compositor_fill(t, frame->x, frame->y, frame->width, frame->height, frame->fill);
                 return;
+        }
         if (frame->builtin)
                 compositor_fill(t, frame->x, frame->y, frame->width, frame->height, taskbar_tab_ink(((int)(frame->slot)), ((unsigned int)(compositor_panel_mark(frame)))));
         else if (frame->swap && !compositor_scaled(frame))
@@ -1421,8 +1427,12 @@ static b32 compositor_gpu_lit_over(const struct compositor_frame *f, int ox, int
 // What is inside a frame's line, in a rectangle of it: the picture's pixels copied (or blended when non-opaque), or the tab's one ink.
 static void compositor_gpu_contents(const struct compositor_frame *f, unsigned int tab, int x0, int y0, int x1, int y1)
 {
-        if (!f->builtin && !f->pixels) // no picture: nothing inside the line (compositor_contents)
+        if (!f->builtin && !f->pixels) // no picture: solid backdrop fill if set, else nothing inside the line
+        {
+                if (f->fill)
+                        compositor_gpu_rect(0, x0, y0, x1, y1, f->fill, 0, 0, 0);
                 return;
+        }
         if (f->builtin)
                 compositor_gpu_rect(0, x0, y0, x1, y1, tab, 0, 0, 0);
         else
@@ -1475,7 +1485,7 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         {
                 int cx = corner & 1 ? ox + ow - r : ox, cy = corner & 2 ? oy + oh - r : oy;
                 int sx1 = cx > x ? cx : x, sx2 = cx + r < x + w ? cx + r : x + w, sy1 = cy > y ? cy : y, sy2 = cy + r < y + h ? cy + r : y + h;
-                int picture = f->builtin || f->pixels != 0;
+                int picture = f->builtin || f->pixels != 0 || f->fill != 0;
                 unsigned int edge_table, content_table, edge = compositor_corner_lit(f, corner) && f->lit ? f->lit_ink : f->edge;
 
                 if (f->square & (1 << corner))

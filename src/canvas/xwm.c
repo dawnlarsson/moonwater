@@ -380,6 +380,7 @@ struct compositor_xwm
         struct compositor_xwm_pending *pending;
         unsigned int pending_at, pending_count, pending_room; // the oldest request waited for, how many are, and the ring's size
         int focus_row;                 // the row with the keys at the last pass
+        unsigned int last_stack_gen;   // compositor.stack_gen last synced to X11 stacking order
         unsigned int focus_window;     // and the X window that row was then (0 for none)
         // The selections (THE SELECTIONS): XFIXES's opcode and first event (0 without it), which selection the window manager is making
         // the compositor's (its number and one, so its own change is not taken for another's), the next requestor window's number, the
@@ -1328,6 +1329,9 @@ static void compositor_xwm_unmapped(struct compositor_xwm_window *w)
         w->row = -1;
         w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED);
         w->closes = 0;
+        w->sent_x = w->sent_y = COMPOSITOR_XWM_NO_PLACE;
+        w->sent_w = w->sent_h = 0;
+        compositor_xwm_at->last_stack_gen = 0;
 }
 
 /*
@@ -1409,6 +1413,7 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
         if (row < 0 || w->row == (int)row)
                 return;
         w->row = (int)row;
+        compositor_xwm_at->last_stack_gen = 0;
         compositor_xwm_app(w);
         compositor_xwm_owned(w);
         if (w->state & COMPOSITOR_XWM_FULLSCREEN)
@@ -1445,6 +1450,7 @@ static void compositor_xwm_fullscreen(struct compositor_xwm_window *w, int on)
                                ? compositor.h[w->row]
                                : (compositor.height > 0 ? (unsigned int)compositor.height : 1);
                 compositor_xwm_configure(w->id, &c);
+                w->sent_x = c.x, w->sent_y = c.y, w->sent_w = c.width, w->sent_h = c.height;
                 compositor_xwm_net_state(w->id, (int)w->state);
         }
         else
@@ -3851,16 +3857,17 @@ static void compositor_xwm_event(const struct xwm_event *e)
                         compositor_xwm_fullscreen(w, 0);
                 }
                 // A fullscreen window keeps the output's place and size whatever it asks.
-                c.mask = e->value_mask & (XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT |
-                                          XWM_CONFIGURE_BORDER | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
+                unsigned int asked = e->value_mask & (XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT |
+                                                      XWM_CONFIGURE_BORDER | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
+                c.mask = asked;
                 if (w && (w->state & COMPOSITOR_XWM_FULLSCREEN))
                         c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT);
                 if (w && w->row >= 0 && (compositor.resize == w->row || compositor.arranged[w->row] != COMPOSITOR_FLOATING))
                         c.mask &= ~(XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT);
-                // The compositor places a window (its place is sent when it changes): the place a client asks is not taken. A popup's
-                // is where it is.
+                // The compositor places and stacks a managed window (its place and stacking order are synced from compositor.stack):
+                // client X/Y and stacking requests are not forwarded so X11 hit-testing never diverges from what Moonwater draws.
                 if (!w || !(w->state & COMPOSITOR_XWM_POPUPTYPE))
-                        c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y);
+                        c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
                 c.x = e->x;
                 c.y = e->y;
                 // A size within the output and the window's WM_NORMAL_HINTS bounds.
@@ -3872,6 +3879,19 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 c.stack_mode = e->detail;
                 if (c.mask)
                         compositor_xwm_configure(e->window, &c);
+                // ICCCM 4.1.5: if a ConfigureRequest was denied or modified, send a synthetic ConfigureNotify with the actual geometry.
+                if (w && (!c.mask || c.mask != asked || c.width != e->width || c.height != e->height))
+                {
+                        unsigned char ev[XWM_EVENT_SIZE], req[64];
+                        int nx = w->row >= 0 && compositor.showing[w->row] ? compositor_xwm_to_x(compositor.x[w->row], 0) : w->x;
+                        int ny = w->row >= 0 && compositor.showing[w->row] ? compositor_xwm_to_x(compositor.y[w->row], 1) : w->y;
+                        unsigned int nw = w->row >= 0 && compositor.showing[w->row] && compositor.w[w->row] > 0 ? compositor.w[w->row] : w->width;
+                        unsigned int nh = w->row >= 0 && compositor.showing[w->row] && compositor.h[w->row] > 0 ? compositor.h[w->row] : w->height;
+                        long n = xwm_enc_configure_notify(ev, sizeof ev, w->id, nx, ny, nw, nh, 0, (w->state & COMPOSITOR_XWM_OVERRIDE) != 0);
+
+                        if (n > 0 && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, XWM_MASK_STRUCTURE_NOTIFY, ev, (unsigned long)n)) > 0)
+                                compositor_xwm_queue(req, n);
+                }
                 break;
         }
         case XWM_EV_CREATE_NOTIFY:
@@ -4726,6 +4746,29 @@ static void compositor_xwm_pass_one(const struct compositor_poll *wanted)
                         if (w->id && w->transient && w->row >= 0 && (w->state & COMPOSITOR_XWM_RAISED) &&
                             (parent = compositor_xwm_find(w->transient, 0)) && parent->row >= 0 && parent->row == x->focus_row)
                                 compositor_raise(w->row);
+                }
+        }
+        // Keep X11 stacking order aligned with compositor.stack so XWayland hit-testing matches what Moonwater draws.
+        if (x->fd >= 0 && x->last_stack_gen != compositor.stack_gen)
+        {
+                x->last_stack_gen = compositor.stack_gen;
+                for (unsigned int s = 0; s < compositor.stacked; s++)
+                {
+                        unsigned int row = compositor.stack[s];
+
+                        for (long at = 0; at < x->window_table.count; at++)
+                        {
+                                struct compositor_xwm_window *w = &x->window[at];
+
+                                if (w->id && w->row == (int)row && !(w->state & COMPOSITOR_XWM_OVERRIDE))
+                                {
+                                        struct xwm_configure sc = {0};
+
+                                        sc.mask = XWM_CONFIGURE_STACK_MODE;
+                                        sc.stack_mode = XWM_STACK_ABOVE;
+                                        compositor_xwm_configure(w->id, &sc);
+                                }
+                        }
                 }
         }
         compositor_xwm_flush();

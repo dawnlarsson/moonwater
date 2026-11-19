@@ -91,9 +91,9 @@ static int compositor_wl_room(unsigned char **at, long *room, long unit, long mo
 #define COMPOSITOR_WL_PUMP 3
 #define COMPOSITOR_WL_PUMP_NS 10000000000ull      // a pump that moves nothing for this long ends
 #define COMPOSITOR_WL_DMABUF_SYNC 0x40086200u         // DMA_BUF_IOCTL_SYNC
-#define COMPOSITOR_WL_DMABUF_WAIT_NS 2000000ull       // how long a dma-buf's writer is waited for (bounded so a slow client never stalls a frame)
+#define COMPOSITOR_WL_DMABUF_WAIT_NS 12000000ull      // how long a dma-buf's writer is waited for (bounded so a slow client never stalls a frame)
 #define COMPOSITOR_WL_STRAIGHT_WAIT_NS 8000000ull     // and a straight picture's, before its owed read (compositor_wl_straight_pay): a frame or so
-#define COMPOSITOR_WL_DMABUF_SLOW_NS 2000000000ull    // after one that did not finish in time, a client's are not waited for this long
+#define COMPOSITOR_WL_DMABUF_SLOW_NS 100000000ull     // after one that did not finish in time, a client's are not waited for this long
 
 
 static struct
@@ -156,6 +156,7 @@ static struct
         unsigned long tiled_rects, tiled_refused[8];
         positive tiled_ns, tiled_most_ns, tiled_pixels; // the texture unit's reads: wall time waited in all and the longest, and the pixels read
         positive tiled_seq;      // the last read submitted and not waited for (compositor_wl_card_image), until a reader on the processor has waited for it
+        int tiled_row;           // the row tiled_seq is reading (-1 for none), kept busy until tiled_seq finishes
         unsigned long tiled_unwaited; // the reads submitted without a wait
         int tiled_lent;          // this picture was read so: its buffer is held as a lent one's is, until the frame after it is drawn
         struct
@@ -2342,7 +2343,10 @@ static void compositor_wl_settle(int row)
         }
         if (compositor_wl_cut(compositor_wl.lent[row].pixels))
                 gpu_forget(compositor_wl.lent[row].pixels, (positive)compositor_wl.lent[row].height * compositor_wl.lent[row].pitch * 4);
-        if (compositor.w[row] != (unsigned int)compositor_wl.lent[row].width || compositor.h[row] != (unsigned int)compositor_wl.lent[row].height)
+        if ((compositor.w[row] != (unsigned int)compositor_wl.lent[row].width || compositor.h[row] != (unsigned int)compositor_wl.lent[row].height) &&
+            !(compositor.fullscreen[row] && compositor_wl.lent[row].width > 0 && compositor_wl.lent[row].height > 0 &&
+              (unsigned int)compositor_wl.lent[row].width == compositor.picture_w[row] &&
+              (unsigned int)compositor_wl.lent[row].height == compositor.picture_h[row]))
                 compositor_wl_seed(row, compositor.front[row]);
 }
 
@@ -2794,6 +2798,7 @@ static void compositor_wl_tiled_settle(void)
                 compositor_gpu_job_failed();
 #endif
         compositor_wl.tiled_seq = 0;
+        compositor_wl.tiled_row = -1;
 }
 
 /*
@@ -2893,7 +2898,7 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
 
                 if (sequence)
                 {
-                        compositor_wl.tiled_seq = sequence, compositor_wl.tiled_lent = 1, compositor_wl.tiled_unwaited++;
+                        compositor_wl.tiled_seq = sequence, compositor_wl.tiled_row = row, compositor_wl.tiled_lent = 1, compositor_wl.tiled_unwaited++;
                         compositor_wl.tiled_pixels += (positive)w * (positive)h;
                         if ((compositor_wl.tiled_rects++ & 4095) == 0)
                                 compositor_wl_tiled_say("read");
@@ -2991,7 +2996,10 @@ static void compositor_wl_straight_pay(int row)
                 return;
         compositor_wl.straight[row].owed = 0;
         if (compositor_wl_straight_read(row, 0, compositor_wl.straight[row].picture.height))
+        {
+                compositor_wl_tiled_settle();
                 compositor_wl.laying[row].last = (unsigned char)((compositor.front[row] & 1u) + 1); // the picture is whole in this buffer now
+        }
 }
 
 // Every row's owed read made (compositor_wl_straight_pay) but keep's (-1 for none): the present is to compose what it reads.
@@ -4969,13 +4977,29 @@ static void compositor_wl_pointer_hold(void *context, long row, long mode)
         // A lock let go of with a hint (set_cursor_position_hint: where a game drew the pointer it held, or where Xwayland has an X
         // game's pointer, which it warps): the pointer is shown there, in the window, where it would otherwise come back where the
         // lock took it and jump. A hint outside the window's picture is not taken.
-        if (compositor_wl.hold == 1 && mode != 1 && was >= 0 && was < COMPOSITOR_ROWS && wayland.hint_row == was &&
-            wayland.hint_x >= 0 && wayland.hint_x < (long)compositor.w[was] && wayland.hint_y >= 0 && wayland.hint_y < (long)compositor.h[was])
+        if (compositor_wl.hold == 1 && mode != 1 && was >= 0 && was < COMPOSITOR_ROWS && wayland.hint_row == was)
         {
-                compositor.pointer_x = compositor.x[was] + (int)wayland.hint_x;
-                compositor.pointer_y = compositor.y[was] + (int)wayland.hint_y;
-                compositor_pointer_sync();
-                compositor_pointer_shown();
+                int dx, dy, dw, dh;
+
+                if (compositor_fullscreen_fit((int)was, &dx, &dy, &dw, &dh))
+                {
+                        if (wayland.hint_x >= 0 && wayland.hint_x < (long)compositor.picture_w[was] &&
+                            wayland.hint_y >= 0 && wayland.hint_y < (long)compositor.picture_h[was])
+                        {
+                                compositor.pointer_x = dx + (int)(wayland.hint_x * (long)dw / (long)compositor.picture_w[was]);
+                                compositor.pointer_y = dy + (int)(wayland.hint_y * (long)dh / (long)compositor.picture_h[was]);
+                                compositor_pointer_sync();
+                                compositor_pointer_shown();
+                        }
+                }
+                else if (wayland.hint_x >= 0 && wayland.hint_x < (long)compositor.w[was] &&
+                         wayland.hint_y >= 0 && wayland.hint_y < (long)compositor.h[was])
+                {
+                        compositor.pointer_x = compositor.x[was] + (int)wayland.hint_x;
+                        compositor.pointer_y = compositor.y[was] + (int)wayland.hint_y;
+                        compositor_pointer_sync();
+                        compositor_pointer_shown();
+                }
         }
         wayland.hint_row = -1;
         compositor_wl_direct_hold();
@@ -6968,7 +6992,11 @@ static int compositor_wl_row_busy(void *context, int row)
 {
         (void)context;
         return compositor_card_reads(row) ||
-               (row >= 0 && (row == compositor.direct_row || row == compositor.plane_row || (compositor.flip_pending && row == compositor.flip_row)));
+#ifdef MOONWATER_GPU_C
+               (row >= 0 && compositor_wl.tiled_seq && row == compositor_wl.tiled_row && gpu_done(compositor_wl.tiled_seq) == 0) ||
+#endif
+               (row >= 0 && (row == compositor.direct_row || row == compositor.plane_row ||
+                             (compositor.flip_pending && (row == compositor.flip_row || row == compositor.leaving_row))));
 }
 
 static const struct wayland_host compositor_wl_host = {
@@ -7929,8 +7957,15 @@ static void compositor_wl_drain(int row)
                 }
                 // Whatever the event, the pointer is on this window for the client first.
                 if (wayland.pointer_row != row)
-                        wayland_pointer_to(row, type == WINDOW_EVENT_MOTION ? a : compositor.pointer_x - compositor.x[row],
-                                           type == WINDOW_EVENT_MOTION ? b : compositor.pointer_y - compositor.y[row]);
+                {
+                        int ex, ey;
+
+                        if (type == WINDOW_EVENT_MOTION)
+                                ex = a, ey = b;
+                        else
+                                compositor_window_point(row, compositor.pointer_x, compositor.pointer_y, &ex, &ey);
+                        wayland_pointer_to(row, ex, ey);
+                }
                 if (type == WINDOW_EVENT_MOTION)
                         wayland_pointer_motion(row, a, b);
                 else if (type == WINDOW_EVENT_BUTTON)
@@ -8016,8 +8051,13 @@ static void compositor_wl_wake(void)
                 if (want >= 0 && compositor.touch.hidden && wayland_row_takes_touch(want))
                         want = -1;
                 if (want != wayland.pointer_row)
-                        wayland_pointer_to(want, want >= 0 ? compositor.pointer_x - compositor.x[want] : 0,
-                                           want >= 0 ? compositor.pointer_y - compositor.y[want] : 0);
+                {
+                        int ex = 0, ey = 0;
+
+                        if (want >= 0)
+                                compositor_window_point(want, compositor.pointer_x, compositor.pointer_y, &ex, &ey);
+                        wayland_pointer_to(want, ex, ey);
+                }
                 if (keys != wayland.keyboard_row)
                         wayland_keyboard_to(keys);
         }
@@ -8191,6 +8231,8 @@ static void compositor_wl_frame(void)
         if (!compositor_wl.started)
                 return;
         busy_row = compositor.direct_row >= 0 ? compositor.direct_row : compositor.plane_row;
+        if (compositor.flip_pending && compositor.leaving_row >= 0)
+                busy_row = busy_row >= 0 && busy_row != compositor.leaving_row ? -2 : compositor.leaving_row;
         wayland_drawn_composed(busy_row);
         wayland_frame();
         compositor_wl_resume_stalled();

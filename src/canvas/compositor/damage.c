@@ -650,6 +650,7 @@ static int compositor_wl_row_blend(int row);
 static void compositor_wl_settle(int row);
 static void compositor_wl_count_card(const unsigned int *rows, unsigned int windows);
 static void compositor_wl_lent_sync(int start);
+static void compositor_wl_tiled_settle(void);
 static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at);
 static void compositor_wl_gathers_fill(void);
 #else
@@ -926,7 +927,8 @@ static void compositor_stretch(int row)
         unsigned long stride = (unsigned long)compositor_stride();
 
         // A client's picture is never written: its window is the picture's size (compositor_wl_settle).
-        if (!drawn_w || !drawn_h || compositor_lent(row))
+        // A fullscreen window with a smaller buffer is aspect-fitted and scaled (compositor_fullscreen_fit), never edge-smeared.
+        if (!drawn_w || !drawn_h || compositor_lent(row) || compositor.fullscreen[row])
                 return;
         compositor_runs_forget(row);
 
@@ -946,6 +948,63 @@ static int compositor_lit_px(int percent)
         int px = (int)(compositor.border ? compositor.border : COMPOSITOR_BORDER_STANDARD) * percent / 100;
 
         return px < 1 ? 1 : px;
+}
+
+// Aspect-preserving centered destination rectangle for a fullscreen window whose committed buffer is smaller/larger than its output.
+static int compositor_fullscreen_fit(int row, int *dx, int *dy, int *dw, int *dh)
+{
+        unsigned int pw, ph, w, h;
+        unsigned long lw, lh;
+
+        if (row < 0 || row >= (int)compositor_rows_in_use || !compositor.fullscreen[row])
+                return 0;
+        pw = compositor.picture_w[row], ph = compositor.picture_h[row];
+        w = compositor.w[row], h = compositor.h[row];
+        if (!pw || !ph || !w || !h || (pw == w && ph == h))
+                return 0;
+        lw = w, lh = h;
+        if ((unsigned long)pw * lh >= (unsigned long)ph * lw)
+                lh = ((unsigned long)ph * lw + pw / 2) / pw;
+        else
+                lw = ((unsigned long)pw * lh + ph / 2) / ph;
+        if (lw < 1)
+                lw = 1;
+        if (lh < 1)
+                lh = 1;
+        if (lw > w)
+                lw = w;
+        if (lh > h)
+                lh = h;
+        *dw = (int)lw;
+        *dh = (int)lh;
+        *dx = compositor.x[row] + (int)((w - lw) / 2);
+        *dy = compositor.y[row] + (int)((h - lh) / 2);
+        return 1;
+}
+
+// Screen coordinates mapped into a window's surface coordinates (scaling through compositor_fullscreen_fit when active).
+static void compositor_window_point(int row, int sx, int sy, int *wx, int *wy)
+{
+        int dx, dy, dw, dh;
+
+        if (compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh))
+        {
+                int rx = sx - dx, ry = sy - dy;
+
+                if (rx < 0)
+                        rx = 0;
+                else if (rx >= dw)
+                        rx = dw - 1;
+                if (ry < 0)
+                        ry = 0;
+                else if (ry >= dh)
+                        ry = dh - 1;
+                *wx = (int)((long)rx * (long)compositor.picture_w[row] / (long)dw);
+                *wy = (int)((long)ry * (long)compositor.picture_h[row] / (long)dh);
+                return;
+        }
+        *wx = sx - compositor.x[row];
+        *wy = sy - compositor.y[row];
 }
 
 static void compositor_frame_of(int row, struct compositor_frame *frame)
@@ -975,6 +1034,17 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         compositor_land_frame(row, frame);
         if (compositor.glide[row] && !compositor.landing[row] && (row != compositor.drag || compositor.drag_glide == row + 1))
                 compositor_glide_frame(row, frame);
+        if (!compositor.landing[row] && !compositor.glide[row])
+        {
+                int dx, dy, dw, dh;
+
+                if (compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh))
+                {
+                        frame->x = dx, frame->y = dy, frame->width = dw, frame->height = dh;
+                        frame->source_w = (int)compositor.picture_w[row], frame->source_h = (int)compositor.picture_h[row];
+                        frame->runs = 0;
+                }
+        }
         // The edge or corner the hand holds or is over, or all of the line of a window being moved.
         if (row == compositor.lit_row && line)
         {

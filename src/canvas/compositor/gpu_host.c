@@ -669,10 +669,12 @@ static int compositor_card_go(void)
                         if (gpu_end == GPU_END_LATE && !gpu_lost)
                                 return 0;
                         compositor_card.next = compositor_card.steps;
+                        gpu_handed_hold = 0, gpu_handed_clear();
                         return -1;
                 }
                 compositor_card.last = sequence, compositor_card.next++, compositor_card.submitted++;
         }
+        gpu_handed_hold = 0, gpu_handed_clear();
         return 1;
 }
 
@@ -820,6 +822,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 }
                 compositor_card.records = g->count, compositor_card.out = out, compositor_card.pitch = (unsigned int)(compositor.scanout_pitch / 4);
                 compositor_card.width = g->width, compositor_card.height = (unsigned int)compositor.height;
+                gpu_handed_hold = 1;
                 if (compositor_card_go() < 0)
                 {
                         if (gpu_lost) // the card lost its state, and what ran on it with it: started again, so the next present draws on it
@@ -834,6 +837,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         }
         else
         {
+                gpu_handed_hold = 1;
                 for (unsigned int at = 0; at < rects; at++)
                 {
                         b32 ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out,
@@ -842,6 +846,9 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                                            (unsigned int)rect[at][3]);
                         if (!ok)
                         {
+                                gpu_handed_hold = 0;
+                                if (!gpu.pending)
+                                        gpu_handed_clear();
                                 if (gpu_lost) // the card lost its state: started again now, so the next present draws on it (and this one is the processor's)
                                         compositor_gpu_recover();
                                 // A hang: this present is the processor's, and the card is given up for two seconds, then started again with no maps; a second hang within
@@ -850,6 +857,9 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                                 return compositor_gpu_job_why();
                         }
                 }
+                gpu_handed_hold = 0;
+                if (!gpu.pending)
+                        gpu_handed_clear();
         }
         if (!compositor_gpu_state.failures && !compositor_gpu_state.told)
                 compositor_gpu_state.told = 1, compositor_say("the GPU composes the desktop, frame records", g->count);

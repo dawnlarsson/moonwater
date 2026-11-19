@@ -483,6 +483,11 @@ static void compositor_card_began(positive began)
 // The present's frame given up (a job of it refused, hung or its fence an error): not shown, and drawn again whole by the next present.
 static void compositor_card_abandon(void)
 {
+#ifdef MOONWATER_GPU_C
+        gpu_handed_hold = 0;
+        if (!gpu.pending)
+                gpu_handed_clear();
+#endif
         compositor_card_record.wanted = 0; // not shown: nothing of it is recorded
         compositor_plane_carried(0);
         compositor_card_fence_close();
@@ -1113,6 +1118,21 @@ static void compositor_present_frames(void)
         for (unsigned int at = 0; at < compositor.stacked; at++)
                 if (compositor_visible(compositor.stack[at]))
                 {
+                        int row = (int)compositor.stack[at], dx, dy, dw, dh;
+
+                        if (compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh) &&
+                            (dw < (int)compositor.w[row] || dh < (int)compositor.h[row]) &&
+                            count + 1 < COMPOSITOR_FRAMES_FOR(compositor_rows_in_use))
+                        {
+                                struct compositor_frame *back = &frames[count];
+
+                                memory_zero(back, sizeof(*back));
+                                back->x = compositor.x[row], back->y = compositor.y[row];
+                                back->width = (int)compositor.w[row], back->height = (int)compositor.h[row];
+                                back->scale = compositor_row_scale(row);
+                                back->fill = 0xff000000u;
+                                rows[count++] = (unsigned int)row;
+                        }
                         rows[count] = compositor.stack[at];
                         compositor_frame_of(compositor.stack[at], &frames[count++]);
                         // Its client's subsurfaces as frames of their own over it, read where they are (wayland_host.c), each with the row.
@@ -1274,6 +1294,8 @@ static void compositor_present_frames(void)
         {
                 if (compositor.flip_pending)
                         return;
+                if (compositor.direct_row >= 0)
+                        compositor.leaving_row = compositor.direct_row;
                 compositor.direct_row = -1;
                 compositor_damage(0, 0, compositor.width, compositor.height);
         }
@@ -1315,6 +1337,8 @@ static void compositor_present_frames(void)
                         else if (!compositor_atomic_to(compositor_primary_fb(), -1, 0, 1, 0, 0, 0))
                                 compositor_overlay_off();
                 }
+                if (compositor.plane_row >= 0)
+                        compositor.leaving_row = compositor.plane_row;
                 compositor.plane_row = compositor.direct_row = -1;
                 compositor.plane_fb = 0;
                 compositor.plane_gone = 0;
@@ -1337,7 +1361,7 @@ static void compositor_present_frames(void)
                 // alone, and with more (the desktop round it, the window's corners) it goes with the flip of the plate that is composed for it
                 // (compositor_plane_carried), so the window and what is round it change at the same vertical blank.
                 compositor_damage_cut(planed);
-                if (fb && fb != compositor.plane_fb && compositor.plane_row == plane && compositor.damages && compositor_plate_wanted(turning) &&
+                if (fb && fb != compositor.plane_fb && compositor.damages && compositor_plate_wanted(turning) &&
                     compositor_spare.fb)
                 {
                         compositor_plane_carry.fb = fb, compositor_plane_carry.row = plane, compositor_plane_carry.which = which;
@@ -1434,7 +1458,10 @@ static void compositor_present_frames(void)
 #endif
 #ifdef CONFIG_MOONWATER_WAYLAND
         if (!gpu_composed)
+        {
+                compositor_wl_tiled_settle();
                 compositor_wl_lent_sync(1);
+        }
 #endif
         if (!compositor.mirror_bytes && compositor.changed > 0)
         {

@@ -475,6 +475,7 @@ static void compositor_flip_done(void)
         compositor_keytrace_shown(compositor.flip_stamped ? compositor.flip_when : clock_monotonic_nanoseconds());
         compositor_frametrace_note('V', -1, compositor.flip_stamped ? compositor.flip_when : clock_monotonic_nanoseconds());
         compositor.flip_pending = 0;
+        compositor.leaving_row = -1;
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
                 if (!rows_has(&compositor.held_rows, row))
@@ -1603,13 +1604,18 @@ static unsigned int compositor_plane_carry_props(unsigned int *objects, unsigned
         return n;
 }
 
+static void compositor_unscanned(unsigned int why);
+
 // The carried overlay taken by a commit (shown), or not (none): carried no more either way.
 static void compositor_plane_carried(int shown)
 {
         if (shown && compositor_plane_carry.fb)
         {
                 compositor.plane_fb = compositor_plane_carry.fb;
+                compositor.plane_row = compositor.direct_row = compositor_plane_carry.row;
                 compositor.overlay_on = 1;
+                compositor_unscanned(0);
+                memory_copy(compositor.plane_rect, compositor_plane_carry.rect, sizeof(compositor.plane_rect));
                 memory_copy(compositor.overlay_rect, compositor_plane_carry.rect, sizeof(compositor.overlay_rect));
         }
         compositor_plane_carry.fb = 0;

@@ -1409,8 +1409,9 @@ static void compositor_magnify(positive now)
 // program has caught up (compositor_wheel) would turn at the place it had before.
 static void compositor_pointer_to(int row)
 {
-        int x = compositor.pointer_x - compositor.x[row], y = compositor.pointer_y - compositor.y[row];
+        int x, y;
 
+        compositor_window_point(row, compositor.pointer_x, compositor.pointer_y, &x, &y);
         compositor.told_row = compositor_post(row, WINDOW_EVENT_MOTION, 0, x, y) ? row : COMPOSITOR_NONE;
         compositor.told_x = x;
         compositor.told_y = y;
@@ -2373,7 +2374,7 @@ static void compositor_button(unsigned int code, int down)
                         is the window's press, not the titlebar's: its pressing
                         is what the window's controls are for.
                 */
-                band = !alt && code == COMPOSITOR_BTN_LEFT && !(compositor.asks[under] & WINDOW_NO_GRAB) &&
+                band = !alt && code == COMPOSITOR_BTN_LEFT && !compositor.fullscreen[under] && !(compositor.asks[under] & WINDOW_NO_GRAB) &&
                        compositor.pointer_x >= compositor.x[under] &&
                        compositor.pointer_x < compositor.x[under] + (int)compositor.w[under] &&
                        compositor.pointer_y >= compositor.y[under] &&
@@ -2388,9 +2389,13 @@ static void compositor_button(unsigned int code, int down)
                         compositor_close(under);
                         return;
                 }
-                // The arrow, or none asked (-1) or no pointer (-2): a control's shape is positive. The comparison is signed, or -1 and -2
-                // would read as huge unsigned values and the titlebar would give way to nothing.
-                top = band && compositor_asked_shape(under) <= (int)WINDOW_POINTER_ARROW;
+                // The arrow (0) or none asked (-1): a control's shape is positive, and a hidden pointer (-2, a game drawing its own cursor)
+                // must never have clicks in the top band stolen as a titlebar drag.
+                {
+                        int asked = compositor_asked_shape(under);
+
+                        top = band && asked >= -1 && asked <= (int)WINDOW_POINTER_ARROW;
+                }
 
                 if (alt || top)
                 {
