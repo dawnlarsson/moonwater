@@ -1474,12 +1474,13 @@ static void compositor_present_frames(void)
         // The top window on the overlay where it can be: nothing of it composed under the plane.
         int planed[4], plane = !back && !turning ? compositor_plane_candidate(frames, rows, windows, count, planed) : -1;
 
-        // Composed from here: a straight picture owed to the table is read first, all but the one the overlay is to show across its whole
-        // width (its rows with corners, composed round the plane, were read at its commit: compositor_wl_straight_take).
-        compositor_wl_straight_pays(plane >= 0 && planed[0] == compositor.x[plane] && planed[2] == compositor.x[plane] + (int)compositor.w[plane] &&
-                                                    plane == compositor.plane_row
-                                            ? plane
-                                            : -1);
+        // Composed from here: a straight picture owed to the table is read first unless AMD RDNA2 single-pass tiled sampling
+        // in the scene kernel will sample it directly (any CPU fallback below pays what is owed before CPU compose reads it).
+        if (back || turning || !compositor_gpu_tiled_ready())
+                compositor_wl_straight_pays(plane >= 0 && planed[0] == compositor.x[plane] && planed[2] == compositor.x[plane] + (int)compositor.w[plane] &&
+                                                            plane == compositor.plane_row
+                                                    ? plane
+                                                    : -1);
 
         compositor_plane_carry.fb = 0;
         int plane_off = 0;
@@ -1627,6 +1628,7 @@ static void compositor_present_frames(void)
 #ifdef CONFIG_MOONWATER_WAYLAND
         if (!gpu_composed)
         {
+                compositor_wl_straight_pays(-1);
                 compositor_wl_tiled_settle();
                 compositor_wl_lent_sync(1);
         }

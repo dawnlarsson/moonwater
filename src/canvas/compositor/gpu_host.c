@@ -374,6 +374,8 @@ static int compositor_gpu_picture(const struct compositor_frame *f)
                 return 1;
         if (!f->pixels) // a frame with no picture is its line and corners only (a grid's border), and nothing to map
                 return 1;
+        if (f->tiled_kind) // a client's tiled/DCC dma-buf sampled via image_load in scene: already imported to the card
+                return 1;
         if (f->gpu_base) // a client's dma-buf, imported to the card (compositor_wl_lend): its address is there already
                 return 1;
         if (f->pitch >= 1ull << 29)
@@ -1545,6 +1547,18 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
         }
         compositor_gpu_state.failures = 0;
         return 1;
+}
+
+// Whether AMD RDNA2 single-pass tiled/DCC sampling in the scene kernel is active for this present.
+static int compositor_gpu_tiled_ready(void)
+{
+        return compositor_gpu && compositor_gpu_state.up && !compositor_gpu_state.dead && !compositor_gpu_held() &&
+               gpu_ready() && gpu.family >= 800 && !(compositor.width & 3);
+}
+#else
+static int compositor_gpu_tiled_ready(void)
+{
+        return 0;
 }
 #endif
 

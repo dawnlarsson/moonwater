@@ -135,6 +135,9 @@ struct compositor_frame
         int layer;
         // Solid opaque fill colour (0xaarrggbb) when !builtin && !pixels (e.g. black letterbox/pillarbox behind an aspect-fitted fullscreen window).
         unsigned int fill;
+        // A client's tiled/DCC dma-buf resource (gpu_amd_image) sampled directly in the scene kernel (0x40 on op[0], zero detile pass).
+        unsigned int tiled_desc[8];
+        unsigned int tiled_kind;
 };
 
 /*
@@ -1232,6 +1235,7 @@ struct compositor_gscene
         enum compositor_gpu_why why;        // why the frames were refused, when they were
         unsigned char *tables;              // the cover tables' pool, in the GPU's buffer, its size and its place from the buffer's start
         unsigned int tables_size, tables_at, tables_used, kept;
+        unsigned int frame_desc;            // byte offset from GPU_VA of the current tiled frame's 8-dword SQ_IMG_RSRC descriptor (0 for linear)
         struct
         {
                 int r, b, corner, content;
@@ -1310,6 +1314,19 @@ static unsigned int compositor_gpu_close_table(int side, int half)
         return at;
 }
 
+// An 8-dword SQ_IMG_RSRC descriptor placed 32-byte-aligned in the tables pool; returns its byte offset from GPU_VA, or 0 when full.
+static unsigned int compositor_gpu_desc(const unsigned int desc[8])
+{
+        struct compositor_gscene *g = &compositor_gscene;
+        unsigned int off = (g->tables_used + 31u) & ~31u;
+
+        if (off > g->tables_size || 32u > g->tables_size - off)
+                return 0;
+        memory_copy(g->tables + off, desc, 32);
+        g->tables_used = off + 32u;
+        return g->tables_at + off;
+}
+
 // One record: the rectangle cut to the picture, none when nothing is left. A fill writes the colour; a copy takes the picture's pixels from the frame, at the
 // rectangle's own corner; a mix (5) is memory_mix_u32_row by the cover table at cover (pitch r), the ink the colour or, with a frame, the picture; 12 is the
 // same words with the premultiplied picture laid over by the cover (compositor_over_weighted), a blended picture's round corner.
@@ -1323,7 +1340,18 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                 return;
         op[0] = kind, op[1] = (unsigned int)cx0, op[2] = (unsigned int)cy0, op[3] = (unsigned int)cx1, op[4] = (unsigned int)cy1;
         op[5] = colour, op[6] = op[7] = 0;
-        if (frame)
+        if (frame && frame->tiled_kind)
+        {
+                unsigned int flags = 0x40u | ((frame->tiled_kind & GPU_IMAGE_RAW) ? 0u : 0x20u) | ((frame->tiled_kind & GPU_IMAGE_SWAP) ? 0x80u : 0u);
+                unsigned int origin = (unsigned int)((cx0 - frame->x) & 0xffff) | ((unsigned int)((cy0 - frame->y) & 0xffff) << 16);
+
+                op[0] |= flags;
+                if (kind == 4 || kind == 11)
+                        op[5] = g->frame_desc, op[6] = origin, op[7] = 0;
+                else
+                        op[6] = g->frame_desc, op[7] = origin;
+        }
+        else if (frame)
         {
                 positive at = compositor_gpu_va(frame) + 4ull * ((positive)(cy0 - frame->y) * frame->pitch + (positive)(cx0 - frame->x));
 
@@ -1448,10 +1476,16 @@ static b32 compositor_gpu_frame(const struct compositor_frame *f)
         unsigned int tab = f->builtin ? taskbar_tab_ink(f->slot, compositor_panel_mark(f)) : 0; // a tab of the panel is one ink
 
         // A frame of no area has no picture to read (a snap preview's lifted frame is one: its tint is in compositor_gpu_frames).
-        if (!f->builtin && f->pixels && w > 0 && h > 0 && !compositor_gpu_va(f))
+        if (!f->builtin && !f->tiled_kind && f->pixels && w > 0 && h > 0 && !compositor_gpu_va(f))
                 return g->why = COMPOSITOR_GPU_WHY_PICTURE, false;
         if (compositor_scaled(f))
                 return g->why = COMPOSITOR_GPU_WHY_SCALED, false;
+        g->frame_desc = 0;
+        if (!f->builtin && f->tiled_kind && w > 0 && h > 0)
+        {
+                if (!(g->frame_desc = compositor_gpu_desc(f->tiled_desc)))
+                        return g->why = COMPOSITOR_GPU_WHY_POOL, false;
+        }
         // The record's pitch is 16 bits (compositor_gpu_frame's op[0]): a wider picture is left to the processor.
         if (f->pitch > 65535)
                 return g->why = COMPOSITOR_GPU_WHY_ALIGN, false;

@@ -318,6 +318,21 @@ glass:
 	v_cndmask_b32_e64 \o, \o, v59, \mk
 .endm
 
+; four UNORM float channels (\r \g \b \a) from image_load dmask:0xf packed into a 32-bit pixel \out (same rounding as kernel image)
+.macro packunorm out, r, g, b, a
+	v_mul_f32	\r, 0x437f8000, \r
+	v_mul_f32	\g, 0x437f8000, \g
+	v_mul_f32	\b, 0x437f8000, \b
+	v_mul_f32	\a, 0x437f8000, \a
+	v_cvt_u32_f32	\r, \r
+	v_cvt_u32_f32	\g, \g
+	v_cvt_u32_f32	\b, \b
+	v_cvt_u32_f32	\a, \a
+	v_lshl_or_b32	\out, \g, 8, \r
+	v_lshl_or_b32	\out, \b, 16, \out
+	v_lshl_or_b32	\out, \a, 24, \out
+.endm
+
 ; op 6: a scene, from the patch (x0, y0 in the arguments, in patches of 64 pixels by 4 rows) on for the grid's size, so that a part of the picture is drawn alone (records of 8 words in the lists: 0 fill, 1 tone over, 2 box as ui_kit_fill takes it with its radii already scaled as CSS draws them),
 ; a wave a patch of 64 pixels by 4 rows, a lane four pixels in a row (v5 to v8), each written once; the width and the pitch a multiple of 4.
 ; The wave leaves if its 64-pixel square has no op, does not read the picture when the first op holds the patch, and skips an op that misses it.
@@ -377,7 +392,8 @@ scene:
 	s_waitcnt	lgkmcnt(0)
 	s_cmp_eq_u32	s32, 2
 	s_cbranch_scc1	.scene_first_box
-	s_cmp_eq_u32	s32, 4
+	s_and_b32	s43, s32, 0x1f
+	s_cmp_eq_u32	s43, 4
 	s_cbranch_scc1	.scene_first_rect
 	s_cmp_lg_u32	s32, 0
 	s_cbranch_scc1	.scene_read
@@ -433,7 +449,7 @@ scene:
 	s_load_dwordx8	s[56:63], s[48:49], 0x0
 	s_add_u32	s44, s44, 1
 	s_waitcnt	lgkmcnt(0)
-	s_and_b32	s47, s56, 0x7f
+	s_and_b32	s47, s56, 0x1f
 	s_cmp_eq_u32	s47, 2
 	s_cbranch_scc1	.scene_box
 	s_cmp_eq_u32	s47, 3
@@ -750,6 +766,8 @@ scene:
 	s_and_b64	exec, s[92:93], s[90:91]
 	global_load_dword v34, v30, s[102:103]
 	s_mov_b64	exec, s[92:93]
+	s_bitcmp1_b32	s56, 6
+	s_cbranch_scc1	.mix_tiled
 	s_cmp_eq_u32	s81, 0
 	s_cbranch_scc1	.mix_constant
 	v_subrev_nc_u32	v35, s58, v4
@@ -770,6 +788,50 @@ scene:
 	global_load_dword v67, v[32:33], off offset:12
 	s_mov_b64	exec, s[92:93]
 	s_branch	.mix_blend
+.mix_tiled:
+	s_add_u32	s50, s102, s62
+	s_addc_u32	s51, s103, 0
+	s_load_dwordx8	s[64:71], s[50:51], 0x0
+	s_and_b32	s50, s63, 0xffff
+	s_lshr_b32	s51, s63, 16
+	v_add_nc_u32	v30, s50, v31
+	v_subrev_nc_u32	v31, s58, v4
+	v_add_nc_u32	v31, s51, v31
+	v_add_nc_u32	v32, 1, v30
+	v_mov_b32	v33, v31
+	v_add_nc_u32	v38, 2, v30
+	v_mov_b32	v39, v31
+	v_add_nc_u32	v40, 3, v30
+	v_mov_b32	v41, v31
+	s_waitcnt	lgkmcnt(0)
+	s_bitcmp1_b32	s56, 5
+	s_cbranch_scc1	.mix_tiled_unorm
+	s_and_b64	exec, s[92:93], s[82:83]
+	image_load	v64, v[30:31], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[84:85]
+	image_load	v65, v[32:33], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[86:87]
+	image_load	v66, v[38:39], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[88:89]
+	image_load	v67, v[40:41], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	s_mov_b64	exec, s[92:93]
+	s_branch	.mix_blend
+.mix_tiled_unorm:
+	s_and_b64	exec, s[92:93], s[82:83]
+	image_load	v[44:47], v[30:31], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[84:85]
+	image_load	v[48:51], v[32:33], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[86:87]
+	image_load	v[52:55], v[38:39], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[88:89]
+	image_load	v[56:59], v[40:41], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
+	s_mov_b64	exec, s[92:93]
+	s_waitcnt	vmcnt(0)
+	packunorm	v64, v44, v45, v46, v47
+	packunorm	v65, v48, v49, v50, v51
+	packunorm	v66, v52, v53, v54, v55
+	packunorm	v67, v56, v57, v58, v59
+	s_branch	.mix_ordered
 .mix_constant:
 	v_mov_b32	v64, s62
 	v_mov_b32	v65, s62
@@ -827,6 +889,8 @@ scene:
 	inside		s[84:85], v17
 	inside		s[86:87], v18
 	inside		s[88:89], v19
+	s_bitcmp1_b32	s56, 6
+	s_cbranch_scc1	.image_tiled
 	v_subrev_nc_u32	v30, s58, v4
 	v_mul_lo_u32	v30, v30, s63
 	v_subrev_nc_u32	v31, s57, v3
@@ -847,6 +911,55 @@ scene:
 	global_load_dword v37, v[32:33], off offset:12
 	s_mov_b64	exec, s[92:93]
 	s_waitcnt	vmcnt(0)
+	s_branch	.image_loaded
+.image_tiled:
+	s_add_u32	s50, s102, s61
+	s_addc_u32	s51, s103, 0
+	s_load_dwordx8	s[64:71], s[50:51], 0x0
+	s_and_b32	s50, s62, 0xffff
+	s_lshr_b32	s51, s62, 16
+	v_subrev_nc_u32	v30, s57, v3
+	v_add_nc_u32	v30, s50, v30
+	v_subrev_nc_u32	v31, s58, v4
+	v_add_nc_u32	v31, s51, v31
+	v_add_nc_u32	v32, 1, v30
+	v_mov_b32	v33, v31
+	v_add_nc_u32	v38, 2, v30
+	v_mov_b32	v39, v31
+	v_add_nc_u32	v40, 3, v30
+	v_mov_b32	v41, v31
+	s_mov_b64	s[92:93], exec
+	s_waitcnt	lgkmcnt(0)
+	s_bitcmp1_b32	s56, 5
+	s_cbranch_scc1	.image_tiled_unorm
+	s_and_b64	exec, s[92:93], s[82:83]
+	image_load	v34, v[30:31], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[84:85]
+	image_load	v35, v[32:33], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[86:87]
+	image_load	v36, v[38:39], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[88:89]
+	image_load	v37, v[40:41], s[64:71] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
+	s_mov_b64	exec, s[92:93]
+	s_waitcnt	vmcnt(0)
+	s_branch	.image_loaded
+.image_tiled_unorm:
+	s_and_b64	exec, s[92:93], s[82:83]
+	image_load	v[44:47], v[30:31], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[84:85]
+	image_load	v[48:51], v[32:33], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[86:87]
+	image_load	v[52:55], v[38:39], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
+	s_and_b64	exec, s[92:93], s[88:89]
+	image_load	v[56:59], v[40:41], s[64:71] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
+	s_mov_b64	exec, s[92:93]
+	s_waitcnt	vmcnt(0)
+	packunorm	v34, v44, v45, v46, v47
+	packunorm	v35, v48, v49, v50, v51
+	packunorm	v36, v52, v53, v54, v55
+	packunorm	v37, v56, v57, v58, v59
+	s_branch	.image_ordered
+.image_loaded:
 	s_and_b32	s50, s56, 0x80
 	s_cmp_eq_u32	s50, 0
 	s_cbranch_scc1	.image_ordered

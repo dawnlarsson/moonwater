@@ -2823,21 +2823,22 @@ static void compositor_wl_tiled_settle(void)
         (compositor_wl.tiled_refused): a card not composing, a transform, a plane in another
         buffer, an import or a resource refused, a buffer smaller than its picture's layout (gpu_amd_image_fits), a job that failed. A refused rectangle is not laid: the window keeps what it showed there.
 */
-static int compositor_wl_card_image(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch, long dx, long dy, long sx,
-                                    long sy, long w, long h)
+// Build an 8-dword AMD SQ_IMG_RSRC descriptor (gpu_amd_image) for a client's tiled/DCC dma-buf, importing it into compositor_wl.source[row]
+// and marking it handed for the next GPU submit's BO list. Returns gpu_amd_image()'s kind, or 0 on failure (reason in *refused if non-null).
+static unsigned int compositor_wl_tiled_desc(int row, const struct wayland_picture *picture, unsigned int desc[8], int *refused)
 {
 #ifdef MOONWATER_GPU_C
         unsigned long stride = (unsigned long)picture->stride, dev = 0, ino = 0;
-        unsigned int desc[8], meta_plane = 0, kind;
-        positive dst_va, base, meta = 0, began;
+        unsigned int meta_plane = 0, kind;
+        positive base, meta = 0;
         long bytes;
 
         if (!gpu_ready() || !compositor_gpu || !compositor_gpu_state.up || compositor_gpu_state.dead || compositor_gpu_held())
-                return compositor_wl_tiled_refused(0);
+                return refused ? (*refused = 0), 0u : 0u;
         if (!gpu_image_takes(picture->modifier))
-                return compositor_wl_tiled_refused(7);
+                return refused ? (*refused = 7), 0u : 0u;
         if (compositor_wl_needs_xform_ordered(picture, picture->row_width, picture->row_height, 3))
-                return compositor_wl_tiled_refused(2);
+                return refused ? (*refused = 2), 0u : 0u;
         if (picture->modifier >> 13 & 1)
                 meta_plane = picture->modifier >> 14 & 1 ? 2u : 1u;
         compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
@@ -2846,28 +2847,28 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
                 unsigned long plane_dev = 0, plane_ino = 0;
 
                 if ((long)meta_plane >= picture->plane_count)
-                        return compositor_wl_tiled_refused(3);
+                        return refused ? (*refused = 3), 0u : 0u;
                 if (picture->plane_fd[meta_plane] != picture->sync_fd)
                         compositor_wl_fd_ident(picture->plane_fd[meta_plane], &plane_dev, &plane_ino);
                 else
                         plane_dev = dev, plane_ino = ino;
                 if (plane_dev != dev || plane_ino != ino || !ino)
-                        return compositor_wl_tiled_refused(3);
+                        return refused ? (*refused = 3), 0u : 0u;
         }
         bytes = compositor_call(syscall(lseek), (positive)picture->sync_fd, 0, 2, 0, 0, 0);
         if (bytes <= 0)
-                return compositor_wl_tiled_refused(4);
+                return refused ? (*refused = 4), 0u : 0u;
         if (compositor_wl.source[row].fd != picture->sync_fd || compositor_wl.source[row].size != bytes || compositor_wl.source[row].dev != dev ||
             compositor_wl.source[row].ino != ino || compositor_wl.source[row].map ||
             !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
         {
                 compositor_wl_source_drop(row);
                 if (compositor_wl_card_barred(row))
-                        return compositor_wl_tiled_refused(4);
+                        return refused ? (*refused = 4), 0u : 0u;
                 compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)bytes);
                 compositor_wl.source[row].epoch = gpu_epoch;
                 if (!compositor_wl.source[row].va)
-                        return compositor_wl_tiled_refused(4);
+                        return refused ? (*refused = 4), 0u : 0u;
                 {
                         static int said;
 
@@ -2893,7 +2894,33 @@ static int compositor_wl_card_image(int row, const struct wayland_picture *pictu
                                 (unsigned int)(stride / 4), (unsigned int)picture->height, (p64)picture->modifier) ||
             !(kind = gpu_amd_image(desc, base, meta, (unsigned int)(stride / 4), (unsigned int)picture->height, (p64)picture->modifier,
                                    compositor_wl_fourcc_swapped(picture->fourcc), false)))
-                return compositor_wl_tiled_refused(5);
+                return refused ? (*refused = 5), 0u : 0u;
+        return kind;
+#else
+        (void)row, (void)picture, (void)desc;
+        if (refused)
+                *refused = 0;
+        return 0;
+#endif
+}
+
+static unsigned int compositor_straight_desc(int row, unsigned int desc[8])
+{
+        if (!compositor_gpu_tiled_ready() || !compositor_straight(row) || !compositor_wl.straight[row].owed)
+                return 0;
+        return compositor_wl_tiled_desc(row, &compositor_wl.straight[row].picture, desc, 0);
+}
+
+static int compositor_wl_card_image(int row, const struct wayland_picture *picture, unsigned int *to, unsigned long pitch, long dx, long dy, long sx,
+                                    long sy, long w, long h)
+{
+#ifdef MOONWATER_GPU_C
+        unsigned int desc[8], kind;
+        int why = 0;
+        positive dst_va, began;
+
+        if (!(kind = compositor_wl_tiled_desc(row, picture, desc, &why)))
+                return compositor_wl_tiled_refused(why);
         dst_va = gpu_va_written(to, compositor.buffer);
         if (!dst_va && gpu_map_written(to, compositor.buffer))
                 dst_va = gpu_va_written(to, compositor.buffer);
@@ -3084,12 +3111,11 @@ static int compositor_wl_straight_take(int row, const struct wayland_picture *pi
                 compositor_wl_straight_drop(row);
                 return 0;
         }
-        // Shown from its buffers, or hidden under another window that is (straight on the primary plane, the whole screen): either way
-        // nothing reads the table's picture until a present composes the window, which reads what it owes first.
-        // A picture whose client's drawing is not done is not taken so on the overlay, whose corner rows are read now (the commit's read
-        // skips it as before, and the next is shown whole).
+        // Shown from its buffers, hidden under another direct-scanned window, or sampled directly in a single pass by the
+        // AMD RDNA2 scene kernel (compositor_gpu_tiled_ready): nothing reads the table's picture unless a CPU fallback runs,
+        // which pays what is owed first.
         shown = (compositor_wl_straight_whole(row) || picture->explicit_sync || compositor_wl_dmabuf_ready(wayland_row_owner(row), (int)picture->sync_fd)) &&
-                (compositor_wl_straight_shown(row) ||
+                (compositor_wl_straight_shown(row) || compositor_gpu_tiled_ready() ||
                  (compositor.direct_row >= 0 && compositor.direct_row != row && compositor.plane_row != compositor.direct_row)) &&
                 compositor.table && width == (long)compositor.table->width[row] && height == (long)compositor.table->height[row];
         compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);

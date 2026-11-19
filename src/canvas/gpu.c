@@ -3320,8 +3320,8 @@ static b32 gpu_record_holds(const unsigned int address_to r, unsigned int dx0, u
 {
         long long x0, y0, x1, y1, ry = (int)r[7];
 
-        //      A copy of a picture with red and blue swapped (4 | 0x80) covers its cells as a copy does.
-        if (r[0] == 0 || (r[0] & ~0x80u) == 4)
+        //      A copy of a picture with red and blue swapped (0x80) or sampled tiled/DCC (0x40, 0x20) covers its cells as a copy does.
+        if (r[0] == 0 || (r[0] & ~0xe0u) == 4)
                 x0 = (int)r[1], y0 = (int)r[2], x1 = (int)r[3], y1 = (int)r[4];
         else if (r[0] == 2 && r[5] >> 24 == 255 && ry >= 0 && (int)r[6] >= 0)
                 x0 = ((long long)(int)r[1] + 255) >> 8, x1 = (long long)(int)r[3] >> 8, y0 = ((long long)(int)r[2] + ry + 255) >> 8, y1 = ((long long)(int)r[4] - ry) >> 8;

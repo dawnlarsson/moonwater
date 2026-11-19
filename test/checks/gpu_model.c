@@ -755,6 +755,78 @@ b32 main()
                           gpu_amd_image_fits(8847360 + 34560, 0, 8847360, 1920, 1080, 0x0200000000537b03ull) &&
                           !gpu_amd_image_fits(8847360 + 34559, 0, 8847360, 1920, 1080, 0x0200000000537b03ull) &&
                           !gpu_amd_image_fits(8847360, 0, 8847360 + 1, 1920, 1080, 0x0200000000537b03ull) && !gpu_amd_image_fits(100, 200, 0, 128, 1, 0));
+                // Single-pass tiled/DCC sampling inside the scene kernel (kinds 4/11 and 5/12 with 0x40 tiled, 0x20 UNORM, 0x80 swap):
+                // bit-exact against CPU for raw 32_UINT, swapped 32_UINT, UNORM 8_8_8_8, alpha-over, and cover-mixed corners.
+                {
+                        positive ops_at = GPU_DATA + 65536, desc_at = GPU_DATA + 131072, cov_at = GPU_DATA + 131200, bins_at = GPU_DATA + 196608;
+                        unsigned int *ops = (unsigned int *)((p8 *)gpu.at + ops_at);
+                        unsigned int *desc_mem = (unsigned int *)((p8 *)gpu.at + desc_at);
+                        p8 *cov_mem = (p8 *)gpu.at + cov_at;
+                        unsigned int scene_wrong = 0;
+                        b32 scene_ok = true;
+
+                        gpu_model_card_reset();
+                        for (unsigned int i = 0; i < 256 * 64; i++)
+                        {
+                                unsigned int a, c;
+
+                                seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5;
+                                a = seed >> 24, c = seed;
+                                from[i] = a << 24 | ((c >> 16 & 0xff) * a / 255) << 16 | ((c >> 8 & 0xff) * a / 255) << 8 | (c & 0xff) * a / 255;
+                        }
+                        for (unsigned int i = 0; i < 16 * 16; i++)
+                                cov_mem[i] = (p8)((i * 17u) & 255u);
+                        for (unsigned int mode = 0; mode < 3; mode++)
+                        {
+                                b32 swap = mode == 1, unorm = mode == 2;
+                                unsigned int kind = gpu_amd_image(desc_mem, GPU_VA + from_at, 0, 256, 64, 0, swap, unorm);
+                                unsigned int flags = 0x40u | (unorm ? 0x20u : 0u) | (swap && !unorm ? 0x80u : 0u);
+
+                                for (unsigned int i = 0; i < 256 * 64; i++)
+                                        into[i] = 0xff112233u;
+                                // op 0: opaque background fill
+                                ops[0] = 0, ops[1] = 0, ops[2] = 0, ops[3] = 256, ops[4] = 64, ops[5] = 0xff112233u, ops[6] = 0, ops[7] = 0;
+                                // op 1: single-pass tiled copy (kind 4 | flags) at (12, 8)..(140, 40) from source (5, 7)
+                                ops[8] = 4u | flags, ops[9] = 12, ops[10] = 8, ops[11] = 140, ops[12] = 40;
+                                ops[13] = (unsigned int)desc_at, ops[14] = 5u | (7u << 16), ops[15] = 0;
+                                // op 2: single-pass tiled alpha-over (kind 11 | flags) at (148, 4)..(220, 44) from source (10, 3)
+                                ops[16] = 11u | flags, ops[17] = 148, ops[18] = 4, ops[19] = 220, ops[20] = 44;
+                                ops[21] = (unsigned int)desc_at, ops[22] = 10u | (3u << 16), ops[23] = 0;
+                                // op 3: single-pass tiled mix corner (kind 5 | flags | 16<<8) at (0, 44)..(16, 60) from source (2, 1)
+                                ops[24] = 5u | flags | (16u << 8), ops[25] = 0, ops[26] = 44, ops[27] = 16, ops[28] = 60;
+                                ops[29] = (unsigned int)cov_at, ops[30] = (unsigned int)desc_at, ops[31] = 2u | (1u << 16);
+                                scene_ok = scene_ok && kind && gpu_scene(ops_at, 4, bins_at, into_at, 256, 256, 64, 0, 0, 256, 64) && !gpu_model.fault.code;
+                                for (unsigned int y = 0; scene_ok && y < 64; y++)
+                                        for (unsigned int x = 0; x < 256; x++)
+                                        {
+                                                unsigned int want_px = 0xff112233u;
+
+                                                if (x >= 12 && x < 140 && y >= 8 && y < 40)
+                                                {
+                                                        unsigned int c = from[(y - 8 + 7) * 256 + (x - 12 + 5)];
+                                                        want_px = swap ? ((c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16) : c;
+                                                }
+                                                else if (x >= 148 && x < 220 && y >= 4 && y < 44)
+                                                {
+                                                        unsigned int c = from[(y - 4 + 3) * 256 + (x - 148 + 10)];
+                                                        if (swap)
+                                                                c = (c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16;
+                                                        want_px = gpu_test_overv(0xff112233u, c);
+                                                }
+                                                else if (x < 16 && y >= 44 && y < 60)
+                                                {
+                                                        unsigned int c = from[(y - 44 + 1) * 256 + (x + 2)];
+                                                        unsigned char cv = cov_mem[(y - 44) * 16 + x];
+                                                        if (swap)
+                                                                c = (c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16;
+                                                        memory_mix_u32_row(&want_px, &c, &cv, 1);
+                                                }
+                                                scene_wrong += into[y * 256 + x] != want_px;
+                                        }
+                        }
+                        check("gpu model: scene kernel samples tiled/DCC resources directly (32_UINT, swapped, UNORM) for copy (4), over (11), and corner mix (5), bit for bit",
+                              scene_ok && !scene_wrong);
+                }
                 gpu_model_card_reset();
         }
 

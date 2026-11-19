@@ -642,6 +642,7 @@ static void compositor_lent_fb_fail(int row);
 static int compositor_client_scans(int row);
 static void compositor_wl_straight_pays(int keep);
 static void compositor_wl_straight_settle(int row, long y0, long y1);
+static unsigned int compositor_straight_desc(int row, unsigned int desc[8]);
 static int compositor_wl_row_async(int row);
 static int compositor_wl_row_opaque(int row, int x1, int y1, int x2, int y2);
 static int compositor_wl_row_unscannable(int row);
@@ -705,6 +706,11 @@ static void compositor_wl_straight_pays(int keep)
 static void compositor_wl_straight_settle(int row, long y0, long y1)
 {
         (void)row, (void)y0, (void)y1;
+}
+static unsigned int compositor_straight_desc(int row, unsigned int desc[8])
+{
+        (void)row, (void)desc;
+        return 0;
 }
 static int compositor_wl_row_async(int row)
 {
@@ -1045,6 +1051,8 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
                         frame->runs = 0;
                 }
         }
+        if (!compositor_scaled(frame))
+                frame->tiled_kind = compositor_straight_desc(row, frame->tiled_desc);
         // The edge or corner the hand holds or is over, or all of the line of a window being moved.
         if (row == compositor.lit_row && line)
         {
