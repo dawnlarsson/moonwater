@@ -41,8 +41,3 @@ rule desktop-rest
 rule desktop-boot
 	on canvas on
 	run desktop-boot
-
-# A disk's /root is the session's once boot has said so: the compositor reads it again (desktop_settled).
-rule desktop-settled
-	on boot disk
-	do restart compositor

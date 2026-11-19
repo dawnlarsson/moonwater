@@ -60,7 +60,7 @@ struct rover_running
         p8 up;
         p8 failed;      // given up
         p8 shorts;      // short lives in a row
-        p8 pad;
+        p8 up_owed;     // up before boot's verdict: its service up is posted at the verdict
 };
 
 static struct
@@ -643,6 +643,14 @@ static b32 rover_runner_service_named(const p8 address_to name, positive length)
         return -1;
 }
 
+static bool rover_runner_service_is(positive which, const char address_to name)
+{
+        positive length;
+        const p8 address_to word = rover_runner_pool_word(rover_runner.view.service[which].name, &length);
+
+        return rover_bytes_are(word, length, name);
+}
+
 //      HOST_STATE/NAME.pid while a service runs, which the verbs that tell one find it by (desktop's compositor.pid).
 static fn rover_runner_pid_file(positive which, bipolar pid)
 {
@@ -774,7 +782,12 @@ static fn rover_runner_services(void)
                         rover_runner_stop(which);
                 if (running->stopping && now - running->stopping >= ROVER_STOP_GRACE_NS)
                         system_call_2(syscall(kill), (positive)running->pid, 9);
-                if (!running->pid && wanted && !running->failed && now >= running->retry)
+                //      Before boot's verdict /root is the image's, and a disk's is mounted over it at the verdict: a service
+                //      started now would read the image's settings and keep watching the directory underneath (the
+                //      session bus read no canvas.theme). Only the compositor starts early, for the screen, and is told to
+                //      read /root again at the verdict.
+                if (!running->pid && wanted && !running->failed && now >= running->retry &&
+                    (rover_runner.verdict_seen || rover_runner_service_is(which, "compositor")))
                         rover_runner_start(which);
                 if (running->pid && !running->up && !running->stopping)
                 {
@@ -787,7 +800,11 @@ static fn rover_runner_services(void)
                         if (ready)
                         {
                                 running->up = 1;
-                                rover_runner_service_event(97, which);
+                                //      Its rules (autostart, the keyboard, the installer) read /root: they hear it at the verdict.
+                                if (rover_runner.verdict_seen)
+                                        rover_runner_service_event(97, which);
+                                else
+                                        running->up_owed = 1;
                         }
                 }
         }
@@ -1576,6 +1593,45 @@ static fn rover_runner_verdict(void)
                 return;
         rover_runner.verdict_seen = true;
         host_restore_session(!string_has_prefix((string_address)word, "ask "), false);
+        /*
+                /root is the session's from here, a disk's mounted over the
+                image's when boot took one: the person's rules on it loaded, the
+                watch made on the directory that is there now (the one made at
+                the start watches the image's, underneath), every setting read
+                again and its when rules asked, the compositor told to read
+                /root again (SIGUSR1, as the machine script's desktop_settled
+                did), and the services' up said, which their rules (autostart,
+                the keyboard, the installer) were held for.
+        */
+        {
+                bipolar table = rover_load_now(rover_runner.device, true);
+                p64 changed;
+                struct rover_event edge;
+
+                if (table > 0 && table != (bipolar)rover_runner.table)
+                        (void)rover_runner_adopt((p32)table);
+                if (rover_runner.watch >= 0)
+                        (void)system_call_3(syscall(inotify_add_watch), (positive)rover_runner.watch, (positive) "/root", 0x88);
+                changed = rover_runner_settings(null);
+                memory_zero(&edge, sizeof(edge));
+                edge.when = clock_monotonic_nanoseconds();
+                edge.realtime = rover_runner_realtime();
+                rover_runner_fire(&edge, changed ? changed : ~0ull);
+                for (positive at = 0; at < rover_runner.view.head->services; at++)
+                {
+                        struct rover_running address_to running = &rover_runner.service[at];
+
+                        if (running->pid > 0 && string_has_prefix((string_address)word, "disk") &&
+                            rover_runner_service_is(at, "compositor"))
+                                (void)system_call_2(syscall(kill), (positive)running->pid, 10 /* SIGUSR1 */);
+                        if (running->up_owed)
+                        {
+                                running->up_owed = 0;
+                                if (running->pid > 0 && running->up)
+                                        rover_runner_service_event(97, at);
+                        }
+                }
+        }
         for (positive at = 0; at < 3; at++)
                 if (string_has_prefix((string_address)word, (string_address)verdicts[at]))
                 {
