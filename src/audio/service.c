@@ -1267,7 +1267,9 @@ static void audio_page_write(void)
         // Nothing differs from what the page holds: nothing is written, and the sequence number is the same as it was.
         if (!audio_service.page_whole && memory_compare((char *)&build + 16, (char *)&held + 16, sizeof(build) - 16) == 0)
                 return;
-        seq = __atomic_load_n(&page->seq, __ATOMIC_RELAXED);
+        //      Even before the write begins whatever the page holds: a server killed mid-write left it odd, and a page
+        //      reused (audio_page_open) kept it odd for good, which every reader takes as a write that never ends.
+        seq = __atomic_load_n(&page->seq, __ATOMIC_RELAXED) & ~1u;
         __atomic_store_n(&page->seq, seq + 1, __ATOMIC_RELAXED); // odd: being written
         // A release store orders what is before it, not what follows: the copy's stores could be moved above the odd mark (or land before it
         // on arm64), and a reader that copied a torn page would find the same even number at both ends. The fence keeps them after it.
@@ -2127,12 +2129,28 @@ static int audio_test_page(struct audio_state *copy)
 
         if (fd < 0)
                 return 0;
-        got = audio_call(syscall(read), (positive)fd, (positive)raw, sizeof(raw), 0, 0, 0);
+        //      Read again while the server is writing it (the sequence odd, or moved between two reads), a few times:
+        //      one read taken mid-write said the modem's card was not open.
+        for (int tries = 0; tries < 16; tries++)
+        {
+                unsigned int before;
+
+                got = audio_call(syscall(pread64), (positive)fd, (positive)raw, sizeof(raw), 0, 0, 0);
+                if (got < (long)sizeof(*copy))
+                        break;
+                memory_copy(copy, raw, sizeof(*copy));
+                before = copy->seq;
+                if (before & 1u)
+                        continue;
+                got = audio_call(syscall(pread64), (positive)fd, (positive)raw, sizeof(raw), 0, 0, 0);
+                if (got >= (long)sizeof(*copy) && ((struct audio_state *)raw)->seq == before)
+                {
+                        audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
+                        return copy->magic == AUDIO_STATE_MAGIC && copy->version == AUDIO_STATE_VERSION && copy->bytes == sizeof(*copy);
+                }
+        }
         audio_call(syscall(close), (positive)fd, 0, 0, 0, 0, 0);
-        if (got < (long)sizeof(*copy))
-                return 0;
-        memory_copy(copy, raw, sizeof(*copy));
-        return copy->magic == AUDIO_STATE_MAGIC && copy->version == AUDIO_STATE_VERSION && copy->bytes == sizeof(*copy) && !(copy->seq & 1u);
+        return 0;
 }
 
 /*

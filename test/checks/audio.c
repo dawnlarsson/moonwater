@@ -10559,6 +10559,13 @@ static void sv_test_page(void)
         after = audio_service.page->seq;
         SVCHECK(!(after & 1u) && after == before + 2, "one write takes the sequence from %u to %u", before, after);
         SVCHECK(audio_state_read(audio_service.page, &copy) && copy.volume == 65536, "the copy reads back whole (volume %u)", copy.volume);
+        //      A page left odd (a server killed mid-write) is even again after the next write, not odd for good (S-d10-2).
+        audio_service.page->seq |= 1u;
+        audio_service.pulse.sink[audio_service.sink].volume[0] ^= 1; // a change, so the write is made
+        audio_page_write();
+        SVCHECK(!(audio_service.page->seq & 1u) && audio_state_read(audio_service.page, &copy),
+                "a page left odd by a write that died is even and readable after the next (sequence %u)", audio_service.page->seq);
+        SVCHECK(audio_test_page(&copy), "and the modem's look at the page reads it");
         audio_service.page_path = "/tmp/unused";
 }
 
