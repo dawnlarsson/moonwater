@@ -220,6 +220,14 @@ static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover sta
 #else
 #include "../../artifacts/gpu_kernels.inc"
 #endif
+// The kernels are the tree's gpu.asm's (CLASS-h4-2): an include made of another one (a hand build's artifacts/gpu_kernels.inc left from before a
+// change of gpu.asm) compiled silently, and the card ran the old words.
+#include "gpu_asm.hash"
+#if !defined(GPU_KERNELS_ASM_HASH)
+#error "the GPU kernels' include was made before it said its source: python3 -I test/gpu_kernels.py --print src/canvas/gpu.asm > artifacts/gpu_kernels.inc"
+#elif GPU_KERNELS_ASM_HASH != GPU_ASM_HASH
+#error "the GPU kernels' include is not of this src/canvas/gpu.asm: python3 -I test/gpu_kernels.py --print src/canvas/gpu.asm > artifacts/gpu_kernels.inc (and --hash src/canvas/gpu.asm > src/canvas/gpu_asm.hash after a change of gpu.asm)"
+#endif
 
 // The Intel GPU's kernels, Gen9: src/canvas/gpu_i915.asm as `build gpu-i915` assembles them. gpu_i915_fill is op 1: its entry is
 // the instruction after IGT's colour replicate (64-byte aligned, see the source). The build names the file with

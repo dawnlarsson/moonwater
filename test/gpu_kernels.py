@@ -5,7 +5,12 @@
                                             `build gpu-kernels ASM INC` wrote) holds exactly the
                                             same words, kernel by kernel
     python3 test/gpu_kernels.py --print ASM the arrays llvm-mc makes of ASM, in the form the
-                                            build writes them (a hand build's artifacts/gpu_kernels.inc)
+                                            build writes them (a hand build's artifacts/gpu_kernels.inc),
+                                            with the FNV-1a 64 of ASM's bytes (GPU_KERNELS_ASM_HASH)
+    python3 test/gpu_kernels.py --hash ASM  the line src/canvas/gpu_asm.hash holds: ASM's FNV-1a 64
+                                            (GPU_ASM_HASH), which gpu.c holds the included kernels'
+                                            GPU_KERNELS_ASM_HASH to, so kernels made from another
+                                            gpu.asm are a compile error, not a card that runs them
     python3 test/gpu_kernels.py --print-intel SRC
                                             the array gpu_i915_gen9.inc holds, made from SRC
                                             (src/canvas/gpu_i915.asm) the way `build gpu-i915`
@@ -160,8 +165,15 @@ def arrays(text):
             for name, body in re.findall(r'static const unsigned int gpu_k_(\w+)\[\] = \{(.*?)\};', text, re.S)]
 
 
-def text(made):
-    lines = []
+def asm_hash(asm):
+    h = 0xcbf29ce484222325
+    for c in pathlib.Path(asm).read_bytes():
+        h = ((h ^ c) * 0x100000001b3) & 0xffffffffffffffff
+    return h
+
+
+def text(made, asm=None):
+    lines = ['#define GPU_KERNELS_ASM_HASH 0x%016xull // the FNV-1a 64 of the gpu.asm these were made of (gpu.c holds it to gpu_asm.hash)\n' % asm_hash(asm)] if asm else []
     for name, words in made:
         lines.append('static const unsigned int gpu_k_%s[] = {\n' % name)
         for i in range(0, len(words), 10):
@@ -853,7 +865,12 @@ def main():
         probe()
         return
     if len(sys.argv) == 3 and sys.argv[1] == '--print':
-        sys.stdout.write(text(kernels(build(sys.argv[2]))))
+        sys.stdout.write(text(kernels(build(sys.argv[2])), sys.argv[2]))
+        return
+    if len(sys.argv) == 3 and sys.argv[1] == '--hash':
+        sys.stdout.write('// src/canvas/gpu.asm\'s FNV-1a 64: what artifacts/gpu_kernels.inc is held to (gpu.c). Made again with\n'
+                         '// python3 -I test/gpu_kernels.py --hash src/canvas/gpu.asm > src/canvas/gpu_asm.hash whenever gpu.asm changes.\n'
+                         '#define GPU_ASM_HASH 0x%016xull\n' % asm_hash(sys.argv[2]))
         return
     if len(sys.argv) != 3 or sys.argv[1].startswith('-'):
         sys.exit(__doc__)

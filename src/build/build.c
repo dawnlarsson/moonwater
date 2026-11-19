@@ -4946,10 +4946,25 @@ static b32 build_gpu_kernels(string_address input, string_address output)
 
         build_tool("mkdir", "-p", build_directory_of(output), null);
 
-        //      Written beside the output and renamed over it, so lanes that
-        //      ask for the file together never read half of it.
-        if (!build_write_file(temporary, (string_address)gpuasm_output, gpuasm_output_length))
-                return string_report(log_error, 1, "gpu-kernels: cannot write %s\n", temporary);
+        //      The source's FNV-1a 64 first (GPU_KERNELS_ASM_HASH), which gpu.c holds to src/canvas/gpu_asm.hash: kernels made of another
+        //      gpu.asm than the tree's are a compile error.
+        {
+                static const char digits[] = "0123456789abcdef";
+                char line[160] = "#define GPU_KERNELS_ASM_HASH 0x0000000000000000ull // the FNV-1a 64 of the gpu.asm these were made of\n";
+                unsigned long long hash = 0xcbf29ce484222325ull;
+                bipolar handle;
+
+                for (bipolar k = 0; k < got; k++)
+                        hash = (hash ^ build_gpu_source[k]) * 0x100000001b3ull;
+                for (unsigned int k = 0; k < 16; k++)
+                        line[31 + 15 - k] = digits[hash >> (4 * k) & 15];
+                handle = system_open_at_mode(AT_FDCWD, temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+                refuse_if(handle < 0, 1, "gpu-kernels: cannot write %s\n", temporary);
+                refuse_if(system_write_once(handle, line, string_length((string_address)line)) < 0 ||
+                              system_write_once(handle, gpuasm_output, gpuasm_output_length) != (bipolar)gpuasm_output_length,
+                          1, "gpu-kernels: cannot write %s\n", temporary);
+                system_close(handle);
+        }
 
         if (rename(temporary, output) < 0)
         {
