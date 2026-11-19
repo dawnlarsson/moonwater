@@ -311,7 +311,7 @@ static void compositor_keys_read(void)
 
                         memory_copy(name, text + start, length);
                         name[length] = 0;
-                        compositor_kmsg((string_address) "compositor: no chord in the machine script's ", 0, (string_address)name);
+                        compositor_kmsg((string_address) "compositor: no chord in the rules' keys line ", 0, (string_address)name);
                         continue;
                 }
 

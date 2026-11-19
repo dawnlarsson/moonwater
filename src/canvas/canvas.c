@@ -4031,7 +4031,7 @@ void canvas_boot(void)
 
         /*
                 The image's settings can say Canvas stays off at boot
-                (moonwater bind init canvas off), and the text console is then
+                (moonwater init canvas off), and the text console is then
                 what is on the screen. The settings are read before this runs,
                 at the start of the core. moonwater desktop on starts Canvas
                 afterwards as it would after any off.

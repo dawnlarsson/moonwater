@@ -659,6 +659,19 @@ def main():
     if options.why:
         return 0
     if options.check:
+        #   The machine script and moonwater bind are gone (the rover runner took the machine): no source names them
+        #   as if they ran, but the link's reserved name (host.c's HOST_MACHINE_SCRIPT, waterlink's leaf list).
+        stale = []
+        for path in sorted((ROOT / 'src').rglob('*')):
+            if path.suffix not in ('.c', '.h', '.inc', '.rover', '.md', '.sh') or not path.is_file():
+                continue
+            for number, line in enumerate(path.read_text(errors='replace').splitlines(), 1):
+                if 'moonwater bind' in line or ('main.moonwater.sh' in line and 'HOST_MACHINE_SCRIPT' not in line and
+                                                path.name != 'host_darwin.c'):
+                    stale.append('%s:%d' % (path.relative_to(ROOT), number))
+        if stale:
+            print('rover_schema: these name the machine script or moonwater bind, which are gone: %s' % ', '.join(stale))
+            return 1
         #   Every image rule file is one the program carries: compile.c names each by ROVER_IMAGE(name).
         named = set(re.findall(r'^ROVER_IMAGE\((\w+)\)$', (ROOT / 'src/rover/compile.c').read_text(), re.M))
         files = {path.stem for path in (ROOT / 'src/rover/examples').glob('*.rover')}

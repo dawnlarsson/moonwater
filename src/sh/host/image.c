@@ -738,7 +738,7 @@ static bool host_settings_visit(storage_identity address_to identity,
         the disk in what this machine runs -- every entry in the payload is a
         command, at boot, at stop, or on a bound event, and these settings do
         not stay in memory: an install stamps them into the image it writes,
-        and moonwater bind saves them as this session's. So the switches are
+        and moonwater init and exit save them as this session's. So the switches are
         taken and the payload is not, and the startup flag goes with it
         because it says a list was written.
 */
@@ -1309,7 +1309,7 @@ static fn host_settings_note(host_settings address_to settings,
                 return;
 
         host_say(log, host_label "%s is read when the entry runs and is not kept "
-                                 "after power off; moonwater bind %s add \"$(cat %s)\" "
+                                 "after power off; moonwater %s add \"$(cat %s)\" "
                                  "keeps the script itself\n",
                  path, verb, path);
 }

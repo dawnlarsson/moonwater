@@ -994,7 +994,7 @@ static b32 host_latency(string_address address_to arguments, positive count)
 
         The variable is written last, and the machine is stopped through the
         same path poweroff and reboot take, so the disks are synced and what
-        `moonwater bind exit` runs has run. If the machine does not stop, the
+        `moonwater exit` runs has run. If the machine does not stop, the
         bit is left set and the next restart of any kind goes to setup.
 */
 #define HOST_EFI_DIRECTORY "/sys/firmware/efi/efivars"

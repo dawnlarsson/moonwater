@@ -117,11 +117,10 @@ static inline int moonwater_same_pair(unsigned int a, unsigned int b)
 }
 
 /*
-        The script text lives in the module: main.moonwater.sh at the
-        repository root is baked in as the fallback, and /root/main.moonwater.sh
-        overlays it when present. GET answers the overlay the CLI and the
-        machine both use; SET replaces the live copy. The module scans once;
-        userspace does not.
+        The script text lives in the module: CONFIG_MOONWATER_MACHINE_SCRIPT's
+        file is baked in as the fallback, none by default since the rover
+        runner took the machine, and a script SET replaces the live copy.
+        GET answers the overlay. The module scans once; userspace does not.
 */
 /*
         length carries the room, both ways.
@@ -1531,9 +1530,8 @@ static long report_machine_script(struct machine_script __user *out)
                 unsigned int length;
                 char *copy = null;
 
-                /*      The text is root's. It is read from
-                        /root/main.moonwater.sh, which is where a person who
-                        cannot open that file was kept from it, and it can
+                /*      The text is root's: it is what root set, which a
+                        person who cannot read root's files is kept from, and it can
                         carry what an operator would not print: a network's
                         password, a token in a command. /dev/spark is open to
                         everyone, so the copy needs the capability the

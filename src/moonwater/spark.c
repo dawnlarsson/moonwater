@@ -353,8 +353,8 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
         A machine-script function `moonwater_<event>`, or a literal case arm
         in `moonwater_event`, owns that event while the kernel holds the
         script: bind_fire queues into the attached process instead of
-        spawning the image line, and `moonwater bind` prints the script line
-        rather than SET. `moonwater_event` itself, when present, is queued
+        spawning the image line. No script is set since the rover runner took
+        the machine (the module bakes in none), so every event runs its line. `moonwater_event` itself, when present, is queued
         every event; `*)` is not ownership. Events the overlay does not name
         still use the image binds. SET of the image line is still allowed (the
         fallback if the machine process is not attached); the CLI refuses to
@@ -401,7 +401,7 @@ _Static_assert(sizeof(struct snapshot_request) == 32,
         Names in event-id order, the same strings the kernel table uses.
         Userspace matches a typed word against this rather than opening
         /dev/spark once per event. An id is never reused; new events
-        append. Two-word names (canvas on) are `moonwater bind canvas on`.
+        append. Two-word names (canvas on) are rover's `on canvas on`.
 */
 static const char spark_bind_event_name[SPARK_BIND_EVENTS][SPARK_BIND_NAME_MAX] = {
         "poweroff",

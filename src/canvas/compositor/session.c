@@ -1344,10 +1344,10 @@ static void compositor_inputs_watch(void)
 }
 
 /*
-        /root read again, whole, at SIGUSR1: the desktop is started before the machine's disks are known (the machine
-        script's desktop_early), on the image's own /root, and a disk taken after that is another directory bound over
-        the name, which the watch on the first hears nothing of. The session sends the signal when the disk is taken
-        (desktop_settled): the name is watched again and every setting the start read from it is read as a change of its
+        /root read again, whole, at SIGUSR1: the desktop is started before the machine's disks are known (the rover
+        runner starts the compositor ahead of boot's verdict), on the image's own /root, and a disk taken after that is
+        another directory bound over the name, which the watch on the first hears nothing of. The runner sends the signal
+        at a disk's verdict (rover_runner_verdict): the name is watched again and every setting the start read from it is read as a change of its
         file would have it read, the screens laid again by the disk's displays and arrangement. What the disk does not
         say stays as the first frame had it, so a disk with no settings of its own changes nothing on the screen. All
         on the loop's thread, as the watch's own reads are.

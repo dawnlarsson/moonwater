@@ -158,7 +158,7 @@ static b32 desktop_status(void)
 /*
         moonwater desktop autostart [PROGRAM...|none|default], add PROGRAM, remove PROGRAM: the programs the desktop opens when it
         starts, in order (registry.c's setting_autostart_valid says what a line is). The desktop opens no window of its own: the
-        machine script's desktop_autostart reads this verb's line once the compositor is up and opens each, so the kernel log and the
+        image's autostart rule (session.rover, its script) reads this verb's line once the compositor is up and opens each, so the kernel log and the
         console are the standard's and not the session's. Bare it says the line, none, or the standard when nothing is kept. They are
         started as root, so a change needs root, and a program added is a file that can be run. Kept in /root, and taken at the
         desktop's next start.

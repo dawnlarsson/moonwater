@@ -738,7 +738,7 @@ static fn host_input_none(void)
         One command at a time changes what a machine keeps.
 
         Settings are read, changed and written back whole, so two commands at
-        once -- six `moonwater bind init add` in a loop -- each read the same
+        once -- six `moonwater init add` in a loop -- each read the same
         copy and the last write kept one entry of the six. The lock covers a
         command from its read to its save, and an install, an update or a take
         from its first look to its last write. The process that holds it takes
@@ -3256,7 +3256,7 @@ static b32 host_boot(void)
                 it is not known to be the one this session started from: a
                 public release's build is what every copy says, and a stick
                 somebody pushed in says it as well as the machine's own disk,
-                its /root/main.moonwater.sh then running as root. */
+                its /root/rules then running as root. */
         if (same == 1 && chosen &&
             !host_install_booted(chosen, running, known ? address_of settings : null) &&
             !host_lone_taken(host_disk_external(chosen->disk),

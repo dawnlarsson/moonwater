@@ -4274,7 +4274,7 @@ static fn bowl_user_store_prepare(void)
         in every file the program made, every signal it sent and a socket's
         credentials, so a program of a bowl that had been taken over (a
         browser, a game) could read /root's keys and settings, write
-        /root/main.moonwater.sh and be run as root at the next event, and
+        /root/rules and be run as root at the next event, and
         signal any process of the machine's. Attacker 8 of SECURITY.md.
 
         Here the program is made a real host uid and gid 1000, in the device
