@@ -949,6 +949,16 @@ static void canvas_modes_keep(void)
                     !set->connectors[0]->name)
                         continue;
 
+                /*
+                        A real screen with no EDID is at a size from the no-EDID
+                        list (up to 1024x768), which is no size of the screen's:
+                        kept, it was the size the next start asked first, and a
+                        start after the EDID came put the screen back at it.
+                */
+                if (!READ_ONCE(set->connectors[0]->edid_blob_ptr) &&
+                    !canvas_is_virtual(output->canvas->client.dev))
+                        continue;
+
                 canvas_mode_keep(set->connectors[0]->name, set->mode);
         }
 }
@@ -1042,11 +1052,62 @@ static struct drm_display_mode *output_guest_mode(struct drm_device *dev,
 }
 
 /*
+        Whether a real card has not looked at its connectors yet: not one says
+        connected, and one or more says unknown, the status a connector is
+        made with.
+
+        i915 answers a detect from any task but its own with the status it
+        already has until its registration lets the display be reached
+        (intel_display_driver_check_access, opened by
+        intel_display_driver_enable_user_access), and that comes after
+        drm_dev_register, which is when Canvas attaches. Every connector then
+        says unknown, the probe helper gives each the no-EDID list (up to
+        1024x768), and the modeset probe, finding none connected, takes every
+        unknown one: on the Dell all-in-one (UHD 630, one panel on HDMI-A-2)
+        the first picture was three screens, DP-1, HDMI-A-2 and HDMI-A-3 at
+        1024x768 (DP-1's would not set, and 640x480 was taken), a desktop of
+        2688x768, and the compositor that started a moment later took the
+        panel's crtc at the 1024x768 it was at. A guest's card and the
+        firmware's framebuffer always know.
+*/
+#define CANVAS_UNSETTLED_TRIES 50
+#define CANVAS_UNSETTLED_MS 20
+
+static _Bool canvas_unsettled(struct drm_device *dev)
+{
+        struct drm_connector_list_iter iter;
+        struct drm_connector *connector;
+        _Bool connected = false, unknown = false;
+
+        if (canvas_is_virtual(dev) || canvas_is_firmware(dev))
+                return false;
+
+        drm_connector_list_iter_begin(dev, &iter);
+        drm_for_each_connector_iter(connector, &iter)
+        {
+                enum drm_connector_status status = READ_ONCE(connector->status);
+
+                connected |= status == connector_status_connected;
+                unknown |= status == connector_status_unknown;
+        }
+        drm_connector_list_iter_end(&iter);
+
+        return unknown && !connected;
+}
+
+/*
         Probes every connector and puts the best mode on each modeset.
 
         The lock order is the one drm_client_modeset_probe uses: the client's
         modesets, then the device's mode configuration, which is what guards a
         connector's list of modes.
+
+        A start (keep_saved) on a card that has not looked at its connectors
+        yet (canvas_unsettled) probes again every CANVAS_UNSETTLED_MS, for a
+        second at most, until one is connected or none is unknown; each probe
+        is a detect of every connector, which is what settles them once the
+        driver answers. Then it takes what there is, as it did before. A card
+        that knows its connectors is probed once, as before.
 */
 static COLD int canvas_probe_modes(struct canvas *canvas, _Bool biggest,
                                    _Bool keep_saved)
@@ -1054,9 +1115,22 @@ static COLD int canvas_probe_modes(struct canvas *canvas, _Bool biggest,
         struct drm_client_dev *client = &canvas->client;
         struct drm_device *dev = client->dev;
         struct drm_mode_set *mode_set;
+        unsigned int waited = 0;
 
-        if (drm_client_modeset_probe(client, 0, 0))
-                return -ENODEV;
+        for (;;)
+        {
+                if (drm_client_modeset_probe(client, 0, 0))
+                        return -ENODEV;
+                if (!keep_saved || waited >= CANVAS_UNSETTLED_TRIES ||
+                    !canvas_unsettled(dev))
+                        break;
+                msleep(CANVAS_UNSETTLED_MS);
+                waited++;
+        }
+        if (waited)
+                pr_info("[moonwater canvas] " "%s: no connector was known, waited %u ms for them%s\n",
+                        dev->driver->name, waited * CANVAS_UNSETTLED_MS,
+                        canvas_unsettled(dev) ? ", and they still are not" : "");
 
         mutex_lock(&client->modeset_mutex);
         mutex_lock(&dev->mode_config.mutex);
