@@ -1282,6 +1282,18 @@ static fn rover_check_red(void)
         check("red: a duration of a nanosecond past a second prints as what reads back",
               rover_round("rule a\n\ton lid close\n\tdo latency 1.000000001s\n") &&
                   rover_round("rule a\n\tevery 1.000000001s\n\tdo log x\n"));
+        //      R-r4-4: a table to run refuses an event nothing posts yet (fullscreen, window, display added); the language's
+        //      own checks still compile one.
+        {
+                static const char text[] = "rule game\n\ton fullscreen on steam_app_*\n\tdo latency 20us\n";
+
+                rover_one.live = true;
+                check("red: a table to run refuses a rule on an event nothing posts yet, with the reason",
+                      !rover_compile(&rover_one, (const p8 address_to)text, sizeof(text) - 1) && rover_holds_why("posted by nothing yet"));
+                check("red: and takes a chord, which the compositor posts",
+                      rover_compile(&rover_one, (const p8 address_to)"rule t\n\ton chord ctrl+shift+t\n\tdo open terminal\n", 48));
+                rover_one.live = false;
+        }
         //      R-compiler-7: a cue rule with a condition may emit what its filter takes; R-compiler-9: comments alone are the
         //      empty table, as their printing is.
         check("red: a cue rule whose condition can stop it may emit a cue its filter takes",

@@ -48,7 +48,7 @@ rule lid-sleep
 	do display off
 
 rule game-latency
-	about "Hold the processor awake while a game is full screen"
+	about "Hold the processor awake while a game is full screen (when the compositor posts fullscreen on: not yet)"
 	on fullscreen on steam_app_*
 	do latency 20us
 
@@ -323,7 +323,7 @@ of events and primitives are kept forever: one is never given to another.
 |---|---|
 | kernel (spark, ids 1–22) | `key power`, `key sleep`, `key reset`, `key ctrl-alt-delete`, `lid close`, `lid open`, `volume up`, `volume down`, `mute`, `brightness up`, `brightness down`, `canvas on`, `canvas off`, `micmute`, `rfkill`, `tablet on`, `tablet off`, `headphone on`, `headphone off`, `dock on`, `dock off`, `resume` |
 | kernel (the module's hooks, ids 23–44, written in `schema.list`) | `key down` and `key up` (chord: every key, with the modifiers held), `mouse down` and `mouse up` (button: left right middle side extra forward back task), `pad down` and `pad up` (button: south east c north west z tl tr tl2 tr2 select start mode thumbl thumbr up down left right), `touch down`, `touch up`, `switch on` and `switch off` (which: every EV_SW switch, Linux's order), `power ac`, `power battery`, `battery` (percent, state), `usb added` and `usb removed` (class, vendor, product: int, port: word), `input added` and `input removed` (kind: keyboard mouse touchpad touchscreen pad tablet switch other, name: word), `display connected` and `display disconnected` (connector: word), `link up` and `link down` (interface: word), `sleep` |
-| desktop (the compositor, ids 64–) | `chord` (chord), `fullscreen on` and `fullscreen off` (app: word), `window opened` and `window closed` (app: word), `display added` and `display removed` (connector: word), `button` (name: `launcher`, `volume`, `mic`, `notices`, `tray-double` or `pin`; slot: int 0 to 63, a pin's place on the taskbar; app: word, a pin's program) |
+| desktop (the compositor, ids 64–) | `chord` (chord), `fullscreen on` and `fullscreen off` (app: word), `window opened` and `window closed` (app: word), `display added` and `display removed` (connector: word): these six have no producer yet, and a table to run (the loader's, `moonwater rover check`) refuses a rule on one, which would never fire; `button` (name: `launcher`, `volume`, `mic`, `notices`, `tray-double` or `pin`; slot: int 0 to 63, a pin's place on the taskbar; app: word, a pin's program) |
 | rules (id 96) | `cue` (name: word), posted by `emit cue NAME` |
 | runner clocks | `every` (period: duration) and `at` (time: clock), which `every DURATION` and `at CLOCK` are rules on: the runner posts `every` for each period its rules name, at that period, and `at` once for each minute of the day the clock passes, so the minute's rules are a scan of keys: a minute a sleep or a step forward went over is posted late (up to a day of them), and one a step back repeats is not posted again. `every` is the runner's monotonic clock, which a sleep does not advance |
 | runner (ids 97–) | `service up`, `service down`, `service failed` (name: word); `setting` (name: word, a registry row's); `boot` (verdict: `live`, `disk` or `ask`; disk: word, the disk's name), once a boot when boot has said what this session's `/root` is, which is what `moonwater_init` was handed as its `$1` |

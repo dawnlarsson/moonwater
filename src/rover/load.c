@@ -129,6 +129,7 @@ static bool rover_load_safe(void)
 //      One file's text into the set, when it compiles alone: said by its name and line when it does not.
 static bool rover_load_add(const p8 address_to text, positive length, string_address said, bool say)
 {
+        rover_load_one.live = rover_load_all.live = true;
         if (!rover_compile(&rover_load_one, text, length))
         {
                 if (say)

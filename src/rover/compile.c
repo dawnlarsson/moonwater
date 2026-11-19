@@ -72,6 +72,7 @@ struct rover_build
         p32 services;
         p8 block;                  // ROVER_BLOCK_*: what the lines at depth 1 belong to
         bool merge;                // many files as one table: a file's services may follow another file's rules
+        bool live;                 // a table to run: an event nothing posts yet is refused (rover_unposted)
         struct rover_rule service_rule; // a service's if lines, read as a when rule's
         p64 pool_words[ROVER_POOL_MOST / 8];
         p32 rules, comparisons, calls, actions, arguments, notes, pool;
@@ -1113,6 +1114,16 @@ static bool rover_glob_word(const struct rover_word address_to word)
         return rover_find(word->text, '*', word->length) || rover_find(word->text, '?', word->length);
 }
 
+/*
+        The schema's events nothing posts yet: the compositor's fullscreen on and off, window opened and closed, and
+        display added and removed (65 to 70) have rows and no producer. A table to run (the loader's, moonwater rover
+        check) refuses a rule on one, which would never fire; the language's own checks still compile them.
+*/
+static bool rover_unposted(p16 id)
+{
+        return id >= 65 && id <= 70;
+}
+
 static bool rover_read_on(struct rover_build address_to build, struct rover_rule address_to rule)
 {
         positive used = 0;
@@ -1123,6 +1134,13 @@ static bool rover_read_on(struct rover_build address_to build, struct rover_rule
                 if (build->words < 2)
                         return rover_refused(build, "on names no event", null, null);
                 return rover_refused(build, "", &build->word[1], " is no event (moonwater rover schema lists them)");
+        }
+        if (build->live && rover_unposted(event->id))
+        {
+                rover_refused(build, "", &build->word[1], " is posted by nothing yet: the compositor does not say ");
+                rover_why_add(build, event->name);
+                rover_why_add(build, ", so a rule on it would never fire");
+                return false;
         }
         build->event = event;
         rule->event = event->id;
@@ -2971,6 +2989,7 @@ static bool rover_verb_compile(string_address path)
                 log_flush();
                 return false;
         }
+        rover_work.live = true;
         if (!rover_compile(&rover_work, rover_source, (positive)length))
         {
                 if (rover_work.line)
