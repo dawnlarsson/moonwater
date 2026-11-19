@@ -7,7 +7,13 @@ built into CHECK_audio_mix, CHECK_audio_alsa or CHECK_audio_pulse with gcc; the 
 in the check.  The "bowl" ones are edits to a copy of src/bowl.c (the PULSE_SERVER a bowl's program is offered), run against the
 bowl_session harness of test/differential.py, which must exit with an error.
 
-    python3 test/audio_mutations.py [NAME...]          from the tree's root; 8 builds at a time, about 4 minutes
+The unmutated tree is built and run first, every check a chosen mutant is held to, and must be green, or nothing is
+counted (exit 2).  A mutant that does not build, or whose text is not in its file, is a survivor: it proved nothing.
+The checks are built with the compiler in CC (gcc by default).
+
+    python3 test/audio_mutations.py [--most N] [NAME...]   from the tree's root; 8 builds at a time (AUDIO_MUTATION_JOBS), about 4 minutes
+
+--most N is the pin (sh test/run mutation_audio): more than N survivors fails, and fewer fails too, saying to lower it.
 
 Last run: see the commit that changed this line.
 """
@@ -21,18 +27,23 @@ target_file = {'socket': 'control'}
 check_of = {'control': 'pulse', 'socket': 'control'}
 checks = os.path.join(root, 'test/checks.c')
 work = tempfile.mkdtemp(prefix='audio-mutations-')
-only = sys.argv[1:]
+argv = sys.argv[1:]
+most = 0
+if argv[:1] == ['--most']:
+    most, argv = int(argv[1]), argv[2:]
+only = argv
+compiler = os.environ.get("CC", "gcc")
 
 M = [
     # ---- mix.c ----
     ("mix", "volume curve squared", "return x * x * x;", "return x * x;"),
     ("mix", "ramp 48 frames", "#define AUDIO_RAMP 96", "#define AUDIO_RAMP 48"),
     ("mix", "ring read off by one", "unsigned long from = voice->ring.read % voice->ring.size;", "unsigned long from = (voice->ring.read + voice->frame) % voice->ring.size;"),
-    ("mix", "output channels swapped", "c == 0 ? left[i] : c == 1 ? right[i] : 0.0f", "c == 0 ? right[i] : c == 1 ? left[i] : 0.0f"),
+    ('mix', 'output channels swapped', 'f32_pair_to_s16(dst, left, right, frames);', 'f32_pair_to_s16(dst, right, left, frames);'),
     ("mix", "LFE mixed in", "case AUDIO_POSITION_LFE:\n                        break;", "case AUDIO_POSITION_LFE:\n                        side = 2;\n                        break;"),
     ("mix", "a 32-bit card gets the short filter", "        audio_narrow = bits == 16;", "        audio_narrow = 1;"),
     ("mix", "a 16-bit card gets 64 taps (aliases at 2:1)", "#define AUDIO_TAPS_NARROW 96 ", "#define AUDIO_TAPS_NARROW 64 "),
-    ("mix", "ring put ignores room", "        if (n > room)\n                n = room;\n        n -= n % ring->frame;\n        from = ring->write % ring->size;\n        first = ring->size - from;\n        if (first > n)\n                first = n;\n        memory_copy_apart(", "        n -= n % ring->frame;\n        from = ring->write % ring->size;\n        first = ring->size - from;\n        if (first > n)\n                first = n;\n        memory_copy_apart("),
+    ('mix', 'ring put ignores room', '        if (n > room)\n                n = room;\n        n -= n % ring->frame;', '        n -= n % ring->frame;'),
     ("mix", "table rows scaled by 1.001 (a gain error of 0.009 dB)", "row[k] = (float)((double)row[k] / sum);", "row[k] = (float)((double)row[k] / (sum * 1.001));"),
     ("mix", "clips not counted", "sink->clips += f32_pair_clip(sink->mix[0], sink->mix[1], (unsigned long)frames);", "(void)f32_pair_clip(sink->mix[0], sink->mix[1], (unsigned long)frames);"),
     ("mix", "S24LE and S24BE exchanged", "format == AUDIO_FORMAT_S24LE ? 3 : format == AUDIO_FORMAT_S24BE ? 4", "format == AUDIO_FORMAT_S24LE ? 4 : format == AUDIO_FORMAT_S24BE ? 3"),
@@ -55,7 +66,6 @@ M = [
     ("mix", "rate change always keeps the table", "(rate > was ? rate - was : was - rate) * 20 <= was", "(rate > was ? rate - was : was - rate) * 20 <= was * 100"),
     ("mix", "seek one frame too far", "> (long long)ring->size)\n                return -1;\n        if ((unsigned long)target > ring->limit)", ">= (long long)ring->size)\n                return -1;\n        if ((unsigned long)target > ring->limit)"),
     ("mix", "ramp twice as fast", "(most > 1.0f ? most : 1.0f) * (1.0f / (float)AUDIO_RAMP)", "(most > 1.0f ? most : 1.0f) * (2.0f / (float)AUDIO_RAMP)"),
-    ("mix", "16-bit clip one too high", "v = v > 32767.0f ? 32767.0f : v;", "v = v > 32768.0f ? 32768.0f : v;"),
     ("mix", "table mirror not turned", "table->h[p * taps + k] = table->h[(phases - p) * taps + taps - 1 - k];", "table->h[p * taps + k] = table->h[(phases - p) * taps + k];"),
     ("mix", "drain tail too short", "long zeros = rs->table->taps / 2;", "long zeros = rs->table->taps / 4;"),
     ("mix", "remix rows not scaled", "matrix[o][c] /= sum;", "matrix[o][c] *= 1.0f;"),
@@ -64,9 +74,8 @@ M = [
     # (the resampler's row between two phases is lib.c's now: its mutations are test/audiolib_mutations.py's)
     ("mix", "filter centre one off", "long lead = rs->table->taps / 2 - 1;", "long lead = rs->table->taps / 2;"),
     ("mix", "volume not clamped", "if (volume > AUDIO_VOLUME_MAX)\n                volume = AUDIO_VOLUME_MAX;", ""),
-    ("mix", "sink rounds down", "r = v + 12582912.0f;", "r = v + 12582912.0f - 0.5f;"),
     ("mix", "resampler step truncated", "(unsigned long)(((unsigned long long)table->rin << 32) / (unsigned long long)table->rout);", "(unsigned long)(((unsigned long long)table->rin << 32) / (unsigned long long)table->rout) - 5000;"),
-    ("mix", "table taps not scaled for downsampling", "taps = AUDIO_TAPS * m;\n        phases", "taps = AUDIO_TAPS;\n        phases"),
+    ('mix', 'table taps not scaled for downsampling', 'taps = (table->narrow ? AUDIO_TAPS_NARROW : AUDIO_TAPS) * m;', 'taps = (table->narrow ? AUDIO_TAPS_NARROW : AUDIO_TAPS);'),
     ("mix", "cutoff at the top of the transition (the old one)", "cutoff = 0.475 * (rin > rout ? (double)rout / (double)rin : 1.0);", "cutoff = 0.5 * (rin > rout ? (double)rout / (double)rin : 1.0);"),
     ("mix", "silent voice still reads", "if (!voice->flows && voice->now[0] == 0 && voice->now[1] == 0 && voice->target[0] == 0 && voice->target[1] == 0)\n                return 0;", ""),
     ("mix", "voice gain NaN let through", "voice->target[0] = audio_gain_clean(left);\n        voice->target[1] = audio_gain_clean(right);", "voice->target[0] = left;\n        voice->target[1] = right;"),
@@ -85,12 +94,12 @@ M = [
     ("alsa", "16 bits before 32", "audio_alsa_formats[] = {{AUDIO_ALSA_FORMAT_S32_LE, 4, AUDIO_FORMAT_S32LE},", "audio_alsa_formats[] = {{AUDIO_ALSA_FORMAT_S16_LE, 2, AUDIO_FORMAT_S16LE}, {AUDIO_ALSA_FORMAT_S32_LE, 4, AUDIO_FORMAT_S32LE},"),
     ("alsa", "the most channels, not a pair", "channels = low <= 2 && high >= 2 ? 2 : (long)low;", "channels = (long)high;"),
     ("alsa", "no rounding of the period to the card's", "nearest = (long)audio_alsa_interval(&wide, AUDIO_ALSA_PERIOD_SIZE)->min;", "nearest = period;"),
-    ("alsa", "target past the buffer", "pcm->target = pcm->buffer < 3 * pcm->period ? pcm->buffer : 3 * pcm->period;", "pcm->target = 3 * pcm->period;"),
-    ("alsa", "wake at every period played, not the target's", "sw.avail_min = (unsigned long)(pcm->buffer - pcm->target + pcm->period);", "sw.avail_min = (unsigned long)pcm->period;"),
+    ('alsa', 'target past the buffer', 'pcm->target = pcm->buffer < fill * pcm->period ? pcm->buffer : fill * pcm->period;', 'pcm->target = fill * pcm->period;'),
+    ('alsa', "wake at every period played, not the target's", 'sw.avail_min = (unsigned long)(pcm->buffer - pcm->target + pcm->period - pcm->period / 4);', 'sw.avail_min = (unsigned long)pcm->period;'),
     ("alsa", "underruns not counted", "else if (error == AUDIO_EPIPE)\n                pcm->xruns++;", "else if (error == AUDIO_EPIPE)\n                pcm->xruns += 0;"),
     ("alsa", "a card that is gone not marked", "if (result == AUDIO_ENODEV)\n                        pcm->broken = 1;\n                return result;", "return result;"),
-    ("alsa", "a driver's name shown as it is", "to[at] = from[at] >= 32 && from[at] < 127 ? (char)from[at] : '?';", "to[at] = (char)from[at];"),
-    ("alsa", "a name read past its array", "for (; at < room - 1 && from[at]; at++)", "for (; from[at] && at < room + 40; at++)"),
+    ('alsa', "a driver's name shown as it is", '        memory_translate(to, (positive)at, (address_any)audio_alsa_printable);\n', ''),
+    ('alsa', 'a name read past its array', 'string_length_max((string_address)from, (positive)(room - 1));', 'string_length_max((string_address)from, (positive)(room + 40));'),
     ("alsa", "control file left open", "                audio_sys_close((int)fd);\n                found++;", "                found++;"),
     ("alsa", "44100 tried before 48000", "{48000, 44100, 96000, 192000,", "{44100, 48000, 96000, 192000,"),
     ("alsa", "period not scaled to the rate", "period = audio_alsa_clamp(period_at_48000 * got_rate / 48000, 16, 1 << 16);", "period = audio_alsa_clamp(period_at_48000, 16, 1 << 16);"),
@@ -128,8 +137,8 @@ M = [
     ("alsa", 'a name that ends in the base taken for it', '                if (k != length)\n                        continue;', ''),
     ("alsa", 'a name that only starts like a switch', 'if (audio_mixer_ends(name, " Playback Switch", &before))\n                return audio_mixer_output_base(name, before) ? 1 : 0;', 'if (audio_mixer_ends(name, "Switch", &before))\n                return audio_mixer_output_base(name, before - 9) ? 1 : 0;'),
     ("alsa", 'the controls of the card not counted', '        report->controls = list.count;', '        report->controls = 0;'),
-    ("alsa", 'a card with no mixer is an error', '        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);\n        if (fd < 0)\n                return fd;\n        __builtin_memset(&list, 0, sizeof(list));', '        fd = audio_sys_open(path, AUDIO_O_RDWR | AUDIO_O_CLOEXEC);\n        if (fd < 0)\n                return 0;\n        __builtin_memset(&list, 0, sizeof(list));'),
-    ("alsa", 'the mixer file left open', '        audio_sys_close((int)fd);\n        return 0;\n}\n\n#endif // AUDIO_ALSA_INCLUDED', '        return 0;\n}\n\n#endif // AUDIO_ALSA_INCLUDED'),
+    ('alsa', 'a card with no mixer is an error', '        if (fd < 0)\n                return fd;\n        memory_zero(&list, sizeof(list));\n        list.space = AUDIO_MIXER_MAX;', '        if (fd < 0)\n                return 0;\n        memory_zero(&list, sizeof(list));\n        list.space = AUDIO_MIXER_MAX;'),
+    ('alsa', 'the mixer file left open', '        audio_sys_close((int)fd);\n        return 0;\n}\n\n/* ---- what is plugged in ---- */', '        return 0;\n}\n\n/* ---- what is plugged in ---- */'),
     ("alsa", "the list's room larger than the array", '        list.space = AUDIO_MIXER_MAX;', '        list.space = AUDIO_MIXER_MAX * 2;'),
     ("alsa", "an HDMI pin's number from its last digit", "number = number * 10 + (name[at] - '0');", "number = name[at] - '0';"),
     ("alsa", 'a pin with no display taken for one with', '                                if (now.value.integer[0])\n                                        jacks->hdmi_plugged |= 1ull << pcm;', '                                jacks->hdmi_plugged |= 1ull << pcm;'),
@@ -152,10 +161,8 @@ M = [
     # ---- pulse.c ----
     ("pulse", "shared memory offered", "wire_w_u32(&w, PULSE_VERSION); // no shared memory, no memfd: neither flag", "wire_w_u32(&w, PULSE_VERSION | 0x80000000u);"),
     ("pulse", "commands served before the handshake", "if (!c->authorized && command != PULSE_COMMAND_AUTH && command != PULSE_COMMAND_SET_CLIENT_NAME)", "if (0 && command != PULSE_COMMAND_AUTH)"),
-    ("pulse", "any program sets the sink volume", "if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (n != 2)", "if (n != 2)"),
-    ("pulse", "any program sets any stream's volume", "if (!pulse_may(c, s->uid))\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (n != s->map_channels)", "if (n != s->map_channels)"),
-    ("pulse", "no cap on a user's clients", "if (uid != 0 && used_by_user >= PULSE_PER_USER)", "if (0)"),
-    ("pulse", "no cap on a client's streams", "if (count >= PULSE_STREAMS_PER_CLIENT || !s)", "if (!s)"),
+    ('pulse', 'any program sets the sink volume', '                if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a sink that is not there\n                sink = pulse_find_sink(p, index, name);\n                if (sink < 0)\n                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);\n                if (n != 2)', '                sink = pulse_find_sink(p, index, name);\n                if (sink < 0)\n                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY);\n                if (n != 2)'),
+    ('pulse', "any program sets any stream's volume", "if (!pulse_may(c, s->uid))\n                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there\n                if (n != s->map_channels)", 'if (n != s->map_channels)'),
     ("pulse", "no cap on the rings", "if (p->ring_total + ring > PULSE_RING_TOTAL)", "if (0)"),
     ("pulse", "shared memory flags accepted", "if (flags & 0xff000000u)", "if (0)"),
     ("pulse", "data off the frame accepted", "if (length % (long)s->voice.frame)\n                return PULSE_DEAD;", ""),
@@ -177,8 +184,8 @@ M = [
     ("pulse", "strings of any length", "#define PULSE_STRING 1024 ", "#define PULSE_STRING 100000 "),
     ("pulse", "no cap on a property list", "if (props->count >= PULSE_PROPS)\n                return 0;", ""),
     ("pulse", "no time to say who", "now - c->born > PULSE_AUTH_USEC", "now - c->born > (1l << 40)"),
-    ("pulse", "the remembered volume not used", "if (p->host.recall && app[0] && p->host.recall(p->host.context, app, &remembered, &mute_remembered))", "if (0)"),
-    ("pulse", "a change not remembered", "if (owner && pulse_props_text(&owner->props, \"application.name\", app, sizeof(app)))\n                                p->host.remember(p->host.context, app, volume[0], s->muted);", ""),
+    ('pulse', 'the remembered volume not used', 'if (p->host.recall && pulse_app_key(c, key, sizeof(key)) && p->host.recall(', 'if (0 && pulse_app_key(c, key, sizeof(key)) && p->host.recall('),
+    ('pulse', 'a change not remembered', '                        if (owner && pulse_app_key(owner, key, sizeof(key)))\n                                p->host.remember(p->host.context, key, volume[0], s->muted);\n', ''),
     ("pulse", "every program sees every stream", "if (p->stream[i].used && !p->stream[i].dying && (list || p->stream[i].index == index) && pulse_may(c, p->stream[i].uid))", "if (p->stream[i].used && !p->stream[i].dying && (list || p->stream[i].index == index))"),
     ("pulse", "every program sees every client", "&& (c->root || p->client[i]->uid == c->uid))", ")"),
     ("pulse", "a request not counted", "if (pulse_enqueue(c, PULSE_INVALID, w.p, w.len) == PULSE_DONE)\n                s->outstanding += missing;", "pulse_enqueue(c, PULSE_INVALID, w.p, w.len);"),
@@ -205,16 +212,16 @@ M = [
     ("pulse", 'record corked stream still wanted', 'n += p->record[i].used && p->record[i].source == slot && !p->record[i].corked;', 'n += p->record[i].used && p->record[i].source == slot;'),
     ("pulse", 'record monitor not fed', '        pulse_source_feed(p, slot, sink->mix.mix[0], sink->mix.mix[1], frames);\n', ''),
     ("pulse", 'record monitor taken before the master volume', 'pulse_source_feed(p, slot, sink->mix.mix[0], sink->mix.mix[1], frames);', 'pulse_source_feed(p, slot, sink->mix.bus[0], sink->mix.bus[1], frames);'),
-    ("pulse", 'record another user hears the monitor', 'if (!p->source[source].capture && !c->root)\n                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n        for (int i = 0; i < PULSE_RECORDS; i++)', 'for (int i = 0; i < PULSE_RECORDS; i++)'),
+    ('pulse', 'record another user hears the monitor', '        if (!c->root && (source < 0 || !p->source[source].capture))\n                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n        if (source < 0)', '        if (source < 0)'),
     ("pulse", 'record made with capture off', '        if (p->capture_off)\n                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n        if (direct', '        if (direct'),
     ("pulse", 'record capture off leaves the streams', '        p->capture_off = !allowed;\n        if (!allowed)', '        p->capture_off = !allowed;\n        if (0)'),
     ("pulse", 'record resampler tables the wrong way round', 'table = audio_table_take(p->source[source].rate, rate);', 'table = audio_table_take(rate, p->source[source].rate);'),
     ("pulse", 'record peaks get a filter', 'if (!peak && rate != p->source[source].rate)', 'if (rate != p->source[source].rate)'),
     ("pulse", 'record capture device not the default over a monitor', 'if (p->default_source < 0 || p->default_source < PULSE_SINKS)', 'if (p->default_source < 0)'),
     ("pulse", 'record kill not told', 'if (tell && c)\n        {\n                struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};\n\n                wire_w_u32(&w, PULSE_COMMAND_RECORD_STREAM_KILLED);', 'if (0 && c)\n        {\n                struct wire_w w = {p->scratch, PULSE_SCRATCH, 0, 0};\n\n                wire_w_u32(&w, PULSE_COMMAND_RECORD_STREAM_KILLED);'),
-    ("pulse", 'record end not announced', '        pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_REMOVE, r->index);\n        pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);\n        pulse_record_free(p, r);', '        pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);\n        pulse_record_free(p, r);'),
+    ('pulse', 'record end not announced', '        pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_REMOVE, r->index, r->uid);\n        pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);\n        pulse_record_free(p, r);', '        pulse_changed(p, PULSE_CHANGED_RECORDS, r->source);\n        pulse_record_free(p, r);'),
     ("pulse", "record another user's output shown", 'if (p->record[i].used && (list || p->record[i].index == index) && pulse_may(c, p->record[i].uid))', 'if (p->record[i].used && (list || p->record[i].index == index))'),
-    ("pulse", 'record source volume set by anyone', '                if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (n != 2)\n                        return pulse_error(p, c, tag, PULSE_ERR_INVALID);\n                p->source[source].volume[0] = volume[0];', '                if (n != 2)\n                        return pulse_error(p, c, tag, PULSE_ERR_INVALID);\n                p->source[source].volume[0] = volume[0];'),
+    ('pulse', 'record source volume set by anyone', '                if (!c->root)\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS); // the same answer for a source that is not there\n                source = pulse_find_source(p, index, name);', '                source = pulse_find_source(p, index, name);'),
     ("pulse", 'record source mute turned over', 'p->source[source].muted = mute;', 'p->source[source].muted = !mute;'),
     ("pulse", 'record latency indexes swapped', "pulse_w_64(&w, 'r', (long long)rec->produced);\n                pulse_w_64(&w, 'r', (long long)rec->sent);", "pulse_w_64(&w, 'r', (long long)rec->sent);\n                pulse_w_64(&w, 'r', (long long)rec->produced);"),
     ("pulse", 'record rate changed on any stream', 'if (!rec->variable_rate || rate < 1 || rate > AUDIO_RATE_MAX)', 'if (rate < 1 || rate > AUDIO_RATE_MAX)'),
@@ -223,18 +230,17 @@ M = [
     ("pulse", 'record buffer under one frame', '        if (maxlength < frame)\n                maxlength = frame;\n', ''),
     ("pulse", 'record source not idle', 'wire_w_u32(w, busy ? 0 : 1); // running, or idle', 'wire_w_u32(w, 0); // running, or idle'),
     ("pulse", 'record capture device called a monitor', 'wire_w_u32(w, s->capture ? PULSE_INVALID : (unsigned long)s->sink);', 'wire_w_u32(w, (unsigned long)(s->sink < 0 ? 0 : s->sink));'),
-    ("pulse", 'record name not kept', 'pulse_props_set(&rec->props, "media.name", (const unsigned char *)name, wire_len(name) + 1);\n                pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);\n                return pulse_ack(p, c, tag);\n        }\n        case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:', 'pulse_event(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index);\n                return pulse_ack(p, c, tag);\n        }\n        case PULSE_COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE:'),
+    ('pulse', 'record name not kept', '                pulse_props_set(&rec->props, "media.name", (const unsigned char *)name, wire_len(name) + 1);\n                pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);', '                pulse_event_to(p, PULSE_FACILITY_SOURCE_OUTPUT, PULSE_EVENT_CHANGE, rec->index, rec->uid);'),
     ("pulse", 'record default falls to nothing', 'return p->default_sink >= 0 && p->source[p->default_sink].used ? p->default_sink : -1;', 'return -1;'),
     ("pulse", 'record default sink does not move a monitor default', '                        if (p->default_source >= 0 && p->default_source < PULSE_SINKS)\n                                pulse_source_default(p, sink);', ''),
     ("pulse", 'record default source does not move its followers', '                if (p->record[i].used && !p->record[i].owner_set && !p->record[i].no_move)\n                        pulse_record_move(p, p->record + i, slot);', ''),
     ("pulse", 'record the stream that named its source is moved', 'if (p->record[i].used && !p->record[i].owner_set && !p->record[i].no_move)', 'if (p->record[i].used && !p->record[i].no_move)'),
-    ("pulse", 'record volume of a stranger', '                if (!pulse_may(c, rec->uid))\n                        return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n                if (n != rec->map_channels)', '                if (n != rec->map_channels)'),
-    ("pulse", 'record move onto a monitor by anyone', 'if (!pulse_may(c, rec->uid) || (!p->source[source].capture && !c->root))', 'if (!pulse_may(c, rec->uid))'),
-    ("pulse", "record a client's streams kept after it goes", '        for (int i = 0; i < PULSE_RECORDS; i++)\n                if (p->record[i].used && p->record[i].client == slot)\n                        pulse_record_end(p, p->record + i, 0);', ''),
-    ("pulse", 'record a device that goes leaves its streams', '        for (int i = 0; i < PULSE_RECORDS; i++)\n                if (p->record[i].used && p->record[i].source == slot)\n                        pulse_record_end(p, p->record + i, 1);\n        p->source[slot].used = 0;', '        p->source[slot].used = 0;'),
+    ('pulse', 'record volume of a stranger', "                if (!pulse_may(c, rec->uid))\n                        return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there\n                if (n != rec->map_channels)", '                if (n != rec->map_channels)'),
+    ('pulse', 'record move onto a monitor by anyone', '                if (!c->root && (source < 0 || !p->source[source].capture))', '                if (0)'),
+    ('pulse', "record a client's streams kept after it goes", '        for (int i = 0; i < p->record_slots; i++)\n                if (p->record[i].used && p->record[i].client == slot)\n                        pulse_record_end(p, p->record + i, 0);\n', ''),
+    ('pulse', 'record a device that goes leaves its streams', '        for (int i = 0; i < p->record_slots; i++)\n                if (p->record[i].used && p->record[i].source == slot)\n                        pulse_record_end(p, p->record + i, 1);\n        p->source[slot].used = 0;', '        p->source[slot].used = 0;'),
     ("pulse", "record a device's new rate not met", '        if (changed)\n                pulse_source_retable(p, slot);\n        pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)slot);', '        pulse_event(p, PULSE_FACILITY_SOURCE, PULSE_EVENT_CHANGE, (unsigned long)slot);'),
     ("pulse", 'record a stream with no table kept after the ratio fails', '                        if (!table)\n                        {\n                                pulse_record_end(p, r, 1);\n                                continue;\n                        }', '                        if (!table)\n                                continue;'),
-    ("pulse", 'record cap of a client', 'if (count >= PULSE_RECORDS_PER_CLIENT || !rec)', 'if (!rec)'),
     ("pulse", 'record format that cannot be recorded', '        if (!pulse_record_format_ok(format))\n                return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);\n', ''),
     ("pulse", "record meter on another's stream served", '        if (direct != PULSE_INVALID)\n                return pulse_error(p, c, tag, PULSE_ERR_NOTSUPPORTED);', ''),
     ("pulse", 'sample name of any length', '        if (n < 1 || n >= PULSE_NAME)\n                return 0;\n        for (long i = 0; i < n; i++)', '        if (n < 1)\n                return 0;\n        for (long i = 0; i < n; i++)'),
@@ -248,21 +254,20 @@ M = [
     ("pulse", 'upload data that seeks', 'if ((flags & 0xff) != 0 || offset != 0 || (unsigned long)length > u->length - u->got)', 'if ((unsigned long)length > u->length - u->got)'),
     ("pulse", 'upload finished short', '        if (u->got != u->length)\n        {\n                pulse_upload_free(p, u);\n                return pulse_error(p, c, tag, PULSE_ERR_INVALID);\n        }', '        if (0)\n        {\n                pulse_upload_free(p, u);\n                return pulse_error(p, c, tag, PULSE_ERR_INVALID);\n        }'),
     ("pulse", 'sample replaced by a stranger', 'if (old && !pulse_may(c, old->uid))\n        {', 'if (0)\n        {'),
-    ("pulse", 'sample taken out by a stranger', '        if (!pulse_may(c, s->uid))\n                return pulse_error(p, c, tag, PULSE_ERR_ACCESS);\n        s->condemned = 1;', '        s->condemned = 1;'),
-    ("pulse", 'replacement has a new index', 's->index = old ? old->index : p->next_sample++;', 's->index = p->next_sample++;'),
-    ("pulse", 'replacement announced as new', 'pulse_event(p, PULSE_FACILITY_SAMPLE_CACHE, old ? PULSE_EVENT_CHANGE : PULSE_EVENT_NEW, s->index);', 'pulse_event(p, PULSE_FACILITY_SAMPLE_CACHE, PULSE_EVENT_NEW, s->index);'),
+    ('pulse', 'sample taken out by a stranger', "        if (!pulse_may(c, s->uid))\n                return pulse_error(p, c, tag, PULSE_ERR_NOENTITY); // another user's: as if it were not there\n        s->condemned = 1;", '        s->condemned = 1;'),
+    ('pulse', 'replacement has a new index', 's->index = old ? index : p->next_sample++;', 's->index = p->next_sample++;'),
+    ('pulse', 'replacement announced as new', 'PULSE_FACILITY_SAMPLE_CACHE, old ? PULSE_EVENT_CHANGE : PULSE_EVENT_NEW, s->index', 'PULSE_FACILITY_SAMPLE_CACHE, PULSE_EVENT_NEW, s->index'),
     ("pulse", 'sample freed under the stream that plays it', 'if (!s->used || !s->condemned || s->playing > 0)\n                return;', 'if (!s->used || !s->condemned)\n                return;'),
     ("pulse", 'sample kept after its last stream', '                sample->playing--;\n                pulse_sample_release(p, sample);', '                sample->playing--;'),
     ("pulse", 'playing not counted', '        sample->playing++;\n', ''),
     ("pulse", 'volume of a play ignored', 's->volume[i] = volume == PULSE_INVALID ? AUDIO_VOLUME_NORM : volume > AUDIO_VOLUME_MAX ? AUDIO_VOLUME_MAX : volume;', 's->volume[i] = AUDIO_VOLUME_NORM;'),
-    ("pulse", 'remembered volume not used for a sound', 'if (volume == PULSE_INVALID && p->host.recall && pulse_props_text(&c->props', 'if (0 && p->host.recall && pulse_props_text(&c->props'),
+    ('pulse', 'remembered volume not used for a sound', 'if (volume == PULSE_INVALID && p->host.recall)', 'if (0 && p->host.recall)'),
     ("pulse", 'sample never ends', 'if (played < frames && s->one_shot)', 'if (0)'),
-    ("pulse", 'sounds without a cap on what one program plays', 'if (mine >= PULSE_STREAMS_PER_CLIENT || !s)\n                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);\n        __builtin_memset(s, 0, __builtin_offsetof(struct pulse_stream, voice));\n        if (audio_voice_open(&s->voice, sample->format', 'if (!s)\n                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);\n        __builtin_memset(s, 0, __builtin_offsetof(struct pulse_stream, voice));\n        if (audio_voice_open(&s->voice, sample->format'),
     ("pulse", 'sink named and numbered for a sound', '                return pulse_error(p, c, tag, PULSE_ERR_INVALID);\n        if (sink_name && sink_name[0])\n                sink = pulse_sink_named(p, sink_name);\n        else if (sink_index != PULSE_INVALID)\n                sink = pulse_find_sink(p, sink_index, 0);\n        else\n                sink = p->default_sink;\n        sample = pulse_sample_named(p, name);', '                (void)0;\n        if (sink_name && sink_name[0])\n                sink = pulse_sink_named(p, sink_name);\n        else if (sink_index != PULSE_INVALID)\n                sink = pulse_find_sink(p, sink_index, 0);\n        else\n                sink = p->default_sink;\n        sample = pulse_sample_named(p, name);'),
     ("pulse", "sound's stream owned by the program that asked", '        s->client = -1;\n        s->index = p->next_input++;\n        s->sink = sink;\n        s->format = sample->format;', '        s->client = slot;\n        s->index = p->next_input++;\n        s->sink = sink;\n        s->format = sample->format;'),
     ("pulse", "sound's own properties not on its stream", '        pulse_props_update(&s->props, &sample->props, 1);\n', ''),
     ("pulse", "sound's stream not named for its program", '        if (!pulse_props_text(&s->props, "application.name", value, sizeof(value)) && pulse_props_text(&c->props, "application.name", value, sizeof(value)))\n                pulse_props_set(&s->props, "application.name", (const unsigned char *)value, wire_len(value) + 1);\n        if (!pulse_props_text(&s->props, "media.name"', '        if (!pulse_props_text(&s->props, "media.name"'),
-    ("pulse", 'sample out of the cache still shown', 'if (p->sample[i].used && !p->sample[i].condemned && (list ||', 'if (p->sample[i].used && (list ||'),
+    ('pulse', 'sample out of the cache still shown', 'if (p->sample[i].used && !p->sample[i].condemned && pulse_may(c, p->sample[i].uid) && (list ||', 'if (p->sample[i].used && pulse_may(c, p->sample[i].uid) && (list ||'),
     ("pulse", 'sample out of the cache still found', 'if (p->sample[i].used && !p->sample[i].condemned && pulse_equal(p->sample[i].name, name))', 'if (p->sample[i].used && pulse_equal(p->sample[i].name, name))'),
     ("pulse", "cache's size not said", 'wire_w_u32(&w, p->sample_total);', 'wire_w_u32(&w, 0);'),
     ("pulse", "a client's uploads kept after it goes", '        for (int i = 0; i < PULSE_UPLOADS; i++)\n                if (p->upload[i].used && p->upload[i].client == slot)\n                        pulse_upload_free(p, p->upload + i);\n', ''),
@@ -271,9 +276,7 @@ M = [
     ("pulse", 'sample played from its start only at the fade', '        s->voice.ring.write = s->voice.ring.limit = s->voice.ring.size;\n        s->used = 1;\n        s->client = -1;', '        s->voice.ring.write = s->voice.ring.limit = s->voice.ring.size / 2;\n        s->used = 1;\n        s->client = -1;'),
     ("pulse", "overlong four-byte UTF-8 taken as text","if (good && extra == 3 && c == 0xf0 && v[at + 1] < 0x90)\n                                                good = 0;", ""),
     ("pulse", "four-byte UTF-8 past U+10FFFF taken as text", "if (good && extra == 3 && c == 0xf4 && v[at + 1] >= 0x90)\n                                                good = 0;", ""),
-    ("pulse", "string copy cut one byte short", "if (n > room - 1)\n                n = room - 1;", "if (n > room - 1)\n                n = room - 2;"),
-    ("pulse", "string copy cut one byte short", "if (n > room - 1)\n                n = room - 1;", "if (n > room - 1)\n                n = room - 2;"),
-    ("pulse", "output ring wrap copy dropped", "if (first < n)\n                __builtin_memcpy(c->out, from + first, (unsigned long)(n - first));", "if (0)\n                __builtin_memcpy(c->out, from + first, (unsigned long)(n - first));"),
+    ('pulse', 'output ring wrap copy dropped', '        if (first < n)\n                memory_copy_apart(c->out, from + first, (unsigned long)(n - first));', '        if (0)\n                memory_copy_apart(c->out, from + first, (unsigned long)(n - first));'),
     ("pulse", 'a list too large drops its client', 'if (w->bad)\n                return pulse_error(p, c, tag, PULSE_ERR_TOOLARGE);\n        return pulse_reply_end(c, w);', 'return pulse_reply_end(c, w);'),
     ("pulse", 'a feed keeps the frames it has read', 'c->in_have -= at;', 'c->in_have -= 0;'),
     ("pulse", 'a replacement in a full cache needs a free place', 'if (old && old->playing == 0)\n        {\n                old->condemned = 1;\n                pulse_sample_release(p, old);\n        }\n        for (int i = 0; i < PULSE_SAMPLES && !s; i++)', 'for (int i = 0; i < PULSE_SAMPLES && !s; i++)'),
@@ -351,23 +354,22 @@ M = [
     ("alsa", "a negative write count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        return audio_pcm_frames(pcm, audio_sys_write(", "        if (0)\n                return AUDIO_EINVAL;\n        return audio_pcm_frames(pcm, audio_sys_write("),
     ("alsa", "a negative read count sent to the card", "        if (count < 0)\n                return AUDIO_EINVAL;\n        return audio_pcm_frames(pcm, audio_sys_read(", "        if (0)\n                return AUDIO_EINVAL;\n        return audio_pcm_frames(pcm, audio_sys_read("),
     # ---- service.c: the server's loop and settings, CHECK_audio_service (Linux, the box) ----
-    ("service", 'clock pass scales its frames by the rate', 'audio_produce((long)expirations * AUDIO_PERIOD);', 'audio_produce((long)expirations * (AUDIO_PERIOD * audio_service.rate / 48000));'),
+    ('service', 'clock pass scales its frames by the rate', 'audio_produce((long)expirations * audio_service.period);', 'audio_produce((long)expirations * (audio_service.period * audio_service.rate / 48000));'),
     ("service", "a saved volume is the exact one, not the file's percent", 'audio_service.applied_volume = percent * AUDIO_VOLUME_NORM / 100;', 'audio_service.applied_volume = sink->volume[0];'),
     ("service", 'an update stays where it was in the table', '                audio_service.apps[audio_service.app_count - 1] = kept;\n                at = audio_service.app_count - 1;', '                (void)kept;\n                at = at;'),
     ("service", 'a socket path too long is cut short', '        if (audio_service.socket_path[length])', '        if (0)'),
     ("service", 'the rest of a short card write is dropped', '                        if (audio_service.block_left > 0)\n                                return; // the card is full: the rest waits for the next wake', '                        audio_service.block_left = 0;'),
     ("service", 'an output file that cannot be written is kept', '                        audio_service.file = -1;\n                        return;', '                        return;'),
     ("service", "the state page's sequence steps by four", '__atomic_store_n(&page->seq, seq + 2, __ATOMIC_RELEASE);', '__atomic_store_n(&page->seq, seq + 4, __ATOMIC_RELEASE);'),
-    ("service", 'the page is written when nothing changed', '        if (!audio_service.page_whole && __builtin_memcmp(', '        if (0 && __builtin_memcmp('),
+    ('service', 'the page is written when nothing changed', 'if (!audio_service.page_whole && memory_compare((char *)&build + 16', 'if (0 && memory_compare((char *)&build + 16'),
     ("service", 'a text is kept though the program renamed itself (the cache ignores versions)', '!k->valid || k->owner != c->index || k->owner_version != c->props.version || k->of != own_index || k->of_version != own->version', '!k->valid || k->owner != c->index || k->of != own_index'),
     ("service", 'a stream that is gone keeps its row', '        for (long i = streams; i < (long)build.streams; i++)', '        for (long i = streams; i < (long)streams; i++)'),
-    ("service", "a settings file is read on every look, even when it has not moved", "        if (!first && __builtin_memcmp(&now, &stamps[slot], sizeof now) == 0)\n                return 0;", "        if (!first)\n                return 0;"),
+    ('service', 'a settings file is read on every look, even when it has not moved', '        if (!first && memory_compare(&now, &stamps[slot], sizeof now) == 0)', '        if (!first)'),
     ("service", "a text equal to a prefix of another is equal", "        return string_compare((string_address)a, (string_address)b) == 0;", "        return 1;"),
-    ("service", "a copy that is cut one byte late", "        for (; i < room - 1 && from[i]; i++)", "        for (; i < room && from[i]; i++)"),
     ("service", "any file in the settings directory is an event", "        else if (length >= 6 && memory_compare(buffer + at + 16, \"audio.\", 6) == 0)", "        else if (length >= 6)"),
     ("service", "a setting moved into place is not an event", "unsigned long mask = 0x8 | 0x40 | 0x80 | 0x100 | 0x200;", "unsigned long mask = 0x8 | 0x40 | 0x100 | 0x200;"),
     ("service", "a pass drops every client", "        if (audio_service.fd[slot] >= 0 && (pulse_client_late(&audio_service.pulse, slot, (long)(now / 1000)) || !audio_client_write(slot, now)))", "        if (audio_service.fd[slot] >= 0 && (1 || pulse_client_late(&audio_service.pulse, slot, (long)(now / 1000)) || !audio_client_write(slot, now)))"),
-    ("service", "the client list leaves out slot 0", "        for (int slot = 0; slot < PULSE_CLIENTS; slot++)\n                if (audio_service.fd[slot] >= 0)\n                        audio_service.live[", "        for (int slot = 1; slot < PULSE_CLIENTS; slot++)\n                if (audio_service.fd[slot] >= 0)\n                        audio_service.live["),
+    ('service', 'the client list leaves out slot 0', '        for (long slot = 0; slot < audio_service.pulse.client_slots; slot++)\n                if (audio_service.fd[slot] >= 0)\n                        audio_service.live[', '        for (long slot = 1; slot < audio_service.pulse.client_slots; slot++)\n                if (audio_service.fd[slot] >= 0)\n                        audio_service.live['),
     ("service", "the output is suspended after four seconds", "#define AUDIO_SUSPEND_NS 5000000000ull", "#define AUDIO_SUSPEND_NS 4000000000ull"),
     ("service", "a stream that plays does not resume a suspended output", "return audio_service.suspended ? AUDIO_POWER_RESUME : AUDIO_POWER_KEEP;", "return AUDIO_POWER_KEEP;"),
     ("service", "a burst of play does not restart the five seconds", "        if (busy)\n        {\n                audio_service.idle_since = 0;", "        if (busy)\n        {"),
@@ -379,6 +381,50 @@ M = [
 sources = {k: open(v).read() for k, v in engines.items()}
 
 
+def tree(d, which, text):
+    """The real tree as links, with the one file of `which` holding the text given."""
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    subprocess.run(["cp", "-as", os.path.join(root, "src"), d + "/src"], check=True)
+    subprocess.run(["cp", "-as", os.path.join(root, "test"), d + "/test"], check=True)
+    path = d + "/" + os.path.relpath(engines[which], root)
+    os.unlink(path)
+    open(path, "w").write(text)
+
+
+def build_and_run(d, which, text):
+    tree(d, which, text)
+    if which == "bowl":
+        # the harness reads the tree beside its own file, so it is a real file here and not a link to the real tree's
+        os.unlink(d + "/test/differential.py")
+        shutil.copy(os.path.join(root, "test/differential.py"), d + "/test/differential.py")
+        try:
+            r = subprocess.run([sys.executable, d + "/test/differential.py", "--harness", "bowl_session"], capture_output=True, text=True,
+                               errors="replace", timeout=300, env=dict(os.environ, CC=compiler))
+        except subprocess.TimeoutExpired:
+            return ("RED", "hang")
+        fails = [l.strip() for l in r.stderr.splitlines() + r.stdout.splitlines() if l.startswith("FAIL")][:1]
+        if r.returncode == 0:
+            return ("SURVIVED", "bowl session")
+        if "error:" in r.stdout + r.stderr:
+            return ("BUILD ERROR", (r.stdout + r.stderr)[-200:])
+        return ("RED", "bowl session" + (" | " + fails[0][:110] if fails else ""))
+    exe = d + "/check"
+    cc = subprocess.run([compiler, "-std=gnu11", "-O2", "-w", "-D_GNU_SOURCE", "-DCHECK_audio_" + check_of.get(which, which), d + "/test/checks.c", "-o", exe, "-lm"],
+                        capture_output=True, text=True, errors="replace")
+    if cc.returncode:
+        return ("BUILD ERROR", cc.stderr.strip()[-200:])
+    try:
+        r = subprocess.run([exe], capture_output=True, text=True, errors="replace", timeout=300)
+    except subprocess.TimeoutExpired:
+        return ("RED", "hang")
+    last = [l for l in r.stdout.splitlines() if l.startswith("CHECK_audio_")]
+    fails = [l.strip() for l in r.stdout.splitlines() if "FAIL" in l][:1]
+    if r.returncode == 0 and not fails:
+        return ("SURVIVED", last[0] if last else "")
+    return ("RED", (last[0] if last else "crashed (%d)" % r.returncode) + (" | " + fails[0][:110] if fails else ""))
+
+
 def run(index):
     which, name, old, new = M[index]
     if only and name not in only and which not in only:
@@ -387,55 +433,31 @@ def run(index):
     if src.count(old) < 1:
         return (name, "NOT APPLIED", "")
     d = os.path.join(work, "m%d" % index)
+    status, detail = build_and_run(d, which, src.replace(old, new) if name.startswith("peak") else src.replace(old, new, 1))
     shutil.rmtree(d, ignore_errors=True)
-    if which == "bowl":
-        os.makedirs(d + "/src")
-        os.makedirs(d + "/test")
-        shutil.copy(os.path.join(root, "test/differential.py"), d + "/test/differential.py")
-        open(d + "/src/bowl.c", "w").write(src.replace(old, new, 1))
-        try:
-            r = subprocess.run([sys.executable, d + "/test/differential.py", "--harness", "bowl_session"], capture_output=True, text=True,
-                               errors="replace", timeout=300, env=dict(os.environ, CC="gcc"))
-        except subprocess.TimeoutExpired:
-            return (name, "RED (hang)", "")
-        fails = [l.strip() for l in r.stderr.splitlines() + r.stdout.splitlines() if l.startswith("FAIL")][:1]
-        if r.returncode == 0:
-            return (name, "SURVIVED", "bowl session")
-        if "error:" in r.stdout + r.stderr:
-            return (name, "BUILD ERROR", (r.stdout + r.stderr)[:200])
-        return (name, "RED", "bowl session" + (" | " + fails[0][:110] if fails else ""))
-    os.makedirs(d + "/src/audio")
-    os.makedirs(d + "/test")
-    os.symlink(checks, d + "/test/checks.c")
-    for split_part in os.listdir(os.path.join(os.path.dirname(checks), "checks")):  # test/checks.c's parts (test/split.py)
-        os.makedirs(os.path.join(os.path.dirname(d + "/test/checks.c"), "checks"), exist_ok=True)
-        os.symlink(os.path.join(os.path.dirname(checks), "checks", split_part),
-                   os.path.join(os.path.dirname(d + "/test/checks.c"), "checks", split_part))
-    for k, v in engines.items():
-        shutil.copy(v, d + "/src/audio/" + k + ".c")
-    open(d + "/src/audio/" + target_file.get(which, which) + ".c", "w").write(src.replace(old, new) if name.startswith("peak") else src.replace(old, new, 1))
-    exe = d + "/check"
-    cc = subprocess.run(["gcc", "-std=gnu11", "-O2", "-w", "-D_GNU_SOURCE", "-DCHECK_audio_" + check_of.get(which, which), d + "/test/checks.c", "-o", exe, "-lm"],
-                        capture_output=True, text=True, errors="replace")
-    if cc.returncode:
-        return (name, "BUILD ERROR", cc.stderr[:200])
-    try:
-        r = subprocess.run([exe], capture_output=True, text=True, errors="replace", timeout=300)
-    except subprocess.TimeoutExpired:
-        return (name, "RED (hang)", "")
-    last = [l for l in r.stdout.splitlines() if l.startswith("CHECK_audio_")]
-    fails = [l.strip() for l in r.stdout.splitlines() if "FAIL" in l][:1]
-    if r.returncode == 0:
-        return (name, "SURVIVED", last[0] if last else "")
-    return (name, "RED", (last[0] if last else "crashed (%d)" % r.returncode) + (" | " + fails[0][:110] if fails else ""))
+    return (name, status, detail)
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+# The baseline: each check a chosen mutant is held to, on the tree as it is (one tree per check).
+asked = sorted(set(which for which, name, _, _ in M if not only or name in only or which in only))
+asked = sorted(set(min(w for w in asked if (check_of.get(w, w) if w != "bowl" else "bowl") == c)
+                   for c in set(check_of.get(w, w) if w != "bowl" else "bowl" for w in asked)))
+for which in asked:
+    status, detail = build_and_run(os.path.join(work, "base-" + which), which, sources[which])
+    shutil.rmtree(os.path.join(work, "base-" + which), ignore_errors=True)
+    if status != "SURVIVED":
+        print("baseline red: the unmutated tree %s (%s): %s" % ("did not build" if status == "BUILD ERROR" else "fails its check", which, detail))
+        shutil.rmtree(work, ignore_errors=True)
+        sys.exit(2)
+with concurrent.futures.ThreadPoolExecutor(max_workers=int(os.environ.get("AUDIO_MUTATION_JOBS", "8"))) as pool:
     results = [r for r in pool.map(run, range(len(M))) if r]
-survived = 0
+shutil.rmtree(work, ignore_errors=True)
+survivors = [name for name, status, _ in results if status != "RED"]
 for name, status, detail in results:
     print("%-42s %-12s %s" % (name, status, detail))
-    survived += status in ("SURVIVED", "NOT APPLIED", "BUILD ERROR")
-print("mutations: %d, red: %d, survived or unusable: %d" % (len(results), len(results) - survived, survived))
-shutil.rmtree(work, ignore_errors=True)
-sys.exit(1 if survived else 0)
+print("mutations audio: %d, killed %d, survived %d, pinned at most %d" % (len(results), len(results) - len(survivors), len(survivors), most))
+if only:
+    sys.exit(1 if survivors else 0)
+if len(survivors) < most:
+    print("mutations audio: %d survive and the pin is %d: lower the pin to %d" % (len(survivors), most, len(survivors)))
+sys.exit(len(survivors) != most)

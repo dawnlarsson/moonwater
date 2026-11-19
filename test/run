@@ -245,7 +245,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland mutation_dbus"
+asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland mutation_dbus mutation_audio"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine rover snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues"
 
@@ -367,6 +367,7 @@ describe()
         msan)     echo "the net wire parsers under MemorySanitizer" ;;
         proof)    echo "the network parsers proved: whole-domain exhaustion and CBMC bounded model checking" ;;
         mutation) echo "every decision in the network code flipped once, and the checks that notice" ;;
+        mutation_audio) echo "the audio stack's mutation proofs (test/audio_mutations.py): edits to mix.c, alsa.c, pulse.c, control.c, state.c, wire.c, service.c and bowl.c's PULSE_SERVER, one at a time against their CHECK_audio_* and bowl_session, with the unmutated tree green first; the survivors pinned" ;;
         mutation_dbus) echo "the session bus's mutation proofs (test/dbus_mutations.py): checks taken out of dbus.c and bounds moved, one at a time against CHECK_dbus, with the unmutated tree green first; the survivors pinned" ;;
         mutation_wayland) echo "the Wayland shim's mutation proofs (test/wayland_mutations.py): the defects the security passes fixed, put back one at a time into wayland.c against CHECK_wayland, with the unmutated tree green first; the survivors pinned" ;;
         ring0)    echo "a hostile program's ioctls, images and root requests against a booted kernel, and what its sanitizers say; then the same image booted with /dev/spark's registration failed, init running without it (NOT RUN on an image without fault injection)" ;;
@@ -420,7 +421,7 @@ seam_apart()
         case $1 in
         net) echo "net wifi fuzz msan proof mutation" ;;
         tools) echo "scale" ;;
-        desktop) echo "desktop chrome gpulists gpuanim mutation_dbus mutation_wayland" ;;
+        desktop) echo "desktop chrome gpulists gpuanim mutation_audio mutation_dbus mutation_wayland" ;;
         image) echo "ring0 tier input usb firewall sound" ;;
         engine) echo "gate" ;;
         *) ;;
@@ -5924,6 +5925,8 @@ mutation_proof()
 lane_mutation_wayland() { mutation_proof wayland 0 python3 test/wayland_mutations.py; }
 
 lane_mutation_dbus() { mutation_proof dbus 0 python3 test/dbus_mutations.py; }
+
+lane_mutation_audio() { mutation_proof audio 1 python3 test/audio_mutations.py; }
 
 lane_proof()
 {

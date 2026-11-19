@@ -42502,6 +42502,22 @@ static bipolar file_read_once_at(bipolar dir, string_address path, void *into, p
     (void)dir; (void)path; (void)into; (void)room;
     return -2;
 }
+/*  The input grants (/etc/moonwater/input-bowls) the window's input group
+    reads and writes: there is no grants file, and a write of one is made
+    and taken out with nothing on disk. */
+static bipolar file_slurp_regular_at(bipolar dir, string_address path, void *into, positive room, positive flags) {
+    (void)dir; (void)path; (void)into; (void)room; (void)flags;
+    return -2;
+}
+static bipolar system_make_directory_at(bipolar dir, string_address path, positive mode) {
+    (void)dir; (void)path; (void)mode;
+    return 0;
+}
+static bipolar system_remove_at(bipolar dir, string_address path, positive flags) {
+    (void)dir; (void)path; (void)flags;
+    return 0;
+}
+static b32 bowl_refuse(string_address message) { (void)message; return 1; }
 /*  A guest's own file, read as the guest names it (src/bowl.c reads its
     conf files this way since the reads stopped going through the host's
     resolution); it sits above this window, and here there is nothing on
