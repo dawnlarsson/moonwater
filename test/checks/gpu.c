@@ -2856,6 +2856,28 @@ static void gpu_clocks_rows(void)
         check("gpu clocks: on a card started again the refused level is asked again", gpu_kernel.pstate_asks == asks + 2 && compositor_gpu_clocks.held);
         compositor_gpu_clocks_tick(t + 6000000000ull);
 
+        // The thread's take (compositor_gpu_clocks_answer, as the thread runs it, with no thread started): an ask is taken whole and once, and one
+        // whose card was let go of before it was answered (its epoch old) is not made on whatever the descriptor's number is now.
+        {
+                b32 kept_inline = compositor_gpu_clocks.inline_asks, kept_started = compositor_gpu_clocks.started, stale, taken, made;
+
+                compositor_gpu_clocks.inline_asks = 0, compositor_gpu_clocks.started = 1, gpu_clocks_state.level = 0;
+                asks = gpu_kernel.pstate_asks;
+                compositor_gpu_clocks_ask(2u);
+                gpu_epoch++;
+                compositor_gpu_clocks_answer();
+                stale = gpu_kernel.pstate_asks == asks && compositor_gpu_clocks.want_fd == -1 &&
+                        compositor_gpu_clocks.answered == compositor_gpu_clocks.asked;
+                compositor_gpu_clocks_answer();
+                taken = gpu_kernel.pstate_asks == asks;
+                compositor_gpu_clocks_ask(2u);
+                compositor_gpu_clocks_answer();
+                made = gpu_kernel.pstate_asks == asks + 1 && gpu_kernel.pstate_level == 2 && compositor_gpu_clocks.want_fd == -1;
+                check("gpu clocks: the thread takes an ask whole and once, and makes none whose card was let go of since it was asked", stale && taken && made);
+                compositor_gpu_clocks_ask(0u), compositor_gpu_clocks_answer();
+                compositor_gpu_clocks.inline_asks = kept_inline, compositor_gpu_clocks.started = kept_started;
+        }
+
         // The owner's file: no level, nothing asked.
         compositor_gpu_clocks.level = 0;
         asks = gpu_kernel.pstate_asks;

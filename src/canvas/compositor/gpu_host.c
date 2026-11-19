@@ -1344,18 +1344,43 @@ static struct
         positive until;      // when the hold ends
         b32 asked;           // the asks the loop made (bumped with each; the thread's word), and the last the thread answered, with its errno
         b32 answered, error;
-        unsigned int want, want_epoch; // the last ask: the level, and the card's descriptor and epoch
-        int want_fd;
+        unsigned int want, want_epoch; // the last ask not yet taken: the level, the card's epoch, and a descriptor of the card of the answerer's own
+        int want_fd;                   // (a duplicate made at the ask, -1 once taken), the three written and taken under want_lock
         b32 started, inline_asks; // the thread was tried; the asks are made in place (no thread to be had, or the checks)
-} compositor_gpu_clocks = {COMPOSITOR_GPU_CLOCKS_LEVEL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0};
+        unsigned int want_lock;
+} compositor_gpu_clocks = {COMPOSITOR_GPU_CLOCKS_LEVEL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0};
+
+static void compositor_gpu_clocks_lock(void)
+{
+        while (__atomic_exchange_n(&compositor_gpu_clocks.want_lock, 1u, __ATOMIC_ACQUIRE))
+                while (__atomic_load_n(&compositor_gpu_clocks.want_lock, __ATOMIC_RELAXED))
+                        ;
+}
+
+static void compositor_gpu_clocks_unlock(void)
+{
+        __atomic_store_n(&compositor_gpu_clocks.want_lock, 0u, __ATOMIC_RELEASE);
+}
 
 // The thread the driver is asked on: it sleeps on the loop's ask count, and answers each newest ask in turn (an ask overtaken while the driver was
 // answering the one before is not made: only the newest level matters).
+// The newest ask is taken whole under the lock (its level, epoch and the descriptor made for it, which is the answerer's to close), so a level is
+// never paired with another ask's card; one whose card was let go of since (its epoch is old) is not made. Nothing taken: the newest was already.
 static void compositor_gpu_clocks_answer(void)
 {
         b32 asked = __atomic_load_n(&compositor_gpu_clocks.asked, __ATOMIC_ACQUIRE);
-        unsigned int e = gpu_clocks(compositor_gpu_clocks.want_fd, compositor_gpu_clocks.want_epoch, compositor_gpu_clocks.want);
+        unsigned int level, epoch, e = __atomic_load_n(&compositor_gpu_clocks.error, __ATOMIC_RELAXED);
+        int fd;
 
+        compositor_gpu_clocks_lock();
+        level = compositor_gpu_clocks.want, epoch = compositor_gpu_clocks.want_epoch, fd = compositor_gpu_clocks.want_fd;
+        compositor_gpu_clocks.want_fd = -1;
+        compositor_gpu_clocks_unlock();
+        if (fd >= 0)
+        {
+                e = epoch == __atomic_load_n(&gpu_epoch, __ATOMIC_ACQUIRE) ? gpu_clocks(fd, epoch, level) : 0;
+                GPU_UNDUP(fd);
+        }
         __atomic_store_n(&compositor_gpu_clocks.error, e, __ATOMIC_RELAXED);
         __atomic_store_n(&compositor_gpu_clocks.answered, asked, __ATOMIC_RELEASE);
 }
@@ -1363,6 +1388,7 @@ static void compositor_gpu_clocks_answer(void)
 static fn compositor_gpu_clocks_run(address_any context)
 {
         (void)context;
+        compositor_ordinary(0); // no frame waits for it: ordinary scheduling, not the loop's real time it was started with
         for (;;)
         {
                 b32 asked = __atomic_load_n(&compositor_gpu_clocks.asked, __ATOMIC_ACQUIRE);
@@ -1377,9 +1403,17 @@ static fn compositor_gpu_clocks_run(address_any context)
 // The loop's ask of a level (0: let go) of the card as it is now: handed to the thread, or made in place where there is none.
 static void compositor_gpu_clocks_ask(unsigned int level)
 {
-        // The ask's words are written before its count, which the thread reads them after (a seqlock of one writer: an ask the loop makes while the
-        // thread reads the one before is answered next, the count having moved).
-        compositor_gpu_clocks.want = level, compositor_gpu_clocks.want_fd = gpu.fd, compositor_gpu_clocks.want_epoch = gpu_epoch;
+        // The ask's words are written under the lock before its count, and the thread takes them whole after reading the count: an ask the loop
+        // makes while the thread answers the one before is answered next, the count having moved. The descriptor is a duplicate of the card's, so
+        // a card the loop lets go of (gpu_stop) is never another file's number in the thread's hands; one an ask overtook is closed here.
+        int fd = gpu.fd >= 0 ? GPU_DUP(gpu.fd) : -1, old;
+
+        compositor_gpu_clocks_lock();
+        old = compositor_gpu_clocks.want_fd;
+        compositor_gpu_clocks.want = level, compositor_gpu_clocks.want_fd = fd < 0 ? -1 : fd, compositor_gpu_clocks.want_epoch = gpu_epoch;
+        compositor_gpu_clocks_unlock();
+        if (old >= 0)
+                GPU_UNDUP(old);
         __atomic_store_n(&compositor_gpu_clocks.asked, compositor_gpu_clocks.asked + 1, __ATOMIC_RELEASE);
         if (!compositor_gpu_clocks.started && !compositor_gpu_clocks.inline_asks)
         {

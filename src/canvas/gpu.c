@@ -190,6 +190,11 @@ static positive gpu_bytes; // the bytes gpu_start was asked for (gpu_recover sta
 #endif
 // Every request this file makes of the kernel's DRM goes through GPU_CONTROL (a descriptor, the request, its record: 0 or a count when the kernel did it, else
 // -errno), so that a check can put a kernel of its own under the whole path, and so that the path's dealings with a card are in one place.
+#ifndef GPU_DUP
+// A descriptor of the card of its holder's own (the clock thread's, compositor_gpu_clocks_ask), and its close: a check's fake card has a number, no file.
+#define GPU_DUP(fd) ((int)system_call_3(syscall(fcntl), (positive)(fd), 1030, 0)) // F_DUPFD_CLOEXEC
+#define GPU_UNDUP(fd) system_close(fd)
+#endif
 #ifndef GPU_CONTROL
 #define GPU_CONTROL(fd, request, a) system_control(fd, request, a)
 #endif

@@ -408,6 +408,8 @@ static long gpu_kernel_control(int fd, unsigned int request, void *a)
         return -22;
 }
 #define GPU_CONTROL(fd, request, a) gpu_kernel_control((int)(fd), (unsigned int)(request), (void *)(a))
+#define GPU_DUP(fd) ((fd) == GPU_KERNEL_FD ? GPU_KERNEL_FD : (int)system_call_3(syscall(fcntl), (positive)(fd), 1030, 0)) // the fake card's number is its own
+#define GPU_UNDUP(fd) ((fd) == GPU_KERNEL_FD ? (void)0 : (void)system_close(fd))
 #define GPU_UDMABUF_OPEN() (gpu_kernel.on && gpu_kernel.udmabuf ? (long)GPU_KERNEL_UDMABUF : system_open_at(AT_FDCWD, (string_address) "/dev/udmabuf", FILE_READ_WRITE | O_CLOEXEC))
 #include "../../src/canvas/gpu.c" // the compositor's compose builds the GPU's scene when gpu.c is there before it
 #endif
