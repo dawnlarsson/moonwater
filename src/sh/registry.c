@@ -1125,21 +1125,7 @@ static bool setting_whole(string_address word, long address_to into)
 // Whether word is unit, without the case of its letters: the one a row's number is written with.
 static bool setting_unit_same(string_address word, const char address_to unit)
 {
-        positive at = 0;
-
-        while (word[at] && unit[at])
-        {
-                p8 a = word[at], b = (p8)unit[at];
-
-                if (a >= 'A' && a <= 'Z')
-                        a += 'a' - 'A';
-                if (b >= 'A' && b <= 'Z')
-                        b += 'a' - 'A';
-                if (a != b)
-                        return false;
-                at++;
-        }
-        return word[at] == 0 && unit[at] == 0;
+        return string_compare_folded(word, (string_address)unit) == 0;
 }
 
 // Whether a number row's unit is a percent, which is written % (`100%`) where it is shown.

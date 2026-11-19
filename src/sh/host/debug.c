@@ -141,31 +141,8 @@ static fn host_debug_body(const struct windows address_to table, unsigned int ro
 */
 static const struct windows address_to host_windows_header(void)
 {
-        long spark, file = -1, mapped;
+        long mapped = host_windows_map(false);
 
-        spark = window_call(WINDOW_SYS_OPENAT, -100, (long)"/dev/spark", WINDOW_OPEN_FLAGS, 0, 0, 0);
-        if (spark >= 0)
-        {
-                file = window_call(WINDOW_SYS_IOCTL, spark, WINDOWS_IOCTL_TABLE_GET, 0, 0, 0, 0);
-                window_call(WINDOW_SYS_CLOSE, spark, 0, 0, 0, 0, 0);
-        }
-        //      Without blocking: a FIFO at the table's name is no table, and a read-only
-        //      open of one waits for a writer that is not coming.
-        if (file < 0)
-                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, WINDOWS_O_READ, 0, 0, 0);
-        //      A table shorter than the struct is no table this build can map:
-        //      the page past its end is a bus error on the first field read,
-        //      which is what an empty file (a compositor still starting) was.
-        if (file >= 0 && window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0) < (long)sizeof(struct windows))
-        {
-                window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-                file = -1;
-        }
-        if (file < 0)
-                return null;
-        // PROT_READ, MAP_SHARED
-        mapped = window_call(WINDOW_SYS_MMAP, 0, (long)sizeof(struct windows), 1, 1, file, 0);
-        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
         return mapped < 0 && mapped > -4096 ? null : (const struct windows address_to)mapped;
 }
 
@@ -408,18 +385,9 @@ static bool host_power_drm(string_address directory, string_address name, addres
 // Whether name ends in suffix.
 static b32 host_power_ends(string_address name, string_address suffix)
 {
-        positive length = 0, tail = 0;
+        positive length = string_length(name), tail = string_length(suffix);
 
-        while (name[length])
-                length++;
-        while (suffix[tail])
-                tail++;
-        if (length < tail)
-                return false;
-        for (positive at = 0; at < tail; at++)
-                if (name[length - tail + at] != suffix[at])
-                        return false;
-        return true;
+        return length >= tail && !memory_compare(name + length - tail, suffix, tail);
 }
 
 static bool host_power_file(string_address directory, string_address name, address_any context)

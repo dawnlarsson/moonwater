@@ -985,7 +985,7 @@ static fn tune_suspend_failure(positive failures)
 {
         p8 device[64];
         p8 step[32];
-        positive errno_value = 0;
+        p8 errno_text[24];
         positive counted = 0;
 
         if (!tune_number(TUNE_SYS_POWER "/suspend_stats/fail", address_of counted) || counted == failures)
@@ -994,9 +994,10 @@ static fn tune_suspend_failure(positive failures)
                 return;
         if (!tune_word(TUNE_SYS_POWER "/suspend_stats/last_failed_step", step, sizeof(step)))
                 step[0] = 0;
-        (void)tune_number(TUNE_SYS_POWER "/suspend_stats/last_failed_errno", address_of errno_value);
-        host_say(log, host_label "the kernel stopped at %s (%s), last error %d\n",
-                 (string_address)device, (string_address)step, (b32)errno_value);
+        if (!tune_word(TUNE_SYS_POWER "/suspend_stats/last_failed_errno", errno_text, sizeof(errno_text)) || !errno_text[0])
+                string_copy(errno_text, "0");
+        host_say(log, host_label "the kernel stopped at %s (%s), last error %s\n",
+                 (string_address)device, (string_address)step, (string_address)errno_text);
 }
 
 /*

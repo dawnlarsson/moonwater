@@ -142,11 +142,7 @@ static b32 host_install_verify(string_address disk)
         alike = host_on_disk(install->system, HOST_SYSTEM, host_install_sum_visit, address_of sums);
         host_unmount(HOST_SYSTEM);
         host_release();
-        for (positive at = 0; at < 32; at++)
-        {
-                hex[2 * at] = "0123456789abcdef"[sums.got[at] >> 4];
-                hex[2 * at + 1] = "0123456789abcdef"[sums.got[at] & 15];
-        }
+        memory_into_hex(hex, sums.got, 32);
         hex[64] = end;
         if (!alike)
                 return host_refuse(sums.read ? "%s read back as sha256 %s, which is not the image written\n"

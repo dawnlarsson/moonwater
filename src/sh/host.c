@@ -325,6 +325,7 @@ static fn host_pause(p64 nanoseconds)
 #include "host/device.c" // the verb device: which devices plugged in are let in, the rules, the census, the lock, the watch, the list
 #include "host/locale.c" // the timezone and the clock (SNTP, NTS, the zone found and set), the keyboard's layout and the canvas's modes: the work under the verbs time, timezone, ntp and keyboard, which are debug.c's
 #include "host/setting.c" // the verbs splash, taskbar, mouse, language and audio, and the canvas's settings; the clock kept and restored at boot, and the name
+static long host_windows_map(bool writable);
 #include "host/debug.c" // the verbs debug, notices, sensors, name, time, timezone, ntp and keyboard
 #include "host/profile.c" // the verb profile: where a program's processor time goes, sampled by the kernel
 #include "host/memory.c" // the verb memory: installed, usable, available and shared memory and the largest memfds, once or to the kernel log every minute
@@ -502,7 +503,7 @@ static long host_windows_map(bool writable)
                 window_call(WINDOW_SYS_CLOSE, spark, 0, 0, 0, 0, 0);
         }
         if (file < 0)
-                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, writable ? WINDOW_OPEN_FLAGS : 0x80000, 0, 0, 0);
+                file = window_call(WINDOW_SYS_OPENAT, -100, (long)WINDOWS_TABLE, writable ? WINDOW_OPEN_FLAGS : WINDOWS_O_READ, 0, 0, 0);
         if (file >= 0 && window_call(WINDOW_SYS_LSEEK, file, 0, 2, 0, 0, 0) < (long)sizeof(struct windows))
         {
                 window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);

@@ -7497,9 +7497,14 @@ static bool zstd_cli_dictionary(string_address path)
                               path, reason);
                 return false;
         }
-        if (file_look_code(handle, (string_address)"", AT_EMPTY_PATH, address_of facts) == 0 &&
-            (facts.mode & MODE_FORMAT) == MODE_FILE)
-                size = facts.size;
+        if (file_look_code(handle, (string_address)"", AT_EMPTY_PATH, address_of facts) != 0 ||
+            (facts.mode & MODE_FORMAT) != MODE_FILE)
+        {
+                system_close(handle);
+                string_format(log_error, "zstd: error 31 : Stat failed on dictionary file %s \n", path);
+                return false;
+        }
+        size = facts.size;
         if (size > ZSTD_WINDOW_MAX)
         {
                 system_close(handle);
@@ -7517,11 +7522,13 @@ static bool zstd_cli_dictionary(string_address path)
         system_close(handle);
         if (got != size)
         {
+                memory_free(bytes, size + 64);
                 string_format(log_error, "zstd: error 31 : Read error : %s \n", path);
                 return false;
         }
         if (!zstd_dictionary_load(bytes, size))
         {
+                memory_free(bytes, size + 64);
                 string_format(log_error, "zstd: error 32 : Dictionary is corrupted : %s \n", path);
                 return false;
         }

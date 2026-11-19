@@ -19077,7 +19077,7 @@ static fn floodlight_load()
                 what a policy restricts and nothing else.
         */
         handle = system_open_at(AT_FDCWD, FLOODLIGHT_PATH,
-                                FILE_READ | O_CLOEXEC);
+                                FILE_READ | O_CLOEXEC | O_NONBLOCK);
 
         /*
                 The register, and not something wearing its name.

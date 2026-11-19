@@ -342,17 +342,7 @@ static positive host_section_of(string_address command)
 // Whether command comes before other in the alphabet, a capital as its small letter.
 static bool host_command_before(string_address command, string_address other)
 {
-        for (positive at = 0;; at++)
-        {
-                p8 a = command[at], b = other[at];
-
-                if (a >= 'A' && a <= 'Z')
-                        a = (p8)(a + ('a' - 'A'));
-                if (b >= 'A' && b <= 'Z')
-                        b = (p8)(b + ('a' - 'A'));
-                if (a != b || !a)
-                        return a < b;
-        }
+        return string_compare_folded(command, other) < 0;
 }
 
 // Whether block comes before other: by section, then by the command of its row.

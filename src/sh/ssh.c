@@ -595,15 +595,8 @@ static bool ssh_told_is(string_address line, positive length, string_address wor
 
         if (length != word_length + 1 + value_length || line[word_length] != ' ')
                 return false;
-        for (positive at = 0; at < word_length; at++)
-        {
-                p8 a = line[at], b = word[at];
-
-                if (b >= 'A' && b <= 'Z')
-                        b += 'a' - 'A';
-                if (a != b)
-                        return false;
-        }
+        if (memory_compare_ascii_case(line, word, word_length))
+                return false;
         return !memory_compare(line + word_length + 1, value, value_length);
 }
 
@@ -617,26 +610,15 @@ static positive ssh_told_count(string_address told, positive length, string_addr
         while (at < length)
         {
                 positive stop = at;
-                bool same = true;
 
                 while (stop < length && told[stop] != '\n')
                         stop++;
-                if (stop - at > word_length && told[at + word_length] == ' ')
+                if (stop - at > word_length && told[at + word_length] == ' ' &&
+                    !memory_compare_ascii_case(told + at, word, word_length))
                 {
-                        for (positive letter = 0; letter < word_length && same; letter++)
-                        {
-                                p8 b = word[letter];
-
-                                if (b >= 'A' && b <= 'Z')
-                                        b += 'a' - 'A';
-                                same = told[at + letter] == b;
-                        }
-                        if (same)
-                        {
-                                count++;
-                                if (value && ssh_told_is(told + at, stop - at, word, value))
-                                        address_to found = true;
-                        }
+                        count++;
+                        if (value && ssh_told_is(told + at, stop - at, word, value))
+                                address_to found = true;
                 }
                 at = stop + 1;
         }
@@ -752,7 +734,7 @@ static bool ssh_wire_string(const p8 address_to address_to at, const p8 address_
 
         if (stop - here < 4)
                 return false;
-        size = (positive)here[0] << 24 | (positive)here[1] << 16 | (positive)here[2] << 8 | here[3];
+        size = network_load_32((p8 address_to)here);
         address_to at += 4;
         if ((positive)(stop - address_to at) < size)
                 return false;
@@ -2119,6 +2101,8 @@ static positive ssh_listening(p16 port, p64 address_to inodes, positive most)
                                 fields[words++] = word;
                                 while (*word && *word != ' ')
                                         word++;
+                                if (*word)
+                                        *word++ = end;
                         }
                         at = stop + 1;
                         if (words < 10 || !string_equals(fields[3], "0A") || !string_first_of(fields[1], ':'))

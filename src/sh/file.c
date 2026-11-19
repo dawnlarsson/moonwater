@@ -33698,9 +33698,9 @@ static bool shuf_source_read(p8 address_to into, positive wanted)
         {
                 if (shuf_source_at == shuf_source_have)
                 {
-                        bipolar got = system_read_once((positive)shuf_source_handle,
-                                                       (string_address)shuf_source_block,
-                                                       sizeof(shuf_source_block));
+                        bipolar got = system_read_retry((positive)shuf_source_handle,
+                                                        (string_address)shuf_source_block,
+                                                        sizeof(shuf_source_block));
 
                         shuf_source_at = 0;
                         shuf_source_have = 0;

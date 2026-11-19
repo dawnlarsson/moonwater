@@ -302,16 +302,11 @@ static positive xz_filter_ppc(xz_filter address_to f, bool encode, p8 address_to
         for (i = 0; i < size; i += 4)
                 if ((buffer[i] >> 2) == 0x12 && (buffer[i + 3] & 3) == 1)
                 {
-                        p32 src = ((p32)buffer[i] & 3) << 24 | (p32)buffer[i + 1] << 16 |
-                                  (p32)buffer[i + 2] << 8 | ((p32)buffer[i + 3] & ~(p32)3);
+                        p32 src = network_load_32(buffer + i) & 0x03fffffc;
                         p32 dest = encode ? f->pos + (p32)i + src
                                           : src - (f->pos + (p32)i);
 
-                        buffer[i] = (p8)(0x48 | ((dest >> 24) & 3));
-                        buffer[i + 1] = (p8)(dest >> 16);
-                        buffer[i + 2] = (p8)(dest >> 8);
-                        buffer[i + 3] &= 3;
-                        buffer[i + 3] |= (p8)dest;
+                        network_store_32(buffer + i, 0x48000001u | (dest & 0x03fffffc));
                 }
         return i;
 }
@@ -326,18 +321,14 @@ static positive xz_filter_sparc(xz_filter address_to f, bool encode, p8 address_
                 if ((buffer[i] == 0x40 && (buffer[i + 1] & 0xc0) == 0) ||
                     (buffer[i] == 0x7f && (buffer[i + 1] & 0xc0) == 0xc0))
                 {
-                        p32 src = ((p32)buffer[i] << 24 | (p32)buffer[i + 1] << 16 |
-                                   (p32)buffer[i + 2] << 8 | buffer[i + 3]) << 2;
+                        p32 src = network_load_32(buffer + i) << 2;
                         p32 dest = encode ? f->pos + (p32)i + src
                                           : src - (f->pos + (p32)i);
 
                         dest >>= 2;
                         dest = (((0 - ((dest >> 22) & 1)) << 22) & 0x3fffffff) |
                                (dest & 0x3fffff) | 0x40000000;
-                        buffer[i] = (p8)(dest >> 24);
-                        buffer[i + 1] = (p8)(dest >> 16);
-                        buffer[i + 2] = (p8)(dest >> 8);
-                        buffer[i + 3] = (p8)dest;
+                        network_store_32(buffer + i, dest);
                 }
         return i;
 }
@@ -510,10 +501,7 @@ static positive xz_filter_riscv(xz_filter address_to f, bool encode, p8 address_
                                         addr += f->pos + (p32)i;
                                         inst = 0x17 | (2 << 7) | (inst2 << 12);
                                         memory_store_unaligned(p32, buffer + i, inst);
-                                        buffer[i + 4] = (p8)(addr >> 24);
-                                        buffer[i + 5] = (p8)(addr >> 16);
-                                        buffer[i + 6] = (p8)(addr >> 8);
-                                        buffer[i + 7] = (p8)addr;
+                                        network_store_32(buffer + i + 4, addr);
                                 }
                                 else
                                 {
@@ -545,9 +533,7 @@ static positive xz_filter_riscv(xz_filter address_to f, bool encode, p8 address_
                                 }
                                 else
                                 {
-                                        p32 addr = (p32)buffer[i + 4] << 24 |
-                                                   (p32)buffer[i + 5] << 16 |
-                                                   (p32)buffer[i + 6] << 8 | buffer[i + 7];
+                                        p32 addr = network_load_32(buffer + i + 4);
 
                                         addr -= f->pos + (p32)i;
 

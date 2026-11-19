@@ -361,45 +361,8 @@ static COLD fn system_input_group(void)
 #ifndef SHELL_NO_CANVAS
 #define SYSTEM_VIDEO_GID 44
 #define SYSTEM_RENDER_GID 105
-
-static COLD fn system_device_grant(string_address path, positive gid)
-{
-        p8 held[256];
-
-        if (system_stat_at(AT_FDCWD, path, 0, 0x001, held) < 0)
-                return;
-        if ((held[0] & 0x01) != 0 &&
-            (((unsigned)held[28] | ((unsigned)held[29] << 8)) & 0170000) ==
-                0040000)
-                return;
-        system_change_owner_at(AT_FDCWD, path, 0, gid, 0);
-        system_change_mode_at(AT_FDCWD, path, 0660);
-}
-
-static COLD fn system_directory_grant(string_address dir,
-                                      string_address prefix, positive gid)
-{
-        file_walk walk;
-        struct linux_dirent64 address_to entry;
-        p8 path[256];
-        positive prefix_len = prefix ? string_length(prefix) : 0;
-
-        if (!file_walk_open(address_of walk, AT_FDCWD, dir))
-                return;
-        while ((entry = file_walk_next(address_of walk)))
-        {
-                string_address name = entry->d_name;
-
-                if (file_is_dot(name))
-                        continue;
-                if (prefix_len &&
-                    string_compare_max(name, prefix, prefix_len))
-                        continue;
-                if (path_join(path, sizeof(path), dir, name))
-                        system_device_grant(path, gid);
-        }
-        file_walk_close(address_of walk);
-}
+#define system_device_grant bowl_isolated_node_grant
+#define system_directory_grant bowl_isolated_dir_grant
 
 static COLD fn system_render_group(void)
 {
@@ -623,40 +586,11 @@ static COLD fn system_kernel_defaults(void)
         makes udmabuf's at boot. The tier lane reads the uinput mode back, so
         a change to it is a red row and not a silent one.
 */
-#define SYSTEM_RLIMIT_NOFILE 7
-#define SYSTEM_RLIMIT_MEMLOCK 8
-#define SYSTEM_NOFILE_TARGET ((p64)524288)
-#define SYSTEM_MEMLOCK_TARGET ((p64)64 * 1024 * 1024)
-
-static COLD fn system_raise_rlimit(positive resource, p64 target)
-{
-        p64 lim[2] = {target, target};
-
-        if (system_call_4(syscall(prlimit64), 0, resource, 0, (positive)lim) < 0)
-        {
-                (void)system_call_4(syscall(prlimit64), 0, resource,
-                                    (positive)lim, 0);
-                return;
-        }
-        if (lim[0] >= target)
-                return;
-
-        p64 want[2] = {target, lim[1] < target ? target : lim[1]};
-        if (system_call_4(syscall(prlimit64), 0, resource, (positive)want, 0) <
-                0 &&
-            lim[0] < lim[1])
-        {
-                lim[0] = lim[1] < target ? lim[1] : target;
-                (void)system_call_4(syscall(prlimit64), 0, resource,
-                                    (positive)lim, 0);
-        }
-}
-
 static COLD fn system_resource_limits(void)
 {
-        system_raise_rlimit(SYSTEM_RLIMIT_NOFILE, SYSTEM_NOFILE_TARGET);
+        bowl_raise_rlimit(BOWL_RLIMIT_NOFILE, BOWL_NOFILE_TARGET);
 #if MOONWATER_STRICT_HOST < STRICT_LOCKED
-        system_raise_rlimit(SYSTEM_RLIMIT_MEMLOCK, SYSTEM_MEMLOCK_TARGET);
+        bowl_raise_rlimit(BOWL_RLIMIT_MEMLOCK, BOWL_MEMLOCK_TARGET);
 #endif
 }
 

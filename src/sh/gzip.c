@@ -3501,11 +3501,10 @@ static positive gzip_min_match_ahead(p8 address_to bytes, positive n, positive d
                 return 3;
         if (n > 4096)
                 n = 4096;
-        memory_fill(used, 0, sizeof(used));
+        memory_zero(used, sizeof(used));
         for (positive i = 0; i < n; i++)
                 used[bytes[i]] = 1;
-        for (positive i = 0; i < 256; i++)
-                kinds += used[i];
+        kinds = memory_sum_bytes(used, 256);
         return gzip_min_match(kinds, depth);
 }
 

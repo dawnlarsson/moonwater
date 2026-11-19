@@ -36056,7 +36056,6 @@ static void sort_keys_reserve(positive count)
         }
 }
 static bool sort_reverse;
-static bool sort_reverse;
 static bool sort_unique;
 static bool sort_stable;
 static bool sort_have_separator;
