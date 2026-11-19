@@ -1324,8 +1324,9 @@ if [ -z "$image" ]; then
 fi
 [ -n "$image" ] || image="dist/bootx64.efi"
 
-#       A build here is stamped here (a build on another machine was, before its image came: build_remote).
-if [ -n "$group_name" ] && [ "$do_build" -eq 1 ] && [ -z "$host" ] && [ -f "$image" ]; then
+#       A build here is stamped here (a build on another machine was, before its image came: build_remote over ssh,
+#       build_link on a linked machine, which brings no artifacts/shell.elf back to stamp with).
+if [ -n "$group_name" ] && [ "$do_build" -eq 1 ] && [ -z "$host" ] && [ -z "$link_host" ] && [ -f "$image" ]; then
         say "Stamping $image with link group $group_name"
         stamp_as=
         [ -w "$image" ] || stamp_as=sudo
