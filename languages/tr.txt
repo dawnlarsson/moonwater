@@ -57,6 +57,7 @@ files_copying	c870	Kopyalanıyor %1$d / %2$d, %3$s / %4$s: Escape durdurur
 files_count	cab8	%d öğe
 files_count_cut	f139	İlk %d öğe: klasörde daha fazlası var
 files_count_found	283a	%2$d içinden %1$d gösteriliyor
+files_count_one	5f6b	1 öğe
 files_delete_ask	807b	%1$d silinsin mi: %2$s? Yeniden Delete siler, Escape bırakır
 files_delete_for_good	ec0e	%1$d kalıcı olarak silinsin mi: %2$s? Yeniden Shift+Delete siler, Escape bırakır
 files_delete_stopped	ef42	%2$s üzerinde durdu: öncesinde %1$d silindi

@@ -57,6 +57,7 @@ files_copying	c870	Kopiowanie %1$d z %2$d, %3$s z %4$s: Escape zatrzymuje
 files_count	cab8	Elementy: %d
 files_count_cut	f139	Pierwsze %d elementów: folder ma ich więcej
 files_count_found	283a	Pokazano %1$d z %2$d
+files_count_one	5f6b	1 element
 files_delete_ask	807b	Usunąć %1$d: %2$s? Ponowne Delete usuwa, Escape zostawia
 files_delete_for_good	ec0e	Usunąć na zawsze %1$d: %2$s? Ponowne Shift+Delete to zrobi, Escape je zostawia
 files_delete_stopped	ef42	Zatrzymano na %2$s: wcześniej usunięto %1$d

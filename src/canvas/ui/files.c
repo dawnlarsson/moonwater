@@ -595,7 +595,7 @@ static fn files_status_text(void)
         else if (m->state == FILES_READY && m->filter_length)
                 language_format(into, room, WORDS(files_count_found), (int)files_model_count(m), (int)m->shown.count);
         else if (m->state == FILES_READY || (m->state == FILES_READING && m->shown.count))
-                language_format(into, room, m->shown.cut ? WORDS(files_count_cut) : WORDS(files_count), (int)m->shown.count);
+                language_format(into, room, m->shown.cut ? WORDS(files_count_cut) : m->shown.count == 1 ? WORDS(files_count_one) : WORDS(files_count), (int)m->shown.count);
 }
 
 /* ---- the path's band ---- */

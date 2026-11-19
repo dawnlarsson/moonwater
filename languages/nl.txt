@@ -57,6 +57,7 @@ files_copying	c870	Kopiëren %1$d van %2$d, %3$s van %4$s: Escape stopt
 files_count	cab8	%d items
 files_count_cut	f139	De eerste %d items: de map heeft er meer
 files_count_found	283a	%1$d van %2$d getoond
+files_count_one	5f6b	1 item
 files_delete_ask	807b	%1$d verwijderen: %2$s? Nogmaals Delete doet het, Escape laat ze
 files_delete_for_good	ec0e	%1$d voorgoed verwijderen: %2$s? Nogmaals Shift+Delete doet het, Escape laat ze
 files_delete_stopped	ef42	Gestopt bij %2$s: %1$d ervoor verwijderd

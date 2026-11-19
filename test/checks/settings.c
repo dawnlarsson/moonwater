@@ -4717,7 +4717,7 @@ static fn check_display_section(void)
         {
                 if (settings_rows[at].kind == SETTINGS_FIELD)
                         typed = true;
-                if (settings_rows[at].usage && string_has_prefix((string_address)settings_rows[at].usage, (string_address) "settings displays"))
+                if (settings_rows[at].usage && string_has_prefix((string_address)settings_rows[at].usage, "settings displays"))
                         window = true;
         }
         check("display section: no row of the section is a typed field", !typed);

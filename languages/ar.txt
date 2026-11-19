@@ -58,6 +58,7 @@ files_copying	c870	نسخ %1$d من %2$d، %3$s من %4$s: Escape يوقف
 files_count	cab8	%d عنصر
 files_count_cut	f139	أول %d عنصر: في المجلد المزيد
 files_count_found	283a	يظهر %1$d من %2$d
+files_count_one	5f6b	عنصر واحد
 files_delete_ask	807b	حذف %1$d: %2$s؟ Delete مرة أخرى يحذف، Escape يتركها
 files_delete_for_good	ec0e	حذف %1$d نهائيا: %2$s؟ Shift+Delete مرة أخرى يحذف، Escape يتركها
 files_delete_stopped	ef42	توقف عند %2$s: حُذف %1$d قبله

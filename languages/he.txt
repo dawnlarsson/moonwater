@@ -58,6 +58,7 @@ files_copying	c870	מעתיק %1$d מתוך %2$d, %3$s מתוך %4$s: Escape ע�
 files_count	cab8	%d פריטים
 files_count_cut	f139	%d הפריטים הראשונים: בתיקייה יש עוד
 files_count_found	283a	מוצגים %1$d מתוך %2$d
+files_count_one	5f6b	פריט אחד
 files_delete_ask	807b	למחוק %1$d: %2$s? Delete שוב מוחק, Escape משאיר
 files_delete_for_good	ec0e	למחוק לצמיתות %1$d: %2$s? Shift+Delete שוב מוחק, Escape משאיר אותם
 files_delete_stopped	ef42	נעצר ב-%2$s: נמחקו %1$d לפניו

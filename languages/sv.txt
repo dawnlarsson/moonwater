@@ -57,6 +57,7 @@ files_copying	c870	Kopierar %1$d av %2$d, %3$s av %4$s: Escape stoppar
 files_count	cab8	%d objekt
 files_count_cut	f139	De första %d objekten: mappen har fler
 files_count_found	283a	%1$d av %2$d visas
+files_count_one	5f6b	1 objekt
 files_delete_ask	807b	Ta bort %1$d: %2$s? Delete igen gör det, Escape låter dem vara
 files_delete_for_good	ec0e	Radera %1$d för gott: %2$s? Skift+Delete igen gör det, Escape låter dem vara
 files_delete_stopped	ef42	Stannade vid %2$s: %1$d borttagna före

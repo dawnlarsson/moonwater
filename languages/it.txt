@@ -57,6 +57,7 @@ files_copying	c870	Copia %1$d di %2$d, %3$s di %4$s: Esc ferma
 files_count	cab8	%d elementi
 files_count_cut	f139	I primi %d elementi: la cartella ne ha altri
 files_count_found	283a	%1$d di %2$d mostrati
+files_count_one	5f6b	1 elemento
 files_delete_ask	807b	Eliminare %1$d: %2$s? Di nuovo Canc lo fa, Escape li lascia
 files_delete_for_good	ec0e	Eliminare per sempre %1$d: %2$s? Maiusc+Canc di nuovo lo fa, Esc li lascia
 files_delete_stopped	ef42	Fermato a %2$s: %1$d eliminati prima

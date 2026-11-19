@@ -57,6 +57,7 @@ files_copying	c870	Copiando %1$d de %2$d, %3$s de %4$s: Escape para
 files_count	cab8	%d itens
 files_count_cut	f139	Os primeiros %d itens: a pasta tem mais
 files_count_found	283a	%1$d de %2$d mostrados
+files_count_one	5f6b	1 item
 files_delete_ask	807b	Excluir %1$d: %2$s? Delete de novo exclui, Escape os mantém
 files_delete_for_good	ec0e	Apagar %1$d de vez: %2$s? Shift+Delete outra vez fá-lo, Escape deixa-os
 files_delete_stopped	ef42	Parou em %2$s: %1$d excluídos antes

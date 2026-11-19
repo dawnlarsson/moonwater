@@ -58,6 +58,7 @@ files_copying	c870	رونوشت %1$d از %2$d، %3$s از %4$s: Escape متوق
 files_count	cab8	%d مورد
 files_count_cut	f139	%d مورد نخست: پوشه بیشتر دارد
 files_count_found	283a	%1$d از %2$d نمایش داده شد
+files_count_one	5f6b	1 مورد
 files_delete_ask	807b	حذف %1$d: %2$s؟ Delete دوباره حذف می‌کند، Escape نگه می‌دارد
 files_delete_for_good	ec0e	%1$d برای همیشه پاک شود: %2$s؟ دوباره Shift+Delete پاک می‌کند، Escape رها می‌کند
 files_delete_stopped	ef42	در %2$s ایستاد: پیش از آن %1$d حذف شد

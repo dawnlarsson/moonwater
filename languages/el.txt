@@ -57,6 +57,7 @@ files_copying	c870	Αντιγραφή %1$d από %2$d, %3$s από %4$s: Escape
 files_count	cab8	%d στοιχεία
 files_count_cut	f139	Τα πρώτα %d στοιχεία: ο φάκελος έχει περισσότερα
 files_count_found	283a	Εμφανίζονται %1$d από %2$d
+files_count_one	5f6b	1 στοιχείο
 files_delete_ask	807b	Διαγραφή %1$d: %2$s; Ξανά Delete το κάνει, Escape τα αφήνει
 files_delete_for_good	ec0e	Οριστική διαγραφή %1$d: %2$s; Ξανά Shift+Delete το κάνει, το Escape τα αφήνει
 files_delete_stopped	ef42	Σταμάτησε στο %2$s: %1$d διαγράφηκαν πριν

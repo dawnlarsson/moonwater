@@ -54,6 +54,7 @@ files_copying	c870	Copying %1$d of %2$d, %3$s of %4$s: Escape stops
 files_count	cab8	%d items
 files_count_cut	f139	The first %d items: the folder has more
 files_count_found	283a	%1$d of %2$d shown
+files_count_one	5f6b	1 item
 files_delete_ask	807b	Delete %1$d: %2$s? Delete again does it, Escape leaves them
 files_delete_for_good	ec0e	Delete %1$d for good: %2$s? Shift+Delete again does it, Escape leaves them
 files_delete_stopped	ef42	Stopped at %2$s: %1$d deleted before it

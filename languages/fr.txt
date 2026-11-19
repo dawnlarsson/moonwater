@@ -57,6 +57,7 @@ files_copying	c870	Copie %1$d sur %2$d, %3$s sur %4$s : Échap arrête
 files_count	cab8	%d éléments
 files_count_cut	f139	Les %d premiers éléments : le dossier en a plus
 files_count_found	283a	%1$d sur %2$d affichés
+files_count_one	5f6b	1 élément
 files_delete_ask	807b	Supprimer %1$d : %2$s ? Suppr à nouveau le fait, Escape les garde
 files_delete_for_good	ec0e	Supprimer définitivement %1$d : %2$s ? Maj+Suppr encore le fait, Échap les laisse
 files_delete_stopped	ef42	Arrêté à %2$s : %1$d supprimés avant

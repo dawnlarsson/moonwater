@@ -8058,6 +8058,7 @@ LANGUAGE_ID(files_copying, "Copying %1$d of %2$d, %3$s of %4$s: Escape stops") \
 LANGUAGE_ID(files_count, "%d items") \
 LANGUAGE_ID(files_count_cut, "The first %d items: the folder has more") \
 LANGUAGE_ID(files_count_found, "%1$d of %2$d shown") \
+LANGUAGE_ID(files_count_one, "1 item") \
 LANGUAGE_ID(files_delete_ask, "Delete %1$d: %2$s? Delete again does it, Escape leaves them") \
 LANGUAGE_ID(files_delete_for_good, "Delete %1$d for good: %2$s? Shift+Delete again does it, Escape leaves them") \
 LANGUAGE_ID(files_delete_stopped, "Stopped at %2$s: %1$d deleted before it") \
