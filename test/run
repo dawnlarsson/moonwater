@@ -1238,8 +1238,10 @@ freestanding()
         case $compiler in *clang*) rwx_flag= ;; esac
         #       A freestanding tool on aarch64 must not call the compiler's outline
         #       atomics: -nostdlib leaves libgcc out, and the calls are unresolved.
+        #       The target's, not the host's: on an aarch64 host the x86_64 and riscv64 compilers refuse the flag, and
+        #       every cross build of a check failed there (CHECK_installer's on Lima).
         outline_flag=
-        case $(uname -m) in aarch64 | arm64) outline_flag=-mno-outline-atomics ;; esac
+        case ${architecture:-$(uname -m)} in aarch64 | arm64) outline_flag=-mno-outline-atomics ;; esac
 
         # shellcheck disable=SC2086
         if build_cached "$output" $compiler -O2 -static -nostdlib -nostartfiles $outline_flag \
