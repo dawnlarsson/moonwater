@@ -874,6 +874,8 @@ static fn settings_say(string_address text);
 #define SETTINGS_SUB_TEXT 240      // bytes of one line
 #define SETTINGS_BOARD_NS 1000000000ll
 #define SETTINGS_REAP_NS 10000000ll // how often a child that is ending is asked whether it has exited (settings_reap)
+#define SETTINGS_LEFT_NS 2000000000ll // how long a killed child is waited for before it is left (settings_leave)
+#define SETTINGS_LEFT 8              // children left, reaped when they exit (settings_left_reap)
 #define SETTINGS_GPU_SAMPLES 10    // samples of the GPU's presents the status is judged on (a second each)
 struct settings_sub
 {
@@ -4260,6 +4262,51 @@ static b32 settings_reap(void)
 }
 
 /*
+        Children killed and not yet exited, left: a process in the kernel's uninterruptible sleep (state D) is not ended by SIGKILL until
+        it leaves that sleep, which a call stuck in the kernel never does. snug-asteroid's `moonwater canvas modes` was such a one, and
+        the settings polled it for ever: no other verb ran after it, so the page stayed unread, and the close waited for it, so the window
+        could only be taken down from outside. A child that has not exited SETTINGS_LEFT_NS after its kill is left (settings_leave): its
+        output closed, its row said to have taken too long, and the next verb run; it is reaped here when it does exit, or by init once
+        the settings have gone. More than SETTINGS_LEFT at once are left to init alone.
+*/
+static bipolar settings_left[SETTINGS_LEFT];
+
+// The children left that have exited, reaped (WNOHANG): whether any is still there.
+static b32 settings_left_reap(void)
+{
+        b32 any = false;
+
+        for (positive at = 0; at < SETTINGS_LEFT; at++)
+        {
+                positive status = 0;
+
+                if (settings_left[at] <= 0)
+                        continue;
+                if (system_wait4_retry(settings_left[at], address_of status, 1, null) == 0)
+                        any = true;
+                else
+                        settings_left[at] = 0;
+        }
+        return any;
+}
+
+// The killed child that will not exit, left: the verb is complete as one that took too long, and the next one runs.
+static fn settings_leave(void)
+{
+        for (positive at = 0; at < SETTINGS_LEFT; at++)
+                if (settings_left[at] <= 0)
+                {
+                        settings_left[at] = settings.child;
+                        break;
+                }
+        system_close(settings.output);
+        settings.child = 0;
+        settings.output = -1;
+        settings.ending = 0;
+        settings_complete(true, 0);
+}
+
+/*
         The verb running has finished, or taken too long (killed): a child that was killed, or whose output ended, is reaped by settings_reap
         when it has exited, and until then the window goes on, polling it from settings_tick (settings.ending).
 */
@@ -4273,6 +4320,7 @@ static fn settings_finished(b32 killed)
         {
                 system_call_2(syscall(kill), (positive)settings.child, SIGKILL);
                 settings.ending = 2;
+                settings.began = (positive)ui_kit.now; // the time it was killed, which settings_leave counts from
         }
         else if (!settings.ending)
                 settings.ending = 1;
@@ -6621,6 +6669,9 @@ static long settings_tick(long timeout, long address_to other)
 
                 timeout = ui_field_tick(&settings.ui, &settings.page, t, timeout, gallery.on ? t->focused : settings.focused);
         }
+        // Children left (settings_leave) are asked once a second whether they have exited.
+        if (settings_left_reap() && (timeout < 0 || timeout > SETTINGS_BOARD_NS))
+                timeout = (long)SETTINGS_BOARD_NS;
         // A child that is ending (its output ended, or it was killed) is reaped here when it has exited, never waited for: its output is not
         // read any more, and the window's events go on meanwhile. A verb whose output ended and that does not exit is killed when its time is up.
         if (settings.child > 0 && settings.ending)
@@ -6632,6 +6683,11 @@ static long settings_tick(long timeout, long address_to other)
                 if (settings.ending == 1 && !(settings.job_sets && settings.job >= SETTINGS_ANY) && now - settings.began >= settings_most())
                 {
                         settings_finished(true);
+                        return 0;
+                }
+                if (settings.ending == 2 && now - settings.began >= (positive)SETTINGS_LEFT_NS)
+                {
+                        settings_leave();
                         return 0;
                 }
                 *other = -1;
@@ -6673,7 +6729,11 @@ static long settings_tick(long timeout, long address_to other)
         return timeout;
 }
 
-// A verb still running when the window closes is stopped.
+/*
+        A verb still running when the window closes is stopped, and not waited for: one in the kernel's uninterruptible sleep does not
+        exit on its kill (settings_left), and the close that waited for it kept the settings' process, and its window, there for good.
+        It is reaped if it has already exited; otherwise init has it once the settings are gone, as it has the children left before.
+*/
 static fn settings_close(void)
 {
         if (settings.child > 0)
@@ -6682,7 +6742,7 @@ static fn settings_close(void)
 
                 // A pairing is stopped as a press on its row stops it: the CLI closes the code it made, and it answers SIGTERM at once.
                 system_call_2(syscall(kill), (positive)settings.child, settings_pair_on ? SIGTERM : SIGKILL);
-                system_wait4_retry(settings.child, address_of status, 0, null);
+                system_wait4_retry(settings.child, address_of status, 1, null);
         }
 }
 

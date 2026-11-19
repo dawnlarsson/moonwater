@@ -3480,6 +3480,73 @@ static fn check_settings_edges(void)
         settings_refilter();
 }
 
+/*
+        A verb's child that will not exit on its kill (snug-asteroid's `moonwater canvas modes`, stuck in the kernel in state D) neither
+        holds the settings' close nor stops every verb after it. A child stopped with SIGSTOP stands in for it: SIGTERM, which a pairing's
+        close sends, is held pending while it is stopped, so it does not exit, as a D child does not on SIGKILL. The close must return at
+        once (the old one waited for it for ever), and a killed child that has not exited SETTINGS_LEFT_NS later is left: its output
+        closed, the verb complete as one that took too long, the next verb free to run, and the child reaped when it does exit.
+*/
+static fn check_settings_stuck_child(void)
+{
+        int ends[2] = {-1, -1};
+        bipolar child;
+        positive status = 0, before, took;
+
+        if (system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+        {
+                check("settings stuck: a pipe for the child", false);
+                return;
+        }
+        child = system_fork();
+        if (child == 0)
+        {
+                system_call_2(syscall(kill), (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), SIGSTOP);
+                system_call_1(syscall(exit), 0);
+        }
+        system_close(ends[1]);
+        // The child is stopped before the close is asked of it (WUNTRACED 2).
+        system_call_4(syscall(wait4), (positive)child, (positive)&status, 2, 0);
+        settings.child = child;
+        settings.output = ends[0];
+        settings.ending = 0;
+        settings.job = 0;
+        settings.job_sets = false;
+        settings_pair_on = true;
+        before = (positive)ui_kit_clock();
+        settings_close();
+        took = (positive)ui_kit_clock() - before;
+        settings_pair_on = false;
+        check("settings stuck: the close of a window whose verb's child will not exit returns within a second",
+              took < 1000000000ull);
+
+        // The same child, its kill sent and not taken: left once SETTINGS_LEFT_NS has gone since the kill.
+        settings.ending = 2;
+        settings.began = (positive)ui_kit.now - (positive)SETTINGS_LEFT_NS - 1;
+        settings.state[0] = SETTINGS_READ;
+        {
+                long other = 0;
+
+                settings_tick(-1, &other);
+        }
+        check("settings stuck: a killed child that has not exited is left, and the verb after it is free to run",
+              settings.child <= 0 && !settings.ending && settings.output < 0);
+        check("settings stuck: the row of a verb left reads as failed", settings.state[0] == SETTINGS_FAILED);
+        check("settings stuck: the child left is kept to be reaped", settings_left[0] == child);
+        // It goes once it runs again, and is reaped then.
+        system_call_2(syscall(kill), (positive)child, SIGKILL);
+        system_call_2(syscall(kill), (positive)child, SIGCONT);
+        for (int tries = 0; tries < 200 && settings_left_reap(); tries++)
+        {
+                timespec nap = {0, 10000000};
+
+                system_call_2(syscall(nanosleep), (positive)&nap, 0);
+        }
+        check("settings stuck: a child left is reaped when it exits", settings_left[0] <= 0);
+        settings.child = 0;
+        settings.output = -1;
+}
+
 static fn check_settings_keys(void)
 {
         int wired = settings_row_named("Wired"), at = 0, below = 0;
@@ -7349,6 +7416,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         ui_kit_inks(&settings.ui);
         ui_kit_settle();
         check_settings_edges();
+        check_settings_stuck_child();
         ui_buffers_start(&settings.page.buffers);
         settings.focused = 1;
         settings_frames.now = 5000000000ull;

@@ -159,7 +159,7 @@ static b32 installer_start(string_address address_to words, positive count, int 
         positive length = input ? string_length((string_address)input) : 0;
         bipolar child;
 
-        if (installer.output >= 0 || system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
+        if (installer.output >= 0 || installer.child > 0 || system_call_2(syscall(pipe2), (positive)ends, O_CLOEXEC) != 0)
                 return false;
         system_call_3(syscall(fcntl), (positive)ends[0], 4, O_NONBLOCK);
         if (length && (system_call_2(syscall(pipe2), (positive)feeds, O_CLOEXEC) != 0 ||
@@ -288,6 +288,30 @@ static fn installer_heard(void)
                 big->net_chosen = -1;
 }
 
+static fn installer_ended(positive status);
+
+/*
+        The command whose output has ended, reaped if it has exited (WNOHANG), and then ended (installer_ended); if it has not, the tick
+        asks again (installer_tick), and no other command starts meanwhile (installer_start). The output ends when the command closes it,
+        which a step that runs on with its output sent elsewhere does before it exits: the wait for it here was the installer's window,
+        frozen until it did, and for good for one stuck in the kernel.
+*/
+static fn installer_reap(void)
+{
+        positive status = 0;
+        bipolar got;
+
+        if (installer.child <= 0 || installer.output >= 0)
+                return;
+        got = system_wait4_retry(installer.child, address_of status, 1, null);
+        if (got == 0)
+                return;
+        if (got < 0)
+                status = 0;
+        installer.child = 0;
+        installer_ended(status);
+}
+
 // The command that ran has ended, its status said: what it was for, then the next of the plan, or the end of it.
 static fn installer_ended(positive status)
 {
@@ -337,7 +361,6 @@ static fn installer_drain(void)
         struct installer_big address_to big = installer.big;
         char block[1024];
         bipolar got;
-        positive status = 0;
 
         if (installer.output < 0)
                 return;
@@ -363,9 +386,7 @@ static fn installer_drain(void)
                 return;
         system_close(installer.output);
         installer.output = -1;
-        system_wait4_retry(installer.child, address_of status, 0, null);
-        installer.child = 0;
-        installer_ended(status);
+        installer_reap();
 }
 
 // The drives asked for again, of the verb: what the window lists is what it says.
@@ -1349,6 +1370,8 @@ static long installer_tick(long timeout, long address_to other)
                 if (installer.output >= 0)
                         *other = installer.output;
         }
+        else
+                installer_reap();
         if (field && field->focused)
         {
                 b32 redraw = false;
@@ -1370,7 +1393,7 @@ static long installer_tick(long timeout, long address_to other)
                 installer.next_wifi = now + INSTALLER_WIFI_NS;
         }
         wait = (installer.step == INSTALLER_STEP_NETWORK && installer.next_wifi < installer.next_look ? installer.next_wifi : installer.next_look) - now;
-        if (installer.output >= 0 && wait > 100000000ll)
+        if ((installer.output >= 0 || installer.child > 0) && wait > 100000000ll)
                 wait = 100000000ll;
         return timeout < 0 || (b64)timeout > wait ? (long)(wait > 0 ? wait : 1) : timeout;
 }
