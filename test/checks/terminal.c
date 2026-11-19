@@ -88,7 +88,7 @@ static long gpu_fake_userptr;
 #define GPU_MAP_FAKE(taken) do { if (gpu_fake_userptr) (taken) = -gpu_fake_userptr; } while (0)
 // The fake card's losses: a submit answers ECANCELED while gpu_fake_cancel is set (and the call is not made), and a node is absent (ENOENT) while
 // gpu_fake_absent counts down.
-static int gpu_fake_cancel, gpu_fake_absent, gpu_fake_again;
+static int gpu_fake_cancel, gpu_fake_absent, gpu_fake_again, gpu_fake_invalid;
 // The words of the IB of the last job submitted (gpu_run_job's ib, which is in scope where this is expanded), kept before any answer is made: a check reads the packets a job sent.
 static unsigned int gpu_fake_ib[256], gpu_fake_ib_words;
 // A job the fake card takes is given the next of its sequences (gpu_fake_sequence, counted from 1), as the kernel gives a context's jobs theirs.
@@ -101,7 +101,7 @@ static long gpu_fake_addfb_answer;
 #define COMPOSITOR_WL_PRIME(prime) (gpu_fake_prime_calls++, (prime).handle = 7u, 0L)
 #define COMPOSITOR_WL_ADDFB(fb) (gpu_fake_addfb_calls++, memory_copy(gpu_fake_addfb, &(fb), sizeof(fb) < sizeof gpu_fake_addfb ? sizeof(fb) : sizeof gpu_fake_addfb), \
                                  (fb).fb_id = gpu_fake_addfb_answer ? 0u : 40u + (unsigned int)gpu_fake_addfb_calls, gpu_fake_addfb_answer)
-#define GPU_SUBMIT_FAKE(error, taken, sequence) do { gpu_fake_submits++; gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; else if (gpu_fake_card) (taken) = true, (sequence) = ++gpu_fake_sequence; } while (0)
+#define GPU_SUBMIT_FAKE(error, taken, sequence) do { gpu_fake_submits++; gpu_fake_ib_words = sizeof(ib) / sizeof(ib[0]) <= 256 ? (unsigned int)(sizeof(ib) / sizeof(ib[0])) : 256; memory_copy(gpu_fake_ib, ib, 4u * gpu_fake_ib_words); if (gpu_fake_cancel) gpu_fake_cancel--, (error) = 125; else if (gpu_fake_again) gpu_fake_again--, (error) = 11; else if (gpu_fake_invalid) gpu_fake_invalid--, (error) = 22; else if (gpu_fake_card) (taken) = true, (sequence) = ++gpu_fake_sequence; } while (0)
 // While gpu_kernel.i915 names a driver, the first render node is the fake i915 node (GPU_KERNEL_I915, its version answering that name) and every other node is
 // absent: the walk of the nodes (gpu_start, gpu_nodes_seen, whose loops name their node `node`) sees one node, whatever the machine has.
 #define GPU_OPEN_FAKE(fd)                                                                                                                                          \

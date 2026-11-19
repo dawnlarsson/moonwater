@@ -1440,8 +1440,8 @@ static void gpu_i915_rows(void)
         gpu_amd_va_max = 2ull << 30;
         check("gpu amd: a space under 3 GiB is refused", gpu_amd_window(130, &va, &maps, &top) == 28);
         gpu_amd_va_max = kept_va_max;
-        check("gpu amd: the classifier is as it was: EINVAL, ENODEV and ECANCELED the card lost, EAGAIN asked again, EFAULT refused",
-              gpu_amd_classify(22) == GPU_ERR_LOST && gpu_amd_classify(19) == GPU_ERR_LOST && gpu_amd_classify(125) == GPU_ERR_LOST && gpu_amd_classify(11) == GPU_ERR_AGAIN &&
+        check("gpu amd: the classifier: ENODEV and ECANCELED the card lost, EINVAL a suspect (lost only the second time in a row), EAGAIN asked again, EFAULT refused",
+              gpu_amd_classify(22) == GPU_ERR_SUSPECT && gpu_amd_classify(19) == GPU_ERR_LOST && gpu_amd_classify(125) == GPU_ERR_LOST && gpu_amd_classify(11) == GPU_ERR_AGAIN &&
                   gpu_amd_classify(14) == GPU_ERR_REFUSED && gpu_amd_classify(5) == GPU_ERR_REFUSED);
         check("gpu i915: the classifier: EINVAL, ENOSPC, ENOENT and EOPNOTSUPP our own job, EIO and ENODEV the card lost, EAGAIN and EINTR asked again, EFAULT refused",
               gpu_i915_classify(22) == GPU_ERR_OURS && gpu_i915_classify(28) == GPU_ERR_OURS && gpu_i915_classify(2) == GPU_ERR_OURS && gpu_i915_classify(95) == GPU_ERR_OURS &&
@@ -1670,6 +1670,16 @@ static void gpu_loss_rows(void)
         check("gpu loss: a submit answered EAGAIN every time gives the job up with the error kept, and the card is not lost",
               !gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu_last_error == 11 && !gpu_lost);
         gpu_fake_again = 0;
+        // A submit answered EINVAL once (a chunk or a buffer of the one job): refused and asked again, the scene drawn, the card not lost; answered so twice
+        // in a row (the context or the VM the kernel has not): the card lost.
+        memory_copy(ops, q, 32);
+        gpu_fake_invalid = 1;
+        check("gpu loss: a submit answered EINVAL once is asked again and the scene is drawn, and the card is not lost",
+              gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && !gpu_lost && gpu_fake_invalid == 0);
+        memory_copy(ops, q, 32);
+        gpu_fake_invalid = 2;
+        check("gpu loss: a submit answered EINVAL twice in a row is a lost card", !gpu_scene(ops_at, 1, bins_at, d_at, 64, 64, 4, 0, 0, 64, 4) && gpu_lost);
+        gpu_fake_invalid = 0, gpu_lost = 0, gpu_suspects = 0;
         // A submit answered ECANCELED: the card is lost (the scene is not drawn; the caller recovers), and the recovery draws the self-test right again.
         memory_copy(ops, q, 32);
         gpu_fake_cancel = 1;
@@ -2537,6 +2547,20 @@ static void gpu_bo_rows(void)
         }
         else
                 check("gpu bo: room for five imports", false);
+
+        // 8. amdgpu's EINVAL (GPU_ERR_SUSPECT): once, the job is refused and asked again, the card not lost; twice in a row, the card lost (E-h6-2).
+        {
+                const struct gpu_backend *kept_backend = gpu_backend;
+
+                gpu_backend = &gpu_amd, gpu_map_count = 0, gpu.imports = 0, gpu_suspects = 0;
+                gpu_fake_invalid = 1, gpu_lost = 0;
+                gpu_run();
+                held = !gpu_lost && gpu_fake_invalid == 0;
+                gpu_fake_invalid = 2, gpu_lost = 0, gpu_suspects = 0;
+                gpu_run();
+                check("gpu submit: an EINVAL is asked again and not the card lost; two in a row are", held && gpu_lost && gpu_fake_invalid == 0);
+                gpu_fake_invalid = 0, gpu_lost = 0, gpu_suspects = 0, gpu_backend = kept_backend;
+        }
 
         gpu_map_count = 0, gpu_gone_at = 0, gpu_seen_count = 0, gpu_fake_cancel = 0, gpu_lost = 0, gpu_last_error = 0, gpu_fault[0] = 0;
         gpu.at = kept_at, gpu.fd = kept_fd;

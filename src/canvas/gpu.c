@@ -369,8 +369,10 @@ static unsigned int gpu_raw(int fd, unsigned int request, void *a)
         closed, a dma-buf to a handle and back.) Each call answers 0 or the kernel's errno unless it says otherwise.
 
         A refused submit is what the driver's classify says it is (enum gpu_err), since the same errno is another thing to each driver:
-          amdgpu: EAGAIN (11) asked again at once; ECANCELED (125, the context lost in a reset), ENODEV (19, the device gone) and EINVAL (22, the VM or the
-                  context the kernel no longer has) the card lost; anything else refused, asked again up to three times without the maps whose pages are gone.
+          amdgpu: EAGAIN (11) asked again at once; ECANCELED (125, the context lost in a reset, or guilty) and ENODEV (19, the device gone) the card lost;
+                  EINVAL (22) a suspect (GPU_ERR_SUSPECT): amdgpu_cs answers it for a bad chunk or buffer of one job as well as for a context it has not
+                  (amdgpu_cs_parser_init) or a VM not ready (amdgpu_cs_vm_handling), so it is refused as anything else is, and the card is lost only
+                  when it comes again on the next try or submit; anything else refused, asked again up to three times without the maps whose pages are gone.
           i915:   EAGAIN and EINTR (4) asked again at once; EIO (5, a context banned after a reset, or the GPU wedged) and ENODEV the card lost; EINVAL (our
                   batch or an object the kernel will not take as it is: a misaligned batch, a pinned offset not page-aligned or not canonical), ENOSPC (28, a
                   pinned range something else holds: on Ivy Bridge and Haswell the display's), ENOENT (2, a handle the kernel does not have) and EOPNOTSUPP
@@ -393,8 +395,10 @@ enum gpu_err
         GPU_ERR_AGAIN,   // asked again at once (up to GPU_AGAIN times)
         GPU_ERR_LOST,    // the card lost its state: the caller starts it again (gpu_recover)
         GPU_ERR_OURS,    // our own job is wrong as it is (the same job is refused the same way again): refused at once, not asked again, and the card is not lost
-        GPU_ERR_PLACE    // an address the job pins is not ours to have (i915's ENOSPC: on Ivy Bridge and Haswell the display holds ranges of the one address space):
+        GPU_ERR_PLACE,   // an address the job pins is not ours to have (i915's ENOSPC: on Ivy Bridge and Haswell the display holds ranges of the one address space):
                          // the job is refused, and the maps are placed elsewhere for the next (gpu_place_elsewhere); the card is not lost
+        GPU_ERR_SUSPECT  // refused as REFUSED is (asked again without the maps whose pages are gone), and the card lost only when the submit before was refused
+                         // so too (amdgpu's EINVAL: a chunk or a buffer of this one job, or the context or the VM the kernel no longer has or has not restored)
 };
 struct gpu_vm_fault
 {
@@ -485,7 +489,7 @@ static const struct gpu_set *gpu_amd_set(unsigned int family)
 
 static enum gpu_err gpu_amd_classify(unsigned int error)
 {
-        return error == 11 ? GPU_ERR_AGAIN : error == 125 || error == 19 || error == 22 ? GPU_ERR_LOST : GPU_ERR_REFUSED;
+        return error == 11 ? GPU_ERR_AGAIN : error == 125 || error == 19 ? GPU_ERR_LOST : error == 22 ? GPU_ERR_SUSPECT : GPU_ERR_REFUSED;
 }
 
 static unsigned int gpu_amd_describe(unsigned int family, unsigned int device, char *into, unsigned int at, unsigned int room)
@@ -3028,6 +3032,7 @@ static b32 gpu_map_named(unsigned int i)
 
 #define GPU_AGAIN 32 // the submits a job is asked again after EAGAIN (gpu_submit)
 static unsigned int gpu_jobs_ours; // the jobs refused as our own (GPU_ERR_OURS), which are never asked again
+static unsigned int gpu_suspects;  // the tries in a row refused as suspects (GPU_ERR_SUSPECT): a second is the card lost; a submit taken clears them
 #define GPU_PLACE_STEP (256ull << 20)
 
 // After a refusal of a place (GPU_ERR_PLACE): every map let go of (gpu_forget: made again at its next use, at a new address; its span kept until the card is
@@ -3089,7 +3094,10 @@ static positive gpu_submit(void)
                 if (gpu_last_error == 0)
                         break;
                 kind = gpu_backend->classify(gpu_last_error); // what the errno is to this driver (struct gpu_backend's mapping)
-                // The card lost the context or its VM (amdgpu: ECANCELED after a reset, ENODEV, EINVAL; i915: EIO, a banned context or a wedged GPU, ENODEV):
+                // A suspect is a refusal the first time, and the card lost the second in a row (a try of this submit or the next submit's).
+                if (kind == GPU_ERR_SUSPECT)
+                        kind = ++gpu_suspects >= 2 ? GPU_ERR_LOST : GPU_ERR_REFUSED;
+                // The card lost the context or its VM (amdgpu: ECANCELED after a reset, ENODEV, EINVAL twice in a row; i915: EIO, a banned context or a wedged GPU, ENODEV):
                 // nothing this job can do again succeeds: the caller recovers (gpu_recover).
                 // EAGAIN: a page of a userptr moved between the kernel's taking it and the submit (a migration or a compaction: on the box at a load of 120 one job in
                 // ten), and the kernel asks for the call again, which takes the pages afresh. Asked again up to GPU_AGAIN times with the processor let go of between: three
@@ -3117,6 +3125,7 @@ static positive gpu_submit(void)
                         return 0;
                 }
         }
+        gpu_suspects = 0;
         if (gpu.pending)
                 gpu_before.sequence = gpu.pending, gpu_before.began = kept;
         gpu.pending = sequence, gpu_pending_slot = gpu_slot, gpu_end_said = 0, gpu_fault_poll = began + GPU_LATE_NS + GPU_FAULT_FIRST;
