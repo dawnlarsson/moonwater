@@ -752,6 +752,22 @@ static bool rover_runner_needs_up(positive which)
         return true;
 }
 
+//      Whether the compositor's service needs this one.
+static bool rover_runner_compositor_needs(positive which)
+{
+        for (positive at = 0; at < rover_runner.view.head->services; at++)
+        {
+                const struct rover_service address_to service = rover_runner.view.service + at;
+
+                if (!rover_runner_service_is(at, "compositor"))
+                        continue;
+                for (positive need = 0; need < ROVER_NEEDS && service->need[need] != ROVER_SERVICE_NONE; need++)
+                        if (service->need[need] == which)
+                                return true;
+        }
+        return false;
+}
+
 //      A service that ended: the count of its short lives, its wait or its giving up, and the events.
 static fn rover_runner_ended(positive which)
 {
@@ -834,9 +850,12 @@ static fn rover_runner_services(void)
                 //      Before boot's verdict /root is the image's, and a disk's is mounted over it at the verdict: a service
                 //      started now would read the image's settings and keep watching the directory underneath (the
                 //      session bus read no canvas.theme). Only the compositor starts early, for the screen, and is told to
-                //      read /root again at the verdict.
+                //      read /root again at the verdict. Under ask the question is put on that screen, so what the compositor
+                //      needs (the session bus, which follows its /root being bound over) starts then too: held, the
+                //      compositor never started, nothing asked, and the boot stayed on Canvas's grey with no services.
                 if (!running->pid && wanted && !running->failed && !running->held_off && now >= running->retry &&
-                    (rover_runner.verdict_seen || rover_runner_service_is(which, "compositor")))
+                    (rover_runner.verdict_seen || rover_runner_service_is(which, "compositor") ||
+                     (rover_runner.verdict_posted && rover_runner_compositor_needs(which))))
                         rover_runner_start(which);
                 if (running->pid && !running->up && !running->stopping)
                 {
