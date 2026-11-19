@@ -331,12 +331,18 @@ typedef union
 	long pad[24];
 } XEvent;
 
+struct pollfd_
+{
+	int fd;
+	short events, revents;
+};
+
 static int game_x_displays;   // XOpenDisplay calls made by the game itself: one says it is an X11 game
 static int bridge_state;      // 0 not tried, 1 up, -1 off
 static int bridge_gl;         // the game draws with EGL, and the renderer's draw runs at its swaps
 static void *bridge_display;
 static XID bridge_window;
-static int bridge_width = 1920, bridge_height = 1080, bridge_open = -1;
+static int bridge_width = 1, bridge_height = 1, bridge_open = -1;
 static long bridge_context[64];
 static int fake_context;
 
@@ -349,6 +355,8 @@ static int (*x_flush)(void *);
 static XID (*x_root)(void *, int);
 static int (*x_screen)(void *);
 static int (*x_resize)(void *, XID, unsigned, unsigned);
+static int (*x_screen_width)(void *, int);
+static int (*x_screen_height)(void *, int);
 static unsigned long (*x_atom)(void *, const char *, int);
 static int (*x_property)(void *, XID, unsigned long, unsigned long, int, int, const void *, int);
 static int (*x_threads)(void);
@@ -356,6 +364,8 @@ static void *(*x_error)(int (*)(void *, void *));
 static void (*r_glx_swap)(void *, XID);
 static int (*r_overlay_open)(void);
 static int (*thread_make)(unsigned long *, const void *, void *(*)(void *), void *);
+static int (*x_fd)(void *);
+static int (*poll_fn)(struct pollfd_ *, unsigned long, int);
 
 #define FIND(variable, name, required)                                                                                    \
 	do                                                                                                                \
@@ -388,15 +398,23 @@ static void tell_open(void)
 	x_flush(bridge_display);
 }
 
-// Each X event Canvas sends the window goes to the renderer through its XNextEvent hook, which reads the hot-key and the input.
+// Each X event Canvas sends the window goes to the renderer through its XPending and XNextEvent hooks, which read the hot-key and
+// the input. The thread waits on the connection itself (poll), never inside the renderer's hooks: the renderer holds its own lock
+// in them, and a thread blocked there kept its draw and its requests to Steam from running (no overlay opened, nothing drawn).
 static void *bridge_pump(void *unused)
 {
 	(void)unused;
 	for (;;)
 	{
-		XEvent event;
+		struct pollfd_ wanted = {x_fd(bridge_display), 1, 0};
 
-		x_next(bridge_display, &event);
+		poll_fn(&wanted, 1, 250);
+		while (x_pending(bridge_display) > 0)
+		{
+			XEvent event;
+
+			x_next(bridge_display, &event);
+		}
 		tell_open();
 	}
 	return 0;
@@ -423,11 +441,15 @@ static int bridge_up(int gl)
 	FIND(x_root, "XRootWindow", 1);
 	FIND(x_screen, "XDefaultScreen", 1);
 	FIND(x_resize, "XResizeWindow", 1);
+	FIND(x_screen_width, "XDisplayWidth", 1);
+	FIND(x_screen_height, "XDisplayHeight", 1);
 	FIND(x_atom, "XInternAtom", 1);
 	FIND(x_property, "XChangeProperty", 1);
 	FIND(x_error, "XSetErrorHandler", 0);
 	FIND(r_overlay_open, "IsOverlayEnabled", 1);
 	FIND(thread_make, "pthread_create", 1);
+	FIND(x_fd, "XConnectionNumber", 1);
+	FIND(poll_fn, "poll", 1);
 	if (gl)
 		FIND(r_glx_swap, "glXSwapBuffers", 1);
 	x_threads();
@@ -449,6 +471,11 @@ static int bridge_up(int gl)
 	// KeyPress, KeyRelease, ButtonPress, ButtonRelease, PointerMotion, FocusChange: what Canvas sends and the renderer reads.
 	x_select(display, bridge_window, 1 | 2 | 4 | 8 | 64 | (1l << 21));
 	x_property(display, bridge_window, x_atom(display, "_MOONWATER_STEAM_OVERLAY", 0), 6, 32, 0, &pid, 1);
+	// Made 1x1 and sized now, the screen's size (an OpenGL game's surface's at its first swap): the renderer learns a window's size
+	// from its ConfigureNotify, and draws nothing, the FPS corner neither, for a window whose size it does not know.
+	bridge_width = x_screen_width(display, screen);
+	bridge_height = x_screen_height(display, screen);
+	x_resize(display, bridge_window, (unsigned)bridge_width, (unsigned)bridge_height);
 	x_flush(display);
 	bridge_display = display;
 	bridge_gl = gl;
