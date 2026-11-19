@@ -404,7 +404,7 @@ static const struct settings_row settings_rows[] = {
     SETTING_PLAIN_ROW(null, "GPU rendering (alpha)", SETTINGS_SWITCH, 0, ("canvas", "gpu"), "gpu ", null,
                       .path = SETTING_GPU_PATH, .standard = "on",
                       .usage = "canvas gpu [on|off]",
-                      .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [off]"),
+                      .help = "draw and compose on the GPU where Canvas has a driver for it, on the processor elsewhere; alpha [on]"),
 #endif
     SETTING_PLAIN_ROW(null, "Clipboard history (copies kept)", SETTINGS_SLIDER, 0, ("canvas", "clipboard", "history"), "history ", null,
                       .type = SETTING_NUMBER, .path = SETTING_CLIPBOARD_HISTORY_PATH,

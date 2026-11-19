@@ -3182,8 +3182,9 @@ static void compositor_gpu_settings(void)
 #endif
 
         compositor_word(SETTING_GPU_PATH, word, sizeof(word));
-        // No file in /root is the registry's standard, on: the GPU is the default on every machine. A word is on only when it says so.
-        compositor_gpu = word[0] ? string_equals((string_address)word, (string_address) "on") : 1;
+        // No file in /root, or the word default (what `canvas gpu default` writes), is the registry's standard, on: the GPU is the default on every
+        // machine; the word on is on too, and any other word (off) is off.
+        compositor_gpu = !word[0] || string_equals((string_address)word, (string_address) "on") || string_equals((string_address)word, (string_address) "default");
 #ifdef MOONWATER_GPU_C
         // Turned on again: a GPU given up on after three hangs is tried again (one that never started, a card that is not one the kernels are for or that
         // drew its self-test wrong, stays given up).

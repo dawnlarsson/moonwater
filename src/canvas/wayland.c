@@ -13,7 +13,7 @@
         through `struct wayland_host` (below), which is also the seam the checks put a fake compositor behind.
 
         It runs in the compositor's process, in ring 3, and is compiled into it when CONFIG_MOONWATER_WAYLAND is
-        on (off by default). It is not kernel code: nothing here may be built into the module, and the file
+        on (on by default). It is not kernel code: nothing here may be built into the module, and the file
         refuses to build without the switch so a Makefile cannot name it by mistake. It is freestanding C: no
         library, no allocator (a client's record is one fixed block the host maps when the client connects and
         gives back when it goes), only long, int and char.
