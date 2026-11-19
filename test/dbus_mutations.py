@@ -2,9 +2,13 @@
 """Mutation proofs for the session bus's engine, src/dbus/dbus.c, against CHECK_dbus.
 
 Each mutation is one edit to a copy of dbus.c (a check taken out, a bound moved, a count changed), built into CHECK_dbus with
-gcc and run; the check must turn red.  A mutation that survives is a hole in the check.
+the compiler in CC (gcc by default) and run; the check must turn red.  A mutation that survives is a hole in the check.
+The unmutated tree is built and run first and must be green, or nothing is counted (exit 2).  A mutant that does not
+build, or whose text is not in dbus.c, is a survivor: it proved nothing.
 
-    python3 test/dbus_mutations.py [NAME...]          from the tree's root; 8 builds at a time (DBUS_MUTATION_JOBS=N for N)
+    python3 test/dbus_mutations.py [--most N] [NAME...]   from the tree's root; 8 builds at a time (DBUS_MUTATION_JOBS=N for N)
+
+--most N is the pin (sh test/run mutation_dbus): more than N survivors fails, and fewer fails too, saying to lower it.
 
 Last run: see the commit that changed this line.
 """
@@ -14,7 +18,12 @@ root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 engine = os.path.join(root, 'src/dbus/dbus.c')
 checks = os.path.join(root, 'test/checks.c')
 work = tempfile.mkdtemp(prefix='dbus-mutations-')
-only = sys.argv[1:]
+argv = sys.argv[1:]
+most = 0
+if argv[:1] == ['--most']:
+    most, argv = int(argv[1]), argv[2:]
+only = argv
+compiler = os.environ.get("CC", "gcc")
 
 # (name, old text, new text); the old text must stand in dbus.c, and every place it stands is replaced.
 M = [
@@ -122,6 +131,30 @@ M = [
 source = open(engine).read()
 
 
+def build_and_run(d, text):
+    """A tree of links with dbus.c's text as given; CHECK_dbus built and run as lane_dbus builds it."""
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    subprocess.run(["cp", "-as", os.path.join(root, "src"), d + "/src"], check=True)
+    subprocess.run(["cp", "-as", os.path.join(root, "test"), d + "/test"], check=True)
+    os.unlink(d + "/src/dbus/dbus.c")
+    open(d + "/src/dbus/dbus.c", "w").write(text)
+    exe = d + "/check"
+    cc = subprocess.run([compiler, "-std=gnu11", "-O2", "-w", "-D_GNU_SOURCE", "-DCHECK_dbus", d + "/test/checks.c", "-o", exe],
+                        capture_output=True, text=True, errors="replace")
+    if cc.returncode:
+        return ("BUILD ERROR", cc.stderr.strip()[-200:])
+    try:
+        r = subprocess.run([exe, "20000", "20000"], capture_output=True, text=True, errors="replace", timeout=300)
+    except subprocess.TimeoutExpired:
+        return ("RED", "hang")
+    last = [l for l in r.stdout.splitlines() if l.startswith("CHECK_dbus:")]
+    fails = [l.strip() for l in r.stdout.splitlines() if "FAIL" in l][:1]
+    if r.returncode == 0 and not fails:
+        return ("SURVIVED", last[0] if last else "")
+    return ("RED", (last[0] if last else "crashed (%d)" % r.returncode) + (" | " + fails[0][:110] if fails else ""))
+
+
 def run(index):
     name, old, new = M[index]
     if only and name not in only:
@@ -129,37 +162,25 @@ def run(index):
     if source.count(old) < 1:
         return (name, "NOT APPLIED", "")
     d = os.path.join(work, "m%d" % index)
+    status, detail = build_and_run(d, source.replace(old, new))
     shutil.rmtree(d, ignore_errors=True)
-    os.makedirs(d + "/src/dbus")
-    os.makedirs(d + "/test")
-    os.symlink(checks, d + "/test/checks.c")
-    for split_part in os.listdir(os.path.join(os.path.dirname(checks), "checks")):  # test/checks.c's parts (test/split.py)
-        os.makedirs(os.path.join(os.path.dirname(d + "/test/checks.c"), "checks"), exist_ok=True)
-        os.symlink(os.path.join(os.path.dirname(checks), "checks", split_part),
-                   os.path.join(os.path.dirname(d + "/test/checks.c"), "checks", split_part))
-    open(d + "/src/dbus/dbus.c", "w").write(source.replace(old, new))
-    exe = d + "/check"
-    cc = subprocess.run(["gcc", "-std=gnu11", "-O2", "-w", "-D_GNU_SOURCE", "-DCHECK_dbus", d + "/test/checks.c", "-o", exe],
-                        capture_output=True, text=True, errors="replace")
-    if cc.returncode:
-        return (name, "BUILD ERROR", cc.stderr[:200])
-    try:
-        r = subprocess.run([exe, "20000", "20000"], capture_output=True, text=True, errors="replace", timeout=300)
-    except subprocess.TimeoutExpired:
-        return (name, "RED (hang)", "")
-    last = [l for l in r.stdout.splitlines() if l.startswith("CHECK_dbus:")]
-    fails = [l.strip() for l in r.stdout.splitlines() if "FAIL" in l][:1]
-    if r.returncode == 0:
-        return (name, "SURVIVED", last[0] if last else "")
-    return (name, "RED", (last[0] if last else "crashed (%d)" % r.returncode) + (" | " + fails[0][:110] if fails else ""))
+    return (name, status, detail)
 
 
+status, detail = build_and_run(os.path.join(work, "base"), source)
+if status != "SURVIVED":
+    print("baseline red: the unmutated tree %s: %s" % ("did not build" if status == "BUILD ERROR" else "fails CHECK_dbus", detail))
+    shutil.rmtree(work, ignore_errors=True)
+    sys.exit(2)
 with concurrent.futures.ThreadPoolExecutor(max_workers=int(os.environ.get("DBUS_MUTATION_JOBS", "8"))) as pool:
     results = [r for r in pool.map(run, range(len(M))) if r]
-survived = 0
+shutil.rmtree(work, ignore_errors=True)
+survivors = [name for name, status, _ in results if status != "RED"]
 for name, status, detail in results:
     print("%-48s %-12s %s" % (name, status, detail))
-    survived += status in ("SURVIVED", "NOT APPLIED", "BUILD ERROR")
-print("mutations: %d, red: %d, survived or unusable: %d" % (len(results), len(results) - survived, survived))
-shutil.rmtree(work, ignore_errors=True)
-sys.exit(1 if survived else 0)
+print("mutations dbus: %d, killed %d, survived %d, pinned at most %d" % (len(results), len(results) - len(survivors), len(survivors), most))
+if only:
+    sys.exit(1 if survivors else 0)
+if len(survivors) < most:
+    print("mutations dbus: %d survive and the pin is %d: lower the pin to %d" % (len(survivors), most, len(survivors)))
+sys.exit(len(survivors) != most)
