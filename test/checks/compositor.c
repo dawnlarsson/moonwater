@@ -4290,14 +4290,18 @@ static void check_taskbar_identity(void)
         taskbar_band(&view, &bx, &by, &bw, &bh);
         t = taskbar_tree(&view);
         icon = &t->node[taskbar_node(&view, 0)->first], ix = icon->x - bx, iy = icon->y - by;
+        // The picture is the task's whole height at its start, its round end the task's: every pixel inside the circle of its side is the
+        // picture's, and the corner at the task's end is cut.
         for (int row = 0; row < icon->h; row++)
             for (int column = 0; column < icon->w; column++)
-                pictured &= (first[(iy + row) * bw + ix + column] & 0xffffffu) == 0xe66000u;
+                if ((2 * column + 1 - icon->w) * (2 * column + 1 - icon->w) + (2 * row + 1 - icon->h) * (2 * row + 1 - icon->h) <= (icon->w - 2) * (icon->w - 2))
+                    pictured &= (first[(iy + row) * bw + ix + column] & 0xffffffu) == 0xe66000u;
+        pictured &= icon->h == taskbar_node(&view, 0)->h && icon->x == taskbar_node(&view, 0)->x && (first[iy * bw + ix] & 0xffffffu) != 0xe66000u;
         icon = &t->node[taskbar_node(&view, 1)->first];
         for (int row = 0; row < icon->h; row++)
             for (int column = 0; column < icon->w; column++)
                 tiled += (first[(icon->y - by + row) * bw + icon->x - bx + column] & 0xffffffu) == tone;
-        check("taskbar identity: a window with a picture has it in its tab's icon, every pixel of it", pictured);
+        check("taskbar identity: a window with a picture has it the tab's whole height at its start, every pixel of it inside the tab's round end", pictured);
         check("taskbar identity: a program with an app_id and no picture has its lettered tile, in its name's colour", tiled > icon->w * icon->h / 2 && tiled < icon->w * icon->h);
         // The kit's program: the symbol ui_icon draws, in the tab's own ink, where the tab with no identity draws the window symbol.
         view = band_view(TASKBAR_BOTTOM, null);
@@ -4336,7 +4340,7 @@ static void check_taskbar_identity(void)
         view.rows = rows, view.icons[0] = again, view.icon_seqs[0] = 4;
         taskbar_draw(&view, 7, band_glass, null, rect);
         icon = &t->node[taskbar_node(&view, 0)->first];
-        changed = (band_pixels[(icon->y - by + 2) * bw + icon->x - bx + 2] & 0xffffffu) == 0x0060e6u;
+        changed = (band_pixels[(icon->y - by + icon->h / 2) * bw + icon->x - bx + icon->w / 2] & 0xffffffu) == 0x0060e6u;
         check("taskbar identity: a window's new picture, a sequence on, is the one its tab draws next", changed);
         // A window whose picture has no sequence has none: its tab is its tile or its symbol.
         view = band_view(TASKBAR_BOTTOM, null);

@@ -418,8 +418,10 @@ static fn taskbar_clock_lay(struct ui_tree address_to t, int m, int margin, int 
 static int taskbar_strip_from[2], taskbar_strip_ends[2][2], taskbar_strip_shown[2], taskbar_strip_listed[2];
 static int taskbar_strip_follow = 1, taskbar_strip_lit[2] = {-1, -1}; // it keeps the window with the keys in it, until the person scrolls it
 static struct ui_grown taskbar_lay_room;      // taskbar_lay's words of every tab
-static fn taskbar_tasks_lay(struct ui_tree address_to t, int slot, int strip, const int *list, int listed, const int *widths, const int *titled, int m,
-                            int margin, int pad, int side, int gap, int high)
+static bool taskbar_tab_full(const struct taskbar_view *view, int at);
+
+static fn taskbar_tasks_lay(const struct taskbar_view *view, struct ui_tree address_to t, int slot, int strip, const int *list, int listed, const int *widths,
+                            const int *titled, int m, int margin, int pad, int side, int gap, int high)
 {
         int length = 0, apart = taskbar_apart, bare = side + 2 * pad;
 
@@ -442,14 +444,18 @@ static fn taskbar_tasks_lay(struct ui_tree address_to t, int slot, int strip, co
         {
                 int at = list[k];
                 struct ui_node address_to n = taskbar_open(t, at, m, taskbar.separate ? (k ? apart : margin) : 0, widths[at], high), address_to part;
+                bool full;
 
                 n->align = UI_CENTER;
+                // A task with a picture (an app's, or the window's own) has it the task's whole height at its start, the task's round
+                // end its edge (taskbar_tab_icon): no padding before it; any other has its symbol in from the padding.
+                full = taskbar_tab_full(view, at);
                 if (titled[at])
-                        n->pad[2 * m] = pad;
+                        n->pad[2 * m] = full ? 0 : pad;
                 else
                         n->justify = UI_CENTER;
                 part = ui_tree_open(t);
-                part->size[0] = part->size[1] = (struct ui_size){UI_FIXED, side, 0, UI_TREE_MOST, 0};
+                part->size[0] = part->size[1] = (struct ui_size){UI_FIXED, full ? (high < widths[at] ? high : widths[at]) : side, 0, UI_TREE_MOST, 0};
                 ui_tree_close(t);
                 if (titled[at])
                 {
@@ -733,7 +739,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                                 n->pad[2 * m + 1] = apart;
                                 if (trays[1])
                                         taskbar_tray_lay(t, 1, m, 0, scale, glyph, square, cell, text_w, high), first = 0;
-                                taskbar_tasks_lay(t, TASKBAR_TABS_LEFT, 0, list[0], listed[0], widths, titled, m, first ? 0 : apart, pad, side, icon_gap, high);
+                                taskbar_tasks_lay(view, t, TASKBAR_TABS_LEFT, 0, list[0], listed[0], widths, titled, m, first ? 0 : apart, pad, side, icon_gap, high);
                         }
                         else if (zone == TASKBAR_ZONE_CENTRE && moon)
                         {
@@ -744,7 +750,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                         else
                         {
                                 n->pad[2 * m] = apart;
-                                taskbar_tasks_lay(t, TASKBAR_TABS, 1, list[1], listed[1], widths, titled, m, 0, pad, side, icon_gap, high);
+                                taskbar_tasks_lay(view, t, TASKBAR_TABS, 1, list[1], listed[1], widths, titled, m, 0, pad, side, icon_gap, high);
                                 if (trays[0])
                                         taskbar_tray_lay(t, 0, m, tabs[1] ? apart : 0, scale, glyph, square, cell, text_w, high);
                                 if (tab)
@@ -776,7 +782,7 @@ static fn taskbar_lay(struct ui_tree address_to t, const struct taskbar_view *vi
                                 if (trays[1])
                                         taskbar_tray_lay(t, 1, m, first ? 0 : apart, scale, glyph, square, cell, text_w, high), first = 0;
                                 if (tabs[1] > 0)
-                                        taskbar_tasks_lay(t, TASKBAR_TABS, 1, list[1], listed[1], widths, titled, m, first ? 0 : apart, pad, side, icon_gap, high), first = 0;
+                                        taskbar_tasks_lay(view, t, TASKBAR_TABS, 1, list[1], listed[1], widths, titled, m, first ? 0 : apart, pad, side, icon_gap, high), first = 0;
                         }
                         if (pill == TASKBAR_PILL_TRAY && taskbar.tasks_zone == zone && trays[0])
                                 taskbar_tray_lay(t, 0, m, first ? 0 : apart, scale, glyph, square, cell, text_w, high), first = 0;
@@ -2180,12 +2186,16 @@ static void taskbar_moon_clock(const struct taskbar_view *view, struct ui addres
 }
 
 /*
-        A tab's icon, in the element the band's tree has for it (the first in the tab): the window's own picture where it has one, made
-        the element's size once and kept until the picture or the size changes (taskbar_pictures, by the window's row of the table;
-        ui_icon_scale), and laid over the tab's glass a row at a time by the library's over (ui_icon_picture); for one with none that is
-        an app of the registry with a picture (a bowl's, by its window key: ui_apps_match, ui_apps_picture), that picture; for a kit
-        program, the kit's symbol for it in the tab's ink, so it follows the theme and dims with a tab put away; for any other program
-        that says who it is, its lettered tile; and for a window that says nothing, the window symbol.
+        A tab's icon, in the element the band's tree has for it (the first in the tab). A task with a picture has it the task's whole
+        height at its start (taskbar_tasks_lay, taskbar_tab_full), cut to the task's round end so the picture is that end of the task
+        (taskbar_tab_rounded: the corners of the picture on the edge it shares with its task are cut to a half circle of the task's
+        thickness, antialiased; an icon-only task's picture is a circle), the task's ground, its lit fill and its words beside it saying
+        its state as before. The picture is an app's of the registry first (by its window key: ui_apps_match, ui_apps_picture, made
+        from the largest PNG the app has, so it is sharp at every scale), then the window's own (the table's icon, made the element's
+        size once and kept until the picture or the size changes: taskbar_pictures, by the window's row; ui_icon_scale), laid over the
+        tab's glass a row at a time by the library's over (ui_icon_picture). With none, a kit program has the kit's symbol for it in the
+        tab's ink, so it follows the theme and dims with a tab put away; any other program that says who it is, its lettered tile; and a
+        window that says nothing, the window symbol.
 */
 struct taskbar_picture
 {
@@ -2196,12 +2206,58 @@ struct taskbar_picture
 };
 static struct ui_grown taskbar_pictures; // by the window's row, as many as the rows (pages touched only for the icons drawn)
 
-static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, int which, unsigned int ink)
+// Whether the task numbered at has a picture: its app's, or the window's own.
+static bool taskbar_tab_full(const struct taskbar_view *view, int at)
+{
+        return (view->apps && view->apps[at] && ui_apps_has_picture(ui_apps_match(view->apps[at]))) ||
+               (view->icons && view->icon_seqs && view->icons[at] && view->icon_seqs[at]);
+}
+
+/*
+        A picture of side pixels laid at x, y with the corners on the edges it shares with its task cut round (a radius of half the side, the
+        task's round end): ends says which, a bit each, 1 the left, 2 the right, 4 the top, 8 the bottom. The cover of a pixel is how far
+        its middle is inside the circle, held to 0 and 1, which is the half pixel of antialiasing a round plate has.
+*/
+static void taskbar_tab_rounded(struct ui address_to ui, int x, int y, int side, const unsigned int address_to picture, unsigned int ends)
+{
+        static unsigned int cut[UI_PICTURE_MOST * UI_PICTURE_MOST];
+
+        if (side <= 0 || side > UI_PICTURE_MOST)
+                return;
+        for (int row = 0; row < side; row++)
+                for (int column = 0; column < side; column++)
+                {
+                        unsigned int pixel = picture[row * side + column], cover = 256;
+                        // The pixel's middle from the picture's, in halves of a pixel: the task's round end is the half circle about it.
+                        int dx = 2 * column + 1 - side, dy = 2 * row + 1 - side;
+
+                        if (((ends & 1) && dx < 0) || ((ends & 2) && dx > 0) || ((ends & 4) && dy < 0) || ((ends & 8) && dy > 0))
+                        {
+                                int d2 = dx * dx + dy * dy, d = 0, inside;
+
+                                while ((d + 1) * (d + 1) <= d2)
+                                        d++;
+                                // The edge is at side halves (the radius); a pixel whose middle is on it is half covered.
+                                inside = (side - d) * 128 + 128;
+                                cover = inside < 0 ? 0u : inside > 256 ? 256u : (unsigned int)inside;
+                        }
+                        if (cover < 256)
+                                pixel = ((pixel >> 24) * cover >> 8) << 24 | ((pixel >> 16 & 255) * cover >> 8) << 16 | ((pixel >> 8 & 255) * cover >> 8) << 8 |
+                                        ((pixel & 255) * cover >> 8);
+                        cut[row * side + column] = pixel;
+                }
+        ui_icon_picture(ui, x, y, side, cut);
+}
+
+static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tree address_to t, const struct ui_node address_to n, const struct ui_node address_to tab,
+                             int which, unsigned int ink)
 {
         ui_tree_ready(t);
         const struct ui_node address_to band = &t->node[1];
         const char *app = view->apps ? view->apps[which] : null;
         int x = n->x - band->x, y = n->y - band->y, side = n->w < n->h ? n->w : n->h, symbol;
+        unsigned int ends = 0;
+        const unsigned int address_to picture;
         struct ui ui;
 
         if (side <= 0 || x < 0 || y < 0 || x + side > band->w || y + side > band->h)
@@ -2209,6 +2265,19 @@ static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tr
         memory_zero(&ui, sizeof(ui));
         ui.pixels = view->pixels, ui.pitch = (unsigned long)band->w, ui.width = band->w, ui.height = band->h, ui.top = 0, ui.bottom = band->h;
         ui.scale = taskbar_scaled(view->scale), ui.scene = view->scene, ui.engine = view->engine, ui.regular = view->face;
+        // The edges the picture shares with its task along the task's length are the task's round ends; an icon-only task's is a circle.
+        if (tab && tab->w >= tab->h)
+                ends = (n->x <= tab->x ? 1u : 0u) | (n->x + n->w >= tab->x + tab->w ? 2u : 0u);
+        else if (tab)
+                ends = (n->y <= tab->y ? 4u : 0u) | (n->y + n->h >= tab->y + tab->h ? 8u : 0u);
+        if (!ends || (tab && n->w >= tab->w && n->h >= tab->h))
+                ends = 15u;
+        picture = side <= UI_PICTURE_MOST ? ui_apps_picture(ui_apps_match(app), side) : null;
+        if (picture)
+        {
+                taskbar_tab_rounded(&ui, x, y, side, picture, ends);
+                return;
+        }
         if (view->icons && view->icon_seqs && view->icons[which] && view->icon_seqs[which] && side <= UI_ICON_MOST)
         {
                 unsigned int row = view->rows ? view->rows[which] : (unsigned int)which;
@@ -2222,19 +2291,8 @@ static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tr
                         ui_icon_scale(kept->pixels, side, view->icons[which]);
                         kept->from = view->icons[which], kept->seq = view->icon_seqs[which], kept->side = side;
                 }
-                ui_icon_picture(&ui, x, y, side, kept->pixels);
+                taskbar_tab_rounded(&ui, x, y, side, kept->pixels, ends);
                 return;
-        }
-        // A window with no picture of its own that is an app of the registry (by its window key), and a pinned app with no window: the
-        // app's picture, as the launcher shows it.
-        {
-                const unsigned int address_to picture = side <= UI_PICTURE_MOST ? ui_apps_picture(ui_apps_match(app), side) : null;
-
-                if (picture)
-                {
-                        ui_icon_picture(&ui, x, y, side, picture);
-                        return;
-                }
         }
         symbol = ui_icon_of(app);
         if (symbol < 0 && app && app[0])
@@ -2426,7 +2484,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 
                         // Each only where the tab has the room for it whole: a tab too short for its icon and its padding draws none of what does not fit.
                         if (icon && icon->x >= n->x && icon->y >= n->y && icon->x + icon->w <= n->x + n->w && icon->y + icon->h <= n->y + n->h)
-                                taskbar_tab_icon(view, t, icon, which, ink);
+                                taskbar_tab_icon(view, t, icon, n, which, ink);
                         if (label && label->w > 0 && label->h > 0 && label->x >= n->x && label->y >= n->y && label->x + label->w <= n->x + n->w &&
                             label->y + label->h <= n->y + n->h && view->titles && view->titles[which] && view->titles[which][0])
                                 taskbar_say(view, t, label, view->titles[which], ink, ground);

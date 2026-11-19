@@ -24355,15 +24355,16 @@ refused:
 
 /*
         An entry's picture file, by its Icon as the Icon Theme Specification finds one without a theme of its own: an absolute path is
-        that file (a .png); a name is the hicolor theme's apps picture of the size nearest the most kept, larger first, then the pixmaps
-        directory's. Every one is opened inside its bowl (a link on the way is followed inside it). A scalable (SVG) picture is not
-        drawn here, and the entry has its tile. The file's bytes into a mapping (memory_free's, *size bytes), or null.
+        that file (a .png); a name is the hicolor theme's apps picture of the largest size it has up to 512 (made smaller here, so a
+        picture drawn large, a full-height task's, stays sharp), then the pixmaps directory's. Every one is opened inside its bowl (a link
+        on the way is followed inside it). A scalable (SVG) picture is not drawn here, and the entry has its tile. The file's bytes into a
+        mapping (memory_free's, *size bytes), or null.
 */
 #define UI_PNG_FILE_MOST (4 * 1024 * 1024)
 
 static p8 address_to ui_apps_picture_file(const struct ui_app_entry address_to app, positive address_to size)
 {
-        static const unsigned short sides[] = {128, 96, 64, 256, 72, 48, 512, 32, 24, 22, 16};
+        static const unsigned short sides[] = {512, 256, 192, 128, 96, 72, 64, 48, 32, 24, 22, 16};
         char path[UI_APP_PATH * 2], name[UI_APP_PATH];
         bipolar inside, handle = -1;
         positive length = string_length((string_address)app->icon);
@@ -24477,6 +24478,16 @@ static const unsigned int address_to ui_apps_picture(int which, int size)
                 app->cached_side = size;
         }
         return app->cached;
+}
+
+// Whether an entry has a picture of its own (made the first time this is asked, as ui_apps_picture makes it; the size kept is left as it was).
+static b32 ui_apps_has_picture(int which)
+{
+        if (which < 0 || which >= ui_apps.count)
+                return false;
+        if (!ui_apps.app[which].tried)
+                ui_apps_picture(which, ui_apps.app[which].cached_side > 0 ? ui_apps.app[which].cached_side : UI_APP_PICTURE);
+        return ui_apps.app[which].picture != null;
 }
 
 /* ---- apps: starting one, and pinning one ---- */
