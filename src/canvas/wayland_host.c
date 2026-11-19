@@ -6864,7 +6864,8 @@ static long compositor_xwm_xdrag(long what, long row, long x, long y);
 // Steam's overlay in a game on Wayland (xwm.c): what its window wants, and the keys and the pointer sent to the overlay while it is open.
 static int compositor_xwm_steam_wants(unsigned int pid);
 static int compositor_xwm_steam_key(unsigned int pid, unsigned int code, int value, unsigned int modifiers);
-static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, unsigned int flags, int a, int b);
+static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, unsigned int flags, int a, int b, int width, int height,
+                                        int flip, int notch);
 
 static int compositor_xwm_row_is_x(int row);
 
@@ -7905,6 +7906,13 @@ static void compositor_wl_drain(int row)
                 }
                 if (type != WINDOW_EVENT_MOTION && type != WINDOW_EVENT_BUTTON && type != WINDOW_EVENT_WHEEL)
                         continue;
+                // Steam's overlay open over a game on Wayland: the pointer is the overlay's (xwm.c), and none of it the game's; a finger
+                // too, as the kit's press and motion (the overlay reads no touch), though the game holds a wl_touch. The window's size
+                // is what the coordinates are scaled from; the turn's sign and notch are as the client's below would be.
+                if (compositor_xwm_steam_pointer(__atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE), type, flags, a, b, (int)compositor.w[row],
+                                                 (int)compositor.h[row], (table->scroll_off & WINDOW_SCROLL_FLIP) != 0,
+                                                 (flags & WINDOW_WHEEL_PRECISE) && !(flags & WINDOW_WHEEL_STREAM) ? UI_NOTCH : 120))
+                        continue;
                 // A finger on a window whose client holds a wl_touch is told of by its touch (compositor_wl_touch_report): the
                 // pointer's version of the same finger (the kit's press and motion, which say so) is not sent to that client.
                 if ((flags & WINDOW_KEY_TOUCH) && wayland_row_takes_touch(row))
@@ -7919,9 +7927,6 @@ static void compositor_wl_drain(int row)
                                             under >= 0 ? compositor.pointer_y - compositor.y[under] : 0);
                         continue;
                 }
-                // Steam's overlay open over a game on Wayland: the pointer is the overlay's (xwm.c), and none of it the game's.
-                if (compositor_xwm_steam_pointer(__atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE), type, flags, a, b))
-                        continue;
                 // Whatever the event, the pointer is on this window for the client first.
                 if (wayland.pointer_row != row)
                         wayland_pointer_to(row, type == WINDOW_EVENT_MOTION ? a : compositor.pointer_x - compositor.x[row],
@@ -8251,7 +8256,8 @@ static void compositor_wl_touch_report(unsigned int at, int dropped)
                         if (screen->was[slot] < 0)
                         {
                                 row = compositor_picture_under(x, y);
-                                if (row >= 0)
+                                // A game whose Steam overlay is open is told no new finger: the overlay has it (compositor_wl_drain).
+                                if (row >= 0 && (!compositor.table || compositor_xwm_steam_wants(__atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE)) != 2))
                                         wayland_touch_down(row, screen->id[slot], x - compositor.x[row], y - compositor.y[row]);
                         }
                         else if ((row = wayland_touch_row(screen->id[slot])) >= 0)

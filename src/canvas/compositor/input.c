@@ -999,6 +999,40 @@ static int compositor_fullscreen_key(int super, int alone)
         return 1;
 }
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+/*
+        Whether a key is one the compositor keeps from Steam's overlay while the overlay has the keys: Super with Escape (the chord a
+        shortcuts inhibitor keeps), Alt with Tab, and a chord a rule bound. They go on as they would with no overlay, so an overlay
+        that is open and draws nothing (the renderer enabled it and Steam never showed it) cannot hold the keyboard. A key kept at its
+        press is kept at its repeats and its release too, so neither the overlay nor the inhibitor's Escape is told half of it.
+*/
+static int compositor_steam_passes(unsigned int code, int value, unsigned int modifiers, unsigned int chord)
+{
+        static unsigned char passed[32];
+        unsigned char mask = (unsigned char)(1u << (code & 7)), *bit = &passed[(code >> 3) & 31];
+        int pass = 0;
+
+        if (code >= 256)
+                return 0;
+        if (value != 1)
+        {
+                pass = (*bit & mask) != 0;
+                if (!value)
+                        *bit &= (unsigned char)~mask;
+                return pass;
+        }
+        pass = (code == CK_KEY_ESC && (modifiers & WINDOW_KEY_SUPER)) || (chord == WINDOW_KEY_ALT && code == CK_KEY_TAB);
+        for (unsigned int at = 0; !pass && at < compositor_keys.count; at++)
+                pass = code == compositor_keys.code[at] &&
+                       (modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) == compositor_keys.modifiers[at];
+        if (pass)
+                *bit |= mask;
+        else
+                *bit &= (unsigned char)~mask;
+        return pass;
+}
+#endif
+
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
         unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
@@ -1058,9 +1092,14 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         chord = modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
 
 #ifdef CONFIG_MOONWATER_WAYLAND
-        // Steam's overlay over a game on Wayland: Shift+Tab opens it, and while it is open every key is its own (wayland_host.c).
-        if (compositor_wl_steam_key(code, (int)value, modifiers))
+        // Steam's overlay over a game on Wayland: Shift+Tab opens it, and while it is open every key is its own (wayland_host.c),
+        // but the chords the compositor keeps (compositor_steam_passes). An Alt let go there still ends an Alt+Tab.
+        if (!compositor_steam_passes(code, (int)value, modifiers, chord) && compositor_wl_steam_key(code, (int)value, modifiers))
+        {
+                if ((bit & (CK_HELD_ALT | CK_HELD_ALTGR)) && !(modifiers & WINDOW_KEY_ALT) && compositor.cycle)
+                        compositor_focus_commit();
                 return;
+        }
 #endif
         if (bit & (CK_HELD_ALT | CK_HELD_ALTGR))
         {
