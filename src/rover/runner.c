@@ -98,6 +98,7 @@ static struct
         string_address pin[ROVER_ARGUMENTS + 5];
         positive pins;
         struct rover_held held[ROVER_HELD_MOST]; // opens asked before the desktop was up
+        bool desktop_was_up;                     // the desktop has been up this boot: opens are not held for it again
         positive helds;
         struct { p8 name[48]; b64 chord; } keys[ROVER_KEYS_MOST];
         positive key_count;
@@ -662,7 +663,12 @@ static bool rover_runner_desktop_up(void)
 {
         for (positive at = 0; rover_runner.view.head && at < rover_runner.view.head->services; at++)
                 if (rover_runner_service_is(at, "compositor"))
-                        return rover_runner.service[at].pid > 0 && rover_runner.service[at].up;
+                {
+                        bool up = rover_runner.service[at].pid > 0 && rover_runner.service[at].up;
+
+                        rover_runner.desktop_was_up = rover_runner.desktop_was_up || up;
+                        return up;
+                }
         return false;
 }
 
@@ -970,6 +976,17 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
                 (void)facts;
                 if (!rover_runner_desktop_up())
                 {
+                        //      Held only while the boot's first desktop is coming: an open asked while a desktop that was up
+                        //      is down is dropped (a compositor started again replayed them all at once), and one already
+                        //      held for the same program is not held twice.
+                        if (rover_runner.desktop_was_up)
+                        {
+                                rover_runner_say("an open is dropped: the desktop is down: ", (string_address)path, null);
+                                return;
+                        }
+                        for (positive at = 0; at < rover_runner.helds; at++)
+                                if (string_equals((string_address)rover_runner.held[at].word[0], (string_address)path))
+                                        return;
                         if (rover_runner.helds == ROVER_HELD_MOST)
                         {
                                 rover_runner_say("an open is dropped: eight are held for the desktop already", null, null);
@@ -1792,6 +1809,7 @@ static b32 rover_runner_run(bipolar device)
                 }
                 rover_runner_verdict();
                 rover_runner_services();
+                (void)rover_runner_desktop_up(); // noted each turn: an open is held only while the first desktop comes
                 rover_runner_held();
                 rover_runner_clocks(now);
                 rover_runner_drain();

@@ -484,6 +484,22 @@ static fn machine_runner_children(void)
                 }
                 check("with no compositor's service running the desktop is not up, whatever file is there",
                       !rover_runner_desktop_up());
+                //      An open asked while a desktop that was up is down is dropped, not held and replayed when a
+                //      compositor starts again (three Launchers at once on box); one held for a program is held once.
+                {
+                        struct rover_value value = {0, (const p8 address_to)"/terminal", 9, 0};
+
+                        rover_runner.helds = 0;
+                        rover_runner.desktop_was_up = false;
+                        rover_runner_primitive(14, &value, 1);
+                        rover_runner_primitive(14, &value, 1);
+                        check("before the first desktop an open is held, and the same program held once", rover_runner.helds == 1);
+                        rover_runner.desktop_was_up = true;
+                        rover_runner.helds = 0;
+                        rover_runner_primitive(14, &value, 1);
+                        check("after a desktop was up, an open while it is down is dropped", rover_runner.helds == 0);
+                        rover_runner.desktop_was_up = false;
+                }
                 (void)system_wait4_retry(pid, null, 0, null);
                 for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
                         if (rover_runner.children[at] == pid)
