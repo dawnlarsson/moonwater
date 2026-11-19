@@ -4530,6 +4530,10 @@ static struct
         // let go of. The reader reads only descriptors it holds, so a number the loop closed and the kernel gave to a client's socket is never one
         // the reader reads.
         int own[COMPOSITOR_INPUTS];
+        // A device's GONE that found the ring full: owed, its generation and one, and put as soon as there is room (compositor_reader_owed). A
+        // GONE is never dropped: it is the loop's one word that the device is gone, and without it the slot stays held and the same eventN plugged
+        // in again is refused (compositor_input_add) until the next wake.
+        unsigned int gone_owed[COMPOSITOR_INPUTS], gone_owing;
         struct compositor_reader_record ring[COMPOSITOR_READER_RING];
 } compositor_reader = {0, -1, -1, -1};
 #define COMPOSITOR_READER_UNWATCH -1
@@ -4577,7 +4581,7 @@ static void compositor_reader_knock(void)
                 system_write_once(compositor_reader.knock, &one, sizeof one);
 }
 
-// A record into the ring, or none when it is full (the drop is said with the next record that fits).
+// A record into the ring, or none when it is full (the drop is said with the next record that fits; a GONE is owed, compositor_reader_owed).
 static void compositor_reader_put(unsigned int at, unsigned int generation, const struct compositor_input_event *raw)
 {
         unsigned long long handed = compositor_reader.handed, taken = __atomic_load_n(&compositor_reader.reading, __ATOMIC_ACQUIRE);
@@ -4585,6 +4589,12 @@ static void compositor_reader_put(unsigned int at, unsigned int generation, cons
 
         if (handed - taken + (compositor_reader.dropped ? 2 : 1) > COMPOSITOR_READER_RING)
         {
+                if (raw->type == COMPOSITOR_READER_GONE && at < COMPOSITOR_INPUTS)
+                {
+                        compositor_reader.gone_owing += !compositor_reader.gone_owed[at];
+                        compositor_reader.gone_owed[at] = generation + 1;
+                        return;
+                }
                 compositor_reader.dropped = at + 1;
                 return;
         }
@@ -4720,6 +4730,24 @@ static void compositor_reader_sync(int *watched, unsigned int *generations, unsi
         *count = devices > *count ? devices : *count;
 }
 
+// The GONEs owed put where the ring has room now; true while any is still owed (the reader's wait is then bounded, so the loop's take is seen).
+static b32 compositor_reader_owed(void)
+{
+        for (unsigned int at = 0; compositor_reader.gone_owing && at < COMPOSITOR_INPUTS; at++)
+                if (compositor_reader.gone_owed[at])
+                {
+                        unsigned long long handed = compositor_reader.handed, taken = __atomic_load_n(&compositor_reader.reading, __ATOMIC_ACQUIRE);
+                        struct compositor_input_event gone = {0, 0, COMPOSITOR_READER_GONE, 0, 0};
+
+                        if (handed - taken + (compositor_reader.dropped ? 2 : 1) > COMPOSITOR_READER_RING)
+                                break;
+                        compositor_reader_put(at, compositor_reader.gone_owed[at] - 1, &gone);
+                        compositor_reader.gone_owed[at] = 0, compositor_reader.gone_owing--;
+                        compositor_reader_knock();
+                }
+        return compositor_reader.gone_owing != 0;
+}
+
 static fn compositor_reader_run(address_any context)
 {
         static int watched[COMPOSITOR_INPUTS];
@@ -4741,10 +4769,11 @@ static fn compositor_reader_run(address_any context)
                         changes = __atomic_load_n(&compositor_reader.changes, __ATOMIC_ACQUIRE);
                         compositor_reader_sync(watched, generations, &count);
                 }
-                // A note waiting for its knock bounds the wait; one due is knocked for.
+                // A note waiting for its knock bounds the wait; one due is knocked for. A GONE owed bounds it to a millisecond.
                 {
                         long wait[2] = {0, 0};
                         positive now = compositor_reader.note_due ? clock_monotonic_nanoseconds() : 0;
+                        b32 owed = compositor_reader_owed();
 
                         if (compositor_reader.note_due && now >= compositor_reader.note_due)
                         {
@@ -4753,8 +4782,10 @@ static fn compositor_reader_run(address_any context)
                         }
                         if (compositor_reader.note_due)
                                 wait[1] = (long)(compositor_reader.note_due - now);
+                        if (owed && (!compositor_reader.note_due || wait[1] > 1000000))
+                                wait[1] = 1000000;
                         got = (long)system_call_6(syscall(epoll_pwait2), (positive)compositor_reader.set, (positive)ready, 16,
-                                                  compositor_reader.note_due ? (positive)wait : 0, 0, 0);
+                                                  compositor_reader.note_due || owed ? (positive)wait : 0, 0, 0);
                 }
                 for (long k = 0; k < got; k++)
                 {

@@ -2783,7 +2783,7 @@ static void check_compositor_hover(void)
         struct compositor_input_event other[2] = {{0, 0, COMPOSITOR_EV_KEY, 31, 1}, {0, 0, COMPOSITOR_EV_SYN, 0, 0}};
         struct compositor_input_event gone = {0, 0, COMPOSITOR_READER_GONE, 0, 0};
         unsigned int generation;
-        b32 down, order = false, stale, wrapped, left;
+        b32 down, order = false, stale, wrapped, left, owed;
 
         if (system_call_2(syscall(pipe2), (positive)device, O_NONBLOCK))
         {
@@ -2822,14 +2822,20 @@ static void check_compositor_hover(void)
         compositor_reader_put(0, generation, &press[0]), compositor_reader_put(0, generation, &press[1]);
         compositor_reader_take();
         wrapped = (compositor.keys_down[30 >> 3] >> (30 & 7) & 1) && compositor_reader.reading == COMPOSITOR_READER_RING * 3ull + 1;
-        // Gone: the device let go of, and the key it held let go.
+        // Gone with the ring full (the loop stalled, the device unplugged): the GONE is owed, not dropped, and put once the loop has taken the
+        // ring's records; then the device is let go of, and the key it held let go.
+        compositor_reader.handed = compositor_reader.reading + COMPOSITOR_READER_RING;
         compositor_reader_put(0, generation, &gone);
+        owed = compositor_reader.gone_owing == 1 && compositor_reader.gone_owed[0] == generation + 1 && !compositor_reader.dropped;
+        compositor_reader.reading = compositor_reader.handed, compositor_reader.reading_out = compositor_reader.handed_out;
+        owed = owed && !compositor_reader_owed() && !compositor_reader.gone_owing;
         compositor_reader_take();
         left = compositor.inputs[0] < 0 && !(compositor.keys_down[30 >> 3] >> (30 & 7) & 1) && compositor_reader.generation[0] != generation;
         check("input: the reader's records are acted on in order as the device's read was", down && order);
         check("input: a record of a device's open let go of since is passed over", stale);
         check("input: a report across the end of the reader's ring is whole", wrapped);
         check("input: the reader's gone record lets the device go and what it held", left);
+        check("input: a gone record that finds the reader's ring full is owed and put once there is room, never dropped (B-h1-2)", owed);
         compositor_reader.on = 0;
         system_close(compositor_reader.knock);
         compositor_reader.knock = -1;
