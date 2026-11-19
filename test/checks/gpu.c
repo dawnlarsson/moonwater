@@ -1819,6 +1819,28 @@ static void gpu_scan_rows(void)
                       compositor_wl.scan_refused.fourcc == 0x34325258u && compositor_wl.lent[ROW].scan_failed);
         check("gpu scan: and not asked again for the same buffer", !compositor_lent_fb(ROW));
         gpu_fake_addfb_answer = 0;
+        // A full grave list while a flip is on its way (every grave counts as scanned): the framebuffer on the screen is not the one removed (E-h2-3),
+        // the oldest the screen does not show is, and it is counted.
+        {
+                unsigned int kept_screen = compositor.on_screen, kept_count = compositor_wl_grave_count, forced = compositor_wl_graves_forced;
+                unsigned int kept_graves[COMPOSITOR_WL_GRAVES];
+                int kept_flip = compositor.flip_pending;
+                b32 screen_kept = false, oldest_gone = true;
+
+                memory_copy(kept_graves, compositor_wl_graves, sizeof kept_graves);
+                compositor.flip_pending = 1, compositor.on_screen = 501;
+                compositor_wl_grave_count = 0;
+                for (unsigned int k = 0; k < COMPOSITOR_WL_GRAVES; k++)
+                        compositor_wl_drop_fb(501 + k);
+                compositor_wl_drop_fb(600);
+                for (unsigned int k = 0; k < compositor_wl_grave_count; k++)
+                        screen_kept |= compositor_wl_graves[k] == 501, oldest_gone &= compositor_wl_graves[k] != 502;
+                check("gpu scan: a full grave list never removes the framebuffer on the screen; the oldest the screen does not show goes, counted",
+                      screen_kept && oldest_gone && compositor_wl_grave_count == COMPOSITOR_WL_GRAVES && compositor_wl_graves_forced == forced + 1 &&
+                          compositor_wl_graves[COMPOSITOR_WL_GRAVES - 1] == 600);
+                memory_copy(compositor_wl_graves, kept_graves, sizeof kept_graves);
+                compositor_wl_grave_count = kept_count, compositor.on_screen = kept_screen, compositor.flip_pending = kept_flip;
+        }
 #undef GPU_SCAN_LEND
         memory_zero(&compositor_wl.lent[ROW], sizeof compositor_wl.lent[ROW]);
         compositor.card = kept_card;

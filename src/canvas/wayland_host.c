@@ -868,6 +868,11 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
                                 (const unsigned int *)((const unsigned char *)compositor_wl.lent[row].pixels + (got - (long)at));
                         compositor_wl.lent[row].map = (const unsigned char *)got;
                 }
+        // The damage source's mapping (compositor_wl_source_import) is the pool's too: kept at the old address, the next look re-imported the
+        // buffer, and an unmap at that address later let another row's import go (compositor_wl_unmap).
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                if (compositor_wl.source[row].map == (const unsigned char *)at)
+                        compositor_wl.source[row].map = (const unsigned char *)got;
         // And the layers read in place from it (compositor_wl_layers).
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
@@ -1315,12 +1320,12 @@ static positive compositor_lent_va(int row)
         that plane off (the kernel disables what uses it), so the one on the screen, the overlay's, and any while a flip is on its way (the
         card scans the one before it until the flip lands, and which that is is not kept) wait here, and go at the next flip's end or present
         (compositor_wl_graves_sweep). Removed at once, a fullscreen window shown straight from its client's buffers had the framebuffer on the
-        screen taken away at the client's next commit, before the flip to the new one, which blanked the screen for that frame. Full, the oldest
-        goes at once, as before. A buffer of a window on the overlay waiting to go with a plate's flip (compositor_plane_carry) is kept as well.
+        screen taken away at the client's next commit, before the flip to the new one, which blanked the screen for that frame. Full, the list
+        is swept, then the oldest that no plane shows goes (counted). A buffer of a window on the overlay waiting to go with a plate's flip (compositor_plane_carry) is kept as well.
 */
 #define COMPOSITOR_WL_GRAVES 16
 static unsigned int compositor_wl_graves[COMPOSITOR_WL_GRAVES];
-static unsigned int compositor_wl_grave_count;
+static unsigned int compositor_wl_grave_count, compositor_wl_graves_forced; // (full: swept, then the oldest no plane shows goes, counted here)
 
 static int compositor_wl_fb_scanned(unsigned int fb)
 {
@@ -1367,9 +1372,17 @@ static void compositor_wl_drop_fb(unsigned int fb)
                 return;
         }
         if (compositor_wl_grave_count == COMPOSITOR_WL_GRAVES)
+                compositor_wl_graves_sweep();
+        if (compositor_wl_grave_count == COMPOSITOR_WL_GRAVES)
         {
-                compositor_wl_rmfb(compositor_wl_graves[0]);
-                for (unsigned int at = 1; at < COMPOSITOR_WL_GRAVES; at++)
+                unsigned int out = 0;
+
+                // The oldest a plane does not show, never on_screen, the overlay's or the carried one's.
+                while (out < COMPOSITOR_WL_GRAVES - 1 && (compositor_wl_graves[out] == compositor.on_screen || compositor_wl_graves[out] == compositor.plane_fb ||
+                                                          compositor_wl_graves[out] == compositor_plane_carry.fb))
+                        out++;
+                compositor_wl_rmfb(compositor_wl_graves[out]), compositor_wl_graves_forced++;
+                for (unsigned int at = out + 1; at < COMPOSITOR_WL_GRAVES; at++)
                         compositor_wl_graves[at - 1] = compositor_wl_graves[at];
                 compositor_wl_grave_count--;
         }
@@ -1483,6 +1496,8 @@ static unsigned int compositor_lent_fb_as(int row, int opaque)
         // is not given one (opaque 0: the fullscreen paths).
         if (compositor_wl.lent[row].scan_fb)
                 return opaque || (!compositor_wl.lent[row].scan_x && !compositor_wl.lent[row].scan_y) ? compositor_wl.lent[row].scan_fb : 0;
+        // The origin is the framebuffer's own, set below only with the one that has it: one left by a refusal (PRIME) was a later one's.
+        compositor_wl.lent[row].scan_x = compositor_wl.lent[row].scan_y = 0;
         fb.width = (unsigned int)compositor_wl.lent[row].width;
         fb.height = (unsigned int)compositor_wl.lent[row].height;
         fb.pixel_format = fourcc;
@@ -2621,6 +2636,10 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
                         gpu_release_import(compositor_wl.lent[row].import);
                 compositor_wl.lent[row].scan_failed = 0;
         }
+        // The same buffer with the window at another place in it (its geometry moved, its size the same): the framebuffer was made at the old
+        // place (its offset, or its origin scan_x and scan_y for the overlay), so it goes; the import, which is the buffer's from its start, stays.
+        else if (compositor_lent(row) && compositor_wl.lent[row].pixels != (const unsigned int *)at)
+                compositor_wl_lent_drop_fb(row);
         compositor_wl.lent[row].pixels = (const unsigned int *)at;
         compositor_wl.lent[row].pitch = stride / 4;
         compositor_wl.lent[row].width = width;
