@@ -685,6 +685,12 @@ b32 main()
                 tested = gpu_image_test() && !gpu_model.fault.code;
                 check("gpu model: gpu_image_test (the texture unit's read a card is held to at its start) passes on the model card", tested);
                 gpu_model_card_reset();
+                tested = gpu_nv12_test() && !gpu_model.fault.code;
+                check("gpu model: gpu_nv12_test (the NV12 kernel held at the card's start to the processor's colour, exactly) passes on the model card", tested);
+                gpu_nv12_ok = 0, gpu_nv12_trying = 0;
+                check("gpu model: an NV12 picture is not drawn on a card whose start did not pass the NV12 test (the processor's walk makes it)",
+                      !gpu_nv12(GPU_VA, 64, GPU_VA, 64, GPU_VA, 64, GPU_VA, 64, 4) && gpu_end == GPU_END_NONE);
+                gpu_model_card_reset();
                 for (unsigned int i = 0; i < 256 * 64; i++)
                         seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, from[i] = seed, into[i] = 0x5a5a5a5au;
                 read = true;

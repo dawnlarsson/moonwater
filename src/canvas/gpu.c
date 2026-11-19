@@ -1170,9 +1170,11 @@ static void gpu_say_kernel(void);
 static b32 gpu_idle(void);
 static unsigned int gpu_test_hash(void);
 static b32 gpu_image_test(void);
+static b32 gpu_nv12_test(void);
 // The texture unit's read (op 8, gpu_image) drew its own test right at the last start (gpu_image_test): a client's tiled or compressed buffer may be offered
 // and read only while this holds (gpu_image_takes). Not a step of the card's: a card that fails it composes as before, and its clients are told of linear alone.
 static b32 gpu_image_ok;
+static b32 gpu_nv12_ok, gpu_nv12_trying; // the card drew its NV12 test right at its start (gpu_nv12_test), and the test is drawing now
 
 // The dma-buf route's own prerequisites (udmabuf, then PRIME), checked once the card is up: a card whose userptr works does not need them, and one whose userptr
 // is refused is served by them (the fallback). A step that fails is kept as gpu_req.route with its error; the card still composes.
@@ -1231,7 +1233,7 @@ static void gpu_stop(void)
         if (gpu.fd >= 0)
                 system_close(gpu.fd);
         memory_zero(&gpu, sizeof(gpu));
-        gpu_image_ok = 0;
+        gpu_image_ok = gpu_nv12_ok = 0;
         if (gpu_import_at_room)
                 gpu_imports_room(0); // the import table's arrays pointed at their reservation again (its room kept, empty)
         gpu.fd = -1, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_before.sequence = 0, gpu_slot = gpu_pending_slot = 0;
@@ -1540,6 +1542,7 @@ static b32 gpu_start(positive bytes)
                         break;
                 }
                 gpu_image_ok = gpu_set == &gpu_amd_rdna2 && gpu_image_test();
+                gpu_nv12_ok = gpu_set == &gpu_amd_rdna2 && gpu_nv12_test();
                 if ((gpu_req.mask & (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME)) != (1u << GPU_REQ_UDMABUF | 1u << GPU_REQ_PRIME))
                         gpu_route_probe();
                 gpu_kmsg_drain();
@@ -3429,7 +3432,8 @@ static b32 gpu_blit(positive src, unsigned int sp, positive dst, unsigned int dp
         An NV12 picture made XRGB by the card (op 9), scaled by tables as op 7 is: its luma at luma (luma_pitch bytes a row), its chroma at chroma
         (chroma_pitch bytes a row, a U and a V byte for each 2 by 2 pixels), into dst (dp pixels a row) over w by h; the processor has made the w
         entries of the columns' and then the h entries of the rows' at tab, each the source's column and row (no pitch in them). The colour is
-        compositor_wl_decode_pixel's, bit for bit (BT.601, limited range). amdgpu's set alone has the kernel. gpu_run waits, as gpu_blit's does.
+        compositor_wl_decode_pixel's, bit for bit (BT.601, limited range). amdgpu's set alone has the kernel. gpu_run waits, as gpu_blit's does. False,
+        with nothing run, on a card whose start did not draw the NV12 test right (gpu_nv12_ok): the caller's processor walk makes the picture then.
 */
 static b32 gpu_nv12(positive luma, unsigned int luma_pitch, positive chroma, unsigned int chroma_pitch, positive dst, unsigned int dp, positive tab,
                     unsigned int w, unsigned int h)
@@ -3437,7 +3441,7 @@ static b32 gpu_nv12(positive luma, unsigned int luma_pitch, positive chroma, uns
         struct gpu_args address_to a;
 
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
-        if (!w || !h || !gpu_idle() || gpu_set != &gpu_amd_rdna2)
+        if (!w || !h || !gpu_idle() || gpu_set != &gpu_amd_rdna2 || (!gpu_nv12_ok && !gpu_nv12_trying))
                 return false;
         gpu_slot_take(), a = GPU_ARGS;
         a->s = luma, a->d = dst, a->g = tab, a->sp = luma_pitch, a->dp = dp, a->gp = chroma_pitch, a->w = w, a->op = 9, a->v = 0, a->x0 = a->y0 = 0, a->rows = h;
@@ -3818,6 +3822,48 @@ static b32 gpu_image_test(void)
                                 ok = dst[y * 64 + x] == ((c & 0xff00ff00u) | (c >> 16 & 0xff) | (c & 0xff) << 16);
                         }
         }
+        return ok;
+}
+
+// An NV12 pixel as op 9 makes it and compositor_wl_decode_pixel does (BT.601, limited range), for the test below.
+static unsigned int gpu_nv12_expect(int luma, int u, int v)
+{
+        int c = luma - 16 < 0 ? 0 : luma - 16, d = u - 128, e = v - 128;
+        int r = (298 * c + 409 * e + 128) >> 8, g = (298 * c - 100 * d - 208 * e + 128) >> 8, b = (298 * c + 516 * d + 128) >> 8;
+
+        r = r < 0 ? 0 : r > 255 ? 255 : r, g = g < 0 ? 0 : g > 255 ? 255 : g, b = b < 0 ? 0 : b > 255 ? 255 : b;
+        return 0xff000000u | (unsigned int)r << 16 | (unsigned int)g << 8 | (unsigned int)b;
+}
+
+/*
+        The NV12 kernel (op 9) held to the colour the processor gives (gpu_nv12_expect, compositor_wl_decode_pixel's arithmetic): 64 by 4 pixels of a
+        luma of numbers and its 2 by 2 chroma, the tables the identity, each pixel compared exactly. The card's start trusted the scene and the texture
+        unit's read and never ran this one, which every video a client shows on the card goes through. True when every pixel is right.
+*/
+static b32 gpu_nv12_test(void)
+{
+        positive base = gpu.size - (1 << 20), luma_at = base + 131072, chroma_at = luma_at + 4096, dst_at = base + 262144, tab_at = base + 393216;
+        p8 address_to luma = (p8 address_to)gpu.at + luma_at, address_to chroma = (p8 address_to)gpu.at + chroma_at;
+        unsigned int address_to dst = (unsigned int address_to)((p8 address_to)gpu.at + dst_at), address_to tab = (unsigned int address_to)((p8 address_to)gpu.at + tab_at);
+        unsigned int seed = 4242u;
+        b32 ok, done;
+
+        for (unsigned int i = 0; i < 64 * 4; i++)
+                seed = seed * 1664525u + 1013904223u, luma[i] = (p8)(seed >> 24);
+        for (unsigned int i = 0; i < 64 * 2; i++)
+                seed = seed * 1664525u + 1013904223u, chroma[i] = (p8)(seed >> 24);
+        for (unsigned int x = 0; x < 64; x++)
+                tab[x] = x;
+        for (unsigned int y = 0; y < 4; y++)
+                tab[64 + y] = y;
+        memory_zero(dst, 64 * 4 * 4);
+        gpu_nv12_trying = 1;
+        done = gpu_nv12(GPU_VA + luma_at, 64, GPU_VA + chroma_at, 64, GPU_VA + dst_at, 64, GPU_VA + tab_at, 64, 4);
+        gpu_nv12_trying = 0;
+        ok = done;
+        for (unsigned int y = 0; y < 4 && ok; y++)
+                for (unsigned int x = 0; x < 64 && ok; x++)
+                        ok = dst[y * 64 + x] == gpu_nv12_expect(luma[y * 64 + x], chroma[(y >> 1) * 64 + (x & ~1u)], chroma[(y >> 1) * 64 + (x & ~1u) + 1]);
         return ok;
 }
 
