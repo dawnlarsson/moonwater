@@ -132,6 +132,9 @@ static void compositor_game_watch(void)
         game's hold: /run/moonwater/game-hold-off.
 */
 #define COMPOSITOR_GAME_SLICE_NS 100000ull
+#define COMPOSITOR_GAME_SLICES 8 // the games sliced at once: one a screen's fullscreen top
+#define COMPOSITOR_GAME_SLICE_FILE "/run/moonwater/game-slice" // the pids sliced now, for a compositor started after this one to give back
+static b32 compositor_game_off; // /run/moonwater/game-hold-off at the start: no game's hold, no slice
 struct compositor_sched_attr
 {
         unsigned int size, policy;
@@ -182,20 +185,93 @@ static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long lon
         return asked;
 }
 
-// Each loop turn: the fullscreen top window's process given the slice, and the one before put back when it changes.
+// The pids sliced now, written where a compositor started after this one finds them (COMPOSITOR_GAME_SLICE_FILE), a line each.
+static void compositor_game_slice_note(const unsigned int *pids, unsigned int count)
+{
+        char text[COMPOSITOR_GAME_SLICES * 12];
+        positive at = 0;
+        bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)COMPOSITOR_GAME_SLICE_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+
+        if (handle < 0)
+                return;
+        for (unsigned int k = 0; k < count; k++)
+                at += positive_into_string((string_address)text + at, (positive)pids[k]), text[at++] = '\n';
+        if (at)
+                system_write_once(handle, text, at);
+        system_close(handle);
+}
+
+/*
+        Each loop turn: every screen's fullscreen top window's process given the slice (two games on two screens each have it, where the first
+        screen's alone did), and the ones that are no longer put back. The slice is the scheduler's and needs no /dev/cpu_dma_latency: a
+        machine without that node (the hold's) still slices; only the owner's game-hold-off file stops it. At the first turn the pids a
+        compositor before this one sliced (its file) are put back, so a game that outlived a compositor's restart is not left with the slice.
+*/
 static void compositor_game_slice(void)
 {
-        static unsigned int pid;
-        int row = compositor.games != ~0ul ? compositor_fullscreen_top() : -1;
-        unsigned int now = row >= 0 && compositor.table ? __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE) : 0;
+        static unsigned int pids[COMPOSITOR_GAME_SLICES], count;
+        static b32 started;
+        unsigned int now[COMPOSITOR_GAME_SLICES], nows = 0, me = (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0);
+        int rows[COMPOSITOR_GAME_SLICES];
+        unsigned int tops = compositor_game_off ? 0 : compositor_fullscreen_tops(rows, COMPOSITOR_GAME_SLICES);
+        b32 changed = false;
 
-        if (now == pid)
+        // The file is the compositor's that has the card and gave the device its table (table_giver): a check's, or a headless one's, has no word in it.
+        if (!started && !compositor.table_giver)
+                started = 1;
+        if (!started)
+        {
+                char text[COMPOSITOR_GAME_SLICES * 12 + 1];
+                bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_GAME_SLICE_FILE, FILE_READ | O_NOFOLLOW | O_CLOEXEC), got = 0;
+                unsigned int value = 0;
+
+                started = 1;
+                if (handle >= 0)
+                        got = system_read_once(handle, text, sizeof text - 1), system_close(handle);
+                for (bipolar k = 0; k < got; k++)
+                        if (text[k] >= '0' && text[k] <= '9')
+                                value = value * 10 + (unsigned int)(text[k] - '0');
+                        else
+                        {
+                                if (value && value != me)
+                                        compositor_game_slice_of(value, 0);
+                                value = 0;
+                        }
+                if (got > 0)
+                        compositor_game_slice_note(pids, 0);
+        }
+        for (unsigned int k = 0; k < tops && compositor.table; k++)
+        {
+                unsigned int pid = __atomic_load_n(&compositor.table->pid[rows[k]], __ATOMIC_ACQUIRE), dup = 0;
+
+                for (unsigned int j = 0; j < nows; j++)
+                        dup |= now[j] == pid;
+                if (pid && pid != me && !dup)
+                        now[nows++] = pid;
+        }
+        for (unsigned int k = 0; k < count; k++)
+        {
+                b32 kept = false;
+
+                for (unsigned int j = 0; j < nows; j++)
+                        kept |= now[j] == pids[k];
+                if (!kept)
+                        compositor_game_slice_of(pids[k], 0), changed = true;
+        }
+        for (unsigned int j = 0; j < nows; j++)
+        {
+                b32 had = false;
+
+                for (unsigned int k = 0; k < count; k++)
+                        had |= pids[k] == now[j];
+                if (!had)
+                        compositor_game_slice_of(now[j], COMPOSITOR_GAME_SLICE_NS), changed = true;
+        }
+        if (!changed)
                 return;
-        if (pid)
-                compositor_game_slice_of(pid, 0);
-        pid = now;
-        if (pid && pid != (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0))
-                compositor_game_slice_of(pid, COMPOSITOR_GAME_SLICE_NS);
+        memory_copy(pids, now, sizeof now[0] * nows), count = nows;
+        if (compositor.table_giver)
+                compositor_game_slice_note(pids, count);
 }
 
 /*

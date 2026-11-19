@@ -5066,8 +5066,19 @@ static void fullscreen_rows(void)
               compositor.fullscreen[0] && compositor.arranged[0] == COMPOSITOR_MAXIMIZED && compositor.x[0] == 0 && compositor.y[0] == 0 &&
                   compositor.stack[compositor.stacked - 1] == 0 && compositor.focus == 0 && compositor.fullscreen_was[0] == COMPOSITOR_FLOATING);
         check("fullscreen: the taskbar slides away for the fullscreen window on top", compositor_fullscreen_up());
+        {
+                int tops[4] = {-1, -1, -1, -1};
+
+                check("fullscreen: every screen's fullscreen top (the game slice's, one a screen) is that window here",
+                      compositor_fullscreen_tops(tops, 4) == 1 && tops[0] == 0);
+        }
         compositor_raise(1);
         check("fullscreen: and comes back while another window is over it", !compositor_fullscreen_up());
+        {
+                int tops[4];
+
+                check("fullscreen: with another window over it no screen has a fullscreen top", compositor_fullscreen_tops(tops, 4) == 0);
+        }
         compositor_raise(0);
         compositor_fullscreen_off(0);
         check("fullscreen: out of it, a window that floated floats again at its place and size",

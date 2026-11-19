@@ -3286,7 +3286,7 @@ static b32 compositor_main()
                 bipolar off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/game-hold-off", FILE_READ | O_CLOEXEC);
 
                 if (off >= 0)
-                        compositor.games = ~0ul, system_close(off);
+                        compositor.games = ~0ul, compositor_game_off = 1, system_close(off);
         }
         // Variable refresh for a screen whose connector does not say it can, where the machine's owner says it can (kms.c's compositor_vrr).
         {

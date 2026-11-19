@@ -1,6 +1,6 @@
 # Production-function inventory seal; not a proof of review coverage or correctness.
-sha256 fa4e45cadb01e23e10a86a4870cd5b9cb894c30b14ed075e5e1222f65ad4403b
-c_functions 15386
+sha256 b59adb79c1f5408e38af576a02a6d8869a06328524497bedd3b45e60a2982f0a
+c_functions 15388
 library_asm 518
 library_arch_bodies 1530
 library_aliases 98

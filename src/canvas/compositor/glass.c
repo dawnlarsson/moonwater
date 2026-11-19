@@ -435,6 +435,28 @@ static int compositor_fullscreen_up(void)
         return compositor_fullscreen_top() >= 0;
 }
 
+// Every screen's fullscreen top window, as compositor_fullscreen_top finds the first (one a screen, most of them): how many.
+static unsigned int compositor_fullscreen_tops(int *rows, unsigned int most)
+{
+        unsigned int seen = 0, count = 0;
+
+        for (unsigned int at = compositor.stacked; at-- > 0 && count < most;)
+        {
+                int row = (int)compositor.stack[at], screen;
+
+                if (!compositor_visible(row) || compositor_popup_parent[row] >= 0 || compositor_row_xoverride(row) ||
+                    (compositor.asks[row] & WINDOW_NO_TAB))
+                        continue;
+                screen = compositor_screen_of(row);
+                if (screen < 0 || screen >= 32 || (seen & (1u << screen)))
+                        continue;
+                seen |= 1u << screen;
+                if (compositor.fullscreen[row])
+                        rows[count++] = row;
+        }
+        return count;
+}
+
 // The taskbar's place, asked on every pass of the loop before a frame is drawn, with the clock: away while `taskbar fullscreen on`
 // and a window is fullscreen. A move damages the band where it was and where it goes.
 static void compositor_taskbar_slide(positive now)
