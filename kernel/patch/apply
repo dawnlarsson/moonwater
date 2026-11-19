@@ -1188,8 +1188,10 @@ fi
 
 #       Zero xHCI interrupt moderation (IMOD = 0 instead of default 40000 ns):
 #       removes 40 us of hardware interrupt coalescing delay on every USB mouse
-#       and keyboard packet before the CPU even sees the HID report.
-xhci_c=linux/drivers/usb/host/xhci.c
+#       and keyboard packet before the CPU even sees the HID report. The PCI
+#       controllers' default is set in xhci-pci.c's probe (xhci.c sets none in
+#       7.4), which is every desktop's and laptop's xHCI.
+xhci_c=linux/drivers/usb/host/xhci-pci.c
 if [ -f "$xhci_c" ]; then
         if grep -q -F -- 'xhci->imod_interval = 40000;' "$xhci_c"; then
                 settings_replace "$xhci_c" 's/xhci->imod_interval = 40000;/xhci->imod_interval = 0; \/* Moonwater: zero USB HID interrupt moderation *\//' ||
