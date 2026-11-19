@@ -10097,6 +10097,10 @@ static void xw_test_send_event(void)
                 XWCHECK(n == 32 && xwm_parse_event(ev, 32, &parsed) == XWM_OK && parsed.kind == XWM_EV_CONFIGURE_NOTIFY &&
                         parsed.window == 0x00400001u && parsed.x == 240 && parsed.y == 0 && parsed.width == 1440 && parsed.height == 1080 && !parsed.override,
                         "ConfigureNotify synthetic event encodes and parses back with exact window and geometry");
+                n = xwm_enc_configure_notify(ev, sizeof ev, 0x00400002u, 0, 0, 1920, 1080, 0, 1);
+                XWCHECK(n == 32 && xwm_parse_event(ev, 32, &parsed) == XWM_OK && parsed.kind == XWM_EV_CONFIGURE_NOTIFY &&
+                        parsed.window == 0x00400002u && parsed.x == 0 && parsed.y == 0 && parsed.width == 1920 && parsed.height == 1080 && parsed.override == 1,
+                        "ConfigureNotify encodes override-redirect fullscreen Wine/Proton geometry cleanly");
                 XWCHECK(xwm_enc_configure_notify(ev, 31, 0x00400001u, 0, 0, 100, 100, 0, 0) == XWM_ERR_SPACE,
                         "ConfigureNotify into 31 bytes is refused");
                 XWCHECK(xwm_enc_configure_notify(ev, sizeof ev, 0, 0, 0, 100, 100, 0, 0) == XWM_ERR_ARG,

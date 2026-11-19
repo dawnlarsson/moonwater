@@ -1348,8 +1348,8 @@ static int compositor_xwm_close_owed(const struct compositor_xwm_window *w)
 
 /*
         The screen an X window covers exactly, at its place and its size (a game that maps borderless at the output's size, the common way
-        a game goes fullscreen without asking for _NET_WM_STATE_FULLSCREEN), or -1. Only a managed window that is no one's transient: a
-        popup's or a dialog's place is its own.
+        a game goes fullscreen without asking for _NET_WM_STATE_FULLSCREEN), or -1. Recognises both managed windows and fullscreen
+        override-redirect windows (Wine/Proton borderless fullscreen), excluding explicit popup types and transients.
 */
 static int compositor_xwm_covers(const struct compositor_xwm_window *w)
 {
@@ -1357,12 +1357,24 @@ static int compositor_xwm_covers(const struct compositor_xwm_window *w)
         const int (*screens)[4] = compositor_screens(&count);
         int x = compositor_xwm_from_x(w->x, 0), y = compositor_xwm_from_x(w->y, 1);
 
-        if ((w->state & COMPOSITOR_XWM_POPUPISH) || w->transient)
+        if ((w->state & COMPOSITOR_XWM_POPUPTYPE) || w->transient)
                 return -1;
         for (unsigned int at = 0; at < count; at++)
                 if (screens[at][0] == x && screens[at][1] == y && screens[at][2] == (int)w->width && screens[at][3] == (int)w->height)
                         return (int)at;
         return -1;
+}
+
+// Whether an X window is an unmanaged popup/menu/tooltip rather than a real toplevel. Fullscreen override-redirect
+// windows (e.g. Wine/Proton borderless fullscreen games) are promoted to managed fullscreen toplevels so they hide
+// the taskbar, appear in the taskbar, receive X11 input focus, and stack above Steam/desktop windows.
+static int compositor_xwm_is_popup(const struct compositor_xwm_window *w)
+{
+        if (!(w->state & COMPOSITOR_XWM_POPUPISH))
+                return 0;
+        if ((w->state & COMPOSITOR_XWM_FULLSCREEN) || ((w->state & COMPOSITOR_XWM_OVERRIDE) && !w->transient && compositor_xwm_covers(w) >= 0))
+                return 0;
+        return 1;
 }
 
 // A window's class as its row's app_id, once it has both (the panel matches it to its app by it: ui_apps_match).
@@ -1388,7 +1400,7 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
                 // A window that hard-set its place is where X says; one transient for a window that shows is centred on it, and the
                 // rest on the screen under the pointer (compositor_free_place).
                 struct compositor_xwm_window *owner = w->transient ? compositor_xwm_find(w->transient, 0) : 0;
-                long how = ((w->state & COMPOSITOR_XWM_POPUPISH) ? WAYLAND_XWINDOW_POPUP : 0) | (w->placed ? WAYLAND_XWINDOW_PLACED : 0) |
+                long how = (compositor_xwm_is_popup(w) ? WAYLAND_XWINDOW_POPUP : 0) | (w->placed ? WAYLAND_XWINDOW_PLACED : 0) |
                            WAYLAND_XWINDOW_OWNER(owner && owner->row >= 0 && owner->row < COMPOSITOR_ROWS ? owner->row : -1);
 
                 // A window mapped over a whole screen is fullscreen on it, said so (_NET_WM_STATE), as if it had asked.
@@ -1554,14 +1566,16 @@ static void compositor_xwm_sync(struct compositor_xwm_window *w)
         compositor_xwm_configure(w->id, &c);
         if (c.mask & XWM_CONFIGURE_X)
         {
-                unsigned char ev[XWM_EVENT_SIZE], req[64];
-                unsigned int nw = (c.mask & XWM_CONFIGURE_WIDTH) ? c.width : (w->sent_w ? w->sent_w : w->width);
-                unsigned int nh = (c.mask & XWM_CONFIGURE_HEIGHT) ? c.height : (w->sent_h ? w->sent_h : w->height);
-                long n = xwm_enc_configure_notify(ev, sizeof ev, w->id, c.x, c.y, nw, nh, 0, (w->state & COMPOSITOR_XWM_OVERRIDE) != 0);
+                // ICCCM 4.1.5: deliver synthetic ConfigureNotify on position-only sync so Wine/Proton x11drv updates its cached
+                // window origin; when width/height also changed, XWayland emits a real ConfigureNotify with the new size.
+                if (!(c.mask & (XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT)) && w->width > 0 && w->height > 0)
+                {
+                        unsigned char ev[XWM_EVENT_SIZE], req[64];
+                        long n = xwm_enc_configure_notify(ev, sizeof ev, w->id, c.x, c.y, w->width, w->height, 0, (w->state & COMPOSITOR_XWM_OVERRIDE) != 0);
 
-                // ICCCM 4.1.5: deliver synthetic ConfigureNotify on position sync so Wine/Proton x11drv updates its cached window origin.
-                if (n > 0 && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, XWM_MASK_STRUCTURE_NOTIFY, ev, (unsigned long)n)) > 0)
-                        compositor_xwm_queue(req, n);
+                        if (n > 0 && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, XWM_MASK_STRUCTURE_NOTIFY, ev, (unsigned long)n)) > 0)
+                                compositor_xwm_queue(req, n);
+                }
                 w->sent_x = c.x;
                 w->sent_y = c.y;
                 w->x = c.x;
@@ -1571,6 +1585,8 @@ static void compositor_xwm_sync(struct compositor_xwm_window *w)
         {
                 w->sent_w = c.width;
                 w->sent_h = c.height;
+                w->width = c.width;
+                w->height = c.height;
         }
 }
 
@@ -3867,9 +3883,8 @@ static void compositor_xwm_event(const struct xwm_event *e)
                         compositor_xwm_fullscreen(w, 0);
                 }
                 // A fullscreen window keeps the output's place and size whatever it asks.
-                unsigned int asked = e->value_mask & (XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT |
-                                                      XWM_CONFIGURE_BORDER | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
-                c.mask = asked;
+                c.mask = e->value_mask & (XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT |
+                                          XWM_CONFIGURE_BORDER | XWM_CONFIGURE_SIBLING | XWM_CONFIGURE_STACK_MODE);
                 if (w && (w->state & COMPOSITOR_XWM_FULLSCREEN))
                         c.mask &= ~(XWM_CONFIGURE_X | XWM_CONFIGURE_Y | XWM_CONFIGURE_WIDTH | XWM_CONFIGURE_HEIGHT);
                 if (w && w->row >= 0 && (compositor.resize == w->row || compositor.arranged[w->row] != COMPOSITOR_FLOATING))
@@ -3888,15 +3903,22 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 c.sibling = e->sibling;
                 c.stack_mode = e->detail;
                 if (c.mask)
+                {
                         compositor_xwm_configure(e->window, &c);
-                // ICCCM 4.1.5: if a ConfigureRequest was denied or modified, send a synthetic ConfigureNotify with the actual geometry.
-                if (w && (!c.mask || c.mask != asked || c.width != e->width || c.height != e->height))
+                        if (w && (c.mask & XWM_CONFIGURE_WIDTH))
+                                w->width = c.width, w->sent_w = c.width;
+                        if (w && (c.mask & XWM_CONFIGURE_HEIGHT))
+                                w->height = c.height, w->sent_h = c.height;
+                }
+                // ICCCM 4.1.5: send a synthetic ConfigureNotify ONLY when the ConfigureRequest was completely refused (!c.mask)
+                // so X11/Wine never receives a stale old-size ConfigureNotify right after a real ConfigureWindow resize.
+                if (w && !c.mask)
                 {
                         unsigned char ev[XWM_EVENT_SIZE], req[64];
                         int nx = w->row >= 0 && compositor.showing[w->row] ? compositor_xwm_to_x(compositor.x[w->row], 0) : w->x;
                         int ny = w->row >= 0 && compositor.showing[w->row] ? compositor_xwm_to_x(compositor.y[w->row], 1) : w->y;
-                        unsigned int nw = w->row >= 0 && compositor.showing[w->row] && compositor.w[w->row] > 0 ? compositor.w[w->row] : w->width;
-                        unsigned int nh = w->row >= 0 && compositor.showing[w->row] && compositor.h[w->row] > 0 ? compositor.h[w->row] : w->height;
+                        unsigned int nw = w->width ? w->width : (w->row >= 0 && compositor.showing[w->row] ? compositor.w[w->row] : 1u);
+                        unsigned int nh = w->height ? w->height : (w->row >= 0 && compositor.showing[w->row] ? compositor.h[w->row] : 1u);
                         long n = xwm_enc_configure_notify(ev, sizeof ev, w->id, nx, ny, nw, nh, 0, (w->state & COMPOSITOR_XWM_OVERRIDE) != 0);
 
                         if (n > 0 && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, XWM_MASK_STRUCTURE_NOTIFY, ev, (unsigned long)n)) > 0)
@@ -3940,13 +3962,39 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 w = compositor_xwm_find(e->window, 0);
                 if (w)
                 {
-                        // A popup Xwayland moves while it is shown is adopted again: its new place is sent to the host there.
-                        if ((w->state & COMPOSITOR_XWM_ADOPTED) && (w->state & COMPOSITOR_XWM_POPUPISH) && w->row >= 0)
-                                w->dirty = 1;
                         w->x = e->x;
                         w->y = e->y;
                         w->width = e->width;
                         w->height = e->height;
+                        // Wine/Proton borderless fullscreen games often map a small override-redirect window first and then resize
+                        // it to cover the whole output: promote it to managed fullscreen so it hides/joins the taskbar and takes focus.
+                        if ((w->state & COMPOSITOR_XWM_ADOPTED) && w->row >= 0 && w->row < COMPOSITOR_ROWS &&
+                            !(w->state & COMPOSITOR_XWM_FULLSCREEN))
+                        {
+                                int covers = compositor_xwm_covers(w);
+
+                                if (covers >= 0)
+                                {
+                                        w->restore_w = w->width, w->restore_h = w->height;
+                                        w->state |= COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_COVERED;
+                                        compositor_xwm_net_state(w->id, (int)w->state);
+                                        if (compositor.table)
+                                        {
+                                                compositor.table->glass[w->row] &= ~WINDOW_NO_TAB;
+                                                compositor.table->popup_parent[w->row] = 0;
+                                        }
+                                        compositor.asks[w->row] &= ~WINDOW_NO_TAB;
+                                        compositor_popup_parent[w->row] = -1;
+                                        compositor_fullscreen_on(w->row, covers);
+                                        compositor_raise(w->row);
+                                        compositor_focus(w->row);
+                                        compositor_tabs_changed();
+                                        break;
+                                }
+                        }
+                        // A popup Xwayland moves while it is shown is adopted again: its new place is sent to the host there.
+                        if ((w->state & COMPOSITOR_XWM_ADOPTED) && compositor_xwm_is_popup(w) && w->row >= 0)
+                                w->dirty = 1;
                 }
                 break;
         case XWM_EV_PROPERTY_NOTIFY:
@@ -4696,7 +4744,7 @@ static void compositor_xwm_pass_one(const struct compositor_poll *wanted)
                                         compositor_call(syscall(kill), (positive)w->owner, w->closes >= 3 ? 9 : 15, 0, 0, 0, 0);
                         }
                 }
-                if (!(w->state & COMPOSITOR_XWM_POPUPISH))
+                if (!compositor_xwm_is_popup(w))
                         compositor_xwm_sync(w);
                 // A dialog that is transient for a window is over it when it is shown, and takes the keys from it if it has them.
                 if (w->transient && !(w->state & COMPOSITOR_XWM_RAISED))
@@ -4724,7 +4772,7 @@ static void compositor_xwm_pass_one(const struct compositor_poll *wanted)
 
                 for (long at = 0; at < x->window_table.count && x->fd >= 0; at++)
                         if (x->window[at].id && x->window[at].row >= 0 && x->window[at].row == (int)compositor.focus &&
-                            !(x->window[at].state & COMPOSITOR_XWM_POPUPISH))
+                            !compositor_xwm_is_popup(&x->window[at]))
                                 now_window = x->window[at].id;
                 if (now_window != x->focus_window)
                         x->focus_row = -3;
@@ -4739,7 +4787,7 @@ static void compositor_xwm_pass_one(const struct compositor_poll *wanted)
                 {
                         struct compositor_xwm_window *w = &x->window[at];
 
-                        if (w->id && w->row >= 0 && w->row == x->focus_row && !(w->state & COMPOSITOR_XWM_POPUPISH))
+                        if (w->id && w->row >= 0 && w->row == x->focus_row && !compositor_xwm_is_popup(w))
                         {
                                 if (!w->no_input)
                                         compositor_xwm_focus(w->id);
@@ -4775,7 +4823,7 @@ static void compositor_xwm_pass_one(const struct compositor_poll *wanted)
                         {
                                 struct compositor_xwm_window *w = &x->window[at];
 
-                                if (w->id && w->row == (int)row && !(w->state & COMPOSITOR_XWM_OVERRIDE))
+                                if (w->id && w->row == (int)row)
                                 {
                                         struct xwm_configure sc = {0};
 
