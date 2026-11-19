@@ -943,11 +943,12 @@ static b32 launcher_power_act(int which)
         return !ui_start_apart(words, launcher_power_words(which, words));
 }
 
-// The power row, a component: a subtree of its buttons, each with what it says while it is armed. A bar narrower than LAUNCHER_NARROW
-// (logical pixels) shares the row between them.
+// The power row, a component: a subtree of its buttons, each with what it says while it is armed, in the middle of the bar across (the
+// layout's justify, so it is the middle at every scale and width, for two buttons or three, and reading from the right too). A bar
+// narrower than LAUNCHER_NARROW (logical pixels) shares the row between them.
 static fn launcher_power_row(void)
 {
-        ui_row(.class = "foot")
+        ui_row(.class = "foot.middle")
                 for (int at = 0; at < LAUNCHER_POWERS; at++)
                         if (launcher_power_offered(at))
                                 ui_button(language_text(launcher_powers[at].label), .class = "action.outlined", .says = language_text(launcher_powers[at].says),
@@ -968,6 +969,7 @@ static fn launcher_tiles_ready(void)
         {
                 launcher.grid.virtual = launcher.recents.virtual = true;
                 launcher.grid.tiles = launcher.recents.tiles = LAUNCHER_TILE;
+                launcher.grid.centre = launcher.recents.centre = true; // every line in the middle, a short one on its own
                 launcher.grid.describe = launcher_grid_describe, launcher.recents.describe = launcher_recent_describe;
                 launcher.grid.damaged = launcher.recents.damaged = launcher_damaged;
                 launcher.grid.hover = launcher.grid.down = launcher.recents.hover = launcher.recents.down = -1;
@@ -1017,7 +1019,9 @@ static fn launcher_view(void)
                 lines = lines > LAUNCHER_GRID_LINES ? LAUNCHER_GRID_LINES : lines;
                 // Nothing typed: the grid of the apps, and under it Recent, a line of the ones started last.
                 ui_rows(&launcher.grid, .class = "list", .h = lines * UI_TILE_H, .hidden = typed || !lines);
-                ui_text(WORDS(launcher_recent), .class = "caption", .hidden = typed || !launcher.recent_count);
+                if (!typed && launcher.recent_count)
+                        ui_row(.class = "middle")
+                                ui_text(WORDS(launcher_recent), .class = "caption");
                 ui_rows(&launcher.recents, .class = "list", .h = UI_TILE_H, .hidden = typed || !launcher.recent_count);
                 ui_rows(&launcher.list, .class = "list", .h = (int)rows * UI_ROW, .hidden = !rows);
                 launcher_power_row();
@@ -1046,11 +1050,12 @@ static fn launcher_changed(void)
         launcher.dirty = true;
 }
 
-// The field, made the first time it is wanted: one line of the engine, its clipboard this window's, the list's room.
+// The field, made the first time it is wanted: one line of the engine, its clipboard this window's, the list's room, its text in the
+// middle of the bar as the grid and the power row are (the kit's centred field).
 static struct ui_text address_to launcher_field(void)
 {
         if (!launcher.field.doc.selections && ui_field_open(&launcher.field, &launcher.own, ""))
-                launcher.field.most = LAUNCHER_TEXT - 1, launcher.field.keeps_vertical = true; // Up and Down move the list
+                launcher.field.most = LAUNCHER_TEXT - 1, launcher.field.keeps_vertical = true, launcher.field.centred = true; // Up and Down move the list
         return &launcher.field;
 }
 
@@ -1114,7 +1119,7 @@ static fn launcher_tile_point(const struct ui_list address_to l, int at, int add
 {
         int per = ui_list_per(&launcher.ui, l), wide = ui_dev(&launcher.ui, l->tiles), high = ui_list_unit(&launcher.ui, l);
 
-        *x = ui_mirror(l->x + at % per * wide, wide, l->x, l->w) + wide / 2;
+        *x = ui_list_tile_x(&launcher.ui, l, at) + wide / 2;
         *y = l->y + at / per * high - l->scroll.scroll + high / 2;
 }
 
@@ -1144,15 +1149,16 @@ static b32 launcher_grid_key(const struct window_event address_to event)
         focus = l->focus < 0 ? 0 : l->focus;
         if (!launcher.in_recents && key == UI_KEY_DOWN && launcher.recent_count && focus / per == (launcher.app_count - 1) / per)
         {
+                // Into Recent at the tile nearest across, as Up and Down go between centred lines (ui_list_tile_near).
                 launcher.in_recents = true;
-                launcher.recents.focus = focus % per < launcher.recents.total ? focus % per : launcher.recents.total - 1;
+                launcher.recents.focus = ui_list_tile_near(&launcher.ui, &launcher.recents, 0, ui_list_tile_middle(&launcher.ui, &launcher.grid, focus));
         }
         else if (launcher.in_recents && key == UI_KEY_UP)
         {
-                int line = (launcher.app_count - 1) / per * per;
+                int to = ui_list_tile_near(&launcher.ui, &launcher.grid, (launcher.app_count - 1) / per, ui_list_tile_middle(&launcher.ui, &launcher.recents, focus));
 
                 launcher.in_recents = false;
-                launcher.grid.focus = line + focus % per < launcher.app_count ? line + focus % per : launcher.app_count - 1;
+                launcher.grid.focus = to >= 0 ? to : launcher.app_count - 1;
                 ui_list_reveal(&launcher.ui, &launcher.grid);
         }
         else

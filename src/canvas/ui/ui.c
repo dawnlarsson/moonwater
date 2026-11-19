@@ -25432,7 +25432,10 @@ struct ui_list
         int band_x0, band_x1, band_y1, band_at;
         // Tiles (a virtual list's icon or list view): its rows laid out as tiles this many logical pixels wide, as many a line as the list
         // is wide, each tile_h tall (0: UI_TILE_H, a symbol over its label; a row high or less, a small symbol before it). 0: rows.
+        // centre: each line of tiles in the middle of the list across, a short last line in the middle on its own (ui_list_tile_x), and
+        // Up and Down go to the nearest tile of the line above or below.
         int tiles, tile_h;
+        b32 centre;
         // Stripes: every stripe-th row (the stripe-th, the 2 stripe-th and on, counted from 1 down the list) tinted across its span
         // (ui_list_stripe), under the row's lit fill, its hover, its press and its ring, which all draw over it; 0 or 1 none. The tint is
         // stripe_tint (straight ARGB, its alpha how much of it) where the app gives one, else the theme's (UI_LIST_STRIPE_INK of the
@@ -25499,6 +25502,47 @@ static inline int ui_list_per(const struct ui address_to ui, const struct ui_lis
         int wide = l->tiles ? ui_dev(ui, l->tiles) : 0, per = wide > 0 ? l->w / wide : 1;
 
         return per < 1 ? 1 : per;
+}
+
+// How far in from the list's start a line of tiles begins: none, or for a centred list the room its tiles leave, halved (a short last
+// line's own). Logical order: ui_list_tile_x turns it over for a window that reads from the right.
+static inline int ui_list_line_in(const struct ui address_to ui, const struct ui_list address_to l, int line)
+{
+        int per = ui_list_per(ui, l), count = l->total - line * per, wide = ui_dev(ui, l->tiles);
+
+        if (!l->centre || !l->tiles)
+                return 0;
+        count = count > per ? per : count < 1 ? 1 : count;
+        return (l->w - count * wide) / 2 > 0 ? (l->w - count * wide) / 2 : 0;
+}
+
+// A tile's left edge in the window, mirrored where it reads from the right.
+static inline int ui_list_tile_x(const struct ui address_to ui, const struct ui_list address_to l, int id)
+{
+        int per = ui_list_per(ui, l), wide = ui_dev(ui, l->tiles);
+
+        return ui_mirror(l->x + ui_list_line_in(ui, l, id / per) + id % per * wide, wide, l->x, l->w);
+}
+
+// The tile of line `line` nearest across to x (logical, from the list's start), or -1 for a line with none.
+static int ui_list_tile_near(const struct ui address_to ui, const struct ui_list address_to l, int line, int x)
+{
+        int per = ui_list_per(ui, l), wide = ui_dev(ui, l->tiles), first = line * per, count = l->total - first, column;
+
+        if (line < 0 || count <= 0 || wide <= 0)
+                return -1;
+        count = count > per ? per : count;
+        column = (x - ui_list_line_in(ui, l, line) + (x >= ui_list_line_in(ui, l, line) ? 0 : -wide + 1)) / wide;
+        column = column < 0 ? 0 : column >= count ? count - 1 : column;
+        return first + column;
+}
+
+// The middle across of a tile, logical (from the list's start, as if it read from the left).
+static inline int ui_list_tile_middle(const struct ui address_to ui, const struct ui_list address_to l, int id)
+{
+        int per = ui_list_per(ui, l), wide = ui_dev(ui, l->tiles);
+
+        return ui_list_line_in(ui, l, id / per) + id % per * wide + wide / 2;
 }
 
 // The row a place shows, in either kind of list.
@@ -25744,7 +25788,9 @@ static int ui_list_hit(const struct ui address_to ui, const struct ui_list addre
                         return -1;
                 if (!l->tiles)
                         return inside / row < l->total ? inside / row : -1;
-                column = (ui_point(x, l->x, l->w) - l->x) / ui_dev(ui, l->tiles);
+                // A centred line begins where its tiles do (ui_list_line_in), and a point before it is on none.
+                column = ui_point(x, l->x, l->w) - l->x - ui_list_line_in(ui, l, inside / row);
+                column = column < 0 ? -1 : column / ui_dev(ui, l->tiles);
                 id = inside / row * per + column;
                 return column >= 0 && column < per && id < l->total ? id : -1;
         }
@@ -25809,6 +25855,15 @@ static b32 ui_list_key(const struct ui address_to ui, struct ui_list address_to 
         int across = l->tiles ? ui_list_per(ui, l) : 1, page = l->scroll.view / (l->tiles ? ui_list_unit(ui, l) : ui_dev(ui, UI_ROW)) - 1, by;
 
         page = page < 1 ? 1 : page;
+        // Centred lines do not stand under each other: Up and Down go to the tile nearest across in the line above or below.
+        if (l->tiles && l->centre && l->virtual && (key == UI_KEY_UP || key == UI_KEY_DOWN) && l->total > 0)
+        {
+                int at = l->focus < 0 ? 0 : l->focus, line = at / across + (key == UI_KEY_DOWN ? 1 : -1);
+                int to = ui_list_tile_near(ui, l, line, ui_list_tile_middle(ui, l, at));
+
+                *moved = to >= 0 && ui_list_move(ui, l, to - at);
+                return true;
+        }
         switch (key)
         {
         case UI_KEY_UP: by = -across; break;
@@ -26926,7 +26981,7 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
 static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
 {
         struct ui_row row;
-        int wide = ui_dev(ui, l->tiles), per = ui_list_per(ui, l), x = ui_mirror(l->x + id % per * wide, wide, l->x, l->w);
+        int wide = ui_dev(ui, l->tiles), x = ui_list_tile_x(ui, l, id);
         int pad = ui_dev(ui, 3), small = height <= ui_dev(ui, UI_ROW), size = small ? ui_dev(ui, 20) : ui_dev(ui, 40), width, at;
         unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         char cut[UI_CUT_TEXT];
@@ -30087,7 +30142,8 @@ struct ui_text
         b32 masked;
         b32 cancels;                            // a command or a passphrase: a press outside cancels it (a masked field always does); a plain value commits
         b32 keeps_vertical;                     // the app takes Up and Down (a list's, rows', a scroll): else they go to the ends, as Home and End
-        b32 pasting;                            // it asked the clipboard, and the answer is its
+        b32 centred;                            // a field's line in the middle of its box across while it fits (and its placeholder): ui_text_origin
+        b32 pasting;                           // it asked the clipboard, and the answer is its
         int well_left, well_top, well_right, well_bottom; // where the hand reaches it, device pixels: a field's whole well
         struct ui_caret caret;                  // the caret's blink: its phase, restarted by a key or a move (ui_caret_wake)
         // Drag and drop (ui_text_drag): a press in the selection that may drag it out, and the span it drags; a drag over it to drop.
@@ -30534,6 +30590,10 @@ static fn ui_text_layout_line(struct ui address_to ui, const struct ui_text addr
 // the line's width, the scroll bringing the end of it into view (the scroll is a distance from the line's start either way).
 static int ui_text_origin(const struct ui_text address_to t, const struct ui_text_layout address_to l)
 {
+        // A centred field's line that fits is in the middle whichever way it reads (the caret, a click and the selection all go by this);
+        // one longer than the box scrolls from its start edge as any other.
+        if (t->centred && l->width <= t->right - t->left)
+                return t->left + (t->right - t->left - l->width) / 2;
         return l->base ? t->right - l->width + (int)t->scroll_x : t->left - (int)t->scroll_x;
 }
 
@@ -33644,7 +33704,8 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 // quiet ink is 7:1 on a surface and held at the readable threshold on glass (ui_glass_quiet), and still reads apart from the ink.
                 unsigned int text = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), alpha = 255;
                 const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};
-                int start = ui_rtl() ? t->right - ui_run_in(ui, faces, 0, 0, (string_address)t->placeholder, t->size + t->zoom, 0, 0, 0, ui->width, 0) : t->left;
+                int wide = ui_rtl() || t->centred ? ui_run_in(ui, faces, 0, 0, (string_address)t->placeholder, t->size + t->zoom, 0, 0, 0, ui->width, 0) : 0;
+                int start = t->centred && wide <= t->right - t->left ? t->left + (t->right - t->left - wide) / 2 : ui_rtl() ? t->right - wide : t->left;
 
                 ui_run_in(ui, faces, start, t->top + m.baseline, (string_address)t->placeholder,
                           t->size + t->zoom, text & 0xffffffu, alpha, t->left, t->right, 0);

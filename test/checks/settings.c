@@ -735,6 +735,46 @@ static fn check_launcher(void)
                 check("launcher: the picture's height follows the grid's lines of tiles, and has the power row under it",
                       launcher.height == 2 * UI_PAD + UI_TARGET + UI_GAP2 + lines * UI_TILE_H + UI_GAP2 + UI_ROW);
         }
+        // Every line of the grid is in the middle of the bar, a short last line on its own; Up and Down go to the nearest tile across.
+        {
+                struct ui_list address_to g = &launcher.grid;
+                int wide, per, total = g->total, both;
+
+                launcher_layout();
+                wide = ui_dev(&launcher.ui, g->tiles), per = ui_list_per(&launcher.ui, g);
+                for (int count = 1; count <= per + 2; count++)
+                {
+                        int last = (count - 1) / per * per, in_line = count - last;
+
+                        g->total = count;
+                        both = ui_list_tile_x(&launcher.ui, g, last) - g->x == (g->w - in_line * wide) / 2 &&
+                               ui_list_tile_x(&launcher.ui, g, 0) - g->x == (g->w - (count < per ? count : per) * wide) / 2;
+                        check("launcher: a line of the grid's tiles is in the middle of the bar, a short last line in the middle on its own (1, 5, a full line and 2)",
+                              count != 1 && count != 5 && count != per + 2 ? true : both);
+                }
+                g->total = per + 2, g->focus = per - 1;
+                {
+                        b32 moved = false;
+                        int near = ui_list_tile_near(&launcher.ui, g, 1, ui_list_tile_middle(&launcher.ui, g, per - 1));
+
+                        ui_list_key(&launcher.ui, g, UI_KEY_DOWN, &moved);
+                        check("launcher: Down from the end of a full line goes to the nearest tile across of the short line under it, and Up back to the line above",
+                              moved && g->focus == near && near == per + 1 && (ui_list_key(&launcher.ui, g, UI_KEY_UP, &moved), moved && g->focus / per == 0));
+                }
+                g->total = total, g->focus = 0;
+        }
+        // The field's text is in the middle of its well while it fits (the caret, a click and the selection go by its origin), and one
+        // longer than the well scrolls from its start edge as before; the launcher's field is a centred one.
+        {
+                static struct ui_text centred;
+                static struct ui_text_layout line;
+
+                centred.left = 10, centred.right = 110, centred.centred = true, centred.scroll_x = 7;
+                line.width = 40, line.base = 0;
+                check("launcher: a centred field's line that fits begins where it is in the middle, either way it reads; a longer one scrolls from its start",
+                      ui_text_origin(&centred, &line) == 40 && (line.base = 1, ui_text_origin(&centred, &line) == 40) &&
+                          (line.width = 300, line.base = 0, ui_text_origin(&centred, &line) == 3) && launcher_field()->centred);
+        }
         launcher_type_text("ls");
 #ifdef UI_TARGET
         // A finger: a row shown pressed as it lands and run only as it lifts there; slid off the row, nothing is run.
@@ -770,10 +810,11 @@ static fn check_launcher(void)
                 launcher.width = LAUNCHER_WIDTH * launcher.ui.scale / 100;
                 launcher_type_text("ls");
                 launcher_layout();
-                check("launcher: the list leaves room for the power row, whose buttons are the kit's, Power off then Restart, right of the bar",
+                check("launcher: the list leaves room for the power row, whose buttons are the kit's, Power off then Restart, in the middle of the bar",
                       launcher.view.group.count == 2 && string_equals((string_address)launcher.view.group.button[0].label, (string_address) "Power off") &&
                           string_equals((string_address)launcher.view.group.button[1].label, (string_address) "Restart") &&
-                          launcher.view.group.button[1].x + launcher.view.group.button[1].w == LAUNCHER_WIDTH - UI_PAD &&
+                          launcher.view.group.button[0].x - (LAUNCHER_WIDTH - launcher.view.group.button[1].x - launcher.view.group.button[1].w) <= 1 &&
+                          launcher.view.group.button[0].x - (LAUNCHER_WIDTH - launcher.view.group.button[1].x - launcher.view.group.button[1].w) >= -1 &&
                           launcher.view.group.button[0].y >= UI_PAD + UI_TARGET + UI_GAP2 + (int)launcher.entries * UI_ROW);
                 check("launcher: Shift-Tab gives the keys to the buttons, the first of them, and leaves the field as it is",
                       launcher_pressed(UI_KEY_TAB, WINDOW_KEY_SHIFT) && launcher.view.group.keys == 1 && launcher_holds("ls"));
