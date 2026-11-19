@@ -457,14 +457,17 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
         return locale_canvas_arrange_status();
 }
 
-#define LOCALE_CANVAS_DISPLAY_USAGE "display is NAME rotation DEGREES, NAME refresh HZ|preferred, NAME scale PERCENT or NAME place X Y [NAME place X Y]...\n"
+#define LOCALE_CANVAS_DISPLAY_USAGE "display is NAME rotation DEGREES, NAME refresh HZ|preferred, NAME mode WxH|preferred, NAME scale PERCENT, NAME primary or NAME place X Y [NAME place X Y]...\n"
 #define LOCALE_CANVAS_DISPLAYS SETTING_CANVAS_DISPLAYS_PATH
 
 /*
-        moonwater canvas display NAME rotation DEGREES, NAME refresh HZ|preferred, NAME scale PERCENT or NAME place X Y: one screen's setting
+        moonwater canvas display NAME rotation DEGREES, NAME refresh HZ|preferred, NAME mode WxH|preferred, NAME scale PERCENT,
+        NAME primary or NAME place X Y: one screen's setting
         in /root/canvas.displays, which the compositor watches and applies as the file is written. DEGREES is 0, 90, 180
         or 270; HZ is a whole number from 1 to 1000, or preferred for the screen's own rate; X and Y are whole numbers of
-        pixels, as canvas arrange's places are. NAME is the connector's (Virtual-1, HDMI-A-1, eDP-1). Only that field of
+        pixels, as canvas arrange's places are. A mode is the panel's size, WIDTHxHEIGHT (1920x1080), which the screen is driven
+        at when it lists it, or preferred for the size Canvas's word picks (canvas modes). primary makes NAME the primary screen
+        (the taskbar's, where a window opens) and no other one. NAME is the connector's (Virtual-1, HDMI-A-1, eDP-1). Only that field of
         that screen changes, and every other line of the file is kept as it is (windows_displays_set). The words are
         judged before root is asked for, as canvas arrange's are; the file is read and written under the settings lock.
 
@@ -476,10 +479,10 @@ static b32 locale_canvas_arrange(string_address address_to arguments, positive c
 static b32 locale_canvas_display(string_address address_to arguments, positive count)
 {
         struct windows_display change;
-        char name[WINDOWS_OUTPUT_NAME], out[4096], placed[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
+        char name[WINDOWS_OUTPUT_NAME], out[4096], work[4096], placed[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
         p8 text[4096];
         unsigned int field;
-        bool rotation, refresh, scale, place;
+        bool rotation, refresh, scale, place, mode, primary;
         int value = 0, made, xs[WINDOWS_OUTPUTS], ys[WINDOWS_OUTPUTS];
         positive places = 0;
         bipolar got, failed;
@@ -489,10 +492,12 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
         rotation = count == 6 && string_equals(arguments[4], "rotation");
         refresh = count == 6 && string_equals(arguments[4], "refresh");
         scale = count == 6 && string_equals(arguments[4], "scale");
+        mode = count == 6 && string_equals(arguments[4], "mode");
+        primary = count == 5 && string_equals(arguments[4], "primary");
         place = count >= 7 && (count - 3) % 4 == 0 && (count - 3) / 4 <= WINDOWS_OUTPUTS;
         for (positive at = 4; place && at < count; at += 4)
                 place = string_equals(arguments[at], "place");
-        if (!rotation && !refresh && !scale && !place)
+        if (!rotation && !refresh && !scale && !mode && !primary && !place)
                 return host_refuse(LOCALE_CANVAS_DISPLAY_USAGE);
         for (positive at = 3; at < count && (at == 3 || place); at += 4)
         {
@@ -538,6 +543,15 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
                 change.scale = (unsigned int)value;
                 field = WINDOWS_DISPLAY_SCALE;
         }
+        else if (mode)
+        {
+                if (!windows_display_size((const char *)arguments[5], string_length(arguments[5]), &change.width, &change.height))
+                        return host_refuse("mode is preferred, the size Canvas picks, or a size WIDTHxHEIGHT of whole numbers "
+                                           "from 1 to %p (1920x1080), not %s\n", (positive)WINDOWS_DISPLAY_SIDE, arguments[5]);
+                field = WINDOWS_DISPLAY_MODE;
+        }
+        else if (primary)
+                field = WINDOWS_DISPLAY_PRIMARY;
         else
                 field = WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y;
         if (!bowl_is_root())
@@ -566,7 +580,9 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
         }
 
         // A place is each screen's in turn, then their lines first in the order named; any other field is the one screen's.
-        made = place ? 0 : windows_displays_set(out, sizeof(out), (const char *)text, name, field, &change);
+        made = place     ? 0
+               : primary ? windows_displays_primary(out, work, sizeof(out), (const char *)text, name)
+                         : windows_displays_set(out, sizeof(out), (const char *)text, name, field, &change);
         for (positive at = 0; place && made >= 0 && at <= places; at++)
         {
                 if (at < places)
@@ -606,6 +622,14 @@ static b32 locale_canvas_display(string_address address_to arguments, positive c
         else if (scale)
                 host_say(log, host_label "%s is drawn at %p percent, saved to " LOCALE_CANVAS_DISPLAYS "\n",
                          (string_address)name, (positive)change.scale);
+        else if (mode && change.width)
+                host_say(log, host_label "%s is driven at %px%p where it lists that size, saved to " LOCALE_CANVAS_DISPLAYS "\n",
+                         (string_address)name, (positive)change.width, (positive)change.height);
+        else if (mode)
+                host_say(log, host_label "%s is driven at the size canvas modes picks, saved to " LOCALE_CANVAS_DISPLAYS "\n",
+                         (string_address)name);
+        else if (primary)
+                host_say(log, host_label "%s is the primary screen, saved to " LOCALE_CANVAS_DISPLAYS "\n", (string_address)name);
         else
                 for (positive at = 0; at < places; at++)
                         host_say(log, host_label "%s is placed at %b,%b, saved to " LOCALE_CANVAS_DISPLAYS "\n",

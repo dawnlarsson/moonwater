@@ -663,6 +663,7 @@ struct windows_issue
 #define WINDOWS_OUTPUT_NAME 16
 #define WINDOWS_OUTPUT_MODEL 16 // the monitor's name from its EDID, the descriptor's 13 bytes and a null
 #define WINDOWS_OUTPUT_HZ 8 // the refresh rates one screen lists at its size, at most
+#define WINDOWS_OUTPUT_SIZES 48 // the sizes one screen lists (width by height, each once), at most
 // The input devices the compositor reads (as many as the kernel has: INPUT_MAX_CHAR_DEVICES, where it was 32), the room of the name it
 // keeps of each, and what it found each to be.
 #define WINDOWS_INPUTS 1024
@@ -913,6 +914,8 @@ struct window_place
 #define WINDOWS_REFUSED_RATE 1u
 #define WINDOWS_REFUSED_TURN 2u
 #define WINDOWS_REFUSED_PLACE 4u
+// A size the displays line asks (mode=WxH) that the screen does not list, or that the card refused: it is at another.
+#define WINDOWS_REFUSED_SIZE 8u
 
 #define WINDOWS_LOOP_SOURCES 10 // the compositor loop's wake sources (metric_loop_by)
 // Why a window's list may not be rendered (window_list_check), each counted apart in the table's list_invalid for moonwater debug.
@@ -999,6 +1002,18 @@ struct windows
         */
         unsigned int output_asked_hz[WINDOWS_OUTPUTS], output_asked_turn[WINDOWS_OUTPUTS], output_refused[WINDOWS_OUTPUTS];
         unsigned int output_asked_scale[WINDOWS_OUTPUTS]; // the scale its displays line asks, in percent (100 when none)
+
+        /*
+                Every size each screen lists, for the Displays page's Resolution: output_sizes of them in output_size (width,
+                height: the panel's, not turned), each once, the most pixels first; output_size_preferred the index of the one
+                the screen marks preferred (its EDID's native size), or output_sizes when it marks none; output_asked_w and
+                output_asked_h the size its displays line asks (mode=WxH), 0 when it asks none. The size it is at is the
+                mode's, output_w and output_h turned back.
+        */
+        unsigned int output_sizes[WINDOWS_OUTPUTS], output_size_preferred[WINDOWS_OUTPUTS];
+        unsigned short output_size[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_SIZES][2];
+        unsigned int output_asked_w[WINDOWS_OUTPUTS], output_asked_h[WINDOWS_OUTPUTS];
+        unsigned int output_mode_w[WINDOWS_OUTPUTS], output_mode_h[WINDOWS_OUTPUTS]; // the size of the mode it is at
 
         /*
                 The compositor's, for moonwater debug: each input device it reads, by its slot, and what became
@@ -2323,8 +2338,13 @@ static unsigned int windows_arrange_lay(const char *text, const char (*names)[WI
 
 /*
         The displays (/root/canvas.displays): one line a screen that has any
-        setting, NAME rotation=0|90|180|270 refresh=preferred|HZ x=X y=Y, the
-        fields in any order. rotation is 0 and refresh preferred unless given.
+        setting, NAME rotation=0|90|180|270 refresh=preferred|HZ mode=preferred|WxH
+        x=X y=Y, the fields in any order. rotation is 0, and refresh and mode
+        preferred, unless given: a mode is the panel's size (1920x1080), the
+        refresh the rate at it, and mode=preferred leaves the size to Canvas's
+        word (canvas modes). primary=yes makes the screen the primary (the
+        taskbar's, where a window opens: the table's index 0) wherever it is
+        laid; one screen has it, and with none the first laid is the primary.
         x and y give the screen's place in the arrangement (NAME@X,Y there) and
         count only when both are given. A malformed field takes its default and
         its bit is set in bad, so the compositor can name it; a line with no
@@ -2341,6 +2361,9 @@ static unsigned int windows_arrange_lay(const char *text, const char (*names)[WI
 #define WINDOWS_DISPLAY_Y 16u
 #define WINDOWS_DISPLAY_OTHER 32u
 #define WINDOWS_DISPLAY_SCALE 64u
+#define WINDOWS_DISPLAY_MODE 128u
+#define WINDOWS_DISPLAY_PRIMARY 256u
+#define WINDOWS_DISPLAY_SIDE 16384u // the widest or tallest a mode= size may be
 #define WINDOWS_DISPLAY_HZ 1000u
 // The scale a screen is drawn at, in percent: the six presets the settings offer, 100 the default.
 #define WINDOWS_SCALE_DEFAULT 100u
@@ -2360,6 +2383,8 @@ struct windows_display
         char name[WINDOWS_OUTPUT_NAME];
         unsigned int rotation; // degrees, 0 when not given
         unsigned int refresh;  // a rate in Hz, or 0 for preferred
+        unsigned int width, height; // the size asked (mode=WxH), the panel's; 0 by 0 for the one Canvas's word picks
+        unsigned int primary;  // 1: the primary screen (primary=yes), whatever its place in the arrangement
         unsigned int scale;    // the scale in percent, WINDOWS_SCALE_DEFAULT when not given
         int x, y;              // the place, when placed
         unsigned int placed;
@@ -2423,6 +2448,30 @@ static int windows_display_number(const char *word, unsigned int length, int sig
         return 1;
 }
 
+/*
+        A size as a displays line and `canvas display NAME mode` write it, WIDTHxHEIGHT (1920x1080), each a whole number from 1
+        to WINDOWS_DISPLAY_SIDE; preferred is 0 by 0. Answers whether it is one.
+*/
+static int windows_display_size(const char *word, unsigned int length, unsigned int *width, unsigned int *height)
+{
+        unsigned int cross = 0;
+        int w, h;
+
+        if (length == 9 && windows_name_is("preferred", word, 9))
+        {
+                *width = *height = 0;
+                return 1;
+        }
+        while (cross < length && word[cross] != 'x')
+                cross++;
+        if (cross == length || !windows_display_number(word, cross, 0, 5, &w) ||
+            !windows_display_number(word + cross + 1, length - cross - 1, 0, 5, &h) || w < 1 || h < 1 ||
+            w > (int)WINDOWS_DISPLAY_SIDE || h > (int)WINDOWS_DISPLAY_SIDE)
+                return 0;
+        *width = (unsigned int)w, *height = (unsigned int)h;
+        return 1;
+}
+
 // Reads one line of length bytes at line into display, and says in bad which of its fields were not right.
 static void windows_display_line(const char *line, unsigned int length, struct windows_display *display)
 {
@@ -2432,6 +2481,7 @@ static void windows_display_line(const char *line, unsigned int length, struct w
         for (unsigned int each = 0; each < WINDOWS_OUTPUT_NAME; each++)
                 display->name[each] = 0;
         display->rotation = display->refresh = display->placed = display->bad = 0;
+        display->width = display->height = display->primary = 0;
         display->scale = WINDOWS_SCALE_DEFAULT;
         display->x = display->y = 0;
         while (at < length && (line[at] == ' ' || line[at] == '\t'))
@@ -2472,6 +2522,10 @@ static void windows_display_line(const char *line, unsigned int length, struct w
                         key = WINDOWS_DISPLAY_REFRESH;
                 else if (keys == 5 && windows_name_is("scale", line + word, 5))
                         key = WINDOWS_DISPLAY_SCALE;
+                else if (keys == 4 && windows_name_is("mode", line + word, 4))
+                        key = WINDOWS_DISPLAY_MODE;
+                else if (keys == 7 && windows_name_is("primary", line + word, 7))
+                        key = WINDOWS_DISPLAY_PRIMARY;
                 else if (keys == 1 && line[word] == 'x')
                         key = WINDOWS_DISPLAY_X;
                 else if (keys == 1 && line[word] == 'y')
@@ -2495,6 +2549,18 @@ static void windows_display_line(const char *line, unsigned int length, struct w
                         if (windows_display_number(line + equals + 1, at - equals - 1, 0, 3, &value) && windows_scale_ok(value))
                                 display->scale = (unsigned int)value;
                         else
+                                display->bad |= key;
+                }
+                else if (key == WINDOWS_DISPLAY_PRIMARY)
+                {
+                        if (at - equals - 1 == 3 && windows_name_is("yes", line + equals + 1, 3))
+                                display->primary = 1;
+                        else if (!(at - equals - 1 == 2 && windows_name_is("no", line + equals + 1, 2)))
+                                display->bad |= key;
+                }
+                else if (key == WINDOWS_DISPLAY_MODE)
+                {
+                        if (!windows_display_size(line + equals + 1, at - equals - 1, &display->width, &display->height))
                                 display->bad |= key;
                 }
                 else if (key == WINDOWS_DISPLAY_REFRESH)
@@ -2767,7 +2833,7 @@ static unsigned int windows_displays_write(char *into, unsigned int room, const 
                 const struct windows_display *display = &list[each];
                 unsigned int length = 0;
 
-                if (!display->name[0] || (!display->rotation && !display->refresh && !display->placed &&
+                if (!display->name[0] || (!display->rotation && !display->refresh && !display->placed && !display->width && !display->primary &&
                                           display->scale == WINDOWS_SCALE_DEFAULT))
                         continue;
                 while (display->name[length])
@@ -2779,6 +2845,13 @@ static unsigned int windows_displays_write(char *into, unsigned int room, const 
                         return 0;
                 if (!display->refresh ? !windows_put(into, room, &at, "preferred", 9) :
                     !windows_put_number(into, room, &at, (int)display->refresh))
+                        return 0;
+                if (display->width && (!windows_put(into, room, &at, " mode=", 6) ||
+                                       !windows_put_number(into, room, &at, (int)display->width) ||
+                                       !windows_put(into, room, &at, "x", 1) ||
+                                       !windows_put_number(into, room, &at, (int)display->height)))
+                        return 0;
+                if (display->primary && !windows_put(into, room, &at, " primary=yes", 12))
                         return 0;
                 if (display->scale != WINDOWS_SCALE_DEFAULT &&
                     (!windows_put(into, room, &at, " scale=", 7) || !windows_put_number(into, room, &at, (int)display->scale)))
@@ -2847,7 +2920,7 @@ static int windows_displays_set(char *into, unsigned int room, const char *text,
         struct windows_display list[WINDOWS_DISPLAYS], screen;
         const struct windows_display *found;
         unsigned int name_length = 0, count, made, at = 0, start = 0, done = 0;
-        char line[128];
+        char line[192];
 
         if (!room)
                 return -1;
@@ -2871,6 +2944,10 @@ static int windows_displays_set(char *into, unsigned int room, const char *text,
                 screen.refresh = change->refresh;
         if (field & WINDOWS_DISPLAY_SCALE)
                 screen.scale = change->scale;
+        if (field & WINDOWS_DISPLAY_MODE)
+                screen.width = change->width, screen.height = change->height;
+        if (field & WINDOWS_DISPLAY_PRIMARY)
+                screen.primary = change->primary;
         if (field & (WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y))
                 screen.placed = 1, screen.x = change->x, screen.y = change->y;
         made = windows_displays_write(line, sizeof(line), &screen, 1);
@@ -2901,6 +2978,43 @@ static int windows_displays_set(char *into, unsigned int room, const char *text,
         if (!done && made && !windows_put(into, room, &at, line, made))
                 return -1;
         return (int)at;
+}
+
+/*
+        The displays file (text, NUL-ended) with name the primary screen (primary=yes on its line) and no other one: every other
+        line that says primary=yes says it no more, and keeps its other fields. With name null no screen is the primary, and the
+        first laid is. work is room bytes the steps are made in. Answers the bytes written into, or -1 as windows_displays_set.
+*/
+static int windows_displays_primary(char *into, char *work, unsigned int room, const char *text, const char *name)
+{
+        struct windows_display list[WINDOWS_DISPLAYS], change = {0};
+        unsigned int count = windows_displays_read(text, list, WINDOWS_DISPLAYS), at = 0;
+        int made = -1;
+
+        if (!room)
+                return -1;
+        for (at = 0; text[at] && at + 1 < room; at++)
+                into[at] = text[at];
+        if (text[at])
+                return -1;
+        into[at] = 0;
+        made = (int)at;
+        for (unsigned int each = 0; each < count; each++)
+        {
+                if (!list[each].primary || !list[each].name[0] || (name && windows_display_same_name(list[each].name, name)))
+                        continue;
+                made = windows_displays_set(work, room, into, list[each].name, WINDOWS_DISPLAY_PRIMARY, &change);
+                if (made < 0)
+                        return -1;
+                memory_copy(into, work, (positive)made + 1);
+        }
+        if (!name)
+                return made;
+        change.primary = 1;
+        made = windows_displays_set(work, room, into, name, WINDOWS_DISPLAY_PRIMARY, &change);
+        if (made >= 0)
+                memory_copy(into, work, (positive)made + 1);
+        return made;
 }
 
 /*

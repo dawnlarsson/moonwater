@@ -248,6 +248,8 @@ static struct compositor_mode *compositor_modes_room(long want)
         return compositor_modes_list;
 }
 
+#define COMPOSITOR_MODE_PREFERRED 8u // DRM_MODE_TYPE_PREFERRED
+
 struct compositor_connected
 {
         unsigned int count, crtc_count, max_width, max_height;
@@ -264,7 +266,51 @@ struct compositor_connected
         struct compositor_mode held[WINDOWS_OUTPUTS];
         int held_size[WINDOWS_OUTPUTS][2];
         unsigned int held_hz[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_HZ], held_hz_count[WINDOWS_OUTPUTS];
+        // Every size it lists, each once, the most pixels first, and which one it marks preferred (compositor_sizes_take).
+        unsigned short sizes[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_SIZES][2];
+        unsigned int size_count[WINDOWS_OUTPUTS], size_preferred[WINDOWS_OUTPUTS];
 };
+
+/*
+        The sizes screen n lists, for the Displays page's Resolution: each width by height once (an interlaced or doubled mode's
+        none), the most pixels first and, of the same pixels, the wider first, at most WINDOWS_OUTPUT_SIZES of them (a list longer
+        keeps the largest). size_preferred is the one of the first mode marked preferred, or size_count when none is.
+*/
+static void compositor_sizes_take(struct compositor_connected *found, unsigned int n, const struct compositor_mode *modes,
+                                  unsigned int count)
+{
+        unsigned short (*sizes)[2] = found->sizes[n];
+        unsigned int had = 0, preferred_w = 0, preferred_h = 0;
+
+        for (unsigned int each = 0; each < count; each++)
+        {
+                unsigned int w = modes[each].hdisplay, h = modes[each].vdisplay, at;
+                unsigned long pixels = (unsigned long)w * h;
+
+                if ((modes[each].flags & COMPOSITOR_MODE_INTERLACED) || !w || !h || w > 0xffff || h > 0xffff)
+                        continue;
+                if (!preferred_w && (modes[each].type & COMPOSITOR_MODE_PREFERRED))
+                        preferred_w = w, preferred_h = h;
+                for (at = 0; at < had && !(sizes[at][0] == w && sizes[at][1] == h); at++)
+                        ;
+                if (at < had)
+                        continue;
+                for (at = had; at > 0 && ((unsigned long)sizes[at - 1][0] * sizes[at - 1][1] < pixels ||
+                                          ((unsigned long)sizes[at - 1][0] * sizes[at - 1][1] == pixels && sizes[at - 1][0] < w));
+                     at--)
+                        if (at < WINDOWS_OUTPUT_SIZES)
+                                sizes[at][0] = sizes[at - 1][0], sizes[at][1] = sizes[at - 1][1];
+                if (at >= WINDOWS_OUTPUT_SIZES)
+                        continue;
+                sizes[at][0] = (unsigned short)w, sizes[at][1] = (unsigned short)h;
+                had += had < WINDOWS_OUTPUT_SIZES;
+        }
+        found->size_count[n] = had;
+        found->size_preferred[n] = had;
+        for (unsigned int at = 0; at < had; at++)
+                if (sizes[at][0] == preferred_w && sizes[at][1] == preferred_h)
+                        found->size_preferred[n] = at;
+}
 
 /*
         Which mode a real screen is driven at: Canvas's word for it (moonwater canvas modes, the kernel's canvas.modes), the largest
@@ -278,7 +324,6 @@ struct compositor_connected
         guest at seventy percent of its host, a size of its own). The word is read from the kernel's parameter, and from the kept
         file when Canvas is not there; largest, Canvas's default, when neither says.
 */
-#define COMPOSITOR_MODE_PREFERRED 8u // DRM_MODE_TYPE_PREFERRED
 #define COMPOSITOR_MODES_WORD "/sys/module/canvas/parameters/modes"
 #define COMPOSITOR_MODES_KEPT "/root/canvas.modes"
 
@@ -504,6 +549,7 @@ static void compositor_connected_blank(struct compositor_connected *found, unsig
         memory_zero(found->hz[n], sizeof(found->hz[n]));
         found->hz_count[n] = 0;
         found->over[n] = 0;
+        found->size_count[n] = 0;
 }
 
 /*
@@ -623,11 +669,27 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                         if (system_control(compositor.card, COMPOSITOR_GETENCODER, address_of encoder) == 0)
                                 found->possible[n] |= encoder.possible_crtcs;
                 }
-                // The size Canvas's word asks, where the screen lists it and the card has not refused it, over the crtc's
-                // (compositor_modes_largest); the crtc's mode is held to go back to (found->held). Not a guest's (largest -1).
-                if (listed && largest >= 0)
+                // Every size the screen lists, for the Displays page (compositor_sizes_take).
+                if (listed)
+                        compositor_sizes_take(found, n, modes, probe.mode_count);
+                /*
+                        The size the screen's displays line asks (mode=WxH), where the screen lists it, and else the size Canvas's
+                        word asks, where the card has not refused it, over the crtc's (compositor_modes_largest); the crtc's mode is
+                        held to go back to (found->held). A guest's (largest -1) takes only a size its line asks.
+                */
                 {
-                        unsigned int pick = compositor_modes_pick(modes, probe.mode_count, largest);
+                        const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, found->name[n],
+                                                                                   windows_name_length(found->name[n]));
+                        unsigned int pick = probe.mode_count;
+
+                        if (listed && display && display->width)
+                        {
+                                pick = compositor_fastest_at(modes, probe.mode_count, display->width, display->height);
+                                if (pick < probe.mode_count && compositor_mode_refused(connectors[at], &modes[pick]))
+                                        pick = probe.mode_count;
+                        }
+                        if (pick == probe.mode_count && listed && largest >= 0)
+                                pick = compositor_modes_pick(modes, probe.mode_count, largest);
 
                         if (pick < probe.mode_count && !compositor_mode_refused(connectors[at], &modes[pick]) &&
                             (modes[pick].hdisplay != found->mode[n].hdisplay || modes[pick].vdisplay != found->mode[n].vdisplay))
@@ -712,6 +774,8 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                         memory_copy(found->held_size[kept], found->held_size[n], sizeof(found->held_size[n]));
                         memory_copy(found->held_hz[kept], found->held_hz[n], sizeof(found->held_hz[n]));
                         found->held_hz_count[kept] = found->held_hz_count[n];
+                        memory_copy(found->sizes[kept], found->sizes[n], sizeof(found->sizes[n]));
+                        found->size_count[kept] = found->size_count[n], found->size_preferred[kept] = found->size_preferred[n];
                 }
                 kept++;
         }
@@ -782,6 +846,24 @@ static unsigned int compositor_space_lay(const struct compositor_connected *foun
                 memory_copy(rects[map[at]], some[at], sizeof(some[at]));
         for (unsigned int at = 0; at < lit; at++)
                 order[at] = map[laid[at]];
+        /*
+                The screen whose displays line says primary=yes is the primary (the table's index 0: the taskbar's, where a window
+                opens) wherever it is laid: it goes first in the order, the rest after it as they were. Where it is on the desk
+                does not change. With no such screen lit the first laid is, as before.
+        */
+        for (unsigned int at = 1; at < lit; at++)
+        {
+                const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, found->name[order[at]],
+                                                                           windows_name_length(found->name[order[at]]));
+                unsigned char primary = order[at];
+
+                if (!display || !display->primary)
+                        continue;
+                for (unsigned int back = at; back > 0; back--)
+                        order[back] = order[back - 1];
+                order[0] = primary;
+                break;
+        }
         return lit;
 }
 
@@ -1217,6 +1299,9 @@ static b32 compositor_space_take(int first)
                         compositor.output[at].mode = found.mode[n];
                         memory_copy(compositor.output[at].hz, found.hz[n], sizeof(found.hz[n]));
                         compositor.output[at].hz_count = found.hz_count[n];
+                        memory_copy(compositor.output[at].sizes, found.sizes[n], sizeof(found.sizes[n]));
+                        compositor.output[at].size_count = found.size_count[n];
+                        compositor.output[at].size_preferred = found.size_preferred[n];
                         memory_copy(compositor.output[at].name, found.name[n], WINDOWS_OUTPUT_NAME);
                         memory_copy(compositor.output[at].model, found.model[n], WINDOWS_OUTPUT_MODEL);
                         for (unsigned int index = 0; index < found.crtc_count; index++)

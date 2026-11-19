@@ -968,6 +968,9 @@ struct compositor_output
         // The refresh rates it lists at its size (hz_count of them), and its turn in degrees with whether Canvas does
         // the turn (turn_software); the table says them to the Displays field (compositor_table_outputs).
         unsigned int hz[WINDOWS_OUTPUT_HZ], hz_count;
+        // Every size it lists, the most pixels first, and the one it marks preferred (size_count when none): the table's output_size.
+        unsigned short sizes[WINDOWS_OUTPUT_SIZES][2];
+        unsigned int size_count, size_preferred;
         unsigned int turn, turn_software;
         // The turn its displays line asks for: degrees, and turned 0 none, 1 by the card (its primary plane's property
         // turn_property, set to turn_value on turn_plane) or 2 by Canvas in software.
@@ -1618,6 +1621,12 @@ static void compositor_table_refusals(struct windows *table, unsigned int at, co
                 refused |= WINDOWS_REFUSED_TURN;
         if (display && (display->bad & (WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y)))
                 refused |= WINDOWS_REFUSED_PLACE;
+        // A size asked that the screen is not at: one it does not list, or one the card refused (compositor_mode_refuse).
+        table->output_asked_w[at] = display ? display->width : 0;
+        table->output_asked_h[at] = display ? display->height : 0;
+        if (display && display->width && ((unsigned int)compositor.output[at].mode.hdisplay != display->width ||
+                                          (unsigned int)compositor.output[at].mode.vdisplay != display->height))
+                refused |= WINDOWS_REFUSED_SIZE;
         table->output_refused[at] = refused;
 }
 
@@ -1650,6 +1659,11 @@ static void compositor_table_outputs(void)
                 table->output_now[at] = compositor.output[at].mode.vrefresh;
                 table->output_rates[at] = compositor.output[at].hz_count;
                 memory_copy(table->output_hz[at], compositor.output[at].hz, sizeof(table->output_hz[at]));
+                memory_copy(table->output_size[at], compositor.output[at].sizes, sizeof(table->output_size[at]));
+                table->output_sizes[at] = compositor.output[at].size_count;
+                table->output_size_preferred[at] = compositor.output[at].size_preferred;
+                table->output_mode_w[at] = (unsigned int)compositor.output[at].mode.hdisplay;
+                table->output_mode_h[at] = (unsigned int)compositor.output[at].mode.vdisplay;
                 table->output_turn[at] = compositor.output[at].turn;
                 table->output_software[at] = compositor.output[at].turn_software;
                 compositor_table_refusals(table, at, name);

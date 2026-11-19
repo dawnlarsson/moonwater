@@ -1359,12 +1359,23 @@ static void check_compositor_card_walk(void)
     card_walk_end();
 
     // The first take asks the kernel for what it has and makes it look at nothing; the look is owed, and a take after it looks.
+    // The screen has an EDID: one with none is taken by looking at once (below).
     card_walk_begin(1ul << 0, 0, 0, 0);
+    card_fake.edid_length = 128;
     status = compositor_cards_walk();
     check("first take: a card the kernel has the lists of is taken with no connector made to look, and the look is owed",
           status == 0 && compositor.outputs == 1 && compositor.width == 1024 && card_fake.looks == 0 && compositor.probe_owed == 1);
     status = compositor_space_take(0);
     check("first take: the take after it looks at the connectors", status == 0 && card_fake.looks >= 1 && compositor.outputs == 1);
+    card_walk_end();
+
+    // A real screen with no EDID in the kernel's lists may be the no-EDID list of a connector the driver had not read yet: the first
+    // take looks at once, and owes nothing.
+    card_walk_begin(1ul << 0, 0, 0, 0);
+    card_fake.edid_length = 0;
+    status = compositor_cards_walk();
+    check("first take: a screen with no EDID in the kernel's lists is taken by looking at once, with no look owed",
+          status == 0 && compositor.outputs == 1 && card_fake.looks >= 1 && compositor.probe_owed == 0);
     card_walk_end();
 
     card_walk_begin(1ul << 0, 0, 0, 0);
