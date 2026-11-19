@@ -5451,6 +5451,36 @@ static fn check_kit_pull_hit(void)
         for (int line = 0; line < 5 * row; line++)
                 off_column += ui_page_column_hit(&ui, &p, 10, p.top + line) != pull_shown[line] / row;
         check("kit page: a column's group is hit where the pulled picture draws it, every line of a column pulled past its top", !off_column);
+
+        // At 125 and 175 percent a window 1001 wide: the column's groups reach the window's edge reading from the right and the column's box's
+        // far edge reading from the left, and a scroll bar placed at a region's trailing edge is drawn to it (one width for both).
+        {
+                b32 flush = true;
+                int scales[2] = {125, 175};
+
+                for (int k = 0; k < 2; k++)
+                {
+                        struct ui at = ui;
+
+                        at.scale = scales[k];
+                        for (unsigned int rtl = 0; rtl < 2; rtl++)
+                        {
+                                ui_kit.rtl = rtl;
+                                memory_zero(&p, sizeof(p));
+                                p.width = 1001, p.height = 400, p.top = 0, p.bottom = 400, p.column_on = 1, p.seam = rtl ? 1001 - 251 : 251;
+                                p.column_box = (struct ui_rect){rtl ? 1001 - 241 : 0, 0, 241, 400};
+                                p.column.count = 3;
+                                ui_page_column_place(&at, &p);
+                                if (rtl)
+                                        flush = flush && (p.column.row_x + p.column.row_w) * at.scale / 100 >= p.width;
+                                else
+                                        flush = flush && (p.column.x + p.column.w) * at.scale / 100 >= p.column_box.x + p.column_box.w;
+                        }
+                        ui_kit.rtl = 0;
+                        flush = flush && 1001 - ui_scroll_width(&at) + ui_scroll_width(&at) == 1001;
+                }
+                check("kit page: at 125 and 175 percent the column's groups reach the window's edge from the right and their box's from the left", flush);
+        }
 }
 
 /*

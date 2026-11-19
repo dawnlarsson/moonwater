@@ -16344,9 +16344,19 @@ static b32 ui_scroll_moving(const struct ui_scroll address_to s)
 
 // The thumb's box for a top and length (device pixels): across the track, its thickness is the drawn one times the growth. A track
 // along a region's foot has the same box turned over, from the start edge (the right one, reading from the right).
+/*
+        A scroll bar's width in device pixels, the one rule for where it is placed, drawn and hit: UI_SCROLL_WIDTH at the scale, truncated as
+        every device size of the kit is (ui_dev). Placed with another rounding (ui_px: 13 at 125 percent) and drawn 12 wide, one device column
+        at the region's trailing edge was under no bar, and the content looked short of the window's edge.
+*/
+static inline int ui_scroll_width(const struct ui address_to ui)
+{
+        return UI_SCROLL_WIDTH * ui->scale / 100;
+}
+
 static void ui_scroll_box(const struct ui address_to ui, struct ui_scroll address_to s, int top, int length, struct ui_box address_to thumb)
 {
-        int border = UI_SCROLL_BORDER * ui->scale / 100, width = UI_SCROLL_WIDTH * ui->scale / 100;
+        int border = UI_SCROLL_BORDER * ui->scale / 100, width = ui_scroll_width(ui);
         b64 centre = (b64)((s->across ? s->y + s->height - width : s->x) + width / 2) * 256, half = (b64)(width / 2 - border) * 256;
         b64 r = ui_qmul(half, ui_kit_tween(&s->grow));
 
@@ -16367,7 +16377,7 @@ static fn ui_scroll_mark(const struct ui address_to ui, const struct ui_scroll a
         ui_scroll_track(ui, s, &top, &height);
         bottom = top + height;
         if (s->across)
-                bottom = s->y + s->height, top = bottom - UI_SCROLL_WIDTH * ui->scale / 100;
+                bottom = s->y + s->height, top = bottom - ui_scroll_width(ui);
         if (ui_kit.damage_bottom <= ui_kit.damage_top)
                 ui_kit.damage_top = top, ui_kit.damage_bottom = bottom;
         else
@@ -16405,7 +16415,7 @@ static b32 ui_scroll_reach(const struct ui address_to ui, const struct ui_scroll
         int top, height;
 
         ui_scroll_track(ui, s, &top, &height);
-        return ui_hit(ui, ui_kit_touch, x, y, s->x, top, UI_SCROLL_WIDTH * ui->scale / 100, height);
+        return ui_hit(ui, ui_kit_touch, x, y, s->x, top, ui_scroll_width(ui), height);
 }
 
 static int ui_scroll_most(const struct ui_scroll address_to s)
@@ -16448,7 +16458,7 @@ static int ui_scroll_pointer(const struct ui address_to ui, struct ui_scroll add
         b32 touch = ui_kit_touch;
         b32 bar = ui_scroll_thumb(ui, s, &top, &length);
         b32 on_track = bar && ui_scroll_reach(ui, s, x, y);
-        b32 on_thumb = on_track && ui_hit(ui, touch, x, y, s->x, top, UI_SCROLL_WIDTH * ui->scale / 100, length);
+        b32 on_thumb = on_track && ui_hit(ui, touch, x, y, s->x, top, ui_scroll_width(ui), length);
 
         ui_scroll_track(ui, s, &at, &track);
         if (type == WINDOW_EVENT_MOTION)
@@ -21991,7 +22001,7 @@ static int ui_view_end(struct ui_view address_to v)
                         // below the window's close button where that edge is the window's.
                         struct ui_scroll address_to s = &v->scroll[item->scroll];
 
-                        s->x = ui_rtl() ? n->x : n->x + n->w - ui_px(ui, UI_SCROLL_WIDTH), s->y = n->y, s->height = s->view = n->h;
+                        s->x = ui_rtl() ? n->x : n->x + n->w - ui_scroll_width(ui), s->y = n->y, s->height = s->view = n->h;
                         s->content = n->extent + n->pad[2] + n->pad[3], s->scale = scale;
                         s->inset = (ui_rtl() ? n->x <= 0 : n->x + n->w >= v->tree.node[0].w) ? UI_CLOSE_BOTTOM : 0;
                         ui_scroll_clamp(s);
@@ -26618,6 +26628,22 @@ static int ui_page_column_key(const struct ui_page address_to p, int key, int gr
         The column drawn: the chosen group under the accent's pip, which slides to another however it is chosen (the pip is the keys'
         mark too: the column has no ring); none chosen (disabled) while a search lists the rows of every group.
 */
+// The column's groups across: in the column's box, in logical pixels from the edge they start at (the box's right, reading from the right),
+// and a group's row from the window's edge to the middle of the bar's track. Logical from device, one edge rule: a start floors and an end
+// ceils, so the groups reach every device column of the box and of the window's edge at any scale (truncated, at 125 percent a window
+// 1001 wide had a column of ground at its right edge).
+static fn ui_page_column_place(const struct ui address_to ui, struct ui_page address_to p)
+{
+        struct ui_control address_to c = &p->column;
+        const struct ui_rect address_to box = &p->column_box;
+
+        c->w = (box->w * 100 + ui->scale - 1) / ui->scale;
+        c->x = ui_rtl() ? ((box->x + box->w) * 100 + ui->scale - 1) / ui->scale - c->w : box->x * 100 / ui->scale;
+        c->row_x = 0, c->row_w = ((ui_rtl() ? p->width - p->seam : p->seam) * 100 + ui->scale - 1) / ui->scale;
+        if (ui_rtl())
+                c->row_x = (p->width * 100 + ui->scale - 1) / ui->scale - c->row_w;
+}
+
 static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b32 keys, b32 disabled)
 {
         struct ui_control address_to c = &p->column;
@@ -26634,18 +26660,13 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
                 c->kind = UI_TABS, c->variant = UI_TABS_VERTICAL;
                 c->at = chosen;
         }
-        // The groups are in the column's box, in logical pixels from the edge they start at (the box's right, reading from the right).
-        c->w = box->w * 100 / ui->scale;
-        c->x = ui_rtl() ? (box->x + box->w) * 100 / ui->scale - c->w : box->x * 100 / ui->scale;
+        ui_page_column_place(ui, p);
         // The groups are drawn at rest, inside the column's ends, and a pull past one is the picture stretched (ui_scroll_pull)
         rest = ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, ui_page_column_bottom(p) - ui_page_column_top(p));
         c->y = (ui_page_column_top(p) - rest) * 100 / ui->scale;
         c->h = UI_ROW;
         // A group is a whole row, flush with the window's edge, to the middle of the bar's track: logical px rounded up, the edge the list's rows
         // begin at (ui_list_across_logical), so the two lie edge to edge at every scale.
-        c->row_x = 0, c->row_w = ((ui_rtl() ? p->width - p->seam : p->seam) * 100 + ui->scale - 1) / ui->scale;
-        if (ui_rtl())
-                c->row_x = p->width * 100 / ui->scale - c->row_w;
         c->disabled = disabled;
         c->focused = keys;
         // The group lit is the one the stretched picture draws under the pointer, as the one pressed is (ui_page_column_hit).
