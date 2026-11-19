@@ -62,6 +62,7 @@ struct rover_running
         p8 shorts;      // short lives in a row
         p8 up_owed;     // up before boot's verdict: its service up is posted at the verdict
         p8 held_off;    // stopped by a rule's stop: not started again until a rule's start or restart
+        p8 usr1_owed;   // to be told to read /root again (SIGUSR1) once it is up
 };
 
 static struct
@@ -721,6 +722,7 @@ static fn rover_runner_start(positive which)
         running->started = clock_monotonic_nanoseconds();
         running->stopping = 0;
         running->up = 0;
+        running->usr1_owed = 0; // a life started now reads the /root there is
         if (running->pid <= 0)
                 running->pid = 0;
         rover_runner_pid_file(which, running->pid);
@@ -833,6 +835,11 @@ static fn rover_runner_services(void)
                         if (ready)
                         {
                                 running->up = 1;
+                                if (running->usr1_owed)
+                                {
+                                        running->usr1_owed = 0;
+                                        (void)system_call_2(syscall(kill), (positive)running->pid, 10 /* SIGUSR1 */);
+                                }
                                 //      Its rules (autostart, the keyboard, the installer) read /root: they hear it at the verdict.
                                 if (rover_runner.verdict_seen)
                                         rover_runner_service_event(97, which);
@@ -1729,8 +1736,12 @@ static fn rover_runner_verdict(void)
                                         font[0] = 0;
                                 if (!string_equals((string_address)font, (string_address)rover_runner.compositor_font))
                                         rover_runner_stop(at);
-                                else
+                                //      Only once it has said it is up: before, it may not yet block the signal, whose
+                                //      default ends it.
+                                else if (running->up)
                                         (void)system_call_2(syscall(kill), (positive)running->pid, 10 /* SIGUSR1 */);
+                                else
+                                        running->usr1_owed = 1;
                         }
                         if (running->up_owed)
                         {

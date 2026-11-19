@@ -3211,6 +3211,15 @@ static b32 compositor_main()
         int running = 1, extra = -1, tablet = 0, up = -1;
         string_address headless = null, file = null, font = null;
 
+        //      The signals the loop takes through its signalfd (compositor_signals), blocked before anything else: one sent
+        //      while the card and the input were still being set up killed the compositor (SIGUSR1's default), where now it
+        //      waits, pending, for the signalfd made later to read it.
+        {
+                unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1) | 1ul << (COMPOSITOR_SIGUSR1 - 1) |
+                                     1ul << (COMPOSITOR_SIGUSR2 - 1);
+
+                compositor_call(syscall(rt_sigprocmask), 0, (positive)address_of mask, 0, 8, 0, 0);
+        }
         claim_standard_descriptors();
         compositor_descriptors_room();
         // The loop's waits end when they are asked to: the kernel gives every wait of a thread 50 us of slack to end late in
