@@ -61,6 +61,7 @@ struct rover_running
         p8 failed;      // given up
         p8 shorts;      // short lives in a row
         p8 up_owed;     // up before boot's verdict: its service up is posted at the verdict
+        p8 held_off;    // stopped by a rule's stop: not started again until a rule's start or restart
 };
 
 static struct
@@ -74,6 +75,7 @@ static struct
         struct rover_running service[ROVER_SERVICES_MOST];
         bipolar children[ROVER_CHILDREN_MOST];
         p8 child_name[ROVER_CHILDREN_MOST][48]; // each child's program, for the line its failure is said in
+        p8 child_desktop[ROVER_CHILDREN_MOST];  // a program opened on the desktop, ended with the compositor
         struct rover_event queue[ROVER_QUEUE_MOST]; // cues and the runner's own events, done after the one in hand
         p8 queue_text[ROVER_QUEUE_MOST][ROVER_WORD_MOST + 1];
         positive queued;
@@ -125,6 +127,7 @@ static const p8 address_to rover_runner_pool_word(p32 at, positive address_to le
 static fn rover_runner_child(bipolar pid);
 static fn rover_runner_leaving(bipolar pid);
 static p8 rover_runner_naming[48] = "a program"; // the program the next child kept is, for the line its failure is said in
+static bool rover_runner_on_desktop; // the next child kept is a program opened on the desktop
 static fn rover_runner_find_everys(void);
 static fn rover_runner_keys(void);
 
@@ -465,6 +468,8 @@ static fn rover_runner_child(bipolar pid)
                                 rover_runner.children[at] = pid;
                                 string_copy_max(rover_runner.child_name[at], (string_address)rover_runner_naming,
                                                 sizeof(rover_runner.child_name[at]));
+                                rover_runner.child_desktop[at] = rover_runner_on_desktop;
+                                rover_runner_on_desktop = false;
                                 return;
                         }
                 rover_runner_reap();
@@ -651,6 +656,16 @@ static bool rover_runner_service_is(positive which, const char address_to name)
         return rover_bytes_are(word, length, name);
 }
 
+//      The desktop is up while the compositor's service runs and has said it is up: a table file a killed compositor
+//      left behind said up when nothing was.
+static bool rover_runner_desktop_up(void)
+{
+        for (positive at = 0; rover_runner.view.head && at < rover_runner.view.head->services; at++)
+                if (rover_runner_service_is(at, "compositor"))
+                        return rover_runner.service[at].pid > 0 && rover_runner.service[at].up;
+        return false;
+}
+
 //      HOST_STATE/NAME.pid while a service runs, which the verbs that tell one find it by (desktop's compositor.pid).
 static fn rover_runner_pid_file(positive which, bipolar pid)
 {
@@ -734,6 +749,12 @@ static fn rover_runner_ended(positive which)
         running->pid = 0;
         running->pidfd = -1;
         rover_runner_pid_file(which, 0);
+        //      The desktop's programs end with its compositor, as the session the machine script kept (desktop.kids) did:
+        //      left, they ran on with no window to show.
+        if (rover_runner_service_is(which, "compositor"))
+                for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
+                        if (rover_runner.children[at] > 0 && rover_runner.child_desktop[at])
+                                (void)system_call_2(syscall(kill), (positive)rover_runner.children[at], 15);
         running->up = 0;
         running->stopping = 0;
         rover_runner_service_event(98, which);
@@ -786,7 +807,7 @@ static fn rover_runner_services(void)
                 //      started now would read the image's settings and keep watching the directory underneath (the
                 //      session bus read no canvas.theme). Only the compositor starts early, for the screen, and is told to
                 //      read /root again at the verdict.
-                if (!running->pid && wanted && !running->failed && now >= running->retry &&
+                if (!running->pid && wanted && !running->failed && !running->held_off && now >= running->retry &&
                     (rover_runner.verdict_seen || rover_runner_service_is(which, "compositor")))
                         rover_runner_start(which);
                 if (running->pid && !running->up && !running->stopping)
@@ -946,7 +967,8 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
                         return;
                 //      A window wants the desktop: before the compositor's table is there the open is held, and done
                 //      when it is (rover_runner_held).
-                if (!file_look(AT_FDCWD, ROVER_DESKTOP_UP, 0, address_of facts))
+                (void)facts;
+                if (!rover_runner_desktop_up())
                 {
                         if (rover_runner.helds == ROVER_HELD_MOST)
                         {
@@ -961,6 +983,7 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
                                 string_copy_max(held->word[held->count++], (string_address)values[at].text, sizeof(held->word[0]));
                         return;
                 }
+                rover_runner_on_desktop = true;
                 rover_runner_program(path, values, count, 1, "MOONWATER_ASKED=1");
                 return;
         }
@@ -977,6 +1000,7 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
                 }
                 argv[0] = rover_runner.pin[0];
                 rover_runner.pins = 0;
+                rover_runner_on_desktop = true;
                 bipolar pid = rover_runner_exec(argv, null, "MOONWATER_ASKED=1");
                 if (pid > 0)
                         rover_runner_child(pid);
@@ -1003,8 +1027,11 @@ static fn rover_runner_primitive(p16 id, const struct rover_value address_to val
                                          (string_address)values[0].text, null);
                         return;
                 }
-                if (id != 16)
+                //      stop holds it off until a start; start lets it be started (now, when its if lines hold); restart is
+                //      both. A start was nothing at all (the service started only as its if lines said).
+                if (id != 16 && running->pid > 0)
                         rover_runner_stop((positive)which);
+                running->held_off = id == 17;
                 return;
         }
         case 19: // desktop rest
@@ -1497,7 +1524,8 @@ static fn rover_runner_held(void)
 {
         file_facts facts;
 
-        if (!rover_runner.helds || !file_look(AT_FDCWD, ROVER_DESKTOP_UP, 0, address_of facts))
+        (void)facts;
+        if (!rover_runner.helds || !rover_runner_desktop_up())
                 return;
         for (positive at = 0; at < rover_runner.helds; at++)
         {
@@ -1507,6 +1535,7 @@ static fn rover_runner_held(void)
                 for (; used < rover_runner.held[at].count; used++)
                         argv[used] = (string_address)rover_runner.held[at].word[used];
                 argv[used] = null;
+                rover_runner_on_desktop = true;
                 bipolar pid = rover_runner_exec(argv, null, "MOONWATER_ASKED=1");
                 if (pid > 0)
                         rover_runner_child(pid);

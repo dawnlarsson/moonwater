@@ -468,11 +468,22 @@ static fn machine_runner_children(void)
                 if (pid == 0)
                         system_call_1(syscall(exit), 3);
                 string_copy_max(rover_runner_naming, (string_address) "failing-rule-program", sizeof(rover_runner_naming));
+                rover_runner_on_desktop = true;
                 rover_runner_child(pid);
                 for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
                         named = named || (rover_runner.children[at] == pid &&
                                           string_equals((string_address)rover_runner.child_name[at], "failing-rule-program"));
                 check("a child the runner keeps carries its program's name", named);
+                {
+                        bool desktop = false;
+
+                        for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
+                                desktop = desktop || (rover_runner.children[at] == pid && rover_runner.child_desktop[at]);
+                        check("and a program opened on the desktop is marked to end with the compositor, the mark taken once",
+                              desktop && !rover_runner_on_desktop);
+                }
+                check("with no compositor's service running the desktop is not up, whatever file is there",
+                      !rover_runner_desktop_up());
                 (void)system_wait4_retry(pid, null, 0, null);
                 for (positive at = 0; at < ROVER_CHILDREN_MOST; at++)
                         if (rover_runner.children[at] == pid)
