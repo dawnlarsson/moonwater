@@ -2965,11 +2965,23 @@ static long canvas_modes_set(unsigned int modes)
 
         WRITE_ONCE(canvas_modes_largest, modes == SPARK_CANVAS_MODES_LARGEST);
 
+        /*
+                Each card's plug work is queued here, and client_hotplug is not
+                called: it starts with canvas_rules_hotplug, which takes
+                canvas_list_lock, the lock this loop holds. A mutex is not
+                taken twice, so the call that set the word never returned, in
+                state D for good, and every later STATUS (moonwater canvas,
+                moonwater canvas modes, the settings' reading of either) waited
+                behind it on the same lock. No connector changed, so there is
+                nothing for rover's display counts either.
+        */
+        canvas_plug_ensure();
         mutex_lock(&canvas_list_lock);
         list_for_each_entry(canvas, &canvas_list, link)
         {
                 canvas->retarget = true;
-                (void)client_hotplug(&canvas->client);
+                queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq,
+                           &canvas->plug);
         }
         mutex_unlock(&canvas_list_lock);
 
