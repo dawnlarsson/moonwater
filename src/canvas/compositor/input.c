@@ -356,8 +356,13 @@ static void compositor_script_say(const char *name)
         // Said by the doors' thread, which may wait on the FIFO's lock (compositor_doors); a ring that is full drops the line.
         if (compositor_doors.threads)
         {
+                //      Full is said, not dropped in silence: sixteen lines are waiting on a runner that does not read.
                 if (head - __atomic_load_n(&compositor_doors.line_tail, __ATOMIC_ACQUIRE) >= 16)
+                {
+                        compositor_kmsg((string_address) "compositor: a line for the rules is dropped, sixteen wait unread: ", 0,
+                                        (string_address)name);
                         return;
+                }
                 memory_copy(compositor_doors.lines[head % 16], name, length);
                 compositor_doors.lines[head % 16][length] = '\n';
                 compositor_doors.lines[head % 16][length + 1] = 0;

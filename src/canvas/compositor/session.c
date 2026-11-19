@@ -1673,6 +1673,9 @@ static void compositor_door_misc(unsigned int asked)
                         system_write_once(handle, line, string_length((string_address)line));
                         system_close(handle);
                 }
+                else // nothing reads keys.fire (the runner is not up): said, as the loop's own write says it
+                        compositor_kmsg((string_address) "compositor: nothing reads /run/moonwater/keys.fire, error ", (positive)-handle,
+                                        (string_address)line);
                 __atomic_add_fetch(&compositor_doors.line_tail, 1u, __ATOMIC_RELEASE);
         }
         if (asked & COMPOSITOR_DOOR_DRAIN)
