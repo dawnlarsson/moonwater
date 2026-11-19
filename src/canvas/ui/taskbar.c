@@ -1668,14 +1668,16 @@ static void taskbar_tray_one(char *into, int *at, int room, int which, const tm 
         {
                 long hottest = 0;
 
-                for (int zone = 0; zone < 8; zone++)
+                for (int zone = 0; zone < 32; zone++)
                 {
                         char path[64], reading[24];
                         int length = 0;
                         long milli;
 
                         taskbar_tray_put(path, &length, (int)sizeof(path), "/sys/class/thermal/thermal_zone");
-                        path[length++] = (char)('0' + zone);
+                        if (zone >= 10)
+                                path[length++] = (char)('0' + zone / 10);
+                        path[length++] = (char)('0' + zone % 10);
                         path[length] = 0;
                         taskbar_tray_put(path, &length, (int)sizeof(path), "/temp");
                         taskbar_tray_file(path, reading, (int)sizeof(reading));

@@ -848,7 +848,7 @@ def intel_check(src, inc):
     for name, words in made:
         if words != kernels[name]:
             sys.exit('%s: the array %s is not the source\'s words' % (inc, name))
-    print('gpu i915 kernels: %s, copy the iga64 assembly of gpu_i915_copy.iga, fill the same as IGT rows 1 to 9, tone, glass, bx and cp the iga64 assembly, all as %s' % (src, inc))
+    print('gpu i915 kernels: %s, copy the iga64 assembly of gpu_i915_copy.iga, fill the same as IGT rows 1 to 9, tone, glass, bx, cp, scene and scale the iga64 assembly, all as %s' % (src, inc))
 
 
 def main():

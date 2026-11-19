@@ -824,7 +824,7 @@ static unsigned int gpu_i915_window(unsigned int family, positive *va, positive 
 {
         positive space = gpu_i915.gtt ? gpu_i915.gtt
                          : family < 800 ? 1ull << 31 : family == 801 ? 1ull << 32 : family == 1101 ? 1ull << 36 : 1ull << 48;
-        b32 shared = gpu_i915.ppgtt == 1 || family < 800;
+        b32 shared = gpu_i915.ppgtt <= 1 || family < 800;
 
         if (space >= GPU_VA_RECORD && !shared)
                 return *va = GPU_AMD_VA, *maps = GPU_AMD_VA_MAPS, *top = GPU_VA_RECORD, 0;
@@ -883,14 +883,19 @@ static b32 gpu_i915_room(void)
 
 static unsigned int gpu_i915_bind(unsigned int handle, positive va, positive bytes, b32 written)
 {
+        positive whole;
+
         if (!gpu_i915_room())
                 return 12;
         if (!handle || handle >= GPU_I915_HANDLES)
                 return 28;
         // A range the window does not hold, or not of whole pages, would be refused at the submit (EINVAL: the kernel takes a pinned offset page-aligned and canonical).
-        if ((va & 4095) || !bytes || va < GPU_VA || va > GPU_VA_END || bytes > GPU_VA_END - va)
+        if ((va & 4095) || !bytes || bytes > GPU_VA_END || va < GPU_VA || va > GPU_VA_END)
                 return 22;
-        gpu_i915.bound[handle].va = va, gpu_i915.bound[handle].bytes = (bytes + 4095) & ~4095ull, gpu_i915.bound[handle].written = written ? 1 : 0;
+        whole = (bytes + 4095) & ~4095ull;
+        if (!whole || whole > GPU_VA_END - va)
+                return 22;
+        gpu_i915.bound[handle].va = va, gpu_i915.bound[handle].bytes = whole, gpu_i915.bound[handle].written = written ? 1 : 0;
         return 0;
 }
 
@@ -913,10 +918,15 @@ static unsigned int gpu_i915_buffer(positive size, positive va, unsigned int *ha
 
         if (e)
                 return e;
-        *handle = made.handle, map.handle = made.handle, map.flags = gpu_i915.llc ? 2 : 1; // I915_MMAP_OFFSET_WB, _WC
+        map.handle = made.handle, map.flags = gpu_i915.llc ? 2 : 1; // I915_MMAP_OFFSET_WB, _WC
         if ((e = gpu_call(3u, 0x24, 32, &map)) != 0 || (e = gpu_i915_bind(made.handle, va, size, true)) != 0)
+        {
+                p64 close[1] = {made.handle};
+
+                GPU_CONTROL(gpu.fd, GPU_GEM_CLOSE, close);
                 return e;
-        gpu_i915.main = made.handle, *offset = map.offset;
+        }
+        *handle = made.handle, gpu_i915.main = made.handle, *offset = map.offset;
         return 0;
 }
 
@@ -966,7 +976,7 @@ static unsigned int gpu_i915_user(positive from, positive bytes, unsigned int ho
         *handle = 0;
         if (how == GPU_USER_READ)
         {
-                if (gpu_i915.read_only_refused || gpu.family == 700 || gpu.family == 750 || gpu.family >= 1100)
+                if (gpu_i915.read_only_refused || gpu.family < 800 || gpu.family >= 1100)
                         return 1;
                 up.flags |= 1; // I915_USERPTR_READ_ONLY
         }
@@ -993,12 +1003,27 @@ static unsigned int gpu_i915_submit(const struct gpu_job *job, p64 *bos, unsigne
                 job->packets_at[words++] = 0;
         if (!words || words > GPU_PACKETS / 4 || (words & 1) || !gpu_i915_room() || !gpu_i915.main)
                 return 22;
+        if (named >= GPU_I915_HANDLES)
+                return 28;
         for (unsigned int k = 0; k < named; k++)
         {
                 const unsigned int handle = (unsigned int)bos[k];
+                b32 dup = false;
 
                 if (handle >= GPU_I915_HANDLES || !gpu_i915.bound[handle].bytes)
                         return 2; // a buffer the table never bound: it has no address to be pinned at
+                if (handle == gpu_i915.main)
+                        continue;
+                for (unsigned int j = 0; j < n; j++)
+                        if (gpu_i915.objects[j].handle == handle)
+                        {
+                                if (gpu_i915.bound[handle].written)
+                                        gpu_i915.objects[j].flags |= GPU_I915_WRITTEN;
+                                dup = true;
+                                break;
+                        }
+                if (dup)
+                        continue;
                 memory_zero(&gpu_i915.objects[n], sizeof(gpu_i915.objects[n]));
                 gpu_i915.objects[n].handle = handle, gpu_i915.objects[n].offset = gpu_i915.bound[handle].va;
                 gpu_i915.objects[n++].flags = GPU_I915_PINNED | wide | (gpu_i915.bound[handle].written ? GPU_I915_WRITTEN : 0);
@@ -1054,7 +1079,7 @@ static int gpu_i915_wait(positive sequence, positive until)
                 {
                         struct { int fd; short events, returned; } watch = {gpu_i915.jobs[slot].fence - 1, 1, 0}; // POLLIN
                         positive wait[2] = {left / 1000000000ull, left % 1000000000ull};
-                        long r = (long)system_call_4(syscall(ppoll), (positive)&watch, 1, (positive)wait, 0);
+                        long r = (long)system_call_5(syscall(ppoll), (positive)&watch, 1, (positive)wait, 0, 8);
 
                         if (r == -4)
                                 continue;
@@ -1240,6 +1265,10 @@ static void gpu_stop(void)
                 system_call_2(syscall(munmap), (positive)gpu.at, gpu.size);
         if (gpu.fd >= 0)
                 system_close(gpu.fd);
+        gpu_i915_forget();
+        gpu_i915.main = 0;
+        if (gpu_i915.bound)
+                memory_zero(gpu_i915.bound, (positive)GPU_I915_HANDLES * sizeof(struct gpu_i915_bound));
         memory_zero(&gpu, sizeof(gpu));
         gpu_image_ok = gpu_nv12_ok = 0;
         if (gpu_import_at_room)
@@ -2375,6 +2404,7 @@ static unsigned int gpu_i915_scale_batch(const struct gpu_job *job, unsigned int
                 return 0;
         xg = (a->w + 3) / 4;
         sbase = (unsigned int)(job->state - GPU_VA);
+        memory_zero(state, 512);
 
         // Binding table: entry 0 the destination (64), entry 1 the source (256), entry 2 the tables (320), relative to the state's base.
         gpu_i915_put(state, 0, sbase + 64);
@@ -2411,6 +2441,7 @@ static unsigned int gpu_i915_cp_batch(const struct gpu_job *job, unsigned int ad
         blocks = (a->w + 3) >> 2, cw = (a->w + 63) >> 6, ch = (a->gp + 63) >> 6;
         pitch = 4u * a->dp;
         sbase = (unsigned int)(job->state - GPU_VA);
+        memory_zero(state, 512);
 
         // Binding table: entry 0 = the destination's surface state, entry 1 = the bins' (both relative to the surface base, the card's buffer).
         gpu_i915_put(state, 0, sbase + 64);
@@ -2446,13 +2477,13 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
         positive base, pitch;
 
         if (!a || !a->count || a->count > 16384u || a->ops < GPU_VA || (a->ops & 63) || !a->sp || (a->sp & 3) || a->sp > 4096u || !a->gp || a->gp > 16384u ||
-            !a->dp || a->dp > 65536u || (a->dp & 15) || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA)
+            !a->dp || a->dp > 65536u || (a->dp & 15) || a->dp < a->sp || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA)
                 return 0;
         // The records (8 words, 32 bytes each) are read through the CPU mapping of the buffer: they must lie inside it.
-        if ((a->ops - GPU_VA) + 32ull * a->count > gpu.size)
+        if (a->ops - GPU_VA > gpu.size || 32ull * a->count > gpu.size - (a->ops - GPU_VA))
                 return 0;
         px0 = a->x0 << 6, py0 = a->y0 << 2;
-        px1 = px0 + a->w < a->sp ? px0 + a->w : a->sp;
+        px1 = (positive)px0 + (positive)a->w < a->sp ? px0 + a->w : a->sp;
         py1 = (positive)py0 + 4 * (positive)a->rows < a->gp ? py0 + 4 * a->rows : a->gp; // in 64 bits: 4 * a->rows wraps at 2^30 rows
         if (px0 >= px1 || py0 >= py1 || ((px1 - px0) & 3))
                 return 0;
@@ -2472,6 +2503,7 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
         sbase = (unsigned int)(job->state - GPU_VA);
         xg = (px1 - px0) / 4;
         rows = py1 - py0;
+        memory_zero(state, 512);
 
         // Binding table: entry 0 the destination's surface state (64), entry 1 the records' (256), relative to the state's base.
         gpu_i915_put(state, 0, sbase + 64);
@@ -2512,7 +2544,7 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
                 return gpu_i915_scale_batch(job, words, room);
         // The surface's fields are 14 bits (width and height, minus one, in 13:0 and 29:16) and the pitch 18: a row of more than 4096 pixels
         // (16384 bytes), more than 16384 rows or a pitch over 256 KiB is refused, not wrapped.
-        if (a->op > 3 || ((a->x0 || a->y0) && a->op != 3) || !a->w || !a->rows || a->w > 4096u || a->rows > 16384u || a->dp > 65536u)
+        if (a->op > 3 || ((a->x0 || a->y0) && a->op != 3) || !a->w || !a->rows || a->w > 4096u || a->rows > 16384u || a->dp > 65536u || a->d < GPU_VA)
                 return 0;
         span = 4u * a->w;
         pitch = 4u * a->dp;
@@ -2531,6 +2563,7 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
                 return 0;
         xg = s.span / 16;
         sbase = (unsigned int)(job->state - GPU_VA);
+        memory_zero(state, 512);
 
         // Binding table: entry 0 = the destination's surface state, entry 1 = the source's (both relative to the surface base, the card's buffer).
         gpu_i915_put(state, 0, sbase + 64);
@@ -2562,7 +2595,7 @@ static const struct gpu_set gpu_i915_gen9_set = {gpu_i915_gen9_kernels, 8, 0, GP
 
 // The bins sides of the scenes built without a wait (gpu_scene_submit): the last job that reads each (0 none), the side and the place of the last scene
 // binned, and what it was binned for (its width and height, and the damage its lists hold), which gpu_scene_more_submit draws more of.
-static struct { positive job[2], at; unsigned int side, w, h, dx0, dy0, dx1, dy1; } gpu_bins;
+static struct { positive job[2], at, ops_at; unsigned int side, w, h, dx0, dy0, dx1, dy1, count; } gpu_bins;
 static void gpu_bins_forget(void)
 {
         memory_zero(&gpu_bins, sizeof(gpu_bins));
@@ -3421,6 +3454,7 @@ static b32 gpu_scene_rect(positive bins_at, positive d_at, unsigned int pitch, u
         a->tab = GPU_VA + GPU_BASES_AT, a->s = GPU_VA, a->d = d_at >= GPU_VA ? d_at : GPU_VA + d_at, a->g = GPU_VA + bins_at;
         a->dp = pitch, a->sp = w, a->gp = h;
         a->op = 6, a->x0 = dx0 >> 6, a->y0 = dy0 >> 2, a->w = (((dx1 + 63) >> 6) - (dx0 >> 6)) * 64, a->rows = ((dy1 + 3) >> 2) - (dy0 >> 2);
+        a->ops = GPU_VA + gpu_bins.ops_at, a->count = gpu_bins.count;
         return true;
 }
 
@@ -3445,7 +3479,7 @@ static positive gpu_scene_submit(positive ops_at, unsigned int n, positive bins_
         built = gpu_scene_build(ops_at, n, at, room, d_at, pitch, w, h, dx0, dy0, dx1, dy1, binned);
         if (built <= 0 || !(sequence = gpu_go()))
                 return 0;
-        gpu_bins.job[side] = sequence, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.w = w, gpu_bins.h = h;
+        gpu_bins.job[side] = sequence, gpu_bins.side = side, gpu_bins.at = at, gpu_bins.ops_at = ops_at, gpu_bins.count = n, gpu_bins.w = w, gpu_bins.h = h;
         gpu_bins.dx0 = binned[0], gpu_bins.dy0 = binned[1], gpu_bins.dx1 = binned[2], gpu_bins.dy1 = binned[3];
         return sequence;
 }

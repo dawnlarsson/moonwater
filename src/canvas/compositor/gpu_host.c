@@ -75,7 +75,9 @@ static void compositor_gpu_publish(void)
         compositor.table->gpu_drawn = compositor_gpu_counts.drawn, compositor.table->gpu_processor = compositor_gpu_counts.processor;
         memory_copy(compositor.table->gpu_refused, compositor_gpu_counts.why, sizeof(compositor_gpu_counts.why));
         compositor.table->gpu_map_why = gpu_map_why;
-        compositor.table->gpu_family = gpu.family, compositor.table->gpu_device = gpu.device, compositor.table->gpu_map_probe = gpu_map_probe;
+        compositor.table->gpu_family = gpu.family ? gpu.family : gpu_req.family;
+        compositor.table->gpu_device = gpu.device ? gpu.device : gpu_req.device;
+        compositor.table->gpu_map_probe = gpu_map_probe;
         if (gpu_said[0] && memory_compare(compositor.table->gpu_said, gpu_said, sizeof(gpu_said)))
                 memory_copy(compositor.table->gpu_said, gpu_said, sizeof(gpu_said));
         compositor.table->gpu_faults = gpu_faults;
@@ -104,7 +106,8 @@ static void compositor_gpu_requirements(void)
         // The detail of a failed step: the machine's own words where gpu.c has them (the driver that has no path and its node, the chip that has no kernels:
         // Settings puts them in its message), else the step's fix.
         if (gpu_req.first)
-                windows_issue_set(compositor.table, "canvas gpu", WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_REQUIRES, gpu_req.first, gpu_req.error,
+                windows_issue_set(compositor.table, "canvas gpu", gpu_req.settled ? WINDOWS_ISSUE_WARNING : WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_REQUIRES,
+                                  gpu_req.first, gpu_req.error,
                                   gpu_req_words(words, sizeof(words)) ? words : (const char *)windows_gpu_req_fixes[gpu_req.first]);
         else if (gpu_req.route) // the card composes; a refused userptr has no fallback until the dma-buf route works
                 windows_issue_set(compositor.table, "canvas gpu", WINDOWS_ISSUE_WARNING, WINDOWS_ISSUE_GPU_REQUIRES, gpu_req.route, gpu_req.route_error,
@@ -121,9 +124,9 @@ static void compositor_gpu_refuse(enum compositor_gpu_why why, int processor)
         b64 now = 0;
 
         compositor_gpu_counts.processor += (unsigned int)processor;
-        // The setting off is no refusal to say in the log (moonwater canvas gpu says it, and debug counts it): the first present of every start
-        // was said so, made before the settings are read, on a machine whose setting is on.
-        if (why == COMPOSITOR_GPU_WHY_OFF)
+        // Off, headless, no-card and untrusted are session-level states already logged once at startup (compositor_gpu_failed); do not spam per-minute refusal lines.
+        if (why == COMPOSITOR_GPU_WHY_OFF || why == COMPOSITOR_GPU_WHY_HEADLESS ||
+            why == COMPOSITOR_GPU_WHY_NO_CARD || why == COMPOSITOR_GPU_WHY_UNTRUSTED)
         {
                 compositor_gpu_publish();
                 return;
@@ -949,7 +952,7 @@ static void compositor_gpu_issues(void)
         table->gpu_state = compositor_gpu_state.dead ? (compositor_gpu_state.dead_why == COMPOSITOR_GPU_WHY_UNTRUSTED ? WINDOWS_GPU_UNTRUSTED
                                                        : compositor_gpu_state.hung_off ? WINDOWS_GPU_HUNG : WINDOWS_GPU_NO_CARD)
                            : compositor_gpu_state.cool_until && clock_monotonic_nanoseconds() < compositor_gpu_state.cool_until ? WINDOWS_GPU_COOLING
-                                                                                                                              : WINDOWS_GPU_UP;
+                           : compositor_gpu_state.up ? WINDOWS_GPU_UP : WINDOWS_GPU_NO_CARD;
         table->gpu_steps = compositor_gpu_state.cool_steps;
         memory_zero(want, sizeof(want));
         count = windows_gpu_wanted(table, want, WINDOWS_GPU_CODES);
@@ -989,7 +992,7 @@ static int compositor_gpu_present(const struct compositor_frame *frames, unsigne
         {
                 static unsigned int issues_at;
 
-                if (why != COMPOSITOR_GPU_WHY_DRAWN || (++issues_at & 63) == 0)
+                if ((why != COMPOSITOR_GPU_WHY_DRAWN && !(compositor_gpu_state.settled && why == COMPOSITOR_GPU_WHY_NO_CARD)) || (++issues_at & 63) == 0)
                         compositor_gpu_issues();
         }
 
@@ -1070,7 +1073,10 @@ static void compositor_gpu_late_tick(positive now)
         {
                 compositor_gpu_state.dead = 0;
                 if (compositor_gpu_up())
+                {
                         compositor_gpu_lists_sync();
+                        compositor_gpu_issues();
+                }
         }
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_dmabuf_refresh();
@@ -1505,7 +1511,7 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
         unsigned int *op;
         positive from, to;
 
-        if (!compositor_gpu_state.up || !compositor_gpu_state.out || compositor.card < 0 || !gpu_idle()) // a job given up on may read the import it lets go of
+        if (!compositor_gpu_state.up || compositor_gpu_state.dead || !compositor_gpu_state.out || compositor.card < 0 || !gpu_idle() || compositor_gpu_held()) // a job given up on may read the import it lets go of
                 return 0;
         if ((degrees != 90 && degrees != 180 && degrees != 270) || !pw || !ph || pw > 16384 || ph > 16384 || (pw & 3) || (turn->pitch & 15) || turn->pitch / 4 < pw)
                 return 0;

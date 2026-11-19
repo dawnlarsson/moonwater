@@ -1903,7 +1903,8 @@ static unsigned int windows_gpu_wanted(const struct windows *table, struct windo
                 WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_HUNG, 0, 0, "");
         if (table->gpu_fault[0])
                 WANT(WINDOWS_ISSUE_ERROR, WINDOWS_ISSUE_GPU_FAULT, table->gpu_faults, 0, table->gpu_fault);
-        for (unsigned int why = 1; why < WINDOWS_GPU_REASONS; why++)
+        // Skip session-level non-card states (1 OFF, 2 HEADLESS, 3 NO_CARD, 4 UNTRUSTED): those have their own issues and are not per-frame card refusals.
+        for (unsigned int why = 5; why < WINDOWS_GPU_REASONS; why++)
                 if (table->gpu_refused[why] > refused_top)
                         refused_top = table->gpu_refused[why], refused_why = why;
         total = table->gpu_drawn + table->gpu_processor;

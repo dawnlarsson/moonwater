@@ -647,6 +647,7 @@ static b32 host_debug(string_address address_to arguments, positive count)
                 memory_copy(node_bus, table->gpu_node_bus, 32), node_bus[32] = 0;
                 memory_copy(display_bus, table->gpu_display_bus, 32), display_bus[32] = 0;
                 host_say(log, "  gpu node        the card is %s: %s (the display is on %s)\n", node_bus[0] ? (string_address)node_bus : (string_address) "-",
+                         !node_bus[0]              ? (string_address) "none (no chip with kernels)" :
                          table->gpu_node_pick == 1 ? (string_address) "the display's own device" :
                          table->gpu_node_pick == 2 ? (string_address) "another device than the display's: it composes only if its PRIME import of the scanout works" :
                                                      (string_address) "the first node of a chip with kernels (no display's bus known)",

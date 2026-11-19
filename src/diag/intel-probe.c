@@ -1512,7 +1512,8 @@ static int fail_early(const struct cfg *c, u32 index, const char *why, i64 r)
 static int walker_once(const struct cfg *c, u32 index)
 {
 	const u32 path = path_of(c->kern);
-	const u32 tb = (c->pitch * c->h + 4095) & ~4095u;
+	const u64 raw_bytes = (u64)c->pitch * (u64)c->h;
+	const u32 tb = raw_bytes <= TARGET_MAX ? (u32)((raw_bytes + 4095ull) & ~4095ull) : (u32)(TARGET_MAX + 1u);
 	const u64 post = ADDR_TARGET + tb;
 	u32 sh = 0, th = 0, g1 = 0, g2 = 0;
 	u32 blen, inside_bad = 0, pad_hits = 0, guard_bad = 0, written = 0;

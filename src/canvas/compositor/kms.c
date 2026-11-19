@@ -1347,6 +1347,12 @@ static b32 compositor_space_take(int first)
                         compositor.table->period_seen = 0;
                 compositor.period = period;
                 compositor_vblank_last.when = 0;
+                if (compositor.crtc != compositor.output[0].crtc)
+                {
+                        compositor.overlay_state = 0;
+                        compositor.primary = compositor.overlay = 0;
+                        compositor_fence_prop = 0;
+                }
                 compositor.crtc = compositor.output[0].crtc;
                 compositor.crtc_index = compositor.output[0].crtc_index;
                 compositor.connector = compositor.output[0].connector;
@@ -1404,6 +1410,20 @@ static b32 compositor_space_take(int first)
                         started again) refuses that buffer the same way, and then the scanout is the one that fits.
                 */
                 unsigned int on_scanout = 0;
+
+                // Disable unused CRTCs before enabling new ones so Intel Haswell PCH FDI / shared PLLs are freed first.
+                for (unsigned int at = 0; at < was_count; at++)
+                {
+                        int used = 0;
+
+                        for (unsigned int now = 0; now < lit; now++)
+                                used |= compositor.output[now].crtc == was_crtc[at];
+                        if (!used)
+                                compositor_crtc_off(was_crtc[at]);
+                }
+                for (unsigned int n = 0; n < found.count; n++)
+                        if (found.current[n] && !rects[n][2])
+                                compositor_crtc_off(found.crtc[n]);
 
                 for (unsigned int at = 0; at < lit; at++)
                 {
@@ -2483,9 +2503,20 @@ static void compositor_cursor_move(void)
                         return;
                 }
 
-        // The card will not take it: the pointer is drawn from here on.
+        // During wake retrain, a transient cursor refusal must not permanently disable the hardware cursor plane.
+        if (compositor.wake_stage)
+                return;
+
+        // The card will not take it: the pointer is drawn from here on, and the dumb buffers are released.
         compositor_cursor_planes_off();
-        compositor.cursor.handle[0] = compositor.cursor.handle[1] = 0;
+        for (int i = 0; i < 2; i++)
+                if (compositor.cursor.handle[i])
+                {
+                        unsigned int close[2] = {compositor.cursor.handle[i], 0};
+
+                        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                        compositor.cursor.handle[i] = 0;
+                }
         compositor.cursor.refused++;
         compositor.cursor.soft = 1;
         compositor_cursor_move();

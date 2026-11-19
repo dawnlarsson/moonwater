@@ -1112,6 +1112,8 @@ static void compositor_wl_row_close(void *context, int row)
                 compositor_wl.laying[row].last = 0;
                 compositor_wl.cursor_asked[row] = 0;
                 compositor_wl.row_blend[row] = 0;
+                compositor_wl.wc_reads[row] = 0;
+                compositor_wl.wc_copy[row] = 0;
                 memory_zero(&compositor_wl.row_opaque[row], sizeof compositor_wl.row_opaque[row]);
                 compositor_wl_unlend(row);
                 compositor_wl_straight_drop(row);
@@ -1516,20 +1518,25 @@ static unsigned int compositor_lent_fb_as(int row, int opaque)
                 first pixel (the plane's offset, whole blocks), as large as reaches the window's last pixel, and the window's place in it kept
                 (scan_x, scan_y): the overlay's source rectangle is moved by it, so the plane shows the window and nothing round it.
         */
-        if (compositor_driver_in(amd, 1) && !compositor_wl.lent[row].modifier && opaque && !(fb.pitches[0] & 255u) && (fb.offsets[0] & 255u) &&
-            !(compositor_wl.lent[row].offset & 255u) && fb.offsets[0] >= compositor_wl.lent[row].offset)
         {
-                unsigned int into = fb.offsets[0] - compositor_wl.lent[row].offset;
+                static const char *const intel[] = {"i915", "xe"};
+                unsigned int align = compositor_driver_in(amd, 1) ? 255u : compositor_driver_in(intel, 2) ? 63u : 0u;
 
-                compositor_wl.lent[row].scan_y = into / fb.pitches[0];
-                compositor_wl.lent[row].scan_x = into % fb.pitches[0] / 4;
-                fb.width += compositor_wl.lent[row].scan_x, fb.height += compositor_wl.lent[row].scan_y;
-                fb.offsets[0] = compositor_wl.lent[row].offset;
-        }
-        if (compositor_driver_in(amd, 1) && !compositor_wl.lent[row].modifier && (fb.pitches[0] & 255u || fb.offsets[0] & 255u))
-        {
-                compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], fb.pitches[0] & 255u ? COMPOSITOR_WL_SCAN_PITCH : COMPOSITOR_WL_SCAN_OFFSET);
-                return 0;
+                if (align && !compositor_wl.lent[row].modifier && opaque && !(fb.pitches[0] & align) && (fb.offsets[0] & align) &&
+                    !(compositor_wl.lent[row].offset & align) && fb.offsets[0] >= compositor_wl.lent[row].offset)
+                {
+                        unsigned int into = fb.offsets[0] - compositor_wl.lent[row].offset;
+
+                        compositor_wl.lent[row].scan_y = into / fb.pitches[0];
+                        compositor_wl.lent[row].scan_x = into % fb.pitches[0] / 4;
+                        fb.width += compositor_wl.lent[row].scan_x, fb.height += compositor_wl.lent[row].scan_y;
+                        fb.offsets[0] = compositor_wl.lent[row].offset;
+                }
+                if (align && !compositor_wl.lent[row].modifier && (fb.pitches[0] & align || fb.offsets[0] & align))
+                {
+                        compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], fb.pitches[0] & align ? COMPOSITOR_WL_SCAN_PITCH : COMPOSITOR_WL_SCAN_OFFSET);
+                        return 0;
+                }
         }
         prime.handle = 0;
         prime.flags = 0;
@@ -2586,8 +2593,14 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         if (picture->fragile && !(picture->full || !picture->damages))
                 return compositor_wl_lend_refused(picture, 4);
         // A row the processor composes is not lent a dma-buf (compositor_wl.wc_copy): its damage is copied with the streaming loads instead.
+        // Clear wc_copy when a window enters fullscreen so it can still use direct scanout.
         if (picture->sync_fd >= 0 && row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.wc_copy[row])
-                return compositor_wl_lend_refused(picture, 5);
+        {
+                if (compositor.fullscreen[row])
+                        compositor_wl.wc_copy[row] = 0, compositor_wl.wc_reads[row] = 0;
+                else
+                        return compositor_wl_lend_refused(picture, 5);
+        }
         if (width > (long)compositor_most_width() || height > (long)compositor_most_height() || x + width > picture->width || y + height > picture->height)
                 return compositor_wl_lend_refused(picture, 6);
         if (stride & 3 || stride < (unsigned long)picture->width * 4)
@@ -5426,9 +5439,16 @@ static long compositor_wl_dmabuf_info(void *context, struct wayland_dmabuf_info 
         // a tranche that holds it as leave to allocate implicitly, and radeonsi's implicit shared buffer has no DCC (64K_R_X alone was all it made),
         // where offered the modifiers alone it makes the display's retiled DCC. A client that asks for the implicit one is still taken (the shim takes
         // it for any format told).
-        for (unsigned long i = 0; i < sizeof base_formats / sizeof base_formats[0]; i++)
-                if (!compositor_wl.dmabuf_tiled || (i != 1 && i != 3))
-                        compositor_wl_dmabuf_add_pair(info, base_formats[i], WAYLAND_MODIFIER_INVALID);
+        // On Intel (i915/xe) without tiled GPU read, never advertise DRM_FORMAT_MOD_INVALID: Mesa crocus/iris allocates implicitly X/Y-tiled
+        // buffers for INVALID which CPU mmap reads as raw tiled bytes. Advertising LINEAR only forces linear allocations.
+        {
+                static const char *const intel[] = {"i915", "xe"};
+                int skip_invalid = !compositor_wl.dmabuf_tiled && compositor_driver_in(intel, 2);
+
+                for (unsigned long i = 0; !skip_invalid && i < sizeof base_formats / sizeof base_formats[0]; i++)
+                        if (!compositor_wl.dmabuf_tiled || (i != 1 && i != 3))
+                                compositor_wl_dmabuf_add_pair(info, base_formats[i], WAYLAND_MODIFIER_INVALID);
+        }
         {
                 long linear = info->count;
 
@@ -5604,7 +5624,7 @@ static void *compositor_wl_dmabuf_map(void *context, long fd, long size)
                         gpu_release_import(import);
                         return WAYLAND_DMABUF_UNMAPPED;
                 }
-                if (compositor.card >= 0 || compositor_wl.render != 0)
+                if (compositor.card >= 0 && compositor_output_count() <= 1)
                         return WAYLAND_DMABUF_UNMAPPED;
                 return 0;
         }
@@ -5847,9 +5867,9 @@ static int compositor_wl_sync_start(long client, int fd)
         compositor_call(syscall(setitimer), 0, (positive)timer, 0, 0, 0, 0); // ITIMER_REAL
         got = compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
         compositor_call(syscall(setitimer), 0, (positive)off, 0, 0, 0, 0);
-        if (got != -4) // EINTR: the timer ended the wait; anything else is read as it always was
+        if (got != -4 && got != -5) // EINTR: timer ended wait; EIO: GPU reset; anything else (0 or ENOTTY on non-dmabuf) proceeds
                 return 1;
-        if (client >= 0 && client < compositor_wl.slots)
+        if (got == -4 && client >= 0 && client < compositor_wl.slots)
                 compositor_wl.slow_until[client] = clock_monotonic_nanoseconds() + COMPOSITOR_WL_DMABUF_SLOW_NS;
         return 0;
 }

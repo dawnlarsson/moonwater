@@ -1250,19 +1250,19 @@ static int compositor_plane_props(unsigned int plane, unsigned int props[COMPOSI
 // The primary plane of this crtc and an overlay that takes XRGB8888 on it, found once; false when the card has none.
 static int compositor_overlay_ready(void)
 {
-        unsigned int planes[32];
+        unsigned int planes[128];
         struct
         {
                 unsigned long ids;
                 unsigned int count, pad;
-        } resources = {(unsigned long)planes, 32, 0};
+        } resources = {(unsigned long)planes, 128, 0};
         unsigned long cap[2] = {3, 1}; // DRM_CLIENT_CAP_ATOMIC, which brings every plane with it
 
         if (compositor.overlay_state)
                 return compositor.overlay_state > 0;
         compositor.overlay_state = -1;
         if (system_control(compositor.card, COMPOSITOR_SET_CLIENT_CAP, address_of cap) != 0 ||
-            system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > 32)
+            system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > 128)
                 return 0;
 
         for (unsigned int at = 0; at < resources.count; at++)
@@ -1423,18 +1423,18 @@ static unsigned int compositor_enums_of(unsigned int object, unsigned int type, 
 static int compositor_rotation_hardware(unsigned int crtc_index, unsigned int degrees, unsigned int *plane,
                                         unsigned int *property, unsigned long *value)
 {
-        unsigned int planes[32];
+        unsigned int planes[128];
         struct
         {
                 unsigned long ids;
                 unsigned int count, pad;
-        } resources = {(unsigned long)planes, 32, 0};
+        } resources = {(unsigned long)planes, 128, 0};
         // DRM_CLIENT_CAP_ATOMIC, which the turn's commit needs and which brings every plane with it: without it the card lists
         // no primary plane, and the first take of the screens is before compositor_overlay_ready has ever asked for it.
         unsigned long cap[2] = {3, 1};
 
         if (system_control(compositor.card, COMPOSITOR_SET_CLIENT_CAP, address_of cap) != 0 ||
-            system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > 32)
+            system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > 128)
                 return 0;
         for (unsigned int at = 0; at < resources.count; at++)
         {

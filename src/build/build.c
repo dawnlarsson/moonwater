@@ -5021,6 +5021,8 @@ static b32 build_gpu_i915(string_address input, string_address output)
                                 name++;
                         if (name >= p)
                                 return string_report(log_error, 1, "gpu-i915: a kernel with no name in %s, line %lu\n", input, (unsigned long)lines);
+                        if (at + 256 >= sizeof(build_gpu_i915_made))
+                                return string_report(log_error, 1, "gpu-i915: the arrays for %s are larger than the build's buffer\n", input);
                         if (in_kernel)
                                 at = build_gpu_i915_put(at, "\n};\n");
                         at = build_gpu_i915_open(at, name, p);
@@ -5043,7 +5045,7 @@ static b32 build_gpu_i915(string_address input, string_address output)
                                         v = v * 16 + (unsigned long)(*q <= '9' ? *q - '0' : ((*q | 0x20) - 'a' + 10));
                                         q++;
                                 }
-                                if (q == start + 2 || v > 0xffffffffUL)
+                                if (q == start + 2 || v > 0xffffffffUL || (q < p && *q != ',' && *q != ' ' && *q != '\t' && *q != '\r'))
                                         return string_report(log_error, 1, "gpu-i915: not a word in %s, line %lu\n", input, (unsigned long)lines);
                                 //      the output has a line's room of its own: a larger input is refused, never cut short
                                 if (at + 64 >= sizeof(build_gpu_i915_made))

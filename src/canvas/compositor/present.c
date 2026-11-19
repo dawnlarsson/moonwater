@@ -1099,8 +1099,8 @@ static void compositor_present_frames(void)
         unsigned int count = 0, windows;
         int tinted;
 
-        // Not while a flip is in flight, nor while the card still has jobs that write or read what this present would (compositor_card_holds).
-        if (!compositor.damages || compositor.flip_pending || compositor_card_holds())
+        // Not while the display is DPMS-off, a flip is in flight, or the card still has jobs that write or read what this present would.
+        if (!compositor.damages || compositor.dark || compositor.flip_pending || compositor_card_holds())
                 return;
         compositor_bands_follow();
         // The pictures of the clients' gathered layers that changed (turned, flipped, cropped or scaled subsurfaces), made before anything
