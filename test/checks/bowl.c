@@ -1372,6 +1372,60 @@ static fn pad_rows(void)
                   chrome_line(steam ? steam->session : null, "SDL_HIDAPI_UDEV=0") == sdl);
 }
 
+#if X64
+// A little-endian word of an ELF image, bytes wide (2, 4, 8), at offset: 0 where it would run past the image's end.
+static positive bowl_check_elf_word(const p8 *image, positive size, positive offset, positive bytes)
+{
+        positive value = 0;
+
+        if (offset > size || bytes > size - offset)
+                return 0;
+        while (bytes--)
+                value = (value << 8) | image[offset + bytes];
+        return value;
+}
+
+// Whether an ELF shared object's .dynsym defines name as a global function: 1 it does, 0 it does not, -1 a table out of the image.
+static int bowl_check_elf_exports(const p8 *image, positive size, string_address name)
+{
+        bool wide = size > 4 && image[4] == 2;
+        positive shoff = bowl_check_elf_word(image, size, wide ? 0x28 : 0x20, wide ? 8 : 4);
+        positive shentsize = bowl_check_elf_word(image, size, wide ? 0x3A : 0x2E, 2);
+        positive shnum = bowl_check_elf_word(image, size, wide ? 0x3C : 0x30, 2);
+        positive length = string_length(name);
+
+        if (!shoff || shentsize < (wide ? 64u : 40u))
+                return -1;
+        for (positive at = 0; at < shnum; at++)
+        {
+                positive base = shoff + at * shentsize;
+                positive offset, bytes, link, entsize, strings;
+
+                if (bowl_check_elf_word(image, size, base + 4, 4) != 11) // SHT_DYNSYM
+                        continue;
+                offset = bowl_check_elf_word(image, size, base + (wide ? 0x18 : 0x10), wide ? 8 : 4);
+                bytes = bowl_check_elf_word(image, size, base + (wide ? 0x20 : 0x14), wide ? 8 : 4);
+                link = bowl_check_elf_word(image, size, base + (wide ? 0x28 : 0x18), 4);
+                entsize = bowl_check_elf_word(image, size, base + (wide ? 0x38 : 0x24), wide ? 8 : 4);
+                if (link >= shnum || entsize < (wide ? 24u : 16u) || offset > size || bytes > size - offset)
+                        return -1;
+                strings = bowl_check_elf_word(image, size, shoff + link * shentsize + (wide ? 0x18 : 0x10), wide ? 8 : 4);
+                for (positive symbol = offset; symbol + entsize <= offset + bytes; symbol += entsize)
+                {
+                        positive text = strings + bowl_check_elf_word(image, size, symbol, 4);
+                        positive info = bowl_check_elf_word(image, size, symbol + (wide ? 4 : 12), 1);
+                        positive index = bowl_check_elf_word(image, size, symbol + (wide ? 6 : 14), 2);
+
+                        if (text >= size || length + 1 > size - text || memory_compare(image + text, name, length) || image[text + length])
+                                continue;
+                        return (info & 0xF) == 2 && (info >> 4) == 1 && index != 0;
+                }
+                return 0;
+        }
+        return -1;
+}
+#endif
+
 static fn steam_profile(void)
 {
         const struct bowl_profile address_to steam = bowl_find_profile("steam");
@@ -1455,9 +1509,12 @@ static fn steam_profile(void)
         }
 #if X64
         {
-                // Each library is an ELF shared object of its machine (ET_DYN; i386 class 1 machine 3, x86_64 class 2
-                // machine 62) and names the four calls it stands in front of.
-                static const char *const hooks[] = {"glBegin", "glDrawArrays", "glDrawElements", "glPopAttrib"};
+                // Each library is an ELF shared object of its machine (ET_DYN; i386 class 1 machine 3, x86_64 class 2 machine 62)
+                // whose .dynsym defines, as global functions, the calls it stands in front of, its dlsym and its EGL swap, and
+                // not vkGetInstanceProcAddr (exported, it took a Vulkan layer's chain). test/steam_overlay_check.py --blob holds the
+                // bytes to a build of the source.
+                static const char *const hooks[] = {"glBegin", "glDrawArrays", "glDrawElements", "glPopAttrib", "glXGetCurrentContext",
+                                                    "dlsym", "eglSwapBuffers", "XOpenDisplay"};
                 const p8 *const images[] = {bowl_steam_overlay_gl_32, bowl_steam_overlay_gl_64};
                 const positive sizes[] = {sizeof(bowl_steam_overlay_gl_32), sizeof(bowl_steam_overlay_gl_64)};
                 bool right = true;
@@ -1469,18 +1526,11 @@ static fn steam_profile(void)
                         right &= sizes[which] > 64 && image[0] == 0x7f && image[1] == 'E' && image[2] == 'L' &&
                                  image[3] == 'F' && image[4] == which + 1 && image[16] == 3 &&
                                  image[18] == (which ? 62 : 3) && image[19] == 0;
-                        for (positive hook = 0; hook < 4; hook++)
-                        {
-                                positive length = string_length(hooks[hook]);
-                                bool named = false;
-
-                                for (positive at = 0; !named && at + length + 1 <= sizes[which]; at++)
-                                        named = image[at + length] == 0 && !memory_compare(image + at, hooks[hook], length) &&
-                                                (at == 0 || image[at - 1] == 0);
-                                right &= named;
-                        }
+                        for (positive hook = 0; right && hook < sizeof(hooks) / sizeof(hooks[0]); hook++)
+                                right &= bowl_check_elf_exports(image, sizes[which], hooks[hook]) == 1;
+                        right &= bowl_check_elf_exports(image, sizes[which], "vkGetInstanceProcAddr") == 0;
                 }
-                check("The overlay libraries are i386 and x86_64 shared objects that stand in front of glBegin, glDrawArrays, glDrawElements and glPopAttrib",
+                check("The overlay libraries are i386 and x86_64 shared objects whose .dynsym exports the GL calls, glXGetCurrentContext, dlsym, eglSwapBuffers and XOpenDisplay as global functions, and not vkGetInstanceProcAddr",
                       right);
         }
 #endif
@@ -1586,6 +1636,21 @@ static fn steam_profile(void)
                       strstr(script, "DISPLAY=display") && strstr(script, "process.terminate()") && strstr(script, "child.wait()"));
                 check("The wrapper keeps a child's exit 125 from meaning the rootless X server never started",
                       strstr(script, "1 if status == UNSTARTED else status"));
+                {
+                        string_address handlers = strstr(script, "signal.signal(name, finish)");
+                        string_address started = strstr(script, "started = start(");
+                        positive kill_line = chrome_line(steam ? steam->session : null, "kill $xwayland 2>/dev/null; exit $status");
+
+                        check("Xwayland is sent SIGTERM when the wrapper ends however it ends (PR_SET_PDEATHSIG in its child), and the wrapper's "
+                              "signal handlers are set before the server is started",
+                              strstr(script, "prctl(PR_SET_PDEATHSIG, signal.SIGTERM") && strstr(script, "preexec_fn=lambda: dies_with_us(parent)") &&
+                                  handlers && started && handlers < started);
+                        check("The server is not ended under a game still on it when Steam ends first (Steam's renderer loaded, DISPLAY the "
+                              "display): the wrapper waits, and so does the rootful session before its kill",
+                              strstr(script, "while games(display):") && strstr(script, "b\"gameoverlayrenderer\"") && kill_line > 1 &&
+                                  strstr(steam->session[kill_line - 2], "gameoverlayrenderer") &&
+                                  strstr(steam->session[kill_line - 2], "DISPLAY=$display"));
+                }
                 check("The wrapper is written where the bowl runs it from, and is small",
                       string_equals(BOWL_XWAYLAND_WRAPPER, "/usr/local/bin/xwayland-moonwater") && sizeof(bowl_xwayland_script) < 8192);
         }

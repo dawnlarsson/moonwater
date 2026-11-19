@@ -23,7 +23,9 @@
  * where the hot-key and the overlay's input are read. Canvas sends the window the person's keys and pointer while the
  * game has the keys (_MOONWATER_STEAM_OVERLAY on the window names the game's pid; _MOONWATER_STEAM_OVERLAY_OPEN says
  * whether the overlay is open, so all input goes to it then and none to the game). Anything not found leaves the game as it
- * was, and one line on standard error says what was missing.
+ * was, and one line on standard error says what was missing. The bridge's X server going (the session ends Xwayland when
+ * Steam ends) turns the bridge off and leaves the game running: the display has an exit handler of its own (libX11 1.7's
+ * XSetIOErrorExitHandler, required), and the pump stops at the hang-up. A Vulkan game's bridge window is its swapchain's size.
  *
  * SDL loads libEGL and libvulkan with dlopen and takes their functions with dlsym, so this library exports dlsym: a lookup
  * by handle is answered by the next dlsym (the renderer's own hook), with wrappers for libEGL's eglSwapBuffers and libvulkan's
@@ -338,13 +340,14 @@ struct pollfd_
 };
 
 static int game_x_displays;   // XOpenDisplay calls made by the game itself: one says it is an X11 game
-static int bridge_state;      // 0 not tried, 1 up, -1 off
+static int bridge_state;      // 0 not tried, -2 being made (one thread makes it), 1 up, -1 off (never made, or its X server went)
 static int bridge_gl;         // the game draws with EGL, and the renderer's draw runs at its swaps
 static void *bridge_display;
 static XID bridge_window;
 static int bridge_width = 1, bridge_height = 1, bridge_open = -1;
 static long bridge_context[64];
 static int fake_context;
+static long bridge_beat_at;  // when the open overlay's state was last told again (CLOCK_MONOTONIC milliseconds): once a second
 
 static void *(*x_open)(const char *);
 static XID (*x_create)(void *, XID, int, int, unsigned, unsigned, unsigned, unsigned long, unsigned long);
@@ -360,12 +363,15 @@ static int (*x_screen_height)(void *, int);
 static unsigned long (*x_atom)(void *, const char *, int);
 static int (*x_property)(void *, XID, unsigned long, unsigned long, int, int, const void *, int);
 static int (*x_threads)(void);
-static void *(*x_error)(int (*)(void *, void *));
+static int (*(*x_error)(int (*)(void *, void *)))(void *, void *);
+static int (*x_error_before)(void *, void *);
+static void (*x_io_exit)(void *, void (*)(void *, void *), void *);
 static void (*r_glx_swap)(void *, XID);
 static int (*r_overlay_open)(void);
 static int (*thread_make)(unsigned long *, const void *, void *(*)(void *), void *);
 static int (*x_fd)(void *);
 static int (*poll_fn)(struct pollfd_ *, unsigned long, int);
+static int (*clock_fn)(int, long *);
 
 #define FIND(variable, name, required)                                                                                    \
 	do                                                                                                                \
@@ -378,20 +384,37 @@ static int (*poll_fn)(struct pollfd_ *, unsigned long, int);
 		}                                                                                                         \
 	} while (0)
 
-static int ignore_x_error(void *display, void *event)
+static int bridge_up_now(void)
 {
-	(void)display;
-	(void)event;
-	return 0;
+	return __atomic_load_n(&bridge_state, __ATOMIC_ACQUIRE) > 0;
 }
 
-// The overlay's state, told to Canvas on the window when it changes.
-static void tell_open(void)
+// The X error handler is the process's: an error on the bridge's own connection (the renderer's real swap on a window with no GLX
+// drawable, each EGL frame) is ignored, and one on any other display goes to the handler that was there before, the game's or Xlib's.
+static int ignore_x_error(void *display, void *event)
+{
+	if (display && display == bridge_display)
+		return 0;
+	return x_error_before ? x_error_before(display, event) : 0;
+}
+
+// The bridge's X server went (the session ended Xwayland, or it died): Xlib calls this, the display's own, where it would have ended
+// the process (its default exit handler is exit(1)). The bridge is off from now, the game goes on, and the pump ends.
+static void bridge_lost(void *display, void *unused)
+{
+	(void)display;
+	(void)unused;
+	__atomic_store_n(&bridge_state, -1, __ATOMIC_RELEASE);
+}
+
+// The overlay's state, told to Canvas on the window when it changes, and again every second while it is open (beat): Canvas takes an
+// open overlay it has not heard of for longer than that as closed, so a game whose bridge stops gives the person the keys back.
+static void tell_open(int beat)
 {
 	int open = r_overlay_open ? r_overlay_open() != 0 : 0;
 	long value = open;
 
-	if (open == bridge_open || !x_atom || !x_property)
+	if (!bridge_up_now() || !x_atom || !x_property || (open == bridge_open && !(open && beat)))
 		return;
 	bridge_open = open;
 	x_property(bridge_display, bridge_window, x_atom(bridge_display, "_MOONWATER_STEAM_OVERLAY_OPEN", 0), 6, 32, 0, &value, 1);
@@ -401,21 +424,34 @@ static void tell_open(void)
 // Each X event Canvas sends the window goes to the renderer through its XPending and XNextEvent hooks, which read the hot-key and
 // the input. The thread waits on the connection itself (poll), never inside the renderer's hooks: the renderer holds its own lock
 // in them, and a thread blocked there kept its draw and its requests to Steam from running (no overlay opened, nothing drawn).
+// The server hung up (POLLHUP, POLLERR, POLLNVAL), or Xlib found it gone (bridge_lost): the bridge is off and the thread ends.
 static void *bridge_pump(void *unused)
 {
 	(void)unused;
-	for (;;)
+	while (bridge_up_now())
 	{
 		struct pollfd_ wanted = {x_fd(bridge_display), 1, 0};
 
-		poll_fn(&wanted, 1, 250);
-		while (x_pending(bridge_display) > 0)
+		if (poll_fn(&wanted, 1, 250) > 0 && (wanted.revents & (0x8 | 0x10 | 0x20)))
+		{
+			__atomic_store_n(&bridge_state, -1, __ATOMIC_RELEASE);
+			break;
+		}
+		while (bridge_up_now() && x_pending(bridge_display) > 0)
 		{
 			XEvent event;
 
 			x_next(bridge_display, &event);
 		}
-		tell_open();
+		{
+			long now[2] = {0, 0}, at;
+
+			clock_fn(1, now); // CLOCK_MONOTONIC: {seconds, nanoseconds}, each a long (time_t and long on i386 and x86_64)
+			at = now[0] * 1000 + now[1] / 1000000;
+			tell_open(at - bridge_beat_at >= 1000);
+			if (at - bridge_beat_at >= 1000)
+				bridge_beat_at = at;
+		}
 	}
 	return 0;
 }
@@ -445,11 +481,14 @@ static int bridge_up(int gl)
 	FIND(x_screen_height, "XDisplayHeight", 1);
 	FIND(x_atom, "XInternAtom", 1);
 	FIND(x_property, "XChangeProperty", 1);
-	FIND(x_error, "XSetErrorHandler", 0);
+	FIND(x_error, "XSetErrorHandler", 1);
+	// libX11 1.7 and newer: without it, the X server going would end the game (Xlib's exit(1)), so there is no bridge.
+	FIND(x_io_exit, "XSetIOErrorExitHandler", 1);
 	FIND(r_overlay_open, "IsOverlayEnabled", 1);
 	FIND(thread_make, "pthread_create", 1);
 	FIND(x_fd, "XConnectionNumber", 1);
 	FIND(poll_fn, "poll", 1);
+	FIND(clock_fn, "clock_gettime", 1);
 	if (gl)
 		FIND(r_glx_swap, "glXSwapBuffers", 1);
 	x_threads();
@@ -459,8 +498,11 @@ static int bridge_up(int gl)
 		say("no X display (DISPLAY)", 0);
 		return 0;
 	}
-	if (x_error)
-		x_error(ignore_x_error);
+	x_io_exit(display, bridge_lost, 0);
+	bridge_display = display;
+	x_error_before = x_error(ignore_x_error);
+	if (x_error_before == ignore_x_error)
+		x_error_before = 0;
 	screen = x_screen(display);
 	bridge_window = x_create(display, x_root(display, screen), 0, 0, (unsigned)bridge_width, (unsigned)bridge_height, 0, 0, 0);
 	if (!bridge_window)
@@ -477,30 +519,30 @@ static int bridge_up(int gl)
 	bridge_height = x_screen_height(display, screen);
 	x_resize(display, bridge_window, (unsigned)bridge_width, (unsigned)bridge_height);
 	x_flush(display);
-	bridge_display = display;
 	bridge_gl = gl;
-	tell_open();
-	{
-		unsigned long thread;
-
-		if (thread_make(&thread, 0, bridge_pump, 0) != 0)
-		{
-			say("no thread", 0);
-			return 0;
-		}
-	}
 	return 1;
 }
 
+// One thread makes the bridge (0 to -2 by compare and swap); one that comes to it meanwhile goes on without it this time.
 static int bridge(int gl)
 {
-	if (bridge_state == 0)
+	int expected = 0;
+
+	if (__atomic_load_n(&bridge_state, __ATOMIC_ACQUIRE) == 0 &&
+	    __atomic_compare_exchange_n(&bridge_state, &expected, -2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 	{
-		bridge_state = -1;
-		if (renderer_present() && !game_x_displays && bridge_up(gl))
-			bridge_state = 1;
+		unsigned long thread;
+		int up = renderer_present() && !game_x_displays && bridge_up(gl);
+
+		__atomic_store_n(&bridge_state, up ? 1 : -1, __ATOMIC_RELEASE);
+		if (up)
+		{
+			tell_open(0);
+			if (thread_make(&thread, 0, bridge_pump, 0) != 0)
+				say("no thread", 0);
+		}
 	}
-	return bridge_state > 0;
+	return bridge_up_now();
 }
 
 // The game's own X displays: a game that opens one draws through X, where the renderer works by itself.
@@ -520,7 +562,7 @@ void *glXGetCurrentContext(void)
 {
 	static void *(*real)(void);
 
-	if (fake_context)
+	if (fake_context && from_renderer(__builtin_return_address(0)))
 		return bridge_context;
 	if (!real)
 		real = (void *(*)(void))after_us("glXGetCurrentContext");
@@ -556,18 +598,62 @@ unsigned eglSwapBuffers(void *display, void *surface)
 		fake_context = 1;
 		r_glx_swap(bridge_display, bridge_window);
 		fake_context = 0;
-		tell_open();
+		tell_open(0);
 	}
 	return real_egl_swap(display, surface);
 }
 
 static int (*real_vk_wayland_surface)(void *, const void *, const void *, void *);
 static void *(*real_vk_instance_proc)(void *, const char *);
+static void *(*real_vk_device_proc)(void *, const char *);
+static int (*real_vk_swapchain)(void *, const void *, const void *, void *);
+
+// VkSwapchainCreateInfoKHR up to its imageExtent, laid out by the compiler as Vulkan's header is (the surface a 64-bit handle).
+struct vk_swapchain_info
+{
+	int type;
+	const void *next;
+	unsigned flags;
+	unsigned long long surface;
+	unsigned images, format, space, width, height;
+};
 
 static int overlay_vk_wayland_surface(void *instance, const void *info, const void *allocator, void *surface)
 {
 	bridge(0);
 	return real_vk_wayland_surface(instance, info, allocator, surface);
+}
+
+// A Vulkan game's swapchain: the bridge's window is made its size, the size Steam's layer draws the overlay at, so the renderer
+// lays the overlay out and reads the pointer (which Canvas scales to the window) in the frame's own pixels.
+static int overlay_vk_swapchain(void *device, const void *info, const void *allocator, void *swapchain)
+{
+	const struct vk_swapchain_info *wanted = (const struct vk_swapchain_info *)info;
+
+	if (wanted && bridge_up_now() && !bridge_gl && wanted->width && wanted->height && wanted->width < 65536 &&
+	    wanted->height < 65536 && ((int)wanted->width != bridge_width || (int)wanted->height != bridge_height))
+	{
+		bridge_width = (int)wanted->width;
+		bridge_height = (int)wanted->height;
+		x_resize(bridge_display, bridge_window, wanted->width, wanted->height);
+		x_flush(bridge_display);
+	}
+	return real_vk_swapchain(device, info, allocator, swapchain);
+}
+
+static void *overlay_vk_swapchain_of(void *found)
+{
+	if (!found)
+		return 0;
+	real_vk_swapchain = (int (*)(void *, const void *, const void *, void *))found;
+	return (void *)overlay_vk_swapchain;
+}
+
+static void *overlay_vk_device_proc(void *device, const char *name)
+{
+	void *found = real_vk_device_proc ? real_vk_device_proc(device, name) : 0;
+
+	return found && name && same(name, "vkCreateSwapchainKHR") ? overlay_vk_swapchain_of(found) : found;
 }
 
 // Handed to SDL in place of libvulkan's (overlay_dlsym), never exported: a layer's own vkGetInstanceProcAddr stays its own.
@@ -578,11 +664,20 @@ HIDDEN void *overlay_vk_instance_proc(void *instance, const char *name)
 	if (!real_vk_instance_proc)
 		return 0;
 	found = real_vk_instance_proc(instance, name);
-	if (found && name && same(name, "vkCreateWaylandSurfaceKHR") && renderer_present())
+	if (!found || !name || !renderer_present())
+		return found;
+	if (same(name, "vkCreateWaylandSurfaceKHR"))
 	{
 		real_vk_wayland_surface = (int (*)(void *, const void *, const void *, void *))found;
 		return (void *)overlay_vk_wayland_surface;
 	}
+	if (same(name, "vkGetDeviceProcAddr"))
+	{
+		real_vk_device_proc = (void *(*)(void *, const char *))found;
+		return (void *)overlay_vk_device_proc;
+	}
+	if (same(name, "vkCreateSwapchainKHR"))
+		return overlay_vk_swapchain_of(found);
 	return found;
 }
 

@@ -8018,6 +8018,7 @@ lane_gate()
         job maybe gate_row gpu-kernels-llvm gate_gpu_kernels_llvm
         job maybe gate_row gpu-kernels-chips gate_gpu_kernels_chips
         job hard gate_row gpu-i915 gate_gpu_i915
+        job maybe gate_row steam-overlay-blob python3 test/steam_overlay_check.py --blob
         job hard gate_row inventory gate_inventory
         job hard gate_row engine lane_differential_oracle
         job hard gate_row host-writes python3 test/differential.py --harness host_writes
