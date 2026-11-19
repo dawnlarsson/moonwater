@@ -367,7 +367,7 @@ two pages; the C asks it.
 |---|---|---|---|
 | `poweroff`, `reboot`, `suspend` | kernel | any | |
 | `backlight` | kernel | any | percent |
-| `latency` | kernel | any | duration: the processor's wake latency, held (cpu latency QoS) |
+| `latency` | kernel | any | duration: the processor's wake latency, held (cpu latency QoS), at most 2147 s, what the request holds |
 | `latency off` | kernel | any | the hold let go |
 | `radio off` | kernel | lower-only | `wifi`, `bluetooth` or `all` (rfkill block) |
 | `radio on` | kernel | deliberate | |

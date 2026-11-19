@@ -27,6 +27,7 @@
 #define ROVER_TEXT_MOST 255u
 #define ROVER_LIMIT_MOST_MS 86400000u
 #define ROVER_DURATION_MOST (86400ll * 1000000000ll)
+#define ROVER_LATENCY_MOST (2147483647ll * 1000ll) // a cpu latency QoS request is s32 microseconds
 
 //      A page: its first sixteen bytes are its version, its sequence (odd
 //      while it is being written), and the zone's offset east of UTC in
@@ -1668,6 +1669,17 @@ static const char address_to rover_action_check(const struct rover_table address
                         return why;
                 if (primitive && !rover_constant_ok(table, argument[at], type))
                         return "an argument outside its type's range";
+                //      The processor's wake latency is held as a QoS request of 32-bit microseconds: past 2147 s it
+                //      would wrap negative (B-h10-1), so a latency's duration is held to what the request takes.
+                if (primitive && argument[at].source == ROVER_CONST_NUMBER &&
+                    string_equals((string_address)primitive->name, (string_address) "latency"))
+                {
+                        b64 number;
+
+                        memory_copy(&number, table->pool + argument[at].index, sizeof(number));
+                        if (number > ROVER_LATENCY_MOST)
+                                return "a latency past 2147 s, more than the processor's wake latency request holds";
+                }
                 if (primitive && argument[at].source == ROVER_CONST_WORD &&
                     !rover_kind_is_word(rover_types[argument[at].page].kind))
                         return "an argument of another type";

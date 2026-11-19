@@ -409,6 +409,7 @@ static const struct
     {"rule a\n\ton key down ctrl+t\n\ttake\n\tif window.fullscreen == on\n\tdo suspend\n", 0, "desktop state"},
     {"rule a\n\ton key down ctrl+t\n\ttake\n\toff\n\tdo suspend\n", 4, "out of order"},
     {"rule a\n\ton key up f9\n\ttake\n\tdo suspend\n", 0, "taken with its press"},
+    {"rule a\n\ton lid close\n\tdo latency 3600s\n", 0, "past 2147 s"},
     {"rule a\n\ton touch up\n\ttake\n\tdo suspend\n", 0, "taken with its press"},
     {"rule a\n\ton usb added\n\ttake\n\tdo suspend\n", 0, "no reader is kept from"},
     {"rule a\n\ton sleep\n\ttake\n\tdo log \"x\"\n", 0, "no reader is kept from"},
@@ -1273,7 +1274,8 @@ static fn rover_check_red(void)
                   !rover_compiled("rule a\n\ton lid close\n\tdo latency 922337203685477580811s\n"));
         check("red: 5124096h is longer than a day, not 25 minutes",
               !rover_compiled("rule a\n\ton lid close\n\tdo latency 5124096h\n") && rover_holds_why("longer than a day"));
-        check("red: and 24h is a day", rover_compiled("rule a\n\ton lid close\n\tdo latency 24h\n"));
+        //      A limit: latency's own range stops at 2147 s, what its QoS request holds (B-h10-1).
+        check("red: and 24h is a day", rover_compiled("rule a\n\ton lid close\n\tlimit 24h\n\tdo latency 20us\n"));
         //      R-compiler-4 and 5: what prints reads back as the same table.
         check("red: a duration of a nanosecond past a second prints as what reads back",
               rover_round("rule a\n\ton lid close\n\tdo latency 1.000000001s\n") &&

@@ -546,7 +546,8 @@ static void rules_do(const struct rules_job *job)
                 pr_info("[rover] %s: %*pE\n", job->name, (int)string_length((string_address)job->text), job->text);
         else if (id == rules_p_latency)
         {
-                s32 us = (s32)(job->number / 1000);
+                //      Clamped: a QoS request is s32 microseconds, and the loader holds a rule's to it already.
+                s32 us = job->number <= 0 ? 0 : job->number >= ROVER_LATENCY_MOST ? S32_MAX : (s32)(job->number / 1000);
 
                 if (cpu_latency_qos_request_active(&rules_qos))
                         cpu_latency_qos_update_request(&rules_qos, us);
