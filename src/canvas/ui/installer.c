@@ -723,6 +723,8 @@ static fn installer_layout(void)
                 ui_host(&big->stepper, .grow = 1);
         ui_side_body(.class = "inset")
         {
+                // The body's top is the window's top band: its words a margin under the window's edge, level with the first step.
+                ui_host(null, .h = UI_PAD);
                 ui_row(.class = "middle", .grow = 1)
                         ui_col(.grow = 1, .max_w = INSTALLER_COLUMN, .class = "gap3")
                         {
