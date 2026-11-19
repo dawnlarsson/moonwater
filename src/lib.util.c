@@ -2982,7 +2982,7 @@ static inline const p8 address_to byte_reader_take(byte_reader address_to reader
 static inline bool byte_reader_skip(byte_reader address_to reader,
                                     positive count)
 {
-        byte_reader_take(reader, count);
+        (void)byte_reader_take(reader, count);
         return !reader->failed;
 }
 
@@ -3062,14 +3062,13 @@ static inline address_any memory_arena_take(memory_arena address_to arena,
                                              positive bytes, positive alignment)
 {
         if (!alignment || (alignment & (alignment - 1)) ||
-            bytes > positive_max - (alignment - 1))
+            !arena->bytes || arena->used > arena->room)
                 return null;
-        bytes = (bytes + alignment - 1) & ~(alignment - 1);
-        if (!arena->bytes || arena->used > arena->room ||
-            bytes > arena->room - arena->used)
+        positive pad = (alignment - (arena->used & (alignment - 1))) & (alignment - 1);
+        if (pad > arena->room - arena->used || bytes > arena->room - arena->used - pad)
                 return null;
-        address_any at = arena->bytes + arena->used;
-        arena->used += bytes;
+        address_any at = arena->bytes + arena->used + pad;
+        arena->used += pad + bytes;
         return at;
 }
 
@@ -3287,38 +3286,44 @@ static inline bool memory_from_base64(p8 address_to into, string_address text,
                                       bool address_to loose)
 {
         p8 values[256];
-        positive padding = (3 - bytes % 3) % 3;
-        positive made = 0;
-        positive bits = 0;
-        positive held = 0;
+        positive full = bytes / 3;
+        positive rem = bytes % 3;
 
         if (length != base64_length(bytes))
                 return false;
 
         alphabet_values(values, (string_address)BASE64_ALPHABET, 64);
-        for (positive at = 0; at < length; at++)
+        if (full && memory_decode_power2(into, (address_any)text, full, values, 6) != full)
+                return false;
+        if (!rem)
         {
-                if (at >= length - padding)
-                {
-                        if (text[at] != '=')
-                                return false;
-                        continue;
-                }
-                if (values[(p8)text[at]] == 255)
+                address_to loose = false;
+                return true;
+        }
+        {
+                string_address tail = text + full * 4;
+                p8 v0 = values[(p8)tail[0]], v1 = values[(p8)tail[1]];
+
+                if (v0 == 255 || v1 == 255 || tail[3] != '=')
                         return false;
-                held = held << 6 | values[(p8)text[at]];
-                bits += 6;
-                if (bits >= 8)
+                into[full * 3] = (p8)((v0 << 2) | (v1 >> 4));
+                if (rem == 1)
                 {
-                        bits -= 8;
-                        if (made < bytes)
-                                into[made++] = (p8)(held >> bits);
-                        held &= ((positive)1 << bits) - 1;
+                        if (tail[2] != '=')
+                                return false;
+                        address_to loose = (v1 & 0xf) != 0;
+                        return true;
+                }
+                {
+                        p8 v2 = values[(p8)tail[2]];
+
+                        if (v2 == 255)
+                                return false;
+                        into[full * 3 + 1] = (p8)((v1 << 4) | (v2 >> 2));
+                        address_to loose = (v2 & 0x3) != 0;
+                        return true;
                 }
         }
-
-        address_to loose = held != 0;
-        return made == bytes;
 }
 #endif
 
@@ -4696,11 +4701,7 @@ enum { NAME_LIST_OK, NAME_LIST_EMPTY, NAME_LIST_UNKNOWN, NAME_LIST_NOROOM };
    entries than it holds cannot be refused for room. */
 static positive name_list_capacity(string_address text)
 {
-        positive names = 1;
-
-        for (string_address at = text; string_get(at); at++)
-                names += string_get(at) == ',';
-        return names;
+        return 1 + memory_count((address_any)text, string_length(text), ',');
 }
 
 /* Room in a selection of used entries for wanted in all, grown in memory when
@@ -6328,7 +6329,7 @@ static inline INLINE bool decimal_short_placed(string_address input,
             "lea (%[val],%[val],4), %[val]\n"
             "lea (%[byte],%[val],2), %[val]\n"
             "inc %[at]\n"
-            "cmp .Ldecimal_short_powers+184(%%rip), %[val]\n   jbe Ld_%=\n"
+            "cmp " ASM_LABEL(decimal_short_powers) "+184(%%rip), %[val]\n   jbe Ld_%=\n"
             "jmp Lx_%=\n"
             "Lq_%=:  cmp $-2, %k[byte]\n   jne Lc_%=\n"
             "test %[frac], %[frac]\n   jnz Lc_%=\n"
@@ -6368,7 +6369,7 @@ static inline INLINE bool decimal_short_placed(string_address input,
             "cmp $44, %[byte]\n   ja Lx_%=\n"
             "pxor %[made], %[made]\n"
             "cvtsi2sdq %[val], %[made]\n"
-            "lea .Ldecimal_short_powers(%%rip), %[table]\n"
+            "lea " ASM_LABEL(decimal_short_powers) "(%%rip), %[table]\n"
             "test %[pow], %[pow]\n   jz Lr_%=\n   js Lv_%=\n"
             "mulsd (%[table],%[pow],8), %[made]\n"
             "jmp Lr_%=\n"
@@ -6418,7 +6419,7 @@ static inline INLINE address_any copy_apart_running(address_any destination,
         RUNNING_WITHIN(destination, size);
         RUNNING_WITHIN(source, size);
 #if LIBRARY_INLINE_COPY
-        if (size < LIBRARY_RUNNING_MAX)
+        if (!RUNNING_CUT(size))
                 return copy_running(destination, source, size);
 #endif
         return memory_copy_apart(destination, source, size);
@@ -10120,7 +10121,10 @@ pub fn allocator_give_slow(address_any block)
 
         if (tag == ALLOCATOR_SHIFTED)
         {
-                memory_give((address_any)address_to allocator_extra(block));
+                address_any inner = (address_any)address_to allocator_extra(block);
+
+                address_to allocator_tag(block) = 0;
+                memory_give(inner);
                 return;
         }
 
@@ -10652,21 +10656,20 @@ HOT pub positive parallel_width(void)
 {
         if (!parallel_pool.width)
         {
-                p8 mask[128] = {0};
+                p64 mask[16] = {0};
                 bipolar got = system_call_3(syscall(sched_getaffinity), 0,
                                             sizeof(mask), (positive)mask);
                 positive count = 0;
-                bipolar at;
 
-                for (at = 0; at < got && at < (bipolar)sizeof(mask); at++)
+                if (got > 0)
                 {
-                        p8 bits = mask[at];
+                        positive bytes = (positive)got < sizeof(mask) ? (positive)got : sizeof(mask);
+                        positive words = (bytes + 7) / 8;
 
-                        while (bits)
-                        {
-                                count += bits & 1;
-                                bits >>= 1;
-                        }
+                        if (words > array_count(mask))
+                                words = array_count(mask);
+                        for (positive at = 0; at < words; at++)
+                                count += (positive)bits_counted(mask[at]);
                 }
 
                 if (!count)
@@ -12420,19 +12423,10 @@ static fn parallel_tree_discard(parallel_tree_run address_to run,
 
         for (node = first; node; node = node->sibling)
         {
-                if (used == room)
-                {
-                        positive grown_room = room ? room * 2 : 64;
-                        parallel_tree_node address_to address_to grown =
-                                memory_resize(stack, grown_room * sizeof(address_any));
-
-                        if (!grown)
-                                break;
-
-                        stack = grown;
-                        room = grown_room;
-                }
-
+                if (!memory_reserve((address_any address_to)address_of stack,
+                                    address_of room, used, used + 1,
+                                    sizeof(address_any), 64))
+                        break;
                 stack[used++] = node;
         }
 
@@ -12448,19 +12442,10 @@ static fn parallel_tree_discard(parallel_tree_run address_to run,
 
                         for (; child; child = child->sibling)
                         {
-                                if (used == room)
-                                {
-                                        positive grown_room = room * 2;
-                                        parallel_tree_node address_to address_to grown =
-                                                memory_resize(stack, grown_room * sizeof(address_any));
-
-                                        if (!grown)
-                                                break;
-
-                                        stack = grown;
-                                        room = grown_room;
-                                }
-
+                                if (!memory_reserve((address_any address_to)address_of stack,
+                                                    address_of room, used, used + 1,
+                                                    sizeof(address_any), 64))
+                                        break;
                                 stack[used++] = child;
                         }
 
@@ -16103,7 +16088,7 @@ static bool numbers_read(string_address input, numbers_scan address_to number)
                         if (address_to walk == ')')
                         {
                                 string_address closing = null;
-                                positive payload = strtoull((const char address_to)inside, (char address_to address_to)address_of closing, 0);
+                                positive payload = string_to_number_unsigned(inside, address_of closing, 0);
 
                                 if (closing == walk)
                                         number->packed = payload;
@@ -17336,12 +17321,8 @@ static fn numbers_big_shift(numbers_big address_to big, b32 places)
 
         if (whole != 0)
         {
-                for (index = big->used - 1; index >= 0; index--)
-                        big->limb[index + whole] = big->limb[index];
-
-                for (index = 0; index < whole; index++)
-                        big->limb[index] = 0;
-
+                memory_copy(big->limb + whole, big->limb, (positive)big->used * sizeof(p64));
+                memory_zero(big->limb, (positive)whole * sizeof(p64));
                 big->used += whole;
         }
 }
@@ -18736,10 +18717,10 @@ fn stdlib_program_starting(void)
            (SPARK_ENTRY_BSS_NOHUGE): there is nothing to ask of it. */
         if (!(program_entry_facts & SPARK_ENTRY_BSS_NOHUGE) &&
             __bss_start && &__bss_end[0] > &__bss_start[0])
-                system_call_3(syscall(madvise),
-                              (positive)(address_any)__bss_start,
-                              (positive)(__bss_end - __bss_start),
-                              FILE_ADVISE_NO_HUGE_PAGE);
+                (void)system_call_3(syscall(madvise),
+                                    (positive)(address_any)__bss_start,
+                                    (positive)(__bss_end - __bss_start),
+                                    FILE_ADVISE_NO_HUGE_PAGE);
 #endif
 #ifdef LINUX
         stdlib_process_at_start = program_initial_identity();
@@ -18876,8 +18857,8 @@ static fn stdlib_signal_raise(b32 number)
         bipolar group = system_call(syscall(getpid));
         bipolar thread = system_call(syscall(gettid));
 
-        system_call_3(syscall(tgkill), (positive)group, (positive)thread,
-                      (positive)number);
+        (void)system_call_3(syscall(tgkill), (positive)group, (positive)thread,
+                            (positive)number);
 }
 
 DEAD_END fn abort(void)
@@ -24281,11 +24262,7 @@ static p8 clock_history_file[1 << 16];
 
 static positive clock_history_be(const p8 address_to at, positive bytes)
 {
-        positive value = 0;
-
-        for (positive i = 0; i < bytes; i++)
-                value = (value << 8) | at[i];
-        return value;
+        return bytes == 4 ? network_load_32((p8 address_to)at) : network_load_64(at);
 }
 
 // Read a TZif file into the tables above; the footer's rule, when the file
@@ -24373,12 +24350,6 @@ static bool clock_history_load(string_address path, p8 address_to footer, positi
                 }
                 clock_history_name[i][length] = 0;
         }
-        for (positive i = 0; i < types; i++)
-                if (!clock_history_dst[i])
-                {
-                        clock_history_first = (p8)i;
-                        break;
-                }
         // Time type 0 is the one before the first change, by RFC 8536.
         clock_history_first = 0;
 
@@ -24699,8 +24670,10 @@ static fn clock_tz_current(void)
 
 static positive clock_tzif_word(p8 address_to at, p64 value, positive bytes)
 {
-        for (positive i = 0; i < bytes; i++)
-                at[i] = (p8)(value >> (8 * (bytes - 1 - i)));
+        if (bytes == 4)
+                network_store_32(at, (p32)value);
+        else
+                network_store_64(at, value);
         return bytes;
 }
 
@@ -32186,14 +32159,8 @@ static fn format_expand(decimal value, format_number address_to number,
                                 break;
                         }
 
-                        for (index = lowest; index < highest; index++)
-                        {
-                                p128 product =
-                                    (p128)limb[index] * FORMAT_CHUNK + carry;
-
-                                limb[index] = (positive)product;
-                                carry = (positive)(product >> 64);
-                        }
+                        carry = limbs_multiply_word(limb + lowest, limb + lowest,
+                                                    highest - lowest, FORMAT_CHUNK, 0);
 
                         //      Out of the top limb is nineteen digits; out of
                         //      a lower one is the span growing by a limb and
@@ -32926,8 +32893,7 @@ static bool format_short(p64 bits, p8 style, bipolar precision,
                 length = positive_into(number->digit, whole);
 
                 if (style == 'g')
-                        while (number->digit[length - 1] == '0')
-                                length--;
+                        length -= memory_span_byte_reverse(number->digit, '0', length);
 
                 number->count = length;
                 number->exponent = decade + 1;
@@ -33898,7 +33864,7 @@ static b32 puts(string_address text)
 
 #ifdef STANDARD_MODERN_C_STANDARD_STREAM
         return format_put_line(text, length);
-#endif
+#else
 
         if (length &&
             format_stream_write(format_output, (address_any)text, length) !=
@@ -33909,6 +33875,7 @@ static b32 puts(string_address text)
                 return -1;
 
         return 1;
+#endif
 }
 
 /*
@@ -35427,8 +35394,11 @@ static b32 scan_run(scan_source address_to source, string_address format,
 
                         while (byte_is_digit(string_get(at)))
                         {
-                                width = width * 10 +
-                                        (positive)(string_get(at) - '0');
+                                positive digit = (positive)(string_get(at) - '0');
+
+                                width = width > (positive_max - digit) / 10
+                                                ? positive_max
+                                                : width * 10 + digit;
                                 at++;
                         }
 
@@ -35748,11 +35718,8 @@ static b32 scan_run(scan_source address_to source, string_address format,
 
                         if (scan_is_text(source))
                         {
-                                got = string_span(source->text + source->place,
-                                                  set);
-
-                                if (got > limit)
-                                        got = limit;
+                                got = string_span_max(source->text + source->place,
+                                                      limit, set);
 
                                 scan_text_take(source, into, got);
 
@@ -38183,10 +38150,19 @@ static bool path_same_walk(string_address a, string_address b)
 {
         for (;;)
         {
-                while (string_is(a, '/'))
-                        a++;
-                while (string_is(b, '/'))
-                        b++;
+                bool sa = string_is(a, '/');
+                bool sb = string_is(b, '/');
+
+                if (sa != sb)
+                        return false;
+                if (sa)
+                {
+                        while (string_is(a, '/'))
+                                a++;
+                        while (string_is(b, '/'))
+                                b++;
+                        continue;
+                }
                 if (string_get(a) != string_get(b))
                         return false;
                 if (!string_get(a))
@@ -38734,7 +38710,7 @@ static b32 getopt(b32 count, string_address address_to words,
                 optarg = process_getopt_place;
                 optind++;
         }
-        else if (optind == count)
+        else if (optind >= count || is_null(words[optind]))
         {
                 optopt = letter;
                 process_getopt_place = null;
