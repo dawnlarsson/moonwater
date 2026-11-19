@@ -1628,9 +1628,18 @@ static void compositor_overlay_off(void)
 {
         unsigned int off[12] = {compositor.overlay, compositor.crtc};
 
+        compositor.overlay_owed = 0;
         if (!compositor.overlay_on)
                 return;
-        system_control(compositor.card, COMPOSITOR_SETPLANE, address_of off);
+        // Refused (a commit of the crtc's still in flight, a card being reset), the overlay is still on as the card has it: the next present asks
+        // again, and what it shows is drawn there again for it. Taken as off, a refusal left whatever it scanned on the screen for good.
+        if (system_control(compositor.card, COMPOSITOR_SETPLANE, address_of off) != 0 && compositor.card >= 0)
+        {
+                compositor.overlay_owed = 1;
+                compositor_damage(compositor.overlay_rect[0], compositor.overlay_rect[1], compositor.overlay_rect[2] - compositor.overlay_rect[0],
+                                  compositor.overlay_rect[3] - compositor.overlay_rect[1]);
+                return;
+        }
         compositor.overlay_on = 0;
         compositor.plane_fb = 0;
 }

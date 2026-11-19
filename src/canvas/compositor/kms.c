@@ -891,6 +891,7 @@ static void compositor_scanout_own(void)
         compositor_overlay_off();
         compositor.direct_row = compositor.plane_row = compositor.flip_row = -1;
         compositor.plane_fb = 0;
+        compositor.plane_gone = 0;
         compositor.on_screen = compositor.fb;
 }
 

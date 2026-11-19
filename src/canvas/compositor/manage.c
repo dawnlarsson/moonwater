@@ -2684,8 +2684,18 @@ static void compositor_leave(int row)
                 compositor.direct_row = -1;
                 compositor_damage(0, 0, compositor.width, compositor.height);
         }
+        // On the overlay: the card scans the window's framebuffer there until a commit says otherwise, and the next present makes it
+        // (compositor_present's plane off, or the plane given to the window under it). Where the row was only forgotten here, nothing took the
+        // overlay off: the closed window stayed on the screen over everything, its framebuffer and pages held (compositor_shows_row), and its
+        // pages read white or black as the client let go of the buffer (box: a Chromium window closed with no window to take the plane after it,
+        // the overlay still on at its place with its framebuffer, the row gone).
         if (compositor.plane_row == row)
+        {
                 compositor.plane_row = -1;
+                compositor.plane_gone = 1;
+                compositor_damage(compositor.plane_rect[0], compositor.plane_rect[1], compositor.plane_rect[2] - compositor.plane_rect[0],
+                                  compositor.plane_rect[3] - compositor.plane_rect[1]);
+        }
         if (compositor_shows_row(row) || (compositor.flip_pending && compositor.flip_row == row))
                 rows_add(&compositor.dropping, row);
         else if (compositor.scan_fb[row][0] || compositor.scan_fb[row][1])

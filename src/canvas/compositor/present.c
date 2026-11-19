@@ -1263,6 +1263,7 @@ static void compositor_present_frames(void)
                 compositor_unscanned(0);
                 compositor.plane_row = -1;
                 compositor.plane_fb = 0;
+                compositor.plane_gone = 0;
                 return;
         }
 
@@ -1293,8 +1294,13 @@ static void compositor_present_frames(void)
         compositor_plane_carry.fb = 0;
         int plane_off = 0;
 
-        if (compositor.plane_row >= 0 && (plane != compositor.plane_row ||
-                                          memory_compare(planed, compositor.plane_rect, sizeof(planed)) != 0))
+        // A disable of the overlay the kernel refused is asked again (compositor_overlay_off keeps it on, as the card does).
+        if (compositor.overlay_owed && !compositor.flip_pending)
+                compositor_overlay_off();
+        // A window on the plane that closed (compositor.plane_gone, compositor_leave) is off it as one that left it: its framebuffer is the card's until
+        // this present's commit takes the overlay off or gives it to the window under it.
+        if (compositor.plane_gone || (compositor.plane_row >= 0 && (plane != compositor.plane_row ||
+                                                                    memory_compare(planed, compositor.plane_rect, sizeof(planed)) != 0)))
         {
                 // Off the plane, or moved on it: the card is to have it no more, and the compositor composes it.
                 if (compositor.flip_pending)
@@ -1311,6 +1317,7 @@ static void compositor_present_frames(void)
                 }
                 compositor.plane_row = compositor.direct_row = -1;
                 compositor.plane_fb = 0;
+                compositor.plane_gone = 0;
         }
         if (plane >= 0)
         {

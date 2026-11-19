@@ -1073,6 +1073,10 @@ static struct
         // shows on the output (plane_rect), and the framebuffer it shows (plane_fb, 0 for none).
         int plane_row, plane_rect[4];
         unsigned int plane_fb;
+        // plane_gone: the window on the overlay closed (compositor_leave), its framebuffer still scanned at plane_rect until the next present
+        // takes the overlay off or gives it to another window. overlay_owed: the overlay's disable was refused (compositor_overlay_off), and
+        // the overlay is still on: asked again at the next present.
+        int plane_gone, overlay_owed;
         unsigned int crtc_index, primary, overlay, primary_props[11], overlay_props[11];
         unsigned int overlay_fb[2], overlay_handle[2], overlay_back, overlay_rows;
         unsigned int *overlay_pixels[2];
