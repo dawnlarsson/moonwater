@@ -26152,7 +26152,9 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                 row = ui_list_hit(ui, l, x, y);
                 if (l->hold_on)
                         ui_hold_begin(&l->hold, x, y, row, (b64)ui_kit_time());
-                if (!ui_press_drags(event->flags))
+                // A list that asks for the hold scrolls with a mouse's press and move as with a finger's (its drags are the hold's and the
+                // modifiers', never a plain press's): the one rule of such a list.
+                if (!ui_press_drags(event->flags) && !l->hold_on)
                         ui_press_begin(&l->press, x, y, row, touch);
                 else if (ui_press_down(&l->press, x, y, row, &l->scroll), l->press.target < 0)
                         return -1; // a press on rows running on stops them, and shows and clicks nothing

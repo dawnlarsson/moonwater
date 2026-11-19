@@ -4493,6 +4493,13 @@ static fn browser_asks(void)
                 browser_go(m, (string_address) "asks");
                 check("browser: in a work tree a name the index holds is tracked (a folder by what is under it), one a .gitignore matches ignored (a folder by a pattern with its /), any other untracked, .git none",
                       marked && !files_git_marks(m, files_git_check_state));
+                // The press rule: plain is the list's (it scrolls; the hold chooses), with Control or Shift or in selection mode a row drags and
+                // the ground bands, while carrying a press is the carry's.
+                check("browser: a plain press is the list's, Control or Shift drags a row and bands the ground, selection mode the same, carrying the carry's",
+                      files_press_kind(0, 3, false, false) == FILES_PRESS_LIST && files_press_kind(0, -1, false, false) == FILES_PRESS_LIST &&
+                          files_press_kind(WINDOW_KEY_CONTROL, 3, false, false) == FILES_PRESS_DRAG && files_press_kind(WINDOW_KEY_SHIFT, -1, false, false) == FILES_PRESS_BAND &&
+                          files_press_kind(0, 3, true, false) == FILES_PRESS_DRAG && files_press_kind(0, -1, true, false) == FILES_PRESS_BAND &&
+                          files_press_kind(0, 3, false, true) == FILES_PRESS_CARRY && files_press_kind(WINDOW_KEY_CONTROL, -1, true, true) == FILES_PRESS_CARRY);
         }
         files_model_close(m);
 }

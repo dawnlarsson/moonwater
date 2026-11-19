@@ -246,6 +246,7 @@ static struct
         // what is carried to the desktop's drag, which another window or a Wayland client takes as its drop.
         b32 carry_press;
         int carry_px, carry_py;
+        b32 drag_toggle; // a row was pressed with a modifier or in selection mode and armed to be dragged: its release is no list click
         // What was done that Ctrl+Z undoes and Ctrl+Y does again (files_deed): the last FILES_DEEDS, deed_done of them done, the ones after
         // them undone (a new one forgets those). move_into is the folder a copy or a move under way goes into, for its deed; undoing is a
         // move begun by an undo, which is no deed of its own.
@@ -2205,17 +2206,36 @@ static b32 files_act(int which)
 
 /* ---- the rubber band ---- */
 
-// Whether a press at (x, y) begins a rubber band: on the rows' ground past the last row, or on a row away from its name (the columns
-// after the first, where the hand would only choose it).
-static b32 files_band_at(int x, int y)
-{
-        struct ui_list address_to l = &files.big->list;
-        int row;
+/*
+        What a left press on the rows does, the one rule for a mouse and a finger alike (the kit's: ui_list.hold_on, ui_list_click):
 
-        if (x < l->x || x >= l->x + l->w || y < l->y || y >= l->y + l->h)
-                return false;
-        row = ui_list_hit(&files.ui, l, x, y);
-        return row < 0 || (files.view == FILES_VIEW_DETAILS && ui_point(x, files.columns.x, files.columns.w) >= files.columns.at[1]);
+            a press and a move scrolls the rows, and its throw runs them on (FILES_PRESS_LIST: the list's, as every kit list);
+            a press held still for three seconds turns into choosing: on a row it carries it, on the ground it is selection mode (the hold);
+            with Control or Shift at the press, or in selection mode, or while carrying, a press on the ground begins a band that adds and a
+            press on a row taken past the slop drags the rows chosen, that row among them, out as files (FILES_PRESS_BAND, FILES_PRESS_DRAG);
+            while carrying, a press let go where it went down drops what is carried there, and taken past the slop drags it (FILES_PRESS_CARRY).
+
+        A plain press and a move never drags a file: that is the scroll's.
+*/
+#define FILES_PRESS_LIST 0
+#define FILES_PRESS_BAND 1
+#define FILES_PRESS_DRAG 2
+#define FILES_PRESS_CARRY 3
+static int files_press_kind(unsigned int flags, int row, b32 selecting, b32 carrying)
+{
+        if (carrying)
+                return FILES_PRESS_CARRY;
+        if ((flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT)) || selecting)
+                return row >= 0 ? FILES_PRESS_DRAG : FILES_PRESS_BAND;
+        return FILES_PRESS_LIST;
+}
+
+// Whether (x, y) is on the rows' list.
+static b32 files_on_rows(int x, int y)
+{
+        const struct ui_list address_to l = &files.big->list;
+
+        return x >= l->x && x < l->x + l->w && y >= l->y && y < l->y + l->h;
 }
 
 /* ---- the menu and the properties sheet ---- */
@@ -3232,7 +3252,8 @@ static b32 files_event(const struct window_event address_to event)
                 }
                 // Carrying: a press on a folder's row drops what is carried in it, a press on the rows' ground in the folder shown.
                 // Its press is held: a release where it went down drops there, a press taken past the slop is the desktop's drag.
-                if (event->a == UI_POINTER_LEFT && down && files.carrying && !files.hold_carry)
+                if (event->a == UI_POINTER_LEFT && down && files.carrying && !files.hold_carry &&
+                    files_press_kind(event->flags, -1, files.selecting, true) == FILES_PRESS_CARRY)
                 {
                         files.carry_press = true, files.carry_px = ui_kit.pointer_x, files.carry_py = ui_kit.pointer_y;
                         break;
@@ -3251,33 +3272,39 @@ static b32 files_event(const struct window_event address_to event)
                         files.dirty = true;
                         break;
                 }
-                if (event->a == UI_POINTER_LEFT && down && !files.editing && files_band_at(ui_kit.pointer_x, ui_kit.pointer_y))
+                // With Control or Shift at the press, or in selection mode: the ground begins a band that adds to what is chosen, and a row is
+                // chosen (added, or a range with Shift) and armed to be dragged out with the rows chosen; a release there with no drag is the
+                // click it was (below, through the list's press).
+                if (event->a == UI_POINTER_LEFT && down && !files.editing && files_on_rows(ui_kit.pointer_x, ui_kit.pointer_y))
                 {
                         int at = ui_list_hit(ui, l, ui_kit.pointer_x, ui_kit.pointer_y);
+                        int kind = files_press_kind(event->flags, at, files.selecting, false);
 
                         files.crumb_keys = files.tree_keys = false;
-                        if (at >= 0 && (p32)at == files.clicked && (b64)ui_kit.now - files.clicked_at <= ui_click_ns && !files.selecting)
+                        if (kind == FILES_PRESS_BAND)
                         {
-                                files.clicked = FILES_NO;
-                                files_open((p32)at);
+                                files.band_add = true;
+                                memory_copy(files_band_base, m->chosen, FILES_MOST / 8), files.band_base_count = m->chosen_count;
+                                m->cursor = FILES_NO, files.clicked = FILES_NO, m->revision++;
+                                ui_list_band_begin(l, ui_kit.pointer_x, ui_kit.pointer_y);
                                 break;
                         }
-                        // With Control held, or in selection mode, the band adds what it crosses to what is chosen; else it chooses afresh. A press
-                        // held still here turns to selection mode (the kit's hold, its ring).
-                        files.band_add = (event->flags & WINDOW_KEY_CONTROL) != 0 || files.selecting;
-                        ui_hold_begin(&l->hold, ui_kit.pointer_x, ui_kit.pointer_y, at, (b64)ui_kit_time());
-                        if (files.band_add)
-                                memory_copy(files_band_base, m->chosen, FILES_MOST / 8), files.band_base_count = m->chosen_count;
-                        else
-                                files_model_choose_none(m);
-                        if (at >= 0 && files.band_add)
-                                files_model_choose(m, (p32)at, FILES_CHOOSE_TOGGLE), files.clicked = (p32)at, files.clicked_at = (b64)ui_kit.now;
-                        else if (at >= 0)
-                                files_model_choose(m, (p32)at, FILES_CHOOSE_ONLY), files.clicked = (p32)at, files.clicked_at = (b64)ui_kit.now;
-                        else
-                                m->cursor = FILES_NO, files.clicked = FILES_NO;
-                        m->revision++;
-                        ui_list_band_begin(l, ui_kit.pointer_x, ui_kit.pointer_y);
+                        if (kind == FILES_PRESS_DRAG)
+                        {
+                                if (!files_model_chosen(m, (p32)at))
+                                        files_model_choose(m, (p32)at, event->flags & WINDOW_KEY_SHIFT ? FILES_CHOOSE_RANGE : FILES_CHOOSE_TOGGLE);
+                                m->cursor = (p32)at, m->revision++;
+                                ui_drag_button(&files.drag, event, ui_kit.pointer_x, ui_kit.pointer_y, true);
+                                files.drag_place = (p32)at, files.drag_chosen = true, files.drag_toggle = true;
+                                files.dirty = true;
+                                break;
+                        }
+                }
+                // A release of a row armed to be dragged and not dragged: the click it was, a row taken out of what is chosen in selection mode or
+                // with Control (it was added at the press when it was not chosen).
+                if (event->a == UI_POINTER_LEFT && !down && files.drag_toggle)
+                {
+                        files.drag_toggle = false;
                         break;
                 }
                 // The right button: the menu of the row under the pointer (chosen alone first, unless it is among those chosen), or of the
@@ -3288,13 +3315,14 @@ static b32 files_event(const struct window_event address_to event)
                                 files_menu_at(ui_kit.pointer_x, ui_kit.pointer_y);
                         break;
                 }
+                // A plain press: the list's, which scrolls with a move (mouse or finger) and is held for the three seconds' hold; its release
+                // with no move is a click on its row.
                 row = ui_list_click(ui, l, event, ui_kit.pointer_x, ui_kit.pointer_y);
-                // The press itself puts the cursor on its row, as the list lights it; a mouse's left press on a row may drag it out.
                 if (down && l->down >= 0 && (p32)l->down != m->cursor)
                         m->cursor = (p32)l->down, m->revision++;
-                ui_drag_button(&files.drag, event, ui_kit.pointer_x, ui_kit.pointer_y, down && l->down >= 0);
-                if (files.drag.armed)
-                        files.drag_place = (p32)l->down;
+                if (row < 0 && down && event->a == UI_POINTER_LEFT && files_on_rows(ui_kit.pointer_x, ui_kit.pointer_y) && ui_list_hit(ui, l, ui_kit.pointer_x, ui_kit.pointer_y) < 0 &&
+                    !files.selecting)
+                        files_model_choose_none(m), m->cursor = FILES_NO, m->revision++, files.dirty = true;
                 if (row >= 0)
                 {
                         p32 place = (p32)row;
@@ -3422,7 +3450,12 @@ static long files_tick(long timeout, long address_to other)
                                 files.hold_carry = files.carrying;
                         }
                         else
-                                files.selecting = true;
+                        {
+                                // On the ground: selection mode, and a band from where the press went down that adds to what is chosen.
+                                files.selecting = true, files.band_add = true;
+                                memory_copy(files_band_base, m->chosen, FILES_MOST / 8), files.band_base_count = m->chosen_count;
+                                ui_list_band_begin(l, l->hold.x, l->hold.y);
+                        }
                 }
                 if (hold)
                 {

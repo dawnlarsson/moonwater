@@ -1168,6 +1168,29 @@ static fn hold_check(struct ui address_to wui)
         ground_held = (ui_list_hold_tick(wui, &l, l.hold.at + UI_CHOOSE_HOLD_NS) & UI_LIST_HELD) && l.hold.target == -1;
         ui_list_click(wui, &l, &release, 20, 100 + 8 * row);
         check("hold: on a list a press held on the ground past its rows turns with none, a band's", ground_held);
+        // The rule of a list that asks for the hold: a mouse's plain press and move scrolls it as a finger's does (the press is a drag of the
+        // list, not of a row), and no row is clicked at its release.
+        {
+                struct window_event motion = {WINDOW_EVENT_MOTION, 0, 20, 0};
+                b32 scrolled;
+                int clicked;
+
+                memory_zero(&l, sizeof(l));
+                l.virtual = true, l.total = 60, l.x = 0, l.y = 100, l.w = 300, l.h = 6 * row, l.hold_on = true, l.hover = l.down = -1, l.describe = stripe_row, l.empty = "";
+                l.scroll.view = l.h;
+                ui_list_window(wui, &l);
+                ui_list_layout(wui, &l);
+                ui_list_click(wui, &l, &press, 20, 100 + 4 * row);
+                for (int step = 1; step <= 6; step++)
+                {
+                        motion.b = (p32)(100 + 4 * row - step * row / 2);
+                        ui_list_click(wui, &l, &motion, 20, (int)motion.b);
+                }
+                scrolled = l.press.dragged && l.scroll.scroll > 0 && !l.hold.down;
+                clicked = ui_list_click(wui, &l, &release, 20, (int)motion.b);
+                check("hold: a list that asks for the hold scrolls with a mouse's plain press and move, its hold let go, and clicks no row at the release",
+                      scrolled && clicked == -1);
+        }
 }
 
 /*
