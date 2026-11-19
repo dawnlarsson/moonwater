@@ -1,17 +1,12 @@
-// Gen9 scene (op 6): the fill and the tone records only, drawn in order over one 16-byte block (four pixels) of one row. Each
-// thread is one block: its group X (r0.1) and row Y (r0.6) from the walker, at the pixel x = px0 + 4 X and y = py0 + Y (CURBE
-// dwords 1 and 2; CURBE dword 0 is the record count). The block is read on binding table entry 0 and written back on it after
-// every record, in order, as the processor's scene draws them. Binding table entry 1 is the records: count of them, 32 bytes
-// each, two a row of a surface 64 bytes a row (pitch 64; a pitch of 32 reads its odd rows as zeros on the card, measured on
-// subtle-cottage): record k is a media block read of 32 bytes at x 32 (k & 1), row k >> 1. Its words: 0 kind (0 a fill, 1
-// a tone over), 1 x0, 2 y0, 3 x1, 4 y1 (the rectangle [x0, x1) by [y0, y1) in pixels), 5 the colour.
+// Gen9 scene (op 6): fill (0), tone over (1), image copy (4, optional 0x80 R/B swap), and image premultiplied alpha-over (11,
+// optional 0x80 R/B swap) drawn in order over one 16-byte block (four pixels) of one row. Each thread is one block: its group X
+// (r0.1) and row Y (r0.6) from the walker, at the pixel x = px0 + 4 X and y = py0 + Y (CURBE dwords 1 and 2; CURBE dword 0 is
+// the record count; CURBE dword 3 is the low 32 bits of the image surface base on binding table entry 2).
 //
-// Per record, for the four pixels (exec size 4): a fill writes the colour where the pixel is in the rectangle; a tone lays the
-// colour over the pixel as ui_over does (tone.iga's formula, on the running pixel) where the pixel is in the rectangle and the
-// colour's alpha is not 0 (an alpha of 0 leaves the pixel). The rectangle test is on sign bits: x - x0, x1 - 1 - x and the row's
-// terms are OR-ed, so a term is negative exactly when the pixel is outside, and one signed compare with 0 per lane sets the
-// flags f0.0 (the fill) and f1.0 (the tone). f0.1 is the loop's flag, compared at SIMD16 with its scalars broadcast, so every
-// channel of the jump's predicate agrees. Lane ids 0..3 are four scalar movs. The encoder takes only records of kind 0 or 1, a count from 1 to 16384, and the alignments the card takes; anything else is the processor's.
+// Binding table entry 0 is the destination surface (read once at entry, written back once at exit). Binding table entry 1 is the
+// records (count of them, 32 bytes each, two per 64-byte row, pitch 64: record k at x = 32 (k & 1), row k >> 1). Binding table
+// entry 2 is the linear image surface (16384 bytes a row, byte offset B at x = B & 16383, y = B >> 14, as gpu_i915_scale.iga).
+// Each record skips the block immediately when the 4-pixel span misses [x0, x1) x [y0, y1).
 mov (1|M0)               r33.0<1>:ud   0:ud
 mov (1|M0)               r33.1<1>:ud   1:ud
 mov (1|M0)               r33.2<1>:ud   2:ud
@@ -38,18 +33,108 @@ shr (1|M0)               r45.0<1>:ud   r28.1<0;1,0>:ud   1:ud
 mov (1|M0)               r32.1<1>:ud   r45.0<0;1,0>:ud
 mov (1|M0)               r32.2<1>:ud   0x1F:ud
 send (16|M0)             r30:ud        r32:ud    0xC  0x02190001
-mov (1|M0)               r20.0<1>:ud   r30.5<0;1,0>:ud
-shr (1|M0)               r21.0<1>:ud   r20.0<0;1,0>:ud   24:ud
-add (1|M0)               r22.0<1>:ud   -r21.0<0;1,0>:ud  255:ud
-and (1|M0)               r23.0<1>:ud   r20.0<0;1,0>:ud   0x00ff00ff:ud
-shr (1|M0)               r25.0<1>:ud   r20.0<0;1,0>:ud   8:ud
-and (1|M0)               r25.0<1>:ud   r25.0<0;1,0>:ud   0x00ff00ff:ud
+// Early-out bbox test: skip record if y < y0 || y >= y1 || x + 3 < x0 || x >= x1
+add (1|M0)               r42.0<1>:ud   r26.0<0;1,0>:ud   -r30.2<0;1,0>:ud
+add (1|M0)               r41.0<1>:ud   r30.4<0;1,0>:ud   -r26.0<0;1,0>:ud
+add (1|M0)               r41.0<1>:ud   r41.0<0;1,0>:ud   0xFFFFFFFF:ud
+or (1|M0)                r40.0<1>:ud   r42.0<0;1,0>:ud   r41.0<0;1,0>:ud
+add (1|M0)               r43.0<1>:ud   r24.0<0;1,0>:ud   3:ud
+add (1|M0)               r43.0<1>:ud   r43.0<0;1,0>:ud   -r30.1<0;1,0>:ud
+or (1|M0)                r40.0<1>:ud   r40.0<0;1,0>:ud   r43.0<0;1,0>:ud
+add (1|M0)               r43.0<1>:ud   r30.3<0;1,0>:ud   -r24.0<0;1,0>:ud
+add (1|M0)               r43.0<1>:ud   r43.0<0;1,0>:ud   0xFFFFFFFF:ud
+or (1|M0)                r40.0<1>:ud   r40.0<0;1,0>:ud   r43.0<0;1,0>:ud
+cmp (16|M0)  (lt)f0.1    null:d        r40.0<0;1,0>:d    0:d
+(W&f0.1) jmpi next
+// Per-lane x in [x0, x1) mask in f1.0 (y is already in [y0, y1); r35 holds x_j - x0)
+add (4|M0)               r35.0<1>:ud   r34.0<1;1,0>:ud   -r30.1<0;1,0>:ud
+add (4|M0)               r36.0<1>:ud   r30.3<0;1,0>:ud   -r34.0<1;1,0>:ud
+add (4|M0)               r36.0<1>:ud   r36.0<1;1,0>:ud   0xFFFFFFFF:ud
+or (4|M0)                r37.0<1>:ud   r35.0<1;1,0>:ud   r36.0<1;1,0>:ud
+cmp (4|M0)   (ge)f1.0    null:d        r37.0<1;1,0>:d    0:d
+// Dispatch on kind = r30.0 & 0x7f
+and (1|M0)               r46.0<1>:ud   r30.0<0;1,0>:ud   0x7F:ud
+cmp (16|M0)  (ne)f0.1    null:ud       r46.0<0;1,0>:ud   0:ud
+(W&f0.1) jmpi not_fill
+(f1.0) mov (4|M0)        r14.0<1>:ud   r30.5<0;1,0>:ud
+jmpi next
+not_fill:
+cmp (16|M0)  (ne)f0.1    null:ud       r46.0<0;1,0>:ud   1:ud
+(W&f0.1) jmpi do_image
+shr (1|M0)               r21.0<1>:ud   r30.5<0;1,0>:ud   24:ud
+cmp (16|M0)  (eq)f0.1    null:ud       r21.0<0;1,0>:ud   0:ud
+(W&f0.1) jmpi next
+mov (4|M0)               r15.0<1>:ud   r30.5<0;1,0>:ud
+jmpi do_over
+do_image:
+// Base byte offset in BTI 2 for (x0, y): ((y - y0) * pitch) * 4 + (va_lo - img_base_lo)
+// pitch is dword 7 of r30 = word 14 (:uw subregister counts 16-bit words)
+mul (1|M0)               r47.0<1>:ud   r42.0<0;1,0>:ud   r30.14<0;1,0>:uw
+shl (1|M0)               r47.0<1>:ud   r47.0<0;1,0>:ud   2:ud
+add (1|M0)               r48.0<1>:ud   r30.5<0;1,0>:ud   -r1.3<0;1,0>:ud
+add (1|M0)               r47.0<1>:ud   r47.0<0;1,0>:ud   r48.0<0;1,0>:ud
+// Per-lane byte offsets for pixels 0..3; out-of-rect lanes read safe byte 0
+shl (4|M0)               r38.0<1>:ud   r35.0<1;1,0>:ud   2:ud
+add (4|M0)               r38.0<1>:ud   r38.0<1;1,0>:ud   r47.0<0;1,0>:ud
+mov (4|M0)               r39.0<1>:ud   0:ud
+(f1.0) mov (4|M0)        r39.0<1>:ud   r38.0<1;1,0>:ud
+// Pixel 0 from BTI 2 -> r15.0
+mov (8|M0)               r60.0<1>:ud   r0.0<8;8,1>:ud
+and (1|M0)               r60.0<1>:ud   r39.0<0;1,0>:ud   0x00003fff:ud
+shr (1|M0)               r60.1<1>:ud   r39.0<0;1,0>:ud   14:ud
+mov (1|M0)               r60.2<1>:ud   0xF:ud
+send (16|M0)             r64:ud        r60:ud    0xC  0x02190002
+mov (1|M0)               r15.0<1>:ud   r64.0<0;1,0>:ud
+// Pixel 1 from BTI 2 -> r15.1
+mov (8|M0)               r61.0<1>:ud   r0.0<8;8,1>:ud
+and (1|M0)               r61.0<1>:ud   r39.1<0;1,0>:ud   0x00003fff:ud
+shr (1|M0)               r61.1<1>:ud   r39.1<0;1,0>:ud   14:ud
+mov (1|M0)               r61.2<1>:ud   0xF:ud
+send (16|M0)             r65:ud        r61:ud    0xC  0x02190002
+mov (1|M0)               r15.1<1>:ud   r65.0<0;1,0>:ud
+// Pixel 2 from BTI 2 -> r15.2
+mov (8|M0)               r62.0<1>:ud   r0.0<8;8,1>:ud
+and (1|M0)               r62.0<1>:ud   r39.2<0;1,0>:ud   0x00003fff:ud
+shr (1|M0)               r62.1<1>:ud   r39.2<0;1,0>:ud   14:ud
+mov (1|M0)               r62.2<1>:ud   0xF:ud
+send (16|M0)             r66:ud        r62:ud    0xC  0x02190002
+mov (1|M0)               r15.2<1>:ud   r66.0<0;1,0>:ud
+// Pixel 3 from BTI 2 -> r15.3
+mov (8|M0)               r63.0<1>:ud   r0.0<8;8,1>:ud
+and (1|M0)               r63.0<1>:ud   r39.3<0;1,0>:ud   0x00003fff:ud
+shr (1|M0)               r63.1<1>:ud   r39.3<0;1,0>:ud   14:ud
+mov (1|M0)               r63.2<1>:ud   0xF:ud
+send (16|M0)             r67:ud        r63:ud    0xC  0x02190002
+mov (1|M0)               r15.3<1>:ud   r67.0<0;1,0>:ud
+// Optional R/B byte swap (0x80 on kind)
+and (1|M0)               r49.0<1>:ud   r30.0<0;1,0>:ud   0x80:ud
+cmp (16|M0)  (eq)f0.1    null:ud       r49.0<0;1,0>:ud   0:ud
+(W&f0.1) jmpi img_ordered
+and (4|M0)               r16.0<1>:ud   r15.0<1;1,0>:ud   0xff00ff00:ud
+shr (4|M0)               r17.0<1>:ud   r15.0<1;1,0>:ud   16:ud
+and (4|M0)               r17.0<1>:ud   r17.0<1;1,0>:ud   0x000000ff:ud
+and (4|M0)               r18.0<1>:ud   r15.0<1;1,0>:ud   0x000000ff:ud
+shl (4|M0)               r18.0<1>:ud   r18.0<1;1,0>:ud   16:ud
+or (4|M0)                r15.0<1>:ud   r16.0<1;1,0>:ud   r17.0<1;1,0>:ud
+or (4|M0)                r15.0<1>:ud   r15.0<1;1,0>:ud   r18.0<1;1,0>:ud
+img_ordered:
+cmp (16|M0)  (ne)f0.1    null:ud       r46.0<0;1,0>:ud   4:ud
+(W&f0.1) jmpi do_over
+(f1.0) mov (4|M0)        r14.0<1>:ud   r15.0<1;1,0>:ud
+jmpi next
+do_over:
+// Per-lane premultiplied alpha-over: r15 over r14 (exact ui_over formula), written under f1.0
+shr (4|M0)               r16.0<1>:ud   r15.0<1;1,0>:ud   24:ud
+add (4|M0)               r16.0<1>:ud   -r16.0<1;1,0>:ud  255:ud
+and (4|M0)               r17.0<1>:ud   r15.0<1;1,0>:ud   0x00ff00ff:ud
+shr (4|M0)               r18.0<1>:ud   r15.0<1;1,0>:ud   8:ud
+and (4|M0)               r18.0<1>:ud   r18.0<1;1,0>:ud   0x00ff00ff:ud
 and (4|M0)               r10.0<1>:ud   r14.0<1;1,0>:ud   0x00ff00ff:ud
 shr (4|M0)               r11.0<1>:ud   r14.0<1;1,0>:ud   8:ud
 and (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   0x00ff00ff:ud
-mul (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   r22.0<0;1,0>:uw
+mul (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   r16.0<2;1,0>:uw
 add (4|M0)               r10.0<1>:ud   r10.0<1;1,0>:ud   0x007f007f:ud
-mul (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   r22.0<0;1,0>:uw
+mul (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   r16.0<2;1,0>:uw
 add (4|M0)               r11.0<1>:ud   r11.0<1;1,0>:ud   0x007f007f:ud
 shr (4|M0)               r12.0<1>:ud   r10.0<1;1,0>:ud   8:ud
 and (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   0x00ff00ff:ud
@@ -63,36 +148,14 @@ add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r11.0<1;1,0>:ud
 add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00010001:ud
 shr (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   8:ud
 and (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   0x00ff00ff:ud
-add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   r23.0<0;1,0>:ud
-add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r25.0<0;1,0>:ud
-sel (8|M0) (lt)f0.0           r12.0<1>:uw   r12.0<8;8,1>:uw   0x00ff:uw
-sel (8|M0) (lt)f0.0           r13.0<1>:uw   r13.0<8;8,1>:uw   0x00ff:uw
+add (4|M0)               r12.0<1>:ud   r12.0<1;1,0>:ud   r17.0<1;1,0>:ud
+add (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   r18.0<1;1,0>:ud
+sel (8|M0) (lt)f0.0      r12.0<1>:uw   r12.0<8;8,1>:uw   0x00ff:uw
+sel (8|M0) (lt)f0.0      r13.0<1>:uw   r13.0<8;8,1>:uw   0x00ff:uw
 shl (4|M0)               r13.0<1>:ud   r13.0<1;1,0>:ud   8:ud
 or (4|M0)                r5.0<1>:ud    r12.0<1;1,0>:ud   r13.0<1;1,0>:ud
-add (1|M0)               r43.0<1>:ud   -r30.0<0;1,0>:ud  0:ud
-or (1|M0)                r40.0<1>:ud   r30.0<0;1,0>:ud   r43.0<0;1,0>:ud
-xor (1|M0)               r41.0<1>:ud   r30.0<0;1,0>:ud   1:ud
-add (1|M0)               r43.0<1>:ud   -r41.0<0;1,0>:ud  0:ud
-or (1|M0)                r41.0<1>:ud   r41.0<0;1,0>:ud   r43.0<0;1,0>:ud
-add (1|M0)               r42.0<1>:ud   r21.0<0;1,0>:ud   0xFFFFFFFF:ud
-or (1|M0)                r40.1<1>:ud   r41.0<0;1,0>:ud   r42.0<0;1,0>:ud
-add (1|M0)               r42.0<1>:ud   r26.0<0;1,0>:ud   -r30.2<0;1,0>:ud
-add (1|M0)               r41.0<1>:ud   r30.4<0;1,0>:ud   -r26.0<0;1,0>:ud
-add (1|M0)               r41.0<1>:ud   r41.0<0;1,0>:ud   0xFFFFFFFF:ud
-or (1|M0)                r40.2<1>:ud   r42.0<0;1,0>:ud   r41.0<0;1,0>:ud
-add (4|M0)               r35.0<1>:ud   r34.0<1;1,0>:ud   -r30.1<0;1,0>:ud
-add (4|M0)               r36.0<1>:ud   r30.3<0;1,0>:ud   -r34.0<1;1,0>:ud
-add (4|M0)               r36.0<1>:ud   r36.0<1;1,0>:ud   0xFFFFFFFF:ud
-or (4|M0)                r37.0<1>:ud   r35.0<1;1,0>:ud   r36.0<1;1,0>:ud
-or (4|M0)                r37.0<1>:ud   r37.0<1;1,0>:ud   r40.2<0;1,0>:ud
-or (4|M0)                r37.0<1>:ud   r37.0<1;1,0>:ud   r40.0<0;1,0>:ud
-or (4|M0)                r38.0<1>:ud   r35.0<1;1,0>:ud   r36.0<1;1,0>:ud
-or (4|M0)                r38.0<1>:ud   r38.0<1;1,0>:ud   r40.2<0;1,0>:ud
-or (4|M0)                r38.0<1>:ud   r38.0<1;1,0>:ud   r40.1<0;1,0>:ud
-cmp (4|M0)   (ge)f0.0    null:d        r37.0<1;1,0>:d  0:d
-cmp (4|M0)   (ge)f1.0    null:d        r38.0<1;1,0>:d  0:d
 (f1.0) mov (4|M0)        r14.0<1>:ud   r5.0<1;1,0>:ud
-(f0.0) mov (4|M0)        r14.0<1>:ud   r20.0<0;1,0>:ud
+next:
 add (1|M0)               r28.1<1>:ud   r28.1<0;1,0>:ud   1:ud
 cmp (16|M0)  (lt)f0.1    null:ud       r28.1<0;1,0>:ud r28.0<0;1,0>:ud
 (W&f0.1) jmpi loop

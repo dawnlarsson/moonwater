@@ -274,6 +274,23 @@ static void gpu_i915_set_rows(void)
                 a->w = 256;
                 a->count = 300;
                 check("gpu i915 scene: records that run past the GPU buffer are refused (0 words), not read", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                // Image records (kind 4 copy, 11 alpha-over, optional 0x80 R/B swap): BTI 2 surface state at offset 320 and CURBE dword 3 img_base_lo.
+                {
+                        positive img_va = GPU_VA + 0x4014ull;
+
+                        a->count = 3;
+                        recs[16] = 4u | 0x80u, recs[17] = 4, recs[18] = 2, recs[19] = 68, recs[20] = 18;
+                        recs[21] = (unsigned int)img_va, recs[22] = (unsigned int)(img_va >> 32), recs[23] = 128;
+                        check("gpu i915 scene: image copy (4 | 0x80) binds BTI 2 (32-byte aligned base) and sets CURBE dword 3",
+                              gpu_i915_gen9_batch(&job, words, 64) == 56 && state[2] == 2560 + 320 &&
+                                  state[51] == (unsigned int)(img_va & ~31ull) && state[(320 + 32) / 4] == (unsigned int)(img_va & ~31ull));
+                        recs[16] = 11u;
+                        check("gpu i915 scene: image alpha-over (11) is accepted with BTI 2", gpu_i915_gen9_batch(&job, words, 64) == 56);
+                        recs[21] = (unsigned int)(img_va + 1); // unaligned (not multiple of 4)
+                        check("gpu i915 scene: an image record with a non-4-byte-aligned VA is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                        recs[21] = (unsigned int)img_va, recs[23] = 0; // zero pitch
+                        check("gpu i915 scene: an image record with zero pitch is refused (0 words)", gpu_i915_gen9_batch(&job, words, 64) == 0);
+                }
                 a->count = 2, a->op = 6;
                 gpu.size = gpu_size;
         }

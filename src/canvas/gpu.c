@@ -2468,20 +2468,22 @@ static unsigned int gpu_i915_cp_batch(const struct gpu_job *job, unsigned int ad
 }
 
 /*
-        The Intel scene (op 6, the kernel gpu_i915_scene: the fill and tone records of a scene, in order, over each 16-byte block of a row). The batch takes
-        the records as the scene holds them: the card's address of the first (a->ops, 64-byte aligned), a->count of them (1 to 16384), each of kind 0 (a fill)
-        or 1 (a tone over) exactly, else 0 words (the processor draws the scene). They are read two a row of a 64-byte pitch (record k at x 32 (k & 1), row
-        k >> 1: a pitch of 32 reads its odd rows as zeros on the card). The rectangle is the patch the arguments name (a->x0 patches of 64 pixels, a->y0 of 4
-        rows, a->w by a->rows as gpu_scene_build sets them), clipped to the picture (a->sp by a->gp), a block of four pixels at a time; the destination block
-        is read and written on entry 0, at a 32-byte-aligned base, with a pitch of whole 16-byte groups. A rectangle whose width is not a multiple of 4
-        pixels is refused: its last block would be dropped.
+        The Intel scene (op 6, the kernel gpu_i915_scene: fill 0, tone over 1, image copy 4, and premultiplied image over 11, with optional 0x80 R/B swap,
+        drawn in order over each 16-byte block of a row). The batch takes the records as the scene holds them: the card's address of the first (a->ops,
+        64-byte aligned), a->count of them (1 to 16384), each of kind 0, 1, 4, or 11 (optional 0x80 swap on 4/11), else 0 words (the processor draws the
+        scene). Records are read two per 64-byte row on binding table entry 1; image pixels are read from a 16384-byte-pitch linear surface on binding table
+        entry 2 (when all image records fit within a single 256 MiB span; low 32 bits of its 32-byte-aligned base in CURBE dword 3). The rectangle is the
+        patch the arguments name (a->x0 patches of 64 pixels, a->y0 of 4 rows, a->w by a->rows as gpu_scene_build sets them), clipped to the picture (a->sp
+        by a->gp), a block of four pixels at a time; the destination block is read and written on entry 0, at a 32-byte-aligned base, with a pitch of whole
+        16-byte groups. A rectangle whose width is not a multiple of 4 pixels is refused: its last block would be dropped.
 */
 static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
         const struct gpu_args address_to a = gpu_i915_args(job, room);
         p8 address_to state = (p8 address_to)job->state_at;
-        unsigned int sbase, xg, rows, px0, py0, px1, py1, i;
-        positive base, pitch;
+        unsigned int sbase, xg, rows, px0, py0, px1, py1, i, img_rows = 0;
+        positive base, pitch, img_base = 0, img_min = 0, img_max = 0;
+        int has_img = 0;
 
         if (!a || !a->count || a->count > 16384u || a->ops < GPU_VA || (a->ops & 63) || !a->sp || (a->sp & 3) || a->sp > 4096u || !a->gp || a->gp > 16384u ||
             !a->dp || a->dp > 65536u || (a->dp & 15) || a->dp < a->sp || a->x0 > 65535u || a->y0 > 65535u || !a->w || !a->rows || a->d < GPU_VA)
@@ -2498,13 +2500,49 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
         if (base & 31)
                 return 0;
         {
-                // The records are in the same mapped buffer as the state: every one must be a fill (kind 0) or a tone (kind 1), exactly. This is a
-                // strided scan (every 8th word), which the library's routines do not cover.
+                // The records are in the same mapped buffer as the state: every one must be fill (0), tone (1), image copy (4), or image over (11),
+                // with optional 0x80 R/B swap on 4 and 11. This is a strided scan (every 8th word), which the library's routines do not cover.
                 const unsigned int address_to rec = (const unsigned int address_to)((p8 address_to)job->state_at + ((long)a->ops - (long)job->state));
 
                 for (i = 0; i < a->count; i++)
-                        if (rec[8 * i] > 1u)
-                                return 0;
+                {
+                        unsigned int raw = rec[8 * i], k = raw & ~0x80u;
+
+                        if (raw <= 1u)
+                                continue;
+                        if (k == 4u || k == 11u)
+                        {
+                                int rx0 = (int)rec[8 * i + 1], ry0 = (int)rec[8 * i + 2], rx1 = (int)rec[8 * i + 3], ry1 = (int)rec[8 * i + 4];
+                                positive va = (positive)rec[8 * i + 5] | ((positive)rec[8 * i + 6] << 32);
+                                unsigned int rp = rec[8 * i + 7];
+                                positive span;
+
+                                if (rx1 <= rx0 || ry1 <= ry0 || !rp || rp > 65535u || va < GPU_VA || (va & 3))
+                                        return 0;
+                                span = 4ull * ((positive)(ry1 - ry0 - 1) * (positive)rp + (positive)(rx1 - rx0));
+                                if (span > (16384ull * 16384ull) || va + span < va)
+                                        return 0;
+                                if (!has_img || va < img_min)
+                                        img_min = va;
+                                if (!has_img || va + span > img_max)
+                                        img_max = va + span;
+                                has_img = 1;
+                                continue;
+                        }
+                        return 0;
+                }
+        }
+        if (has_img)
+        {
+                positive img_bytes;
+
+                img_base = img_min & ~31ull;
+                img_bytes = img_max - img_base;
+                if (img_bytes > (16384ull * 16384ull))
+                        return 0;
+                img_rows = (unsigned int)((img_bytes + 16383ull) >> 14);
+                if (!img_rows)
+                        img_rows = 1;
         }
         pitch = 4u * a->dp;
         sbase = (unsigned int)(job->state - GPU_VA);
@@ -2512,18 +2550,25 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
         rows = py1 - py0;
         memory_zero(state, 512);
 
-        // Binding table: entry 0 the destination's surface state (64), entry 1 the records' (256), relative to the state's base.
+        // Binding table: entry 0 the destination's surface state (64), entry 1 the records' (256), entry 2 the image surface (320), relative to state's base.
         gpu_i915_put(state, 0, sbase + 64);
         gpu_i915_put(state, 4, sbase + 256);
+        if (has_img)
+        {
+                gpu_i915_put(state, 8, sbase + 320);
+                gpu_i915_surface(state, 320, img_base, 16384, img_rows, 16384);
+        }
         // The destination: R8_UNORM bytes, 4 * (px1 - px0) wide, rows high, pitch 4 * dp, based on the block at px0, py0.
         gpu_i915_surface(state, 64, base, 4u * (px1 - px0), rows, pitch);
         // The records: 64 bytes a row (two records), (count + 1) / 2 rows, pitch 64, based on the first record.
         gpu_i915_surface(state, 256, a->ops, 64, (a->count + 1) >> 1, 64);
         gpu_i915_descriptor(state, job, sbase);
-        // The CURBE: the record count, and the first pixel's x and y (dwords 1 and 2; the kernel adds 4 X and Y to them).
+        // The CURBE: the record count, the first pixel's x and y, and the low 32 bits of the image surface base (dwords 0..3).
         gpu_i915_put(state, 192, a->count);
         gpu_i915_put(state, 196, px0);
         gpu_i915_put(state, 200, py0);
+        if (has_img)
+                gpu_i915_put(state, 204, (unsigned int)img_base);
         gpu_i915_frame(words, sbase, xg, rows);
         return 56;
 }
