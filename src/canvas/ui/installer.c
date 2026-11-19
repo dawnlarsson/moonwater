@@ -41,7 +41,6 @@
 #define INSTALLER_WIDTH 900 // logical pixels
 #define INSTALLER_HEIGHT 660
 #define INSTALLER_COLUMN 640           // what a step says, in the middle of the room beside the steps
-#define INSTALLER_SIDE 200             // the steps' glass pane, the window's whole height at its start
 #define INSTALLER_STEP_ROW 48          // a step's row in it
 #define INSTALLER_CARD_H 96            // an app's card
 #define INSTALLER_LOOK_NS 1000000000ll // the network looked at this often
@@ -751,16 +750,12 @@ static fn installer_layout(void)
 
         ui_view_begin(&big->view, ui, installer.width, -installer.height);
         // The steps are the window's glass pane, its whole height at its start; what a step says is beside them.
-        ui_row(.grow = 1)
+        ui_side_frame()
         {
-        ui_col(.host = &big->side_box, .w = INSTALLER_SIDE, .shrink = 0)
-        {
-                ui_host(null, .h = UI_PAGE_TOP);
+        ui_side_pane(&big->side_box)
                 ui_host(&big->stepper, .grow = 1);
-        }
-        ui_col(.class = "inset", .grow = 1)
+        ui_side_body(.class = "inset")
         {
-                ui_host(null, .h = UI_GAP2);
                 ui_row(.class = "middle", .grow = 1)
                         ui_col(.grow = 1, .max_w = INSTALLER_COLUMN, .class = "gap3")
                         {
@@ -1062,6 +1057,9 @@ static b32 installer_steps_event(const struct window_event address_to event)
         {
                 if (k != big->step_hover)
                         big->step_hover = k, installer.dirty = true;
+                // A step a press goes to shows the hand, which also tells the compositor the window's top band gives way to it there.
+                if (installer_step_reachable(k))
+                        ui_kit_shape = WINDOW_POINTER_HAND;
                 return false;
         }
         if (event->type != WINDOW_EVENT_BUTTON || k < 0)

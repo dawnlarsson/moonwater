@@ -11856,6 +11856,25 @@ static fn ui_kit_inks(struct ui address_to ui)
         by where each element is, so an app's rows, their hover, their press, the row the keys are on and their stripes draw over the
         glass as they do on a glass menu, and an app gives no ink of its own.
 */
+/*
+        The frame of every window with a pane, one layout for all (the browser's tree, the settings' groups, the installer's steps):
+
+            ui_side_frame()
+            {
+                    ui_side_pane(&box)  { what is in the pane, from the window's very top }
+                    ui_side_body()      { the rest, from the top, to the window's other edge }
+            }
+
+        and ui_side_place(ui, box.x, box.w) once the picture is laid out. The pane is UI_SIDE_W wide and the window's whole height; its
+        first item sits in the window's top band, where a press on it is its (the kit shows its hand there, so the compositor gives the
+        band way to it) and a press on the pane's ground still takes the window to move it. The body has no margin of its own at the
+        top or the far edge: what it holds keeps to its own insets, and rows run to the window's edge.
+*/
+#define UI_SIDE_W 200 // logical pixels: the pane's width in every window that has one
+#define ui_side_frame() ui_row(.grow = 1)
+#define ui_side_pane(box) ui_col(.host = (box), .w = UI_SIDE_W, .min_w = UI_COLUMN_LEAST, .shrink = 1)
+#define ui_side_body(...) ui_col(.grow = 1, __VA_ARGS__)
+
 static b32 ui_side_holds(const struct ui address_to ui, int x, int w)
 {
         return ui->sided && ui->side_w > 0 && x >= ui->side_x && x + w <= ui->side_x + ui->side_w;
@@ -26283,6 +26302,7 @@ struct ui_page
         int list_least;                    // the width the list's rows need (ui_list_least, device pixels; 0 none): the column gives way before it
         // Read off those by ui_page_fit, device pixels.
         int top, bottom;                   // the body's band
+        int column_top, column_bottom;     // and the column's: the body's, or the window's whole height where the column is a side pane
         int left, right;                   // and its sides
         int column_w;
         int seam;                          // the middle of the column's scroll bar, device px: the column's rows end and the body's begin there
@@ -26336,21 +26356,20 @@ static fn ui_page_view(struct ui address_to ui, struct ui_page address_to p)
         // groups under a band as tall as the title's, and the title, the search and the body beside it.
         if (ui->sided && p->column_on)
         {
-                ui_row(.grow = 1)
+                (void)most;
+                ui_side_frame()
                 {
-                        ui_row(.host = &p->side_box, .shrink = 0)
+                        ui_side_pane(&p->side_box)
                         {
-                                ui_host(null, .w = UI_PAD);
-                                ui_col()
+                                ui_row(.grow = 1)
                                 {
-                                        ui_host(null, .h = UI_PAGE_TOP);
-                                        ui_row(.host = &p->column_box, .max_w = most, .grow = 1)
-                                                ui_host(null, .w = ui_share(UI_COLUMN_SHARE), .min_w = UI_COLUMN_LEAST, .max_w = UI_COLUMN_MOST, .shrink = 1);
+                                        ui_row(.host = &p->column_box, .grow = 1)
+                                                ;
+                                        ui_row(.w = UI_COLUMN_GUTTER, .class = "middle")
+                                                ui_host(&p->column_bar, .w = UI_SCROLL_WIDTH);
                                 }
-                                ui_row(.w = UI_COLUMN_GUTTER, .class = "middle")
-                                        ui_host(&p->column_bar, .w = UI_SCROLL_WIDTH);
                         }
-                        ui_col(.grow = 1)
+                        ui_side_body()
                         {
                                 ui_row(.h = UI_PAGE_TOP)
                                 {
@@ -26453,10 +26472,21 @@ static inline b32 ui_page_in_column(const struct ui_page address_to p, int x)
         return ui_rtl() ? x >= p->seam && x < p->width : x >= 0 && x < p->seam;
 }
 
+// The column's band: its own where it is a side pane's (column_top under column_bottom), else the body's.
+static inline int ui_page_column_top(const struct ui_page address_to p)
+{
+        return p->column_bottom > p->column_top ? p->column_top : p->top;
+}
+
+static inline int ui_page_column_bottom(const struct ui_page address_to p)
+{
+        return p->column_bottom > p->column_top ? p->column_bottom : p->bottom;
+}
+
 // A row of the window as the column's groups have it drawn, its picture stretched by a pull past an end (ui_scroll_unpull).
 static int ui_page_column_unpull(const struct ui address_to ui, const struct ui_page address_to p, int y)
 {
-        return ui_scroll_unpull(ui, &p->column_scroll, p->column_scroll.scroll, p->top, p->bottom - p->top, y);
+        return ui_scroll_unpull(ui, &p->column_scroll, p->column_scroll.scroll, ui_page_column_top(p), ui_page_column_bottom(p) - ui_page_column_top(p), y);
 }
 
 static int ui_page_column_hit(const struct ui address_to ui, const struct ui_page address_to p, int x, int y)
@@ -26465,10 +26495,10 @@ static int ui_page_column_hit(const struct ui address_to ui, const struct ui_pag
         // are where the groups are drawn, at rest too, as a list's rows are (ui_list_hit).
         int group;
 
-        if (!p->column_on || y < p->top || y >= p->bottom || !ui_page_in_column(p, x))
+        if (!p->column_on || y < ui_page_column_top(p) || y >= ui_page_column_bottom(p) || !ui_page_in_column(p, x))
                 return -1;
-        group = (ui_page_column_unpull(ui, p, y) - p->top +
-                 ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, p->bottom - p->top)) / ui_dev(ui, UI_ROW);
+        group = (ui_page_column_unpull(ui, p, y) - ui_page_column_top(p) +
+                 ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, ui_page_column_bottom(p) - ui_page_column_top(p))) / ui_dev(ui, UI_ROW);
 
         return group >= p->column.count ? -1 : group;
 }
@@ -26521,6 +26551,9 @@ static fn ui_page_fit(struct ui address_to ui, struct ui_page address_to p, stru
         p->width = width, p->height = height;
         ui_page_view(ui, p);
         p->top = p->body_bar.y, p->bottom = p->top + p->body_bar.h;
+        // The column's band: the pane's whole height where it is a side pane (its first group in the window's top band), else the body's.
+        p->column_top = p->side_box.w > 0 ? p->column_box.y : p->top;
+        p->column_bottom = p->side_box.w > 0 ? p->column_box.y + p->column_box.h : p->bottom;
         p->left = box->x, p->right = box->x + box->w;
         p->column_w = p->column_on ? p->column_box.w : 0;
         p->seam = p->column_on ? ui_mirror(bar->x + bar->w / 2, 0, bar->x, bar->w) : 0;
@@ -26528,7 +26561,9 @@ static fn ui_page_fit(struct ui address_to ui, struct ui_page address_to p, stru
         card->x = p->body_bar.x, card->content = card_content;
         for (int k = 0; k < 2; k++)
         {
-                bars[k]->y = p->top, bars[k]->height = bars[k]->view = p->bottom - p->top, bars[k]->scale = ui->scale;
+                int top = k ? p->top : ui_page_column_top(p), bottom = k ? p->bottom : ui_page_column_bottom(p);
+
+                bars[k]->y = top, bars[k]->height = bars[k]->view = bottom - top, bars[k]->scale = ui->scale;
                 ui_scroll_clamp(bars[k]);
         }
         ui_list_place(ui, l, box->x, box->y, box->w, box->h);
@@ -26590,8 +26625,8 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
         if (!p->column_on)
                 return;
         ui_scroll_frame(ui, &p->column_scroll);
-        ui->top = p->top;
-        ui->bottom = p->bottom;
+        ui->top = ui_page_column_top(p);
+        ui->bottom = ui_page_column_bottom(p);
         if (c->kind != UI_TABS)
         {
                 c->kind = UI_TABS, c->variant = UI_TABS_VERTICAL;
@@ -26601,8 +26636,8 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
         c->w = box->w * 100 / ui->scale;
         c->x = ui_rtl() ? (box->x + box->w) * 100 / ui->scale - c->w : box->x * 100 / ui->scale;
         // The groups are drawn at rest, inside the column's ends, and a pull past one is the picture stretched (ui_scroll_pull)
-        rest = ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, p->bottom - p->top);
-        c->y = (p->top - rest) * 100 / ui->scale;
+        rest = ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, ui_page_column_bottom(p) - ui_page_column_top(p));
+        c->y = (ui_page_column_top(p) - rest) * 100 / ui->scale;
         c->h = UI_ROW;
         // A group is a whole row, flush with the window's edge, to the middle of the bar's track: logical px rounded up, the edge the list's rows
         // begin at (ui_list_across_logical), so the two lie edge to edge at every scale.
@@ -26617,7 +26652,8 @@ static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b
         if (chosen != c->at)
                 ui_tabs_choose(ui, c, chosen); // placed at its first frame, moving after
         ui_control_draw(ui, c);
-        ui_scroll_pull(ui, &p->column_scroll, p->column_scroll.scroll, ui_rtl() ? p->seam : 0, p->top, ui_rtl() ? p->width - p->seam : p->seam, p->bottom - p->top);
+        ui_scroll_pull(ui, &p->column_scroll, p->column_scroll.scroll, ui_rtl() ? p->seam : 0, ui_page_column_top(p), ui_rtl() ? p->width - p->seam : p->seam,
+                       ui_page_column_bottom(p) - ui_page_column_top(p));
 }
 
 // The column's bar, drawn last of the page (after the body's rows): its track lies across the seam, so the body's rows (their hover,
@@ -26626,8 +26662,8 @@ static fn ui_page_column_bar(struct ui address_to ui, struct ui_page address_to 
 {
         if (!p->column_on)
                 return;
-        ui->top = p->top;
-        ui->bottom = p->bottom;
+        ui->top = ui_page_column_top(p);
+        ui->bottom = ui_page_column_bottom(p);
         ui_scroll_draw(ui, &p->column_scroll);
 }
 
@@ -26646,7 +26682,7 @@ static fn ui_page_moved(const struct ui address_to ui, struct ui_page address_to
 {
         if (!region)
                 return;
-        ui_page_damage(p, p->top - ui_dev(ui, UI_ROW), p->bottom + ui_dev(ui, UI_ROW));
+        ui_page_damage(p, (ui_page_column_top(p) < p->top ? ui_page_column_top(p) : p->top) - ui_dev(ui, UI_ROW), p->bottom + ui_dev(ui, UI_ROW));
 }
 
 // The wheel on the page: it turns the region under the pointer.
@@ -27121,6 +27157,9 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
                         ui_list_pointer(ui, l, WINDOW_EVENT_MOTION, event->a, event->b, false);
                         if (ui_control_hit(ui, &p->column, event->a, ui_page_column_unpull(ui, p, event->b)) != p->column.item)
                                 ui_page_changed(p);
+                        // A group under the pointer shows the hand: in a side pane the first is in the window's top band, which gives way to it.
+                        if (ui_page_column_hit(ui, p, event->a, event->b) >= 0)
+                                ui_kit_shape = WINDOW_POINTER_HAND;
                 }
                 return;
         }

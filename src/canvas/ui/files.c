@@ -88,7 +88,6 @@
 #define FILES_TURN_NS 4000000ll      // steps are taken for this long a pass,
 #define FILES_SHOW_NS 100000000ll    // the entries so far are drawn this often while it reads,
 #define FILES_LOOK_NS 1000000000ll   // and the folder shown is looked at again this often
-#define FILES_TREE_WIDTH 180         // logical pixels of the folder tree beside the rows
 #define FILES_KEY_F5 63
 #define FILES_KEY_R 19
 #define FILES_KEY_H 35
@@ -714,15 +713,12 @@ static fn files_layout(void)
         l->empty = files_state_text(m);
         ui_view_begin(&files.big->view, ui, files.width, -files.height);
         // The folder tree is the window's glass pane, its whole height at the start; the band, the rows and the foot are beside it.
-        ui_row(.grow = 1)
+        ui_side_frame()
         {
-                ui_col(.host = &files.side_box, .w = FILES_TREE_WIDTH, .shrink = 0)
-                {
-                        ui_host(null, .h = UI_GAP2);
+                ui_side_pane(&files.side_box)
                         ui_col(.class = "rows", .grow = 1)
                                 ui_rows(&files.big->tree_list, .class = "list", .grow = 1);
-                }
-                ui_col(.grow = 1)
+                ui_side_body()
                 {
                         ui_row(.class = "pathbar")
                         {
