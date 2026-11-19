@@ -198,6 +198,7 @@ menu_redo	ac45	Повторить
 menu_rename	9529	&Переименовать
 menu_reset_zoom	1b0f	Сбросить масштаб
 menu_select_all	f6f6	Выделить всё
+menu_set_wallpaper	1a27	Сделать &обоями
 menu_show_hidden	37bd	Показать &скрытые файлы
 menu_toggle_comment	92ac	Закомментировать/раскомментировать
 menu_undo	b9d3	Отменить
@@ -706,6 +707,7 @@ settings_size_refused	20a9	Экран не принял %d × %d: возврат
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Пускает ключи из списка по сети; выключенный останавливается и завершает все сеансы
 =Root may log in by a key of the list, and by nothing else	a430	Root может войти по ключу из списка и больше никак
 =Wallpaper	0da9	Обои
+=Wallpaper picture (a PNG file, or none)	8e9d	Картинка обоев (файл PNG или нет)
 =Wallpaper in the dark theme	a6dc	Обои в тёмной теме
 =Wallpaper seas (percent grey)	6836	Моря на обоях (процент серого)
 =Wallpaper glow	57c6	Свечение обоев
@@ -724,6 +726,7 @@ settings_size_refused	20a9	Экран не принял %d × %d: возврат
 =Taskbar clock bulge (percent)	fa6c	Выпуклость часов на панели задач (проценты)
 =moon	ae40	луна
 =plain	3f67	простые
+=picture	d389	картинка
 =dimmed	bded	приглушённые
 =inverted	8038	инвертированные
 =glow	27bc	свечение

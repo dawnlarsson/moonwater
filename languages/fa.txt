@@ -199,6 +199,7 @@ menu_redo	ac45	انجام دوباره
 menu_rename	9529	&تغییر نام
 menu_reset_zoom	1b0f	بازنشانی بزرگ‌نمایی
 menu_select_all	f6f6	انتخاب همه
+menu_set_wallpaper	1a27	تنظیم به عنوان &پس‌زمینه
 menu_show_hidden	37bd	نمایش پرونده‌های &پنهان
 menu_toggle_comment	92ac	تغییر وضعیت توضیح
 menu_undo	b9d3	واگرد
@@ -707,6 +708,7 @@ settings_size_refused	20a9	صفحه %d × %d را نپذیرفت: بازگشت �
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	به کلیدهای فهرست اجازهٔ ورود از راه شبکه می‌دهد؛ خاموش، می‌ایستد و همهٔ نشست‌ها را پایان می‌دهد
 =Root may log in by a key of the list, and by nothing else	a430	root می‌تواند با کلیدی از فهرست وارد شود، و با هیچ چیز دیگر
 =Wallpaper	0da9	کاغذ دیواری
+=Wallpaper picture (a PNG file, or none)	8e9d	تصویر پس‌زمینه (یک فایل PNG، یا هیچ)
 =Wallpaper in the dark theme	a6dc	کاغذ دیواری در تم تیره
 =Wallpaper seas (percent grey)	6836	دریاهای کاغذ دیواری (درصد خاکستری)
 =Wallpaper glow	57c6	درخشش کاغذ دیواری
@@ -725,6 +727,7 @@ settings_size_refused	20a9	صفحه %d × %d را نپذیرفت: بازگشت �
 =Taskbar clock bulge (percent)	fa6c	برآمدگی ساعت در نوار وظیفه (درصد)
 =moon	ae40	ماه
 =plain	3f67	ساده
+=picture	d389	تصویر
 =dimmed	bded	کم‌نور
 =inverted	8038	وارونه
 =glow	27bc	درخشش

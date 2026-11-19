@@ -198,6 +198,7 @@ menu_redo	ac45	Επανάληψη
 menu_rename	9529	&Μετονομασία
 menu_reset_zoom	1b0f	Επαναφορά ζουμ
 menu_select_all	f6f6	Επιλογή όλων
+menu_set_wallpaper	1a27	Ορισμός ως &ταπετσαρία
 menu_show_hidden	37bd	Εμφάνιση &κρυφών αρχείων
 menu_toggle_comment	92ac	Εναλλαγή σχολίου
 menu_undo	b9d3	Αναίρεση
@@ -706,6 +707,7 @@ settings_size_refused	20a9	Η οθόνη δεν δέχτηκε το %d × %d: π
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Αφήνει τα κλειδιά της λίστας να συνδέονται μέσω δικτύου· κλειστός σταματά και τερματίζει κάθε συνεδρία
 =Root may log in by a key of the list, and by nothing else	a430	Ο root μπορεί να συνδεθεί με κλειδί της λίστας, και με τίποτε άλλο
 =Wallpaper	0da9	Ταπετσαρία
+=Wallpaper picture (a PNG file, or none)	8e9d	Εικόνα ταπετσαρίας (αρχείο PNG ή καμία)
 =Wallpaper in the dark theme	a6dc	Ταπετσαρία στο σκούρο θέμα
 =Wallpaper seas (percent grey)	6836	Θάλασσες της ταπετσαρίας (ποσοστό γκρι)
 =Wallpaper glow	57c6	Λάμψη της ταπετσαρίας
@@ -724,6 +726,7 @@ settings_size_refused	20a9	Η οθόνη δεν δέχτηκε το %d × %d: π
 =Taskbar clock bulge (percent)	fa6c	Καμπύλωση του ρολογιού στη γραμμή εργασιών (ποσοστό)
 =moon	ae40	σελήνη
 =plain	3f67	απλή
+=picture	d389	εικόνα
 =dimmed	bded	μειωμένη
 =inverted	8038	αντεστραμμένη
 =glow	27bc	λάμψη

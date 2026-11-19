@@ -198,6 +198,7 @@ menu_redo	ac45	Op&nieuw
 menu_rename	9529	Naam &wijzigen
 menu_reset_zoom	1b0f	Zoom &herstellen
 menu_select_all	f6f6	&Alles selecteren
+menu_set_wallpaper	1a27	Instellen als &achtergrond
 menu_show_hidden	37bd	&Verborgen bestanden tonen
 menu_toggle_comment	92ac	Co&mmentaar wisselen
 menu_undo	b9d3	&Ongedaan maken
@@ -706,6 +707,7 @@ settings_size_refused	20a9	Het scherm nam %d × %d niet aan: terug naar %s
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Laat de sleutels van de lijst via het netwerk aanmelden; uit stopt hem en beëindigt alle sessies
 =Root may log in by a key of the list, and by nothing else	a430	Root mag zich aanmelden met een sleutel van de lijst, en met niets anders
 =Wallpaper	0da9	Bureaubladachtergrond
+=Wallpaper picture (a PNG file, or none)	8e9d	Achtergrondafbeelding (een PNG-bestand, of geen)
 =Wallpaper in the dark theme	a6dc	Bureaubladachtergrond in het donkere thema
 =Wallpaper seas (percent grey)	6836	Zeeën van de bureaubladachtergrond (procent grijs)
 =Wallpaper glow	57c6	Gloed van de bureaubladachtergrond
@@ -724,6 +726,7 @@ settings_size_refused	20a9	Het scherm nam %d × %d niet aan: terug naar %s
 =Taskbar clock bulge (percent)	fa6c	Bolling van de klok op de taakbalk (procent)
 =moon	ae40	maan
 =plain	3f67	effen
+=picture	d389	afbeelding
 =dimmed	bded	gedimd
 =inverted	8038	omgekeerd
 =glow	27bc	gloed

@@ -300,7 +300,15 @@ static void compositor_wall_read(void)
                 compositor_word(paths[at], word, sizeof(word));
                 compositor_setting_kept(paths[at], word, &kept[at]);
         }
-        compositor_wall_rows.moon = kept[0] == 0, compositor_wall_rows.dimmed = kept[1] == 0;
+        compositor_wall_rows.moon = kept[0] == 0, compositor_wall_rows.picture = kept[0] == 2, compositor_wall_rows.dimmed = kept[1] == 0;
+        // The pictures' directory as it is now: a picture put there, or one taken away, is a change of the wallpaper.
+        {
+                unsigned int stamp = 0;
+
+                compositor_wall_rows.stamp = compositor_wall_look(COMPOSITOR_WALL_DIR, &stamp) == 0040000u ? stamp | 1u : 0;
+        }
+        // A picture wallpaper falls back to the moon on a screen that has none.
+        compositor_wall_rows.moon |= compositor_wall_rows.picture;
         compositor_wall_rows.maria = kept[2] >= 20 && kept[2] <= 80 ? (int)kept[2] : 45, compositor_wall_rows.glow = (int)kept[3];
         compositor_wall_rows.ready = 1;
         compositor_damage(0, 0, compositor.width, compositor.height);

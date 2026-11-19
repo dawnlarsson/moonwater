@@ -199,6 +199,7 @@ menu_redo	ac45	إعادة
 menu_rename	9529	إعادة &تسمية
 menu_reset_zoom	1b0f	إعادة تعيين التكبير
 menu_select_all	f6f6	تحديد الكل
+menu_set_wallpaper	1a27	تعيين &خلفية لسطح المكتب
 menu_show_hidden	37bd	إظهار الملفات &المخفية
 menu_toggle_comment	92ac	تبديل التعليق
 menu_undo	b9d3	تراجع
@@ -707,6 +708,7 @@ settings_size_refused	20a9	لم تقبل الشاشة %d × %d: عودة إلى 
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	يسمح لمفاتيح القائمة بالدخول عبر الشبكة؛ إيقافه يوقفه وينهي كل الجلسات
 =Root may log in by a key of the list, and by nothing else	a430	يمكن لـ root الدخول بمفتاح من القائمة، ولا بشيء غيره
 =Wallpaper	0da9	خلفية سطح المكتب
+=Wallpaper picture (a PNG file, or none)	8e9d	صورة الخلفية (ملف PNG أو لا شيء)
 =Wallpaper in the dark theme	a6dc	خلفية سطح المكتب في السمة الداكنة
 =Wallpaper seas (percent grey)	6836	بحار خلفية سطح المكتب (نسبة الرمادي)
 =Wallpaper glow	57c6	توهج خلفية سطح المكتب
@@ -725,6 +727,7 @@ settings_size_refused	20a9	لم تقبل الشاشة %d × %d: عودة إلى 
 =Taskbar clock bulge (percent)	fa6c	انتفاخ الساعة في شريط المهام (نسبة مئوية)
 =moon	ae40	القمر
 =plain	3f67	بسيطة
+=picture	d389	صورة
 =dimmed	bded	خافتة
 =inverted	8038	معكوسة
 =glow	27bc	توهج

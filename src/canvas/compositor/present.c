@@ -788,7 +788,21 @@ static struct
 {
         int moon, dimmed, maria, glow; // the rows: the moon or plain, dimmed or inverted, the seas' grey (percent), none, glow or edges too
         int ready;                     // the rows were read
-} compositor_wall_rows = {1, 1, 45, 1, 0};
+        int picture;                   // canvas wallpaper picture: every screen with no picture of its own shows COMPOSITOR_WALL_ALL
+        unsigned int stamp;            // COMPOSITOR_WALL_DIR's change time when the rows were read, 0 with no such directory
+} compositor_wall_rows = {1, 1, 45, 1, 0, 0, 0};
+
+/*
+        A picture wallpaper (`canvas wallpaper picture FILE [SCREEN]`, which puts a copy of the PNG here): a screen's own,
+        COMPOSITOR_WALL_DIR/NAME.png by its connector's name, else the one for every screen, COMPOSITOR_WALL_ALL, while canvas
+        wallpaper is picture. It covers the screen, cut at its long sides to the screen's shape, and is made on the wallpaper's
+        thread as the moon is; a file that is not a PNG the kit reads, or larger than the limits, is the moon (or the colour).
+*/
+#define COMPOSITOR_WALL_DIR "/root/wallpapers"
+#define COMPOSITOR_WALL_ALL COMPOSITOR_WALL_DIR "/all.png"
+#define COMPOSITOR_WALL_FILE_MOST (64ul << 20)       // the bytes of a picture's file
+#define COMPOSITOR_WALL_PIXELS_MOST (48ul << 20)     // and its pixels, 8K by 4K and more
+#define COMPOSITOR_WALL_SIDE_MOST 16384u
 
 #define COMPOSITOR_WALL_SCREENS WINDOWS_OUTPUTS
 
@@ -807,6 +821,9 @@ static struct compositor_wall_job
         int step;                // a step of the turn: the wallpaper as it was with each moon's square made again, and those squares its damage
         const unsigned int *from; // a step's: the wallpaper shown, which it starts from
         int squares[COMPOSITOR_WALL_SCREENS][4]; // each screen's moon's square, in the space
+        int moon;                // the moon where a screen has no picture, else the colour
+        unsigned int ground;     // the colour
+        char picture[COMPOSITOR_WALL_SCREENS][64]; // each screen's picture's file, "" for none
 } compositor_wall_job;
 
 /*
@@ -855,7 +872,111 @@ static void compositor_wall_say(const char *why, int width, int height, positive
 static unsigned int compositor_wall_key[8]; // what the wallpaper shown was made from
 static positive compositor_wall_bytes;
 
-// Make the job's wallpaper: each screen's in its rectangle of the space.
+// A path's type (S_IFMT bits of its mode, 0 for none) and its change time folded to a word, a link not followed: statx, as manage.c reads it.
+static unsigned int compositor_wall_look(const char *path, unsigned int *stamp)
+{
+        // struct statx: stx_mode at 28 (u16), stx_mtime at 112 (i64 seconds, u32 nanoseconds).
+        p8 info[256] = {0};
+
+        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive)path, 0x100 /* AT_SYMLINK_NOFOLLOW */, 0x41 /* TYPE | MTIME */,
+                            (positive)info, 0) < 0)
+                return 0;
+        if (stamp)
+                *stamp = (unsigned int)(memory_load_unaligned(b64, info + 112) * 1000003) ^ memory_load_unaligned(p32, info + 120);
+        return memory_load_unaligned(p16, info + 28) & 0170000u;
+}
+
+// The file of a screen's picture (by its connector's name; "" for the space with no screens) into path: 1 when there is one.
+static int compositor_wall_picture_of(const char *name, int every, char *path, positive room)
+{
+        if (name && name[0] && string_length((string_address)COMPOSITOR_WALL_DIR "/") + string_length((string_address)name) + 5 <= room)
+        {
+                string_copy((string_address)path, (string_address)COMPOSITOR_WALL_DIR "/");
+                string_append_bounded((string_address)path, (string_address)name, room);
+                string_append_bounded((string_address)path, (string_address) ".png", room);
+                if (compositor_wall_look(path, null) == 0100000u)
+                        return 1;
+        }
+        if (every && sizeof(COMPOSITOR_WALL_ALL) <= room && compositor_wall_look(COMPOSITOR_WALL_ALL, null) == 0100000u)
+        {
+                string_copy((string_address)path, (string_address)COMPOSITOR_WALL_ALL);
+                return 1;
+        }
+        path[0] = 0;
+        return 0;
+}
+
+static unsigned int *ui_png_decode_most(const p8 *file, positive size, int *width_out, int *height_out, unsigned int most); // ui.c's
+
+/*
+        A picture's file drawn over w by h pixels at into (pitch pixels a row), covering them: the middle of the picture the screen's shape,
+        each pixel the mean of the picture's under it (at least one), opaque. 0 for a file that is not a PNG within the limits.
+*/
+static int compositor_wall_picture(const char *path, unsigned int *into, int pitch, int w, int h)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
+        p8 *file;
+        positive got = 0;
+        unsigned int *picture, pw, ph;
+        int width = 0, height = 0;
+        positive vis_w, vis_h, ox, oy;
+
+        if (handle < 0)
+                return 0;
+        file = (p8 *)memory_checked(COMPOSITOR_WALL_FILE_MOST);
+        while (file && got < COMPOSITOR_WALL_FILE_MOST)
+        {
+                bipolar read = system_read_once(handle, file + got, COMPOSITOR_WALL_FILE_MOST - got);
+
+                if (read <= 0)
+                        break;
+                got += (positive)read;
+        }
+        system_close(handle);
+        if (!file)
+                return 0;
+        // The size from its header first: one too large is not inflated at all.
+        pw = got >= 24 ? (unsigned int)file[16] << 24 | (unsigned int)file[17] << 16 | (unsigned int)file[18] << 8 | file[19] : 0;
+        ph = got >= 24 ? (unsigned int)file[20] << 24 | (unsigned int)file[21] << 16 | (unsigned int)file[22] << 8 | file[23] : 0;
+        picture = got < COMPOSITOR_WALL_FILE_MOST && pw && ph && pw <= COMPOSITOR_WALL_SIDE_MOST && ph <= COMPOSITOR_WALL_SIDE_MOST &&
+                          (positive)pw * ph <= COMPOSITOR_WALL_PIXELS_MOST
+                      ? ui_png_decode_most(file, got, &width, &height, COMPOSITOR_WALL_SIDE_MOST)
+                      : null;
+        memory_free(file, COMPOSITOR_WALL_FILE_MOST);
+        if (!picture)
+                return 0;
+        // The part of it shown: its whole width or height, the other cut to the screen's shape about the middle.
+        if ((positive)width * (positive)h > (positive)height * (positive)w)
+                vis_h = (positive)height, vis_w = (positive)height * (positive)w / (positive)h, ox = ((positive)width - vis_w) / 2, oy = 0;
+        else
+                vis_w = (positive)width, vis_h = (positive)width * (positive)h / (positive)w, ox = 0, oy = ((positive)height - vis_h) / 2;
+        vis_w = vis_w ? vis_w : 1, vis_h = vis_h ? vis_h : 1;
+        for (int y = 0; y < h; y++)
+        {
+                positive y0 = oy + (positive)y * vis_h / (positive)h, y1 = oy + ((positive)y + 1) * vis_h / (positive)h;
+
+                y1 = y1 > y0 ? y1 : y0 + 1;
+                for (int x = 0; x < w; x++)
+                {
+                        positive x0 = ox + (positive)x * vis_w / (positive)w, x1 = ox + ((positive)x + 1) * vis_w / (positive)w, r = 0, g = 0, b = 0, n;
+
+                        x1 = x1 > x0 ? x1 : x0 + 1;
+                        n = (y1 - y0) * (x1 - x0);
+                        for (positive sy = y0; sy < y1; sy++)
+                                for (positive sx = x0; sx < x1; sx++)
+                                {
+                                        unsigned int pixel = picture[sy * (positive)width + sx];
+
+                                        r += pixel >> 16 & 255, g += pixel >> 8 & 255, b += pixel & 255;
+                                }
+                        into[(long)y * pitch + x] = 0xff000000u | (unsigned int)(r / n) << 16 | (unsigned int)(g / n) << 8 | (unsigned int)(b / n);
+                }
+        }
+        memory_free(picture, (positive)width * (positive)height * 4);
+        return 1;
+}
+
+// Make the job's wallpaper: each screen's in its rectangle of the space, its picture, the moon, or the colour.
 static void compositor_wall_make(struct compositor_wall_job *job)
 {
         if (job->step && job->from)
@@ -867,6 +988,22 @@ static void compositor_wall_make(struct compositor_wall_job *job)
 
                 if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > job->width || y + h > job->height)
                         continue;
+                // A picture, or the colour: nothing turns, so a step of the moon's turn leaves them as they are.
+                if (job->picture[at][0] || !job->moon)
+                {
+                        unsigned int *corner = job->pixels + (long)y * job->width + x;
+
+                        job->squares[at][0] = job->squares[at][1] = job->squares[at][2] = job->squares[at][3] = 0;
+                        if (job->step)
+                                continue;
+                        if (job->picture[at][0] && compositor_wall_picture(job->picture[at], corner, job->width, w, h))
+                                continue;
+                        if (!job->moon)
+                        {
+                                memory_fill_u32_rect(corner, (positive)job->width, (positive)w, (positive)h, job->ground | 0xff000000u);
+                                continue;
+                        }
+                }
                 taskbar_wall_draw(job->pixels + (long)y * job->width + x, job->width, w, h, job->dark, job->dimmed, job->maria, job->glow, job->accent,
                                   job->turn, job->step, job->squares[at < COMPOSITOR_WALL_SCREENS ? at : 0]);
                 job->squares[at][0] += x, job->squares[at][1] += y;
@@ -998,6 +1135,10 @@ static void compositor_wall_start(b64 turn, int step)
                 memory_copy(job->screens[at], screens[at], sizeof(job->screens[at]));
         job->dark = !(compositor.table && compositor.table->themed && compositor.table->theme == UI_THEME_LIGHT);
         job->dimmed = compositor_wall_rows.dimmed, job->maria = compositor_wall_rows.maria, job->glow = compositor_wall_rows.glow;
+        job->moon = compositor_wall_rows.moon, job->ground = compositor_ground;
+        for (int at = 0; at < (job->count ? job->count : 1) && at < COMPOSITOR_WALL_SCREENS; at++)
+                compositor_wall_picture_of(job->count && compositor.outputs ? compositor.output[at].name : "", compositor_wall_rows.picture,
+                                           job->picture[at], sizeof(job->picture[at]));
         job->accent = taskbar_wall_accent(), job->done = 0, job->began = clock_monotonic_nanoseconds(), job->took = 0;
         job->turn = turn, job->step = step;
         job->worker = thread_start(compositor_wall_run, (address_any)job);
@@ -1035,7 +1176,8 @@ static void compositor_wall_keep(void)
                 return;
         }
         now[0] = (unsigned int)compositor.width, now[1] = (unsigned int)compositor.height, now[2] = count, now[3] = (unsigned int)dark;
-        now[4] = taskbar_wall_accent(), now[5] = (unsigned int)(compositor_wall_rows.moon | compositor_wall_rows.dimmed << 1 | compositor_wall_rows.glow << 2);
+        now[4] = taskbar_wall_accent(), now[5] = (unsigned int)(compositor_wall_rows.moon | compositor_wall_rows.dimmed << 1 | compositor_wall_rows.glow << 2 |
+                                                                compositor_wall_rows.picture << 4) ^ compositor_wall_rows.stamp << 5 ^ compositor_ground << 7;
         now[6] = (unsigned int)compositor_wall_rows.maria, now[7] = count ? (unsigned int)(screens[0][2] * 31 + screens[0][3]) : 0;
         if (!memory_compare(compositor_wall_key, now, sizeof(now)))
         {
@@ -1048,8 +1190,8 @@ static void compositor_wall_keep(void)
                 compositor_wall_start(compositor_wall_turn_of(step), 1);
                 return;
         }
-        // Plain, or a space with nothing in it: the colour, at once.
-        if (!compositor_wall_rows.moon || compositor.width <= 0 || compositor.height <= 0)
+        // Plain with no picture anywhere, or a space with nothing in it: the colour, at once.
+        if ((!compositor_wall_rows.moon && !compositor_wall_rows.picture && !compositor_wall_rows.stamp) || compositor.width <= 0 || compositor.height <= 0)
         {
                 compositor_wall_say(!compositor_wall_rows.moon ? "canvas wallpaper is plain" : "the space has no screen yet", 0, 0, 0);
                 memory_copy(compositor_wall_key, now, sizeof(now));

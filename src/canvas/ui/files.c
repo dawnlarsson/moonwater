@@ -132,6 +132,7 @@
 #define FILES_MENU_BIN 42            // the bin shown
 #define FILES_MENU_BIN_EMPTY 43      // everything in it deleted for good, asked first
 #define FILES_MENU_RESTORE 44        // what is chosen in it put back where it was
+#define FILES_MENU_WALLPAPER 45      // a PNG made the wallpaper of every screen (moonwater canvas wallpaper picture)
 #define FILES_KEY_Z 44
 #define FILES_FLASH_NS 450000000ll // a drop's things lit where they landed
 #define FILES_SPRING_NS 900000000ll  // a drag held this long over a folder opens it, so the drop can go further in
@@ -2476,6 +2477,34 @@ static fn files_open_with(b32 editor)
         }
 }
 
+// Whether the entry is a PNG by its name (.png, any case): the pictures a wallpaper may be.
+static b32 files_is_png(struct files_model address_to m, const struct files_entry address_to entry)
+{
+        const char address_to name = (const char address_to)files_model_name(m, entry);
+        positive length = entry ? entry->length : 0;
+
+        return length > 4 && name[length - 4] == '.' && (name[length - 3] | 32) == 'p' && (name[length - 2] | 32) == 'n' && (name[length - 1] | 32) == 'g';
+}
+
+// The PNG the keys are on made the wallpaper of every screen: moonwater canvas wallpaper picture PATH, which keeps a copy of it.
+static fn files_wallpaper(void)
+{
+        struct files_model address_to m = &files.big->model;
+        const struct files_entry address_to entry = files_model_entry(m, m->cursor);
+        static p8 path[FILES_PATH];
+        string_address words[6] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "picture",
+                                   (string_address)path, null};
+        positive length = string_length((string_address)m->path);
+
+        if (!entry || entry->kind == FILES_KIND_DIRECTORY || !files_is_png(m, entry) || length + entry->length + 2 > sizeof(path))
+                return;
+        memory_copy(path, m->path, length);
+        if (length > 1)
+                path[length++] = '/';
+        memory_copy(path + length, files_model_name(m, entry), (positive)entry->length + 1);
+        (void)ui_start_apart(words, 5);
+}
+
 /*
         The browser's menu at (x, y) in the window: of the rows (on) or of the folder shown. The rows' is Open, Open in the editor (a
         file), Open a terminal here (a folder), Cut, Copy, Paste, Rename, Delete and Properties; the folder's Paste, New folder, Select
@@ -2495,7 +2524,9 @@ static fn files_menu_open(b32 on, int x, int y)
                 ui_popmenu_add(menu, WORDS(menu_open), "Enter", 0, FILES_MENU_OPEN);
                 if (!folder)
                         ui_popmenu_add(menu, WORDS(menu_open_editor), null, 0, FILES_MENU_EDITOR);
-                else
+                if (!folder && files_is_png(m, entry))
+                        ui_popmenu_add(menu, WORDS(menu_set_wallpaper), null, 0, FILES_MENU_WALLPAPER);
+                if (folder)
                         ui_popmenu_add(menu, WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL);
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 ui_popmenu_add(menu, WORDS(menu_cut), "Ctrl+X", 0, FILES_MENU_CUT);
@@ -2596,6 +2627,7 @@ static fn files_menu_do(int id)
         {
         case FILES_MENU_OPEN: files_open(m->cursor); break;
         case FILES_MENU_EDITOR: files_open_with(true); break;
+        case FILES_MENU_WALLPAPER: files_wallpaper(); break;
         case FILES_MENU_TERMINAL: files_open_with(false); break;
         case FILES_MENU_CUT: files_rows_copy(true); break;
         case FILES_MENU_COPY: files_rows_copy(false); break;

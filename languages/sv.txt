@@ -198,6 +198,7 @@ menu_redo	ac45	&Gör om
 menu_rename	9529	Byt &namn
 menu_reset_zoom	1b0f	Å&terställ zoom
 menu_select_all	f6f6	&Markera allt
+menu_set_wallpaper	1a27	Använd som &skrivbordsbild
 menu_show_hidden	37bd	Visa &dolda filer
 menu_toggle_comment	92ac	Växla k&ommentar
 menu_undo	b9d3	Å&ngra
@@ -706,6 +707,7 @@ settings_size_refused	20a9	Skärmen tog inte %d × %d: tillbaka till %s
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Låter listans nycklar logga in över nätverket; av stoppar den och avslutar alla sessioner
 =Root may log in by a key of the list, and by nothing else	a430	Root får logga in med en nyckel i listan, och med inget annat
 =Wallpaper	0da9	Skrivbordsbild
+=Wallpaper picture (a PNG file, or none)	8e9d	Skrivbordsbild (en PNG-fil, eller ingen)
 =Wallpaper in the dark theme	a6dc	Skrivbordsbild i mörkt tema
 =Wallpaper seas (percent grey)	6836	Skrivbordsbildens hav (procent grått)
 =Wallpaper glow	57c6	Skrivbordsbildens sken
@@ -724,6 +726,7 @@ settings_size_refused	20a9	Skärmen tog inte %d × %d: tillbaka till %s
 =Taskbar clock bulge (percent)	fa6c	Klockans välvning i aktivitetsfältet (procent)
 =moon	ae40	måne
 =plain	3f67	enkel
+=picture	d389	bild
 =dimmed	bded	dämpad
 =inverted	8038	inverterad
 =glow	27bc	sken

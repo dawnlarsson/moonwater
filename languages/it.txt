@@ -198,6 +198,7 @@ menu_redo	ac45	&Ripeti
 menu_rename	9529	&Rinomina
 menu_reset_zoom	1b0f	Rei&mposta zoom
 menu_select_all	f6f6	Seleziona t&utto
+menu_set_wallpaper	1a27	Imposta come &sfondo
 menu_show_hidden	37bd	Mostra file &nascosti
 menu_toggle_comment	92ac	Attiva/disattiva co&mmento
 menu_undo	b9d3	&Annulla
@@ -706,6 +707,7 @@ settings_size_refused	20a9	Lo schermo non ha accettato %d × %d: torna a %s
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Lascia entrare dalla rete le chiavi della lista; spento si ferma e termina tutte le sessioni
 =Root may log in by a key of the list, and by nothing else	a430	Root può accedere con una chiave della lista, e con nient'altro
 =Wallpaper	0da9	Immagine di sfondo
+=Wallpaper picture (a PNG file, or none)	8e9d	Immagine di sfondo (un file PNG, o nessuna)
 =Wallpaper in the dark theme	a6dc	Immagine di sfondo nel tema scuro
 =Wallpaper seas (percent grey)	6836	Mari dell'immagine di sfondo (percentuale di grigio)
 =Wallpaper glow	57c6	Bagliore dell'immagine di sfondo
@@ -724,6 +726,7 @@ settings_size_refused	20a9	Lo schermo non ha accettato %d × %d: torna a %s
 =Taskbar clock bulge (percent)	fa6c	Curvatura dell'orologio nella barra delle applicazioni (percentuale)
 =moon	ae40	luna
 =plain	3f67	semplice
+=picture	d389	immagine
 =dimmed	bded	attenuato
 =inverted	8038	invertito
 =glow	27bc	bagliore

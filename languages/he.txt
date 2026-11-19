@@ -199,6 +199,7 @@ menu_redo	ac45	בצע שוב
 menu_rename	9529	&שנה שם
 menu_reset_zoom	1b0f	אפס זום
 menu_select_all	f6f6	בחר הכול
+menu_set_wallpaper	1a27	הגדר כ&רקע
 menu_show_hidden	37bd	הצג קבצים &מוסתרים
 menu_toggle_comment	92ac	החלף הערה
 menu_undo	b9d3	בטל
@@ -707,6 +708,7 @@ settings_size_refused	20a9	המסך לא קיבל %d × %d: חזרה אל %s
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	מאפשר למפתחות שברשימה להתחבר דרך הרשת; כבוי, הוא נעצר ומסיים כל הפעלה
 =Root may log in by a key of the list, and by nothing else	a430	root יכול להתחבר במפתח מהרשימה, ובשום דבר אחר
 =Wallpaper	0da9	טפט
+=Wallpaper picture (a PNG file, or none)	8e9d	תמונת רקע (קובץ PNG, או ללא)
 =Wallpaper in the dark theme	a6dc	טפט בערכת הנושא הכהה
 =Wallpaper seas (percent grey)	6836	ימות הטפט (אחוז אפור)
 =Wallpaper glow	57c6	זוהר הטפט
@@ -725,6 +727,7 @@ settings_size_refused	20a9	המסך לא קיבל %d × %d: חזרה אל %s
 =Taskbar clock bulge (percent)	fa6c	קמירות השעון בשורת המשימות (אחוזים)
 =moon	ae40	ירח
 =plain	3f67	פשוט
+=picture	d389	תמונה
 =dimmed	bded	מעומעם
 =inverted	8038	הפוך
 =glow	27bc	זוהר

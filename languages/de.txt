@@ -198,6 +198,7 @@ menu_redo	ac45	&Wiederholen
 menu_rename	9529	&Umbenennen
 menu_reset_zoom	1b0f	&Zoom zurücksetzen
 menu_select_all	f6f6	Alles &auswählen
+menu_set_wallpaper	1a27	Als &Hintergrundbild festlegen
 menu_show_hidden	37bd	&Versteckte Dateien zeigen
 menu_toggle_comment	92ac	Kommentar u&mschalten
 menu_undo	b9d3	&Rückgängig
@@ -706,6 +707,7 @@ settings_size_refused	20a9	Der Bildschirm hat %d × %d nicht angenommen: zurück
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Lässt die Schlüssel der Liste über das Netzwerk anmelden; aus stoppt ihn und beendet alle Sitzungen
 =Root may log in by a key of the list, and by nothing else	a430	Root darf sich mit einem Schlüssel der Liste anmelden, mit nichts sonst
 =Wallpaper	0da9	Hintergrundbild
+=Wallpaper picture (a PNG file, or none)	8e9d	Hintergrundbild (eine PNG-Datei oder keins)
 =Wallpaper in the dark theme	a6dc	Hintergrundbild im dunklen Design
 =Wallpaper seas (percent grey)	6836	Meere des Hintergrundbilds (Prozent Grau)
 =Wallpaper glow	57c6	Leuchten des Hintergrundbilds
@@ -724,6 +726,7 @@ settings_size_refused	20a9	Der Bildschirm hat %d × %d nicht angenommen: zurück
 =Taskbar clock bulge (percent)	fa6c	Wölbung der Uhr in der Taskleiste (Prozent)
 =moon	ae40	Mond
 =plain	3f67	schlicht
+=picture	d389	Bild
 =dimmed	bded	gedimmt
 =inverted	8038	invertiert
 =glow	27bc	Leuchten

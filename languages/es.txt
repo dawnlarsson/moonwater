@@ -198,6 +198,7 @@ menu_redo	ac45	&Rehacer
 menu_rename	9529	Cambiar &nombre
 menu_reset_zoom	1b0f	Re&establecer zoom
 menu_select_all	f6f6	Seleccionar t&odo
+menu_set_wallpaper	1a27	Establecer como &fondo
 menu_show_hidden	37bd	Mostrar archivos &ocultos
 menu_toggle_comment	92ac	Alternar co&mentario
 menu_undo	b9d3	&Deshacer
@@ -706,6 +707,7 @@ settings_size_refused	20a9	La pantalla no aceptó %d × %d: vuelve a %s
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Deja entrar por la red a las claves de la lista; apagado se detiene y termina todas las sesiones
 =Root may log in by a key of the list, and by nothing else	a430	Root puede entrar con una clave de la lista, y con nada más
 =Wallpaper	0da9	Fondo de pantalla
+=Wallpaper picture (a PNG file, or none)	8e9d	Imagen de fondo (un archivo PNG, o ninguna)
 =Wallpaper in the dark theme	a6dc	Fondo de pantalla en el tema oscuro
 =Wallpaper seas (percent grey)	6836	Mares del fondo de pantalla (porcentaje de gris)
 =Wallpaper glow	57c6	Resplandor del fondo de pantalla
@@ -724,6 +726,7 @@ settings_size_refused	20a9	La pantalla no aceptó %d × %d: vuelve a %s
 =Taskbar clock bulge (percent)	fa6c	Curvatura del reloj en la barra de tareas (porcentaje)
 =moon	ae40	luna
 =plain	3f67	sencillo
+=picture	d389	imagen
 =dimmed	bded	atenuado
 =inverted	8038	invertido
 =glow	27bc	resplandor

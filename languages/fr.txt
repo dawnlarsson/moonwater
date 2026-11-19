@@ -198,6 +198,7 @@ menu_redo	ac45	&Rétablir
 menu_rename	9529	Re&nommer
 menu_reset_zoom	1b0f	Réinitialiser le &zoom
 menu_select_all	f6f6	&Tout sélectionner
+menu_set_wallpaper	1a27	Définir comme &fond d'écran
 menu_show_hidden	37bd	Afficher les fichiers &cachés
 menu_toggle_comment	92ac	&Basculer le commentaire
 menu_undo	b9d3	&Annuler
@@ -706,6 +707,7 @@ settings_size_refused	20a9	L'écran n'a pas pris %d × %d : retour à %s
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Laisse les clés de la liste se connecter par le réseau ; éteint, il s'arrête et termine toutes les sessions
 =Root may log in by a key of the list, and by nothing else	a430	Root peut se connecter par une clé de la liste, et par rien d'autre
 =Wallpaper	0da9	Fond d'écran
+=Wallpaper picture (a PNG file, or none)	8e9d	Image de fond d'écran (un fichier PNG, ou aucune)
 =Wallpaper in the dark theme	a6dc	Fond d'écran du thème sombre
 =Wallpaper seas (percent grey)	6836	Mers du fond d'écran (pourcentage de gris)
 =Wallpaper glow	57c6	Halo du fond d'écran
@@ -724,6 +726,7 @@ settings_size_refused	20a9	L'écran n'a pas pris %d × %d : retour à %s
 =Taskbar clock bulge (percent)	fa6c	Bombement de l'horloge dans la barre des tâches (pourcentage)
 =moon	ae40	lune
 =plain	3f67	uni
+=picture	d389	image
 =dimmed	bded	atténué
 =inverted	8038	inversé
 =glow	27bc	halo

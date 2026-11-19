@@ -199,6 +199,7 @@ menu_redo	ac45	دوبارہ کریں
 menu_rename	9529	نام &تبدیل کریں
 menu_reset_zoom	1b0f	زوم بحال کریں
 menu_select_all	f6f6	سب منتخب کریں
+menu_set_wallpaper	1a27	&وال پیپر بنائیں
 menu_show_hidden	37bd	&پوشیدہ فائلیں دکھائیں
 menu_toggle_comment	92ac	تبصرہ بدلیں
 menu_undo	b9d3	کالعدم کریں
@@ -707,6 +708,7 @@ settings_size_refused	20a9	اسکرین نے %d × %d نہیں لیا: واپس 
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	فہرست کی کلیدوں کو نیٹ ورک سے لاگ ان ہونے دیتا ہے؛ بند ہونے پر رک جاتا ہے اور ہر سیشن ختم کرتا ہے
 =Root may log in by a key of the list, and by nothing else	a430	root فہرست کی کسی کلید سے لاگ ان ہو سکتا ہے، اور کسی اور چیز سے نہیں
 =Wallpaper	0da9	وال پیپر
+=Wallpaper picture (a PNG file, or none)	8e9d	وال پیپر تصویر (ایک PNG فائل، یا کوئی نہیں)
 =Wallpaper in the dark theme	a6dc	تاریک تھیم میں وال پیپر
 =Wallpaper seas (percent grey)	6836	وال پیپر کے سمندر (سرمئی کا فیصد)
 =Wallpaper glow	57c6	وال پیپر کی چمک
@@ -725,6 +727,7 @@ settings_size_refused	20a9	اسکرین نے %d × %d نہیں لیا: واپس 
 =Taskbar clock bulge (percent)	fa6c	ٹاسک بار میں گھڑی کا ابھار (فیصد)
 =moon	ae40	چاند
 =plain	3f67	سادہ
+=picture	d389	تصویر
 =dimmed	bded	مدھم
 =inverted	8038	الٹا
 =glow	27bc	چمک

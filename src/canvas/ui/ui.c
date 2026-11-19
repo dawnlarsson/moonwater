@@ -8199,6 +8199,7 @@ LANGUAGE_ID(menu_redo, "&Redo") \
 LANGUAGE_ID(menu_rename, "Re&name") \
 LANGUAGE_ID(menu_reset_zoom, "&Reset Zoom") \
 LANGUAGE_ID(menu_select_all, "Select &All") \
+LANGUAGE_ID(menu_set_wallpaper, "Set as &Wallpaper") \
 LANGUAGE_ID(menu_show_hidden, "Show &Hidden Files") \
 LANGUAGE_ID(menu_toggle_comment, "Toggle Co&mment") \
 LANGUAGE_ID(menu_undo, "&Undo") \
@@ -24120,7 +24121,8 @@ static inline unsigned int ui_png_premultiply(unsigned int r, unsigned int g, un
         return a << 24 | (r * a + 127) / 255 << 16 | (g * a + 127) / 255 << 8 | (b * a + 127) / 255;
 }
 
-static unsigned int address_to ui_png_decode(const p8 address_to file, positive size, int address_to width_out, int address_to height_out)
+static unsigned int address_to ui_png_decode_most(const p8 address_to file, positive size, int address_to width_out, int address_to height_out,
+                                               unsigned int most)
 {
         static const p8 signature[8] = {137, 'P', 'N', 'G', 13, 10, 26, 10};
         p8 palette[256 * 4];
@@ -24156,7 +24158,7 @@ static unsigned int address_to ui_png_decode(const p8 address_to file, positive 
                         height = (unsigned int)data[4] << 24 | (unsigned int)data[5] << 16 | (unsigned int)data[6] << 8 | data[7];
                         depth = data[8], colour = data[9];
                         // Deflate, the adaptive filters, and no interlace.
-                        if (data[10] || data[11] || data[12] || !width || !height || width > UI_PNG_MOST || height > UI_PNG_MOST)
+                        if (data[10] || data[11] || data[12] || !width || !height || width > most || height > most)
                                 goto refused;
                         if (!((colour == 0 && (depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16)) ||
                               (colour == 3 && (depth == 1 || depth == 2 || depth == 4 || depth == 8)) ||
@@ -24289,6 +24291,12 @@ refused:
         if (pixels)
                 memory_free(pixels, (positive)width * height * 4);
         return null;
+}
+
+// A picture of the kit's (an app's icon): at most UI_PNG_MOST each way.
+static unsigned int address_to ui_png_decode(const p8 address_to file, positive size, int address_to width_out, int address_to height_out)
+{
+        return ui_png_decode_most(file, size, width_out, height_out, UI_PNG_MOST);
 }
 
 /*

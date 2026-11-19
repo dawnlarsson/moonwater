@@ -311,10 +311,15 @@ static const struct settings_row settings_rows[] = {
     //  The wallpaper the compositor draws its ground with (ui.c's ui_moon_night): the moon over its sky with the glow of the accent, or
     //  the background colour plain. In a dark theme the moon is dimmed (as it is, its seas a share of grey) or inverted (the ink look,
     //  chalk on charcoal); the glow is none, the glow, or the glow and the light along the screen's edges.
-    SETTING_PLAIN_ROW(null, "Wallpaper", SETTINGS_CHOICE, 0, ("canvas", "wallpaper"), "wallpaper ", "moon plain",
+    SETTING_PLAIN_ROW(null, "Wallpaper", SETTINGS_CHOICE, 0, ("canvas", "wallpaper"), "wallpaper ", "moon plain picture",
                       .path = SETTING_WALLPAPER_PATH, .standard = "moon",
-                      .usage = "canvas wallpaper [moon|plain]",
-                      .help = "the desktop behind the windows: the moon over a night sky that turns with the theme and the accent, or the background colour plain [moon]"),
+                      .usage = "canvas wallpaper [moon|plain|picture]",
+                      .help = "the desktop behind the windows: the moon over a night sky that turns with the theme and the accent, the background colour plain, or the picture canvas wallpaper picture keeps [moon]"),
+    //  The picture (setting.c's locale_canvas_wallpaper_picture): a PNG copied into /root/wallpapers, for every screen or one.
+    {null, "Wallpaper picture (a PNG file, or none)", SETTINGS_FIELD, 0, 0, {"canvas", "wallpaper", "picture"}, "picture of every screen: ", "picture ",
+     {"canvas", "wallpaper", "picture"}, null, 0,
+     .usage = "canvas wallpaper picture [FILE|none] [SCREEN]",
+     .help = "a PNG as the wallpaper of every screen, or of SCREEN alone by its name, over the moon; none takes it away; bare, the pictures kept [none]"},
     SETTING_PLAIN_ROW(null, "Wallpaper in the dark theme", SETTINGS_CHOICE, 0, ("canvas", "wallpaper", "dark"), "dark ", "dimmed inverted",
                       .path = SETTING_WALLPAPER_DARK_PATH, .standard = "dimmed",
                       .usage = "canvas wallpaper dark [dimmed|inverted]",

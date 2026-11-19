@@ -198,6 +198,7 @@ menu_redo	ac45	Повторити
 menu_rename	9529	&Перейменувати
 menu_reset_zoom	1b0f	Скинути масштаб
 menu_select_all	f6f6	Вибрати все
+menu_set_wallpaper	1a27	Зробити &шпалерами
 menu_show_hidden	37bd	Показати &приховані файли
 menu_toggle_comment	92ac	Закоментувати/розкоментувати
 menu_undo	b9d3	Скасувати
@@ -706,6 +707,7 @@ settings_size_refused	20a9	Екран не прийняв %d × %d: поверн
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Пускає ключі зі списку через мережу; вимкнений зупиняється й завершує всі сеанси
 =Root may log in by a key of the list, and by nothing else	a430	Root може увійти за ключем зі списку й більше ніяк
 =Wallpaper	0da9	Шпалери
+=Wallpaper picture (a PNG file, or none)	8e9d	Зображення шпалер (файл PNG або нічого)
 =Wallpaper in the dark theme	a6dc	Шпалери в темній темі
 =Wallpaper seas (percent grey)	6836	Моря на шпалерах (відсоток сірого)
 =Wallpaper glow	57c6	Сяйво шпалер
@@ -724,6 +726,7 @@ settings_size_refused	20a9	Екран не прийняв %d × %d: поверн
 =Taskbar clock bulge (percent)	fa6c	Опуклість годинника на панелі завдань (відсотки)
 =moon	ae40	місяць
 =plain	3f67	прості
+=picture	d389	зображення
 =dimmed	bded	приглушені
 =inverted	8038	інвертовані
 =glow	27bc	сяйво

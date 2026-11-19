@@ -1056,6 +1056,10 @@ static b32 host_main()
                 return 0;
         }
 
+        //      canvas wallpaper picture: a file and a screen, which the plain row canvas wallpaper below would take for its word.
+        if (count >= 4 && string_equals(arguments[1], "canvas") && string_equals(arguments[2], "wallpaper") && string_equals(arguments[3], "picture"))
+                return locale_canvas_wallpaper_picture(arguments, count);
+
         //      A plain row of the settings table is answered by its own words,
         //      the longest of them, before any verb's handler is asked.
         {

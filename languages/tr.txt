@@ -198,6 +198,7 @@ menu_redo	ac45	&Yinele
 menu_rename	9529	&Yeniden adlandır
 menu_reset_zoom	1b0f	Yakınlaştırmayı Sıfır&la
 menu_select_all	f6f6	&Tümünü Seç
+menu_set_wallpaper	1a27	&Duvar kağıdı yap
 menu_show_hidden	37bd	&Gizli dosyaları göster
 menu_toggle_comment	92ac	Yo&rumu Aç/Kapat
 menu_undo	b9d3	&Geri Al
@@ -706,6 +707,7 @@ settings_size_refused	20a9	Ekran %d × %d boyutunu almadı: %s boyutuna dönüld
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Listedeki anahtarların ağ üzerinden girmesine izin verir; kapalıyken durur ve tüm oturumları bitirir
 =Root may log in by a key of the list, and by nothing else	a430	Root listedeki bir anahtarla girebilir, başka hiçbir şeyle değil
 =Wallpaper	0da9	Duvar kâğıdı
+=Wallpaper picture (a PNG file, or none)	8e9d	Duvar kağıdı resmi (bir PNG dosyası ya da hiçbiri)
 =Wallpaper in the dark theme	a6dc	Koyu temada duvar kâğıdı
 =Wallpaper seas (percent grey)	6836	Duvar kâğıdının denizleri (yüzde gri)
 =Wallpaper glow	57c6	Duvar kâğıdının parıltısı
@@ -724,6 +726,7 @@ settings_size_refused	20a9	Ekran %d × %d boyutunu almadı: %s boyutuna dönüld
 =Taskbar clock bulge (percent)	fa6c	Görev çubuğunda saatin şişkinliği (yüzde)
 =moon	ae40	ay
 =plain	3f67	düz
+=picture	d389	resim
 =dimmed	bded	kısık
 =inverted	8038	ters
 =glow	27bc	parıltı

@@ -198,6 +198,7 @@ menu_redo	ac45	&Refazer
 menu_rename	9529	Re&nomear
 menu_reset_zoom	1b0f	&Redefinir zoom
 menu_select_all	f6f6	Selecionar t&udo
+menu_set_wallpaper	1a27	Definir como &fundo
 menu_show_hidden	37bd	Mostrar arquivos &ocultos
 menu_toggle_comment	92ac	Alternar co&mentário
 menu_undo	b9d3	&Desfazer
@@ -706,6 +707,7 @@ settings_size_refused	20a9	O ecrã não aceitou %d × %d: volta para %s
 =Lets the keys of the list log in over the network; off stops it and ends every session	c746	Deixa as chaves da lista entrar pela rede; desligado, para e encerra todas as sessões
 =Root may log in by a key of the list, and by nothing else	a430	Root pode entrar com uma chave da lista, e com nada mais
 =Wallpaper	0da9	Papel de parede
+=Wallpaper picture (a PNG file, or none)	8e9d	Imagem de fundo (um ficheiro PNG, ou nenhuma)
 =Wallpaper in the dark theme	a6dc	Papel de parede no tema escuro
 =Wallpaper seas (percent grey)	6836	Mares do papel de parede (porcentagem de cinza)
 =Wallpaper glow	57c6	Brilho do papel de parede
@@ -724,6 +726,7 @@ settings_size_refused	20a9	O ecrã não aceitou %d × %d: volta para %s
 =Taskbar clock bulge (percent)	fa6c	Curvatura do relógio na barra de tarefas (porcentagem)
 =moon	ae40	lua
 =plain	3f67	simples
+=picture	d389	imagem
 =dimmed	bded	esmaecido
 =inverted	8038	invertido
 =glow	27bc	brilho
