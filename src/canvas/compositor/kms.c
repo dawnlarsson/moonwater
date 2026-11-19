@@ -1351,6 +1351,7 @@ static b32 compositor_space_take(int first)
                 {
                         compositor.overlay_state = 0;
                         compositor.primary = compositor.overlay = 0;
+                        compositor.scaled_direct = compositor.scale_plane_refused = 0;
 #ifdef MOONWATER_GPU_C
                         compositor_fence_prop = 0; // the new primary plane's IN_FENCE_FD is looked for again (present.c's, with the GPU)
 #endif

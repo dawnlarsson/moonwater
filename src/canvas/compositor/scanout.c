@@ -418,6 +418,8 @@ static void compositor_dirty(unsigned int fb, const unsigned short (*clip)[4], u
         }
 }
 
+static int compositor_atomic_primary(unsigned int fb, int row, unsigned int which, int src_w, int src_h, int dx, int dy, int dw, int dh);
+
 static int compositor_flip(unsigned int fb, int row, unsigned int which)
 {
         struct
@@ -425,6 +427,14 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
                 unsigned int crtc_id, fb_id, flags, reserved;
                 unsigned long user_data;
         } flip = {compositor.crtc, fb, COMPOSITOR_FLIP_EVENT, 0, 0};
+
+        // Leaving hardware-scaled direct scanout: restore 1:1 primary plane geometry atomically in this flip.
+        if (compositor.scaled_direct && compositor.card >= 0)
+        {
+                if (compositor_atomic_primary(fb, row, which, compositor.width, compositor.height, 0, 0, compositor.width, compositor.height))
+                        return 1;
+                compositor.scaled_direct = 0;
+        }
 
         if (row >= 0 && compositor_wl_row_async(row))
                 flip.flags |= COMPOSITOR_FLIP_ASYNC;
@@ -465,6 +475,9 @@ static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks
 static void compositor_wl_graves_sweep(void);   // wayland_host.c: the client framebuffers the card was still on, removed once it is off them
 static void compositor_wl_frame(void);           // wayland_host.c: a frame drawn: callbacks answered, buffers given back
 static int compositor_wl_frame_owed;             // a frame shown straight whose callbacks wait for its flip (compositor.c's loop)
+static positive compositor_wl_frame_at;          // Reflex/Anti-Lag: next just-in-time wl_surface.frame deadline (0 = none armed)
+static positive compositor_wl_frame_sent_at;     // timestamp of last wl_surface.frame sent to a direct-scanout game
+static positive compositor_wl_game_render_ns;    // smoothed game render duration (fast-attack / slow-decay)
 static void compositor_wl_dmabuf_refresh(void); // wayland_host.c: re-probe render node after late GPU init or drm uevents
 static int compositor_wl_dmabuf_missing(void);
 #endif
@@ -502,8 +515,27 @@ static void compositor_flip_done(void)
         compositor_wl_flip_presented();
         if (compositor_wl_frame_owed)
         {
+                positive now = clock_monotonic_nanoseconds();
+                positive vblank = compositor.flip_stamped && compositor.flip_when ? compositor.flip_when : now;
+                positive margin = 1500000ull; // 1.5 ms safety margin before vblank
+                positive budget = compositor_wl_game_render_ns + margin;
+
                 compositor_wl_frame_owed = 0;
+                if (compositor.direct_row >= 0 && compositor_wl_game_render_ns > 0 && compositor.period > budget + 1000000ull &&
+                    !compositor_wl_row_async(compositor.direct_row))
+                {
+                        positive target = vblank + compositor.period - budget;
+
+                        if (target > now + 200000ull)
+                        {
+                                compositor_wl_frame_at = target;
+                                goto reflex_armed;
+                        }
+                }
+                compositor_wl_frame_at = 0;
+                compositor_wl_frame_sent_at = now;
                 compositor_wl_frame();
+        reflex_armed:;
         }
 #endif
 }
@@ -928,6 +960,8 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
         __atomic_store_n(&table->spoiled_height[row][which], rect[3] - rect[1], __ATOMIC_RELEASE);
 }
 
+static int compositor_overlay_ready(void);
+
 // The window the card can show straight: the top one, opaque, square and filling the output at the size it drew, with
 // nothing over it but the tabs, a pointer on its own plane or none (hidden), and a framebuffer of its buffer; -1 when there is none.
 static int compositor_direct_candidate(const struct compositor_frame *frames, const unsigned int *rows, unsigned int windows)
@@ -949,9 +983,12 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
         if (!compositor_client_scans(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
                 return -1;
         // Glass is the window's WINDOW_GLASS (compositor.glassy): the row's other flags (a client's NO_CLOSE and NO_GRAB) are no glass.
+        // Undersized fullscreen client buffers (e.g. 1024x768 on 1920x1080) are eligible for hardware primary-plane scaling when atomic is ready.
         if (compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != 0 || compositor.y[row] != 0 ||
             compositor.w[row] != (unsigned int)compositor.width || compositor.h[row] != (unsigned int)compositor.height ||
-            compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row] ||
+            ((compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row]) &&
+             !(compositor.fullscreen[row] && compositor_client_scans(row) && !compositor.scale_plane_refused &&
+               compositor.picture_w[row] && compositor.picture_h[row] && compositor_overlay_ready())) ||
             compositor.asking[row] || compositor_radius(&frames[windows - 1]) || frames[windows - 1].line)
                 return -1;
         return (compositor_client_scans(row) ? compositor_lent_fb(row) : compositor_window_fb(row, compositor.front[row])) ? row : -1;
@@ -975,7 +1012,17 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
                 compositor_direct_patch(row, which, tabs, count);
         if (compositor.on_screen != fb)
         {
-                if (!compositor_flip(fb, row, which))
+                int dx, dy, dw, dh;
+
+                if (lent && compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh))
+                {
+                        if (!compositor_atomic_primary(fb, row, which, (int)compositor.picture_w[row], (int)compositor.picture_h[row], dx, dy, dw, dh))
+                        {
+                                compositor.scale_plane_refused = 1;
+                                return 0;
+                        }
+                }
+                else if (!compositor_flip(fb, row, which))
                 {
                         if (lent)
                         {
@@ -1511,6 +1558,58 @@ static int compositor_rotate_commit(const struct compositor_output *output, cons
         does not wait, and its event is the flip's; false when the card
         refuses it.
 */
+// Hardware primary-plane scaling commit for undersized fullscreen games (SRC_W/H -> centered CRTC_X/Y/W/H), or 1:1 restore.
+static int compositor_atomic_primary(unsigned int fb, int row, unsigned int which, int src_w, int src_h, int dx, int dy, int dw, int dh)
+{
+        unsigned int objects[2] = {compositor.primary, compositor.overlay}, counts[2] = {0, 0}, props[16];
+        unsigned long values[16];
+        const unsigned int *id = compositor.primary_props;
+        unsigned int n = 0, obj_count = 1;
+
+        if (!compositor_overlay_ready() || !compositor.primary || src_w <= 0 || src_h <= 0 || dw <= 0 || dh <= 0)
+                return 0;
+        props[n] = id[COMPOSITOR_PLANE_FB], values[n++] = fb;
+        props[n] = id[COMPOSITOR_PLANE_CRTC], values[n++] = compositor.crtc;
+        props[n] = id[COMPOSITOR_PLANE_SRC_X], values[n++] = 0;
+        props[n] = id[COMPOSITOR_PLANE_SRC_Y], values[n++] = 0;
+        props[n] = id[COMPOSITOR_PLANE_SRC_W], values[n++] = (unsigned long)src_w << 16;
+        props[n] = id[COMPOSITOR_PLANE_SRC_H], values[n++] = (unsigned long)src_h << 16;
+        props[n] = id[COMPOSITOR_PLANE_CRTC_X], values[n++] = (unsigned long)dx;
+        props[n] = id[COMPOSITOR_PLANE_CRTC_Y], values[n++] = (unsigned long)dy;
+        props[n] = id[COMPOSITOR_PLANE_CRTC_W], values[n++] = (unsigned long)dw;
+        props[n] = id[COMPOSITOR_PLANE_CRTC_H], values[n++] = (unsigned long)dh;
+        counts[0] = n;
+        if (compositor.overlay_on && compositor.overlay)
+        {
+                props[n] = compositor.overlay_props[COMPOSITOR_PLANE_FB], values[n++] = 0;
+                props[n] = compositor.overlay_props[COMPOSITOR_PLANE_CRTC], values[n++] = 0;
+                counts[1] = 2;
+                obj_count = 2;
+        }
+        struct
+        {
+                unsigned int flags, count;
+                unsigned long objects, counts, props, values, reserved, user_data;
+        } commit = {COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, obj_count, (unsigned long)objects,
+                    (unsigned long)counts, (unsigned long)props, (unsigned long)values, 0, 0};
+
+        commit.user_data = ++compositor.flip_serial;
+        if (system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit) != 0)
+                return 0;
+        compositor_flip_refused = 0;
+        compositor.flip_pending = 1;
+        compositor.vrr_kick = 0;
+        compositor.flip_async = 0;
+        compositor.flip_issued = clock_monotonic_nanoseconds();
+        compositor.flip_row = row;
+        compositor.flip_buffer = which;
+        compositor.on_screen = fb;
+        compositor.scaled_direct = (src_w != dw || src_h != dh || dx != 0 || dy != 0);
+        if (obj_count == 2)
+                compositor.overlay_on = 0, compositor.plane_fb = 0;
+        return 1;
+}
+
 static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, int overlay, unsigned int shown,
                                 const int *source, const int *rect)
 {

@@ -1076,6 +1076,7 @@ static struct
         // shows on the output (plane_rect), and the framebuffer it shows (plane_fb, 0 for none). leaving_row holds a
         // row that just left direct/overlay scanout until its flip away lands (compositor_flip_done).
         int plane_row, leaving_row, plane_rect[4];
+        int scaled_direct, scale_plane_refused; // primary plane hardware scaling for undersized fullscreen games
         unsigned int plane_fb;
         // plane_gone: the window on the overlay closed (compositor_leave), its framebuffer still scanned at plane_rect until the next present
         // takes the overlay off or gives it to another window. overlay_owed: the overlay's disable was refused (compositor_overlay_off), and
@@ -3637,6 +3638,9 @@ static b32 compositor_main()
 #endif
 
 #ifdef CONFIG_MOONWATER_WAYLAND
+                // Automatic Reflex / Anti-Lag: wake just in time to send wl_surface.frame before the next vblank.
+                if (compositor_wl_frame_at)
+                        compositor_deadline(&until, compositor_wl_frame_at);
         compositor_sling_poll:
 #endif
                 // A timespec: a wait past a second in its nanoseconds is EINVAL, and the loop would spin on it.
@@ -3811,6 +3815,13 @@ static b32 compositor_main()
                         compositor_volume_look(now);
 
 #ifdef CONFIG_MOONWATER_WAYLAND
+                // Automatic Reflex / Anti-Lag: send deferred wl_surface.frame right on schedule (or immediately if direct scanout ended).
+                if (compositor_wl_frame_at && (now >= compositor_wl_frame_at || compositor.direct_row < 0))
+                {
+                        compositor_wl_frame_at = 0;
+                        compositor_wl_frame_sent_at = now;
+                        compositor_wl_frame();
+                }
                 // The windows' clients are told of what changed, before the frame is drawn: no event waits for it.
                 compositor_wl_wake();
 #endif
@@ -3873,9 +3884,24 @@ static b32 compositor_main()
                                 // draws unpaced, and the callback is no pace of it.
                                 if (!compositor_card.on && compositor.flip_pending && compositor.direct_row >= 0 && compositor.flip_row == compositor.direct_row &&
                                     !compositor_wl_row_async(compositor.direct_row))
+                                {
+                                        if (compositor_wl_frame_sent_at && stamp > compositor_wl_frame_sent_at)
+                                        {
+                                                positive sample = stamp - compositor_wl_frame_sent_at;
+
+                                                if (sample < compositor.period)
+                                                        compositor_wl_game_render_ns = sample > compositor_wl_game_render_ns
+                                                                                               ? sample
+                                                                                               : (compositor_wl_game_render_ns * 7 + sample) / 8;
+                                        }
                                         compositor_wl_frame_owed = 1;
+                                }
                                 else if (!compositor_card.on)
+                                {
+                                        if (compositor.direct_row < 0)
+                                                compositor_wl_game_render_ns = compositor_wl_frame_sent_at = 0;
                                         compositor_wl_frame();
+                                }
 #endif
                         }
                 }

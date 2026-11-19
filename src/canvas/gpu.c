@@ -784,7 +784,7 @@ struct gpu_i915_bound { positive va, bytes; unsigned int written, pad; };
 static struct
 {
         b32 llc, softpin, no_reloc, fence, probe, read_only_refused;
-        unsigned int ppgtt, main, lost; // HAS_ALIASING_PPGTT (1 aliasing, 2 and up full); the card's own buffer's handle; its context's lost batches when last looked
+        unsigned int ppgtt, main, lost, eu_total; // HAS_ALIASING_PPGTT (1 aliasing, 2 and up full); the card's own buffer's handle; lost batches; EU count
         positive gtt, sequence, done;   // the address space's size (I915_CONTEXT_PARAM_GTT_SIZE, 0 not said); the last job's sequence (from 1) and the last one seen done
         struct { positive sequence; int fence; } jobs[GPU_I915_JOBS];
         struct gpu_i915_bound *bound;
@@ -811,6 +811,7 @@ static unsigned int gpu_i915_identify(int fd, unsigned int *family, unsigned int
                 return e;
         gpu_i915.llc = gpu_i915_param(fd, 17) > 0, gpu_i915.ppgtt = (unsigned int)gpu_i915_param(fd, 18), gpu_i915.no_reloc = gpu_i915_param(fd, 25) > 0;
         gpu_i915.softpin = gpu_i915_param(fd, 37) > 0, gpu_i915.fence = gpu_i915_param(fd, 44) > 0, gpu_i915.probe = gpu_i915_param(fd, 56) > 0;
+        gpu_i915.eu_total = (unsigned int)gpu_i915_param(fd, 34); // I915_PARAM_EU_TOTAL
         gpu_i915.gtt = gpu_raw(fd, GPU_I915_CONTEXT_GETPARAM, &gtt) ? 0 : gtt.value;
         gpu_i915.read_only_refused = 0;
         return 0;
@@ -2364,7 +2365,13 @@ static void gpu_i915_frame(unsigned int address_to words, unsigned int sbase, un
         words[n++] = (unsigned int)GPU_VA | 1; words[n++] = (unsigned int)(GPU_VA >> 32);
         words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1; words[n++] = 0xfffff000u | 1; words[n++] = 65536u | 1;
         words[n++] = 1; words[n++] = 0; words[n++] = 0xfffff000u;
-        words[n++] = 0x70000007u; words[n++] = 0; words[n++] = 0; words[n++] = (1u << 16) | (1u << 8); words[n++] = 0; words[n++] = 1; words[n++] = 0; words[n++] = 0; words[n++] = 0;
+        {
+                unsigned int threads = gpu_i915.eu_total ? gpu_i915.eu_total * 7u - 1u : 63u;
+
+                if (threads > 167u)
+                        threads = 167u;
+                words[n++] = 0x70000007u; words[n++] = 0; words[n++] = 0; words[n++] = (threads << 16) | (1u << 8); words[n++] = 0; words[n++] = 1; words[n++] = 0; words[n++] = 0; words[n++] = 0;
+        }
         words[n++] = 0x70010002u; words[n++] = 0; words[n++] = 64; words[n++] = sbase + 192;
         words[n++] = 0x70020002u; words[n++] = 0; words[n++] = 32; words[n++] = sbase + 128;
         words[n++] = 0x7105000du; words[n++] = 0; words[n++] = 0; words[n++] = 0; words[n++] = 1u << 30;
