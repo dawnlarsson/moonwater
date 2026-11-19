@@ -1186,6 +1186,19 @@ EOF
                 after "$settings_work/btmtk" "btmtk coredump"
 fi
 
+#       Zero xHCI interrupt moderation (IMOD = 0 instead of default 40000 ns):
+#       removes 40 us of hardware interrupt coalescing delay on every USB mouse
+#       and keyboard packet before the CPU even sees the HID report.
+xhci_c=linux/drivers/usb/host/xhci.c
+if [ -f "$xhci_c" ]; then
+        if grep -q -F -- 'xhci->imod_interval = 40000;' "$xhci_c"; then
+                settings_replace "$xhci_c" 's/xhci->imod_interval = 40000;/xhci->imod_interval = 0; \/* Moonwater: zero USB HID interrupt moderation *\//' ||
+                die "xhci imod_interval: could not edit $xhci_c"
+        elif ! grep -q -F -- 'xhci->imod_interval = 0;' "$xhci_c"; then
+                die "xhci imod_interval: expected line moved in $xhci_c"
+        fi
+fi
+
 rm -rf "$settings_work"
 
 #       So: where does it actually point, and is that here.

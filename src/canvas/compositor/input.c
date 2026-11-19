@@ -4922,22 +4922,117 @@ static b32 compositor_reader_owed(void)
         return compositor_reader.gone_owing != 0;
 }
 
+static unsigned int compositor_spark_want; // 1 while a locked-pointer game wants direct zero-evdev input via /dev/spark
+
+static unsigned int compositor_reader_spark_drain(struct spark_input_ring *ring, positive *last_ns)
+{
+#ifdef CONFIG_MOONWATER_WAYLAND
+        unsigned long long tail, head;
+        unsigned int count = 0;
+
+        if (!ring)
+                return 0;
+        tail = ring->tail;
+        head = __atomic_load_n(&ring->head, __ATOMIC_ACQUIRE);
+        while (tail != head)
+        {
+                const struct spark_input_slot *s = &ring->slots[tail & ring->mask];
+                int dx = s->dx, dy = s->dy;
+                positive micro = s->time_us;
+
+                tail++;
+                __atomic_store_n(&ring->tail, tail, __ATOMIC_RELEASE);
+                if ((dx || dy) && compositor_wl_direct_send(dx, dy, micro))
+                {
+                        positive now = clock_monotonic_nanoseconds();
+                        positive late = now / 1000 - micro;
+
+                        __atomic_add_fetch(&compositor_reader.direct, 1, __ATOMIC_RELEASE);
+                        compositor_reader.late_most = late > compositor_reader.late_most && late < 1000000000ull ? late : compositor_reader.late_most;
+                        compositor_reader.late += late >= 100;
+                        *last_ns = now;
+                }
+                count++;
+        }
+        return count;
+#else
+        (void)ring, (void)last_ns;
+        return 0;
+#endif
+}
+
 static fn compositor_reader_run(address_any context)
 {
         static int watched[COMPOSITOR_INPUTS];
         static unsigned int generations[COMPOSITOR_INPUTS];
         unsigned int count = 0, changes = ~0u;
-        int priority = COMPOSITOR_READER_PRIORITY;
+        int priority = COMPOSITOR_READER_PRIORITY, spark_fd = -1;
+        struct spark_input_ring *spark_ring = 0;
+        positive spark_last = 0;
 
         (void)context;
         compositor_call(syscall(sched_setscheduler), 0, 1, (positive)&priority, 0, 0, 0); // SCHED_FIFO: refused, it stays the loop's
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++)
                 watched[at] = -1;
+        // Open Moonwater's /dev/spark direct zero-evdev input ring when available (non-fatal on stock kernels / tests).
+        spark_fd = (int)system_open_at(AT_FDCWD, (string_address)SPARK_DEVICE, FILE_READ_WRITE | O_CLOEXEC);
+        if (spark_fd >= 0)
+        {
+                long mapped = (long)system_call_6(syscall(mmap), 0, SPARK_INPUT_PAGE_BYTES, 3, 1, (positive)spark_fd,
+                                                  SPARK_INPUT_MMAP_PGOFF * SPARK_INPUT_PAGE_BYTES);
+                struct compositor_epoll_event ev = {COMPOSITOR_POLLIN, COMPOSITOR_INPUTS + 1};
+
+                if (!(mapped < 0 && mapped > -4096) &&
+                    ((struct spark_input_ring *)mapped)->magic == SPARK_INPUT_MAGIC &&
+                    ((struct spark_input_ring *)mapped)->version == SPARK_INPUT_VERSION &&
+                    ((struct spark_input_ring *)mapped)->mask == SPARK_INPUT_SLOTS - 1u &&
+                    system_call_4(syscall(epoll_ctl), (positive)compositor_reader.set, 1, (positive)spark_fd, (positive)&ev) == 0)
+                        spark_ring = (struct spark_input_ring *)mapped;
+                else
+                {
+                        if (!(mapped < 0 && mapped > -4096))
+                                system_call_2(syscall(munmap), (positive)mapped, SPARK_INPUT_PAGE_BYTES);
+                        system_close(spark_fd);
+                        spark_fd = -1;
+                }
+        }
         for (;;)
         {
                 struct compositor_epoll_event ready[16];
                 long got;
 
+                if (spark_ring)
+                {
+                        unsigned int want = __atomic_load_n(&compositor_spark_want, __ATOMIC_ACQUIRE);
+
+                        if (spark_ring->active != want)
+                                __atomic_store_n(&spark_ring->active, want, __ATOMIC_RELEASE);
+                        compositor_reader_spark_drain(spark_ring, &spark_last);
+                        // Adaptive 15 us spin-poll while high-rate (4-8 kHz) mouse reports are actively streaming, avoiding epoll wakeup jitter.
+                        if (want && spark_last)
+                        {
+                                positive now = clock_monotonic_nanoseconds();
+
+                                if (now - spark_last < 500000ull)
+                                {
+                                        positive stop = now + 15000ull;
+
+                                        while (clock_monotonic_nanoseconds() < stop)
+                                        {
+                                                if (__atomic_load_n(&spark_ring->head, __ATOMIC_ACQUIRE) != spark_ring->tail)
+                                                {
+                                                        compositor_reader_spark_drain(spark_ring, &spark_last);
+                                                        stop = clock_monotonic_nanoseconds() + 15000ull;
+                                                }
+#if defined(__x86_64__)
+                                                __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__)
+                                                __asm__ volatile("yield" ::: "memory");
+#endif
+                                        }
+                                }
+                        }
+                }
                 if (__atomic_load_n(&compositor_reader.changes, __ATOMIC_ACQUIRE) != changes)
                 {
                         changes = __atomic_load_n(&compositor_reader.changes, __ATOMIC_ACQUIRE);
@@ -4967,6 +5062,11 @@ static fn compositor_reader_run(address_any context)
                         struct compositor_input_event raw[64];
                         unsigned int put = 0;
 
+                        if (at == COMPOSITOR_INPUTS + 1)
+                        {
+                                compositor_reader_spark_drain(spark_ring, &spark_last);
+                                continue;
+                        }
                         if (at >= COMPOSITOR_INPUTS)
                         {
                                 unsigned long long word;

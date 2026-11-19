@@ -344,6 +344,7 @@ static int device_close(struct inode *inode, struct file *file)
 {
         struct device_context *context = file->private_data;
 
+        spark_input_release(file);
         bind_machine_detach(file, NULL);
         canvas_client_release(file);
         spark_environment_release(context);
@@ -351,9 +352,11 @@ static int device_close(struct inode *inode, struct file *file)
         return 0;
 }
 
-// Rover's state page and ring (rules.c): mapped, polled, and read for the ring's head.
+// Rover's state page and ring (rules.c, pgoff 0) and direct input ring (moonwater.c, pgoff SPARK_INPUT_MMAP_PGOFF).
 static int device_mmap(struct file *file, struct vm_area_struct *vma)
 {
+        if (vma->vm_pgoff == SPARK_INPUT_MMAP_PGOFF)
+                return spark_input_mmap(file, vma);
         return rules_mmap(file, vma);
 }
 
@@ -361,6 +364,8 @@ static __poll_t device_poll(struct file *file, poll_table *wait)
 {
         struct device_context *context = file->private_data;
 
+        if (spark_input_is_owner(file))
+                return spark_input_poll(file, wait);
         return rules_poll(file, &context->rover_seen, wait);
 }
 

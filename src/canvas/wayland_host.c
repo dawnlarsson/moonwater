@@ -7198,17 +7198,29 @@ static void compositor_wl_direct_release(void)
 // The loop, holding the lock: what the reader sends to made again from the shim as it is now (nothing, when no client holds it locked).
 static void compositor_wl_direct_make(void)
 {
+        unsigned int was = __atomic_load_n(&compositor_spark_want, __ATOMIC_RELAXED);
         long slot;
 
         compositor_wl_direct.valid = 0;
         if (!compositor_reader.on || !compositor_wl.started || !compositor_wl_locked())
-                return;
+                goto sync_spark;
         slot = wayland_pointer_direct(compositor_wl.hold_row, compositor_wl_direct.relative, &compositor_wl_direct.relatives,
                                       compositor_wl_direct.frames, &compositor_wl_direct.framed, COMPOSITOR_WL_DIRECT_IDS,
                                       &compositor_wl_direct.scale120) - 1;
         if (slot < 0 || slot >= compositor_wl.slots || compositor_wl.fd[slot] < 0)
-                return;
+                goto sync_spark;
         compositor_wl_direct.slot = (int)slot, compositor_wl_direct.fd = compositor_wl.fd[slot], compositor_wl_direct.valid = 1;
+sync_spark:
+        if (was != (unsigned int)compositor_wl_direct.valid)
+        {
+                __atomic_store_n(&compositor_spark_want, (unsigned int)compositor_wl_direct.valid, __ATOMIC_RELEASE);
+                if (compositor_reader.wake >= 0)
+                {
+                        unsigned long long one = 1;
+
+                        system_write_once(compositor_reader.wake, &one, sizeof one);
+                }
+        }
 }
 
 static int compositor_wl_key_row(void); // below: the row whose client has the keys

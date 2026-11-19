@@ -808,8 +808,105 @@ struct bind_handle {
         unsigned int rover_mods;
         // not the machine's own: a program's (uinput, uhid), heard by no rule and by no stop key's binding
         bool rover_virtual;
+        int rel_x, rel_y; // pending REL_X / REL_Y accumulated for the current HID report (spark_input_ring)
         unsigned long rover_taken[BITS_TO_LONGS(KEY_CNT)];
 };
+
+static struct spark_input_ring *spark_input_page;
+static DECLARE_WAIT_QUEUE_HEAD(spark_input_wait);
+static DEFINE_SPINLOCK(spark_input_lock);
+static struct file *spark_input_owner;
+
+static void spark_input_init(void)
+{
+        struct spark_input_ring *page = vmalloc_user(SPARK_INPUT_PAGE_BYTES);
+
+        if (!page)
+                return;
+        page->magic = SPARK_INPUT_MAGIC;
+        page->version = SPARK_INPUT_VERSION;
+        page->mask = SPARK_INPUT_SLOTS - 1u;
+        page->active = 0;
+        page->head = 0;
+        page->tail = 0;
+        page->drops = 0;
+        smp_wmb();
+        WRITE_ONCE(spark_input_page, page);
+}
+
+static void spark_input_exit(void)
+{
+        struct spark_input_ring *page = xchg(&spark_input_page, NULL);
+
+        if (page)
+        {
+                WRITE_ONCE(page->active, 0);
+                vfree(page);
+        }
+}
+
+static bool spark_input_is_owner(struct file *file)
+{
+        return file && READ_ONCE(spark_input_owner) == file;
+}
+
+static int spark_input_mmap(struct file *file, struct vm_area_struct *vma)
+{
+        struct spark_input_ring *page = READ_ONCE(spark_input_page);
+        unsigned long length = vma->vm_end - vma->vm_start;
+        unsigned long flags;
+        int err;
+
+        if (!page)
+                return -ENODEV;
+        if (!capable(CAP_SYS_ADMIN))
+                return -EPERM;
+        if (length != SPARK_INPUT_PAGE_BYTES || (vma->vm_flags & VM_EXEC) || !(vma->vm_flags & VM_SHARED))
+                return -EINVAL;
+        vm_flags_clear(vma, VM_MAYEXEC);
+        spin_lock_irqsave(&spark_input_lock, flags);
+        if (spark_input_owner && spark_input_owner != file)
+        {
+                spin_unlock_irqrestore(&spark_input_lock, flags);
+                return -EBUSY;
+        }
+        spark_input_owner = file;
+        spin_unlock_irqrestore(&spark_input_lock, flags);
+        err = remap_vmalloc_range(vma, page, 0);
+        if (err)
+        {
+                spin_lock_irqsave(&spark_input_lock, flags);
+                if (spark_input_owner == file)
+                        spark_input_owner = NULL;
+                spin_unlock_irqrestore(&spark_input_lock, flags);
+        }
+        return err;
+}
+
+static __poll_t spark_input_poll(struct file *file, poll_table *wait)
+{
+        struct spark_input_ring *page = READ_ONCE(spark_input_page);
+
+        poll_wait(file, &spark_input_wait, wait);
+        if (!page || !spark_input_is_owner(file))
+                return 0;
+        return smp_load_acquire(&page->head) != READ_ONCE(page->tail) ? EPOLLIN | EPOLLRDNORM : 0;
+}
+
+static void spark_input_release(struct file *file)
+{
+        struct spark_input_ring *page = READ_ONCE(spark_input_page);
+        unsigned long flags;
+
+        spin_lock_irqsave(&spark_input_lock, flags);
+        if (spark_input_owner == file)
+        {
+                spark_input_owner = NULL;
+                if (page)
+                        WRITE_ONCE(page->active, 0);
+        }
+        spin_unlock_irqrestore(&spark_input_lock, flags);
+}
 
 static struct bind_row bind_table[SPARK_BIND_EVENTS];
 static DEFINE_SPINLOCK(bind_lock);
@@ -1752,6 +1849,51 @@ static _Bool bind_filter(struct input_handle *handle, unsigned int type,
         u64 started = moonwater_cost_begin(&bind_cost);
         bool taken = false;
 
+        struct spark_input_ring *ring = READ_ONCE(spark_input_page);
+
+        if (ring && READ_ONCE(ring->active) && !bind->rover_virtual)
+        {
+                if (type == EV_REL && (code == REL_X || code == REL_Y))
+                {
+                        if (code == REL_X)
+                                bind->rel_x += value;
+                        else
+                                bind->rel_y += value;
+                        taken = true;
+                        goto counted;
+                }
+                if (type == EV_SYN && code == SYN_REPORT && (bind->rel_x || bind->rel_y))
+                {
+                        int dx = bind->rel_x, dy = bind->rel_y;
+                        unsigned long flags;
+
+                        bind->rel_x = bind->rel_y = 0;
+                        spin_lock_irqsave(&spark_input_lock, flags);
+                        if (READ_ONCE(ring->active))
+                        {
+                                u64 head = ring->head;
+                                u64 tail = smp_load_acquire(&ring->tail);
+
+                                if (head - tail < SPARK_INPUT_SLOTS)
+                                {
+                                        struct spark_input_slot *s = &ring->slots[head & (SPARK_INPUT_SLOTS - 1u)];
+
+                                        s->dx = dx;
+                                        s->dy = dy;
+                                        s->time_us = ktime_get_ns() / 1000ull;
+                                        smp_store_release(&ring->head, head + 1);
+                                        wake_up_interruptible(&spark_input_wait);
+                                }
+                                else
+                                        ring->drops++;
+                        }
+                        spin_unlock_irqrestore(&spark_input_lock, flags);
+                        goto counted;
+                }
+        }
+        else if (unlikely(bind->rel_x || bind->rel_y))
+                bind->rel_x = bind->rel_y = 0;
+
         if (unlikely(type == EV_KEY || type == EV_SW)) {
                 //      A program's device (uinput, uhid) is no rule's, and
                 //      it stops no machine and closes no lid: its switches
@@ -1818,6 +1960,7 @@ static void bind_disconnect(struct input_handle *handle)
 static const struct input_device_id bind_ids[] = {
         { .flags = INPUT_DEVICE_ID_MATCH_EVBIT, .evbit = { BIT_MASK(EV_KEY) } },
         { .flags = INPUT_DEVICE_ID_MATCH_EVBIT, .evbit = { BIT_MASK(EV_SW) } },
+        { .flags = INPUT_DEVICE_ID_MATCH_EVBIT, .evbit = { BIT_MASK(EV_REL) } },
         {},
 };
 
@@ -1901,6 +2044,7 @@ static void bind_start(void)
                 INIT_WORK(&row->work, bind_work);
                 bind_watch_row(row);
         }
+        spark_input_init();
         atomic_set(&bind_alive, 1);
         if (input_register_handler(&bind_handler))
                 pr_alert("[moonwater] could not watch the machine's keys\n");
@@ -1934,6 +2078,7 @@ static void bind_stop(void)
 #endif
         if (bind_handler_registered)
                 input_unregister_handler(&bind_handler);
+        spark_input_exit();
 
         cancel_work_sync(&bind_state_work);
         for (at = 0; at < SPARK_BIND_EVENTS; at++)

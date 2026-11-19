@@ -109,6 +109,44 @@ _Static_assert(sizeof(struct header) == SPARK_HEADER_SIZE,
 #define SPARK_DEVICE_MAJOR 10
 #define SPARK_DEVICE_MINOR 250
 
+/*
+        Direct zero-evdev input ring (/dev/spark mmap at offset SPARK_INPUT_MMAP_PGOFF * 4096):
+        When a locked-pointer game is active, Moonwater's in-kernel input filter writes raw
+        (dx, dy, ktime_us) directly from the USB-HID IRQ into this single shared page and
+        suppresses evdev delivery for those motion axes. The compositor's SCHED_FIFO reader
+        drains it straight from mapped RAM with zero read() syscalls.
+*/
+#define SPARK_INPUT_MAGIC 0x504e4953u // "SINP"
+#define SPARK_INPUT_VERSION 1u
+#define SPARK_INPUT_SLOTS 128u
+#define SPARK_INPUT_MMAP_PGOFF 16ul
+#define SPARK_INPUT_PAGE_BYTES 4096ul
+
+struct spark_input_slot
+{
+        int dx;
+        int dy;
+        unsigned long long time_us;
+        unsigned int pad0;
+        unsigned int pad1;
+};
+
+struct spark_input_ring
+{
+        unsigned int magic;
+        unsigned int version;
+        unsigned int mask;
+        unsigned int active;
+        unsigned long long head;
+        unsigned long long tail;
+        unsigned long long drops;
+        unsigned int reserved[6];
+        struct spark_input_slot slots[SPARK_INPUT_SLOTS];
+};
+
+_Static_assert(sizeof(struct spark_input_slot) == 24, "spark_input_slot must be 24 bytes");
+_Static_assert(sizeof(struct spark_input_ring) <= SPARK_INPUT_PAGE_BYTES, "spark_input_ring must fit in one 4 KiB page");
+
 // _IOW('s', 1, struct spawn) -- spelled out so userspace does not need
 // the kernel ioctl macros to talk to it. The size is part of the encoding, so
 // this changes if the request struct does. Generation-keyed environments make
