@@ -41,17 +41,21 @@ static void compositor_raise(int row)
         if (!++compositor.stack_gen)
                 compositor.stack_gen++;
         compositor_damage_row(row);
-        for (unsigned int at = 0; !compositor_row_xoverride(row) && at + 1 + over < compositor.stacked; at++)
-        {
-                unsigned int other = compositor.stack[at];
+        // Keep small X11 override-redirect popups/menus above normal windows, but never let a fullscreen override-redirect
+        // window (e.g. borderless Wine/Proton games) bury the desktop launcher or an explicitly raised window.
+        if ((compositor.asks[row] & (WINDOW_DISMISS | WINDOW_NO_CLOSE)) != (WINDOW_DISMISS | WINDOW_NO_CLOSE))
+                for (unsigned int at = 0; !compositor_row_xoverride(row) && at + 1 + over < compositor.stacked; at++)
+                {
+                        unsigned int other = compositor.stack[at];
 
-                if (!compositor_row_xoverride((int)other))
-                        continue;
-                memory_copy(compositor.stack + at, compositor.stack + at + 1, (compositor.stacked - at - 1) * sizeof(*compositor.stack));
-                compositor.stack[compositor.stacked - 1] = other;
-                compositor_damage_row((int)other);
-                over++, at--;
-        }
+                        if (!compositor_row_xoverride((int)other) || compositor.fullscreen[other] ||
+                            ((int)compositor.w[other] >= compositor.width && (int)compositor.h[other] >= compositor.height))
+                                continue;
+                        memory_copy(compositor.stack + at, compositor.stack + at + 1, (compositor.stacked - at - 1) * sizeof(*compositor.stack));
+                        compositor.stack[compositor.stacked - 1] = other;
+                        compositor_damage_row((int)other);
+                        over++, at--;
+                }
 }
 
 static unsigned int compositor_modifiers(void);

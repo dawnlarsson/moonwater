@@ -1529,7 +1529,7 @@ static void compositor_xwm_sync(struct compositor_xwm_window *w)
         c.mask = 0;
         c.x = compositor_xwm_to_x(compositor.x[row], 0);
         c.y = compositor_xwm_to_x(compositor.y[row], 1);
-        if (c.x != w->sent_x || c.y != w->sent_y)
+        if (c.x != w->sent_x || c.y != w->sent_y || c.x != w->x || c.y != w->y)
                 c.mask |= XWM_CONFIGURE_X | XWM_CONFIGURE_Y;
         if (table && (compositor.arranged[row] != COMPOSITOR_FLOATING || compositor.asking[row]))
         {
@@ -1554,8 +1554,18 @@ static void compositor_xwm_sync(struct compositor_xwm_window *w)
         compositor_xwm_configure(w->id, &c);
         if (c.mask & XWM_CONFIGURE_X)
         {
+                unsigned char ev[XWM_EVENT_SIZE], req[64];
+                unsigned int nw = (c.mask & XWM_CONFIGURE_WIDTH) ? c.width : (w->sent_w ? w->sent_w : w->width);
+                unsigned int nh = (c.mask & XWM_CONFIGURE_HEIGHT) ? c.height : (w->sent_h ? w->sent_h : w->height);
+                long n = xwm_enc_configure_notify(ev, sizeof ev, w->id, c.x, c.y, nw, nh, 0, (w->state & COMPOSITOR_XWM_OVERRIDE) != 0);
+
+                // ICCCM 4.1.5: deliver synthetic ConfigureNotify on position sync so Wine/Proton x11drv updates its cached window origin.
+                if (n > 0 && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, XWM_MASK_STRUCTURE_NOTIFY, ev, (unsigned long)n)) > 0)
+                        compositor_xwm_queue(req, n);
                 w->sent_x = c.x;
                 w->sent_y = c.y;
+                w->x = c.x;
+                w->y = c.y;
         }
         if (c.mask & XWM_CONFIGURE_WIDTH)
         {
@@ -4669,17 +4679,22 @@ static void compositor_xwm_pass_one(const struct compositor_poll *wanted)
                 compositor_xwm_resolve(w);
                 if (w->row < 0 || w->row >= COMPOSITOR_ROWS)
                         continue;
-                // The compositor asked this window to go: a popup is unmapped, a window is asked by WM_DELETE_WINDOW (once for each
-                // ask, compositor_xwm_close_owed) when its WM_PROTOCOLS lists it, and is destroyed when it does not (ICCCM 4.2.8.1).
+                // The compositor asked this window to go: a popup is unmapped, a window is asked by WM_DELETE_WINDOW on the first ask
+                // when its WM_PROTOCOLS lists it, and escalated to DestroyWindow (plus SIGTERM/SIGKILL to its owner PID if unresponsive)
+                // on repeated Alt+F4 / close asks so hung Wine/Proton/X11 games can always be closed.
                 if (compositor_xwm_close_owed(w))
                 {
                         w->closes = compositor.close_asks[w->row];
                         if (w->state & COMPOSITOR_XWM_POPUPISH)
                                 compositor_xwm_window_op(XWM_OP_UNMAP_WINDOW, w->id);
-                        else if (w->protocols & COMPOSITOR_XWM_PROTO_DELETE)
+                        else if ((w->protocols & COMPOSITOR_XWM_PROTO_DELETE) && w->closes < 2)
                                 compositor_xwm_protocol(w->id, x->atoms[COMPOSITOR_XWM_A_DELETE]);
                         else
+                        {
                                 compositor_xwm_window_op(XWM_OP_DESTROY_WINDOW, w->id);
+                                if (w->closes >= 2 && w->owner > 1)
+                                        compositor_call(syscall(kill), (positive)w->owner, w->closes >= 3 ? 9 : 15, 0, 0, 0, 0);
+                        }
                 }
                 if (!(w->state & COMPOSITOR_XWM_POPUPISH))
                         compositor_xwm_sync(w);

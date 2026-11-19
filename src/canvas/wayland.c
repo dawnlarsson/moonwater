@@ -2099,8 +2099,14 @@ static void wayland_output_send(struct wayland_client *c, long slot)
         e = wayland_begin(c, o->id, WLE_wl_output_geometry);
         wayland_word(&e, (unsigned long)x);
         wayland_word(&e, (unsigned long)y);
-        wayland_word(&e, (unsigned long)screen->physical_width);
-        wayland_word(&e, (unsigned long)screen->physical_height);
+        // Report standard 96 DPI physical dimensions when EDID physical mm is 0 so XWayland/Wine/Proton compute 1.0x DPI cleanly.
+        {
+                unsigned long pw = screen->physical_width > 0 ? (unsigned long)screen->physical_width : (unsigned long)((screen->width * 254 + 480) / 960);
+                unsigned long ph = screen->physical_height > 0 ? (unsigned long)screen->physical_height : (unsigned long)((screen->height * 254 + 480) / 960);
+
+                wayland_word(&e, pw);
+                wayland_word(&e, ph);
+        }
         wayland_word(&e, WLN_wl_output_subpixel_unknown);
         wayland_string(&e, "Moonwater");
         wayland_string(&e, screen->name);
