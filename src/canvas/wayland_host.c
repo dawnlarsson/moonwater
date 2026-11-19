@@ -8392,10 +8392,10 @@ static void compositor_wl_presented(void)
 
         if (!compositor_wl.started)
                 return;
-        // The row shown straight from its client's own buffer, which only the card's scanout reads (zero copy).
-        compositor_wl.zero_row = compositor.direct_row >= 0 && compositor_lent(compositor.direct_row) ? compositor.direct_row
-                                 : compositor.plane_row >= 0 && compositor_lent(compositor.plane_row) ? compositor.plane_row
-                                                                                                      : -1;
+        // The row shown straight from its client's own buffer (linear lent OR tiled straight), which only the card's scanout reads (zero copy).
+        compositor_wl.zero_row = compositor.direct_row >= 0 && compositor_client_scans(compositor.direct_row) ? compositor.direct_row
+                                 : compositor.plane_row >= 0 && compositor_client_scans(compositor.plane_row) ? compositor.plane_row
+                                                                                                              : -1;
         // The frame's flip landed while its jobs were still on the card's books (its event read before the end of its fence, in the same
         // turn of the loop): it is answered with the card's stamp of it, where it was answered by the clock, flagless, as a frame that
         // had no flip.
@@ -8419,7 +8419,7 @@ static void compositor_wl_presented(void)
         compositor_wl.presenting_waiting = 0;
         // Not sent here: the frame's callbacks follow in the same pass (compositor_wl_frame), and one write carries the feedbacks, the
         // releases and the callbacks to a client, where each had a write of its own.
-        wayland_presented((unsigned long)now, (unsigned long)compositor_wl_refresh(), compositor_wl.presents++, 0ul, -1);
+        wayland_presented((unsigned long)now, (unsigned long)compositor_wl_refresh(), compositor_wl.presents++, 0ul, compositor_wl.zero_row);
 }
 
 /*

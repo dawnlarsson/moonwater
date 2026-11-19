@@ -554,7 +554,7 @@ struct wayland_surface
         // replaced, held until the frame that shows the replacement is drawn (buffer index + 1, 0 for none). A subsurface's are the same
         // for its picture as a layer (row_layers). layered: a root whose subsurfaces the host keeps as layers; laying: a root whose picture
         // is being laid (a row_picture without last was handed, and the take that ends it is owed).
-        unsigned int lent, lent_gone;
+        unsigned int lent, lent_gone, lent_latched, lent_shown;
         unsigned char layered, laying;
         // A toplevel.
         char title[WAYLAND_TEXT];
@@ -2400,7 +2400,7 @@ static void wayland_texts_row_gone(struct wayland_client *c, long row);
 
 static void wayland_row_release(struct wayland_client *c, struct wayland_surface *s)
 {
-        long lent = s->lent, gone = s->lent_gone;
+        long lent = s->lent, gone = s->lent_gone, latched = s->lent_latched, shown = s->lent_shown;
 
         if (s->row < 0)
                 return;
@@ -2415,10 +2415,12 @@ static void wayland_row_release(struct wayland_client *c, struct wayland_surface
         wayland.host->row_close(wayland.host->context, s->row);
         // The window is gone, so the host has let go of what it read in place: the buffers its picture was are the client's again, and so
         // are those of its subsurfaces' layers.
-        s->lent = s->lent_gone = 0;
+        s->lent = s->lent_gone = s->lent_latched = s->lent_shown = 0;
         s->layered = s->laying = 0;
         wayland_lent_let(c, s->row, (unsigned int)lent);
         wayland_lent_let(c, s->row, (unsigned int)gone);
+        wayland_lent_let(c, s->row, (unsigned int)latched);
+        wayland_lent_let(c, s->row, (unsigned int)shown);
         for (struct wayland_subs sub_it = wayland_subs_of(c); wayland_subs_next(&sub_it);)
         {
                 struct wayland_surface *child = &c->surfaces[sub_it.at];
@@ -3170,10 +3172,10 @@ static void wayland_lend_end(struct wayland_client *c, struct wayland_surface *s
 // without them (wayland_gone_drawn), let go of at once only when the memory for the list is not there.
 static void wayland_lend_leave(struct wayland_client *c, struct wayland_surface *s)
 {
-        unsigned int kept[2] = {s->lent, s->lent_gone};
+        unsigned int kept[4] = {s->lent, s->lent_gone, s->lent_latched, s->lent_shown};
 
-        s->lent = s->lent_gone = 0;
-        for (long at = 0; at < 2; at++)
+        s->lent = s->lent_gone = s->lent_latched = s->lent_shown = 0;
+        for (long at = 0; at < 4; at++)
                 if (kept[at] && !wayland_ids_add(&c->gone, kept[at]))
                         wayland_let_go(c, kept[at] - 1);
 }
@@ -5047,7 +5049,7 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         }
                         else
                                 wayland_unhold(c, s);
-                        if (again->held <= 0 && s->lent != now && s->lent_gone != now)
+                        if (again->held <= 0 && s->lent != now && s->lent_gone != now && s->lent_latched != now && s->lent_shown != now)
                                 wayland_release_buffer(c, buffer);
                 }
         }
@@ -11312,6 +11314,26 @@ WAYLAND_API void wayland_latch(void)
                 return;
         wayland.latches++;
         wayland.framing = wayland.calling = 1;
+        // Pin the exact lent buffer handed to this present (flip or GPU compose) so commits arriving before the vblank
+        // cannot release the buffer that is currently being flipped onto or scanned out by the display.
+        for (long row = 0; row < wayland.row_made; row++)
+        {
+                struct wayland_client *c = wayland.row_client[row] >= 0 ? wayland.client[wayland.row_client[row]] : 0;
+                struct wayland_surface *s = c ? &c->surfaces[wayland.row_surface[row]] : 0;
+
+                if (!s || !s->live)
+                        continue;
+                if (s->lent_latched)
+                {
+                        wayland_let_go(c, s->lent_latched - 1);
+                        s->lent_latched = 0;
+                }
+                if (s->lent)
+                {
+                        s->lent_latched = s->lent;
+                        c->buffers[s->lent - 1].held++;
+                }
+        }
         for (long slot = 0; slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
@@ -11402,12 +11424,47 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
                         // client's again at the first frame's time after the commit, drawn or not (what read it before the commit is done
                         // by then). Kept for a frame that never comes, a client with two buffers that draws while it is put away had
                         // neither: one is the picture, and the other was never released.
+                        if (s->lent_latched)
+                        {
+                                wayland_let_go(c, s->lent_latched - 1);
+                                s->lent_latched = 0;
+                        }
+                        if (s->lent_shown)
+                        {
+                                wayland_let_go(c, s->lent_shown - 1);
+                                s->lent_shown = 0;
+                        }
                         wayland_window_gone(c, s, 1);
                         continue;
                 }
-                // The frame that shows the picture a lent buffer was replaced by is drawn: the buffer is the client's again.
+                // The frame that shows the picture a lent buffer was replaced by is drawn: update the pinned on-screen scanout
+                // buffer first so a buffer that just flipped onto the display (zero_row) stays held until the NEXT flip away from it.
                 if (drawn)
+                {
+                        if (row == zero_row)
+                        {
+                                unsigned int old_shown = s->lent_shown;
+
+                                s->lent_shown = s->lent_latched;
+                                s->lent_latched = 0;
+                                if (old_shown)
+                                        wayland_let_go(c, old_shown - 1);
+                        }
+                        else
+                        {
+                                if (s->lent_latched)
+                                {
+                                        wayland_let_go(c, s->lent_latched - 1);
+                                        s->lent_latched = 0;
+                                }
+                                if (s->lent_shown)
+                                {
+                                        wayland_let_go(c, s->lent_shown - 1);
+                                        s->lent_shown = 0;
+                                }
+                        }
                         wayland_window_gone(c, s, 1);
+                }
                 // The window the card scanned out of its own buffer is presented with no copy (zero_copy), its subsurfaces were not shown so.
                 wayland_presentings_done(c, s, when, refresh, seq, row == zero_row ? flags | WLN_wp_presentation_feedback_kind_zero_copy : flags);
                 if (c->subsurfaces)
