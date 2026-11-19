@@ -4908,10 +4908,15 @@ static b32 build_gpu_kernels(string_address input, string_address output)
         //      gpu.asm than the tree's are a compile error.
         {
                 char line[160] = "#define GPU_KERNELS_ASM_HASH 0x0000000000000000ull // the FNV-1a 64 of the gpu.asm these were made of\n";
+                unsigned long long hash = 0xcbf29ce484222325ull;
                 p8 raw[8];
                 bipolar handle;
 
-                network_store_64(raw, hash_fnv1a64(0xcbf29ce484222325ull, build_gpu_source, (positive)got));
+                //      lib.c has only the 32-bit hash_fnv1a, and the include's header must stay the 64-bit FNV-1a that
+                //      test/gpu_kernels.py --hash writes: the loop is that hash, the digits memory_into_hex's.
+                for (bipolar k = 0; k < got; k++)
+                        hash = (hash ^ (p8)build_gpu_source[k]) * 0x100000001b3ull;
+                network_store_64(raw, hash);
                 memory_into_hex(line + 31, raw, 8);
                 handle = system_open_at_mode(AT_FDCWD, temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
                 refuse_if(handle < 0, 1, "gpu-kernels: cannot write %s\n", temporary);
