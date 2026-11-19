@@ -6,18 +6,18 @@ functions 16
 # file, the function it is in, the function dropped and how many times there, a tab, why the drop is
 # right. A drop with no line fails, and a line with no drop. voids and unreviewed may only fall.
 voids 358
-unreviewed 292
+unreviewed 270
 void src/bowl.c bowl_profile_keep bowl_mkdir 1	unreviewed
 void src/bowl.c bowl_profile_keep system_call_2 1	unreviewed
 void src/bowl.c bowl_profile_locales bowl_setup_isolated 1	unreviewed
 void src/bowl.c bowl_raise_rlimit system_call_4 2	unreviewed
 void src/bowl.c bowl_signature_read byte_reader_skip 1	unreviewed
 void src/canvas/compositor/session.c compositor_woke compositor_slept 1	unreviewed
-void src/canvas/screen.c term_session shell_exec_file 2	unreviewed
+void src/canvas/screen.c term_session shell_exec_file 2	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/canvas/ui/files.c files_open_with ui_start_apart 1	unreviewed
 void src/canvas/ui/files.c files_open_with ui_start_apart_at 1	unreviewed
-void src/canvas/ui/installer.c installer_start shell_exec_file 1	unreviewed
-void src/canvas/ui/settings.c settings_start shell_exec_file 1	unreviewed
+void src/canvas/ui/installer.c installer_start shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
+void src/canvas/ui/settings.c settings_start shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/canvas/ui/ui.c ui_list_slider ui_press_lift 1	unreviewed
 void src/lib.util.c darwin_pipe fcntl 2	unreviewed
 void src/lib.util.c darwin_socket_flags close 1	unreviewed
@@ -86,7 +86,7 @@ void src/rover/runner.c rover_runner_verdict rover_runner_adopt 1	unreviewed
 void src/rover/runner.c rover_runner_verdict system_call_2 1	unreviewed
 void src/rover/runner.c rover_runner_verdict system_call_3 1	unreviewed
 void src/rover/runner.c rover_runner_watched rover_runner_post 1	unreviewed
-void src/sh/awk.c awk_spawn shell_exec_file 1	unreviewed
+void src/sh/awk.c awk_spawn shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/sh/builtin.c floodlight_children_open floodlight_children_close 1	unreviewed
 void src/sh/builtin.c floodlight_parent_prepare system_call_5 1	unreviewed
 void src/sh/builtin.c shell_declare_apply env_assign 1	unreviewed
@@ -127,10 +127,10 @@ void src/sh/file.c rm_tree_leave rm_tree_put 4	unreviewed
 void src/sh/file.c shred_one system_call_3 1	unreviewed
 void src/sh/file.c split_output_abort split_output_close 1	unreviewed
 void src/sh/file.c utility_hold system_call_3 1	unreviewed
-void src/sh/host.c host_canvas_identify shell_exec_file 1	unreviewed
-void src/sh/host.c host_settings_window shell_exec_file 1	unreviewed
+void src/sh/host.c host_canvas_identify shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
+void src/sh/host.c host_settings_window shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/sh/host/boot.c host_console_redraw system_call_3 4	unreviewed
-void src/sh/host/boot.c host_shell_start shell_exec_file 1	unreviewed
+void src/sh/host/boot.c host_shell_start shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/sh/host/device.c usb_census_visit usb_read 1	unreviewed
 void src/sh/host/device.c usb_defaults host_write_text 1	the marker only keeps the next start from saying "a default could not be set" a second time; the failure itself is said by usb_tell_text on the next line, and a marker not written says it again
 void src/sh/host/device.c usb_first_lock host_write_text 1	the marker that USB settled once: not written, a later first lock waits for USB to settle again, the cautious path (usb_first_lock's carried)
@@ -143,11 +143,11 @@ void src/sh/host/device.c usb_watch_start usb_watch_run 1	unreviewed
 void src/sh/host/disk.c host_attach bowl_profile_refresh 1	unreviewed
 void src/sh/host/disk.c host_boot security_publish_answer 1	unreviewed
 void src/sh/host/disk.c host_booted security_publish_answer 1	unreviewed
-void src/sh/host/disk.c host_detach descriptors_close_except 1	unreviewed
-void src/sh/host/disk.c host_run shell_exec_file 1	unreviewed
+void src/sh/host/disk.c host_detach descriptors_close_except 1	in a child before it becomes another program or a daemon: a descriptor it could not close is one the program inherits, the tree opens the rest O_CLOEXEC, and the child has nobody to say it to
+void src/sh/host/disk.c host_run shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/sh/host/disk.c host_splash_file_is system_call_4 1	unreviewed
 void src/sh/host/locale.c host_clock_stop locale_clock_persist 1	unreviewed
-void src/sh/host/locale.c locale_child_fork descriptors_close_except 1	unreviewed
+void src/sh/host/locale.c locale_child_fork descriptors_close_except 1	in a child before it becomes another program or a daemon: a descriptor it could not close is one the program inherits, the tree opens the rest O_CLOEXEC, and the child has nobody to say it to
 void src/sh/host/locale.c locale_clock_authenticated host_write_file 1	unreviewed
 void src/sh/host/locale.c locale_clock_base_keep host_write_file 1	unreviewed
 void src/sh/host/locale.c locale_ntp_take host_write_file 1	unreviewed
@@ -169,7 +169,7 @@ void src/sh/host/radio.c radio_rsn_security byte_reader_skip 1	unreviewed
 void src/sh/host/radio.c radio_rules_put radio_station_number 1	unreviewed
 void src/sh/host/radio.c radio_scan_note host_write_file 1	unreviewed
 void src/sh/host/radio.c radio_scan_note radio_station_number 1	unreviewed
-void src/sh/host/radio.c radio_share_run shell_exec_file 1	unreviewed
+void src/sh/host/radio.c radio_share_run shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/sh/host/radio.c radio_wifi_forget radio_wifi_leave 1	unreviewed
 void src/sh/host/security.c dns_restore dns_internal_publish 1	unreviewed
 void src/sh/host/security.c dns_restore dns_tls_publish 1	unreviewed
@@ -214,14 +214,14 @@ void src/sh/ssh.c ssh_profile_forget ssh_settings_read 1	unreviewed
 void src/sh/ssh.c ssh_profile_forget ssh_settings_save 1	unreviewed
 void src/sh/ssh.c ssh_profile_forget ssh_stop 1	unreviewed
 void src/sh/ssh.c ssh_profile_record ssh_settings_read 1	unreviewed
-void src/sh/ssh.c ssh_run descriptors_close_except 1	unreviewed
+void src/sh/ssh.c ssh_run descriptors_close_except 1	in a child before it becomes another program or a daemon: a descriptor it could not close is one the program inherits, the tree opens the rest O_CLOEXEC, and the child has nobody to say it to
 void src/sh/ssh.c ssh_serve host_write_file 1	unreviewed
-void src/sh/ssh.c ssh_serve_start shell_exec_file 1	unreviewed
+void src/sh/ssh.c ssh_serve_start shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/sh/ssh.c ssh_sessions ssh_list_add 1	unreviewed
 void src/sh/ssh.c ssh_stop host_lock_signal 1	unreviewed
 void src/sh/ssh.c ssh_supervisor_end ssh_signal 2	unreviewed
-void src/sh/ssh.c ssh_view_enter descriptors_close_except 2	unreviewed
-void src/sh/system.c start_service shell_exec_file 1	unreviewed
+void src/sh/ssh.c ssh_view_enter descriptors_close_except 2	in a child before it becomes another program or a daemon: a descriptor it could not close is one the program inherits, the tree opens the rest O_CLOEXEC, and the child has nobody to say it to
+void src/sh/system.c start_service shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/sh/tar.c tar_advise system_call_4 1	unreviewed
 void src/sh/tar.c tar_deliver_sparse tar_skip 3	unreviewed
 void src/sh/tar.c tar_extract_regular system_path_remove_opened_at 1	unreviewed
@@ -233,7 +233,7 @@ void src/sh/text.c grep_leaf_file system_call_3 1	unreviewed
 void src/sh/text.c grep_path_walk grep_path_add 1	unreviewed
 void src/sh/text.c grep_tree_enter grep_tree_record 2	unreviewed
 void src/sh/text.c sort_compress_end system_call_4 1	unreviewed
-void src/sh/text.c sort_compress_spawn shell_exec_file 1	unreviewed
+void src/sh/text.c sort_compress_spawn shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/sh/text.c sort_obsolete_key sort_obsolete_start 1	unreviewed
 void src/sh/tools.c numfmt_option_seen text_list_trouble 1	unreviewed
 void src/sh/tools.c tools_dd system_call_4 2	unreviewed
@@ -253,18 +253,18 @@ void src/waterlink/command.c link_keep_machine host_lock_signal 1	unreviewed
 void src/waterlink/command.c link_pair_close link_groups_save 1	unreviewed
 void src/waterlink/command.c link_pair_guard fcntl 2	unreviewed
 void src/waterlink/command.c link_pair_wait link_wait_readable 1	unreviewed
-void src/waterlink/command.c link_serve_start descriptors_close_except 1	unreviewed
-void src/waterlink/command.c link_serve_start shell_exec_file 1	unreviewed
+void src/waterlink/command.c link_serve_start descriptors_close_except 1	in a child before it becomes another program or a daemon: a descriptor it could not close is one the program inherits, the tree opens the rest O_CLOEXEC, and the child has nobody to say it to
+void src/waterlink/command.c link_serve_start shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/waterlink/command.c link_serve_start system_call 1	unreviewed
 void src/waterlink/command.c link_switch host_lock_signal 1	unreviewed
 void src/waterlink/command.c link_wait_stopped link_wait_readable 1	unreviewed
 void src/waterlink/host_darwin.c file_publish_with close 2	unreviewed
 void src/waterlink/host_darwin.c file_publish_with unlink 2	unreviewed
-void src/waterlink/host_darwin.c host_detach descriptors_close_except 1	unreviewed
+void src/waterlink/host_darwin.c host_detach descriptors_close_except 1	in a child before it becomes another program or a daemon: a descriptor it could not close is one the program inherits, the tree opens the rest O_CLOEXEC, and the child has nobody to say it to
 void src/waterlink/host_darwin.c process_pty_child_setup close 4	unreviewed
 void src/waterlink/host_darwin.c process_pty_open close 1	unreviewed
 void src/waterlink/host_darwin.c process_pty_open fcntl 3	unreviewed
-void src/waterlink/host_darwin.c shell_exec_file execve 1	unreviewed
+void src/waterlink/host_darwin.c shell_exec_file execve 1	execve answers only when it failed, and the next line hands errno back as the function's answer
 void src/waterlink/modem.c link_modem_hear modem_seq_save 1	unreviewed
 void src/waterlink/modem.c modem_streams_set link_file_replace 1	unreviewed
 void src/waterlink/nearby.c link_group_close link_groups_save 1	unreviewed
@@ -272,8 +272,8 @@ void src/waterlink/nearby.c link_groups_expire link_groups_save 1	unreviewed
 void src/waterlink/nearby.c link_pair_begin link_udp_send_to 1	unreviewed
 void src/waterlink/nearby.c link_sweep_turn link_udp_send_to 1	unreviewed
 void src/waterlink/service.c link_batch_flush link_send_to 1	unreviewed
-void src/waterlink/service.c link_child_exec descriptors_close_except 1	unreviewed
-void src/waterlink/service.c link_child_exec shell_exec_file 1	unreviewed
+void src/waterlink/service.c link_child_exec descriptors_close_except 1	in a child before it becomes another program or a daemon: a descriptor it could not close is one the program inherits, the tree opens the rest O_CLOEXEC, and the child has nobody to say it to
+void src/waterlink/service.c link_child_exec shell_exec_file 1	in a child: an exec answers only when it failed, and the child exits with its status (127 or its own) on the next line, which its parent reads
 void src/waterlink/service.c link_child_exec system_call_1 1	unreviewed
 void src/waterlink/service.c link_child_exec system_call_4 1	unreviewed
 void src/waterlink/service.c link_child_watch fcntl 1	unreviewed
