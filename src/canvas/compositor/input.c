@@ -3759,6 +3759,48 @@ static void compositor_touch_point(unsigned int at, int slot, int *x, int *y)
         *y = sy + compositor_tablet(screen->y[slot], screen->range[2], screen->range[3], height - 1);
 }
 
+/*
+        A multitouch device's slots as the kernel has them now (EVIOCGMTSLOTS of ABS_MT_TRACKING_ID and POSITION_X and Y, and EVIOCGABS of
+        ABS_MT_SLOT for the slot its next events are about): what SYN_DROPPED lost, read again, as the keys are (compositor_input_state). A
+        finger still down after the drop sends no TRACKING_ID again (the kernel sends one only when the contact changes), so without this it
+        stays unknown until it is lifted. False when the device does not answer: then nothing is known down.
+*/
+#ifndef COMPOSITOR_EVIOCGMTSLOTS
+#define COMPOSITOR_EVIOCGMTSLOTS(bytes) (0x80000000u | (bytes) << 16 | 0x450au)
+#endif
+static b32 compositor_mt_slots(unsigned int at, int ids[UI_TOUCH_SLOTS], int xs[UI_TOUCH_SLOTS], int ys[UI_TOUCH_SLOTS], int *slot)
+{
+        struct
+        {
+                unsigned int code;
+                int values[UI_TOUCH_SLOTS];
+        } asked;
+        const unsigned int codes[3] = {COMPOSITOR_ABS_MT_TRACKING_ID, COMPOSITOR_ABS_MT_POSITION_X, COMPOSITOR_ABS_MT_POSITION_Y};
+        int *into[3] = {ids, xs, ys};
+        struct compositor_absinfo current = {0};
+
+        for (int k = 0; k < UI_TOUCH_SLOTS; k++)
+                ids[k] = -1;
+        if (at >= COMPOSITOR_INPUTS || compositor.inputs[at] < 0)
+                return false;
+        for (unsigned int c = 0; c < 3; c++)
+        {
+                memory_zero(&asked, sizeof asked);
+                asked.code = codes[c];
+                if (system_control(compositor.inputs[at], COMPOSITOR_EVIOCGMTSLOTS((unsigned int)sizeof asked), &asked) != 0)
+                {
+                        for (int k = 0; k < UI_TOUCH_SLOTS; k++)
+                                ids[k] = -1;
+                        return false;
+                }
+                for (int k = 0; k < UI_TOUCH_SLOTS; k++)
+                        into[c][k] = c == 0 && asked.values[k] < 0 ? -1 : asked.values[k];
+        }
+        if (slot && system_control(compositor.inputs[at], COMPOSITOR_EVIOCGABS(COMPOSITOR_ABS_MT_SLOT), &current) == 0)
+                *slot = current.value;
+        return true;
+}
+
 // A touch screen's event, kept until its report is over: its slot, a finger's id and its place.
 static void compositor_touch_event(unsigned int at, const struct compositor_report_event *event)
 {
@@ -4308,6 +4350,16 @@ static void compositor_touch_report(unsigned int at, positive now)
                 {
                         ui_touch_drop(&touch->gesture, &out);
                         compositor_touch_apply(at, &out, now);
+                }
+                // The fingers still down are read again from the kernel (B-h3-3): each lands anew at the next report, where it was a finger
+                // with no id, moving nothing, until it was lifted.
+                if (screen->slots)
+                {
+                        int ids[UI_TOUCH_SLOTS], xs[UI_TOUCH_SLOTS], ys[UI_TOUCH_SLOTS];
+
+                        if (compositor_mt_slots(at, ids, xs, ys, &screen->slot))
+                                for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+                                        screen->id[slot] = ids[slot], screen->x[slot] = xs[slot], screen->y[slot] = ys[slot];
                 }
                 return;
         }
@@ -5173,8 +5225,27 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                         // next report says where the finger is, and is no move from where it was before.
                         if (compositor.touchpad[at])
                         {
-                                compositor.pad[at].moving = 0;
-                                compositor.pad[at].left_x = compositor.pad[at].left_y = 0;
+                                struct compositor_pad *pad = &compositor.pad[at];
+                                unsigned char bits[COMPOSITOR_KEY_BYTES];
+                                int ids[UI_TOUCH_SLOTS];
+
+                                pad->moving = 0;
+                                pad->left_x = pad->left_y = 0;
+                                // Its fingers as the kernel has them now (B-h3-4): a lift that was lost left a slot down and a count of two, and a
+                                // single finger's drag was read as a pinch with a stale second point. The slots by EVIOCGMTSLOTS, the touch and the
+                                // count of fingers by the tool keys (EVIOCGKEY); a pad that answers neither has nothing down.
+                                compositor_mt_slots(at, ids, pad->mt_x, pad->mt_y, &pad->slot);
+                                pad->slot = pad->slot < 0 ? 0 : pad->slot >= UI_TOUCH_SLOTS ? UI_TOUCH_SLOTS - 1 : pad->slot;
+                                for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
+                                        pad->mt_down[slot] = ids[slot] >= 0;
+                                compositor_input_state(at, bits);
+                                pad->touching = compositor_input_down(bits, COMPOSITOR_BTN_TOUCH);
+                                pad->fingers = compositor_input_down(bits, COMPOSITOR_BTN_TOOL_QUINTTAP)   ? 5
+                                               : compositor_input_down(bits, COMPOSITOR_BTN_TOOL_QUADTAP)  ? 4
+                                               : compositor_input_down(bits, COMPOSITOR_BTN_TOOL_TRIPLETAP) ? 3
+                                               : compositor_input_down(bits, COMPOSITOR_BTN_TOOL_DOUBLETAP) ? 2
+                                               : compositor_input_down(bits, COMPOSITOR_BTN_TOOL_FINGER)    ? 1
+                                                                                                             : 0;
                         }
                         // And a key's or a button's release: what no device has down is let go.
                         compositor_input_dropped(at, now);

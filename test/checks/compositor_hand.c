@@ -2773,6 +2773,35 @@ static void check_compositor_hover(void)
         system_close(device[1]);
     }
 
+    /* A touchpad's dropped reports (B-h3-4): its fingers are read again from the kernel (EVIOCGMTSLOTS, EVIOCGKEY), where a lost lift left a
+       slot down and two fingers counted, so one finger's drag read as a pinch. A pipe stands for the pad and answers neither: nothing down. */
+    {
+        int device[2] = {-1, -1};
+        struct compositor_input_event dropped[2] = {{0, 0, COMPOSITOR_EV_SYN, (unsigned short)COMPOSITOR_SYN_DROPPED, 0}, {0, 0, COMPOSITOR_EV_SYN, 0, 0}};
+        b32 stale, cleared;
+
+        if (system_call_2(syscall(pipe2), (positive)device, O_NONBLOCK))
+        {
+            check("input: the pad is made", false);
+            return;
+        }
+        compositor.inputs[0] = device[0];
+        compositor.input_count = 1;
+        compositor.touchpad[0] = 1;
+        compositor.pad[0].mt_down[0] = compositor.pad[0].mt_down[1] = 1, compositor.pad[0].fingers = 2, compositor.pad[0].touching = 1;
+        stale = compositor.pad[0].mt_down[1] && compositor.pad[0].fingers == 2;
+        system_write_once(device[1], dropped, sizeof dropped);
+        compositor_input_read(0);
+        cleared = !compositor.pad[0].mt_down[0] && !compositor.pad[0].mt_down[1] && !compositor.pad[0].fingers && !compositor.pad[0].touching;
+        check("input: a touchpad's dropped reports read its fingers again, so a lost lift leaves no slot down and no second finger", stale && cleared);
+        compositor.touchpad[0] = 0;
+        memory_zero(&compositor.pad[0], sizeof compositor.pad[0]);
+        compositor.inputs[0] = -1;
+        compositor.input_count = 0;
+        system_close(device[0]);
+        system_close(device[1]);
+    }
+
     /* The input thread's ring (compositor_reader): records handed over are acted on by the loop as its own read of the device was, in
        order; a record of an open since let go of (an old generation) is passed over; the ring's place wraps; a gone record lets the
        device go. The thread is not started: the records are put as it puts them. */
