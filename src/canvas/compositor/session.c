@@ -1274,13 +1274,15 @@ static void compositor_inputs_open(void)
         (void)system_remove_at(AT_FDCWD, (string_address)COMPOSITOR_DARK_FILE, 0);
         if (compositor.watch >= 0)
                 compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive) "/run/moonwater",
-                                COMPOSITOR_IN_CREATE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_DELETE, 0, 0, 0);
+                                COMPOSITOR_IN_CREATE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_DELETE | COMPOSITOR_IN_CLOSE_WRITE,
+                                0, 0, 0);
 
         for (unsigned int number = 0; number < COMPOSITOR_DEVICES; number++)
                 compositor_input_add(number);
 }
 
 static void compositor_osk_setting_read(void);
+static void compositor_keys_read(void);
 
 // What appeared in /dev/input since the last look: a name that is eventN is a device;
 // and a keyboard written in /root is a layout that was changed.
@@ -1322,6 +1324,10 @@ static void compositor_inputs_watch(void)
                         }
                         else if (string_equals((string_address)name, (string_address)COMPOSITOR_DARK_FILE + sizeof("/run/moonwater/") - 1))
                                 compositor_dark_look();
+                        //      The rules' chords, written again at every load of the rules: read again, so a chord a load
+                        //      added is heard without the compositor starting again.
+                        else if (string_equals((string_address)name, (string_address) "keys"))
+                                compositor_keys_read();
                         else if (length > 8 && !string_compare_max((string_address)name, (string_address) "keyboard", 8) && !name[8] &&
                                  !compositor.layout_given)
                                 compositor_layout_read();

@@ -423,6 +423,8 @@ static const struct
     {"rule a\n\ton fullscreen on\n\tplace kernel\n\tdo suspend\n", 0, "kernel never sees it"},
     {"rule a\n\twhen $app == x\n\tdo suspend\n", 2, "fields are no states"},
     {"rule a\n\ton window opened\n\tdo open $app\n", 3, "not the rule's own word"},
+    {"rule a\n\ton chord alt+tab\n\tdo log x\n", 0, "keeps for itself"},
+    {"rule a\n\ton chord alt+f4\n\tdo log x\n", 0, "keeps for itself"},
     {"rule a\n\ton lid close\n\tif byte_is_alnum(256) == 1\n\tdo log x\n", 3, "outside the range the routine takes"},
     {"rule a\n\ton lid close\n\tif byte_is_alnum(-1) == 1\n\tdo log x\n", 3, "outside the range the routine takes"},
     {"rule a\n\ton lid close\n\ttool rfkill unblock all\n", 3, "is deliberate"},

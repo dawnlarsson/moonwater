@@ -33,6 +33,7 @@
 #define ROVER_WHY_MOST 240u
 #define ROVER_SLOT_AFTER 0xffffu
 #define ROVER_EVENT_EVERY 102u
+#define ROVER_EVENT_CHORD 64u
 #define ROVER_EVENT_AT 103u
 #define ROVER_EVERY_LEAST 1000000000ll // a second
 
@@ -1531,6 +1532,22 @@ static bool rover_rule_finish(struct rover_build address_to build)
                 return false;
         if (rover_rule_numbers(rule, build->comparison))
                 rule->flags |= ROVER_RULE_NUMBERS;
+        //      The compositor's own chords run before any rule's (Alt+Tab, Alt+F4, Alt+F9): a chord rule on one would never
+        //      fire, so it is refused with that reason.
+        if (rule->event == ROVER_EVENT_CHORD && rule->trigger)
+        {
+                const struct rover_comparison address_to trigger = &build->comparison[rule->comparison];
+
+                if (trigger->op == ROVER_EQ && trigger->b.source == ROVER_CONST_NUMBER)
+                {
+                        b64 chord = memory_load_unaligned(b64, rover_pool(build) + trigger->b.index);
+
+                        if (((chord >> 16) & 0xff) == ROVER_CHORD_ALT &&
+                            ((chord & 0xffff) == 15 || (chord & 0xffff) == 62 || (chord & 0xffff) == 67))
+                                return rover_refused(build, "a chord the desktop keeps for itself (Alt+Tab, Alt+F4, Alt+F9), "
+                                                            "which no rule hears", null, null);
+                }
+        }
         //      A cue that posts itself with nothing to stop it is a loop the runner would cut at depth four: a rule on cue
         //      with no condition past its trigger, whose filter (none, a name, or a pattern) takes a cue it emits.
         if (rule->event == ROVER_CUE && rule->comparisons == rule->trigger)

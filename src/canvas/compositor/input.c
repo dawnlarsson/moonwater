@@ -236,7 +236,7 @@ static struct
 {
         unsigned int count;
         unsigned short modifiers[COMPOSITOR_KEYS];
-        unsigned char code[COMPOSITOR_KEYS];
+        unsigned short code[COMPOSITOR_KEYS]; // Linux's key number, which reaches 0x2ff
         char chord[COMPOSITOR_KEYS][32];
 } compositor_keys;
 
@@ -258,12 +258,32 @@ static unsigned int compositor_key_word(const char *word, unsigned int length, u
                         *code = compositor_key_names[at].code;
                         return 0;
                 }
+        //      Linux's key number itself, which the rover runner writes (it knows every key rover names, f13 to f24,
+        //      the keypad, the media keys, print), so the two tables of names cannot disagree.
+        if (length && length <= 3)
+        {
+                unsigned int number = 0;
+
+                for (unsigned int at = 0; at < length; at++)
+                {
+                        if (word[at] < '0' || word[at] > '9')
+                                return ~0u;
+                        number = number * 10 + (unsigned int)(word[at] - '0');
+                }
+                if (number && number < 0x300)
+                {
+                        *code = number;
+                        return 0;
+                }
+        }
         return ~0u;
 }
 
 // The chords the rules bound, read once at the start: a line that is not one is left out, and said.
 static void compositor_keys_read(void)
 {
+        //      Read whole each time: the runner writes the file again at every load of the rules.
+        compositor_keys.count = 0;
         static char text[4096];
         bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_KEYS_FILE, COMPOSITOR_SETTING_OPEN);
         bipolar got = handle < 0 ? 0 : system_read_once(handle, text, sizeof(text) - 1);
@@ -317,7 +337,7 @@ static void compositor_keys_read(void)
 
                 memory_copy(compositor_keys.chord[compositor_keys.count], text + start, close - start);
                 compositor_keys.chord[compositor_keys.count][close - start] = 0;
-                compositor_keys.code[compositor_keys.count] = (unsigned char)code;
+                compositor_keys.code[compositor_keys.count] = (unsigned short)code;
                 compositor_keys.modifiers[compositor_keys.count++] = (unsigned short)modifiers;
         }
 }

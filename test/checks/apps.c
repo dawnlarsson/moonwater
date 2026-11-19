@@ -1672,6 +1672,17 @@ static fn text_widget_check(string_address inter, string_address mono)
                 check("a start apart of a program that is not there answers false", !ui_start_apart(none, 1));
                 check("and of one that runs, true", ui_start_apart(some, 1));
         }
+        //      The rules' chords name a key by Linux's number, which the compositor reads as a name (B-h3-1): f13 (183) and
+        //      print (99) are keys no name of the compositor's says.
+        {
+                unsigned int code = 0;
+
+                check("compositor: a chord's key given as its number is that key",
+                      compositor_key_word("183", 3, &code) == 0 && code == 183 && compositor_key_word("99", 2, &code) == 0 &&
+                          code == 99);
+                check("compositor: and a number past the keys, or a word that is no key, is none",
+                      compositor_key_word("999", 3, &code) == ~0u && compositor_key_word("f99", 3, &code) == ~0u);
+        }
         popmenu_bar_check(&wui);
         drop_check(&wui);
         band_check(&wui);

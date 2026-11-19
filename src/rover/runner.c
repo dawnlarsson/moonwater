@@ -1269,12 +1269,15 @@ static fn rover_runner_keys(void)
                                 rover_puts(&name, "_");
                                 rover_puts(&name, rover_modifiers[k].name);
                         }
-                for (positive k = 0; k < array_count(rover_keys); k++)
-                        if (rover_keys[k].code == (chord & 0xffff))
-                        {
-                                rover_puts(&name, "_");
-                                rover_puts(&name, rover_keys[k].name);
-                        }
+                //      The key by Linux's number, which the compositor reads as it reads a name (compositor_key_word), so a
+                //      key rover names and the compositor's table does not is still heard.
+                {
+                        p8 number[8];
+
+                        number[positive_into_string(number, (positive)(chord & 0xffff))] = 0;
+                        rover_puts(&name, "_");
+                        rover_puts(&name, (const char address_to)number);
+                }
                 name.bytes[name.used] = 0;
                 rover_runner.keys[rover_runner.key_count++].chord = chord;
                 rover_put(&out, name.bytes, name.used);
