@@ -1348,6 +1348,15 @@ static fn rover_runner_kernel_thread(address_any unused)
                         continue;
                 if (failed < 0)
                         event = ~0u;
+                //      The machine is stopping: let go of the attach here and now, whatever the loop is doing (a keeper's
+                //      or a verb's child it waits for), so the stop that asked for it (shell_stop, host_machine_stop) goes on
+                //      at once. It polled for ten seconds for a detach the loop made only after its turn.
+                if (!failed && !event)
+                {
+                        struct machine_control detach;
+
+                        (void)host_machine_ioctl(rover_runner.device, MOONWATER_DETACH, address_of detach);
+                }
                 system_write_all((positive)rover_runner.kernel_pipe[1], &event, 4);
                 if (failed < 0 || !event)
                         return;

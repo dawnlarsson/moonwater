@@ -300,6 +300,16 @@ fn host_exit_run(void)
                 return;
 
         machine = host_machine_stop();
+        //      Said with its time, so a stop that waits is seen waiting: the machine process let go (or there was
+        //      none to ask), or the wait ran out.
+        {
+                p8 spent[24];
+                string_address line[] = {"stop: the machine process ", machine ? (string_address) "let go" : (string_address) "was not there or did not let go",
+                                         " after ", (string_address)spent, " ms", null};
+
+                spent[positive_into_string(spent, (system_clock_ns(HOST_CLOCK_BOOTTIME) - started) / 1000000)] = 0;
+                host_kmsg(line);
+        }
         if (!host_settings_kept(address_of settings) &&
             !host_settings_booted(address_of settings))
                 return;
