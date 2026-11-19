@@ -4356,6 +4356,23 @@ static void xwm_atom_rows(void)
         compositor_xwm_interned((const unsigned char[32]){1, 0, 0, 0, 0, 0, 0, 0, 7919u * 3 & 0xff, 7919u * 3 >> 8 & 0xff, 7919u * 3 >> 16 & 0xff, 0},
                                 32, &(struct compositor_xwm_pending){.slot = (unsigned int)named});
         dup = compositor_xwm_atom_index(7919u * 3);
+        // A window not yet placed (row -1) is no row's: a drag's end, which has no row, is not routed to its server by it (B-h9-1).
+        {
+                __typeof__(compositor_xwm_slots[0].window) w = compositor_xwm_find(77u, 1);
+                int kept_fd = x->fd;
+                b32 unplaced, placed;
+
+                x->fd = 0; // live for the lookup; no byte is sent
+                unplaced = w && w->row == -1 && compositor_xwm_slot_of_row(-1) == 0;
+                if (w)
+                        w->row = 5;
+                placed = compositor_xwm_slot_of_row(5) == x;
+                check("xwm: a window not yet placed is no row's, so a drag's end is not sent to its server for it; a placed one is its server's", unplaced && placed);
+                if (w)
+                        compositor_xwm_release(w);
+                x->fd = kept_fd;
+                wayland_table_drop(&x->window_table), wayland_table_drop(&x->window_index), x->windows = 0, x->window = 0;
+        }
         check("xwm atoms: 5000 atoms each found by the index at their record, none for one not there, the first record of an atom two have, an interned "
               "name's found by its reply's atom",
               found && named == 5000 && dup == 2 && x->atoms_indexed == 5001);

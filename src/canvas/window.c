@@ -1277,6 +1277,10 @@ struct windows
         unsigned int client_scan_pitch, client_scan_offset, client_scan_width, client_scan_height;
         int client_scan_errno;
         unsigned int client_scan_refused;
+        // The X window manager's refusals and drops, over the session (xwm.c compositor_xwm_counted): 0 a connection refused (every slot taken, or a
+        // peer not let in), 1 a window's record refused (no memory for the table or its index), 2 a MapRequest so refused (the window not mapped),
+        // 3 a connection closed (each compositor_xwm_drop).
+        unsigned int xwm_counts[4];
         // The card's copy of a commit's damage refused (compositor_wl_card_rect), by reason: 0 small (under COMPOSITOR_WL_CARD_COPY_PIXELS or a
         // rectangle under 32768 pixels), 1 the card not ready, 2 the card busy (gpu_idle false), 3 a blended picture, 4 a picture that needs a
         // transform, 5 the pool cut, 6 the card's map or import refused, 7 the blit failed.

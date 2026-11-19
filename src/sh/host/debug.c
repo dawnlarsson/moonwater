@@ -940,6 +940,10 @@ static b32 host_debug(string_address address_to arguments, positive count)
                         host_say(log, "\n");
                 }
         }
+        //      The X window manager's refusals and drops (xwm.c): nothing it refused is unseen.
+        if (table->xwm_counts[0] || table->xwm_counts[1] || table->xwm_counts[2] || table->xwm_counts[3])
+                host_say(log, "  xwm: %p connections refused, %p window records refused, %p MapRequests refused (not mapped), %p connections closed\n",
+                         (positive)table->xwm_counts[0], (positive)table->xwm_counts[1], (positive)table->xwm_counts[2], (positive)table->xwm_counts[3]);
         //      A client's dma-buf refused as a framebuffer to scan out (compositor_lent_fb): how many, and what the last one asked and why.
         if (table->client_scan_refused)
         {
