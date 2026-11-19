@@ -1303,7 +1303,14 @@ static void compositor_inputs_watch(void)
                         if (at + 16 + (long)length > got)
                                 break;
 
-                        if (compositor_setting_file(name) || string_equals((string_address)name, (string_address)TASKBAR_TUNE_NAME) ||
+                        // Canvas's word for which mode a screen is driven at (moonwater canvas modes, kept after the kernel took
+                        // it): the screens taken again at it, every size refused before asked again (compositor_modes_pick).
+                        if (string_equals((string_address)name, (string_address)COMPOSITOR_MODES_KEPT + sizeof("/root/") - 1))
+                        {
+                                compositor_modes_forget();
+                                compositor_space_retake();
+                        }
+                        else if (compositor_setting_file(name) || string_equals((string_address)name, (string_address)TASKBAR_TUNE_NAME) ||
                             string_equals((string_address)name, (string_address)SETTING_CANVAS_DISPLAYS_PATH + sizeof("/root/") - 1))
                         {
                                 compositor_clip_settings();
@@ -1320,7 +1327,7 @@ static void compositor_inputs_watch(void)
                                                   (string_address)SETTING_CANVAS_ARRANGE_PATH + sizeof("/root/") - 1) ||
                                     string_equals((string_address)name,
                                                   (string_address)SETTING_CANVAS_DISPLAYS_PATH + sizeof("/root/") - 1))
-                                        compositor_space_retake();
+                                        compositor_modes_forget(), compositor_space_retake();
                         }
                         else if (string_equals((string_address)name, (string_address)COMPOSITOR_DARK_FILE + sizeof("/run/moonwater/") - 1))
                                 compositor_dark_look();

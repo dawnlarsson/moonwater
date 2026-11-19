@@ -43,6 +43,7 @@ static void compositor_room(const int *screen, int *room);
 static void compositor_arrange_rect(int row, unsigned int how, const int *rect);
 static void compositor_room_follow(void);
 static void compositor_vrr_forget(void);
+static int compositor_virtual(void);
 
 // The displays file as the compositor has it: its lines, read when the screens are taken (compositor_displays_read),
 // and how many.
@@ -257,7 +258,99 @@ struct compositor_connected
         char name[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME], model[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_MODEL];
         int size[WINDOWS_OUTPUTS][2];
         unsigned int hz[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_HZ], hz_count[WINDOWS_OUTPUTS];
+        // A screen taken at the size Canvas's word asks (compositor_modes_pick) and not at the one its crtc is at: what the crtc
+        // is at, its size and rates, which the take goes back to when the card refuses the other (compositor_space_take).
+        int over[WINDOWS_OUTPUTS];
+        struct compositor_mode held[WINDOWS_OUTPUTS];
+        int held_size[WINDOWS_OUTPUTS][2];
+        unsigned int held_hz[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_HZ], held_hz_count[WINDOWS_OUTPUTS];
 };
+
+/*
+        Which mode a real screen is driven at: Canvas's word for it (moonwater canvas modes, the kernel's canvas.modes), the largest
+        it lists or the one it marks preferred, which the compositor took no notice of. It took the mode the crtc was at whenever a
+        crtc drove the screen, so the size it started at was the size for the session: on snug-asteroid (a Dell all-in-one, UHD 630)
+        Canvas's first picture was the no-EDID 1024x768 of a connector i915 had not looked at yet, the compositor took the panel's
+        crtc at that, and the 1920x1080 the panel's EDID listed a moment later was never taken; and a word changed with the
+        compositor up changed nothing on the screen, since Canvas does not commit while the compositor is the card's master. Now
+        the mode a screen lists that the word asks is taken, the crtc's kept when it is that size. A mode the kernel's command line
+        forced (video=, USERDEF) is the person's and comes first, as Canvas has it; a guest's card keeps the crtc's (Canvas drives a
+        guest at seventy percent of its host, a size of its own). The word is read from the kernel's parameter, and from the kept
+        file when Canvas is not there; largest, Canvas's default, when neither says.
+*/
+#define COMPOSITOR_MODE_PREFERRED 8u // DRM_MODE_TYPE_PREFERRED
+#define COMPOSITOR_MODES_WORD "/sys/module/canvas/parameters/modes"
+#define COMPOSITOR_MODES_KEPT "/root/canvas.modes"
+
+static int compositor_modes_largest(void)
+{
+        char word[16];
+
+        compositor_text(COMPOSITOR_MODES_WORD, word, sizeof(word));
+        if (!word[0])
+                compositor_text(COMPOSITOR_MODES_KEPT, word, sizeof(word));
+        return string_compare_max((string_address)word, (string_address) "preferred", 9) != 0;
+}
+
+// The mode of count that the word asks (USERDEF first, then the largest, or the first marked preferred): its index, or count.
+static unsigned int compositor_modes_pick(const struct compositor_mode *modes, unsigned int count, int largest)
+{
+        unsigned int best = count;
+
+        for (unsigned int at = 0; at < count; at++)
+                if (modes[at].type & COMPOSITOR_MODE_USERDEF)
+                        return at;
+        for (unsigned int at = 0; at < count; at++)
+        {
+                unsigned long pixels = (unsigned long)modes[at].hdisplay * modes[at].vdisplay, most;
+
+                if ((modes[at].flags & COMPOSITOR_MODE_INTERLACED) || !pixels)
+                        continue;
+                if (!largest)
+                {
+                        if (modes[at].type & COMPOSITOR_MODE_PREFERRED)
+                                return at;
+                        continue;
+                }
+                most = best < count ? (unsigned long)modes[best].hdisplay * modes[best].vdisplay : 0;
+                if (best == count || pixels > most || (pixels == most && modes[at].vrefresh > modes[best].vrefresh))
+                        best = at;
+        }
+        return best;
+}
+
+/*
+        Sizes the card refused a screen at, by connector, which the next takes do not ask again of it: the take goes back to the
+        crtc's mode when the card refuses the word's (compositor_space_take), and the look every few seconds would ask the same
+        refused size for ever. Forgotten when the word or the displays file is written (compositor_modes_forget).
+*/
+#define COMPOSITOR_REFUSED 8
+static unsigned int compositor_refused[COMPOSITOR_REFUSED][3];
+
+static void compositor_modes_forget(void)
+{
+        memory_zero(compositor_refused, sizeof(compositor_refused));
+}
+
+static int compositor_mode_refused(unsigned int connector, const struct compositor_mode *mode)
+{
+        for (unsigned int at = 0; at < COMPOSITOR_REFUSED; at++)
+                if (compositor_refused[at][0] == connector && compositor_refused[at][1] == (unsigned int)mode->hdisplay &&
+                    compositor_refused[at][2] == (unsigned int)mode->vdisplay)
+                        return 1;
+        return 0;
+}
+
+static void compositor_mode_refuse(unsigned int connector, const struct compositor_mode *mode)
+{
+        unsigned int at = 0;
+
+        while (at < COMPOSITOR_REFUSED - 1 && compositor_refused[at][0] && compositor_refused[at][0] != connector)
+                at++;
+        compositor_refused[at][0] = connector;
+        compositor_refused[at][1] = (unsigned int)mode->hdisplay;
+        compositor_refused[at][2] = (unsigned int)mode->vdisplay;
+}
 
 // Adds a mode's refresh rate to a screen's list when the mode is the screen's size and the list has no such rate yet:
 // the rates a screen lists at its size, which the Displays field offers, the fastest first (the preferred rate the
@@ -321,8 +414,9 @@ static unsigned int compositor_edid_name(const unsigned char *edid, unsigned int
 }
 
 // The monitor's name, from the EDID blob the connector's EDID property names: the connector's properties are listed and the one
-// called EDID is read. Empty when the connector has no EDID (a virtual screen may have none), or the card will not say.
-static void compositor_connector_model(unsigned int connector, char *name, unsigned int room)
+// called EDID is read. Empty when the connector has no EDID (a virtual screen may have none), or the card will not say. Answers
+// whether the connector has an EDID blob at all (a monitor's EDID need not name it).
+static int compositor_connector_model(unsigned int connector, char *name, unsigned int room)
 {
         unsigned int ids[64];
         unsigned long values[64];
@@ -336,7 +430,7 @@ static void compositor_connector_model(unsigned int connector, char *name, unsig
         if (room)
                 name[0] = 0;
         if (system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, address_of got) != 0 || got.count > 64)
-                return;
+                return 0;
         for (unsigned int at = 0; at < got.count; at++)
         {
                 struct
@@ -356,7 +450,7 @@ static void compositor_connector_model(unsigned int connector, char *name, unsig
                     !string_equals((string_address)property.name, (string_address) "EDID"))
                         continue;
                 if (!values[at])
-                        return;
+                        return 0;
                 /*
                         The kernel copies a blob only when the length asked is the blob's own (drm_mode_getblob_ioctl), so a
                         length of 256 read only a monitor whose EDID is one extension long: its length first, then all of
@@ -365,7 +459,7 @@ static void compositor_connector_model(unsigned int connector, char *name, unsig
                 blob.blob_id = (unsigned int)values[at], blob.length = 0, blob.data = 0;
                 if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, address_of blob) != 0 || !blob.length ||
                     blob.length % COMPOSITOR_EDID_BLOCK || blob.length > COMPOSITOR_EDID_MOST)
-                        return;
+                        return 1;
                 {
                         unsigned int length = blob.length;
 
@@ -374,8 +468,9 @@ static void compositor_connector_model(unsigned int connector, char *name, unsig
                         if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, address_of blob) == 0 && blob.length == length)
                                 compositor_edid_name(edid, length, name, room);
                 }
-                return;
+                return 1;
         }
+        return 0;
 }
 
 /*
@@ -408,6 +503,7 @@ static void compositor_connected_blank(struct compositor_connected *found, unsig
         found->size[n][0] = found->size[n][1] = 0;
         memory_zero(found->hz[n], sizeof(found->hz[n]));
         found->hz_count[n] = 0;
+        found->over[n] = 0;
 }
 
 /*
@@ -425,6 +521,7 @@ static b32 compositor_connected_read(struct compositor_connected *found)
 {
         struct compositor_card_res resources = {0};
         unsigned int *connectors, taken = 0, kept = 0;
+        int largest = compositor_virtual() ? -1 : compositor_modes_largest();
 
         memory_zero(found, sizeof(*found));
         if (system_control(compositor.card, COMPOSITOR_GETRESOURCES, address_of resources) != 0 ||
@@ -489,7 +586,15 @@ static b32 compositor_connected_read(struct compositor_connected *found)
 
                 found->connector[n] = connectors[at];
                 compositor_connector_name(probe.connector_type, probe.connector_type_id, found->name[n]);
-                compositor_connector_model(connectors[at], found->model[n], WINDOWS_OUTPUT_MODEL);
+                /*
+                        A real screen with no EDID, read from the kernel's list without a look: the list may be the no-EDID
+                        one (up to 1024x768) of a connector the driver had not looked at yet when Canvas read it, and a first
+                        take of it is the session's room for every window (compositor.stride). The list is not trusted: the
+                        first take is made again by looking (compositor_space_first), which reads the EDID if there is one.
+                */
+                if (!compositor_connector_model(connectors[at], found->model[n], WINDOWS_OUTPUT_MODEL) && compositor_list_kept &&
+                    largest >= 0)
+                        return -COMPOSITOR_EINVAL;
                 // The mode the kernel's command line names (video=, which the kernel marks the person's) before the
                 // first listed, which is the one the screen prefers; Canvas takes them in that order too.
                 for (unsigned int each = 0; listed && each < probe.mode_count && !found->mode[n].clock; each++)
@@ -517,6 +622,31 @@ static b32 compositor_connected_read(struct compositor_connected *found)
 
                         if (system_control(compositor.card, COMPOSITOR_GETENCODER, address_of encoder) == 0)
                                 found->possible[n] |= encoder.possible_crtcs;
+                }
+                // The size Canvas's word asks, where the screen lists it and the card has not refused it, over the crtc's
+                // (compositor_modes_largest); the crtc's mode is held to go back to (found->held). Not a guest's (largest -1).
+                if (listed && largest >= 0)
+                {
+                        unsigned int pick = compositor_modes_pick(modes, probe.mode_count, largest);
+
+                        if (pick < probe.mode_count && !compositor_mode_refused(connectors[at], &modes[pick]) &&
+                            (modes[pick].hdisplay != found->mode[n].hdisplay || modes[pick].vdisplay != found->mode[n].vdisplay))
+                        {
+                                if (found->current[n])
+                                {
+                                        found->held[n] = found->mode[n];
+                                        compositor_refresh_pick(found->name[n], probe.mode_count, modes, &found->held[n]);
+                                        found->held_size[n][0] = found->held[n].hdisplay;
+                                        found->held_size[n][1] = found->held[n].vdisplay;
+                                        if (compositor_display_degrees(found->name[n]) % 180 == 90)
+                                                found->held_size[n][0] = found->held[n].vdisplay, found->held_size[n][1] = found->held[n].hdisplay;
+                                        for (unsigned int each = 0; each < probe.mode_count; each++)
+                                                compositor_rate_add(found->held_hz[n], &found->held_hz_count[n], &modes[each],
+                                                                    found->held[n].hdisplay, found->held[n].vdisplay);
+                                        found->over[n] = 1;
+                                }
+                                found->mode[n] = modes[pick];
+                        }
                 }
                 // The rate the displays file asks for: the mode of this size at it that the screen lists, or the mode it has.
                 if (listed)
@@ -578,6 +708,10 @@ static b32 compositor_connected_read(struct compositor_connected *found)
                         found->size[kept][0] = found->size[n][0], found->size[kept][1] = found->size[n][1];
                         memory_copy(found->hz[kept], found->hz[n], sizeof(found->hz[n]));
                         found->hz_count[kept] = found->hz_count[n];
+                        found->over[kept] = found->over[n], found->held[kept] = found->held[n];
+                        memory_copy(found->held_size[kept], found->held_size[n], sizeof(found->held_size[n]));
+                        memory_copy(found->held_hz[kept], found->held_hz[n], sizeof(found->held_hz[n]));
+                        found->held_hz_count[kept] = found->held_hz_count[n];
                 }
                 kept++;
         }
@@ -1258,6 +1392,42 @@ static b32 compositor_space_take(int first)
 
                 if (!refused)
                         break;
+                /*
+                        A screen the card refused at the size Canvas's word asks, where its crtc was at another a moment ago: it goes
+                        back to that one, which the card had, and is not left dark; the size is not asked of it again until the word
+                        or the displays file is written (compositor_mode_refuse). The take is made again with every screen in it.
+                */
+                {
+                        unsigned int back = 0;
+
+                        for (unsigned int n = 0; n < found.count; n++)
+                                if ((refused >> n & 1) && found.over[n])
+                                {
+                                        compositor_mode_refuse(found.connector[n], &found.mode[n]);
+                                        compositor_kmsg((string_address) "compositor: the card refused a screen at the size asked, back to the one it had: ",
+                                                        0, (string_address)found.name[n]);
+                                        found.mode[n] = found.held[n];
+                                        found.size[n][0] = found.held_size[n][0], found.size[n][1] = found.held_size[n][1];
+                                        memory_copy(found.hz[n], found.held_hz[n], sizeof(found.hz[n]));
+                                        found.hz_count[n] = found.held_hz_count[n];
+                                        found.over[n] = 0;
+                                        back |= 1u << n;
+                                }
+                        refused &= ~back;
+                        if (back)
+                        {
+                                was_count = compositor.outputs;
+                                for (unsigned int at = 0; at < was_count; at++)
+                                {
+                                        memory_copy(was[at], compositor.screen[at], sizeof(was[at]));
+                                        memory_copy(was_names[at], compositor.output[at].name, WINDOWS_OUTPUT_NAME);
+                                        was_crtc[at] = compositor.output[at].crtc;
+                                }
+                                first = 0;
+                                if (!refused)
+                                        continue;
+                        }
+                }
                 // A commit refused a screen: it is left dark, and the rest are taken again without it, from what was taken.
                 for (unsigned int n = 0; n < found.count; n++)
                         if (refused >> n & 1)
