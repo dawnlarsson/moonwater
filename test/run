@@ -245,7 +245,7 @@ fi
 #       fuzz an hour a target, msan a clang with MemorySanitizer, ring0 an
 #       image and a machine that boots it, best one built with
 #       kernel/profile/sec_sanitize.
-asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland mutation_dbus mutation_audio mutation_ui mutation_audiolib"
+asked_lanes="gpulists gpuanim gpumodel wifi fuzz msan proof mutation ring0 tier input scale desktop chrome usb firewall sound gate net_fast net_x86_64 net_arm64 net_riscv64 net_crypto net_tls net_fuzz net_http mutation_wayland mutation_dbus mutation_audio mutation_ui mutation_audiolib stop locks"
 
 lanes="standard declare fold allocator reserve utf8 hex codec fixed table error strings stdlib leaving numbers clock math format scan stream spool process signal lock verify exact libdiff text_asm shell_asm known socket net waterlink modem link netem bowl tar zstd gzip xz compression_floor compression reuse_shell audit regex editing slurp wait writer native probe stack checksum storage_io storage_format machine rover snapshot sensors browser font font_shape cli script differential_oracle text files misc util_linux shell builtins awk term edit kit switches boot install canvas sleep tensor matrix train ranged audiolib clang wayland osk band audio dbus issues"
 
@@ -373,6 +373,8 @@ describe()
         mutation_dbus) echo "the session bus's mutation proofs (test/dbus_mutations.py): checks taken out of dbus.c and bounds moved, one at a time against CHECK_dbus, with the unmutated tree green first; the survivors pinned" ;;
         mutation_wayland) echo "the Wayland shim's mutation proofs (test/wayland_mutations.py): the defects the security passes fixed, put back one at a time into wayland.c against CHECK_wayland, with the unmutated tree green first; the survivors pinned" ;;
         ring0)    echo "a hostile program's ioctls, images and root requests against a booted kernel, and what its sanitizers say; then the same image booted with /dev/spark's registration failed, init running without it (NOT RUN on an image without fault injection)" ;;
+        stop)     echo "the machine stops when told, timed in a booted guest: Ctrl-Alt-Delete on its keyboard, /shell -c reboot at its shell, the power key, and the power key's floor past a rule that takes it, each within MOONWATER_STOP_MOST seconds (2) (NOT RUN without qemu-system-x86_64, python3 or an image)" ;;
+        locks)    echo "Canvas's locks in a booted guest with a card: moonwater canvas modes preferred and largest and a hotplug answered in time, askers of desktop.lock and the compositor killed with nothing left in state D and a compositor back, and with a CONFIG_PROVE_LOCKING image no report from lockdep (NOT RUN without qemu-system-x86_64, python3 or an image; its lockdep rows NOT RUN on an image without lockdep)" ;;
         sound)    echo "the sound server heard: the image booted with an Intel HDA card whose output is a wav file, a second of 440 Hz played through moonwater audio test, and the tone measured in the file (a codec starts muted; a server that leaves it so plays into silence) (NOT RUN without qemu-system-x86_64, python3, a wav audio backend or an image)" ;;
         tier)     echo "a security tier's image, booted: the sysctls init wrote, the mount flags, lockdown, the W+X check and the IOMMU the tier asked for, /dev/uinput's mode and vm.max_map_count (MOONWATER_TIER names the tier)" ;;
         input)    echo "the desktop image's game controllers, booted: a virtual pad made through /dev/uinput, its /dev/input/js node found and a press read back from it, a DRM sync object on the render node, and the node modes and vm.max_map_count (NOT RUN without qemu-system-x86_64, cc, an image or a box whose drm headers are installed)" ;;
@@ -425,7 +427,7 @@ seam_apart()
         net) echo "net wifi fuzz msan proof mutation" ;;
         tools) echo "scale" ;;
         desktop) echo "desktop chrome gpulists gpuanim mutation_ui mutation_audio mutation_dbus mutation_wayland" ;;
-        image) echo "ring0 tier input usb firewall sound" ;;
+        image) echo "ring0 tier input usb firewall sound stop locks" ;;
         engine) echo "gate" ;;
         *) ;;
         esac
@@ -15967,6 +15969,10 @@ same 'the machine process says it sourced the script before it restores, and say
 #       kernel's LINUX_REBOOT_MAGIC1, MAGIC2, CMD_RESTART and CMD_POWER_OFF
 #       have; no other file in the shell defines or spells them again, and the
 #       three that stop the machine hand them to shell_stop, the one call.
+#       These two rows are lints of where the call is written, and prove no
+#       stop: on 2026-11-18 both passed while every reboot took 10 s. That
+#       the machine stops, and how soon, is the stop lane's, which boots an
+#       image and times Ctrl-Alt-Delete, the shell's reboot and the power key.
 reboot_defs=$(LC_ALL=C grep -h '^#define \(HOST_\)\{0,1\}REBOOT_' src/sh/*.c src/moonwater/moonwater.c |
         LC_ALL=C sort | tr '\n' ' ')
 same 'reboot(2)'"'"'s magic words and commands are defined once, with the kernel'"'"'s values' \
@@ -15977,7 +15983,7 @@ reboot_builtin=$(grep -c 'shell_stop(write, REBOOT_RESTART);\|shell_stop(write, 
 reboot_firmware=$(cat src/sh/host.c src/sh/host/*.c | grep -c 'shell_stop(log, REBOOT_RESTART);')
 reboot_machine=$(printf '%s' "$machine_run_body" | tr -d '\n' | tr -s ' ' |
         grep -cF 'shell_stop(log, stopping == SPARK_BIND_POWEROFF ? REBOOT_POWER_OFF : REBOOT_RESTART);')
-same 'reboot, poweroff, the firmware restart and the machine process'"'"'s stop hand the one call the one set' \
+same 'lint: reboot, poweroff, the firmware restart and the machine process'"'"'s stop are written as the one call with the one set (that they stop: the stop lane)' \
         '1:2:1:1' "$reboot_calls:$reboot_builtin:$reboot_firmware:$reboot_machine"
 
 #       An edited script has to reach the process that runs it.
@@ -27701,6 +27707,335 @@ done < "$work/answers"
 
 counted
 )
+
+#
+#       The machine stops when it is told to, timed in a booted guest.
+#
+#           MOONWATER_IMAGE=dist/bootx64.efi sh test/run stop
+#
+#       Ctrl-Alt-Delete pressed on the guest's keyboard over QMP, `/shell -c
+#       reboot` typed at its serial shell (what the installer's Restart runs),
+#       the power key as the image's power.rover answers it, and the power key's
+#       floor (a rule that takes the press: the first is taken and the machine
+#       stays, the second inside ten seconds stops it whatever the rules say).
+#       Each is a guest of its own started with -no-reboot, so a reboot is qemu
+#       ending, and the row is the time from the press to that, held to
+#       MOONWATER_STOP_MOST seconds (2). This is what a source grep of the
+#       shell_stop calls in lane_kit could never see: on 2026-11-18 every one
+#       was there and a reboot took 10.3 s, because the runner's wait for the
+#       stop sat behind a child's wait (3294fcd4b). An image from before that
+#       (971bc381f) fails the shell's row here at 10.1 s; one from after
+#       passes it at under a second, under TCG on a Mac. The guest runs with
+#       KVM where there is one and TCG where there is not.
+#
+lane_stop()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+
+counting stop
+
+if ! command -v qemu-system-x86_64 > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+        echo "  stop         NOT RUN -- no qemu-system-x86_64 or python3"
+        exit 2
+fi
+if [ ! -f "$image" ]; then
+        echo "  stop         NOT RUN -- no image at $image"
+        exit 2
+fi
+
+#       Short: the sockets' paths have to fit a sockaddr_un, which a Mac's TMPDIR does not leave room for.
+work=$(mktemp -d /tmp/mw-stop.XXXXXX) || exit 1
+trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+
+qmp_guest_module "$work"
+vm_stop_module "$work"
+
+MOONWATER_STOP_WORK=$work PYTHONPATH=$work python3 - "$image" "${MOONWATER_STOP_MOST:-2}" > "$work/answers" 2> "$work/why" <<'PY'
+import os, sys, time
+from qmp_guest import *
+from vm_stop import *
+
+image, most = sys.argv[1], float(sys.argv[2])
+work = os.environ["MOONWATER_STOP_WORK"]
+out = []
+
+def stopped(label, guest):
+    """The row: did qemu end within the bound of the press, and how long it took (said beside the row)."""
+    took = gone(guest, most + 30)
+    print("%s: %s" % (label, "%.2f s" % took if took is not None else "did not stop in %d s" % (most + 30)), file=sys.stderr)
+    out.append((label + " stops the machine within %g s" % most,
+                "yes" if took is not None and took <= most else "no (%s)" % ("%.1f s" % took if took is not None else "never")),
+               )
+    end(guest)
+
+guest, shell = boot(image, work, "cad")
+if shell:
+    chord("ctrl", "alt", "delete")
+    stopped("Ctrl-Alt-Delete on the keyboard", guest)
+else:
+    out.append(("the guest for Ctrl-Alt-Delete answers at its shell", "no")); end(guest)
+
+guest, shell = boot(image, work, "shell")
+if shell:
+    say(shell, "/shell -c reboot")
+    stopped("/shell -c reboot at the shell", guest)
+else:
+    out.append(("the guest for /shell -c reboot answers at its shell", "no")); end(guest)
+
+guest, shell = boot(image, work, "power")
+if shell:
+    qcmd({"execute": "system_powerdown"})
+    stopped("the power key, as the image's rules answer it", guest)
+else:
+    out.append(("the guest for the power key answers at its shell", "no")); end(guest)
+
+#       The floor: the image's power.rover masked and a rule that takes the key and only says so.
+guest, shell = boot(image, work, "floor")
+if shell:
+    shell.run("mkdir -p /root/rules && : > /root/rules/power.rover && "
+              "printf 'rule power-taken\\n\\ton key power\\n\\ttake\\n\\tdo log \"power key taken\"\\n' > /root/rules/test.rover && "
+              "moonwater rover load", 30)
+    qcmd({"execute": "system_powerdown"})
+    time.sleep(3)
+    out.append(("a power key a rule takes leaves the machine running", "yes" if guest.poll() is None else "no"))
+    if guest.poll() is None:
+        qcmd({"execute": "system_powerdown"})
+        stopped("the power key's second press inside ten seconds (the floor)", guest)
+    else:
+        end(guest)
+else:
+    out.append(("the guest for the floor answers at its shell", "no")); end(guest)
+
+for row in out:
+    print("%s|%s" % row)
+PY
+
+if [ ! -s "$work/answers" ]; then
+        same "the stop guests answered" "yes" "no"
+        sed 's/^/    /' "$work/why" | tail -5
+else
+        sed 's/^/    /' "$work/why" | grep -v '^    shell: ' || true
+        while IFS='|' read -r name got; do
+                same "$name" "yes" "$got"
+        done < "$work/answers"
+fi
+
+counted
+)
+
+#
+#       Canvas's locks, in a booted guest with a card: the verbs that take
+#       them and a hotplug, timed, and what lockdep says of them.
+#
+#           MOONWATER_IMAGE=artifacts/sanitize/bootx64.efi sh test/run locks
+#
+#       `moonwater canvas modes preferred` and `largest`, a connector told to
+#       look again (detect written to its sysfs status, which is a hotplug the
+#       DRM core passes to every client), and both again after it: each verb
+#       runs in the background of the guest's shell and is held to answer in
+#       MOONWATER_LOCKS_MOST seconds (10), because a verb in a self-deadlock is
+#       in state D and would take the shell with it. Then programs are killed
+#       (SIGKILL) while they ask Canvas for the modes and its state, which take
+#       desktop.lock, and the compositor with them: Canvas must answer again,
+#       no task may be left in state D, and the runner must have a compositor
+#       up again. With an image built with CONFIG_PROVE_LOCKING (the
+#       sec_sanitize profile) lockdep has to be on at the start and still on at
+#       the end, and the kernel's log must have none of its reports; another
+#       image runs the rest and says the lockdep rows are not run. On
+#       2026-11-19 `moonwater canvas modes` hung the machine it was asked on:
+#       canvas_modes_set held canvas_list_lock and called client_hotplug, whose
+#       rover hook took it again (fixed by 5423142b3). test/differential.py
+#       stubs canvas_modes_set, so no check ran the real lock; here an image of
+#       971bc381f, from before the fix, fails the first verb's row.
+#
+lane_locks()
+(
+image=${MOONWATER_IMAGE:-dist/bootx64.efi}
+
+counting locks
+
+if ! command -v qemu-system-x86_64 > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+        echo "  locks        NOT RUN -- no qemu-system-x86_64 or python3"
+        exit 2
+fi
+if [ ! -f "$image" ]; then
+        echo "  locks        NOT RUN -- no image at $image"
+        exit 2
+fi
+
+work=$(mktemp -d /tmp/mw-locks.XXXXXX) || exit 1
+trap 'rm -rf "$work"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+
+qmp_guest_module "$work"
+vm_stop_module "$work"
+
+MOONWATER_LOCKS_WORK=$work PYTHONPATH=$work python3 - "$image" "${MOONWATER_LOCKS_MOST:-10}" > "$work/answers" 2> "$work/why" <<'PY'
+import os, re, sys, time
+from qmp_guest import *
+from vm_stop import *
+
+image, most = sys.argv[1], float(sys.argv[2])
+work = os.environ["MOONWATER_LOCKS_WORK"]
+out = []
+
+guest, shell = boot(image, work, "locks", card=True)
+if not shell:
+    print("the guest answers at its shell|no")
+    end(guest)
+    sys.exit(0)
+
+lockdep = shell.run("[ -e /proc/lockdep_chains ] && grep -c 'debug_locks: *1' /proc/lockdep_stats", 10)[0].strip().endswith("1")
+print("lockdep %s" % ("on" if lockdep else "not in this image"), file=sys.stderr)
+out.append(("Canvas has a card", "yes" if "Canvas is on" in shell.run("moonwater canvas", 20)[0] else "no"))
+
+tag = [0]
+def bounded(label, command):
+    """COMMAND in the background of the guest's shell, answered within the bound or not: a verb stuck in the
+    kernel is in state D and nothing ends it, so it is left there and the row says so."""
+    tag[0] += 1
+    done = "/tmp/locks-done-%d" % tag[0]
+    shell.run("( %s > /dev/null 2>&1; echo $? > %s ) &" % (command, done), 10)
+    start = time.time()
+    while time.time() - start < most:
+        if shell.run("cat %s 2>/dev/null" % done, 5)[0].strip().isdigit():
+            break
+        time.sleep(0.3)
+    took = time.time() - start
+    answered = shell.run("cat %s 2>/dev/null" % done, 5)[0].strip()
+    print("%s: %s" % (label, "%.1f s, status %s" % (took, answered) if answered.isdigit() else "no answer in %g s" % most),
+          file=sys.stderr)
+    out.append((label + " answers within %g s" % most, "yes" if answered == "0" else "no (%s)" % (answered or "stuck")))
+    return answered == "0"
+
+connector = shell.run("ls -d /sys/class/drm/card*-*/status | head -1", 10)[0].strip().splitlines()[-1:] or [""]
+connector = connector[0] if connector[0].startswith("/sys/") else ""
+alive = bounded("moonwater canvas modes preferred", "moonwater canvas modes preferred")
+alive = alive and bounded("moonwater canvas modes largest", "moonwater canvas modes largest")
+if alive and connector:
+    alive = bounded("a hotplug (detect written to %s), then moonwater canvas" % connector.split("/")[4],
+                    "echo detect > %s && sleep 1 && moonwater canvas" % connector)
+    alive = alive and bounded("moonwater canvas modes preferred after the hotplug", "moonwater canvas modes preferred")
+    alive = alive and bounded("moonwater canvas modes largest after the hotplug", "moonwater canvas modes largest")
+elif not connector:
+    out.append(("the card has a connector to plug", "no"))
+
+if alive:
+    #   Askers of desktop.lock killed while they hold it or wait for it, and the compositor (which holds the
+    #   display) killed with them, five times over.
+    before = shell.run("for q in /proc/[0-9]*; do [ \"$(cat $q/comm 2>/dev/null)\" = compositor ] && echo ${q#/proc/}; done", 10)[0].split()
+    shell.run("rm -f /tmp/askers; i=0; while [ $i -lt 5 ]; do "
+              "for k in 1 2 3; do ( while :; do moonwater canvas modes preferred; moonwater canvas; "
+              "moonwater canvas modes largest; done > /dev/null 2>&1 ) & echo $! >> /tmp/askers; done; sleep 1; "
+              "for q in /proc/[0-9]*; do grep -qx \"$(cut -d' ' -f4 $q/stat 2>/dev/null)\" /tmp/askers 2>/dev/null && "
+              "kill -9 ${q#/proc/}; done; kill -9 $(cat /tmp/askers) 2> /dev/null; "
+              "[ $i = 2 ] && for q in /proc/[0-9]*; do [ \"$(cat $q/comm 2>/dev/null)\" = compositor ] && kill -9 ${q#/proc/}; done; "
+              "i=$((i+1)); done; wait 2> /dev/null", 120)
+    bounded("moonwater canvas after askers of desktop.lock were killed", "moonwater canvas")
+    stuck = ""
+    for _ in range(2):
+        time.sleep(2)
+        stuck = shell.run("for q in /proc/[0-9]*; do [ \"$(cut -d' ' -f3 $q/stat 2>/dev/null)\" = D ] && "
+                          "echo \"${q#/proc/}:$(cat $q/comm)\"; done", 15)[0].split()
+        if not stuck:
+            break
+    out.append(("no task is left in state D after the kills", "yes" if not stuck else "no (%s)" % ",".join(stuck)))
+    found, _ = until(lambda: [p for p in shell.run(
+        "for q in /proc/[0-9]*; do [ \"$(cat $q/comm 2>/dev/null)\" = compositor ] && echo ${q#/proc/}; done", 10)[0].split()
+        if p.isdigit() and p not in before], 30)
+    print("compositor %s killed, %s up after" % (",".join(before) or "none", ",".join(found or []) or "none"), file=sys.stderr)
+    out.append(("a compositor is up again after its own was killed",
+                "yes" if found and before else "no (%s)" % ("none ran before" if not before else "none came back")))
+
+log = shell.run("dmesg", 30)[0]
+if lockdep:
+    out.append(("lockdep is still on at the end (it turns itself off at its first report)",
+                "yes" if shell.run("grep -c 'debug_locks: *1' /proc/lockdep_stats", 10)[0].strip().endswith("1") else "no"))
+    said = [w for w in ("possible recursive locking", "possible circular locking", "inconsistent lock state",
+                        "suspicious RCU usage", "possible irq lock inversion", "blocked for more than", "BUG:")
+            if w in log]
+    out.append(("the kernel's log has no lock report", "yes" if not said else "no (%s)" % ", ".join(said)))
+else:
+    hung = "blocked for more than" in log
+    out.append(("the kernel's log has no hung task", "yes" if not hung else "no"))
+    print("NOT RUN|lockdep's rows: the image is not built with CONFIG_PROVE_LOCKING (sec_sanitize)")
+end(guest)
+
+for row in out:
+    print("%s|%s" % row)
+PY
+
+if [ ! -s "$work/answers" ]; then
+        same "the locks guest answered" "yes" "no"
+        sed 's/^/    /' "$work/why" | tail -5
+else
+        sed 's/^/    /' "$work/why" | grep -v '^    shell: ' || true
+        while IFS='|' read -r name got; do
+                if [ "$name" = "NOT RUN" ]; then
+                        not_run_part "locks: $got"
+                else
+                        same "$name" "yes" "$got"
+                fi
+        done < "$work/answers"
+fi
+
+counted
+)
+
+#       What the stop and locks guests share, beside qmp_guest: a guest booted to its serial shell, KVM where there
+#       is one and TCG where not, with -no-reboot so a reboot is qemu ending.
+vm_stop_module()
+{
+        cat > "$1/vm_stop.py" <<'PY'
+import os, time
+from qmp_guest import *
+
+def boot(image, work, name, card=False):
+    """A guest and its shell, or (guest, None) when the shell never answered."""
+    console = "%s/%s.ser" % (work, name)
+    accel = ["-cpu", "host", "-enable-kvm"] if os.access("/dev/kvm", os.R_OK | os.W_OK) else \
+            ["-accel", "tcg,thread=multi", "-cpu", "max"]
+    args = ["qemu-system-x86_64", "-m", "2G", "-smp", "2"] + accel + ["-kernel", image, "-no-reboot",
+            "-display", "none", "-vga", "none", "-device", "qemu-xhci", "-device", "usb-kbd",
+            "-nic", "user,model=e1000",
+            "-chardev", "socket,id=console,path=" + console + ",server=on,wait=off", "-serial", "chardev:console",
+            "-append", "console=ttyS0 drm_client_lib.active= mac80211_hwsim.radios=0 panic=-1" +
+            ("" if card else " moonwater.desktop=none")]
+    if card:
+        args[args.index("-vga") + 2:args.index("-vga") + 2] = ["-device", "virtio-gpu-pci"]
+    guest = Guest(args, "%s/%s.qmp" % (work, name), None, work, (console,), 0.1)
+    shell = Shell(console)
+    for _ in range(60):
+        if shell.run("echo up", 5, booting=True)[1] == 0:
+            break
+    else:
+        return guest, None
+    shell.run("PS1=; PS2=", 5)
+    # The rules' tables are loaded a few seconds after the shell is up: a press before them is not the image's.
+    until(lambda: "table" in shell.run("dmesg | grep 'rover\\] table'", 10)[0], 30)
+    time.sleep(2)
+    return guest, shell
+
+def say(shell, line):
+    shell.sock.sendall(("\n" + line + "\n").encode())
+
+def gone(guest, seconds):
+    """How long until qemu ended, or None."""
+    start = time.time()
+    while time.time() - start < seconds:
+        if guest.poll() is not None:
+            return time.time() - start
+        time.sleep(0.02)
+    return None
+
+def end(guest):
+    if guest.poll() is None:
+        guest.kill()
+    try:
+        guest.wait(10)
+    except Exception:
+        pass
+PY
+}
 
 #       moonwater sleep, woken by a key, with the compositor holding the card.
 #
