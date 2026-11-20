@@ -1186,9 +1186,10 @@ AUDIO_API long audio_voice_mix(struct audio_sink *sink, struct audio_voice *voic
         }
         if (played < frames)
         {
-                // Out of data: it starts again from nothing, with the filter's history gone.
+                // Out of data: fade to nothing, keeping any unconsumed input frames in the resampler so small writes or
+                // transient underruns do not drop up to taps/2 frames of audio.
                 voice->now[0] = voice->now[1] = 0;
-                if (voice->table && !(drain && voice->flushed))
+                if (voice->table && !(drain && voice->flushed) && voice->rs.have <= voice->rs.table->taps / 2 - 1)
                         audio_rs_reset(&voice->rs);
         }
         return played;

@@ -267,7 +267,7 @@ struct pulse_stream
         int drain_pending, drained, flushing;
         unsigned long drain_tag;
         long drain_at;
-        unsigned long long underrun_for, playing_for;
+        unsigned long long underrun_for, playing_for, played_rem, underrun_rem;
         unsigned char *ring_memory;
         unsigned long ring_bytes;
         long uid, pid;
@@ -1727,7 +1727,7 @@ static void pulse_fill_device(struct wire_w *w, struct pulse_client *c, unsigned
                 wire_w_u32(w, 0);
                 wire_w_string(w, 0);
         }
-        if (c->version >= format_version)
+        if (format_version >= 0 && c->version >= (unsigned int)format_version)
         {
                 pulse_w_u8(w, 1);
                 pulse_w_format_info(w);
@@ -4156,7 +4156,15 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
                 }
                 else
                 {
-                        s->underrun_for += (unsigned long long)frames * s->voice.frame;
+                        if (!s->voice.table || s->voice.out_rate <= 0)
+                                s->underrun_for += (unsigned long long)frames * s->voice.frame;
+                        else
+                        {
+                                unsigned long long num = (unsigned long long)frames * (unsigned long long)s->voice.rate + s->underrun_rem;
+
+                                s->underrun_rem = num % (unsigned long long)s->voice.out_rate;
+                                s->underrun_for += (num / (unsigned long long)s->voice.out_rate) * s->voice.frame;
+                        }
                         if (s->drain_pending && fill == 0 && !s->drained)
                         {
                                 s->drained = 1;
@@ -4166,7 +4174,15 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
                 }
         }
         played = audio_voice_mix(&sink->mix, &s->voice, frames, s->drain_pending);
-        s->playing_for += (unsigned long long)played * s->voice.frame;
+        if (!s->voice.table || s->voice.out_rate <= 0)
+                s->playing_for += (unsigned long long)played * s->voice.frame;
+        else
+        {
+                unsigned long long num = (unsigned long long)played * (unsigned long long)s->voice.rate + s->played_rem;
+
+                s->played_rem = num % (unsigned long long)s->voice.out_rate;
+                s->playing_for += (num / (unsigned long long)s->voice.out_rate) * s->voice.frame;
+        }
         if (played < frames && s->one_shot)
         {
                 // A sample's frames are done (the last of them were faded to nothing): it ends, and its end is announced.

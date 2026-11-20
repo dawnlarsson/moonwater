@@ -1103,6 +1103,12 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                 w->transient = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != w->id ? xwm_get32(r.value) : 0;
         else if (p->what == COMPOSITOR_XWM_PROP_STATE)
         {
+                unsigned int had_fs = w->state & COMPOSITOR_XWM_FULLSCREEN;
+                unsigned int had_max = w->state & COMPOSITOR_XWM_MAXIMIZED;
+
+                if (!(w->state & COMPOSITOR_XWM_COVERED))
+                        w->state &= ~COMPOSITOR_XWM_FULLSCREEN;
+                w->state &= ~COMPOSITOR_XWM_MAXIMIZED;
                 for (unsigned long at = 0; r.format == XWM_FORMAT_32 && at + 4 <= r.value_len; at += 4)
                 {
                         unsigned int atom = xwm_get32(r.value + at);
@@ -1111,6 +1117,20 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                                 w->state |= COMPOSITOR_XWM_FULLSCREEN;
                         else if (atom && (atom == x->atoms[COMPOSITOR_XWM_A_MAX_VERT] || atom == x->atoms[COMPOSITOR_XWM_A_MAX_HORZ]))
                                 w->state |= COMPOSITOR_XWM_MAXIMIZED;
+                }
+                // If WL_SURFACE_SERIAL adopted the row before _NET_WM_STATE arrived, apply fullscreen/maximized now
+                // so the next compositor_xwm_sync pass does not wipe the state out.
+                if ((w->state & COMPOSITOR_XWM_ADOPTED) && w->row >= 0 && w->row < COMPOSITOR_ROWS)
+                {
+                        if ((w->state & COMPOSITOR_XWM_FULLSCREEN) && !had_fs && !compositor.fullscreen[w->row])
+                        {
+                                if (!(w->state & COMPOSITOR_XWM_MAXIMIZED))
+                                        w->restore_w = w->width, w->restore_h = w->height;
+                                compositor_fullscreen_on(w->row, compositor_xwm_covers(w));
+                        }
+                        else if ((w->state & COMPOSITOR_XWM_MAXIMIZED) && !had_max && !(w->state & COMPOSITOR_XWM_FULLSCREEN) &&
+                                 compositor.arranged[w->row] == COMPOSITOR_FLOATING)
+                                compositor_arrange(w->row, COMPOSITOR_ROOM);
                 }
         }
         else if (p->what == COMPOSITOR_XWM_PROP_TYPE)
@@ -1403,8 +1423,11 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
                 long how = (compositor_xwm_is_popup(w) ? WAYLAND_XWINDOW_POPUP : 0) | (w->placed ? WAYLAND_XWINDOW_PLACED : 0) |
                            WAYLAND_XWINDOW_OWNER(owner && owner->row >= 0 && owner->row < COMPOSITOR_ROWS ? owner->row : -1);
 
-                // A window mapped over a whole screen is fullscreen on it, said so (_NET_WM_STATE), as if it had asked.
-                if (!(w->state & (COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_FULLSCREEN)) && (covers = compositor_xwm_covers(w)) >= 0)
+                // An override-redirect window mapped over a whole screen (Wine/Proton borderless fullscreen) is promoted to
+                // fullscreen on it, said so (_NET_WM_STATE). Managed windows that open at screen size stay normal windows
+                // unless they explicitly asked for _NET_WM_STATE_FULLSCREEN.
+                if (!(w->state & (COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_FULLSCREEN)) && (w->state & COMPOSITOR_XWM_OVERRIDE) &&
+                    (covers = compositor_xwm_covers(w)) >= 0)
                 {
                         w->restore_w = w->width, w->restore_h = w->height;
                         w->state |= COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_COVERED;
@@ -3968,20 +3991,24 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 w = compositor_xwm_find(e->window, 0);
                 if (w)
                 {
+                        unsigned int prev_w = w->width, prev_h = w->height;
+
                         w->x = e->x;
                         w->y = e->y;
                         w->width = e->width;
                         w->height = e->height;
                         // Wine/Proton borderless fullscreen games often map a small override-redirect window first and then resize
                         // it to cover the whole output: promote it to managed fullscreen so it hides/joins the taskbar and takes focus.
-                        if ((w->state & COMPOSITOR_XWM_ADOPTED) && w->row >= 0 && w->row < COMPOSITOR_ROWS &&
-                            !(w->state & COMPOSITOR_XWM_FULLSCREEN))
+                        if ((w->state & COMPOSITOR_XWM_ADOPTED) && (w->state & COMPOSITOR_XWM_OVERRIDE) &&
+                            w->row >= 0 && w->row < COMPOSITOR_ROWS && !(w->state & COMPOSITOR_XWM_FULLSCREEN) &&
+                            (w->width != prev_w || w->height != prev_h))
                         {
                                 int covers = compositor_xwm_covers(w);
 
                                 if (covers >= 0)
                                 {
-                                        w->restore_w = w->width, w->restore_h = w->height;
+                                        if (!w->restore_w || !w->restore_h)
+                                                w->restore_w = prev_w ? prev_w : w->width, w->restore_h = prev_h ? prev_h : w->height;
                                         w->state |= COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_COVERED;
                                         compositor_xwm_net_state(w->id, (int)w->state);
                                         if (compositor.table)
