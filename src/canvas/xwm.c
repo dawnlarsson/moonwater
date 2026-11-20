@@ -185,31 +185,34 @@
 #define COMPOSITOR_XWM_XA_WM_NORMAL_HINTS 40
 #define COMPOSITOR_XWM_XA_STRING 31
 #define COMPOSITOR_XWM_TITLE 128              // a title's bytes, its NUL included (the shim takes fewer)
-#define COMPOSITOR_XWM_PROP_NET_NAME 1
-#define COMPOSITOR_XWM_PROP_NAME 2
-#define COMPOSITOR_XWM_PROP_PROTOCOLS 3
-#define COMPOSITOR_XWM_PROP_TRANSIENT 4
-#define COMPOSITOR_XWM_PROP_TYPE 5
-#define COMPOSITOR_XWM_PROP_STATE 6
-#define COMPOSITOR_XWM_PROP_WM_HINTS 7
-#define COMPOSITOR_XWM_PROP_NORMAL_HINTS 8
-#define COMPOSITOR_XWM_PROP_OWNER 9          // not a property: X-Resource's pid of the window's client (compositor_xwm_ask_owner)
-#define COMPOSITOR_XWM_PROP_INTERN 10         // an InternAtom of a type's name (slot: the atom's record)
-#define COMPOSITOR_XWM_PROP_ATOM_NAME 11      // a GetAtomName (slot: the atom's record)
-#define COMPOSITOR_XWM_PROP_SEL 12            // a piece of a conversion (slot: the transfer; window: its requestor window)
-#define COMPOSITOR_XWM_PROP_SEL_SYNC 13       // a reply that says every name asked before it has come (slot, window: the transfer)
-#define COMPOSITOR_XWM_PROP_XDND_AWARE 14     // the XdndAware of the X window a Wayland drag is over (window: it)
-#define COMPOSITOR_XWM_PROP_XDND_TYPES 15     // the XdndTypeList of an X drag's source (window: the source)
-#define COMPOSITOR_XWM_PROP_XDND_SYNC 16      // a reply that says the names of an X drag's types have come (window: the source)
-#define COMPOSITOR_XWM_PROP_ICON 17           // _NET_WM_ICON for a docked _NET_SYSTEM_TRAY_S0 icon window
-#define COMPOSITOR_XWM_PROP_MULTIPLE 17       // a MULTIPLE's pairs (slot: its answer; window: its requestor)
-#define COMPOSITOR_XWM_PROP_XDND_PROXY 18     // the XdndProxy of the X window a Wayland drag is over (window: it)
-#define COMPOSITOR_XWM_PROP_XDND_PROXIED 19   // the XdndProxy of that proxy, which names itself when it is one (window: the X window; slot: the proxy)
-#define COMPOSITOR_XWM_PROP_XDND_ACTIONS 20   // the XdndActionList of an X drag's source (window: the source)
-#define COMPOSITOR_XWM_PROP_XDND_WORDS 21     // its XdndActionDescription (window: the source)
-#define COMPOSITOR_XWM_PROP_STEAM 22          // _MOONWATER_STEAM_OVERLAY of a window (the game's pid)
-#define COMPOSITOR_XWM_PROP_STEAM_OPEN 23     // _MOONWATER_STEAM_OVERLAY_OPEN of that window
-#define COMPOSITOR_XWM_PROP_CLASS 24          // WM_CLASS: the instance and the class, two strings (a window's app_id: compositor_xwm_app)
+enum compositor_xwm_prop
+{
+        COMPOSITOR_XWM_PROP_NET_NAME = 1,
+        COMPOSITOR_XWM_PROP_NAME,
+        COMPOSITOR_XWM_PROP_PROTOCOLS,
+        COMPOSITOR_XWM_PROP_TRANSIENT,
+        COMPOSITOR_XWM_PROP_TYPE,
+        COMPOSITOR_XWM_PROP_STATE,
+        COMPOSITOR_XWM_PROP_WM_HINTS,
+        COMPOSITOR_XWM_PROP_NORMAL_HINTS,
+        COMPOSITOR_XWM_PROP_OWNER,          // not a property: X-Resource's pid of the window's client (compositor_xwm_ask_owner)
+        COMPOSITOR_XWM_PROP_INTERN,         // an InternAtom of a type's name (slot: the atom's record)
+        COMPOSITOR_XWM_PROP_ATOM_NAME,      // a GetAtomName (slot: the atom's record)
+        COMPOSITOR_XWM_PROP_SEL,            // a piece of a conversion (slot: the transfer; window: its requestor window)
+        COMPOSITOR_XWM_PROP_SEL_SYNC,       // a reply that says every name asked before it has come (slot, window: the transfer)
+        COMPOSITOR_XWM_PROP_XDND_AWARE,     // the XdndAware of the X window a Wayland drag is over (window: it)
+        COMPOSITOR_XWM_PROP_XDND_TYPES,     // the XdndTypeList of an X drag's source (window: the source)
+        COMPOSITOR_XWM_PROP_XDND_SYNC,      // a reply that says the names of an X drag's types have come (window: the source)
+        COMPOSITOR_XWM_PROP_ICON,           // _NET_WM_ICON for a docked _NET_SYSTEM_TRAY_S0 icon window
+        COMPOSITOR_XWM_PROP_MULTIPLE,       // a MULTIPLE's pairs (slot: its answer; window: its requestor)
+        COMPOSITOR_XWM_PROP_XDND_PROXY,     // the XdndProxy of the X window a Wayland drag is over (window: it)
+        COMPOSITOR_XWM_PROP_XDND_PROXIED,   // the XdndProxy of that proxy, which names itself when it is one (window: the X window; slot: the proxy)
+        COMPOSITOR_XWM_PROP_XDND_ACTIONS,   // the XdndActionList of an X drag's source (window: the source)
+        COMPOSITOR_XWM_PROP_XDND_WORDS,     // its XdndActionDescription (window: the source)
+        COMPOSITOR_XWM_PROP_STEAM,          // _MOONWATER_STEAM_OVERLAY of a window (the game's pid)
+        COMPOSITOR_XWM_PROP_STEAM_OPEN,     // _MOONWATER_STEAM_OVERLAY_OPEN of that window
+        COMPOSITOR_XWM_PROP_CLASS,          // WM_CLASS: the instance and the class, two strings (a window's app_id: compositor_xwm_app)
+};
 #define COMPOSITOR_XWM_XA_WM_CLASS 67         // a predefined atom
 #define COMPOSITOR_XWM_DND_REPLY(what) (((what) >= COMPOSITOR_XWM_PROP_XDND_AWARE && (what) <= COMPOSITOR_XWM_PROP_XDND_SYNC) || \
                                         ((what) >= COMPOSITOR_XWM_PROP_XDND_PROXY && (what) <= COMPOSITOR_XWM_PROP_XDND_WORDS))
@@ -280,16 +283,23 @@ struct compositor_xwm_window
         unsigned char no_input;        // 1 if WM_HINTS InputHint is explicitly False
         unsigned int owner;            // the pid of the program whose window it is, as X-Resource says (0 until it has; compositor_xwm_owned)
         unsigned int asking;           // title requests in flight
-        unsigned int steam_pid;        // the game it is Steam's overlay window for (_MOONWATER_STEAM_OVERLAY), 0 for none
-        unsigned char steam_open;      // the overlay is open (_MOONWATER_STEAM_OVERLAY_OPEN): the person's input is the overlay's
-        unsigned char steam_focused;   // told FocusIn, as the renderer takes the hot-key from the window with the focus
-        unsigned char steam_tab;       // the Tab of a Shift+Tab sent it is held: its repeats and its release are the overlay's too
-        int steam_x, steam_y;          // the pointer's last place, in the X window's pixels (the game's frame's)
-        int steam_wheel[2];            // a wheel's turn not yet a whole notch (vertical, horizontal), in its own units
-        unsigned int steam_told;       // when the overlay's state was last told (milliseconds): an open one beats every second
         unsigned int dirty;            // the shim has not the window's latest title
         char title[COMPOSITOR_XWM_TITLE];
         char app[WINDOWS_APP_ID];      // its WM_CLASS's class (else its instance), the app_id its row is given (compositor_xwm_app)
+};
+
+// Singleton Steam overlay bridge state (only one unmapped overlay X window is active for a Wayland game at a time).
+struct compositor_xwm_steam
+{
+        struct compositor_xwm *slot;
+        unsigned int window;           // the X window carrying _MOONWATER_STEAM_OVERLAY, 0 for none
+        unsigned int pid;              // the game it is Steam's overlay window for (_MOONWATER_STEAM_OVERLAY), 0 for none
+        unsigned char open;            // the overlay is open (_MOONWATER_STEAM_OVERLAY_OPEN): the person's input is the overlay's
+        unsigned char focused;         // told FocusIn, as the renderer takes the hot-key from the window with the focus
+        unsigned char tab;             // the Tab of a Shift+Tab sent it is held: its repeats and its release are the overlay's too
+        int x, y;                      // the pointer's last place, in the X window's pixels (the game's frame's)
+        int wheel[2];                  // a wheel's turn not yet a whole notch (vertical, horizontal), in its own units
+        unsigned int told;             // when the overlay's state was last told (milliseconds): an open one beats every second
 };
 
 struct compositor_xwm_pending
@@ -434,6 +444,7 @@ struct compositor_xwm
 static const struct compositor_xwm compositor_xwm_fresh = COMPOSITOR_XWM_FRESH;
 static struct compositor_xwm compositor_xwm_slots[COMPOSITOR_XWM_SLOTS] = {[0 ... COMPOSITOR_XWM_SLOTS - 1] = COMPOSITOR_XWM_FRESH};
 static struct compositor_xwm *compositor_xwm_at = &compositor_xwm_slots[0];
+static struct compositor_xwm_steam compositor_xwm_steam;
 static unsigned int compositor_xwm_counted[4]; // the table's xwm_counts: refused connections, refused records, refused MapRequests, closed connections
 static int compositor_xwm_listen_fd = -1, compositor_xwm_listen_at = -1; // the listening socket, and its place in the loop's list
 static int compositor_xwm_uid;                                            // the user the servers may be (the compositor's own, or 1000 under root)
@@ -1280,8 +1291,39 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
         else if (p->what == COMPOSITOR_XWM_PROP_STEAM)
         {
                 // Whose overlay window it is: believed only once X-Resource says the window is that program's own (the owner asked now).
-                w->steam_pid = r.format == XWM_FORMAT_32 && r.value_len >= 4 ? xwm_get32(r.value) : 0;
-                if (w->steam_pid && !w->owner)
+                unsigned int spid = r.format == XWM_FORMAT_32 && r.value_len >= 4 ? xwm_get32(r.value) : 0;
+
+                if (compositor_xwm_steam.slot == x && compositor_xwm_steam.window == w->id)
+                {
+                        if (!spid)
+                                memory_zero(&compositor_xwm_steam, sizeof compositor_xwm_steam);
+                        else
+                                compositor_xwm_steam.pid = spid;
+                }
+                else if (spid)
+                {
+                        int keep = 0;
+
+                        if (compositor_xwm_steam.slot && compositor_xwm_steam.slot->fd >= 0 && compositor_xwm_steam.window &&
+                            compositor_xwm_steam.pid)
+                        {
+                                struct compositor_xwm *saved = compositor_xwm_at;
+                                struct compositor_xwm_window *cur;
+
+                                compositor_xwm_at = compositor_xwm_steam.slot;
+                                cur = compositor_xwm_find(compositor_xwm_steam.window, 0);
+                                keep = cur && cur->owner == compositor_xwm_steam.pid;
+                                compositor_xwm_at = saved;
+                        }
+                        if (!keep)
+                        {
+                                memory_zero(&compositor_xwm_steam, sizeof compositor_xwm_steam);
+                                compositor_xwm_steam.slot = x;
+                                compositor_xwm_steam.window = w->id;
+                                compositor_xwm_steam.pid = spid;
+                        }
+                }
+                if (spid && !w->owner)
                         compositor_xwm_ask_owner(w->id);
         }
         else if (p->what == COMPOSITOR_XWM_PROP_CLASS)
@@ -1308,8 +1350,11 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
         }
         else if (p->what == COMPOSITOR_XWM_PROP_STEAM_OPEN)
         {
-                w->steam_open = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != 0;
-                w->steam_told = (unsigned int)(clock_monotonic_nanoseconds() / 1000000);
+                if (compositor_xwm_steam.slot == x && compositor_xwm_steam.window == w->id)
+                {
+                        compositor_xwm_steam.open = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != 0;
+                        compositor_xwm_steam.told = (unsigned int)(clock_monotonic_nanoseconds() / 1000000);
+                }
         }
         else if (p->what == COMPOSITOR_XWM_PROP_TRANSIENT)
                 w->transient = r.format == XWM_FORMAT_32 && r.value_len >= 4 && xwm_get32(r.value) != w->id ? xwm_get32(r.value) : 0;
@@ -1432,56 +1477,90 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
         }
 }
 
-/* ---- the window table ---- */
+/* ---- open-addressing u32 index shared by window_index and atom_index (both structs store their u32 key at offset 0) ---- */
 
-static unsigned long compositor_xwm_hash(unsigned int id, long buckets)
+static unsigned int compositor_xwm_u32_key(const struct wayland_table *records, long slot)
 {
-        return ((unsigned long)id * 0x9e3779b97f4a7c15ul >> 24) & (unsigned long)(buckets - 1);
+        return *(const unsigned int *)(const void *)(records->at + (unsigned long)slot * records->unit);
 }
 
-static void compositor_xwm_index_put(struct wayland_table *index, long slot)
+static void compositor_xwm_index_put(struct wayland_table *index, unsigned int key, long slot)
 {
-        unsigned int *bucket = (unsigned int *)index->at;
-        unsigned long b = compositor_xwm_hash(compositor_xwm_at->window[slot].id, index->count);
+        unsigned int *bucket = (unsigned int *)(void *)index->at;
+        unsigned long b = wayland_u32_hash(key, index->count);
 
         while (bucket[b])
                 b = (b + 1) & (unsigned long)(index->count - 1);
         bucket[b] = (unsigned int)(slot + 1);
 }
 
-// The record's slot for an X window, or -1; *at the bucket it is in.
-static long compositor_xwm_slot(unsigned int id, unsigned long *at)
+// Doubles an open-addressing index at half full (64 buckets first), rehashing live records with nonzero key (excluding skip).
+static int compositor_xwm_index_grow(struct wayland_table *index, const struct wayland_table *records, long used, long skip)
 {
-        struct compositor_xwm *x = compositor_xwm_at;
-        long buckets = x->window_index.count;
-        const unsigned int *bucket = (const unsigned int *)x->window_index.at;
+        struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
 
-        for (unsigned long b = buckets ? compositor_xwm_hash(id, buckets) : 0, n = 0; buckets && n < (unsigned long)buckets;
+        if (2 * (used + 1) <= index->count)
+                return 1;
+        wayland_tables_host(&compositor_wl_host);
+        if (!wayland_table_reach(&grown, index->count ? 2 * index->count : 64))
+                return 0;
+        for (long at = 0; at < records->count; at++)
+                if (at != skip)
+                {
+                        unsigned int key = compositor_xwm_u32_key(records, at);
+
+                        if (key)
+                                compositor_xwm_index_put(&grown, key, at);
+                }
+        wayland_table_drop(index);
+        *index = grown;
+        return 1;
+}
+
+// Looks up key in index: first==0 returns the first hit (and sets *at to its bucket); first!=0 returns the lowest matching slot.
+static long compositor_xwm_index_find(const struct wayland_table *index, const struct wayland_table *records, unsigned int key,
+                                      int first, unsigned long *at)
+{
+        long buckets = index->count, found = -1;
+        const unsigned int *bucket = (const unsigned int *)(const void *)index->at;
+
+        for (unsigned long b = buckets ? wayland_u32_hash(key, buckets) : 0, n = 0; buckets && n < (unsigned long)buckets;
              n++, b = (b + 1) & (unsigned long)(buckets - 1))
         {
                 if (!bucket[b])
-                        return -1;
-                if (x->window[bucket[b] - 1].id == id)
+                        return found;
+                if (compositor_xwm_u32_key(records, (long)bucket[b] - 1) == key)
                 {
-                        if (at)
-                                *at = b;
-                        return (long)bucket[b] - 1;
+                        long slot = (long)bucket[b] - 1;
+
+                        if (!first)
+                        {
+                                if (at)
+                                        *at = b;
+                                return slot;
+                        }
+                        if (found < 0 || slot < found)
+                                found = slot;
                 }
         }
-        return -1;
+        return found;
 }
+
+/* ---- the window table ---- */
 
 // The record of an X window let go of: out of the index (backward shift), its slot free to be taken again.
 static void compositor_xwm_release(struct compositor_xwm_window *w)
 {
         struct compositor_xwm *x = compositor_xwm_at;
         long buckets = x->window_index.count, slot;
-        unsigned int *bucket = (unsigned int *)x->window_index.at;
+        unsigned int *bucket = (unsigned int *)(void *)x->window_index.at;
         unsigned long hole = 0;
 
+        if (w->id && compositor_xwm_steam.slot == x && compositor_xwm_steam.window == w->id)
+                memory_zero(&compositor_xwm_steam, sizeof compositor_xwm_steam);
         if (w->id && w->id == x->focus_window)
                 x->focus_window = 0, x->focus_row = -3;
-        if (!w->id || (slot = compositor_xwm_slot(w->id, &hole)) < 0)
+        if (!w->id || (slot = compositor_xwm_index_find(&x->window_index, &x->window_table, w->id, 0, &hole)) < 0)
         {
                 w->id = 0;
                 return;
@@ -1489,7 +1568,7 @@ static void compositor_xwm_release(struct compositor_xwm_window *w)
         bucket[hole] = 0;
         for (unsigned long b = (hole + 1) & (unsigned long)(buckets - 1); bucket[b]; b = (b + 1) & (unsigned long)(buckets - 1))
         {
-                unsigned long home = compositor_xwm_hash(x->window[bucket[b] - 1].id, buckets);
+                unsigned long home = wayland_u32_hash(x->window[bucket[b] - 1].id, buckets);
 
                 if ((b > hole && (home <= hole || home > b)) || (b < hole && home <= hole && home > b))
                 {
@@ -1511,27 +1590,15 @@ static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int ad
 
         if (!id)
                 return 0;
-        slot = compositor_xwm_slot(id, 0);
+        slot = compositor_xwm_index_find(&x->window_index, &x->window_table, id, 0, 0);
         if (slot >= 0)
                 return &x->window[slot];
         if (!add)
                 return 0;
-        // The index doubles at half full (64 buckets first), every record put in the new one; then the record's slot.
-        if (2 * (x->windows + 1) > x->window_index.count)
+        if (!compositor_xwm_index_grow(&x->window_index, &x->window_table, x->windows, -1))
         {
-                struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
-
-                wayland_tables_host(&compositor_wl_host);
-                if (!wayland_table_reach(&grown, x->window_index.count ? 2 * x->window_index.count : 64))
-                {
-                        x->refused++, compositor_xwm_counted[1]++;
-                        return 0;
-                }
-                for (long at = 0; at < x->window_table.count; at++)
-                        if (x->window[at].id)
-                                compositor_xwm_index_put(&grown, at);
-                wayland_table_drop(&x->window_index);
-                x->window_index = grown;
+                x->refused++, compositor_xwm_counted[1]++;
+                return 0;
         }
         x->window_table.unit = sizeof(struct compositor_xwm_window);
         slot = wayland_table_take(&x->window_table);
@@ -1545,7 +1612,7 @@ static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int ad
         memory_zero(free, sizeof(*free));
         free->id = id;
         x->windows++;
-        compositor_xwm_index_put(&x->window_index, slot);
+        compositor_xwm_index_put(&x->window_index, id, slot);
         free->row = -1;
         free->sent_x = free->sent_y = COMPOSITOR_XWM_NO_PLACE;
         return free;
@@ -1973,41 +2040,21 @@ static int compositor_xwm_same(const unsigned char *a, const unsigned char *b, u
         A record's atom is put in once it is known (at its making, or at its InternAtom's reply) and is never taken out: the table only grows, and
         is let go of with the connection. At half full the index is made again at twice the buckets.
 */
-static void compositor_xwm_atom_put(struct wayland_table *index, long slot)
-{
-        unsigned int *bucket = (unsigned int *)index->at;
-        unsigned long b = compositor_xwm_hash(compositor_xwm_at->atom[slot].atom, index->count);
-
-        while (bucket[b])
-                b = (b + 1) & (unsigned long)(index->count - 1);
-        bucket[b] = (unsigned int)(slot + 1);
-}
-
 // The record at slot, its atom now known, put in the index (made again when half full); without the memory it is left out and found by the walk.
 static void compositor_xwm_atom_indexed(long slot)
 {
         struct compositor_xwm *x = compositor_xwm_at;
+        unsigned int atom = x->atom[slot].atom;
 
-        if (!x->atom[slot].atom)
+        if (!atom)
                 return;
-        if (2 * (x->atoms_indexed + 1) > x->atom_index.count)
+        if (!compositor_xwm_index_grow(&x->atom_index, &x->atom_table, x->atoms_indexed, slot))
         {
-                struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
-
-                wayland_tables_host(&compositor_wl_host);
-                if (!wayland_table_reach(&grown, x->atom_index.count ? 2 * x->atom_index.count : 64))
-                {
-                        x->atoms_indexed = -1; // no index: every look is the walk (compositor_xwm_atom_index)
-                        wayland_table_drop(&x->atom_index);
-                        return;
-                }
-                for (long at = 0; at < x->atom_table.count; at++)
-                        if (at != slot && x->atom[at].atom)
-                                compositor_xwm_atom_put(&grown, at);
+                x->atoms_indexed = -1; // no index: every look is the walk (compositor_xwm_atom_index)
                 wayland_table_drop(&x->atom_index);
-                x->atom_index = grown;
+                return;
         }
-        compositor_xwm_atom_put(&x->atom_index, slot);
+        compositor_xwm_index_put(&x->atom_index, atom, slot);
         x->atoms_indexed++;
 }
 
@@ -2042,8 +2089,6 @@ static long compositor_xwm_atom_add(unsigned int atom, const unsigned char *name
 static long compositor_xwm_atom_index(unsigned int atom)
 {
         struct compositor_xwm *x = compositor_xwm_at;
-        long buckets = x->atom_index.count, found = -1;
-        const unsigned int *bucket = (const unsigned int *)x->atom_index.at;
 
         if (!atom)
                 return -1;
@@ -2054,11 +2099,7 @@ static long compositor_xwm_atom_index(unsigned int atom)
                                 return at;
                 return -1;
         }
-        for (unsigned long b = buckets ? compositor_xwm_hash(atom, buckets) : 0, n = 0; buckets && n < (unsigned long)buckets && bucket[b];
-             n++, b = (b + 1) & (unsigned long)(buckets - 1))
-                if (x->atom[bucket[b] - 1].atom == atom && (found < 0 || (long)bucket[b] - 1 < found))
-                        found = (long)bucket[b] - 1;
-        return found;
+        return compositor_xwm_index_find(&x->atom_index, &x->atom_table, atom, 1, 0);
 }
 
 static long compositor_xwm_atom_named(const unsigned char *name, unsigned long length)
@@ -4824,6 +4865,8 @@ static void compositor_xwm_drop(const char *why)
         log_flush();
         system_close(x->fd);
         x->fd = -1;
+        if (compositor_xwm_steam.slot == x)
+                memory_zero(&compositor_xwm_steam, sizeof compositor_xwm_steam);
         compositor_xwm_close_rows();
         x->ready = 0;
         x->broken = 0;
@@ -5195,63 +5238,6 @@ static void compositor_xwm_pass(const struct compositor_poll *wanted)
 
 /* ---- which Wayland client is this X server ---- */
 
-// The parent of a process (the pid after the command name's closing parenthesis, the field after the state), or -1.
-static long compositor_xwm_ppid(long pid)
-{
-        char path[48], text[512];
-        long at = 0, handle, got, digits, value = 0;
-        static const char prefix[] = "/proc/";
-        static const char suffix[] = "/stat";
-
-        for (long k = 0; prefix[k]; k++)
-                path[at++] = prefix[k];
-        {
-                char digit[24];
-                long n = 0;
-
-                if (pid <= 0)
-                        return -1;
-                for (long v = pid; v > 0; v /= 10)
-                        digit[n++] = (char)('0' + v % 10);
-                while (n > 0)
-                        path[at++] = digit[--n];
-        }
-        for (long k = 0; suffix[k]; k++)
-                path[at++] = suffix[k];
-        path[at] = 0;
-        handle = system_open_at(AT_FDCWD, path, FILE_READ | COMPOSITOR_XWM_O_CLOEXEC);
-        if (handle < 0)
-                return -1;
-        got = compositor_call(syscall(read), (positive)handle, (positive)text, sizeof text - 1, 0, 0, 0);
-        system_close((int)handle);
-        if (got <= 0)
-                return -1;
-        text[got] = 0;
-        digits = 0;
-        // the command name is in parentheses and may hold anything: the fields are after the last one
-        for (long k = got - 1; k >= 0; k--)
-                if (text[k] == ')')
-                {
-                        digits = k + 1;
-                        break;
-                }
-        if (digits == 0)
-                return -1;
-        // " state ppid": skip the state, then read the parent
-        at = digits;
-        while (text[at] == ' ')
-                at++;
-        while (text[at] && text[at] != ' ')
-                at++;
-        while (text[at] == ' ')
-                at++;
-        if (text[at] < '0' || text[at] > '9')
-                return -1;
-        while (text[at] >= '0' && text[at] <= '9')
-                value = value * 10 + (text[at++] - '0');
-        return value;
-}
-
 // The wayland client that is this X server: the one whose process is a child of the wrapper that connected (peer_pid). Found once, then
 // kept while that client is the same process; -1 until a client's parent is the wrapper (the server's connection to Wayland comes first or second).
 static long compositor_xwm_server(struct compositor_xwm *x)
@@ -5265,12 +5251,17 @@ static long compositor_xwm_server(struct compositor_xwm *x)
         for (long at = 0; at < wayland_client_count(); at++)
         {
                 long pid = wayland_client_pid(at);
+                unsigned int parent = 0;
 
-                if (pid > 0 && compositor_xwm_ppid(pid) == x->peer_pid)
+                if (pid > 0)
                 {
-                        x->client = at;
-                        x->client_pid = pid;
-                        break;
+                        windows_proc_stat((unsigned int)pid, &parent);
+                        if (parent == (unsigned int)x->peer_pid)
+                        {
+                                x->client = at;
+                                x->client_pid = pid;
+                                break;
+                        }
                 }
         }
         return x->client;
@@ -5375,27 +5366,22 @@ static long compositor_xwm_xdrag(long what, long row, long px, long py)
 #define COMPOSITOR_XWM_STEAM_QUIET 3000u // milliseconds
 static struct compositor_xwm_window *compositor_xwm_steam_window(unsigned int pid)
 {
-        if (!pid || pid == 1)
+        struct compositor_xwm_window *w;
+
+        if (!pid || pid == 1 || !compositor_xwm_steam.slot || compositor_xwm_steam.slot->fd < 0 ||
+            !compositor_xwm_steam.window || compositor_xwm_steam.pid != pid)
                 return 0;
-        for (int slot = 0; slot < COMPOSITOR_XWM_SLOTS; slot++)
+        compositor_xwm_at = compositor_xwm_steam.slot;
+        w = compositor_xwm_find(compositor_xwm_steam.window, 0);
+        if (!w || w->owner != pid)
         {
-                struct compositor_xwm *x = &compositor_xwm_slots[slot];
-
-                if (x->fd < 0)
-                        continue;
-                for (long at = 0; at < x->window_table.count; at++)
-                        if (x->window[at].id && x->window[at].steam_pid == pid && x->window[at].owner == pid)
-                        {
-                                struct compositor_xwm_window *w = &x->window[at];
-
-                                if (w->steam_open &&
-                                    (unsigned int)(clock_monotonic_nanoseconds() / 1000000) - w->steam_told > COMPOSITOR_XWM_STEAM_QUIET)
-                                        w->steam_open = 0;
-                                compositor_xwm_at = x;
-                                return w;
-                        }
+                compositor_xwm_at = &compositor_xwm_slots[0];
+                return 0;
         }
-        return 0;
+        if (compositor_xwm_steam.open &&
+            (unsigned int)(clock_monotonic_nanoseconds() / 1000000) - compositor_xwm_steam.told > COMPOSITOR_XWM_STEAM_QUIET)
+                compositor_xwm_steam.open = 0;
+        return w;
 }
 
 // The modifiers as X's state mask: Shift, Control, Mod1 (Alt), Mod4 (the logo key).
@@ -5415,7 +5401,8 @@ static void compositor_xwm_steam_send(struct compositor_xwm_window *w, unsigned 
         // Each event a later time than the one before: an X client takes a release and a press of one time for a key's repeat.
         now = now > last ? now : last + 1;
         last = now;
-        n = xwm_enc_input_event(event, sizeof event, type, detail, now, compositor_xwm_at->root, w->id, w->steam_x, w->steam_y, state);
+        n = xwm_enc_input_event(event, sizeof event, type, detail, now, compositor_xwm_at->root, w->id, compositor_xwm_steam.x,
+                                compositor_xwm_steam.y, state);
         if (n == XWM_EVENT_SIZE && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, 0, event, XWM_EVENT_SIZE)) > 0)
                 compositor_xwm_queue(req, n);
 }
@@ -5424,7 +5411,7 @@ static void compositor_xwm_steam_send(struct compositor_xwm_window *w, unsigned 
 static int compositor_xwm_steam_wants(unsigned int pid)
 {
         struct compositor_xwm_window *w = compositor_xwm_steam_window(pid);
-        int wants = w ? (w->steam_open ? 2 : 1) : 0;
+        int wants = w ? (compositor_xwm_steam.open ? 2 : 1) : 0;
 
         compositor_xwm_at = &compositor_xwm_slots[0];
         return wants;
@@ -5442,7 +5429,7 @@ static int compositor_xwm_steam_key(unsigned int pid, unsigned int code, int val
                 compositor_xwm_at = &compositor_xwm_slots[0];
                 return 0;
         }
-        if (!w->steam_focused)
+        if (!compositor_xwm_steam.focused)
         {
                 // FocusIn, mode NotifyNormal, detail NotifyNonlinear: the renderer reads the hot-key of the window with the focus.
                 unsigned char event[XWM_EVENT_SIZE], req[64];
@@ -5450,16 +5437,16 @@ static int compositor_xwm_steam_key(unsigned int pid, unsigned int code, int val
 
                 if (n == XWM_EVENT_SIZE && (n = xwm_enc_send_event(req, sizeof req, 0, w->id, 0, event, XWM_EVENT_SIZE)) > 0)
                         compositor_xwm_queue(req, n);
-                w->steam_focused = 1;
+                compositor_xwm_steam.focused = 1;
         }
-        if (code == CK_KEY_TAB && w->steam_tab && value != 1)
+        if (code == CK_KEY_TAB && compositor_xwm_steam.tab && value != 1)
         {
                 // The Tab of the Shift+Tab sent: its repeats and its release are not the game's.
                 if (!value)
-                        w->steam_tab = 0;
+                        compositor_xwm_steam.tab = 0;
                 taken = 1;
         }
-        else if (w->steam_open)
+        else if (compositor_xwm_steam.open)
         {
                 // The overlay is open: the key is its own, at the X keycode of the evdev code (Xwayland's keymap is the compositor's).
                 if (value != 2 && code + 8 <= 255)
@@ -5474,7 +5461,7 @@ static int compositor_xwm_steam_key(unsigned int pid, unsigned int code, int val
                 compositor_xwm_steam_send(w, XWM_EVENT_KEY_PRESS, 23, 1);
                 compositor_xwm_steam_send(w, XWM_EVENT_KEY_RELEASE, 23, 1);
                 compositor_xwm_steam_send(w, XWM_EVENT_KEY_RELEASE, 50, 1);
-                w->steam_tab = 1;
+                compositor_xwm_steam.tab = 1;
                 taken = 1;
         }
         if (taken)
@@ -5504,13 +5491,13 @@ static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, uns
         struct compositor_xwm_window *w = compositor_xwm_steam_window(pid);
         int taken = 0;
 
-        if (w && w->steam_open)
+        if (w && compositor_xwm_steam.open)
         {
                 taken = 1;
                 if (type == WINDOW_EVENT_MOTION)
                 {
-                        w->steam_x = compositor_xwm_steam_scale(a, width, w->width);
-                        w->steam_y = compositor_xwm_steam_scale(b, height, w->height);
+                        compositor_xwm_steam.x = compositor_xwm_steam_scale(a, width, w->width);
+                        compositor_xwm_steam.y = compositor_xwm_steam_scale(b, height, w->height);
                         compositor_xwm_steam_send(w, XWM_EVENT_MOTION_NOTIFY, 0, 0);
                 }
                 else if (type == WINDOW_EVENT_BUTTON)
@@ -5523,10 +5510,10 @@ static int compositor_xwm_steam_pointer(unsigned int pid, unsigned int type, uns
                                                           button, 0);
                 }
                 else if (type == WINDOW_EVENT_WHEEL && (flags & WINDOW_WHEEL_STOP))
-                        w->steam_wheel[0] = w->steam_wheel[1] = 0;
+                        compositor_xwm_steam.wheel[0] = compositor_xwm_steam.wheel[1] = 0;
                 else if (type == WINDOW_EVENT_WHEEL && a)
                 {
-                        int axis = b != 0, turn = flip ? -a : a, *left = &w->steam_wheel[axis];
+                        int axis = b != 0, turn = flip ? -a : a, *left = &compositor_xwm_steam.wheel[axis];
 
                         notch = notch > 0 ? notch : 120;
                         if ((*left > 0 && turn < 0) || (*left < 0 && turn > 0))

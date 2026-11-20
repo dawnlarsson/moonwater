@@ -1805,7 +1805,7 @@ static char gpu_said[256];
 #define gpu_kmsg_open() ((long)system_open_at(AT_FDCWD, (string_address) "/dev/kmsg", FILE_READ | O_NONBLOCK | O_CLOEXEC))
 // A read that answers EPIPE (-32) is the log's records overwritten under the reader (the ring wrapped during the walk): the kernel moved the
 // reader to its oldest record, and the next read goes on from there (devkmsg_read), so it is read again, not taken for the end (E-h4-1).
-static char *gpu_kmsg_next(long *handle, unsigned int *records)
+static char *gpu_kmsg_read(long *handle, unsigned int *records, b32 close_at_end)
 {
         static char record[8192];
         bipolar got;
@@ -1815,9 +1815,14 @@ static char *gpu_kmsg_next(long *handle, unsigned int *records)
         while (got == -32);
         if (got > 0)
                 return record[got] = 0, record;
-        if (*handle >= 0)
+        if (close_at_end && *handle >= 0)
                 system_close(*handle), *handle = -1;
         return 0;
+}
+
+static char *gpu_kmsg_next(long *handle, unsigned int *records)
+{
+        return gpu_kmsg_read(handle, records, true);
 }
 
 static void gpu_say_kernel(void)
@@ -2042,30 +2047,31 @@ static b32 gpu_map_as(const void *addr, positive size, b32 written)
 // (The map found last is looked at first: a present asks for the same few pictures over and over, and the table is up to 256 maps looked at in order. The
 // place kept is only where the looking starts: the map there is held to the pointer as any other is, so a table that has moved under it costs a look, not an answer.)
 static unsigned int gpu_map_last;
-static positive gpu_va_bytes(const void *pointer, positive bytes)
+static positive gpu_va_lookup(const void *pointer, positive bytes, b32 written_only)
 {
         for (unsigned int k = 0, i = gpu_map_last < gpu_map_count ? gpu_map_last : 0; k < gpu_map_count; k++, i = i + 1 < gpu_map_count ? i + 1 : 0)
-                if ((positive)pointer >= gpu_maps[i].from && (positive)pointer < gpu_maps[i].to && bytes <= gpu_maps[i].to - (positive)pointer) // no sum to wrap
+                if ((!written_only || gpu_maps[i].written) && (positive)pointer >= gpu_maps[i].from && (positive)pointer < gpu_maps[i].to &&
+                    bytes <= gpu_maps[i].to - (positive)pointer) // no sum to wrap
                 {
                         gpu_maps[i].used = gpu_tick, gpu_maps[i].handed = 1;
-                        gpu_map_hits++, gpu_map_last = i;
+                        if (!written_only)
+                                gpu_map_hits++, gpu_map_last = i;
                         return gpu_maps[i].va + (positive)pointer - gpu_maps[i].from;
                 }
-        gpu_map_misses++;
+        if (!written_only)
+                gpu_map_misses++;
         return 0;
+}
+static positive gpu_va_bytes(const void *pointer, positive bytes)
+{
+        return gpu_va_lookup(pointer, bytes, false);
 }
 #define gpu_va(pointer) gpu_va_bytes(pointer, 1)
 
 // The same, for a map the card may write (gpu_map_written): 0 for a pointer that only a map to read holds.
 static positive gpu_va_written(const void *pointer, positive bytes)
 {
-        for (unsigned int i = 0; i < gpu_map_count; i++)
-                if (gpu_maps[i].written && (positive)pointer >= gpu_maps[i].from && (positive)pointer < gpu_maps[i].to && bytes <= gpu_maps[i].to - (positive)pointer)
-                {
-                        gpu_maps[i].used = gpu_tick, gpu_maps[i].handed = 1;
-                        return gpu_maps[i].va + (positive)pointer - gpu_maps[i].from;
-                }
-        return 0;
+        return gpu_va_lookup(pointer, bytes, true);
 }
 
 static void gpu_unimport(positive at, enum gpu_gone_why why);
@@ -2400,35 +2406,43 @@ static const struct gpu_args address_to gpu_i915_args(const struct gpu_job *job,
         kernel checks. The source's own height is not seen here: its pixels are indexed by the tables, so a source of more than 2^26 pixels is the caller's
         to keep off the card.
 */
+// Shared Gen9 compute batch emitter: zeros state, populates binding table entries 0..nsurf-1 and surface states, writes descriptor, CURBE, and 56-dword batch.
+struct gpu_i915_surf { positive base; unsigned int width, rows, pitch; };
+static unsigned int gpu_i915_emit_batch(const struct gpu_job *job, unsigned int address_to words, const struct gpu_i915_surf surfs[3],
+                                        unsigned int nsurf, const unsigned int curbe[4], unsigned int ncurbe, unsigned int cols, unsigned int rows)
+{
+        static const unsigned int off[3] = {64, 256, 320};
+        p8 address_to state = (p8 address_to)job->state_at;
+        unsigned int sbase = (unsigned int)(job->state - GPU_VA);
+
+        memory_zero(state, 512);
+        gpu_i915_put(state, 0, sbase + 64);
+        gpu_i915_put(state, 4, sbase + 256);
+        if (nsurf >= 3)
+                gpu_i915_put(state, 8, sbase + 320);
+        for (unsigned int i = 0; i < nsurf; i++)
+                if (surfs[i].width)
+                        gpu_i915_surface(state, off[i], surfs[i].base, surfs[i].width, surfs[i].rows, surfs[i].pitch);
+        gpu_i915_descriptor(state, job, sbase);
+        for (unsigned int i = 0; i < ncurbe; i++)
+                gpu_i915_put(state, 192 + 4 * i, curbe[i]);
+        gpu_i915_frame(words, sbase, cols, rows);
+        return 56;
+}
+
 static unsigned int gpu_i915_scale_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
         const struct gpu_args address_to a = gpu_i915_args(job, room);
-        p8 address_to state = (p8 address_to)job->state_at;
-        unsigned int sbase, xg;
 
         if (!a || !a->w || a->w > 65535u || !a->rows || a->rows > 16384u || !a->sp || a->sp > 65535u || !a->dp || a->dp > 65535u || (a->dp & 15) || a->dp < a->w ||
             (a->sp & 15) || (positive)a->dp * a->rows > (1ull << 26) || a->s < GPU_VA || a->d < GPU_VA || a->g < GPU_VA || (a->s & 15) || (a->d & 15) || (a->g & 15))
                 return 0;
-        xg = (a->w + 3) / 4;
-        sbase = (unsigned int)(job->state - GPU_VA);
-        memory_zero(state, 512);
+        {
+                const struct gpu_i915_surf surfs[3] = {{a->d, 16384, 16384, 16384}, {a->s, 16384, 16384, 16384}, {a->g, 16384, 16384, 16384}};
+                const unsigned int curbe[4] = {a->sp, a->w, a->dp, 0};
 
-        // Binding table: entry 0 the destination (64), entry 1 the source (256), entry 2 the tables (320), relative to the state's base.
-        gpu_i915_put(state, 0, sbase + 64);
-        gpu_i915_put(state, 4, sbase + 256);
-        gpu_i915_put(state, 8, sbase + 320);
-        // The three surfaces are linear: 16384 bytes wide and rows, on a pitch of 16384, so a byte B is at x = B & 16383, y = B >> 14 (the card's media
-        // block messages want a 64-byte pitch; this one takes any offset).
-        gpu_i915_surface(state, 64, a->d, 16384, 16384, 16384);
-        gpu_i915_surface(state, 256, a->s, 16384, 16384, 16384);
-        gpu_i915_surface(state, 320, a->g, 16384, 16384, 16384);
-        gpu_i915_descriptor(state, job, sbase);
-        // The CURBE: the source's pitch (a word: the kernel multiplies by it), w, and the destination's pitch (a word, dword 2).
-        gpu_i915_put(state, 192, a->sp);
-        gpu_i915_put(state, 196, a->w);
-        gpu_i915_put(state, 200, a->dp);
-        gpu_i915_frame(words, sbase, xg, a->rows);
-        return 56;
+                return gpu_i915_emit_batch(job, words, surfs, 3, curbe, 3, (a->w + 3) / 4, a->rows);
+        }
 }
 
 // The scene (op 4, gpu_i915_cp.iga): the picture a->w pixels by a->gp rows (the scene's w and h), a->dp pixels a row (a multiple of 16, at least w), at
@@ -2439,32 +2453,18 @@ static unsigned int gpu_i915_scale_batch(const struct gpu_job *job, unsigned int
 static unsigned int gpu_i915_cp_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
         const struct gpu_args address_to a = gpu_i915_args(job, room);
-        p8 address_to state = (p8 address_to)job->state_at;
-        unsigned int blocks, cw, ch, sbase, pitch;
+        unsigned int blocks, cw, ch;
 
         if (!a || a->x0 || a->y0 || !a->w || !a->gp || a->w > 4096u || a->gp > 16384u || !a->dp || a->dp > 65536u || (a->dp & 15) || a->dp < a->w ||
             a->d < GPU_VA || (a->d & 31) || a->g < GPU_VA || (a->g & 63))
                 return 0;
         blocks = (a->w + 3) >> 2, cw = (a->w + 63) >> 6, ch = (a->gp + 63) >> 6;
-        pitch = 4u * a->dp;
-        sbase = (unsigned int)(job->state - GPU_VA);
-        memory_zero(state, 512);
+        {
+                const struct gpu_i915_surf surfs[3] = {{a->d, 16u * blocks, a->gp, 4u * a->dp}, {a->g, 16384, 16384, 16384}, {0, 0, 0, 0}};
+                const unsigned int curbe[4] = {a->w, cw, 8u * cw * ch, 0};
 
-        // Binding table: entry 0 = the destination's surface state, entry 1 = the bins' (both relative to the surface base, the card's buffer).
-        gpu_i915_put(state, 0, sbase + 64);
-        gpu_i915_put(state, 4, sbase + 256);
-        // The destination: a byte surface 16 * blocks bytes wide (the pad of a row's last block is in it, and left as it was), a->gp rows, the pitch in bytes.
-        gpu_i915_surface(state, 64, a->d, 16u * blocks, a->gp, pitch);
-        // The bins: a byte surface 16384 bytes a row, 16384 rows, so that every 8-byte read of a cell or a record lies in it (a read at an offset that
-        // is a multiple of 8 never crosses a row).
-        gpu_i915_surface(state, 256, a->g, 16384, 16384, 16384);
-        gpu_i915_descriptor(state, job, sbase);
-        // The CURBE (64 bytes from 192): the picture's width in pixels, the cells a row, the lists' offset from the bins (8 * cells).
-        gpu_i915_put(state, 192 + 0, a->w);
-        gpu_i915_put(state, 192 + 4, cw);
-        gpu_i915_put(state, 192 + 8, 8u * cw * ch);
-        gpu_i915_frame(words, sbase, blocks, a->gp);
-        return 56;
+                return gpu_i915_emit_batch(job, words, surfs, 2, curbe, 3, blocks, a->gp);
+        }
 }
 
 /*
@@ -2480,9 +2480,8 @@ static unsigned int gpu_i915_cp_batch(const struct gpu_job *job, unsigned int ad
 static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int address_to words, unsigned int room)
 {
         const struct gpu_args address_to a = gpu_i915_args(job, room);
-        p8 address_to state = (p8 address_to)job->state_at;
-        unsigned int sbase, xg, rows, px0, py0, px1, py1, i, img_rows = 0;
-        positive base, pitch, img_base = 0, img_min = 0, img_max = 0;
+        unsigned int rows, px0, py0, px1, py1, i, img_rows = 0;
+        positive base, img_base = 0, img_min = 0, img_max = 0;
         int has_img = 0;
 
         if (!a || !a->count || a->count > 16384u || a->ops < GPU_VA || (a->ops & 63) || !a->sp || (a->sp & 3) || a->sp > 4096u || !a->gp || a->gp > 16384u ||
@@ -2544,33 +2543,16 @@ static unsigned int gpu_i915_scene_batch(const struct gpu_job *job, unsigned int
                 if (!img_rows)
                         img_rows = 1;
         }
-        pitch = 4u * a->dp;
-        sbase = (unsigned int)(job->state - GPU_VA);
-        xg = (px1 - px0) / 4;
         rows = py1 - py0;
-        memory_zero(state, 512);
-
-        // Binding table: entry 0 the destination's surface state (64), entry 1 the records' (256), entry 2 the image surface (320), relative to state's base.
-        gpu_i915_put(state, 0, sbase + 64);
-        gpu_i915_put(state, 4, sbase + 256);
-        if (has_img)
         {
-                gpu_i915_put(state, 8, sbase + 320);
-                gpu_i915_surface(state, 320, img_base, 16384, img_rows, 16384);
+                const struct gpu_i915_surf surfs[3] = {
+                    {base, 4u * (px1 - px0), rows, 4u * a->dp},
+                    {a->ops, 64, (a->count + 1) >> 1, 64},
+                    {img_base, has_img ? 16384u : 0u, img_rows, 16384u}};
+                const unsigned int curbe[4] = {a->count, px0, py0, (unsigned int)img_base};
+
+                return gpu_i915_emit_batch(job, words, surfs, has_img ? 3u : 2u, curbe, has_img ? 4u : 3u, (px1 - px0) / 4, rows);
         }
-        // The destination: R8_UNORM bytes, 4 * (px1 - px0) wide, rows high, pitch 4 * dp, based on the block at px0, py0.
-        gpu_i915_surface(state, 64, base, 4u * (px1 - px0), rows, pitch);
-        // The records: 64 bytes a row (two records), (count + 1) / 2 rows, pitch 64, based on the first record.
-        gpu_i915_surface(state, 256, a->ops, 64, (a->count + 1) >> 1, 64);
-        gpu_i915_descriptor(state, job, sbase);
-        // The CURBE: the record count, the first pixel's x and y, and the low 32 bits of the image surface base (dwords 0..3).
-        gpu_i915_put(state, 192, a->count);
-        gpu_i915_put(state, 196, px0);
-        gpu_i915_put(state, 200, py0);
-        if (has_img)
-                gpu_i915_put(state, 204, (unsigned int)img_base);
-        gpu_i915_frame(words, sbase, xg, rows);
-        return 56;
 }
 
 // The batch for one job, by op: 0 copy, 1 fill, 2 tone and 3 glass take the byte surface (the whole rows, or refused: the processor draws a
@@ -2582,9 +2564,8 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
 {
         // The arguments are in the same mapped buffer as the state: their CPU address is the state's, plus their card distance from it.
         const struct gpu_args address_to a = gpu_i915_args(job, room);
-        p8 address_to state = (p8 address_to)job->state_at;
         struct gpu_i915_split s;
-        unsigned int xg, sbase, pitch, span, spitch, gpitch;
+        unsigned int pitch, span, spitch, gpitch;
 
         if (!a)
                 return 0;
@@ -2613,28 +2594,15 @@ static unsigned int gpu_i915_gen9_batch(const struct gpu_job *job, unsigned int 
         gpitch = 4u * a->gp;
         if (a->op == 3 && (a->g < GPU_VA || (a->g & 31) || !a->gp || a->gp > 65536u || gpitch < span || (gpitch & 63)))
                 return 0;
-        xg = s.span / 16;
-        sbase = (unsigned int)(job->state - GPU_VA);
-        memory_zero(state, 512);
+        {
+                const struct gpu_i915_surf surfs[3] = {
+                    {s.interior, s.span, a->rows, pitch},
+                    {a->s, (a->op == 0 || a->op == 3) ? s.span : 0u, a->rows, spitch},
+                    {a->g, a->op == 3 ? s.span : 0u, a->rows, gpitch}};
+                const unsigned int curbe[4] = {a->v, a->x0, a->y0, 0};
 
-        // Binding table: entry 0 = the destination's surface state, entry 1 = the source's (both relative to the surface base, the card's buffer).
-        gpu_i915_put(state, 0, sbase + 64);
-        gpu_i915_put(state, 4, sbase + 256);
-        if (a->op == 0 || a->op == 3)
-                gpu_i915_surface(state, 256, a->s, s.span, a->rows, spitch);
-        if (a->op == 3) {
-                // Glass's ground (entry 2) at 320: the same surface state, its base the card's address of the ground, its pitch the ground's.
-                gpu_i915_put(state, 8, sbase + 320);
-                gpu_i915_surface(state, 320, a->g, s.span, a->rows, gpitch);
+                return gpu_i915_emit_batch(job, words, surfs, a->op == 3 ? 3u : 2u, curbe, a->op == 3 ? 3u : 1u, s.span / 16, a->rows);
         }
-        gpu_i915_surface(state, 64, s.interior, s.span, a->rows, pitch);
-        gpu_i915_descriptor(state, job, sbase);
-        // The colour dword: the CURBE reads 64 bytes from here (its first dword is the colour).
-        gpu_i915_put(state, 192, a->v);
-        if (a->op == 3) // glass: the grain's origin (its parities, the kernel's r1.1 and r1.2)
-                gpu_i915_put(state, 196, a->x0), gpu_i915_put(state, 200, a->y0);
-        gpu_i915_frame(words, sbase, xg, a->rows);
-        return 56;
 }
 
 // The set as the table will hold it, once registered: the eight ops in the order of gpu_kernels (copy, fill, tone, glass, cp, bx, scene, scale),
@@ -2805,13 +2773,7 @@ static b32 gpu_fault_pending_new; // the tail was opened again: what the reads f
 // The tail's next record, or 0 once there is none now (EAGAIN): the log stays open, at its end.
 static char *gpu_kmsg_more(unsigned int *records)
 {
-        static char record[8192];
-        bipolar got;
-
-        do
-                got = gpu_kmsg_tail >= 0 && (*records)++ < 8192 ? system_read_once(gpu_kmsg_tail, record, sizeof(record) - 1) : 0;
-        while (got == -32);
-        return got > 0 ? (record[got] = 0, record) : 0;
+        return gpu_kmsg_read(&gpu_kmsg_tail, records, false);
 }
 
 static void gpu_kmsg_drain(void)
@@ -3604,16 +3566,23 @@ static b32 gpu_nv12(positive luma, unsigned int luma_pitch, positive chroma, uns
 #define GPU_IMAGE_RAW 2u  // (gpu_amd_image's word) a resource of 32_UINT: the pixel's word as it is
 #define GPU_IMAGE_SWAP 4u // and its red and blue the other way
 #define GPU_IMAGE_MADE 8u // a resource made
+static void gpu_image_args(const unsigned int desc[8], unsigned int kind, unsigned int x0, unsigned int y0, positive dst, unsigned int dp, unsigned int w,
+                           unsigned int h)
+{
+        struct gpu_args address_to a = GPU_ARGS;
+
+        a->s = 0, a->d = dst, a->g = 0, a->sp = 0, a->dp = dp, a->gp = 0, a->w = w, a->op = 8;
+        a->v = kind & (GPU_IMAGE_OVER | GPU_IMAGE_RAW | GPU_IMAGE_SWAP), a->x0 = x0, a->y0 = y0, a->rows = h, a->tab = 0;
+        memory_copy((p8 address_to)a + 128, desc, 32);
+}
+
 static b32 gpu_image(const unsigned int desc[8], unsigned int kind, unsigned int x0, unsigned int y0, positive dst, unsigned int dp, unsigned int w, unsigned int h)
 {
-        struct gpu_args address_to a;
-
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
         if (!w || !h || !gpu_idle() || gpu_set != &gpu_amd_rdna2)
                 return false;
-        gpu_slot_take(), a = GPU_ARGS;
-        a->s = 0, a->d = dst, a->g = 0, a->sp = 0, a->dp = dp, a->gp = 0, a->w = w, a->op = 8, a->v = kind & (GPU_IMAGE_OVER | GPU_IMAGE_RAW | GPU_IMAGE_SWAP), a->x0 = x0, a->y0 = y0, a->rows = h, a->tab = 0;
-        memory_copy((p8 address_to)a + 128, desc, 32);
+        gpu_slot_take();
+        gpu_image_args(desc, kind, x0, y0, dst, dp, w, h);
         return gpu_run();
 }
 
@@ -3622,14 +3591,10 @@ static b32 gpu_image(const unsigned int desc[8], unsigned int kind, unsigned int
 static positive gpu_image_go(const unsigned int desc[8], unsigned int kind, unsigned int x0, unsigned int y0, positive dst, unsigned int dp, unsigned int w,
                              unsigned int h)
 {
-        struct gpu_args address_to a;
-
         gpu_last_error = 0, gpu_end = GPU_END_NONE;
         if (!w || !h || gpu_set != &gpu_amd_rdna2 || gpu_lost || gpu_slot_take() < 0)
                 return 0;
-        a = GPU_ARGS;
-        a->s = 0, a->d = dst, a->g = 0, a->sp = 0, a->dp = dp, a->gp = 0, a->w = w, a->op = 8, a->v = kind & (GPU_IMAGE_OVER | GPU_IMAGE_RAW | GPU_IMAGE_SWAP), a->x0 = x0, a->y0 = y0, a->rows = h, a->tab = 0;
-        memory_copy((p8 address_to)a + 128, desc, 32);
+        gpu_image_args(desc, kind, x0, y0, dst, dp, w, h);
         return gpu_go();
 }
 

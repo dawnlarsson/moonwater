@@ -904,9 +904,14 @@ static struct taskbar_band
         int glow_shown;         // its glow was in the last frame, so the frame after it puts the ground back where it was
 } taskbar_bands[WINDOWS_OUTPUTS];
 
+static inline struct taskbar_band address_to taskbar_band_cur(void)
+{
+        return &taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0];
+}
+
 static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
 {
-        struct taskbar_band address_to band = &taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0];
+        struct taskbar_band address_to band = taskbar_band_cur();
         struct taskbar_key key = {taskbar.shift, view->width, view->height, view->scale, view->x, view->y, (int)view->position, (int)view->count,
                                   view->lengths != null, taskbar.scale, taskbar.padding, taskbar.launcher != 0,
                                   taskbar.tray_custom ? taskbar.tray_chars : -1, 0, language_rtl(),
@@ -1060,7 +1065,7 @@ static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage
         // changing every frame under it, the taskbar's moon, its clock's glyphs and their glow a quarter of the loop thread's samples.
         if (solid)
         {
-                const struct taskbar_band address_to own = &taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0];
+                const struct taskbar_band address_to own = taskbar_band_cur();
 
                 for (unsigned int at = 0; own->moon_own && at < damages; at++)
                         if (!memory_compare(damage[at], own->moon_damage, sizeof(damage[at])))
@@ -1077,7 +1082,7 @@ static unsigned long taskbar_meets(const struct taskbar_view *view, int (*damage
                 reach[0] -= COMPOSITOR_GLASS_REACH, reach[1] -= COMPOSITOR_GLASS_REACH;
                 for (unsigned int at = 0; at < damages; at++)
                 {
-                        const struct taskbar_band address_to own = &taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0];
+                        const struct taskbar_band address_to own = taskbar_band_cur();
                         int meet[4];
 
                         // What the moon damaged of itself is no change under the band: it is the moon's to draw again, not the others'.
@@ -1152,17 +1157,24 @@ static void taskbar_say(const struct taskbar_view *view, const struct ui_tree ad
                 ui_cell_line(taskbar_cell(view, band->w), n->x - band->x, n->y - band->y, n->w, n->h, text, ink, ground);
 }
 
-// The kit's drawing state over the band's own pixels, recording into the frame's scene when there is one: what the marks that are
-// drawn with the kit's painters stand on. Answers the mark in the middle of the element n, and where it is in those pixels.
-static const struct ui_node address_to taskbar_ui(struct ui *ui, const struct taskbar_view *view, const struct ui_tree address_to t,
-                                                  const struct ui_node address_to n, int *x, int *y)
+// The kit's drawing state over the band's own pixels, recording into the frame's scene when there is one.
+static void taskbar_band_ui(struct ui *ui, const struct taskbar_view *view, const struct ui_tree address_to t)
 {
         ui_tree_ready(t);
-        const struct ui_node address_to band = &t->node[1], address_to mark = &t->node[n->first];
+        const struct ui_node address_to band = &t->node[1];
 
         memory_zero(ui, sizeof(*ui));
         ui->pixels = view->pixels, ui->pitch = (unsigned long)band->w, ui->width = band->w, ui->height = band->h, ui->top = 0, ui->bottom = band->h;
-        ui->scale = taskbar_scaled(view->scale), ui->scene = view->scene;
+        ui->scale = taskbar_scaled(view->scale), ui->scene = view->scene, ui->engine = view->engine, ui->regular = view->face;
+}
+
+// Answers the mark in the middle of the element n, and where it is in the band's pixels.
+static const struct ui_node address_to taskbar_ui(struct ui *ui, const struct taskbar_view *view, const struct ui_tree address_to t,
+                                                  const struct ui_node address_to n, int *x, int *y)
+{
+        taskbar_band_ui(ui, view, t);
+        const struct ui_node address_to band = &t->node[1], address_to mark = &t->node[n->first];
+
         *x = mark->x - band->x, *y = mark->y - band->y;
         return mark;
 }
@@ -1203,12 +1215,8 @@ static unsigned int taskbar_glass_tab(const struct taskbar_view *view, int gx, i
 // The kit's drawing state over the band's pixels as a glass whose ground is what a plate came to (ui_inks), for its buttons.
 static fn taskbar_glass_ui(struct ui *ui, const struct taskbar_view *view, const struct ui_tree address_to t, unsigned int ground)
 {
-        ui_tree_ready(t);
-        const struct ui_node address_to band = &t->node[1];
-
-        memory_zero(ui, sizeof(*ui));
-        ui->pixels = view->pixels, ui->pitch = (unsigned long)band->w, ui->width = band->w, ui->height = band->h, ui->top = 0, ui->bottom = band->h;
-        ui->scale = taskbar_scaled(view->scale), ui->scene = view->scene, ui->glass = 1;
+        taskbar_band_ui(ui, view, t);
+        ui->glass = 1;
         ui_inks(ui, ground);
 }
 
@@ -1288,7 +1296,7 @@ static int taskbar_tween_moving(const struct ui_tween address_to t, positive now
 static b64 taskbar_moon_share(void)
 {
         b32 live = 0;
-        b64 share = ui_tween_at(&taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0].grow, &live);
+        b64 share = ui_tween_at(&taskbar_band_cur()->grow, &live);
 
         return share < 0 ? 0 : share > UI_ONE ? UI_ONE : share;
 }
@@ -1379,7 +1387,7 @@ static int taskbar_moon_glow_was(int band, int shown)
 */
 static int taskbar_moon_glow(const struct taskbar_view *view, unsigned int *pixels, const int square[4])
 {
-        struct taskbar_band address_to band = &taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0];
+        struct taskbar_band address_to band = taskbar_band_cur();
         b64 share = taskbar_moon_share(), level = taskbar_moon_glow_level();
         int side = square[2], size, key[5];
         unsigned int accent = taskbar_accent();
@@ -1526,15 +1534,8 @@ static int taskbar_moving(positive now)
 // Decimal digits of a value from 0 to 999, with no sign.
 static void taskbar_digits(char *into, int value)
 {
-        char backwards[4];
-        int count = 0, at = 0;
-
-        do
-                backwards[count++] = (char)('0' + value % 10), value /= 10;
-        while (value > 0 && count < 4);
-        while (count > 0)
-                into[at++] = backwards[--count];
-        into[at] = 0;
+        value = value < 0 ? 0 : value > 9999 ? 9999 : value;
+        into[positive_into_string((string_address)into, (positive)value)] = 0;
 }
 
 // The battery as the tray shows it: its percentage, with a plus in front while it charges.
@@ -2272,10 +2273,8 @@ static void taskbar_tab_rounded(struct ui address_to ui, int x, int y, int side,
 
                         if (((ends & 1) && dx < 0) || ((ends & 2) && dx > 0) || ((ends & 4) && dy < 0) || ((ends & 8) && dy > 0))
                         {
-                                int d2 = dx * dx + dy * dy, d = 0, inside;
+                                int d = (int)ui_touch_isqrt((unsigned long long)(dx * dx + dy * dy)), inside;
 
-                                while ((d + 1) * (d + 1) <= d2)
-                                        d++;
                                 // The edge is at side halves (the radius); a pixel whose middle is on it is half covered.
                                 inside = (side - d) * 128 + 128;
                                 cover = inside < 0 ? 0u : inside > 256 ? 256u : (unsigned int)inside;
@@ -2300,9 +2299,7 @@ static void taskbar_tab_turning(const struct taskbar_view *view, const struct ui
 
         if (side <= 0 || x < 0 || y < 0 || x + side > band->w || y + side > band->h || scale <= 0)
                 return;
-        memory_zero(&ui, sizeof(ui));
-        ui.pixels = view->pixels, ui.pitch = (unsigned long)band->w, ui.width = band->w, ui.height = band->h, ui.top = 0, ui.bottom = band->h;
-        ui.scale = scale, ui.scene = view->scene, ui.engine = view->engine, ui.regular = view->face;
+        taskbar_band_ui(&ui, view, t);
         memory_zero(&spin, sizeof(spin));
         spin.kind = UI_SPINNER, spin.w = side * 100 / scale, spin.x = x * 100 / scale, spin.y = y * 100 / scale;
         ui_kit.now = ui_kit_clock(), ui_kit.motion = !taskbar.glides;
@@ -2323,9 +2320,7 @@ static void taskbar_tab_icon(const struct taskbar_view *view, const struct ui_tr
 
         if (side <= 0 || x < 0 || y < 0 || x + side > band->w || y + side > band->h)
                 return;
-        memory_zero(&ui, sizeof(ui));
-        ui.pixels = view->pixels, ui.pitch = (unsigned long)band->w, ui.width = band->w, ui.height = band->h, ui.top = 0, ui.bottom = band->h;
-        ui.scale = taskbar_scaled(view->scale), ui.scene = view->scene, ui.engine = view->engine, ui.regular = view->face;
+        taskbar_band_ui(&ui, view, t);
         // The edges the picture shares with its task along the task's length are the task's round ends; an icon-only task's is a circle.
         if (tab && tab->w >= tab->h)
                 ends = (n->x <= tab->x ? 1u : 0u) | (n->x + n->w >= tab->x + tab->w ? 2u : 0u);
@@ -2426,7 +2421,8 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 {
         const struct ui_tree address_to t = taskbar_tree(view);
         const struct ui_node address_to band = &t->node[1];
-        struct taskbar_lit address_to lit = &taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0].lit;
+        struct taskbar_band address_to cur = taskbar_band_cur();
+        struct taskbar_lit address_to lit = &cur->lit;
         int span[4] = {0, 0, 0, 0}, stripe[4], gw, time_ok;
         timespec now = {0, 0};
         time_t seconds;
@@ -2437,7 +2433,7 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
         char clock[6] = {0}, text[8];
 
         taskbar.stale = 0;
-        taskbar_bands[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0].moon_own = 0;
+        cur->moon_own = 0;
         if (!view->pixels || (unsigned long)band->w * (unsigned long)band->h * 4 > view->band_bytes)
                 return 0;
         for (int which = TASKBAR_TRAY_BEFORE; which < (int)view->count; which++)

@@ -417,6 +417,56 @@ XWM_API long xwm_request_start(unsigned char *out, unsigned long cap, unsigned l
         return (long)bytes;
 }
 
+/* Packs a fixed-word request: 4-byte header (opcode, data, length) followed by `count` 32-bit words. */
+static long xwm_request_words(unsigned char *out, unsigned long cap, unsigned int opcode, unsigned char data,
+                              const unsigned int *words, unsigned long count)
+{
+        long n = xwm_request_start(out, cap, 4 + XWM_UNIT * count, opcode);
+
+        if (n < 0)
+                return n;
+        out[1] = data;
+        for (unsigned long i = 0; i < count; i++)
+                xwm_put32(out + 4 + XWM_UNIT * i, words[i]);
+        return n;
+}
+
+/* Packs a name-bearing request (InternAtom, QueryExtension): 8-byte header + padded name bytes. */
+static long xwm_request_name(unsigned char *out, unsigned long cap, unsigned int opcode, unsigned char data,
+                             const unsigned char *name, unsigned long name_len, unsigned long max_len)
+{
+        long n;
+
+        if (!name || name_len == 0)
+                return XWM_ERR_ARG;
+        if (name_len > max_len)
+                return XWM_ERR_CAP;
+        n = xwm_request_start(out, cap, XWM_REQUEST_SHORT + xwm_pad4(name_len), opcode);
+        if (n < 0)
+                return n;
+        out[1] = data;
+        xwm_put16(out + 4, (unsigned int)name_len);
+        for (unsigned long i = 0; i < name_len; i++)
+                out[XWM_REQUEST_SHORT + i] = name[i];
+        return n;
+}
+
+/* Packs a 32-byte synthetic event with type, detail byte, and `count` leading 32-bit words. */
+static long xwm_event_words(unsigned char *out, unsigned long cap, unsigned char type, unsigned char detail,
+                            const unsigned int *words, unsigned long count)
+{
+        if (!out)
+                return XWM_ERR_ARG;
+        if (cap < XWM_EVENT_SIZE)
+                return XWM_ERR_SPACE;
+        xwm_zero(out, XWM_EVENT_SIZE);
+        out[0] = type;
+        out[1] = detail;
+        for (unsigned long i = 0; i < count; i++)
+                xwm_put32(out + 4 + XWM_UNIT * i, words[i]);
+        return XWM_EVENT_SIZE;
+}
+
 /* The setup request: byte order, protocol 11.0, and no authorization. */
 XWM_API long xwm_enc_setup_request(unsigned char *out, unsigned long cap)
 {
@@ -434,39 +484,17 @@ XWM_API long xwm_enc_setup_request(unsigned char *out, unsigned long cap)
 /* InternAtom: the name's bytes, padded to a unit. */
 XWM_API long xwm_enc_intern_atom(unsigned char *out, unsigned long cap, int only_if_exists, const unsigned char *name, unsigned long name_len)
 {
-        long n;
-
-        if (!name || name_len == 0)
-                return XWM_ERR_ARG;
-        if (name_len > XWM_ATOM_NAME_MAX)
-                return XWM_ERR_CAP;
-        n = xwm_request_start(out, cap, XWM_REQUEST_SHORT + xwm_pad4(name_len), XWM_OP_INTERN_ATOM);
-        if (n < 0)
-                return n;
-        out[1] = only_if_exists ? 1 : 0;
-        xwm_put16(out + 4, (unsigned int)name_len);
-        for (unsigned long i = 0; i < name_len; i++)
-                out[XWM_REQUEST_SHORT + i] = name[i];
-        return n;
+        return xwm_request_name(out, cap, XWM_OP_INTERN_ATOM, only_if_exists ? 1 : 0, name, name_len, XWM_ATOM_NAME_MAX);
 }
 
 /* GetProperty: the value's start and length are in units of its format, and the length is capped. */
 XWM_API long xwm_enc_get_property(unsigned char *out, unsigned long cap, int delete_it, unsigned int window, unsigned int property, unsigned int type, unsigned int long_offset, unsigned int long_length)
 {
-        long n;
+        unsigned int w[5] = {window, property, type, long_offset, long_length};
 
         if (long_length > XWM_PROPERTY_MAX / XWM_UNIT)
                 return XWM_ERR_CAP;
-        n = xwm_request_start(out, cap, 24, XWM_OP_GET_PROPERTY);
-        if (n < 0)
-                return n;
-        out[1] = delete_it ? 1 : 0;
-        xwm_put32(out + 4, window);
-        xwm_put32(out + 8, property);
-        xwm_put32(out + 12, type);
-        xwm_put32(out + 16, long_offset);
-        xwm_put32(out + 20, long_length);
-        return n;
+        return xwm_request_words(out, cap, XWM_OP_GET_PROPERTY, delete_it ? 1 : 0, w, 5);
 }
 
 /* ChangeProperty: the data is the value's bytes, little-endian, in whole elements of the format. */
@@ -503,17 +531,11 @@ XWM_API long xwm_enc_change_property(unsigned char *out, unsigned long cap, unsi
 /* ChangeWindowAttributes with one value: the window's event mask. */
 XWM_API long xwm_enc_select_events(unsigned char *out, unsigned long cap, unsigned int window, unsigned int event_mask)
 {
-        long n;
+        unsigned int w[3] = {window, XWM_CW_EVENT_MASK, event_mask};
 
         if (event_mask & ~XWM_MASK_ALL)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 16, XWM_OP_CHANGE_WINDOW_ATTRIBUTES);
-        if (n < 0)
-                return n;
-        xwm_put32(out + 4, window);
-        xwm_put32(out + 8, XWM_CW_EVENT_MASK);
-        xwm_put32(out + 12, event_mask);
-        return n;
+        return xwm_request_words(out, cap, XWM_OP_CHANGE_WINDOW_ATTRIBUTES, 0, w, 3);
 }
 
 /* CreateWindow with no values: depth 0 copies the parent's. The window manager's check window is one of these. */
@@ -543,30 +565,18 @@ XWM_API long xwm_enc_create_window(unsigned char *out, unsigned long cap, unsign
 /* The requests of one window, each eight bytes: MapWindow, UnmapWindow, DestroyWindow, GetGeometry, GetWindowAttributes. */
 XWM_API long xwm_enc_window_op(unsigned char *out, unsigned long cap, unsigned int opcode, unsigned int window)
 {
-        long n;
-
         if (opcode != XWM_OP_MAP_WINDOW && opcode != XWM_OP_UNMAP_WINDOW && opcode != XWM_OP_DESTROY_WINDOW &&
                 opcode != XWM_OP_GET_GEOMETRY && opcode != XWM_OP_GET_WINDOW_ATTRIBUTES)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, XWM_REQUEST_SHORT, opcode);
-        if (n < 0)
-                return n;
-        xwm_put32(out + 4, window);
-        return n;
+        return xwm_request_words(out, cap, opcode, 0, &window, 1);
 }
 
 /* ReparentWindow: places window inside parent at (x, y). */
 XWM_API long xwm_enc_reparent_window(unsigned char *out, unsigned long cap, unsigned int window, unsigned int parent, int x, int y)
 {
-        long n = xwm_request_start(out, cap, 16, XWM_OP_REPARENT_WINDOW);
+        unsigned int w[3] = {window, parent, ((unsigned int)x & 0xffffu) | (((unsigned int)y & 0xffffu) << 16)};
 
-        if (n < 0)
-                return n;
-        xwm_put32(out + 4, window);
-        xwm_put32(out + 8, parent);
-        xwm_put16(out + 12, x);
-        xwm_put16(out + 14, y);
-        return n;
+        return xwm_request_words(out, cap, XWM_OP_REPARENT_WINDOW, 0, w, 3);
 }
 
 /* ConfigureWindow: the value mask's bits, in order, each with its value as four bytes. */
@@ -621,50 +631,26 @@ XWM_API long xwm_enc_configure_window(unsigned char *out, unsigned long cap, uns
 
 XWM_API long xwm_enc_set_input_focus(unsigned char *out, unsigned long cap, unsigned int revert_to, unsigned int focus, unsigned int time)
 {
-        long n;
+        unsigned int w[2] = {focus, time};
 
         if (revert_to > XWM_REVERT_PARENT)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 12, XWM_OP_SET_INPUT_FOCUS);
-        if (n < 0)
-                return n;
-        out[1] = (unsigned char)revert_to;
-        xwm_put32(out + 4, focus);
-        xwm_put32(out + 8, time);
-        return n;
+        return xwm_request_words(out, cap, XWM_OP_SET_INPUT_FOCUS, (unsigned char)revert_to, w, 2);
 }
 
 /* QueryExtension: the name's bytes, padded to a unit. The reply says whether the extension is there and its opcodes. */
 XWM_API long xwm_enc_query_extension(unsigned char *out, unsigned long cap, const unsigned char *name, unsigned long name_len)
 {
-        long n;
-
-        if (!name || name_len == 0)
-                return XWM_ERR_ARG;
-        if (name_len > XWM_EXT_NAME_MAX)
-                return XWM_ERR_CAP;
-        n = xwm_request_start(out, cap, XWM_REQUEST_SHORT + xwm_pad4(name_len), XWM_OP_QUERY_EXTENSION);
-        if (n < 0)
-                return n;
-        xwm_put16(out + 4, (unsigned int)name_len);
-        for (unsigned long i = 0; i < name_len; i++)
-                out[XWM_REQUEST_SHORT + i] = name[i];
-        return n;
+        return xwm_request_name(out, cap, XWM_OP_QUERY_EXTENSION, 0, name, name_len, XWM_EXT_NAME_MAX);
 }
 
 static long xwm_enc_ext_version(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned char minor_opcode, unsigned int client_major, unsigned int client_minor)
 {
-        long n;
+        unsigned int w[2] = {client_major, client_minor};
 
         if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 12, major_opcode);
-        if (n < 0)
-                return n;
-        out[1] = minor_opcode;
-        xwm_put32(out + 4, client_major);
-        xwm_put32(out + 8, client_minor);
-        return n;
+        return xwm_request_words(out, cap, major_opcode, minor_opcode, w, 2);
 }
 
 /* Composite QueryVersion: twelve bytes, the client's version (the protocol's answer is the one the server can give). The major
@@ -678,53 +664,34 @@ XWM_API long xwm_enc_composite_query_version(unsigned char *out, unsigned long c
    them) or Automatic. Twelve bytes. */
 XWM_API long xwm_enc_composite_redirect_subwindows(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int window, unsigned int update)
 {
-        long n;
+        unsigned int w[2] = {window, update};
 
         if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255)
                 return XWM_ERR_ARG;
         if (update != XWM_REDIRECT_AUTOMATIC && update != XWM_REDIRECT_MANUAL)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 12, major_opcode);
-        if (n < 0)
-                return n;
-        out[1] = XWM_COMPOSITE_REDIRECT_SUBWINDOWS;
-        xwm_put32(out + 4, window);
-        out[8] = (unsigned char)update;
-        return n;
+        return xwm_request_words(out, cap, major_opcode, XWM_COMPOSITE_REDIRECT_SUBWINDOWS, w, 2);
 }
 
 /* X-Resource QueryClientIds for one resource, the pid only: sixteen bytes, one spec of the resource's client and the LocalClientPID
    mask. Any resource of a client names the client (the server keeps the client's part of the id). */
 XWM_API long xwm_enc_xres_client_pid(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int resource)
 {
-        long n;
+        unsigned int w[3] = {1, resource, XWM_XRES_LOCAL_CLIENT_PID};
 
         if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255 || !resource)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 16, major_opcode);
-        if (n < 0)
-                return n;
-        out[1] = XWM_XRES_QUERY_CLIENT_IDS;
-        xwm_put32(out + 4, 1);
-        xwm_put32(out + 8, resource);
-        xwm_put32(out + 12, XWM_XRES_LOCAL_CLIENT_PID);
-        return n;
+        return xwm_request_words(out, cap, major_opcode, XWM_XRES_QUERY_CLIENT_IDS, w, 3);
 }
 
-/* X-Resource QueryVersion: twelve bytes, the client's version as two bytes (1.2). */
+/* X-Resource QueryVersion: eight bytes, the client's version as two bytes (1.2). */
 XWM_API long xwm_enc_xres_query_version(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int client_major, unsigned int client_minor)
 {
-        long n;
+        unsigned int w = client_major | (client_minor << 8);
 
         if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255 || client_major > 255 || client_minor > 255)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 8, major_opcode);
-        if (n < 0)
-                return n;
-        out[1] = XWM_XRES_QUERY_VERSION;
-        out[4] = (unsigned char)client_major;
-        out[5] = (unsigned char)client_minor;
-        return n;
+        return xwm_request_words(out, cap, major_opcode, XWM_XRES_QUERY_VERSION, &w, 1);
 }
 
 /*
@@ -758,20 +725,17 @@ XWM_API long xwm_enc_send_event(unsigned char *out, unsigned long cap, int propa
 */
 XWM_API long xwm_enc_client_message(unsigned char *out, unsigned long cap, unsigned int window, unsigned int type, const unsigned int *data, unsigned long count)
 {
-        if (!out)
-                return XWM_ERR_ARG;
+        unsigned int w[2] = {window, type};
+        long n;
+
         if (count > XWM_DATA_LONGS || (count && !data))
                 return XWM_ERR_ARG;
-        if (cap < XWM_EVENT_SIZE)
-                return XWM_ERR_SPACE;
-        xwm_zero(out, XWM_EVENT_SIZE);
-        out[0] = XWM_EVENT_CLIENT_MESSAGE;
-        out[1] = XWM_FORMAT_32;
-        xwm_put32(out + 4, window);
-        xwm_put32(out + 8, type);
+        n = xwm_event_words(out, cap, XWM_EVENT_CLIENT_MESSAGE, XWM_FORMAT_32, w, 2);
+        if (n < 0)
+                return n;
         for (unsigned long i = 0; i < count; i++)
                 xwm_put32(out + 12 + XWM_UNIT * i, data[i]);
-        return XWM_EVENT_SIZE;
+        return n;
 }
 
 /*
@@ -783,134 +747,97 @@ XWM_API long xwm_enc_client_message(unsigned char *out, unsigned long cap, unsig
 XWM_API long xwm_enc_input_event(unsigned char *out, unsigned long cap, unsigned int type, unsigned int detail, unsigned int time,
                                  unsigned int root, unsigned int window, int x, int y, unsigned int state)
 {
-        if (!out)
-                return XWM_ERR_ARG;
+        unsigned int w[3] = {time, root, window};
+        long n;
+
         if ((type < XWM_EVENT_KEY_PRESS || type > XWM_EVENT_MOTION_NOTIFY) && type != XWM_EVENT_FOCUS_IN)
                 return XWM_ERR_ARG;
         if (detail > 255 || x < -32768 || x > 32767 || y < -32768 || y > 32767 || state > 0xffffu)
                 return XWM_ERR_ARG;
-        if (cap < XWM_EVENT_SIZE)
-                return XWM_ERR_SPACE;
-        xwm_zero(out, XWM_EVENT_SIZE);
-        out[0] = (unsigned char)type;
-        out[1] = (unsigned char)detail;
         if (type == XWM_EVENT_FOCUS_IN)
         {
-                xwm_put32(out + 4, window);
-                out[8] = (unsigned char)state;
-                return XWM_EVENT_SIZE;
+                unsigned int fw[2] = {window, state & 0xffu};
+
+                return xwm_event_words(out, cap, (unsigned char)type, (unsigned char)detail, fw, 2);
         }
-        xwm_put32(out + 4, time);
-        xwm_put32(out + 8, root);
-        xwm_put32(out + 12, window);
+        n = xwm_event_words(out, cap, (unsigned char)type, (unsigned char)detail, w, 3);
+        if (n < 0)
+                return n;
         xwm_put16(out + 20, (unsigned int)x & 0xffffu);
         xwm_put16(out + 22, (unsigned int)y & 0xffffu);
         xwm_put16(out + 24, (unsigned int)x & 0xffffu);
         xwm_put16(out + 26, (unsigned int)y & 0xffffu);
         xwm_put16(out + 28, state);
         out[30] = 1;
-        return XWM_EVENT_SIZE;
+        return n;
 }
 
 /* GetAtomName: an atom's name, which its reply carries (an atom is never 0). */
 XWM_API long xwm_enc_get_atom_name(unsigned char *out, unsigned long cap, unsigned int atom)
 {
-        long n;
-
         if (!atom)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, XWM_REQUEST_SHORT, XWM_OP_GET_ATOM_NAME);
-        if (n < 0)
-                return n;
-        xwm_put32(out + 4, atom);
-        return n;
+        return xwm_request_words(out, cap, XWM_OP_GET_ATOM_NAME, 0, &atom, 1);
 }
 
 /* DeleteProperty: twelve bytes. */
 XWM_API long xwm_enc_delete_property(unsigned char *out, unsigned long cap, unsigned int window, unsigned int property)
 {
-        long n;
+        unsigned int w[2] = {window, property};
 
         if (!window || !property)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 12, XWM_OP_DELETE_PROPERTY);
-        if (n < 0)
-                return n;
-        xwm_put32(out + 4, window);
-        xwm_put32(out + 8, property);
-        return n;
+        return xwm_request_words(out, cap, XWM_OP_DELETE_PROPERTY, 0, w, 2);
 }
 
 /* SetSelectionOwner: the owner (0 for none) of a selection, from a time (0: the server's now). Sixteen bytes. */
 XWM_API long xwm_enc_set_selection_owner(unsigned char *out, unsigned long cap, unsigned int owner, unsigned int selection, unsigned int time)
 {
-        long n;
+        unsigned int w[3] = {owner, selection, time};
 
         if (!selection)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 16, XWM_OP_SET_SELECTION_OWNER);
-        if (n < 0)
-                return n;
-        xwm_put32(out + 4, owner);
-        xwm_put32(out + 8, selection);
-        xwm_put32(out + 12, time);
-        return n;
+        return xwm_request_words(out, cap, XWM_OP_SET_SELECTION_OWNER, 0, w, 3);
 }
 
 /* ConvertSelection: the owner asked for the selection as target, into property of requestor. Twenty-four bytes. */
 XWM_API long xwm_enc_convert_selection(unsigned char *out, unsigned long cap, unsigned int requestor, unsigned int selection, unsigned int target, unsigned int property, unsigned int time)
 {
-        long n;
+        unsigned int w[5] = {requestor, selection, target, property, time};
 
         if (!requestor || !selection || !target)
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 24, XWM_OP_CONVERT_SELECTION);
-        if (n < 0)
-                return n;
-        xwm_put32(out + 4, requestor);
-        xwm_put32(out + 8, selection);
-        xwm_put32(out + 12, target);
-        xwm_put32(out + 16, property);
-        xwm_put32(out + 20, time);
-        return n;
+        return xwm_request_words(out, cap, XWM_OP_CONVERT_SELECTION, 0, w, 5);
 }
 
 /* A SelectionNotify, as the 32 bytes SendEvent carries: the owner's answer to a requestor, property 0 for a refusal. */
 XWM_API long xwm_enc_selection_notify(unsigned char *out, unsigned long cap, unsigned int time, unsigned int requestor, unsigned int selection, unsigned int target, unsigned int property)
 {
-        if (!out || !requestor || !selection)
+        unsigned int w[5] = {time, requestor, selection, target, property};
+
+        if (!requestor || !selection)
                 return XWM_ERR_ARG;
-        if (cap < XWM_EVENT_SIZE)
-                return XWM_ERR_SPACE;
-        xwm_zero(out, XWM_EVENT_SIZE);
-        out[0] = XWM_EVENT_SELECTION_NOTIFY;
-        xwm_put32(out + 4, time);
-        xwm_put32(out + 8, requestor);
-        xwm_put32(out + 12, selection);
-        xwm_put32(out + 16, target);
-        xwm_put32(out + 20, property);
-        return XWM_EVENT_SIZE;
+        return xwm_event_words(out, cap, XWM_EVENT_SELECTION_NOTIFY, 0, w, 5);
 }
 
 /* A synthetic ConfigureNotify, as the 32 bytes SendEvent carries (ICCCM 4.1.5): sent when a ConfigureRequest is denied or modified. */
 XWM_API long xwm_enc_configure_notify(unsigned char *out, unsigned long cap, unsigned int window, int x, int y, unsigned int width, unsigned int height, unsigned int border, int override)
 {
-        if (!out || !window)
+        unsigned int w[2] = {window, window};
+        long n;
+
+        if (!window)
                 return XWM_ERR_ARG;
-        if (cap < XWM_EVENT_SIZE)
-                return XWM_ERR_SPACE;
-        xwm_zero(out, XWM_EVENT_SIZE);
-        out[0] = XWM_EVENT_CONFIGURE_NOTIFY;
-        xwm_put32(out + 4, window);
-        xwm_put32(out + 8, window);
-        xwm_put32(out + 12, 0);
+        n = xwm_event_words(out, cap, XWM_EVENT_CONFIGURE_NOTIFY, 0, w, 2);
+        if (n < 0)
+                return n;
         xwm_put16(out + 16, (unsigned int)x);
         xwm_put16(out + 18, (unsigned int)y);
         xwm_put16(out + 20, width);
         xwm_put16(out + 22, height);
         xwm_put16(out + 24, border);
         out[26] = (unsigned char)(override != 0);
-        return XWM_EVENT_SIZE;
+        return n;
 }
 
 /* ChangeWindowAttributes: a value for each bit of the mask, in the order of the bits, as many as the mask has. */
@@ -945,18 +872,11 @@ XWM_API long xwm_enc_xfixes_query_version(unsigned char *out, unsigned long cap,
    connection closing, as the mask asks. Sixteen bytes. */
 XWM_API long xwm_enc_xfixes_select_selection_input(unsigned char *out, unsigned long cap, unsigned int major_opcode, unsigned int window, unsigned int selection, unsigned int mask)
 {
-        long n;
+        unsigned int w[3] = {window, selection, mask};
 
         if (major_opcode < XWM_EXT_MAJOR_FIRST || major_opcode > 255 || !window || !selection || (mask & ~XWM_XFIXES_SELECTION_MASK))
                 return XWM_ERR_ARG;
-        n = xwm_request_start(out, cap, 16, major_opcode);
-        if (n < 0)
-                return n;
-        out[1] = XWM_XFIXES_SELECT_SELECTION_INPUT;
-        xwm_put32(out + 4, window);
-        xwm_put32(out + 8, selection);
-        xwm_put32(out + 12, mask);
-        return n;
+        return xwm_request_words(out, cap, major_opcode, XWM_XFIXES_SELECT_SELECTION_INPUT, w, 3);
 }
 
 /* XTEST FakeInput: a key's press or release (type 2 or 3) of keycode detail, as if the person's, to whatever X has the keyboard or grabs it;
@@ -1365,36 +1285,8 @@ XWM_API int xwm_parse_xres_client_pid(const unsigned char *buf, unsigned long le
 /* Sets every field of an event to zero, and its kind to XWM_EV_UNKNOWN. */
 XWM_API void xwm_event_clear(struct xwm_event *e)
 {
+        xwm_zero((unsigned char *)e, sizeof *e);
         e->kind = XWM_EV_UNKNOWN;
-        e->code = 0;
-        e->synthetic = 0;
-        e->sequence = 0;
-        e->detail = 0;
-        e->event = 0;
-        e->window = 0;
-        e->parent = 0;
-        e->sibling = 0;
-        e->atom = 0;
-        e->time = 0;
-        e->state = 0;
-        e->format = 0;
-        e->mode = 0;
-        e->value_mask = 0;
-        e->override = 0;
-        e->from_configure = 0;
-        e->owner = 0;
-        e->requestor = 0;
-        e->selection = 0;
-        e->target = 0;
-        e->property = 0;
-        e->selection_time = 0;
-        e->x = 0;
-        e->y = 0;
-        e->width = 0;
-        e->height = 0;
-        e->border = 0;
-        for (unsigned long i = 0; i < XWM_DATA_LONGS; i++)
-                e->data[i] = 0;
 }
 
 /*

@@ -484,49 +484,59 @@ static int osk_alt_hit(int x, int y)
         return -1;
 }
 
-static int osk_put_number(char address_to into, int n);
+// Trace helpers shared by osk_alts_trace and osk_trace: formats "<prefix vals...> x y w h label\n" and writes to path.
+static int osk_trace_line(char address_to into, int room, const int address_to prefix, int nprefix, const struct ui_control address_to c)
+{
+        int values[7], count = nprefix + 4, length = 0;
+
+        if (room < OSK_TRACE_LINE)
+                return 0;
+        for (int v = 0; v < nprefix; v++)
+                values[v] = prefix[v];
+        values[nprefix] = osk.left + ui_dev(&osk.ui, c->x);
+        values[nprefix + 1] = osk.top + ui_dev(&osk.ui, c->y);
+        values[nprefix + 2] = ui_dev(&osk.ui, c->w);
+        values[nprefix + 3] = ui_dev(&osk.ui, c->h);
+        for (int v = 0; v < count; v++)
+        {
+                int n = values[v];
+
+                if (n < 0)
+                        into[length++] = '-', n = -n;
+                length += (int)positive_into_string((string_address)(into + length), (positive)n);
+                into[length++] = ' ';
+        }
+        for (int w = 0; c->label[w] && w < OSK_TRACE_LINE - 40; w++)
+                into[length++] = c->label[w];
+        into[length++] = '\n';
+        return length;
+}
+
+static void osk_trace_save(const char address_to path, const char address_to text, int length)
+{
+        bipolar handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+
+        if (handle >= 0)
+        {
+                system_write_once(handle, text, (positive)length);
+                system_close(handle);
+        }
+}
 
 // The trace's accents: "index x y w h word" a line each, in the file the trace's name with .alt on it, written when the row opens (the
 // e2e lane picks an accent by it).
 static void osk_alts_trace(void)
 {
         char path[OSK_ALT_PATH_MOST], text[OSK_ALT_MOST * OSK_TRACE_LINE];
-        const char *suffix = ".alt";
-        int at = 0, length = 0;
-        bipolar handle;
+        int length = 0;
 
         if (!osk.trace)
                 return;
-        for (; osk.trace[at] && at < OSK_ALT_PATH_MOST - 5; at++)
-                path[at] = osk.trace[at];
-        for (int k = 0; suffix[k]; k++)
-                path[at++] = suffix[k];
-        path[at] = 0;
+        string_copy_bounded((string_address)path, (string_address)osk.trace, sizeof(path) - 4);
+        string_append_bounded((string_address)path, (string_address) ".alt", sizeof(path));
         for (int k = 0; k < osk.alt_count; k++)
-        {
-                const struct ui_control address_to c = &osk.alts[k];
-                int values[5];
-
-                values[0] = k;
-                values[1] = osk.left + ui_dev(&osk.ui, c->x);
-                values[2] = osk.top + ui_dev(&osk.ui, c->y);
-                values[3] = ui_dev(&osk.ui, c->w);
-                values[4] = ui_dev(&osk.ui, c->h);
-                for (int v = 0; v < 5; v++)
-                {
-                        length += osk_put_number(text + length, values[v]);
-                        text[length++] = ' ';
-                }
-                for (int w = 0; c->label[w] && w < OSK_TRACE_LINE - 40; w++)
-                        text[length++] = c->label[w];
-                text[length++] = '\n';
-        }
-        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        if (handle >= 0)
-        {
-                system_write_once(handle, text, (positive)length);
-                system_close(handle);
-        }
+                length += osk_trace_line(text + length, (int)sizeof(text) - length, &k, 1, &osk.alts[k]);
+        osk_trace_save(path, text, length);
 }
 
 // The accents of the letter held (its index): the row is laid out above the key, or over it on the top row, centred on it, kept on the
@@ -830,26 +840,10 @@ static fn osk_language(void)
 }
 
 // The trace: one line a key of the page shown, "page row column x y w h word", the rectangle in the screen's pixels as the window
-// stands when the keyboard opens. A number is written with its sign and the rest with a space before it.
-static int osk_put_number(char address_to into, int n)
-{
-        char digits[12];
-        int at = 0, length = 0;
-
-        if (n < 0)
-                into[at++] = '-', n = -n;
-        do
-                digits[length++] = (char)('0' + n % 10), n /= 10;
-        while (n);
-        while (length)
-                into[at++] = digits[--length];
-        return at;
-}
-
+// stands when the keyboard opens.
 static void osk_trace(void)
 {
-        int x = osk.left, y = osk.top, length = 0, shown = osk.page;
-        bipolar handle;
+        int length = 0, shown = osk.page;
 
         if (!osk.trace)
                 return;
@@ -870,30 +864,17 @@ static void osk_trace(void)
                                 for (int k = 0; k < OSK_COLS; k++)
                                 {
                                         const struct ui_control address_to c = &osk.keys[row * OSK_COLS + k];
-                                        int values[7] = {number, row, k, x + ui_dev(&osk.ui, c->x), y + ui_dev(&osk.ui, c->y), ui_dev(&osk.ui, c->w), ui_dev(&osk.ui, c->h)};
+                                        int prefix[3] = {number, row, k};
 
-                                        if (!c->kind || length + OSK_TRACE_LINE > OSK_TRACE_MOST)
-                                                continue;
-                                        for (int v = 0; v < 7; v++)
-                                        {
-                                                length += osk_put_number(osk.trace_text + length, values[v]);
-                                                osk.trace_text[length++] = ' ';
-                                        }
-                                        for (int w = 0; c->label[w] && w < OSK_TRACE_LINE - 40; w++)
-                                                osk.trace_text[length++] = c->label[w];
-                                        osk.trace_text[length++] = '\n';
+                                        if (c->kind)
+                                                length += osk_trace_line(osk.trace_text + length, OSK_TRACE_MOST - length, prefix, 3, c);
                                 }
                 }
         }
         osk_symbols_use(osk.purpose == OSK_PURPOSE_EMAIL || osk.purpose == OSK_PURPOSE_URL);
         osk.page = shown;
         osk_layout();
-        handle = system_open_at_mode(AT_FDCWD, (string_address)osk.trace, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        if (handle >= 0)
-        {
-                system_write_once(handle, osk.trace_text, (positive)length);
-                system_close(handle);
-        }
+        osk_trace_save(osk.trace, osk.trace_text, length);
 }
 
 static struct ui_app osk_app;

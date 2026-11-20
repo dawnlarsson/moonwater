@@ -184,6 +184,38 @@ struct files_model
 
 /* ---- the memory ---- */
 
+static address_any files_anon_map(positive bytes, bipolar address_to error)
+{
+        bipolar mapped = (bipolar)system_call_6(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+
+        if (mapped < 0 && mapped > -4096)
+        {
+                if (error)
+                        *error = mapped;
+                return null;
+        }
+        return (address_any)mapped;
+}
+
+static inline b32 files_same_file(p64 inode, p32 major, p32 minor, const file_facts address_to facts)
+{
+        return inode == facts->inode && major == facts->device_major && minor == facts->device_minor;
+}
+
+static b32 files_path_join(p8 address_to into, positive room, const p8 address_to folder, const p8 address_to name)
+{
+        positive flen = string_length((string_address)folder), nlen = string_length((string_address)name);
+        b32 slash = flen > 1 && folder[flen - 1] != '/';
+
+        if (flen + slash + nlen >= room)
+                return false;
+        memory_copy(into, folder, flen);
+        if (slash)
+                into[flen++] = '/';
+        memory_copy(into + flen, name, nlen + 1);
+        return true;
+}
+
 static positive files_model_bytes(void)
 {
         return 2 * ((positive)FILES_MOST * sizeof(struct files_entry) + FILES_NAMES + (positive)FILES_MOST * sizeof(p32)) + FILES_MOST / 8 +
@@ -194,15 +226,13 @@ static positive files_model_bytes(void)
 static b32 files_model_open(struct files_model address_to m)
 {
         positive size = files_model_bytes();
-        bipolar mapped = (bipolar)system_call_6(syscall(mmap), 0, size, 3, 0x22, (positive)-1, 0);
         p8 address_to at;
 
         memory_fill(m, 0, sizeof(*m));
         m->handle = -1, m->reader.handle = -1, m->cursor = FILES_NO, m->anchor = FILES_NO;
-        if (mapped < 0 && mapped > -4096)
+        if (!(at = (p8 address_to)files_anon_map(size, null)))
                 return false;
-        m->mapped = (address_any)mapped, m->mapped_size = size;
-        at = (p8 address_to)mapped;
+        m->mapped = at, m->mapped_size = size;
         for (int which = 0; which < 2; which++)
         {
                 struct files_listing address_to l = which ? &m->next : &m->shown;
@@ -426,6 +456,36 @@ static fn files_model_choose(struct files_model address_to m, p32 place, int how
         }
         m->cursor = place;
         m->revision++;
+}
+
+static fn files_select_all(struct files_model address_to m)
+{
+        if (!files_model_count(m))
+                return;
+        files_model_choose(m, 0, FILES_CHOOSE_ONLY);
+        files_model_choose(m, files_model_count(m) - 1, FILES_CHOOSE_RANGE);
+}
+
+// Next chosen place (or cursor alone when nothing is chosen); advances *at, returns FILES_NO at end.
+static p32 files_selected_next(const struct files_model address_to m, p32 address_to at)
+{
+        p32 count = files_model_count(m);
+
+        if (!m->chosen_count)
+        {
+                p32 cur = *at == 0 && m->cursor < count ? m->cursor : FILES_NO;
+
+                *at = count;
+                return cur;
+        }
+        while (*at < count)
+        {
+                p32 place = (*at)++;
+
+                if (files_model_chosen(m, place))
+                        return place;
+        }
+        return FILES_NO;
 }
 
 // The cursor moved by so many places and held at the listing's ends; nothing chosen changes. True when it moved.
@@ -709,7 +769,7 @@ static fn files_keep_put(struct files_model address_to m)
                 held -= m->kept[oldest].bytes;
                 files_keep_drop(m, oldest);
         }
-        if (bytes && (mapped = (bipolar)system_call_6(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0)) < 0 && mapped > -4096)
+        if (bytes && !(mapped = (bipolar)files_anon_map(bytes, null)))
                 return;
         k = &m->kept[which];
         string_copy_bounded(k->path, m->path, FILES_PATH);
@@ -785,8 +845,8 @@ static fn files_model_show(struct files_model address_to m, string_address path,
         {
                 const struct files_kept address_to k = &m->kept[kept];
 
-                if (handle >= 0 && k->hidden == m->hidden && file_look_code(handle, (string_address) "", AT_EMPTY_PATH, &now) >= 0 && now.inode == k->folder.inode &&
-                    now.device_major == k->folder.device_major && now.device_minor == k->folder.device_minor)
+                if (handle >= 0 && k->hidden == m->hidden && file_look_code(handle, (string_address) "", AT_EMPTY_PATH, &now) >= 0 &&
+                    files_same_file(k->folder.inode, k->folder.device_major, k->folder.device_minor, &now))
                 {
                         files_keep_take(m, kept);
                         m->state = FILES_READY, m->error = 0, m->restored = true, m->came[0] = end, m->listed++;
@@ -847,8 +907,7 @@ static int files_model_stale(struct files_model address_to m)
         if (m->handle < 0 || m->state == FILES_GONE)
                 return m->state == FILES_GONE ? FILES_LOST : FILES_FRESH;
         if (file_look_code(m->handle, (string_address) "", AT_EMPTY_PATH, &now) < 0 || !now.hard_links ||
-            file_look_code(AT_FDCWD, m->path, 0, &named) < 0 || named.inode != now.inode || named.device_major != now.device_major ||
-            named.device_minor != now.device_minor)
+            file_look_code(AT_FDCWD, m->path, 0, &named) < 0 || !files_same_file(now.inode, now.device_major, now.device_minor, &named))
         {
                 if (m->walking)
                         file_walk_close(&m->reader);
@@ -886,7 +945,7 @@ static int files_model_check(struct files_model address_to m, p32 place, file_fa
         if (looked < 0)
                 return looked == -ERROR_NO_ENTRY || looked == -ERROR_NOT_DIRECTORY ? FILES_MISSING : FILES_CHANGED;
         if (files_kind_of(facts.mode) != entry->kind ||
-            (entry->looked && (facts.inode != entry->inode || facts.device_major != entry->device_major || facts.device_minor != entry->device_minor ||
+            (entry->looked && (!files_same_file(entry->inode, entry->device_major, entry->device_minor, &facts) ||
                                facts.created.seconds != entry->born || facts.created.nanoseconds != entry->born_part)))
                 return FILES_CHANGED;
         entry->size = facts.size, entry->modified = facts.modified.seconds;
@@ -938,6 +997,15 @@ static fn files_history_push(p8 address_to stack, p32 address_to count, const p8
         (*count)++;
 }
 
+static fn files_model_commit(struct files_model address_to m, string_address path, bipolar handle, bipolar error)
+{
+        if (m->state != FILES_NONE)
+                files_history_push(m->back, &m->back_count, m->path);
+        m->forward_count = 0;
+        m->came[0] = end;
+        files_model_show(m, path, handle, error);
+}
+
 // To a folder a person named: opened as named (a link in the path is followed, which is what naming one means). The folder shown
 // goes on the way back and the way forward is forgotten. False for a path that is not absolute or too long, and nothing changes.
 static b32 files_model_go(struct files_model address_to m, string_address path)
@@ -947,12 +1015,8 @@ static b32 files_model_go(struct files_model address_to m, string_address path)
 
         if (!files_path_take(taken, path))
                 return false;
-        if (m->state != FILES_NONE)
-                files_history_push(m->back, &m->back_count, m->path);
-        m->forward_count = 0;
-        m->came[0] = end;
         file_walk_open(&opened, AT_FDCWD, taken);
-        files_model_show(m, taken, opened.handle, opened.error);
+        files_model_commit(m, taken, opened.handle, opened.error);
         return true;
 }
 
@@ -974,11 +1038,7 @@ static int files_model_try(struct files_model address_to m, string_address path)
                 return FILES_NOT_DIRECTORY;
         if (!file_walk_open(&opened, AT_FDCWD, taken))
                 return files_state_of(opened.error);
-        if (m->state != FILES_NONE)
-                files_history_push(m->back, &m->back_count, m->path);
-        m->forward_count = 0;
-        m->came[0] = end;
-        files_model_show(m, taken, opened.handle, 0);
+        files_model_commit(m, taken, opened.handle, 0);
         return FILES_READING;
 }
 
@@ -1044,11 +1104,7 @@ static p32 files_model_complete_in(const struct files_model address_to m, const 
 // A folder that is open already, by a descriptor that is taken over, is the folder shown: the one before it goes on the way back.
 static fn files_model_take(struct files_model address_to m, string_address path, bipolar handle)
 {
-        if (m->state != FILES_NONE)
-                files_history_push(m->back, &m->back_count, m->path);
-        m->forward_count = 0;
-        m->came[0] = end;
-        files_model_show(m, path, handle, 0);
+        files_model_commit(m, path, handle, 0);
 }
 
 // Into the folder at a place of the listing: only one that is, now, the folder that was listed (files_model_check), opened without
@@ -1057,7 +1113,6 @@ static int files_model_enter(struct files_model address_to m, p32 place)
 {
         const struct files_entry address_to entry = files_model_entry(m, place);
         p8 into[FILES_PATH];
-        positive length, name_length;
         file_walk opened;
         int seen;
 
@@ -1065,23 +1120,13 @@ static int files_model_enter(struct files_model address_to m, p32 place)
                 return FILES_REFUSED;
         if ((seen = files_model_check(m, place, null)) != FILES_SAME)
                 return seen;
-        if (entry->kind != FILES_KIND_DIRECTORY)
+        if (entry->kind != FILES_KIND_DIRECTORY || !files_path_join(into, FILES_PATH, m->path, files_model_name(m, entry)))
                 return FILES_REFUSED;
-        length = string_length(m->path), name_length = entry->length;
-        if (length + 1 + name_length >= FILES_PATH)
-                return FILES_REFUSED;
-        memory_copy(into, m->path, length);
-        if (length > 1)
-                into[length++] = '/';
-        memory_copy(into + length, files_model_name(m, entry), name_length + 1);
         // Between the look above and this open the name may have been given to something else: the open looks again, does not
         // follow, and is refused unless what it opened is what it looked at.
         if (!file_walk_open_found(&opened, m->handle, (string_address)files_model_name(m, entry)))
                 return opened.error == -ERROR_NO_ENTRY ? FILES_MISSING : FILES_CHANGED;
-        files_history_push(m->back, &m->back_count, m->path);
-        m->forward_count = 0;
-        m->came[0] = end;
-        files_model_show(m, into, opened.handle, 0);
+        files_model_commit(m, into, opened.handle, 0);
         return FILES_SAME;
 }
 
@@ -1105,10 +1150,8 @@ static b32 files_model_up(struct files_model address_to m)
 
         if (m->state == FILES_NONE || !files_path_parent(m->path, parent, name))
                 return false;
-        files_history_push(m->back, &m->back_count, m->path);
-        m->forward_count = 0;
         file_walk_open(&opened, AT_FDCWD, parent);
-        files_model_show(m, parent, opened.handle, opened.error);
+        files_model_commit(m, parent, opened.handle, opened.error);
         files_model_came(m, name);
         return true;
 }
@@ -1458,6 +1501,7 @@ struct files_job
         p32 removed;                  // the things removed so far, folders and what was in them alike
         p32 count, next;              // the entries asked for, and the next of them
         p8 address_to names;          // their names, each with its end (the job's own copy: the listing may be read again under it)
+        p32 address_to offsets;       // byte offset of each name in names (O(1) lookup)
         file_facts address_to facts;  // and each as it was looked at when the job began
         bipolar stack[FILES_JOB_DEEP]; // the folders it is inside, the innermost last
         p8 inside[FILES_JOB_DEEP][FILES_NAME]; // and the name each has in the one before it
@@ -1507,7 +1551,7 @@ static int files_model_rename(struct files_model address_to m, p32 place, const 
 
 static positive files_job_bytes(void)
 {
-        return (positive)FILES_MOST * FILES_NAME / 8 + (positive)FILES_MOST / 8 * sizeof(file_facts);
+        return (positive)FILES_MOST * FILES_NAME / 8 + (positive)FILES_MOST / 8 * (sizeof(file_facts) + sizeof(p32));
 }
 
 static fn files_job_close(struct files_job address_to job)
@@ -1546,24 +1590,22 @@ static fn files_job_cancel(struct files_job address_to job)
 */
 static b32 files_delete_begin(struct files_model address_to m, struct files_job address_to job)
 {
-        bipolar mapped;
+        bipolar err = 0;
         positive used = 0;
+        p32 iter = 0, place;
 
         files_job_end(job);
-        mapped = (bipolar)system_call_6(syscall(mmap), 0, files_job_bytes(), 3, 0x22, (positive)-1, 0);
-        if (mapped < 0 && mapped > -4096)
+        if (!(job->names = (p8 address_to)files_anon_map(files_job_bytes(), &err)))
         {
-                job->state = FILES_JOB_FAILED, job->error = mapped;
+                job->state = FILES_JOB_FAILED, job->error = err;
                 return false;
         }
-        job->names = (p8 address_to)mapped;
         job->facts = (file_facts address_to)(job->names + (positive)FILES_MOST * FILES_NAME / 8);
-        for (p32 place = 0; place < m->shown.places; place++)
+        job->offsets = (p32 address_to)(job->facts + FILES_MOST / 8);
+        while ((place = files_selected_next(m, &iter)) != FILES_NO)
         {
                 const struct files_entry address_to entry = &m->shown.entry[m->shown.order[place]];
 
-                if (m->chosen_count ? !files_model_chosen(m, place) : place != m->cursor)
-                        continue;
                 if (job->count >= FILES_MOST / 8 || used + entry->length + 1 > (positive)FILES_MOST * FILES_NAME / 8)
                         break;
                 if (files_model_check(m, place, &job->facts[job->count]) != FILES_SAME)
@@ -1573,6 +1615,7 @@ static b32 files_delete_begin(struct files_model address_to m, struct files_job 
                         job->state = FILES_JOB_FAILED, job->error = -ERROR_NO_ENTRY;
                         return false;
                 }
+                job->offsets[job->count] = (p32)used;
                 memory_copy(job->names + used, files_model_name(m, entry), (positive)entry->length + 1);
                 used += (positive)entry->length + 1;
                 job->count++;
@@ -1581,111 +1624,98 @@ static b32 files_delete_begin(struct files_model address_to m, struct files_job 
         return job->count != 0;
 }
 
-// The name of the job's entry number `which`.
-// The which-th of a table of strings each with its end after it (a delete's names, a move's paths).
-static const p8 address_to files_nth(const p8 address_to table, p32 which)
+static inline const p8 address_to files_job_name(const struct files_job address_to job, p32 which)
 {
-        while (which--)
-                table += string_length((string_address)table) + 1;
-        return table;
+        return job->names + job->offsets[which];
 }
 
-static const p8 address_to files_job_name(const struct files_job address_to job, p32 which)
+/*
+        One step of recursive DFS directory removal (shared by files_delete_one and files_move_remove):
+        - When *depth == 0: enters top_name (holding top_facts) if a directory, else removes it from root_fd.
+        - When *depth > 0: removes or enters the first entry in stack[*depth - 1], or closes and unlinks it once empty.
+        Returns: 1 = removed top-level entry completely, 0 = still descending/removing inside, < 0 = kernel error.
+*/
+static int files_rmdir_step(bipolar root_fd, bipolar address_to stack, p8 (*inside)[FILES_NAME], int address_to depth, p8 address_to at,
+                            const p8 address_to top_name, const file_facts address_to top_facts, p32 address_to removed, bipolar address_to error)
 {
-        return files_nth(job->names, which);
+        bipolar in = *depth ? stack[*depth - 1] : root_fd, gone;
+        file_walk walk;
+        struct linux_dirent64 address_to record;
+        file_facts facts;
+        b32 top = !*depth;
+
+        if (top)
+        {
+                string_copy_bounded(at, (string_address)top_name, FILES_NAME);
+                facts = *top_facts;
+        }
+        else
+        {
+                if (!file_walk_open(&walk, in, (string_address) "."))
+                        return *error = walk.error, -1;
+                while ((record = file_walk_next(&walk)) && file_is_dot((string_address)record->d_name))
+                        ;
+                if (record)
+                        string_copy_bounded(at, (string_address)record->d_name, FILES_NAME);
+                gone = walk.error;
+                file_walk_close(&walk);
+                if (!record)
+                {
+                        if (gone < 0)
+                                return *error = gone, -1;
+                        system_close(stack[--(*depth)]);
+                        stack[*depth] = -1;
+                        string_copy_bounded(at, inside[*depth], FILES_NAME);
+                        gone = (bipolar)system_call_3(syscall(unlinkat), (positive)(*depth ? stack[*depth - 1] : root_fd), (positive)at, AT_REMOVEDIR);
+                        if (gone < 0)
+                                return *error = gone, -1;
+                        if (removed)
+                                (*removed)++;
+                        return !*depth ? 1 : 0;
+                }
+                gone = file_look_code(in, (string_address)at, AT_SYMLINK_NOFOLLOW, &facts);
+                if (gone < 0)
+                        return *error = gone, -1;
+        }
+        if ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
+        {
+                if (*depth >= FILES_JOB_DEEP)
+                        return *error = -ERROR_LOOP, -1;
+                if (!file_walk_open_found_same(&walk, in, (string_address)at, &facts))
+                        return *error = walk.error, -1;
+                string_copy_bounded(inside[*depth], at, FILES_NAME);
+                stack[(*depth)++] = walk.handle;
+                return 0;
+        }
+        gone = file_remove_same(in, (string_address)at, 0, &facts);
+        if (gone < 0)
+                return *error = gone, -1;
+        if (removed)
+                (*removed)++;
+        return top ? 1 : 0;
 }
 
 // One thing of a delete: the next entry inside the innermost folder it is in removed or gone into, or that folder, empty, removed
 // from the one it is in. False when the job is over (done or failed).
 static b32 files_delete_one(struct files_model address_to m, struct files_job address_to job)
 {
-        bipolar in = job->depth ? job->stack[job->depth - 1] : m->handle, gone;
-        file_walk walk;
-        struct linux_dirent64 address_to record;
-        file_facts facts;
-        const p8 address_to name = null;
-        b32 top = !job->depth;
+        bipolar err = 0;
+        int step;
 
-        if (top)
+        if (!job->depth && job->next >= job->count)
         {
-                if (job->next >= job->count)
-                {
-                        job->state = FILES_JOB_DONE;
-                        return false;
-                }
-                name = files_job_name(job, job->next);
-                facts = job->facts[job->next];
-        }
-        else
-        {
-                // The first thing still in the folder: read afresh each time, since the last step changed what is there.
-                if (!file_walk_open(&walk, in, (string_address) "."))
-                {
-                        files_job_fail(job, walk.error);
-                        return false;
-                }
-                while ((record = file_walk_next(&walk)) && file_is_dot((string_address)record->d_name))
-                        ;
-                if (record)
-                        string_copy_bounded(job->at, (string_address)record->d_name, FILES_NAME);
-                gone = walk.error;
-                file_walk_close(&walk);
-                if (!record)
-                {
-                        // Empty (or unreadable: the remove says which): out of it, and it is removed from the folder it is in.
-                        if (gone < 0)
-                        {
-                                files_job_fail(job, gone);
-                                return false;
-                        }
-                        system_close(job->stack[--job->depth]);
-                        string_copy_bounded(job->at, job->inside[job->depth], FILES_NAME);
-                        gone = (bipolar)system_call_3(syscall(unlinkat), (positive)(job->depth ? job->stack[job->depth - 1] : m->handle), (positive)job->at, AT_REMOVEDIR);
-                        if (gone < 0)
-                        {
-                                files_job_fail(job, gone);
-                                return false;
-                        }
-                        job->removed++;
-                        job->next += !job->depth;
-                        return true;
-                }
-                name = job->at;
-                gone = file_look_code(in, (string_address)name, AT_SYMLINK_NOFOLLOW, &facts);
-                if (gone < 0)
-                {
-                        files_job_fail(job, gone);
-                        return false;
-                }
-        }
-        if (top)
-                string_copy_bounded(job->at, (string_address)name, FILES_NAME);
-        if ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
-        {
-                // A folder: gone into, opened without following and held to the inode looked at. It is removed when it is empty.
-                if (job->depth >= FILES_JOB_DEEP)
-                {
-                        files_job_fail(job, -40);
-                        return false;
-                }
-                if (!file_walk_open_found_same(&walk, in, (string_address)job->at, &facts))
-                {
-                        files_job_fail(job, walk.error);
-                        return false;
-                }
-                string_copy_bounded(job->inside[job->depth], job->at, FILES_NAME);
-                job->stack[job->depth++] = walk.handle;
-                return true;
-        }
-        // Anything else is removed as the entry it is: a link is the link, and it must still be what was looked at.
-        gone = file_remove_same(in, (string_address)job->at, 0, &facts);
-        if (gone < 0)
-        {
-                files_job_fail(job, gone);
+                job->state = FILES_JOB_DONE;
                 return false;
         }
-        job->removed++;
-        job->next += top;
+        step = files_rmdir_step(m->handle, job->stack, job->inside, &job->depth, job->at,
+                                job->depth ? null : files_job_name(job, job->next),
+                                job->depth ? null : &job->facts[job->next], &job->removed, &err);
+        if (step < 0)
+        {
+                files_job_fail(job, err);
+                return false;
+        }
+        job->next += step;
         return true;
 }
 
@@ -1800,12 +1830,12 @@ static b32 files_tree_add_root(struct files_tree address_to t, const p8 address_
 // The tree's memory, and its root, the folder /. False when there is no memory.
 static b32 files_tree_begin(struct files_tree address_to t)
 {
-        bipolar mapped = (bipolar)system_call_6(syscall(mmap), 0, files_tree_bytes(), 3, 0x22, (positive)-1, 0);
+        address_any mapped = files_anon_map(files_tree_bytes(), null);
 
         memory_fill(t, 0, sizeof(*t));
-        if (mapped < 0 && mapped > -4096)
+        if (!mapped)
                 return false;
-        t->mapped = (address_any)mapped, t->mapped_size = files_tree_bytes();
+        t->mapped = mapped, t->mapped_size = files_tree_bytes();
         t->node = (struct files_node address_to)mapped;
         t->names = (p8 address_to)mapped + (positive)FILES_TREE_MOST * sizeof(struct files_node);
         return files_tree_add_root(t, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT);
@@ -1968,32 +1998,22 @@ static int files_drives_parse(const p8 address_to text, positive length, struct 
         Populates the sidebar tree with common folders above the storage drives: Home, Downloads and Pictures (when home is given),
         followed by the root drive (/) and every other mounted storage drive parsed from mountinfo. All roots start collapsed.
 */
-static fn files_tree_populate(struct files_tree address_to t, const p8 address_to home, const p8 address_to mountinfo, positive mountinfo_len)
+static fn files_tree_apply(struct files_tree address_to t, const p8 address_to home, const struct files_drive address_to drives, int n, p64 hash)
 {
-        static struct files_drive drives[FILES_DRIVES_MOST];
+        static const struct
+        {
+                const char address_to name;
+                p8 place;
+        } places[] = {{"Downloads", FILES_PLACE_DOWNLOADS}, {"Pictures", FILES_PLACE_PICTURES}};
         p8 sub[FILES_PATH];
-        p64 hash = 0;
-        int n = mountinfo && mountinfo_len ? files_drives_parse(mountinfo, mountinfo_len, drives, FILES_DRIVES_MOST, &hash) : 0;
 
         files_tree_reset(t);
         if (home && home[0] == '/')
         {
-                positive hlen = string_length((string_address)home);
-
                 files_tree_add_root(t, (const p8 address_to) "Home", home, FILES_NODE_PLACE, FILES_PLACE_HOME);
-                if (hlen + 16 < sizeof(sub))
-                {
-                        string_copy_bounded((string_address)sub, (string_address)home, sizeof(sub));
-                        if (hlen > 1)
-                                string_append_bounded((string_address)sub, (string_address) "/", sizeof(sub));
-                        string_append_bounded((string_address)sub, (string_address) "Downloads", sizeof(sub));
-                        files_tree_add_root(t, (const p8 address_to) "Downloads", sub, FILES_NODE_PLACE, FILES_PLACE_DOWNLOADS);
-                        string_copy_bounded((string_address)sub, (string_address)home, sizeof(sub));
-                        if (hlen > 1)
-                                string_append_bounded((string_address)sub, (string_address) "/", sizeof(sub));
-                        string_append_bounded((string_address)sub, (string_address) "Pictures", sizeof(sub));
-                        files_tree_add_root(t, (const p8 address_to) "Pictures", sub, FILES_NODE_PLACE, FILES_PLACE_PICTURES);
-                }
+                for (positive k = 0; k < sizeof(places) / sizeof(places[0]); k++)
+                        if (files_path_join(sub, sizeof(sub), home, (const p8 address_to)places[k].name))
+                                files_tree_add_root(t, (const p8 address_to)places[k].name, sub, FILES_NODE_PLACE, places[k].place);
         }
         files_tree_add_root(t, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT);
         for (int k = 0; k < n; k++)
@@ -2001,23 +2021,60 @@ static fn files_tree_populate(struct files_tree address_to t, const p8 address_t
         t->drives_hash = hash;
 }
 
+struct files_mount_scratch
+{
+        p8 buf[65536];
+        struct files_drive drives[FILES_DRIVES_MOST];
+};
+
+static fn files_tree_populate(struct files_tree address_to t, const p8 address_to home, const p8 address_to mountinfo, positive mountinfo_len)
+{
+        struct files_drive address_to drives = mountinfo && mountinfo_len ? (struct files_drive address_to)files_anon_map(sizeof(struct files_drive) * FILES_DRIVES_MOST, null) : null;
+        p64 hash = 0;
+        int n = drives ? files_drives_parse(mountinfo, mountinfo_len, drives, FILES_DRIVES_MOST, &hash) : 0;
+
+        files_tree_apply(t, home, drives, n, hash);
+        if (drives)
+                system_call_2(syscall(munmap), (positive)drives, sizeof(struct files_drive) * FILES_DRIVES_MOST);
+}
+
+static b32 files_tree_sync_drives(struct files_tree address_to t, const p8 address_to home, b32 force)
+{
+        struct files_mount_scratch address_to s = (struct files_mount_scratch address_to)files_anon_map(sizeof(*s), null);
+        bipolar got;
+        p64 hash = 0;
+        int n = 0;
+        b32 changed;
+
+        if (!s)
+                return false;
+        got = file_slurp_once_at(AT_FDCWD, (string_address) "/proc/self/mountinfo", s->buf, sizeof(s->buf) - 1);
+        if (got > 0)
+                n = files_drives_parse(s->buf, (positive)got, s->drives, FILES_DRIVES_MOST, &hash);
+        changed = force || hash != t->drives_hash;
+        if (changed)
+                files_tree_apply(t, home, s->drives, n, hash);
+        system_call_2(syscall(munmap), (positive)s, sizeof(*s));
+        return changed;
+}
+
 static fn files_tree_populate_live(struct files_tree address_to t, const p8 address_to home)
 {
-        static p8 buf[65536];
-        bipolar got = file_slurp_once_at(AT_FDCWD, (string_address) "/proc/self/mountinfo", buf, sizeof(buf) - 1);
-
-        files_tree_populate(t, home, got > 0 ? buf : null, got > 0 ? (positive)got : 0);
+        files_tree_sync_drives(t, home, true);
 }
 
 static b32 files_tree_drives_changed(const struct files_tree address_to t)
 {
-        static p8 buf[65536];
-        static struct files_drive drives[FILES_DRIVES_MOST];
-        bipolar got = file_slurp_once_at(AT_FDCWD, (string_address) "/proc/self/mountinfo", buf, sizeof(buf) - 1);
+        struct files_mount_scratch address_to s = (struct files_mount_scratch address_to)files_anon_map(sizeof(*s), null);
+        bipolar got;
         p64 hash = 0;
 
+        if (!s)
+                return false;
+        got = file_slurp_once_at(AT_FDCWD, (string_address) "/proc/self/mountinfo", s->buf, sizeof(s->buf) - 1);
         if (got > 0)
-                files_drives_parse(buf, (positive)got, drives, FILES_DRIVES_MOST, &hash);
+                files_drives_parse(s->buf, (positive)got, s->drives, FILES_DRIVES_MOST, &hash);
+        system_call_2(syscall(munmap), (positive)s, sizeof(*s));
         return hash != t->drives_hash;
 }
 
@@ -2099,11 +2156,16 @@ static int files_tree_name_order(address_any left, address_any right, address_an
         A node opened: its folders read (once; a node read before shows what it read, and is read again by files_tree_shut then open) and
         put after it, one level in. False when it cannot be read or there is no room; it is then shown with none.
 */
+struct files_tree_open_scratch
+{
+        p8 path[FILES_PATH];
+        p32 offsets[FILES_TREE_CHILDREN];
+        p8 found[FILES_TREE_CHILDREN * 64];
+};
+
 static b32 files_tree_open(struct files_tree address_to t, p32 at)
 {
-        static p8 path[FILES_PATH];
-        static p32 offsets[FILES_TREE_CHILDREN];
-        static p8 found[FILES_TREE_CHILDREN * 64];
+        struct files_tree_open_scratch address_to s;
         file_walk walk;
         struct linux_dirent64 address_to record;
         file_facts folder;
@@ -2112,17 +2174,20 @@ static b32 files_tree_open(struct files_tree address_to t, p32 at)
 
         if (at >= t->count || t->node[at].open)
                 return at < t->count;
-        if (!files_tree_path(t, at, path) || !file_walk_open(&walk, AT_FDCWD, (string_address)path))
+        if (!(s = (struct files_tree_open_scratch address_to)files_anon_map(sizeof(*s), null)))
+                return false;
+        if (!files_tree_path(t, at, s->path) || !file_walk_open(&walk, AT_FDCWD, (string_address)s->path))
         {
+                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
                 t->node[at].read = true, t->node[at].has = 0;
                 return false;
         }
         // The folder held to what the node was read as: another one under its path is not this node's.
         if (file_look_code(walk.handle, (string_address) "", AT_EMPTY_PATH, &folder) < 0 ||
-            (t->node[at].inode && (folder.inode != t->node[at].inode || folder.device_major != t->node[at].device_major ||
-                                   folder.device_minor != t->node[at].device_minor)))
+            (t->node[at].inode && !files_same_file(t->node[at].inode, t->node[at].device_major, t->node[at].device_minor, &folder)))
         {
                 file_walk_close(&walk);
+                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
                 t->node[at].read = true, t->node[at].has = 0;
                 return false;
         }
@@ -2132,25 +2197,26 @@ static b32 files_tree_open(struct files_tree address_to t, p32 at)
                 file_facts facts;
 
                 scanned++;
-                if (file_is_dot((string_address)record->d_name) || record->d_name[0] == '.' || length >= FILES_NAME || used + length + 1 > sizeof(found))
+                if (file_is_dot((string_address)record->d_name) || record->d_name[0] == '.' || length >= FILES_NAME || used + length + 1 > sizeof(s->found))
                         continue;
                 // A folder as it is, not followed: d_type when the disk says it, a look otherwise.
                 if (record->d_type != DT_DIR && (record->d_type != DT_UNKNOWN || file_look_code(walk.handle, (string_address)record->d_name, AT_SYMLINK_NOFOLLOW, &facts) < 0 ||
                                                  (facts.mode & MODE_FORMAT) != MODE_DIRECTORY))
                         continue;
-                offsets[count++] = (p32)used;
-                memory_copy(found + used, record->d_name, length + 1);
+                s->offsets[count++] = (p32)used;
+                memory_copy(s->found + used, record->d_name, length + 1);
                 used += length + 1;
         }
         if (count > 1)
-                qsort_r(offsets, count, sizeof(p32), files_tree_name_order, found);
+                qsort_r(s->offsets, count, sizeof(p32), files_tree_name_order, s->found);
         for (p32 k = 0; k < count; k++)
-                need += string_length((string_address)(found + offsets[k]));
+                need += string_length((string_address)(s->found + s->offsets[k]));
         after = at + 1, depth = t->node[at].depth + 1u;
         t->node[at].read = true, t->node[at].has = (p16)count, t->node[at].open = true;
         if (t->count + count > FILES_TREE_MOST || t->names_used + need + count > FILES_TREE_NAMES)
         {
                 file_walk_close(&walk);
+                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
                 t->node[at].open = false;
                 return false;
         }
@@ -2158,7 +2224,7 @@ static b32 files_tree_open(struct files_tree address_to t, p32 at)
         memory_copy(&t->node[after + count], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
         for (p32 k = 0; k < count; k++)
         {
-                const p8 address_to name = found + offsets[k];
+                const p8 address_to name = s->found + s->offsets[k];
                 positive length = string_length((string_address)name);
                 struct files_node address_to n = &t->node[after + k];
                 file_facts facts;
@@ -2172,10 +2238,39 @@ static b32 files_tree_open(struct files_tree address_to t, p32 at)
         }
         t->count += count;
         file_walk_close(&walk);
+        system_call_2(syscall(munmap), (positive)s, sizeof(*s));
         return true;
 }
 
-// A node shut: every node under it let go (their names stay in the tree's bytes till it is made again), and read again when opened.
+// Reclaims name bytes left behind by shut nodes by compacting surviving node names in place.
+static fn files_tree_compact(struct files_tree address_to t)
+{
+        p8 address_to fresh = (p8 address_to)files_anon_map(FILES_TREE_NAMES, null);
+        p32 used = 0;
+
+        if (!fresh)
+                return;
+        for (p32 k = 0; k < t->count; k++)
+        {
+                struct files_node address_to n = &t->node[k];
+                positive nlen = (positive)n->length + 1;
+
+                memory_copy(fresh + used, t->names + n->name, nlen);
+                n->name = used, used += (p32)nlen;
+                if (n->depth == 0)
+                {
+                        positive rlen = string_length((string_address)(t->names + n->root_path)) + 1;
+
+                        memory_copy(fresh + used, t->names + n->root_path, rlen);
+                        n->root_path = used, used += (p32)rlen;
+                }
+        }
+        memory_copy(t->names, fresh, used);
+        t->names_used = used;
+        system_call_2(syscall(munmap), (positive)fresh, FILES_TREE_NAMES);
+}
+
+// A node shut: every node under it let go and its name bytes reclaimed, and read again when opened.
 static fn files_tree_shut(struct files_tree address_to t, p32 at)
 {
         p32 after;
@@ -2186,6 +2281,8 @@ static fn files_tree_shut(struct files_tree address_to t, p32 at)
         memory_copy(&t->node[at + 1], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
         t->count -= after - at - 1;
         t->node[at].open = false, t->node[at].read = false;
+        if (after > at + 1)
+                files_tree_compact(t);
 }
 
 /*
@@ -2194,7 +2291,7 @@ static fn files_tree_shut(struct files_tree address_to t, p32 at)
 */
 static p32 files_tree_find(const struct files_tree address_to t, const p8 address_to path)
 {
-        static p8 made[FILES_PATH];
+        p8 made[FILES_PATH];
         p32 found = FILES_NO;
 
         for (p32 at = 0; at < t->count; at++)
@@ -2312,6 +2409,7 @@ struct files_move
         bipolar into;                     // the folder it goes into, its own descriptor
         file_facts into_facts;
         p8 address_to paths;              // the sources, absolute, each with its end
+        p32 address_to offsets;           // byte offset of each source in paths (O(1) lookup)
         p8 address_to copied;             // per source: 1 when it is copied (a copy, or a move across filesystems), 2 when it is done
         p8 address_to landed;             // per source, FILES_NAME bytes: the name it has in into once it is there ("" none), for an undo
         p32 count, next;
@@ -2389,10 +2487,10 @@ static fn files_move_close(struct files_move address_to job)
         job->from = job->into = -1;
 }
 
-// The bytes of a move's own memory: the sources' paths, and a mark each.
+// The bytes of a move's own memory: the sources' paths, offsets, marks and landed names.
 static positive files_move_bytes(void)
 {
-        return (positive)FILES_MOVE_MOST * FILES_PATH / 4 + FILES_MOVE_MOST + (positive)FILES_MOVE_MOST * FILES_NAME;
+        return (positive)FILES_MOVE_MOST * FILES_PATH / 4 + (positive)FILES_MOVE_MOST * (sizeof(p32) + 1 + FILES_NAME);
 }
 
 /*
@@ -2402,7 +2500,7 @@ static positive files_move_bytes(void)
 */
 static b32 files_move_begin(struct files_move address_to job, int how, bipolar into, const p8 address_to paths, p32 count)
 {
-        bipolar mapped;
+        bipolar err = 0;
         positive used = 0, room = (positive)FILES_MOVE_MOST * FILES_PATH / 4;
 
         memory_fill(job, 0, sizeof(*job));
@@ -2416,19 +2514,21 @@ static b32 files_move_begin(struct files_move address_to job, int how, bipolar i
                 files_move_fail(job, into < 0 ? into : -ERROR_NOT_DIRECTORY);
                 return false;
         }
-        mapped = (bipolar)system_call_6(syscall(mmap), 0, files_move_bytes(), 3, 0x22, (positive)-1, 0);
-        if (mapped < 0 && mapped > -4096)
+        if (!(job->paths = (p8 address_to)files_anon_map(files_move_bytes(), &err)))
         {
-                files_move_fail(job, mapped);
+                files_move_fail(job, err);
                 return false;
         }
-        job->paths = (p8 address_to)mapped, job->copied = job->paths + room, job->landed = job->copied + FILES_MOVE_MOST;
+        job->offsets = (p32 address_to)(job->paths + room);
+        job->copied = (p8 address_to)(job->offsets + FILES_MOVE_MOST);
+        job->landed = job->copied + FILES_MOVE_MOST;
         for (p32 k = 0; k < count && job->count < FILES_MOVE_MOST; k++)
         {
                 positive length = string_length((string_address)paths);
 
                 if (length > 1 && paths[0] == '/' && length < FILES_PATH && used + length + 1 <= room)
                 {
+                        job->offsets[job->count] = (p32)used;
                         memory_copy(job->paths + used, paths, length + 1);
                         used += length + 1, job->count++;
                 }
@@ -2438,9 +2538,9 @@ static b32 files_move_begin(struct files_move address_to job, int how, bipolar i
         return job->count != 0;
 }
 
-static const p8 address_to files_move_path(const struct files_move address_to job, p32 which)
+static inline const p8 address_to files_move_path(const struct files_move address_to job, p32 which)
 {
-        return files_nth(job->paths, which);
+        return job->paths + job->offsets[which];
 }
 
 /*
@@ -2491,10 +2591,10 @@ static b32 files_move_within(bipolar folder, const file_facts address_to facts)
 
                 if (file_look_code(at, (string_address) "", AT_EMPTY_PATH, &here) < 0)
                         break;
-                inside = here.inode == facts->inode && here.device_major == facts->device_major && here.device_minor == facts->device_minor;
+                inside = files_same_file(facts->inode, facts->device_major, facts->device_minor, &here);
                 next = system_open_at(at, (string_address) "..", FILE_READ | O_DIRECTORY | O_CLOEXEC);
                 if (next < 0 || file_look_code(next, (string_address) "", AT_EMPTY_PATH, &above) < 0 ||
-                    (above.inode == here.inode && above.device_major == here.device_major && above.device_minor == here.device_minor))
+                    files_same_file(here.inode, here.device_major, here.device_minor, &above))
                 {
                         if (next >= 0)
                                 system_close(next);
@@ -2679,17 +2779,8 @@ static b32 files_move_piece(struct files_move address_to job)
                 }
                 else
                 {
-                        if (!job->buffer)
-                        {
-                                bipolar mapped = (bipolar)system_call_6(syscall(mmap), 0, FILES_MOVE_BUFFER, 3, 0x22, (positive)-1, 0);
-
-                                if (mapped < 0 && mapped > -4096)
-                                {
-                                        got = mapped;
-                                        break;
-                                }
-                                job->buffer = (p8 address_to)mapped;
-                        }
+                        if (!job->buffer && !(job->buffer = (p8 address_to)files_anon_map(FILES_MOVE_BUFFER, &got)))
+                                break;
                         got = (bipolar)system_read_once(job->in, job->buffer, want - moved < FILES_MOVE_BUFFER ? want - moved : FILES_MOVE_BUFFER);
                         if (got > 0 && (bipolar)system_write_all((positive)job->out, job->buffer, (positive)got) != got)
                                 got = -5;
@@ -2772,93 +2863,21 @@ static b32 files_move_walk(struct files_move address_to job, b32 counting)
 }
 
 /*
-        A step of a moved source's removal (its copy is whole): the first thing left in the innermost folder removed or gone into, or
-        that folder, empty, removed from the one it is in; the source itself last. False at the end, or when it stopped.
+        A step of a moved source's removal (its copy is whole): delegates to the shared DFS files_rmdir_step
+        using job->made[] as the directory fd stack (unused during FILES_MOVE_REMOVE, closed by files_move_close).
 */
 static b32 files_move_remove(struct files_move address_to job)
 {
-        bipolar in = files_move_source(job), gone;
-        file_walk walk;
-        struct linux_dirent64 address_to record;
-        file_facts facts;
+        bipolar err = 0;
+        int step = files_rmdir_step(job->from, job->made, job->inside, &job->depth, job->at,
+                                    job->depth ? null : job->name, job->depth ? null : &job->facts, null, &err);
 
-        if (!job->depth)
+        if (step < 0)
         {
-                // The source itself: a folder is emptied first, anything else removed as it was looked at.
-                if ((job->facts.mode & MODE_FORMAT) == MODE_DIRECTORY && !job->made_facts[0].mode)
-                {
-                        job->made_facts[0].mode = 1; // gone into once
-                        if (!file_walk_open_found_same(&job->walk[0], job->from, (string_address)job->name, &job->facts))
-                        {
-                                files_move_fail(job, job->walk[0].error);
-                                return false;
-                        }
-                        string_copy_bounded(job->inside[0], (string_address)job->name, FILES_NAME);
-                        job->made[0] = -1, job->depth = 1;
-                        return true;
-                }
-                gone = (job->facts.mode & MODE_FORMAT) == MODE_DIRECTORY
-                           ? (bipolar)system_call_3(syscall(unlinkat), (positive)job->from, (positive)job->name, AT_REMOVEDIR)
-                           : file_remove_same(job->from, (string_address)job->name, 0, &job->facts);
-                if (gone < 0)
-                        files_move_fail(job, gone);
+                files_move_fail(job, err);
                 return false;
         }
-        if (!file_walk_open(&walk, in, (string_address) "."))
-        {
-                files_move_fail(job, walk.error);
-                return false;
-        }
-        while ((record = file_walk_next(&walk)) && file_is_dot((string_address)record->d_name))
-                ;
-        if (record)
-                string_copy_bounded(job->at, (string_address)record->d_name, FILES_NAME);
-        gone = walk.error;
-        file_walk_close(&walk);
-        if (!record)
-        {
-                if (gone < 0)
-                {
-                        files_move_fail(job, gone);
-                        return false;
-                }
-                job->depth--;
-                file_walk_close(&job->walk[job->depth]);
-                if (job->depth)
-                {
-                        gone = (bipolar)system_call_3(syscall(unlinkat), (positive)files_move_source(job), (positive)job->inside[job->depth], AT_REMOVEDIR);
-                        if (gone < 0)
-                        {
-                                files_move_fail(job, gone);
-                                return false;
-                        }
-                }
-                return true;
-        }
-        gone = file_look_code(in, (string_address)job->at, AT_SYMLINK_NOFOLLOW, &facts);
-        if (gone >= 0 && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
-        {
-                if (job->depth >= FILES_JOB_DEEP)
-                {
-                        files_move_fail(job, -ERROR_LOOP);
-                        return false;
-                }
-                if (!file_walk_open_found_same(&job->walk[job->depth], in, (string_address)job->at, &facts))
-                {
-                        files_move_fail(job, job->walk[job->depth].error);
-                        return false;
-                }
-                string_copy_bounded(job->inside[job->depth], (string_address)job->at, FILES_NAME);
-                job->made[job->depth] = -1, job->depth++;
-                return true;
-        }
-        gone = gone < 0 ? gone : file_remove_same(in, (string_address)job->at, 0, &facts);
-        if (gone < 0)
-        {
-                files_move_fail(job, gone);
-                return false;
-        }
-        return true;
+        return step == 0;
 }
 
 /*
@@ -2904,8 +2923,8 @@ static b32 files_move_step(struct files_move address_to job)
                 if (job->how == FILES_MOVE_MOVE)
                 {
                         // Already in the folder: nothing to do. Else a rename where the name is free, and a copy where it crosses filesystems.
-                        if (file_look_code(job->from, (string_address) "", AT_EMPTY_PATH, &folder) >= 0 && folder.inode == job->into_facts.inode &&
-                            folder.device_major == job->into_facts.device_major && folder.device_minor == job->into_facts.device_minor)
+                        if (file_look_code(job->from, (string_address) "", AT_EMPTY_PATH, &folder) >= 0 &&
+                            files_same_file(job->into_facts.inode, job->into_facts.device_major, job->into_facts.device_minor, &folder))
                                 job->copied[job->next] = 2;
                         else if (!files_move_free_name(job->into, job->name, job->named, &numbered))
                         {
@@ -2944,7 +2963,7 @@ static b32 files_move_step(struct files_move address_to job)
                         if (counting)
                                 job->next++;
                         else if (job->how == FILES_MOVE_MOVE)
-                                job->phase = FILES_MOVE_REMOVE, job->made_facts[0].mode = 0;
+                                job->phase = FILES_MOVE_REMOVE;
                         else
                                 job->copied[job->next++] = 2;
                         return true;
@@ -2982,7 +3001,7 @@ static b32 files_move_step(struct files_move address_to job)
                 {
                         // A link is whole at once (a moved one removed now), and something skipped stays where it is.
                         if (job->how == FILES_MOVE_MOVE && (job->facts.mode & MODE_FORMAT) == MODE_LINK)
-                                job->phase = FILES_MOVE_REMOVE, job->made_facts[0].mode = 0;
+                                job->phase = FILES_MOVE_REMOVE;
                         else
                                 job->copied[job->next++] = 2;
                 }
@@ -3311,12 +3330,20 @@ struct files_git_pattern
         p8 only_folders, rooted; // a / at its end; it is of the folder the file is in (the file is the folder shown's, or a / began it)
 };
 
-static struct
+struct files_git_rules
 {
         struct files_git_pattern literal[FILES_GIT_LITERALS]; // by the name's hash, open addressed (length 0: none)
         struct files_git_pattern glob[FILES_GIT_GLOBS];
         int globs;
-} files_git_rules;
+};
+
+struct files_git_scratch
+{
+        struct files_git_rules rules;
+        p32 table[FILES_GIT_NAMES];
+        p8 root[FILES_PATH];
+        p8 ignore[2][FILES_GIT_IGNORE_MOST];
+};
 
 static p32 files_git_hash(const p8 address_to text, positive length)
 {
@@ -3324,7 +3351,7 @@ static p32 files_git_hash(const p8 address_to text, positive length)
 }
 
 // An ignore file's lines read into the rules: rooted says the folder shown is the folder the file is in.
-static fn files_git_rules_add(const p8 address_to text, positive size, b32 rooted)
+static fn files_git_rules_add(struct files_git_rules address_to rules, const p8 address_to text, positive size, b32 rooted)
 {
         for (positive at = 0; at < size;)
         {
@@ -3348,15 +3375,15 @@ static fn files_git_rules_add(const p8 address_to text, positive size, b32 roote
                 if (inside || stop == start || stop - start > 255 || (anchored && !rooted))
                         continue;
                 pattern = (struct files_git_pattern){text + start, (p16)(stop - start), (p8)only_folders, (p8)(rooted || anchored)};
-                if (wild && files_git_rules.globs < FILES_GIT_GLOBS)
-                        files_git_rules.glob[files_git_rules.globs++] = pattern;
+                if (wild && rules->globs < FILES_GIT_GLOBS)
+                        rules->glob[rules->globs++] = pattern;
                 else if (!wild)
                 {
                         p32 hash = files_git_hash(pattern.text, pattern.length);
 
                         for (p32 probe = 0; probe < FILES_GIT_LITERALS; probe++, hash++)
                         {
-                                struct files_git_pattern address_to slot = &files_git_rules.literal[hash & (FILES_GIT_LITERALS - 1)];
+                                struct files_git_pattern address_to slot = &rules->literal[hash & (FILES_GIT_LITERALS - 1)];
 
                                 if (!slot->length)
                                 {
@@ -3375,22 +3402,22 @@ static fn files_git_rules_add(const p8 address_to text, positive size, b32 roote
 }
 
 // Whether the rules ignore name (a folder's when folder).
-static b32 files_git_ignored(const p8 address_to name, positive length, b32 folder, positive address_to budget)
+static b32 files_git_ignored(const struct files_git_rules address_to rules, const p8 address_to name, positive length, b32 folder, positive address_to budget)
 {
         p32 hash = files_git_hash(name, length);
 
         for (p32 probe = 0; probe < FILES_GIT_LITERALS; probe++, hash++)
         {
-                const struct files_git_pattern address_to slot = &files_git_rules.literal[hash & (FILES_GIT_LITERALS - 1)];
+                const struct files_git_pattern address_to slot = &rules->literal[hash & (FILES_GIT_LITERALS - 1)];
 
                 if (!slot->length)
                         break;
                 if (slot->length == length && !memory_compare(slot->text, name, length) && (folder || !slot->only_folders))
                         return true;
         }
-        for (int k = 0; k < files_git_rules.globs; k++)
+        for (int k = 0; k < rules->globs; k++)
         {
-                const struct files_git_pattern address_to g = &files_git_rules.glob[k];
+                const struct files_git_pattern address_to g = &rules->glob[k];
 
                 if ((folder || !g->only_folders) && files_git_glob(g->text, g->length, name, length, budget))
                         return true;
@@ -3405,13 +3432,12 @@ static b32 files_git_ignored(const p8 address_to name, positive length, b32 fold
 */
 static b32 files_git_marks(const struct files_model address_to m, p8 address_to state)
 {
-        static p32 table[FILES_GIT_NAMES];
-        static p8 root[FILES_PATH], ignore[2][FILES_GIT_IGNORE_MOST];
+        struct files_git_scratch address_to s;
         p8 at_path[FILES_PATH];
         positive length = string_length((string_address)m->path), rel, ignore_size[2] = {0, 0}, size = 0, got = 0, budget = FILES_GIT_BUDGET;
         file_facts facts;
         bipolar handle;
-        long mapped;
+        p8 address_to mapped;
         const p8 address_to index;
         p32 count, version;
         b32 at_root;
@@ -3419,63 +3445,72 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
         memory_fill(state, FILES_GIT_NONE, FILES_MOST);
         if (!length || length >= FILES_PATH - 16)
                 return false;
+        if (!(s = (struct files_git_scratch address_to)files_anon_map(sizeof(*s), null)))
+                return false;
         // The work tree: the folder shown or the nearest above it with a .git folder.
-        string_copy_bounded((string_address)root, (string_address)m->path, FILES_PATH);
+        string_copy_bounded((string_address)s->root, (string_address)m->path, FILES_PATH);
         for (;;)
         {
-                positive here = string_length((string_address)root);
+                positive here = string_length((string_address)s->root);
 
-                string_copy_bounded((string_address)at_path, (string_address)root, FILES_PATH);
-                string_append_bounded((string_address)at_path, (string_address)(here > 1 ? "/.git" : ".git"), FILES_PATH);
+                files_path_join(at_path, FILES_PATH, s->root, (const p8 address_to) ".git");
                 if (file_look_code(AT_FDCWD, (string_address)at_path, 0, &facts) == 0 && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
                         break;
                 if (here <= 1)
+                {
+                        system_call_2(syscall(munmap), (positive)s, sizeof(*s));
                         return false;
-                while (here > 1 && root[here - 1] != '/')
+                }
+                while (here > 1 && s->root[here - 1] != '/')
                         here--;
-                root[here > 1 ? here - 1 : 1] = 0;
+                s->root[here > 1 ? here - 1 : 1] = 0;
         }
-        rel = string_length((string_address)root);
+        rel = string_length((string_address)s->root);
         rel = rel > 1 ? rel + 1 : 1; // the folder shown's path inside the work tree starts here ("" at the root)
         at_root = rel <= 1 || length + 1 == rel;
         string_append_bounded((string_address)at_path, (string_address) "/index", FILES_PATH);
         if ((handle = system_open_at(AT_FDCWD, (string_address)at_path, FILE_READ | O_CLOEXEC)) < 0)
-                return false;
-        size = file_look_code(handle, (string_address) "", AT_EMPTY_PATH, &facts) == 0 ? (positive)facts.size : 0;
-        mapped = size >= 12 && size <= FILES_GIT_INDEX_MOST ? (long)system_call_6(syscall(mmap), 0, size, 3, 0x22, (positive)-1, 0) : -1;
-        if (mapped < 0 && mapped > -4096)
-                mapped = -1;
-        // Read whole into memory of its own; what it holds past a short read is the zeros the mapping began with, and is not read.
-        while (mapped >= 0 && got < size)
         {
-                bipolar part = (bipolar)system_read_once(handle, (p8 address_to)mapped + got, size - got);
+                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
+                return false;
+        }
+        size = file_look_code(handle, (string_address) "", AT_EMPTY_PATH, &facts) == 0 ? (positive)facts.size : 0;
+        mapped = size >= 12 && size <= FILES_GIT_INDEX_MOST ? (p8 address_to)files_anon_map(size, null) : null;
+        // Read whole into memory of its own; what it holds past a short read is the zeros the mapping began with, and is not read.
+        while (mapped && got < size)
+        {
+                bipolar part = (bipolar)system_read_once(handle, mapped + got, size - got);
 
                 if (part <= 0)
                         break;
                 got += (positive)part;
         }
         system_close(handle);
-        if (mapped < 0)
+        if (!mapped)
+        {
+                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
                 return false;
+        }
         size = got;
-        index = (const p8 address_to)mapped;
+        index = mapped;
         version = size >= 12 ? (p32)index[4] << 24 | (p32)index[5] << 16 | (p32)index[6] << 8 | index[7] : 0;
         count = size >= 12 ? (p32)index[8] << 24 | (p32)index[9] << 16 | (p32)index[10] << 8 | index[11] : 0;
         if (size < 12 || memory_compare(index, "DIRC", 4) || (version != 2 && version != 3))
         {
                 system_call_2(syscall(munmap), (positive)mapped, facts.size);
+                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
                 return false;
         }
         // The listing's names in a table, each to its entry, so a path of the index finds its entry at once.
-        memory_fill(table, 0xff, sizeof(table));
+        memory_fill(s->table, 0xff, sizeof(s->table));
         for (p32 k = 0; k < m->shown.count; k++)
         {
                 const struct files_entry address_to entry = &m->shown.entry[k];
                 p32 hash = files_git_hash(m->shown.names + entry->name, entry->length);
 
-                while (table[hash & (FILES_GIT_NAMES - 1)] != 0xffffffffu)
+                while (s->table[hash & (FILES_GIT_NAMES - 1)] != 0xffffffffu)
                         hash++;
-                table[hash & (FILES_GIT_NAMES - 1)] = k;
+                s->table[hash & (FILES_GIT_NAMES - 1)] = k;
                 state[k] = FILES_GIT_UNTRACKED;
         }
         // Every path of the index under the folder shown marks the name it starts with there tracked.
@@ -3500,7 +3535,7 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
                 for (stop = first; stop < end_at && index[stop] != '/'; stop++)
                         ;
                 hash = files_git_hash(index + first, stop - first);
-                while ((found = table[hash & (FILES_GIT_NAMES - 1)]) != 0xffffffffu)
+                while ((found = s->table[hash & (FILES_GIT_NAMES - 1)]) != 0xffffffffu)
                 {
                         const struct files_entry address_to entry = &m->shown.entry[found];
 
@@ -3514,16 +3549,14 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
         }
         system_call_2(syscall(munmap), (positive)mapped, facts.size);
         // The ignore files: the work tree's root's and the folder shown's, read once into the rules.
-        memory_zero(&files_git_rules, sizeof(files_git_rules));
         for (int which = 0; which < 2; which++)
         {
                 bipolar read;
 
-                string_copy_bounded((string_address)at_path, (string_address)(which ? m->path : root), FILES_PATH);
-                string_append_bounded((string_address)at_path, (string_address)(string_length((string_address)at_path) > 1 ? "/.gitignore" : ".gitignore"), FILES_PATH);
-                read = file_slurp_once_at(AT_FDCWD, (string_address)at_path, ignore[which], sizeof(ignore[which]));
+                files_path_join(at_path, FILES_PATH, which ? m->path : s->root, (const p8 address_to) ".gitignore");
+                read = file_slurp_once_at(AT_FDCWD, (string_address)at_path, s->ignore[which], sizeof(s->ignore[which]));
                 ignore_size[which] = read > 0 ? (positive)read : 0;
-                files_git_rules_add(ignore[which], ignore_size[which], which ? true : at_root);
+                files_git_rules_add(&s->rules, s->ignore[which], ignore_size[which], which ? true : at_root);
                 if (at_root)
                         break; // the folder shown is the root: one file
         }
@@ -3537,9 +3570,10 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
                         state[k] = FILES_GIT_NONE;
                         continue;
                 }
-                if (state[k] == FILES_GIT_UNTRACKED && files_git_ignored(name, entry->length, entry->kind == FILES_KIND_DIRECTORY, &budget))
+                if (state[k] == FILES_GIT_UNTRACKED && files_git_ignored(&s->rules, name, entry->length, entry->kind == FILES_KIND_DIRECTORY, &budget))
                         state[k] = FILES_GIT_IGNORED;
         }
+        system_call_2(syscall(munmap), (positive)s, sizeof(*s));
         return true;
 }
 

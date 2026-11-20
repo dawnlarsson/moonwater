@@ -424,3 +424,101 @@ static unsigned int compositor_screen_clips(const int *screen, const unsigned sh
 }
 
 /* ---- end of the outputs ---- */
+
+/* ---- placement: pure screen-room & window placement rules ---- */
+
+// The room of a screen: the screen less the taskbar's band where the band lies along the edge position names.
+// A band that is not on the screen, or that would leave nothing, takes nothing.
+static void place_room(const int *screen, const int *band, unsigned int position, int *room)
+{
+        int cut = 0, size;
+
+        memory_copy(room, screen, 4 * sizeof(int));
+        if (band[2] <= 0 || band[3] <= 0 || band[0] >= screen[0] + screen[2] || band[0] + band[2] <= screen[0] ||
+            band[1] >= screen[1] + screen[3] || band[1] + band[3] <= screen[1])
+                return;
+        if (position == TASKBAR_TOP || position == TASKBAR_BOTTOM)
+        {
+                cut = position == TASKBAR_TOP ? band[1] + band[3] - screen[1] : screen[1] + screen[3] - band[1];
+                size = screen[3] - cut;
+                if (size <= 0)
+                        return;
+                room[1] += position == TASKBAR_TOP ? cut : 0;
+                room[3] = size;
+                return;
+        }
+        cut = position == TASKBAR_LEFT ? band[0] + band[2] - screen[0] : screen[0] + screen[2] - band[0];
+        size = screen[2] - cut;
+        if (size <= 0)
+                return;
+        room[0] += position == TASKBAR_LEFT ? cut : 0;
+        room[2] = size;
+}
+
+// Kept on a screen as compositor_place keeps it on the output: all of it, its line too, when it fits; its top left
+// when it does not, so the top it is taken by is always there to take.
+static void place_clamp(const int *screen, int width, int height, int line, int *x, int *y)
+{
+        *x = compositor_fit(*x, screen[0] + line, screen[0] + screen[2] - width - line);
+        *y = compositor_fit(*y, screen[1] + line, screen[1] + screen[3] - height - line);
+}
+
+// A size as a window may have it in an area: what was asked, up to the area's and never under the least.
+static int place_size(unsigned int asked, int area, int least)
+{
+        int size = asked > (unsigned int)area ? area : (int)asked;
+
+        return size < least ? (least < area ? least : area) : size;
+}
+
+// Where a window with no place of its own goes (WINDOW_PLACE_FREE): centred on its owner's rectangle when it has one,
+// else on the room; kept inside the room, its line too, and at the room's top left when it is larger.
+static void place_free(const int *room, const int *owner, int width, int height, int line, int *x, int *y)
+{
+        const int *on = owner && owner[2] > 0 && owner[3] > 0 ? owner : room;
+
+        *x = on[0] + (on[2] - width) / 2;
+        *y = on[1] + (on[3] - height) / 2;
+        place_clamp(room, width, height, line, x, y);
+}
+
+// Where a placement puts a window on its screen, whose room is room: what the window fills and its rectangle.
+static unsigned int place_rect(const struct window_place *place, const int *screen, const int *room, int x, int y,
+                               unsigned int picture_w, unsigned int picture_h, int line, int least_w, int least_h,
+                               int *rect)
+{
+        unsigned int how = place->how & WINDOW_PLACE_HOW;
+        unsigned int asked_w = place->how & WINDOW_PLACE_SIZE ? place->width : picture_w;
+        unsigned int asked_h = place->how & WINDOW_PLACE_SIZE ? place->height : picture_h;
+        const int *area = how == WINDOW_PLACE_CENTER ? room : screen;
+
+        if (how == WINDOW_PLACE_MAXIMIZED || how == WINDOW_PLACE_FULLSCREEN)
+        {
+                memory_copy(rect, how == WINDOW_PLACE_MAXIMIZED ? room : screen, 4 * sizeof(int));
+                return how == WINDOW_PLACE_MAXIMIZED ? COMPOSITOR_ROOM : COMPOSITOR_MAXIMIZED;
+        }
+        rect[2] = place_size(asked_w, area[2] - 2 * line, least_w);
+        rect[3] = place_size(asked_h, area[3] - 2 * line, least_h);
+        rect[0] = how == WINDOW_PLACE_CENTER ? room[0] + (room[2] - rect[2]) / 2 : how == WINDOW_PLACE_AT ? screen[0] + place->x : x;
+        rect[1] = how == WINDOW_PLACE_CENTER ? room[1] + (room[3] - rect[3]) / 2 : how == WINDOW_PLACE_AT ? screen[1] + place->y : y;
+        if (how)
+                place_clamp(screen, rect[2], rect[3], line, &rect[0], &rect[1]);
+        return COMPOSITOR_FLOATING;
+}
+
+// The screen a point is on, or the nearest to it; the first of equals, and the first when there are none.
+static unsigned int place_screen_at(int x, int y, const int (*screens)[4], unsigned int count)
+{
+        unsigned int found = 0;
+        long long best = -1;
+
+        for (unsigned int at = 0; at < count; at++)
+        {
+                int nx = x, ny = y;
+                long long distance = compositor_screen_nearest(screens[at], &nx, &ny);
+
+                if (best < 0 || distance < best)
+                        best = distance, found = at;
+        }
+        return found;
+}

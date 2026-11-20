@@ -506,7 +506,7 @@ static struct compositor_frame *compositor_gpu_scaled_copy; // the rows' (compos
 static struct
 {
         unsigned int *memory;
-        positive bytes;
+        unsigned long bytes;
         int fd;
 } compositor_gpu_scaled_pool[COMPOSITOR_GPU_SCALED];
 
@@ -544,26 +544,23 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 source.width = f->source_w, source.height = f->source_h, source.source_w = source.source_h = 0;
                 if (!compositor_gpu_picture(&source) || !(src_va = compositor_gpu_va(&source)))
                         return COMPOSITOR_GPU_WHY_PICTURE;
-                if (compositor_gpu_scaled_pool[used].bytes < bytes)
+                if (compositor_gpu_scaled_pool[used].bytes < (unsigned long)bytes)
                 {
-                        positive grown = (bytes + (1ull << 20) - 1) & ~((1ull << 20) - 1);
+                        unsigned long grown = ((unsigned long)bytes + (1ul << 20) - 1) & ~((1ul << 20) - 1);
                         long memfd, mapped;
+                        void *p = compositor_gpu_scaled_pool[used].memory;
 
-                        if (compositor_gpu_scaled_pool[used].memory)
-                        {
-                                // The card's maps of these pages are let go of first: an address the new pages take would otherwise be read as the old map's.
-                                gpu_forget(compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_pool[used].bytes);
-                                gpu_unregister_memfd(compositor_gpu_scaled_pool[used].memory);
-                                compositor_call(syscall(munmap), (positive)compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_pool[used].bytes, 0, 0, 0, 0);
-                        }
+                        if (p)
+                                gpu_unregister_memfd(p);
+                        mem_buf_free(&p, &compositor_gpu_scaled_pool[used].bytes, MEM_BUF_GPU_FORGET);
                         if (compositor_gpu_scaled_pool[used].fd > 0)
                                 system_close(compositor_gpu_scaled_pool[used].fd - 1);
-                        compositor_gpu_scaled_pool[used].memory = 0, compositor_gpu_scaled_pool[used].bytes = 0, compositor_gpu_scaled_pool[used].fd = 0;
+                        compositor_gpu_scaled_pool[used].memory = 0, compositor_gpu_scaled_pool[used].fd = 0;
                         memfd = compositor_call(syscall(memfd_create), (positive) "moonwater-scaled", 1 | 2, 0, 0, 0, 0);
-                        if (memfd >= 0 && system_truncate_handle((int)memfd, grown) == 0 &&
+                        if (memfd >= 0 && system_truncate_handle((int)memfd, (positive)grown) == 0 &&
                             compositor_call(syscall(fcntl), (positive)memfd, WINDOWS_F_ADD_SEALS, 2, 0, 0, 0) == 0) // F_SEAL_SHRINK
                         {
-                                mapped = compositor_call(syscall(mmap), 0, grown, 3, 1, (positive)memfd, 0);
+                                mapped = compositor_call(syscall(mmap), 0, (positive)grown, 3, 1, (positive)memfd, 0);
                                 if (mapped < 0 && mapped > -4096)
                                 {
                                         system_close((int)memfd);
@@ -571,16 +568,15 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                                 }
                                 compositor_gpu_scaled_pool[used].memory = (unsigned int *)mapped, compositor_gpu_scaled_pool[used].bytes = grown;
                                 compositor_gpu_scaled_pool[used].fd = (int)memfd + 1;
-                                gpu_register_memfd((int)memfd, compositor_gpu_scaled_pool[used].memory, grown, 0);
+                                gpu_register_memfd((int)memfd, compositor_gpu_scaled_pool[used].memory, (positive)grown, 0);
                         }
                         else
                         {
                                 if (memfd >= 0)
                                         system_close((int)memfd);
-                                mapped = compositor_call(syscall(mmap), 0, grown, 3, 0x22, (positive)-1, 0);
-                                if (mapped < 0 && mapped > -4096)
+                                if (!mem_buf_grow(&p, &compositor_gpu_scaled_pool[used].bytes, grown, 0))
                                         return COMPOSITOR_GPU_WHY_SCALED;
-                                compositor_gpu_scaled_pool[used].memory = (unsigned int *)mapped, compositor_gpu_scaled_pool[used].bytes = grown;
+                                compositor_gpu_scaled_pool[used].memory = (unsigned int *)p;
                         }
                 }
                 if (!(dst_va = gpu_va_written(compositor_gpu_scaled_pool[used].memory, bytes)) &&

@@ -1576,27 +1576,29 @@ static int compositor_tray_gen(void)
         return compositor.tray_gen;
 }
 
-static const unsigned int *compositor_tray_pixels(int index)
+static int compositor_tray_nth(int index)
 {
         int n = 0;
 
         for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
                 if (compositor.tray[i].used && n++ == index)
-                        return compositor.tray[i].has_icon ? compositor.tray[i].pixels : 0;
-        return 0;
+                        return i;
+        return -1;
+}
+
+static const unsigned int *compositor_tray_pixels(int index)
+{
+        int slot = compositor_tray_nth(index);
+
+        return slot >= 0 && compositor.tray[slot].has_icon ? compositor.tray[slot].pixels : 0;
 }
 
 static void compositor_tray_click(int index, int button)
 {
-        int n = 0;
+        int slot = compositor_tray_nth(index);
 
-        for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
-                if (compositor.tray[i].used && n++ == index)
-                {
-                        if (compositor.tray[i].click)
-                                compositor.tray[i].click(compositor.tray[i].owner, compositor.tray[i].id, button);
-                        return;
-                }
+        if (slot >= 0 && compositor.tray[slot].click)
+                compositor.tray[slot].click(compositor.tray[slot].owner, compositor.tray[slot].id, button);
 }
 
 // The nine parts that read the state, in the order their uses need (the comment before the first run says why).
@@ -1746,9 +1748,7 @@ static void compositor_lists_set(int on)
                 return;
         __atomic_store_n(&table->list_mode, on ? 1u : 0u, __ATOMIC_RELEASE);
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (table->pid[row])
-                        rows_add(&compositor.woken, row);
+        compositor_wake_all();
 }
 
 /*
@@ -2101,12 +2101,42 @@ static void compositor_hand_back(void)
         reads the picture out of, and the card's calls fail on a descriptor
         that is not there and are not looked at. -H WIDTHxHEIGHT FILE.
 */
+// A file opened read/write, sized to bytes and mapped shared (headless scanout and its spare); null on failure.
+static void *compositor_map_rw_file(string_address path, long bytes, int *error)
+{
+        long handle = (long)system_open_at_mode(AT_FDCWD, path, FILE_READ_WRITE | O_CREAT | O_CLOEXEC, 0644);
+        long mapped;
+
+        if (handle < 0)
+        {
+                if (error)
+                        *error = -COMPOSITOR_EINVAL;
+                return null;
+        }
+        if (compositor_call(syscall(ftruncate), (positive)handle, (positive)bytes, 0, 0, 0, 0) < 0)
+        {
+                system_close((positive)handle);
+                if (error)
+                        *error = -COMPOSITOR_EINVAL;
+                return null;
+        }
+        mapped = compositor_call(syscall(mmap), 0, (positive)bytes, 3, 1, (positive)handle, 0);
+        system_close((positive)handle);
+        if (mapped < 0 && mapped > -4096)
+        {
+                if (error)
+                        *error = -COMPOSITOR_ENOSPC;
+                return null;
+        }
+        return (void *)mapped;
+}
+
 // Headless: the scan image's spare beside it, <path>.spare, of the same size: the frames are composed into the spare and the two names are exchanged
 // at each flip, so the image is whole at every moment (compositor_headless_flip). 0 when the names do not fit or the file does not make.
 static b32 compositor_headless_plate(string_address path, long bytes)
 {
         unsigned long length = 0, at;
-        long handle, mapped;
+        void *mapped;
         static const char suffix[] = ".spare";
 
         while (path[length])
@@ -2118,17 +2148,8 @@ static b32 compositor_headless_plate(string_address path, long bytes)
         for (at = 0; suffix[at]; at++)
                 compositor_spare_name[length + at] = suffix[at];
         compositor_spare_name[length + sizeof(suffix) - 1] = 0;
-        handle = (long)system_open_at_mode(AT_FDCWD, (string_address)compositor_spare_name, FILE_READ_WRITE | O_CREAT | O_CLOEXEC, 0644);
-        if (handle < 0)
-                return 0;
-        if (compositor_call(syscall(ftruncate), (positive)handle, (positive)bytes, 0, 0, 0, 0) < 0)
-        {
-                system_close((positive)handle);
-                return 0;
-        }
-        mapped = compositor_call(syscall(mmap), 0, (positive)bytes, 3, 1, (positive)handle, 0);
-        system_close((positive)handle);
-        if (mapped < 0 && mapped > -4096)
+        mapped = compositor_map_rw_file((string_address)compositor_spare_name, bytes, null);
+        if (!mapped)
                 return 0;
         compositor_spare.fb = 2, compositor_spare.handle = 0, compositor_spare.pixels = (unsigned int *)mapped; // 2: the other name, as a framebuffer is
         compositor_spare.bytes = (unsigned long)bytes, compositor_spare.pitch = compositor.scanout_pitch;
@@ -2138,7 +2159,9 @@ static b32 compositor_headless_plate(string_address path, long bytes)
 
 static b32 compositor_headless(string_address size, string_address path)
 {
-        long width = 0, height = 0, handle, mapped, bytes;
+        long width = 0, height = 0, bytes;
+        void *mapped;
+        int error = 0;
 
         while (*size >= '0' && *size <= '9')
         {
@@ -2158,19 +2181,9 @@ static b32 compositor_headless(string_address size, string_address path)
                 return -COMPOSITOR_EINVAL;
 
         bytes = width * height * 4;
-        handle = (long)system_open_at_mode(AT_FDCWD, path, FILE_READ_WRITE | O_CREAT | O_CLOEXEC, 0644);
-        if (handle < 0)
-                return -COMPOSITOR_EINVAL;
-        if (compositor_call(syscall(ftruncate), (positive)handle, (positive)bytes, 0, 0, 0, 0) < 0)
-        {
-                system_close((positive)handle);
-                return -COMPOSITOR_EINVAL;
-        }
-
-        mapped = compositor_call(syscall(mmap), 0, (positive)bytes, 3, 1, (positive)handle, 0);
-        system_close((positive)handle);
-        if (mapped < 0 && mapped > -4096)
-                return -COMPOSITOR_ENOSPC;
+        mapped = compositor_map_rw_file(path, bytes, &error);
+        if (!mapped)
+                return error;
 
         compositor.card = -1;
         compositor.scanout = (unsigned int *)mapped;
@@ -2187,6 +2200,17 @@ static b32 compositor_headless(string_address size, string_address path)
         compositor_damage(0, 0, compositor.width, compositor.height);
         compositor_present();
         return 0;
+}
+
+// Whether a /run/moonwater control flag file exists (readable).
+static b32 compositor_flag_exists(string_address path)
+{
+        bipolar handle = system_open_at(AT_FDCWD, path, FILE_READ | O_CLOEXEC);
+
+        if (handle < 0)
+                return 0;
+        system_close(handle);
+        return 1;
 }
 
 static b32 compositor_option(string_address argument, char letter)
@@ -2678,13 +2702,6 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor_clip.gesture, COMPOSITOR_ROWS_ROW) \
         X(compositor_gpu_pins, COMPOSITOR_ROWS_ROW) \
         X(compositor_osk_held, COMPOSITOR_ROWS_ROW) \
-        X(compositor_owed, COMPOSITOR_ROWS_ROW) \
-        X(compositor_owed_flags, COMPOSITOR_ROWS_ROW) \
-        X(compositor_owed_keys, COMPOSITOR_ROWS_ROW) \
-        X(compositor_owed_key_flags, COMPOSITOR_ROWS_ROW) \
-        X(compositor_owed_any, COMPOSITOR_ROWS_ROW) \
-        X(compositor_owed_physical, COMPOSITOR_ROWS_ROW) \
-        X(compositor_owed_key_physical, COMPOSITOR_ROWS_ROW) \
         X(compositor_doors.asked, COMPOSITOR_ROWS_ROW1) \
         X(compositor_record_shots[0].rects, COMPOSITOR_ROWS_ROW) \
         X(compositor_record_shots[1].rects, COMPOSITOR_ROWS_ROW) \
@@ -2805,6 +2822,7 @@ static void compositor_zero(void)
         compositor_rows_point();
         compositor_rows_make(compositor_rows_in_use);
         COMPOSITOR_ROWS_OWN(COMPOSITOR_ROWS_ZERO)
+        compositor_owed_reset();
 }
 
 // The card's struct likewise.
@@ -3353,55 +3371,23 @@ static b32 compositor_main()
 
         compositor_keys_read();
         // A present late in its period, unless the machine's owner asks for every present early (compositor_present_due).
-        {
-                bipolar early = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/present-early", FILE_READ | O_CLOEXEC);
-
-                compositor_late.early = early >= 0;
-                if (early >= 0)
-                        system_close(early);
-        }
+        compositor_late.early = compositor_flag_exists((string_address) "/run/moonwater/present-early");
         // No game's hold of the processor's idle states, where the owner says so (compositor_game_watch).
-        {
-                bipolar off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/game-hold-off", FILE_READ | O_CLOEXEC);
-
-                if (off >= 0)
-                        compositor.games = ~0ul, compositor_game_off = 1, system_close(off);
-        }
+        if (compositor_flag_exists((string_address) "/run/moonwater/game-hold-off"))
+                compositor.games = ~0ul, compositor_game_off = 1;
         // Variable refresh for a screen whose connector does not say it can, where the machine's owner says it can (kms.c's compositor_vrr).
-        {
-                bipolar said = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/vrr-capable", FILE_READ | O_CLOEXEC);
-
-                compositor_vrr.said = said >= 0;
-                if (said >= 0)
-                        system_close(said);
-        }
+        compositor_vrr.said = compositor_flag_exists((string_address) "/run/moonwater/vrr-capable");
 #ifdef MOONWATER_GPU_C
         // The card's present without a wait, unless the owner asks for every job waited for in place, as it was (/run/moonwater/present-wait).
-        {
-                bipolar wait = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/present-wait", FILE_READ | O_CLOEXEC);
-
-                compositor_card.nowait = wait < 0;
-                if (wait >= 0)
-                        system_close(wait);
-        }
+        compositor_card.nowait = !compositor_flag_exists((string_address) "/run/moonwater/present-wait");
         // The card's clocks held while input arrives (compositor_gpu_clocks), unless the owner's file /run/moonwater/gpu-clocks-off is there.
-        {
-                bipolar off = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/gpu-clocks-off", FILE_READ | O_CLOEXEC);
-
-                if (off >= 0)
-                        compositor_gpu_clocks.level = 0, compositor_gpu_clocks.game_off = 1, system_close(off);
-        }
+        if (compositor_flag_exists((string_address) "/run/moonwater/gpu-clocks-off"))
+                compositor_gpu_clocks.level = 0, compositor_gpu_clocks.game_off = 1;
         // A window's list drawn by a job of the card the loop does not wait for, unless the owner asks for it waited for in place, as it was
         // (/run/moonwater/lists-wait). Waited for, every list a kit program drew (a terminal's frame, the settings') stopped the loop for its job,
         // 1853 us mean on box (22 ms a second at 10 lists a second): no input device was read meanwhile, so a key pressed in it reached its window
         // that much later.
-        {
-                bipolar lists = system_open_at(AT_FDCWD, (string_address) "/run/moonwater/lists-wait", FILE_READ | O_CLOEXEC);
-
-                compositor_card.lists_nowait = lists < 0;
-                if (lists >= 0)
-                        system_close(lists);
-        }
+        compositor_card.lists_nowait = !compositor_flag_exists((string_address) "/run/moonwater/lists-wait");
 #endif
         if (compositor.scale < 25 || compositor.scale > 800)
                 compositor.scale = WINDOWS_SCALE_DEFAULT;
@@ -4169,13 +4155,7 @@ static b32 surface_main()
         if (!placed)
                 windows_place_free(table, own.row);
         table->state[own.row] = away ? WINDOW_MINIMIZED : 0;
-        {
-                positive at = 0;
-
-                for (; title && title[at] && at < WINDOWS_TITLE - 1; at++)
-                        table->title[own.row][at] = (char)title[at];
-                table->title[own.row][at] = 0; // a row is reused: what it held past this title is not the title's
-        }
+        windows_title_set(&own, (const char *)title);
         windows_name(&own, (const char *)name);
         surface_draw(&own, which, (unsigned int)width, (unsigned int)height, (unsigned int)colour, font, text);
 

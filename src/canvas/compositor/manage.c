@@ -1740,141 +1740,6 @@ static void compositor_first_place(int row, int *x, int *y)
         }
 }
 
-/*
-        Placement: where a window that asked to be put somewhere goes (window.c's WINDOW_PLACE_*), worked out from
-        rectangles alone -- x, y, width and height on the desktop -- so the checks can ask it everything. It runs
-        when a window first shows and when the taskbar moves, never for a frame.
-*/
-
-// The room of a screen: the screen less the taskbar's band where the band lies along the edge position names.
-// A band that is not on the screen, or that would leave nothing, takes nothing.
-static void place_room(const int *screen, const int *band, unsigned int position, int *room)
-{
-        int cut = 0, size;
-
-        memory_copy(room, screen, 4 * sizeof(int));
-        if (band[2] <= 0 || band[3] <= 0 || band[0] >= screen[0] + screen[2] || band[0] + band[2] <= screen[0] ||
-            band[1] >= screen[1] + screen[3] || band[1] + band[3] <= screen[1])
-                return;
-        if (position == TASKBAR_TOP || position == TASKBAR_BOTTOM)
-        {
-                cut = position == TASKBAR_TOP ? band[1] + band[3] - screen[1] : screen[1] + screen[3] - band[1];
-                size = screen[3] - cut;
-                if (size <= 0)
-                        return;
-                room[1] += position == TASKBAR_TOP ? cut : 0;
-                room[3] = size;
-                return;
-        }
-        cut = position == TASKBAR_LEFT ? band[0] + band[2] - screen[0] : screen[0] + screen[2] - band[0];
-        size = screen[2] - cut;
-        if (size <= 0)
-                return;
-        room[0] += position == TASKBAR_LEFT ? cut : 0;
-        room[2] = size;
-}
-
-// Kept on a screen as compositor_place keeps it on the output: all of it, its line too, when it fits; its top left
-// when it does not, so the top it is taken by is always there to take.
-static void place_clamp(const int *screen, int width, int height, int line, int *x, int *y)
-{
-        int high_x = screen[0] + screen[2] - width - line, high_y = screen[1] + screen[3] - height - line;
-
-        *x = *x > high_x ? high_x : *x;
-        *y = *y > high_y ? high_y : *y;
-        *x = *x < screen[0] + line ? screen[0] + line : *x;
-        *y = *y < screen[1] + line ? screen[1] + line : *y;
-}
-
-// A size as a window may have it in an area: what was asked, up to the area's and never under the least.
-static int place_size(unsigned int asked, int area, int least)
-{
-        int size = asked > (unsigned int)area ? area : (int)asked;
-
-        return size < least ? (least < area ? least : area) : size;
-}
-
-/*
-        Where a window with no place of its own goes (WINDOW_PLACE_FREE), the one rule for the compositor's programs, Wayland's
-        toplevels and X's windows: centred on its owner's rectangle when it has one (a dialog on its parent, a transient on the
-        window it is for), else on the room; kept inside the room (the screen less the taskbar), its line too, and at the room's
-        top left when it is larger. owner is 0 for none, or a rectangle of no size.
-*/
-static void place_free(const int *room, const int *owner, int width, int height, int line, int *x, int *y)
-{
-        const int *on = owner && owner[2] > 0 && owner[3] > 0 ? owner : room;
-
-        *x = on[0] + (on[2] - width) / 2;
-        *y = on[1] + (on[3] - height) / 2;
-        place_clamp(room, width, height, line, x, y);
-}
-
-/*
-        Where a placement puts a window on its screen, whose room is room: what the window fills (COMPOSITOR_FLOATING,
-        COMPOSITOR_ROOM, COMPOSITOR_MAXIMIZED for the whole screen), and the rectangle. A floating one is the size
-        asked for, or the picture's, up to the room's when it is centred in it and the screen's when it is put at
-        a place, and kept on the screen. x and y are where the program asked, which a placement with no mode
-        keeps. line is the outline a floating window has round it, least the size no window is made smaller than.
-*/
-static unsigned int place_rect(const struct window_place *place, const int *screen, const int *room, int x, int y,
-                               unsigned int picture_w, unsigned int picture_h, int line, int least_w, int least_h,
-                               int *rect)
-{
-        unsigned int how = place->how & WINDOW_PLACE_HOW;
-        unsigned int asked_w = place->how & WINDOW_PLACE_SIZE ? place->width : picture_w;
-        unsigned int asked_h = place->how & WINDOW_PLACE_SIZE ? place->height : picture_h;
-        const int *area = how == WINDOW_PLACE_CENTER ? room : screen;
-
-        if (how == WINDOW_PLACE_MAXIMIZED || how == WINDOW_PLACE_FULLSCREEN)
-        {
-                memory_copy(rect, how == WINDOW_PLACE_MAXIMIZED ? room : screen, 4 * sizeof(int));
-                return how == WINDOW_PLACE_MAXIMIZED ? COMPOSITOR_ROOM : COMPOSITOR_MAXIMIZED;
-        }
-        rect[2] = place_size(asked_w, area[2] - 2 * line, least_w);
-        rect[3] = place_size(asked_h, area[3] - 2 * line, least_h);
-        rect[0] = how == WINDOW_PLACE_CENTER ? room[0] + (room[2] - rect[2]) / 2 : how == WINDOW_PLACE_AT ? screen[0] + place->x : x;
-        rect[1] = how == WINDOW_PLACE_CENTER ? room[1] + (room[3] - rect[3]) / 2 : how == WINDOW_PLACE_AT ? screen[1] + place->y : y;
-        if (how)
-                place_clamp(screen, rect[2], rect[3], line, &rect[0], &rect[1]);
-        return COMPOSITOR_FLOATING;
-}
-
-// The distance, squared, from a point to a rectangle: 0 inside it.
-static long place_distance(int x, int y, const int *rect)
-{
-        long dx = x < rect[0] ? rect[0] - x : x >= rect[0] + rect[2] ? x - (rect[0] + rect[2] - 1) : 0;
-        long dy = y < rect[1] ? rect[1] - y : y >= rect[1] + rect[3] ? y - (rect[1] + rect[3] - 1) : 0;
-
-        return dx * dx + dy * dy;
-}
-
-// The screen a point is on, or the nearest to it; the first of equals, and the first when there are none.
-static unsigned int place_screen_at(int x, int y, const int (*screens)[4], unsigned int count)
-{
-        unsigned int found = 0;
-        long best = -1;
-
-        for (unsigned int at = 0; at < count; at++)
-        {
-                long distance = place_distance(x, y, screens[at]);
-
-                if (best < 0 || distance < best)
-                        best = distance, found = at;
-        }
-        return found;
-}
-
-// The screens' rectangles, and how many there are.
-static unsigned int place_screens(int (*screens)[4])
-{
-        unsigned int count = compositor_output_count();
-
-        count = count < WINDOW_PLACE_SCREENS ? count : WINDOW_PLACE_SCREENS;
-        for (unsigned int at = 0; at < count; at++)
-                compositor_output_rect((int)at, &screens[at][0], &screens[at][1], &screens[at][2], &screens[at][3]);
-        return count;
-}
-
 // The room of a screen, the band on it where it is now taken out: the primary's, or with a band on every screen
 // (`taskbar display all`) the screen's own.
 static void compositor_room(const int *screen, int *room)
@@ -1899,8 +1764,9 @@ static void compositor_room(const int *screen, int *room)
 // The taskbar moved, or its screen changed: every window that fills the room of a screen fills it where it is now.
 static void compositor_room_follow(void)
 {
-        int screens[WINDOW_PLACE_SCREENS][4], room[4];
-        unsigned int count = place_screens(screens);
+        unsigned int count;
+        const int (*screens)[4] = compositor_screens(&count);
+        int room[4];
 
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
@@ -1994,22 +1860,9 @@ static void compositor_places_read(struct places *places)
 static void compositor_places_write(const struct places *places)
 {
         static char text[PLACES_BYTES];
-        char stage[80];
-        unsigned long length = places_say(places, text, sizeof(text)), path = string_length((string_address)compositor_places_path);
-        bipolar handle, written;
+        unsigned long length = places_say(places, text, sizeof(text));
 
-        if (path + sizeof(".new") > sizeof(stage))
-                return;
-        memory_copy(stage, compositor_places_path, path);
-        memory_copy(stage + path, ".new", sizeof(".new"));
-        handle = system_open_at_mode(AT_FDCWD, (string_address)stage, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
-        if (handle < 0)
-                return;
-        written = length ? system_write_once(handle, text, length) : 0;
-        system_close(handle);
-        if (written != (bipolar)length ||
-            system_rename_at(AT_FDCWD, (string_address)stage, AT_FDCWD, (string_address)compositor_places_path, 0) < 0)
-                system_remove_at(AT_FDCWD, (string_address)stage, 0);
+        (void)file_write_atomic_at(AT_FDCWD, (string_address)compositor_places_path, text, (positive)length, 0600);
 }
 
 // The screen a kept place goes on: the one of its connector's name, else the one nearest where it was, else the first.
@@ -2044,16 +1897,16 @@ static void compositor_screen_names(char (*names)[WINDOWS_NAME], unsigned int co
 */
 static void compositor_remember(int row)
 {
-        int screens[WINDOW_PLACE_SCREENS][4];
         char names[WINDOW_PLACE_SCREENS][WINDOWS_NAME];
         unsigned int count, on;
+        const int (*screens)[4];
         struct places places;
         struct place_kept kept;
 
         if (row < 0 || !compositor.showing[row] || !compositor.name[row][0] ||
             compositor.arranged[row] != COMPOSITOR_FLOATING || !compositor_remembering())
                 return;
-        count = place_screens(screens);
+        screens = compositor_screens(&count);
         on = place_screen_at(compositor.x[row] + (int)compositor.w[row] / 2, compositor.y[row] + (int)compositor.h[row] / 2,
                              screens, count);
         compositor_screen_names(names, count);
@@ -2143,9 +1996,10 @@ static void compositor_free_place(int row, const struct window_place *place, con
 */
 static void compositor_first_put(int row, int x, int y)
 {
-        int screens[WINDOW_PLACE_SCREENS][4], room[4], rect[4];
+        int room[4], rect[4];
         int least_w = compositor_least(row, 0), least_h = compositor_least(row, 1);
-        unsigned int count = place_screens(screens), on, how, fills;
+        unsigned int count, on, how, fills;
+        const int (*screens)[4] = compositor_screens(&count);
         struct window_place place;
 
         compositor_place_read(row, &place);
@@ -2202,9 +2056,10 @@ static void compositor_first_put(int row, int x, int y)
 */
 static void compositor_move(int row)
 {
-        int screens[WINDOW_PLACE_SCREENS][4], room[4], rect[4];
+        int room[4], rect[4];
         int least_w = compositor_least(row, 0), least_h = compositor_least(row, 1);
-        unsigned int count = place_screens(screens), from, on, fills;
+        unsigned int count, from, on, fills;
+        const int (*screens)[4] = compositor_screens(&count);
         char name[WINDOWS_NAME];
         struct window_place place;
 
@@ -2373,7 +2228,7 @@ refused:
         damage[0] = damage[1] = damage[2] = damage[3] = 0;
         __atomic_store_n(&table->list_state[row], 2u, __ATOMIC_RELEASE);
         __atomic_add_fetch(&table->list_refused, 1, __ATOMIC_RELEASE);
-        return 0;
+        return -2;
 }
 
 // The program the on-screen keyboard is, by its name (/proc/PID/comm, what ui_is_program reads).
@@ -2515,20 +2370,19 @@ static void compositor_take(int row)
         compositor.seen[row] = frame;
         width = width > (unsigned int)compositor_most_width() ? (unsigned int)compositor_most_width() : width;
         height = height > (unsigned int)compositor_most_height() ? (unsigned int)compositor_most_height() : height;
-        // A window's list (window_list_of) is drawn into its picture here, before the picture is shown, or refused; the damage it sets stands.
-        unsigned int refused_before = __atomic_load_n(&table->list_refused, __ATOMIC_ACQUIRE);
+        // A window's list (window_list_of) is drawn into its picture here (1 drawn, 0 pixels, -1 defer, -2 refused).
         int listed = compositor_lists_take(row, width, height, damage);
         // A publish was writing the list: the frame is not taken now (the window shows what it showed), and the next take takes it.
-        if (listed < 0)
+        if (listed == -1)
         {
                 compositor.seen[row] = seen;
                 if (reclaimed)
                         rows_add(&compositor.reclaim, row);
                 return;
         }
-        b32 list_refused = !listed && __atomic_load_n(&table->list_refused, __ATOMIC_ACQUIRE) != refused_before;
+        b32 list_refused = listed == -2;
 
-        if (listed)
+        if (listed == 1)
         {
                 front = 0;
                 __atomic_store_n(&table->buffer_index[row], 0u, __ATOMIC_RELEASE);

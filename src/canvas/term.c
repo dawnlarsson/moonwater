@@ -121,10 +121,8 @@ static struct cursor_state cursor_saved = {0, 0, 7, 0, 0, false};
 static struct cursor_state cursor_primary = {0, 0, 7, 0, 0, false};
 
 // Tab stops, one bit a column, which is what makes HTS and TBC mean anything.
-// The table is cut for the widest grid there is: grid_take holds COLUMNS to
-// TAB_COLUMNS, and a ring of eight byte cells holding the 512 lines the
-// terminal starts with leaves room for 2^20 of them.
-#define TAB_COLUMNS (1u << 20)
+// grid_take holds COLUMNS to TAB_COLUMNS (512 bytes of BSS for 4096 columns).
+#define TAB_COLUMNS 4096u
 #define TAB_WORD (8 * sizeof(unsigned long))
 static unsigned long tab_stop[TAB_COLUMNS / TAB_WORD] __attribute__((aligned(8)));
 
@@ -617,12 +615,34 @@ static PURE positive cell_attribute()
                ((positive)cell_flags() << 48);
 }
 
+// Fetch a row's cells and length once, blanking any unwritten gap up to col.
+static inline INLINE struct window_cell address_to term_row_prepare(
+    unsigned int r, unsigned int col, unsigned int address_to address_to length_out)
+{
+        unsigned int slot = row_slot(r);
+        unsigned int address_to length = slot_length(slot);
+
+        if (address_to length < col)
+        {
+                cells_blank(r, address_to length, col - address_to length);
+                address_to length = col;
+        }
+        address_to length_out = length;
+        return slot_cells(slot);
+}
+
+static inline INLINE unsigned int term_char_width(unsigned int character)
+{
+        return character < 0x300
+                   ? 1
+                   : (unsigned int)unicode_width(character, UNICODE_WIDTH_TERMINAL);
+}
+
 static fn put_cells(unsigned int character, unsigned int width)
 {
         struct window_cell address_to cells;
         struct window_cell address_to cell;
         unsigned int address_to length;
-        unsigned int slot;
 
         if (width > COLUMNS)
                 width = 1;
@@ -630,15 +650,7 @@ static fn put_cells(unsigned int character, unsigned int width)
         wrap_for(width);
 
         // The row's slot, once: nothing below moves head.
-        slot = row_slot(row);
-        cells = slot_cells(slot);
-        length = slot_length(slot);
-
-        if (address_to length < column)
-        {
-                cells_blank(row, address_to length, column - address_to length);
-                address_to length = column;
-        }
+        cells = term_row_prepare(row, column, address_of length);
 
         if (insert_mode)
                 open_gap(column, width);
@@ -678,25 +690,10 @@ static positive term_repeated;
         A character in the columns it takes. A mark that belongs over the
         character before it takes none and is dropped: the face cannot draw
         it there.
-
-        Programs count columns with wcwidth, and a terminal that disagrees
-        puts everything after an ideograph, an emoji or a combining accent a
-        column away from where the program meant it. The columns are
-        lib.c's unicode_width for the terminal: Unicode 16's East Asian
-        Wide and Fullwidth take two, marks and format characters take none,
-        and everything below U+0300 takes one -- and where glibc prints what
-        Unicode 16 does not, glibc's width, because the programs in a bowl
-        size their text with glibc's wcwidth and tmux counts the same: an
-        Arabic number sign takes one and U+1FA8A two. Below U+0300 is asked
-        here, before the call: a byte at a time, the ASCII consume() hands
-        put() costs a compare and not a call.
 */
 static fn put(unsigned int character)
 {
-        unsigned int width =
-            character < 0x300
-                ? 1
-                : (unsigned int)unicode_width(character, UNICODE_WIDTH_TERMINAL);
+        unsigned int width = term_char_width(character);
 
         if (width)
                 put_cells(character, width);
@@ -816,37 +813,29 @@ static fn SPARE emit_character(unsigned int character)
         emit_bytes((address_any)(text), sizeof(text) - 1)
 
 /* One CSI parameter machine serves both terminal output and editor input.
-   The final byte is deliberately not stored: it is the caller's action, while
-   digits, separators and the private marker are the reusable transition. */
-/* The parameters a sequence has, as many as it is given: value (each parameter)
-   and joined (nonzero when ':' joined it to the one before it) grow in memory
-   together with them (terminal_parameters_room), as the lines and the history
-   do, so no count is capped. value and joined are read as arrays by the
-   editor's input too, which is why they are not one struct array. Until a
-   parameter is kept they point at one zero slot each, which is never grown
-   from, so a reader of value[0] with no parameter reads 0. A refusal by the
-   kernel drops the rest of the sequence. */
+   The first 16 parameters live inline so common sequences never allocate;
+   longer sequences spill into dynamically grown stores so no count is capped. */
+#define TERMINAL_PARAMS_INLINE 16
+
 typedef struct
 {
         unsigned int *value;
         p8 *joined;
-        positive room;      // the slots value owns: 0 while it is the zero slot below
-        positive flag_room; // the slots joined owns: 0 while it is the zero slot below
+        positive room;      // heap slots value owns: 0 while backed by inline_value
+        positive flag_room; // heap slots joined owns: 0 while backed by inline_joined
         unsigned int count;
         p8 marker;
         p8 full;            // the kernel refused the store: the rest are dropped
+        unsigned int inline_value[TERMINAL_PARAMS_INLINE];
+        p8 inline_joined[TERMINAL_PARAMS_INLINE];
 } terminal_parameters;
 
-static unsigned int terminal_value_none[1];
-static p8 terminal_joined_none[1];
-
-// Starts a sequence with no parameter. A sequence that was never reset has no store at all, so it is given the zero slots first.
 static void terminal_parameters_reset(terminal_parameters address_to sequence)
 {
         if (!sequence->value)
         {
-                sequence->value = terminal_value_none;
-                sequence->joined = terminal_joined_none;
+                sequence->value = sequence->inline_value;
+                sequence->joined = sequence->inline_joined;
         }
         sequence->count = 0;
         sequence->marker = 0;
@@ -855,39 +844,49 @@ static void terminal_parameters_reset(terminal_parameters address_to sequence)
         sequence->joined[0] = 0;
 }
 
-// Room for slots parameters in both stores, each grown in memory with the ones it has kept: 0 when the kernel refuses one, and the sequence
-// is full from then on.
 static b32 terminal_parameters_room(terminal_parameters address_to sequence,
                                     positive slots)
 {
-        unsigned int address_to values = sequence->room ? sequence->value : null;
-        p8 address_to flags = sequence->flag_room ? sequence->joined : null;
-        positive room = sequence->room, flag_room = sequence->flag_room;
-
-        if (slots > room)
+        if (!sequence->value)
         {
-                if (!array_store_reserve(values, room, sequence->room, slots, 16))
+                sequence->value = sequence->inline_value;
+                sequence->joined = sequence->inline_joined;
+        }
+        if (slots <= TERMINAL_PARAMS_INLINE)
+                return true;
+        if (slots > sequence->room)
+        {
+                unsigned int address_to values = sequence->room ? sequence->value : null;
+                positive room = sequence->room;
+
+                if (!array_store_reserve(values, room, sequence->room, slots, 32))
                 {
                         sequence->full = 1;
                         return false;
                 }
+                if (!sequence->room)
+                        memory_copy(values, sequence->inline_value, sizeof(sequence->inline_value));
                 sequence->value = values;
                 sequence->room = room;
         }
-        if (slots > flag_room)
+        if (slots > sequence->flag_room)
         {
-                if (!array_store_reserve(flags, flag_room, sequence->flag_room, slots, 16))
+                p8 address_to flags = sequence->flag_room ? sequence->joined : null;
+                positive flag_room = sequence->flag_room;
+
+                if (!array_store_reserve(flags, flag_room, sequence->flag_room, slots, 32))
                 {
                         sequence->full = 1;
                         return false;
                 }
+                if (!sequence->flag_room)
+                        memory_copy(flags, sequence->inline_joined, sizeof(sequence->inline_joined));
                 sequence->joined = flags;
                 sequence->flag_room = flag_room;
         }
         return true;
 }
 
-// The first parameter of a sequence that has none: a store grown in memory is not zeroed, so its first slot is.
 static b32 terminal_parameters_first(terminal_parameters address_to sequence)
 {
         if (sequence->count)
@@ -900,61 +899,79 @@ static b32 terminal_parameters_first(terminal_parameters address_to sequence)
         return true;
 }
 
+/* Unified CSI parameter scanner: consumes bytes into sequence until a final
+   byte ('@'..'~') is reached, returning index+1 of the final byte or 0.
+   When intermediate is non-null (batch CSI scan), records 0x20..0x2f
+   intermediates and aborts on C0 controls (< ' ') so consume() handles them. */
+static inline INLINE positive terminal_parameters_scan(
+    terminal_parameters address_to sequence, const p8 address_to bytes,
+    positive count, p8 address_to intermediate)
+{
+        for (positive at = 0; at < count; at++)
+        {
+                unsigned int byte = bytes[at];
+
+                if (byte - '0' < 10)
+                {
+                        unsigned int address_to value;
+
+                        if (sequence->full || !terminal_parameters_first(sequence))
+                                continue;
+                        value = address_of sequence->value[sequence->count - 1];
+                        for (;;)
+                        {
+                                unsigned int digit = bytes[at] - '0';
+
+                                if (address_to value < 429496729u)
+                                        address_to value = address_to value * 10 + digit;
+                                else if (address_to value > (~0u - digit) / 10)
+                                        address_to value = ~0u;
+                                else
+                                        address_to value = address_to value * 10 + digit;
+
+                                if (at + 1 == count || (unsigned int)bytes[at + 1] - '0' >= 10)
+                                        break;
+                                at++;
+                        }
+                        continue;
+                }
+
+                if (byte == ';' || byte == ':')
+                {
+                        if (sequence->full || !terminal_parameters_first(sequence) ||
+                            !terminal_parameters_room(sequence, sequence->count + 1))
+                                continue;
+                        sequence->joined[sequence->count] = byte == ':';
+                        sequence->value[sequence->count] = 0;
+                        sequence->count++;
+                        continue;
+                }
+
+                if (byte >= '@' && byte <= '~')
+                        return at + 1;
+
+                if (intermediate && byte < ' ')
+                        return 0;
+
+                if (intermediate && byte >= 0x20 && byte <= 0x2f)
+                        address_to intermediate = (p8)byte;
+                else if (byte == '?' || byte == '<' || byte == '=' || byte == '>')
+                        sequence->marker = (p8)byte;
+        }
+
+        return 0;
+}
+
 static inline INLINE p8 terminal_parameters_take(
     terminal_parameters address_to sequence, unsigned int byte)
 {
-        if (byte_is_digit((b32)byte))
-        {
-                unsigned int digit = byte - '0';
-                unsigned int address_to value;
+        p8 one = (p8)byte;
 
-                if (sequence->full)
-                        return false;
-
-                if (!terminal_parameters_first(sequence))
-                        return false;
-
-                value = address_of sequence->value[sequence->count - 1];
-
-                // CSI parameters have no protocol-level machine-word limit.
-                // Saturation preserves the only useful meaning of a larger
-                // value -- past the edge -- instead of wrapping it to a small
-                // cursor position or erase count.
-                if (address_to value > (~0u - digit) / 10)
-                        address_to value = ~0u;
-                else
-                        address_to value = address_to value * 10 + digit;
-
-                return false;
-        }
-
-        if (byte == ';' || byte == ':')
-        {
-                if (sequence->full)
-                        return false;
-
-                if (!terminal_parameters_first(sequence))
-                        return false;
-
-                if (!terminal_parameters_room(sequence, sequence->count + 1))
-                        return false;
-                sequence->joined[sequence->count] = byte == ':';
-                sequence->value[sequence->count] = 0;
-                sequence->count++;
-
-                return false;
-        }
-
-        if (byte == '?' || byte == '<' || byte == '=' || byte == '>')
-        {
-                sequence->marker = (p8)byte;
-                return false;
-        }
-
-        return byte >= '@' && byte <= '~';
+        return terminal_parameters_scan(sequence, address_of one, 1, null) != 0;
 }
 
-static terminal_parameters terminal_csi = {terminal_value_none, terminal_joined_none, 0, 0, 0, 0, 0};
+static terminal_parameters terminal_csi = {
+    terminal_csi.inline_value, terminal_csi.inline_joined, 0, 0, 0, 0, 0, {0}, {0}};
 static b32 in_escape, in_csi, in_string, escape_intermediate;
 
 // A string sequence ends at ST, and ST is two bytes with an ESC in front.
@@ -1851,46 +1868,6 @@ static fn history_clear()
         history_lines = 0;
 }
 
-/*
-        A marker or an intermediate byte makes another sequence of the same
-        final. CSI > 4 ; 2 m is xterm's modifyOtherKeys and not an underline,
-        CSI ? u asks about the keyboard rather than restoring the cursor, and
-        CSI 2 SP @ scrolls sideways rather than inserting. A final that does
-        not take the marker or intermediate it came with is ignored, which is
-        what xterm does with a sequence it has never heard of.
-*/
-static b32 csi_known(unsigned int final)
-{
-        switch (csi_intermediate)
-        {
-        case 0:
-                break;
-        case ' ':
-                return final == 'q' && !terminal_csi.marker;
-        case '!':
-                return final == 'p' && !terminal_csi.marker;
-        case '$':
-                return final == 'p';
-        default:
-                return false;
-        }
-
-        switch (terminal_csi.marker)
-        {
-        case 0:
-                return true;
-        case '?':
-                return final == 'h' || final == 'l' || final == 'n' ||
-                       final == 'J' || final == 'K';
-        case '>':
-                return final == 'c' || final == 'q';
-        case '=':
-                return final == 'c';
-        default:
-                return false;
-        }
-}
-
 // The pixels a cell is, which is the kernel's face until a program that draws
 // its own glyphs says what its font made them. Reports (CSI 14 t, CSI 16 t)
 // and the pty's size both read these.
@@ -1907,68 +1884,140 @@ static unsigned int addressed_row(unsigned int a)
         return a - 1 < bottom - top ? top + a - 1 : (bottom ? bottom - 1 : 0);
 }
 
+/*
+        A marker or an intermediate byte makes another sequence of the same
+        final. Every handled (final, marker, intermediate) triple lives in one
+        table so recognition and dispatch cannot disagree.
+*/
+#define CSI_MARKER_ANY 0xff
+#define CSI_MARKER_PRIV 0xfe // 0 or '?'
+
+enum
+{
+        CSI_CUP, CSI_UP, CSI_DOWN, CSI_RIGHT, CSI_LEFT, CSI_COL, CSI_ROW,
+        CSI_ED, CSI_EL, CSI_IL_DL, CSI_DCH, CSI_ICH, CSI_ECH, CSI_SCROLL,
+        CSI_TBC, CSI_MODE, CSI_SGR, CSI_DSR, CSI_REPLY, CSI_TAB, CSI_REP,
+        CSI_CURSOR_SHAPE, CSI_SOFT_RESET, CSI_DECRQM, CSI_WINOPS, CSI_DECSTBM,
+        CSI_SAVE_RESTORE,
+};
+
+static const struct
+{
+        p8 final;
+        p8 marker;
+        p8 intermediate;
+        p8 action;
+        p8 arg;
+        const char address_to literal;
+} csi_rule[] = {
+    {'H', 0, 0, CSI_CUP, 0, null},
+    {'f', 0, 0, CSI_CUP, 0, null},
+    {'A', 0, 0, CSI_UP, 0, null},
+    {'F', 0, 0, CSI_UP, 1, null},
+    {'B', 0, 0, CSI_DOWN, 0, null},
+    {'e', 0, 0, CSI_DOWN, 0, null},
+    {'E', 0, 0, CSI_DOWN, 1, null},
+    {'C', 0, 0, CSI_RIGHT, 0, null},
+    {'a', 0, 0, CSI_RIGHT, 0, null},
+    {'D', 0, 0, CSI_LEFT, 0, null},
+    {'G', 0, 0, CSI_COL, 0, null},
+    {'`', 0, 0, CSI_COL, 0, null},
+    {'d', 0, 0, CSI_ROW, 0, null},
+    {'J', CSI_MARKER_PRIV, 0, CSI_ED, 0, null},
+    {'K', CSI_MARKER_PRIV, 0, CSI_EL, 0, null},
+    {'L', 0, 0, CSI_IL_DL, 0, null},
+    {'M', 0, 0, CSI_IL_DL, 1, null},
+    {'P', 0, 0, CSI_DCH, 0, null},
+    {'@', 0, 0, CSI_ICH, 0, null},
+    {'X', 0, 0, CSI_ECH, 0, null},
+    {'S', 0, 0, CSI_SCROLL, 1, null},
+    {'T', 0, 0, CSI_SCROLL, 0, null},
+    {'g', 0, 0, CSI_TBC, 0, null},
+    {'h', CSI_MARKER_PRIV, 0, CSI_MODE, 1, null},
+    {'l', CSI_MARKER_PRIV, 0, CSI_MODE, 0, null},
+    {'m', 0, 0, CSI_SGR, 0, null},
+    {'n', CSI_MARKER_PRIV, 0, CSI_DSR, 0, null},
+    {'c', 0, 0, CSI_REPLY, 0, "\x1b[?1;2c"},
+    {'c', '>', 0, CSI_REPLY, 0, "\x1b[>0;115;0c"},
+    {'c', '=', 0, CSI_REPLY, 0, "\x1bP!|00000000\x1b\\"},
+    {'q', '>', 0, CSI_REPLY, 1, "\x1bP>|moonwater\x1b\\"},
+    {'I', 0, 0, CSI_TAB, 1, null},
+    {'Z', 0, 0, CSI_TAB, 0, null},
+    {'b', 0, 0, CSI_REP, 0, null},
+    {'q', 0, ' ', CSI_CURSOR_SHAPE, 0, null},
+    {'p', 0, '!', CSI_SOFT_RESET, 0, null},
+    {'p', CSI_MARKER_ANY, '$', CSI_DECRQM, 0, null},
+    {'t', 0, 0, CSI_WINOPS, 0, null},
+    {'r', 0, 0, CSI_DECSTBM, 0, null},
+    {'s', 0, 0, CSI_SAVE_RESTORE, 1, null},
+    {'u', 0, 0, CSI_SAVE_RESTORE, 0, null},
+};
+
 static fn csi_final(unsigned int final)
 {
         unsigned int a = terminal_csi.count && terminal_csi.value[0]
                              ? terminal_csi.value[0] : 1;
         unsigned int b = terminal_csi.count > 1 && terminal_csi.value[1]
                              ? terminal_csi.value[1] : 1;
+        positive match = array_count(csi_rule);
+        p8 arg;
 
-        if (!csi_known(final))
+        for (positive i = 0; i < array_count(csi_rule); i++)
+        {
+                p8 m = csi_rule[i].marker;
+
+                if (csi_rule[i].final != final || csi_rule[i].intermediate != csi_intermediate)
+                        continue;
+                if (m == CSI_MARKER_ANY ||
+                    (m == CSI_MARKER_PRIV ? (!terminal_csi.marker || terminal_csi.marker == '?')
+                                          : m == terminal_csi.marker))
+                {
+                        match = i;
+                        break;
+                }
+        }
+        if (match == array_count(csi_rule))
                 return;
 
-        switch (final)
+        arg = csi_rule[match].arg;
+
+        switch (csi_rule[match].action)
         {
-        case 'H':
-        case 'f':
+        case CSI_CUP:
                 row = addressed_row(a);
                 column = b - 1 < COLUMNS ? b - 1 : COLUMNS - 1;
                 break;
-        /*
-                Up and down stop at the margin of a region the cursor is in or
-                past, and at the edge of the page from the other side of it, as
-                xterm and tmux do. A count is compared with the room left, since
-                a hostile one wraps row + a, and a pending wrap is gone once the
-                cursor has moved.
-        */
-        case 'A':
-        case 'F':
+        case CSI_UP:
         {
                 unsigned int limit = row >= region_top ? region_top : 0;
 
                 row = row - limit > a ? row - a : limit;
-                column = final == 'F' ? 0 : min(column, COLUMNS - 1);
+                column = arg ? 0 : min(column, COLUMNS - 1);
                 break;
         }
-        case 'B':
-        case 'e':
-        case 'E':
+        case CSI_DOWN:
         {
                 unsigned int limit = row < region_bottom ? region_bottom - 1 : ROWS - 1;
 
                 row = limit - row > a ? row + a : limit;
-                column = final == 'E' ? 0 : min(column, COLUMNS - 1);
+                column = arg ? 0 : min(column, COLUMNS - 1);
                 break;
         }
-        case 'C':
-        case 'a':
+        case CSI_RIGHT:
                 column = a < COLUMNS - column ? column + a : COLUMNS - 1;
                 break;
-        case 'D':
+        case CSI_LEFT:
                 // From the wrap point the cursor is on the last column first.
                 column = min(column, COLUMNS - 1);
                 column = column > a ? column - a : 0;
                 break;
-        case 'G':
-        case '`':
+        case CSI_COL:
                 column = a - 1 < COLUMNS ? a - 1 : COLUMNS - 1;
                 break;
-        case 'd':
+        case CSI_ROW:
                 row = addressed_row(a);
                 break;
-        // A reset parameter slot is 0, so no parameter is ED 0 and EL 0, and
-        // a number nobody has defined erases nothing.
-        case 'J':
+        case CSI_ED:
                 if (terminal_csi.value[0] == 0)
                         erase(row, column, ROWS - 1, COLUMNS - 1);
                 else if (terminal_csi.value[0] == 1)
@@ -1978,7 +2027,7 @@ static fn csi_final(unsigned int final)
                 else if (terminal_csi.value[0] == 3)
                         history_clear();
                 break;
-        case 'K':
+        case CSI_EL:
                 if (terminal_csi.value[0] == 0)
                         erase(row, column, row, COLUMNS - 1);
                 else if (terminal_csi.value[0] == 1)
@@ -1986,40 +2035,29 @@ static fn csi_final(unsigned int final)
                 else if (terminal_csi.value[0] == 2)
                         erase(row, 0, row, COLUMNS - 1);
                 break;
-        case 'L':
-        case 'M':
-                // Lines are put in and taken out at the cursor, and the rest
-                // of the region moves. A cursor outside the region is a
-                // sequence with nowhere to happen.
+        case CSI_IL_DL:
                 if (row >= region_top && row < region_bottom)
                 {
                         unsigned int was = region_top;
 
                         region_top = row;
-
-                        // A deleted line is gone, never history, so only
-                        // the alternate screen, which keeps none, lets the
-                        // ring take a DL at the top of the page.
-                        if (final == 'L')
+                        if (!arg)
                                 region_scroll(a, false);
                         else if (alternate && region_top == 0 &&
                                  region_bottom == ROWS)
                                 scroll_up(a);
                         else
                                 region_scroll(a, true);
-
                         region_top = was;
                 }
                 break;
-        case 'P':
+        case CSI_DCH:
         {
                 unsigned int address_to length;
                 struct window_cell address_to cells;
                 unsigned int last;
                 unsigned int gone;
 
-                // In colour the line is drawn to the edge, and what DCH pulls
-                // in at the right margin is that colour.
                 if (paper_set() && column < COLUMNS)
                         reach(row, COLUMNS);
 
@@ -2044,43 +2082,32 @@ static fn csi_final(unsigned int final)
                 touch(row);
                 break;
         }
-        case '@':
+        case CSI_ICH:
                 open_gap(column, a);
                 break;
-        case 'X':
-                // An erase like the others, so one in colour past the end of
-                // the line is drawn there.
+        case CSI_ECH:
                 if (column < COLUMNS)
                         erase(row, column, row, column + min(a, COLUMNS - column) - 1);
                 break;
-        case 'S':
-                scroll_up(a);
+        case CSI_SCROLL:
+                if (arg)
+                        scroll_up(a);
+                else
+                        region_scroll(a, false);
                 break;
-        case 'T':
-                region_scroll(a, false);
-                break;
-        case 'g':
+        case CSI_TBC:
                 if (terminal_csi.count && terminal_csi.value[0] == 3)
-                {
                         memory_fill(tab_stop, 0, sizeof(tab_stop));
-                }
-                // TBC 0 (or none) clears the stop under the cursor; any other
-                // number is no TBC at all, as xterm and tmux read it.
                 else if (terminal_csi.value[0] == 0)
                         tab_set(column, false);
                 break;
-        case 'h':
-                mode_set(true);
+        case CSI_MODE:
+                mode_set(arg);
                 break;
-        case 'l':
-                mode_set(false);
-                break;
-        case 'm':
+        case CSI_SGR:
                 sgr();
                 break;
-        case 'n':
-                // The cursor is reported one based, which is the same
-                // counting CUP takes it back in.
+        case CSI_DSR:
                 if (!answering())
                         break;
                 if (terminal_csi.count && terminal_csi.value[0] == 6)
@@ -2088,12 +2115,10 @@ static fn csi_final(unsigned int final)
                         emit_literal("\x1b[");
                         if (terminal_csi.marker)
                                 emit('?');
-                        // Under origin mode the row counts from the region's top, as CUP's does.
                         positive_to_string(emit_bytes, (origin_mode && row >= region_top ? row - region_top : row) + 1);
                         emit(';');
                         positive_to_string(emit_bytes,
                                            column < COLUMNS ? column + 1 : COLUMNS);
-                        // DECXCPR's third field is the page, which is always the first.
                         if (terminal_csi.marker)
                         {
                                 emit(';');
@@ -2105,62 +2130,39 @@ static fn csi_final(unsigned int final)
                          !terminal_csi.marker)
                         emit_literal("\x1b[0n");
                 break;
-        case 'c':
-                // Primary DA names a VT100 with AVO, which is what xterm
-                // answers and what ncurses's u8 reads for. Secondary DA is
-                // the xterm version report, and tertiary DA the unit's number,
-                // which xterm gives as zeros.
-                if (!answering())
-                        break;
-                if (terminal_csi.marker == '>')
-                        emit_literal("\x1b[>0;115;0c");
-                else if (terminal_csi.marker == '=')
-                        emit_literal("\x1bP!|00000000\x1b\\");
-                else
-                        emit_literal("\x1b[?1;2c");
+        case CSI_REPLY:
+                if (answering() && (!arg || terminal_csi.value[0] == 0))
+                        emit_bytes((address_any)csi_rule[match].literal,
+                                   string_length((string_address)csi_rule[match].literal));
                 break;
-        /*
-                A count saturates at four billion rather than wrapping, and
-                this is bounded: no count of tab stops can go further than the
-                width has stops.
-        */
-        case 'I':
-                for (a = a < COLUMNS ? a : COLUMNS; a; a--)
-                        tab_forward();
+        case CSI_TAB:
+                for (a = min(a, COLUMNS); a; a--)
+                {
+                        if (arg)
+                                tab_forward();
+                        else
+                                tab_backward();
+                }
                 break;
-        case 'Z':
-                for (a = a < COLUMNS ? a : COLUMNS; a; a--)
-                        tab_backward();
-                break;
-        case 'b':
+        case CSI_REP:
                 if (last_character)
                 {
                         unsigned int n;
 
-                        // Every cell of the screen once is all a repeat can
-                        // show, and the count is as hostile as the tabs'.
                         for (n = 0; n < a && n < ROWS * COLUMNS; n++)
                                 put(last_character);
                         term_repeated += n;
                 }
                 break;
-        case 'q':
-                // DECSCUSR: 1 and 2 are a block, 3 and 4 an underline, 5 and 6
-                // a bar. Nothing here blinks, so each pair is one shape. Without
-                // the space it is DECLL, which has no lights here to set.
-                if (csi_intermediate == ' ' && a <= 6)
+        case CSI_CURSOR_SHAPE:
+                if (a <= 6)
                         cursor_shape = a;
-                // XTVERSION, CSI > 0 q: the name of this terminal, which is
-                // the answer xterm gives in its own form.
-                else if (terminal_csi.marker == '>' && terminal_csi.value[0] == 0 && answering())
-                        emit_literal("\x1bP>|moonwater\x1b\\");
                 break;
-        case 'p':
-                if (csi_intermediate == '!')
-                        soft_reset();
-                // DECRQM. neovim and kakoune ask before they lean on
-                // synchronized output or the mouse.
-                else if (csi_intermediate == '$' && answering())
+        case CSI_SOFT_RESET:
+                soft_reset();
+                break;
+        case CSI_DECRQM:
+                if (answering())
                 {
                         unsigned int p = terminal_csi.count ? terminal_csi.value[0] : 0;
 
@@ -2173,13 +2175,7 @@ static fn csi_final(unsigned int final)
                         emit_literal("$y");
                 }
                 break;
-        /*
-                XTWINOPS, only the reports: the text area in cells (18) and in
-                pixels (14), a cell (16) and the screen (19). Image viewers and
-                notcurses ask before they size a picture; moving, raising and
-                the title stack are the compositor's business, and ignored.
-        */
-        case 't':
+        case CSI_WINOPS:
         {
                 unsigned int op = terminal_csi.value[0];
                 unsigned int high = op == 14 ? ROWS * term_cell_h
@@ -2200,38 +2196,29 @@ static fn csi_final(unsigned int final)
                 emit('t');
                 break;
         }
-        case 'r':
+        case CSI_DECSTBM:
         {
-                unsigned int top;
-                unsigned int bottom;
-
-                top = terminal_csi.count && terminal_csi.value[0]
-                          ? terminal_csi.value[0] - 1 : 0;
-                bottom = terminal_csi.count > 1 && terminal_csi.value[1]
-                             ? terminal_csi.value[1] : ROWS;
+                unsigned int top = terminal_csi.count && terminal_csi.value[0]
+                                       ? terminal_csi.value[0] - 1 : 0;
+                unsigned int bottom = terminal_csi.count > 1 && terminal_csi.value[1]
+                                          ? terminal_csi.value[1] : ROWS;
 
                 if (bottom > ROWS)
                         bottom = ROWS;
-
-                // A region has to have two rows in it to scroll, and one that
-                // does not is left alone rather than half applied.
                 if (top + 1 < bottom)
                 {
                         region_top = top;
                         region_bottom = bottom;
-
-                        // Home is the top of the region when origin mode is
-                        // on, and the top of the page otherwise.
                         row = origin_mode ? region_top : 0;
                         column = 0;
                 }
                 break;
         }
-        case 's':
-                cursor_save(address_of cursor_saved);
-                break;
-        case 'u':
-                cursor_restore(address_of cursor_saved);
+        case CSI_SAVE_RESTORE:
+                if (arg)
+                        cursor_save(address_of cursor_saved);
+                else
+                        cursor_restore(address_of cursor_saved);
                 break;
         }
 }
@@ -2239,66 +2226,41 @@ static fn csi_final(unsigned int final)
 /*
         Bytes into characters.
 
-        A cell holds a character and the stream is UTF-8, so the two are not
-        the same thing and the bytes above 127 were being thrown away one at a
-        time. Anything malformed becomes U+FFFD rather than disappearing,
-        which is what stops one bad byte from eating the character after it.
+        Driven by memory_utf8_feed with Unicode 3.9 maximal-subpart prefix
+        rejection: an impossible prefix becomes one U+FFFD at the byte that
+        makes it impossible, and that byte is replayed on a fresh state.
 */
 static memory_utf8_state terminal_utf8;
-
-/*
-        Whether some character starts with the bits so far: value, with left
-        more bytes to come, and the least a character of this length may be.
-        A prefix that no character can start is refused at the byte that makes
-        it one, which is how the replacement is counted: the bytes before that
-        byte are one U+FFFD and the byte is a byte of its own (Unicode's
-        maximal subpart). So C0 AF is two, E0 80 80 three, and F5 80 80 80 four.
-*/
-static b32 utf8_possible(unsigned int value, unsigned int left, unsigned int least)
-{
-        unsigned long low = (unsigned long)value << (6 * left);
-        unsigned long high = low + ((1ul << (6 * left)) - 1);
-
-        if (high < least || low > 0x10ffff)
-                return false;
-        return !(low >= 0xd800 && high <= 0xdfff);
-}
 
 static fn utf8_byte(unsigned int c)
 {
         p8 byte = (p8)c;
 
-        if (terminal_utf8.left)
+        for (;;)
         {
-                unsigned int value = terminal_utf8.value << 6 | (byte & 0x3f);
+                b32 had = terminal_utf8.left != 0;
+                b32 fed = memory_utf8_feed(address_of terminal_utf8, byte);
 
-                if ((byte & 0xc0) == 0x80 && utf8_possible(value, terminal_utf8.left - 1, terminal_utf8.least))
+                if (fed > 0)
                 {
-                        terminal_utf8.value = value;
                         // A C1 control spelled in UTF-8 is a control nothing here acts on, not a character to draw.
-                        if (--terminal_utf8.left == 0 && value >= 0xa0)
-                                put(value);
+                        if (terminal_utf8.value >= 0xa0)
+                                put(terminal_utf8.value);
                         return;
                 }
+                if (!fed)
+                {
+                        unsigned long low = (unsigned long)terminal_utf8.value << (6 * terminal_utf8.left);
+                        unsigned long high = low + ((1ul << (6 * terminal_utf8.left)) - 1);
 
-                // The bytes so far are one replacement, and the byte that refused them starts again below.
-                terminal_utf8.left = 0;
+                        if (high >= terminal_utf8.least && low <= 0x10ffff &&
+                            !(low >= 0xd800 && high <= 0xdfff))
+                                return;
+                        terminal_utf8.left = 0;
+                }
                 put(0xfffd);
-        }
-
-        if (byte < 0xc0 || byte >= 0xf8)
-        {
-                put(0xfffd);
-                return;
-        }
-
-        terminal_utf8.left = byte < 0xe0 ? 1 : byte < 0xf0 ? 2 : 3;
-        terminal_utf8.least = terminal_utf8.left == 1 ? 0x80 : terminal_utf8.left == 2 ? 0x800 : 0x10000;
-        terminal_utf8.value = byte & (0x3f >> terminal_utf8.left);
-        if (!utf8_possible(terminal_utf8.value, terminal_utf8.left, terminal_utf8.least))
-        {
-                terminal_utf8.left = 0;
-                put(0xfffd);
+                if (!had)
+                        return;
         }
 }
 
@@ -2639,22 +2601,14 @@ static positive text_ascii(const p8 address_to bytes, positive count)
 {
         struct window_cell address_to cells;
         unsigned int address_to length;
-        unsigned int first, had, slot;
+        unsigned int first, had;
         positive room, limit, guarded, attribute, n = 0;
 
         wrap_for(1);
 
         first = column;
         room = COLUMNS - first;
-        slot = row_slot(row);
-        cells = slot_cells(slot);
-        length = slot_length(slot);
-
-        if (address_to length < first)
-        {
-                cells_blank(row, address_to length, first - address_to length);
-                address_to length = first;
-        }
+        cells = term_row_prepare(row, first, address_of length);
 
         had = address_to length;
         limit = count < room ? count : room;
@@ -2698,18 +2652,10 @@ static positive text_ascii(const p8 address_to bytes, positive count)
         return n;
 }
 
-/* A whole, valid UTF-8 character of two to four bytes, just as
-   memory_utf8_feed would finish it and utf8_byte would draw it, or 0 for one
-   it would refuse, one that is not drawn, or one the bytes do not hold all
-   of. It is that feed, run over the bytes the read already holds rather than
-   over the terminal's own state, so an overlong form, a surrogate, anything
-   past U+10FFFF and a lead byte that is not one have one spelling between the
-   two paths. U+0080 to U+009F are C1 controls, which utf8_byte drops rather
-   than draws -- consume() says what becomes of them -- and no longer form
-   reaches below U+00A0 without being an overlong the feed has already
-   refused, so the one test covers every width. */
-static unsigned int text_utf8(const p8 address_to bytes, positive count,
-                              unsigned int address_to character)
+/* Decode one whole valid UTF-8 scalar via memory_utf8_feed, returning bytes
+   consumed (1..4) or 0 if invalid or incomplete. */
+static unsigned int term_utf8_decode(const p8 address_to bytes, positive count,
+                                     unsigned int address_to character)
 {
         memory_utf8_state state = {0, 0, 0};
 
@@ -2719,36 +2665,26 @@ static unsigned int text_utf8(const p8 address_to bytes, positive count,
 
                 if (whole < 0)
                         return 0;
-
-                if (!whole)
-                        continue;
-
-                if (state.value < 0xa0)
-                        return 0;
-
-                address_to character = state.value;
-                return at + 1;
+                if (whole > 0)
+                {
+                        address_to character = state.value;
+                        return at + 1;
+                }
         }
-
         return 0;
 }
 
-/*
-        Characters of two to four bytes from the first byte, as far as the row
-        has room, left as put() a character at a time would leave them.
-        Answers the bytes taken, which is 0 only when the first is not a
-        character text_utf8 takes; one that has to wrap goes through put(),
-        whose put_cells wraps it.
+static unsigned int text_utf8(const p8 address_to bytes, positive count,
+                              unsigned int address_to character)
+{
+        unsigned int value, used = term_utf8_decode(bytes, count, address_of value);
 
-        put() found the row's slot, the colours and the length again for every
-        character and marked the row touched each time; a run of Cyrillic or
-        kana is one row, one set of colours and one length, found once here.
-        What is left a character is the decode, its width and its cells. A
-        mark that takes no columns is dropped as put() drops it, and blanks
-        nothing even where a character would have had to blank up to the
-        column first. Bounded by the bytes handed over: every turn takes at
-        least one or stops.
-*/
+        if (!used || value < 0xa0)
+                return 0;
+        address_to character = value;
+        return used;
+}
+
 static positive __attribute__((__noinline__)) text_wide(const p8 address_to bytes, positive count)
 {
         struct window_cell address_to cells = null;
@@ -2761,13 +2697,6 @@ static positive __attribute__((__noinline__)) text_wide(const p8 address_to byte
                 unsigned int character, width, used;
                 unsigned int lead = bytes[n];
 
-                /*
-                        Two and three bytes whole and well formed are most of
-                        what is not ASCII, and are decoded here as the feed
-                        would decode them; anything else, including a C1 and
-                        the three byte spellings that are overlong or a
-                        surrogate, is text_utf8's to answer.
-                */
                 if (lead - 0xc2 < 0x1e && count - n >= 2 &&
                     (bytes[n + 1] & 0xc0) == 0x80)
                 {
@@ -2788,10 +2717,7 @@ static positive __attribute__((__noinline__)) text_wide(const p8 address_to byte
                 if (!used)
                         break;
 
-                width = character < 0x300
-                            ? 1
-                            : (unsigned int)unicode_width(character,
-                                                          UNICODE_WIDTH_TERMINAL);
+                width = term_char_width(character);
 
                 if (width)
                 {
@@ -2805,18 +2731,7 @@ static positive __attribute__((__noinline__)) text_wide(const p8 address_to byte
 
                         if (!cells)
                         {
-                                unsigned int slot = row_slot(row);
-
-                                cells = slot_cells(slot);
-                                length = slot_length(slot);
-
-                                if (address_to length < at)
-                                {
-                                        cells_blank(row, address_to length,
-                                                    at - address_to length);
-                                        address_to length = at;
-                                }
-
+                                cells = term_row_prepare(row, at, address_of length);
                                 had = address_to length;
                                 attribute = cell_attribute();
                         }
@@ -2855,11 +2770,6 @@ static positive __attribute__((__noinline__)) text_wide(const p8 address_to byte
                 column_held();
         }
 
-        /*
-                Nothing put: one this could not, past the edge of the row,
-                where put_cells wraps it, or no character at all, which is
-                consume()'s.
-        */
         if (!n)
         {
                 unsigned int character;
@@ -2907,135 +2817,22 @@ static positive text_run(const p8 address_to bytes, positive count)
 }
 
 /*
-        A control sequence the read holds all of.
-
-        A byte at a time, every byte of ESC [ 3 8 ; 5 ; 1 9 6 m went through
-        consume()'s tests and stored its digit before the next byte could be
-        looked at, and a dashboard is mostly such sequences. When the read has
-        the whole of one it is taken here in one pass, through the same
-        parameter machine -- the joined flags, the slots growing, digits
-        saturating at ~0u, the marker kept apart, the last intermediate in
-        csi_intermediate -- and csi_final() is its dispatch as it is
-        consume()'s.
-
-        What a sequence can be interrupted by is consume()'s to do: a control
-        is done where it arrives, CAN and SUB abandon the sequence and ESC
-        starts another. With one of those in it, or a final the read does not
-        reach, nothing here has happened but parameter slots written as
-        scratch, which the sequence's own [ resets, and consume() takes it
-        from its ESC.
+        A control sequence the read holds all of, parsed in one pass through
+        terminal_parameters_scan and dispatched through csi_final.
 */
 static positive csi_parse(const p8 address_to bytes, positive count)
 {
-        unsigned int slots = 0, value = 0;
-        p8 marker = 0, full = 0, intermediate = 0;
-        positive at;
+        p8 intermediate = 0;
+        positive used;
 
         if (count < 3 || bytes[1] != '[')
                 return 0;
 
-        /*
-                terminal_parameters_take's transitions, with the count, the
-                joined flags, the marker and the number being read in registers
-                rather than stored and loaded again for every byte. A slot is
-                written as it is left and the last one at the final, which
-                leaves the array as a byte at a time leaves it.
-        */
-        for (at = 2; at < count; at++)
-        {
-                unsigned int c = bytes[at];
-
-                // Below 429496729 another digit cannot pass ~0u, so the
-                // saturating test is taken only past that.
-                if (c - '0' < 10)
-                {
-                        if (full)
-                                continue;
-
-                        if (!slots)
-                        {
-                                if (!terminal_parameters_room(&terminal_csi, 1))
-                                {
-                                        full = 1;
-                                        continue;
-                                }
-                                slots = 1;
-                        }
-
-                        for (;;)
-                        {
-                                unsigned int digit = bytes[at] - '0';
-
-                                if (value < 429496729)
-                                        value = value * 10 + digit;
-                                else if (value > (~0u - digit) / 10)
-                                        value = ~0u;
-                                else
-                                        value = value * 10 + digit;
-
-                                if (at + 1 == count ||
-                                    (unsigned int)bytes[at + 1] - '0' >= 10)
-                                        break;
-
-                                at++;
-                        }
-
-                        continue;
-                }
-
-                if (c == ';' || c == ':')
-                {
-                        if (!slots)
-                        {
-                                if (!terminal_parameters_room(&terminal_csi, 1))
-                                {
-                                        full = 1;
-                                        continue;
-                                }
-                                slots = 1;
-                        }
-
-                        if (!full)
-                        {
-                                if (!terminal_parameters_room(&terminal_csi, slots + 1))
-                                        full = 1;
-                                else
-                                {
-                                        terminal_csi.value[slots - 1] = value;
-                                        terminal_csi.joined[slots] = c == ':';
-                                        slots++;
-                                        value = 0;
-                                }
-                        }
-
-                        continue;
-                }
-
-                if (c >= '@' && c <= '~')
-                        break;
-
-                if (c < ' ')
-                        return 0;
-
-                // DEL and bytes past ASCII are nothing inside a sequence, as
-                // they are to consume().
-                if (c <= '/')
-                        intermediate = (p8)c;
-                else if (c >= '<' && c <= '?')
-                        marker = (p8)c;
-        }
-
-        if (at == count)
+        terminal_parameters_reset(address_of terminal_csi);
+        used = terminal_parameters_scan(address_of terminal_csi, bytes + 2,
+                                        count - 2, address_of intermediate);
+        if (!used)
                 return 0;
-
-        // With no parameter at all, slot[0] is still 0, as a reset leaves it.
-        if (terminal_parameters_room(&terminal_csi, slots ? slots : 1))
-                terminal_csi.value[slots ? slots - 1 : 0] = value;
-        else
-                full = 1;
-        terminal_csi.count = slots;
-        terminal_csi.marker = marker;
-        terminal_csi.full = full;
 
         // What the ESC and the [ did, and the state the final runs in.
         line_forget();
@@ -3044,12 +2841,12 @@ static positive csi_parse(const p8 address_to bytes, positive count)
         in_escape = in_csi = true;
         csi_intermediate = intermediate;
 
-        csi_final(bytes[at]);
+        csi_final(bytes[2 + used - 1]);
 
         in_csi = in_escape = false;
         csi_intermediate = 0;
 
-        return at + 1;
+        return 2 + used;
 }
 
 /*
@@ -3296,23 +3093,10 @@ static b32 line_ascii()
 // begins. The line's own bytes always decode; the fallback keeps a walk moving.
 static positive line_decode(positive at, unsigned int address_to character)
 {
-        memory_utf8_state state = {0, 0, 0};
-        positive stop = at;
+        unsigned int used = term_utf8_decode(line + at, line_length - at, character);
 
-        while (stop < line_length)
-        {
-                b32 whole = memory_utf8_feed(address_of state, line[stop++]);
-
-                if (whole > 0)
-                {
-                        address_to character = state.value;
-                        return stop;
-                }
-
-                if (whole < 0)
-                        break;
-        }
-
+        if (used)
+                return at + used;
         address_to character = line[at];
         return at + 1;
 }
@@ -3321,9 +3105,7 @@ static positive line_decode(positive at, unsigned int address_to character)
 // mark takes none.
 static unsigned int line_width(unsigned int character)
 {
-        unsigned int width = character < 0x300
-                                 ? 1
-                                 : (unsigned int)unicode_width(character, UNICODE_WIDTH_TERMINAL);
+        unsigned int width = term_char_width(character);
 
         return width > COLUMNS ? 1 : width;
 }

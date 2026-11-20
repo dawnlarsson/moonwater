@@ -167,6 +167,16 @@ struct files_big
         char note[256];                // what the foot says of the last thing done, in the language's words with its numbers and names in
         char status[192];              // the foot's words
         char sheet[FILES_SHEET_LINES][FILES_NAME * 3 + 64]; // a properties sheet's lines
+        p8 band_base[FILES_MOST / 8];  // what was chosen when a band with Control began
+        p8 git_state[FILES_MOST];      // each entry's git mark (FILES_GIT_*)
+};
+
+enum
+{
+        FILES_FOCUS_ROWS,
+        FILES_FOCUS_CRUMBS,
+        FILES_FOCUS_TREE,
+        FILES_FOCUS_FIND,
 };
 
 /*
@@ -212,7 +222,7 @@ static struct
         int crumb_hover;          // the folder of it under the pointer, -1 none
         int editing;             // the band is the field: FILES_EDIT_PATH or FILES_EDIT_NAME; FILES_EDIT_PART one folder of the trail is; 0 the crumbs
         int part;                // the trail's folder being spelled again
-        b32 crumb_keys;          // the keys are in the trail,
+        int focus;               // FILES_FOCUS_*: which pane/field holds keyboard focus
         int crumb_focus;         // on this folder of it
         int crumb_clicked, crumb_from; // the folder of the trail a press last went to, and the one that was shown before it:
         b64 crumb_clicked_at;    // a second press on it in time spells it again
@@ -269,14 +279,13 @@ static struct
         b64 spring_at;
         b64 next_progress;       // when the foot next says how far a copy has gone
         b32 moving;              // a copy or a move was begun and its end is not said yet
-        b32 tree_keys;           // the keys are in the folder tree
         p32 tree_at;             // the tree's node the keys are on there
         p32 tree_shown;          // the tree's node of the folder shown, FILES_NO when it is not in the tree
         b32 tree_reseat;         // the tree's rows are to be scrolled to the folder shown at the next layout
         int view;                // FILES_VIEW_*: details, icons or a list
         b32 pasting;             // the clipboard was asked for files to paste: its answer is a paste into the folder shown
         // Find in the folder (Ctrl+F): a field at the foot whose text keeps the rows to the names that hold it (files_model_filter).
-        b32 finding, find_keys;
+        b32 finding;
         struct ui_text finder;
         struct ui_control finder_field;
         // Letters typed on the rows: the keys go to the first name that starts with them (typed, with when the last one came).
@@ -290,8 +299,6 @@ static struct
 } files;
 
 static struct ui_app files_app;
-static p8 files_band_base[FILES_MOST / 8]; // what was chosen when a band with Control began
-static p8 files_git_state[FILES_MOST];     // each entry's git mark (FILES_GIT_*)
 static b32 files_carried(const p8 address_to name, positive length);
 static b32 files_flashed(const p8 address_to name, positive length);
 static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how);
@@ -414,7 +421,7 @@ static fn files_describe(int id, struct ui_row address_to row)
         // In a work tree: what git ignores is quiet, what it does not track yet is cyan, a shade the theme's ground keeps readable.
         if (files.git && entry >= m->shown.entry && entry < m->shown.entry + m->shown.count)
         {
-                p8 mark = files_git_state[entry - m->shown.entry];
+                p8 mark = files.big->git_state[entry - m->shown.entry];
 
                 row->dim |= mark == FILES_GIT_IGNORED;
                 row->ink = mark == FILES_GIT_UNTRACKED ? (ui_kit_light(&files.ui) ? 0xff00838fu : 0xff5fd7e0u) : 0;
@@ -432,6 +439,15 @@ static b32 files_tree_trash(const p8 address_to name, positive length)
 // drives), each expandable into its own folder tree; a subtle separator separates the drives from the common folders above them.
 static fn files_tree_describe(int id, struct ui_row address_to row)
 {
+        static const struct
+        {
+                unsigned int word, icon;
+        } places[] = {
+            [FILES_PLACE_HOME] = {LANGUAGE_files_place_home, UI_FILE_HOME},
+            [FILES_PLACE_DOWNLOADS] = {LANGUAGE_files_place_downloads, UI_FILE_DOWNLOADS},
+            [FILES_PLACE_PICTURES] = {LANGUAGE_files_place_pictures, UI_FILE_PICTURES},
+            [FILES_PLACE_ROOT] = {LANGUAGE_files_drive_root, UI_FILE_DRIVE},
+        };
         static char label[FILES_NAME * 3 + 4];
         const struct files_tree address_to t = &files.big->tree;
         const struct files_node address_to n = id >= 0 && (p32)id < t->count ? &t->node[id] : null;
@@ -439,14 +455,8 @@ static fn files_tree_describe(int id, struct ui_row address_to row)
 
         if (!n)
                 return;
-        if (n->depth == 0 && n->place == FILES_PLACE_HOME)
-                row->label = WORDS(files_place_home), icon = UI_FILE_HOME;
-        else if (n->depth == 0 && n->place == FILES_PLACE_DOWNLOADS)
-                row->label = WORDS(files_place_downloads), icon = UI_FILE_DOWNLOADS;
-        else if (n->depth == 0 && n->place == FILES_PLACE_PICTURES)
-                row->label = WORDS(files_place_pictures), icon = UI_FILE_PICTURES;
-        else if (n->depth == 0 && n->place == FILES_PLACE_ROOT)
-                row->label = WORDS(files_drive_root), icon = UI_FILE_DRIVE;
+        if (n->depth == 0 && n->place > FILES_PLACE_NONE && n->place <= FILES_PLACE_ROOT)
+                row->label = language_text(places[n->place].word), icon = places[n->place].icon;
         else
         {
                 ui_label_foreign(label, sizeof(label), files_tree_name(t, (p32)id), n->length);
@@ -582,7 +592,7 @@ static fn files_crumbs_lay(void)
                 t->lost[k] = k < trail->count && trail->lost[k];
         t->x = files.crumbs_box.x, t->y = files.crumbs_box.y, t->w = files.crumbs_box.w, t->h = files.crumbs_box.h;
         t->hover = files.crumb_hover;
-        t->keys = files.crumb_keys && files.focused && !files.editing, t->focus = files.crumb_focus;
+        t->keys = files.focus == FILES_FOCUS_CRUMBS && files.focused && !files.editing, t->focus = files.crumb_focus;
         t->edit = files.part, t->edit_wide = 0;
         if (files.editing == FILES_EDIT_PART)
         {
@@ -654,7 +664,7 @@ static fn files_layout(void)
                 t->hover = t->down = -1;
         }
         files.big->tree_list.total = (int)files.big->tree.count;
-        files.big->tree_list.focus = files.tree_keys ? (int)files.tree_at : files.tree_shown != FILES_NO ? (int)files.tree_shown : -1;
+        files.big->tree_list.focus = files.focus == FILES_FOCUS_TREE ? (int)files.tree_at : files.tree_shown != FILES_NO ? (int)files.tree_shown : -1;
         files_status_text();
         if (!files.path.kind)
         {
@@ -667,7 +677,7 @@ static fn files_layout(void)
                 files.finder_field.kind = UI_INPUT, files.finder_field.variant = UI_FIELD_BARE;
                 files.finder_field.edit = &files.finder;
         }
-        files.finder_field.focused = files.finding && files.find_keys && files.focused;
+        files.finder_field.focused = files.finding && files.focus == FILES_FOCUS_FIND && files.focused;
         files.finder_field.items[0] = WORDS(files_find_hint);
         files.path.items[0] = files.editing == FILES_EDIT_NAME ? WORDS(files_rename_hint) : null;
         // Every entry is a row of the list, the row the keys are on is the model's cursor, and an empty folder says what it is.
@@ -774,7 +784,7 @@ static fn files_edit(int how)
         // The whole path, and a folder's name in the trail, are chosen whole: what is typed takes their place.
         if (how == FILES_EDIT_PATH || how == FILES_EDIT_PART)
                 doc_select_set(&files_field()->doc, 0, doc_length(&files_field()->doc));
-        files.crumb_keys = false;
+        files.focus = FILES_FOCUS_ROWS;
         files.crumb_hover = -1, files.said = 0, files.armed = false, files.big->note[0] = 0;
         files.dirty = true;
 }
@@ -785,15 +795,13 @@ static p32 files_ask_names(char address_to into, positive room)
 {
         const struct files_model address_to m = &files.big->model;
         positive used = 0;
-        p32 count = 0;
+        p32 count = 0, iter = 0, place;
 
         into[0] = 0;
-        for (p32 place = 0; place < files_model_count(m); place++)
+        while ((place = files_selected_next(m, &iter)) != FILES_NO)
         {
                 const struct files_entry address_to entry = files_model_entry(m, place);
 
-                if (m->chosen_count ? !files_model_chosen(m, place) : place != m->cursor)
-                        continue;
                 if (count++ >= FILES_ASK_NAMES || used + 80 > room)
                         continue;
                 if (used)
@@ -901,12 +909,8 @@ static fn files_name_go(void)
                 was[0] = 0;
                 if (entry)
                 {
-                        string_copy_bounded((string_address)was, (string_address)m->path, FILES_PATH);
-                        if (string_length((string_address)was) > 1)
-                                string_append_bounded((string_address)was, (string_address) "/", FILES_PATH);
-                        string_copy_bounded((string_address)now, (string_address)was, FILES_PATH);
-                        string_append_bounded((string_address)was, (string_address)files_model_name(m, entry), FILES_PATH);
-                        string_append_bounded((string_address)now, (string_address)typed, FILES_PATH);
+                        files_path_join(was, FILES_PATH, m->path, files_model_name(m, entry));
+                        files_path_join(now, FILES_PATH, m->path, typed);
                 }
                 did = files_model_rename(m, files.naming, typed);
                 if (did == FILES_DID && was[0])
@@ -1211,11 +1215,8 @@ static fn files_move_deed(const struct files_move address_to job)
 
                 if (!landed[0] || !job->copied[k])
                         continue;
-                string_copy_bounded((string_address)to, (string_address)files.move_into, FILES_PATH);
-                if (string_length((string_address)to) > 1)
-                        string_append_bounded((string_address)to, (string_address) "/", FILES_PATH);
-                string_append_bounded((string_address)to, (string_address)landed, FILES_PATH);
-                files_deed_add(d, files_move_path(job, k), to);
+                if (files_path_join(to, FILES_PATH, files.move_into, landed))
+                        files_deed_add(d, files_move_path(job, k), to);
         }
         files_deed_keep(d);
 }
@@ -1228,11 +1229,13 @@ static int files_deed_turn(struct files_deed address_to d, b32 back)
 {
         p8 bin[FILES_PATH], named[FILES_NAME], where[FILES_PATH];
         char when[24];
-        static const p8 address_to pair[FILES_MOVE_MOST][2];
-        struct files_deed turned;
+        const p8 address_to (*pair)[2] = (const p8 address_to (*)[2])files_anon_map(sizeof(*pair) * FILES_MOVE_MOST, null);
+        struct files_deed turned, again;
         int done = 0;
-        p32 count = 0;
+        p32 count = 0, n = 0;
 
+        if (!pair)
+                return 0;
         files_now_text(when);
         for (positive at = 0; at < d->used && count < FILES_MOVE_MOST; count++)
         {
@@ -1287,27 +1290,22 @@ static int files_deed_turn(struct files_deed address_to d, b32 back)
                         files_deed_add(&turned, from, to);
                 done += ok;
         }
-        // The pairs as they are now, in their first order again (they were turned the last first).
+        // The pairs as they are now, in their first order again (they were turned the last first), reusing the transient pair table.
+        memory_zero(&again, sizeof(again));
+        again.kind = d->kind;
+        for (positive k = 0; k < turned.used && n < FILES_MOVE_MOST; n++)
         {
-                struct files_deed again;
-                static const p8 address_to at[FILES_MOVE_MOST][2];
-                p32 n = 0;
-
-                memory_zero(&again, sizeof(again));
-                again.kind = d->kind;
-                for (positive k = 0; k < turned.used && n < FILES_MOVE_MOST; n++)
-                {
-                        at[n][0] = turned.pairs + k, k += string_length((string_address)turned.pairs + k) + 1;
-                        at[n][1] = turned.pairs + k, k += string_length((string_address)turned.pairs + k) + 1;
-                }
-                for (p32 k = n; k-- > 0;)
-                        files_deed_add(&again, at[k][0], at[k][1]);
-                again.binned = d->kind == FILES_DEED_COPY ? (d->binned ? !done && d->binned : done > 0) : false;
-                again.restored = d->restored;
-                files_deed_free(&turned);
-                files_deed_free(d);
-                *d = again;
+                pair[n][0] = turned.pairs + k, k += string_length((string_address)turned.pairs + k) + 1;
+                pair[n][1] = turned.pairs + k, k += string_length((string_address)turned.pairs + k) + 1;
         }
+        for (p32 k = n; k-- > 0;)
+                files_deed_add(&again, pair[k][0], pair[k][1]);
+        again.binned = d->kind == FILES_DEED_COPY ? (d->binned ? !done && d->binned : done > 0) : false;
+        again.restored = d->restored;
+        system_call_2(syscall(munmap), (positive)pair, sizeof(*pair) * FILES_MOVE_MOST);
+        files_deed_free(&turned);
+        files_deed_free(d);
+        *d = again;
         return done;
 }
 
@@ -1338,7 +1336,8 @@ static fn files_bin_delete(void)
         p8 bin[FILES_PATH], named[FILES_NAME], path[FILES_PATH], where[FILES_PATH];
         char when[24];
         struct files_deed address_to d;
-        b32 any = m->chosen_count > 0, cross = false;
+        b32 cross = false;
+        p32 iter = 0, at;
 
         files.said = 0, files.big->note[0] = 0, files.armed = false;
         if (m->state != FILES_READY || !files_bin_root(bin))
@@ -1346,18 +1345,13 @@ static fn files_bin_delete(void)
         files_now_text(when);
         files_after_delete(m);
         d = files_deed_new(FILES_DEED_BIN);
-        for (p32 at = 0; at < files_model_count(m); at++)
+        while ((at = files_selected_next(m, &iter)) != FILES_NO)
         {
                 const struct files_entry address_to entry = files_model_entry(m, at);
-                positive folder = string_length((string_address)m->path);
                 int did;
 
-                if (!entry || (any ? !files_model_chosen(m, at) : at != m->cursor))
+                if (!entry || !files_path_join(path, FILES_PATH, m->path, files_model_name(m, entry)))
                         continue;
-                string_copy_bounded((string_address)path, (string_address)m->path, FILES_PATH);
-                if (folder > 1)
-                        string_append_bounded((string_address)path, (string_address) "/", FILES_PATH);
-                string_append_bounded((string_address)path, (string_address)files_model_name(m, entry), FILES_PATH);
                 did = files_bin_put(bin, path, when, named);
                 cross |= did == FILES_DID_CROSS;
                 if (did == FILES_DID)
@@ -1378,17 +1372,17 @@ static fn files_bin_put_back(void)
         struct files_model address_to m = &files.big->model;
         p8 bin[FILES_PATH], back[FILES_PATH], where[FILES_PATH];
         struct files_deed address_to d;
-        b32 any = m->chosen_count > 0;
         int done = 0;
+        p32 iter = 0, at;
 
         if (!files_bin_root(bin) || !files_in_bin())
                 return;
         d = files_deed_new(FILES_DEED_BIN);
-        for (p32 at = 0; at < files_model_count(m); at++)
+        while ((at = files_selected_next(m, &iter)) != FILES_NO)
         {
                 const struct files_entry address_to entry = files_model_entry(m, at);
 
-                if (!entry || (any ? !files_model_chosen(m, at) : at != m->cursor))
+                if (!entry)
                         continue;
                 files_bin_join(where, bin, "/files", files_model_name(m, entry), null);
                 if (files_bin_restore(bin, files_model_name(m, entry), back) == FILES_DID)
@@ -1423,8 +1417,7 @@ static fn files_bin_empty(void)
 
         if (!files_in_bin() || !files_model_count(m) || !files_bin_root(bin))
                 return;
-        files_model_choose(m, 0, FILES_CHOOSE_ONLY);
-        files_model_choose(m, files_model_count(m) - 1, FILES_CHOOSE_RANGE);
+        files_select_all(m);
         if (files.armed && files.armed_at == m->revision)
                 for (p32 at = 0; at < files_model_count(m); at++)
                 {
@@ -1450,24 +1443,22 @@ static fn files_carry_end(void)
 static b32 files_carry_take(void)
 {
         const struct files_model address_to m = &files.big->model;
-        b32 any = m->chosen_count > 0;
         positive folder = string_length((string_address)m->path);
+        p32 iter = 0, at;
 
         files_carry_end();
-        for (p32 at = 0; at < files_model_count(m); at++)
+        while ((at = files_selected_next(m, &iter)) != FILES_NO)
         {
                 const struct files_entry address_to entry = files_model_entry(m, at);
                 const p8 address_to name = entry ? files_model_name(m, entry) : null;
                 positive length = name ? string_length((string_address)name) : 0, used = files.carry_used;
 
-                if (!name || (any ? !files_model_chosen(m, at) : at != m->cursor))
+                if (!name)
                         continue;
                 if (!array_store_reserve(files.carry_paths, files.carry_room, used, used + folder + length + 2, 4096))
                         break;
-                memory_copy(files.carry_paths + used, m->path, folder), used += folder;
-                if (folder > 1)
-                        files.carry_paths[used++] = '/';
-                memory_copy(files.carry_paths + used, name, length + 1), used += length + 1;
+                files_path_join(files.carry_paths + used, files.carry_room - used, m->path, name);
+                used += string_length((string_address)(files.carry_paths + used)) + 1;
                 if (!files.carry_count)
                         files.carry_kind = files_symbol(m, entry);
                 files.carry_used = used, files.carry_count++;
@@ -1743,78 +1734,55 @@ static bipolar files_drop_folder(int row)
         A copy or a move of files (paths, count of them, each with its end) into the folder at row (-1 the folder shown), begun on its own
         thread. False, with the foot saying why, when it could not begin.
 */
-static b32 files_transfer_into(const p8 address_to paths, p32 count, const p8 address_to folder, int how);
-
-static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how)
+static b32 files_transfer_start(const p8 address_to paths, p32 count, bipolar into, const p8 address_to dest, int how, b32 reload_on_fail)
 {
         struct files_move address_to job = &files.big->move;
-        bipolar into;
-
-        // A drop on a node of the folder tree: into that node's folder, by its path.
-        if (row <= -2 && files.drop_node >= 0)
-        {
-                static p8 path[FILES_PATH];
-
-                return files_tree_path(&files.big->tree, (p32)files.drop_node, path) && files_transfer_into(paths, count, path, how);
-        }
 
         files.said = 0, files.big->note[0] = 0, files.dirty = true;
         if (files_move_running(job) || files.big->job.state == FILES_JOB_RUNNING)
         {
+                if (into >= 0)
+                        system_close(into);
                 files.said = LANGUAGE_files_busy;
                 return false;
         }
         files_move_end(job);
-        if ((into = files_drop_folder(row)) < 0)
+        if (into < 0)
         {
                 files.said = LANGUAGE_files_changed;
-                files_model_reload(&files.big->model);
+                if (reload_on_fail)
+                        files_model_reload(&files.big->model);
                 return false;
         }
         if (!files_move_begin(job, how, into, paths, count))
                 return false;
-        // Where it goes, for its deed (Ctrl+Z): the folder shown, or the folder of the row.
-        {
-                const struct files_model address_to m = &files.big->model;
-                const struct files_entry address_to entry = row >= 0 ? files_model_entry(m, (p32)row) : null;
-
-                string_copy_bounded((string_address)files.move_into, (string_address)m->path, FILES_PATH);
-                if (entry)
-                {
-                        if (string_length((string_address)files.move_into) > 1)
-                                string_append_bounded((string_address)files.move_into, (string_address) "/", FILES_PATH);
-                        string_append_bounded((string_address)files.move_into, (string_address)files_model_name(m, entry), FILES_PATH);
-                }
-        }
+        string_copy_bounded((string_address)files.move_into, (string_address)dest, FILES_PATH);
         files_move_start(job);
         files.moving = true, files.next_progress = (b64)ui_kit.now;
         return true;
 }
 
-// A copy or a move into the folder at an absolute path (a tree node's), begun on its own thread as files_transfer's is.
 static b32 files_transfer_into(const p8 address_to paths, p32 count, const p8 address_to folder, int how)
 {
-        struct files_move address_to job = &files.big->move;
-        bipolar into;
+        bipolar into = system_open_at(AT_FDCWD, (string_address)folder, FILE_READ | O_DIRECTORY | O_CLOEXEC);
 
-        files.said = 0, files.big->note[0] = 0, files.dirty = true;
-        if (files_move_running(job) || files.big->job.state == FILES_JOB_RUNNING)
-        {
-                files.said = LANGUAGE_files_busy;
-                return false;
-        }
-        files_move_end(job);
-        if ((into = system_open_at(AT_FDCWD, (string_address)folder, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
-        {
-                files.said = LANGUAGE_files_changed;
-                return false;
-        }
-        if (!files_move_begin(job, how, into, paths, count))
-                return false;
-        string_copy_bounded((string_address)files.move_into, (string_address)folder, FILES_PATH);
-        files_move_start(job);
-        files.moving = true, files.next_progress = (b64)ui_kit.now;
-        return true;
+        return files_transfer_start(paths, count, into, folder, how, false);
+}
+
+static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how)
+{
+        const struct files_model address_to m = &files.big->model;
+        const struct files_entry address_to entry = row >= 0 ? files_model_entry(m, (p32)row) : null;
+        p8 dest[FILES_PATH];
+
+        // A drop on a node of the folder tree: into that node's folder, by its path.
+        if (row <= -2 && files.drop_node >= 0)
+                return files_tree_path(&files.big->tree, (p32)files.drop_node, dest) && files_transfer_into(paths, count, dest, how);
+        if (entry)
+                files_path_join(dest, FILES_PATH, m->path, files_model_name(m, entry));
+        else
+                string_copy_bounded((string_address)dest, (string_address)m->path, FILES_PATH);
+        return files_transfer_start(paths, count, files_drop_folder(row), dest, how, true);
 }
 
 // What a copy or a move that is over came to, in the foot: how many, or where it stopped and why.
@@ -2069,7 +2037,7 @@ static b32 files_crumb_key(const struct window_event address_to event)
         case UI_KEY_ENTER:
         case UI_KEY_ENTER_PAD:
                 if (!(event->flags & WINDOW_KEY_REPEAT))
-                        to = files.crumb_focus, files_crumb_go(to), files.crumb_keys = true, files.crumb_focus = to;
+                        to = files.crumb_focus, files_crumb_go(to), files.focus = FILES_FOCUS_CRUMBS, files.crumb_focus = to;
                 break;
         case FILES_KEY_F2:
                 files_part_edit(files.crumb_focus, false);
@@ -2078,12 +2046,12 @@ static b32 files_crumb_key(const struct window_event address_to event)
                 // Tab goes on to the folder tree (Shift+Tab is the band's buttons', the kit's).
                 if (event->flags & WINDOW_KEY_SHIFT)
                         return false;
-                files.crumb_keys = false, files.tree_keys = true;
+                files.focus = FILES_FOCUS_TREE;
                 files.tree_at = files.tree_shown != FILES_NO ? files.tree_shown : 0;
                 break;
         case UI_KEY_ESCAPE:
         case UI_KEY_DOWN:
-                files.crumb_keys = false;
+                files.focus = FILES_FOCUS_ROWS;
                 break;
         default: return false;
         }
@@ -2157,7 +2125,7 @@ static fn files_band_apply(void)
         b32 any = false;
 
         if (files.band_add)
-                memory_copy(m->chosen, files_band_base, FILES_MOST / 8), m->chosen_count = files.band_base_count;
+                memory_copy(m->chosen, files.big->band_base, FILES_MOST / 8), m->chosen_count = files.band_base_count;
         else
                 files_model_choose_none(m);
         if (ui_list_band_rows(ui, l, &first, &last))
@@ -2423,15 +2391,10 @@ static fn files_open_with(b32 editor)
 
         if (editor)
         {
-                positive length = string_length((string_address)m->path);
                 string_address words[5] = {(string_address) "/editor", (string_address) "-f", face, (string_address)path, null};
 
-                if (!entry || entry->kind == FILES_KIND_DIRECTORY || length + entry->length + 2 > sizeof(path))
+                if (!entry || entry->kind == FILES_KIND_DIRECTORY || !files_path_join(path, sizeof(path), m->path, files_model_name(m, entry)))
                         return;
-                memory_copy(path, m->path, length);
-                if (length > 1)
-                        path[length++] = '/';
-                memory_copy(path + length, files_model_name(m, entry), (positive)entry->length + 1);
                 (void)ui_start_apart(words, 4);
                 return;
         }
@@ -2470,14 +2433,8 @@ static fn files_wallpaper(int screen)
         static p8 path[FILES_PATH];
         string_address words[7] = {(string_address) "/moonwater", (string_address) "canvas", (string_address) "wallpaper", (string_address) "picture",
                                    (string_address)path, screen >= 0 && screen < FILES_WALL_SCREENS ? (string_address)files_wall_names[screen] : null, null};
-        positive length = string_length((string_address)m->path);
-
-        if (!entry || entry->kind == FILES_KIND_DIRECTORY || !files_is_png(m, entry) || length + entry->length + 2 > sizeof(path))
+        if (!entry || entry->kind == FILES_KIND_DIRECTORY || !files_is_png(m, entry) || !files_path_join(path, sizeof(path), m->path, files_model_name(m, entry)))
                 return;
-        memory_copy(path, m->path, length);
-        if (length > 1)
-                path[length++] = '/';
-        memory_copy(path + length, files_model_name(m, entry), (positive)entry->length + 1);
         (void)ui_start_apart(words, words[5] ? 6 : 5);
 }
 
@@ -2657,11 +2614,7 @@ static fn files_menu_do(int id)
                 files_show_cursor();
                 break;
         case FILES_MENU_ALL:
-                if (files_model_count(m))
-                {
-                        files_model_choose(m, 0, FILES_CHOOSE_ONLY);
-                        files_model_choose(m, files_model_count(m) - 1, FILES_CHOOSE_RANGE);
-                }
+                files_select_all(m);
                 break;
         }
 }
@@ -2746,7 +2699,7 @@ static b32 files_tree_key(const struct window_event address_to event)
                 break;
         case UI_KEY_TAB:
         case UI_KEY_ESCAPE:
-                files.tree_keys = false;
+                files.focus = FILES_FOCUS_ROWS;
                 break;
         default: return false;
         }
@@ -2775,16 +2728,15 @@ static fn files_find(b32 on)
         {
                 if (!files.finder.doc.selections && ui_field_open(&files.finder, &files.own, ""))
                         files.finder.most = FILES_NAME - 1;
-                files.finding = files.find_keys = true;
+                files.finding = true, files.focus = FILES_FOCUS_FIND;
                 doc_select_set(&files.finder.doc, 0, doc_length(&files.finder.doc));
         }
         else
         {
-                files.finding = files.find_keys = false;
+                files.finding = false, files.focus = FILES_FOCUS_ROWS;
                 ui_text_set(&files.finder, (const p8 address_to) "", 0);
                 files_model_filter(&files.big->model, (const p8 address_to) "", 0);
         }
-        files.crumb_keys = files.tree_keys = false;
         files.dirty = true;
 }
 
@@ -2865,7 +2817,7 @@ static b32 files_key(const struct window_event address_to event)
                 files_carry_end();
                 return true;
         }
-        if (key == UI_KEY_TAB && !shift && !control && !alt && !files.crumb_keys && !files.tree_keys)
+        if (key == UI_KEY_TAB && !shift && !control && !alt && files.focus == FILES_FOCUS_ROWS)
         {
                 if (files.carrying)
                         files_carry_drop(-1);
@@ -2880,29 +2832,45 @@ static b32 files_key(const struct window_event address_to event)
                 files_crumb_step(key == UI_KEY_UP ? -1 : 1);
                 return true;
         }
-        if (files.crumb_keys && files_crumb_key(event))
+        if (files.focus == FILES_FOCUS_CRUMBS && files_crumb_key(event))
                 return true;
-        if (files.tree_keys && files_tree_key(event))
+        if (files.focus == FILES_FOCUS_TREE && files_tree_key(event))
                 return true;
         // F6 (and Tab from the trail): the rows, the trail, the tree, and the rows again (Shift+Tab is the band's buttons', the kit's).
         if ((key == UI_KEY_TAB || key == FILES_KEY_F6) && !shift && !control && !alt)
         {
-                if (files.crumb_keys)
-                        files.crumb_keys = false, files.tree_keys = true, files.tree_at = files.tree_shown != FILES_NO ? files.tree_shown : 0;
+                if (files.focus == FILES_FOCUS_CRUMBS)
+                        files.focus = FILES_FOCUS_TREE, files.tree_at = files.tree_shown != FILES_NO ? files.tree_shown : 0;
                 else
-                        files.crumb_keys = true, files.crumb_focus = files.trail.current;
+                        files.focus = FILES_FOCUS_CRUMBS, files.crumb_focus = files.trail.current;
                 files.dirty = true;
                 return true;
         }
-        if (key == FILES_KEY_F2)
         {
-                files_edit(FILES_EDIT_NAME);
-                return true;
-        }
-        if (control && shift && key == FILES_KEY_N)
-        {
-                files_new_folder();
-                return true;
+                static const struct
+                {
+                        p32 req, forbid;
+                        int key, menu_id;
+                } shortcuts[] = {
+                    {0, 0, FILES_KEY_F2, FILES_MENU_RENAME},
+                    {WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT, 0, FILES_KEY_N, FILES_MENU_NEW_FOLDER},
+                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_H, FILES_MENU_HIDDEN},
+                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_C, FILES_MENU_COPY},
+                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_X, FILES_MENU_CUT},
+                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_V, FILES_MENU_PASTE},
+                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_1, FILES_MENU_DETAILS},
+                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_1 + 1, FILES_MENU_ICONS},
+                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_1 + 2, FILES_MENU_LIST},
+                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_A, FILES_MENU_ALL},
+                };
+
+                for (positive k = 0; k < sizeof(shortcuts) / sizeof(shortcuts[0]); k++)
+                        if (key == shortcuts[k].key && (event->flags & shortcuts[k].req) == shortcuts[k].req && !(event->flags & shortcuts[k].forbid))
+                        {
+                                files_menu_do(shortcuts[k].menu_id);
+                                files.dirty = true;
+                                return true;
+                        }
         }
         if (alt && (key == UI_KEY_LEFT || key == UI_KEY_RIGHT))
                 return files_act(key == UI_KEY_RIGHT);
@@ -2915,32 +2883,9 @@ static b32 files_key(const struct window_event address_to event)
                 files.dirty = true;
                 return true;
         }
-        if (control && key == FILES_KEY_H)
-        {
-                // Names that start with a dot, shown or not: the folder is read again with the other answer.
-                m->hidden = !m->hidden;
-                files_model_reload(m);
-                files.dirty = true;
-                return true;
-        }
-        if (control && (key == FILES_KEY_C || key == FILES_KEY_X))
-        {
-                files_rows_copy(key == FILES_KEY_X);
-                return true;
-        }
-        if (control && key == FILES_KEY_V)
-        {
-                files_paste();
-                return true;
-        }
         if (control && key == FILES_KEY_F)
         {
                 files_find(true);
-                return true;
-        }
-        if (control && key >= FILES_KEY_1 && key < FILES_KEY_1 + 3)
-        {
-                files_view(key - FILES_KEY_1);
                 return true;
         }
         if (key == UI_KEY_ESCAPE && files.finding)
@@ -2962,16 +2907,6 @@ static b32 files_key(const struct window_event address_to event)
         if (alt && (key == UI_KEY_ENTER || key == UI_KEY_ENTER_PAD))
         {
                 files_sheet_open(false, -1, -1);
-                return true;
-        }
-        if (control && key == FILES_KEY_A)
-        {
-                if (files_model_count(m))
-                {
-                        files_model_choose(m, 0, FILES_CHOOSE_ONLY);
-                        files_model_choose(m, files_model_count(m) - 1, FILES_CHOOSE_RANGE);
-                }
-                files.dirty = true;
                 return true;
         }
         switch (key)
@@ -3065,22 +3000,22 @@ static b32 files_event(const struct window_event address_to event)
         }
         // The find field: its keys while it has them, a press on it gives them to it; Enter gives them to the rows (what it found stays),
         // Escape ends the finding (every entry shown again), and its text is the filter as it is typed.
-        else if (files.finding && (files.find_keys || event->type == WINDOW_EVENT_BUTTON))
+        else if (files.finding && (files.focus == FILES_FOCUS_FIND || event->type == WINDOW_EVENT_BUTTON))
         {
                 b32 on = ui_kit.pointer_x >= files.finder.well_left && ui_kit.pointer_x < files.finder.well_right && ui_kit.pointer_y >= files.finder.well_top &&
                          ui_kit.pointer_y < files.finder.well_bottom;
 
                 if (event->type == WINDOW_EVENT_BUTTON && down && on)
-                        files.find_keys = true;
-                if (files.find_keys)
+                        files.focus = FILES_FOCUS_FIND;
+                if (files.focus == FILES_FOCUS_FIND)
                 {
                         asks = ui_field_send(ui, &files.finder, &files.menu, event);
                         if (asks & UI_TEXT_SUBMIT)
-                                files.find_keys = false;
+                                files.focus = FILES_FOCUS_ROWS;
                         else if (asks & UI_TEXT_CANCEL)
                                 files_find(false);
                         else if (asks & UI_TEXT_COMMIT)
-                                files.find_keys = false;
+                                files.focus = FILES_FOCUS_ROWS;
                         if (asks & ~(p32)(UI_TEXT_SUBMIT | UI_TEXT_CANCEL | UI_TEXT_COMMIT))
                                 files_find_take();
                         files.dirty |= asks != 0;
@@ -3153,7 +3088,7 @@ static b32 files_event(const struct window_event address_to event)
 
                         // A folder of the trail is gone to, and a second press on it in time spells it again (the first one's move
                         // taken back); its ground, and the dots that stand for folders left out, open the field.
-                        files.crumb_keys = false;
+                        files.focus = FILES_FOCUS_ROWS;
                         if (crumb >= 0 && crumb == files.crumb_clicked && (b64)ui_kit.now - files.crumb_clicked_at <= ui_click_ns)
                         {
                                 files.crumb_clicked = -1;
@@ -3169,7 +3104,11 @@ static b32 files_event(const struct window_event address_to event)
                         break;
                 }
                 if (down)
-                        files.crumb_keys = false, files.crumb_clicked = -1;
+                {
+                        if (files.focus == FILES_FOCUS_CRUMBS)
+                                files.focus = FILES_FOCUS_ROWS;
+                        files.crumb_clicked = -1;
+                }
                 // Carrying (Tab): a press on a folder's row drops what is carried in it, a press on the rows' ground in the folder shown;
                 // taken past the slop it hands what is carried to the desktop's drag.
                 if (event->a == UI_POINTER_LEFT && down && files.carrying)
@@ -3202,7 +3141,7 @@ static b32 files_event(const struct window_event address_to event)
                                 int node = ui_list_click(ui, tl, event, ui_kit.pointer_x, ui_kit.pointer_y);
 
                                 if (down && event->a == UI_POINTER_LEFT && in_side)
-                                        files.tree_keys = true, files.crumb_keys = false;
+                                        files.focus = FILES_FOCUS_TREE;
                                 if (node >= 0 && (p32)node < files.big->tree.count)
                                 {
                                         files.tree_at = (p32)node;
@@ -3216,7 +3155,7 @@ static b32 files_event(const struct window_event address_to event)
 
                                                 files_tree_toggle((p32)node);
                                                 if (!moved && files.big->tree.node[node].read && !files.big->tree.node[node].has)
-                                                        files.tree_keys = false, files_model_reload(m);
+                                                        files.focus = FILES_FOCUS_ROWS, files_model_reload(m);
                                         }
                                         else if (files_tree_go((p32)node))
                                                 files.dirty = true;
@@ -3228,12 +3167,12 @@ static b32 files_event(const struct window_event address_to event)
                 // The main rows: standardized kit interaction (selected rows drag, unselected scroll, L+R box-selects, clean right click
                 // asks for menu on release, double click opens).
                 if (down && event->a == UI_POINTER_LEFT)
-                        files.crumb_keys = files.tree_keys = false;
+                        files.focus = FILES_FOCUS_ROWS;
                 row = ui_list_click(ui, l, event, ui_kit.pointer_x, ui_kit.pointer_y);
                 if (l->band_began)
                 {
                         files.band_add = (event->flags & WINDOW_KEY_CONTROL) != 0;
-                        memory_copy(files_band_base, m->chosen, FILES_MOST / 8), files.band_base_count = m->chosen_count;
+                        memory_copy(files.big->band_base, m->chosen, FILES_MOST / 8), files.band_base_count = m->chosen_count;
                         files_band_apply();
                         break;
                 }
@@ -3274,8 +3213,8 @@ static fn files_draw(unsigned int address_to pixels)
         ui_begin(ui, pixels, files.own.table->stride, files.width, files.height);
         files_layout();
         ui_side_place(ui, files.side_box.x, files.side_box.w);
-        l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && !files.crumb_keys && !files.tree_keys;
-        files.big->tree_list.lit = files.big->tree_list.focus >= 0, files.big->tree_list.keys = files.focused && files.tree_keys;
+        l->lit = l->focus >= 0, l->keys = files.focused && !files.big->view.group.keys && files.focus == FILES_FOCUS_ROWS;
+        files.big->tree_list.lit = files.big->tree_list.focus >= 0, files.big->tree_list.keys = files.focused && files.focus == FILES_FOCUS_TREE;
         ui_view_draw(ui, &files.big->view, files.focused);
         if (files.view == FILES_VIEW_DETAILS)
                 ui_columns_draw(ui, &files.columns);
@@ -3305,7 +3244,7 @@ static long files_tick(long timeout, long address_to other)
         // by the count of listings made whole (files_model.listed), which a listing of the same names' lengths changes too.
         if (m->state == FILES_READY && m->listed != files.git_key)
         {
-                files.git = files_git_marks(m, files_git_state), files.git_key = m->listed;
+                files.git = files_git_marks(m, files.big->git_state), files.git_key = m->listed;
                 files.dirty = true;
         }
         // A drag over the window: held over a folder it opens it (a row's folder shown, a tree node's shown and opened in the tree), and
@@ -3384,7 +3323,7 @@ static long files_tick(long timeout, long address_to other)
                 timeout = ui_text_timeout(&files.ui, files_field(), timeout, &redraw);
                 files.dirty |= redraw;
         }
-        if (files.finding && files.find_keys)
+        if (files.finding && files.focus == FILES_FOCUS_FIND)
         {
                 b32 redraw = false;
 
@@ -3474,9 +3413,8 @@ static long files_tick(long timeout, long address_to other)
 
                 if (became == FILES_STALE)
                         files_model_reload(m);
-                if (files_tree_drives_changed(&files.big->tree))
+                if (files_tree_sync_drives(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"), false))
                 {
-                        files_tree_populate_live(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"));
                         files_tree_follow();
                         files.dirty = true;
                 }

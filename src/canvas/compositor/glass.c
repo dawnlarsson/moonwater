@@ -56,21 +56,9 @@ static int compositor_ceil_shift(int x, int shift)
 // grown a little each frame makes it again a few times and not every frame.
 static unsigned int *compositor_scratch(unsigned int **at, unsigned long *had, unsigned long bytes)
 {
-        long mapped;
+        void *p = *at;
 
-        if (bytes <= *had)
-                return *at;
-        bytes = bytes < *had * 2 ? *had * 2 : bytes;
-        bytes = (bytes + 65535) & ~65535ul;
-        if (*at)
-                gpu_forget((const void *)(*at), (positive)(*had)), compositor_call(syscall(munmap), (positive)*at, *had, 0, 0, 0, 0);
-        mapped = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
-        *at = null;
-        *had = 0;
-        if (mapped < 0 && mapped > -4096)
-                return null;
-        *at = (unsigned int *)mapped;
-        *had = bytes;
+        *at = (unsigned int *)mem_buf_grow(&p, had, bytes, MEM_BUF_GPU_FORGET | MEM_BUF_GROW_2X | MEM_BUF_ALIGN_64K);
         return *at;
 }
 
@@ -501,7 +489,7 @@ static void compositor_moon_keep(positive now)
 static struct
 {
         unsigned int *pixels;
-        positive bytes;
+        unsigned long bytes;
 } compositor_glow[WINDOWS_OUTPUTS];
 
 static unsigned int compositor_moon_glow_frame(struct compositor_frame *frame)
@@ -509,22 +497,16 @@ static unsigned int compositor_moon_glow_frame(struct compositor_frame *frame)
         struct taskbar_view view = compositor_taskbar_view();
         unsigned int at = (unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? (unsigned int)compositor.band_at : 0;
         int square[4];
-        positive bytes;
+        unsigned long bytes;
+        void *p;
 
         if (taskbar_moon_glow_level() <= 0 || !taskbar_moon_glow_square(&view, square))
                 return 0;
-        bytes = (positive)square[2] * (positive)square[3] * 4;
-        if (compositor_glow[at].bytes < bytes)
-        {
-                long got = (long)compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
-
-                if (got < 0 && got > -4096)
-                        return 0;
-                if (compositor_glow[at].pixels)
-                        gpu_forget(compositor_glow[at].pixels, compositor_glow[at].bytes),
-                            compositor_call(syscall(munmap), (positive)compositor_glow[at].pixels, compositor_glow[at].bytes, 0, 0, 0, 0);
-                compositor_glow[at].pixels = (unsigned int *)got, compositor_glow[at].bytes = bytes;
-        }
+        bytes = (unsigned long)square[2] * (unsigned long)square[3] * 4;
+        p = compositor_glow[at].pixels;
+        if (!mem_buf_grow(&p, &compositor_glow[at].bytes, bytes, MEM_BUF_GPU_FORGET))
+                return compositor_glow[at].pixels = 0, 0;
+        compositor_glow[at].pixels = (unsigned int *)p;
         if (!taskbar_moon_glow(&view, compositor_glow[at].pixels, square))
                 return 0;
         memory_zero(frame, sizeof(*frame));
@@ -540,7 +522,7 @@ static unsigned int compositor_moon_glow_frame(struct compositor_frame *frame)
 static struct
 {
         unsigned int *pixels;
-        positive bytes;
+        unsigned long bytes;
         int band;  // the band whose moon it is from
         int drawn; // the buffer holds the menu's picture
 } compositor_menu;
@@ -549,21 +531,18 @@ static unsigned int compositor_moon_menu_frame(struct compositor_frame *frame)
 {
         struct taskbar_view view;
         int rect[4], was = compositor.band_at;
-        positive bytes;
+        unsigned long bytes;
 
         if (!taskbar_menu_rect(rect))
                 return 0;
-        bytes = (positive)rect[2] * (positive)rect[3] * 4;
+        bytes = (unsigned long)rect[2] * (unsigned long)rect[3] * 4;
         if (compositor_menu.bytes < bytes)
         {
-                long got = (long)compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+                void *p = compositor_menu.pixels;
 
-                if (got < 0 && got > -4096)
-                        return 0;
-                if (compositor_menu.pixels)
-                        gpu_forget(compositor_menu.pixels, compositor_menu.bytes),
-                            compositor_call(syscall(munmap), (positive)compositor_menu.pixels, compositor_menu.bytes, 0, 0, 0, 0);
-                compositor_menu.pixels = (unsigned int *)got, compositor_menu.bytes = bytes, compositor_menu.drawn = 0;
+                if (!mem_buf_grow(&p, &compositor_menu.bytes, bytes, MEM_BUF_GPU_FORGET))
+                        return compositor_menu.pixels = 0, compositor_menu.drawn = 0, 0;
+                compositor_menu.pixels = (unsigned int *)p, compositor_menu.drawn = 0;
         }
         if (taskbar_menu_redraw() || !compositor_menu.drawn)
         {
@@ -744,9 +723,9 @@ static int compositor_glass_side(int row)
 static void compositor_glass_drop(int row)
 {
         int left = 0;
+        void *p = compositor.backdrop[row];
 
-        if (compositor.backdrop[row])
-                gpu_forget((const void *)(compositor.backdrop[row]), (positive)(compositor.glass_cut[row])), compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
+        mem_buf_free(&p, &compositor.glass_cut[row], MEM_BUF_GPU_FORGET);
         for (int other = 0; other < (int)compositor_rows_in_use; other++)
                 left |= other != row && compositor.glassy[other];
         if (!left && compositor.frost)
@@ -754,7 +733,6 @@ static void compositor_glass_drop(int row)
         if (!left && compositor.rise)
                 compositor_call(syscall(madvise), (positive)compositor.rise, compositor.rise_bytes, 4, 0, 0, 0);
         compositor.backdrop[row] = compositor.tinted[row] = compositor.boosted[row] = compositor.composed[row] = null;
-        compositor.glass_cut[row] = 0;
         compositor.glassy[row] = 0;
         memory_zero(compositor.glass_sum[row], sizeof(compositor.glass_sum[row]));
         memory_zero(compositor.glass_made[row], sizeof(compositor.glass_made[row]));
@@ -775,7 +753,6 @@ static int compositor_glass_room(int row)
         int x = compositor.x[row], y = compositor.y[row], w = (int)compositor.w[row], h = (int)compositor.h[row];
         int *blocks = compositor.glass_blocks[row];
         unsigned long pixels = (unsigned long)w * (unsigned long)h, cells, need, most;
-        long mapped;
 
         blocks[0] = compositor_floor_shift(x, shift) - margin;
         blocks[1] = compositor_floor_shift(y, shift) - margin;
@@ -790,15 +767,14 @@ static int compositor_glass_room(int row)
 
         if (need > compositor.glass_cut[row])
         {
-                if (compositor.backdrop[row])
-                        gpu_forget((const void *)(compositor.backdrop[row]), (positive)(compositor.glass_cut[row])), compositor_call(syscall(munmap), (positive)compositor.backdrop[row], compositor.glass_cut[row], 0, 0, 0, 0);
-                mapped = compositor_call(syscall(mmap), 0, need, 3, 0x22, (positive)-1, 0);
-                compositor.backdrop[row] = compositor.tinted[row] = compositor.boosted[row] = compositor.composed[row] = null;
-                compositor.glass_cut[row] = 0;
-                if (mapped < 0 && mapped > -4096)
+                void *p = compositor.backdrop[row];
+
+                if (!mem_buf_grow(&p, &compositor.glass_cut[row], need, MEM_BUF_GPU_FORGET))
+                {
+                        compositor.backdrop[row] = compositor.tinted[row] = compositor.boosted[row] = compositor.composed[row] = null;
                         return 0;
-                compositor.backdrop[row] = (unsigned int *)mapped;
-                compositor.glass_cut[row] = need;
+                }
+                compositor.backdrop[row] = (unsigned int *)p;
         }
         compositor.tinted[row] = compositor.backdrop[row] + cells;
         compositor.boosted[row] = compositor.tinted[row] + cells;

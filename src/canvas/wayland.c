@@ -966,6 +966,12 @@ WAYLAND_API void wayland_tables_host(const struct wayland_host *host)
         wayland_tables_by = host;
 }
 
+/* Multiplicative Fibonacci hash for power-of-two open-addressing tables (shared by xwm.c and wayland_host.c). */
+WAYLAND_API unsigned long wayland_u32_hash(unsigned long key, long buckets)
+{
+        return (key * 0x9e3779b97f4a7c15ul >> 24) & (unsigned long)(buckets - 1);
+}
+
 static const struct wayland_host *wayland_table_host(void)
 {
         return wayland.host ? wayland.host : wayland_tables_by;
@@ -3829,8 +3835,9 @@ static int wayland_new_fail(struct wayland_client *c, unsigned long self, unsign
 #define WAYLAND_IMPLEMENTATION WLN_wl_display_error_implementation
 
 /* wl_display: sync answers at once, so its callback never lives; get_registry lists the globals. */
-static int wayland_display_request(struct wayland_client *c, long op, struct wayland_arg *a)
+static int wayland_display_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
+        (void)self;
         if (op == WLQ_wl_display_sync)
         {
                 unsigned int word = (unsigned int)wayland_serial(c);
@@ -3853,10 +3860,12 @@ WAYLAND_API void wayland_xwayland_client(long slot);
         wl_registry.bind: a global by its name, the interface named exactly, a version from one to the one built,
         and a new id. Checked whole before the object is made; the events a bound global sends follow it.
 */
-static int wayland_registry_request(struct wayland_client *c, struct wayland_object *self, struct wayland_arg *a)
+static int wayland_registry_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         long name = (long)a[0].u, iface, version, slot;
         unsigned long id = a[1].u;
+
+        (void)op;
 
         if (name >= 1 && name <= WAYLAND_GLOBAL_COUNT && wayland_global_offered(c, name))
         {
@@ -3991,10 +4000,12 @@ static void wayland_scale_tell(struct wayland_client *c, struct wayland_surface 
         s->told_whole = whole;
 }
 
-static int wayland_compositor_request(struct wayland_client *c, long op, struct wayland_arg *a)
+static int wayland_compositor_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         long slot, screen_scale = wayland.screens ? wayland.screen[0].scale : 100;
         struct wayland_surface *s;
+
+        (void)self;
 
         if (op == WLQ_wl_compositor_create_region)
         {
@@ -5239,10 +5250,12 @@ static int wayland_surface_request(struct wayland_client *c, struct wayland_obje
 }
 
 /* wl_shm and its pools. A pool is mapped once, read-only, and its descriptor is closed; a buffer is a rectangle of it. */
-static int wayland_shm_request(struct wayland_client *c, struct wayland_object *self, struct wayland_arg *a)
+static int wayland_shm_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         long size = a[2].i, pool = -1;
         void *at;
+
+        (void)op;
 
         if (size < 1 || size > WAYLAND_POOL_BYTES)
                 return wayland_fail(c, self->id, WLN_wl_shm_error_invalid_stride, "the pool's size is out of range");
@@ -5334,9 +5347,12 @@ static int wayland_pool_request(struct wayland_client *c, struct wayland_object 
         }
 }
 
-static int wayland_buffer_request(struct wayland_client *c, struct wayland_object *self)
+static int wayland_buffer_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_buffer *b = &c->buffers[self->link];
+
+        (void)op;
+        (void)a;
 
         // A surface whose pending state names the buffer (attached, or cached by a synchronized subsurface, and not committed yet) has
         // that attach unmade: its commit shows what it showed. The protocol lets a client destroy a buffer at any time; the commit was a
@@ -9521,17 +9537,29 @@ static int wayland_presentation_request(struct wayland_client *c, struct wayland
 }
 
 /*
-        An object made for a surface (a wp_content_type, a wp_alpha_modifier surface, an xdg_dialog) takes the surface's link and
-        generation, so wayland_surface_of finds the surface it is for, and is none once that surface is gone.
+        An object made for a surface (content_type, alpha_modifier, fifo, commit_timer, xdg_dialog, xwayland, inhibitors, tearing)
+        takes the surface's slot and generation, so wayland_surface_of finds the surface it is for, and returns 0 once gone.
 */
-static void wayland_hint_bind(struct wayland_client *c, long hint, struct wayland_surface *s)
+static void wayland_surface_link(struct wayland_client *c, long slot, struct wayland_surface *s)
 {
-        long base = wayland_find(c, s->id, WLI_wl_surface);
-
-        if (hint < 0 || base < 0)
+        if (slot < 0 || !s)
                 return;
-        c->objects[hint].link = c->objects[base].link;
-        c->objects[hint].aux = c->objects[base].aux;
+        c->objects[slot].link = (int)wayland_surface_index(c, s);
+        c->objects[slot].aux = s->gen;
+}
+
+static struct wayland_surface *wayland_bind_surface(struct wayland_client *c, struct wayland_object *self, struct wayland_arg *a, int *status)
+{
+        struct wayland_surface *s = wayland_surface_of(c, a[1].slot);
+
+        if (!s)
+        {
+                *status = wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                return 0;
+        }
+        wayland_surface_link(c, a[0].slot, s);
+        *status = WAYLAND_OK;
+        return s;
 }
 
 /*
@@ -9569,6 +9597,7 @@ static void wayland_icon_set(struct wayland_client *c, long toplevel, long icon)
 static int wayland_hints_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *s;
+        int status = WAYLAND_OK;
 
         switch (self->iface)
         {
@@ -9578,7 +9607,7 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                 for (long at = 0; at < c->surface_table.count; at++)
                         if (c->surfaces[at].live && c->surfaces[at].role_id == c->objects[a[1].slot].id)
                         {
-                                wayland_hint_bind(c, a[0].slot, &c->surfaces[at]);
+                                wayland_surface_link(c, a[0].slot, &c->surfaces[at]);
                                 return WAYLAND_OK;
                         }
                 return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "no such toplevel");
@@ -9590,13 +9619,9 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                         s->modal = 0;
                 return WAYLAND_OK;
         case WLI_wp_content_type_manager_v1:
-                if (op != WLQ_wp_content_type_manager_v1_get_surface_content_type)
-                        return WAYLAND_OK;
-                s = wayland_surface_of(c, a[1].slot);
-                if (!s)
-                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-                wayland_hint_bind(c, a[0].slot, s);
-                return WAYLAND_OK;
+                if (op == WLQ_wp_content_type_manager_v1_get_surface_content_type)
+                        wayland_bind_surface(c, self, a, &status);
+                return status;
         case WLI_wp_content_type_v1:
                 s = wayland_surface_of(c, self - c->objects);
                 if (op == WLQ_wp_content_type_v1_set_content_type && s)
@@ -9605,13 +9630,9 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                         s->content = WLN_wp_content_type_v1_type_none;
                 return WAYLAND_OK;
         case WLI_wp_alpha_modifier_v1:
-                if (op != WLQ_wp_alpha_modifier_v1_get_surface)
-                        return WAYLAND_OK;
-                s = wayland_surface_of(c, a[1].slot);
-                if (!s)
-                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-                wayland_hint_bind(c, a[0].slot, s);
-                return WAYLAND_OK;
+                if (op == WLQ_wp_alpha_modifier_v1_get_surface)
+                        wayland_bind_surface(c, self, a, &status);
+                return status;
         case WLI_wp_alpha_modifier_surface_v1:
                 s = wayland_surface_of(c, self - c->objects);
                 if (op == WLQ_wp_alpha_modifier_surface_v1_set_multiplier && s)
@@ -9620,13 +9641,9 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                         s->pending_alpha = 0xffffffffu;
                 return WAYLAND_OK;
         case WLI_wp_fifo_manager_v1:
-                if (op != WLQ_wp_fifo_manager_v1_get_fifo)
-                        return WAYLAND_OK;
-                s = wayland_surface_of(c, a[1].slot);
-                if (!s)
-                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-                wayland_hint_bind(c, a[0].slot, s);
-                return WAYLAND_OK;
+                if (op == WLQ_wp_fifo_manager_v1_get_fifo)
+                        wayland_bind_surface(c, self, a, &status);
+                return status;
         case WLI_wp_fifo_v1:
                 // The barrier is the next commit's (wait_barrier); set_barrier is the one the compositor's latch releases.
                 s = wayland_surface_of(c, self - c->objects);
@@ -9636,13 +9653,9 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                         s->pending_barrier = 1;
                 return WAYLAND_OK;
         case WLI_wp_commit_timing_manager_v1:
-                if (op != WLQ_wp_commit_timing_manager_v1_get_timer)
-                        return WAYLAND_OK;
-                s = wayland_surface_of(c, a[1].slot);
-                if (!s)
-                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-                wayland_hint_bind(c, a[0].slot, s);
-                return WAYLAND_OK;
+                if (op == WLQ_wp_commit_timing_manager_v1_get_timer)
+                        wayland_bind_surface(c, self, a, &status);
+                return status;
         case WLI_wp_commit_timer_v1:
                 s = wayland_surface_of(c, self - c->objects);
                 if (op != WLQ_wp_commit_timer_v1_set_timestamp || !s)
@@ -9847,6 +9860,7 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
 static int wayland_xwayland_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *surface;
+        int status;
 
         if (self->iface == WLI_xwayland_shell_v1)
         {
@@ -9858,8 +9872,7 @@ static int wayland_xwayland_request(struct wayland_client *c, struct wayland_obj
                         if (surface->xsurface || (surface->flags & WAYLAND_SURFACE_XDG) || surface->role != WAYLAND_ROLE_NONE)
                                 return wayland_fail(c, self->id, WLN_xwayland_shell_v1_error_role, "the surface has another role");
                         surface->xsurface = 1;
-                        c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
-                        c->objects[a[0].slot].aux = surface->gen;
+                        wayland_surface_link(c, a[0].slot, surface);
                         // The client whose surfaces are X windows is the X server: its outputs are told again in X's space.
                         wayland_xwayland_client(c->slot);
                 }
@@ -9888,17 +9901,15 @@ static int wayland_xwayland_request(struct wayland_client *c, struct wayland_obj
         {
                 if (op == WLQ_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard)
                 {
-                        surface = wayland_surface_of(c, a[1].slot);
+                        surface = wayland_bind_surface(c, self, a, &status);
                         if (!surface)
-                                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
+                                return status;
                         surface->xgrab = 1;
                         if (surface->row >= 0 && surface->row == wayland.keyboard_row && !surface->shortcut_active)
                         {
                                 surface->shortcut_active = 1;
                                 surface->escape_down = 0;
                         }
-                        c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
-                        c->objects[a[0].slot].aux = surface->gen;
                 }
                 return WAYLAND_OK;
         }
@@ -10004,8 +10015,7 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                                                     "the surface has an inhibitor");
                         surface->shortcuts = 1;
                         surface->shortcut_id = c->objects[a[0].slot].id;
-                        c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
-                        c->objects[a[0].slot].aux = surface->gen;
+                        wayland_surface_link(c, a[0].slot, surface);
                         if (surface->row >= 0 && surface->row == wayland.keyboard_row)
                         {
                                 surface->shortcut_active = 1;
@@ -10032,8 +10042,7 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                                 return wayland_fail(c, self->id, WLN_wp_tearing_control_manager_v1_error_tearing_control_exists,
                                                     "the surface has a tearing control");
                         surface->tearing = 1;
-                        c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
-                        c->objects[a[0].slot].aux = surface->gen;
+                        wayland_surface_link(c, a[0].slot, surface);
                 }
                 return WAYLAND_OK;
         case WLI_wp_tearing_control_v1:
@@ -10051,16 +10060,16 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                         surface->pending_async = a[0].u == WLN_wp_tearing_control_v1_presentation_hint_async;
                 return WAYLAND_OK;
         case WLI_zwp_idle_inhibit_manager_v1:
-                if (op != WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor)
-                        return WAYLAND_OK;
-                surface = wayland_surface_of(c, a[1].slot);
-                if (!surface)
-                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-                // The inhibitor is linked to its surface, as a shortcuts inhibitor is: it holds while that surface is shown
-                // (wayland_inhibitors_now), and ends with its surface or its own destroy, which is the object going.
-                c->objects[a[0].slot].link = (int)wayland_surface_index(c, surface);
-                c->objects[a[0].slot].aux = surface->gen;
-                c->inhibitors++;
+                if (op == WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor)
+                {
+                        int status;
+
+                        // The inhibitor is linked to its surface, as a shortcuts inhibitor is: it holds while that surface is shown
+                        // (wayland_inhibitors_now), and ends with its surface or its own destroy, which is the object going.
+                        if (!wayland_bind_surface(c, self, a, &status))
+                                return status;
+                        c->inhibitors++;
+                }
                 return WAYLAND_OK;
         case WLI_zwp_idle_inhibitor_v1:
                 return WAYLAND_OK;
@@ -10361,6 +10370,94 @@ static int wayland_layer_request(struct wayland_client *c, struct wayland_object
         return WAYLAND_OK;
 }
 
+typedef int (*wayland_request_fn)(struct wayland_client *, struct wayland_object *, long, struct wayland_arg *);
+
+// Unlisted interfaces (outputs, xdg outputs, etc.) have only release/destroy and return WAYLAND_OK.
+static const wayland_request_fn wayland_handlers[WLI_COUNT] = {
+        [WLI_wl_display] = wayland_display_request,
+        [WLI_wl_registry] = wayland_registry_request,
+        [WLI_wl_compositor] = wayland_compositor_request,
+        [WLI_wl_surface] = wayland_surface_request,
+        [WLI_wl_region] = wayland_region_request,
+        [WLI_wl_shm] = wayland_shm_request,
+        [WLI_wl_shm_pool] = wayland_pool_request,
+        [WLI_wl_buffer] = wayland_buffer_request,
+        [WLI_wl_subcompositor] = wayland_subcompositor_request,
+        [WLI_wl_subsurface] = wayland_subsurface_request,
+        [WLI_wl_seat] = wayland_seat_request,
+        [WLI_wl_pointer] = wayland_seat_object_request,
+        [WLI_wl_keyboard] = wayland_seat_object_request,
+        [WLI_wl_touch] = wayland_seat_object_request,
+        [WLI_xdg_wm_base] = wayland_wm_base_request,
+        [WLI_xdg_positioner] = wayland_positioner_request,
+        [WLI_xdg_surface] = wayland_xdg_surface_request,
+        [WLI_xdg_toplevel] = wayland_toplevel_request,
+        [WLI_xdg_popup] = wayland_popup_request,
+        [WLI_zxdg_output_manager_v1] = wayland_output_manager_request,
+        [WLI_zwp_relative_pointer_manager_v1] = wayland_games_request,
+        [WLI_zwp_relative_pointer_v1] = wayland_games_request,
+        [WLI_zwp_pointer_constraints_v1] = wayland_games_request,
+        [WLI_zwp_locked_pointer_v1] = wayland_games_request,
+        [WLI_zwp_confined_pointer_v1] = wayland_games_request,
+        [WLI_zwp_idle_inhibit_manager_v1] = wayland_games_request,
+        [WLI_zwp_idle_inhibitor_v1] = wayland_games_request,
+        [WLI_zwp_keyboard_shortcuts_inhibit_manager_v1] = wayland_games_request,
+        [WLI_zwp_keyboard_shortcuts_inhibitor_v1] = wayland_games_request,
+        [WLI_wp_tearing_control_manager_v1] = wayland_games_request,
+        [WLI_wp_tearing_control_v1] = wayland_games_request,
+        [WLI_xwayland_shell_v1] = wayland_xwayland_request,
+        [WLI_xwayland_surface_v1] = wayland_xwayland_request,
+        [WLI_zwp_xwayland_keyboard_grab_manager_v1] = wayland_xwayland_request,
+        [WLI_zwp_xwayland_keyboard_grab_v1] = wayland_xwayland_request,
+        [WLI_xdg_activation_v1] = wayland_activation_request,
+        [WLI_xdg_activation_token_v1] = wayland_activation_request,
+        [WLI_zwp_pointer_gestures_v1] = wayland_gestures_request,
+        [WLI_zwp_pointer_gesture_swipe_v1] = wayland_gestures_request,
+        [WLI_zwp_pointer_gesture_pinch_v1] = wayland_gestures_request,
+        [WLI_zwp_pointer_gesture_hold_v1] = wayland_gestures_request,
+        [WLI_ext_idle_notifier_v1] = wayland_idle_request,
+        [WLI_ext_idle_notification_v1] = wayland_idle_request,
+        [WLI_wp_fifo_manager_v1] = wayland_hints_request,
+        [WLI_wp_fifo_v1] = wayland_hints_request,
+        [WLI_wp_commit_timing_manager_v1] = wayland_hints_request,
+        [WLI_wp_commit_timer_v1] = wayland_hints_request,
+        [WLI_xdg_wm_dialog_v1] = wayland_hints_request,
+        [WLI_xdg_dialog_v1] = wayland_hints_request,
+        [WLI_xdg_system_bell_v1] = wayland_hints_request,
+        [WLI_xdg_toplevel_icon_manager_v1] = wayland_hints_request,
+        [WLI_xdg_toplevel_icon_v1] = wayland_hints_request,
+        [WLI_wp_content_type_manager_v1] = wayland_hints_request,
+        [WLI_wp_content_type_v1] = wayland_hints_request,
+        [WLI_wp_alpha_modifier_v1] = wayland_hints_request,
+        [WLI_wp_alpha_modifier_surface_v1] = wayland_hints_request,
+        [WLI_zwp_linux_dmabuf_v1] = wayland_dmabuf_request,
+        [WLI_zwp_linux_buffer_params_v1] = wayland_dmabuf_request,
+        [WLI_zwp_linux_dmabuf_feedback_v1] = wayland_dmabuf_request,
+        [WLI_wl_drm] = wayland_drm_request,
+        [WLI_wp_linux_drm_syncobj_manager_v1] = wayland_syncobj_request,
+        [WLI_wp_linux_drm_syncobj_timeline_v1] = wayland_syncobj_request,
+        [WLI_wp_linux_drm_syncobj_surface_v1] = wayland_syncobj_request,
+        [WLI_wp_cursor_shape_manager_v1] = wayland_cursor_shape_request,
+        [WLI_wp_cursor_shape_device_v1] = wayland_cursor_shape_request,
+        [WLI_zwp_text_input_manager_v3] = wayland_text_request,
+        [WLI_zwp_text_input_v3] = wayland_text_request,
+        [WLI_wp_presentation] = wayland_presentation_request,
+        [WLI_wp_viewporter] = wayland_viewport_request,
+        [WLI_wp_viewport] = wayland_viewport_request,
+        [WLI_wp_fractional_scale_manager_v1] = wayland_fractional_request,
+        [WLI_wp_fractional_scale_v1] = wayland_fractional_request,
+        [WLI_zwlr_layer_shell_v1] = wayland_layer_request,
+        [WLI_zwlr_layer_surface_v1] = wayland_layer_request,
+        [WLI_wl_data_device_manager] = wayland_data_request,
+        [WLI_wl_data_device] = wayland_data_request,
+        [WLI_wl_data_source] = wayland_data_request,
+        [WLI_wl_data_offer] = wayland_data_request,
+        [WLI_zwp_primary_selection_device_manager_v1] = wayland_data_request,
+        [WLI_zwp_primary_selection_device_v1] = wayland_data_request,
+        [WLI_zwp_primary_selection_source_v1] = wayland_data_request,
+        [WLI_zwp_primary_selection_offer_v1] = wayland_data_request,
+};
+
 static int wayland_dispatch(struct wayland_client *c, const unsigned char *message, long size, unsigned long id, long op)
 {
         long slot = wayland_slot_of(c, id), n;
@@ -10382,164 +10479,9 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
         status = wayland_args(c, o, msg, message + 8, size - 8, a, &begun, &took_fd);
         if (status >= 0)
         {
-                switch (o->iface)
-                {
-                case WLI_wl_display:
-                        status = wayland_display_request(c, op, a);
-                        break;
-                case WLI_wl_registry:
-                        status = wayland_registry_request(c, o, a);
-                        break;
-                case WLI_wl_compositor:
-                        status = wayland_compositor_request(c, op, a);
-                        break;
-                case WLI_wl_surface:
-                        status = wayland_surface_request(c, o, op, a);
-                        break;
-                case WLI_wl_region:
-                        status = wayland_region_request(c, o, op, a);
-                        break;
-                case WLI_wl_shm:
-                        status = wayland_shm_request(c, o, a);
-                        break;
-                case WLI_wl_shm_pool:
-                        status = wayland_pool_request(c, o, op, a);
-                        break;
-                case WLI_wl_buffer:
-                        status = wayland_buffer_request(c, o);
-                        break;
-                case WLI_wl_subcompositor:
-                        status = wayland_subcompositor_request(c, o, op, a);
-                        break;
-                case WLI_wl_subsurface:
-                        status = wayland_subsurface_request(c, o, op, a);
-                        break;
-                case WLI_wl_seat:
-                        status = wayland_seat_request(c, o, op, a);
-                        break;
-                case WLI_wl_pointer:
-                case WLI_wl_keyboard:
-                case WLI_wl_touch:
-                        status = wayland_seat_object_request(c, o, op, a);
-                        break;
-                case WLI_xdg_wm_base:
-                        status = wayland_wm_base_request(c, o, op, a);
-                        break;
-                case WLI_xdg_positioner:
-                        status = wayland_positioner_request(c, o, op, a);
-                        break;
-                case WLI_xdg_surface:
-                        status = wayland_xdg_surface_request(c, o, op, a);
-                        break;
-                case WLI_xdg_toplevel:
-                        status = wayland_toplevel_request(c, o, op, a);
-                        break;
-                case WLI_xdg_popup:
-                        status = wayland_popup_request(c, o, op, a);
-                        break;
-                case WLI_zxdg_output_manager_v1:
-                        status = wayland_output_manager_request(c, o, op, a);
-                        break;
-                case WLI_zwp_relative_pointer_manager_v1:
-                case WLI_zwp_relative_pointer_v1:
-                case WLI_zwp_pointer_constraints_v1:
-                case WLI_zwp_locked_pointer_v1:
-                case WLI_zwp_confined_pointer_v1:
-                case WLI_zwp_idle_inhibit_manager_v1:
-                case WLI_zwp_idle_inhibitor_v1:
-                case WLI_zwp_keyboard_shortcuts_inhibit_manager_v1:
-                case WLI_zwp_keyboard_shortcuts_inhibitor_v1:
-                case WLI_wp_tearing_control_manager_v1:
-                case WLI_wp_tearing_control_v1:
-                        status = wayland_games_request(c, o, op, a);
-                        break;
-                case WLI_xwayland_shell_v1:
-                case WLI_xwayland_surface_v1:
-                case WLI_zwp_xwayland_keyboard_grab_manager_v1:
-                case WLI_zwp_xwayland_keyboard_grab_v1:
-                        status = wayland_xwayland_request(c, o, op, a);
-                        break;
-                case WLI_xdg_activation_v1:
-                case WLI_xdg_activation_token_v1:
-                        status = wayland_activation_request(c, o, op, a);
-                        break;
-                case WLI_zwp_pointer_gestures_v1:
-                case WLI_zwp_pointer_gesture_swipe_v1:
-                case WLI_zwp_pointer_gesture_pinch_v1:
-                case WLI_zwp_pointer_gesture_hold_v1:
-                        status = wayland_gestures_request(c, o, op, a);
-                        break;
-                case WLI_ext_idle_notifier_v1:
-                case WLI_ext_idle_notification_v1:
-                        status = wayland_idle_request(c, o, op, a);
-                        break;
-                case WLI_wp_fifo_manager_v1:
-                case WLI_wp_fifo_v1:
-                case WLI_wp_commit_timing_manager_v1:
-                case WLI_wp_commit_timer_v1:
-                        status = wayland_hints_request(c, o, op, a);
-                        break;
-                case WLI_xdg_wm_dialog_v1:
-                case WLI_xdg_dialog_v1:
-                case WLI_xdg_system_bell_v1:
-                case WLI_xdg_toplevel_icon_manager_v1:
-                case WLI_xdg_toplevel_icon_v1:
-                case WLI_wp_content_type_manager_v1:
-                case WLI_wp_content_type_v1:
-                case WLI_wp_alpha_modifier_v1:
-                case WLI_wp_alpha_modifier_surface_v1:
-                        status = wayland_hints_request(c, o, op, a);
-                        break;
-                case WLI_zwp_linux_dmabuf_v1:
-                case WLI_zwp_linux_buffer_params_v1:
-                case WLI_zwp_linux_dmabuf_feedback_v1:
-                        status = wayland_dmabuf_request(c, o, op, a);
-                        break;
-                case WLI_wl_drm:
-                        status = wayland_drm_request(c, o, op, a);
-                        break;
-                case WLI_wp_linux_drm_syncobj_manager_v1:
-                case WLI_wp_linux_drm_syncobj_timeline_v1:
-                case WLI_wp_linux_drm_syncobj_surface_v1:
-                        status = wayland_syncobj_request(c, o, op, a);
-                        break;
-                case WLI_wp_cursor_shape_manager_v1:
-                case WLI_wp_cursor_shape_device_v1:
-                        status = wayland_cursor_shape_request(c, o, op, a);
-                        break;
-                case WLI_zwp_text_input_manager_v3:
-                case WLI_zwp_text_input_v3:
-                        status = wayland_text_request(c, o, op, a);
-                        break;
-                case WLI_wp_presentation:
-                        status = wayland_presentation_request(c, o, op, a);
-                        break;
-                case WLI_wp_viewporter:
-                case WLI_wp_viewport:
-                        status = wayland_viewport_request(c, o, op, a);
-                        break;
-                case WLI_wp_fractional_scale_manager_v1:
-                case WLI_wp_fractional_scale_v1:
-                        status = wayland_fractional_request(c, o, op, a);
-                        break;
-                case WLI_zwlr_layer_shell_v1:
-                case WLI_zwlr_layer_surface_v1:
-                        status = wayland_layer_request(c, o, op, a);
-                        break;
-                case WLI_wl_data_device_manager:
-                case WLI_wl_data_device:
-                case WLI_wl_data_source:
-                case WLI_wl_data_offer:
-                case WLI_zwp_primary_selection_device_manager_v1:
-                case WLI_zwp_primary_selection_device_v1:
-                case WLI_zwp_primary_selection_source_v1:
-                case WLI_zwp_primary_selection_offer_v1:
-                        status = wayland_data_request(c, o, op, a);
-                        break;
-                default: // pointers, keyboards, outputs and xdg outputs have only a release or a destroy
-                        status = WAYLAND_OK;
-                        break;
-                }
+                wayland_request_fn handler = o->iface < WLI_COUNT ? wayland_handlers[o->iface] : 0;
+
+                status = handler ? handler(c, o, op, a) : WAYLAND_OK;
         }
         // A descriptor a handler did not take is closed here, whatever became of the request (a request that took none has none to look
         // for: every request walked its arguments for one).

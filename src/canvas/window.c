@@ -2190,9 +2190,75 @@ static unsigned int windows_language_code(const char *word, unsigned int length)
 #define WINDOWS_PLACE_OFF 2
 #define WINDOWS_PLACE_MOST 32768
 
+// Appends length bytes of text to into at *at, bounded by room with its NUL; 0 when it does not fit.
+static int windows_buf_put(char *into, unsigned int room, unsigned int *at, const char *text, unsigned int length)
+{
+        if (room < *at || room - *at <= length)
+                return 0;
+        for (unsigned int each = 0; each < length; each++)
+                into[*at + each] = text[each];
+        *at += length;
+        into[*at] = 0;
+        return 1;
+}
+
+static int windows_buf_str(char *into, unsigned int room, unsigned int *at, const char *text)
+{
+        unsigned int length = 0;
+
+        while (text[length])
+                length++;
+        return windows_buf_put(into, room, at, text, length);
+}
+
+// Appends value in decimal (a minus first when negative) to into at *at.
+static int windows_buf_num(char *into, unsigned int room, unsigned int *at, long value)
+{
+        char digits[24];
+        unsigned int count = 0;
+        unsigned long magnitude = value < 0 ? 0ul - (unsigned long)value : (unsigned long)value;
+
+        do
+                digits[count++] = (char)('0' + magnitude % 10), magnitude /= 10;
+        while (magnitude);
+        if (value < 0 && !windows_buf_put(into, room, at, "-", 1))
+                return 0;
+        while (count)
+                if (!windows_buf_put(into, room, at, digits + --count, 1))
+                        return 0;
+        return 1;
+}
+
+// Parses a bounded decimal integer from length bytes at word into *into.
+// When strict_zero is set, leading zeros ("01") and "-0" are rejected.
+static int windows_scan_int(const char *word, unsigned int length, int low, int high, unsigned int max_digits, int strict_zero, int *into)
+{
+        unsigned int at = 0, digits = 0;
+        int negative = 0;
+        long value = 0;
+
+        if (low < 0 && at < length && word[at] == '-')
+                negative = 1, at++;
+        if (strict_zero && at + 1 < length && word[at] == '0' && word[at + 1] >= '0' && word[at + 1] <= '9')
+                return 0;
+        for (; at < length; at++, digits++)
+        {
+                if (word[at] < '0' || word[at] > '9' || digits == max_digits)
+                        return 0;
+                value = value * 10 + (word[at] - '0');
+        }
+        if (!digits || (strict_zero && negative && !value))
+                return 0;
+        value = negative ? -value : value;
+        if (value < low || value > high)
+                return 0;
+        *into = (int)value;
+        return 1;
+}
+
 static int windows_arrange_word(const char *word, unsigned int length, unsigned int *name, int *how, int *x, int *y)
 {
-        unsigned int at = 0;
+        unsigned int at = 0, comma;
 
         while (at < length && ((unsigned int)((word[at] | 32) - 'a') < 26u || (word[at] >= '0' && word[at] <= '9') ||
                                word[at] == '-'))
@@ -2211,22 +2277,15 @@ static int windows_arrange_word(const char *word, unsigned int length, unsigned 
                 *how = WINDOWS_PLACE_OFF;
                 return 1;
         }
-        for (int axis = 0; axis < 2; axis++)
-        {
-                int sign = 1, value = 0, digits = 0, *into = axis ? y : x;
-
-                if (at < length && word[at] == '-')
-                        sign = -1, at++;
-                while (at < length && word[at] >= '0' && word[at] <= '9' && digits < 6)
-                        value = value * 10 + (word[at++] - '0'), digits++;
-                if (!digits || value > WINDOWS_PLACE_MOST)
-                        return 0;
-                *into = sign * value;
-                if (!axis && (at >= length || word[at++] != ','))
-                        return 0;
-        }
+        comma = at;
+        while (comma < length && word[comma] != ',')
+                comma++;
+        if (comma == length ||
+            !windows_scan_int(word + at, comma - at, -WINDOWS_PLACE_MOST, WINDOWS_PLACE_MOST, 6, 0, x) ||
+            !windows_scan_int(word + comma + 1, length - comma - 1, -WINDOWS_PLACE_MOST, WINDOWS_PLACE_MOST, 6, 0, y))
+                return 0;
         *how = WINDOWS_PLACE_AT;
-        return at == length;
+        return 1;
 }
 
 // Whether count bytes at a and at b are the same.
@@ -2448,22 +2507,7 @@ static int windows_display_same_name(const char *a, const char *b)
 // Whether length bytes at word are the decimal number value, as at most digits digits (a minus first when signed).
 static int windows_display_number(const char *word, unsigned int length, int signed_number, unsigned int digits, int *into)
 {
-        unsigned int at = 0, count = 0;
-        int negative = 0;
-        long value = 0;
-
-        if (signed_number && at < length && word[at] == '-')
-                negative = 1, at++;
-        for (; at < length; at++, count++)
-        {
-                if (word[at] < '0' || word[at] > '9' || count == digits)
-                        return 0;
-                value = value * 10 + (word[at] - '0');
-        }
-        if (!count)
-                return 0;
-        *into = (int)(negative ? -value : value);
-        return 1;
+        return windows_scan_int(word, length, signed_number ? -2147483647 : 0, 2147483647, digits, 0, into);
 }
 
 /*
@@ -2533,21 +2577,27 @@ static void windows_display_line(const char *line, unsigned int length, struct w
                         continue;
                 }
                 // Each field is the key's name and the value after its '=': the rest is the value.
-                key = 0;
-                if (keys == 8 && windows_name_is("rotation", line + word, 8))
-                        key = WINDOWS_DISPLAY_ROTATION;
-                else if (keys == 7 && windows_name_is("refresh", line + word, 7))
-                        key = WINDOWS_DISPLAY_REFRESH;
-                else if (keys == 5 && windows_name_is("scale", line + word, 5))
-                        key = WINDOWS_DISPLAY_SCALE;
-                else if (keys == 4 && windows_name_is("mode", line + word, 4))
-                        key = WINDOWS_DISPLAY_MODE;
-                else if (keys == 7 && windows_name_is("primary", line + word, 7))
-                        key = WINDOWS_DISPLAY_PRIMARY;
-                else if (keys == 1 && line[word] == 'x')
-                        key = WINDOWS_DISPLAY_X;
-                else if (keys == 1 && line[word] == 'y')
-                        key = WINDOWS_DISPLAY_Y;
+                {
+                        static const struct
+                        {
+                                const char *name;
+                                unsigned char len;
+                                unsigned short bit;
+                        } fields[] = {
+                            {"rotation", 8, WINDOWS_DISPLAY_ROTATION}, {"refresh", 7, WINDOWS_DISPLAY_REFRESH},
+                            {"scale", 5, WINDOWS_DISPLAY_SCALE},       {"mode", 4, WINDOWS_DISPLAY_MODE},
+                            {"primary", 7, WINDOWS_DISPLAY_PRIMARY},   {"x", 1, WINDOWS_DISPLAY_X},
+                            {"y", 1, WINDOWS_DISPLAY_Y},
+                        };
+
+                        key = 0;
+                        for (unsigned int f = 0; f < sizeof(fields) / sizeof(fields[0]); f++)
+                                if (keys == fields[f].len && windows_name_is(fields[f].name, line + word, fields[f].len))
+                                {
+                                        key = fields[f].bit;
+                                        break;
+                                }
+                }
                 if (!key || (seen & key))
                 {
                         display->bad |= WINDOWS_DISPLAY_OTHER;
@@ -2808,34 +2858,20 @@ static void windows_rotate_panel(unsigned int lw, unsigned int lh, unsigned int 
         }
 }
 
-// Appends text (length bytes) to into at *at, bounded by room with its NUL; 0 when it does not fit.
-static int windows_put(char *into, unsigned int room, unsigned int *at, const char *text, unsigned int length)
+// Scans one line of text from start: sets *stop to line end and *word..*word_end to its leading token.
+static void windows_line_first_word(const char *text, unsigned int start, unsigned int *stop, unsigned int *word, unsigned int *word_end)
 {
-        if (room < *at || room - *at <= length)
-                return 0;
-        for (unsigned int each = 0; each < length; each++)
-                into[*at + each] = text[each];
-        *at += length;
-        into[*at] = 0;
-        return 1;
-}
+        unsigned int s = start, w, e;
 
-// Appends value in decimal (a minus first when negative) to into at *at.
-static int windows_put_number(char *into, unsigned int room, unsigned int *at, int value)
-{
-        char digits[12];
-        unsigned int count = 0;
-        unsigned long magnitude = value < 0 ? 0ul - (unsigned long)(long)value : (unsigned long)value;
-
-        do
-                digits[count++] = (char)('0' + magnitude % 10), magnitude /= 10;
-        while (magnitude);
-        if (value < 0 && !windows_put(into, room, at, "-", 1))
-                return 0;
-        while (count)
-                if (!windows_put(into, room, at, digits + --count, 1))
-                        return 0;
-        return 1;
+        while (text[s] && text[s] != '\n')
+                s++;
+        w = start;
+        while (w < s && (text[w] == ' ' || text[w] == '\t'))
+                w++;
+        e = w;
+        while (e < s && text[e] != ' ' && text[e] != '\t')
+                e++;
+        *stop = s, *word = w, *word_end = e;
 }
 
 // The displays a screen has a setting for, one line each, as windows_displays_read reads them; 0 when they do not fit.
@@ -2849,37 +2885,34 @@ static unsigned int windows_displays_write(char *into, unsigned int room, const 
         for (unsigned int each = 0; each < count; each++)
         {
                 const struct windows_display *display = &list[each];
-                unsigned int length = 0;
 
                 if (!display->name[0] || (!display->rotation && !display->refresh && !display->placed && !display->width && !display->primary &&
                                           display->scale == WINDOWS_SCALE_DEFAULT))
                         continue;
-                while (display->name[length])
-                        length++;
-                if (!windows_put(into, room, &at, display->name, length) ||
-                    !windows_put(into, room, &at, " rotation=", 10) ||
-                    !windows_put_number(into, room, &at, (int)display->rotation) ||
-                    !windows_put(into, room, &at, " refresh=", 9))
+                if (!windows_buf_str(into, room, &at, display->name) ||
+                    !windows_buf_str(into, room, &at, " rotation=") ||
+                    !windows_buf_num(into, room, &at, (long)display->rotation) ||
+                    !windows_buf_str(into, room, &at, " refresh="))
                         return 0;
-                if (!display->refresh ? !windows_put(into, room, &at, "preferred", 9) :
-                    !windows_put_number(into, room, &at, (int)display->refresh))
+                if (!display->refresh ? !windows_buf_str(into, room, &at, "preferred")
+                                      : !windows_buf_num(into, room, &at, (long)display->refresh))
                         return 0;
-                if (display->width && (!windows_put(into, room, &at, " mode=", 6) ||
-                                       !windows_put_number(into, room, &at, (int)display->width) ||
-                                       !windows_put(into, room, &at, "x", 1) ||
-                                       !windows_put_number(into, room, &at, (int)display->height)))
+                if (display->width && (!windows_buf_str(into, room, &at, " mode=") ||
+                                       !windows_buf_num(into, room, &at, (long)display->width) ||
+                                       !windows_buf_str(into, room, &at, "x") ||
+                                       !windows_buf_num(into, room, &at, (long)display->height)))
                         return 0;
-                if (display->primary && !windows_put(into, room, &at, " primary=yes", 12))
+                if (display->primary && !windows_buf_str(into, room, &at, " primary=yes"))
                         return 0;
                 if (display->scale != WINDOWS_SCALE_DEFAULT &&
-                    (!windows_put(into, room, &at, " scale=", 7) || !windows_put_number(into, room, &at, (int)display->scale)))
+                    (!windows_buf_str(into, room, &at, " scale=") || !windows_buf_num(into, room, &at, (long)display->scale)))
                         return 0;
-                if (display->placed && (!windows_put(into, room, &at, " x=", 3) ||
-                                        !windows_put_number(into, room, &at, display->x) ||
-                                        !windows_put(into, room, &at, " y=", 3) ||
-                                        !windows_put_number(into, room, &at, display->y)))
+                if (display->placed && (!windows_buf_str(into, room, &at, " x=") ||
+                                        !windows_buf_num(into, room, &at, display->x) ||
+                                        !windows_buf_str(into, room, &at, " y=") ||
+                                        !windows_buf_num(into, room, &at, display->y)))
                         return 0;
-                if (!windows_put(into, room, &at, "\n", 1))
+                if (!windows_buf_put(into, room, &at, "\n", 1))
                         return 0;
         }
         return at;
@@ -2972,28 +3005,21 @@ static int windows_displays_set(char *into, unsigned int room, const char *text,
 
         while (text[start])
         {
-                unsigned int stop = start, word, word_end;
+                unsigned int stop, word, word_end;
 
-                while (text[stop] && text[stop] != '\n')
-                        stop++;
-                word = start;
-                while (word < stop && (text[word] == ' ' || text[word] == '\t'))
-                        word++;
-                word_end = word;
-                while (word_end < stop && text[word_end] != ' ' && text[word_end] != '\t')
-                        word_end++;
+                windows_line_first_word(text, start, &stop, &word, &word_end);
                 if (word_end - word == name_length && windows_name_is(name, text + word, name_length))
                 {
-                        if (!done && made && !windows_put(into, room, &at, line, made))
+                        if (!done && made && !windows_buf_put(into, room, &at, line, made))
                                 return -1;
                         done = 1;
                 }
-                else if (!windows_put(into, room, &at, text + start, stop - start) ||
-                         !windows_put(into, room, &at, "\n", 1))
+                else if (!windows_buf_put(into, room, &at, text + start, stop - start) ||
+                         !windows_buf_put(into, room, &at, "\n", 1))
                         return -1;
                 start = stop + (text[stop] == '\n');
         }
-        if (!done && made && !windows_put(into, room, &at, line, made))
+        if (!done && made && !windows_buf_put(into, room, &at, line, made))
                 return -1;
         return (int)at;
 }
@@ -3001,38 +3027,75 @@ static int windows_displays_set(char *into, unsigned int room, const char *text,
 /*
         The displays file (text, NUL-ended) with name the primary screen (primary=yes on its line) and no other one: every other
         line that says primary=yes says it no more, and keeps its other fields. With name null no screen is the primary, and the
-        first laid is. work is room bytes the steps are made in. Answers the bytes written into, or -1 as windows_displays_set.
+        first laid is. work is kept for caller signature compatibility. Answers the bytes written into, or -1 as windows_displays_set.
 */
 static int windows_displays_primary(char *into, char *work, unsigned int room, const char *text, const char *name)
 {
-        struct windows_display list[WINDOWS_DISPLAYS], change = {0};
-        unsigned int count = windows_displays_read(text, list, WINDOWS_DISPLAYS), at = 0;
-        int made = -1;
+        struct windows_display list[WINDOWS_DISPLAYS];
+        unsigned int count = windows_displays_read(text, list, WINDOWS_DISPLAYS), name_len = 0, at = 0, start = 0;
+        unsigned char dirty[WINDOWS_DISPLAYS] = {0}, emitted[WINDOWS_DISPLAYS] = {0};
+        char line[192], valid_name[WINDOWS_OUTPUT_NAME];
+        int target = -1;
 
+        (void)work;
         if (!room)
                 return -1;
-        for (at = 0; text[at] && at + 1 < room; at++)
-                into[at] = text[at];
-        if (text[at])
-                return -1;
-        into[at] = 0;
-        made = (int)at;
-        for (unsigned int each = 0; each < count; each++)
+        into[0] = 0;
+        if (name)
         {
-                if (!list[each].primary || !list[each].name[0] || (name && windows_display_same_name(list[each].name, name)))
-                        continue;
-                made = windows_displays_set(work, room, into, list[each].name, WINDOWS_DISPLAY_PRIMARY, &change);
-                if (made < 0)
+                while (name_len < WINDOWS_OUTPUT_NAME && name[name_len])
+                        name_len++;
+                if (!windows_display_name(name, name_len, valid_name))
                         return -1;
-                memory_copy(into, work, (positive)made + 1);
         }
-        if (!name)
-                return made;
-        change.primary = 1;
-        made = windows_displays_set(work, room, into, name, WINDOWS_DISPLAY_PRIMARY, &change);
-        if (made >= 0)
-                memory_copy(into, work, (positive)made + 1);
-        return made;
+        for (unsigned int i = 0; i < count; i++)
+        {
+                if (!list[i].name[0])
+                        continue;
+                if (name && target < 0 && windows_display_same_name(list[i].name, name))
+                        target = (int)i, list[i].primary = 1, list[i].bad = 0, dirty[i] = 1;
+                else if (list[i].primary)
+                        list[i].primary = 0, list[i].bad = 0, dirty[i] = 1;
+        }
+        if (name && target < 0 && count == WINDOWS_DISPLAYS)
+                return -1;
+        while (text[start])
+        {
+                unsigned int stop, word, word_end;
+                const struct windows_display *found;
+
+                windows_line_first_word(text, start, &stop, &word, &word_end);
+                found = word_end > word ? windows_display_of(list, count, text + word, word_end - word) : 0;
+                if (found && dirty[found - list])
+                {
+                        unsigned int idx = (unsigned int)(found - list);
+
+                        if (!emitted[idx])
+                        {
+                                unsigned int made = windows_displays_write(line, sizeof(line), found, 1);
+
+                                emitted[idx] = 1;
+                                if (made && !windows_buf_put(into, room, &at, line, made))
+                                        return -1;
+                        }
+                }
+                else if (!windows_buf_put(into, room, &at, text + start, stop - start) ||
+                         !windows_buf_put(into, room, &at, "\n", 1))
+                        return -1;
+                start = stop + (text[stop] == '\n');
+        }
+        if (name && target < 0)
+        {
+                struct windows_display added = {0};
+                unsigned int made;
+
+                added.scale = WINDOWS_SCALE_DEFAULT, added.primary = 1;
+                memory_copy(added.name, valid_name, WINDOWS_OUTPUT_NAME);
+                made = windows_displays_write(line, sizeof(line), &added, 1);
+                if (made && !windows_buf_put(into, room, &at, line, made))
+                        return -1;
+        }
+        return (int)at;
 }
 
 /*
@@ -3055,21 +3118,14 @@ static int windows_displays_lead(char *into, unsigned int room, const char *text
 
                 while (text[start])
                 {
-                        unsigned int stop = start, word, word_end, which = 0;
+                        unsigned int stop, word, word_end, which = 0;
 
-                        while (text[stop] && text[stop] != '\n')
-                                stop++;
-                        word = start;
-                        while (word < stop && (text[word] == ' ' || text[word] == '\t'))
-                                word++;
-                        word_end = word;
-                        while (word_end < stop && text[word_end] != ' ' && text[word_end] != '\t')
-                                word_end++;
+                        windows_line_first_word(text, start, &stop, &word, &word_end);
                         while (which < count && !(word_end > word && windows_name_is(names[which], text + word, word_end - word)))
                                 which++;
                         if (pass < count ? which == pass && !taken : which == count)
                         {
-                                if (!windows_put(into, room, &at, text + start, stop - start) || !windows_put(into, room, &at, "\n", 1))
+                                if (!windows_buf_put(into, room, &at, text + start, stop - start) || !windows_buf_put(into, room, &at, "\n", 1))
                                         return -1;
                                 taken = 1;
                         }
@@ -3179,12 +3235,12 @@ static unsigned int windows_arrange_pinned(const char *arrangement, const char (
                 display = how == WINDOWS_PLACE_OFF ? 0 : windows_display_of(list, listed, base + start, name);
                 if (display && display->placed)
                 {
-                        if (!windows_put(into, room, &at, display->name, name) || !windows_put(into, room, &at, "@", 1) ||
-                            !windows_put_number(into, room, &at, display->x) || !windows_put(into, room, &at, ",", 1) ||
-                            !windows_put_number(into, room, &at, display->y) || !windows_put(into, room, &at, " ", 1))
+                        if (!windows_buf_put(into, room, &at, display->name, name) || !windows_buf_put(into, room, &at, "@", 1) ||
+                            !windows_buf_num(into, room, &at, display->x) || !windows_buf_put(into, room, &at, ",", 1) ||
+                            !windows_buf_num(into, room, &at, display->y) || !windows_buf_put(into, room, &at, " ", 1))
                                 return 0;
                 }
-                else if (!windows_put(into, room, &at, base + start, stop - start) || !windows_put(into, room, &at, " ", 1))
+                else if (!windows_buf_put(into, room, &at, base + start, stop - start) || !windows_buf_put(into, room, &at, " ", 1))
                         return 0;
         }
         // The card screens the arrangement does not name, in the card's order.
@@ -3194,7 +3250,7 @@ static unsigned int windows_arrange_pinned(const char *arrangement, const char (
 
                 if (named[screen])
                         continue;
-                if (!windows_put(into, room, &at, names[screen], length) || !windows_put(into, room, &at, " ", 1))
+                if (!windows_buf_put(into, room, &at, names[screen], length) || !windows_buf_put(into, room, &at, " ", 1))
                         return 0;
                 named[screen] = 1;
         }
@@ -3207,9 +3263,9 @@ static unsigned int windows_arrange_pinned(const char *arrangement, const char (
                 if (!display->placed || used[each] || !length || windows_display_of(list, listed, display->name, length) != display ||
                     !windows_screen_of(names, count, display->name, length))
                         continue;
-                if (!windows_put(into, room, &at, display->name, length) || !windows_put(into, room, &at, "@", 1) ||
-                    !windows_put_number(into, room, &at, display->x) || !windows_put(into, room, &at, ",", 1) ||
-                    !windows_put_number(into, room, &at, display->y) || !windows_put(into, room, &at, " ", 1))
+                if (!windows_buf_put(into, room, &at, display->name, length) || !windows_buf_put(into, room, &at, "@", 1) ||
+                    !windows_buf_num(into, room, &at, display->x) || !windows_buf_put(into, room, &at, ",", 1) ||
+                    !windows_buf_num(into, room, &at, display->y) || !windows_buf_put(into, room, &at, " ", 1))
                         return 0;
         }
         // The space each word left at its end is dropped; an empty arrangement (no screens) is the card's order.
@@ -3722,24 +3778,12 @@ static void window_widen(struct window *window, unsigned int columns)
 // "/run/moonwater/window.N" and, with wake, ".wake" after it.
 static void windows_door_name(char *into, unsigned int row, int wake)
 {
-        const char *wake_name = ".wake";
         unsigned int at = 0;
 
-        char digits[10];
-        unsigned int count = 0;
-
-        for (const char *from = WINDOWS_DOOR; *from; from++)
-                into[at++] = *from;
-        // The row in decimal, every digit of it: a row past 99 had its tens written as one character past '9' (row 100 ':0'),
-        // and row 2550 '/0', a path through a directory that is not there.
-        do
-                digits[count++] = (char)('0' + row % 10), row /= 10;
-        while (row);
-        while (count)
-                into[at++] = digits[--count];
-        for (; wake && *wake_name; wake_name++)
-                into[at++] = *wake_name;
-        into[at] = 0;
+        windows_buf_str(into, 48, &at, WINDOWS_DOOR);
+        windows_buf_num(into, 48, &at, (long)row);
+        if (wake)
+                windows_buf_str(into, 48, &at, ".wake");
 }
 
 /*
@@ -4095,22 +4139,13 @@ static int window_name_valid(const char *name)
 */
 static const char *window_place_number(const char *text, char stop, int low, int high, int *value)
 {
-        int negative = text[0] == '-' && low < 0, digits = 0;
-        long number = 0;
+        unsigned int len = 0;
 
-        text += negative;
-        if (text[0] == '0' && text[1] >= '0' && text[1] <= '9')
+        while (text[len] && text[len] != stop)
+                len++;
+        if (text[len] != stop || !windows_scan_int(text, len, low, high, 6, 1, value))
                 return 0;
-        // Six digits is past WINDOW_PLACE_MOST, and is refused at the stop.
-        for (; text[0] >= '0' && text[0] <= '9' && digits < 6; text++, digits++)
-                number = number * 10 + (text[0] - '0');
-        if (!digits || text[0] != stop || (negative && !number))
-                return 0;
-        number = negative ? -number : number;
-        if (number < low || number > high)
-                return 0;
-        *value = (int)number;
-        return text;
+        return text + len;
 }
 
 static int window_place_word(const char *word, const char *name)
@@ -4204,29 +4239,6 @@ static int window_place_parse(struct window_place *place, const char *const *wor
         return (int)at;
 }
 
-// A whole number in decimal, a minus before it when it is below zero: where it ends.
-static char *window_place_digits(char *into, int value)
-{
-        char digits[12];
-        unsigned int count = 0, magnitude = value < 0 ? 0u - (unsigned int)value : (unsigned int)value;
-
-        if (value < 0)
-                *into++ = '-';
-        do
-                digits[count++] = (char)('0' + magnitude % 10);
-        while ((magnitude /= 10));
-        while (count)
-                *into++ = digits[--count];
-        return into;
-}
-
-static char *window_place_text(char *into, const char *text)
-{
-        while (*text)
-                *into++ = *text++;
-        return into;
-}
-
 /*
         A placement as its words, the way window_place_parse reads them back, into room bytes (WINDOW_PLACE_TEXT
         holds the longest): one blank between two words and none at either end. Its length.
@@ -4234,27 +4246,37 @@ static char *window_place_text(char *into, const char *text)
 static unsigned int window_place_say(const struct window_place *place, char *into, unsigned int room)
 {
         static const char *const modes[] = {"", "center", "at", "maximized", "fullscreen"};
-        char text[WINDOW_PLACE_TEXT], *at = text;
-        unsigned int how = place->how & WINDOW_PLACE_HOW, length;
+        char text[WINDOW_PLACE_TEXT];
+        unsigned int at = 0, how = place->how & WINDOW_PLACE_HOW, length;
 
+        text[0] = 0;
         if (how && how < sizeof(modes) / sizeof(modes[0]))
-                at = window_place_text(at, modes[how]);
+                windows_buf_str(text, sizeof(text), &at, modes[how]);
         if (how == WINDOW_PLACE_AT)
         {
-                at = window_place_digits(window_place_text(at, " "), place->x);
-                at = window_place_digits(window_place_text(at, ","), place->y);
+                windows_buf_str(text, sizeof(text), &at, " ");
+                windows_buf_num(text, sizeof(text), &at, place->x);
+                windows_buf_str(text, sizeof(text), &at, ",");
+                windows_buf_num(text, sizeof(text), &at, place->y);
         }
         if (place->how & WINDOW_PLACE_SCREEN)
-                at = window_place_digits(window_place_text(at, at > text ? " screen " : "screen "), (int)place->screen + 1);
+        {
+                windows_buf_str(text, sizeof(text), &at, at ? " screen " : "screen ");
+                windows_buf_num(text, sizeof(text), &at, (long)place->screen + 1);
+        }
         if (place->how & WINDOW_PLACE_SIZE)
         {
-                at = window_place_digits(window_place_text(at, at > text ? " size " : "size "), (int)place->width);
-                at = window_place_digits(window_place_text(at, "x"), (int)place->height);
+                windows_buf_str(text, sizeof(text), &at, at ? " size " : "size ");
+                windows_buf_num(text, sizeof(text), &at, (long)place->width);
+                windows_buf_str(text, sizeof(text), &at, "x");
+                windows_buf_num(text, sizeof(text), &at, (long)place->height);
         }
         if (place->name[0])
-                at = window_place_text(window_place_text(at, at > text ? " name " : "name "), place->name);
-        length = (unsigned int)(at - text);
-        length = length < room ? length : room ? room - 1 : 0;
+        {
+                windows_buf_str(text, sizeof(text), &at, at ? " name " : "name ");
+                windows_buf_str(text, sizeof(text), &at, place->name);
+        }
+        length = at < room ? at : room ? room - 1 : 0;
         for (unsigned int byte = 0; byte < length; byte++)
                 into[byte] = text[byte];
         if (room)
@@ -4376,20 +4398,15 @@ static void windows_asked_take(struct windows *table, unsigned int row, string_a
 */
 static unsigned long windows_proc_stat(unsigned int pid, unsigned int *parent)
 {
-        char path[32] = "/proc/", text[512];
-        unsigned int at = 6, digits = 0, field = 3;
+        char path[32], text[512];
+        unsigned int at = 0, field = 3;
         unsigned long value = 0, start = 0;
         long handle, got, from = -1;
 
         *parent = 0;
-        for (unsigned int copy = pid; copy; copy /= 10)
-                digits++;
-        for (unsigned int index = digits, copy = pid; index--; copy /= 10)
-                path[at + index] = (char)('0' + copy % 10);
-        at += digits;
-        for (const char *tail = "/stat"; *tail; tail++)
-                path[at++] = *tail;
-        path[at] = 0;
+        windows_buf_str(path, sizeof(path), &at, "/proc/");
+        windows_buf_num(path, sizeof(path), &at, (long)pid);
+        windows_buf_str(path, sizeof(path), &at, "/stat");
         handle = pid ? window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0) : -1; // O_RDONLY | O_CLOEXEC
         if (handle < 0)
                 return 0;
@@ -4428,16 +4445,11 @@ static const char *windows_asked_dir = WINDOWS_ASKED_DIR; // (a check points it 
 // The record of pid's ask, windows_asked_dir/PID, into path (64 bytes).
 static void windows_asked_path(char *path, unsigned int pid)
 {
-        unsigned int at = 0, digits = 0;
+        unsigned int at = 0;
 
-        for (const char *from = windows_asked_dir; *from && at < 40; from++)
-                path[at++] = *from;
-        path[at++] = '/';
-        for (unsigned int copy = pid; copy; copy /= 10)
-                digits++;
-        for (unsigned int index = digits, copy = pid; index--; copy /= 10)
-                path[at + index] = (char)('0' + copy % 10);
-        path[at + digits] = 0;
+        windows_buf_str(path, 64, &at, windows_asked_dir);
+        windows_buf_put(path, 64, &at, "/", 1);
+        windows_buf_num(path, 64, &at, (long)pid);
 }
 
 static void windows_asked_record(void)
@@ -4451,11 +4463,8 @@ static void windows_asked_record(void)
                 return;
         window_call(WINDOW_SYS_MKDIRAT, -100, (long)windows_asked_dir, 0700, 0, 0, 0);
         windows_asked_path(path, pid);
-        for (unsigned long copy = start; copy; copy /= 10)
-                length++;
-        for (unsigned int index = length; index--;)
-                line[index] = (char)('0' + start % 10), start /= 10;
-        line[length++] = '\n';
+        windows_buf_num(line, sizeof(line), &length, (long)start);
+        windows_buf_put(line, sizeof(line), &length, "\n", 1);
         // O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW (the architecture's) | O_CLOEXEC
         handle = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 01 | 0100 | 01000 | O_NOFOLLOW | 02000000, 0600, 0, 0);
         if (handle < 0)
@@ -4737,16 +4746,22 @@ static unsigned long places_say(const struct places *places, char *into, unsigne
         {
                 const struct place_kept *kept = &places->kept[at];
                 const int numbers[6] = {kept->origin_x, kept->origin_y, kept->x, kept->y, kept->width, kept->height};
-                char line[PLACES_LINE * 2], *tail = window_place_text(line, kept->name);
+                char line[PLACES_LINE * 2];
+                unsigned int pos = 0;
 
-                tail = window_place_text(window_place_text(tail, " "), kept->screen);
+                windows_buf_str(line, sizeof(line), &pos, kept->name);
+                windows_buf_str(line, sizeof(line), &pos, " ");
+                windows_buf_str(line, sizeof(line), &pos, kept->screen);
                 for (unsigned int number = 0; number < 6; number++)
-                        tail = window_place_digits(window_place_text(tail, " "), numbers[number]);
-                *tail++ = '\n';
-                if (length + (unsigned long)(tail - line) > room)
+                {
+                        windows_buf_str(line, sizeof(line), &pos, " ");
+                        windows_buf_num(line, sizeof(line), &pos, numbers[number]);
+                }
+                windows_buf_put(line, sizeof(line), &pos, "\n", 1);
+                if (length + pos > room)
                         break;
-                for (char *byte = line; byte < tail; byte++)
-                        into[length++] = *byte;
+                for (unsigned int byte = 0; byte < pos; byte++)
+                        into[length++] = line[byte];
         }
         return length;
 }
@@ -5187,6 +5202,28 @@ static void windows_knock(const struct window_row *own)
         window_call(WINDOW_SYS_WRITE, own->door, (long)&byte, 1, 0, 0, 0);
 }
 
+// Writes a UTF-8-safe truncated title into the row (NUL-padded tail) and knocks when changed.
+static void windows_title_set(const struct window_row *own, const char *title)
+{
+        char *dst = own->table->title[own->row];
+        unsigned int len = 0, changed = 0;
+
+        while (title && title[len] && len < WINDOWS_TITLE - 1)
+                len++;
+        // Do not split a multi-byte UTF-8 sequence at the boundary.
+        while (len && (unsigned char)title[len] >= 0x80 && (unsigned char)title[len] < 0xc0)
+                len--;
+        for (unsigned int i = 0; i < WINDOWS_TITLE; i++)
+        {
+                char ch = i < len ? title[i] : 0;
+
+                if (dst[i] != ch)
+                        dst[i] = ch, changed = 1;
+        }
+        if (changed && own->table->frame[own->row])
+                windows_knock(own);
+}
+
 /*
         A key the on-screen keyboard sends the window with the keys (WINDOW_KEYBOARD): one entry of the row's ring, knocked on. A ring of
         WINDOWS_OSK entries the compositor has not read yet refuses the key (0): a keyboard that taps faster than the compositor reads is
@@ -5329,6 +5366,33 @@ static void windows_leave(struct window_row *own)
         window_call(WINDOW_SYS_MUNMAP, (long)own->table, (long)own->bytes, 0, 0, 0, 0);
         own->table = 0;
 }
+
+#ifdef STANDARD_MODERN_C
+// Writes length bytes to "<path>.new" relative to dir and atomically renames over path (0600 or mode). Returns true on success.
+static b32 file_write_atomic_at(b32 dir, string_address path, const void *bytes, positive length, positive mode)
+{
+        char stage[512];
+        positive path_len = string_length(path);
+        bipolar handle;
+        b32 ok;
+
+        if (path_len + 5 > sizeof(stage))
+                return false;
+        memory_copy(stage, path, path_len);
+        memory_copy(stage + path_len, ".new", 5);
+        handle = system_open_at_mode(dir, (string_address)stage, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, mode);
+        if (handle < 0)
+                return false;
+        ok = !length || system_write_all((positive)handle, bytes, length) == (bipolar)length;
+        system_close(handle);
+        if (!ok || system_rename_at(dir, (string_address)stage, dir, path, 0) < 0)
+        {
+                system_remove_at(dir, (string_address)stage, 0);
+                return false;
+        }
+        return true;
+}
+#endif
 
 /*
         The clipboard from a program's side. A copy is one memfd of every type it holds, sealed against any change (the format below),
@@ -5658,25 +5722,12 @@ static void windows_clip_ask(const struct window_row *own, unsigned int which)
 // "/proc/PID/fd/NUMBER" into path (48 bytes).
 static void windows_proc_fd(char *path, unsigned int pid, unsigned int number)
 {
-        unsigned int at = 0, values[2] = {pid, number};
-        const char *parts[3] = {"/proc/", "/fd/", ""};
+        unsigned int at = 0;
 
-        for (unsigned int part = 0; part < 3; part++)
-        {
-                char digits[12];
-                unsigned int count = 0;
-
-                for (const char *from = parts[part]; *from; from++)
-                        path[at++] = *from;
-                if (part == 2)
-                        break;
-                do
-                        digits[count++] = (char)('0' + values[part] % 10);
-                while ((values[part] /= 10));
-                while (count)
-                        path[at++] = digits[--count];
-        }
-        path[at] = 0;
+        windows_buf_str(path, 48, &at, "/proc/");
+        windows_buf_num(path, 48, &at, (long)pid);
+        windows_buf_str(path, 48, &at, "/fd/");
+        windows_buf_num(path, 48, &at, (long)number);
 }
 
 /*

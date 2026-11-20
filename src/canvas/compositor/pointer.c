@@ -573,9 +573,7 @@ static struct
         int width, height;      // the copy, in device pixels
         int left, top;          // the copy's corner in its square
         int span, hot_x, hot_y; // the square's side, and the pointer's pixel of it
-        unsigned int premultiplied[CP_PLANE * CP_PLANE]; // rows CP_PLANE apart: the plane's pixels
-        unsigned int ink[CP_PLANE * CP_PLANE];           // the colour over its alpha, the top byte zero
-        unsigned char cover[CP_PLANE * CP_PLANE];        // the alpha
+        unsigned int premultiplied[CP_PLANE * CP_PLANE]; // rows CP_PLANE apart: the plane's pixels and software scene source
 } compositor_picture;
 
 // n over d rounded toward minus infinity, d above zero: a hotspot left of a picture is left of its copy too.
@@ -615,7 +613,7 @@ static unsigned long compositor_picture_take(const unsigned char *pixels, long s
                 {
                         long x0 = x * width / wide, x1 = (x + 1) * width / wide;
                         unsigned long sums[4] = {0, 0, 0, 0}, count, mean[4];
-                        unsigned int at = (unsigned int)(y * CP_PLANE + x), ink = 0;
+                        unsigned int at = (unsigned int)(y * CP_PLANE + x);
 
                         x1 = x1 > x0 ? x1 : x0 + 1;
                         count = (unsigned long)((y1 - y0) * (x1 - x0));
@@ -631,12 +629,7 @@ static unsigned long compositor_picture_take(const unsigned char *pixels, long s
                                 }
                         for (int channel = 0; channel < 4; channel++)
                                 mean[channel] = (sums[channel] + count / 2) / count;
-                        // Each colour's mean is at most the alpha's: every colour summed was at most its pixel's alpha.
-                        for (int channel = 0; channel < 3 && mean[3]; channel++)
-                                ink |= (unsigned int)((mean[channel] * 255 + mean[3] / 2) / mean[3]) << (8 * channel);
                         compositor_picture.premultiplied[at] = (unsigned int)(mean[3] << 24 | mean[2] << 16 | mean[1] << 8 | mean[0]);
-                        compositor_picture.ink[at] = ink;
-                        compositor_picture.cover[at] = (unsigned char)mean[3];
                 }
         }
         hx = compositor_picture_floor(hot_x * wide, width), hy = compositor_picture_floor(hot_y * tall, height);
@@ -673,8 +666,30 @@ static void compositor_picture_draw(const struct compositor_target *t, int left,
                 return;
         }
         for (int row = y1; row < y2; row++, from += CP_PLANE)
-                memory_mix_u32_row(t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox), compositor_picture.ink + from,
-                                   compositor_picture.cover + from, (positive)(x2 - x1));
+        {
+                unsigned int *dst = t->pixels + (unsigned long)(row - t->oy) * t->pitch + (unsigned long)(x1 - t->ox);
+                const unsigned int *src = compositor_picture.premultiplied + from;
+
+                for (int at = 0; at < x2 - x1; at++)
+                {
+                        unsigned int s = src[at], a = s >> 24, d = dst[at], inv = 255u - a, out = 0;
+
+                        if (!a)
+                                continue;
+                        if (a == 255u)
+                        {
+                                dst[at] = s & 0xffffffu;
+                                continue;
+                        }
+                        for (int shift = 0; shift < 24; shift += 8)
+                        {
+                                unsigned int v = ((d >> shift & 255u) * inv + 127u) / 255u + (s >> shift & 255u);
+
+                                out |= (v > 255u ? 255u : v) << shift;
+                        }
+                        dst[at] = out;
+                }
+        }
 }
 
 /*

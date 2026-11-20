@@ -832,40 +832,35 @@ static fn launcher_recent_add(int which)
         system_close(handle);
 }
 
-// The row's start: false when nothing could be started, and the launcher stays up. An app started is the first of Recent.
-static b32 launcher_run(int row)
+// One start path for a list row or an app tile: false when nothing could be started, and the launcher stays up.
+static b32 launcher_launch(struct launcher_entry entry, b32 mark_starting)
 {
         string_address words[LAUNCHER_WORDS];
         char full[LAUNCHER_FULL];
         positive count;
 
-        if (row < 0 || (positive)row >= launcher.entries)
-                return false;
-        count = launcher_words(&launcher.entry[row], words, full, sizeof(full));
-        if (!count || !ui_start_apart(words, count))
-                return false;
-        if (launcher.entry[row].kind == LAUNCHER_WINDOW)
-                launcher_recent_add(launcher.entry[row].index);
-        return true;
-}
-
-// An app of the grid or of Recent started, as its row would be.
-static b32 launcher_start_app(int which)
-{
-        struct launcher_entry entry = {LAUNCHER_WINDOW, (unsigned short)which};
-        string_address words[LAUNCHER_WORDS];
-        char full[LAUNCHER_FULL];
-        positive count;
-
-        if (which < 0 || which >= ui_apps.count)
+        if (entry.kind == LAUNCHER_WINDOW && entry.index >= ui_apps.count)
                 return false;
         count = launcher_words(&entry, words, full, sizeof(full));
         if (!count || !ui_start_apart(words, count))
                 return false;
-        // The taskbar shows its task turning until a window of it is up: a start that takes seconds does not look like nothing happened.
-        ui_app_starting(ui_apps.app[which].id);
-        launcher_recent_add(which);
+        if (entry.kind == LAUNCHER_WINDOW)
+        {
+                if (mark_starting)
+                        ui_app_starting(ui_apps.app[entry.index].id);
+                launcher_recent_add(entry.index);
+        }
         return true;
+}
+
+static b32 launcher_run(int row)
+{
+        return row >= 0 && (positive)row < launcher.entries && launcher_launch(launcher.entry[row], false);
+}
+
+static b32 launcher_start_app(int which)
+{
+        return which >= 0 && launcher_launch((struct launcher_entry){LAUNCHER_WINDOW, (unsigned short)which}, true);
 }
 
 // The app the keys are on with nothing typed: the grid's, or Recent's; -1 none.
@@ -1307,6 +1302,36 @@ static fn launcher_layout(void)
         launcher_build(launcher.height);
 }
 
+// Pointer handling shared by the search list, the app grid, and Recent: hover-focuses on motion, clicks on release,
+// and reports right-presses via *right_hit (>= 0). Returns clicked index or -1.
+static int launcher_list_pointer(struct ui_list address_to l, const struct window_event address_to event, int x, int y, b32 focus_group,
+                                 b32 update_recents, int address_to right_hit)
+{
+        b32 moved = event->type == WINDOW_EVENT_MOTION && (event->a != l->pointer_x || event->b != l->pointer_y);
+        int hit = ui_list_hit(&launcher.ui, l, x, y), clicked;
+
+        *right_hit = -1;
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT)
+        {
+                if (hit >= 0 && (event->flags & WINDOW_KEY_DOWN))
+                        *right_hit = hit;
+                return -1;
+        }
+        clicked = ui_list_click(&launcher.ui, l, event, x, y);
+        if (l->press.down && l->press.dragged)
+                launcher.dirty = true;
+        else if (hit >= 0 && moved && (hit != l->focus || (update_recents && launcher.in_recents != focus_group)))
+        {
+                l->focus = hit;
+                if (update_recents)
+                        launcher.in_recents = focus_group;
+                launcher.dirty = true;
+        }
+        if (event->type == WINDOW_EVENT_BUTTON)
+                launcher.dirty = true;
+        return clicked;
+}
+
 // The pointer over the grid and Recent (nothing typed): false when what it did closes the bar (an app started).
 static b32 launcher_tiles_event(const struct window_event address_to event)
 {
@@ -1315,26 +1340,10 @@ static b32 launcher_tiles_event(const struct window_event address_to event)
 
         for (int which = 0; which < 2; which++)
         {
-                struct ui_list address_to l = lists[which];
-                b32 moved = event->type == WINDOW_EVENT_MOTION && (event->a != l->pointer_x || event->b != l->pointer_y);
-                int tile = ui_list_hit(&launcher.ui, l, x, y), clicked;
+                int right_hit, clicked = launcher_list_pointer(lists[which], event, x, y, which != 0, true, &right_hit);
 
-                if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT)
-                {
-                        if (tile >= 0 && (event->flags & WINDOW_KEY_DOWN))
-                                launcher_app_menu(which ? launcher.recent[tile] : launcher.apps[tile], x, y, ui_kit_touch);
-                        continue;
-                }
-                clicked = ui_list_click(&launcher.ui, l, event, x, y);
-                if (l->press.down && l->press.dragged)
-                        launcher.dirty = true;
-                else if (tile >= 0 && moved && (tile != l->focus || launcher.in_recents != (b32)which))
-                {
-                        l->focus = tile, launcher.in_recents = which;
-                        launcher.dirty = true;
-                }
-                if (event->type == WINDOW_EVENT_BUTTON)
-                        launcher.dirty = true;
+                if (right_hit >= 0)
+                        launcher_app_menu(which ? launcher.recent[right_hit] : launcher.apps[right_hit], x, y, ui_kit_touch);
                 if (clicked >= 0)
                         return !launcher_start_app(which ? launcher.recent[clicked] : launcher.apps[clicked]);
         }
@@ -1343,8 +1352,7 @@ static b32 launcher_tiles_event(const struct window_event address_to event)
 
 static b32 launcher_event(const struct window_event address_to event)
 {
-        int row;
-        b32 moved;
+        int right_hit, clicked, x, y;
         p32 asks;
 
         launcher_layout();
@@ -1371,43 +1379,16 @@ static b32 launcher_event(const struct window_event address_to event)
         // it, and a right press opens its menu.
         if (event->type != WINDOW_EVENT_KEY && !launcher.text[0])
                 return launcher_tiles_event(event);
-        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && (event->flags & WINDOW_KEY_DOWN))
-        {
-                row = ui_list_hit(&launcher.ui, &launcher.list, ui_kit.pointer_x, ui_kit.pointer_y);
-                if (row >= 0 && (positive)row < launcher.entries && launcher.entry[row].kind == LAUNCHER_WINDOW)
-                        launcher_app_menu(launcher.entry[row].index, ui_kit.pointer_x, ui_kit.pointer_y, ui_kit_touch);
-                return true;
-        }
-        switch (event->type)
-        {
-        case WINDOW_EVENT_KEY:
+        if (event->type == WINDOW_EVENT_KEY)
                 return launcher_key(event);
-        case WINDOW_EVENT_MOTION:
-                // The row the pointer is on is the highlighted one, where it has moved to it and not where a key put it: a motion
-                // from the place the list was last told (ui_list_pointer keeps it) is a move.
-                moved = event->a != launcher.list.pointer_x || event->b != launcher.list.pointer_y;
-                row = ui_list_hit(&launcher.ui, &launcher.list, event->a, event->b);
-                ui_list_click(&launcher.ui, &launcher.list, event, event->a, event->b);
-                // A press that drags the list (a finger's, or the mouse's with canvas scroll drag on) moves it: it is drawn again.
-                if (launcher.list.press.down && launcher.list.press.dragged)
-                {
-                        launcher.dirty = true;
-                        break;
-                }
-                if (row >= 0 && moved && row != launcher.list.focus)
-                {
-                        launcher.list.focus = row;
-                        launcher.dirty = true;
-                }
-                break;
-        case WINDOW_EVENT_BUTTON:
-                // The kit's click: a press goes down where the pointer is and runs on its release there, a finger's or a mouse's alike.
-                launcher.dirty = true;
-                if ((row = ui_list_click(&launcher.ui, &launcher.list, event, ui_kit.pointer_x, ui_kit.pointer_y)) >= 0)
-                        return !launcher_run(row);
-                break;
-        }
-        return true;
+        if (event->type != WINDOW_EVENT_MOTION && event->type != WINDOW_EVENT_BUTTON)
+                return true;
+        x = event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x;
+        y = event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y;
+        clicked = launcher_list_pointer(&launcher.list, event, x, y, false, false, &right_hit);
+        if (right_hit >= 0 && (positive)right_hit < launcher.entries && launcher.entry[right_hit].kind == LAUNCHER_WINDOW)
+                launcher_app_menu(launcher.entry[right_hit].index, x, y, ui_kit_touch);
+        return clicked >= 0 ? !launcher_run(clicked) : true;
 }
 
 /* ---- the picture ---- */

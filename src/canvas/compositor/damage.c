@@ -17,6 +17,55 @@
 */
 
 /*
+        Growable anonymous mmap scratch helper shared across the compositor (damage, glass, scanout, record, gpu_host).
+        Handles alignment (4 KiB or 64 KiB), optional 2x growth, optional gpu_forget before munmap, and optional content preservation.
+*/
+#define MEM_BUF_GPU_FORGET 1u
+#define MEM_BUF_GROW_2X    2u
+#define MEM_BUF_ALIGN_64K  4u
+#define MEM_BUF_KEEP       8u
+
+static void mem_buf_free(void **ptr, unsigned long *cap, unsigned int flags)
+{
+        if (*ptr)
+        {
+                if (flags & MEM_BUF_GPU_FORGET)
+                        gpu_forget((const void *)*ptr, (positive)*cap);
+                compositor_call(syscall(munmap), (positive)*ptr, *cap, 0, 0, 0, 0);
+        }
+        *ptr = 0;
+        *cap = 0;
+}
+
+static void *mem_buf_grow(void **ptr, unsigned long *cap, unsigned long need, unsigned int flags)
+{
+        unsigned long align = (flags & MEM_BUF_ALIGN_64K) ? 65536ul : 4096ul;
+        unsigned long bytes = need;
+        long mapped;
+
+        if (!need)
+                return *ptr;
+        if (*ptr && *cap >= need)
+                return *ptr;
+        if ((flags & MEM_BUF_GROW_2X) && bytes < *cap * 2)
+                bytes = *cap * 2;
+        bytes = (bytes + align - 1) & ~(align - 1);
+        if (!(flags & MEM_BUF_KEEP))
+                mem_buf_free(ptr, cap, flags);
+        mapped = (long)compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+        if (mapped < 0 && mapped > -4096)
+                return 0;
+        if (*ptr)
+        {
+                memory_copy((void *)mapped, *ptr, *cap);
+                mem_buf_free(ptr, cap, flags);
+        }
+        *ptr = (void *)mapped;
+        *cap = bytes;
+        return *ptr;
+}
+
+/*
         What changed, as a few rectangles that do not overlap. A rectangle
         joins one it overlaps or lines up with, which costs nothing, and
         stays apart from the rest, so two windows at opposite corners are
@@ -787,10 +836,10 @@ static unsigned int *compositor_pixels(int row)
 
 static void compositor_runs_drop(int row)
 {
-        if (compositor.runs[row])
-                compositor_call(syscall(munmap), (positive)compositor.runs[row], compositor.runs_bytes[row], 0, 0, 0, 0);
+        void *p = compositor.runs[row];
+
+        mem_buf_free(&p, &compositor.runs_bytes[row], 0);
         compositor.runs[row] = 0;
-        compositor.runs_bytes[row] = 0;
         compositor.runs_tag[row] = compositor.runs_composed[row] = compositor.runs_state[row] = 0;
 }
 
@@ -805,17 +854,18 @@ static void compositor_runs_forget(int row)
 static struct compositor_run_row *compositor_runs_of(int row)
 {
         unsigned long rows = compositor_buffer_room() / ((unsigned long)compositor_stride() * 4);
-        unsigned long bytes = (rows * sizeof(struct compositor_run_row) + 4095) & ~4095ul;
-        long got;
+        unsigned long bytes = rows * sizeof(struct compositor_run_row);
+        void *was = compositor.runs[row], *p = was;
 
-        if (compositor.runs[row] && compositor.runs_bytes[row] >= bytes)
-                return compositor.runs[row];
-        compositor_runs_drop(row);
-        got = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
-        if (got < 0 && got > -4096)
+        if (!mem_buf_grow(&p, &compositor.runs_bytes[row], bytes, 0))
+        {
+                compositor.runs[row] = 0;
+                compositor.runs_tag[row] = compositor.runs_composed[row] = compositor.runs_state[row] = 0;
                 return 0;
-        compositor.runs[row] = (struct compositor_run_row *)got;
-        compositor.runs_bytes[row] = bytes;
+        }
+        if (p != was)
+                compositor.runs_tag[row] = compositor.runs_composed[row] = compositor.runs_state[row] = 0;
+        compositor.runs[row] = (struct compositor_run_row *)p;
         return compositor.runs[row];
 }
 

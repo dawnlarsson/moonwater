@@ -351,8 +351,7 @@ static unsigned int terminal_top(unsigned int view, unsigned int address_to skip
         running sums: terminal_sums[i % TERMINAL_SUMS] is the rows of the lines
         from the base up to i, for i up to the end of the sums, and only the lines
         of the screen are counted each time. Walking every line from the oldest
-        (terminal_extent_walk, which is also the fallback for a history too long
-        for the sums) cost about ten instructions a line, every frame: about 9000
+        (the fallback for a history too long for the sums) cost about ten instructions a line, every frame: about 9000
         a frame with a 900-line scrollback, from 3% to 14% of a frame while the
         view was back from the end. The sums are made again when the grid
         changes, or the oldest line or the screen moves back past them: a return
@@ -366,24 +365,30 @@ static unsigned int terminal_sums_base, terminal_sums_end;
 static unsigned int terminal_sums_grid[4];
 static b32 terminal_sums_valid;
 
-static b32 terminal_extent_walk(unsigned int address_to first, unsigned int address_to shown,
-                                unsigned int address_to total)
+// Ensure terminal_sums holds running row counts for [oldest, screen). Returns false when
+// the ring is empty or too large for the cache and callers must walk lines directly.
+static b32 terminal_sums_sync(void)
 {
-        unsigned int skip, top = terminal_top(terminal.view, &skip), at;
+        unsigned int oldest = terminal_oldest(), head = window->head, screen, grid[4];
 
-        address_to shown = ROWS;
-        address_to total = 0;
-        address_to first = 0;
+        if (head == oldest || window->history + ROWS >= TERMINAL_SUMS)
+                return false;
+        screen = head - oldest > ROWS ? head - ROWS : oldest;
+        grid[0] = COLUMNS, grid[1] = ROWS, grid[2] = window->stride, grid[3] = window->history;
 
-        for (at = terminal_oldest(); at != window->head; at++)
+        if (!terminal_sums_valid || oldest < terminal_sums_base || oldest > terminal_sums_end || screen < terminal_sums_end ||
+            memory_compare(grid, terminal_sums_grid, sizeof(grid)))
         {
-                if (at == top)
-                        address_to first = address_to total + skip;
-
-                address_to total += terminal_line_rows(at);
+                terminal_sums_base = terminal_sums_end = oldest;
+                terminal_sums[oldest % TERMINAL_SUMS] = 0;
+                memory_copy(terminal_sums_grid, grid, sizeof(grid));
+                terminal_sums_valid = true;
         }
 
-        return address_to total > ROWS;
+        for (; terminal_sums_end < screen; terminal_sums_end++)
+                terminal_sums[(terminal_sums_end + 1) % TERMINAL_SUMS] =
+                    terminal_sums[terminal_sums_end % TERMINAL_SUMS] + terminal_line_rows(terminal_sums_end);
+        return true;
 }
 
 // The rows from the base to the line at, which is one the sums hold, or else one past their end counted directly.
@@ -402,8 +407,7 @@ static unsigned int terminal_sum_to(unsigned int at)
 static b32 terminal_extent(unsigned int address_to first, unsigned int address_to shown,
                            unsigned int address_to total)
 {
-        unsigned int oldest = terminal_oldest(), head = window->head, screen, skip, top, grid[4];
-        unsigned int from;
+        unsigned int oldest = terminal_oldest(), head = window->head, skip, top;
 
         address_to shown = ROWS;
         address_to total = 0;
@@ -411,31 +415,78 @@ static b32 terminal_extent(unsigned int address_to first, unsigned int address_t
 
         if (head == oldest)
                 return false;
-        if (window->history + ROWS >= TERMINAL_SUMS)
-                return terminal_extent_walk(first, shown, total);
 
         top = terminal_top(terminal.view, &skip);
-        screen = head - oldest > ROWS ? head - ROWS : oldest;
-        grid[0] = COLUMNS, grid[1] = ROWS, grid[2] = window->stride, grid[3] = window->history;
-
-        if (!terminal_sums_valid || oldest < terminal_sums_base || oldest > terminal_sums_end || screen < terminal_sums_end ||
-            memory_compare(grid, terminal_sums_grid, sizeof(grid)))
+        if (terminal_sums_sync())
         {
-                terminal_sums_base = terminal_sums_end = oldest;
-                terminal_sums[oldest % TERMINAL_SUMS] = 0;
-                memory_copy(terminal_sums_grid, grid, sizeof(grid));
-                terminal_sums_valid = true;
+                unsigned int from = terminal_sums[oldest % TERMINAL_SUMS];
+
+                address_to total = terminal_sum_to(head) - from;
+                address_to first = terminal_sum_to(top) - from + skip;
+                return address_to total > ROWS;
         }
 
-        for (; terminal_sums_end < screen; terminal_sums_end++)
-                terminal_sums[(terminal_sums_end + 1) % TERMINAL_SUMS] =
-                    terminal_sums[terminal_sums_end % TERMINAL_SUMS] + terminal_line_rows(terminal_sums_end);
-
-        from = terminal_sums[oldest % TERMINAL_SUMS];
-        address_to total = terminal_sum_to(head) - from;
-        address_to first = terminal_sum_to(top) - from + skip;
-
+        for (unsigned int at = oldest; at != head; at++)
+        {
+                if (at == top)
+                        address_to first = address_to total + skip;
+                address_to total += terminal_line_rows(at);
+        }
         return address_to total > ROWS;
+}
+
+// Folded-row iterator over the visible view: yields each (row, line, fold) with
+// the line's cell slice loaded once per stored line.
+struct term_view_iter
+{
+        unsigned int line;
+        unsigned int fold;
+        unsigned int folds;
+        unsigned int row;
+        unsigned int length;
+        struct window_cell address_to cells;
+};
+
+static void term_view_begin(struct term_view_iter address_to it, unsigned int view)
+{
+        unsigned int skip;
+
+        it->line = terminal_top(view, &skip);
+        it->fold = skip;
+        it->folds = 0;
+        it->row = 0;
+        it->length = 0;
+        it->cells = null;
+}
+
+static b32 term_view_next(struct term_view_iter address_to it, unsigned int max_rows)
+{
+        if (it->row >= max_rows)
+                return false;
+        while (it->line != window->head)
+        {
+                if (!it->folds)
+                {
+                        unsigned int slot = it->line % window->history;
+                        unsigned int length = window_lengths(window)[slot];
+
+                        it->length = length < window->stride ? length : window->stride;
+                        it->cells = window_cells(window) + (unsigned long)slot * window->stride;
+                        it->folds = it->length ? (it->length + COLUMNS - 1) / COLUMNS : 1;
+                }
+                if (it->fold < it->folds)
+                        return true;
+                it->fold = 0;
+                it->folds = 0;
+                it->line++;
+        }
+        return false;
+}
+
+static void term_view_step(struct term_view_iter address_to it)
+{
+        it->fold++;
+        it->row++;
 }
 
 static void terminal_bar_follow(void);
@@ -451,26 +502,57 @@ static b32 terminal_view_live(void)
         return true;
 }
 
-// The view put where a count of rows above it says, and nothing else; false when it did not move. The kit's bar is the one that
-// moves it while the wheel or a finger does (terminal_bar_out), so this is the only setter those paths use.
+// The view put where a count of rows above it says, and nothing else; false when it did not move.
+// Binary-searches terminal_sums[] in O(log N) for cached history lines.
 static b32 terminal_view_put(unsigned int above)
 {
         unsigned int was = terminal.view, was_skip = terminal.view_skip;
-        unsigned int at, run = 0, live_skip, skip = 0;
+        unsigned int at = terminal_oldest(), run = 0, live_skip, skip = 0;
         unsigned int live = terminal_top(TERMINAL_LIVE, &live_skip);
+        b32 found = false;
 
-        for (at = terminal_oldest(); at != window->head; at++)
+        if (terminal_sums_sync())
         {
-                unsigned int past = run + terminal_line_rows(at);
+                unsigned int base = terminal_sums[at % TERMINAL_SUMS];
+                unsigned int screen = terminal_sums_end;
+                unsigned int cached = terminal_sums[screen % TERMINAL_SUMS] - base;
 
-                if (above < past)
+                if (above < cached)
                 {
-                        skip = above - run;
-                        break;
-                }
+                        unsigned int lo = at, hi = screen;
 
-                run = past;
+                        while (lo + 1 < hi)
+                        {
+                                unsigned int mid = lo + (hi - lo) / 2;
+
+                                if (terminal_sums[mid % TERMINAL_SUMS] - base <= above)
+                                        lo = mid;
+                                else
+                                        hi = mid;
+                        }
+                        at = lo;
+                        skip = above - (terminal_sums[lo % TERMINAL_SUMS] - base);
+                        found = true;
+                }
+                else
+                {
+                        at = screen;
+                        run = cached;
+                }
         }
+
+        if (!found)
+                for (; at != window->head; at++)
+                {
+                        unsigned int past = run + terminal_line_rows(at);
+
+                        if (above < past)
+                        {
+                                skip = above - run;
+                                break;
+                        }
+                        run = past;
+                }
 
         if (at > live || (at == live && skip >= live_skip))
         {
@@ -569,9 +651,10 @@ static unsigned int terminal_wheel_lines(void)
         return ui_kit.wheel_lines ? ui_kit.wheel_lines : TERMINAL_WHEEL_LINES;
 }
 
+#define TERMINAL_BAR_KEY() ((terminal.bar.held ? 1u : 0u) | (terminal.bar.hover ? 2u : 0u))
+
 // The kit's scroll bar where the view is: its track down the window's right edge, flush with it, from below the close
-// button to the window's bottom; the view's rows over the scrollback's, and first, the rows above the view. Its hover
-// and grab stay as the kit keeps them, from one frame to the next.
+// button to the window's bottom; the view's rows over the scrollback's, and first, the rows above the view.
 static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned int total)
 {
         int cell = (int)terminal.cell_h;
@@ -579,17 +662,23 @@ static void terminal_bar_place(unsigned int first, unsigned int shown, unsigned 
         terminal.bar.x = (int)terminal.width - UI_SCROLL_WIDTH * terminal_scale() / 100, terminal.bar.y = 0;
         terminal.bar.height = (int)terminal.height, terminal.bar.inset = UI_CLOSE_BOTTOM;
         terminal.bar.content = (int)total * cell, terminal.bar.view = (int)shown * cell, terminal.bar.scale = terminal_scale();
-        terminal.bar.wheel = (int)terminal_wheel_lines() * cell; // a notch of a wheel is three lines, as every terminal's is, or the lines set
-        // A body moving at the live end goes with it as lines are printed (ui_body_fit_end): a notch's glide or bounce there would
-        // otherwise rest a line short of the new end, and the view, which is the body's place, would stop following the output.
+        terminal.bar.wheel = (int)terminal_wheel_lines() * cell;
         ui_body_fit_end(&terminal.bar.body, (b64)shown * cell * UI_ONE, (b64)total * cell * UI_ONE, terminal.view == TERMINAL_LIVE);
-        // Where the view is, unless the body is moving (a notch's glide, a finger's hold or throw): then its place stands.
         if (!ui_body_going(&terminal.bar.body) && ui_body_px(&terminal.bar.body) != (int)first * cell)
                 ui_body_set(&terminal.bar.body, terminal.bar.body.view, terminal.bar.body.content, (b64)first * cell * UI_ONE, terminal.bar.body.at);
         terminal.bar.scroll = ui_body_px(&terminal.bar.body);
 }
 
-// The kit's bar follows the view: placed where the view's first row is, in pixels, and the body with it (not moving any more).
+static b32 terminal_bar_sync(void)
+{
+        unsigned int first, shown, total;
+
+        if (!terminal_extent(&first, &shown, &total) || total <= shown)
+                return false;
+        terminal_bar_place(first, shown, total);
+        return true;
+}
+
 static void terminal_bar_follow(void)
 {
         unsigned int first, shown, total;
@@ -601,42 +690,30 @@ static void terminal_bar_follow(void)
         terminal.bar.scroll = ui_body_px(&terminal.bar.body);
 }
 
-// The grid's height in device pixels: its rows, from the top of the paper round it (ui_scroll_pull stretches it by a pull).
 static int terminal_grid_height(void)
 {
         return (int)(ROWS * terminal.cell_h);
 }
 
-// The grid's shift in device pixels, down positive: the view's whole row less the body's rest (ui_scroll_rest), which is the part of a
-// notch's glide between rows the view cannot draw. The overscroll past an end is no shift: the kit stretches the picture (terminal_grid_pull).
-// Nothing on the alternate screen, and nothing while a program has the pointer: it has no scrollback to stretch, and the wheel is its.
-static int terminal_grid_shift(void)
+// Grid shift (pull=false) or rubber-band overscroll pull (pull=true) in device pixels.
+static int terminal_grid_delta(b32 pull)
 {
         unsigned int first, shown, total;
-        int drawn, shift;
+        int drawn, rest, shift;
 
         if (alternate || mouse_mode || !terminal_extent(&first, &shown, &total) || total <= shown)
                 return 0;
         drawn = ui_body_px(&terminal.bar.body);
-        shift = (int)(first * terminal.cell_h) - ui_scroll_rest(&terminal.bar, drawn, terminal_grid_height());
+        rest = ui_scroll_rest(&terminal.bar, drawn, terminal_grid_height());
+        if (pull)
+                return drawn - rest;
+        shift = (int)(first * terminal.cell_h) - rest;
         return shift > (int)terminal.height ? (int)terminal.height : shift < -(int)terminal.height ? -(int)terminal.height : shift;
 }
 
-// The grid's pull past an end in device pixels, down positive: the body's place less its rest. The kit stretches the picture by it
-// (ui_scroll_pull), from the end it is pulled past, under the same rules as every region's.
-static int terminal_grid_pull(void)
-{
-        unsigned int first, shown, total;
-        int drawn;
+static int terminal_grid_shift(void) { return terminal_grid_delta(false); }
+static int terminal_grid_pull(void) { return terminal_grid_delta(true); }
 
-        if (alternate || mouse_mode || !terminal_extent(&first, &shown, &total) || total <= shown)
-                return 0;
-        drawn = ui_body_px(&terminal.bar.body);
-        return drawn - ui_scroll_rest(&terminal.bar, drawn, terminal_grid_height());
-}
-
-// The pointer's place in the grid's rows, where the cells under it are drawn: through the stretch a pull past an end made of the picture
-// (ui_scroll_unpull) and back from the slide a glide between rows gave the grid (terminal_grid_shift), which terminal_at_y has neither of.
 static int terminal_cell_y(void)
 {
         int y = ui_kit.pointer_y;
@@ -650,92 +727,57 @@ static int terminal_cell_y(void)
         return y - (int)terminal.pad_y - terminal_grid_shift();
 }
 
-// The view is where the body is, to the nearest row (a row is a cell's height): the grid's only rounding of the body's place.
 static b32 terminal_bar_out(void)
 {
-        int cell = (int)terminal.cell_h, at = ui_body_px(&terminal.bar.body) < 0 ? 0 : ui_body_px(&terminal.bar.body);
+        int cell = (int)terminal.cell_h, at = ui_body_px(&terminal.bar.body);
 
-        return terminal_view_put((unsigned int)((at + cell / 2) / cell));
+        return terminal_view_put((unsigned int)(((at < 0 ? 0 : at) + cell / 2) / cell));
 }
 
-// A wheel's turn is the kit's (ui_wheel_turn) on the bar, whose body is the grid's: a notch glides the grid to where the turns take
-// it, and a trackpad's hand moves it one for one, its release throwing on the speed.
 static void terminal_bar_turn(const struct window_event address_to event, b32 address_to dirty)
 {
-        unsigned int first, shown, total;
         struct ui kit = terminal_kit(null);
 
-        if (!terminal_extent(&first, &shown, &total) || total <= shown)
-                return;
-        terminal_bar_place(first, shown, total);
-        // The view is put from the body here as well as in its frames: with the wheel smooth off a notch leaves the body at rest at its
-        // new place, no frame follows, and the next placing would set the body back to the view the notch never moved.
-        if (ui_wheel_turn(&kit, &terminal.bar, event))
+        if (terminal_bar_sync() && ui_wheel_turn(&kit, &terminal.bar, event))
         {
                 terminal_bar_out();
                 *dirty = true;
         }
 }
 
-// The body's motion, a frame: a notch's glide, a finger's throw, a pull's spring, and the view and the bar with it. A change of the
-// grid's shift is a frame too, the last one of a spring included.
 static void terminal_bar_step(void)
 {
         struct ui kit = terminal_kit(null);
-        unsigned int first, shown, total;
         int shift, before;
 
-        // The bar is placed first, so the body has the scrollback as it is now (lines printed since the last frame drawn) before it steps.
-        if (terminal_extent(&first, &shown, &total) && total > shown)
-                terminal_bar_place(first, shown, total);
+        terminal_bar_sync();
         shift = terminal_grid_shift(), before = terminal.bar.scroll;
         ui_kit.busy = 0;
-        ui_scroll_frame(&kit, &terminal.bar); // the kit's frame, as every region's: a trackpad's hand that went quiet is let go, and the body steps
+        ui_scroll_frame(&kit, &terminal.bar);
         if (terminal_bar_out() || terminal.bar.scroll != before || terminal_grid_shift() != shift)
                 terminal.dirty = true;
 }
 
-// What the bar is drawn in beyond its place: held and hovered, the two states the kit draws it in.
-static unsigned int terminal_bar_key(void)
+// Hit-test (type == 0) or handle a pointer event on the scroll bar.
+static b32 terminal_bar_event(int type, int x, int y, b32 down, b32 address_to moved)
 {
-        return (terminal.bar.held ? 1u : 0u) | (terminal.bar.hover ? 2u : 0u);
-}
-
-// Whether a press at the pointer is the bar's: on its track where the bar is, or a finger's within its reach (ui_scroll_reach,
-// which is wider than the bar drawn). The pointer is the grid's, so the window's place is the pointer's plus the grid's.
-static b32 terminal_bar_takes(void)
-{
-        unsigned int first, shown, total;
-        struct ui kit = terminal_kit(null);
-
-        if (!terminal_extent(&first, &shown, &total) || total <= shown)
-                return false;
-        terminal_bar_place(first, shown, total);
-        return ui_scroll_reach(&kit, &terminal.bar, ui_kit.pointer_x, ui_kit.pointer_y);
-}
-
-// The bar's pointer, through the kit's own (ui_scroll_bar): a press, a release or a motion at x, y in the window.
-// A button's event carries its code and no place, so a press passes where the pointer is. Answers whether the bar took
-// it, and sets moved when the view or the bar's lit state went somewhere (the bar is drawn again). The view is where the
-// body is, to the nearest row, and the body is left as the bar has it: a thumb pulled past an end is the grid's stretch
-// (terminal_grid_pull) while it is held, and springs home in the body's frames (terminal_bar_step) when it is let go.
-static b32 terminal_bar_pointer(int type, int x, int y, b32 down, b32 address_to moved)
-{
-        unsigned int first, shown, total;
         struct ui kit = terminal_kit(null);
         unsigned int lit;
         b32 taken;
 
-        *moved = false;
-        if (!terminal_extent(&first, &shown, &total) || total <= shown)
+        if (moved)
+                *moved = false;
+        if (!terminal_bar_sync())
         {
-                terminal.bar.hover = terminal.bar.held = 0;
+                if (type)
+                        terminal.bar.hover = terminal.bar.held = 0;
                 return false;
         }
-        terminal_bar_place(first, shown, total);
-        lit = terminal_bar_key();
+        if (!type)
+                return ui_scroll_reach(&kit, &terminal.bar, ui_kit.pointer_x, ui_kit.pointer_y);
+        lit = TERMINAL_BAR_KEY();
         taken = ui_scroll_bar(&kit, &terminal.bar, type, x, y, down);
-        *moved = terminal_bar_key() != lit;
+        *moved = TERMINAL_BAR_KEY() != lit;
         if (taken)
                 *moved = terminal_bar_out() || ui_body_going(&terminal.bar.body) || *moved;
         return taken;
@@ -752,46 +794,31 @@ static void terminal_select_mark(struct window_cell address_to out, unsigned int
 */
 static void terminal_build(struct window_cell address_to into)
 {
-        unsigned int skip, line = terminal_top(terminal.view, &skip);
-        unsigned int row = 0;
+        struct term_view_iter it;
         const struct window_cell address_to block = shown && shown_block ? row_cells(shown_row) + shown_column : null;
         const struct window_cell address_to caret = shown ? row_cells(shown_row) + shown_column : null;
 
         terminal.cursor_at = ~0u;
         terminal_caret_index = ~0u;
 
-        while (row < ROWS && line != window->head)
+        for (term_view_begin(&it, terminal.view); term_view_next(&it, ROWS); term_view_step(&it))
         {
-                unsigned int slot = line % window->history;
-                unsigned int length = window_lengths(window)[slot];
-                struct window_cell address_to cells = window_cells(window) + (unsigned long)slot * window->stride;
-                unsigned int folds;
+                unsigned int from = it.fold * COLUMNS;
+                unsigned int used = it.length > from ? it.length - from : 0;
+                struct window_cell address_to out = into + (unsigned long)it.row * COLUMNS;
 
-                length = length < window->stride ? length : window->stride;
-                folds = length ? (length + COLUMNS - 1) / COLUMNS : 1;
-
-                for (unsigned int fold = skip; fold < folds && row < ROWS; fold++, row++)
-                {
-                        unsigned int from = fold * COLUMNS;
-                        unsigned int used = length > from ? length - from : 0;
-                        struct window_cell address_to out = into + (unsigned long)row * COLUMNS;
-
-                        used = used < COLUMNS ? used : COLUMNS;
-                        memory_copy(out, cells + from, (positive)used * sizeof(struct window_cell));
-                        if (block >= cells + from && block < cells + from + used)
-                                terminal.cursor_at = row * COLUMNS + (unsigned int)(block - (cells + from));
-                        if (caret >= cells + from && caret < cells + from + used)
-                                terminal_caret_index = row * COLUMNS + (unsigned int)(caret - (cells + from));
-                        memory_fill_u64_aligned(out + used, COLUMNS - used, BLANK_CELL_WORD);
-                        terminal_select_mark(out, line, from);
-                }
-
-                skip = 0;
-                line++;
+                used = used < COLUMNS ? used : COLUMNS;
+                memory_copy(out, it.cells + from, (positive)used * sizeof(struct window_cell));
+                if (block >= it.cells + from && block < it.cells + from + used)
+                        terminal.cursor_at = it.row * COLUMNS + (unsigned int)(block - (it.cells + from));
+                if (caret >= it.cells + from && caret < it.cells + from + used)
+                        terminal_caret_index = it.row * COLUMNS + (unsigned int)(caret - (it.cells + from));
+                memory_fill_u64_aligned(out + used, COLUMNS - used, BLANK_CELL_WORD);
+                terminal_select_mark(out, it.line, from);
         }
 
-        if (row < ROWS)
-                memory_fill_u64_aligned(into + (unsigned long)row * COLUMNS, (ROWS - row) * COLUMNS,
+        if (it.row < ROWS)
+                memory_fill_u64_aligned(into + (unsigned long)it.row * COLUMNS, (ROWS - it.row) * COLUMNS,
                                         BLANK_CELL_WORD);
 }
 
@@ -1224,45 +1251,36 @@ static void terminal_row(struct terminal_painter address_to painter, unsigned in
                         cells = 0;
                 }
 
-                if (glyph && cells == 1 && !decor && !here)
-                {
-                        b32 heavy = (cell->flags & WINDOW_CELL_BOLD) && terminal.bold_count;
-                        p32 style = terminal_style(cell);
+                b32 plain_glyph = glyph && cells == 1 && !decor && !here;
+                b32 plain_space = !plain_glyph && glyphs && cells == 1 && !glyph && !decor && !here &&
+                                  paper == glyphs_paper && glyphs_from + glyphs == at && glyphs < FONT_RUN;
 
-                        if (run)
-                                terminal_blanks(pixels, run_from, run, y, run_colour);
-                        run = 0;
-                        if (cell->flags & WINDOW_CELL_DIM)
-                                ink = terminal_mix(ink, paper);
-                        if (glyphs && (glyphs_from + glyphs != at || glyphs_ink != ink || glyphs_paper != paper ||
-                                       glyphs_heavy != heavy || glyphs_flags != style || glyphs == FONT_RUN))
-                                TERMINAL_GLYPHS();
-                        if (!glyphs)
-                        {
-                                glyphs_from = at;
-                                glyphs_ink = ink;
-                                glyphs_paper = paper;
-                                glyphs_heavy = heavy;
-                                glyphs_flags = style;
-                                glyphs_bits = cell->flags & TERMINAL_STYLE_BITS;
-                        }
-                        painter->codes[glyphs++] = cell->character;
-                        {
-                                struct terminal_plain key = {glyphs_ink, glyphs_paper, glyphs_bits};
-                                unsigned int taken = terminal_plain_glyphs(now, old, at + 1, stop, painter->codes, glyphs, &key);
-
-                                glyphs += taken;
-                                at += taken;
-                        }
-                        continue;
-                }
-                // A blank between glyphs on the run's ground is a cell of the run: a space no
-                // longer ends it, so a line of words in one colour is one font_cells and not one
-                // a word, each with its own setup and its own narrow rows to make pixels.
-                if (glyphs && cells == 1 && !glyph && !decor && !here && paper == glyphs_paper && glyphs_from + glyphs == at &&
-                    glyphs < FONT_RUN)
+                if (plain_glyph || plain_space)
                 {
-                        painter->codes[glyphs++] = ' ';
+                        if (plain_glyph)
+                        {
+                                b32 heavy = (cell->flags & WINDOW_CELL_BOLD) && terminal.bold_count;
+                                p32 style = terminal_style(cell);
+
+                                if (run)
+                                        terminal_blanks(pixels, run_from, run, y, run_colour);
+                                run = 0;
+                                if (cell->flags & WINDOW_CELL_DIM)
+                                        ink = terminal_mix(ink, paper);
+                                if (glyphs && (glyphs_from + glyphs != at || glyphs_ink != ink || glyphs_paper != paper ||
+                                               glyphs_heavy != heavy || glyphs_flags != style || glyphs == FONT_RUN))
+                                        TERMINAL_GLYPHS();
+                                if (!glyphs)
+                                {
+                                        glyphs_from = at;
+                                        glyphs_ink = ink;
+                                        glyphs_paper = paper;
+                                        glyphs_heavy = heavy;
+                                        glyphs_flags = style;
+                                        glyphs_bits = cell->flags & TERMINAL_STYLE_BITS;
+                                }
+                        }
+                        painter->codes[glyphs++] = plain_glyph ? cell->character : ' ';
                         {
                                 struct terminal_plain key = {glyphs_ink, glyphs_paper, glyphs_bits};
                                 unsigned int taken = terminal_plain_glyphs(now, old, at + 1, stop, painter->codes, glyphs, &key);
@@ -1423,7 +1441,7 @@ static unsigned int terminal_bar_from(void)
         window's right edge, and the kit's scroll bar over the cells at that
         edge where the view has a scrollback. The kit draws the bar
         (ui_scroll_draw) in its own colours and at its own width, and takes the
-        pointer on the same track (terminal_bar_pointer), so what is drawn and
+        pointer on the same track (terminal_bar_event), so what is drawn and
         what is pressed agree. The bar takes no column: the last column's cells
         are drawn again whenever the bar is, so the thumb's old place comes back.
 */
@@ -1738,7 +1756,6 @@ static b32 terminal_frame(void)
         struct window_cell address_to drawn;
         struct window_cell address_to screen;
         unsigned int first, shown, total;
-        unsigned int row_x0[1024], row_x1[1024];
         int x1 = 0x7fffffff, y1 = 0x7fffffff, x2 = 0, y2 = 0;
         b32 bar, bar_told, any, right = false, turning, full, stretched = false;
         int shift, pull;
@@ -1803,9 +1820,9 @@ static b32 terminal_frame(void)
         // told where the one on the screen was not. A thumb growing or shrinking across its track is drawn again each frame.
         turning = total > shown && ui_scroll_moving(&terminal.bar);
         bar = !terminal.valid[slot] || terminal.bar_first[slot] != first || terminal.bar_shown[slot] != shown ||
-              terminal.bar_total[slot] != total || terminal.bar_drawn[slot] != terminal_bar_key() || turning;
+              terminal.bar_total[slot] != total || terminal.bar_drawn[slot] != TERMINAL_BAR_KEY() || turning;
         bar_told = !screen || terminal.bar_first[front] != first || terminal.bar_shown[front] != shown ||
-                   terminal.bar_total[front] != total || terminal.bar_drawn[front] != terminal_bar_key() || turning;
+                   terminal.bar_total[front] != total || terminal.bar_drawn[front] != TERMINAL_BAR_KEY() || turning;
 
         // A top margin a spoil reached is drawn again, which makes the frame whether or not a cell changed.
         b32 margin = terminal.margin_spoiled[slot];
@@ -1850,9 +1867,6 @@ static b32 terminal_frame(void)
                 // come back, and it is drawn on them.
                 if (bar || visible)
                 {
-                        // A row that did not change has the span 0 to 0, which is not a first column of 0: the cells the bar
-                        // covers are drawn again, and not the whole row. They start where a span starts (terminal_span): never
-                        // on the second half of a wide character, which drawn alone is a blank.
                         unsigned int start = from && ((line[from].flags & WINDOW_CELL_WIDE_RIGHT) || (line[from - 1].flags & WINDOW_CELL_WIDE))
                                                  ? from - 1
                                                  : from;
@@ -1870,11 +1884,19 @@ static b32 terminal_frame(void)
                 }
                 any |= a1 > a0 || b1 > b0;
 
-                // What the compositor reads again is what differs from what it shows: a cell
-                // that is the same as on the screen is the same pixels in this buffer too,
-                // however old the buffer was.
-                row_x0[row & 1023] = b1 > b0 ? b0 : 0;
-                row_x1[row & 1023] = b1 > b0 ? b1 : 0;
+                // Accumulate compositor damage bounds directly from the screen diff span.
+                if (screen && b1 > b0)
+                {
+                        unsigned int top, height;
+                        int left = b0 ? (int)(terminal.pad + b0 * terminal.cell_w) : 0;
+                        int edge = b1 < COLUMNS ? (int)(terminal.pad + b1 * terminal.cell_w) : (int)terminal.width;
+
+                        terminal_band(row, &top, &height);
+                        x1 = left < x1 ? left : x1;
+                        x2 = edge > x2 ? edge : x2;
+                        y1 = (int)top < y1 ? (int)top : y1;
+                        y2 = (int)(top + height) > y2 ? (int)(top + height) : y2;
+                }
         }
 
         if (changed)
@@ -1918,7 +1940,7 @@ static b32 terminal_frame(void)
                 terminal.bar_first[slot] = first;
                 terminal.bar_shown[slot] = shown;
                 terminal.bar_total[slot] = total;
-                terminal.bar_drawn[slot] = terminal_bar_key();
+                terminal.bar_drawn[slot] = TERMINAL_BAR_KEY();
         }
 
         // The handles and the bar go over the cells and the scrollbar, last in the buffer.
@@ -1935,24 +1957,8 @@ static b32 terminal_frame(void)
                 table->damage_width[own] = terminal.width;
                 table->damage_height[own] = terminal.height;
         }
-        else if (screen && ROWS <= 1024)
+        else if (screen && ROWS <= TERMINAL_SPAN_ROWS)
         {
-                for (unsigned int row = 0; row < ROWS; row++)
-                        if (row_x1[row] > row_x0[row])
-                        {
-                                // A row's edge cells are the paper beyond them too.
-                                unsigned int top, height;
-                                int left = row_x0[row] ? (int)(terminal.pad + row_x0[row] * terminal.cell_w) : 0;
-                                int edge = row_x1[row] < COLUMNS ? (int)(terminal.pad + row_x1[row] * terminal.cell_w)
-                                                                 : (int)terminal.width;
-
-                                terminal_band(row, &top, &height);
-                                x1 = left < x1 ? left : x1;
-                                x2 = edge > x2 ? edge : x2;
-                                y1 = (int)top < y1 ? (int)top : y1;
-                                y2 = (int)(top + height) > y2 ? (int)(top + height) : y2;
-                        }
-
                 // The top margin drawn again is the window's top edge across, to the grid's first row.
                 if (margin)
                 {
@@ -2432,6 +2438,19 @@ static void terminal_modes_read(b32 master, positive now)
         pager or an editor has no scrollback here, they are its arrows, as the wheel's are. Answers whether the pty still
         takes what it is owed; false in moved when the view went nowhere (an end of the scrollback).
 */
+// On the alternate screen, wheel/touch scroll emits cursor-key arrows via term_key_modified.
+static b32 terminal_alt_arrows(b32 master, int lines)
+{
+        unsigned int code = lines > 0 ? KEY_UP : KEY_DOWN;
+        b32 editing = line_editing;
+
+        line_editing = false;
+        for (int at = lines < 0 ? -lines : lines; at > 0; at--)
+                term_key_modified(0, code, 0);
+        line_editing = editing;
+        return term_send(master);
+}
+
 static b32 terminal_finger_scroll(b32 master, int pixels, b32 address_to dirty, b32 address_to moved)
 {
         long total = (long)terminal.finger_left + pixels;
@@ -2443,13 +2462,7 @@ static b32 terminal_finger_scroll(b32 master, int pixels, b32 address_to dirty, 
         if (!lines)
                 return true;
         if (alternate)
-        {
-                string_address arrow = lines > 0 ? (application_keys ? "\033OA" : "\033[A") : (application_keys ? "\033OB" : "\033[B");
-
-                for (int at = lines < 0 ? -lines : lines; at > 0; at--)
-                        emit_bytes((address_any)arrow, string_length(arrow));
-                return term_send(master);
-        }
+                return terminal_alt_arrows(master, lines);
         *moved = terminal_view_scroll(lines);
         if (*moved)
                 *dirty = true;
@@ -2464,17 +2477,14 @@ static b32 terminal_finger_scroll(b32 master, int pixels, b32 address_to dirty, 
 */
 static b32 terminal_finger(b32 master, const struct window_event address_to event, b32 address_to dirty, b32 address_to handled)
 {
-        struct window_key key;
         struct ui kit;
-        b32 moved, sent, dragged;
+        b32 moved, dragged;
 
         *handled = false;
         if (!ui_kit_touch || mouse_mode || terminal.bar.held)
                 return true;
         if (event->type == WINDOW_EVENT_MOTION && terminal.finger.down)
         {
-                // The slop is the kit's, at the scale the terminal draws at (its own ui may not have one yet). The finger's move is
-                // the kit's (ui_press_follow), and its pixels move the grid or the view.
                 int moved_px;
 
                 kit = terminal.ui;
@@ -2482,14 +2492,10 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
                 *handled = true;
                 if (!alternate)
                 {
-                        unsigned int first, shown, total;
                         int shift = terminal_grid_shift(), drawn = ui_body_px(&terminal.bar.body);
 
-                        if (terminal_extent(&first, &shown, &total) && total > shown)
-                                terminal_bar_place(first, shown, total);
+                        terminal_bar_sync();
                         moved_px = ui_press_follow(&kit, &terminal.finger, terminal_at_x(), terminal_at_y());
-                        // The grid moves one for one with the finger, up for a finger that goes down (the tracker's reports are kept
-                        // where the grid fits, for a drag that finds it scrolling later). Past an end the kit stretches the picture.
                         if (terminal.finger.dragged)
                                 ui_body_track(&terminal.bar.body, -(b64)moved_px * UI_ONE, ui_kit_time());
                         if (terminal_bar_out() | (terminal_grid_shift() != shift) | (ui_body_px(&terminal.bar.body) != drawn))
@@ -2504,12 +2510,11 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT)
                 return true;
         // The bar's track is the bar's, for a finger as for the mouse.
-        if ((event->flags & WINDOW_KEY_DOWN) && terminal_bar_takes())
+        if ((event->flags & WINDOW_KEY_DOWN) && terminal_bar_event(0, 0, 0, false, null))
                 return true;
         *handled = true;
         if (event->flags & WINDOW_KEY_DOWN)
         {
-                // Whatever was moving the grid stops where it is drawn, and the press is where the finger is.
                 ui_press_down(&terminal.finger, terminal_at_x(), terminal_at_y(), 0, null);
                 ui_body_hold(alternate ? &terminal.alt : &terminal.bar.body, ui_kit_time());
                 terminal.finger_left = 0;
@@ -2521,8 +2526,6 @@ static b32 terminal_finger(b32 master, const struct window_event address_to even
         ui_press_lift(&terminal.finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
         if (!dragged)
                 return true;
-        // The lift throws the view at the finger's fitted speed (the one velocity, ui_press_velocity), down the screen positive: the
-        // grid's body carries it the other way, and the alternate screen's arrows go on the free body. The body floors and caps it.
         {
                 long speed = ui_press_velocity(&terminal.finger, ui_press_now());
 
@@ -2562,22 +2565,15 @@ static struct ui_select address_to terminal_sel(void);
 // The line and column of the ring under a cell of the grid (row and column on the screen), as terminal_build lays them.
 static b32 terminal_place_at(unsigned int row, unsigned int column, unsigned int address_to line_out, unsigned int address_to column_out)
 {
-        unsigned int skip, line = terminal_top(terminal.view, &skip), at = 0;
+        struct term_view_iter it;
 
-        while (line != window->head)
-        {
-                unsigned int folds = terminal_line_rows(line);
-
-                for (unsigned int fold = skip; fold < folds; fold++, at++)
-                        if (at == row)
-                        {
-                                *line_out = line;
-                                *column_out = fold * COLUMNS + column;
-                                return true;
-                        }
-                skip = 0;
-                line++;
-        }
+        for (term_view_begin(&it, terminal.view); term_view_next(&it, row + 1); term_view_step(&it))
+                if (it.row == row)
+                {
+                        *line_out = it.line;
+                        *column_out = it.fold * COLUMNS + column;
+                        return true;
+                }
         // Below the newest line: the end of it.
         *line_out = window->head - 1;
         *column_out = window_lengths(window)[(window->head - 1) % window->history];
@@ -2815,28 +2811,24 @@ static fn terminal_chose(int id)
 // the grid, -1 above the view and 1 below it.
 static int terminal_op_where(struct ui address_to ui, void address_to self, p64 at, int address_to x, int address_to top)
 {
-        unsigned int want_line = TERMINAL_LINE_OF(at), want_column = TERMINAL_COLUMN_OF(at), skip, line, row = 0;
+        unsigned int want_line = TERMINAL_LINE_OF(at), want_column = TERMINAL_COLUMN_OF(at), first_line;
+        struct term_view_iter it;
 
         (void)ui, (void)self;
-        line = terminal_top(terminal.view, &skip);
-        while (line != window->head)
+        term_view_begin(&it, terminal.view);
+        first_line = it.line;
+        for (; term_view_next(&it, ROWS); term_view_step(&it))
         {
-                unsigned int folds = terminal_line_rows(line);
-                unsigned int at_fold = want_column / COLUMNS < folds ? want_column / COLUMNS : folds - 1;
+                unsigned int at_fold = want_column / COLUMNS < it.folds ? want_column / COLUMNS : it.folds - 1;
 
-                for (unsigned int fold = skip; fold < folds; fold++, row++)
-                        if (line == want_line && fold == at_fold)
-                        {
-                                if (row >= ROWS)
-                                        return 1;
-                                *x = (int)((want_column - fold * COLUMNS) * terminal.cell_w);
-                                *top = (int)(row * terminal.cell_h) + terminal_grid_shift(); // the grid's slide, which the cells move by too
-                                return 0;
-                        }
-                skip = 0;
-                line++;
+                if (it.line == want_line && it.fold == at_fold)
+                {
+                        *x = (int)((want_column - it.fold * COLUMNS) * terminal.cell_w);
+                        *top = (int)(it.row * terminal.cell_h) + terminal_grid_shift();
+                        return 0;
+                }
         }
-        return want_line < terminal_top(terminal.view, &skip) ? -1 : 1;
+        return want_line < first_line ? -1 : 1;
 }
 
 static b32 terminal_op_shown(void address_to self)
@@ -3236,7 +3228,7 @@ static b32 terminal_touch_select(const struct window_event address_to event, b32
         if (event->a == UI_POINTER_LEFT)
         {
                 // A press on the scrollbar is the bar's, and a press that is not held is the scroll's as well as the selection's.
-                if ((event->flags & WINDOW_KEY_DOWN) && (terminal.bar.held || terminal_bar_takes()))
+                if ((event->flags & WINDOW_KEY_DOWN) && (terminal.bar.held || terminal_bar_event(0, 0, 0, false, null)))
                         return false;
                 if (!(event->flags & WINDOW_KEY_DOWN) && !s->finger && !(event->flags & WINDOW_KEY_HOLD))
                         return false;
@@ -3317,8 +3309,8 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                         b32 moved = false, lit = terminal.bar.hover;
 
                         // The kit's bar takes the motion that is over it or held; what it lights or moves is drawn again.
-                        if (terminal.bar.held || terminal.bar.hover || terminal_bar_takes())
-                                terminal_bar_pointer(WINDOW_EVENT_MOTION, event->a, event->b, false, &moved);
+                        if (terminal.bar.held || terminal.bar.hover || terminal_bar_event(0, 0, 0, false, null))
+                                terminal_bar_event(WINDOW_EVENT_MOTION, event->a, event->b, false, &moved);
                         if (moved || lit != terminal.bar.hover)
                                 address_to dirty = true;
                         if (terminal.bar.held)
@@ -3345,12 +3337,12 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
 
                 // The bar's track is the bar's, not the program's, where there is a bar: its press, and the release of a held
                 // thumb, go to the kit's pointer.
-                if (event->a == UI_POINTER_LEFT && (terminal.bar.held || (down && terminal_bar_takes())))
+                if (event->a == UI_POINTER_LEFT && (terminal.bar.held || (down && terminal_bar_event(0, 0, 0, false, null))))
                 {
                         b32 moved = false;
 
-                        terminal_bar_pointer(WINDOW_EVENT_BUTTON, ui_kit.pointer_x,
-                                             ui_kit.pointer_y, down, &moved);
+                        terminal_bar_event(WINDOW_EVENT_BUTTON, ui_kit.pointer_x,
+                                           ui_kit.pointer_y, down, &moved);
                         if (moved)
                                 address_to dirty = true;
                         return true;
@@ -3427,14 +3419,7 @@ static b32 terminal_receive(b32 master, const struct window_event address_to eve
                 if (!lines)
                         return true;
 
-                // A pager or an editor on the alternate screen has no scrollback here: the wheel is its
-                // arrows, a line a step, as the cursor keys' mode spells them.
-                string_address arrow = lines > 0 ? (application_keys ? "\033OA" : "\033[A")
-                                                 : (application_keys ? "\033OB" : "\033[B");
-
-                for (int at = lines < 0 ? -lines : lines; at > 0; at--)
-                        emit_bytes((address_any)arrow, string_length(arrow));
-                return term_send(master);
+                return terminal_alt_arrows(master, lines);
         }
         }
 

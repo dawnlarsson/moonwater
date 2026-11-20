@@ -3614,7 +3614,6 @@ static positive doc_eol_length(const struct doc address_to doc)
 
 /* ---- ranges that move with the text ---- */
 
-#define DOC_RANGE_READONLY 1u
 #define DOC_RANGE_ERROR 2u
 #define DOC_RANGE_WARNING 3u
 #define DOC_RANGE_INFO 4u
@@ -3663,22 +3662,6 @@ static b32 doc_range_add(struct doc address_to doc, p64 start, p64 finish, p32 k
                 return false;
         doc->ranges[doc->range_count++] = (struct doc_range){start, finish, kind, data};
         return true;
-}
-
-// Whether a replace at at of removed bytes would touch read-only text: put something inside it, or take any of it.
-// Its edges are not inside: text typed against a read-only span is not in it.
-static b32 doc_readonly(const struct doc address_to doc, p64 at, p64 removed)
-{
-        for (positive i = 0; i < doc->range_count; i++)
-        {
-                const struct doc_range address_to range = &doc->ranges[i];
-
-                if (range->kind != DOC_RANGE_READONLY)
-                        continue;
-                if (removed ? at < range->finish && at + removed > range->start : at > range->start && at < range->finish)
-                        return true;
-        }
-        return false;
 }
 
 /* ---- the tokenizer's line states, which move with the lines ---- */
@@ -3935,8 +3918,6 @@ static b32 doc_replace_in(struct doc address_to doc, p64 at, p64 removed, const 
                 return false;
         if (!removed && !length)
                 return true;
-        if (doc_readonly(doc, at, removed))
-                return false;
         if (doc->recording && !array_store_reserve(doc->changes, doc->change_room, doc->change_count, doc->change_count + 1, 256))
                 return false;
         line = doc_line_of(doc, at);
@@ -4770,8 +4751,6 @@ static b32 doc_apply(struct doc address_to doc, struct doc_edit address_to edits
 
         for (positive i = 0; i < count; i++)
         {
-                if (doc_readonly(doc, edits[i].at, edits[i].removed))
-                        return false;
                 placed = placed && edits[i].anchor != DOC_NONE;
                 changes = changes || edits[i].removed || edits[i].length;
         }
@@ -7503,7 +7482,6 @@ static positive doc_tokens(struct doc address_to doc, p64 line, struct doc_token
         positive count = 0;
         const p8 address_to bytes;
         positive length;
-        static struct doc_token scratch[512];
 
         if (line >= lines)
                 return 0;
@@ -7533,7 +7511,7 @@ static positive doc_tokens(struct doc address_to doc, p64 line, struct doc_token
                 p32 state;
 
                 length = doc_line_bytes(doc, at, &bytes);
-                state = tokenize(bytes, length, doc_state_get(doc, at), scratch, &scratch_count, 512);
+                state = tokenize(bytes, length, doc_state_get(doc, at), null, &scratch_count, 0);
                 if (doc->states_valid > doc->states_last_edit && doc->states_valid < doc->states_converge &&
                     doc_state_get(doc, doc->states_valid) == state)
                 {
@@ -10047,28 +10025,47 @@ __asm__(
 );
 #endif
 
+// A bordered cover bitmap allocated in the scene pool and emitted as op 3: returns the bitmap buffer, or null when out of room.
+static unsigned char address_to ui_scene_op3(struct ui_scene address_to scene, int wide, int rows, int x0, int y0, int x1, int y1,
+                                             int cover_dx, int cover_dy, unsigned int colour, unsigned int alpha, unsigned int stroke)
+{
+        int pitch = wide + 2;
+        unsigned long bytes = (unsigned long)pitch * (unsigned long)(rows + 2);
+        unsigned char address_to bitmap;
+        unsigned int address_to op;
+
+        if (scene->count >= scene->room || scene->used + bytes + 16 > scene->size)
+        {
+                scene->lost = scene->count >= scene->room ? UI_LOST_ROOM : UI_LOST_POOL;
+                return null;
+        }
+        bitmap = scene->cover + scene->used;
+        memory_zero(bitmap, bytes);
+        op = scene->ops + 8 * scene->count++;
+        op[0] = 3u | (unsigned int)pitch << 8, op[1] = (unsigned int)(scene->ox + x0), op[2] = (unsigned int)(scene->oy + y0);
+        op[3] = (unsigned int)(scene->ox + x1), op[4] = (unsigned int)(scene->oy + y1);
+        op[5] = colour, op[6] = (alpha > 255 ? 255 : alpha) | (stroke > 255 ? 255 : stroke) << 8;
+        op[7] = (unsigned int)(scene->at + scene->used + (unsigned long)(1 + cover_dy) * (unsigned long)pitch + (unsigned long)(1 + cover_dx));
+        scene->used += (bytes + 15) & ~15ul;
+        ui_scene_touch(scene, scene->ox + x0, scene->oy + y0, scene->ox + x1, scene->oy + y1);
+        return bitmap;
+}
+
 // A text run recorded for the GPU: its coverage (the scratch's green byte, as the ink's cover) as a bitmap with a border, and an op for it.
 static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, int pen_x, int first, int last, unsigned int colour, unsigned int alpha,
                           b32 light, unsigned int stroke)
 {
-        struct ui_scene address_to scene = ui->scene;
         int from = top, to = top + rows, pitch = wide + 2;
-        unsigned long bytes = (unsigned long)pitch * (unsigned long)(rows + 2);
         unsigned char address_to bitmap;
-        unsigned int address_to op;
 
         from = from < ui->top ? ui->top : from, to = to > ui->bottom ? ui->bottom : to, to = to > ui->height ? ui->height : to;
         if (ui->band_bottom > ui->band_top)
                 from = from < ui->band_top ? ui->band_top : from, to = to > ui->band_bottom ? ui->band_bottom : to;
         if (first >= last || from >= to)
                 return;
-        if (scene->count >= scene->room || scene->used + bytes + 16 > scene->size)
-        {
-                scene->lost = scene->count >= scene->room ? UI_LOST_ROOM : UI_LOST_POOL;
+        bitmap = ui_scene_op3(ui->scene, wide, rows, pen_x + first, from, pen_x + last, to, first, from - top, colour, alpha, stroke);
+        if (!bitmap)
                 return;
-        }
-        bitmap = scene->cover + scene->used;
-        memory_zero(bitmap, bytes);
         for (int row = 0; row < rows; row++)
                 for (int column = 0; column < wide; column++)
                 {
@@ -10076,13 +10073,6 @@ static void ui_scene_text(struct ui address_to ui, int wide, int rows, int top, 
 
                         bitmap[(unsigned long)(row + 1) * (unsigned long)pitch + (unsigned long)column + 1] = (unsigned char)(light ? value : 255 - value);
                 }
-        op = scene->ops + 8 * scene->count++;
-        op[0] = 3u | (unsigned int)pitch << 8, op[1] = (unsigned int)(scene->ox + pen_x + first), op[2] = (unsigned int)(scene->oy + from),
-        op[3] = (unsigned int)(scene->ox + pen_x + last), op[4] = (unsigned int)(scene->oy + to);
-        op[5] = colour, op[6] = (alpha > 255 ? 255 : alpha) | (stroke > 255 ? 255 : stroke) << 8;
-        op[7] = (unsigned int)(scene->at + scene->used + (unsigned long)(1 + from - top) * (unsigned long)pitch + (unsigned long)(1 + first));
-        scene->used += (bytes + 15) & ~15ul;
-        ui_scene_touch(scene, scene->ox + pen_x + first, scene->oy + from, scene->ox + pen_x + last, scene->oy + to);
 }
 
 /*
@@ -10102,28 +10092,13 @@ static fn ui_kit_covers(struct ui address_to ui, int x, int y, int w, int h, con
                 return;
         if (ui->scene)
         {
-                struct ui_scene address_to scene = ui->scene;
                 int wide = right - left, rows = bottom - top, stride = wide + 2;
-                unsigned long bytes = (unsigned long)stride * (unsigned long)(rows + 2);
-                unsigned char address_to bitmap;
-                unsigned int address_to op;
+                unsigned char address_to bitmap = ui_scene_op3(ui->scene, wide, rows, left, top, right, bottom, 0, 0, ink & 0xffffffu, 255, 0);
 
-                if (scene->count >= scene->room || scene->used + bytes + 16 > scene->size)
-                {
-                        scene->lost = scene->count >= scene->room ? UI_LOST_ROOM : UI_LOST_POOL;
+                if (!bitmap)
                         return;
-                }
-                bitmap = scene->cover + scene->used;
-                memory_zero(bitmap, bytes);
                 for (int row = 0; row < rows; row++)
                         memory_copy(bitmap + (unsigned long)(row + 1) * (unsigned long)stride + 1, cover + (long)(top - y + row) * pitch + (left - x), (positive)wide);
-                op = scene->ops + 8 * scene->count++;
-                op[0] = 3u | (unsigned int)stride << 8, op[1] = (unsigned int)(scene->ox + left), op[2] = (unsigned int)(scene->oy + top);
-                op[3] = (unsigned int)(scene->ox + right), op[4] = (unsigned int)(scene->oy + bottom);
-                op[5] = ink & 0xffffffu, op[6] = 255;
-                op[7] = (unsigned int)(scene->at + scene->used + (unsigned long)stride + 1);
-                scene->used += (bytes + 15) & ~15ul;
-                ui_scene_touch(scene, scene->ox + left, scene->oy + top, scene->ox + right, scene->oy + bottom);
                 return;
         }
         memory_over_cover_u32_rect(ui->pixels + (unsigned long)top * ui->pitch + (unsigned long)left, ui->pitch,
@@ -10131,27 +10106,9 @@ static fn ui_kit_covers(struct ui address_to ui, int x, int y, int w, int h, con
                                    (positive)(right - left), (positive)(bottom - top), ink);
 }
 
-// The place of a key's copy in the pool, when the frame has one (the lookup ui_scene_copy makes first, without copying): false when it has none.
-static b32 ui_scene_find(struct ui_scene_slot address_to slots, p64 a, p64 b, p32 c, unsigned long address_to at)
-{
-        p32 slot = (p32)((((a * 0x9e3779b97f4a7c15ull) ^ (b * 0xc2b2ae3d27d4eb4full)) ^ c) >> 55);
-
-        for (p32 probe = 0; probe < UI_SCENE_SLOTS && slots[slot].used; probe++)
-        {
-                if (slots[slot].a == a && slots[slot].b == b && slots[slot].c == c)
-                {
-                        *at = slots[slot].at;
-                        return true;
-                }
-                slot = (slot + 1) & (UI_SCENE_SLOTS - 1);
-        }
-        return false;
-}
-
-// The pool's copy of count bytes for a key, once per frame: the copy's place from the list's base, 16-aligned; false when the frame has no room
-// for it (and the table or the pool is full). A key is the pointer and what its bytes depend on (a, b, c), so the same key is the same bytes.
-static b32 ui_scene_copy(struct ui_scene address_to scene, struct ui_scene_slot address_to slots, p64 a, p64 b, p32 c, const void address_to bytes,
-                         unsigned long count, unsigned long address_to at)
+// Look up or reserve a slot for key (a, b, c) in a scene table: returns 1 if already present (*at set), 0 if a free slot was
+// found (*slot_out set), or -1 if the table is full.
+static int ui_scene_probe(struct ui_scene_slot address_to slots, p64 a, p64 b, p32 c, p32 address_to slot_out, unsigned long address_to at)
 {
         p32 slot = (p32)((((a * 0x9e3779b97f4a7c15ull) ^ (b * 0xc2b2ae3d27d4eb4full)) ^ c) >> 55), probe;
 
@@ -10160,22 +10117,34 @@ static b32 ui_scene_copy(struct ui_scene address_to scene, struct ui_scene_slot 
                 if (slots[slot].a == a && slots[slot].b == b && slots[slot].c == c)
                 {
                         *at = slots[slot].at;
-                        return true;
+                        return 1;
                 }
                 slot = (slot + 1) & (UI_SCENE_SLOTS - 1);
         }
         if (probe == UI_SCENE_SLOTS)
-                return false;
-        {
-                unsigned long start = (scene->used + 15) & ~15ul;
+                return -1;
+        *slot_out = slot;
+        return 0;
+}
 
-                if (start + count > scene->size)
-                        return false;
-                memory_copy(scene->cover + start, bytes, (positive)count);
-                scene->used = start + count;
-                slots[slot].a = a, slots[slot].b = b, slots[slot].c = c, slots[slot].used = 1, slots[slot].at = scene->at + start;
-                *at = scene->at + start;
-        }
+// The pool's copy of count bytes for a key, once per frame: the copy's place from the list's base, 16-aligned; false when the frame has no room
+// for it (and the table or the pool is full). A key is the pointer and what its bytes depend on (a, b, c), so the same key is the same bytes.
+static b32 ui_scene_copy(struct ui_scene address_to scene, struct ui_scene_slot address_to slots, p64 a, p64 b, p32 c, const void address_to bytes,
+                         unsigned long count, unsigned long address_to at)
+{
+        p32 slot = 0;
+        int found = ui_scene_probe(slots, a, b, c, &slot, at);
+        unsigned long start;
+
+        if (found != 0)
+                return found > 0;
+        start = (scene->used + 15) & ~15ul;
+        if (start + count > scene->size)
+                return false;
+        memory_copy(scene->cover + start, bytes, (positive)count);
+        scene->used = start + count;
+        slots[slot].a = a, slots[slot].b = b, slots[slot].c = c, slots[slot].used = 1, slots[slot].at = scene->at + start;
+        *at = scene->at + start;
         return true;
 }
 
@@ -10188,15 +10157,17 @@ static b32 ui_scene_copy(struct ui_scene address_to scene, struct ui_scene_slot 
 static b32 ui_scene_translate(struct ui_scene address_to scene, const font_cell_plan_t address_to plan, p32 colour, p32 background, p64 cover_key,
                               p32 cover_gen, b32 ox, b32 oy)
 {
-        static p8 rows[256 * 256];
         unsigned long tones_at = 0, cover_at = 0;
         unsigned int address_to op;
         b32 w, h;
+        p32 slot = 0;
+        p64 dim_key;
+        int found;
 
         if (!plan->translate)
                 return true;
         w = plan->to - plan->from, h = plan->below - plan->above;
-        if (w <= 0 || h <= 0 || (unsigned long)w * (unsigned long)h > sizeof(rows))
+        if (w <= 0 || h <= 0 || (unsigned long)w * (unsigned long)h > 256ul * 256ul)
         {
                 scene->lost = UI_LOST_CELL;
                 return false;
@@ -10207,18 +10178,29 @@ static b32 ui_scene_translate(struct ui_scene address_to scene, const font_cell_
                 scene->lost = UI_LOST_POOL;
                 return false;
         }
-        //      The coverage's rows are gathered only when the frame does not hold it yet: a glyph is found again by its key, and the
-        //      gather was a copy per row for every cell.
-        if (!ui_scene_find(scene->cover_slots, cover_key, (p64)w << 40 | (p64)h << 20 | plan->stride, cover_gen, &cover_at))
+        // Gather the coverage rows directly into the scene pool when this frame does not hold the glyph yet.
+        dim_key = (p64)w << 40 | (p64)h << 20 | plan->stride;
+        found = ui_scene_probe(scene->cover_slots, cover_key, dim_key, cover_gen, &slot, &cover_at);
+        if (found < 0)
         {
-                for (b32 r = 0; r < h; r++)
-                        memory_copy(rows + (positive)r * w, plan->coverage + (positive)r * plan->stride, (positive)w);
-                if (!ui_scene_copy(scene, scene->cover_slots, cover_key, (p64)w << 40 | (p64)h << 20 | plan->stride, cover_gen, rows,
-                                   (unsigned long)w * (unsigned long)h, &cover_at))
+                scene->lost = UI_LOST_POOL;
+                return false;
+        }
+        if (found == 0)
+        {
+                unsigned long start = (scene->used + 15) & ~15ul, count = (unsigned long)w * (unsigned long)h;
+
+                if (start + count > scene->size)
                 {
                         scene->lost = UI_LOST_POOL;
                         return false;
                 }
+                for (b32 r = 0; r < h; r++)
+                        memory_copy(scene->cover + start + (positive)r * w, plan->coverage + (positive)r * plan->stride, (positive)w);
+                scene->used = start + count;
+                scene->cover_slots[slot].a = cover_key, scene->cover_slots[slot].b = dim_key, scene->cover_slots[slot].c = cover_gen;
+                scene->cover_slots[slot].used = 1, scene->cover_slots[slot].at = scene->at + start;
+                cover_at = scene->at + start;
         }
         op = scene->ops + 8 * scene->count++;
         op[0] = 10u | (unsigned int)w << 8, op[1] = (unsigned int)(ox + plan->from), op[2] = (unsigned int)(oy + plan->above);
@@ -10228,9 +10210,28 @@ static b32 ui_scene_translate(struct ui_scene address_to scene, const font_cell_
         return true;
 }
 
+// A single cell plan (wide or combining cluster), recorded for the GPU: ground fill then glyph translate.
+static void ui_scene_plan(struct ui_scene address_to scene, const font_cell_plan_t address_to plan, p32 colour, p32 background,
+                          p64 cover_key, p32 cover_gen, b32 ox, b32 oy)
+{
+        if (plan->unknown)
+        {
+                scene->lost = UI_LOST_GROUND;
+                return;
+        }
+        if (plan->empty)
+                return;
+        if (scene->count + 2 > scene->room)
+        {
+                scene->lost = UI_LOST_ROOM;
+                return;
+        }
+        if (plan->left < plan->right && plan->top < plan->bottom)
+                ui_scene_record(scene, ox + plan->left, oy + plan->top, ox + plan->right, oy + plan->bottom, plan->ground, true);
+        ui_scene_translate(scene, plan, colour, background, cover_key, cover_gen, ox, oy);
+}
+
 // A wide cell (one code point, two cells) of a code view, recorded for the GPU: the two cells' rectangle on the ground, then the glyph's translate.
-// The plan is font_cell's known-ground branch with two cells (font_cell_plan), the same one the processor draws (font_cell), so the two agree by
-// construction (the rig checks it at four scales, light and dark).
 static void ui_scene_wide(struct ui address_to ui, const font_face address_to const address_to faces, p32 code, const font_metrics address_to grid, p32 em,
                           const font_target address_to target, b32 ox, b32 oy, b32 x, b32 y, p32 colour, p32 background)
 {
@@ -10243,16 +10244,7 @@ static void ui_scene_wide(struct ui address_to ui, const font_face address_to co
                 return;
         }
         font_cell_plan(ui->engine, faces, 2, code, 2, grid, em, 0, target, x, y, colour, background, &plan);
-        if (plan.unknown)
-        {
-                scene->lost = UI_LOST_GROUND;
-                return;
-        }
-        if (plan.empty)
-                return;
-        if (plan.left < plan.right && plan.top < plan.bottom)
-                ui_scene_record(scene, ox + plan.left, oy + plan.top, ox + plan.right, oy + plan.bottom, plan.ground, true);
-        ui_scene_translate(scene, &plan, colour, background, (p64)(unsigned long)plan.coverage, ui->engine->generation, ox, oy);
+        ui_scene_plan(scene, &plan, colour, background, (p64)(unsigned long)plan.coverage, ui->engine->generation, ox, oy);
 }
 
 static void ui_scene_cells(struct ui address_to ui, const font_face address_to const address_to faces, p32 count, p32 flags, const p32 address_to codes,
@@ -10287,27 +10279,12 @@ static void ui_scene_cells(struct ui address_to ui, const font_face address_to c
         }
 }
 
-// A cluster of one cell (a base and its combining marks), recorded for the GPU: the cell's rectangle on the ground, then the coverage of the
-// cluster (one bitmap, font_cluster_plan's) translated through the tones. The cluster's bitmap is a scratch the processor reuses, so it is keyed
-// by the op it is recorded at, not by its pointer: no two clusters of a frame share a copy.
+// A cluster of one cell (a base and its combining marks), recorded for the GPU: keyed by op index since its bitmap is a scratch.
 static void ui_scene_cluster(struct ui address_to ui, const font_cell_plan_t address_to plan, p32 colour, p32 background, b32 ox, b32 oy)
 {
         struct ui_scene address_to scene = ui->scene;
 
-        if (plan->unknown)
-        {
-                scene->lost = UI_LOST_GROUND;
-                return;
-        }
-        if (plan->empty)
-                return;
-        if (scene->count + 2 > scene->room)
-        {
-                scene->lost = UI_LOST_ROOM;
-                return;
-        }
-        ui_scene_record(scene, ox + plan->left, oy + plan->top, ox + plan->right, oy + plan->bottom, plan->ground, true);
-        ui_scene_translate(scene, plan, colour, background, (p64)(unsigned long)scene->ops + scene->count, 0, ox, oy);
+        ui_scene_plan(scene, plan, colour, background, (p64)(unsigned long)scene->ops + scene->count + 1, 0, ox, oy);
 }
 
 // The code points of a cluster (up to eight), from its bytes: false when a code point does not decode or there are more.
@@ -10798,9 +10775,7 @@ static fn ui_press_begin(struct ui_press address_to press, int x, int y, int tar
 // Whether x, y is past the slop from x0, y0: the one slop of every press (UI_SLOP logical pixels at the scale).
 static b32 ui_press_past(const struct ui address_to ui, int x0, int y0, int x, int y)
 {
-        long dx = (long)x - x0, dy = (long)y - y0, slop = UI_SLOP * (long)ui->scale / 100;
-
-        return dx * dx + dy * dy >= slop * slop;
+        return ui_touch_past(x0, y0, x, y, ui_touch_slop(ui->scale));
 }
 
 static b32 ui_press_move(const struct ui address_to ui, struct ui_press address_to press, int x, int y)
@@ -10936,19 +10911,7 @@ static void ui_sincos(b64 x, b64 address_to sine, b64 address_to cosine)
 // The whole square root of n.
 static p64 ui_isqrt(p64 n)
 {
-        p64 root = 0, bit = 1ull << 62;
-
-        while (bit > n)
-                bit >>= 2;
-        while (bit)
-        {
-                if (n >= root + bit)
-                        n -= root + bit, root = (root >> 1) + bit;
-                else
-                        root >>= 1;
-                bit >>= 2;
-        }
-        return root;
+        return (p64)ui_touch_isqrt(n);
 }
 
 // The square root of a Q30 value 0 or more, Q30: of x shifted by as much of 30 as it holds, and the rest after.
@@ -11694,6 +11657,18 @@ static fn ui_kit_text_take(const struct windows address_to table)
         ui_kit_settle();
 }
 
+// Take every compositor-owned kit setting from the window table at once.
+static fn ui_kit_sync_table(const struct windows address_to table)
+{
+        ui_kit.wheel_off = table->wheel_off ? 1 : 0;
+        ui_kit_caret_take(table);
+        ui_kit_scroll_take(table);
+        ui_kit_pace_take(table);
+        ui_kit_input_take(table);
+        ui_kit_language_take(table);
+        ui_kit_text_take(table);
+}
+
 // Rows top to bottom (logical pixels) of the control being drawn move this frame.
 static fn ui_kit_reach(int top, int bottom)
 {
@@ -11946,8 +11921,6 @@ static inline void ui_flip(struct ui_box address_to box, b32 sum)
         }
 }
 
-static unsigned short ui_kit_line[UI_KIT_LINE], ui_kit_clip[UI_KIT_LINE];
-
 // A box from a logical rectangle (Q30 logical pixels) at the window's scale, with a corner radius (Q30, logical).
 static struct ui_box ui_box_of(const struct ui address_to ui, b64 x, b64 y, b64 w, b64 h, b64 radius)
 {
@@ -12039,76 +12012,6 @@ static b32 ui_box_span(const struct ui_box address_to box, b32 y, b32 address_to
         *left = box->x0;
         *right = box->x1;
         return 1;
-}
-
-/*
-        A span's cover added into a line, from pixel first (the line's 0), weight lines of it. The line holds first
-        differences, not covers: a pixel's cover is the running sum of the entries up to it (the callers take that sum
-        as they read the row), so a span is at most four entries however wide. The running sums are the covers the
-        per-pixel adds made, modulo 2^16, for every span, since each cover is a difference of covers and the wrap is the
-        same. An entry at width (past the row) is never read, so it is not written.
-*/
-static fn ui_line_add(unsigned short address_to line, b32 first, b32 width, b32 left, b32 right, b32 weight)
-{
-        b32 p0, p1, a, b;
-
-        left -= first * 256;
-        right -= first * 256;
-        left = left < 0 ? 0 : left;
-        right = right > width * 256 ? width * 256 : right;
-        if (right <= left)
-                return;
-        p0 = left >> 8;
-        p1 = (right - 1) >> 8;
-        if (p0 == p1)
-        {
-                b = (right - left) * weight;
-                line[p0] += (unsigned short)b;
-                if (p0 + 1 < width)
-                        line[p0 + 1] += (unsigned short)-b;
-                return;
-        }
-        // Covers: a at p0, 256 * weight through the middle, b at p1. Steps: a at p0, then to the middle (or to b), then
-        // from the middle to b, and back to nothing past p1.
-        a = (256 - (left & 255)) * weight;
-        b = (right - p1 * 256) * weight;
-        line[p0] += (unsigned short)a;
-        line[p0 + 1] += (unsigned short)((p1 == p0 + 1 ? b : 256 * weight) - a);
-        if (p1 >= p0 + 2)
-                line[p1] += (unsigned short)(b - 256 * weight);
-        if (p1 + 1 < width)
-                line[p1 + 1] += (unsigned short)-b;
-}
-
-// The cover of a box over the row y of pixels, into line from pixel first, width wide: false when none.
-static b32 ui_box_row(const struct ui_box address_to box, b32 y, unsigned short address_to line, b32 first, b32 width)
-{
-        b32 top = y * 256, bottom = top + 256, ry = box->ry, any = 0;
-
-        if (bottom <= box->y0 || top >= box->y1)
-                return 0;
-        {
-                b32 rx = box->rx;
-
-                ui_box_radii(box, &rx, &ry);
-        }
-        // A row in the straight middle, all of it inside: one span, every line.
-        if (top >= box->y0 + ry && bottom <= box->y1 - ry && top >= box->y0 && bottom <= box->y1)
-        {
-                ui_line_add(line, first, width, box->x0, box->x1, UI_SUB);
-                return 1;
-        }
-        for (b32 sub = 0; sub < UI_SUB; sub++)
-        {
-                b32 left, right;
-
-                if (ui_box_span(box, top + sub * (256 / UI_SUB) + 256 / UI_SUB / 2, &left, &right))
-                {
-                        ui_line_add(line, first, width, left, right, 1);
-                        any = 1;
-                }
-        }
-        return any;
 }
 
 #if defined(__SSE2__) || defined(__aarch64__)
@@ -12761,120 +12664,6 @@ static fn ui_kit_ring(struct ui address_to ui, const struct ui_box address_to bo
                 ui_kit_ring_cols(ui, box, thickness, argb, at, at + UI_KIT_LINE < last ? at + UI_KIT_LINE : last);
 }
 
-// A Gaussian's share left of x sigmas, x from -4 to 4 in sixteenths, 0 to 65535: a blurred edge.
-static const unsigned short ui_edge[129] = {
-        2, 3, 3, 5, 6, 7, 9, 12, 15, 19, 24, 30, 38, 47, 58, 72, 88, 108, 132, 161, 195, 236, 284, 341, 407, 485, 575, 680,
-        801, 941, 1101, 1283, 1491, 1726, 1992, 2291, 2625, 2998, 3413, 3872, 4378, 4934, 5542, 6205, 6924, 7701, 8539, 9437,
-        10397, 11420, 12503, 13648, 14852, 16114, 17431, 18801, 20220, 21684, 23188, 24728, 26299, 27894, 29508, 31135,
-        32768, 34400, 36027, 37641, 39236, 40807, 42347, 43851, 45315, 46734, 48104, 49421, 50683, 51887, 53032, 54115,
-        55138, 56098, 56996, 57834, 58611, 59330, 59993, 60601, 61157, 61663, 62122, 62537, 62910, 63244, 63543, 63809,
-        64044, 64252, 64434, 64594, 64734, 64855, 64960, 65050, 65128, 65194, 65251, 65299, 65340, 65374, 65403, 65427,
-        65447, 65463, 65477, 65488, 65497, 65505, 65511, 65516, 65520, 65523, 65526, 65528, 65529, 65530, 65532, 65532,
-        65533,
-};
-
-// The share of a blurred span from low to high (256ths) at x, for a blur of sigma (256ths), 0 to 65535.
-static unsigned int ui_blurred(b32 x, b32 low, b32 high, b32 sigma)
-{
-        b64 a = ((b64)(x - low) * 16) / sigma, b = ((b64)(x - high) * 16) / sigma;
-        unsigned int in = a <= -64 ? 0 : a >= 64 ? 65535 : ui_edge[a + 64];
-        unsigned int out = b <= -64 ? 0 : b >= 64 ? 65535 : ui_edge[b + 64];
-
-        return in > out ? in - out : 0;
-}
-
-/*
-        The kit is flat: it draws no shadow and no outline of its own. The owner asked for both to go
-        (2026-10-30); a control's states are its fills, its text and its motion. Turning either back on
-        is these two numbers, and every shadow and every decorative outline in this file goes through them.
-        Rings that are a shape and not an edge (a spinner's track, a swatch's mark of the one chosen) are
-        drawn with ui_kit_ring as before.
-*/
-#define UI_KIT_SHADOWS 0
-#define UI_KIT_OUTLINES 0
-
-static fn ui_kit_outline(struct ui address_to ui, const struct ui_box address_to box, b32 thickness, unsigned int argb)
-{
-#if UI_KIT_OUTLINES
-        ui_kit_ring(ui, box, thickness, argb);
-#else
-        (void)ui, (void)box, (void)thickness, (void)argb;
-#endif
-}
-
-/*
-        A box-shadow: the box moved by dx, dy, grown by spread (all 256ths of a
-        device pixel) and blurred by blur (CSS's blur radius, twice the
-        Gaussian's sigma), in a colour at its own alpha. The blur is the box's
-        two axes blurred apart and multiplied, from a ramp made once, so a shadow
-        whose numbers move each frame (a field's, lifting on hover) is drawn
-        afresh at no more than a multiply a pixel. Drawn outside the box only,
-        as CSS draws an outer shadow: the box's own pixels are its face's.
-*/
-// The columns [first, last) of a shadow (a chunk of ui_kit_shadow, at most UI_KIT_LINE wide), the shape s the box moved and grown.
-static fn ui_kit_shadow_cols(struct ui address_to ui, const struct ui_box address_to box, struct ui_box s, b32 sigma, b32 top, b32 bottom,
-                             unsigned int argb, b32 first, b32 last)
-{
-        // The horizontal blur is the same on every row: worked out once, into the clip line, and given back zeroed.
-        for (b32 x = 0; x < last - first; x++)
-        {
-                b32 cx = (first + x) * 256 + 128;
-
-                ui_kit_clip[x] = (unsigned short)(sigma > 0 ? ui_blurred(cx, s.x0, s.x1, sigma) : (cx >= s.x0 && cx < s.x1 ? 65535 : 0));
-        }
-        for (b32 y = top; y < bottom && last > first; y++)
-        {
-                unsigned int address_to row;
-                b32 width = last - first, cy = y * 256 + 128;
-                unsigned int vertical;
-
-                if (y < ui->top || y >= ui->bottom || y >= ui->height || y < 0 || !ui_in_band(ui, y))
-                        continue;
-                vertical = sigma > 0 ? ui_blurred(cy, s.y0, s.y1, sigma) : (cy >= s.y0 && cy < s.y1 ? 65535 : 0);
-                if (!vertical)
-                        continue;
-                // The box itself is not shadowed: its cover is taken out of the shadow's.
-                ui_box_row(box, y, ui_kit_line, first, width);
-                row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
-                for (b32 x = 0, run = 0; x < width; x++)
-                {
-                        unsigned int cover = (unsigned int)(((p64)ui_kit_clip[x] * vertical) >> 20); // to UI_FULL (4096)
-                        unsigned int inside;
-
-                        // ui_kit_line holds first differences (ui_line_add): the running sum is the box's cover here.
-                        run = (unsigned short)(run + ui_kit_line[x]);
-                        inside = run;
-                        ui_kit_line[x] = 0;
-                        cover = inside >= UI_FULL ? 0 : cover * (UI_FULL - inside) / UI_FULL;
-                        if (cover)
-                                ui_kit_put(row, x, cover, argb);
-                }
-        }
-        memory_zero(ui_kit_clip, (positive)(last > first ? last - first : 0) * sizeof(ui_kit_clip[0]));
-}
-
-// A shadow of a box, moved by dx and dy and grown by spread, blurred over blur (256ths): drawn in chunks of UI_KIT_LINE columns.
-static fn ui_kit_shadow(struct ui address_to ui, const struct ui_box address_to box, b32 dx, b32 dy, b32 blur, b32 spread,
-                        unsigned int argb)
-{
-        struct ui_box s = *box;
-        b32 sigma = blur / 2, reach = blur + 256;
-        b32 first, last, top, bottom;
-
-        if (!UI_KIT_SHADOWS)
-                return;
-        if (!(argb >> 24))
-                return;
-        s.x0 += dx - spread, s.x1 += dx + spread, s.y0 += dy - spread, s.y1 += dy + spread;
-        s.rx = s.rx + spread > 0 ? s.rx + spread : 0;
-        s.ry = s.ry + spread > 0 ? s.ry + spread : 0;
-        first = (s.x0 - reach) >> 8, last = (s.x1 + reach + 255) >> 8, top = (s.y0 - reach) >> 8, bottom = (s.y1 + reach + 255) >> 8;
-        first = first < 0 ? 0 : first;
-        last = last > ui->width ? ui->width : last;
-        for (b32 at = first; at < last; at += UI_KIT_LINE)
-                ui_kit_shadow_cols(ui, box, s, sigma, top, bottom, argb, at, at + UI_KIT_LINE < last ? at + UI_KIT_LINE : last);
-}
-
 /* ---- end of the kit's shapes ---- */
 
 /* ---- kit: controls ---- */
@@ -13227,7 +13016,6 @@ struct ui_control
         struct ui_chase drawn;
         struct ui_ripple ripple[3];
         struct ui_tween layer, fill, ink, label_ink, stroke, scale, extent, pip_x, pip_w, pip_y;
-        struct ui_tween item_ink[UI_ITEMS], item_scale[UI_ITEMS];
         struct ui_stretch dom, item_dom[UI_ITEMS];
         int dom_origin;                    // -1 the far edge, 1 the near (left, top), 0 the middle
         struct ui_spring held_squish;      // --sw-squish or --squish let go
@@ -13245,6 +13033,7 @@ struct ui_control
         // The row the control is in, logical pixels: what its press ripples across and its hover lights, edge to edge.
         // None (row_w 0) is the kit's own: the box and the card's padding round it (24 across, 8 down, ui.css's ripple-clip).
         int row_x, row_y, row_w, row_h;
+        p64 items_id;                      // key into ui_items_pool (0 none); value-copied with struct ui_control
         unsigned int marks;                // tabs: bit k is a dot at the far end of item k (a file that has changes); last, for the layout's sake
 };
 
@@ -13312,12 +13101,64 @@ static struct ui_box ui_kit_focus_outset(const struct ui address_to ui, struct u
 // A determinate progress's fill as a whole: at most the track's end, UI_ONE (a value past its whole fills the track, no more).
 static inline b64 ui_progress_whole(b64 value) { return value > UI_ONE ? UI_ONE : value; }
 
+// Per-item ink & scale tweens live in a small ID-keyed pool instead of bloating every ui_control by ~5 KiB.
+// Keyed by a monotonic generation ID stored on ui_control (not its pointer) so value copies (`bare = *c`)
+// share the exact mid-tween state and `memory_zero` cleanly disassociates reused stack slots.
+#define UI_ITEMS_POOL 16
+struct ui_items_anim
+{
+        p64 id, used;
+        struct ui_tween ink[UI_ITEMS], scale[UI_ITEMS];
+};
+static struct ui_items_anim ui_items_pool[UI_ITEMS_POOL];
+static p64 ui_items_gen, ui_items_tick;
+
+static struct ui_items_anim address_to ui_items_anim_for(struct ui_control address_to c)
+{
+        int free_slot = -1, oldest = 0;
+
+        for (int i = 0; i < UI_ITEMS_POOL; i++)
+        {
+                if (c->items_id && ui_items_pool[i].id == c->items_id)
+                {
+                        ui_items_pool[i].used = ++ui_items_tick;
+                        return &ui_items_pool[i];
+                }
+                if (!ui_items_pool[i].id && free_slot < 0)
+                        free_slot = i;
+                if (ui_items_pool[i].used < ui_items_pool[oldest].used)
+                        oldest = i;
+        }
+        {
+                struct ui_items_anim address_to slot = &ui_items_pool[free_slot >= 0 ? free_slot : oldest];
+
+                memory_zero(slot, sizeof(*slot));
+                c->items_id = slot->id = ++ui_items_gen;
+                slot->used = ++ui_items_tick;
+                for (int k = 0; k < UI_ITEMS; k++)
+                        ui_tween_put(&slot->scale[k], k == c->at ? 0 : UI_ONE, UI_TWEEN_NUMBER);
+                return slot;
+        }
+}
+
+static fn ui_items_anim_reset(struct ui_control address_to c)
+{
+        if (!c->items_id)
+                return;
+        for (int i = 0; i < UI_ITEMS_POOL; i++)
+                if (ui_items_pool[i].id == c->items_id)
+                {
+                        ui_items_pool[i].id = 0;
+                        break;
+                }
+        c->items_id = 0;
+}
+
 // A control before its first frame: its transitions have no value yet, so the first frame puts each at its state's.
 static fn ui_control_start(struct ui_control address_to c)
 {
         ui_tween_put(&c->extent, c->on ? UI_ONE : 0, UI_TWEEN_NUMBER);
-        for (int k = 0; k < UI_ITEMS; k++)
-                ui_tween_put(&c->item_scale[k], k == c->at ? 0 : UI_ONE, UI_TWEEN_NUMBER);
+        ui_items_anim_reset(c);
         if (c->kind == UI_PROGRESS && c->value >= 0)
                 ui_tween_put(&c->extent, ui_progress_whole(c->value), UI_TWEEN_NUMBER);
         c->hover_x = -1;
@@ -13604,8 +13445,6 @@ static fn ui_button_draw(struct ui address_to ui, struct ui_control address_to c
         ui_kit_press_transform(ui, c, 1, &sx, &sy, &tx, &ty);
         face = ui_box_transform(face, sx, sy, ox, oy, tx, ty);
         ui_kit_fill(ui, &face, fill, null);
-        if (c->variant == UI_BUTTON_OUTLINED && !c->disabled)
-                ui_kit_outline(ui, &face, ui_q8(ui, 1), ui_role(c->hover || c->down ? UI_OUTLINE : UI_OUTLINE_VARIANT));
         ui_kit_layer_fill(ui, &face, ink, layer);
         // The keys on it: the focus ring, a gap out from the pill, whatever its variant, while the hand is on the keys (a click leaves none).
         if (c->focused && !c->disabled && ui_kit.keyed)
@@ -13817,6 +13656,8 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
         b32 tx, ty, live = 0;
         b32 cx = ui_q8(ui, ui_rtl() ? c->x + 12 + 14 : c->x + c->w - 12 - 14); // the circles' middle: 12 in from the row's end, 28 wide
 
+        struct ui_items_anim address_to anim = ui_items_anim_for(c);
+
         ui_kit_press_transform(ui, c, 0, &sx, &sy, &tx, &ty);
         for (int item = 0; item < c->count; item++)
         {
@@ -13831,18 +13672,18 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
                 b32 row_tx = lrow ? tx : 0, row_ty = lrow ? ty : 0;
                 struct ui_box clip;
 
-                ui_kit_number_to(&c->item_scale[item], item == c->at ? 0 : UI_ONE, 200, null);
-                ui_kit_colour_to(&c->item_ink[item], item == c->at ? ui_role(UI_ON_SURFACE) : lrow && c->hover ? ui_role(UI_PRIMARY)
+                ui_kit_number_to(&anim->scale[item], item == c->at ? 0 : UI_ONE, 200, null);
+                ui_kit_colour_to(&anim->ink[item], item == c->at ? ui_role(UI_ON_SURFACE) : lrow && c->hover ? ui_role(UI_PRIMARY)
                                                                                                         : ui_mix(ui_role(UI_ON_SURFACE), 50, 0), 200, &ui_ease);
                 hover = lrow ? (c->down ? UI_Q2(110) : c->hover ? UI_Q2(105) : UI_ONE) : UI_ONE;
                 {
                         // The rest's scale goes linearly (.2s linear): a straight bezier.
                         static const struct ui_bezier linear = UI_BEZIER(0, 0, UI_ONE, UI_ONE);
 
-                        if (c->item_scale[item].pending)
-                                c->item_scale[item].ease = &linear;
+                        if (anim->scale[item].pending)
+                                anim->scale[item].ease = &linear;
                 }
-                rest = ui_kit_tween(&c->item_scale[item]);
+                rest = ui_kit_tween(&anim->scale[item]);
                 // The ripple is cut to the row it is on, the box the hover is drawn on: not an outset of it, and not moved with the press.
                 clip = (struct ui_box){rx, ry, rx + rw, ry + rh, 0, 0};
                 // The rest circle: scale(rest) about its middle, inside the bars' scaleY(dom) scale(hover) about the origin.
@@ -13854,7 +13695,7 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
                         r = ui_box_transform(r, row_sx, row_sy, rx + rw / 2, oy, row_tx, row_ty);
                         ui_kit_fill(ui, &r, ui_role(UI_CONTROL_OFF), null);
                 }
-                label = ui_kit_colour(&c->item_ink[item]);
+                label = ui_kit_colour(&anim->ink[item]);
                 x = ui_rtl() ? (rx + rw + row_tx) / 256 - ui_kit_measure(ui, (string_address)c->items[item], UI_BODY_LARGE) : (rx + row_tx) / 256;
                 {
                         // The label stretches 0.55 of the row's along y about the same origin: its line moves with it.
@@ -14265,6 +14106,7 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
         if (c->count == 0)
                 return;
         int height = seg ? UI_TABS_H : 40, chosen = c->at;
+        struct ui_items_anim address_to anim = ui_items_anim_for(c);
         b64 pip_x, pip_w;
 
         if (!seg)
@@ -14287,7 +14129,7 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 struct ui_box face = ui_box_transform(ui_box_of(ui, ui_q(x), ui_q(c->y), ui_q(w), ui_q(height), ui_q(height) / 2), dom, UI_ONE, anchor, 0, 0, 0);
 
                 ui_kit_layer_to(c, 0);
-                ui_kit_layer_fill(ui, &face, ui_kit_colour(&c->item_ink[c->item]), ui_kit_layer(c));
+                ui_kit_layer_fill(ui, &face, ui_kit_colour(&anim->ink[c->item]), ui_kit_layer(c));
         }
         {
                 struct ui_box pip = seg ? ui_box_of(ui, pip_x, ui_q(c->y), pip_w, ui_q(height), ui_q(height) / 2)
@@ -14303,9 +14145,9 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 struct ui_box face = ui_box_of(ui, ui_q(x), ui_q(c->y), ui_q(w), ui_q(height), ui_q(height) / 2);
                 unsigned int ink;
 
-                ui_kit_colour_to(&c->item_ink[item], item == chosen ? ui_role(seg ? UI_ON_PRIMARY : UI_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT),
+                ui_kit_colour_to(&anim->ink[item], item == chosen ? ui_role(seg ? UI_ON_PRIMARY : UI_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT),
                                  200, &ui_ease);
-                ink = ui_kit_colour(&c->item_ink[item]);
+                ink = ui_kit_colour(&anim->ink[item]);
                 face = ui_box_transform(face, dom, UI_ONE, anchor, 0, 0, 0);
                 // The ripple: a tab is a button (its state layer is under the pip, above).
                 if (c->item == item)
@@ -14353,6 +14195,8 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
         b64 pip_y;
         int rx, rw;
 
+        struct ui_items_anim address_to anim = ui_items_anim_for(c);
+
         ui_vtabs_row(c, &rx, &rw);
 
         // What moves is said item by item: the column is count items, and its box (c->h) is one of them. The pip's
@@ -14394,8 +14238,8 @@ static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 ui_kit.busy = live;
                 if (y + c->h + 8 < ui->top * 100 / ui->scale || y - 8 > ui->bottom * 100 / ui->scale)
                         continue;
-                ui_kit_colour_to(&c->item_ink[item], item == c->at && !c->disabled ? ui_role(UI_ON_SURFACE) : ui_role(UI_ON_SURFACE_VARIANT), 200, &ui_ease);
-                ink = ui_kit_colour(&c->item_ink[item]);
+                ui_kit_colour_to(&anim->ink[item], item == c->at && !c->disabled ? ui_role(UI_ON_SURFACE) : ui_role(UI_ON_SURFACE_VARIANT), 200, &ui_ease);
+                ink = ui_kit_colour(&anim->ink[item]);
                 face = ui_box_transform(face, UI_ONE, dom, 0, anchor, 0, 0);
                 if (c->item == item)
                 {
@@ -14635,8 +14479,6 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
         box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(22), ui_q(6));
         if (fill)
                 ui_kit_fill(ui, &box, fill, null);
-        if (role < 0)
-                ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
         if (dot)
                 ui_kit_dot(ui, ui_rtl() ? ui_dev(ui, c->x + c->w - 9) - ui_px(ui, UI_DOT) : ui_dev(ui, c->x + 9), ui_dev(ui, c->y + 8), ink);
         ui_control_label(ui, c, 9 + dot, 3, UI_LABEL_MEDIUM, ink);
@@ -14651,7 +14493,6 @@ static fn ui_tag_draw(struct ui address_to ui, struct ui_control address_to c)
         ui_control_size(ui, c);
         box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(26), ui_q(6));
         ui_kit_fill(ui, &box, ui_role(UI_SURFACE_LOW), null);
-        ui_kit_outline(ui, &box, ui_q8(ui, 1), c->on ? ui_mix(ui_role(UI_PRIMARY), 35, ui_role(UI_OUTLINE_VARIANT)) : ui_role(UI_OUTLINE_VARIANT));
         ui_control_label(ui, c, 10, 5, UI_MONO, ink);
 }
 
@@ -14748,35 +14589,20 @@ static fn ui_spinner_draw(struct ui address_to ui, struct ui_control address_to 
                 ui_kit.busy = 1;
 }
 
-// A surface: a card (14 round, the low face, a hairline) or a window (20 round, the high face, a hairline and a lift).
+// A surface: a card (14 round, the low face) or a window (20 round, the high face).
 static fn ui_surface_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         UI_CALL();
         b32 window = c->kind == UI_WINDOW;
         struct ui_box box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h), ui_q(window ? 20 : 14));
 
-        if (window)
-        {
-                ui_kit_shadow(ui, &box, 0, ui_q8(ui, 10), ui_q8(ui, 30), -ui_q8(ui, 12), ui_mix(ui_role(UI_SHADOW), 14, 0));
-                ui_kit_shadow(ui, &box, 0, ui_q8(ui, 1), ui_q8(ui, 2), 0, ui_mix(ui_role(UI_SHADOW), 4, 0));
-        }
         ui_kit_fill(ui, &box, ui_role(window ? UI_SURFACE_HIGH : UI_SURFACE_LOW), null);
-        if (window)
+        if (window && c->label)
         {
-                struct ui_box outer = box;
-
-                outer.x0 -= ui_q8(ui, 1), outer.y0 -= ui_q8(ui, 1), outer.x1 += ui_q8(ui, 1), outer.y1 += ui_q8(ui, 1);
-                outer.rx += ui_q8(ui, 1), outer.ry += ui_q8(ui, 1);
-                ui_kit_outline(ui, &outer, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
-                if (c->label)
-                {
-                        ui_control_label(ui, c, 24, 24, UI_TITLE_LARGE, ui_role(UI_ON_SURFACE));
-                        ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y + 68), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + 68) + ui_stroke(ui), 0, 0},
-                                    ui_role(UI_OUTLINE_VARIANT), null);
-                }
+                ui_control_label(ui, c, 24, 24, UI_TITLE_LARGE, ui_role(UI_ON_SURFACE));
+                ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y + 68), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + 68) + ui_stroke(ui), 0, 0},
+                            ui_role(UI_OUTLINE_VARIANT), null);
         }
-        else
-                ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
 }
 
 static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to c)
@@ -14787,11 +14613,9 @@ static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to 
                                  : ui_role(UI_SURFACE_LOW);
         unsigned int ink = role ? ui_role(role == UI_PRIMARY ? UI_ON_PRIMARY_CONTAINER : role == UI_ERROR ? UI_ON_ERROR_CONTAINER : role + 2)
                                 : ui_role(UI_ON_SURFACE_VARIANT);
-        unsigned int line = role ? ui_mix(ui_role(role), 28, ui_role(UI_OUTLINE_VARIANT)) : ui_role(UI_OUTLINE_VARIANT);
         struct ui_box box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h), ui_q(14));
 
         ui_kit_fill(ui, &box, fill, null);
-        ui_kit_outline(ui, &box, ui_q8(ui, 1), line);
         ui_control_label(ui, c, 16, 14, UI_LABEL_LARGE, role ? ink : ui_role(UI_ON_SURFACE));
         if (c->text[0])
                 ui_kit_start(ui, ui_rtl() ? ui_dev(ui, c->x + c->w - 16) : ui_dev(ui, c->x + 16), ui_kit_baseline(ui, ui_dev(ui, c->y + 14 + 24), UI_BODY_MEDIUM),
@@ -14807,7 +14631,6 @@ static fn ui_code_draw(struct ui address_to ui, struct ui_control address_to c)
         ui_kit_fill(ui, &box, ui_role(UI_SURFACE_HIGHEST), null);
         ui_kit_fill(ui, &head, ui_role(UI_SURFACE_LOW), &box);
         ui_kit_fill(ui, &(struct ui_box){head.x0, head.y1 - ui_q8(ui, 1), head.x1, head.y1, 0, 0}, ui_role(UI_OUTLINE_VARIANT), null);
-        ui_kit_outline(ui, &box, ui_q8(ui, 1), ui_role(UI_OUTLINE_VARIANT));
         ui_control_label(ui, c, 14, 10, UI_MONO, ui_role(UI_ON_SURFACE_VARIANT));
         for (int k = 0; k < c->count; k++)
                 ui_kit_start(ui, ui_rtl() ? ui_dev(ui, c->x + c->w - 14) : ui_dev(ui, c->x + 14), ui_kit_baseline(ui, ui_dev(ui, c->y + 37 + 14 + k * 21), UI_CODE),
@@ -14831,19 +14654,6 @@ static fn ui_kbd_draw(struct ui address_to ui, struct ui_control address_to c)
         ui_kit_text(ui, ui_dev(ui, c->x) + (ui_dev(ui, c->w) - width) / 2, ui_kit_baseline(ui, ui_dev(ui, c->y + 1), UI_MONO), (string_address)c->label,
                     UI_MONO, ui_role(UI_ON_SURFACE_VARIANT), 0);
 }
-
-/*
-        RISE, the entrance: a control (or a group, staggered by index times
-        --rb-step 48 ms) shows from opacity 0 and scaleY 1.45, anchored at its
-        top (from below) or its bottom (from above), to 1 over --rb-rise 440 ms
-        on --rb-ease-rise; with reduced motion it is shown at once.
-*/
-struct ui_rise
-{
-        b64 start;   // the first frame, 1 pending, 0 shown
-        int index;
-        b32 from_top;
-};
 
 // The rows a control that moved this frame reaches, with room for its ripple, its shadow and its stretch: those it
 // said move, with room for a stretch and a ring, when it said (tabs on end), else its box and room round it.
@@ -14904,12 +14714,9 @@ static fn ui_control_place(struct ui_control address_to c)
 
         for (positive k = 0; k < sizeof(unplaced) / sizeof(unplaced[0]); k++)
                 unplaced[k]->placed = 0;
+        ui_items_anim_reset(c);
         for (int k = 0; k < UI_ITEMS; k++)
-        {
-                c->item_ink[k].placed = 0;
-                ui_tween_put(&c->item_scale[k], k == c->at ? 0 : UI_ONE, UI_TWEEN_NUMBER);
                 c->item_dom[k].at = 0;
-        }
         // A slider's extent is not drawn: it is unplaced, as it was when it was the thumb's halo radius.
         if (c->kind == UI_SLIDER)
                 c->extent.placed = 0;
@@ -18803,7 +18610,6 @@ laid:
 static b32 ui_stretch_now, ui_stretch_last;     // a frame stretched a picture (this one, the one before): the card does not draw it, so the frame after one is the processor's
 static unsigned int address_to ui_stretch_rows; // the region's picture as it was drawn, a copy the remap reads
 static positive ui_stretch_room;                // its room, pixels
-static int ui_stretch_map[UI_STRETCH_VIEW + 1]; // where each row of the picture is shown, 256ths of a row
 
 // two pixels (premultiplied ARGB) blended by f in 256ths, a and b held two channels to a lane
 static inline unsigned int ui_stretch_blend(unsigned int a, unsigned int b, unsigned int f)
@@ -18818,31 +18624,29 @@ static inline unsigned int ui_stretch_blend(unsigned int a, unsigned int b, unsi
 // past the top and positive past the bottom. True when it was.
 static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int height, int pull);
 
-// Where each row of a picture of view rows, pulled band pixels past an end, is shown: ui_stretch_map, the distance from the pinned end in 256ths of a row.
-static fn ui_stretch_shape(int view, int band)
+// The stretch's growth factor (Q30) for a view pulled band pixels past an end.
+static b64 ui_stretch_grow(int view, int band)
 {
-        b64 raw, grow;
+        b64 raw;
 
         band = band > view / 2 ? view / 2 : band;
         raw = (b64)band * UI_STRETCH_K_Q4 * UI_ONE / 16 / view;
-        grow = ui_qdiv(ui_qmul(raw, (b64)UI_STRETCH_MAX_Q4 * UI_ONE / 16), raw + (b64)UI_STRETCH_MAX_Q4 * UI_ONE / 16);
-        // Where the picture's row i is shown (the distance from the pinned end, 256ths of a row): u + grow (u - u^2 + u^3/3), of the view
-        for (int i = 0; i <= view; i++)
-        {
-                b64 u = (b64)i * UI_ONE / view, u2 = ui_qmul(u, u), u3 = ui_qmul(u2, u), shown = u + ui_qmul(grow, u - u2 + u3 / 3);
-
-                ui_stretch_map[i] = (int)((shown * view) >> (UI_Q - 8));
-        }
+        return ui_qdiv(ui_qmul(raw, (b64)UI_STRETCH_MAX_Q4 * UI_ONE / 16), raw + (b64)UI_STRETCH_MAX_Q4 * UI_ONE / 16);
 }
 
-// The row of the picture (256ths, from the pinned end) that is shown d rows from the pinned end; at is where the last one was found, a walk's.
-static int ui_stretch_from(int view, int d, int address_to at)
+// Where picture row i is shown (256ths of a row from the pinned end): u + grow * (u - u^2 + u^3/3), of the view.
+static inline int ui_stretch_row(int view, b64 grow, int i)
 {
-        int target = d * 256, from;
+        b64 u = (b64)i * UI_ONE / view, u2 = ui_qmul(u, u), u3 = ui_qmul(u2, u), shown = u + ui_qmul(grow, u - u2 + u3 / 3);
 
-        while (*at < view - 1 && ui_stretch_map[*at + 1] <= target)
-                (*at)++;
-        from = *at * 256 + (ui_stretch_map[*at + 1] > ui_stretch_map[*at] ? (target - ui_stretch_map[*at]) * 256 / (ui_stretch_map[*at + 1] - ui_stretch_map[*at]) : 0);
+        return (int)((shown * view) >> (UI_Q - 8));
+}
+
+// Interpolate the source row (256ths) inside [at, at + 1] whose shown endpoints are [m0, m1].
+static inline int ui_stretch_interp(int view, int at, int m0, int m1, int target)
+{
+        int from = at * 256 + (m1 > m0 ? (target - m0) * 256 / (m1 - m0) : 0);
+
         return from > (view - 1) * 256 ? (view - 1) * 256 : from < 0 ? 0 : from;
 }
 
@@ -18850,7 +18654,8 @@ static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int heig
 {
         int x0 = x < 0 ? 0 : x, x1 = x + width > ui->width ? ui->width : x + width;
         int y0 = y < 0 ? 0 : y, y1 = y + height > ui->height ? ui->height : y + height;
-        int view = y1 - y0, wide = x1 - x0, band = pull < 0 ? -pull : pull, at = 0;
+        int view = y1 - y0, wide = x1 - x0, band = pull < 0 ? -pull : pull, at = 0, m0 = 0, m1;
+        b64 grow;
         positive need;
 
         if (!pull || view < 8 || wide <= 0 || view > UI_STRETCH_VIEW)
@@ -18874,16 +18679,20 @@ static b32 ui_stretch(struct ui address_to ui, int x, int y, int width, int heig
                 ui_stretch_rows = (unsigned int address_to)mapped;
                 ui_stretch_room = room / 4;
         }
-        ui_stretch_shape(view, band);
+        grow = ui_stretch_grow(view, band);
+        m1 = ui_stretch_row(view, grow, 1);
         memory_copy_rect_u32(ui_stretch_rows, (unsigned long)wide, ui->pixels + (unsigned long)y0 * ui->pitch + (unsigned long)x0, ui->pitch,
                              (unsigned long)wide, (unsigned long)view);
         for (int d = 0; d < view; d++)
         {
-                int from = ui_stretch_from(view, d, &at), row, next, line = pull < 0 ? d : view - 1 - d;
+                int target = d * 256, from, row, next, line = pull < 0 ? d : view - 1 - d;
                 unsigned int f;
                 const unsigned int address_to a, address_to b;
                 unsigned int address_to to;
 
+                while (at < view - 1 && m1 <= target)
+                        at++, m0 = m1, m1 = ui_stretch_row(view, grow, at + 1);
+                from = ui_stretch_interp(view, at, m0, m1, target);
                 // the distance from the pinned end is the row from the top at the top, and from the bottom at the bottom
                 if (pull > 0)
                         from = (view - 1) * 256 - from;
@@ -18936,12 +18745,24 @@ static b32 ui_scroll_pull(struct ui address_to ui, const struct ui_scroll addres
 static int ui_scroll_unpull(const struct ui address_to ui, const struct ui_scroll address_to s, int drawn, int top, int height, int y)
 {
         int pull = drawn - ui_scroll_rest(s, drawn, height), y0 = top < 0 ? 0 : top, y1 = top + height > ui->height ? ui->height : top + height;
-        int view = y1 - y0, at = 0, from;
+        int view = y1 - y0, target, lo = 0, hi, from;
+        b64 grow;
 
         if (!pull || view < 8 || view > UI_STRETCH_VIEW || y < y0 || y >= y1)
                 return y;
-        ui_stretch_shape(view, pull < 0 ? -pull : pull);
-        from = ui_stretch_from(view, pull < 0 ? y - y0 : y1 - 1 - y, &at);
+        grow = ui_stretch_grow(view, pull < 0 ? -pull : pull);
+        target = (pull < 0 ? y - y0 : y1 - 1 - y) * 256;
+        hi = view - 1;
+        while (lo < hi)
+        {
+                int mid = lo + (hi - lo + 1) / 2;
+
+                if (ui_stretch_row(view, grow, mid) <= target)
+                        lo = mid;
+                else
+                        hi = mid - 1;
+        }
+        from = ui_stretch_interp(view, lo, ui_stretch_row(view, grow, lo), ui_stretch_row(view, grow, lo + 1), target);
         if (pull > 0)
                 from = (view - 1) * 256 - from;
         return y0 + (from >> 8);
@@ -19631,7 +19452,7 @@ static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_ro
         // opened in the old theme, its loop reading the new one only after the press that opened it.
         if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
         {
-                ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_input_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+                ui_kit_sync_table(table);
                 ui_kit_theme(table->theme, table->accent, table->motion);
         }
         ui_kit.shown = ui_kit.to;
@@ -21512,12 +21333,10 @@ static const struct ui_class ui_classes[] = {
         {"figure", .type = UI_ROLE(UI_LABEL_LARGE), .cut = 1},                           // a bold text, sized by the element, one line
         {"title", .type = UI_ROLE(UI_TITLE_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE), .cut = 1}, // a card's title, one line
         {"quiet", .type = UI_ROLE(UI_BODY_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT)},
-        {"path", .type = UI_ROLE(UI_BODY_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE), .grow = 1, .cut = 1}, // a path in its band: one line, the rest of the band's
         {"status", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_ON_SURFACE_VARIANT), .cut = 1}, // a status bar's words, one line in its band
         {"warning", .type = UI_ROLE(UI_LABEL_MEDIUM), .ink = UI_ROLE(UI_WARNING), .cut = 1},           // a status bar's warning, one line in its band
         // Buttons: the size of an action, and the variants.
         {"action", .w = UI_BUTTONS_W, .h = UI_BUTTONS_H},
-        {"plain", .variant = UI_ROLE(UI_BUTTON_DEFAULT)},
         {"primary", .variant = UI_ROLE(UI_BUTTON_PRIMARY)},
         {"outlined", .variant = UI_ROLE(UI_BUTTON_OUTLINED)},
         {"ghost", .variant = UI_ROLE(UI_BUTTON_TEXT)},
@@ -23044,6 +22863,8 @@ static inline b32 ui_icon_stroke(int size)
         The symbol which, size to a side with its top left at left, top (device pixels), in argb. value is the network's lit bars (0 to
         4) or the battery's percent, and nothing to the others. A symbol the table has not got draws nothing.
 */
+static fn ui_icon_draw_parts_styled(struct ui address_to ui, const struct ui_icon_part address_to parts, int count, int left, int top, int size, unsigned int argb, b32 square);
+
 static fn ui_icon(struct ui address_to ui, int which, int left, int top, int size, int value, unsigned int argb)
 {
         b32 thick = ui_icon_stroke(size);
@@ -23061,29 +22882,7 @@ static fn ui_icon(struct ui address_to ui, int which, int left, int top, int siz
                                     bar < value ? argb : faint, null);
                 return;
         }
-        for (int at = 0; at < UI_ICON_PARTS && ui_icon_parts[which][at].kind; at++)
-        {
-                const struct ui_icon_part address_to part = &ui_icon_parts[which][at];
-                struct ui_box box = {ui_icon_at(left, size, part->x0), ui_icon_at(top, size, part->y0), ui_icon_at(left, size, part->x1), ui_icon_at(top, size, part->y1),
-                                     (b32)(part->r * size * 256 / 48), (b32)(part->r * size * 256 / 48)};
-
-                if (part->kind == UI_ICON_BOX)
-                        ui_kit_fill(ui, &box, argb, null);
-                else if (part->kind == UI_ICON_RING)
-                        ui_kit_ring(ui, &box, thick, argb);
-                else if (box.x0 == box.x1 || box.y0 == box.y1)
-                {
-                        // A stroke along the grid is one box, its ends square: the stroke's width about the line.
-                        b32 x0 = box.x0 < box.x1 ? box.x0 : box.x1, x1 = box.x0 < box.x1 ? box.x1 : box.x0, y0 = box.y0 < box.y1 ? box.y0 : box.y1, y1 = box.y0 < box.y1 ? box.y1 : box.y0;
-
-                        if (box.y0 == box.y1)
-                                ui_kit_fill(ui, &(struct ui_box){x0, y0 - thick / 512 * 256, x1, y0 - thick / 512 * 256 + thick, 0, 0}, argb, null);
-                        else
-                                ui_kit_fill(ui, &(struct ui_box){x0 - thick / 512 * 256, y0, x0 - thick / 512 * 256 + thick, y1, 0, 0}, argb, null);
-                }
-                else
-                        ui_chevron_stroke(ui, box.x0 - thick / 2, box.y0 - thick / 2, box.x1 - thick / 2, box.y1 - thick / 2, thick, argb);
-        }
+        ui_icon_draw_parts_styled(ui, ui_icon_parts[which], UI_ICON_PARTS, left, top, size, argb, false);
         if (which == UI_ICON_BATTERY)
         {
                 // What is in the cell: a bar from its left, as much of the room inside the outline as the percent says, and none for none.
@@ -23111,9 +22910,9 @@ static fn ui_icon(struct ui address_to ui, int which, int left, int top, int siz
         Parts on the grid, size to a side from left, top (device pixels), in argb. A stroke along the grid is a box with square ends that
         reach half its width past its points, so two strokes that meet at a corner close it; one across the grid is the chevron's stroke.
 */
-static fn ui_icon_draw_parts(struct ui address_to ui, const struct ui_icon_part address_to parts, int count, int left, int top, int size, unsigned int argb)
+static fn ui_icon_draw_parts_styled(struct ui address_to ui, const struct ui_icon_part address_to parts, int count, int left, int top, int size, unsigned int argb, b32 square)
 {
-        b32 thick = ui_icon_stroke(size), half = thick / 512 * 256;
+        b32 thick = ui_icon_stroke(size), half = thick / 512 * 256, cap = square ? half : 0, span = square ? thick : 0;
 
         for (int at = 0; at < count && parts[at].kind; at++)
         {
@@ -23132,13 +22931,18 @@ static fn ui_icon_draw_parts(struct ui address_to ui, const struct ui_icon_part 
                         b32 x0 = box.x0 < box.x1 ? box.x0 : box.x1, x1 = box.x0 < box.x1 ? box.x1 : box.x0, y0 = box.y0 < box.y1 ? box.y0 : box.y1, y1 = box.y0 < box.y1 ? box.y1 : box.y0;
 
                         if (box.y0 == box.y1)
-                                ui_kit_fill(ui, &(struct ui_box){x0 - half, y0 - half, x1 - half + thick, y0 - half + thick, 0, 0}, argb, null);
+                                ui_kit_fill(ui, &(struct ui_box){x0 - cap, y0 - half, x1 - cap + span, y0 - half + thick, 0, 0}, argb, null);
                         else
-                                ui_kit_fill(ui, &(struct ui_box){x0 - half, y0 - half, x0 - half + thick, y1 - half + thick, 0, 0}, argb, null);
+                                ui_kit_fill(ui, &(struct ui_box){x0 - half, y0 - cap, x0 - half + thick, y1 - cap + span, 0, 0}, argb, null);
                 }
                 else
                         ui_chevron_stroke(ui, box.x0 - thick / 2, box.y0 - thick / 2, box.x1 - thick / 2, box.y1 - thick / 2, thick, argb);
         }
+}
+
+static fn ui_icon_draw_parts(struct ui address_to ui, const struct ui_icon_part address_to parts, int count, int left, int top, int size, unsigned int argb)
+{
+        ui_icon_draw_parts_styled(ui, parts, count, left, top, size, argb, true);
 }
 
 // The colour of a kind's symbol: a folder's amber and a program's green, a shade of each that reads on the theme's ground (a light
@@ -23481,34 +23285,13 @@ static fn ui_icon_tile(struct ui address_to ui, int left, int top, int size, con
 #define UI_ICON_MOST 64     // the largest a window's picture is drawn, each way
 #define UI_PICTURE_MOST 128 // the largest any picture is laid over the window (ui_icon_picture), each way: an app's (ui_apps_picture) too
 
+static fn ui_picture_scale(unsigned int address_to into, int size, const unsigned int address_to from, int side);
+
 static fn ui_icon_scale(unsigned int address_to into, int size, const unsigned int address_to from)
 {
         if (size <= 0 || size > UI_ICON_MOST)
                 return;
-        if (size >= WINDOWS_ICON)
-        {
-                memory_resample_u32_rect(into, (positive)size, (positive)size, (positive)size, from, WINDOWS_ICON, WINDOWS_ICON, WINDOWS_ICON, (positive)size, (positive)size, 0, 0);
-                return;
-        }
-        for (int y = 0; y < size; y++)
-        {
-                int y0 = y * WINDOWS_ICON / size, y1 = (y + 1) * WINDOWS_ICON / size;
-
-                for (int x = 0; x < size; x++)
-                {
-                        int x0 = x * WINDOWS_ICON / size, x1 = (x + 1) * WINDOWS_ICON / size;
-                        unsigned int sum[4] = {0, 0, 0, 0}, count = (unsigned int)((x1 - x0) * (y1 - y0));
-
-                        for (int sy = y0; sy < y1; sy++)
-                                for (int sx = x0; sx < x1; sx++)
-                                {
-                                        unsigned int pixel = from[sy * WINDOWS_ICON + sx];
-
-                                        sum[0] += pixel >> 24, sum[1] += pixel >> 16 & 255, sum[2] += pixel >> 8 & 255, sum[3] += pixel & 255;
-                                }
-                        into[y * size + x] = (sum[0] + count / 2) / count << 24 | (sum[1] + count / 2) / count << 16 | (sum[2] + count / 2) / count << 8 | (sum[3] + count / 2) / count;
-                }
-        }
+        ui_picture_scale(into, size, from, WINDOWS_ICON);
 }
 
 static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, const unsigned int address_to picture)
@@ -24285,6 +24068,32 @@ static positive ui_apps_names(bipolar directory, char address_to names, positive
 }
 
 // Read every directory again: the kit's programs, then each bowl's entries, the bowls by name. The language is the kit's now.
+static fn ui_apps_scan_folder(const char address_to base, const char address_to sub, const char address_to entry_root,
+                              char address_to entries, positive room, unsigned int address_to entry_order)
+{
+        char folder[UI_APP_PATH];
+        bipolar inside, directory;
+        positive count;
+
+        string_copy_bounded((p8 address_to)folder, (string_address)base, sizeof(folder));
+        if (sub[0] != '/')
+                string_append_bounded((p8 address_to)folder, (string_address) "/", sizeof(folder));
+        string_append_bounded((p8 address_to)folder, (string_address)sub, sizeof(folder));
+        ui_apps_watch(folder);
+        inside = system_open_at(AT_FDCWD, (string_address)base, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        if (inside < 0)
+                return;
+        directory = system_open_resolved(inside, (string_address)sub, FILE_READ | O_DIRECTORY | O_CLOEXEC,
+                                         SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
+        system_close(inside);
+        if (directory < 0)
+                return;
+        count = ui_apps_names(directory, entries, room, entry_order);
+        for (positive each = 0; each < count; each++)
+                ui_apps_entry(entry_root, directory, folder, entries + entry_order[each], language.code);
+        system_close(directory);
+}
+
 static fn ui_apps_read(void)
 {
         static const char address_to const folders[] = {"/usr/share/applications", "/usr/local/share/applications"};
@@ -24320,7 +24129,7 @@ static fn ui_apps_read(void)
         for (positive at = 0; at < bowl_count; at++)
         {
                 const char address_to bowl = bowls + bowl_order[at];
-                char root[UI_APP_PATH], folder[UI_APP_PATH];
+                char root[UI_APP_PATH];
 
                 if (string_equals((string_address)bowl, (string_address) "bin"))
                         continue;
@@ -24328,56 +24137,13 @@ static fn ui_apps_read(void)
                 string_append_bounded((p8 address_to)root, (string_address) "/", sizeof(root));
                 string_append_bounded((p8 address_to)root, (string_address)bowl, sizeof(root));
                 for (positive which = 0; which < 2; which++)
-                {
-                        positive count;
-                        bipolar directory;
-
-                        string_copy_bounded((p8 address_to)folder, (string_address)root, sizeof(folder));
-                        string_append_bounded((p8 address_to)folder, (string_address)folders[which], sizeof(folder));
-                        ui_apps_watch(folder);
-                        // Inside the bowl: a link on the way that leads out of it is followed inside it, as the bowl reads it.
-                        {
-                                bipolar inside = system_open_at(AT_FDCWD, (string_address)root, FILE_READ | O_DIRECTORY | O_CLOEXEC);
-
-                                if (inside < 0)
-                                        continue;
-                                directory = system_open_resolved(inside, (string_address)folders[which], FILE_READ | O_DIRECTORY | O_CLOEXEC,
-                                                                 SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
-                                system_close(inside);
-                        }
-                        if (directory < 0)
-                                continue;
-                        count = ui_apps_names(directory, entries, room, entry_order);
-                        for (positive each = 0; each < count; each++)
-                                ui_apps_entry(root, directory, folder, entries + entry_order[each], language.code);
-                        system_close(directory);
-                }
+                        ui_apps_scan_folder(root, folders[which], root, entries, room, entry_order);
         }
         // User XDG desktop entries (e.g. Steam game shortcuts in /root/.local/share/applications), resolved inside ui_apps_local.
         if (ui_apps_local && ui_apps_local[0])
         {
-                char folder[UI_APP_PATH];
-                bipolar inside, directory = -1;
-
                 ui_apps_watch(ui_apps_local);
-                string_copy_bounded((p8 address_to)folder, (string_address)ui_apps_local, sizeof(folder));
-                string_append_bounded((p8 address_to)folder, (string_address) "/applications", sizeof(folder));
-                ui_apps_watch(folder);
-                inside = system_open_at(AT_FDCWD, (string_address)ui_apps_local, FILE_READ | O_DIRECTORY | O_CLOEXEC);
-                if (inside >= 0)
-                {
-                        directory = system_open_resolved(inside, (string_address) "applications", FILE_READ | O_DIRECTORY | O_CLOEXEC,
-                                                         SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
-                        system_close(inside);
-                }
-                if (directory >= 0)
-                {
-                        positive count = ui_apps_names(directory, entries, room, entry_order);
-
-                        for (positive each = 0; each < count; each++)
-                                ui_apps_entry("", directory, folder, entries + entry_order[each], language.code);
-                        system_close(directory);
-                }
+                ui_apps_scan_folder(ui_apps_local, "applications", "", entries, room, entry_order);
         }
         memory_free(bowls, room * 2);
 }
@@ -24855,6 +24621,24 @@ static fn ui_apps_pins_path(const char address_to root, char address_to path, po
         programs stay as they are. 1 when the file was written, 0 when nothing changed, -1 when it could not be (no room in the line,
         SETTING_PINS_ENTRIES of them, or the file).
 */
+// Read and strip the pins file under root into line (room bytes), writing its resolved path into path.
+static b32 ui_apps_pins_read(const char address_to root, char address_to path, positive path_room, char address_to line, positive line_room)
+{
+        bipolar handle, got = 0;
+
+        ui_apps_pins_path(root, path, path_room);
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (handle >= 0)
+        {
+                got = system_read_once(handle, line, line_room - 1);
+                system_close(handle);
+        }
+        line[got > 0 ? got : 0] = 0;
+        for (bipolar end_at = got - 1; end_at >= 0 && (line[end_at] == '\n' || line[end_at] == '\r'); end_at--)
+                line[end_at] = 0;
+        return setting_pins_valid(line, null);
+}
+
 static int ui_apps_pin(const char address_to root, int which, b32 on)
 {
         char path[160], line[SETTING_PINS_MOST + 16], made[SETTING_PINS_MOST + 16], word[SETTING_PINS_WORD];
@@ -24867,17 +24651,7 @@ static int ui_apps_pin(const char address_to root, int which, b32 on)
         if (which < 0 || which >= ui_apps.count || (on && !ui_apps_pinnable(which)))
                 return -1;
         app = &ui_apps.app[which];
-        ui_apps_pins_path(root, path, sizeof(path));
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-        if (handle >= 0)
-        {
-                got = system_read_once(handle, line, sizeof(line) - 1);
-                system_close(handle);
-        }
-        line[got > 0 ? got : 0] = 0;
-        for (bipolar end_at = got - 1; end_at >= 0 && (line[end_at] == '\n' || line[end_at] == '\r'); end_at--)
-                line[end_at] = 0;
-        if (string_equals((string_address)line, (string_address) "none") || !setting_pins_valid(line, null))
+        if (!ui_apps_pins_read(root, path, sizeof(path), line, sizeof(line)) || string_equals((string_address)line, (string_address) "none"))
                 line[0] = 0;
         made[0] = 0;
         // Each entry of the line copied, but the ones of this id; then this one, where it is pinned.
@@ -24943,21 +24717,10 @@ static b32 ui_apps_pinned(const char address_to root, int which)
         char path[160], line[SETTING_PINS_MOST + 16], word[SETTING_PINS_WORD];
         positive at = 0;
         int kind, word_at = 0;
-        bipolar handle, got = 0;
 
         if (which < 0 || which >= ui_apps.count)
                 return false;
-        ui_apps_pins_path(root, path, sizeof(path));
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-        if (handle >= 0)
-        {
-                got = system_read_once(handle, line, sizeof(line) - 1);
-                system_close(handle);
-        }
-        line[got > 0 ? got : 0] = 0;
-        for (bipolar end_at = got - 1; end_at >= 0 && (line[end_at] == '\n' || line[end_at] == '\r'); end_at--)
-                line[end_at] = 0;
-        if (!setting_pins_valid(line, null))
+        if (!ui_apps_pins_read(root, path, sizeof(path), line, sizeof(line)))
                 return false;
         while ((kind = setting_pins_next(line, &at, word, sizeof(word))) == SETTING_PINS_WORD_NEXT || kind == SETTING_PINS_SEPARATOR)
         {
@@ -28243,6 +28006,34 @@ static fn ui_page_changed(struct ui_page address_to p);
         Reading from the right the view turns it over the window's middle: the column at the right edge, the body to its left. It is
         declared when the page is laid out and again for each picture, so the words in it are what they are then.
 */
+static fn ui_page_body(struct ui_page address_to p, b32 inline_col, int most)
+{
+        ui_row(.h = UI_PAGE_TOP)
+        {
+                ui_text(p->title, .class = "pagetitle", .host = &p->title_box);
+                ui_control(&p->search, .class = "search", .hidden = !p->search.items[0]);
+        }
+        ui_row(.grow = 1)
+        {
+                ui_host(null, .w = UI_PAD);
+                if (inline_col)
+                {
+                        ui_row(.host = &p->column_box, .max_w = most)
+                                ui_host(null, .w = ui_share(UI_COLUMN_SHARE), .min_w = UI_COLUMN_LEAST, .max_w = UI_COLUMN_MOST, .shrink = 1);
+                        ui_row(.w = UI_COLUMN_GUTTER, .class = "middle")
+                                ui_host(&p->column_bar, .w = UI_SCROLL_WIDTH);
+                }
+                ui_col(.grow = 1)
+                {
+                        if (p->above)
+                                p->above();
+                        ui_host(&p->list_box, .grow = 1);
+                }
+                ui_row(.w = UI_PAD, .class = "middle")
+                        ui_host(&p->body_bar, .w = UI_SCROLL_WIDTH);
+        }
+}
+
 static fn ui_page_view(struct ui address_to ui, struct ui_page address_to p)
 {
         int half = p->width / 2, least = ui_px(ui, UI_COLUMN_LEAST), room = p->width - 2 * ui_px(ui, UI_PAD) - ui_px(ui, UI_COLUMN_GUTTER) - p->list_least;
@@ -28259,7 +28050,6 @@ static fn ui_page_view(struct ui address_to ui, struct ui_page address_to p)
         // groups under a band as tall as the title's, and the title, the search and the body beside it.
         if (ui->sided && p->column_on)
         {
-                (void)most;
                 ui_side_frame()
                 {
                         ui_side_pane(&p->side_box)
@@ -28273,53 +28063,13 @@ static fn ui_page_view(struct ui address_to ui, struct ui_page address_to p)
                                 }
                         }
                         ui_side_body()
-                        {
-                                ui_row(.h = UI_PAGE_TOP)
-                                {
-                                        ui_text(p->title, .class = "pagetitle", .host = &p->title_box);
-                                        ui_control(&p->search, .class = "search", .hidden = !p->search.items[0]);
-                                }
-                                ui_row(.grow = 1)
-                                {
-                                        ui_host(null, .w = UI_PAD);
-                                        ui_col(.grow = 1)
-                                        {
-                                                if (p->above)
-                                                        p->above();
-                                                ui_host(&p->list_box, .grow = 1);
-                                        }
-                                        ui_row(.w = UI_PAD, .class = "middle")
-                                                ui_host(&p->body_bar, .w = UI_SCROLL_WIDTH);
-                                }
-                        }
+                                ui_page_body(p, false, most);
                 }
-                ui_view_end(p->view);
-                return;
         }
-        p->side_box = (struct ui_rect){0, 0, 0, 0};
-        ui_row(.h = UI_PAGE_TOP)
+        else
         {
-                ui_text(p->title, .class = "pagetitle", .host = &p->title_box);
-                ui_control(&p->search, .class = "search", .hidden = !p->search.items[0]);
-        }
-        ui_row(.grow = 1)
-        {
-                ui_host(null, .w = UI_PAD);
-                if (p->column_on)
-                {
-                        ui_row(.host = &p->column_box, .max_w = most)
-                                ui_host(null, .w = ui_share(UI_COLUMN_SHARE), .min_w = UI_COLUMN_LEAST, .max_w = UI_COLUMN_MOST, .shrink = 1);
-                        ui_row(.w = UI_COLUMN_GUTTER, .class = "middle")
-                                ui_host(&p->column_bar, .w = UI_SCROLL_WIDTH);
-                }
-                ui_col(.grow = 1)
-                {
-                        if (p->above)
-                                p->above();
-                        ui_host(&p->list_box, .grow = 1);
-                }
-                ui_row(.w = UI_PAD, .class = "middle")
-                        ui_host(&p->body_bar, .w = UI_SCROLL_WIDTH);
+                p->side_box = (struct ui_rect){0, 0, 0, 0};
+                ui_page_body(p, p->column_on, most);
         }
         ui_view_end(p->view);
 }
@@ -29997,7 +29747,7 @@ static int ui_app_run(struct ui_app address_to app)
         // The theme the compositor keeps in the table, taken at once the first time.
         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
         // A table the compositor has not themed yet is the standard: dark, white.
-        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_input_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+        ui_kit_sync_table(table);
         ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
         string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
@@ -30115,7 +29865,7 @@ static int ui_app_run(struct ui_app address_to app)
                         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
                         unsigned int was = language.code;
 
-                        ui_kit.wheel_off = table->wheel_off ? 1 : 0, ui_kit_caret_take(table), ui_kit_scroll_take(table), ui_kit_pace_take(table), ui_kit_input_take(table), ui_kit_language_take(table), ui_kit_text_take(table);
+                        ui_kit_sync_table(table);
                         // The title is a text the kit copied for the app, so the kit sets it again when the language changed (a theme's
                         // knock leaves it, and so does an app that names its window itself).
                         if (language.code != was && !app->own_title)
@@ -30512,18 +30262,6 @@ static b32 ui_lift_other(const struct window_row address_to own, string_address 
 #define UI_TEXT_COMMIT 256u   // a press outside a field that has the keys: the field's plain value is kept (the app commits it)
 
 /*
-        What a finger on a text widget holds, from its press to its lift: the text (a tap, or a drag that scrolls it), an
-        end of the selection by its handle (the drag moves that end), an item of the actions bar (the lift does it), or a
-        selection it is making by words (a long press, or a double tap, and the finger going on). UI_TEXT_BAR_ITEMS is the
-        most the bar has: Cut, Copy, Paste and Select All.
-*/
-#define UI_TEXT_FINGER_TEXT 1
-#define UI_TEXT_FINGER_HANDLE 2
-#define UI_TEXT_FINGER_BAR 3
-#define UI_TEXT_FINGER_SELECT 4
-#define UI_TEXT_BAR_ITEMS 4
-
-/*
         An edge scroll (ui_edge_steps): a drag held past an edge scrolls what it is in, a step at a time as the time passes. past is
         how far past the edge the drag is in device pixels (negative past the top or left, 0 inside, which stops it), at when the last
         step was (0 before the first), and owed the scroll that step owes and has not made, in thousandths of a device pixel. The text
@@ -30723,15 +30461,17 @@ static const struct doc_keymap address_to ui_text_keymap(void)
 
         if (!read)
         {
-                static char text[16384];
-                bipolar handle = system_open_at(AT_FDCWD, (string_address)UI_TEXT_KEYS_PATH, FILE_READ | O_CLOEXEC);
-                bipolar got = handle >= 0 ? system_read_once((b32)handle, text, sizeof(text) - 1) : 0;
+                char address_to text = (char address_to)memory_checked(16384);
+                bipolar handle = text ? system_open_at(AT_FDCWD, (string_address)UI_TEXT_KEYS_PATH, FILE_READ | O_CLOEXEC) : -1;
+                bipolar got = handle >= 0 ? system_read_once((b32)handle, text, 16383) : 0;
 
                 if (handle >= 0)
                         system_close(handle);
                 doc_keymap_defaults(&keys);
                 if (got > 0)
                         doc_keymap_read(&keys, text, (positive)got);
+                if (text)
+                        memory_free(text, 16384);
                 read = true;
         }
         return &keys;
@@ -31242,10 +30982,21 @@ static b32 ui_text_folds(const struct ui_text address_to t)
         return false;
 }
 
+// Shared line layout scratch for non-overlapping text layout queries and line drawing (avoids 10x 66 KiB BSS copies).
+static struct ui_text_layout ui_text_lay;
+
+// The x of an offset within cluster slice [from, to] of a laid line.
+static int ui_text_slice_x(const struct ui_text_layout address_to l, p32 from, p32 to, p64 offset)
+{
+        for (p32 k = from; k <= to; k++)
+                if (l->offset[k] >= offset)
+                        return l->x[k];
+        return l->x[to];
+}
+
 // How many rows a line takes: none hidden in a fold, one unless the widget wraps.
 static int ui_text_line_rows(struct ui address_to ui, struct ui_text address_to t, p64 line)
 {
-        static struct ui_text_layout l;
         int rows = 0, room = t->right - t->left, indent;
         p32 from = 0, to;
 
@@ -31253,13 +31004,13 @@ static int ui_text_line_rows(struct ui address_to ui, struct ui_text address_to 
                 return 0;
         if (!t->wrap || t->mode == UI_TEXT_FIELD)
                 return 1;
-        ui_text_layout_line(ui, t, line, &l);
-        indent = ui_text_wrap_indent(&l, room);
+        ui_text_layout_line(ui, t, line, &ui_text_lay);
+        indent = ui_text_wrap_indent(&ui_text_lay, room);
         for (;;)
         {
-                to = ui_text_wrap_to(&l, from, room, indent);
+                to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
                 rows++;
-                if (to >= l.count)
+                if (to >= ui_text_lay.count)
                         return rows;
                 from = to;
         }
@@ -31334,7 +31085,6 @@ static b32 ui_text_nth_row(struct ui address_to ui, struct ui_text address_to t,
 */
 static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p64 offset, int address_to x, int address_to top)
 {
-        static struct ui_text_layout l;
         b32 field = t->mode == UI_TEXT_FIELD, wrapped = t->wrap && !field;
         p64 target = doc_line_of(&t->doc, offset), line = field ? 0 : t->top_line;
         int at = 0, rows = field ? 1 : ui_text_rows(t), room = t->right - t->left, indent, place;
@@ -31346,27 +31096,27 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
                 at += ui_text_line_rows(ui, t, line);
         if (at >= rows)
                 return 1;
-        ui_text_layout_line(ui, t, target, &l);
-        for (k = 0; k < l.count && l.offset[k] < offset; k++)
+        ui_text_layout_line(ui, t, target, &ui_text_lay);
+        for (k = 0; k < ui_text_lay.count && ui_text_lay.offset[k] < offset; k++)
                 ;
-        place = l.x[k];
-        if (wrapped && !l.bidi)
+        place = ui_text_lay.x[k];
+        if (wrapped && !ui_text_lay.bidi)
         {
-                indent = ui_text_wrap_indent(&l, room);
+                indent = ui_text_wrap_indent(&ui_text_lay, room);
                 for (;;)
                 {
-                        to = ui_text_wrap_to(&l, from, room, indent);
-                        if (k < to || to >= l.count)
+                        to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
+                        if (k < to || to >= ui_text_lay.count)
                                 break;
                         from = to;
                         at++;
                 }
-                place -= l.x[from] - (from ? indent : 0);
+                place -= ui_text_lay.x[from] - (from ? indent : 0);
                 if (at >= rows)
                         return 1;
         }
         *top = t->top + at * t->line_height;
-        *x = ui_text_origin(t, &l) + place;
+        *x = ui_text_origin(t, &ui_text_lay) + place;
         return *x < t->left ? -1 : *x > t->right ? 1 : 0;
 }
 
@@ -31377,7 +31127,6 @@ static int ui_text_where(struct ui address_to ui, struct ui_text address_to t, p
 */
 static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
 {
-        static struct ui_text_layout l;
         p64 caret = t->doc.selections[t->doc.primary].active, line = doc_line_of(&t->doc, caret);
         int rows = ui_text_rows(t), width = t->right - t->left, x;
 
@@ -31405,8 +31154,8 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
                 t->scroll_x = 0;
                 return;
         }
-        ui_text_layout_line(ui, t, line, &l);
-        x = ui_text_along(&l, ui_text_x_of(&l, caret)); // from the line's start, which is its right where it reads from the right
+        ui_text_layout_line(ui, t, line, &ui_text_lay);
+        x = ui_text_along(&ui_text_lay, ui_text_x_of(&ui_text_lay, caret)); // from the line's start, which is its right where it reads from the right
         if (x - t->scroll_x < 0)
                 t->scroll_x = x - width / 4 > 0 ? x - width / 4 : 0;
         else if (x - t->scroll_x > width - 2 * ui->scale / 100)
@@ -31414,7 +31163,7 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
         // A field whose line fits is not scrolled at all; one longer shows no blank past its end.
         if (t->mode == UI_TEXT_FIELD && width > 0)
         {
-                b64 most = (b64)l.width - width + 2 * ui->scale / 100;
+                b64 most = (b64)ui_text_lay.width - width + 2 * ui->scale / 100;
 
                 t->scroll_x = t->scroll_x > most ? (most > 0 ? most : 0) : t->scroll_x;
         }
@@ -31427,26 +31176,27 @@ static fn ui_text_reveal(struct ui address_to ui, struct ui_text address_to t)
 */
 static p64 ui_text_hit(struct ui address_to ui, struct ui_text address_to t, int x, int y)
 {
-        static struct ui_text_layout l;
         struct ui_text_row row;
         int index = y > t->top && t->line_height ? (y - t->top) / t->line_height : 0, px;
 
-        ui_text_nth_row(ui, t, index < 4096 ? index : 4096, &l, &row);
-        if (l.bidi)
+        ui_text_nth_row(ui, t, index < 4096 ? index : 4096, &ui_text_lay, &row);
+        if (ui_text_lay.bidi)
         {
                 // A reordered line: the boundary whose place is nearest, whichever way it runs.
-                int along = x - ui_text_origin(t, &l), best = 0;
+                int along = x - ui_text_origin(t, &ui_text_lay), best = 0;
 
-                for (p32 b = 1; b <= l.count; b++)
-                        if ((l.x[b] > along ? l.x[b] - along : along - l.x[b]) < (l.x[best] > along ? l.x[best] - along : along - l.x[best]))
+                for (p32 b = 1; b <= ui_text_lay.count; b++)
+                        if ((ui_text_lay.x[b] > along ? ui_text_lay.x[b] - along : along - ui_text_lay.x[b]) <
+                            (ui_text_lay.x[best] > along ? ui_text_lay.x[best] - along : along - ui_text_lay.x[best]))
                                 best = (int)b;
-                return l.offset[best];
+                return ui_text_lay.offset[best];
         }
         px = x - t->left + (int)t->scroll_x + row.shift;
         for (p32 k = row.from; k < row.to; k++)
-                if (px < (l.x[k] + l.x[k + 1]) / 2)
-                        return l.offset[k];
-        return !row.last && row.to > row.from && l.shown[l.shown_at[row.to - 1]] == ' ' ? l.offset[row.to - 1] : l.offset[row.to];
+                if (px < (ui_text_lay.x[k] + ui_text_lay.x[k + 1]) / 2)
+                        return ui_text_lay.offset[k];
+        return !row.last && row.to > row.from && ui_text_lay.shown[ui_text_lay.shown_at[row.to - 1]] == ' ' ? ui_text_lay.offset[row.to - 1]
+                                                                                                               : ui_text_lay.offset[row.to];
 }
 
 /*
@@ -31832,13 +31582,6 @@ static fn ui_drop_done(const struct window_row address_to own, struct ui_drop ad
         drop->dropped = false;
 }
 
-// Where a drop would land: the kit's focus ring round the box, while a drag that the window takes is over it.
-static fn ui_drop_ring(struct ui address_to ui, const struct ui_drop address_to drop, const struct ui_box address_to box)
-{
-        if (drop->over && drop->nth >= 0)
-                ui_kit_focus_ring(ui, box);
-}
-
 /*
         A list of URIs (text/uri-list: a URI a line, CRLF or LF, a line starting with # a comment) read a file at a time: the next
         file:// URI's path from *at on, its %XX made bytes again, into into (room bytes with its end); its length, or 0 at the end. A
@@ -32094,7 +31837,6 @@ static p32 ui_text_masked_command(p32 command)
 */
 static b32 ui_text_visual(struct ui address_to ui, struct ui_text address_to t, p32 address_to command)
 {
-        static struct ui_text_layout l;
         static const p32 pairs[4][2] = {{DOC_CMD_LEFT, DOC_CMD_RIGHT}, {DOC_CMD_SELECT_LEFT, DOC_CMD_SELECT_RIGHT},
                                         {DOC_CMD_WORD_LEFT, DOC_CMD_WORD_RIGHT}, {DOC_CMD_SELECT_WORD_LEFT, DOC_CMD_SELECT_WORD_RIGHT}};
         int pair = -1, side = 0;
@@ -32108,27 +31850,27 @@ static b32 ui_text_visual(struct ui address_to ui, struct ui_text address_to t, 
                                 pair = k, side = j;
         if (pair < 0)
                 return false;
-        ui_text_layout_line(ui, t, doc_line_of(&t->doc, caret->active), &l);
-        if (!l.bidi)
+        ui_text_layout_line(ui, t, doc_line_of(&t->doc, caret->active), &ui_text_lay);
+        if (!ui_text_lay.bidi)
                 return false;
         if (pair >= 2 || t->doc.selection_count != 1)
         {
                 // A word, or carets in a number: the way the line reads decides, as the text goes.
-                *command = pairs[pair][l.base ? 1 - side : side];
+                *command = pairs[pair][ui_text_lay.base ? 1 - side : side];
                 return false;
         }
-        while (at < l.count && l.offset[at] < caret->active)
+        while (at < ui_text_lay.count && ui_text_lay.offset[at] < caret->active)
                 at++;
-        for (p32 b = 0; b <= l.count; b++)
-                if (side ? l.x[b] > l.x[at] : l.x[b] < l.x[at])
-                        if (!found || (side ? l.x[b] < l.x[best] : l.x[b] > l.x[best]))
+        for (p32 b = 0; b <= ui_text_lay.count; b++)
+                if (side ? ui_text_lay.x[b] > ui_text_lay.x[at] : ui_text_lay.x[b] < ui_text_lay.x[at])
+                        if (!found || (side ? ui_text_lay.x[b] < ui_text_lay.x[best] : ui_text_lay.x[b] > ui_text_lay.x[best]))
                                 best = b, found = true;
         if (!found)
         {
-                *command = pairs[pair][l.base ? 1 - side : side]; // the line's end: on to the next or the one before
+                *command = pairs[pair][ui_text_lay.base ? 1 - side : side]; // the line's end: on to the next or the one before
                 return false;
         }
-        doc_select_set(&t->doc, pair == 1 ? caret->anchor : l.offset[best], l.offset[best]);
+        doc_select_set(&t->doc, pair == 1 ? caret->anchor : ui_text_lay.offset[best], ui_text_lay.offset[best]);
         return true;
 }
 
@@ -32185,11 +31927,10 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
         case DOC_CMD_MENU:
         {
                 // The menu at the caret, for a key that asks for it.
-                static struct ui_text_layout l;
                 p64 caret = t->doc.selections[t->doc.primary].active, line = doc_line_of(&t->doc, caret);
 
-                ui_text_layout_line(ui, t, line, &l);
-                t->menu_x = ui_text_origin(t, &l) + ui_text_x_of(&l, caret);
+                ui_text_layout_line(ui, t, line, &ui_text_lay);
+                t->menu_x = ui_text_origin(t, &ui_text_lay) + ui_text_x_of(&ui_text_lay, caret);
                 t->menu_y = t->top + (int)(line >= t->top_line ? line - t->top_line + 1 : 1) * t->line_height;
                 return UI_TEXT_MENU;
         }
@@ -32360,11 +32101,10 @@ static long ui_edge_steps(struct ui_edge address_to e, int scale, long unit)
 // The most a field's view scrolls: its line's end past the box, with a little room after it (ui_text_reveal's rule).
 static b64 ui_text_scroll_most(struct ui address_to ui, struct ui_text address_to t)
 {
-        static struct ui_text_layout l;
         b64 most;
 
-        ui_text_layout_line(ui, t, 0, &l);
-        most = (b64)l.x[l.count] - (t->right - t->left) + 2 * ui->scale / 100;
+        ui_text_layout_line(ui, t, 0, &ui_text_lay);
+        most = (b64)ui_text_lay.x[ui_text_lay.count] - (t->right - t->left) + 2 * ui->scale / 100;
         return most > 0 ? most : 0;
 }
 
@@ -32372,15 +32112,14 @@ static b64 ui_text_scroll_most(struct ui address_to ui, struct ui_text address_t
 // the caret's room past it kept (as ui_text_reveal keeps it), and not at all when every line in view fits. A field is its one line.
 static b64 ui_text_across_most(struct ui address_to ui, struct ui_text address_to t)
 {
-        static struct ui_text_layout l;
         struct ui_text_row row;
         int rows = ui_text_rows(t), widest = 0;
         b64 most;
 
         if (t->mode == UI_TEXT_FIELD)
                 return ui_text_scroll_most(ui, t);
-        for (int index = 0; index < rows && ui_text_nth_row(ui, t, index, &l, &row); index++)
-                widest = l.width > widest ? l.width : widest;
+        for (int index = 0; index < rows && ui_text_nth_row(ui, t, index, &ui_text_lay, &row); index++)
+                widest = ui_text_lay.width > widest ? ui_text_lay.width : widest;
         most = (b64)widest - (t->right - t->left) + 2 * ui->scale / 100;
         return most > 0 ? most : 0;
 }
@@ -33945,10 +33684,10 @@ static fn ui_text_fill(struct ui address_to ui, const struct ui_text address_to 
                 ui_fill(ui, x0, y, x1 - x0, height, tone);
 }
 
-static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t, const struct ui_text_layout address_to l, p64 line,
-                            int y, int baseline, unsigned int ground)
+static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t, struct ui_text_layout address_to l,
+                            p32 from, p32 to, int shift, p64 line, int y, int baseline, unsigned int ground)
 {
-        int origin = ui_text_origin(t, l);
+        int base_origin = ui_text_origin(t, l), origin = base_origin - shift;
         unsigned int selection = ui_well(ui, UI_SELECTION, 40), text = ui_text_colour(ui, UI_ON_SURFACE);
         static struct doc_token tokens[512];
         positive token_count = t->mode == UI_TEXT_CODE ? doc_tokens(&t->doc, line, tokens, 512) : 0;
@@ -33959,27 +33698,31 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
         {
                 const struct doc_range address_to range = &t->doc.ranges[r];
 
-                if (range->kind != DOC_RANGE_HIGHLIGHT || range->finish <= l->offset[0] || range->start >= l->offset[l->count])
+                if (range->kind != DOC_RANGE_HIGHLIGHT || range->finish <= l->offset[from] || range->start >= l->offset[to])
                         continue;
                 if (!l->bidi)
-                        ui_text_fill(ui, t, origin + ui_text_x_of(l, range->start), y, ui_text_x_of(l, range->finish) - ui_text_x_of(l, range->start),
-                                     t->line_height, 0xff000000u | window_mix(ground, ui_text_range_role(range->data) & 0xffffffu, 64));
+                {
+                        int x0 = ui_text_slice_x(l, from, to, range->start), x1 = ui_text_slice_x(l, from, to, range->finish);
+
+                        ui_text_fill(ui, t, origin + x0, y, x1 - x0, t->line_height,
+                                     0xff000000u | window_mix(ground, ui_text_range_role(range->data) & 0xffffffu, 64));
+                }
                 else
-                        for (p32 k = 0; k < l->count; k++)
+                        for (p32 k = from; k < to; k++)
                                 if (l->offset[k] >= range->start && l->offset[k] < range->finish)
                                         ui_text_fill(ui, t, origin + l->left[k], y, l->right[k] - l->left[k], t->line_height,
                                                      0xff000000u | window_mix(ground, ui_text_range_role(range->data) & 0xffffffu, 64));
         }
         // The selection: one rectangle a run of selected clusters that lie side by side (all of them on a line that reads one way), and a
         // sliver past the end of a line the selection goes on from, at the end the line runs to.
-        for (p32 k = 0; k < l->count; k++)
+        for (p32 k = from; k < to; k++)
         {
                 int x0, x1;
 
                 if (!ui_text_selected(t, l->offset[k]))
                         continue;
                 x0 = l->bidi ? l->left[k] : l->x[k], x1 = l->bidi ? l->right[k] : l->x[k + 1];
-                while (k + 1 < l->count && ui_text_selected(t, l->offset[k + 1]))
+                while (k + 1 < to && ui_text_selected(t, l->offset[k + 1]))
                 {
                         int next0 = l->bidi ? l->left[k + 1] : l->x[k + 1], next1 = l->bidi ? l->right[k + 1] : l->x[k + 2];
 
@@ -33993,8 +33736,8 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 }
                 ui_text_fill(ui, t, origin + x0, y, x1 - x0, t->line_height, ui_tone(selection & 0xffffffu, selection >> 24));
         }
-        if (ui_text_selected(t, l->offset[l->count]) && t->mode != UI_TEXT_FIELD)
-                ui_text_fill(ui, t, origin + l->x[l->count] - (l->base ? t->cell / 2 + ui_px(ui, 1) : 0), y, t->cell / 2 + ui_px(ui, 1), t->line_height,
+        if (ui_text_selected(t, l->offset[to]) && t->mode != UI_TEXT_FIELD)
+                ui_text_fill(ui, t, origin + l->x[to] - (l->base ? t->cell / 2 + ui_px(ui, 1) : 0), y, t->cell / 2 + ui_px(ui, 1), t->line_height,
                              ui_tone(selection & 0xffffffu, selection >> 24));
 
         if (t->mode != UI_TEXT_CODE || l->bidi)
@@ -34002,12 +33745,15 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 // A run is drawn through the kit's scratch, which is as wide as the window: a line longer than that (a path in a field)
                 // drawn from its start is cut there, however far it is scrolled. So a line that reads one way is drawn from the
                 // cluster before the first one in sight, and what is left of the box is never laid into the scratch at all.
-                p32 first = 0;
+                p32 first = from;
+                p8 saved = l->shown[l->shown_at[to]];
 
-                while (!l->bidi && first + 2 < l->count && origin + l->x[first + 2] <= t->left)
+                while (!l->bidi && first + 2 < to && origin + l->x[first + 2] <= t->left)
                         first++;
+                l->shown[l->shown_at[to]] = 0;
                 ui_run_flagged(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, origin + (l->bidi ? 0 : l->x[first]), baseline,
                                (string_address)(l->shown + l->shown_at[first]), t->size + t->zoom, text & 0xffffffu, 255, t->left, t->right, 0, ui_text_flags(t));
+                l->shown[l->shown_at[to]] = saved;
         }
         else
         {
@@ -34025,7 +33771,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 p32 cluster[8];
                 positive cluster_n = 0;
 
-                for (p32 k = 0; k < l->count;)
+                for (p32 k = from; k < to;)
                 {
                         p64 offset = l->offset[k] - l->offset[0];
                         unsigned int ink = text;
@@ -34035,7 +33781,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                                 token++;
                         if (token < token_count && tokens[token].start <= offset)
                                 ink = ui_text_role(tokens[token].role);
-                        while (k < l->count && run < 256)
+                        while (k < to && run < 256)
                         {
                                 p32 code;
                                 positive size = l->shown_at[k + 1] - l->shown_at[k];
@@ -34143,13 +33889,13 @@ cluster_lost:
 
                 for (p64 column = t->doc.tab_size; column < indent; column += t->doc.tab_size)
                 {
-                        int at = origin + (int)column * t->cell;
+                        int at = base_origin + (int)column * t->cell;
 
                         if (at >= t->left && at < t->right)
                                 ui_fill(ui, at, y, ui_px(ui, 1), t->line_height, guide);
                 }
                 // A selection's blanks, seen: a dot in a space's cell, a line along a tab's.
-                for (p32 k = 0; k < l->count; k++)
+                for (p32 k = from; k < to; k++)
                 {
                         p8 c = l->shown[l->shown_at[k]];
                         int x0 = origin + l->x[k], x1 = origin + l->x[k + 1], mid = y + t->line_height / 2;
@@ -34170,10 +33916,10 @@ cluster_lost:
 
                 if (range->kind != DOC_RANGE_ERROR && range->kind != DOC_RANGE_WARNING && range->kind != DOC_RANGE_INFO)
                         continue;
-                if (range->finish <= l->offset[0] || range->start > l->offset[l->count])
+                if (range->finish <= l->offset[from] || range->start > l->offset[to])
                         continue;
                 colour = ui_role(range->kind == DOC_RANGE_ERROR ? UI_ERROR : range->kind == DOC_RANGE_WARNING ? UI_WARNING : UI_INFO);
-                for (int x = origin + ui_text_x_of(l, range->start), stop = origin + ui_text_x_of(l, range->finish); x < stop; x++)
+                for (int x = origin + ui_text_slice_x(l, from, to, range->start), stop = origin + ui_text_slice_x(l, from, to, range->finish); x < stop; x++)
                         ui_text_fill(ui, t, x, baseline + 2 * ui->scale / 100 + ((x / (2 * ui->scale / 100)) & 1) * ui->scale / 100, 1, ui_px(ui, 1), ui_tone(colour & 0xffffffu, 255));
         }
         // The carets on this line, in the accent, at the blink's cover (solid, faded or gone: ui_text_wake); a composition's
@@ -34185,9 +33931,9 @@ cluster_lost:
                         p64 caret = t->doc.selections[s].active;
                         unsigned int cover = UI_CARET_FULL - t->caret_fade;
 
-                        if (caret < l->offset[0] || caret > l->offset[l->count])
+                        if (caret < l->offset[from] || caret > l->offset[to])
                                 continue;
-                        ui_fill(ui, origin + ui_text_x_of(l, caret) - (t->doc.overwrite ? 0 : ui_px(ui, 1)), y + ui_px(ui, 1),
+                        ui_fill(ui, origin + ui_text_slice_x(l, from, to, caret) - (t->doc.overwrite ? 0 : ui_px(ui, 1)), y + ui_px(ui, 1),
                                 t->doc.overwrite ? t->cell : ui_caret_px(ui),
                                 t->line_height - 2 * ui->scale / 100,
                                 ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, t->doc.overwrite ? 110 * cover / UI_CARET_FULL : cover));
@@ -34196,9 +33942,9 @@ cluster_lost:
         {
                 p64 caret = t->doc.selections[t->doc.primary].active;
 
-                if (caret >= l->offset[0] && caret <= l->offset[l->count])
+                if (caret >= l->offset[from] && caret <= l->offset[to])
                 {
-                        int x = origin + ui_text_x_of(l, caret);
+                        int x = origin + ui_text_slice_x(l, from, to, caret);
                         p8 shown[sizeof(t->preedit) * 3];
                         int wide;
 
@@ -34219,7 +33965,6 @@ cluster_lost:
 static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int x, int y, int width, int height, unsigned int ground)
 {
         UI_CALL();
-        static struct ui_text_layout l;
         p64 lines = doc_line_count(&t->doc), line = t->mode == UI_TEXT_FIELD ? 0 : t->top_line;
         font_metrics m;
         int row_y;
@@ -34274,7 +34019,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
 
                 if (doc_hidden(&t->doc, line))
                         continue;
-                ui_text_layout_line(ui, t, line, &l);
+                ui_text_layout_line(ui, t, line, &ui_text_lay);
                 // The line's paper: a line range's ground, and the current line lit faintly in a code view with one
                 // caret; filled under the line, and the paper the code view's glyphs are laid on.
                 line_ground = ground;
@@ -34310,39 +34055,28 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                                 ui_chevron(ui, ui_mirror(x + t->cell / 2 - t->cell / 3, 2 * (t->cell / 3) + 1, x, width) + t->cell / 3, row_y + t->line_height / 2, t->cell / 3,
                                            ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 160));
                 }
-                if (!t->wrap || t->mode == UI_TEXT_FIELD || l.bidi)
+                if (!t->wrap || t->mode == UI_TEXT_FIELD || ui_text_lay.bidi)
                 {
-                        ui_text_draw_line(ui, t, &l, line, row_y, baseline, line_ground);
+                        ui_text_draw_line(ui, t, &ui_text_lay, 0, ui_text_lay.count, 0, line, row_y, baseline, line_ground);
                         row_y += t->line_height;
                         continue;
                 }
                 // Wrapped: the line cut where it would pass the box's width, at a blank when one is near, each row
                 // after the first indented as the line is (ui_text_wrap_to, which the hand and the handles cut it by too).
                 {
-                        static struct ui_text_layout part;
                         p32 from = 0;
-                        int room = t->right - t->left, indent = ui_text_wrap_indent(&l, room);
+                        int room = t->right - t->left, indent = ui_text_wrap_indent(&ui_text_lay, room);
 
                         do
                         {
-                                p32 to = ui_text_wrap_to(&l, from, room, indent);
-                                int offset_x = l.x[from] - (from ? indent : 0);
+                                p32 to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
+                                int offset_x = ui_text_lay.x[from] - (from ? indent : 0);
 
-                                part.count = to - from;
-                                for (p32 k = 0; k <= part.count; k++)
-                                {
-                                        part.offset[k] = l.offset[from + k];
-                                        part.x[k] = l.x[from + k] - offset_x;
-                                        part.shown_at[k] = l.shown_at[from + k] - l.shown_at[from];
-                                }
-                                part.shown_length = l.shown_at[to] - l.shown_at[from];
-                                memory_copy(part.shown, l.shown + l.shown_at[from], part.shown_length);
-                                part.shown[part.shown_length] = 0;
-                                ui_text_draw_line(ui, t, &part, line, row_y, row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline,
-                                                  line_ground);
+                                ui_text_draw_line(ui, t, &ui_text_lay, from, to, offset_x, line, row_y,
+                                                  row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline, line_ground);
                                 row_y += t->line_height;
                                 from = to;
-                        } while (from < l.count && row_y + t->line_height <= t->bottom);
+                        } while (from < ui_text_lay.count && row_y + t->line_height <= t->bottom);
                 }
         }
 }

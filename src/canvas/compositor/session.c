@@ -314,12 +314,10 @@ static void compositor_wall_read(void)
         compositor_damage(0, 0, compositor.width, compositor.height);
 }
 
-static void compositor_look_read(void)
+static void compositor_cursor_look_read(void)
 {
         char word[16];
         long colour, sized = 0;
-
-        compositor_wall_read();
         int size, look = 0, style, squeeze = 25;
         long percent = 25;
 
@@ -361,6 +359,24 @@ static void compositor_look_read(void)
         }
 }
 
+static void compositor_look_read(void)
+{
+        compositor_wall_read();
+        compositor_cursor_look_read();
+}
+
+// Every window row that holds a program woken to read the table's updated settings.
+static void compositor_wake_all(void)
+{
+        struct windows *table = compositor.table;
+
+        if (!table)
+                return;
+        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                if (table->pid[row])
+                        rows_add(&compositor.woken, row);
+}
+
 /*
         The theme of Canvas's own windows, as `moonwater canvas theme`, `canvas theme accent` and `canvas
         motion` keep it, into the window table's header (theme, accent, motion), with themed counted up and
@@ -386,9 +402,7 @@ static void compositor_theme_set(unsigned int theme, unsigned int accent, unsign
                                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor_damage(0, 0, compositor.width, compositor.height);
         }
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (table->pid[row])
-                        rows_add(&compositor.woken, row);
+        compositor_wake_all();
 }
 
 // Whether the local clock says day (SETTING_THEME_DAY_FROM to SETTING_THEME_DAY_UNTIL).
@@ -537,15 +551,16 @@ static unsigned int compositor_ink_role(int role)
 
 
 // A setting the table keeps for every window, a field of it or two (other none for one), set to what was read: a change knocks every
-// window (themed counts up), as a theme change does, and the same value knocks none. The callers have a table.
+// window (themed counts up), as a theme change does, and the same value knocks none.
 static void compositor_table_publish(unsigned int *field, unsigned int value, unsigned int *other, unsigned int other_value)
 {
-        if (*field == value && (!other || *other == other_value))
+        if (!compositor.table || (*field == value && (!other || *other == other_value)))
                 return;
         *field = value;
         if (other)
                 *other = other_value;
         __atomic_add_fetch(&compositor.table->themed, 1, __ATOMIC_RELEASE);
+        compositor_wake_all();
 }
 
 // The wheel's glide (ui_wheel_turn), as the table keeps it.
@@ -645,15 +660,12 @@ static void compositor_scroll_read(void)
 */
 static void compositor_pace_set(const char *word)
 {
-        struct windows *table = compositor.table;
         long percent = UI_PACE_STANDARD;
 
         compositor_setting_kept(SETTING_MOTION_SPEED_PATH, word, &percent);
         ui_pace = percent < UI_PACE_LEAST || percent > UI_PACE_MOST ? UI_PACE_STANDARD : (unsigned int)percent;
-        if (!table || table->motion_pace == ui_pace)
-                return;
-        table->motion_pace = ui_pace;
-        __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+        if (compositor.table)
+                compositor_table_publish(&compositor.table->motion_pace, ui_pace, 0, 0);
 }
 
 // canvas vrr: the policy of the screen's variable refresh (kms.c's compositor_vrr) (on when nothing is kept), and the screen set by it.
@@ -668,7 +680,7 @@ static void compositor_vrr_read(void)
         compositor_vrr_keep();
 }
 
-static void compositor_theme_read(void)
+static void compositor_theme_core_read(void)
 {
         char word[16];
         long accent = -1, smooth = 0, blink = 0, thick = 0, text = 100, border = COMPOSITOR_BORDER_STANDARD;
@@ -686,14 +698,11 @@ static void compositor_theme_read(void)
         compositor_word(SETTING_WHEEL_SMOOTH_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_WHEEL_SMOOTH_PATH, word, &smooth);
         compositor_wheel_publish(smooth != 0);
-        compositor_scroll_read();
         compositor_word(SETTING_CARET_BLINK_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_CARET_BLINK_PATH, word, &blink);
         compositor_word(SETTING_CARET_THICKNESS_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_CARET_THICKNESS_PATH, word, &thick);
         compositor_caret_publish((unsigned int)blink + 1, (unsigned int)thick + 1);
-        // canvas vrr: the screen's variable refresh (kms.c), read with the look, as every change of /root and the start read it.
-        compositor_vrr_read();
         // English when nothing is kept, and when what is kept is not a code (default).
         compositor_word(SETTING_LANGUAGE_PATH, word, sizeof(word));
         compositor_language_publish(windows_language_code(word, string_length((string_address)word)));
@@ -711,6 +720,13 @@ static void compositor_theme_read(void)
         // The pace after the theme, so a window that takes the table's first count takes its theme with it.
         compositor_word(SETTING_MOTION_SPEED_PATH, word, sizeof(word));
         compositor_pace_set(word);
+}
+
+static void compositor_theme_read(void)
+{
+        compositor_theme_core_read();
+        compositor_scroll_read();
+        compositor_vrr_read();
 }
 
 // Auto, again by the clock: a minute's wake is enough.
@@ -967,6 +983,7 @@ static void compositor_hand_set(const char *click, const char *hold, const char 
                 return;
         table->click_ms = click_ms, table->hold_ms = hold_ms, table->wheel_lines = lines;
         __atomic_add_fetch(&table->themed, 1, __ATOMIC_RELEASE);
+        compositor_wake_all();
 }
 
 static void compositor_hand_read(void)
@@ -980,8 +997,7 @@ static void compositor_hand_read(void)
         compositor_hand_set(words[0], words[1], words[2], words[3], words[4]);
 }
 
-// Read when the compositor starts and again when a file of them is written.
-static void compositor_input_settings_read(void)
+static void compositor_input_core_read(void)
 {
         char words[6][16];
         static const char *const paths[6] = {SETTING_SHAKE_PATH, SETTING_SHAKE_DELAY_PATH, SETTING_SENSITIVITY_PATH,
@@ -990,6 +1006,12 @@ static void compositor_input_settings_read(void)
         for (unsigned int at = 0; at < 6; at++)
                 compositor_word(paths[at], words[at], sizeof(words[at]));
         compositor_input_settings_set(words[0], words[1], words[2], words[3], words[4], words[5]);
+}
+
+// Read when the compositor starts and again when a file of them is written.
+static void compositor_input_settings_read(void)
+{
+        compositor_input_core_read();
         compositor_taskbar_settings_read();
         compositor_touch_settings_read();
         compositor_predict_read();
@@ -1292,6 +1314,162 @@ static void compositor_inputs_open(void)
 static void compositor_osk_setting_read(void);
 static void compositor_keys_read(void);
 
+// Declarative mapping from /root/<name> setting files to the reader group(s) they affect.
+#define COMPOSITOR_SET_CLIP     (1u << 0)
+#define COMPOSITOR_SET_GPU      (1u << 1)
+#define COMPOSITOR_SET_WALL     (1u << 2)
+#define COMPOSITOR_SET_LOOK     (1u << 3)
+#define COMPOSITOR_SET_THEME    (1u << 4)
+#define COMPOSITOR_SET_SCROLL   (1u << 5)
+#define COMPOSITOR_SET_VRR      (1u << 6)
+#define COMPOSITOR_SET_INPUT    (1u << 7)
+#define COMPOSITOR_SET_TASKBAR  (1u << 8)
+#define COMPOSITOR_SET_TOUCH    (1u << 9)
+#define COMPOSITOR_SET_PREDICT  (1u << 10)
+#define COMPOSITOR_SET_CLICK    (1u << 11)
+#define COMPOSITOR_SET_HAND     (1u << 12)
+#define COMPOSITOR_SET_OSK      (1u << 13)
+#define COMPOSITOR_SET_DISPLAYS (1u << 14)
+#define COMPOSITOR_SET_ALL      ((1u << 14) - 1u)
+
+struct compositor_setting_spec
+{
+        const char *path;
+        unsigned int group;
+};
+
+static const struct compositor_setting_spec compositor_setting_specs[] = {
+        {SETTING_CLIPBOARD_PATH, COMPOSITOR_SET_CLIP},
+        {SETTING_CLIPBOARD_HISTORY_PATH, COMPOSITOR_SET_CLIP},
+        {SETTING_GPU_PATH, COMPOSITOR_SET_GPU},
+        {SETTING_WALLPAPER_PATH, COMPOSITOR_SET_WALL},
+        {SETTING_WALLPAPER_DARK_PATH, COMPOSITOR_SET_WALL},
+        {SETTING_WALLPAPER_MARIA_PATH, COMPOSITOR_SET_WALL},
+        {SETTING_WALLPAPER_GLOW_PATH, COMPOSITOR_SET_WALL},
+        {SETTING_BACKGROUND_PATH, COMPOSITOR_SET_LOOK},
+        {SETTING_CURSOR_SIZE_PATH, COMPOSITOR_SET_LOOK},
+        {SETTING_CURSOR_LOOK_PATH, COMPOSITOR_SET_LOOK},
+        {SETTING_CURSOR_STYLE_PATH, COMPOSITOR_SET_LOOK},
+        {SETTING_SQUEEZE_PATH, COMPOSITOR_SET_LOOK},
+        {SETTING_THEME_PATH, COMPOSITOR_SET_THEME},
+        {SETTING_ACCENT_PATH, COMPOSITOR_SET_THEME},
+        {SETTING_MOTION_PATH, COMPOSITOR_SET_THEME},
+        {SETTING_MOTION_SPEED_PATH, COMPOSITOR_SET_THEME},
+        {SETTING_WHEEL_SMOOTH_PATH, COMPOSITOR_SET_THEME},
+        {SETTING_CARET_BLINK_PATH, COMPOSITOR_SET_THEME},
+        {SETTING_CARET_THICKNESS_PATH, COMPOSITOR_SET_THEME},
+        {SETTING_LANGUAGE_PATH, COMPOSITOR_SET_THEME},
+        {SETTING_TEXT_SCALE_PATH, COMPOSITOR_SET_THEME},
+        {SETTING_BORDER_WIDTH_PATH, COMPOSITOR_SET_THEME},
+        {SETTING_SCROLL_NATURAL_PATH, COMPOSITOR_SET_SCROLL},
+        {SETTING_SCROLL_MOMENTUM_PATH, COMPOSITOR_SET_SCROLL},
+        {SETTING_SCROLL_RUBBER_PATH, COMPOSITOR_SET_SCROLL},
+        {SETTING_SCROLL_DRAG_PATH, COMPOSITOR_SET_SCROLL},
+        {SETTING_TRACKPAD_SPEED_PATH, COMPOSITOR_SET_SCROLL},
+        {SETTING_VRR_PATH, COMPOSITOR_SET_VRR},
+        {SETTING_SHAKE_PATH, COMPOSITOR_SET_INPUT},
+        {SETTING_SHAKE_DELAY_PATH, COMPOSITOR_SET_INPUT},
+        {SETTING_SENSITIVITY_PATH, COMPOSITOR_SET_INPUT},
+        {SETTING_ACCELERATION_PATH, COMPOSITOR_SET_INPUT},
+        {SETTING_REPEAT_DELAY_PATH, COMPOSITOR_SET_INPUT},
+        {SETTING_REPEAT_RATE_PATH, COMPOSITOR_SET_INPUT},
+        {SETTING_TASKBAR_POSITION_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_DISPLAY_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_TRAY_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_CLOCK_FORMAT_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_DATE_FORMAT_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_TEXT_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_LAUNCHER_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_SCALE_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_PADDING_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_FULLSCREEN_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_MOON_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_TASKS_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_NEWEST_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_ORDER_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_MOON_LOOK_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_CLOCK_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_CLOCK_BULGE_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_ITEM_NOTICES_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_ITEM_MIC_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_ITEM_SOUND_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_ITEM_BATTERY_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_ITEM_TEXT_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_ITEM_CLOCK_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_GROUPED_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_EDGE_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TASKBAR_MOON_SPIN_PATH, COMPOSITOR_SET_TASKBAR},
+        {TASKBAR_TUNE_PATH, COMPOSITOR_SET_TASKBAR},
+        {SETTING_TOUCH_PATH, COMPOSITOR_SET_TOUCH},
+        {SETTING_TOUCH_LEFT_PATH, COMPOSITOR_SET_TOUCH},
+        {SETTING_TOUCH_RIGHT_PATH, COMPOSITOR_SET_TOUCH},
+        {SETTING_PREDICT_TOUCH_PATH, COMPOSITOR_SET_PREDICT},
+        {SETTING_CURSOR_CLICK_PATH, COMPOSITOR_SET_CLICK},
+        {SETTING_DOUBLE_CLICK_PATH, COMPOSITOR_SET_HAND},
+        {SETTING_TOUCH_HOLD_PATH, COMPOSITOR_SET_HAND},
+        {SETTING_TERMINAL_WHEEL_PATH, COMPOSITOR_SET_HAND},
+        {SETTING_SHAKE_FEEL_PATH, COMPOSITOR_SET_HAND},
+        {SETTING_BORDER_GRIP_PATH, COMPOSITOR_SET_HAND},
+        {SETTING_ONSCREEN_PATH, COMPOSITOR_SET_OSK},
+        {SETTING_CANVAS_ARRANGE_PATH, COMPOSITOR_SET_DISPLAYS},
+        {SETTING_CANVAS_DISPLAYS_PATH, COMPOSITOR_SET_DISPLAYS},
+};
+
+static unsigned int compositor_setting_mask(const char *name)
+{
+        unsigned int mask = 0;
+
+        if (!name)
+                return COMPOSITOR_SET_ALL;
+        for (unsigned int at = 0; at < sizeof(compositor_setting_specs) / sizeof(compositor_setting_specs[0]); at++)
+                if (string_equals((string_address)name, (string_address)compositor_setting_specs[at].path + sizeof("/root/") - 1))
+                        mask |= compositor_setting_specs[at].group;
+        if (!mask && compositor_setting_file(name))
+                mask = COMPOSITOR_SET_ALL;
+        return mask;
+}
+
+// Reload only the setting group(s) affected by changed_name (or all non-display groups when changed_name is null).
+static void compositor_settings_sync(const char *changed_name)
+{
+        unsigned int mask = compositor_setting_mask(changed_name);
+
+        if (!mask)
+                return;
+        if (mask & COMPOSITOR_SET_CLIP)
+                compositor_clip_settings();
+#ifndef SHELL_NO_GPU
+        if (mask & COMPOSITOR_SET_GPU)
+                compositor_gpu_settings();
+#endif
+        if (mask & COMPOSITOR_SET_WALL)
+                compositor_wall_read();
+        if (mask & COMPOSITOR_SET_LOOK)
+                compositor_cursor_look_read();
+        if (mask & COMPOSITOR_SET_THEME)
+                compositor_theme_core_read();
+        if (mask & COMPOSITOR_SET_SCROLL)
+                compositor_scroll_read();
+        if (mask & COMPOSITOR_SET_VRR)
+                compositor_vrr_read();
+        if (mask & COMPOSITOR_SET_INPUT)
+                compositor_input_core_read();
+        if (mask & COMPOSITOR_SET_TASKBAR)
+                compositor_taskbar_settings_read();
+        if (mask & COMPOSITOR_SET_TOUCH)
+                compositor_touch_settings_read();
+        if (mask & COMPOSITOR_SET_PREDICT)
+                compositor_predict_read();
+        if (mask & COMPOSITOR_SET_CLICK)
+                compositor_click_read();
+        if (mask & COMPOSITOR_SET_HAND)
+                compositor_hand_read();
+        if (mask & COMPOSITOR_SET_OSK)
+                compositor_osk_setting_read();
+        if (mask & COMPOSITOR_SET_DISPLAYS)
+                compositor_modes_forget(), compositor_space_retake();
+}
+
 // What appeared in /dev/input since the last look: a name that is eventN is a device;
 // and a keyboard written in /root is a layout that was changed.
 static void compositor_inputs_watch(void)
@@ -1318,25 +1496,8 @@ static void compositor_inputs_watch(void)
                                 compositor_modes_forget();
                                 compositor_space_retake();
                         }
-                        else if (compositor_setting_file(name) || string_equals((string_address)name, (string_address)TASKBAR_TUNE_NAME) ||
-                            string_equals((string_address)name, (string_address)SETTING_CANVAS_DISPLAYS_PATH + sizeof("/root/") - 1))
-                        {
-                                compositor_clip_settings();
-#ifndef SHELL_NO_GPU
-                                compositor_gpu_settings();
-#endif
-                                compositor_look_read();
-                                compositor_theme_read();
-                                compositor_input_settings_read();
-                                compositor_osk_setting_read();
-                                // The arrangement and the displays: the screens laid again, which probes them, so only when one
-                                // of those files is the one written.
-                                if (string_equals((string_address)name,
-                                                  (string_address)SETTING_CANVAS_ARRANGE_PATH + sizeof("/root/") - 1) ||
-                                    string_equals((string_address)name,
-                                                  (string_address)SETTING_CANVAS_DISPLAYS_PATH + sizeof("/root/") - 1))
-                                        compositor_modes_forget(), compositor_space_retake();
-                        }
+                        else if (compositor_setting_mask(name))
+                                compositor_settings_sync(name);
                         else if (string_equals((string_address)name, (string_address)COMPOSITOR_DARK_FILE + sizeof("/run/moonwater/") - 1))
                                 compositor_dark_look();
                         //      The rules' chords, written again at every load of the rules: read again, so a chord a load
@@ -1379,14 +1540,7 @@ static void compositor_root_again(void)
                 compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive) "/root",
                                 COMPOSITOR_IN_CLOSE_WRITE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_CREATE,
                                 0, 0, 0);
-        compositor_clip_settings();
-#ifndef SHELL_NO_GPU
-        compositor_gpu_settings();
-#endif
-        compositor_look_read();
-        compositor_theme_read();
-        compositor_input_settings_read();
-        compositor_osk_setting_read();
+        compositor_settings_sync(null);
         if (!compositor.layout_given)
                 compositor_layout_read();
         compositor_space_retake();
@@ -1430,37 +1584,67 @@ static int compositor_post_now(int row, unsigned int type, unsigned int flags, i
         again before the next thing the row is sent and at each pass of the loop (compositor_owed_pass), the buttons first and then the keys,
         with the flags it was dropped with (a key's character none, as compositor_keys_release posts it).
 */
-static unsigned char *compositor_owed;                 // the buttons (bit of code - COMPOSITOR_BTN_LEFT) whose release the row is owed
-static unsigned int (*compositor_owed_flags)[8];
-static unsigned char (*compositor_owed_keys)[32];        // the keys (bit of code, codes under 256) whose release the row is owed
-static unsigned int (*compositor_owed_key_flags)[256];
-static unsigned char *compositor_owed_any;             // whether any key of the row is owed
-static unsigned char *compositor_owed_physical;        // the buttons owed whose device was the machine's own, a bit each (compositor_owed)
-static unsigned char (*compositor_owed_key_physical)[32]; // the same for the keys owed (compositor_owed_keys)
+#define COMPOSITOR_OWED_CAP 64u
+struct compositor_owed_item
+{
+        int row;
+        unsigned int type;
+        unsigned int flags;
+        int code;
+        unsigned char physical;
+};
+static struct compositor_owed_item compositor_owed_q[COMPOSITOR_OWED_CAP];
+static unsigned int compositor_owed_n;
+
+static void compositor_owed_reset(void)
+{
+        compositor_owed_n = 0;
+}
+
+static void compositor_owed_add(int row, unsigned int type, unsigned int flags, int code, int physical)
+{
+        for (unsigned int at = 0; at < compositor_owed_n; at++)
+                if (compositor_owed_q[at].row == row && compositor_owed_q[at].type == type && compositor_owed_q[at].code == code)
+                {
+                        compositor_owed_q[at].flags = flags;
+                        compositor_owed_q[at].physical = (unsigned char)(physical != 0);
+                        return;
+                }
+        if (compositor_owed_n < COMPOSITOR_OWED_CAP)
+                compositor_owed_q[compositor_owed_n++] = (struct compositor_owed_item){
+                        .row = row, .type = type, .flags = flags, .code = code, .physical = (unsigned char)(physical != 0)
+                };
+}
 
 static void compositor_owed_flush(int row)
 {
-        if (row < 0 || row >= COMPOSITOR_ROWS)
+        unsigned int kept = 0;
+        int blocked = 0;
+
+        if (row < 0 || !compositor_owed_n)
                 return;
-        for (unsigned int index = 0; index < 8 && compositor_owed[row]; index++)
+        for (int pass = 0; pass < 2 && !blocked; pass++)
         {
-                if (!(compositor_owed[row] >> index & 1))
-                        continue;
-                if (!compositor_post_now(row, WINDOW_EVENT_BUTTON, compositor_owed_flags[row][index], (int)(COMPOSITOR_BTN_LEFT + index), 0,
-                                         compositor_owed_physical[row] >> index & 1))
-                        return;
-                compositor_owed[row] &= (unsigned char)~(1u << index);
+                unsigned int want = pass == 0 ? WINDOW_EVENT_BUTTON : WINDOW_EVENT_KEY;
+
+                for (unsigned int at = 0; at < compositor_owed_n; at++)
+                {
+                        struct compositor_owed_item *item = &compositor_owed_q[at];
+
+                        if (item->row != row || item->type != want)
+                                continue;
+                        if (!compositor_post_now(row, item->type, item->flags, item->code, 0, item->physical))
+                        {
+                                blocked = 1;
+                                break;
+                        }
+                        item->row = -1;
+                }
         }
-        for (unsigned int code = 0; code < 256 && compositor_owed_any[row]; code++)
-        {
-                if (!(compositor_owed_keys[row][code >> 3] >> (code & 7) & 1))
-                        continue;
-                if (!compositor_post_now(row, WINDOW_EVENT_KEY, compositor_owed_key_flags[row][code], (int)code, 0,
-                                         compositor_owed_key_physical[row][code >> 3] >> (code & 7) & 1))
-                        return;
-                compositor_owed_keys[row][code >> 3] &= (unsigned char)~(1u << (code & 7));
-        }
-        compositor_owed_any[row] = 0;
+        for (unsigned int at = 0; at < compositor_owed_n; at++)
+                if (compositor_owed_q[at].row >= 0)
+                        compositor_owed_q[kept++] = compositor_owed_q[at];
+        compositor_owed_n = kept;
 }
 
 static int compositor_post(int row, unsigned int type, unsigned int flags, int a, int b)
@@ -1471,42 +1655,45 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
                 return 0;
         compositor_owed_flush(row);
         posted = compositor_post_now(row, type, flags, a, b, compositor_post_physical);
-        if (!posted && type == WINDOW_EVENT_BUTTON && !(flags & WINDOW_KEY_DOWN) && (unsigned int)a - COMPOSITOR_BTN_LEFT < 8)
-        {
-                unsigned int bit = 1u << ((unsigned int)a - COMPOSITOR_BTN_LEFT);
-
-                compositor_owed[row] |= (unsigned char)bit;
-                compositor_owed_physical[row] = (unsigned char)(compositor_post_physical ? compositor_owed_physical[row] | bit :
-                                                                compositor_owed_physical[row] & ~bit);
-                compositor_owed_flags[row][(unsigned int)a - COMPOSITOR_BTN_LEFT] = flags;
-        }
-        if (!posted && type == WINDOW_EVENT_KEY && !(flags & WINDOW_KEY_DOWN) && (unsigned int)a < 256 && row < COMPOSITOR_ROWS)
-        {
-                unsigned int bit = 1u << ((unsigned int)a & 7);
-
-                compositor_owed_keys[row][(unsigned int)a >> 3] |= (unsigned char)bit;
-                compositor_owed_key_physical[row][(unsigned int)a >> 3] = (unsigned char)(compositor_post_physical ?
-                        compositor_owed_key_physical[row][(unsigned int)a >> 3] | bit : compositor_owed_key_physical[row][(unsigned int)a >> 3] & ~bit);
-                compositor_owed_key_flags[row][(unsigned int)a] = flags;
-                compositor_owed_any[row] = 1;
-        }
+        if (!posted && !(flags & WINDOW_KEY_DOWN) &&
+            ((type == WINDOW_EVENT_BUTTON && (unsigned int)a - COMPOSITOR_BTN_LEFT < 8) ||
+             (type == WINDOW_EVENT_KEY && (unsigned int)a < 256)))
+                compositor_owed_add(row, type, flags, a, compositor_post_physical);
         return posted;
 }
 
 // A row gone owes nothing: what it was owed was the program's that is gone, not the next one's.
 static void compositor_owed_drop(int row)
 {
-        compositor_owed[row] = 0;
-        compositor_owed_any[row] = 0;
-        memory_zero(compositor_owed_keys[row], sizeof compositor_owed_keys[row]);
+        unsigned int kept = 0;
+
+        for (unsigned int at = 0; at < compositor_owed_n; at++)
+                if (compositor_owed_q[at].row != row)
+                        compositor_owed_q[kept++] = compositor_owed_q[at];
+        compositor_owed_n = kept;
 }
 
 // What every row is owed, tried again: a program that has caught up takes the release that did not fit.
 static void compositor_owed_pass(void)
 {
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (compositor_owed[row] || compositor_owed_any[row])
-                        compositor_owed_flush(row);
+        int seen[COMPOSITOR_OWED_CAP];
+        unsigned int count = 0;
+
+        if (!compositor_owed_n)
+                return;
+        for (unsigned int at = 0; at < compositor_owed_n; at++)
+        {
+                int row = compositor_owed_q[at].row;
+                unsigned int dup = 0;
+
+                for (unsigned int j = 0; j < count; j++)
+                        if (seen[j] == row)
+                                dup = 1;
+                if (!dup)
+                        seen[count++] = row;
+        }
+        for (unsigned int j = 0; j < count; j++)
+                compositor_owed_flush(seen[j]);
 }
 
 static int compositor_post_now(int row, unsigned int type, unsigned int flags, int a, int b, int physical)

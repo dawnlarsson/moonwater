@@ -694,21 +694,24 @@ static void compositor_button_rect(int x, int y, int which)
         compositor.band_at = 0;
 }
 
+// Trigger a band-anchored popup via the runner unless a window named `named` is already open.
+static void compositor_popup_trigger(const char *named, const char *say, int x, int y, int slot)
+{
+        if (named && compositor_row_named(named) >= 0)
+                return;
+        compositor_button_rect(x, y, slot);
+        compositor_script_say(say);
+}
+
 static void compositor_volume_open(int x, int y)
 {
-        if (compositor_quick_row() >= 0)
-                return;
-        compositor_button_rect(x, y, TASKBAR_VOLUME);
-        compositor_script_say("volume_button");
+        compositor_popup_trigger("mixer-quick", "volume_button", x, y, TASKBAR_VOLUME);
 }
 
 // The microphone cell pressed: the same popup form of the mixer (mic_button, which adds -i) with the recording strips in it, beside the cell.
 static void compositor_mic_open(int x, int y)
 {
-        if (compositor_quick_row() >= 0)
-                return;
-        compositor_button_rect(x, y, TASKBAR_MIC);
-        compositor_script_say("mic_button");
+        compositor_popup_trigger("mixer-quick", "mic_button", x, y, TASKBAR_MIC);
 }
 
 /*
@@ -749,10 +752,7 @@ static void compositor_volume_show(void)
 // Settings on its System notices page. A popup already up is put away by the press before this runs, so none is started twice.
 static void compositor_notices_open(int x, int y)
 {
-        if (compositor_row_named("notices") >= 0)
-                return;
-        compositor_button_rect(x, y, TASKBAR_NOTICES);
-        compositor_script_say("notices_button");
+        compositor_popup_trigger("notices", "notices_button", x, y, TASKBAR_NOTICES);
 }
 
 // The page looked at: whether there is a server, and the volume and the mute it says (not for a moment after our own change).
@@ -983,9 +983,8 @@ static void compositor_settings_open(void)
 */
 static void compositor_launcher_open(int x, int y)
 {
-        compositor_button_rect(x, y, TASKBAR_LAUNCHER);
         compositor.launcher_asked++;
-        compositor_script_say("launcher_button");
+        compositor_popup_trigger(null, "launcher_button", x, y, TASKBAR_LAUNCHER);
 }
 
 /*
@@ -1082,44 +1081,21 @@ static unsigned int compositor_modifiers(void)
 */
 static unsigned int compositor_chord_next(unsigned int how, unsigned int code)
 {
-        int filled = how == COMPOSITOR_MAXIMIZED || how == COMPOSITOR_ROOM;
+        static const unsigned char next[10][4] = {
+            [COMPOSITOR_FLOATING]     = {COMPOSITOR_LEFT, COMPOSITOR_RIGHT, COMPOSITOR_MAXIMIZED, COMPOSITOR_FLOATING},
+            [COMPOSITOR_MAXIMIZED]    = {COMPOSITOR_LEFT, COMPOSITOR_RIGHT, COMPOSITOR_MAXIMIZED, COMPOSITOR_FLOATING},
+            [COMPOSITOR_LEFT]         = {COMPOSITOR_LEFT, COMPOSITOR_FLOATING, COMPOSITOR_TOP_LEFT, COMPOSITOR_BOTTOM_LEFT},
+            [COMPOSITOR_RIGHT]        = {COMPOSITOR_FLOATING, COMPOSITOR_RIGHT, COMPOSITOR_TOP_RIGHT, COMPOSITOR_BOTTOM_RIGHT},
+            [COMPOSITOR_ROOM]         = {COMPOSITOR_LEFT, COMPOSITOR_RIGHT, COMPOSITOR_ROOM, COMPOSITOR_FLOATING},
+            [COMPOSITOR_BOTTOM]       = {COMPOSITOR_BOTTOM_LEFT, COMPOSITOR_BOTTOM_RIGHT, COMPOSITOR_MAXIMIZED, COMPOSITOR_BOTTOM},
+            [COMPOSITOR_TOP_LEFT]     = {COMPOSITOR_TOP_LEFT, COMPOSITOR_TOP_RIGHT, COMPOSITOR_MAXIMIZED, COMPOSITOR_LEFT},
+            [COMPOSITOR_TOP_RIGHT]    = {COMPOSITOR_TOP_LEFT, COMPOSITOR_TOP_RIGHT, COMPOSITOR_MAXIMIZED, COMPOSITOR_RIGHT},
+            [COMPOSITOR_BOTTOM_LEFT]  = {COMPOSITOR_BOTTOM_LEFT, COMPOSITOR_BOTTOM_RIGHT, COMPOSITOR_LEFT, COMPOSITOR_BOTTOM_LEFT},
+            [COMPOSITOR_BOTTOM_RIGHT] = {COMPOSITOR_BOTTOM_LEFT, COMPOSITOR_BOTTOM_RIGHT, COMPOSITOR_RIGHT, COMPOSITOR_BOTTOM_RIGHT},
+        };
+        unsigned int dir = code == CK_KEY_LEFT ? 0 : code == CK_KEY_RIGHT ? 1 : code == CK_KEY_UP ? 2 : code == CK_KEY_DOWN ? 3 : 4;
 
-        if (code == CK_KEY_LEFT || code == CK_KEY_RIGHT)
-        {
-                int left = code == CK_KEY_LEFT;
-
-                if (how == COMPOSITOR_FLOATING || filled)
-                        return left ? COMPOSITOR_LEFT : COMPOSITOR_RIGHT;
-                if (how == (left ? COMPOSITOR_RIGHT : COMPOSITOR_LEFT))
-                        return COMPOSITOR_FLOATING;
-                if (how == (left ? COMPOSITOR_TOP_RIGHT : COMPOSITOR_TOP_LEFT))
-                        return left ? COMPOSITOR_TOP_LEFT : COMPOSITOR_TOP_RIGHT;
-                if (how == COMPOSITOR_BOTTOM || how == (left ? COMPOSITOR_BOTTOM_RIGHT : COMPOSITOR_BOTTOM_LEFT))
-                        return left ? COMPOSITOR_BOTTOM_LEFT : COMPOSITOR_BOTTOM_RIGHT;
-                return how;
-        }
-        if (code == CK_KEY_UP)
-                switch (how)
-                {
-                case COMPOSITOR_FLOATING: case COMPOSITOR_TOP_LEFT: case COMPOSITOR_TOP_RIGHT: case COMPOSITOR_BOTTOM:
-                        return COMPOSITOR_MAXIMIZED;
-                case COMPOSITOR_LEFT: return COMPOSITOR_TOP_LEFT;
-                case COMPOSITOR_RIGHT: return COMPOSITOR_TOP_RIGHT;
-                case COMPOSITOR_BOTTOM_LEFT: return COMPOSITOR_LEFT;
-                case COMPOSITOR_BOTTOM_RIGHT: return COMPOSITOR_RIGHT;
-                default: return how;
-                }
-        if (code == CK_KEY_DOWN)
-                switch (how)
-                {
-                case COMPOSITOR_MAXIMIZED: case COMPOSITOR_ROOM: return COMPOSITOR_FLOATING;
-                case COMPOSITOR_LEFT: return COMPOSITOR_BOTTOM_LEFT;
-                case COMPOSITOR_RIGHT: return COMPOSITOR_BOTTOM_RIGHT;
-                case COMPOSITOR_TOP_LEFT: return COMPOSITOR_LEFT;
-                case COMPOSITOR_TOP_RIGHT: return COMPOSITOR_RIGHT;
-                default: return how;
-                }
-        return how;
+        return how < sizeof(next) / sizeof(next[0]) && dir < 4 ? next[how][dir] : how;
 }
 
 static void compositor_tile_chord(unsigned int code)
@@ -2666,12 +2642,28 @@ static int compositor_speed(void)
         return compositor.trackpad_speed < 25 || compositor.trackpad_speed > 400 ? 100 : (int)compositor.trackpad_speed;
 }
 
+// Scale delta by num/den with sub-unit remainder carried in *rem (truncation toward zero).
+static inline long long compositor_scale_rem(long long delta, long long num, long long den, long long *rem)
+{
+        long long total = delta * num + *rem, out = total / den;
+
+        *rem = total - out * den;
+        return out;
+}
+
+static inline int compositor_scale_rem_i(long long delta, long long num, long long den, int *rem)
+{
+        long long r = *rem, out = compositor_scale_rem(delta, num, den, &r);
+
+        *rem = (int)r;
+        return (int)out;
+}
+
 static int compositor_pad_report(struct compositor_pad *pad, int *x, int *y)
 {
         long dx = (long)pad->next_x - pad->at_x, dy = (long)pad->next_y - pad->at_y;
         int kind = pad->fingers >= 2 ? 2 : 1;
         int per = kind == 2 ? COMPOSITOR_PAD_WHEEL * compositor_speed() / 100 : COMPOSITOR_PAD_COUNTS;
-        long left_x, left_y;
 
         *x = *y = 0;
         pad->at_x = pad->next_x;
@@ -2681,12 +2673,8 @@ static int compositor_pad_report(struct compositor_pad *pad, int *x, int *y)
                 pad->moving = pad->touching && pad->fingers;
                 return 0;
         }
-        left_x = pad->left_x + dx * per;
-        left_y = pad->left_y + (kind == 2 ? -dy : dy) * per;
-        *x = (int)(left_x / pad->per_mm_x);
-        *y = (int)(left_y / pad->per_mm_y);
-        pad->left_x = (int)(left_x - (long)*x * pad->per_mm_x);
-        pad->left_y = (int)(left_y - (long)*y * pad->per_mm_y);
+        *x = compositor_scale_rem_i(dx, per, pad->per_mm_x, &pad->left_x);
+        *y = compositor_scale_rem_i(kind == 2 ? -dy : dy, per, pad->per_mm_y, &pad->left_y);
         return *x || *y ? kind : 0;
 }
 
@@ -2825,33 +2813,22 @@ static void compositor_predict_place(unsigned int cls, int x, int y, positive no
         compositor.osk_typed = 0;
         compositor.real_x = x, compositor.real_y = y;
         compositor_predict_sample(cls, (long long)x * COMPOSITOR_PREDICT_FX, (long long)y * COMPOSITOR_PREDICT_FX, now, now);
-        compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_x = compositor.predict[COMPOSITOR_PREDICT_MOUSE].lead_y = 0;
         compositor_pointer_shown();
         compositor_osk_sync();
 }
 
-// A class's lead is over (a touch lifted, a pen out of range, a stop, or its setting turned off). A mouse's pointer goes back to
-// its real place, and the windows are told when it moved; a finger or a pen goes back to its newest place, and the windows are told
-// where that is.
+// A class's lead is over (a touch lifted, a pen out of range, a stop, or its setting turned off): a finger or a pen goes back
+// to its newest place, and the windows are told where that is.
 static void compositor_predict_clear(unsigned int cls)
 {
         struct compositor_predict *track = &compositor.predict[cls];
-        int moved_x, moved_y;
 
+        if (cls == COMPOSITOR_PREDICT_MOUSE)
+                return;
         compositor_pointer_sync();
-        moved_x = compositor.pointer_x, moved_y = compositor.pointer_y;
         if (!track->lead_x && !track->lead_y)
                 return;
         track->lead_x = track->lead_y = 0;
-        if (cls == COMPOSITOR_PREDICT_MOUSE)
-        {
-                if (compositor.owner != COMPOSITOR_PREDICT_MOUSE)
-                        return;
-                compositor_pointer_shown();
-                if (compositor.pointer_x != moved_x || compositor.pointer_y != moved_y)
-                        compositor_motion();
-                return;
-        }
         compositor.owner = cls;
         compositor.real_x = (int)(track->x[track->count - 1] / COMPOSITOR_PREDICT_FX);
         compositor.real_y = (int)(track->y[track->count - 1] / COMPOSITOR_PREDICT_FX);
@@ -2873,7 +2850,7 @@ static positive compositor_predict_due(void)
 {
         positive period = compositor_predict_period(), due = 0;
 
-        for (unsigned int cls = 0; cls < COMPOSITOR_PREDICTS; cls++)
+        for (unsigned int cls = COMPOSITOR_PREDICT_TOUCH; cls < COMPOSITOR_PREDICTS; cls++)
         {
                 const struct compositor_predict *track = &compositor.predict[cls];
 
@@ -2888,7 +2865,7 @@ static void compositor_predict_expire(positive now)
 {
         positive period = compositor_predict_period();
 
-        for (unsigned int cls = 0; cls < COMPOSITOR_PREDICTS; cls++)
+        for (unsigned int cls = COMPOSITOR_PREDICT_TOUCH; cls < COMPOSITOR_PREDICTS; cls++)
                 if ((compositor.predict[cls].lead_x || compositor.predict[cls].lead_y) && now >= compositor.predict[cls].last + period)
                         compositor_predict_clear(cls);
 }
@@ -3086,13 +3063,9 @@ static long long compositor_stream_gain_at(unsigned int at, positive now)
 static long long compositor_stream_turn(unsigned int at, long long value120, long long gain, int horizontal)
 {
         int axis = horizontal ? 1 : 0;
-        long long pct = compositor_speed(), total, turn;
 
         value120 = value120 > 1000000000ll ? 1000000000ll : value120 < -1000000000ll ? -1000000000ll : value120;
-        total = value120 * gain * pct + compositor.wheel_rest[at][axis];
-        turn = total / COMPOSITOR_GAIN_TURN;
-        compositor.wheel_rest[at][axis] = total - turn * COMPOSITOR_GAIN_TURN;
-        return turn;
+        return compositor_scale_rem(value120, gain * (long long)compositor_speed(), COMPOSITOR_GAIN_TURN, &compositor.wheel_rest[at][axis]);
 }
 
 // The wheel goes to what holds the pointer, or to what is under it when the wheel turns. Not to what was under it when
@@ -3278,12 +3251,8 @@ static void compositor_pad_gain(struct compositor_pad *pad, positive now, int *x
         gain = speed <= COMPOSITOR_PAD_GAIN_SLOW ? 256
                : speed >= COMPOSITOR_PAD_GAIN_FAST ? COMPOSITOR_PAD_GAIN_TOP
                : 256 + (speed - COMPOSITOR_PAD_GAIN_SLOW) * (COMPOSITOR_PAD_GAIN_TOP - 256) / (COMPOSITOR_PAD_GAIN_FAST - COMPOSITOR_PAD_GAIN_SLOW);
-        {
-                long long gx = (long long)*x * gain + pad->gain_left_x, gy = (long long)*y * gain + pad->gain_left_y;
-
-                *x = (int)(gx / 256), *y = (int)(gy / 256);
-                pad->gain_left_x = (int)(gx - (long long)*x * 256), pad->gain_left_y = (int)(gy - (long long)*y * 256);
-        }
+        *x = compositor_scale_rem_i(*x, gain, 256, &pad->gain_left_x);
+        *y = compositor_scale_rem_i(*y, gain, 256, &pad->gain_left_y);
 }
 
 static void compositor_pad_apply(unsigned int at, positive now)
@@ -3461,16 +3430,14 @@ static void compositor_chip_paint(int w, int h, int scale, int glyphs)
         }
 }
 
-// The chip's memory, mapped once at its largest: the coverage, and the scene under it when a target is only written.
+// The chip's coverage memory, mapped once at its largest (body + glyphs).
 static int compositor_chip_map(void)
 {
         struct compositor_chip *c = &compositor.chip;
 
         if (!c->cover)
                 c->cover = (unsigned char *)compositor_map_zeroed(2UL * COMPOSITOR_CHIP_W_MOST * COMPOSITOR_CHIP_H_MOST);
-        if (!c->scratch)
-                c->scratch = (unsigned int *)compositor_map_zeroed(4UL * COMPOSITOR_CHIP_W_MOST * COMPOSITOR_CHIP_H_MOST);
-        return c->cover && c->scratch;
+        return c->cover != null;
 }
 
 // Whether the table asks for reduced motion (the kit's motion setting), when a chip slides in at once.
@@ -3786,34 +3753,6 @@ static void compositor_chip_draw(const struct compositor_target *t)
         }
 }
 
-// The chip over a target that is only written (the scanout): the scene under its box composed again into a scratch, the chip over it, and
-// the box copied out, as the marks are.
-static void compositor_chip_compose(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count)
-{
-        const struct compositor_chip *c = &compositor.chip;
-        int box[4], clip[4] = {t->x1, t->y1, t->x2, t->y2};
-
-        if (c->kind == COMPOSITOR_CHIP_NONE || !c->alpha || !c->scratch)
-                return;
-        compositor_chip_place(box);
-        {
-                int edge[4] = {box[0], box[1], box[0] + box[2], box[1] + box[3]};
-
-                compositor_meet(edge, clip);
-                if (edge[2] <= edge[0] || edge[3] <= edge[1])
-                        return;
-                {
-                        struct compositor_target square = {c->scratch, (unsigned long)(edge[2] - edge[0]), t->width, t->height, edge[0], edge[1],
-                                                           edge[2], edge[3], edge[0], edge[1], 0};
-
-                        compositor_scene(&square, frames, count);
-                        compositor_spots_marks(&square);
-                        compositor_chip_draw(&square);
-                        compositor_blit(t, edge[0], edge[1], edge[2] - edge[0], edge[3] - edge[1], c->scratch, (unsigned long)(edge[2] - edge[0]));
-                }
-        }
-}
-
 // Whether any mark is drawn, and whether any is fading, which is a frame to draw each period until it is gone. A chip is drawn while it is up,
 // and fades on the same frames.
 static int compositor_spots_any(int fading)
@@ -3889,9 +3828,57 @@ static void compositor_spots_draw(const struct compositor_target *t)
         compositor_chip_draw(t);
 }
 
+// Shared scratch buffer for overlays (marks, chip, software pointer) composed over write-only scanout targets without reading them.
+#define COMPOSITOR_OVERLAY_PIXELS ((unsigned long)COMPOSITOR_CHIP_W_MOST * COMPOSITOR_CHIP_H_MOST)
+_Static_assert(COMPOSITOR_OVERLAY_PIXELS >= (unsigned long)CP_SPAN_MOST * CP_SPAN_MOST, "overlay scratch fits cursor");
+_Static_assert(COMPOSITOR_OVERLAY_PIXELS >= (unsigned long)(2 * COMPOSITOR_MASK_MOST) * (2 * COMPOSITOR_MASK_MOST), "overlay scratch fits spot");
+
+static unsigned int *compositor_overlay_scratch;
+
+// One overlay box over a write-only target: clip rect to t, compose the scene under it into scratch, run draw over it, and blit out.
+// Answers 1 when drawn or clipped empty, 0 only when the scratch could not be mapped.
+static int compositor_overlay_compose(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count,
+                                      const int rect[4], void (*draw)(const struct compositor_target *))
+{
+        int box[4] = {rect[0], rect[1], rect[2], rect[3]}, clip[4] = {t->x1, t->y1, t->x2, t->y2};
+
+        compositor_meet(box, clip);
+        if (box[2] <= box[0] || box[3] <= box[1])
+                return 1;
+        if (!compositor_overlay_scratch)
+                compositor_overlay_scratch = (unsigned int *)compositor_map_zeroed(4ul * COMPOSITOR_OVERLAY_PIXELS);
+        if (!compositor_overlay_scratch)
+                return 0;
+        {
+                struct compositor_target square = {compositor_overlay_scratch, (unsigned long)(box[2] - box[0]), t->width, t->height,
+                                                   box[0], box[1], box[2], box[3], box[0], box[1], 0, 0};
+
+                compositor_scene(&square, frames, count);
+                draw(&square);
+                compositor_blit(t, box[0], box[1], box[2] - box[0], box[3] - box[1], compositor_overlay_scratch,
+                                (unsigned long)(box[2] - box[0]));
+        }
+        return 1;
+}
+
+static void compositor_chip_compose(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count)
+{
+        const struct compositor_chip *c = &compositor.chip;
+        int box[4];
+
+        if (c->kind == COMPOSITOR_CHIP_NONE || !c->alpha || !c->cover)
+                return;
+        compositor_chip_place(box);
+        {
+                int edge[4] = {box[0], box[1], box[0] + box[2], box[1] + box[3]};
+
+                compositor_overlay_compose(t, frames, count, edge, compositor_spots_draw);
+        }
+}
+
 /*
-        The marks over a target that is only written (the scanout): what is under each mark is composed again into a
-        scratch of its own, the marks are drawn over that, and it is copied out, as the round corners are.
+        The marks and chip over a target that is only written (the scanout): what is under each box is composed into the shared
+        scratch, drawn over, and blitted out.
 */
 static void compositor_spots_compose(const struct compositor_target *t, const struct compositor_frame *frames,
                                      unsigned int count)
@@ -3902,75 +3889,43 @@ static void compositor_spots_compose(const struct compositor_target *t, const st
         {
                 int box[4] = {compositor.spot[slot].x - radius, compositor.spot[slot].y - radius,
                               compositor.spot[slot].x + radius, compositor.spot[slot].y + radius};
-                int clip[4] = {t->x1, t->y1, t->x2, t->y2};
 
                 if (!compositor.spot[slot].on)
                         continue;
-                compositor_meet(box, clip);
-                if (box[2] <= box[0] || box[3] <= box[1])
-                        continue;
-                if (!compositor.spot_scratch)
-                        compositor.spot_scratch = (unsigned int *)compositor_map_zeroed(
-                            (unsigned long)4 * (2 * COMPOSITOR_MASK_MOST) * (2 * COMPOSITOR_MASK_MOST));
-                if (!compositor.spot_scratch)
+                if (!compositor_overlay_compose(t, frames, count, box, compositor_spots_marks))
                         return;
-                {
-                        struct compositor_target square = {compositor.spot_scratch, (unsigned long)(box[2] - box[0]),
-                                                           t->width, t->height, box[0], box[1], box[2], box[3],
-                                                           box[0], box[1], 0};
-
-                        compositor_scene(&square, frames, count);
-                        compositor_spots_marks(&square);
-                        compositor_blit(t, box[0], box[1], box[2] - box[0], box[3] - box[1], compositor.spot_scratch,
-                                        (unsigned long)(box[2] - box[0]));
-                }
         }
         compositor_chip_compose(t, frames, count);
+}
+
+static void compositor_cursor_overlay_draw(const struct compositor_target *square)
+{
+        if (compositor_spots_any(0))
+        {
+                compositor_spots_marks(square);
+                if (compositor.chip.kind != COMPOSITOR_CHIP_NONE && compositor.chip.alpha && compositor.chip.cover)
+                        compositor_chip_draw(square);
+        }
+        compositor_cursor_draw(square, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0),
+                               compositor_cursor_ink(1, 0));
 }
 
 /*
         The software pointer over a target only written (a scanout, a strip of one the card left): its square composed aside, the
         scene, the fingers' marks and the chip as they are drawn under it, the pointer drawn over that, and the square copied out,
-        so nothing reads the scanout, whose memory is write-combined on most cards (the pointer was mixed into it in place, and a
-        mix reads every pixel it writes). The pixels are the ones the pointer mixed in place made, bit for bit: the square's scene
-        is the scene's (compositor_scene of a part is the part of the scene, as the marks' squares are). With no memory for the
-        square the pointer is mixed in place as it was.
+        so nothing reads the scanout, whose memory is write-combined on most cards. With no memory for the scratch the pointer is
+        mixed in place as it was.
 */
 static void compositor_cursor_compose(const struct compositor_target *t, const struct compositor_frame *frames, unsigned int count)
 {
-        static unsigned int *square_pixels;
         int hot_x, hot_y, span = compositor_pointer_span(&compositor.cursor.drawn_as, &hot_x, &hot_y);
         int box[4] = {compositor.cursor.x - hot_x, compositor.cursor.y - hot_y, compositor.cursor.x - hot_x + span, compositor.cursor.y - hot_y + span};
-        int clip[4] = {t->x1, t->y1, t->x2, t->y2};
 
         if (!compositor.cursor.drawn)
                 return;
-        compositor_meet(box, clip);
-        if (box[2] <= box[0] || box[3] <= box[1])
-                return;
-        if (!square_pixels)
-                square_pixels = (unsigned int *)compositor_map_zeroed((unsigned long)4 * CP_SPAN_MOST * CP_SPAN_MOST);
-        if (!square_pixels)
-        {
+        if (!compositor_overlay_compose(t, frames, count, box, compositor_cursor_overlay_draw))
                 compositor_cursor_draw(t, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0),
                                        compositor_cursor_ink(1, 0));
-                return;
-        }
-        {
-                struct compositor_target square = {square_pixels, (unsigned long)(box[2] - box[0]), t->width, t->height, box[0], box[1], box[2], box[3],
-                                                   box[0], box[1], 0, 0};
-
-                compositor_scene(&square, frames, count);
-                if (compositor_spots_any(0))
-                {
-                        compositor_spots_marks(&square);
-                        if (compositor.chip.kind != COMPOSITOR_CHIP_NONE && compositor.chip.alpha && compositor.chip.scratch)
-                                compositor_chip_draw(&square);
-                }
-                compositor_cursor_draw(&square, compositor.cursor.x, compositor.cursor.y, &compositor.cursor.drawn_as, compositor_cursor_ink(0, 0),
-                                       compositor_cursor_ink(1, 0));
-                compositor_blit(t, box[0], box[1], box[2] - box[0], box[3] - box[1], square_pixels, (unsigned long)(box[2] - box[0]));
-        }
 }
 
 // `moonwater canvas touch`, read with the other settings the compositor takes at once: on (the row's standard, nothing

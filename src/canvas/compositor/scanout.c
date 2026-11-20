@@ -837,28 +837,16 @@ static void compositor_direct_unpatch(void)
 }
 
 static unsigned int *compositor_direct_stage;
-static positive compositor_direct_stage_bytes;
+static unsigned long compositor_direct_stage_bytes;
 
 static unsigned int *compositor_direct_stage_ready(void)
 {
-        positive need = (positive)compositor_stride() * (positive)compositor.height * 4;
+        unsigned long need = (unsigned long)compositor_stride() * (unsigned long)compositor.height * 4;
+        void *p = compositor_direct_stage;
 
         if (!need)
                 return 0;
-        if (compositor_direct_stage && compositor_direct_stage_bytes >= need)
-                return compositor_direct_stage;
-        if (compositor_direct_stage)
-        {
-                compositor_call(syscall(munmap), (positive)compositor_direct_stage, compositor_direct_stage_bytes, 0, 0, 0, 0);
-                compositor_direct_stage = 0, compositor_direct_stage_bytes = 0;
-        }
-        {
-                long mapped = compositor_call(syscall(mmap), 0, need, 3, 0x22, (positive)-1, 0);
-
-                if (mapped < 0 && mapped > -4096)
-                        return 0;
-                compositor_direct_stage = (unsigned int *)mapped, compositor_direct_stage_bytes = need;
-        }
+        compositor_direct_stage = (unsigned int *)mem_buf_grow(&p, &compositor_direct_stage_bytes, need, 0);
         return compositor_direct_stage;
 }
 
@@ -872,25 +860,18 @@ static int compositor_tabs_rect(const struct compositor_frame *tabs, unsigned in
         rows), and the copy into it ran past its end. It is the size the rectangle asks now (the screen's at the least), made again when it is too
         small, with what it held.
 */
-static positive compositor_under_bytes[2];
+static unsigned long compositor_under_bytes[2];
 
 static b32 compositor_direct_under_ready(unsigned int which, positive need)
 {
-        positive bytes = (positive)compositor.width * (positive)compositor.height * 4;
-        long mapped;
+        unsigned long bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
+        void *p = compositor.under[which];
 
-        if (compositor.under[which] && compositor_under_bytes[which] >= need)
+        if (compositor.under[which] && compositor_under_bytes[which] >= (unsigned long)need)
                 return true;
-        bytes = ((need > bytes ? need : bytes) + 4095) & ~4095ull;
-        mapped = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
-        if (mapped < 0 && mapped > -4096)
+        if (!mem_buf_grow(&p, &compositor_under_bytes[which], (unsigned long)need > bytes ? (unsigned long)need : bytes, MEM_BUF_KEEP))
                 return false;
-        if (compositor.under[which])
-        {
-                memory_copy((void *)mapped, compositor.under[which], compositor_under_bytes[which]);
-                compositor_call(syscall(munmap), (positive)compositor.under[which], compositor_under_bytes[which], 0, 0, 0, 0);
-        }
-        compositor.under[which] = (unsigned int *)mapped, compositor_under_bytes[which] = bytes;
+        compositor.under[which] = (unsigned int *)p;
         return true;
 }
 
@@ -1150,12 +1131,16 @@ static int compositor_turning_software(void);
 // What compositor_changed_ready mapped, given back; it is decided again at the next present.
 static void compositor_apart_drop(void)
 {
-        if (compositor.composing)
-                gpu_forget((const void *)(compositor.composing), (positive)(compositor.composing_bytes)), compositor_call(syscall(munmap), (positive)compositor.composing, compositor.composing_bytes, 0, 0, 0, 0);
-        if (compositor.mirror && compositor.mirror_bytes)
-                gpu_forget((const void *)(compositor.mirror), (positive)(compositor.mirror_bytes)), compositor_call(syscall(munmap), (positive)compositor.mirror, compositor.mirror_bytes, 0, 0, 0, 0);
-        compositor.composing = compositor.mirror = 0;
-        compositor.composing_bytes = compositor.mirror_bytes = 0;
+        void *p = compositor.composing;
+
+        mem_buf_free(&p, &compositor.composing_bytes, MEM_BUF_GPU_FORGET);
+        compositor.composing = 0;
+        if (compositor.mirror_bytes)
+        {
+                p = compositor.mirror;
+                mem_buf_free(&p, &compositor.mirror_bytes, MEM_BUF_GPU_FORGET);
+        }
+        compositor.mirror = 0;
         compositor.changed = 0;
 }
 
@@ -1215,27 +1200,24 @@ static int compositor_changed_ready(void)
                 return 0;
         own = own || !listed;
 
-        long composing = compositor_call(syscall(mmap), 0, slices, 3, 0x22, (positive)-1, 0);
+        void *p = 0;
 
-        if (composing < 0 && composing > -4096)
+        if (!mem_buf_grow(&p, &compositor.composing_bytes, slices, MEM_BUF_GPU_FORGET))
                 return 0;
-        compositor.composing = (unsigned int *)composing;
-        compositor.composing_bytes = slices;
+        compositor.composing = (unsigned int *)p;
         compositor.mirror = compositor.scanout;
         compositor.mirror_bytes = 0;
         compositor.mirror_pitch = compositor.scanout_pitch / 4;
         if (own)
         {
-                long mirror = compositor_call(syscall(mmap), 0, bytes, 3, 0x22, (positive)-1, 0);
+                void *mp = 0;
 
-                if (mirror < 0 && mirror > -4096)
+                if (!mem_buf_grow(&mp, &compositor.mirror_bytes, bytes, MEM_BUF_GPU_FORGET))
                 {
-                        gpu_forget((const void *)(composing), (positive)(slices)), compositor_call(syscall(munmap), (positive)composing, slices, 0, 0, 0, 0);
-                        compositor.composing = 0;
+                        compositor_apart_drop();
                         return 0;
                 }
-                compositor.mirror = (unsigned int *)mirror;
-                compositor.mirror_bytes = bytes;
+                compositor.mirror = (unsigned int *)mp;
                 compositor.mirror_pitch = (unsigned long)compositor.width;
                 compositor.mirror_stale = 1;
                 compositor_damage(0, 0, compositor.width, compositor.height);
@@ -1802,7 +1784,6 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
                      buffer = compositor.overlay_back;
         int rect[4], shown = compositor_tabs_rect(frames + windows, count - windows, rect), drawn = 0;
         unsigned short clip[COMPOSITOR_DAMAGE][4];
-        struct compositor_dirty dirty = {fb, 0, 0, 0, (unsigned long)clip};
 
         if (!fb)
                 return 0;
@@ -1859,8 +1840,7 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
         for (unsigned int at = 0; at < compositor.damages; at++)
                 for (unsigned int side = 0; side < 4; side++)
                         clip[at][side] = (unsigned short)compositor.damage[at][side];
-        dirty.clip_count = compositor.damages;
-        system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
+        compositor_dirty(fb, (const unsigned short (*)[4])clip, compositor.damages);
         compositor.damages = 0;
         compositor.screen_stale = 1;
         return 1;
@@ -2082,11 +2062,7 @@ static void compositor_dirty_screens(const unsigned short (*clip)[4], unsigned i
                         told = clips;
                 }
                 if (told)
-                {
-                        struct compositor_dirty dirty = {fb, 0, 0, told, (unsigned long)mine};
-
-                        system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
-                }
+                        compositor_dirty(fb, (const unsigned short (*)[4])mine, told);
         }
 }
 
@@ -2187,11 +2163,7 @@ static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int 
                         told++;
                 }
                 if (told)
-                {
-                        struct compositor_dirty dirty = {compositor_turns[at].fb, 0, 0, told, (unsigned long)rect};
-
-                        system_control(compositor.card, COMPOSITOR_DIRTYFB, address_of dirty);
-                }
+                        compositor_dirty(compositor_turns[at].fb, (const unsigned short (*)[4])rect, told);
         }
 }
 
