@@ -937,6 +937,7 @@ static void compositor_xwm_pending_done(void)
 }
 
 static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int add);
+static int compositor_xwm_covers(const struct compositor_xwm_window *w);
 static void compositor_xwm_app(struct compositor_xwm_window *w);
 
 static void compositor_xwm_ask_title(struct compositor_xwm_window *w)
@@ -1298,25 +1299,12 @@ static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int ad
         }
         x->window = (struct compositor_xwm_window *)x->window_table.at;
         free = &x->window[slot];
+        memory_zero(free, sizeof(*free));
         free->id = id;
         x->windows++;
         compositor_xwm_index_put(&x->window_index, slot);
-        free->state = 0;
-        free->serial = 0;
         free->row = -1;
-        free->owner = 0;
-        free->protocols = 0;
-        free->closes = 0;
-        free->transient = 0;
-        free->placed = 0;
-        free->x = free->y = 0;
-        free->width = free->height = 0;
         free->sent_x = free->sent_y = COMPOSITOR_XWM_NO_PLACE;
-        free->sent_w = free->sent_h = 0;
-        free->restore_w = free->restore_h = 0;
-        free->asking = 0;
-        free->dirty = 0;
-        free->title[0] = 0;
         return free;
 }
 
@@ -1347,7 +1335,9 @@ static void compositor_xwm_unmapped(struct compositor_xwm_window *w)
         if (w->id && w->id == compositor_xwm_at->focus_window)
                 compositor_xwm_at->focus_window = 0, compositor_xwm_at->focus_row = -3;
         w->row = -1;
-        w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED);
+        w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED | COMPOSITOR_XWM_FULLSCREEN |
+                      COMPOSITOR_XWM_MAXIMIZED | COMPOSITOR_XWM_COVERED | COMPOSITOR_XWM_POPUPTYPE |
+                      COMPOSITOR_XWM_PROPS_READ);
         w->closes = 0;
         w->sent_x = w->sent_y = COMPOSITOR_XWM_NO_PLACE;
         w->sent_w = w->sent_h = 0;

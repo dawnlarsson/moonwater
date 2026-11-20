@@ -2006,6 +2006,28 @@ static void au_test_hardening(void)
         AUCHECK(sink.mix[0][AUDIO_BLOCK - 1] == 0, "a master gain of NaN is not silence (%g)", (double)sink.mix[0][AUDIO_BLOCK - 1]);
 }
 
+static void au_test_resample_underrun_keeps_buf(void)
+{
+        static unsigned char ring[16384];
+        static float chunk[100];
+        struct audio_sink sink;
+        struct audio_voice voice;
+        long played;
+
+        for (long i = 0; i < 100; i++)
+                chunk[i] = 0.25f;
+        audio_sink_open(&sink, 48000, 2);
+        AUCHECK(audio_voice_open(&voice, AUDIO_FORMAT_F32LE, 1, 22050, 0, 48000, ring, sizeof(ring)) == 0,
+                "resampled 22050->48000 voice opens");
+        audio_ring_put(&voice.ring, (const unsigned char *)chunk, 100 * 4);
+        audio_sink_begin(&sink, 128);
+        played = audio_voice_mix(&sink, &voice, 128, 0);
+        AUCHECK(played < 128 && voice.rs.have > voice.rs.table->taps / 2 - 1,
+                "transient underrun keeps unconsumed resampler input frames (played %ld, have %ld, lead %ld)",
+                played, voice.rs.have, voice.rs.table->taps / 2 - 1);
+        audio_voice_close(&voice);
+}
+
 int main(void)
 {
         au_test_numbers();
@@ -2033,6 +2055,7 @@ int main(void)
         au_test_fuzz();
         au_test_fuzz_range();
         au_test_speed();
+        au_test_resample_underrun_keeps_buf();
         printf("CHECK_audio_mix: %u checks, %u failures\n", au_checks, au_failures);
         return au_failures ? 1 : 0;
 }
@@ -10039,6 +10062,32 @@ static void pt_test_reference_loops(void)
         }
 }
 
+static void pt_test_resample_playing_for(void)
+{
+        long slot;
+        unsigned long channel, index, missing;
+        unsigned char pcm[4410 * 4];
+        unsigned char mix[480 * 4];
+        struct pulse_stream *s;
+
+        pt_reset();
+        pulse_sink_add(&pt_engine, "null", "Null", 48000);
+        slot = pt_connect(1000, 99, 35, "ResampleTime");
+        PTCHECK(pt_create(slot, 35, 40, PULSE_INVALID, 0, PULSE_INVALID, &channel, &index, &missing, 0, 0x10000, 0, AUDIO_FORMAT_S16LE, 2, 22050, 0) == 0,
+                "a 22050 Hz stream on a 48000 Hz sink");
+        memset(pcm, 0, sizeof(pcm));
+        pt_data(slot, channel, pcm, sizeof(pcm), 0, 0);
+        for (int i = 0; i < 10; i++)
+                pulse_sink_mix(&pt_engine, 0, mix, AUDIO_FORMAT_S16LE, 2, 480);
+        s = pt_stream_of(index);
+        PTCHECK(s && s->playing_for >= 2205 * 4 - 8 && s->playing_for <= 2205 * 4 + 8,
+                "4800 sink frames at 48000 Hz advance playing_for by ~2205 stream frames (got %llu bytes, expected ~8820)",
+                s ? s->playing_for : 0ull);
+        pulse_client_close(&pt_engine, slot);
+        for (int i = 0; i < 4; i++)
+                pulse_sink_mix(&pt_engine, 0, mix, AUDIO_FORMAT_S16LE, 2, 480);
+}
+
 int main(void)
 {
         pt_make_source();
@@ -10083,6 +10132,7 @@ int main(void)
         pt_test_samples_play();
         pt_test_samples_policy();
         pt_test_caps();
+        pt_test_resample_playing_for();
         pt_test_memory();
         pt_test_session();
         pt_test_fuzz();
