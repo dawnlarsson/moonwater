@@ -1153,6 +1153,16 @@ static struct
         unsigned char *marks, *lengths;
         unsigned int listing;
         unsigned int *band;  // the band's pixels, or none: no font, and the tabs are shapes
+        // Native tray items absorbed into the taskbar (X11 _NET_SYSTEM_TRAY_S0 or future native tray clients).
+        struct
+        {
+                int used, has_icon;
+                void *owner;
+                unsigned int id;
+                unsigned int pixels[TASKBAR_TRAY_ITEM_PX * TASKBAR_TRAY_ITEM_PX];
+                void (*click)(void *owner, unsigned int id, int button);
+        } tray[TASKBAR_TRAY_ITEM_MAX];
+        int tray_gen;
         /*
                 `taskbar display all`, a band on every screen listing that screen's windows: band_at is the band
                 being drawn or asked of (screen band_at's; 0, the primary's, is band above), each other band's
@@ -1550,15 +1560,44 @@ static void *compositor_map_zeroed(unsigned long bytes)
         return got < 0 && got > -4096 ? 0 : (void *)got;
 }
 
-#ifdef CONFIG_MOONWATER_WAYLAND
-static int compositor_xtray_count(void);
-static const unsigned int *compositor_xtray_pixels(int index);
-static void compositor_xtray_click(int index, int button);
-#else
-static inline int compositor_xtray_count(void) { return 0; }
-static inline const unsigned int *compositor_xtray_pixels(int index) { (void)index; return 0; }
-static inline void compositor_xtray_click(int index, int button) { (void)index; (void)button; }
-#endif
+// Core taskbar tray item accessors: protocol layers register/unregister slots directly in compositor.tray[].
+static int compositor_tray_count(void)
+{
+        int n = 0;
+
+        for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
+                if (compositor.tray[i].used)
+                        n++;
+        return n;
+}
+
+static int compositor_tray_gen(void)
+{
+        return compositor.tray_gen;
+}
+
+static const unsigned int *compositor_tray_pixels(int index)
+{
+        int n = 0;
+
+        for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
+                if (compositor.tray[i].used && n++ == index)
+                        return compositor.tray[i].has_icon ? compositor.tray[i].pixels : 0;
+        return 0;
+}
+
+static void compositor_tray_click(int index, int button)
+{
+        int n = 0;
+
+        for (int i = 0; i < TASKBAR_TRAY_ITEM_MAX; i++)
+                if (compositor.tray[i].used && n++ == index)
+                {
+                        if (compositor.tray[i].click)
+                                compositor.tray[i].click(compositor.tray[i].owner, compositor.tray[i].id, button);
+                        return;
+                }
+}
 
 // The nine parts that read the state, in the order their uses need (the comment before the first run says why).
 #include "compositor/damage.c" // what changed: rectangles and damage, landings and glides, the snap preview's state, a row's pixels and runs, the frames and the bands

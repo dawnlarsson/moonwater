@@ -4483,7 +4483,7 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
                 placed = !popup && s->xsurface && (s->xalone || s->xplaced);
                 s->row = wayland.host->row_open(wayland.host->context, c->slot,
                                                 popup ? WAYLAND_KIND_POPUP : placed ? WAYLAND_KIND_PLACED : WAYLAND_KIND_TOPLEVEL,
-                                                placed ? -1 : parent, placed ? s->xx : s->popup_x, placed ? s->xy : s->popup_y);
+                                                parent, placed ? s->xx : s->popup_x, placed ? s->xy : s->popup_y);
                 // No row of the table is free: the window is not shown yet, and each commit asks again, so it is shown when one is let go
                 // of. Its client goes on, as a popup with nothing to hang from does: ending it ended Xwayland, every X program with it,
                 // at the desktop's 33rd window.

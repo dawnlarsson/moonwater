@@ -1014,6 +1014,26 @@ static void compositor_window_point(int row, int sx, int sy, int *wx, int *wy)
         *wy = sy - compositor.y[row];
 }
 
+// Inverse of compositor_window_point: surface coordinates mapped back to screen coordinates (0 if outside the surface).
+static int compositor_screen_point(int row, int wx, int wy, int *sx, int *sy)
+{
+        int dx, dy, dw, dh;
+
+        if (compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh))
+        {
+                if (wx < 0 || wx >= (int)compositor.picture_w[row] || wy < 0 || wy >= (int)compositor.picture_h[row])
+                        return 0;
+                *sx = dx + (int)((long)wx * (long)dw / (long)compositor.picture_w[row]);
+                *sy = dy + (int)((long)wy * (long)dh / (long)compositor.picture_h[row]);
+                return 1;
+        }
+        if (wx < 0 || wx >= (int)compositor.w[row] || wy < 0 || wy >= (int)compositor.h[row])
+                return 0;
+        *sx = compositor.x[row] + wx;
+        *sy = compositor.y[row] + wy;
+        return 1;
+}
+
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
         int line, scale;
@@ -1287,6 +1307,14 @@ static void compositor_band_frame(struct compositor_frame *frame)
         frame->launcher_lit = view.launcher_lit;
 }
 
+// Damage a rectangle in the overlay plane (above every window: bands, touch spots, chip).
+static void compositor_damage_over(int x, int y, int width, int height)
+{
+        compositor.damage_by = COMPOSITOR_OVER;
+        compositor_damage(x, y, width, height);
+        compositor.damage_by = 0;
+}
+
 // What the tabs show changed: the windows, which has the keys, which are put away, a title, the minute, the battery.
 static void compositor_tabs_changed(void)
 {
@@ -1297,9 +1325,7 @@ static void compositor_tabs_changed(void)
                 int x, y, width, height;
 
                 taskbar_band(&view, &x, &y, &width, &height);
-                compositor.damage_by = COMPOSITOR_OVER;
-                compositor_damage(x, y, width, height);
-                compositor.damage_by = 0;
+                compositor_damage_over(x, y, width, height);
         }
         compositor.band_at = 0;
 }

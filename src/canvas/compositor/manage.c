@@ -48,8 +48,8 @@ static signed char compositor_layer_of(int row)
         return layer;
 }
 
-// On top of its own stacking layer band (BACKGROUND < NORMAL < ABOVE < OVERLAY).
-static void compositor_raise(int row)
+// Single-row raise inside its stacking layer band (BACKGROUND < NORMAL < ABOVE < OVERLAY).
+static void compositor_raise_one(int row)
 {
         signed char mine = compositor_layer_of(row);
         unsigned int at = 0;
@@ -64,6 +64,17 @@ static void compositor_raise(int row)
         if (!++compositor.stack_gen)
                 compositor.stack_gen++;
         compositor_damage_row(row);
+}
+
+// On top of its own stacking layer band, keeping owned transient/modal dialogs above their owner.
+static void compositor_raise(int row)
+{
+        compositor_raise_one(row);
+        if (compositor_popup_parent[row] >= 0)
+                return;
+        for (int child = 0; child < (int)compositor_rows_in_use; child++)
+                if (child != row && compositor_owner[child] == row + 1 && compositor_visible(child) && compositor_popup_parent[child] < 0)
+                        compositor_raise_one(child);
 }
 
 static unsigned int compositor_modifiers(void);
@@ -183,13 +194,20 @@ static int compositor_grip(void)
         return compositor.grip ? compositor.grip : COMPOSITOR_GRIP;
 }
 
+static unsigned int compositor_resizable_axes(int row);
+
 // Whether a point is in the band at a window's edges that resizes it -- just inside its contents, its line,
 // and past it -- and which edges.
 static unsigned int compositor_edge_zone(int row, int x, int y)
 {
+        unsigned int axes;
+
         // A menu is not resized: its edges are no grip, for a pointer or a finger, and draw no indicator (none of
         // what is outside it is the menu's to take).
         if (compositor_popup_parent[row] >= 0)
+                return 0;
+        axes = compositor_resizable_axes(row);
+        if (!axes)
                 return 0;
         // A finger's are wider (COMPOSITOR_TOUCH_GRIP), its corners further along each edge, and its top a pointer's.
         int touch = compositor.touching;
@@ -210,6 +228,7 @@ static unsigned int compositor_edge_zone(int row, int x, int y)
 
                 edges = corner ? corner : edges;
         }
+        edges &= axes;
         if (!edges)
                 return 0;
 
@@ -332,31 +351,82 @@ static void compositor_place(int row, int x, int y)
         hand's edge, a divider, a tile and a snap all ask for a size through compositor_want, which holds it to this: a tile
         narrower than a window's least is the window at its least, held by the tile's edges that are its screen's.
 */
-static int compositor_least(int row, int down)
-{
-        b32 named = row >= 0 && row < COMPOSITOR_ROWS;
-        unsigned int own = named ? (down ? compositor.table->least_height[row] : compositor.table->least_width[row]) : 0;
-        unsigned int scale = named ? compositor.table->window_scale[row] : 0;
-        int least = (down ? WINDOW_MIN_HEIGHT : WINDOW_MIN_WIDTH) * compositor.scale / 100, asked;
-
-        scale = scale >= 25 && scale <= 800 ? scale : (unsigned int)compositor.scale;
-        own = own > WINDOW_LEAST_MOST ? WINDOW_LEAST_MOST : own;
-        asked = (int)(own * scale / 100);
-        return asked > least ? asked : least;
-}
-
-// Maximum size a window accepts, device pixels, across (down 0) or down (down 1), or 0 for unbounded.
-static int compositor_most(int row, int down)
+// Minimum and maximum size a window accepts on an axis (down 0 = width, 1 = height) in device pixels; *most == 0 means unbounded.
+static void compositor_bounds(int row, int down, int *least_out, int *most_out)
 {
         b32 named = row >= 0 && row < COMPOSITOR_ROWS && compositor.table;
-        unsigned int own = named ? (down ? compositor.table->most_height[row] : compositor.table->most_width[row]) : 0;
+        unsigned int own_min = named ? (down ? compositor.table->least_height[row] : compositor.table->least_width[row]) : 0;
+        unsigned int own_max = named ? (down ? compositor.table->most_height[row] : compositor.table->most_width[row]) : 0;
         unsigned int scale = named ? compositor.table->window_scale[row] : 0;
+        int floor_min = (down ? WINDOW_MIN_HEIGHT : WINDOW_MIN_WIDTH) * compositor.scale / 100;
+        int asked_min;
 
-        if (!own)
-                return 0;
         scale = scale >= 25 && scale <= 800 ? scale : (unsigned int)compositor.scale;
-        own = own > WINDOW_LEAST_MOST ? WINDOW_LEAST_MOST : own;
-        return (int)(own * scale / 100);
+        own_min = own_min > WINDOW_LEAST_MOST ? WINDOW_LEAST_MOST : own_min;
+        own_max = own_max > WINDOW_LEAST_MOST ? WINDOW_LEAST_MOST : own_max;
+        asked_min = (int)(own_min * scale / 100);
+        if (least_out)
+                *least_out = asked_min > floor_min ? asked_min : floor_min;
+        if (most_out)
+                *most_out = own_max ? (int)(own_max * scale / 100) : 0;
+}
+
+static int compositor_least(int row, int down)
+{
+        int least = 0;
+
+        compositor_bounds(row, down, &least, 0);
+        return least;
+}
+
+static int compositor_most(int row, int down)
+{
+        int most = 0;
+
+        compositor_bounds(row, down, 0, &most);
+        return most;
+}
+
+// Bitmask of COMPOSITOR_EDGE_* axes on which a row may be resized (0 for fixed-size windows where most <= least on both axes).
+static unsigned int compositor_resizable_axes(int row)
+{
+        int least_w, most_w, least_h, most_h;
+        unsigned int axes = 0;
+
+        compositor_bounds(row, 0, &least_w, &most_w);
+        compositor_bounds(row, 1, &least_h, &most_h);
+        if (!most_w || most_w > least_w)
+                axes |= COMPOSITOR_EDGE_LEFT | COMPOSITOR_EDGE_RIGHT;
+        if (!most_h || most_h > least_h)
+                axes |= COMPOSITOR_EDGE_TOP | COMPOSITOR_EDGE_BOTTOM;
+        return axes;
+}
+
+// Clamp width/height to row's min/max and display bounds (exempting fullscreen/background rows from max bounds).
+static void compositor_clamp_size(int row, int *width, int *height)
+{
+        int least_w, most_w, least_h, most_h;
+
+        compositor_bounds(row, 0, &least_w, &most_w);
+        compositor_bounds(row, 1, &least_h, &most_h);
+        if (!compositor.fullscreen[row] && compositor.layer[row] != WINDOW_LAYER_BACKGROUND)
+        {
+                if (most_w > 0 && *width > most_w)
+                        *width = most_w;
+                if (most_h > 0 && *height > most_h)
+                        *height = most_h;
+        }
+        // The least first and the most last: at a scale whose least window is past the largest screen (96 pixels at 800
+        // percent is 768), the least won and a window was made wider than its buffer's rows, which compositor_stretch
+        // then filled into the rows after them -- the next window's pixels, and for the last row past the table.
+        if (*width < least_w)
+                *width = least_w;
+        if (*width > compositor_most_width())
+                *width = compositor_most_width();
+        if (*height < least_h)
+                *height = least_h;
+        if (*height > compositor_most_height())
+                *height = compositor_most_height();
 }
 
 /*
@@ -366,26 +436,9 @@ static int compositor_most(int row, int down)
 */
 static void compositor_want(int row, int width, int height)
 {
-        int x = compositor.x[row], y = compositor.y[row], least_w = compositor_least(row, 0), least_h = compositor_least(row, 1);
-        int most_w = compositor_most(row, 0), most_h = compositor_most(row, 1);
+        int x = compositor.x[row], y = compositor.y[row];
 
-        // Enforce window max bounds on non-fullscreen/non-background rows so fixed-size dialogs (Wine modals, launcher cards)
-        // cannot be inflated past their declared size into white edge-smeared areas.
-        if (!compositor.fullscreen[row] && compositor.layer[row] != WINDOW_LAYER_BACKGROUND)
-        {
-                if (most_w > 0 && width > most_w)
-                        width = most_w;
-                if (most_h > 0 && height > most_h)
-                        height = most_h;
-        }
-        // The least first and the most last: at a scale whose least window is past the largest screen (96 pixels at 800
-        // percent is 768), the least won and a window was made wider than its buffer's rows, which compositor_stretch
-        // then filled into the rows after them -- the next window's pixels, and for the last row past the table. The least is
-        // the window's own where it says one (compositor_least).
-        width = width < least_w ? least_w : width;
-        width = width > compositor_most_width() ? compositor_most_width() : width;
-        height = height < least_h ? least_h : height;
-        height = height > compositor_most_height() ? compositor_most_height() : height;
+        compositor_clamp_size(row, &width, &height);
         compositor.table->want_width[row] = (unsigned int)width;
         compositor.table->want_height[row] = (unsigned int)height;
         rows_add(&compositor.woken, row);
@@ -734,11 +787,14 @@ static void compositor_shared_move(void)
 
         for (int each = 0; each < (int)compositor_rows_in_use; each++)
         {
-                int size = compositor.shared_sizes[each], least = compositor_least(each, !vertical);
+                int size = compositor.shared_sizes[each], least, row_most;
                 int most = (vertical ? compositor_most_width() : compositor_most_height()) - 2 * compositor_line(each);
 
                 if (!rows_has(&all, each))
                         continue;
+                compositor_bounds(each, !vertical, &least, &row_most);
+                if (row_most > 0 && row_most < most)
+                        most = row_most;
                 if (rows_has(&compositor.shared_lo_set, each))
                         low = least - size > low ? least - size : low, high = most - size < high ? most - size : high;
                 else
@@ -771,6 +827,9 @@ static void compositor_shared_move(void)
 */
 static void compositor_resize_begin(int row, unsigned int edges)
 {
+        edges &= compositor_resizable_axes(row);
+        if (!edges)
+                return;
         compositor_hold_take(0, row);
         compositor.resize = row;
         compositor.shared_row = COMPOSITOR_NONE;
@@ -850,8 +909,12 @@ static void compositor_set_rect(int row, unsigned int how, const int *rect)
         compositor_put(row, rect[0], rect[1]);
         compositor_damage_row(row);
         compositor_want(row, rect[2], rect[3]);
-        if (memory_compare(was, rect, sizeof(was)))
-                compositor_glide_start(row, was);
+        {
+                int now[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+
+                if (memory_compare(was, now, sizeof(was)))
+                        compositor_glide_start(row, was);
+        }
 }
 
 static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
@@ -1486,14 +1549,20 @@ static void compositor_arrange(int row, unsigned int how)
 static void compositor_fullscreen_on(int row, int screen)
 {
         unsigned int was;
+        unsigned char was_fs;
 
         if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
                 return;
-        was = compositor.fullscreen[row] ? compositor.fullscreen_was[row] : compositor.arranged[row];
+        was_fs = compositor.fullscreen[row];
+        was = was_fs ? compositor.fullscreen_was[row] : compositor.arranged[row];
+        // Set fullscreen before arrange so compositor_want/stretch do not clamp fixed-size fullscreen windows to most_w/h.
+        compositor.fullscreen[row] = 1;
         compositor_arrange_on(row, COMPOSITOR_MAXIMIZED, screen);
         if (compositor.arranged[row] != COMPOSITOR_MAXIMIZED)
+        {
+                compositor.fullscreen[row] = was_fs;
                 return;
-        compositor.fullscreen[row] = 1;
+        }
         compositor.fullscreen_was[row] = (unsigned char)was;
         compositor_raise(row);
         compositor_focus(row);
@@ -1582,12 +1651,10 @@ static void compositor_float(int row)
 */
 static void compositor_float_for_drag(int row)
 {
-        int least_w, least_h;
+        int width = (int)compositor.saved_w[row], height = (int)compositor.saved_h[row];
 
         compositor_osk_unpan(row);
-        least_w = compositor_least(row, 0), least_h = compositor_least(row, 1);
-        int width = (int)compositor.saved_w[row] < least_w ? least_w : (int)compositor.saved_w[row];
-        int height = (int)compositor.saved_h[row] < least_h ? least_h : (int)compositor.saved_h[row];
+        compositor_clamp_size(row, &width, &height);
         int in_x = compositor.press_x - compositor.x[row], in_y = compositor.press_y - compositor.y[row];
         int grab = (int)((long)in_x * width / (compositor.w[row] ? (int)compositor.w[row] : 1));
         int at = in_y < COMPOSITOR_GRAB * compositor.scale / 100
@@ -2112,11 +2179,13 @@ static void compositor_first_put(int row, int x, int y)
         if (fills != COMPOSITOR_FLOATING)
         {
                 unsigned int was = compositor.fullscreen[row] ? compositor.fullscreen_was[row] : compositor.arranged[row];
+                unsigned char want_fs = fills == COMPOSITOR_MAXIMIZED && how == WINDOW_PLACE_FULLSCREEN;
 
-                compositor_arrange_rect(row, fills, rect);
-                // Fullscreen as a client's ask is (compositor_fullscreen_on), and what it filled before kept for its way out.
-                if (fills == COMPOSITOR_MAXIMIZED && how == WINDOW_PLACE_FULLSCREEN)
+                if (want_fs)
                         compositor.fullscreen[row] = 1, compositor.fullscreen_was[row] = (unsigned char)was;
+                compositor_arrange_rect(row, fills, rect);
+                if (want_fs && compositor.arranged[row] != COMPOSITOR_MAXIMIZED)
+                        compositor.fullscreen[row] = 0;
                 return;
         }
         compositor_put(row, rect[0], rect[1]);
@@ -3683,15 +3752,28 @@ static b32 compositor_popup_first(int row)
         return true;
 }
 
-// A row gone: it is no popup any more, and the popups of it go too.
+// A row gone: it is no popup any more, and every popup descended from it goes too.
 static void compositor_popup_leave(int row)
 {
         compositor_popup_parent[row] = -1;
-        compositor_popups_close(row, -1);
-        // Asked to go, they are no popups of whatever takes the row next: their link to it is cut.
         for (int child = 0; child < (int)compositor_rows_in_use; child++)
-                if (compositor_popup_parent[child] == row)
+        {
+                b32 under = false;
+
+                for (int link = compositor_popup_parent[child], hops = 0; link >= 0 && hops < (int)compositor_rows_in_use;
+                     link = compositor_popup_parent[link], hops++)
+                        if (link == row)
+                        {
+                                under = true;
+                                break;
+                        }
+                if (under)
+                {
+                        if (compositor.showing[child] && !compositor_row_xoverride(child))
+                                compositor_close(child);
                         compositor_popup_parent[child] = -1;
+                }
+        }
 }
 
 #ifdef CONFIG_MOONWATER_WAYLAND

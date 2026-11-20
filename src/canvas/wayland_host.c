@@ -1073,9 +1073,10 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
                         compositor_wl.asked[client] = 1;
                         table->asked[row] = (unsigned int)compositor_wl_asked(client);
                 }
-                // A toplevel has no place of its own (xdg asks for none): the compositor centres it, on the window it is for when it has
-                // a parent (a dialog, an X transient). An X window that placed itself (USPosition, PPosition, override-redirect) is where it said.
-                compositor_owner[row] = kind == WAYLAND_KIND_TOPLEVEL && parent >= 0 && parent < (int)compositor_rows_in_use ? parent + 1 : 0;
+                // A toplevel or placed transient keeps its owner so dialogs stay stacked above their parent (and toplevels centre on it).
+                compositor_owner[row] = (kind == WAYLAND_KIND_TOPLEVEL || kind == WAYLAND_KIND_PLACED) && parent >= 0 && parent < (int)compositor_rows_in_use
+                                            ? parent + 1
+                                            : 0;
                 if (kind == WAYLAND_KIND_TOPLEVEL)
                         table->place[row] = WINDOW_PLACE_FREE;
                 if (kind == WAYLAND_KIND_PLACED)
@@ -4834,7 +4835,7 @@ static int compositor_wl_row_facts(void *context, int row, struct wayland_facts 
         }
         if (compositor.fullscreen[row])
                 states |= WAYLAND_STATE_FULLSCREEN;
-        else if (compositor.arranged[row] == COMPOSITOR_ROOM || compositor.arranged[row] == COMPOSITOR_MAXIMIZED)
+        else if (compositor_filling(row))
                 states |= WAYLAND_STATE_MAXIMIZED;
         else if (compositor.arranged[row] != COMPOSITOR_FLOATING)
                 states |= WAYLAND_STATE_TILED_LEFT | WAYLAND_STATE_TILED_RIGHT | WAYLAND_STATE_TILED_TOP | WAYLAND_STATE_TILED_BOTTOM;
@@ -5031,24 +5032,12 @@ static void compositor_wl_pointer_hold(void *context, long row, long mode)
         // lock took it and jump. A hint outside the window's picture is not taken.
         if (compositor_wl.hold == 1 && mode != 1 && was >= 0 && was < COMPOSITOR_ROWS && wayland.hint_row == was)
         {
-                int dx, dy, dw, dh;
+                int sx, sy;
 
-                if (compositor_fullscreen_fit((int)was, &dx, &dy, &dw, &dh))
+                if (compositor_screen_point((int)was, (int)wayland.hint_x, (int)wayland.hint_y, &sx, &sy))
                 {
-                        if (wayland.hint_x >= 0 && wayland.hint_x < (long)compositor.picture_w[was] &&
-                            wayland.hint_y >= 0 && wayland.hint_y < (long)compositor.picture_h[was])
-                        {
-                                compositor.pointer_x = dx + (int)(wayland.hint_x * (long)dw / (long)compositor.picture_w[was]);
-                                compositor.pointer_y = dy + (int)(wayland.hint_y * (long)dh / (long)compositor.picture_h[was]);
-                                compositor_pointer_sync();
-                                compositor_pointer_shown();
-                        }
-                }
-                else if (wayland.hint_x >= 0 && wayland.hint_x < (long)compositor.w[was] &&
-                         wayland.hint_y >= 0 && wayland.hint_y < (long)compositor.h[was])
-                {
-                        compositor.pointer_x = compositor.x[was] + (int)wayland.hint_x;
-                        compositor.pointer_y = compositor.y[was] + (int)wayland.hint_y;
+                        compositor.pointer_x = sx;
+                        compositor.pointer_y = sy;
                         compositor_pointer_sync();
                         compositor_pointer_shown();
                 }
@@ -6881,7 +6870,13 @@ static void compositor_drag_follow(int under)
         if (!compositor_wl.started)
                 return;
         if (wayland_dragging() && wayland.drag.held)
-                wayland_drag_motion(under, under >= 0 ? compositor.pointer_x - compositor.x[under] : 0, under >= 0 ? compositor.pointer_y - compositor.y[under] : 0);
+        {
+                int wx = 0, wy = 0;
+
+                if (under >= 0)
+                        compositor_window_point(under, compositor.pointer_x, compositor.pointer_y, &wx, &wy);
+                wayland_drag_motion(under, wx, wy);
+        }
         compositor_chip_drag(compositor_drag_action());
 }
 
@@ -8021,9 +8016,11 @@ static void compositor_wl_drain(int row)
                 if (type == WINDOW_EVENT_MOTION && wayland_dragging())
                 {
                         int tab, under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+                        int wx = 0, wy = 0;
 
-                        wayland_drag_motion(under, under >= 0 ? compositor.pointer_x - compositor.x[under] : 0,
-                                            under >= 0 ? compositor.pointer_y - compositor.y[under] : 0);
+                        if (under >= 0)
+                                compositor_window_point(under, compositor.pointer_x, compositor.pointer_y, &wx, &wy);
+                        wayland_drag_motion(under, wx, wy);
                         continue;
                 }
                 // Whatever the event, the pointer is on this window for the client first.
@@ -8375,10 +8372,20 @@ static void compositor_wl_touch_report(unsigned int at, int dropped)
                                 row = compositor_picture_under(x, y);
                                 // A game whose Steam overlay is open is told no new finger: the overlay has it (compositor_wl_drain).
                                 if (row >= 0 && (!compositor.table || compositor_xwm_steam_wants(__atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE)) != 2))
-                                        wayland_touch_down(row, screen->id[slot], x - compositor.x[row], y - compositor.y[row]);
+                                {
+                                        int wx, wy;
+
+                                        compositor_window_point(row, x, y, &wx, &wy);
+                                        wayland_touch_down(row, screen->id[slot], wx, wy);
+                                }
                         }
                         else if ((row = wayland_touch_row(screen->id[slot])) >= 0)
-                                wayland_touch_motion(screen->id[slot], x - compositor.x[row], y - compositor.y[row]);
+                        {
+                                int wx, wy;
+
+                                compositor_window_point(row, x, y, &wx, &wy);
+                                wayland_touch_motion(screen->id[slot], wx, wy);
+                        }
                 }
                 else if (screen->was[slot] >= 0)
                         wayland_touch_up(screen->was[slot]);

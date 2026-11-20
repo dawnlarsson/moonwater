@@ -1429,7 +1429,10 @@ static fn launcher_label(const struct launcher_entry address_to entry, char addr
                         string_copy_bounded((string_address)into, (string_address)launcher_app_name(entry->index), room);
                 else
                         ui_label_foreign(into, room, (const p8 address_to)app->name, string_length((string_address)app->name));
-                *note = app->kit ? language_of("desktop") : ui_apps_base(app->root);
+                *note = app->kit ? language_of("desktop")
+                                 : ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local)
+                                       ? (app->profile[0] ? app->profile : "local")
+                                       : ui_apps_base(app->root);
         }
         else if (entry->kind == LAUNCHER_PROGRAM)
         {

@@ -268,6 +268,19 @@ static positive compositor_present_at(int tearing, positive lead, positive now)
 */
 static void compositor_damage_space(void); // kms.c
 
+// Synchronous CRTC modeset fallback when page flips fail.
+static void compositor_crtc_sync(void)
+{
+        struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
+                                      0, 0, 0, 1, compositor.mode};
+
+        system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
+        compositor_dark_set();
+        compositor.on_screen = compositor.fb;
+        compositor_flip_refused = 0;
+        compositor_flip_done();
+}
+
 static void compositor_present_tell(const unsigned short (*clip)[4], unsigned int clips, int turning, int gpu_composed, int flip_own, int back, int plane_off)
 {
         // No clips at all would tell the card everything changed. A headless compositor has no card to tell (its scan image is a file).
@@ -304,14 +317,7 @@ static void compositor_present_tell(const unsigned short (*clip)[4], unsigned in
                 else if (++compositor_flip_refused >= 3)
                 {
                         // Refused three presents running: the crtc is set to the buffer composed into, which shows it at once (a modeset, so it tears).
-                        struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
-                                                      0, 0, 0, 1, compositor.mode};
-
-                        system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
-                        compositor_dark_set();
-                        compositor.on_screen = compositor.fb;
-                        compositor_flip_refused = 0;
-                        compositor_flip_done();
+                        compositor_crtc_sync();
                 }
                 else
                 {
@@ -332,13 +338,7 @@ static void compositor_present_tell(const unsigned short (*clip)[4], unsigned in
         else if (back && compositor.on_screen != compositor.fb && !compositor_flip(compositor.fb, -1, 0))
         {
                 compositor_record_refuse();
-                struct compositor_crtc set = {(unsigned long)address_of compositor.connector, 1, compositor.crtc, compositor.fb,
-                                              0, 0, 0, 1, compositor.mode};
-
-                system_control(compositor.card, COMPOSITOR_SETCRTC, address_of set);
-                compositor_dark_set();
-                compositor.on_screen = compositor.fb;
-                compositor_flip_done();
+                compositor_crtc_sync();
         }
 }
 
@@ -424,12 +424,7 @@ static int compositor_flip_fenced(unsigned int fb, int fence)
         }
         compositor_plane_carried(1);
         compositor.flip_serial++;
-        compositor_flip_refused = 0;
-        compositor.flip_pending = 1;
-        compositor.flip_issued = clock_monotonic_nanoseconds();
-        compositor.flip_row = -1;
-        compositor.flip_buffer = 0;
-        compositor.on_screen = fb;
+        compositor_flip_arm(fb, -1, 0, 0);
         {
                 // The jobs not yet seen done as it was committed (moonwater debug's flips with jobs in flight).
                 unsigned int jobs = (gpu.pending != 0) + (gpu_before.sequence != 0);
@@ -1289,7 +1284,8 @@ static void compositor_present_frames(void)
                     compositor.x[row] == ox && compositor.y[row] == oy &&
                     compositor.w[row] == (unsigned int)ow && compositor.h[row] == (unsigned int)oh &&
                     ((compositor.picture_w[row] == compositor.w[row] && compositor.picture_h[row] == compositor.h[row]) ||
-                     (!compositor.scale_plane_refused && compositor.fullscreen[row] && compositor.picture_w[row] && compositor.picture_h[row])) &&
+                     (!compositor.scale_plane_refused && compositor.fullscreen[row] && compositor.picture_w[row] && compositor.picture_h[row] &&
+                      compositor_overlay_ready())) &&
                     compositor_present_direct(row, 0, 0))
                 {
                         compositor_unscanned(0);

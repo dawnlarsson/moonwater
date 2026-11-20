@@ -4249,10 +4249,16 @@ static void check_compositor_least(void)
         check("most: a window with most_width/most_height is held to its maximum size",
               compositor.w[1] == 160 && compositor.h[1] == 110 &&
               compositor.table->want_width[1] == 160 && compositor.table->want_height[1] == 110);
+        check("most: a fixed-size window has no resizable axes and fullscreen is not clamped by most_width/most_height",
+              compositor_resizable_axes(1) == 0 && compositor_edge_zone(1, compositor.x[1], compositor.y[1]) == 0);
+        compositor_fullscreen_on(1, -1);
+        check("most: fullscreen_on lets a max-bounded window fill the output before leaving fullscreen restores its bounds",
+              compositor.fullscreen[1] && compositor.w[1] == 256 && compositor.h[1] == 256);
+        compositor_fullscreen_off(1);
         compositor.table->least_width[1] = compositor.table->least_height[1] = 0;
         compositor.table->most_width[1] = compositor.table->most_height[1] = 0;
     }
-    // Native stacking-layer primitive (BACKGROUND < NORMAL < ABOVE < OVERLAY): raising keeps every row in its band.
+    // Native stacking-layer primitive (BACKGROUND < NORMAL < ABOVE < OVERLAY) and owned transient dialogs.
     {
         layout_show(2, 10, 10, 120, 80);
         layout_show(3, 30, 30, 120, 80);
@@ -4265,6 +4271,11 @@ static void check_compositor_least(void)
               compositor.stacked >= 3 && compositor.stack[0] == 1 && compositor.stack[1] == 2 && compositor.stack[2] == 3);
         compositor_layer_set(1, WINDOW_LAYER_NORMAL, -1);
         compositor_layer_set(3, WINDOW_LAYER_NORMAL, -1);
+        compositor_owner[3] = 2 + 1;
+        compositor_raise(2);
+        check("owner: raising a parent keeps its owned transient dialog stacked above it",
+              compositor.stacked >= 2 && compositor.stack[compositor.stacked - 1] == 3 && compositor.stack[compositor.stacked - 2] == 2);
+        compositor_owner[3] = 0;
     }
 }
 

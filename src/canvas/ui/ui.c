@@ -1520,6 +1520,9 @@ static inline int taskbar_notices_set(int present, unsigned int severity)
         double press, which is the kit's click count (ui_click_again: within 450 ms and 4 px, scaled); its state is taskbar_cells.
 */
 #define TASKBAR_TRAY (-2) // what a point of the tray is over (the tray as a whole, between the cells)
+#define TASKBAR_TRAY_ITEM_BASE (-100)
+#define TASKBAR_TRAY_ITEM_MAX 16
+#define TASKBAR_TRAY_ITEM_PX 24
 #define TASKBAR_BUTTON_LEFT 0u
 #define TASKBAR_BUTTON_MIDDLE 2u
 #define TASKBAR_BUTTON_WHEEL 3u
@@ -23595,10 +23598,11 @@ static fn ui_picture_scale(unsigned int address_to into, int size, const unsigne
 #define UI_APP_PATH 160
 #define UI_APP_ARGS 8                   // the Exec's words after its program that are kept
 #define UI_APP_PICTURE UI_PICTURE_MOST  // the most a picture is kept at, each way
-#define UI_APPS_DIRS 24                 // the directories looked at for a change: /bowls and two in each bowl
+#define UI_APPS_DIRS 32                 // the directories looked at for a change: /bowls, user local share, and two in each bowl
 #define UI_APPS_LOOK_NS 2000000000ll
 #define UI_APPS_ENTRY_MOST (96 * 1024)  // the bytes of a desktop file that are read
 #define UI_APPS_BOWLS "/bowls"
+#define UI_APPS_LOCAL "/root/.local/share"
 #define UI_APPS_DESKTOP "Moonwater"     // what OnlyShowIn and NotShowIn name this desktop by (XDG_CURRENT_DESKTOP)
 
 // The kit's own programs, in the order they are listed: what each is called (English, the language's by language_of), the words that
@@ -23663,8 +23667,9 @@ static struct
         b64 dir_time[UI_APPS_DIRS];         // each one's modification, ns (-1: not there)
 } ui_apps;
 
-// The directory of bowls, which a check points at a tree of its own, and whose a desktop file and a launcher must be (root's; a check's own).
+// The directory of bowls and the user's XDG data directory, which a check points at trees of its own, and whose a desktop file and a launcher must be (root's; a check's own).
 static const char address_to ui_apps_bowls = UI_APPS_BOWLS;
+static const char address_to ui_apps_local = UI_APPS_LOCAL;
 static unsigned int ui_apps_owner = 0;
 
 // The statx a look needs: its type, mode and owner, and its modification time.
@@ -24007,9 +24012,14 @@ static b32 ui_apps_launcher(const char address_to root, const char address_to na
         if (got <= 0)
                 return false;
         line[got] = 0;
-        // A bowl's launcher: #!/bowl @ROOT/PROGRAM, ROOT this bowl's.
+        // A bowl's launcher: #!/bowl @ROOT/PROGRAM, ROOT this bowl's (or any bowl under ui_apps_bowls for a user local entry where root is "").
         if (!memory_compare(line, "#!/bowl @", 9))
-                return !memory_compare(line + 9, root, length) && line[9 + length] == '/';
+        {
+                const char address_to base = length ? root : ui_apps_bowls;
+                positive base_length = length ? length : string_length((string_address)ui_apps_bowls);
+
+                return base_length && !memory_compare(line + 9, base, base_length) && line[9 + base_length] == '/';
+        }
         // A profile's session: #!/bin/sh, then # bowl profile NAME.
         if (!memory_compare(line, "#!/bin/sh\n# bowl profile ", 25))
         {
@@ -24067,31 +24077,89 @@ static fn ui_apps_words(struct ui_app_entry address_to app, const char address_t
 
 static int ui_apps_find(const char address_to id);
 
+// Steam appid ("steam_app_<digits>") from an Exec arg ("steam://rungameid/<digits>") or Icon ("steam_icon_<digits>").
+static b32 ui_apps_steam_id(const char address_to icon, char (address_to words)[UI_APP_PATH], int first, int count, char address_to out, positive room)
+{
+        const char address_to digits = null;
+        positive dlen = 0;
+
+        out[0] = 0;
+        for (int at = first + 1; at < count && !digits; at++)
+                if (!memory_compare(words[at], "steam://rungameid/", 18))
+                        digits = words[at] + 18;
+        if (!digits && icon && !memory_compare(icon, "steam_icon_", 11))
+                digits = icon + 11;
+        if (!digits)
+                return false;
+        while (digits[dlen] >= '0' && digits[dlen] <= '9' && dlen < 16)
+                dlen++;
+        if (!dlen || (digits[dlen] && digits[dlen] != '/'))
+                return false;
+        if (10 + dlen + 1 > room)
+                return false;
+        memory_copy(out, "steam_app_", 10);
+        memory_copy(out + 10, digits, dlen);
+        out[10 + dlen] = 0;
+        return true;
+}
+
+// Registry id (strictly ui_apps_id_byte, < room) from a .desktop stem, falling back to steam_id or a dashed sanitisation.
+static b32 ui_apps_make_id(const char address_to file, positive stem, const char address_to steam_id, char address_to out, positive room)
+{
+        b32 plain = stem > 0 && stem < room;
+
+        for (positive at = 0; plain && at < stem; at++)
+                plain = ui_apps_id_byte((unsigned char)file[at]);
+        if (plain)
+        {
+                memory_copy(out, file, stem);
+                out[stem] = 0;
+                return true;
+        }
+        if (steam_id && steam_id[0])
+        {
+                string_copy_bounded((p8 address_to)out, (string_address)steam_id, room);
+                return true;
+        }
+        {
+                positive made = 0;
+                b32 dash = false;
+
+                for (positive at = 0; at < stem && made + 1 < room; at++)
+                {
+                        unsigned char byte = (unsigned char)file[at];
+
+                        if (ui_apps_id_byte(byte))
+                                out[made++] = (char)byte, dash = false;
+                        else if (made && !dash)
+                                out[made++] = '-', dash = true;
+                }
+                while (made && out[made - 1] == '-')
+                        made--;
+                out[made] = 0;
+                return made > 0;
+        }
+}
+
 /*
-        One desktop file of a bowl, read and listed when it is one of the machine's (the rules above). root is the bowl (/bowls/NAME),
-        directory the applications directory it is in, opened, and file its name there.
+        One desktop file of a bowl or of the user's XDG data directory (root == ""), read and listed when it is one of the machine's
+        (the rules above). root is the bowl (/bowls/NAME) or "" for local, directory the applications directory it is in, opened, and file
+        its name there.
 */
 static fn ui_apps_entry(const char address_to root, bipolar directory, const char address_to folder, const char address_to file, unsigned int code)
 {
         struct ui_app_entry address_to app;
         struct ui_desktop desktop;
         struct ui_apps_facts facts;
-        char words[UI_APP_ARGS + 8][UI_APP_PATH], profile[48];
+        char words[UI_APP_ARGS + 8][UI_APP_PATH], profile[48], steam_id[WINDOWS_APP_ID], id[WINDOWS_APP_ID];
         const char address_to program;
+        const char address_to entry_root = root[0] ? root : ui_apps_local;
         positive length = string_length((string_address)file);
         bipolar handle, got;
         p8 address_to text;
         int count, first = 0;
 
-        if (ui_apps.count >= UI_APPS_MOST || length <= 8 || length - 8 >= WINDOWS_APP_ID || memory_compare(file + length - 8, ".desktop", 8))
-                return;
-        for (positive at = 0; at < length - 8; at++)
-                if (!ui_apps_id_byte((unsigned char)file[at]))
-                        return;
-        app = &ui_apps.app[ui_apps.count];
-        memory_zero(app, sizeof(*app));
-        memory_copy(app->id, file, length - 8);
-        if (ui_apps_find(app->id) >= 0)
+        if (ui_apps.count >= UI_APPS_MOST || length <= 8 || memory_compare(file + length - 8, ".desktop", 8))
                 return;
         // Root's alone, a regular file, read through the directory and never through a link.
         if (!ui_apps_look(directory, file, false, &facts) || (facts.mode & 0170000u) != 0100000u || facts.owner != ui_apps_owner || (facts.mode & 0022) ||
@@ -24117,14 +24185,20 @@ static fn ui_apps_entry(const char address_to root, bipolar directory, const cha
         if (count <= first)
                 return;
         program = ui_apps_base(words[first]);
+        ui_apps_steam_id(desktop.icon, words, first, count, steam_id, sizeof(steam_id));
+        if (!ui_apps_make_id(file, length - 8, steam_id, id, sizeof(id)) || ui_apps_find(id) >= 0)
+                return;
+        app = &ui_apps.app[ui_apps.count];
+        memory_zero(app, sizeof(*app));
         if (!ui_apps_launcher(root, program, app->launch, sizeof(app->launch), profile, sizeof(profile)))
                 return;
+        string_copy_bounded((p8 address_to)app->id, (string_address)id, sizeof(app->id));
         for (int at = first + 1; at < count && app->arg_count < UI_APP_ARGS; at++)
                 string_copy_bounded((p8 address_to)app->args[app->arg_count++], (string_address)words[at], UI_APP_PATH);
         string_copy_bounded((p8 address_to)app->name, (string_address)desktop.name, sizeof(app->name));
-        string_copy_bounded((p8 address_to)app->key, (string_address)(desktop.key[0] ? desktop.key : app->id), sizeof(app->key));
+        string_copy_bounded((p8 address_to)app->key, (string_address)(desktop.key[0] ? desktop.key : steam_id[0] ? steam_id : app->id), sizeof(app->key));
         string_copy_bounded((p8 address_to)app->icon, (string_address)desktop.icon, sizeof(app->icon));
-        string_copy_bounded((p8 address_to)app->root, (string_address)root, sizeof(app->root));
+        string_copy_bounded((p8 address_to)app->root, (string_address)entry_root, sizeof(app->root));
         string_copy_bounded((p8 address_to)app->source, (string_address)folder, sizeof(app->source));
         string_append_bounded((p8 address_to)app->source, (string_address) "/", sizeof(app->source));
         string_append_bounded((p8 address_to)app->source, (string_address)file, sizeof(app->source));
@@ -24276,6 +24350,32 @@ static fn ui_apps_read(void)
                         count = ui_apps_names(directory, entries, room, entry_order);
                         for (positive each = 0; each < count; each++)
                                 ui_apps_entry(root, directory, folder, entries + entry_order[each], language.code);
+                        system_close(directory);
+                }
+        }
+        // User XDG desktop entries (e.g. Steam game shortcuts in /root/.local/share/applications), resolved inside ui_apps_local.
+        if (ui_apps_local && ui_apps_local[0])
+        {
+                char folder[UI_APP_PATH];
+                bipolar inside, directory = -1;
+
+                ui_apps_watch(ui_apps_local);
+                string_copy_bounded((p8 address_to)folder, (string_address)ui_apps_local, sizeof(folder));
+                string_append_bounded((p8 address_to)folder, (string_address) "/applications", sizeof(folder));
+                ui_apps_watch(folder);
+                inside = system_open_at(AT_FDCWD, (string_address)ui_apps_local, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+                if (inside >= 0)
+                {
+                        directory = system_open_resolved(inside, (string_address) "applications", FILE_READ | O_DIRECTORY | O_CLOEXEC,
+                                                         SYSTEM_RESOLVE_IN_ROOT | SYSTEM_RESOLVE_NO_MAGICLINKS);
+                        system_close(inside);
+                }
+                if (directory >= 0)
+                {
+                        positive count = ui_apps_names(directory, entries, room, entry_order);
+
+                        for (positive each = 0; each < count; each++)
+                                ui_apps_entry("", directory, folder, entries + entry_order[each], language.code);
                         system_close(directory);
                 }
         }
@@ -24587,6 +24687,8 @@ static p8 address_to ui_apps_picture_file(const struct ui_app_entry address_to a
         }
         else if (!string_first_of((string_address)app->icon, '/'))
         {
+                b32 is_local = ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local);
+
                 // A name with .png, .svg or .xpm is the name before it, as the specification's older entries say it.
                 string_copy_bounded((p8 address_to)name, (string_address)app->icon, sizeof(name));
                 if (length > 4 && name[length - 4] == '.')
@@ -24598,14 +24700,14 @@ static p8 address_to ui_apps_picture_file(const struct ui_app_entry address_to a
                                 char digits[8];
 
                                 positive_into_string((p8 address_to)digits, sides[at]);
-                                string_copy_bounded((p8 address_to)path, (string_address) "usr/share/icons/hicolor/", sizeof(path));
+                                string_copy_bounded((p8 address_to)path, (string_address)(is_local ? "icons/hicolor/" : "usr/share/icons/hicolor/"), sizeof(path));
                                 string_append_bounded((p8 address_to)path, (string_address)digits, sizeof(path));
                                 string_append_bounded((p8 address_to)path, (string_address) "x", sizeof(path));
                                 string_append_bounded((p8 address_to)path, (string_address)digits, sizeof(path));
                                 string_append_bounded((p8 address_to)path, (string_address) "/apps/", sizeof(path));
                         }
                         else
-                                string_copy_bounded((p8 address_to)path, (string_address) "usr/share/pixmaps/", sizeof(path));
+                                string_copy_bounded((p8 address_to)path, (string_address)(is_local ? "pixmaps/" : "usr/share/pixmaps/"), sizeof(path));
                         string_append_bounded((p8 address_to)path, (string_address)name, sizeof(path));
                         string_append_bounded((p8 address_to)path, (string_address) ".png", sizeof(path));
                         handle = system_open_resolved(inside, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK,

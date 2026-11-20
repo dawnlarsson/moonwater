@@ -418,6 +418,21 @@ static void compositor_dirty(unsigned int fb, const unsigned short (*clip)[4], u
         }
 }
 
+// Common flip/atomic commit bookkeeping after the kernel accepts a page flip.
+static void compositor_flip_arm(unsigned int fb, int row, unsigned int which, int async)
+{
+        compositor_flip_refused = 0;
+        compositor.flip_pending = 1;
+        compositor.vrr_kick = 0; // the pointer's place goes up with this flip
+        compositor.flip_async = async != 0;
+        if (compositor.flip_async && compositor.table)
+                compositor.table->flips_async++;
+        compositor.flip_issued = clock_monotonic_nanoseconds();
+        compositor.flip_row = row;
+        compositor.flip_buffer = which;
+        compositor.on_screen = fb;
+}
+
 static int compositor_atomic_primary(unsigned int fb, int row, unsigned int which, int src_w, int src_h, int dx, int dy, int dw, int dh);
 
 static int compositor_flip(unsigned int fb, int row, unsigned int which)
@@ -461,16 +476,7 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
                 if (system_control(compositor.card, COMPOSITOR_PAGE_FLIP, address_of flip) != 0)
                         return 0;
         }
-        compositor_flip_refused = 0;
-        compositor.flip_pending = 1;
-        compositor.vrr_kick = 0; // the pointer's place goes up with this flip
-        compositor.flip_async = (flip.flags & COMPOSITOR_FLIP_ASYNC) != 0;
-        if (compositor.flip_async && compositor.table)
-                compositor.table->flips_async++;
-        compositor.flip_issued = clock_monotonic_nanoseconds();
-        compositor.flip_row = row;
-        compositor.flip_buffer = which;
-        compositor.on_screen = fb;
+        compositor_flip_arm(fb, row, which, (flip.flags & COMPOSITOR_FLIP_ASYNC) != 0);
         return 1;
 }
 
@@ -493,6 +499,7 @@ static void compositor_flip_done(void)
         compositor_keytrace_shown(compositor.flip_stamped ? compositor.flip_when : clock_monotonic_nanoseconds());
         compositor_frametrace_note('V', -1, compositor.flip_stamped ? compositor.flip_when : clock_monotonic_nanoseconds());
         compositor.flip_pending = 0;
+        compositor.flip_async = 0;
         compositor.leaving_row = -1;
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
         {
@@ -1624,14 +1631,7 @@ static int compositor_atomic_primary(unsigned int fb, int row, unsigned int whic
         commit.user_data = ++compositor.flip_serial;
         if (system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit) != 0)
                 return 0;
-        compositor_flip_refused = 0;
-        compositor.flip_pending = 1;
-        compositor.vrr_kick = 0;
-        compositor.flip_async = 0;
-        compositor.flip_issued = clock_monotonic_nanoseconds();
-        compositor.flip_row = row;
-        compositor.flip_buffer = which;
-        compositor.on_screen = fb;
+        compositor_flip_arm(fb, row, which, 0);
         compositor.scaled_direct = (src_w != dw || src_h != dh || dx != 0 || dy != 0);
         if (obj_count == 2)
                 compositor.overlay_on = 0, compositor.plane_fb = 0;
@@ -1678,11 +1678,7 @@ static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, in
         commit.user_data = ++compositor.flip_serial;
         if (system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit) != 0)
                 return 0;
-        compositor.flip_pending = 1;
-        compositor.flip_issued = clock_monotonic_nanoseconds();
-        compositor.flip_row = row;
-        compositor.flip_buffer = which;
-        compositor.on_screen = fb;
+        compositor_flip_arm(fb, row, which, 0);
         if (overlay)
         {
                 compositor.overlay_on = rect != 0;

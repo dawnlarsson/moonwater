@@ -2391,10 +2391,10 @@ static void compositor_button(unsigned int code, int down)
                 compositor_menu_open(compositor.pointer_x, compositor.pointer_y);
                 return;
         }
-        if (tab <= -100 && tab > -116)
+        if (tab <= TASKBAR_TRAY_ITEM_BASE && tab > TASKBAR_TRAY_ITEM_BASE - TASKBAR_TRAY_ITEM_MAX)
         {
                 if (code == COMPOSITOR_BTN_LEFT || code == COMPOSITOR_BTN_RIGHT)
-                        compositor_xtray_click(-100 - tab, code == COMPOSITOR_BTN_RIGHT ? 3 : 1);
+                        compositor_tray_click(TASKBAR_TRAY_ITEM_BASE - tab, code == COMPOSITOR_BTN_RIGHT ? 3 : 1);
                 return;
         }
         if (tab == TASKBAR_LAUNCHER || tab == TASKBAR_MIC || tab == TASKBAR_VOLUME || tab == TASKBAR_NOTICES || tab == COMPOSITOR_TRAY)
@@ -2506,7 +2506,8 @@ static void compositor_button(unsigned int code, int down)
                                                                                         : COMPOSITOR_EDGE_RIGHT) |
                                                            (compositor.pointer_y < centre_y ? COMPOSITOR_EDGE_TOP
                                                                                             : COMPOSITOR_EDGE_BOTTOM));
-                        compositor_lit(under, compositor.edges[under], 1);
+                        if (compositor.resize == under)
+                                compositor_lit(under, compositor.edges[under], 1);
                         return;
                 }
 
@@ -2556,8 +2557,7 @@ static void compositor_button(unsigned int code, int down)
                         {
                                 compositor.press = COMPOSITOR_NONE;
                                 // One placed filling its screen's room is given back as a maximized one is.
-                                if (compositor.arranged[under] == COMPOSITOR_MAXIMIZED ||
-                                    compositor.arranged[under] == COMPOSITOR_ROOM)
+                                if (compositor_filling(under))
                                         compositor_float(under);
                                 else
                                         compositor_arrange(under, COMPOSITOR_MAXIMIZED);
@@ -3144,9 +3144,11 @@ static void compositor_wheel(int v120, int horizontal, unsigned int flags)
         // is (the settings window's two columns, a terminal's report to a program that asked for the mouse) has only
         // the last motion it was told of, which is none when it opened under a pointer that has not moved. Told once:
         // a wheel that reports in 120ths sends several events to a notch, and each would take two of the ring's places.
-        if (row >= 0 && !compositor_wl_locked() &&
-            (row != compositor.told_row || compositor.pointer_x - compositor.x[row] != compositor.told_x ||
-             compositor.pointer_y - compositor.y[row] != compositor.told_y))
+        int wx = compositor.pointer_x, wy = compositor.pointer_y;
+
+        if (row >= 0)
+                compositor_window_point(row, compositor.pointer_x, compositor.pointer_y, &wx, &wy);
+        if (row >= 0 && !compositor_wl_locked() && (row != compositor.told_row || wx != compositor.told_x || wy != compositor.told_y))
                 compositor_pointer_to(row);
         // What became of it, for moonwater debug.
         if (row < 0)
@@ -3156,8 +3158,8 @@ static void compositor_wheel(int v120, int horizontal, unsigned int flags)
         else
                 compositor.table->wheel_full++;
         compositor.table->wheel_row = row;
-        compositor.table->wheel_x = row < 0 ? compositor.pointer_x : compositor.pointer_x - compositor.x[row];
-        compositor.table->wheel_y = row < 0 ? compositor.pointer_y : compositor.pointer_y - compositor.y[row];
+        compositor.table->wheel_x = wx;
+        compositor.table->wheel_y = wy;
 }
 
 // A touchpad's report over: its finger's move is a mouse's, and two fingers' are the wheel, counted for moonwater
@@ -3323,9 +3325,7 @@ static void compositor_spot_undraw(int slot)
 
         if (!drawn[2])
                 return;
-        compositor.damage_by = COMPOSITOR_OVER;
-        compositor_damage(drawn[0], drawn[1], drawn[2], drawn[2]);
-        compositor.damage_by = 0;
+        compositor_damage_over(drawn[0], drawn[1], drawn[2], drawn[2]);
         drawn[2] = 0;
 }
 
@@ -3337,9 +3337,7 @@ static void compositor_spot_redraw(int slot)
         drawn[0] = compositor.spot[slot].x - radius;
         drawn[1] = compositor.spot[slot].y - radius;
         drawn[2] = 2 * radius;
-        compositor.damage_by = COMPOSITOR_OVER;
-        compositor_damage(drawn[0], drawn[1], drawn[2], drawn[2]);
-        compositor.damage_by = 0;
+        compositor_damage_over(drawn[0], drawn[1], drawn[2], drawn[2]);
 }
 
 // A finger down at x, y: its mark follows it.
@@ -3498,9 +3496,7 @@ static void compositor_chip_damage(const int *box)
 {
         if (box[2] <= 0 || box[3] <= 0)
                 return;
-        compositor.damage_by = COMPOSITOR_OVER;
-        compositor_damage(box[0], box[1], box[2], box[3]);
-        compositor.damage_by = 0;
+        compositor_damage_over(box[0], box[1], box[2], box[3]);
 }
 
 // The chip's box and alpha, when either changed since it was last drawn: the old place and the new are damaged.
@@ -4189,7 +4185,7 @@ static void compositor_pinch(const struct ui_touch_event *e)
         if (row >= 0 && compositor_visible(row))
         {
                 // The focal point in the window's own pixels, kept to the packing's room (window_pinch_pack).
-                x = e->x - compositor.x[row], y = e->y - compositor.y[row];
+                compositor_window_point(row, e->x, e->y, &x, &y);
                 x = x < 0 ? 0 : x > 0x7fff ? 0x7fff : x;
                 y = y < 0 ? 0 : y > 0x7fff ? 0x7fff : y;
                 compositor.touching = 1;
@@ -4464,7 +4460,7 @@ static void compositor_chip_press(int cell)
                 compositor_close(row);
         else if (cell == 1)
                 compositor_minimize_row(row);
-        else if (compositor.arranged[row] == COMPOSITOR_MAXIMIZED)
+        else if (compositor_filling(row))
                 compositor_float(row);
         else
                 compositor_arrange(row, COMPOSITOR_MAXIMIZED);

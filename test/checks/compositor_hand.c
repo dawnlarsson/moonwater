@@ -2246,26 +2246,30 @@ static void check_taskbar_pins(void)
     positive_into_string((p8 *)root + string_length((string_address)root), (positive)system_call(syscall(getpid)));
     tab_remove_tree(root);
     tab_make_dir(root);
-    for (int each = 0; each < 13; each++)
+    for (int each = 0; each < 20; each++)
     {
-        static const char *const names[13] = {"/proc", "/root", "/run", "/bowls", "/bowls/bin", "/bowls/alpine", "/bowls/alpine/usr", "/bowls/alpine/usr/share",
-                                              "/bowls/alpine/usr/share/applications", "/bowls/arch", "/bowls/arch/usr", "/bowls/arch/usr/share",
-                                              "/bowls/arch/usr/share/applications"};
+        static const char *const names[20] = {"/proc", "/root", "/root/.local", "/root/.local/share", "/root/.local/share/applications",
+                                              "/root/.local/share/icons", "/root/.local/share/icons/hicolor", "/root/.local/share/icons/hicolor/16x16",
+                                              "/root/.local/share/icons/hicolor/16x16/apps", "/run", "/bowls", "/bowls/bin", "/bowls/alpine",
+                                              "/bowls/alpine/usr", "/bowls/alpine/usr/share", "/bowls/alpine/usr/share/applications", "/bowls/arch",
+                                              "/bowls/arch/usr", "/bowls/arch/usr/share", "/bowls/arch/usr/share/applications"};
 
         string_copy((string_address)path, (string_address)root), string_append_bounded((string_address)path, (string_address)names[each], sizeof(path));
         tab_make_dir(path);
     }
     string_copy((string_address)second, (string_address)root), string_append_bounded((string_address)second, (string_address) "/proc", sizeof(second));
     {
-        static char proc_root[112], run_root[112], settings_root[112], bowls[112];
+        static char proc_root[112], run_root[112], settings_root[112], bowls[112], local_dir[128];
         static const struct { const char *at, *text; } files[] = {
             // Chromium: started by its bowl's launcher of the Exec's program; Steam: its class is Steam, its launcher a profile's session;
-            // htop runs in a terminal and is not pinned; a hidden entry and one whose program has no launcher are not listed.
+            // htop runs in a terminal and is not pinned; a hidden entry and one whose program has no launcher are not listed;
+            // a Steam game shortcut in /root/.local/share/applications with spaces in its filename resolves to /bowls/bin/steam with steam://rungameid/<id>.
             {"/bowls/alpine/usr/share/applications/chromium.desktop", "[Desktop Entry]\nType=Application\nName=Chromium\nExec=chromium-browser %U\nIcon=chromium\n"},
             {"/bowls/alpine/usr/share/applications/htop.desktop", "[Desktop Entry]\nType=Application\nName=htop\nExec=htop\nTerminal=true\n"},
             {"/bowls/alpine/usr/share/applications/hidden.desktop", "[Desktop Entry]\nType=Application\nName=Hidden\nExec=htop\nNoDisplay=true\n"},
             {"/bowls/alpine/usr/share/applications/lost.desktop", "[Desktop Entry]\nType=Application\nName=Lost\nExec=lost\n"},
             {"/bowls/arch/usr/share/applications/steam.desktop", "[Desktop Entry]\nType=Application\nName=Steam\nExec=/usr/bin/steam %U\nStartupWMClass=Steam\n"},
+            {"/root/.local/share/applications/Black Mesa.desktop", "[Desktop Entry]\nName=Black Mesa\nExec=steam steam://rungameid/362890\nIcon=steam_icon_362890\nTerminal=false\nType=Application\n"},
             {"/bowls/bin/steam", "#!/bin/sh\n# bowl profile steam\nexec bowl profile steam session \"$@\"\n"},
         };
 
@@ -2273,12 +2277,21 @@ static void check_taskbar_pins(void)
         string_copy((string_address)run_root, (string_address)root), string_append_bounded((string_address)run_root, (string_address) "/run", sizeof(run_root));
         string_copy((string_address)settings_root, (string_address)root);
         string_copy((string_address)bowls, (string_address)root), string_append_bounded((string_address)bowls, (string_address) "/bowls", sizeof(bowls));
+        string_copy((string_address)local_dir, (string_address)root), string_append_bounded((string_address)local_dir, (string_address) "/root/.local/share", sizeof(local_dir));
         taskbar_proc_root = proc_root, taskbar_run_root = run_root, compositor_settings_root = settings_root;
-        ui_apps_bowls = bowls, ui_apps_owner = (unsigned int)system_call(syscall(getuid)), ui_apps.read = false;
+        ui_apps_bowls = bowls, ui_apps_local = local_dir, ui_apps_owner = (unsigned int)system_call(syscall(getuid)), ui_apps.read = false;
         for (unsigned int each = 0; each < sizeof(files) / sizeof(files[0]); each++)
         {
             string_copy((string_address)path, (string_address)root), string_append_bounded((string_address)path, (string_address)files[each].at, sizeof(path));
             tab_make_file(path, files[each].text, string_length((string_address)files[each].text));
+        }
+        // Steam game icon in /root/.local/share/icons/hicolor/16x16/apps/steam_icon_362890.png.
+        {
+            static const unsigned char png[138] = {137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,4,0,0,0,5,8,6,0,0,0,98,173,77,219,0,0,0,81,73,68,65,84,120,218,13,139,161,17,192,48,12,196,62,117,175,127,37,69,97,97,65,193,198,30,39,67,148,57,222,169,251,165,6,34,58,9,0,150,9,246,123,97,127,55,86,161,98,155,84,36,145,248,145,2,212,26,212,225,84,131,60,19,165,183,225,189,41,122,179,56,179,112,230,66,25,65,49,255,1,194,82,15,30,228,59,233,117,0,0,0,0,73,69,78,68,174,66,96,130};
+
+            string_copy((string_address)path, (string_address)root);
+            string_append_bounded((string_address)path, (string_address) "/root/.local/share/icons/hicolor/16x16/apps/steam_icon_362890.png", sizeof(path));
+            tab_make_file(path, (const char *)png, sizeof(png));
         }
         // The launchers name their bowl's program: chromium-browser and htop of alpine's.
         for (int each = 0; each < 2; each++)
@@ -2294,7 +2307,7 @@ static void check_taskbar_pins(void)
     }
     ui_apps_fresh((b64)clock_monotonic_nanoseconds());
     {
-        int chromium = ui_apps_find("chromium"), steam = ui_apps_find("steam"), htop = ui_apps_find("htop");
+        int chromium = ui_apps_find("chromium"), steam = ui_apps_find("steam"), htop = ui_apps_find("htop"), game = ui_apps_find("steam_app_362890");
         char want[200];
 
         string_copy((string_address)want, (string_address)ui_apps_bowls), string_append_bounded((string_address)want, (string_address) "/bin/chromium-browser", sizeof(want));
@@ -2307,6 +2320,11 @@ static void check_taskbar_pins(void)
         check("apps: a profile's session script is a launcher, and its profile is a word of the app; one that runs in a terminal is listed and not pinned",
               steam >= 0 && string_equals((string_address)ui_apps.app[steam].profile, (string_address) "steam") && htop >= 0 && ui_apps.app[htop].terminal &&
                   !ui_apps_pinnable(htop) && ui_apps_pinnable(chromium));
+        check("apps: a Steam game shortcut in user local applications gets steam_app_<id> id/key, forwards steam://rungameid/<id> through /bowls/bin/steam, loads its local hicolor PNG icon, and is pinnable",
+              game >= 0 && ui_apps_match("steam_app_362890") == game && string_equals((string_address)ui_apps.app[game].name, (string_address) "Black Mesa") &&
+                  string_equals((string_address)ui_apps.app[game].profile, (string_address) "steam") && ui_apps.app[game].arg_count == 1 &&
+                  string_equals((string_address)ui_apps.app[game].args[0], (string_address) "steam://rungameid/362890") &&
+                  ui_apps_has_picture(game) && ui_apps_pinnable(game));
     }
     taskbar_pins_set("chromium /x /y ; settings /settings /settings ; nosuch /a /b ; Steam /usr/lib/steam/steam /bowls/bin/steam --x");
     check("taskbar pinned: a line's entries are the registry's apps they name, by id or by an older line's window key, titled by their names; one of no app is not shown",
@@ -2520,7 +2538,7 @@ static void check_taskbar_pins(void)
 
     tab_remove_tree(root);
     taskbar_proc_root = "/proc", taskbar_run_root = "/run/moonwater", compositor_settings_root = "";
-    ui_apps_bowls = UI_APPS_BOWLS, ui_apps_owner = 0, ui_apps.read = false;
+    ui_apps_bowls = UI_APPS_BOWLS, ui_apps_local = UI_APPS_LOCAL, ui_apps_owner = 0, ui_apps.read = false;
     taskbar_signal = taskbar_signal_send;
     taskbar_standard();
 }

@@ -368,19 +368,28 @@ static int taskbar_before(int slot)
 static int taskbar_clocked; // the clock's cell, as long as its text (taskbar_lay sets it before it lays the tray)
 static int taskbar_apart;   // the kit's gap twice, between one pill and the next (taskbar_lay sets it before it lays the tasks)
 
-static int taskbar_xtray_count(void)
+static int taskbar_tray_items_count(void)
 {
 #ifdef COMPOSITOR_ROWS
-        return compositor_xtray_count();
+        return compositor_tray_count();
 #else
         return 0;
 #endif
 }
 
-static const unsigned int *taskbar_xtray_pixels(int index)
+static int taskbar_tray_items_gen(void)
 {
 #ifdef COMPOSITOR_ROWS
-        return compositor_xtray_pixels(index);
+        return compositor_tray_gen();
+#else
+        return 0;
+#endif
+}
+
+static const unsigned int *taskbar_tray_items_pixels(int index)
+{
+#ifdef COMPOSITOR_ROWS
+        return compositor_tray_pixels(index);
 #else
         (void)index;
         return 0;
@@ -390,7 +399,7 @@ static const unsigned int *taskbar_xtray_pixels(int index)
 static int taskbar_tray_lay(struct ui_tree address_to t, int before, int m, int margin, int scale, int glyph, int square, int cell, int text_w, int high)
 {
         int clocked = taskbar_clocked;
-        int xtray = !before ? taskbar_xtray_count() : 0;
+        int xtray = !before ? taskbar_tray_items_count() : 0;
 
         struct ui_node address_to n = null;
         int length = 0;
@@ -405,9 +414,9 @@ static int taskbar_tray_lay(struct ui_tree address_to t, int before, int m, int 
         if (!t || !length)
                 return length;
         taskbar_open(t, before ? TASKBAR_TRAY_BEFORE : TASKBAR_TRAY, m, margin, length, high);
-        for (int i = 0; i < xtray && i < 16; i++)
+        for (int i = 0; i < xtray && i < TASKBAR_TRAY_ITEM_MAX; i++)
         {
-                n = taskbar_open(t, -100 - i, m, 0, square, high);
+                n = taskbar_open(t, TASKBAR_TRAY_ITEM_BASE - i, m, 0, square, high);
                 taskbar_mark(t, n, glyph);
                 ui_tree_close(t);
         }
@@ -862,7 +871,7 @@ struct taskbar_key
         unsigned int lengths;           // each tab's title in characters, their digest (FNV-1a over them)
         int strip[2], follow;           // where each side's strip is scrolled to, and whether it follows the keys
         unsigned int marks;             // the tabs' marks, their digest (the lit one is what a strip follows)
-        int spare;                      // none: the key is whole words
+        int tray_gen;                   // tray items generation (invalidates layout when tray icons dock/undock/change)
 };
 
 _Static_assert(sizeof(struct taskbar_key) == 8 + 22 * 4, "a key is compared as bytes, so it has no padding");
@@ -905,7 +914,7 @@ static struct ui_tree address_to taskbar_tree(const struct taskbar_view *view)
                                       taskbar.order[0] << 12 | taskbar.order[1] << 14 | taskbar.order[2] << 16,
                                   taskbar.editing | taskbar.clock_tray << 1 | taskbar.moon_ink << 2 | taskbar.clock_tab << 3 | taskbar.clock_none << 4 |
                                       taskbar.separate << 5 | (taskbar.edge_in + 64) << 6 | taskbar.clock_chars << 14, 0,
-                                  {taskbar_strip_from[0], taskbar_strip_from[1]}, taskbar_strip_follow, 0};
+                                  {taskbar_strip_from[0], taskbar_strip_from[1]}, taskbar_strip_follow, 0, taskbar_tray_items_gen()};
 
 #define TASKBAR_CELL(slot, shown, mark, paint) key.cells = key.cells << 1 | ((shown) != 0);
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
@@ -2471,9 +2480,10 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 int which = n->id - 1, m = band->dir, s = taskbar_scaled(view->scale);
                 struct ui ui;
 
-                // The tray, and so its cells, is drawn only with the time to say. The tabs' plate is its tabs.
+                // The tray, and so its cells, is drawn only with the time to say (except native/X11 tray items, which do not depend on the clock).
+                b32 tray_item = which <= TASKBAR_TRAY_ITEM_BASE && which > TASKBAR_TRAY_ITEM_BASE - TASKBAR_TRAY_ITEM_MAX;
                 if (!n->id || which == TASKBAR_TABS || which == TASKBAR_TABS_LEFT || (which <= TASKBAR_ZONE && which > TASKBAR_DONE) || !(redo & taskbar_bit(which)) ||
-                    (which < 0 && which != TASKBAR_LAUNCHER && which != TASKBAR_DONE && !time_ok))
+                    (which < 0 && which != TASKBAR_LAUNCHER && which != TASKBAR_DONE && !tray_item && !time_ok))
                         continue;
                 if (which >= 0 || which == TASKBAR_TRAY || which == TASKBAR_TRAY_BEFORE || which == TASKBAR_DONE || which == TASKBAR_STRIP_BACK ||
                     which == TASKBAR_STRIP_ON || (which == -3 && taskbar.clock_tab))
@@ -2530,11 +2540,16 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                 TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
                 default:
-                        if (which <= -100 && which > -116)
+                        if (tray_item)
                         {
                                 const struct ui_node address_to mark = n->first >= 0 ? &t->node[n->first] : null;
-                                const unsigned int *px = taskbar_xtray_pixels(-100 - which);
+                                const unsigned int *px = taskbar_tray_items_pixels(TASKBAR_TRAY_ITEM_BASE - which);
 
+                                if (!time_ok)
+                                {
+                                        ground = taskbar_glass_tab(view, rect[0], rect[1], gw, band->x, band->y, band->w, n->x, n->y, n->w, n->h);
+                                        ink = window_contrast(ground);
+                                }
                                 if (mark && px)
                                 {
                                         int mx = mark->x - band->x, my = mark->y - band->y, mw = mark->w, mh = mark->h;
@@ -2542,7 +2557,8 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
                                         for (int yy = 0; yy < mh && my + yy < band->h; yy++)
                                                 for (int xx = 0; xx < mw && mx + xx < band->w; xx++)
                                                 {
-                                                        unsigned int src = px[(yy * 24 / mh) * 24 + (xx * 24 / mw)];
+                                                        unsigned int src = px[(yy * TASKBAR_TRAY_ITEM_PX / mh) * TASKBAR_TRAY_ITEM_PX +
+                                                                              (xx * TASKBAR_TRAY_ITEM_PX / mw)];
                                                         unsigned int a = src >> 24;
 
                                                         if (a && mx + xx >= 0 && my + yy >= 0)

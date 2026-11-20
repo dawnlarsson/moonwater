@@ -388,9 +388,7 @@ static unsigned int compositor_vivid(unsigned int pixel)
 // The output's band over x, width, from y down its height: what the tabs redone wrote, for the composition to show.
 static void compositor_band_damage(int x, int y, int width, int height)
 {
-        compositor.damage_by = COMPOSITOR_OVER;
-        compositor_damage(x, y, width, height);
-        compositor.damage_by = 0;
+        compositor_damage_over(x, y, width, height);
 }
 
 // The damage of the band's move: where it was (before) and where it is now, on every band. A slide damages nothing else.
@@ -408,39 +406,9 @@ static void compositor_taskbar_damage(b64 before)
 }
 
 /*
-        Whether a fullscreen window is the top window of its screen, and the taskbar slides away for it (taskbar_slide_now): the first window
-        of each screen from the top of the stack, a popup, an X window's menu or an overlay of no tab passed over (a menu of the fullscreen
-        window's own shows over it, and the band stays away). Put away or under another window, it is not, and the band comes back; it slid
-        away for any fullscreen window shown, under a window over it too, and stayed away there. compositor_fullscreen_top says which row it
-        is (-1: none), for the game's own scheduling (compositor_game_slice).
+        Every screen's top fullscreen window (one a screen, most of them): the first window of each screen from the top of the stack,
+        passing over popups, X override-redirect menus and no-tab overlays. compositor_fullscreen_top returns the first (-1 for none).
 */
-static int compositor_fullscreen_top(void)
-{
-        unsigned int seen = 0;
-
-        for (unsigned int at = compositor.stacked; at-- > 0;)
-        {
-                int row = (int)compositor.stack[at], screen;
-
-                if (!compositor_visible(row) || compositor_popup_parent[row] >= 0 || compositor_row_xoverride(row) ||
-                    (compositor.asks[row] & WINDOW_NO_TAB))
-                        continue;
-                screen = compositor_screen_of(row);
-                if (screen < 0 || screen >= 32 || (seen & (1u << screen)))
-                        continue;
-                seen |= 1u << screen;
-                if (compositor.fullscreen[row])
-                        return row;
-        }
-        return -1;
-}
-
-static int compositor_fullscreen_up(void)
-{
-        return compositor_fullscreen_top() >= 0;
-}
-
-// Every screen's fullscreen top window, as compositor_fullscreen_top finds the first (one a screen, most of them): how many.
 static unsigned int compositor_fullscreen_tops(int *rows, unsigned int most)
 {
         unsigned int seen = 0, count = 0;
@@ -460,6 +428,18 @@ static unsigned int compositor_fullscreen_tops(int *rows, unsigned int most)
                         rows[count++] = row;
         }
         return count;
+}
+
+static int compositor_fullscreen_top(void)
+{
+        int row = -1;
+
+        return compositor_fullscreen_tops(&row, 1) ? row : -1;
+}
+
+static int compositor_fullscreen_up(void)
+{
+        return compositor_fullscreen_top() >= 0;
 }
 
 // The taskbar's place, asked on every pass of the loop before a frame is drawn, with the clock: away while `taskbar fullscreen on`
