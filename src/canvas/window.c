@@ -2225,6 +2225,37 @@ static int windows_buf_num(char *into, unsigned int room, unsigned int *at, long
         return 1;
 }
 
+// Formats "<pre><num><post>" into out (room bytes, always NUL-terminated when room > 0).
+static void windows_num_path(char *out, unsigned int room, const char *pre, unsigned long num, const char *post)
+{
+        unsigned int at = 0;
+
+        if (!room)
+                return;
+        out[0] = 0;
+        if (pre && *pre)
+                windows_buf_str(out, room, &at, pre);
+        windows_buf_num(out, room, &at, (long)num);
+        if (post && *post)
+                windows_buf_str(out, room, &at, post);
+}
+
+// Formats "<pre><a><mid><b>" into out (room bytes, always NUL-terminated when room > 0).
+static void windows_num2_path(char *out, unsigned int room, const char *pre, unsigned long a, const char *mid, unsigned long b)
+{
+        unsigned int at = 0;
+
+        if (!room)
+                return;
+        out[0] = 0;
+        if (pre && *pre)
+                windows_buf_str(out, room, &at, pre);
+        windows_buf_num(out, room, &at, (long)a);
+        if (mid && *mid)
+                windows_buf_str(out, room, &at, mid);
+        windows_buf_num(out, room, &at, (long)b);
+}
+
 // Parses a bounded decimal integer from length bytes at word into *into.
 // When strict_zero is set, leading zeros ("01") and "-0" are rejected.
 static int windows_scan_int(const char *word, unsigned int length, int low, int high, unsigned int max_digits, int strict_zero, int *into)
@@ -3461,6 +3492,35 @@ static long window_call(long number, long a, long b, long c, long d, long e, lon
 #endif
 #endif
 
+// Reads up to room - 1 bytes of a small /proc, /sys or /root file, stripping at the first newline or CR.
+// Returns line length, or -1 on open/read error.
+static long windows_read_line(const char *path, char *buf, unsigned int room, long flags)
+{
+        long fd, got;
+
+        if (!room)
+                return -1;
+        buf[0] = 0;
+        fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, flags, 0, 0, 0);
+        if (fd < 0)
+                return -1;
+        got = window_call(WINDOW_SYS_READ, fd, (long)buf, (long)(room - 1), 0, 0, 0);
+        window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
+        if (got < 0)
+        {
+                buf[0] = 0;
+                return -1;
+        }
+        buf[got] = 0;
+        for (long i = 0; i < got; i++)
+                if (buf[i] == '\n' || buf[i] == '\r')
+                {
+                        buf[i] = 0;
+                        return i;
+                }
+        return got;
+}
+
 /*
         A table of no file and no compositor's (a check's, a program's that draws alone), made at its first use where *at is 0: the
         header alone, private and of no memory but the pages written (MAP_NORESERVE), where a struct windows of WINDOWS rows in a
@@ -4392,14 +4452,12 @@ static void windows_asked_take(struct windows *table, unsigned int row, string_a
 static unsigned long windows_proc_stat(unsigned int pid, unsigned int *parent)
 {
         char path[32], text[512];
-        unsigned int at = 0, field = 3;
+        unsigned int field = 3;
         unsigned long value = 0, start = 0;
         long handle, got, from = -1;
 
         *parent = 0;
-        windows_buf_str(path, sizeof(path), &at, "/proc/");
-        windows_buf_num(path, sizeof(path), &at, (long)pid);
-        windows_buf_str(path, sizeof(path), &at, "/stat");
+        windows_num_path(path, sizeof(path), "/proc/", pid, "/stat");
         handle = pid ? window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0) : -1; // O_RDONLY | O_CLOEXEC
         if (handle < 0)
                 return 0;
@@ -4816,19 +4874,7 @@ static const char *radio_blocked_detail(const char *type, int soft, int hard, in
 // Reads a small file of sysfs, whole, into buf (ended): its length, or -1.
 static long radio_read_file(const char *path, char *buf, unsigned int room)
 {
-        long file = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0), got = -1;
-
-        if (file < 0)
-                return -1;
-        got = window_call(WINDOW_SYS_READ, file, (long)buf, room - 1, 0, 0, 0);
-        window_call(WINDOW_SYS_CLOSE, file, 0, 0, 0, 0, 0);
-        if (got < 0)
-                return -1;
-        buf[got] = 0;
-        for (long i = 0; i < got; i++)
-                if (buf[i] == '\n')
-                        buf[i] = 0, got = i;
-        return got;
+        return windows_read_line(path, buf, room, 0x80000);
 }
 
 // Whether a radio was asked for, as src/sh/host/radio.c's radio_kept reads the machine's own record: the word the person last set (word: the first line of
@@ -4850,12 +4896,10 @@ static int radio_asked_on(const char *key)
         return radio_asked(null, radio_read_file(wifi ? "/root/wifi" : "/root/bluetooth", list, sizeof(list)));
 }
 
-// The path of one of an rfkill switch's files (/sys/class/rfkill/rfkillN/leaf), for N of one digit.
+// The path of one of an rfkill switch's files (/sys/class/rfkill/rfkillN/leaf).
 static void radio_path(char *path, unsigned int room, unsigned int n, const char *leaf)
 {
-        string_copy_bounded((string_address)path, (string_address)"/sys/class/rfkill/rfkill", room);
-        path[24] = (char)('0' + (n % 10)), path[25] = 0;
-        string_append_bounded((string_address)path, (string_address)"/", room);
+        windows_num_path(path, room, "/sys/class/rfkill/rfkill", n, "/");
         string_append_bounded((string_address)path, (string_address)leaf, room);
 }
 
@@ -5715,12 +5759,7 @@ static void windows_clip_ask(const struct window_row *own, unsigned int which)
 // "/proc/PID/fd/NUMBER" into path (48 bytes).
 static void windows_proc_fd(char *path, unsigned int pid, unsigned int number)
 {
-        unsigned int at = 0;
-
-        windows_buf_str(path, 48, &at, "/proc/");
-        windows_buf_num(path, 48, &at, (long)pid);
-        windows_buf_str(path, 48, &at, "/fd/");
-        windows_buf_num(path, 48, &at, (long)number);
+        windows_num2_path(path, 48, "/proc/", pid, "/fd/", number);
 }
 
 /*

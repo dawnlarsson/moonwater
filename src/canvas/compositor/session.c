@@ -214,25 +214,19 @@ static void compositor_osk_sync(void);
 static void compositor_osk_unpan(int row);
 static int compositor_osk_row(void);
 
+// The word kept in a file of /root, cut at its first space or line end: empty when there is none.
+static void compositor_word(const char *path, char *word, unsigned int room);
+
 // The layout the machine keeps, which `moonwater keyboard` writes; a machine that has not kept one has the US. A layout that
 // changes is the on-screen keyboard's too: its letters are the layout's, so the keyboard is asked again (compositor_osk_sync
 // writes the layout to the table) and woken to read it.
 static void compositor_layout_read(void)
 {
-        char name[8] = {0};
-        bipolar handle = system_open_at(AT_FDCWD, (string_address) "/root/keyboard", COMPOSITOR_SETTING_OPEN);
-        int layout = -1;
+        char name[8];
+        int layout;
 
-        if (handle >= 0)
-        {
-                bipolar got = system_read_once(handle, name, sizeof(name) - 1);
-
-                system_close(handle);
-                for (bipolar at = 0; at < (got > 0 ? got : 0); at++)
-                        if (name[at] == '\n' || name[at] == ' ')
-                                name[at] = 0;
-                layout = compositor_layout_index(name);
-        }
+        compositor_word("/root/keyboard", name, sizeof(name));
+        layout = name[0] ? compositor_layout_index(name) : -1;
 
         if (layout >= 0 && layout != compositor.keymap.layout)
         {
@@ -266,17 +260,14 @@ static void compositor_text(const char *path, char *text, unsigned int room)
 // The word kept in a file of /root, cut at its first space or line end: empty when there is none.
 static void compositor_word(const char *path, char *word, unsigned int room)
 {
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, COMPOSITOR_SETTING_OPEN);
-        bipolar got = 0, at = 0;
+        long got = windows_read_line(path, word, room, COMPOSITOR_SETTING_OPEN);
 
-        if (handle >= 0)
-        {
-                got = system_read_once(handle, word, room - 1);
-                system_close(handle);
-        }
-        while (at < got && word[at] != '\n' && word[at] != ' ' && word[at] != '\r')
-                at++;
-        word[at] = 0;
+        for (long at = 0; at < got; at++)
+                if (word[at] == ' ')
+                {
+                        word[at] = 0;
+                        break;
+                }
 }
 
 /*
@@ -287,19 +278,21 @@ static void compositor_word(const char *path, char *word, unsigned int room)
         know is the default, as if nothing were kept. What changed is drawn at once.
 */
 static p8 compositor_setting_kept(const char *path, const char *word, long *value);
+static void compositor_setting_apply_binds(unsigned int mask);
 
 // `canvas wallpaper` and its rows: what compositor_wall_keep makes the wallpaper with (the theme and the accent it reads itself).
 static void compositor_wall_read(void)
 {
-        static const char *const paths[4] = {SETTING_WALLPAPER_PATH, SETTING_WALLPAPER_DARK_PATH, SETTING_WALLPAPER_MARIA_PATH, SETTING_WALLPAPER_GLOW_PATH};
-        long kept[4];
+        static const char *const paths[2] = {SETTING_WALLPAPER_PATH, SETTING_WALLPAPER_DARK_PATH};
+        long kept[2];
         char word[16];
 
-        for (int at = 0; at < 4; at++)
+        for (int at = 0; at < 2; at++)
         {
                 compositor_word(paths[at], word, sizeof(word));
                 compositor_setting_kept(paths[at], word, &kept[at]);
         }
+        compositor_setting_apply_binds(1u << 2); // COMPOSITOR_SET_WALL: maria & glow
         compositor_wall_rows.moon = kept[0] == 0, compositor_wall_rows.picture = kept[0] == 2, compositor_wall_rows.dimmed = kept[1] == 0;
         // The pictures' directory as it is now: a picture put there, or one taken away, is a change of the wallpaper.
         {
@@ -309,7 +302,6 @@ static void compositor_wall_read(void)
         }
         // A picture wallpaper falls back to the moon on a screen that has none.
         compositor_wall_rows.moon |= compositor_wall_rows.picture;
-        compositor_wall_rows.maria = kept[2] >= 20 && kept[2] <= 80 ? (int)kept[2] : 45, compositor_wall_rows.glow = (int)kept[3];
         compositor_wall_rows.ready = 1;
         compositor_damage(0, 0, compositor.width, compositor.height);
 }
@@ -357,12 +349,6 @@ static void compositor_cursor_look_read(void)
                 compositor.cursor.plane.scale = 0;
                 compositor_cursor_move();
         }
-}
-
-static void compositor_look_read(void)
-{
-        compositor_wall_read();
-        compositor_cursor_look_read();
 }
 
 // Every window row that holds a program woken to read the table's updated settings.
@@ -563,20 +549,6 @@ static void compositor_table_publish(unsigned int *field, unsigned int value, un
         compositor_wake_all();
 }
 
-// The wheel's glide (ui_wheel_turn), as the table keeps it.
-static void compositor_wheel_publish(unsigned int off)
-{
-        if (compositor.table)
-                compositor_table_publish(&compositor.table->wheel_off, off, 0, 0);
-}
-
-// The caret's blink and width (ui.c's ui_caret_wave and ui_caret_thick), as the table keeps them, each one more than its place.
-static void compositor_caret_publish(unsigned int speed, unsigned int thick)
-{
-        if (compositor.table)
-                compositor_table_publish(&compositor.table->caret_speed, speed, &compositor.table->caret_thick, thick);
-}
-
 // The width of a lit edge or corner (compositor_lit_px): the lit edge is drawn again at the old width and at the new, so the
 // pixels the old one drew are not left behind. Only the window the hand is on has one lit.
 static void compositor_border_publish(unsigned int width)
@@ -604,14 +576,6 @@ static void compositor_text_publish(unsigned int percent)
                 compositor_table_publish(&compositor.table->text_scale, percent, 0, 0);
 }
 
-// The scroll body's switches, as the table keeps them (scroll_off: WINDOW_SCROLL_FLIP, _STOPS, _STILL and _DRAG, _DRAG alone the standard) with the
-// trackpad's speed in percent (scroll_speed).
-static void compositor_scroll_publish(unsigned int off, unsigned int speed)
-{
-        if (compositor.table)
-                compositor_table_publish(&compositor.table->scroll_off, off, &compositor.table->scroll_speed, speed);
-}
-
 // Whether a Scrolling switch is on for the word its file holds (the row's standard when it holds none, or none of its words). A switch row's
 // value is the place of its word in "on off" (registry.c: setting_words_of), so on is 0 and off is 1, as every other reader of a switch has it
 // (touch, predict touch, shake, acceleration). This was read as if on were 1: momentum and the rubber band, whose standard is on, were off in a
@@ -635,22 +599,18 @@ static unsigned int compositor_scroll_bits(const char *natural, const char *mome
                (compositor_switch_on(SETTING_SCROLL_DRAG_PATH, drag) ? WINDOW_SCROLL_DRAG : 0);
 }
 
-// The Scrolling group's five rows, read in one place: natural direction (off when nothing is kept), momentum and the rubber band (on), the
-// mouse's drag (on), and the trackpad's speed (a percent: 100 when nothing is kept, or what is kept is none of the row's words), which
-// compositor_speed takes for the pads.
+// The Scrolling group's switch rows (trackpad_speed is bound declaratively in compositor_setting_specs[]).
 static void compositor_scroll_read(void)
 {
-        char natural[16], momentum[16], rubber[16], drag[16], speed[16];
-        long percent;
+        char natural[16], momentum[16], rubber[16], drag[16];
 
         compositor_word(SETTING_SCROLL_NATURAL_PATH, natural, sizeof(natural));
         compositor_word(SETTING_SCROLL_MOMENTUM_PATH, momentum, sizeof(momentum));
         compositor_word(SETTING_SCROLL_RUBBER_PATH, rubber, sizeof(rubber));
         compositor_word(SETTING_SCROLL_DRAG_PATH, drag, sizeof(drag));
-        compositor_word(SETTING_TRACKPAD_SPEED_PATH, speed, sizeof(speed));
-        compositor_setting_kept(SETTING_TRACKPAD_SPEED_PATH, speed, &percent);
-        compositor.trackpad_speed = (unsigned int)percent;
-        compositor_scroll_publish(compositor_scroll_bits(natural, momentum, rubber, drag), compositor.trackpad_speed);
+        if (compositor.table)
+                compositor_table_publish(&compositor.table->scroll_off, compositor_scroll_bits(natural, momentum, rubber, drag),
+                                         &compositor.table->scroll_speed, compositor.trackpad_speed);
 }
 
 /*
@@ -666,18 +626,6 @@ static void compositor_pace_set(const char *word)
         ui_pace = percent < UI_PACE_LEAST || percent > UI_PACE_MOST ? UI_PACE_STANDARD : (unsigned int)percent;
         if (compositor.table)
                 compositor_table_publish(&compositor.table->motion_pace, ui_pace, 0, 0);
-}
-
-// canvas vrr: the policy of the screen's variable refresh (kms.c's compositor_vrr) (on when nothing is kept), and the screen set by it.
-static void compositor_vrr_read(void)
-{
-        char word[16];
-        long kept = 0;
-
-        compositor_word(SETTING_VRR_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_VRR_PATH, word, &kept);
-        compositor_vrr.policy = kept >= 0 && kept <= 2 ? (unsigned int)kept : 0u;
-        compositor_vrr_keep();
 }
 
 static void compositor_theme_core_read(void)
@@ -697,12 +645,14 @@ static void compositor_theme_core_read(void)
         motion = string_equals((string_address)word, (string_address) "reduced");
         compositor_word(SETTING_WHEEL_SMOOTH_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_WHEEL_SMOOTH_PATH, word, &smooth);
-        compositor_wheel_publish(smooth != 0);
+        if (compositor.table)
+                compositor_table_publish(&compositor.table->wheel_off, smooth != 0, 0, 0);
         compositor_word(SETTING_CARET_BLINK_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_CARET_BLINK_PATH, word, &blink);
         compositor_word(SETTING_CARET_THICKNESS_PATH, word, sizeof(word));
         compositor_setting_kept(SETTING_CARET_THICKNESS_PATH, word, &thick);
-        compositor_caret_publish((unsigned int)blink + 1, (unsigned int)thick + 1);
+        if (compositor.table)
+                compositor_table_publish(&compositor.table->caret_speed, (unsigned int)blink + 1, &compositor.table->caret_thick, (unsigned int)thick + 1);
         // English when nothing is kept, and when what is kept is not a code (default).
         compositor_word(SETTING_LANGUAGE_PATH, word, sizeof(word));
         compositor_language_publish(windows_language_code(word, string_length((string_address)word)));
@@ -720,13 +670,6 @@ static void compositor_theme_core_read(void)
         // The pace after the theme, so a window that takes the table's first count takes its theme with it.
         compositor_word(SETTING_MOTION_SPEED_PATH, word, sizeof(word));
         compositor_pace_set(word);
-}
-
-static void compositor_theme_read(void)
-{
-        compositor_theme_core_read();
-        compositor_scroll_read();
-        compositor_vrr_read();
 }
 
 // Auto, again by the clock: a minute's wake is enough.
@@ -773,12 +716,12 @@ static void compositor_repeat_apply(unsigned int at)
                 return;
         compositor_repeat_target(compositor.repeat_kept, compositor.repeat_delay, compositor.repeat_rate,
                                  compositor.repeat_own[at], want);
-        if (want[0] == compositor.repeat_now[at][0] && want[1] == compositor.repeat_now[at][1])
+        if (want[0] == compositor.devices[at].repeat_now[0] && want[1] == compositor.devices[at].repeat_now[1])
                 return;
         if (system_control(compositor.inputs[at], COMPOSITOR_EVIOCSREP, want) == 0)
         {
-                compositor.repeat_now[at][0] = want[0];
-                compositor.repeat_now[at][1] = want[1];
+                compositor.devices[at].repeat_now[0] = want[0];
+                compositor.devices[at].repeat_now[1] = want[1];
         }
 }
 
@@ -942,17 +885,7 @@ static void compositor_taskbar_settings_read(void)
 }
 
 static void compositor_touch_settings_read(void);
-static void compositor_predict_read(void);
-
-// `moonwater canvas cursor click`: on unless the file says off, read when the compositor starts and again when it is written.
-static void compositor_click_read(void)
-{
-        char word[16];
-        long value;
-
-        compositor_word(SETTING_CURSOR_CLICK_PATH, word, sizeof(word));
-        compositor.cursor.click_off = compositor_setting_kept(SETTING_CURSOR_CLICK_PATH, word, &value) && value == 1;
-}
+static void compositor_predict_set(unsigned int cls, int on);
 
 /*
         What a hand takes, as the files of their rows keep them (none, default or a word that is none of a row's is its standard):
@@ -986,39 +919,6 @@ static void compositor_hand_set(const char *click, const char *hold, const char 
         compositor_wake_all();
 }
 
-static void compositor_hand_read(void)
-{
-        char words[5][16];
-        static const char *const paths[5] = {SETTING_DOUBLE_CLICK_PATH, SETTING_TOUCH_HOLD_PATH, SETTING_TERMINAL_WHEEL_PATH,
-                                             SETTING_SHAKE_FEEL_PATH, SETTING_BORDER_GRIP_PATH};
-
-        for (unsigned int at = 0; at < 5; at++)
-                compositor_word(paths[at], words[at], sizeof(words[at]));
-        compositor_hand_set(words[0], words[1], words[2], words[3], words[4]);
-}
-
-static void compositor_input_core_read(void)
-{
-        char words[6][16];
-        static const char *const paths[6] = {SETTING_SHAKE_PATH, SETTING_SHAKE_DELAY_PATH, SETTING_SENSITIVITY_PATH,
-                                             SETTING_ACCELERATION_PATH, SETTING_REPEAT_DELAY_PATH, SETTING_REPEAT_RATE_PATH};
-
-        for (unsigned int at = 0; at < 6; at++)
-                compositor_word(paths[at], words[at], sizeof(words[at]));
-        compositor_input_settings_set(words[0], words[1], words[2], words[3], words[4], words[5]);
-}
-
-// Read when the compositor starts and again when a file of them is written.
-static void compositor_input_settings_read(void)
-{
-        compositor_input_core_read();
-        compositor_taskbar_settings_read();
-        compositor_touch_settings_read();
-        compositor_predict_read();
-        compositor_click_read();
-        compositor_hand_read();
-}
-
 _Static_assert(COMPOSITOR_INPUTS == WINDOWS_INPUTS, "an input slot is a row of the table's");
 
 // What moonwater debug is shown of slot at: the device in it, or none, its counts started again. Once the table is made.
@@ -1028,10 +928,10 @@ static void compositor_input_publish(unsigned int at)
 
         if (!table)
                 return;
-        table->input_number[at] = at < compositor.input_count && compositor.inputs[at] >= 0 ? compositor.device_number[at] : -1;
+        table->input_number[at] = at < compositor.input_count && compositor.inputs[at] >= 0 ? compositor.devices[at].number : -1;
         table->input_kinds[at] = compositor.input_kinds[at];
-        memory_copy(table->input_id[at], compositor.input_id[at], sizeof(table->input_id[at]));
-        memory_copy(table->input_name[at], compositor.input_name[at], sizeof(table->input_name[at]));
+        memory_copy(table->input_id[at], compositor.devices[at].id, sizeof(table->input_id[at]));
+        memory_copy(table->input_name[at], compositor.devices[at].name, sizeof(table->input_name[at]));
         table->input_wheel_read[at] = table->input_wheel_used[at] = table->input_dropped[at] = 0;
         table->input_wheel_last[at] = 0;
 }
@@ -1053,7 +953,7 @@ static void compositor_space_retake(void);
 // A touch screen as it is opened: no finger on it, and the range of its places, its slots' where it has slots.
 static void compositor_touch_screen_open(unsigned int at, bipolar handle, int slotted)
 {
-        struct compositor_touch_screen *screen = &compositor.screen_touch[at];
+        struct compositor_touch_screen *screen = compositor_touch_of(at);
         struct compositor_absinfo x = {0}, y = {0};
 
         memory_zero(screen, sizeof(*screen));
@@ -1074,6 +974,7 @@ static void compositor_touch_screen_open(unsigned int at, bipolar handle, int sl
                 system_control(handle, COMPOSITOR_EVIOCGABS(COMPOSITOR_ABS_MT_SLOT), address_of slot);
                 screen->slot = slot.value;
         }
+        memory_copy(compositor_touch_alloc(at), screen, sizeof(*screen));
 }
 
 /*
@@ -1115,8 +1016,7 @@ static int compositor_input_path_physical(const char *resolved)
 // The device of an open input node, classified (compositor_input_path_physical): 1 the machine's own, 0 not or not known.
 static int compositor_input_handle_physical(bipolar handle)
 {
-        p8 statx[256] = {0}, link[48] = "/sys/dev/char/", resolved[512];
-        positive length = string_length(link);
+        p8 statx[256] = {0}, link[48], resolved[512];
         unsigned int major, minor;
         long got;
 
@@ -1125,10 +1025,7 @@ static int compositor_input_handle_physical(bipolar handle)
                 return 0;
         memory_copy(address_of major, statx + 128, 4);
         memory_copy(address_of minor, statx + 132, 4);
-        length += positive_into_string(link + length, major);
-        link[length++] = ':';
-        length += positive_into_string(link + length, minor);
-        link[length] = 0;
+        windows_num2_path((char *)link, sizeof(link), "/sys/dev/char/", major, ":", minor);
         got = compositor_call(syscall(readlinkat), (positive)AT_FDCWD, (positive)link, (positive)resolved, sizeof(resolved) - 1, 0, 0);
         if (got <= 0)
                 return 0;
@@ -1136,17 +1033,39 @@ static int compositor_input_handle_physical(bipolar handle)
         return compositor_input_path_physical((const char *)resolved);
 }
 
+// Resets all per-device state for slot at (unified struct, pad/touch pool slots, and Wave 1 mirror arrays).
+static void compositor_device_reset(unsigned int at)
+{
+        if (at >= COMPOSITOR_INPUTS)
+                return;
+        compositor_pad_free(at);
+        compositor_touch_free(at);
+        memory_zero(&compositor.devices[at], sizeof(compositor.devices[at]));
+        compositor.devices[at].number = -1;
+        compositor.absolute_x[at][0] = compositor.absolute_x[at][1] = 0;
+        compositor.absolute_y[at][0] = compositor.absolute_y[at][1] = 0;
+        compositor.held[at] = 0;
+        compositor.hires[at] = 0;
+        compositor.wheel_rest[at][0] = compositor.wheel_rest[at][1] = 0;
+        compositor.stream_hist_n[at] = 0;
+        compositor.touchpad[at] = 0;
+        compositor.touchscreen[at] = 0;
+        compositor.input_kinds[at] = 0;
+        compositor.repeats[at] = 0;
+        compositor.repeat_own[at][0] = compositor.repeat_own[at][1] = 0;
+        compositor_input_physical[at] = 0;
+}
+
 static void compositor_input_add(unsigned int number)
 {
-        p8 path[32] = "/dev/input/event";
+        char path[32];
         unsigned long kinds = 0;
         p8 keys[96] = {0};
         unsigned long relative = 0, absolute = 0;
-        positive length = string_length(path);
         bipolar handle;
         unsigned int at = 0;
 
-        if (number >= COMPOSITOR_DEVICES || compositor.devices[number / 64] >> (number % 64) & 1)
+        if (number >= COMPOSITOR_DEVICES || compositor.device_open[number / 64] >> (number % 64) & 1)
                 return;
 
         while (at < compositor.input_count && compositor.inputs[at] >= 0)
@@ -1154,8 +1073,7 @@ static void compositor_input_add(unsigned int number)
         if (at == COMPOSITOR_INPUTS)
                 return;
 
-        length += positive_into_string(path + length, number);
-        path[length] = 0;
+        windows_num_path(path, sizeof(path), "/dev/input/event", number, "");
 
         handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | O_NONBLOCK);
         if (handle < 0)
@@ -1196,17 +1114,11 @@ static void compositor_input_add(unsigned int number)
                 return;
         }
 
-        compositor.absolute_x[at][0] = compositor.absolute_x[at][1] = 0;
-        compositor.absolute_y[at][0] = compositor.absolute_y[at][1] = 0;
-        compositor.held[at] = 0;
-        compositor.wakeonly[at] = (unsigned char)(!keyboard && !mouse && !tablet && !touchscreen);
+        compositor_device_reset(at);
+        compositor.devices[at].wakeonly = (unsigned char)(!keyboard && !mouse && !tablet && !touchscreen);
         // A wheel that reports in 120ths says so, and its detents are then not counted twice.
         compositor.hires[at] = (unsigned char)((relative >> COMPOSITOR_REL_WHEEL_HI & 1) |
                                                (relative >> COMPOSITOR_REL_HWHEEL_HI & 1) << 1);
-        compositor.wheel_at[at] = compositor.wheel_stream_at[at] = 0;
-        compositor.wheel_run[at] = 0, compositor.wheel_streamed[at] = 0;
-        compositor.wheel_rest[at][0] = compositor.wheel_rest[at][1] = 0;
-        compositor.stream_hist_n[at] = 0;
         // What it is, for moonwater debug: a device that is not what this took it for says so there. A pad that
         // counts the fingers on it and is no screen (INPUT_PROP_DIRECT is a screen's mark) is a touchpad.
         {
@@ -1214,13 +1126,12 @@ static void compositor_input_add(unsigned int number)
 
                 compositor.touchpad[at] = (unsigned char)(tablet && !(properties & 2) &&
                                                           (keys[COMPOSITOR_BTN_TOOL_FINGER / 8] >> (COMPOSITOR_BTN_TOOL_FINGER % 8) & 1));
-                compositor.pad[at] = (struct compositor_pad){0};
                 compositor.touchscreen[at] = (unsigned char)touchscreen;
                 compositor_touch_screen_open(at, handle, slotted);
                 kinds = (keyboard ? WINDOWS_INPUT_KEYBOARD : 0) | (mouse ? WINDOWS_INPUT_MOUSE : 0) |
                         (tablet && !compositor.touchpad[at] && !touchscreen ? WINDOWS_INPUT_TABLET : 0) |
-                        (compositor.wakeonly[at] ? WINDOWS_INPUT_WAKES : 0);
-                kinds |=(relative >> COMPOSITOR_REL_WHEEL & 1 ? WINDOWS_INPUT_WHEEL : 0) |
+                        (compositor.devices[at].wakeonly ? WINDOWS_INPUT_WAKES : 0);
+                kinds |= (relative >> COMPOSITOR_REL_WHEEL & 1 ? WINDOWS_INPUT_WHEEL : 0) |
                          (relative >> COMPOSITOR_REL_WHEEL_HI & 1 ? WINDOWS_INPUT_WHEEL_HI : 0) |
                          (relative >> COMPOSITOR_REL_HWHEEL & 1 ? WINDOWS_INPUT_HWHEEL : 0) |
                          (relative >> COMPOSITOR_REL_HWHEEL_HI & 1 ? WINDOWS_INPUT_HWHEEL_HI : 0) |
@@ -1230,10 +1141,8 @@ static void compositor_input_add(unsigned int number)
                          (absolute >> COMPOSITOR_ABS_MT_POSITION_X & 1 ? WINDOWS_INPUT_SLOTS : 0) |
                          (properties & 1 ? WINDOWS_INPUT_POINTER : 0) | (properties & 2 ? WINDOWS_INPUT_DIRECT : 0);
                 compositor.input_kinds[at] = kinds;
-                memory_zero(compositor.input_id[at], sizeof(compositor.input_id[at]));
-                memory_zero(compositor.input_name[at], sizeof(compositor.input_name[at]));
-                system_control(handle, COMPOSITOR_EVIOCGID, compositor.input_id[at]);
-                system_control(handle, COMPOSITOR_EVIOCGNAME(WINDOWS_INPUT_NAME - 1), compositor.input_name[at]);
+                system_control(handle, COMPOSITOR_EVIOCGID, compositor.devices[at].id);
+                system_control(handle, COMPOSITOR_EVIOCGNAME(WINDOWS_INPUT_NAME - 1), compositor.devices[at].name);
         }
         // The events are stamped by the clock the speed of the hand is measured on.
         {
@@ -1252,29 +1161,33 @@ static void compositor_input_add(unsigned int number)
                 compositor.absolute_x[at][1] = x.maximum;
                 compositor.absolute_y[at][0] = y.minimum;
                 compositor.absolute_y[at][1] = y.maximum;
-                // A touchpad's units to a millimetre, which a finger's moves are measured in.
-                compositor.pad[at].per_mm_x = x.resolution > 0 ? x.resolution
-                                              : ((long)x.maximum - x.minimum) / COMPOSITOR_PAD_WIDTH_MM > 0
-                                                  ? (int)(((long)x.maximum - x.minimum) / COMPOSITOR_PAD_WIDTH_MM)
-                                                  : 1;
-                compositor.pad[at].per_mm_y = y.resolution > 0 ? y.resolution : compositor.pad[at].per_mm_x;
-                compositor.pad[at].next_x = compositor.pad[at].at_x = x.value;
-                compositor.pad[at].next_y = compositor.pad[at].at_y = y.value;
+                if (compositor.touchpad[at])
+                {
+                        struct compositor_pad *pad = compositor_pad_alloc(at);
+
+                        // A touchpad's units to a millimetre, which a finger's moves are measured in.
+                        pad->per_mm_x = x.resolution > 0 ? x.resolution
+                                        : ((long)x.maximum - x.minimum) / COMPOSITOR_PAD_WIDTH_MM > 0
+                                            ? (int)(((long)x.maximum - x.minimum) / COMPOSITOR_PAD_WIDTH_MM)
+                                            : 1;
+                        pad->per_mm_y = y.resolution > 0 ? y.resolution : pad->per_mm_x;
+                        pad->next_x = pad->at_x = x.value;
+                        pad->next_y = pad->at_y = y.value;
+                }
         }
 
         compositor.inputs[at] = (int)handle;
-        compositor.device_number[at] = (int)number;
+        compositor.devices[at].number = (int)number;
         compositor_input_physical[at] = (unsigned char)compositor_input_handle_physical(handle);
         // A keyboard whose repeat can be asked is told what the settings keep, now and when they change.
-        compositor.repeats[at] = 0;
         if (keyboard && system_control(handle, COMPOSITOR_EVIOCGREP, compositor.repeat_own[at]) == 0)
         {
                 compositor.repeats[at] = 1;
-                compositor.repeat_now[at][0] = compositor.repeat_own[at][0];
-                compositor.repeat_now[at][1] = compositor.repeat_own[at][1];
+                compositor.devices[at].repeat_now[0] = compositor.repeat_own[at][0];
+                compositor.devices[at].repeat_now[1] = compositor.repeat_own[at][1];
                 compositor_repeat_apply(at);
         }
-        compositor.devices[number / 64] |= 1ul << (number % 64);
+        compositor.device_open[number / 64] |= 1ul << (number % 64);
         compositor.input_count = at + 1 > compositor.input_count ? at + 1 : compositor.input_count;
         // The input thread takes the device into its set now that the count holds it (it reads the slots below the count).
         compositor_reader_changed(at);
@@ -1332,88 +1245,133 @@ static void compositor_keys_read(void);
 #define COMPOSITOR_SET_DISPLAYS (1u << 14)
 #define COMPOSITOR_SET_ALL      ((1u << 14) - 1u)
 
+enum compositor_setting_bind
+{
+        COMPOSITOR_BIND_NONE = 0, // group callback handles this path
+        COMPOSITOR_BIND_INT,      // clamped [lo, hi] (else fallback) -> *(int *)target
+        COMPOSITOR_BIND_UINT,     // clamped [lo, hi] (else fallback) -> *(unsigned int *)target
+        COMPOSITOR_BIND_INT_EQ,   // *(int *)target = (kept && value == lo)
+};
+
 struct compositor_setting_spec
 {
         const char *path;
         unsigned int group;
+        unsigned char bind;
+        long lo, hi, fallback;
+        void *target;
 };
 
 static const struct compositor_setting_spec compositor_setting_specs[] = {
-        {SETTING_CLIPBOARD_PATH, COMPOSITOR_SET_CLIP},
-        {SETTING_CLIPBOARD_HISTORY_PATH, COMPOSITOR_SET_CLIP},
-        {SETTING_GPU_PATH, COMPOSITOR_SET_GPU},
-        {SETTING_WALLPAPER_PATH, COMPOSITOR_SET_WALL},
-        {SETTING_WALLPAPER_DARK_PATH, COMPOSITOR_SET_WALL},
-        {SETTING_WALLPAPER_MARIA_PATH, COMPOSITOR_SET_WALL},
-        {SETTING_WALLPAPER_GLOW_PATH, COMPOSITOR_SET_WALL},
-        {SETTING_BACKGROUND_PATH, COMPOSITOR_SET_LOOK},
-        {SETTING_CURSOR_SIZE_PATH, COMPOSITOR_SET_LOOK},
-        {SETTING_CURSOR_LOOK_PATH, COMPOSITOR_SET_LOOK},
-        {SETTING_CURSOR_STYLE_PATH, COMPOSITOR_SET_LOOK},
-        {SETTING_SQUEEZE_PATH, COMPOSITOR_SET_LOOK},
-        {SETTING_THEME_PATH, COMPOSITOR_SET_THEME},
-        {SETTING_ACCENT_PATH, COMPOSITOR_SET_THEME},
-        {SETTING_MOTION_PATH, COMPOSITOR_SET_THEME},
-        {SETTING_MOTION_SPEED_PATH, COMPOSITOR_SET_THEME},
-        {SETTING_WHEEL_SMOOTH_PATH, COMPOSITOR_SET_THEME},
-        {SETTING_CARET_BLINK_PATH, COMPOSITOR_SET_THEME},
-        {SETTING_CARET_THICKNESS_PATH, COMPOSITOR_SET_THEME},
-        {SETTING_LANGUAGE_PATH, COMPOSITOR_SET_THEME},
-        {SETTING_TEXT_SCALE_PATH, COMPOSITOR_SET_THEME},
-        {SETTING_BORDER_WIDTH_PATH, COMPOSITOR_SET_THEME},
-        {SETTING_SCROLL_NATURAL_PATH, COMPOSITOR_SET_SCROLL},
-        {SETTING_SCROLL_MOMENTUM_PATH, COMPOSITOR_SET_SCROLL},
-        {SETTING_SCROLL_RUBBER_PATH, COMPOSITOR_SET_SCROLL},
-        {SETTING_SCROLL_DRAG_PATH, COMPOSITOR_SET_SCROLL},
-        {SETTING_TRACKPAD_SPEED_PATH, COMPOSITOR_SET_SCROLL},
-        {SETTING_VRR_PATH, COMPOSITOR_SET_VRR},
-        {SETTING_SHAKE_PATH, COMPOSITOR_SET_INPUT},
-        {SETTING_SHAKE_DELAY_PATH, COMPOSITOR_SET_INPUT},
-        {SETTING_SENSITIVITY_PATH, COMPOSITOR_SET_INPUT},
-        {SETTING_ACCELERATION_PATH, COMPOSITOR_SET_INPUT},
-        {SETTING_REPEAT_DELAY_PATH, COMPOSITOR_SET_INPUT},
-        {SETTING_REPEAT_RATE_PATH, COMPOSITOR_SET_INPUT},
-        {SETTING_TASKBAR_POSITION_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_DISPLAY_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_TRAY_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_CLOCK_FORMAT_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_DATE_FORMAT_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_TEXT_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_LAUNCHER_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_SCALE_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_PADDING_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_FULLSCREEN_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_MOON_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_TASKS_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_NEWEST_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_ORDER_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_MOON_LOOK_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_CLOCK_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_CLOCK_BULGE_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_ITEM_NOTICES_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_ITEM_MIC_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_ITEM_SOUND_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_ITEM_BATTERY_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_ITEM_TEXT_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_ITEM_CLOCK_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_GROUPED_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_EDGE_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TASKBAR_MOON_SPIN_PATH, COMPOSITOR_SET_TASKBAR},
-        {TASKBAR_TUNE_PATH, COMPOSITOR_SET_TASKBAR},
-        {SETTING_TOUCH_PATH, COMPOSITOR_SET_TOUCH},
-        {SETTING_TOUCH_LEFT_PATH, COMPOSITOR_SET_TOUCH},
-        {SETTING_TOUCH_RIGHT_PATH, COMPOSITOR_SET_TOUCH},
-        {SETTING_PREDICT_TOUCH_PATH, COMPOSITOR_SET_PREDICT},
-        {SETTING_CURSOR_CLICK_PATH, COMPOSITOR_SET_CLICK},
-        {SETTING_DOUBLE_CLICK_PATH, COMPOSITOR_SET_HAND},
-        {SETTING_TOUCH_HOLD_PATH, COMPOSITOR_SET_HAND},
-        {SETTING_TERMINAL_WHEEL_PATH, COMPOSITOR_SET_HAND},
-        {SETTING_SHAKE_FEEL_PATH, COMPOSITOR_SET_HAND},
-        {SETTING_BORDER_GRIP_PATH, COMPOSITOR_SET_HAND},
-        {SETTING_ONSCREEN_PATH, COMPOSITOR_SET_OSK},
-        {SETTING_CANVAS_ARRANGE_PATH, COMPOSITOR_SET_DISPLAYS},
-        {SETTING_CANVAS_DISPLAYS_PATH, COMPOSITOR_SET_DISPLAYS},
+        {SETTING_CLIPBOARD_PATH, COMPOSITOR_SET_CLIP, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_CLIPBOARD_HISTORY_PATH, COMPOSITOR_SET_CLIP, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_GPU_PATH, COMPOSITOR_SET_GPU, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_WALLPAPER_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_WALLPAPER_DARK_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_WALLPAPER_MARIA_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_INT, 20, 80, 45, &compositor_wall_rows.maria},
+        {SETTING_WALLPAPER_GLOW_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_INT, -1000, 1000, 0, &compositor_wall_rows.glow},
+        {SETTING_BACKGROUND_PATH, COMPOSITOR_SET_LOOK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_CURSOR_SIZE_PATH, COMPOSITOR_SET_LOOK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_CURSOR_LOOK_PATH, COMPOSITOR_SET_LOOK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_CURSOR_STYLE_PATH, COMPOSITOR_SET_LOOK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_SQUEEZE_PATH, COMPOSITOR_SET_LOOK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_THEME_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_ACCENT_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_MOTION_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_MOTION_SPEED_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_WHEEL_SMOOTH_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_CARET_BLINK_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_CARET_THICKNESS_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_LANGUAGE_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TEXT_SCALE_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_BORDER_WIDTH_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_SCROLL_NATURAL_PATH, COMPOSITOR_SET_SCROLL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_SCROLL_MOMENTUM_PATH, COMPOSITOR_SET_SCROLL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_SCROLL_RUBBER_PATH, COMPOSITOR_SET_SCROLL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_SCROLL_DRAG_PATH, COMPOSITOR_SET_SCROLL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TRACKPAD_SPEED_PATH, COMPOSITOR_SET_SCROLL, COMPOSITOR_BIND_UINT, 0, 10000, 100, &compositor.trackpad_speed},
+        {SETTING_VRR_PATH, COMPOSITOR_SET_VRR, COMPOSITOR_BIND_UINT, 0, 2, 0, &compositor_vrr.policy},
+        {SETTING_SHAKE_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_SHAKE_DELAY_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_SENSITIVITY_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_ACCELERATION_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_REPEAT_DELAY_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_REPEAT_RATE_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_POSITION_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_DISPLAY_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_TRAY_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_CLOCK_FORMAT_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_DATE_FORMAT_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_TEXT_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_LAUNCHER_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_SCALE_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_PADDING_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_FULLSCREEN_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_MOON_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_TASKS_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_NEWEST_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_ORDER_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_MOON_LOOK_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_CLOCK_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_CLOCK_BULGE_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_ITEM_NOTICES_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_ITEM_MIC_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_ITEM_SOUND_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_ITEM_BATTERY_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_ITEM_TEXT_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_ITEM_CLOCK_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_GROUPED_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_EDGE_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TASKBAR_MOON_SPIN_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {TASKBAR_TUNE_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TOUCH_PATH, COMPOSITOR_SET_TOUCH, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TOUCH_LEFT_PATH, COMPOSITOR_SET_TOUCH, COMPOSITOR_BIND_INT, COMPOSITOR_SIDE_OFF, COMPOSITOR_SIDE_ACT, COMPOSITOR_SIDE_OFF, &compositor.side_left},
+        {SETTING_TOUCH_RIGHT_PATH, COMPOSITOR_SET_TOUCH, COMPOSITOR_BIND_INT, COMPOSITOR_SIDE_OFF, COMPOSITOR_SIDE_ACT, COMPOSITOR_SIDE_OFF, &compositor.side_right},
+        {SETTING_PREDICT_TOUCH_PATH, COMPOSITOR_SET_PREDICT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_CURSOR_CLICK_PATH, COMPOSITOR_SET_CLICK, COMPOSITOR_BIND_INT_EQ, 1, 0, 0, &compositor.cursor.click_off},
+        {SETTING_DOUBLE_CLICK_PATH, COMPOSITOR_SET_HAND, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TOUCH_HOLD_PATH, COMPOSITOR_SET_HAND, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_TERMINAL_WHEEL_PATH, COMPOSITOR_SET_HAND, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_SHAKE_FEEL_PATH, COMPOSITOR_SET_HAND, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_BORDER_GRIP_PATH, COMPOSITOR_SET_HAND, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_ONSCREEN_PATH, COMPOSITOR_SET_OSK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_CANVAS_ARRANGE_PATH, COMPOSITOR_SET_DISPLAYS, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        {SETTING_CANVAS_DISPLAYS_PATH, COMPOSITOR_SET_DISPLAYS, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
 };
+
+// Applies every declaratively bound setting in compositor_setting_specs[] belonging to mask.
+static void compositor_setting_apply_binds(unsigned int mask)
+{
+        char word[16];
+
+        for (unsigned int at = 0; at < sizeof(compositor_setting_specs) / sizeof(compositor_setting_specs[0]); at++)
+        {
+                const struct compositor_setting_spec *spec = &compositor_setting_specs[at];
+                long value = 0;
+                p8 kept;
+
+                if (!(spec->group & mask) || spec->bind == COMPOSITOR_BIND_NONE || !spec->target)
+                        continue;
+                compositor_word(spec->path, word, sizeof(word));
+                kept = compositor_setting_kept(spec->path, word, &value);
+                if (spec->bind == COMPOSITOR_BIND_INT)
+                        *(int *)spec->target = (int)(value >= spec->lo && value <= spec->hi ? value : spec->fallback);
+                else if (spec->bind == COMPOSITOR_BIND_UINT)
+                        *(unsigned int *)spec->target = (unsigned int)(value >= spec->lo && value <= spec->hi ? value : spec->fallback);
+                else if (spec->bind == COMPOSITOR_BIND_INT_EQ)
+                        *(int *)spec->target = kept && value == spec->lo;
+        }
+}
+
+// Reads the words of all paths in compositor_setting_specs[] for group into words[0..max-1] in table order.
+static void compositor_setting_read_group(unsigned int group, char (*words)[16], unsigned int max)
+{
+        unsigned int count = 0;
+
+        for (unsigned int at = 0; at < sizeof(compositor_setting_specs) / sizeof(compositor_setting_specs[0]) && count < max; at++)
+                if (compositor_setting_specs[at].group == group)
+                        compositor_word(compositor_setting_specs[at].path, words[count++], 16);
+}
 
 static unsigned int compositor_setting_mask(const char *name)
 {
@@ -1429,13 +1387,12 @@ static unsigned int compositor_setting_mask(const char *name)
         return mask;
 }
 
-// Reload only the setting group(s) affected by changed_name (or all non-display groups when changed_name is null).
-static void compositor_settings_sync(const char *changed_name)
+// Applies every setting group named in mask (declarative bindings first, then group callbacks).
+static void compositor_settings_apply(unsigned int mask)
 {
-        unsigned int mask = compositor_setting_mask(changed_name);
-
         if (!mask)
                 return;
+        compositor_setting_apply_binds(mask & ~(COMPOSITOR_SET_WALL | COMPOSITOR_SET_TOUCH));
         if (mask & COMPOSITOR_SET_CLIP)
                 compositor_clip_settings();
 #ifndef SHELL_NO_GPU
@@ -1451,23 +1408,45 @@ static void compositor_settings_sync(const char *changed_name)
         if (mask & COMPOSITOR_SET_SCROLL)
                 compositor_scroll_read();
         if (mask & COMPOSITOR_SET_VRR)
-                compositor_vrr_read();
+                compositor_vrr_keep();
         if (mask & COMPOSITOR_SET_INPUT)
-                compositor_input_core_read();
+        {
+                char words[6][16];
+
+                compositor_setting_read_group(COMPOSITOR_SET_INPUT, words, 6);
+                compositor_input_settings_set(words[0], words[1], words[2], words[3], words[4], words[5]);
+        }
         if (mask & COMPOSITOR_SET_TASKBAR)
                 compositor_taskbar_settings_read();
         if (mask & COMPOSITOR_SET_TOUCH)
                 compositor_touch_settings_read();
         if (mask & COMPOSITOR_SET_PREDICT)
-                compositor_predict_read();
-        if (mask & COMPOSITOR_SET_CLICK)
-                compositor_click_read();
+        {
+                char word[16];
+                long value = 0;
+
+                compositor_word(SETTING_PREDICT_TOUCH_PATH, word, sizeof(word));
+                compositor_setting_kept(SETTING_PREDICT_TOUCH_PATH, word, &value);
+                compositor_predict_set(COMPOSITOR_PREDICT_TOUCH, value == 0);
+                compositor_predict_set(COMPOSITOR_PREDICT_PEN, value == 0);
+        }
         if (mask & COMPOSITOR_SET_HAND)
-                compositor_hand_read();
+        {
+                char words[5][16];
+
+                compositor_setting_read_group(COMPOSITOR_SET_HAND, words, 5);
+                compositor_hand_set(words[0], words[1], words[2], words[3], words[4]);
+        }
         if (mask & COMPOSITOR_SET_OSK)
                 compositor_osk_setting_read();
         if (mask & COMPOSITOR_SET_DISPLAYS)
                 compositor_modes_forget(), compositor_space_retake();
+}
+
+// Reload only the setting group(s) affected by changed_name (or all non-display groups when changed_name is null).
+static void compositor_settings_sync(const char *changed_name)
+{
+        compositor_settings_apply(compositor_setting_mask(changed_name));
 }
 
 // What appeared in /dev/input since the last look: a name that is eventN is a device;

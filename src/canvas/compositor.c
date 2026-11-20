@@ -1013,6 +1013,28 @@ struct compositor_grab
         unsigned int edges; // COMPOSITOR_EDGE_* for resize/divider/edge-chord
 };
 
+/*
+        Per-device evdev state unified into one struct (replacing scattered [COMPOSITOR_INPUTS]
+        arrays) plus compact 16-entry pools for touchpads and touchscreens (saving >200 KiB BSS
+        immediately; screen_touch[COMPOSITOR_INPUTS] stays synced in Wave 1 for wayland_host.c/xwm.c).
+*/
+#define COMPOSITOR_PAD_POOL 16
+#define COMPOSITOR_TOUCH_POOL 16
+
+struct compositor_device
+{
+        int number;                      // evdev eventN number (-1 when unused)
+        unsigned char wakeonly;          // power button / lid: wakes loop only
+        unsigned char wheel_streamed;    // gesture reached COMPOSITOR_WHEEL_STREAMS
+        unsigned char pad_slot;          // 1-based index into compositor.pad[], 0 = none
+        unsigned char touch_slot;        // 1-based index into compositor.touches[], 0 = none
+        unsigned int wheel_run;          // stream notches in current gesture
+        positive wheel_at, wheel_stream_at; // last wheel / stream notch timestamp (ns)
+        int repeat_now[2];               // current keyboard repeat [delay, period]
+        unsigned short id[4];            // EVIOCGID
+        char name[WINDOWS_INPUT_NAME];   // EVIOCGNAME
+};
+
 static struct
 {
         int card;
@@ -1063,8 +1085,8 @@ static struct
         int watch;           // inotify on /dev/input, -1 when there is none
         int probe_owed;      // the first take read the kernel's lists without a look (compositor_space_first): the loop looks, once
         int uevents;         // the kernel's uevents (compositor_uevents_read), -1 when there is no socket for them
-        unsigned long devices[COMPOSITOR_DEVICES / 64]; // the evdev numbers that are open, a bit each
-        int device_number[COMPOSITOR_INPUTS];
+        unsigned long device_open[COMPOSITOR_DEVICES / 64]; // the evdev numbers that are open, a bit each
+        struct compositor_device devices[COMPOSITOR_INPUTS];
 
         int scale;           // device pixels a drawn one is
         int boot_scale;      // the percent the program was started at (-s, else WINDOWS_SCALE_DEFAULT): what a screen with no displays line is drawn at
@@ -1341,26 +1363,24 @@ static struct
         int game;                   // /dev/cpu_dma_latency, open while a fullscreen window is on top (compositor_game_watch), or -1
         unsigned long games;        // how many times it was taken; ~0 when the machine has no such file or the owner said no
         struct { positive total, count, worst; } latency[3]; // pointer to plane, pointer to frame, key to window
-        unsigned char wakeonly[COMPOSITOR_INPUTS]; // a power button or a lid: it wakes the loop and says nothing it uses
         int cycle;           // an Alt-Tab is under way: the place in the stack of the window it is on, from 1
         int raw_x, raw_y;    // what the mouse has said since its last report
         int accel_x, accel_y; // the fraction of a pixel the gain has not yet paid out
         int tablet_x, tablet_y, tablet_have; // what a tablet has said since its last report
         positive stamp;      // when the last movement was
         unsigned char hires[COMPOSITOR_INPUTS]; // the device reports its wheel in 120ths: bit 0 the vertical one, bit 1 the sideways one
-        positive wheel_at[COMPOSITOR_INPUTS];   // when the device's last wheel event came, ns (compositor_wheel_stream: a stream's gap)
-        positive wheel_stream_at[COMPOSITOR_INPUTS]; // when its last stream notch came, ns: the memory's three seconds run from it
-        unsigned int wheel_run[COMPOSITOR_INPUTS];   // the stream notches in its current gesture (compositor_wheel_stream)
-        unsigned char wheel_streamed[COMPOSITOR_INPUTS]; // it has streamed: a gesture of COMPOSITOR_WHEEL_STREAMS stream notches
         long long wheel_rest[COMPOSITOR_INPUTS][2]; // what a stream's notches have not turned whole, per axis, in COMPOSITOR_GAIN_TURN units (compositor_stream_turn)
         positive stream_hist[COMPOSITOR_INPUTS][COMPOSITOR_STREAM_HIST]; // the times of the device's last stream notches, a ring
         unsigned int stream_hist_n[COMPOSITOR_INPUTS];                    // how many stream notches the gesture has had (the ring's count)
         unsigned int trackpad_speed; // the setting `canvas trackpad speed` as a percent: 0 is 100 (what a zeroed compositor is)
         unsigned char touchpad[COMPOSITOR_INPUTS]; // the device is a touchpad, read as compositor_pad_report says
-        struct compositor_pad pad[COMPOSITOR_INPUTS];
+        struct compositor_pad pad[COMPOSITOR_PAD_POOL];
+        unsigned int pad_used; // bitmask of allocated slots in pad[COMPOSITOR_PAD_POOL]
         // The device is a touch screen (compositor_touch_report), and its fingers; what they are doing; and whether the
         // press, release or motion being handled is a finger's, which hit wider and are told so (WINDOW_KEY_TOUCH).
         unsigned char touchscreen[COMPOSITOR_INPUTS];
+        struct compositor_touch_screen touches[COMPOSITOR_TOUCH_POOL];
+        unsigned int touch_used; // bitmask of allocated slots in touches[COMPOSITOR_TOUCH_POOL]
         struct compositor_touch_screen screen_touch[COMPOSITOR_INPUTS];
         struct compositor_touch touch;
         struct compositor_swipe swipe; // a finger the screen's edges may take (compositor_swipe_report)
@@ -1429,15 +1449,13 @@ static struct
         positive preview_at;
         // What moonwater debug is told of each device, kept here for the table that is made after they are opened.
         unsigned int input_kinds[COMPOSITOR_INPUTS];
-        unsigned short input_id[COMPOSITOR_INPUTS][4];
-        char input_name[COMPOSITOR_INPUTS][WINDOWS_INPUT_NAME];
         int told_row, told_x, told_y; // where the pointer was last told to a window: its row and the place in its picture
         unsigned char button_down;    // the buttons (BTN_LEFT up, a bit each) a window was sent the press of
         int button_row[8];            // and the window each press went to, which its release goes to
         unsigned char held[COMPOSITOR_INPUTS]; // the modifiers each keyboard holds down
         // `moonwater keyboard repeat` and `moonwater mouse`: what the settings kept, and what each keyboard has been told.
         unsigned char repeats[COMPOSITOR_INPUTS]; // the keyboard's repeat can be set: it answered EVIOCGREP
-        int repeat_own[COMPOSITOR_INPUTS][2], repeat_now[COMPOSITOR_INPUTS][2]; // delay, period: as it was, as it is
+        int repeat_own[COMPOSITOR_INPUTS][2]; // delay, period: as it was
         int repeat_kept, repeat_delay, repeat_rate; // bit 1 delay, bit 2 rate kept; the delay in ms, the rate a second (0 off)
         int sensitivity, flat; // percent of the gain (0 is 100); one to one, with no curve
         int grip;              // `moonwater canvas border grip`: logical pixels outside a window's edge a pointer's press resizes it by (0 is COMPOSITOR_GRIP)
@@ -1445,6 +1463,91 @@ static struct
         unsigned long painted; // pixels composed, all frames
         positive period, presented; // a frame in nanoseconds, and when the last one went out
 } compositor;
+
+// Pool accessors for touchpads (compositor.pad[COMPOSITOR_PAD_POOL]) and touchscreens (compositor.touches[COMPOSITOR_TOUCH_POOL]).
+static struct compositor_pad *compositor_pad_of(unsigned int at)
+{
+        unsigned int slot = at < COMPOSITOR_INPUTS && compositor.devices[at].pad_slot
+                                ? (unsigned int)(compositor.devices[at].pad_slot - 1)
+                                : (at < COMPOSITOR_PAD_POOL ? at : 0u);
+
+        return &compositor.pad[slot];
+}
+
+static struct compositor_pad *compositor_pad_alloc(unsigned int at)
+{
+        unsigned int slot = 0;
+
+        if (at >= COMPOSITOR_INPUTS)
+                return &compositor.pad[0];
+        if (compositor.devices[at].pad_slot)
+                slot = (unsigned int)(compositor.devices[at].pad_slot - 1);
+        else if (at < COMPOSITOR_PAD_POOL && !(compositor.pad_used & (1u << at)))
+                slot = at;
+        else
+        {
+                while (slot < COMPOSITOR_PAD_POOL && (compositor.pad_used & (1u << slot)))
+                        slot++;
+                if (slot >= COMPOSITOR_PAD_POOL)
+                        slot = 0;
+        }
+        compositor.pad_used |= 1u << slot;
+        compositor.devices[at].pad_slot = (unsigned char)(slot + 1);
+        memory_zero(&compositor.pad[slot], sizeof(compositor.pad[slot]));
+        return &compositor.pad[slot];
+}
+
+static void compositor_pad_free(unsigned int at)
+{
+        if (at < COMPOSITOR_INPUTS && compositor.devices[at].pad_slot)
+        {
+                unsigned int slot = (unsigned int)(compositor.devices[at].pad_slot - 1);
+
+                compositor.pad_used &= ~(1u << slot);
+                memory_zero(&compositor.pad[slot], sizeof(compositor.pad[slot]));
+                compositor.devices[at].pad_slot = 0;
+        }
+}
+
+static struct compositor_touch_screen *compositor_touch_alloc(unsigned int at)
+{
+        unsigned int slot = 0;
+
+        if (at >= COMPOSITOR_INPUTS)
+                return &compositor.touches[0];
+        if (compositor.devices[at].touch_slot)
+                slot = (unsigned int)(compositor.devices[at].touch_slot - 1);
+        else if (at < COMPOSITOR_TOUCH_POOL && !(compositor.touch_used & (1u << at)))
+                slot = at;
+        else
+        {
+                while (slot < COMPOSITOR_TOUCH_POOL && (compositor.touch_used & (1u << slot)))
+                        slot++;
+                if (slot >= COMPOSITOR_TOUCH_POOL)
+                        slot = 0;
+        }
+        compositor.touch_used |= 1u << slot;
+        compositor.devices[at].touch_slot = (unsigned char)(slot + 1);
+        memory_zero(&compositor.touches[slot], sizeof(compositor.touches[slot]));
+        return &compositor.touches[slot];
+}
+
+static void compositor_touch_free(unsigned int at)
+{
+        if (at < COMPOSITOR_INPUTS && compositor.devices[at].touch_slot)
+        {
+                unsigned int slot = (unsigned int)(compositor.devices[at].touch_slot - 1);
+
+                compositor.touch_used &= ~(1u << slot);
+                memory_zero(&compositor.touches[slot], sizeof(compositor.touches[slot]));
+                compositor.devices[at].touch_slot = 0;
+        }
+}
+
+static struct compositor_touch_screen *compositor_touch_of(unsigned int at)
+{
+        return &compositor.screen_touch[at < COMPOSITOR_INPUTS ? at : 0u];
+}
 
 // The count of a row's asks to go, kept and said: the compositor's own (close_asks) and the table's, which the row's program reads.
 static void compositor_close_count(int row, unsigned int asks)
@@ -1665,9 +1768,8 @@ static void compositor_tray_click(int index, int button)
 */
 static long compositor_table_memfd(unsigned long bytes)
 {
-        p8 path[48] = "/proc/";
+        p8 path[48];
         long handle = compositor_call(syscall(memfd_create), (positive) "moonwater-windows", WINDOWS_MFD_CLOEXEC | WINDOWS_MFD_SEALING, 0, 0, 0, 0);
-        positive at = 6;
 
         if (handle < 0)
         {
@@ -1675,10 +1777,7 @@ static long compositor_table_memfd(unsigned long bytes)
                 return handle;
         }
         // /proc/PID/fd/N, this process's own number and not self, which is whoever opens it.
-        at += positive_into_string(path + at, (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0));
-        memory_copy(path + at, "/fd/", 4);
-        at += 4;
-        path[at + positive_into_string(path + at, (positive)handle)] = 0;
+        windows_proc_fd((char *)path, (unsigned int)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (unsigned int)handle);
         // The seals: F_SEAL_SEAL, F_SEAL_SHRINK and F_SEAL_GROW.
         compositor.memfd_failed = compositor_call(syscall(ftruncate), (positive)handle, bytes, 0, 0, 0, 0) < 0 ? 8
                                   : compositor_call(syscall(fcntl), (positive)handle, WINDOWS_F_ADD_SEALS, 1 | 2 | 4, 0, 0, 0) < 0 ? 9
@@ -3526,7 +3625,7 @@ static b32 compositor_main()
                 // wheel is a stream when its notches come close together.
                 compositor.input_kinds[compositor.input_count] = (tablet ? 0 : WINDOWS_INPUT_MOUSE) | WINDOWS_INPUT_WHEEL | WINDOWS_INPUT_BUTTONS;
                 compositor.inputs[compositor.input_count] = extra;
-                compositor.device_number[compositor.input_count++] = COMPOSITOR_DEVICES - 1;
+                compositor.devices[compositor.input_count++].number = COMPOSITOR_DEVICES - 1;
         }
         // The middle of the primary screen.
         {
@@ -3538,8 +3637,9 @@ static b32 compositor_main()
                 compositor.owner = COMPOSITOR_PREDICT_MOUSE;
                 compositor_pointer_shown();
         }
-        compositor_look_read();
-        compositor_input_settings_read();
+        compositor_settings_apply(COMPOSITOR_SET_WALL | COMPOSITOR_SET_LOOK | COMPOSITOR_SET_INPUT |
+                                  COMPOSITOR_SET_TASKBAR | COMPOSITOR_SET_TOUCH | COMPOSITOR_SET_PREDICT |
+                                  COMPOSITOR_SET_CLICK | COMPOSITOR_SET_HAND);
         compositor_cursor_move();
         //      No face given is the faces the desktop's programs find for themselves (ui_faces).
         compositor_font(font ? font : ui_faces()->text[0] ? (string_address)ui_faces()->text : null);
@@ -3562,11 +3662,10 @@ static b32 compositor_main()
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_start();
 #endif
-        // The theme goes in the table it now has, and what a hand takes (read before there was a table) with it.
-        compositor_theme_read();
-        compositor_hand_read();
-        // The keyboard's setting too (compositor_osk_sync writes the table).
-        compositor_osk_setting_read();
+        // The theme goes in the table it now has, and what a hand takes (read before there was a table) with it,
+        // along with the keyboard's setting (compositor_osk_sync writes the table).
+        compositor_settings_apply(COMPOSITOR_SET_THEME | COMPOSITOR_SET_SCROLL | COMPOSITOR_SET_VRR |
+                                  COMPOSITOR_SET_HAND | COMPOSITOR_SET_OSK);
         for (unsigned int at = 0; at < COMPOSITOR_INPUTS; at++) // every slot: one no device is in is said to be none (-1)
                 compositor_input_publish(at);
         // The input thread, the devices' reader from here on (none: the loop reads them, as it did).
