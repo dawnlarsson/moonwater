@@ -37,6 +37,7 @@ static const p8 bowl_usage_text[] = bowl_label
     bowl_label "       bowl [--fast|--isolated|--root] <root> [program [argument...]]\n"
     bowl_label "       bowl expose <root> <program> [name]\n"
     bowl_label "       bowl profile [<name> [install|remove]]\n"
+    bowl_label "       bowl uninstall <profile|desktop>\n"
     bowl_label "       bowl udev\n"
     bowl_label "       bowl bus\n";
 
@@ -13610,6 +13611,89 @@ static fn bowl_profile_script_drop(const struct bowl_profile address_to profile,
         }
 }
 
+#define BOWL_LOCAL_APPLICATIONS "/root/.local/share/applications"
+
+static bool bowl_desktop_word_matches(string_address text, positive length,
+                                      string_address program)
+{
+        for (positive at = 0; at < length;)
+        {
+                positive line_end = at;
+
+                while (line_end < length && text[line_end] != '\n')
+                        line_end++;
+                if (line_end - at >= 5 && !memory_compare(text + at, "Exec=", 5))
+                {
+                        positive pos = at + 5, end_pos = line_end, last_slash = 0;
+
+                        while (pos < end_pos && (text[pos] == ' ' || text[pos] == '\t' || text[pos] == '"'))
+                                pos++;
+                        for (positive scan = pos; scan < end_pos && text[scan] != ' ' && text[scan] != '\t' && text[scan] != '"'; scan++)
+                                if (text[scan] == '/')
+                                        last_slash = scan + 1;
+                        {
+                                positive word_start = last_slash ? last_slash : pos;
+                                positive word_end = word_start;
+
+                                while (word_end < line_end && text[word_end] != ' ' && text[word_end] != '\t' && text[word_end] != '"')
+                                        word_end++;
+                                if (word_end - word_start == string_length(program) &&
+                                    !memory_compare(text + word_start, program, word_end - word_start))
+                                        return true;
+                        }
+                }
+                at = line_end + 1;
+        }
+        return false;
+}
+
+static fn bowl_profile_clean_shortcuts(const struct bowl_profile address_to profile)
+{
+        bipolar dir;
+        p8 buffer[4096];
+
+        dir = system_open_at(AT_FDCWD, BOWL_LOCAL_APPLICATIONS, FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        if (dir < 0)
+                return;
+        for (;;)
+        {
+                bipolar got = system_read_directory((positive)dir, buffer, sizeof(buffer));
+
+                if (got <= 0)
+                        break;
+                for (positive at = 0; at < (positive)got;)
+                {
+                        const struct linux_dirent64 address_to entry = (const struct linux_dirent64 address_to)(buffer + at);
+                        positive name_len;
+                        bipolar handle, read_bytes;
+                        p8 body[4096];
+                        bool match = false;
+
+                        if (entry->d_reclen < 20 || at + entry->d_reclen > (positive)got)
+                                break;
+                        at += entry->d_reclen;
+                        name_len = string_length((string_address)entry->d_name);
+                        if (entry->d_name[0] == '.' || name_len <= 8 ||
+                            memory_compare(entry->d_name + name_len - 8, ".desktop", 8))
+                                continue;
+                        handle = system_open_at((positive)dir, (string_address)entry->d_name,
+                                                FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+                        if (handle < 0)
+                                continue;
+                        read_bytes = system_read_retry((positive)handle, body, sizeof(body));
+                        system_close(handle);
+                        if (read_bytes <= 0)
+                                continue;
+                        match = bowl_desktop_word_matches(body, (positive)read_bytes, profile->name);
+                        for (string_address address_to other = profile->names; !match && other && *other; other++)
+                                match = bowl_desktop_word_matches(body, (positive)read_bytes, *other);
+                        if (match)
+                                system_remove_at((positive)dir, (string_address)entry->d_name, 0);
+                }
+        }
+        system_close(dir);
+}
+
 static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
 {
         //      The server before its files: stopped, and its sessions with it.
@@ -13685,13 +13769,14 @@ static b32 bowl_profile_remove(const struct bowl_profile address_to profile)
                 bowl_profile_forget(distro->root, profile->name);
         }
 
-        // The scripts go only if they are the ones install wrote.
+        // The scripts go only if they are the ones install wrote, along with any local shortcuts that invoke them.
         if (profile->session)
         {
                 bowl_profile_script_drop(profile, profile->name);
                 for (string_address address_to other = profile->names;
                      other && *other; other++)
                         bowl_profile_script_drop(profile, *other);
+                bowl_profile_clean_shortcuts(profile);
         }
 
         string_format(log, bowl_label "%s removed\n", profile->label);
@@ -13802,6 +13887,52 @@ bowl_profile_main(positive count, string_address address_to arguments)
                       : bowl_profile_install(profile);
 }
 
+static bool bowl_desktop_path_ok(string_address path)
+{
+        positive length = path ? string_length(path) : 0;
+        const p8 local_prefix[] = BOWL_LOCAL_APPLICATIONS "/";
+
+        if (length <= 8 || memory_compare(path + length - 8, ".desktop", 8))
+                return false;
+        if (string_find(path, "/../") || (length >= 3 && !memory_compare(path + length - 3, "/..", 3)))
+                return false;
+        if (!memory_compare(path, local_prefix, sizeof(local_prefix) - 1))
+                return true;
+        return !memory_compare(path, BOWL_ROOT_PREFIX, sizeof(BOWL_ROOT_PREFIX) - 1) &&
+               string_find(path + sizeof(BOWL_ROOT_PREFIX) - 1, "/applications/") != null;
+}
+
+static b32 bowl_uninstall(positive count, string_address address_to arguments)
+{
+        string_address target;
+        const struct bowl_profile address_to profile;
+        struct file_facts facts;
+        bipolar failed;
+
+        if (count != 3 || !arguments[2][0])
+                return bowl_usage();
+        target = arguments[2];
+        profile = bowl_find_profile(target);
+        if (profile)
+        {
+                if (bowl_setup_become_root("profile", profile->name, "remove"))
+                        return 1;
+                return bowl_profile_remove(profile);
+        }
+        if (!bowl_desktop_path_ok(target))
+                return bowl_refuse("uninstall takes a profile name or a .desktop entry under "
+                                   BOWL_LOCAL_APPLICATIONS " or " BOWL_ROOT_DIRECTORY "\n");
+        if (bowl_setup_become_root("uninstall", target, null))
+                return 1;
+        if (file_look_code(AT_FDCWD, target, AT_SYMLINK_NOFOLLOW, address_of facts) < 0 ||
+            (facts.mode & 0170000u) != 0100000u)
+                return bowl_refuse("desktop entry is not a regular file\n");
+        failed = system_remove_at(AT_FDCWD, target, 0);
+        if (failed < 0)
+                return bowl_fail(target, failed);
+        return 0;
+}
+
 static b32 bowl_main()
 {
         string_address address_to arguments = program_argument_list();
@@ -13824,6 +13955,9 @@ static b32 bowl_main()
 
         if (string_equals(arguments[1], "profile"))
                 return bowl_profile_main(count, arguments);
+
+        if (string_equals(arguments[1], "uninstall"))
+                return bowl_uninstall(count, arguments);
 
         if (string_equals(arguments[1], "udev"))
                 return bowl_udev(count);

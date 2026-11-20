@@ -1250,11 +1250,20 @@ static fn launcher_chose(int id)
         }
         if (id == LAUNCHER_MENU_UNINSTALL)
         {
-                if (ui_apps_uninstall(compositor_settings_root, launcher.menu_app,
+                int target = launcher.menu_app;
+
+                launcher.menu_app = -1;
+                if (ui_apps_uninstall(compositor_settings_root, target,
                                       launcher.mono ? launcher.mono : launcher.regular, launcher.mono_bold))
                 {
                         launcher_apps_make();
                         launcher_recent_read();
+                        if (launcher.grid.focus >= launcher.app_count)
+                                launcher.grid.focus = launcher.app_count - 1;
+                        if (launcher.recents.focus >= launcher.recent_count)
+                                launcher.recents.focus = launcher.recent_count - 1;
+                        if (!launcher.recent_count)
+                                launcher.in_recents = false;
                         launcher_changed();
                 }
                 return;

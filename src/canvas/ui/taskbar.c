@@ -3659,6 +3659,7 @@ static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab)
         // it may be, with room for one more. A window that is no app's has neither: nothing of a window's own words is ever pinned.
         {
                 int which = ui_apps_match(compositor.app_id[row]), pinned = -1;
+                bool has_pin = false;
 
                 for (int each = 0; each < taskbar_pins.count && pinned < 0; each++)
                         if (taskbar_pin_runs(&taskbar_pins.pin[each], compositor.app_id[row]))
@@ -3668,17 +3669,19 @@ static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab)
                         string_copy_bounded((p8 *)taskbar_menu.pin.app, (string_address)taskbar_pins.pin[pinned].app, sizeof(taskbar_menu.pin.app));
                         ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
                         ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_unpin), null, 0, TASKBAR_MENU_UNPIN);
+                        has_pin = true;
                 }
                 else if (which >= 0 && taskbar_pins.count < SETTING_PINS_ENTRIES && taskbar_pin_of(which, &taskbar_menu.pin))
                 {
                         ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
                         ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_pin), null, 0, TASKBAR_MENU_PIN);
+                        has_pin = true;
                 }
                 else
                         memory_zero(&taskbar_menu.pin, sizeof(taskbar_menu.pin));
                 if (which >= 0 && ui_apps_uninstallable(which))
                 {
-                        if (pinned < 0 && !(which >= 0 && taskbar_pins.count < SETTING_PINS_ENTRIES && taskbar_menu.pin.app[0]))
+                        if (!has_pin)
                                 ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
                         ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_uninstall), null, 0, TASKBAR_MENU_UNINSTALL);
                 }

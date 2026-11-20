@@ -29660,8 +29660,29 @@ static b32 ui_start_apart(string_address address_to words, positive count)
         return ui_start_apart_at(-1, words, count);
 }
 
-// Uninstall an app entry: local shortcuts (e.g. Steam game shortcuts) and non-profile entries remove their .desktop file;
-// bowl profiles (e.g. steam, chrome) run `bowl profile <name> remove` in a terminal.
+// Run a helper command synchronously and wait for exit status 0.
+static b32 ui_run_wait(string_address address_to words)
+{
+        bipolar child = system_fork();
+        b32 status = 0;
+
+        if (child < 0)
+                return false;
+        if (child == 0)
+        {
+                string_address address_to environment = program_environment_list();
+
+                system_call_3(syscall(execve), (positive)words[0], (positive)words, (positive)environment);
+                system_call_1(syscall(exit_group), 127);
+        }
+        if (system_wait4_retry(child, address_of status, 0, null) < 0)
+                return false;
+        return ((status >> 8) & 0xff) == 0 && (status & 0x7f) == 0;
+}
+
+// Uninstall an app entry centrally through `/bowl`:
+// bowl profiles (e.g. steam, chrome) run `bowl profile <name> remove` in a terminal;
+// local shortcuts (e.g. Steam game shortcuts) and non-profile entries run `bowl uninstall <path>`.
 static b32 ui_apps_uninstall(const char address_to root, int which, const char address_to mono, const char address_to mono_bold)
 {
         const struct ui_app_entry address_to app;
@@ -29696,8 +29717,14 @@ static b32 ui_apps_uninstall(const char address_to root, int which, const char a
                 words[count] = null;
                 return ui_start_apart(words, count);
         }
-        if (!app->source[0] || system_remove_at(AT_FDCWD, (string_address)app->source, 0) < 0)
+        if (!app->source[0])
                 return false;
+        {
+                string_address words[4] = {(string_address) "/bowl", (string_address) "uninstall", (string_address)app->source, null};
+
+                if (!ui_run_wait(words))
+                        return false;
+        }
         ui_apps_read();
         return true;
 }
