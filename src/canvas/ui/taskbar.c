@@ -3676,6 +3676,12 @@ static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab)
                 }
                 else
                         memory_zero(&taskbar_menu.pin, sizeof(taskbar_menu.pin));
+                if (which >= 0 && ui_apps_uninstallable(which))
+                {
+                        if (pinned < 0 && !(which >= 0 && taskbar_pins.count < SETTING_PINS_ENTRIES && taskbar_menu.pin.app[0]))
+                                ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
+                        ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_uninstall), null, 0, TASKBAR_MENU_UNINSTALL);
+                }
         }
         return taskbar_menu_place(view, x, y, w, h);
 }
@@ -3701,6 +3707,16 @@ static void taskbar_tab_chose(int id)
         else if (id == TASKBAR_MENU_PIN && taskbar_menu.pin.app[0] && ui_apps_match(compositor.app_id[row]) >= 0 &&
                  ui_apps_match(compositor.app_id[row]) == ui_apps_find(taskbar_menu.pin.app))
                 taskbar_pin_keep(ui_apps_find(taskbar_menu.pin.app), true);
+        else if (id == TASKBAR_MENU_UNINSTALL)
+        {
+                int which = ui_apps_match(compositor.app_id[row]);
+
+                if (which >= 0 && ui_apps_uninstallable(which))
+                {
+                        taskbar_pin_keep(which, false);
+                        ui_apps_uninstall(compositor_settings_root, which, ui_faces()->face, ui_faces()->bold);
+                }
+        }
 }
 
 // The clock format the menu's clock item turns to (`time format`'s word), and the band's clock turned to it.

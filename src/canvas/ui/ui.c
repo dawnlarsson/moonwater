@@ -1417,6 +1417,7 @@ static int taskbar_edit_drop(const struct taskbar_view *view, int which, int px,
 #define TASKBAR_MENU_STOP 5     // Force stop: the program's processes ended
 #define TASKBAR_MENU_PIN 6      // Pin to taskbar: the window's program kept on the taskbar
 #define TASKBAR_MENU_UNPIN 7    // Unpin from taskbar
+#define TASKBAR_MENU_UNINSTALL 8 // Uninstall: remove the app's profile or desktop shortcut
 #define TASKBAR_GHOST 0xffffffffu // the row a view gives the task of a pinned program that has no window (taskbar_pins_tabs)
 #define TASKBAR_EDIT_ROWS 8     // the rows the arrangement keeps
 static int taskbar_menu_rect(int rect[4]);
@@ -8387,6 +8388,7 @@ LANGUAGE_ID(taskbar_tab_exit, "Exit") \
 LANGUAGE_ID(taskbar_tab_pin, "Pin to taskbar") \
 LANGUAGE_ID(taskbar_tab_stop, "Force stop") \
 LANGUAGE_ID(taskbar_tab_stop_windows, "Force stop (%d windows)") \
+LANGUAGE_ID(taskbar_tab_uninstall, "Uninstall") \
 LANGUAGE_ID(taskbar_tab_unpin, "Unpin from taskbar") \
 LANGUAGE_ID(terminal_exited_press_to_close, "exited with status %d, press a key to close") \
 LANGUAGE_ID(terminal_press_to_close, "press a key to close") \
@@ -24607,6 +24609,21 @@ static b32 ui_apps_pinnable(int which)
         return which >= 0 && which < ui_apps.count && !ui_apps.app[which].terminal;
 }
 
+// Whether an entry may be uninstalled: any non-kit app (a bowl profile, a bowl entry, or a local desktop shortcut such as a Steam game).
+static b32 ui_apps_uninstallable(int which)
+{
+        const struct ui_app_entry address_to app;
+
+        if (which < 0 || which >= ui_apps.count)
+                return false;
+        app = &ui_apps.app[which];
+        if (app->kit)
+                return false;
+        if (ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local))
+                return app->source[0] != 0;
+        return app->profile[0] != 0 || app->source[0] != 0;
+}
+
 // The file the pins are kept in under root (the machine's /, a check's own directory).
 static fn ui_apps_pins_path(const char address_to root, char address_to path, positive room)
 {
@@ -29640,6 +29657,48 @@ static fn ui_app_starting(const char address_to id)
 static b32 ui_start_apart(string_address address_to words, positive count)
 {
         return ui_start_apart_at(-1, words, count);
+}
+
+// Uninstall an app entry: local shortcuts (e.g. Steam game shortcuts) and non-profile entries remove their .desktop file;
+// bowl profiles (e.g. steam, chrome) run `bowl profile <name> remove` in a terminal.
+static b32 ui_apps_uninstall(const char address_to root, int which, const char address_to mono, const char address_to mono_bold)
+{
+        const struct ui_app_entry address_to app;
+        b32 local;
+
+        if (!ui_apps_uninstallable(which))
+                return false;
+        app = &ui_apps.app[which];
+        local = ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local);
+        ui_apps_pin(root, which, false);
+        if (!local && app->profile[0])
+        {
+                string_address words[10];
+                positive count = 0;
+
+                words[count++] = (string_address) "/terminal";
+                if (mono && mono[0])
+                {
+                        words[count++] = (string_address) "-f";
+                        words[count++] = (string_address)mono;
+                }
+                if (mono_bold && mono_bold[0])
+                {
+                        words[count++] = (string_address) "-b";
+                        words[count++] = (string_address)mono_bold;
+                }
+                words[count++] = (string_address) "-x";
+                words[count++] = (string_address) "/bowl";
+                words[count++] = (string_address) "profile";
+                words[count++] = (string_address)app->profile;
+                words[count++] = (string_address) "remove";
+                words[count] = null;
+                return ui_start_apart(words, count);
+        }
+        if (!app->source[0] || system_remove_at(AT_FDCWD, (string_address)app->source, 0) < 0)
+                return false;
+        ui_apps_read();
+        return true;
 }
 
 /*

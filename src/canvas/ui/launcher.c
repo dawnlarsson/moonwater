@@ -103,6 +103,7 @@
 #define LAUNCHER_RECENT_PATH "/root/launcher.recent" // under the root the settings are kept in: an app's id a line, the last first
 #define LAUNCHER_MENU_PIN 100    // the app menu's items (the field's are the kit's, 1 to 7)
 #define LAUNCHER_MENU_UNPIN 101
+#define LAUNCHER_MENU_UNINSTALL 102
 
 // What a row starts.
 #define LAUNCHER_WINDOW 1u  // an app (the registry's: a kit program or a bowl's): a window of its own
@@ -1111,17 +1112,26 @@ static b32 launcher_asked(p32 asks)
 */
 static b32 launcher_app_menu(int which, int x, int y, b32 touch)
 {
-        b32 pinned;
+        b32 pinned, pinnable, uninstallable;
 
         if (which < 0 || which >= ui_apps.count)
                 return false;
         pinned = ui_apps_pinned(compositor_settings_root, which);
-        if (!pinned && !ui_apps_pinnable(which))
+        pinnable = pinned || ui_apps_pinnable(which);
+        uninstallable = ui_apps_uninstallable(which);
+        if (!pinnable && !uninstallable)
                 return false;
         launcher.menu.menu.count = 0;
         launcher.menu.field = null;
-        ui_popmenu_add(&launcher.menu.menu, pinned ? WORDS(taskbar_tab_unpin) : WORDS(taskbar_tab_pin), null, 0,
-                       pinned ? LAUNCHER_MENU_UNPIN : LAUNCHER_MENU_PIN);
+        if (pinnable)
+                ui_popmenu_add(&launcher.menu.menu, pinned ? WORDS(taskbar_tab_unpin) : WORDS(taskbar_tab_pin), null, 0,
+                               pinned ? LAUNCHER_MENU_UNPIN : LAUNCHER_MENU_PIN);
+        if (uninstallable)
+        {
+                if (pinnable)
+                        ui_popmenu_add(&launcher.menu.menu, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(&launcher.menu.menu, WORDS(taskbar_tab_uninstall), null, 0, LAUNCHER_MENU_UNINSTALL);
+        }
         launcher.menu_app = which;
         return ui_popmenu_open(&launcher.menu, &launcher.own, &launcher.ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
@@ -1236,6 +1246,17 @@ static fn launcher_chose(int id)
         {
                 ui_apps_pin(compositor_settings_root, launcher.menu_app, id == LAUNCHER_MENU_PIN);
                 launcher.dirty = true;
+                return;
+        }
+        if (id == LAUNCHER_MENU_UNINSTALL)
+        {
+                if (ui_apps_uninstall(compositor_settings_root, launcher.menu_app,
+                                      launcher.mono ? launcher.mono : launcher.regular, launcher.mono_bold))
+                {
+                        launcher_apps_make();
+                        launcher_recent_read();
+                        launcher_changed();
+                }
                 return;
         }
         launcher_asked(ui_text_menu_do(&launcher.ui, launcher.menu.field, id));
