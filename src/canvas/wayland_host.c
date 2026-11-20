@@ -58,31 +58,38 @@ struct compositor_wl_syncobj
         unsigned long long armed_point;
 };
 
-// Room for want elements of unit bytes in a reservation of most of them (made at the first need, committed a doubling at a time): 1, or
-// 0 when the address space or the memory is not there.
-static int compositor_wl_room(unsigned char **at, long *room, long unit, long most, long want)
+/*
+        Shared buffer attachment & scanout framebuffer metadata embedded into lent, straight, source, and layer records.
+        Anonymous union keeps direct field access (.fd, .va, .map, .scan_fb, ...) ABI-compatible with compositor.c and tests.
+*/
+#define CANVAS_BUFFER_REF_FIELDS \
+        const unsigned char *map; \
+        long fd, size; \
+        unsigned long dev, ino, modifier; \
+        positive va, import; \
+        unsigned int epoch, fourcc, offset
+
+struct canvas_buffer_ref
 {
-        long grown;
+        CANVAS_BUFFER_REF_FIELDS;
+};
 
-        if (want <= *room)
-                return 1;
-        if (want > most)
-                return 0;
-        if (!*at)
-        {
-                long got = compositor_call(syscall(mmap), 0, (positive)(unit * most), 0, 0x4022, (positive)-1, 0); // PROT_NONE, private, anonymous, no reserve
+#define CANVAS_SCAN_FB_FIELDS \
+        unsigned int scan_fb, scan_fourcc, scan_x, scan_y; \
+        unsigned char scan_failed
 
-                if (got < 0 && got > -4096)
-                        return 0;
-                *at = (unsigned char *)got;
-        }
-        grown = *room ? *room * 2 : 64;
-        grown = grown < want ? want : grown > most ? most : grown;
-        if (compositor_call(syscall(mprotect), (positive)*at, (positive)((unit * grown + 4095) & ~4095L), 3, 0, 0, 0) != 0)
-                return 0;
-        *room = grown;
-        return 1;
-}
+struct canvas_scan_fb
+{
+        CANVAS_SCAN_FB_FIELDS;
+};
+
+struct compositor_wl_client
+{
+        int uid;
+        unsigned char asked;
+        positive slow_until;
+};
+
 #define COMPOSITOR_WL_PULL_NS 3000000000ull      // a copy's source that writes nothing for this long is done with
 #define COMPOSITOR_WL_PUSH_NS 5000000000ull      // a paste's reader that takes nothing for this long is done with
 #define COMPOSITOR_WL_CHUNK 4096                 // PIPE_BUF: a write of this much to a pipe that poll said is ready does not wait
@@ -99,15 +106,14 @@ static int compositor_wl_room(unsigned char **at, long *room, long unit, long mo
 static struct
 {
         int listen;
-        // Each client slot's (slots of them, the shim's, grown with it: compositor_wl_slots_reach): its connection (-1 for none), the peer's
-        // uid and pid, and whether its first window has been opened (so its launch is not read again).
-        int *fd;
-        int *uid, *pid;
-        unsigned char *asked;
-        unsigned char *barred; // a client whose buffer the card hung reading (compositor_wl_card_blame): none of its buffers is the card's again
+        // Per-client slots (grown together in compositor_wl_slots_reach): fd/pid/barred stay flat arrays for compositor.c & tests;
+        // uid, asked, slow_until live in one struct compositor_wl_client table.
+        int *fd, *pid;
+        unsigned char *barred;
+        struct compositor_wl_client *client;
         long slots;
         long polled; // the slots the loop's poll list was made with (compositor_wl_poll), which a list polled again has, and no more
-        struct wayland_table fd_table, uid_table, pid_table, asked_table, slow_table, barred_table;
+        struct wayland_table fd_table, pid_table, barred_table, client_table;
         int started, handler;
         unsigned long frames;
         // The picture being laid on each window: whether one is begun, the buffer of the table it goes in, what it has touched so
@@ -133,25 +139,15 @@ static struct
         unsigned int layout_told;
         unsigned long screens_told; // the screens the clients were last told, as compositor_wl_screens_digest says them
         long repeat_told[2];        // and the key repeat they were last told: its rate and its delay
-        // The clipboard's transfers. A pull is a copy's source being read: its pipe's read end (in) and the sealed file the text is
-        // gathered in (keep); the end the source writes to is the shim's, in the client's queue until it is sent, and the
-        // compositor's copy goes when it is, so the source's closing is the end of the file. A push is a paste: the compositor's text
-        // (in, a descriptor of its own for the file, so a newer copy cannot change it half way) written to the client's (out).
-        // Each is read and written by a thread of its own (worker), which says how it ended in finished (1 badly, 2 well) and
-        // stops when the loop sets cancel; total is a paste's length, limit the most a copy may be.
+        // Clipboard/drag/XWM transfers backed by wayland_table.
         struct compositor_wl_transfer *transfer;
         long transfers;
-        unsigned char *transfer_at; // the reservation (compositor_wl_room), and the elements committed in it
-        long transfer_room;
+        struct wayland_table transfer_table;
         int wake;                       // the eventfd a transfer's thread knocks on when it has ended
         int hold_row, hold;             // the window that holds the pointer, and how: 0 free, 1 locked, 2 confined
         int dmabuf_table;               // the file of format and modifier pairs the feedback names, rebuilt when changed
         long dmabuf_table_size;
         long dmabuf_entry_count;
-        // Whether the pairs told name the card's tiled and compressed layouts (compositor_wl_tiled_now when they were made), the card's epoch and
-        // the answer the render node's match with the card's node was found for, and the tiled pictures' rectangles the card read and the ones
-        // refused, by why (compositor_wl_card_image: 0 the card not composing, 1 none now, 2 a transform or a viewport that is not a crop at the
-        // corner, 3 a plane that is not plane 0's buffer, 4 an import refused, 5 a resource refused, 6 the job failed, 7 a card that does not read it).
         int dmabuf_tiled, tiled_node_epoch, tiled_node;
         unsigned long tiled_rects, tiled_refused[8];
         positive tiled_ns, tiled_most_ns, tiled_pixels; // the texture unit's reads: wall time waited in all and the longest, and the pixels read
@@ -187,70 +183,35 @@ static struct
         char render_path[64];
         struct compositor_wl_syncobj *syncobj;
         long syncobjs;
-        unsigned char *syncobj_at;
-        long syncobj_room;
-        positive *slow_until; // a client's dma-bufs are not waited for until this (compositor_wl_slow)
-        // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut: a table that grows and never moves (the
-        // handler reads it as it is), with an index by each mapping's start (open addressing, a power of two of buckets, each a slot and
-        // one), so a pool let go of or resized is found at once; map_hint is the mapping the last question about a pixel was answered by.
+        struct wayland_table syncobj_table;
+        // Where each pool is mapped, so a SIGBUS can be put to the pool whose file was cut: backed by shared canvas_htab_*.
         struct wayland_table map_table, map_index;
         struct compositor_wl_mapping *map;
         long map_live, map_hint;
-        // The client's own pictures the row shows, read in place (compositor_wl_lend): the first pixel of the picture in the client's
-        // buffer, its pitch in pixels and its size, the card's address of that pixel when it is a dma-buf (its import's address, let go
-        // of when the picture is) and the mapping the buffer is in. pixels 0 for a row whose picture is the table's.
+        // Unified buffer-ref & scanout-FB records for lent, straight, and damage-copy source attachments.
         struct
         {
                 const unsigned int *pixels;
                 unsigned long pitch;
                 long width, height;
-                positive va, import;
-                const unsigned char *map;
-                long fd, size;
-                unsigned long dev, ino, modifier;
-                unsigned int epoch; // the card's epoch the import was made in (gpu_epoch): an import of an earlier one is the card's no more
-                unsigned int fourcc, offset, scan_fb, scan_fourcc; // scan_fourcc: the format scan_fb was made as
-                int synced, scan_failed;
-                unsigned int scan_x, scan_y; // where the window is in scan_fb (made from the buffer's first pixel: compositor_lent_fb_as)
+                union { struct canvas_buffer_ref buf; struct { CANVAS_BUFFER_REF_FIELDS; }; };
+                union { struct canvas_scan_fb scan; struct { CANVAS_SCAN_FB_FIELDS; }; };
+                int synced;
         } *lent;
-        /*
-                A row's picture a tiled dma-buf the whole window is (compositor_wl_straight_take): the commit as it was handed, its descriptors the
-                buffer's for as long as the shim holds it (WAYLAND_PICTURE_LENT), so the display scans it out as it is (compositor_lent_fb makes
-                its framebuffer, with its modifier and planes). owed: the commit was not read into the table, the screen showing the window from
-                the buffer itself, and the table's picture is the one before (compositor_wl_straight_pay reads it the first time anything is
-                composed from it).
-        */
         struct
         {
                 struct wayland_picture picture;
                 unsigned long dev, ino;
-                unsigned int scan_fb, scan_fourcc;
-                unsigned char live, owed, scan_failed;
+                union { struct canvas_scan_fb scan; struct { CANVAS_SCAN_FB_FIELDS; }; };
+                unsigned char live, owed;
         } *straight;
-        // The dma-buf a row's damage is copied from on the card (compositor_wl_card_rect): its mapping and its import's address, let go of
-        // when the buffer changes or the row closes.
         struct
         {
-                const unsigned char *map;
-                long fd, size;
-                unsigned long dev, ino;
-                positive va;
-                unsigned int epoch; // the card's epoch the import was made in (gpu_epoch)
+                union { struct canvas_buffer_ref buf; struct { CANVAS_BUFFER_REF_FIELDS; }; };
         } *source;
         int lent_synced;
-        /*
-                A lent dma-buf the processor composes is read where the client's card wrote it, through a mapping that is write-combined on a
-                card with memory of its own: a load from it is an uncached read across the bus, and a present of a whole 1920 by 1080 game the
-                processor drew so took 13 ms on the owner's machine against the card's 0.7 ms. A row whose lent dma-buf the processor read in
-                COMPOSITOR_WL_WC_PRESENTS presents running (wc_reads, counted at each present's first read, compositor_wl_lent_sync) is copied
-                into the table once, with the streaming loads (compositor_wl_seed), and its dma-bufs are not lent again (wc_copy) until the
-                card draws a present: each commit's damage is copied so (the copy path's memory_copy_rect_stream_u32), and the processor
-                composes from the machine's own memory. Counted: the presents read so and the rows copied (wc_presents, wc_seeded).
-        */
         unsigned char *wc_reads, *wc_copy;
         unsigned int wc_presents, wc_seeded;
-        // The last refusal of a client's buffer as a framebuffer to scan out (compositor_lent_fb): what was asked, and the kernel's errno or why it was
-        // not asked (COMPOSITOR_WL_SCAN_*), and how many there were.
         struct
         {
                 unsigned int fourcc, pitch, offset, width, height, count;
@@ -259,14 +220,6 @@ static struct
         } scan_refused;
 } compositor_wl = {.listen = -1, .wake = -1, .syncobj_drm_fd = -1};
 
-/*
-        A window's subsurfaces as layers of their own (row_layers, wayland.c): each the rectangle of a client's buffer at its place in the
-        window, cut to it, read where the client keeps it as the lent picture is, and shown as a frame of its own over the window's
-        (compositor_wl_layers_frames), so a subsurface's commit is the composing of its damage and nothing copied. A row has layers only while
-        its own picture is lent: they are over that picture, and a row whose picture is the table's has its layers laid into it
-        (compositor_wl_layers_lay), as the shim lays a subsurface it does not hand as a layer. COMPOSITOR_LAYERS in all (the frames a
-        present has room for), WAYLAND_LAYERS a row.
-*/
 struct compositor_wl_layer
 {
         const unsigned int *pixels;   // the first pixel of the layer's rectangle, in the client's buffer
@@ -274,31 +227,10 @@ struct compositor_wl_layer
         int x, y, width, height;      // the rectangle in the window's pixels
         int blend;                    // premultiplied, laid over what is under it
         unsigned int id;              // the surface's (wayland_picture.layer)
-        const unsigned char *map;     // the mapping the buffer is in, and its size, as the lent picture's
-        long fd, size;
-        unsigned long dev, ino, modifier;
-        positive va, import;          // a dma-buf's: the card's address of the first pixel, and the import's
-        unsigned int epoch, fourcc, offset;
-        int synced;
-        int swap;                     // red and blue the other way round (an ABGR or XBGR buffer): the frame's swap
-        /*
-                A layer gathered (gather 1): a picture turned or flipped (a buffer transform, y_invert), or a viewport's source at an offset, or
-                scaled. It is drawn from a picture of its own at its rectangle's size, compositor_wl_layers.gathered[row][at], which the card
-                makes from the buffer (op 7 by tables of where each column and row comes from, compositor_wl_gathers_fill) or the processor
-                with the same tables, each time it changed; pixels and pitch are then the buffer's first pixel and its pitch, source_w by
-                source_h its size, and transform, y_invert, the viewport's source (sx, sy, sw, sh in 1/256 pixels of the turned buffer) and the
-                size drawn (tw by th) say where each pixel comes from, as compositor_wl_blit_xform reads them; ox, oy are the rectangle's first
-                column and row in the picture drawn (a layer cut by the window's edge).
-        */
-        int gather;
+        union { struct canvas_buffer_ref buf; struct { CANVAS_BUFFER_REF_FIELDS; }; };
+        int synced, swap, gather;
         unsigned int at;
         long source_w, source_h, transform, y_invert, sx, sy, sw, sh, tw, th, ox, oy;
-        /*
-                An NV12 layer (nv12 1, always gathered: its picture is made XRGB, by the card's op 9 or the processor's walk of the same tables):
-                a dma-buf whose two planes are one buffer's, its luma at byte luma of it (luma_pitch bytes a row) and its chroma at chroma
-                (chroma_pitch), extent the bytes of the buffer the two reach; va is the import's first byte (the buffer's), pitch 1, so that
-                the rows' table holds the source's row and the columns' its column. Never turned across its axes (transform 1, 3, 5, 7).
-        */
         int nv12;
         unsigned long luma, chroma, luma_pitch, chroma_pitch, extent;
 };
@@ -677,39 +609,102 @@ struct compositor_wl_mapping
         volatile int bad;
 };
 
-static unsigned long compositor_wl_map_hash(unsigned long at, long buckets)
+static const struct wayland_host compositor_wl_host;
+
+/* ---- shared open-addressing hash index (used by wayland_host map_index [64-bit key] and xwm window_index/atom_index [32-bit key]) ---- */
+
+static unsigned long canvas_htab_key(const struct wayland_table *records, long slot, int key64)
 {
-        return ((at >> 12) * 0x9e3779b97f4a7c15ul >> 20) & (unsigned long)(buckets - 1);
+        const void *p = records->at + (unsigned long)slot * records->unit;
+
+        return key64 ? *(const volatile unsigned long *)p : (unsigned long)*(const unsigned int *)p;
 }
 
-// The mapping that starts at `at`: its slot, or -1.
-static long compositor_wl_map_find(unsigned long at)
+static unsigned long canvas_htab_hash(unsigned long key, long buckets, int key64)
 {
-        long buckets = compositor_wl.map_index.count;
-        const unsigned int *bucket = (const unsigned int *)compositor_wl.map_index.at;
-
-        for (unsigned long b = buckets ? compositor_wl_map_hash(at, buckets) : 0, n = 0; buckets && n < (unsigned long)buckets; n++, b = (b + 1) & (unsigned long)(buckets - 1))
-        {
-                if (!bucket[b])
-                        return -1;
-                if (compositor_wl.map[bucket[b] - 1].at == at)
-                        return (long)bucket[b] - 1;
-        }
-        return -1;
+        if (key64)
+                return ((key >> 12) * 0x9e3779b97f4a7c15ul >> 20) & (unsigned long)(buckets - 1);
+        return wayland_u32_hash((unsigned int)key, buckets);
 }
 
-static void compositor_wl_map_put(struct wayland_table *index, long slot)
+static void canvas_htab_put(struct wayland_table *index, unsigned long key, long slot, int key64)
 {
-        long buckets = index->count;
-        unsigned int *bucket = (unsigned int *)index->at;
-        unsigned long b = compositor_wl_map_hash(compositor_wl.map[slot].at, buckets);
+        unsigned int *bucket = (unsigned int *)(void *)index->at;
+        unsigned long b = canvas_htab_hash(key, index->count, key64);
 
         while (bucket[b])
-                b = (b + 1) & (unsigned long)(buckets - 1);
+                b = (b + 1) & (unsigned long)(index->count - 1);
         bucket[b] = (unsigned int)(slot + 1);
 }
 
-static const struct wayland_host compositor_wl_host;
+static int canvas_htab_grow(struct wayland_table *index, const struct wayland_table *records, long used, long skip, int key64)
+{
+        struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
+
+        wayland_tables_host(&compositor_wl_host);
+        if (index->count && 2 * (used + 1) <= index->count)
+                return 1;
+        if (!wayland_table_reach(&grown, index->count ? 2 * index->count : 64))
+                return 0;
+        for (long at = 0; at < records->count; at++)
+                if (at != skip)
+                {
+                        unsigned long key = canvas_htab_key(records, at, key64);
+
+                        if (key)
+                                canvas_htab_put(&grown, key, at, key64);
+                }
+        wayland_table_drop(index);
+        *index = grown;
+        return 1;
+}
+
+static long canvas_htab_find(const struct wayland_table *index, const struct wayland_table *records, unsigned long key,
+                             int first, unsigned long *at, int key64)
+{
+        long buckets = index->count, found = -1;
+        const unsigned int *bucket = (const unsigned int *)(const void *)index->at;
+
+        for (unsigned long b = buckets ? canvas_htab_hash(key, buckets, key64) : 0, n = 0; buckets && n < (unsigned long)buckets;
+             n++, b = (b + 1) & (unsigned long)(buckets - 1))
+        {
+                if (!bucket[b])
+                        return found;
+                if (canvas_htab_key(records, (long)bucket[b] - 1, key64) == key)
+                {
+                        long slot = (long)bucket[b] - 1;
+
+                        if (!first)
+                        {
+                                if (at)
+                                        *at = b;
+                                return slot;
+                        }
+                        if (found < 0 || slot < found)
+                                found = slot;
+                }
+        }
+        return found;
+}
+
+static void canvas_htab_del(struct wayland_table *index, const struct wayland_table *records, unsigned long hole, int key64)
+{
+        long buckets = index->count;
+        unsigned int *bucket = (unsigned int *)(void *)index->at;
+
+        bucket[hole] = 0;
+        for (unsigned long b = (hole + 1) & (unsigned long)(buckets - 1); bucket[b]; b = (b + 1) & (unsigned long)(buckets - 1))
+        {
+                unsigned long home = canvas_htab_hash(canvas_htab_key(records, (long)bucket[b] - 1, key64), buckets, key64);
+
+                if ((b > hole && (home <= hole || home > b)) || (b < hole && home <= hole && home > b))
+                {
+                        bucket[hole] = bucket[b];
+                        bucket[b] = 0;
+                        hole = b;
+                }
+        }
+}
 
 /*
         The host's arrays of a client slot reached to `slots` (the shim's own grow first, wayland_connect): tables that never move,
@@ -718,70 +713,43 @@ static const struct wayland_host compositor_wl_host;
 static int compositor_wl_slots_reach(long slots)
 {
         long was = compositor_wl.slots;
+        struct { struct wayland_table *t; unsigned long unit; } specs[4] = {
+                {&compositor_wl.fd_table, sizeof(int)},
+                {&compositor_wl.pid_table, sizeof(int)},
+                {&compositor_wl.barred_table, 1},
+                {&compositor_wl.client_table, sizeof(struct compositor_wl_client)},
+        };
 
         if (slots <= was)
                 return 1;
         wayland_tables_host(&compositor_wl_host);
-        compositor_wl.fd_table.unit = compositor_wl.uid_table.unit = compositor_wl.pid_table.unit = sizeof(int);
-        compositor_wl.asked_table.unit = compositor_wl.barred_table.unit = 1, compositor_wl.slow_table.unit = sizeof(positive);
-        if (!wayland_table_reach(&compositor_wl.fd_table, slots) || !wayland_table_reach(&compositor_wl.uid_table, slots) ||
-            !wayland_table_reach(&compositor_wl.pid_table, slots) || !wayland_table_reach(&compositor_wl.asked_table, slots) ||
-            !wayland_table_reach(&compositor_wl.slow_table, slots) || !wayland_table_reach(&compositor_wl.barred_table, slots))
-                return 0;
-        compositor_wl.fd = (int *)compositor_wl.fd_table.at, compositor_wl.uid = (int *)compositor_wl.uid_table.at;
-        compositor_wl.pid = (int *)compositor_wl.pid_table.at, compositor_wl.asked = compositor_wl.asked_table.at;
-        compositor_wl.slow_until = (positive *)compositor_wl.slow_table.at, compositor_wl.barred = compositor_wl.barred_table.at;
+        for (unsigned int i = 0; i < 4; i++)
+        {
+                specs[i].t->unit = specs[i].unit;
+                if (!wayland_table_reach(specs[i].t, slots))
+                        return 0;
+        }
+        compositor_wl.fd = (int *)compositor_wl.fd_table.at;
+        compositor_wl.pid = (int *)compositor_wl.pid_table.at;
+        compositor_wl.barred = compositor_wl.barred_table.at;
+        compositor_wl.client = (struct compositor_wl_client *)compositor_wl.client_table.at;
         for (long at = was; at < slots; at++)
-                compositor_wl.fd[at] = -1, compositor_wl.uid[at] = compositor_wl.pid[at] = 0, compositor_wl.asked[at] = 0, compositor_wl.slow_until[at] = 0,
-                compositor_wl.barred[at] = 0;
+        {
+                compositor_wl.fd[at] = -1, compositor_wl.pid[at] = 0, compositor_wl.barred[at] = 0;
+                memory_zero(&compositor_wl.client[at], sizeof compositor_wl.client[at]);
+        }
         compositor_wl.slots = slots;
         return 1;
 }
 
-// The index made room for one more mapping: at half full, one of twice the buckets is made and every live mapping put in it. 0 when the memory is not there.
-// The tables are the compositor's, made by its host whether or not the shim has started (a pool is mapped before, and with no shim).
-static int compositor_wl_map_room(void)
-{
-        long buckets = compositor_wl.map_index.count;
-        struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
-
-        wayland_tables_host(&compositor_wl_host);
-        if (buckets && 2 * (compositor_wl.map_live + 1) <= buckets)
-                return 1;
-        if (!wayland_table_reach(&grown, buckets ? 2 * buckets : 64))
-                return 0;
-        for (long slot = 0; slot < compositor_wl.map_table.count; slot++)
-                if (compositor_wl.map[slot].at)
-                        compositor_wl_map_put(&grown, slot);
-        wayland_table_drop(&compositor_wl.map_index);
-        compositor_wl.map_index = grown;
-        return 1;
-}
-
-// The mapping at `at` taken out of the index (backward shift: the buckets after it that hashed before it move up), and its slot let go of.
 static void compositor_wl_map_forget(unsigned long at)
 {
-        long buckets = compositor_wl.map_index.count, slot = compositor_wl_map_find(at);
-        unsigned int *bucket = (unsigned int *)compositor_wl.map_index.at;
-        unsigned long hole, b;
+        unsigned long hole = 0;
+        long slot = canvas_htab_find(&compositor_wl.map_index, &compositor_wl.map_table, at, 0, &hole, 1);
 
         if (slot < 0)
                 return;
-        for (hole = compositor_wl_map_hash(at, buckets); bucket[hole] != (unsigned int)(slot + 1); hole = (hole + 1) & (unsigned long)(buckets - 1))
-                ;
-        bucket[hole] = 0;
-        for (b = (hole + 1) & (unsigned long)(buckets - 1); bucket[b]; b = (b + 1) & (unsigned long)(buckets - 1))
-        {
-                unsigned long home = compositor_wl_map_hash(compositor_wl.map[bucket[b] - 1].at, buckets);
-
-                // The entry at b may fill the hole if its home is not in (hole, b], cyclically.
-                if ((b > hole && (home <= hole || home > b)) || (b < hole && home <= hole && home > b))
-                {
-                        bucket[hole] = bucket[b];
-                        bucket[b] = 0;
-                        hole = b;
-                }
-        }
+        canvas_htab_del(&compositor_wl.map_index, &compositor_wl.map_table, hole, 1);
         compositor_wl.map[slot].at = 0;
         compositor_wl.map[slot].size = 0;
         compositor_wl.map[slot].bad = 0;
@@ -794,7 +762,7 @@ static int compositor_wl_map_note(unsigned long at, unsigned long size)
 {
         long slot;
 
-        if (!compositor_wl_map_room())
+        if (!canvas_htab_grow(&compositor_wl.map_index, &compositor_wl.map_table, compositor_wl.map_live, -1, 1))
                 return 0;
         slot = wayland_table_take(&compositor_wl.map_table);
         if (slot < 0)
@@ -804,7 +772,7 @@ static int compositor_wl_map_note(unsigned long at, unsigned long size)
         compositor_wl.map[slot].size = size;
         __atomic_store_n(&compositor_wl.map[slot].at, at, __ATOMIC_RELEASE);
         compositor_wl.map_live++;
-        compositor_wl_map_put(&compositor_wl.map_index, slot);
+        canvas_htab_put(&compositor_wl.map_index, at, slot, 1);
         return 1;
 }
 
@@ -834,6 +802,33 @@ static void *compositor_wl_map(void *context, long fd, long size)
         return 0;
 }
 
+static void compositor_wl_dmabuf_sync(long fd, int finish)
+{
+        unsigned long sync = finish ? 5ul : 1ul; // DMA_BUF_SYNC_READ | (END : START)
+
+        if (fd >= 0)
+                compositor_call(syscall(ioctl), (positive)fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+}
+
+static void compositor_wl_buf_release(struct canvas_buffer_ref *ref)
+{
+        positive handle = ref->import ? ref->import : ref->va;
+
+        if (handle && compositor_wl_live(handle, ref->epoch))
+                gpu_release_import(handle);
+        memory_zero(ref, sizeof *ref);
+        ref->fd = -1;
+}
+
+static void compositor_wl_buf_remap(struct canvas_buffer_ref *ref, const unsigned int **pixels, const void *old_at, long new_at)
+{
+        if (ref->map != (const unsigned char *)old_at)
+                return;
+        if (pixels && *pixels)
+                *pixels = (const unsigned int *)((const unsigned char *)*pixels + (new_at - (long)old_at));
+        ref->map = (const unsigned char *)new_at;
+}
+
 static void *compositor_wl_remap(void *context, void *at, long old_size, long new_size)
 {
         long got;
@@ -844,45 +839,24 @@ static void *compositor_wl_remap(void *context, void *at, long old_size, long ne
         got = compositor_call(syscall(mremap), (positive)at, (positive)old_size, (positive)new_size, 1, 0, 0);
         if (got < 0 && got > -4096)
                 return 0;
+        if (canvas_htab_find(&compositor_wl.map_index, &compositor_wl.map_table, (unsigned long)at, 0, 0, 1) >= 0)
         {
-                long slot = compositor_wl_map_find((unsigned long)at);
-
-                if (slot >= 0)
+                compositor_wl_map_forget((unsigned long)at);
+                if (!compositor_wl_map_note((unsigned long)got, (unsigned long)new_size))
                 {
-                        // Out of the index at its old start and into it at its new one (the slot is the same: the handler sees it move).
-                        unsigned long size = (unsigned long)new_size;
-
-                        compositor_wl_map_forget((unsigned long)at);
-                        if (!compositor_wl_map_note((unsigned long)got, size))
-                        {
-                                compositor_call(syscall(munmap), (positive)got, (positive)new_size, 0, 0, 0, 0);
-                                return 0;
-                        }
+                        compositor_call(syscall(munmap), (positive)got, (positive)new_size, 0, 0, 0, 0);
+                        return 0;
                 }
         }
-        // A picture a row shows in place from this pool (compositor_wl_lend) is read where the pool now is: a pool that grew may have moved,
-        // and the address it was lent at is then no mapping at all, which the next compose would read.
+        // Update lent, damage-source, and layer references whose pool moved on mremap.
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (compositor_wl.lent[row].pixels && compositor_wl.lent[row].map == (const unsigned char *)at)
-                {
-                        compositor_wl.lent[row].pixels =
-                                (const unsigned int *)((const unsigned char *)compositor_wl.lent[row].pixels + (got - (long)at));
-                        compositor_wl.lent[row].map = (const unsigned char *)got;
-                }
-        // The damage source's mapping (compositor_wl_source_import) is the pool's too: kept at the old address, the next look re-imported the
-        // buffer, and an unmap at that address later let another row's import go (compositor_wl_unmap).
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (compositor_wl.source[row].map == (const unsigned char *)at)
-                        compositor_wl.source[row].map = (const unsigned char *)got;
-        // And the layers read in place from it (compositor_wl_layers).
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
+        {
+                if (compositor_wl.lent[row].pixels)
+                        compositor_wl_buf_remap(&compositor_wl.lent[row].buf, &compositor_wl.lent[row].pixels, at, got);
+                compositor_wl_buf_remap(&compositor_wl.source[row].buf, 0, at, got);
                 for (unsigned int k = 0; k < compositor_wl_layers.count[row]; k++)
-                        if (compositor_wl_layers.layer[row][k].map == (const unsigned char *)at)
-                        {
-                                compositor_wl_layers.layer[row][k].pixels =
-                                        (const unsigned int *)((const unsigned char *)compositor_wl_layers.layer[row][k].pixels + (got - (long)at));
-                                compositor_wl_layers.layer[row][k].map = (const unsigned char *)got;
-                        }
+                        compositor_wl_buf_remap(&compositor_wl_layers.layer[row][k].buf, &compositor_wl_layers.layer[row][k].pixels, at, got);
+        }
         return (void *)got;
 }
 
@@ -893,16 +867,8 @@ static void compositor_wl_straight_drop(int row);
 
 static void compositor_wl_source_drop(int row)
 {
-        if (row < 0 || row >= COMPOSITOR_ROWS)
-                return;
-        if (compositor_wl.source[row].va && compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
-                gpu_release_import(compositor_wl.source[row].va);
-        compositor_wl.source[row].va = 0;
-        compositor_wl.source[row].map = 0;
-        compositor_wl.source[row].fd = -1;
-        compositor_wl.source[row].size = 0;
-        compositor_wl.source[row].dev = 0;
-        compositor_wl.source[row].ino = 0;
+        if (row >= 0 && row < COMPOSITOR_ROWS)
+                compositor_wl_buf_release(&compositor_wl.source[row].buf);
 }
 
 static void compositor_wl_unmap(void *context, void *at, long size)
@@ -1068,9 +1034,9 @@ static int compositor_wl_row_open(void *context, long client, long kind, int par
                 // A client draws its own frame, and keeps the whole of its picture, the top included.
                 table->glass[row] = WINDOW_NO_CLOSE | WINDOW_NO_GRAB;
                 // The person's own launch takes the keys with its first window, as a program of the compositor's does.
-                if ((kind == WAYLAND_KIND_TOPLEVEL || kind == WAYLAND_KIND_PLACED) && !compositor_wl.asked[client])
+                if ((kind == WAYLAND_KIND_TOPLEVEL || kind == WAYLAND_KIND_PLACED) && !compositor_wl.client[client].asked)
                 {
-                        compositor_wl.asked[client] = 1;
+                        compositor_wl.client[client].asked = 1;
                         table->asked[row] = (unsigned int)compositor_wl_asked(client);
                 }
                 // A toplevel or placed transient keeps its owner so dialogs stay stacked above their parent (and toplevels centre on it).
@@ -1121,9 +1087,7 @@ static void compositor_wl_row_close(void *context, int row)
                 compositor_wl_source_drop(row);
                 compositor_wl_gathers_free(row);
         }
-        compositor_clip_leave(row);
-        compositor_popup_leave(row);
-        compositor_leave(row);
+        compositor_row_release(row);
 }
 
 static __attribute__((unused)) int compositor_wl_row_blend(int row)
@@ -1446,12 +1410,11 @@ static void compositor_wl_scan_refuse(int row, unsigned int fourcc, unsigned int
         }
 }
 
-static unsigned int compositor_lent_fb_as(int row, int opaque);
-static unsigned int compositor_wl_straight_fb(int row, int opaque);
+static unsigned int compositor_wl_scan_fb(int row, int opaque);
 
 static unsigned int compositor_lent_fb(int row)
 {
-        return compositor_lent_fb_as(row, !compositor_wl.row_blend[row]);
+        return compositor_wl_scan_fb(row, !compositor_wl.row_blend[row]);
 }
 
 /*
@@ -1460,19 +1423,32 @@ static unsigned int compositor_lent_fb(int row)
 */
 static unsigned int compositor_lent_fb_opaque(int row)
 {
-        return row >= 0 && row < COMPOSITOR_ROWS ? compositor_lent_fb_as(row, 1) : 0;
+        return row >= 0 && row < COMPOSITOR_ROWS ? compositor_wl_scan_fb(row, 1) : 0;
 }
 
-static unsigned int compositor_lent_fb_as(int row, int opaque)
+static int compositor_straight(int row)
 {
-        static const char *const amd[] = {"amdgpu"};
-        unsigned int fourcc;
-        long refused;
-        struct
-        {
-                unsigned int handle, flags;
-                int fd;
-        } prime;
+        return row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.straight[row].live;
+}
+
+// Whether the row's picture is a client's buffer the display may be given as it is (compositor_lent_fb): a lent one, or a straight one.
+static int compositor_client_scans(int row)
+{
+        return compositor_lent(row) || compositor_straight(row);
+}
+
+/*
+        Unified scanout framebuffer creation (PRIME_FD_TO_HANDLE + ADDFB2 + GEM_CLOSE) for both linear lent buffers
+        (single-plane with 256B/64B alignment + overlay crop origin scan_x/scan_y) and tiled/DCC straight buffers (1..4 planes).
+*/
+static unsigned int compositor_wl_scan_fb(int row, int opaque)
+{
+        static const char *const amd[] = {"amdgpu"}, *const intel[] = {"i915", "xe"};
+        int is_lent = compositor_lent(row);
+        struct canvas_scan_fb *scan;
+        unsigned int fourcc, planes = 1, close[2] = {0, 0};
+        long fds[4] = {-1, -1, -1, -1}, refused = 0;
+        struct { unsigned int handle, flags; int fd; } prime;
         struct
         {
                 unsigned int fb_id, width, height, pixel_format, flags;
@@ -1480,96 +1456,114 @@ static unsigned int compositor_lent_fb_as(int row, int opaque)
                 unsigned long long modifier[4];
         } fb = {0};
 
-        if (!compositor_lent(row))
-                return compositor_wl_straight_fb(row, opaque);
-        // A picture with layers over it is not the window: its layers are composed over it (compositor_wl_layers_frames).
-        if (compositor_wl.lent[row].fd < 0 || compositor_wl.lent[row].scan_failed || compositor.card < 0 ||
-            compositor_wl_layers.count[row])
+        if ((!is_lent && !compositor_straight(row)) || compositor.card < 0 || compositor_wl_layers.count[row])
                 return 0;
-        fourcc = compositor_wl.lent[row].fourcc ? compositor_wl.lent[row].fourcc : COMPOSITOR_XRGB8888;
-        // A window the compositor shows opaque (no blend: an X format, or an opaque region over all of it) is given to the card as the X
-        // format of the same bytes, so the plane's alpha is not read: as ARGB the display engine blends the buffer's own alpha over the
-        // primary plane under it, where nothing is drawn, and a client's alpha that is not meant to be seen (a game's, written as depth,
-        // or an overlay blended into its frame) showed as black or darkened on the screen and nowhere in the composed picture.
-        if (opaque && (fourcc == 0x34325241u || fourcc == 0x34324241u || fourcc == 0x30335241u || fourcc == 0x30334241u))
-                fourcc = (fourcc & ~0xffu) | 'X'; // AR24, AB24, AR30, AB30 to XR24, XB24, XR30, XB30
-        if (compositor_wl.lent[row].scan_fb && compositor_wl.lent[row].scan_fourcc != fourcc)
-                compositor_wl_lent_drop_fb(row);
-        // A framebuffer whose window is not at its first pixel shows the window only through a plane's source rectangle (the overlay's, which
-        // the plane's present moves by compositor_lent_fb_origin): the primary plane's flip, which shows a framebuffer from its first pixel,
-        // is not given one (opaque 0: the fullscreen paths).
-        if (compositor_wl.lent[row].scan_fb)
-                return opaque || (!compositor_wl.lent[row].scan_x && !compositor_wl.lent[row].scan_y) ? compositor_wl.lent[row].scan_fb : 0;
-        // The origin is the framebuffer's own, set below only with the one that has it: one left by a refusal (PRIME) was a later one's.
-        compositor_wl.lent[row].scan_x = compositor_wl.lent[row].scan_y = 0;
-        fb.width = (unsigned int)compositor_wl.lent[row].width;
-        fb.height = (unsigned int)compositor_wl.lent[row].height;
-        fb.pixel_format = fourcc;
-        fb.pitches[0] = (unsigned int)(compositor_wl.lent[row].pitch * 4);
-        fb.offsets[0] = (unsigned int)((const unsigned char *)compositor_wl.lent[row].pixels - compositor_wl.lent[row].map);
-        if (compositor_wl.lent[row].modifier != 0x00ffffffffffffffULL)
+        scan = is_lent ? &compositor_wl.lent[row].scan : &compositor_wl.straight[row].scan;
+        if (scan->scan_failed || (is_lent && compositor_wl.lent[row].fd < 0))
+                return 0;
+        fourcc = is_lent ? compositor_wl.lent[row].fourcc : compositor_wl.straight[row].picture.fourcc;
+        if (!fourcc)
+                fourcc = COMPOSITOR_XRGB8888;
+        // Opaque windows are presented as the X format of the same bytes so planes do not blend client alpha.
+        if (opaque && (fourcc == 0x34325241u || fourcc == 0x34324241u || (is_lent && (fourcc == 0x30335241u || fourcc == 0x30334241u))))
+                fourcc = (fourcc & ~0xffu) | 'X';
+        if (scan->scan_fb && scan->scan_fourcc != fourcc)
         {
-                fb.flags = 2u; // DRM_MODE_FB_MODIFIERS: the client's, linear (0) or not
-                fb.modifier[0] = compositor_wl.lent[row].modifier;
+                if (is_lent)
+                        compositor_wl_lent_drop_fb(row);
+                else
+                        compositor_wl_drop_fb(scan->scan_fb), scan->scan_fb = 0;
         }
-        /*
-                amdgpu takes a linear framebuffer only at an offset of whole 256-byte blocks (and a pitch of them): a window inside its buffer
-                (a browser's, which draws its shadow and edges round the window: Chromium's frame is at 16, 10 of its buffer, 51264 bytes in at a
-                pitch of 5120) was refused the overlay at every commit, and composed. Its framebuffer for the overlay is made from the buffer's
-                first pixel (the plane's offset, whole blocks), as large as reaches the window's last pixel, and the window's place in it kept
-                (scan_x, scan_y): the overlay's source rectangle is moved by it, so the plane shows the window and nothing round it.
-        */
+        if (scan->scan_fb)
+                return !is_lent || opaque || (!scan->scan_x && !scan->scan_y) ? scan->scan_fb : 0;
+        scan->scan_x = scan->scan_y = 0;
+        fb.pixel_format = fourcc;
+        if (is_lent)
         {
-                static const char *const intel[] = {"i915", "xe"};
                 unsigned int align = compositor_driver_in(amd, 1) ? 255u : compositor_driver_in(intel, 2) ? 63u : 0u;
 
+                fb.width = (unsigned int)compositor_wl.lent[row].width;
+                fb.height = (unsigned int)compositor_wl.lent[row].height;
+                fb.pitches[0] = (unsigned int)(compositor_wl.lent[row].pitch * 4);
+                fb.offsets[0] = (unsigned int)((const unsigned char *)compositor_wl.lent[row].pixels - compositor_wl.lent[row].map);
+                fds[0] = compositor_wl.lent[row].fd;
+                if (compositor_wl.lent[row].modifier != 0x00ffffffffffffffULL)
+                        fb.flags = 2u, fb.modifier[0] = compositor_wl.lent[row].modifier;
                 if (align && !compositor_wl.lent[row].modifier && opaque && !(fb.pitches[0] & align) && (fb.offsets[0] & align) &&
                     !(compositor_wl.lent[row].offset & align) && fb.offsets[0] >= compositor_wl.lent[row].offset)
                 {
                         unsigned int into = fb.offsets[0] - compositor_wl.lent[row].offset;
 
-                        compositor_wl.lent[row].scan_y = into / fb.pitches[0];
-                        compositor_wl.lent[row].scan_x = into % fb.pitches[0] / 4;
-                        fb.width += compositor_wl.lent[row].scan_x, fb.height += compositor_wl.lent[row].scan_y;
+                        scan->scan_y = into / fb.pitches[0];
+                        scan->scan_x = into % fb.pitches[0] / 4;
+                        fb.width += scan->scan_x, fb.height += scan->scan_y;
                         fb.offsets[0] = compositor_wl.lent[row].offset;
                 }
                 if (align && !compositor_wl.lent[row].modifier && (fb.pitches[0] & align || fb.offsets[0] & align))
                 {
-                        compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], fb.pitches[0] & align ? COMPOSITOR_WL_SCAN_PITCH : COMPOSITOR_WL_SCAN_OFFSET);
+                        compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0],
+                                                  fb.pitches[0] & align ? COMPOSITOR_WL_SCAN_PITCH : COMPOSITOR_WL_SCAN_OFFSET);
                         return 0;
                 }
         }
-        prime.handle = 0;
-        prime.flags = 0;
-        prime.fd = (int)compositor_wl.lent[row].fd;
-        if (COMPOSITOR_WL_PRIME(prime) != 0 || !prime.handle)
+        else
         {
-                compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], COMPOSITOR_WL_SCAN_PRIME);
+                const struct wayland_picture *picture = &compositor_wl.straight[row].picture;
+
+                planes = picture->plane_count < 1 ? 1u : picture->plane_count > 4 ? 4u : (unsigned int)picture->plane_count;
+                fb.width = compositor.table ? compositor.table->width[row] : (unsigned int)picture->width;
+                fb.height = compositor.table ? compositor.table->height[row] : (unsigned int)picture->height;
+                fb.flags = 2u; // DRM_MODE_FB_MODIFIERS
+                for (unsigned int at = 0; at < planes; at++)
+                {
+                        fds[at] = at && picture->plane_fd[at] >= 0 ? picture->plane_fd[at] : picture->sync_fd;
+                        fb.pitches[at] = (unsigned int)picture->plane_stride[at];
+                        fb.offsets[at] = (unsigned int)picture->plane_offset[at];
+                        fb.modifier[at] = picture->modifier;
+                }
+        }
+        for (unsigned int at = 0; at < planes; at++)
+        {
+                unsigned int same = 0;
+
+                for (unsigned int before = 0; before < at && !same; before++)
+                        if (fds[before] == fds[at])
+                                same = fb.handles[before];
+                if (!same)
+                {
+                        prime.handle = 0, prime.flags = 0, prime.fd = (int)fds[at];
+                        if (COMPOSITOR_WL_PRIME(prime) != 0 || !prime.handle)
+                        {
+                                refused = COMPOSITOR_WL_SCAN_PRIME;
+                                break;
+                        }
+                        same = prime.handle;
+                }
+                fb.handles[at] = same;
+        }
+        if (!refused && ((refused = COMPOSITOR_WL_ADDFB(fb)) != 0 || !fb.fb_id))
+                refused = refused < 0 ? -refused : refused ? refused : 22;
+        for (unsigned int at = 0; at < planes; at++)
+        {
+                unsigned int first = 1;
+
+                for (unsigned int before = 0; before < at; before++)
+                        first = first && fb.handles[before] != fb.handles[at];
+                if (fb.handles[at] && first)
+                        close[0] = fb.handles[at], system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+        }
+        if (refused)
+        {
+                scan->scan_x = scan->scan_y = 0;
+                compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], (int)refused);
                 return 0;
         }
-        fb.handles[0] = prime.handle;
-        if ((refused = COMPOSITOR_WL_ADDFB(fb)) != 0 || !fb.fb_id)
-        {
-                unsigned int close[2] = {prime.handle, 0};
-
-                system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
-                compositor_wl.lent[row].scan_x = compositor_wl.lent[row].scan_y = 0;
-                compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], refused < 0 ? (int)-refused : (int)refused);
-                return 0;
-        }
-        // The framebuffer holds the buffer: the handle goes now. Kept, a handle closed later could be the number a later import of the same
-        // dma-buf (PRIME gives one handle a buffer on a file) or of another buffer was given, and closing it took that one's away.
-        {
-                unsigned int close[2] = {prime.handle, 0};
-
-                system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
-        }
-        compositor_wl.lent[row].scan_fb = fb.fb_id;
-        compositor_wl.lent[row].scan_fourcc = fourcc;
+        scan->scan_fb = fb.fb_id;
+        scan->scan_fourcc = fourcc;
         return fb.fb_id;
 }
 
-// Where the row's window is in the framebuffer the overlay shows it from (compositor_lent_fb_as): 0, 0 but for a lent buffer whose window is
+// Where the row's window is in the framebuffer the overlay shows it from (compositor_wl_scan_fb): 0, 0 but for a lent buffer whose window is
 // inside it. The overlay's source rectangle, in the window's pixels, is moved by it.
 static void compositor_lent_fb_origin(int row, int *x, int *y)
 {
@@ -1592,108 +1586,6 @@ static void compositor_lent_fb_fail(int row)
         }
         compositor_wl.lent[row].scan_failed = 1;
         compositor_wl_lent_drop_fb(row);
-}
-
-/*
-        A tiled dma-buf the whole window is, scanned out as it is: ADDFB2 of the client's buffer with its modifier, and a handle, an offset and a
-        pitch for each of its planes (one for the plain tiled layouts; the DCC ones have the metadata as plane 1, and a retiled one the display's
-        own metadata as plane 2, each in the same buffer or another the client gave). The pairs a client is told for the card's tiled layouts are
-        the primary plane's own (its IN_FORMATS, compositor_wl_dmabuf_tiled_pairs), so the display takes every one of them; one refused is kept
-        (compositor_wl.scan_refused) and not asked again for that buffer, and the window is composed from the table as before. Made the first
-        time it is asked for a buffer, and the same while the window's picture is that buffer: a client that draws into three in turn has one
-        framebuffer made at each commit, and the one it replaces goes when no flip may still be on its way to it (compositor_wl_drop_fb).
-*/
-static int compositor_straight(int row)
-{
-        return row >= 0 && row < COMPOSITOR_ROWS && compositor_wl.straight[row].live;
-}
-
-// Whether the row's picture is a client's buffer the display may be given as it is (compositor_lent_fb): a lent one, or a straight one.
-static int compositor_client_scans(int row)
-{
-        return compositor_lent(row) || compositor_straight(row);
-}
-
-static unsigned int compositor_wl_straight_fb(int row, int opaque)
-{
-        struct wayland_picture *picture;
-        unsigned int fourcc, planes, close[2] = {0, 0};
-        long refused = 0;
-        struct
-        {
-                unsigned int handle, flags;
-                int fd;
-        } prime;
-        struct
-        {
-                unsigned int fb_id, width, height, pixel_format, flags;
-                unsigned int handles[4], pitches[4], offsets[4];
-                unsigned long long modifier[4];
-        } fb = {0};
-
-        if (!compositor_straight(row) || compositor_wl.straight[row].scan_failed || compositor.card < 0 || compositor_wl_layers.count[row])
-                return 0;
-        picture = &compositor_wl.straight[row].picture;
-        fourcc = picture->fourcc ? picture->fourcc : COMPOSITOR_XRGB8888;
-        // Opaque as a lent picture is (compositor_lent_fb_as): the X format of the same bytes, so the display reads no alpha of the client's.
-        if (opaque && (fourcc == 0x34325241u || fourcc == 0x34324241u))
-                fourcc = (fourcc & ~0xffu) | 'X';
-        if (compositor_wl.straight[row].scan_fb && compositor_wl.straight[row].scan_fourcc != fourcc)
-        {
-                compositor_wl_drop_fb(compositor_wl.straight[row].scan_fb);
-                compositor_wl.straight[row].scan_fb = 0;
-        }
-        if (compositor_wl.straight[row].scan_fb)
-                return compositor_wl.straight[row].scan_fb;
-        planes = picture->plane_count < 1 ? 1u : picture->plane_count > 4 ? 4u : (unsigned int)picture->plane_count;
-        fb.width = compositor.table ? compositor.table->width[row] : (unsigned int)picture->width;
-        fb.height = compositor.table ? compositor.table->height[row] : (unsigned int)picture->height;
-        fb.pixel_format = fourcc;
-        fb.flags = 2u; // DRM_MODE_FB_MODIFIERS
-        for (unsigned int at = 0; at < planes; at++)
-        {
-                long fd = at && picture->plane_fd[at] >= 0 ? picture->plane_fd[at] : picture->sync_fd;
-                unsigned int same = 0;
-
-                // A plane in the buffer plane 0 is in has its handle (PRIME gives a buffer one handle on a file); another's is its own.
-                for (unsigned int before = 0; before < at && !same; before++)
-                        if ((before ? picture->plane_fd[before] : picture->sync_fd) == fd)
-                                same = fb.handles[before];
-                if (!same)
-                {
-                        prime.handle = 0, prime.flags = 0, prime.fd = (int)fd;
-                        if (COMPOSITOR_WL_PRIME(prime) != 0 || !prime.handle)
-                        {
-                                refused = COMPOSITOR_WL_SCAN_PRIME;
-                                break;
-                        }
-                        same = prime.handle;
-                }
-                fb.handles[at] = same;
-                fb.pitches[at] = (unsigned int)picture->plane_stride[at];
-                fb.offsets[at] = (unsigned int)picture->plane_offset[at];
-                fb.modifier[at] = picture->modifier;
-        }
-        if (!refused && ((refused = COMPOSITOR_WL_ADDFB(fb)) != 0 || !fb.fb_id))
-                refused = refused < 0 ? -refused : refused ? refused : 22;
-        // The framebuffer holds the buffers: their handles go now (compositor_lent_fb_as says why).
-        for (unsigned int at = 0; at < planes; at++)
-        {
-                unsigned int first = 1;
-
-                for (unsigned int before = 0; before < at; before++)
-                        first = first && fb.handles[before] != fb.handles[at];
-                if (fb.handles[at] && first)
-                        close[0] = fb.handles[at], system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
-        }
-        if (refused)
-        {
-                compositor_wl_scan_refuse(row, fourcc, fb.pitches[0], fb.offsets[0], (int)refused);
-                return 0;
-        }
-        compositor_wl.straight[row].scan_fb = fb.fb_id;
-        compositor_wl.straight[row].scan_fourcc = fourcc;
-        return fb.fb_id;
 }
 
 static int compositor_wl_row_async(int row)
@@ -1860,21 +1752,18 @@ static void compositor_wl_nv12_run(const struct compositor_wl_layer *l, const un
 // An NV12 layer's buffer mapped for the processor to read, its extent from its first byte, the read begun (DMA_BUF_SYNC): 0 when the map is refused.
 static const unsigned char *compositor_wl_nv12_map(const struct compositor_wl_layer *l)
 {
-        unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ
         long got = compositor_call(syscall(mmap), 0, (positive)l->extent, 1, 1, (positive)l->fd, 0);
 
         if (got < 0 && got > -4096)
                 return 0;
-        compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+        compositor_wl_dmabuf_sync(l->fd, 0);
         return (const unsigned char *)got;
 }
 
 // The read ended and the map let go of.
 static void compositor_wl_nv12_unmap(const struct compositor_wl_layer *l, const unsigned char *base)
 {
-        unsigned long sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
-
-        compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+        compositor_wl_dmabuf_sync(l->fd, 1);
         compositor_call(syscall(munmap), (positive)base, (positive)l->extent, 0, 0, 0, 0);
 }
 
@@ -1894,7 +1783,6 @@ static void compositor_wl_gathers_fill(void)
                         struct compositor_wl_gathered *g;
                         positive pixels, bytes;
                         unsigned int *cols, *lines;
-                        unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, and then END
 
                         if (!l->gather || l->at >= WAYLAND_LAYERS || (g = &compositor_wl_layers.gathered[row][l->at])->filled || g->id != l->id)
                                 continue;
@@ -1959,8 +1847,7 @@ static void compositor_wl_gathers_fill(void)
                                         compositor.table->client_layers_gathered[1]++;
                                 continue;
                         }
-                        if (l->fd >= 0)
-                                compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                        compositor_wl_dmabuf_sync(l->fd, 0);
                         for (long y = 0; y < l->height; y++)
                         {
                                 const unsigned int *line = l->pixels + lines[y];
@@ -1969,11 +1856,7 @@ static void compositor_wl_gathers_fill(void)
                                 for (long x = 0; x < l->width; x++)
                                         to[x] = line[cols[x]];
                         }
-                        if (l->fd >= 0)
-                        {
-                                sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
-                                compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
-                        }
+                        compositor_wl_dmabuf_sync(l->fd, 1);
                         // A pool cut under the walk was read as the zeros its handler maps: the picture is not made, and the layers are laid.
                         if (compositor_wl_cut(l->pixels))
                                 continue;
@@ -2059,7 +1942,6 @@ static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list
         {
                 const struct compositor_wl_layer *l = &list[at];
                 unsigned int *into = to + (unsigned long)l->y * pitch + (unsigned long)l->x;
-                unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, and then END
 
                 if (l->nv12)
                 {
@@ -2080,8 +1962,7 @@ static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list
                         compositor_wl_nv12_unmap(l, base);
                         continue;
                 }
-                if (l->fd >= 0)
-                        compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+                compositor_wl_dmabuf_sync(l->fd, 0);
                 if (l->swap || l->gather)
                 {
                         // Red and blue the other way round, or gathered: each row read into a run of its own (with the streaming loads, or
@@ -2113,11 +1994,7 @@ static void compositor_wl_layers_put_list(const struct compositor_wl_layer *list
                         memory_copy_rect_stream_u32(into, pitch, l->pixels, l->pitch, (unsigned long)l->width, (unsigned long)l->height);
                 else
                         memory_copy_rect_u32(into, pitch, l->pixels, l->pitch, (unsigned long)l->width, (unsigned long)l->height);
-                if (l->fd >= 0)
-                {
-                        sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
-                        compositor_call(syscall(ioctl), (positive)l->fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
-                }
+                compositor_wl_dmabuf_sync(l->fd, 1);
         }
 }
 
@@ -2224,8 +2101,7 @@ static void compositor_wl_unlend(int row)
         if (!compositor_lent(row))
                 return;
         compositor_wl_lent_drop_fb(row);
-        if (compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch))
-                gpu_release_import(compositor_wl.lent[row].import);
+        compositor_wl_buf_release(&compositor_wl.lent[row].buf);
         memory_zero(&compositor_wl.lent[row], sizeof compositor_wl.lent[row]);
 }
 
@@ -2236,7 +2112,6 @@ static void compositor_wl_tiled_settle(void);
 static void compositor_wl_seed(int row, unsigned int which)
 {
         unsigned int *to;
-        unsigned long sync = 1; // DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ, and then END, as a copy of a dma-buf is bracketed
 
         if (!compositor_lent(row))
                 return;
@@ -2251,8 +2126,7 @@ static void compositor_wl_seed(int row, unsigned int which)
         }
         if (compositor.table)
                 compositor.table->client_seeded[1]++, compositor_wl_copied(row, WINDOWS_COPY_WHOLE);
-        if (compositor_wl.lent[row].fd >= 0)
-                compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
+        compositor_wl_dmabuf_sync(compositor_wl.lent[row].fd, 0);
         if (compositor_lent_swap(row))
         {
                 // Red and blue swapped as the rows come: each read with the streaming loads into its place, and turned there.
@@ -2274,11 +2148,7 @@ static void compositor_wl_seed(int row, unsigned int which)
         else
                 memory_copy_rect_u32(to, (unsigned long)compositor_stride(), compositor_wl.lent[row].pixels, compositor_wl.lent[row].pitch,
                                      (unsigned long)compositor_wl.lent[row].width, (unsigned long)compositor_wl.lent[row].height);
-        if (compositor_wl.lent[row].fd >= 0)
-        {
-                sync = 5; // DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ
-                compositor_call(syscall(ioctl), (positive)compositor_wl.lent[row].fd, COMPOSITOR_WL_DMABUF_SYNC, (positive)&sync, 0, 0, 0);
-        }
+        compositor_wl_dmabuf_sync(compositor_wl.lent[row].fd, 1);
         compositor_wl_layers_put(row, to, (unsigned long)compositor_stride());
         compositor_wl.laying[row].last = (unsigned char)((which & 1u) + 1); // the picture is whole in this buffer now
         compositor_wl_unlend(row);
@@ -2374,6 +2244,81 @@ static void compositor_wl_fd_ident(long fd, unsigned long *dev, unsigned long *i
                 return;
         *ino = *(unsigned long *)(info + 32);
         *dev = (((unsigned long)*(unsigned int *)(info + 136)) << 32) | *(unsigned int *)(info + 140);
+}
+
+static void compositor_wl_pic_ident(const struct wayland_picture *picture, unsigned long *dev, unsigned long *ino)
+{
+        *dev = 0, *ino = 0;
+        if (picture->pool_id)
+                *ino = picture->pool_id;
+        else if (picture->sync_fd >= 0)
+                compositor_wl_fd_ident(picture->sync_fd, dev, ino);
+}
+
+static int compositor_wl_buf_same(const struct canvas_buffer_ref *ref, const unsigned char *map, long fd, long size, unsigned long dev,
+                                  unsigned long ino)
+{
+        positive handle = ref->import ? ref->import : ref->va;
+
+        return ref->map == map && ref->fd == fd && ref->size == size && ref->dev == dev && ref->ino == ino &&
+               (!handle || compositor_wl_live(handle, ref->epoch));
+}
+
+/*
+        Unified cached GPU dma-buf import: reuses ref's live import if (map, fd, size, dev, ino) match on the current gpu_epoch,
+        otherwise releases any prior import on ref, checks client barring, and imports fd. Sets *reused if non-null.
+*/
+static positive compositor_gpu_import_cached(struct canvas_buffer_ref *ref, int row, const unsigned char *map, long fd, long size,
+                                             unsigned long dev, unsigned long ino, int check_barred, int *reused)
+{
+        positive handle = ref->import ? ref->import : ref->va;
+
+        if (handle && compositor_wl_buf_same(ref, map, fd, size, dev, ino))
+        {
+                if (reused)
+                        *reused = 1;
+                return handle;
+        }
+        compositor_wl_buf_release(ref);
+        if (check_barred && compositor_wl_card_barred(row))
+                return 0;
+        handle = gpu_import_fd((int)fd, (positive)size);
+        if (!handle)
+                return 0;
+        ref->map = map, ref->fd = fd, ref->size = size, ref->dev = dev, ref->ino = ino;
+        ref->import = ref->va = handle, ref->epoch = gpu_epoch;
+        if (reused)
+                *reused = 0;
+        return handle;
+}
+
+static positive compositor_gpu_import_layer(struct compositor_wl_layer *old, unsigned int olds, const unsigned char *map, long fd, long size,
+                                            unsigned long dev, unsigned long ino, int nv12, unsigned long extent)
+{
+        for (unsigned int k = 0; k < olds; k++)
+                if (old[k].fd == fd && old[k].dev == dev && old[k].ino == ino &&
+                    (nv12 ? (old[k].nv12 && old[k].extent == extent) : (old[k].map == map && old[k].size == size)) &&
+                    compositor_wl_live(old[k].import, old[k].epoch))
+                {
+                        positive got = old[k].import;
+
+                        old[k].import = 0; // transferred to the new layer
+                        return got;
+                }
+        return gpu_import_fd((int)fd, (positive)(nv12 ? extent : (unsigned long)size));
+}
+
+static void compositor_wl_gather_set(struct compositor_wl_layer *l, const struct wayland_picture *p, long tw, long th, long x1, long y1)
+{
+        l->gather = 1;
+        l->source_w = p->width, l->source_h = p->height;
+        l->transform = p->transform & 7, l->y_invert = p->y_invert != 0;
+        l->sx = p->src_width > 0 ? p->src_x : 0;
+        l->sy = p->src_width > 0 ? p->src_y : 0;
+        l->sw = p->src_width > 0 ? p->src_width : (p->transform & 1 ? p->height : p->width) * 256;
+        l->sh = p->src_width > 0 ? p->src_height : (p->transform & 1 ? p->width : p->height) * 256;
+        l->tw = tw, l->th = th;
+        l->ox = x1 - p->dest_x, l->oy = y1 - p->dest_y;
 }
 
 /*
@@ -2624,17 +2569,12 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
             !gpu_map(at, (positive)(height - 1) * stride + (positive)width * 4))
                 return compositor_wl_lend_refused(picture, 9);
 #endif
-        if (picture->pool_id)
-                dev = 0, ino = picture->pool_id;
-        else if (picture->sync_fd >= 0)
-                compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
-        same = compositor_lent(row) && compositor_wl.lent[row].map == picture->map && compositor_wl.lent[row].fd == picture->sync_fd &&
-               compositor_wl.lent[row].size == picture->map_bytes && compositor_wl.lent[row].dev == dev && compositor_wl.lent[row].ino == ino &&
+        compositor_wl_pic_ident(picture, &dev, &ino);
+        same = compositor_lent(row) && compositor_wl_buf_same(&compositor_wl.lent[row].buf, picture->map, picture->sync_fd, picture->map_bytes, dev, ino) &&
                compositor_wl.lent[row].width == width && compositor_wl.lent[row].height == height &&
                compositor_wl.lent[row].pitch == stride / 4 && compositor_wl.lent[row].fourcc == picture->fourcc &&
                compositor_wl.lent[row].offset == (unsigned int)picture->plane_offset[0] &&
-               compositor_wl.lent[row].modifier == picture->modifier &&
-               (!compositor_wl.lent[row].import || compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch));
+               compositor_wl.lent[row].modifier == picture->modifier;
         if (picture->sync_fd >= 0)
         {
                 if (!gpu_ready())
@@ -2650,8 +2590,7 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         if (compositor_lent(row) && !same)
         {
                 compositor_wl_lent_drop_fb(row);
-                if (compositor_wl_live(compositor_wl.lent[row].import, compositor_wl.lent[row].epoch))
-                        gpu_release_import(compositor_wl.lent[row].import);
+                compositor_wl_buf_release(&compositor_wl.lent[row].buf);
                 compositor_wl.lent[row].scan_failed = 0;
         }
         // The same buffer with the window at another place in it (its geometry moved, its size the same): the framebuffer was made at the old
@@ -2662,17 +2601,12 @@ static int compositor_wl_lend(int row, const struct wayland_picture *picture, lo
         compositor_wl.lent[row].pitch = stride / 4;
         compositor_wl.lent[row].width = width;
         compositor_wl.lent[row].height = height;
-        compositor_wl.lent[row].va = va;
-        compositor_wl.lent[row].import = import;
-        compositor_wl.lent[row].epoch = gpu_epoch;
-        compositor_wl.lent[row].map = picture->map;
-        compositor_wl.lent[row].fd = picture->sync_fd;
-        compositor_wl.lent[row].size = picture->map_bytes;
-        compositor_wl.lent[row].dev = dev;
-        compositor_wl.lent[row].ino = ino;
-        compositor_wl.lent[row].fourcc = picture->fourcc;
-        compositor_wl.lent[row].offset = (unsigned int)picture->plane_offset[0];
-        compositor_wl.lent[row].modifier = picture->modifier;
+        compositor_wl.lent[row].buf = (struct canvas_buffer_ref){
+                .map = picture->map, .fd = picture->sync_fd, .size = picture->map_bytes,
+                .dev = dev, .ino = ino, .modifier = picture->modifier,
+                .va = va, .import = import, .epoch = gpu_epoch,
+                .fourcc = picture->fourcc, .offset = (unsigned int)picture->plane_offset[0],
+        };
         compositor_wl.lent[row].synced = 0;
         return 1;
 }
@@ -2703,28 +2637,8 @@ static positive compositor_wl_source_import(int row, const struct wayland_pictur
         unsigned long dev = 0, ino = 0;
         long need_bytes = picture->map_bytes > 0 ? picture->map_bytes : (long)picture->plane_offset[0] + (long)picture->height * (long)picture->stride;
 
-        if (picture->pool_id)
-                dev = 0, ino = picture->pool_id;
-        else
-                compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
-        if (compositor_wl.source[row].map != picture->map || compositor_wl.source[row].fd != picture->sync_fd || compositor_wl.source[row].size != need_bytes ||
-            compositor_wl.source[row].dev != dev || compositor_wl.source[row].ino != ino ||
-            !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
-        {
-                compositor_wl_source_drop(row);
-                if (compositor_wl_card_barred(row))
-                        return 0;
-                compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)need_bytes);
-                compositor_wl.source[row].epoch = gpu_epoch;
-                if (!compositor_wl.source[row].va)
-                        return 0;
-                compositor_wl.source[row].map = picture->map;
-                compositor_wl.source[row].fd = picture->sync_fd;
-                compositor_wl.source[row].size = need_bytes;
-                compositor_wl.source[row].dev = dev;
-                compositor_wl.source[row].ino = ino;
-        }
-        return compositor_wl.source[row].va;
+        compositor_wl_pic_ident(picture, &dev, &ino);
+        return compositor_gpu_import_cached(&compositor_wl.source[row].buf, row, picture->map, picture->sync_fd, need_bytes, dev, ino, 1, 0);
 }
 
 /*
@@ -2859,17 +2773,12 @@ static unsigned int compositor_wl_tiled_desc(int row, const struct wayland_pictu
         bytes = compositor_call(syscall(lseek), (positive)picture->sync_fd, 0, 2, 0, 0, 0);
         if (bytes <= 0)
                 return refused ? (*refused = 4), 0u : 0u;
-        if (compositor_wl.source[row].fd != picture->sync_fd || compositor_wl.source[row].size != bytes || compositor_wl.source[row].dev != dev ||
-            compositor_wl.source[row].ino != ino || compositor_wl.source[row].map ||
-            !compositor_wl_live(compositor_wl.source[row].va, compositor_wl.source[row].epoch))
         {
-                compositor_wl_source_drop(row);
-                if (compositor_wl_card_barred(row))
+                int reused = 0;
+
+                if (!compositor_gpu_import_cached(&compositor_wl.source[row].buf, row, 0, picture->sync_fd, bytes, dev, ino, 1, &reused))
                         return refused ? (*refused = 4), 0u : 0u;
-                compositor_wl.source[row].va = gpu_import_fd((int)picture->sync_fd, (positive)bytes);
-                compositor_wl.source[row].epoch = gpu_epoch;
-                if (!compositor_wl.source[row].va)
-                        return refused ? (*refused = 4), 0u : 0u;
+                if (!reused)
                 {
                         static int said;
 
@@ -2881,11 +2790,6 @@ static unsigned int compositor_wl_tiled_desc(int row, const struct wayland_pictu
                                               (positive)picture->plane_stride[2], (positive)picture->width, (positive)picture->height),
                                     log_flush();
                 }
-                compositor_wl.source[row].map = 0;
-                compositor_wl.source[row].fd = picture->sync_fd;
-                compositor_wl.source[row].size = bytes;
-                compositor_wl.source[row].dev = dev;
-                compositor_wl.source[row].ino = ino;
         }
         base = compositor_wl.source[row].va + (positive)picture->plane_offset[0];
         if (meta_plane)
@@ -3358,15 +3262,7 @@ static int compositor_wl_layer_nv12(const struct wayland_picture *picture, long 
                 return 1;
         if (compositor_wl_meets_corner((int)x1, (int)y1, (int)x2, (int)y2, (int)width, (int)height, radius, line))
                 return 0;
-        for (unsigned int k = 0; k < olds && !out->import; k++)
-                if (old[k].fd == picture->sync_fd && old[k].nv12 && old[k].extent == extent && old[k].dev == dev && old[k].ino == ino &&
-                    compositor_wl_live(old[k].import, old[k].epoch))
-                {
-                        out->import = old[k].import;
-                        old[k].import = 0; // the new layer's now
-                }
-        if (!out->import)
-                out->import = gpu_import_fd((int)picture->sync_fd, (positive)extent);
+        out->import = compositor_gpu_import_layer(old, olds, picture->map, picture->sync_fd, picture->map_bytes, dev, ino, 1, extent);
         if (!out->import)
                 return 0;
         out->va = out->import;
@@ -3377,15 +3273,7 @@ static int compositor_wl_layer_nv12(const struct wayland_picture *picture, long 
         out->modifier = picture->modifier, out->epoch = gpu_epoch, out->fourcc = picture->fourcc, out->at = WAYLAND_LAYERS;
         out->nv12 = 1, out->luma = picture->plane_offset[0], out->chroma = picture->plane_offset[1];
         out->luma_pitch = (unsigned long)picture->stride, out->chroma_pitch = picture->plane_stride[1], out->extent = extent;
-        out->gather = 1;
-        out->source_w = picture->width, out->source_h = picture->height;
-        out->transform = picture->transform & 7, out->y_invert = picture->y_invert != 0;
-        out->sx = picture->src_width > 0 ? picture->src_x : 0;
-        out->sy = picture->src_width > 0 ? picture->src_y : 0;
-        out->sw = picture->src_width > 0 ? picture->src_width : picture->width * 256;
-        out->sh = picture->src_width > 0 ? picture->src_height : picture->height * 256;
-        out->tw = tw, out->th = th;
-        out->ox = x1 - picture->dest_x, out->oy = y1 - picture->dest_y;
+        compositor_wl_gather_set(out, picture, tw, th, x1, y1);
         return 1;
 }
 
@@ -3464,57 +3352,27 @@ static int compositor_wl_layer_make(const struct wayland_picture *picture, long 
             !gpu_map(at, (positive)bytes))
                 return 0;
 #endif
-        if (picture->pool_id)
-                dev = 0, ino = picture->pool_id;
-        else if (picture->sync_fd >= 0)
-                compositor_wl_fd_ident(picture->sync_fd, &dev, &ino);
+        compositor_wl_pic_ident(picture, &dev, &ino);
         if (picture->sync_fd >= 0)
         {
                 if (!gpu_ready())
                         return 0;
-                for (unsigned int k = 0; k < olds && !out->import; k++)
-                        if (old[k].fd == picture->sync_fd && old[k].map == picture->map && old[k].size == picture->map_bytes && old[k].dev == dev &&
-                            old[k].ino == ino && compositor_wl_live(old[k].import, old[k].epoch))
-                        {
-                                out->import = old[k].import;
-                                old[k].import = 0; // the new layer's now
-                        }
-                if (!out->import)
-                        out->import = gpu_import_fd((int)picture->sync_fd, (positive)picture->map_bytes);
+                out->import = compositor_gpu_import_layer(old, olds, picture->map, picture->sync_fd, picture->map_bytes, dev, ino, 0, 0);
                 if (!out->import)
                         return 0;
                 out->va = out->import + (positive)(at - picture->map);
         }
         out->pixels = (const unsigned int *)at;
         out->pitch = stride / 4;
-        out->x = (int)x1;
-        out->y = (int)y1;
-        out->width = (int)(x2 - x1);
-        out->height = (int)(y2 - y1);
+        out->x = (int)x1, out->y = (int)y1, out->width = (int)(x2 - x1), out->height = (int)(y2 - y1);
         out->blend = picture->blend != 0;
-        out->map = picture->map;
-        out->fd = picture->sync_fd;
-        out->size = picture->map_bytes;
-        out->dev = dev;
-        out->ino = ino;
-        out->modifier = picture->modifier;
-        out->epoch = gpu_epoch;
-        out->fourcc = picture->fourcc;
+        out->map = picture->map, out->fd = picture->sync_fd, out->size = picture->map_bytes, out->dev = dev, out->ino = ino;
+        out->modifier = picture->modifier, out->epoch = gpu_epoch, out->fourcc = picture->fourcc;
         out->offset = (unsigned int)(picture->plane_offset[0] + (unsigned long)(at - picture->pixels));
         out->swap = compositor_wl_fourcc_swapped(picture->fourcc);
         out->at = WAYLAND_LAYERS;
         if (gather)
-        {
-                out->gather = 1;
-                out->source_w = picture->width, out->source_h = picture->height;
-                out->transform = picture->transform & 7, out->y_invert = picture->y_invert != 0;
-                out->sx = picture->src_width > 0 ? picture->src_x : 0;
-                out->sy = picture->src_width > 0 ? picture->src_y : 0;
-                out->sw = picture->src_width > 0 ? picture->src_width : (picture->transform & 1 ? picture->height : picture->width) * 256;
-                out->sh = picture->src_width > 0 ? picture->src_height : (picture->transform & 1 ? picture->width : picture->height) * 256;
-                out->tw = tw, out->th = th;
-                out->ox = x1 - picture->dest_x, out->oy = y1 - picture->dest_y;
-        }
+                compositor_wl_gather_set(out, picture, tw, th, x1, y1);
         return 1;
 }
 
@@ -3802,11 +3660,6 @@ static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame
         return count;
 }
 
-static inline unsigned int compositor_wl_clamp8(long v)
-{
-        return v < 0 ? 0u : v > 255 ? 255u : (unsigned int)v;
-}
-
 static inline unsigned int compositor_wl_resolve_fourcc(const struct wayland_picture *picture)
 {
         if (picture->fourcc)
@@ -3858,25 +3711,15 @@ static unsigned int compositor_wl_decode_pixel(const struct wayland_picture *pic
         if (fourcc == WAYLAND_FOURCC_NV12)
         {
                 long yv = (long)picture->pixels[(unsigned long)by * stride + (unsigned long)bx];
-                long u = 128, vr = 128, c, d, e;
-                unsigned int r, g, b;
+                long u = 128, vr = 128;
 
                 if (uv_base && uv_stride > 0)
                 {
                         const unsigned char *uv = uv_base + (unsigned long)(by / 2) * uv_stride + (unsigned long)(bx & ~1L);
 
-                        u = (long)uv[0];
-                        vr = (long)uv[1];
+                        u = (long)uv[0], vr = (long)uv[1];
                 }
-                c = yv - 16;
-                if (c < 0)
-                        c = 0;
-                d = u - 128;
-                e = vr - 128;
-                r = compositor_wl_clamp8((298 * c + 409 * e + 128) >> 8);
-                g = compositor_wl_clamp8((298 * c - 100 * d - 208 * e + 128) >> 8);
-                b = compositor_wl_clamp8((298 * c + 516 * d + 128) >> 8);
-                return 0xff000000u | (r << 16) | (g << 8) | b;
+                return compositor_wl_yuv(yv, u, vr);
         }
         return compositor_wl_convert_pixel(*(const unsigned int *)(picture->pixels + (unsigned long)by * stride + (unsigned long)bx * 4), fourcc);
 }
@@ -3950,12 +3793,9 @@ static int compositor_wl_card_gather(int row, const struct wayland_picture *pict
         if (x2 <= x1 || y2 <= y1)
                 return 0;
         memory_zero(&l, sizeof l);
-        l.pixels = (const unsigned int *)picture->pixels, l.pitch = stride / 4, l.gather = 1;
-        l.source_w = picture->width, l.source_h = picture->height, l.transform = picture->transform & 7, l.y_invert = picture->y_invert != 0;
-        l.sx = picture->src_width > 0 ? picture->src_x : 0, l.sy = picture->src_width > 0 ? picture->src_y : 0;
-        l.sw = picture->src_width > 0 ? picture->src_width : (picture->transform & 1 ? picture->height : picture->width) * 256;
-        l.sh = picture->src_width > 0 ? picture->src_height : (picture->transform & 1 ? picture->width : picture->height) * 256;
-        l.tw = tw, l.th = th, l.ox = x1 - picture->dest_x, l.oy = y1 - picture->dest_y, l.width = (int)(x2 - x1), l.height = (int)(y2 - y1);
+        l.pixels = (const unsigned int *)picture->pixels, l.pitch = stride / 4;
+        compositor_wl_gather_set(&l, picture, tw, th, x1, y1);
+        l.width = (int)(x2 - x1), l.height = (int)(y2 - y1);
         extent = compositor_wl_layer_bytes(&l);
         if (picture->sync_fd < 0)
         {
@@ -4237,40 +4077,12 @@ static int compositor_wl_blit_xform(int row, const struct wayland_picture *pictu
                                         else if (tx >= bw_t)
                                                 tx = bw_t - 1;
                                 }
-                                switch (picture->transform & 7)
                                 {
-                                case 1:
-                                        bx = bw - 1 - ty;
-                                        by = tx;
-                                        break;
-                                case 2:
-                                        bx = bw - 1 - tx;
-                                        by = bh - 1 - ty;
-                                        break;
-                                case 3:
-                                        bx = ty;
-                                        by = bh - 1 - tx;
-                                        break;
-                                case 4:
-                                        bx = bw - 1 - tx;
-                                        by = ty;
-                                        break;
-                                case 5:
-                                        bx = bw - 1 - ty;
-                                        by = bh - 1 - tx;
-                                        break;
-                                case 6:
-                                        bx = tx;
-                                        by = bh - 1 - ty;
-                                        break;
-                                case 7:
-                                        bx = ty;
-                                        by = tx;
-                                        break;
-                                default:
-                                        bx = tx;
-                                        by = ty;
-                                        break;
+                                        int tr = picture->transform & 7;
+                                        long ax = tr & 1 ? ty : tx, ay = tr & 1 ? tx : ty;
+
+                                        bx = (0x36 >> tr & 1) ? bw - 1 - ax : ax;
+                                        by = (0x6c >> tr & 1) ? bh - 1 - ay : ay;
                                 }
                                 px = compositor_wl_decode_pixel(picture, fourcc, uv_base, uv_stride, bx, by);
                                 dst[ox] = picture->blend ? compositor_wl_over(px, dst[ox]) : px;
@@ -4637,22 +4449,11 @@ static int compositor_wl_row_picture(void *context, int row, const struct waylan
         return compositor_wl.tiled_lent ? WAYLAND_PICTURE_LENT : 0;
 }
 
-// A title into the table, as a program writes one: cut to the room on a character's boundary.
+// A title into the table, via Canvas's UTF-8-safe title primitive.
 static void compositor_wl_row_title(void *context, int row, const char *text, long length)
 {
-        struct windows *table = compositor.table;
-        unsigned int used = 0, at;
-
-        (void)context;
-        (void)length;
-        while (text[used])
-                used++;
-        at = used < WINDOWS_TITLE - 1 ? used : WINDOWS_TITLE - 1;
-        // Not in the middle of a character: back to the byte that starts one.
-        while (at && at < used && ((unsigned char)text[at] & 0xc0) == 0x80)
-                at--;
-        for (unsigned int index = 0; index < WINDOWS_TITLE; index++)
-                table->title[row][index] = index < at ? text[index] : 0;
+        (void)context, (void)length;
+        compositor_row_set_title(row, text, WINDOWS_TITLE);
         compositor_take(row);
 }
 
@@ -4796,9 +4597,7 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
                 compositor_shape_sync();
                 break;
         case WAYLAND_DO_MOVE:
-                // Only while the person holds the left button on this window: a client cannot take the pointer.
-                if ((compositor.button_down & 1u) && compositor.button_row[0] == row && compositor.drag < 0 && compositor.resize < 0)
-                        compositor_drag_begin_client(row);
+                (void)compositor_grab_begin_client(row, 0, 1, 0);
                 break;
         case WAYLAND_DO_RESIZE:
         {
@@ -4806,11 +4605,7 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
                 unsigned int edges = ((a & 1) ? COMPOSITOR_EDGE_TOP : 0) | ((a & 2) ? COMPOSITOR_EDGE_BOTTOM : 0) |
                                      ((a & 4) ? COMPOSITOR_EDGE_LEFT : 0) | ((a & 8) ? COMPOSITOR_EDGE_RIGHT : 0);
 
-                if (edges && (compositor.button_down & 1u) && compositor.button_row[0] == row && compositor.drag < 0 && compositor.resize < 0)
-                {
-                        compositor_resize_begin(row, edges);
-                        compositor_lit(row, edges, 1);
-                }
+                (void)compositor_grab_begin_client(row, edges, 0, 0);
                 break;
         }
         default:
@@ -4818,39 +4613,34 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
         }
 }
 
-/* What the compositor says of a row, in the shim's words. */
+/* What the compositor says of a row, in the shim's words (from Canvas's canonical compositor_row_facts). */
 static int compositor_wl_row_facts(void *context, int row, struct wayland_facts *facts)
 {
-        struct windows *table = compositor.table;
+        struct compositor_row_facts f;
         long states = 0;
 
         (void)context;
-        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
+        if (compositor_row_facts(row, &f) != 0)
                 return -1;
-        facts->width = facts->height = 0;
-        if (compositor.arranged[row] != COMPOSITOR_FLOATING || compositor.asking[row])
-        {
-                facts->width = (long)table->want_width[row];
-                facts->height = (long)table->want_height[row];
-        }
-        if (compositor.fullscreen[row])
+        facts->width = (long)f.want_width;
+        facts->height = (long)f.want_height;
+        if (f.fullscreen)
                 states |= WAYLAND_STATE_FULLSCREEN;
-        else if (compositor_filling(row))
+        else if (f.filling)
                 states |= WAYLAND_STATE_MAXIMIZED;
-        else if (compositor.arranged[row] != COMPOSITOR_FLOATING)
+        else if (f.arranged != COMPOSITOR_FLOATING)
                 states |= WAYLAND_STATE_TILED_LEFT | WAYLAND_STATE_TILED_RIGHT | WAYLAND_STATE_TILED_TOP | WAYLAND_STATE_TILED_BOTTOM;
-        if (compositor.focus == row)
+        if (f.focused)
                 states |= WAYLAND_STATE_ACTIVATED;
-        if (compositor.resize == row)
+        if (f.resizing)
                 states |= WAYLAND_STATE_RESIZING;
-        if (compositor.state[row] & WINDOW_MINIMIZED)
+        if (f.minimized)
                 states |= WAYLAND_STATE_SUSPENDED;
         facts->states = states;
-        // The count of asks, which is the compositor's own and no program's to write (compositor_close): the shim says each one once.
-        facts->closing = (compositor.state[row] & WINDOW_CLOSING) ? (long)compositor.close_asks[row] : 0;
-        facts->x = compositor.x[row];
-        facts->y = compositor.y[row];
-        facts->scale = compositor_row_scale(row);
+        facts->closing = (long)f.closing;
+        facts->x = f.x;
+        facts->y = f.y;
+        facts->scale = f.scale;
         return 0;
 }
 
@@ -4918,6 +4708,29 @@ static long compositor_wl_now(void *context)
         return (long)(clock_monotonic_nanoseconds() / 1000000ull);
 }
 
+// Create a read-only sealed memfd holding `length` bytes of `data` (shared by keymap and dmabuf format table).
+static long compositor_wl_memfd_sealed(const char *name, const void *data, unsigned long length)
+{
+        long fd = compositor_call(syscall(memfd_create), (positive)name, 3, 0, 0, 0, 0); // MFD_CLOEXEC | MFD_ALLOW_SEALING
+        unsigned long done = 0;
+
+        if (fd < 0)
+                return -1;
+        while (done < length)
+        {
+                long put = compositor_call(syscall(write), (positive)fd, (positive)((const unsigned char *)data + done), length - done, 0, 0, 0);
+
+                if (put <= 0)
+                {
+                        system_close((int)fd);
+                        return -1;
+                }
+                done += (unsigned long)put;
+        }
+        compositor_call(syscall(fcntl), (positive)fd, 1033, 15, 0, 0, 0); // F_ADD_SEALS: SEAL|SHRINK|GROW|WRITE
+        return fd;
+}
+
 /*
         The keymap of the layout in use, as a sealed file the shim hands out beside the keyboard's event: made the first time,
         written whole and sealed against any change, and the same file for every client after. Clients map it private and
@@ -4927,34 +4740,17 @@ static long compositor_wl_keymap(void *context, long *size)
 {
         static char text[COMPOSITOR_WL_KEYMAP_ROOM];
         unsigned int layout = compositor.keymap.layout;
-        unsigned long length, done = 0;
-        long fd;
 
         (void)context;
         if (layout >= 16)
                 return -1;
         if (compositor_wl.keymap[layout] < 0)
         {
-                length = compositor_wl_keymap_text(layout, text, sizeof text);
-                if (!length)
-                        return -1;
-                // MFD_CLOEXEC | MFD_ALLOW_SEALING
-                fd = compositor_call(syscall(memfd_create), (positive) "moonwater-keymap", 3, 0, 0, 0, 0);
+                unsigned long length = compositor_wl_keymap_text(layout, text, sizeof text);
+                long fd = length ? compositor_wl_memfd_sealed("moonwater-keymap", text, length) : -1;
+
                 if (fd < 0)
                         return -1;
-                while (done < length)
-                {
-                        long put = compositor_call(syscall(write), (positive)fd, (positive)(text + done), length - done, 0, 0, 0);
-
-                        if (put <= 0)
-                        {
-                                system_close((int)fd);
-                                return -1;
-                        }
-                        done += (unsigned long)put;
-                }
-                // F_ADD_SEALS: SEAL, SHRINK, GROW and WRITE
-                compositor_call(syscall(fcntl), (positive)fd, 1033, 15, 0, 0, 0);
                 compositor_wl.keymap[layout] = (int)fd;
                 compositor_wl.keymap_size[layout] = length;
         }
@@ -5545,7 +5341,7 @@ static void compositor_wl_dmabuf_refresh(void)
 static long compositor_wl_dmabuf_table(void *context, long *size)
 {
         unsigned char bytes[WAYLAND_DMABUF_ENTRIES * 16];
-        long count = compositor_wl.dmabuf_entry_count, total, fd, done = 0;
+        long count = compositor_wl.dmabuf_entry_count, total, fd;
 
         (void)context;
         if (count < 1)
@@ -5568,22 +5364,9 @@ static long compositor_wl_dmabuf_table(void *context, long *size)
                         for (long byte = 0; byte < 8; byte++)
                                 bytes[at * 16 + 8 + byte] = (unsigned char)(mod >> (8 * byte));
                 }
-                // MFD_CLOEXEC | MFD_ALLOW_SEALING
-                fd = compositor_call(syscall(memfd_create), (positive)"moonwater-dmabuf-table", 3, 0, 0, 0, 0);
+                fd = compositor_wl_memfd_sealed("moonwater-dmabuf-table", bytes, (unsigned long)total);
                 if (fd < 0)
                         return -1;
-                while (done < total)
-                {
-                        long put = compositor_call(syscall(write), (positive)fd, (positive)(bytes + done), (positive)(total - done), 0, 0, 0);
-
-                        if (put <= 0)
-                        {
-                                system_close((int)fd);
-                                return -1;
-                        }
-                        done += put;
-                }
-                compositor_call(syscall(fcntl), (positive)fd, 1033, 15, 0, 0, 0); // F_ADD_SEALS: all four
                 compositor_wl.dmabuf_table = (int)fd;
                 compositor_wl.dmabuf_table_size = total;
         }
@@ -5729,10 +5512,11 @@ static long compositor_wl_syncobj_import(void *context, long fd)
         // None free: the table one longer (-1 when the memory is not there).
         if (slot < 0)
         {
-                if (!compositor_wl_room(&compositor_wl.syncobj_at, &compositor_wl.syncobj_room, (long)sizeof(struct compositor_wl_syncobj),
-                                        COMPOSITOR_WL_SYNCOBJS_MOST, compositor_wl.syncobjs + 1))
+                wayland_tables_host(&compositor_wl_host);
+                compositor_wl.syncobj_table.unit = sizeof(struct compositor_wl_syncobj);
+                if (compositor_wl.syncobjs >= COMPOSITOR_WL_SYNCOBJS_MOST || !wayland_table_reach(&compositor_wl.syncobj_table, compositor_wl.syncobjs + 1))
                         return -1;
-                compositor_wl.syncobj = (struct compositor_wl_syncobj *)compositor_wl.syncobj_at;
+                compositor_wl.syncobj = (struct compositor_wl_syncobj *)compositor_wl.syncobj_table.at;
                 slot = compositor_wl.syncobjs++;
                 compositor_wl.syncobj[slot].used = 0, compositor_wl.syncobj[slot].eventfd = -1;
         }
@@ -5889,7 +5673,7 @@ static int compositor_wl_sync_start(long client, int fd)
         positive timer[4] = {0, 0, 0, COMPOSITOR_WL_DMABUF_WAIT_NS / 1000}, off[4] = {0, 0, 0, 0}; // struct itimerval, in us
         long got;
 
-        if (client >= 0 && client < compositor_wl.slots && compositor_wl.slow_until[client] > clock_monotonic_nanoseconds())
+        if (client >= 0 && client < compositor_wl.slots && compositor_wl.client[client].slow_until > clock_monotonic_nanoseconds())
                 return 0;
 
         compositor_call(syscall(setitimer), 0, (positive)timer, 0, 0, 0, 0); // ITIMER_REAL
@@ -5898,7 +5682,7 @@ static int compositor_wl_sync_start(long client, int fd)
         if (got != -4 && got != -5) // EINTR: timer ended wait; EIO: GPU reset; anything else (0 or ENOTTY on non-dmabuf) proceeds
                 return 1;
         if (got == -4 && client >= 0 && client < compositor_wl.slots)
-                compositor_wl.slow_until[client] = clock_monotonic_nanoseconds() + COMPOSITOR_WL_DMABUF_SLOW_NS;
+                compositor_wl.client[client].slow_until = clock_monotonic_nanoseconds() + COMPOSITOR_WL_DMABUF_SLOW_NS;
         return 0;
 }
 
@@ -5960,10 +5744,11 @@ static long compositor_wl_transfer_place(void)
         for (long at = 0; at < compositor_wl.transfers; at++)
                 if (!compositor_wl.transfer[at].state)
                         return at;
-        if (!compositor_wl_room(&compositor_wl.transfer_at, &compositor_wl.transfer_room, (long)sizeof(struct compositor_wl_transfer),
-                                COMPOSITOR_WL_TRANSFERS_MOST, compositor_wl.transfers + 1))
+        wayland_tables_host(&compositor_wl_host);
+        compositor_wl.transfer_table.unit = sizeof(struct compositor_wl_transfer);
+        if (compositor_wl.transfers >= COMPOSITOR_WL_TRANSFERS_MOST || !wayland_table_reach(&compositor_wl.transfer_table, compositor_wl.transfers + 1))
                 return -1;
-        compositor_wl.transfer = (struct compositor_wl_transfer *)compositor_wl.transfer_at;
+        compositor_wl.transfer = (struct compositor_wl_transfer *)compositor_wl.transfer_table.at;
         slot = compositor_wl.transfers++;
         memory_zero(&compositor_wl.transfer[slot], sizeof(compositor_wl.transfer[slot]));
         compositor_wl.transfer[slot].in = compositor_wl.transfer[slot].out = compositor_wl.transfer[slot].keep = compositor_wl.transfer[slot].index = -1;
@@ -6197,6 +5982,63 @@ static void compositor_wl_transfers_done(void)
         names text goes by left out when there is text. A pipe for it, its write end to the shim for the source's send, and the thread
         that reads it. When there is none left the copy is made whole and is the selection, or is refused when it has no type at all.
 */
+// Open the paired (keep, index) memfds for a multi-type clipboard or drag pull.
+static int compositor_wl_pull_open(const char *name, int *keep_out, int *index_out)
+{
+        long keep = compositor_call(syscall(memfd_create), (positive)name, 3, 0, 0, 0, 0); // MFD_CLOEXEC | MFD_ALLOW_SEALING
+        long index = keep >= 0 ? compositor_call(syscall(memfd_create), (positive)"moonwater-index", 1, 0, 0, 0, 0) : -1;
+
+        if (index < 0)
+        {
+                if (keep >= 0)
+                        system_close((int)keep);
+                return 0;
+        }
+        *keep_out = (int)keep, *index_out = (int)index;
+        return 1;
+}
+
+// Shared clipboard/drag paste push helper: validates mime (and pipe fd when requested), dups selection fd, starts transfer thread.
+static int compositor_wl_push_start(unsigned int which, long client, long row, const char *mime, long fd, int check_pipe)
+{
+        struct windows *table = compositor.table;
+        struct windows_clip_type type;
+        long src, slot;
+
+        if (!table || which > WINDOWS_CLIP_DRAG || compositor_clip.fd[which] < 0 || !mime ||
+            !windows_clip_find(compositor_clip.map[which], table->clip_length[which], mime, string_length((string_address)mime), &type))
+                goto fail;
+        if (check_pipe)
+        {
+                unsigned char info[256];
+
+                memory_zero(info, sizeof info);
+                if (compositor_call(syscall(statx), (positive)fd, (positive)"", 0x1000, 0x1, (positive)info, 0) < 0 ||
+                    ((((unsigned int)info[28] | (unsigned int)info[29] << 8) & 0170000) != 0010000))
+                        goto fail;
+        }
+        slot = compositor_wl_transfer_place();
+        src = slot >= 0 ? compositor_call(syscall(fcntl), (positive)compositor_clip.fd[which], COMPOSITOR_F_DUPFD_CLOEXEC, 0, 0, 0, 0) : -1;
+        if (slot < 0 || src < 0)
+        {
+                if (src >= 0)
+                        system_close((int)src);
+                goto fail;
+        }
+        compositor_wl.transfer[slot].state = COMPOSITOR_WL_PUSH;
+        compositor_wl.transfer[slot].which = (unsigned char)which;
+        compositor_wl.transfer[slot].client = (int)client;
+        compositor_wl.transfer[slot].row = (int)row;
+        compositor_wl.transfer[slot].in = (int)src;
+        compositor_wl.transfer[slot].out = (int)fd;
+        compositor_wl.transfer[slot].base = type.offset;
+        compositor_wl.transfer[slot].total = type.length;
+        return compositor_wl_transfer_start(slot);
+fail:
+        system_close((int)fd);
+        return 0;
+}
+
 static void compositor_wl_pull_whole(long at);
 
 static void compositor_wl_pull_next(long at)
@@ -6211,14 +6053,16 @@ static void compositor_wl_pull_next(long at)
 
                 if (t->text == -2)
                 {
-                        // The best text: the UTF-8 type, then UTF8_STRING, then text/plain (each name as windows_clip_alias has them).
-                        static const char *const rank[3] = {WINDOWS_CLIP_TEXT, "UTF8_STRING", "text/plain"};
+                        int best_rank = 0;
 
                         t->text = -1;
-                        for (int r = 0; r < 3 && t->text < 0; r++)
-                                for (nth = 0; (type = wayland_clip_type(t->client, t->which, nth)) && t->text < 0; nth++)
-                                        if (windows_clip_same(type, string_length((string_address)type), rank[r]))
-                                                t->text = nth;
+                        for (nth = 0; (type = wayland_clip_type(t->client, t->which, nth)); nth++)
+                        {
+                                int rank = windows_clip_text_rank(type, string_length((string_address)type));
+
+                                if (rank >= 1 && rank <= 3 && (!best_rank || rank < best_rank))
+                                        best_rank = rank, t->text = nth;
+                        }
                         nth = t->text;
                         t->nth = -1;
                         if (nth < 0)
@@ -6264,8 +6108,8 @@ static long compositor_wl_clip_pull(void *context, long client, long which)
 {
         struct windows *table = compositor.table;
         positive now = clock_monotonic_nanoseconds();
-        int row = -1;
-        long slot, keep, index;
+        int row = -1, keep = -1, index = -1;
+        long slot;
 
         (void)context;
         if (!table || which < 0 || which > 1 || !table->clip_on)
@@ -6275,23 +6119,14 @@ static long compositor_wl_clip_pull(void *context, long client, long which)
                     (row < 0 || at == compositor.focus))
                         row = at;
         slot = row >= 0 ? compositor_wl_transfer_place() : -1;
-        if (slot < 0 || compositor_wl.wake < 0)
+        if (slot < 0 || compositor_wl.wake < 0 || !compositor_wl_pull_open("moonwater-copy", &keep, &index))
                 return 0;
-        // MFD_CLOEXEC | MFD_ALLOW_SEALING: the copy; MFD_CLOEXEC: its index, written as its types come.
-        keep = compositor_call(syscall(memfd_create), (positive) "moonwater-copy", 3, 0, 0, 0, 0);
-        index = keep >= 0 ? compositor_call(syscall(memfd_create), (positive) "moonwater-index", 1, 0, 0, 0, 0) : -1;
-        if (index < 0)
-        {
-                if (keep >= 0)
-                        system_close((int)keep);
-                return 0;
-        }
         compositor_wl.transfer[slot].state = COMPOSITOR_WL_PULL;
         compositor_wl.transfer[slot].which = (unsigned char)which;
         compositor_wl.transfer[slot].client = (int)client;
         compositor_wl.transfer[slot].row = row;
-        compositor_wl.transfer[slot].keep = (int)keep;
-        compositor_wl.transfer[slot].index = (int)index;
+        compositor_wl.transfer[slot].keep = keep;
+        compositor_wl.transfer[slot].index = index;
         compositor_wl.transfer[slot].total = compositor_wl.transfer[slot].count = 0;
         compositor_wl.transfer[slot].text = -2;
         compositor_wl_pull_next(slot);
@@ -6353,69 +6188,32 @@ static void compositor_wl_pull_end(long at, int ok)
         compositor_wl_pull_next(at);
 }
 
-// Every type asked for: the copy whole, sealed and checked as every copy is, the selection (the shim told either way, after the watchers).
+// Every type asked for: the copy whole, sealed and checked via Canvas's compositor_clip_set_memfd.
 static void compositor_wl_pull_whole(long at)
 {
         struct compositor_wl_transfer *t = &compositor_wl.transfer[at];
         long client = t->client;
-        unsigned long length = 0;
         unsigned int which = t->which;
-        int row = t->row, kept = -1;
+        int row = t->row;
+        b32 ok = t->count && windows_clip_seal(t->keep, t->index, t->total, t->count) && compositor_clip_set_memfd(which, t->keep, row);
 
-        if (t->count && windows_clip_seal(t->keep, t->index, t->total, t->count))
-                kept = compositor_clip_open(compositor.table->clip_pid, t->keep, &length);
         compositor_wl_transfer_free(at);
-        if (kept >= 0)
-                compositor_clip_keep(which, kept, length, row);
-        wayland_clip_pulled(client, (long)which, kept >= 0);
+        wayland_clip_pulled(client, (long)which, ok != 0);
 }
 
 /*
         A paste: a type of selection which to the descriptor the client gave (a name text goes by is the text), which is taken whatever
-        comes of it. Given only to a window that is the one with the keys and was just touched, for a descriptor that is a pipe (a file
-        on a filesystem that waits, or a socket, could make the compositor wait, and a pipe is written only when poll says it can take
-        a page), of a type the copy has, and while there is room.
+        comes of it. Checked via Canvas's compositor_clip_may_access and started via compositor_wl_push_start.
 */
 static void compositor_wl_clip_push(void *context, long row, long which, const char *mime, long fd)
 {
-        struct windows *table = compositor.table;
-        positive now = clock_monotonic_nanoseconds();
-        unsigned char info[256];
-        struct windows_clip_type type;
-        long src, slot, client = wayland_row_owner(row);
-        int root = row >= 0 && row < COMPOSITOR_ROWS ? compositor_clip_root((int)row) : -1;
-        unsigned int mode;
-
         (void)context;
-        memory_zero(info, sizeof info);
-        // struct statx: stx_mode at 28 (u16); asked for the type, of the descriptor itself.
-        if (!table || which < 0 || which > 1 || !table->clip_on || compositor_clip.fd[which] < 0 || root < 0 || root != compositor.focus ||
-            now - compositor_clip.gesture[row] > COMPOSITOR_CLIP_GESTURE_NS || !mime ||
-            !windows_clip_find(compositor_clip.map[which], table->clip_length[which], mime, string_length((string_address)mime), &type) ||
-            compositor_call(syscall(statx), (positive)fd, (positive) "", 0x1000, 0x1, (positive)info, 0) < 0)
+        if (which < 0 || which > 1 || !compositor_clip_may_access((int)row, clock_monotonic_nanoseconds()))
         {
                 system_close((int)fd);
                 return;
         }
-        mode = ((unsigned int)info[28] | (unsigned int)info[29] << 8) & 0170000;
-        slot = compositor_wl_transfer_place();
-        src = mode == 0010000 ? compositor_call(syscall(fcntl), (positive)compositor_clip.fd[which], COMPOSITOR_F_DUPFD_CLOEXEC, 0, 0, 0, 0) : -1;
-        if (slot < 0 || src < 0)
-        {
-                if (src >= 0)
-                        system_close((int)src);
-                system_close((int)fd);
-                return;
-        }
-        compositor_wl.transfer[slot].state = COMPOSITOR_WL_PUSH;
-        compositor_wl.transfer[slot].which = (unsigned char)which;
-        compositor_wl.transfer[slot].client = (int)client;
-        compositor_wl.transfer[slot].row = (int)row;
-        compositor_wl.transfer[slot].in = (int)src;
-        compositor_wl.transfer[slot].out = (int)fd;
-        compositor_wl.transfer[slot].base = type.offset;
-        compositor_wl.transfer[slot].total = type.length;
-        compositor_wl_transfer_start(slot);
+        compositor_wl_push_start((unsigned int)which, wayland_row_owner(row), row, mime, fd, 1);
 }
 
 /* ---- drag and drop: a program's of the compositor's, in the shim's one drag ---- */
@@ -6442,10 +6240,11 @@ static struct
         int dropped;                    // dropped on the target: its type is read (reading), then READY
         long reading;                   // the transfer reading a Wayland or X source's type for the target, -1
         int named;                      // the drag's copy at WINDOWS_CLIP_DRAG is the names of another's drag's types
-        unsigned char *types;           // the drag's types for the shim, each with its NUL (a reservation: compositor_wl_room)
-        long types_room, types_bytes;
+        struct wayland_table types_table;
+        unsigned char *types;           // the drag's types for the shim, each with its NUL
+        long types_bytes;
         int place;                      // where over the target it was last, as its events carry it (compositor_drag_place)
-} compositor_drag = {-1, -1, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0};
+} compositor_drag = {.source = -1, .target = -1, .take = -1, .reading = -1};
 
 // A copy made the drag's: put at WINDOWS_CLIP_DRAG (what was there let go), mapped, its size in the table, its serial moved.
 static void compositor_drag_keep(int opened, unsigned long length)
@@ -6521,12 +6320,15 @@ static long compositor_drag_types_of(void)
         const char *name;
         long bytes = 0;
 
+        wayland_tables_host(&compositor_wl_host);
+        compositor_drag.types_table.unit = 1;
         for (long nth = 0; (name = compositor_drag_name(nth)); nth++)
         {
                 long n = (long)string_length((string_address)name) + 1;
 
-                if (!compositor_wl_room(&compositor_drag.types, &compositor_drag.types_room, 1, 1l << 32, bytes + n))
+                if (!wayland_table_reach(&compositor_drag.types_table, bytes + n))
                         break;
+                compositor_drag.types = compositor_drag.types_table.at;
                 memory_copy(compositor_drag.types + bytes, name, (positive)n);
                 bytes += n;
         }
@@ -6743,8 +6545,8 @@ static void compositor_drag_ready(void)
 */
 static void compositor_drag_read(const char *name)
 {
-        int fds[2] = {-1, -1};
-        long slot, keep, index;
+        int fds[2] = {-1, -1}, keep = -1, index = -1;
+        long slot;
 
         if (compositor_drag.source >= 0)
         {
@@ -6752,14 +6554,13 @@ static void compositor_drag_read(const char *name)
                 return;
         }
         slot = compositor_wl.wake >= 0 ? compositor_wl_transfer_place() : -1;
-        keep = slot >= 0 ? compositor_call(syscall(memfd_create), (positive) "moonwater-drop", 3, 0, 0, 0, 0) : -1;
-        index = keep >= 0 ? compositor_call(syscall(memfd_create), (positive) "moonwater-index", 1, 0, 0, 0, 0) : -1;
-        if (index < 0 || compositor_call(syscall(pipe2), (positive)fds, 0x80000, 0, 0, 0, 0) < 0)
+        if (slot < 0 || !compositor_wl_pull_open("moonwater-drop", &keep, &index) ||
+            compositor_call(syscall(pipe2), (positive)fds, 0x80000, 0, 0, 0, 0) < 0)
         {
                 if (keep >= 0)
-                        system_close((int)keep);
+                        system_close(keep);
                 if (index >= 0)
-                        system_close((int)index);
+                        system_close(index);
                 wayland_drag_x_finished(0);
                 return;
         }
@@ -6769,8 +6570,8 @@ static void compositor_drag_read(const char *name)
         compositor_wl.transfer[slot].client = -1;
         compositor_wl.transfer[slot].row = compositor_drag.target;
         compositor_wl.transfer[slot].in = fds[0];
-        compositor_wl.transfer[slot].keep = (int)keep;
-        compositor_wl.transfer[slot].index = (int)index;
+        compositor_wl.transfer[slot].keep = keep;
+        compositor_wl.transfer[slot].index = index;
         compositor_wl.transfer[slot].total = compositor_wl.transfer[slot].count = 0;
         compositor_wl.transfer[slot].drop = name;
         // The write end: a Wayland source's send (the shim's from then on), or an X source's conversion (the window manager's).
@@ -6807,34 +6608,14 @@ static void compositor_drag_pulled(long at, int ok)
         compositor_drag_ready();
 }
 
-/*
-        A type of a program's drag to the descriptor a target gave (a Wayland client's receive; an X window's conversion's pipe), a pipe,
-        as a paste is written (compositor_wl_clip_push), once the drag is dropped on that target.
-*/
 static int compositor_drag_push(const char *mime, long fd)
 {
-        struct windows *table = compositor.table;
-        struct windows_clip_type type;
-        long src, slot;
-
-        if (compositor_drag.source < 0 || !mime || compositor_clip.fd[WINDOWS_CLIP_DRAG] < 0 ||
-            !windows_clip_find(compositor_clip.map[WINDOWS_CLIP_DRAG], table->clip_length[WINDOWS_CLIP_DRAG], mime, string_length((string_address)mime),
-                               &type) ||
-            (slot = compositor_wl_transfer_place()) < 0 ||
-            (src = compositor_call(syscall(fcntl), (positive)compositor_clip.fd[WINDOWS_CLIP_DRAG], COMPOSITOR_F_DUPFD_CLOEXEC, 0, 0, 0, 0)) < 0)
+        if (compositor_drag.source < 0)
         {
                 system_close((int)fd);
                 return 0;
         }
-        compositor_wl.transfer[slot].state = COMPOSITOR_WL_PUSH;
-        compositor_wl.transfer[slot].which = WINDOWS_CLIP_DRAG;
-        compositor_wl.transfer[slot].client = -1;
-        compositor_wl.transfer[slot].row = -1;
-        compositor_wl.transfer[slot].in = (int)src;
-        compositor_wl.transfer[slot].out = (int)fd;
-        compositor_wl.transfer[slot].base = type.offset;
-        compositor_wl.transfer[slot].total = type.length;
-        return compositor_wl_transfer_start(slot);
+        return compositor_wl_push_start(WINDOWS_CLIP_DRAG, -1, -1, mime, fd, 0);
 }
 
 // A row gone: a drag it made is cancelled, and one over it has left it.
@@ -7538,11 +7319,9 @@ static void compositor_wl_accept(void)
                         continue;
                 }
                 compositor_wl.fd[slot] = (int)fd;
-                compositor_wl.slow_until[slot] = 0;
-                compositor_wl.asked[slot] = 0;
                 compositor_wl.barred[slot] = 0;
                 compositor_wl.pid[slot] = credentials[0];
-                compositor_wl.uid[slot] = credentials[1];
+                compositor_wl.client[slot] = (struct compositor_wl_client){.uid = credentials[1], .asked = 0, .slow_until = 0};
         }
 }
 

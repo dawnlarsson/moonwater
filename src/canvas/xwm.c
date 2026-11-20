@@ -1484,73 +1484,22 @@ static void xwm_property(struct compositor_xwm *x, const unsigned char *in, long
         }
 }
 
-/* ---- open-addressing u32 index shared by window_index and atom_index (both structs store their u32 key at offset 0) ---- */
-
-static unsigned int compositor_xwm_u32_key(const struct wayland_table *records, long slot)
-{
-        return *(const unsigned int *)(const void *)(records->at + (unsigned long)slot * records->unit);
-}
+/* ---- open-addressing u32 index (delegated to wayland_host.c's shared canvas_htab_*) ---- */
 
 static void compositor_xwm_index_put(struct wayland_table *index, unsigned int key, long slot)
 {
-        unsigned int *bucket = (unsigned int *)(void *)index->at;
-        unsigned long b = wayland_u32_hash(key, index->count);
-
-        while (bucket[b])
-                b = (b + 1) & (unsigned long)(index->count - 1);
-        bucket[b] = (unsigned int)(slot + 1);
+        canvas_htab_put(index, key, slot, 0);
 }
 
-// Doubles an open-addressing index at half full (64 buckets first), rehashing live records with nonzero key (excluding skip).
 static int compositor_xwm_index_grow(struct wayland_table *index, const struct wayland_table *records, long used, long skip)
 {
-        struct wayland_table grown = {0, sizeof(unsigned int), 0, 0, 0, 0, 0, 0, 0, 0};
-
-        if (2 * (used + 1) <= index->count)
-                return 1;
-        wayland_tables_host(&compositor_wl_host);
-        if (!wayland_table_reach(&grown, index->count ? 2 * index->count : 64))
-                return 0;
-        for (long at = 0; at < records->count; at++)
-                if (at != skip)
-                {
-                        unsigned int key = compositor_xwm_u32_key(records, at);
-
-                        if (key)
-                                compositor_xwm_index_put(&grown, key, at);
-                }
-        wayland_table_drop(index);
-        *index = grown;
-        return 1;
+        return canvas_htab_grow(index, records, used, skip, 0);
 }
 
-// Looks up key in index: first==0 returns the first hit (and sets *at to its bucket); first!=0 returns the lowest matching slot.
 static long compositor_xwm_index_find(const struct wayland_table *index, const struct wayland_table *records, unsigned int key,
                                       int first, unsigned long *at)
 {
-        long buckets = index->count, found = -1;
-        const unsigned int *bucket = (const unsigned int *)(const void *)index->at;
-
-        for (unsigned long b = buckets ? wayland_u32_hash(key, buckets) : 0, n = 0; buckets && n < (unsigned long)buckets;
-             n++, b = (b + 1) & (unsigned long)(buckets - 1))
-        {
-                if (!bucket[b])
-                        return found;
-                if (compositor_xwm_u32_key(records, (long)bucket[b] - 1) == key)
-                {
-                        long slot = (long)bucket[b] - 1;
-
-                        if (!first)
-                        {
-                                if (at)
-                                        *at = b;
-                                return slot;
-                        }
-                        if (found < 0 || slot < found)
-                                found = slot;
-                }
-        }
-        return found;
+        return canvas_htab_find(index, records, key, first, at, 0);
 }
 
 /* ---- the window table and O(1) row -> (slot, win) index ---- */
@@ -1623,8 +1572,7 @@ static struct compositor_xwm_window *xwm_row_lookup(const struct compositor_xwm 
 // The record of an X window let go of: out of the index (backward shift), its slot free to be taken again.
 static void xwm_release(struct compositor_xwm *x, struct compositor_xwm_window *w)
 {
-        long buckets = x->window_index.count, slot;
-        unsigned int *bucket = (unsigned int *)(void *)x->window_index.at;
+        long slot;
         unsigned long hole = 0;
 
         xwm_row_unbind(x, w);
@@ -1637,18 +1585,7 @@ static void xwm_release(struct compositor_xwm *x, struct compositor_xwm_window *
                 w->id = 0;
                 return;
         }
-        bucket[hole] = 0;
-        for (unsigned long b = (hole + 1) & (unsigned long)(buckets - 1); bucket[b]; b = (b + 1) & (unsigned long)(buckets - 1))
-        {
-                unsigned long home = wayland_u32_hash(x->window[bucket[b] - 1].id, buckets);
-
-                if ((b > hole && (home <= hole || home > b)) || (b < hole && home <= hole && home > b))
-                {
-                        bucket[hole] = bucket[b];
-                        bucket[b] = 0;
-                        hole = b;
-                }
-        }
+        canvas_htab_del(&x->window_index, &x->window_table, hole, 0);
         w->id = 0;
         wayland_table_give(&x->window_table, slot);
         x->windows--;
