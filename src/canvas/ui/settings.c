@@ -1,150 +1,9 @@
 /*
-        The settings, as a window on the compositor in userspace.
-
-        `settings` is a front end to the moonwater command and to nothing
-        else: every value it shows is what a verb says when it is asked
-        (moonwater name, moonwater keyboard, ...), read from the verb's
-        output as a person would read it, and every change is the verb run
-        with the new value. What the command keeps is what the window shows
-        the next time it asks, so the two never disagree, and a value the
-        command refuses is refused in the window in the command's words.
-
-        The rows are not written here: they are the table of settings in
-        src/sh/registry.c, in its order, and a setting added there is a row
-        of this window. They are the switches and choices of the command that
-        a person sets by hand: the machine's name, the keyboard and how its
-        keys repeat, the time zone, how Canvas is drawn (its scale, the
-        desktop's colour, the size and look of the pointer and
-        whether a shake of the hand makes it large, and for how long), the
-        mouse's sensitivity and acceleration, the clock and where the network sets it from, the
-        wired link, the radios and airplane mode, which link the internet
-        prefers, the servers names and time are asked of, the power profile,
-        the processor and the battery, and what the machine starts at boot.
-        The Display group is the screens: their modes, where they are
-        arranged and the backlight. A row the machine has nothing for (no
-        backlight, no boost switch) says so and does nothing. Nothing in those rows ends
-        the desktop, the session or the machine.
-
-        The desktop's colour is two rows of the one verb (moonwater canvas
-        background): a choice of named inks, whose first is the default,
-        each one an rrggbb that the verb is run with and that is shown by
-        its name when the verb says it, and a field that takes any rrggbb
-        (or default) and keeps it on Enter, the verb's own words being the
-        status when it refuses what was typed.
-
-        The last section, All commands, is every row of what `moonwater
-        help` says, read from it when the window opens (at most 96 rows, and
-        the window says when there were more), so a verb the rows above do
-        not cover is still one the window runs; and its first row runs any
-        moonwater command at all. Enter on one opens a field for the words
-        that follow its verb, and Enter in it runs the command as words, with
-        the command's own words first: blanks part them and a pair of double
-        or single quotes holds blanks in one, and nothing else is read, never
-        a shell. What it said is the window's status when it is a line (kept,
-        and drawn nowhere: settings_say), and else a card with the lines,
-        which the keys and the wheel scroll and Escape or a press closes. A command runs until it ends or Escape
-        stops it. A command that ends the desktop, the session or the
-        machine, or throws away what a person keeps (wipe, setup install,
-        update, use and rollback, sleep, hibernate, bios reboot, desktop start and rest,
-        desktop off, link remove and group leave, wifi and bluetooth remove,
-        cpu offline, init and exit remove), whichever row it is typed
-        in, is not run by the first Enter: the window says so and runs it
-        when the same Enter is pressed again, and any other key asks again.
-
-        It is a page of the kit (ui.c), and says only what it shows: the
-        groups, one for each section of rows and All commands last, are the
-        page's column at the left, and the rows of the group chosen are the
-        kit's list at the right, each row its label, its value and the kind
-        of value it is (settings_describe), in sections with their headers.
-        Everything else -- the sizes, the type, the theme's colours, the row
-        the keys are on, the hover, the press and its ripple, the menu a
-        choice opens, the field a row is typed in, every scrollbar, the wheel
-        and a finger's drag and throw -- is the kit's. The keys are in the
-        column or in the rows, whichever the lit one is: the window opens
-        with them in the rows, on the first.
-
-        The keys. Tab and Shift-Tab go between the column and the rows.
-        Up, Down, Home, End, Page Up and Page Down move in whichever has the
-        keys, and moving in the column puts the rows of that group at the
-        right at once. Enter or Right in the column go to its rows, on the
-        first. In the rows, Enter or Space changes a row (a switch is
-        thrown, a choice opens its list, a field is typed in and Enter
-        keeps it, Escape leaves it as it was); Enter or Space throws a switch
-        over, Left and Right move a step either way, and on a switch or any
-        other row Left goes back to the column and Right does nothing.
-        Escape closes the window, as Alt-F4 and its close button do. A
-        character typed with no row typed in goes to the search field, the
-        filter: the rows that have each of its words, in any order, are the
-        ones listed, from every group, with the keys on the first of them.
-        While it holds something, every key goes to it first, as in any of
-        the kit's fields (the caret by the arrows, Home and End, a selection
-        by Shift, words by Control, Backspace and Delete, a blank, undo, the
-        clipboard), and what it does not take is the rows': Up and Down move
-        in them, Enter works the row the keys are on, and Escape clears it
-        before it closes the window. Choosing another group clears it too.
-        Every field (the search field, and the field a row is typed in) is
-        the kit's: the hand puts its caret, a drag selects, a double click a
-        word and a triple the line, the middle button pastes and the right
-        button opens its menu. With the mouse, a press on a group chooses
-        it, a press on a row is Enter on it, and the wheel scrolls what is
-        under the pointer. An action (Discover now, Pair a machine) is the
-        kit's button at its row's end, which a press, Enter or a tap on the
-        row runs once, and which says so while its verb waits. The right
-        button on a row that has a value, or the menu key or Shift-F10 on
-        the row the keys are on, opens its copies: the value, or the label
-        and the value, put on the clipboard, which sets nothing.
-
-        A choice opens a list of all its choices, under its row (over it
-        where there is more room there, and slid up where it fits the window
-        no other way; a list taller than the window scrolls), the one it
-        has now dotted and the keys on it. While the list is open it takes
-        every key: Up, Down, Home, End, Page Up and Page Down move the keys
-        in it, a letter or a digit goes to the next choice that starts with
-        it, Enter or Space sets the choice the keys are on (the verb is run
-        as for any row) and closes it, and Escape closes it with the row as
-        it was. A press on a choice sets it, a press anywhere else only
-        closes the list, the pointer over a choice puts the keys on it, and
-        the wheel scrolls it. A choice the machine has none of opens none.
-
-        What changes under a person's eyes is kept up with. While a group is
-        shown, the verb it declares (a feed, settings_feeds) is run again
-        every second or two, and never while the window is put away, while
-        another group is shown, while what is typed filters every group,
-        while a card or a field fills the window, or while any other verb
-        is running or waiting (a change a person makes drops a reading under
-        way, which is had again). Wi-Fi lists the networks in range under
-        its switch (marked joined or saved, with what each asks for and the
-        bars of its signal) and the saved ones not heard, from moonwater
-        wifi, whose own first line is also the state of the switch; Enter
-        joins one that is open, asks for the passphrase of one that is not
-        (shown as dots, given to the verb on its input and never in its
-        words, and kept nowhere here), and Delete twice forgets a saved
-        one. Bluetooth lists the devices kept, from moonwater bluetooth,
-        with a last row that keeps another by its name and Delete twice to
-        forget one: the command has no scan, no pairing and no connecting,
-        so the window has none either. Waterlink's Pair a machine runs
-        moonwater link pair: its code is drawn large with the seconds left,
-        under the lines the command said (the other machine's command among
-        them), and its outcome is the command's last line; a press on the row
-        while it waits stops it. The linked machines are a list, each with
-        the words the command says of where it was last heard. Power asks the
-        battery again and Time the clock; Network asks again the addresses its
-        connections have (Wired IP address, Wi-Fi IP address, from moonwater
-        network discovery, none when a cable is out or the radio is not
-        joined) and what discovery learned beside them, so a lease that
-        changes or a cable that is pulled shows without leaving the group;
-        the right button on the row (or the menu key) offers its value to copy.
-        The keys stay on the row of the name they were on when
-        the list moves under them, and a reading that says what the last
-        said draws nothing.
-
-        One window: a second start finds the first by the program's name and
-        lifts it -- raised, brought back if it was put away, given the keys --
-        and ends.
+        The settings window on the compositor (a ui.c page front-end to /moonwater).
+        Rows come from src/sh/registry.c; All commands is parsed from `moonwater help`;
+        live feeds poll Wi-Fi, Bluetooth, Devices, Waterlink, Power, Time and Network.
 
             settings [-f FONT.ttf] [-b BOLD.ttf] [-m MOONWATER]
-
-        -m is the command it runs, /moonwater by default.
 
         Dawn Larsson - Apache-2.0 license
         github.com/dawnlarsson/moonwater
@@ -206,29 +65,18 @@ struct settings_change
 #define SETTINGS_ANY ((int)SETTINGS_ROWS) // the row of All commands that runs any command
 #define SETTINGS_ALL_HEADER "All commands"
 
-/*
-        A feed is a verb run again while the group it belongs to is shown, so
-        that what changes under a person's eyes is what the window shows. It
-        is not run while the window is put away, while another group is
-        shown, while a field is typed in or a card is up, while what is typed
-        filters the rows of every group, or while another verb runs or waits.
-        A list feed turns what the verb says into the rows of a list under
-        the group's own rows (the networks in range, the devices kept), and
-        the verb's own first line is also what the switch of the group reads
-        as; a rows feed asks again the rows of the group that say they change
-        by themselves (the clock, the battery, the addresses a connection has and the public one).
-*/
+// Live feeds polled while their group is shown (list feeds first, then row feeds).
 #define SETTINGS_FEED_ROWS 1u
 #define SETTINGS_FEED_WIFI 2u
 #define SETTINGS_FEED_DEVICES 3u
-#define SETTINGS_FEED_HARDWARE 4u // the devices the system sees, allowed or blocked by a press (device list)
-#define SETTINGS_FEED_LINKS 5u    // the machines linked, as moonwater link says them
-#define SETTINGS_LISTS 4 // the list feeds, which come first in the table: the Wi-Fi, Bluetooth, Devices and Waterlink lists
+#define SETTINGS_FEED_HARDWARE 4u
+#define SETTINGS_FEED_LINKS 5u
+#define SETTINGS_LISTS 4
 #define SETTINGS_LIST_ROWS 24
 #define SETTINGS_ITEM_LABEL 96
 #define SETTINGS_FEED_WAIT_NS 8000000000ll
-#define SETTINGS_ACT_WAIT_NS 60000000000ll // a join waits for its handshake
-#define SETTINGS_WAIT_PAIR_NS 330000000000ll // a pairing waits as long as its code lasts (five minutes), and the verb two seconds more
+#define SETTINGS_ACT_WAIT_NS 60000000000ll
+#define SETTINGS_WAIT_PAIR_NS 330000000000ll
 
 struct settings_feed
 {
@@ -312,11 +160,7 @@ struct settings_item
         char (address_to segment_name)[SETTINGS_SEGMENT_NAME]; // each segment's name, the partition's as the host says it (none: empty)
 };
 
-/*
-        The named colours of a row that chooses an ink, as the rrggbb the verb
-        takes and says (with its # in front). A colour the verb says that is
-        none of them is shown as the verb said it.
-*/
+// Named colours for ink rows (background and accent).
 struct settings_ink
 {
         const char address_to name;
@@ -328,61 +172,35 @@ static const struct settings_ink settings_inks[] = {
     {"forest", "163a26"},  {"plum", "3b1f4a"},   {"light-grey", "d4d4d8"}, {"white", "ffffff"},
 };
 
-// The accents (canvas theme accent), named as the background's inks are: white first, the standard, then the kit's amber.
 static const struct settings_ink settings_accents[] = {
     {"white", "ffffff"}, {"amber", "ff8800"}, {"blue", "2563eb"}, {"green", "16a34a"}, {"violet", "7c3aed"}, {"rose", "e11d48"}, {"graphite", "52525b"},
 };
 
-// The named inks of a row of them: the accent's, or the background's.
-static const struct settings_ink address_to settings_ink_table(const struct settings_row address_to row, positive address_to count)
+static const struct settings_ink address_to settings_ink_find(const struct settings_row address_to row, const char address_to text, b32 by_colour)
 {
-        if (row->path && string_equals((string_address)row->path, (string_address)SETTING_ACCENT_PATH))
-        {
-                *count = sizeof(settings_accents) / sizeof(settings_accents[0]);
-                return settings_accents;
-        }
-        *count = sizeof(settings_inks) / sizeof(settings_inks[0]);
-        return settings_inks;
+        b32 accent = row->path && string_equals((string_address)row->path, (string_address)SETTING_ACCENT_PATH);
+        const struct settings_ink address_to table = accent ? settings_accents : settings_inks;
+        positive count = accent ? sizeof(settings_accents) / sizeof(settings_accents[0]) : sizeof(settings_inks) / sizeof(settings_inks[0]);
+
+        for (positive at = 0; at < count; at++)
+                if (string_equals((string_address)text, (string_address)(by_colour ? table[at].colour : table[at].name)))
+                        return &table[at];
+        return null;
 }
 
-// The rows to ask are a bit each, in as many words of 64 bits as the table's rows take, so a row added never outgrows them.
 #define SETTINGS_UNREAD_WORDS ((sizeof(settings_rows) / sizeof(settings_rows[0]) + 63) / 64)
 _Static_assert(sizeof(settings_rows) / sizeof(settings_rows[0]) <= 64 * SETTINGS_UNREAD_WORDS, "the rows to ask fit their words");
 
-/*
-        What changes the machine or ends what a person has, as the words that
-        would be run (after moonwater): a pattern is the first words of a
-        command, so setup install matches whatever follows it. Such a
-        command is run by a second Enter and not the first.
-*/
+// Commands that require a second Enter to confirm.
 static const char address_to const settings_asks[][3] = {
-    {"wipe"},
-    {"setup", "install"},
-    {"setup", "update"},
-    {"setup", "use"},
-    {"setup", "rollback"},
-    {"sleep"},
-    {"hibernate"},
-    {"bios", "reboot"},
-    {"desktop", "start"},
-    {"desktop", "rest"},
-    {"desktop", "off"},
-    {"link", "remove"},
-    {"link", "group", "leave"},
-    {"wifi", "remove"},
-    {"bluetooth", "remove"},
-    {"cpu", "offline"},
-    {"init", "remove"},
-    {"exit", "remove"},
+    {"wipe"},            {"setup", "install"}, {"setup", "update"},   {"setup", "use"},      {"setup", "rollback"}, {"sleep"},
+    {"hibernate"},       {"bios", "reboot"},   {"desktop", "start"},  {"desktop", "rest"},   {"desktop", "off"},    {"link", "remove"},
+    {"link", "group", "leave"}, {"wifi", "remove"}, {"bluetooth", "remove"}, {"cpu", "offline"}, {"init", "remove"}, {"exit", "remove"},
 };
 
 /* ---- the model: what a verb said, and what to run ---- */
 
-/*
-        One line of what a verb said, as words: escapes taken out and the
-        control characters, a tab a blank, and the blanks that indent it
-        left. Answers the line's length, and where the next line starts.
-*/
+// One line of verb output with escapes/controls stripped, tabs as spaces, leading indent preserved.
 static positive settings_keep(const char address_to said, positive length, positive address_to at, char address_to into,
                               positive room)
 {
@@ -395,7 +213,6 @@ static positive settings_keep(const char address_to said, positive length, posit
                 address_to at += 1;
                 if (c == '\t')
                         c = ' ';
-                // An escape sequence: its introducer, its parameters and its final letter. The end of a line is never taken into one.
                 if (c == 0x1b)
                 {
                         if (address_to at < length && said[address_to at] == '[')
@@ -417,7 +234,6 @@ static positive settings_keep(const char address_to said, positive length, posit
         return made;
 }
 
-// The "[Moonwater] " a verb starts its lines with: how many bytes it is at the start of a line, or none.
 static positive settings_label_length(const char address_to line, positive length)
 {
         positive rest = length;
@@ -425,12 +241,7 @@ static positive settings_label_length(const char address_to line, positive lengt
         return (positive)(ui_strip_verb_prefix(line, &rest) - line);
 }
 
-/*
-        One line of what a verb said, as words: escapes taken out, the
-        "[Moonwater] " a verb starts its lines with and the blanks that
-        indent them taken off. Answers the line's length, and where the
-        next line starts.
-*/
+// One line stripped of escapes, "[Moonwater] " prefix, and leading spaces.
 static positive settings_line(const char address_to said, positive length, positive address_to at, char address_to into,
                               positive room)
 {
@@ -439,13 +250,12 @@ static positive settings_line(const char address_to said, positive length, posit
 
         while (skip < made && into[skip] == ' ')
                 skip++;
-        // To the left, the rest and its terminator.
         if (skip)
                 memory_copy(into, into + skip, made - skip + 1);
         return made - skip;
 }
 
-// Where key is in a line, at the start or after a blank or a semicolon; the line's length when it is not.
+// Where key occurs in line at start or after space/semicolon, or length if absent.
 static positive settings_find(const char address_to line, positive length, const char address_to key)
 {
         positive size = string_length((string_address)key);
@@ -456,17 +266,7 @@ static positive settings_find(const char address_to line, positive length, const
         return length;
 }
 
-// What a line of a machine that has none of a thing says.
-static b32 settings_absent(const char address_to line, positive length)
-{
-        return settings_find(line, length, "this machine has no") < length ||
-               settings_find(line, length, "this battery has no") < length ||
-               settings_find(line, length, "no wireless hardware") < length;
-}
-
-// The part of a line that a machine said of itself: what follows `; "` is a name some device chose (device says each device's product
-// there, escaped so that no quote but the opening one is bare), and a device that calls itself "this machine has no" must not take
-// every row of its verb away.
+// Part of line before `; "` (escaped device product name).
 static positive settings_unquoted(const char address_to line, positive length)
 {
         for (positive at = 0; at + 2 < length; at++)
@@ -475,31 +275,21 @@ static positive settings_unquoted(const char address_to line, positive length)
         return length;
 }
 
-// Whether a line says a row has none, for this row. "this battery has no charge limit" is the charge limit's none only: a line that
-// also says this row's own key (the battery's percent) is a value of this row and does not take it away.
+// Whether a line reports this row's hardware as absent.
 static b32 settings_lacks(const char address_to line, positive length, const struct settings_row address_to row)
 {
-        if (settings_find(line, length, "this battery has no") < length && settings_find(line, length, "this machine has no") >= length &&
-            settings_find(line, length, "no wireless hardware") >= length && row->key && row->key[0] &&
-            settings_find(line, length, row->key) < length)
-                return false;
-        return settings_absent(line, length);
+        if (settings_find(line, length, "this machine has no") < length || settings_find(line, length, "no wireless hardware") < length)
+                return true;
+        return settings_find(line, length, "this battery has no") < length &&
+               !(row->key && row->key[0] && settings_find(line, length, row->key) < length);
 }
 
-// Whether a value goes on past the character c: a word ends at a blank, a comma, a semicolon or a bracket, a line only at its stop.
 static b32 settings_goes_on(const struct settings_row address_to row, char c)
 {
-        if (row->stop && c == row->stop)
-                return false;
-        return (row->flags & SETTINGS_LINE) || (c != ' ' && c != ',' && c != ';' && c != '(');
+        return (!row->stop || c != row->stop) && ((row->flags & SETTINGS_LINE) || (c != ' ' && c != ',' && c != ';' && c != '('));
 }
 
-/*
-        A verb's output as a row's value, into value: the word after the
-        row's key (or with line the rest of the line; with no key, the first
-        line), or after its second key when the first is said with nothing
-        after it. Answers the state that leaves the row in.
-*/
+// Parse a verb's output into row's value and return SETTINGS_*.
 static unsigned int settings_parse(const struct settings_row address_to row, const char address_to said, positive length,
                                    char address_to value, positive room)
 {
@@ -515,16 +305,12 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
                 if (!size)
                         continue;
                 absent |= settings_lacks(line, settings_unquoted(line, size), row);
-
                 for (positive which = 0; which < 2 && !found; which++)
                 {
                         const char address_to key = which ? row->also : row->key;
                         positive where, start, stop;
 
-                        if (!key)
-                                continue;
-                        where = key[0] ? settings_find(line, size, key) : 0;
-                        if (where >= size)
+                        if (!key || (where = key[0] ? settings_find(line, size, key) : 0) >= size)
                                 continue;
                         start = where + string_length((string_address)key);
                         while (start < size && line[start] == ' ')
@@ -542,31 +328,31 @@ static unsigned int settings_parse(const struct settings_row address_to row, con
                         found = 1;
                 }
         }
-
-        // A switch a machine may have none of says so as a word that is neither (smt notsupported).
         if (found && row->kind == SETTINGS_SWITCH && row->lacks && !string_equals((string_address)value, (string_address) "on") &&
             !string_equals((string_address)value, (string_address) "off"))
                 absent = true;
         return absent ? SETTINGS_ABSENT : found ? SETTINGS_READ : row->lacks ? SETTINGS_ABSENT : SETTINGS_FAILED;
 }
 
-/*
-        The Battery row is the battery the Battery picker row chose, as
-        the battery reader (ui/ui.c) reads it: its percent and whether it charges. A machine with
-        none, or with none present, has none. The verb's words are not used
-        for it, so a battery without a charge limit is still a battery.
-*/
+// Read the Battery row directly via ui.c's battery reader.
 static unsigned int settings_battery(string_address chosen, char address_to value, positive room)
 {
+        static const struct
+        {
+                unsigned char state;
+                unsigned int text;
+        } charge_words[] = {
+            {BATTERY_CHARGING,     LANGUAGE_settings_battery_charging},
+            {BATTERY_DISCHARGING,  LANGUAGE_settings_battery_discharging},
+            {BATTERY_FULL,         LANGUAGE_settings_battery_full},
+            {BATTERY_NOT_CHARGING, LANGUAGE_settings_battery_idle},
+        };
         struct battery_state battery;
 
         value[0] = 0;
-        // none is no battery. A chosen name is read as it is; only a name that has gone (no longer a battery) falls back to the first present one.
         if (chosen && string_equals(chosen, (string_address) "none"))
                 return SETTINGS_ABSENT;
-        if (!chosen || !chosen[0] || string_equals(chosen, (string_address) "auto"))
-                battery_read(null, &battery);
-        else if (!battery_read(chosen, &battery))
+        if (!chosen || !chosen[0] || string_equals(chosen, (string_address) "auto") || !battery_read(chosen, &battery))
                 battery_read(null, &battery);
         if (!battery.present)
                 return SETTINGS_ABSENT;
@@ -574,23 +360,12 @@ static unsigned int settings_battery(string_address chosen, char address_to valu
                 string_copy_bounded((string_address)value, (string_address)WORDS(settings_unknown), room);
         else
                 language_format(value, room, WORDS(settings_percent), (long)battery.percent);
-        if (battery.charging == BATTERY_CHARGING)
-                string_append_bounded((string_address)value, (string_address)WORDS(settings_battery_charging), room);
-        else if (battery.charging == BATTERY_DISCHARGING)
-                string_append_bounded((string_address)value, (string_address)WORDS(settings_battery_discharging), room);
-        else if (battery.charging == BATTERY_FULL)
-                string_append_bounded((string_address)value, (string_address)WORDS(settings_battery_full), room);
-        else if (battery.charging == BATTERY_NOT_CHARGING)
-                string_append_bounded((string_address)value, (string_address)WORDS(settings_battery_idle), room);
+        for (positive k = 0; k < sizeof(charge_words) / sizeof(charge_words[0]); k++)
+                if (battery.charging == charge_words[k].state)
+                        string_append_bounded((string_address)value, (string_address)language_text(charge_words[k].text), room);
         return SETTINGS_READ;
 }
 
-/*
-        What a row reads as from its verb's output and how the verb ended. A
-        verb that said nothing and failed did not run (no moonwater where it
-        was asked for, or it died before it said anything): that is not a
-        machine that has none of the thing, so a row it lacks is unknown then.
-*/
 static const char address_to settings_battery_choice(void);
 
 static unsigned int settings_read(const struct settings_row address_to row, const char address_to said, positive length,
@@ -601,23 +376,17 @@ static unsigned int settings_read(const struct settings_row address_to row, cons
         if (row->label && string_equals((string_address)row->label, (string_address) "Battery"))
                 return settings_battery((string_address)settings_battery_choice(), value, room);
         state = settings_parse(row, said, length, value, room);
-
         if (state == SETTINGS_READ && (row->flags & SETTINGS_INK) && value[0] == '#')
         {
-                positive inks;
-                const struct settings_ink address_to table = settings_ink_table(row, &inks);
+                const struct settings_ink address_to ink = settings_ink_find(row, value + 1, true);
 
-                for (positive at = 0; at < inks; at++)
-                        if (string_equals((string_address)value + 1, (string_address)table[at].colour))
-                        {
-                                string_copy_bounded((string_address)value, (string_address)table[at].name, room);
-                                break;
-                        }
+                if (ink)
+                        string_copy_bounded((string_address)value, (string_address)ink->name, room);
         }
         return state == SETTINGS_ABSENT && failed && !length ? SETTINGS_FAILED : state;
 }
 
-// The word of a list (words a blank apart) at index, into into; false past its end.
+// Extract space-separated word at index into into; false past end.
 static b32 settings_word(const char address_to words, positive index, char address_to into, positive room)
 {
         while (words && *words)
@@ -636,46 +405,25 @@ static b32 settings_word(const char address_to words, positive index, char addre
         return false;
 }
 
-// How far a slider row moves for a key and between the places its slider rests at: 5 where the range is 100 or more, else 1.
 static int settings_slider_step(const struct settings_row address_to row)
 {
         return row->high - row->low >= 100 ? 5 : 1;
 }
 
-/*
-        What a switch or a step goes to from value, one way (1) or the other
-        (-1): a switch to the other of on and off (2 throws it on and -2
-        off, whatever it said), a step to its word for that way. A choice is
-        not moved this way: it opens a list of its words, and a word of it is
-        what it goes to.
-*/
+// Next value for switch (way > 1 on, < -1 off, else toggle) or step.
 static fn settings_next(const struct settings_row address_to row, const char address_to value, int way, char address_to into,
                         positive room)
 {
         into[0] = 0;
         if (row->kind == SETTINGS_SWITCH)
-        {
-                // Right throws it on and Left off, whatever it said; an Enter or a press turns it over.
-                const char address_to to = way > 1 ? "on" : way < -1 ? "off"
-                                           : string_equals((string_address)value, (string_address) "on") ? "off" : "on";
-
-                string_copy_bounded((string_address)into, (string_address)to, room);
-                return;
-        }
-        if (row->kind == SETTINGS_STEP)
-        {
+                string_copy_bounded((string_address)into,
+                                    (string_address)(way > 1 ? "on" : way < -1 ? "off" : string_equals((string_address)value, (string_address) "on") ? "off" : "on"),
+                                    room);
+        else if (row->kind == SETTINGS_STEP)
                 settings_word(row->choices, way > 0 ? 1 : 0, into, room);
-                return;
-        }
 }
 
-/*
-        text as words, after those words already in words (count of them):
-        blanks part them, and a pair of double or single quotes holds blanks
-        in one word and is not part of it; nothing else is read. The words
-        are copied into buffer, and words ends with a null. Answers the new
-        count, or none when there is not room for them.
-*/
+// Split text on spaces (respecting single/double quotes) into buffer/words; 0 if out of room.
 static positive settings_tokens(const char address_to text, char address_to buffer, positive size,
                                 string_address address_to words, positive count, positive room)
 {
@@ -718,12 +466,7 @@ struct settings_generic
         unsigned char verb;           // the bytes of the command that are its verb, which are not typed
 };
 
-/*
-        The map of the screens above the Display rows (settings_map_*): the kit's graph (ui_graph) of the desk, a node for each screen
-        the table lists, in its order, at its place and size in the desk's pixels; the screen the rows are for; the places last sent and
-        not yet in the table; the screens as the map last showed them, by name, so the camera keeps still when the table moves them all;
-        and the two buttons across the panel's top. The panel is the window's device pixels, where the page's frame has it.
-*/
+// Screen map state above the Display rows (ui_graph desk nodes, selection, pending layout, buttons, wallpaper cache).
 struct settings_map
 {
         int display;                     // the table's index of the screen the rows are for, -1 none chosen
@@ -748,11 +491,7 @@ struct settings_map
         int wall_w[WINDOWS_OUTPUTS], wall_h[WINDOWS_OUTPUTS];
 };
 
-/*
-        A screen's wallpaper on the map, as the compositor makes it (compositor_wall_make): its own picture (/root/wallpapers/NAME.png),
-        else the picture of every screen while canvas wallpaper is picture, else the moon (taskbar_wall_draw, the compositor's own) or
-        the background colour, at SETTINGS_WALL_W pixels across and the screen's shape.
-*/
+// Per-screen wallpaper thumbnail on the map (lazy mmap, freed in settings_close).
 #define SETTINGS_WALL_W 192
 #define SETTINGS_WALL_H 192
 #define SETTINGS_WALL_BYTES ((positive)SETTINGS_WALL_W * SETTINGS_WALL_H * sizeof(unsigned int))
@@ -784,11 +523,7 @@ static struct
         int feed_list; // the feed whose verb is being run
         char forget[SETTINGS_ITEM_LABEL], joining[SETTINGS_ITEM_LABEL];
 
-        /*
-                The window is the kit's page (ui.c): the column of groups at the left, the list of the rows of the
-                group chosen at the right (its places are the rows that show, in order, and its focus the row the
-                keys are on), the menu a choice opens, a finger on any of them, and the card's lines.
-        */
+        // Kit page, list and card scroll state.
         struct ui_page page;
         struct ui_list list;
         struct ui_scroll card;
@@ -850,13 +585,7 @@ static struct
 
 _Static_assert(SETTINGS_ALL <= UI_LIST_MOST, "every row the window shows is a place of the kit's list");
 
-/*
-        What is kept in a mapping made when the window opens and not in the
-        image (the shell image links this file, and a tool under a 12 MiB
-        address cap has no room for forty kilobytes it never uses): what a
-        verb said, the words of help, the card, the words of a command
-        being made, and the page's frame (the kit's view of it).
-*/
+// Lazily mapped large buffers (kept out of the shell image BSS).
 static struct settings_large
 {
         char said[SETTINGS_SAID];
@@ -866,27 +595,27 @@ static struct settings_large
         char split[SETTINGS_TYPED * 2];
         struct settings_item item[SETTINGS_LISTS][SETTINGS_LIST_ROWS];
         struct settings_drive drive[SETTINGS_DRIVES];
-        struct ui_columns columns[SETTINGS_LISTS]; // file-explorer-style details column headers for Wi-Fi, Bluetooth, External devices, Waterlink
+        struct ui_columns columns[SETTINGS_LISTS];
         struct ui_view view;
-        char label_cut[SETTINGS_ROWS][SETTINGS_LABEL_CUT]; // each row's label as its line in the window says it (settings_label_window)
-        unsigned char try_cover[2][SETTINGS_TRY_SPAN * SETTINGS_TRY_SPAN];              // a pointer's covers as the pointer's row draws it, its fill's and its line's
-        unsigned char logo_cover[SETTINGS_LOGO_MAX_W * SETTINGS_LOGO_MAX_H];            // the Moonwater wordmark cover drawn on the System About row
+        char label_cut[SETTINGS_ROWS][SETTINGS_LABEL_CUT];
+        unsigned char try_cover[2][SETTINGS_TRY_SPAN * SETTINGS_TRY_SPAN];
+        unsigned char logo_cover[SETTINGS_LOGO_MAX_W * SETTINGS_LOGO_MAX_H];
 } address_to settings_large;
+
+static void address_to settings_alloc_pages(positive bytes)
+{
+        long mapped = ui_map((bytes + 4095) & ~(positive)4095);
+
+        return mapped < 0 && mapped > -4096 ? null : (void address_to)mapped;
+}
 
 static b32 settings_map(void)
 {
-        long mapped;
-
-        if (settings_large)
-                return true;
-        mapped = ui_map((sizeof(struct settings_large) + 4095) & ~(positive)4095);
-        if (mapped < 0 && mapped > -4096)
-                return false;
-        settings_large = (struct settings_large address_to)mapped;
-        return true;
+        if (!settings_large)
+                settings_large = (struct settings_large address_to)settings_alloc_pages(sizeof(struct settings_large));
+        return settings_large != null;
 }
 
-// Rows [top, bottom) of the list changed (the list's damage hook, which the kit calls for its rows): the page's rows are drawn again.
 static fn settings_changed(int top, int bottom)
 {
         ui_page_damage(&settings.page, top, bottom);
@@ -896,14 +625,8 @@ static fn settings_changed(int top, int bottom)
 static int settings_section_start(int row);
 static fn settings_rebuild(void);
 static fn settings_say(string_address text);
-/*
-        A row whose option has issues on the board (its key is the row's verb, "canvas gpu") shows a badge at its right, the worst severity,
-        and the lines under it: one for each issue, its message and then its detail (the kernel's words, copyable as text). The GPU's row
-        also has a status line first, what the card does now (windows_gpu_judge, from the table's counters over the last ten seconds).
-        The board is read once a second while Settings is open, and the lines are made again when what they say changed. Each line is a
-        list row of its own, numbered after the rows, so the kit lays them out, scrolls them and moves the rows under them.
-*/
-#define SETTINGS_SUBS 80           // the lines under the rows at most: an option's, and a drive's partitions (settings_drive_rows)
+// Issue/status/partition sub-rows (list ids starting at SETTINGS_ALL), polled once per second.
+#define SETTINGS_SUBS 80
 // The rows that show a setting (settings_tries), numbered after the lines under the rows.
 #define SETTINGS_TRY_REPEAT 0
 #define SETTINGS_TRY_CLICK 1
@@ -1123,8 +846,6 @@ static void settings_badge(int row, struct ui_row address_to out)
         out->badge_words = worst == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning);
 }
 
-// The GPU's status from the table, judged on the presents of the last samples: the card's drawn and the processor's, each read as the
-// difference from the last sample (a table that counts down is read as none), and the words it says.
 static void settings_gpu_sample(void)
 {
         struct windows address_to table = settings.own.table;
@@ -1143,52 +864,53 @@ static void settings_gpu_sample(void)
         language_format(settings_metric_line, sizeof(settings_metric_line), WORDS(settings_metrics), (long)table->metric_card_mean, (long)table->metric_card_worst,
                         (long)table->metric_processor_mean, (long)table->metric_processor_worst, (long)table->metric_maps, (long)table->metric_wakes,
                         (long)table->metric_presents, (long)table->metric_lists);
-        switch (settings_gpu_status)
-        {
-        case WINDOWS_GPU_STATUS_OFF: language_format(settings_status, sizeof(settings_status), WORDS(settings_status_off)); break;
-        case WINDOWS_GPU_STATUS_NONE: language_format(settings_status, sizeof(settings_status), WORDS(settings_status_none)); break;
-        case WINDOWS_GPU_STATUS_IN_USE:
-        case WINDOWS_GPU_STATUS_PARTLY:
-        case WINDOWS_GPU_STATUS_NOT:
-                if (!settings_gpu_shown_total)
-                {
-                        language_format(settings_status, sizeof(settings_status), WORDS(settings_status_waiting));
-                        break;
-                }
+        if (settings_gpu_status == WINDOWS_GPU_STATUS_OFF || settings_gpu_status == WINDOWS_GPU_STATUS_NONE)
+                language_format(settings_status, sizeof(settings_status),
+                                settings_gpu_status == WINDOWS_GPU_STATUS_OFF ? WORDS(settings_status_off) : WORDS(settings_status_none));
+        else if (!settings_gpu_shown_total)
+                language_format(settings_status, sizeof(settings_status), WORDS(settings_status_waiting));
+        else
                 language_format(settings_status, sizeof(settings_status),
                                 settings_gpu_status == WINDOWS_GPU_STATUS_IN_USE ? WORDS(settings_status_in_use)
                                 : settings_gpu_status == WINDOWS_GPU_STATUS_PARTLY ? WORDS(settings_status_partly) : WORDS(settings_status_not),
-                                (long)drawn, (long)(drawn + processor), (long)(drawn * 100 / (drawn + processor)));
-                break;
-        }
+                                (long)drawn, (long)settings_gpu_shown_total, (long)(drawn * 100 / settings_gpu_shown_total));
         settings_gpu_key = settings_gpu_status;
-        if (settings_gpu_status == WINDOWS_GPU_STATUS_IN_USE || settings_gpu_status == WINDOWS_GPU_STATUS_PARTLY || settings_gpu_status == WINDOWS_GPU_STATUS_NOT)
-                settings_gpu_key |= settings_gpu_shown_total ? 1u << 8 | (drawn * 100 / settings_gpu_shown_total) << 9 : 0u;
+        if (settings_gpu_status != WINDOWS_GPU_STATUS_OFF && settings_gpu_status != WINDOWS_GPU_STATUS_NONE && settings_gpu_shown_total)
+                settings_gpu_key |= 1u << 8 | (drawn * 100 / settings_gpu_shown_total) << 9;
 }
 
-// Adds a line under the row being listed: its text (a message, a detail or a status), at list position count. Returns the count.
+// Append a sub-row at list position count (replacing the last slot with a "not shown" note on overflow).
 static int settings_sub_put(int section, b32 detail, const char address_to words, const char address_to text, int count)
 {
         struct settings_sub address_to sub;
+        b32 overflow = settings_sub_count >= SETTINGS_SUBS;
 
         if (count >= UI_LIST_MOST - 1)
                 return count;
-        if (settings_sub_count >= SETTINGS_SUBS)
+        sub = &settings_sub[overflow ? SETTINGS_SUBS - 1 : settings_sub_count];
+        memory_zero(sub, sizeof(*sub));
+        sub->section = section, sub->owner = settings_sub_owner;
+        if (overflow)
         {
-                // The window keeps SETTINGS_SUBS lines: the last one is given up for a note saying how many are not shown, that one included.
-                sub = &settings_sub[SETTINGS_SUBS - 1];
                 settings_sub_cut++;
-                sub->section = section, sub->detail = false, sub->words = null, sub->code = 0, sub->action = SETTINGS_SUB_COPY;
-                sub->owner = settings_sub_owner, sub->part = 0;
                 language_format(sub->text, sizeof(sub->text), WORDS(settings_not_shown), (long)(settings_sub_cut + 1));
                 return count;
         }
-        sub = &settings_sub[settings_sub_count];
-        sub->section = section, sub->detail = detail, sub->words = words, sub->code = 0, sub->action = SETTINGS_SUB_COPY, sub->owner = settings_sub_owner;
-        sub->part = 0;
+        sub->detail = detail, sub->words = words;
         string_copy_bounded((string_address)sub->text, (string_address)text, sizeof(sub->text));
         settings.list.id[count] = (unsigned short)(SETTINGS_ALL + (positive)settings_sub_count++);
         return count + 1;
+}
+
+static int settings_sub_add(int section, b32 detail, const char address_to words, const char address_to text,
+                            unsigned int code, unsigned int action, int part, int count)
+{
+        int next = settings_sub_put(section, detail, words, text, count);
+
+        if (next != count)
+                settings_sub[settings_sub_count - 1].code = code, settings_sub[settings_sub_count - 1].action = action,
+                settings_sub[settings_sub_count - 1].part = part;
+        return next;
 }
 
 // The words of a prerequisite of the GPU path that failed (gpu.c's enum gpu_req, the step the board's a number is): the fix, in the reader's
@@ -1268,16 +990,12 @@ static void settings_issue_text(const struct windows_issue address_to issue, cha
         language_format(into, room, WORDS(settings_issue_unknown), (long)issue->code);
 }
 
-// The lines under row, listed after it from position count: the GPU's status first, then each issue under its key, its message and its
-// detail when it has one. Returns the new count.
 static int settings_sub_rows(int row, int count)
 {
         char key[WINDOWS_ISSUE_KEY], text[SETTINGS_SUB_TEXT];
         const struct settings_row address_to which = row < SETTINGS_ANY ? &settings_rows[row] : null;
-        int section, next;
+        int section;
 
-        // The lines show when the row is open, and while it shuts (they fold away on the spring): each issue's message and its detail, and the
-        // GPU's status and metrics first.
         if (!settings_key_of(row, key, sizeof(key)) ||
             (!settings_always_open(row) && (!(settings_expanded[row] || settings_fold_at[row]) || !settings_expander(row))))
                 return count;
@@ -1285,11 +1003,8 @@ static int settings_sub_rows(int row, int count)
         section = settings_section_start(row);
         if (string_equals((string_address)key, (string_address)WINDOWS_KEY_GPU) && which && which->kind == SETTINGS_SWITCH)
         {
-                string_copy_bounded((string_address)text, (string_address)settings_status, sizeof(text));
-                count = settings_sub_put(section, false, null, text, count);
-                // The card's and the processor's presents, the maps and the wakes, as the table counts them (one line, a second old at most).
-                string_copy_bounded((string_address)text, (string_address)settings_metric_line, sizeof(text));
-                count = settings_sub_put(section, true, null, text, count);
+                count = settings_sub_put(section, false, null, settings_status, count);
+                count = settings_sub_put(section, true, null, settings_metric_line, count);
         }
         for (int i = 0; i < WINDOWS_ISSUES && count < UI_LIST_MOST - 1; i++)
         {
@@ -1298,25 +1013,13 @@ static int settings_sub_rows(int row, int count)
                 if (!issue->used || !windows_issue_same(issue->key, key) || issue->code == WINDOWS_ISSUE_NOTIFICATION)
                         continue;
                 settings_issue_text(issue, text, sizeof(text));
-                next = settings_sub_put(section, false, issue->severity == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning),
-                                        text, count);
-                // A line that did not fit is not added, and the line before it is not this issue's: only an added line takes its code.
-                if (next != count)
-                        settings_sub[settings_sub_count - 1].code = issue->code;
-                count = next;
-                // The detail of a prerequisite is its fix, which the message already says in the reader's language: no English copy of it.
+                count = settings_sub_add(section, false, issue->severity == WINDOWS_ISSUE_ERROR ? WORDS(settings_badge_error) : WORDS(settings_badge_warning),
+                                         text, issue->code, SETTINGS_SUB_COPY, 0, count);
                 if (issue->detail[0] && issue->code != WINDOWS_ISSUE_GPU_REQUIRES && (issue->code < WINDOWS_ISSUE_KERNEL_GPU || issue->code > WINDOWS_ISSUE_NOTIFICATION))
                         count = settings_sub_put(section, true, null, issue->detail, count);
         }
-        // The kernel's notices row lists them with one line that dismisses every kernel notice, after the last of them.
         if (which && which->output == SETTINGS_OUT_NOTICES && count > 0 && settings_sub_count > 0)
-        {
-                next = settings_sub_put(section, false, null, WORDS(settings_notices_dismiss), count);
-                // Only an added line dismisses: a refused one must not make the line before it dismiss every kernel notice.
-                if (next != count)
-                        settings_sub[settings_sub_count - 1].action = SETTINGS_SUB_DISMISS_ALL;
-                count = next;
-        }
+                count = settings_sub_add(section, false, null, WORDS(settings_notices_dismiss), 0, SETTINGS_SUB_DISMISS_ALL, 0, count);
         return count;
 }
 
@@ -1374,37 +1077,22 @@ enum settings_domain_kind
 {
         SETTINGS_DOM_NONE = -1,
         SETTINGS_DOM_ROW = 0,     // [0, SETTINGS_ANY): registry settings_rows[offset]
-        SETTINGS_DOM_COMMAND = 1, // [SETTINGS_ANY, SETTINGS_LIST): offset 0 = Run any, offset > 0 = generic[offset - 1]
+        SETTINGS_DOM_COMMAND = 1, // [SETTINGS_ANY, SETTINGS_LIST): 0 = Run any, >0 = generic[offset - 1]
         SETTINGS_DOM_LIST = 2,    // [SETTINGS_LIST, SETTINGS_ALL): feed list items
         SETTINGS_DOM_SUB = 3,     // [SETTINGS_ALL, SETTINGS_TRY): issue/status/partition sub-rows
         SETTINGS_DOM_TRY = 4,     // [SETTINGS_TRY, SETTINGS_ABOUT): interactive try rows
         SETTINGS_DOM_ABOUT = 5,   // [SETTINGS_ABOUT, SETTINGS_LIST_IDS): About section rows
 };
 
-struct settings_domain_ops
-{
-        int first, stop;
-        const char address_to (*label)(int id, int offset, b32 shown);
-        int (*section_start)(int id, int offset);
-        const char address_to (*section)(int id, int offset);
-        int (*group_of)(int id, int offset);
-        b32 (*matches_word)(int id, int offset, const char address_to word, positive size);
-        fn (*describe)(int id, int offset, struct ui_row address_to row);
-        fn (*activate)(int id, int offset, int way);
-        b32 (*press)(int id, int offset, int x, int y);
-        const char address_to (*copy_text)(int id, int offset);
-        p32 (*menu_flags)(int id, int offset, b32 has);
-};
-
-static const struct settings_domain_ops settings_domains[6];
-
 static int settings_domain_of(int id, int address_to offset)
 {
+        static const int stops[7] = {0, SETTINGS_ANY, (int)SETTINGS_LIST, (int)SETTINGS_ALL, SETTINGS_TRY, SETTINGS_ABOUT, SETTINGS_LIST_IDS};
+
         for (int k = 0; k < 6; k++)
-                if (id >= settings_domains[k].first && id < settings_domains[k].stop)
+                if (id >= stops[k] && id < stops[k + 1])
                 {
                         if (offset)
-                                *offset = id - settings_domains[k].first;
+                                *offset = id - stops[k];
                         return k;
                 }
         if (offset)
@@ -1428,8 +1116,10 @@ static int settings_about_of(int id);
 static const char address_to settings_about_label(int which);
 static b32 settings_about_matches_word(int which, const char address_to word, positive size);
 static int settings_system_group(void);
+static int settings_groups(void);
+static const char address_to settings_group_name(int group);
+static int settings_device_section(const struct settings_item address_to item);
 
-// Which list a row is in (an index of the feeds), or -1 when it is in none.
 static int settings_list_of(int row)
 {
         int at;
@@ -1437,7 +1127,6 @@ static int settings_list_of(int row)
         return settings_domain_of(row, &at) == SETTINGS_DOM_LIST ? at / SETTINGS_LIST_ROWS : -1;
 }
 
-// The network or the device a row is, or none: a row of a list that was read and is still there.
 static struct settings_item address_to settings_item(int row)
 {
         int offset, list, at;
@@ -1448,31 +1137,33 @@ static struct settings_item address_to settings_item(int row)
         return list < SETTINGS_LISTS && at < settings.item_count[list] ? &settings_large->item[list][at] : null;
 }
 
-static const char address_to settings_label(int row)
+static const char address_to settings_label_get(int row, b32 shown)
 {
-        int at, dom = settings_domain_of(row, &at);
+        int at;
 
-        return dom >= 0 && settings_domains[dom].label ? settings_domains[dom].label(row, at, false) : WORDS(settings_run_any);
+        switch (settings_domain_of(row, &at))
+        {
+        case SETTINGS_DOM_ROW:
+                return shown ? language_of(settings_rows[at].label) : settings_rows[at].label;
+        case SETTINGS_DOM_COMMAND:
+                return at > 0 ? settings_large->pool + settings.generic[at - 1].command : WORDS(settings_run_any);
+        case SETTINGS_DOM_LIST:
+        {
+                const struct settings_item address_to item = settings_item(row);
+
+                return !item ? WORDS(settings_run_any) : shown && item->kind == SETTINGS_ADD ? language_of(item->label) : item->label;
+        }
+        case SETTINGS_DOM_ABOUT:
+                return shown ? settings_about_label(at) : WORDS(settings_run_any);
+        default:
+                return WORDS(settings_run_any);
+        }
 }
 
-/*
-        A row's label as the window shows it. A setting's label is English the language says (registry.c keeps it, and code
-        that compares it compares the English); the name of a network or a device, and a command's verb, are what they are.
-*/
-static const char address_to settings_label_shown(int row)
-{
-        int at, dom = settings_domain_of(row, &at);
+static const char address_to settings_label(int row) { return settings_label_get(row, false); }
+static const char address_to settings_label_shown(int row) { return settings_label_get(row, true); }
 
-        return dom >= 0 && settings_domains[dom].label ? settings_domains[dom].label(row, at, true) : WORDS(settings_run_any);
-}
-
-/*
-        A row's label as its line in the window says it. The label of a number with a unit ends with what the command line is told
-        of it, in brackets ("Key repeat delay (ms, or default)"), and its control says that already (a slider's number has its
-        unit, a typed number is said with it): the window's line is the label up to the bracket, in the language taken, which
-        keeps the bracket at the end as English does (a check holds every file to it). A label whose bracket is not at its end
-        is shown whole.
-*/
+// Label up to any trailing " (...)" unit suffix, since controls show units themselves.
 static const char address_to settings_label_window(int row)
 {
         const char address_to shown = settings_label_shown(row);
@@ -1496,7 +1187,6 @@ static const char address_to settings_label_window(int row)
         return settings_large->label_cut[row];
 }
 
-// What a row of a list does when it is pressed, said where the status is.
 static const char address_to settings_item_text(const struct settings_item address_to item)
 {
         if (item->kind == SETTINGS_NETWORK)
@@ -1511,18 +1201,14 @@ static const char address_to settings_item_text(const struct settings_item addre
                : item->kind == SETTINGS_ADD      ? WORDS(settings_item_add) : "";
 }
 
-// What a command of All commands does, as help says; the any row's own words.
 static const char address_to settings_text(int row)
 {
         const struct settings_generic address_to generic = settings_generic_of(row);
         const struct settings_item address_to item = settings_item(row);
 
-        if (item)
-                return settings_item_text(item);
-        return generic ? settings_large->pool + generic->text : WORDS(settings_any_text);
+        return item ? settings_item_text(item) : generic ? settings_large->pool + generic->text : WORDS(settings_any_text);
 }
 
-// Whether a row's command takes words after its verb (the any row all of them).
 static b32 settings_takes(int row)
 {
         const struct settings_generic address_to generic = settings_generic_of(row);
@@ -1530,33 +1216,69 @@ static b32 settings_takes(int row)
         return !generic || settings_large->pool[generic->command + generic->verb] != 0;
 }
 
-/*
-        The section of the device list a device is in: 0 Internal storage, 1 External devices, 2 the note that says nothing was found,
-        which has no header. The list holds its devices in that order (settings_feed_hardware).
-*/
 static int settings_device_section(const struct settings_item address_to item)
 {
         return item->where == SETTINGS_WHERE_INTERNAL ? 0 : item->where == SETTINGS_WHERE_NONE ? 2 : 1;
 }
 
-// The first row of the section a row is listed in: the part of its group it is in (registry.c), or the group's own; a list is a section
-// of its own, and the device list is one for each place a device is.
 static int settings_section_start(int row)
 {
-        int offset, dom = settings_domain_of(row, &offset);
+        int offset;
 
-        return dom >= 0 && settings_domains[dom].section_start ? settings_domains[dom].section_start(row, offset) : row;
+        switch (settings_domain_of(row, &offset))
+        {
+        case SETTINGS_DOM_ROW:
+                while (row > 0 && !settings_rows[row].section && !settings_rows[row].part)
+                        row--;
+                return row;
+        case SETTINGS_DOM_COMMAND:
+                return SETTINGS_ANY;
+        case SETTINGS_DOM_LIST:
+        {
+                int list = offset / SETTINGS_LIST_ROWS, at = offset % SETTINGS_LIST_ROWS;
+                const struct settings_item address_to item = settings_item(row);
+
+                if (list == 2 && item)
+                {
+                        int section = settings_device_section(item);
+
+                        while (at > 0 && settings_device_section(&settings_large->item[2][at - 1]) == section)
+                                at--;
+                        return (int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + at;
+                }
+                return (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS;
+        }
+        default:
+                return row;
+        }
 }
 
-// The name of the group a row is in (a list's heading for a row of a list), which the filter finds it by.
 static const char address_to settings_section(int row)
 {
-        int offset, dom = settings_domain_of(row, &offset);
+        int offset;
 
-        return dom >= 0 && settings_domains[dom].section ? settings_domains[dom].section(row, offset) : "";
+        switch (settings_domain_of(row, &offset))
+        {
+        case SETTINGS_DOM_ROW:
+                while (row > 0 && !settings_rows[row].section)
+                        row--;
+                return settings_rows[row].section;
+        case SETTINGS_DOM_COMMAND:
+                return SETTINGS_ALL_HEADER;
+        case SETTINGS_DOM_LIST:
+        {
+                int list = offset / SETTINGS_LIST_ROWS;
+                const struct settings_item address_to item = settings_item(row);
+
+                if (list == 2 && item && settings_device_section(item))
+                        return settings_device_section(item) == 1 ? SETTINGS_EXTERNAL_HEADER : "";
+                return settings_feeds[list].heading;
+        }
+        default:
+                return "";
+        }
 }
 
-// The header a row is listed under: the name of its part, or of its group for a row before the group's first part.
 static const char address_to settings_header(int row)
 {
         int start = settings_section_start(row);
@@ -1564,11 +1286,6 @@ static const char address_to settings_header(int row)
         return start < SETTINGS_ANY && settings_rows[start].part ? settings_rows[start].part : settings_section(row);
 }
 
-/*
-        The groups: one for each header the rows start a section under, and
-        All commands last. A group is what the column at the left lists and
-        what the rows at the right are of.
-*/
 static int settings_groups(void)
 {
         int count = 1;
@@ -1588,33 +1305,42 @@ static const char address_to settings_group_name(int group)
         return SETTINGS_ALL_HEADER;
 }
 
-// A group's name as the column shows it; settings_group_name is the English that code compares.
 static const char address_to settings_group_text(int group)
 {
         return language_of(settings_group_name(group));
 }
 
-// The group a row is in; a list is in the group its feed keeps up with.
 static int settings_group_of(int row)
 {
-        int offset, dom = settings_domain_of(row, &offset);
+        int offset;
 
-        return dom >= 0 && settings_domains[dom].group_of ? settings_domains[dom].group_of(row, offset) : 0;
+        switch (settings_domain_of(row, &offset))
+        {
+        case SETTINGS_DOM_ROW:
+        {
+                int group = -1;
+
+                for (int at = 0; at <= offset; at++)
+                        group += settings_rows[at].section != null;
+                return group;
+        }
+        case SETTINGS_DOM_COMMAND:
+                return settings_groups() - 1;
+        case SETTINGS_DOM_LIST:
+                for (int at = 0; at < settings_groups(); at++)
+                        if (string_equals((string_address)settings_group_name(at), (string_address)settings_feeds[offset / SETTINGS_LIST_ROWS].group))
+                                return at;
+                return 0;
+        case SETTINGS_DOM_ABOUT:
+                return settings_system_group();
+        default:
+                return 0;
+        }
 }
 
-// Where a row is in the rows that show, or -1.
-static int settings_pos(int row)
-{
-        return ui_list_at(&settings.list, row);
-}
+static int settings_pos(int row) { return ui_list_at(&settings.list, row); }
+static int settings_editing(void) { return settings.edit.open ? settings.edit.owner : -1; }
 
-// The row typed in, or -1: the kit's field is open for it (the field knows its owner).
-static int settings_editing(void)
-{
-        return settings.edit.open ? settings.edit.owner : -1;
-}
-
-// Whether text has what is typed in the filter, whatever the case.
 static b32 settings_has(const char address_to text, const char address_to wanted, positive size)
 {
         positive length = text ? string_length((string_address)text) : 0;
@@ -1622,7 +1348,6 @@ static b32 settings_has(const char address_to text, const char address_to wanted
         return length >= size && (memory_search_ascii_case)((address_any)text, length, (address_any)wanted, size) != null;
 }
 
-// Whether the label or the group of a row has the word, in English or in the language taken.
 static b32 settings_matches_name(const char address_to label, const char address_to section, const char address_to word, positive size)
 {
         return settings_has(label, word, size) || settings_has(section, word, size) ||
@@ -1631,9 +1356,32 @@ static b32 settings_matches_name(const char address_to label, const char address
 
 static b32 settings_matches_word(int row, const char address_to word, positive size)
 {
-        int offset, dom = settings_domain_of(row, &offset);
+        int offset;
 
-        return dom >= 0 && settings_domains[dom].matches_word ? settings_domains[dom].matches_word(row, offset, word, size) : false;
+        switch (settings_domain_of(row, &offset))
+        {
+        case SETTINGS_DOM_ROW:
+        {
+                const struct settings_row address_to which = &settings_rows[offset];
+
+                for (positive at = 0; at < SETTING_WORDS; at++)
+                        if (settings_has(which->read[at], word, size) || settings_has(which->set[at], word, size))
+                                return true;
+                return settings_has(settings.value[offset], word, size) || settings_matches_name(which->label, settings_section(row), word, size) ||
+                       settings_matches_name(which->about, settings_rows[settings_section_start(row)].part, word, size);
+        }
+        case SETTINGS_DOM_LIST:
+                return settings_matches_name(settings_label(row), settings_section(row), word, size);
+        case SETTINGS_DOM_ABOUT:
+                return settings_about_matches_word(offset, word, size);
+        case SETTINGS_DOM_COMMAND:
+        case SETTINGS_DOM_SUB:
+        case SETTINGS_DOM_TRY:
+                return settings_has(settings_label(row), word, size) || settings_has(settings_text(row), word, size) ||
+                       (row == SETTINGS_ANY && settings_has("anything", word, size));
+        default:
+                return false;
+        }
 }
 
 /*
@@ -1714,18 +1462,12 @@ static positive settings_map_add(char address_to into, positive room, positive a
 static positive settings_map_number(char address_to into, positive room, positive at, long value)
 {
         char digits[24];
-        positive count = 0;
         unsigned long magnitude = value < 0 ? (unsigned long)(-(value + 1)) + 1 : (unsigned long)value;
 
         if (value < 0)
                 at = settings_map_add(into, room, at, "-");
-        do
-                digits[count++] = (char)('0' + magnitude % 10), magnitude /= 10;
-        while (magnitude && count < sizeof(digits));
-        while (count && at + 1 < room)
-                into[at++] = digits[--count];
-        into[at] = 0;
-        return at;
+        digits[positive_into((p8 address_to)digits, (positive)magnitude)] = 0;
+        return settings_map_add(into, room, at, digits);
 }
 
 /*
@@ -1883,13 +1625,7 @@ static unsigned int address_to settings_wall_slot(unsigned int at)
         if (at >= WINDOWS_OUTPUTS)
                 return null;
         if (!settings_wall_pixels[at])
-        {
-                long mapped = ui_map((SETTINGS_WALL_BYTES + 4095) & ~(positive)4095);
-
-                if (mapped < 0 && mapped > -4096)
-                        return null;
-                settings_wall_pixels[at] = (unsigned int address_to)mapped;
-        }
+                settings_wall_pixels[at] = (unsigned int address_to)settings_alloc_pages(SETTINGS_WALL_BYTES);
         return settings_wall_pixels[at];
 }
 
@@ -1898,20 +1634,24 @@ static fn settings_wall_free(void)
         for (unsigned int at = 0; at < WINDOWS_OUTPUTS; at++)
                 if (settings_wall_pixels[at])
                 {
-                        compositor_call(syscall(munmap), (positive)settings_wall_pixels[at],
-                                        (SETTINGS_WALL_BYTES + 4095) & ~(positive)4095, 0, 0, 0, 0);
+                        compositor_call(syscall(munmap), (positive)settings_wall_pixels[at], (SETTINGS_WALL_BYTES + 4095) & ~(positive)4095, 0, 0, 0, 0);
                         settings_wall_pixels[at] = null;
                         settings.map.wall_key[at] = 0;
                         settings.map.wall_w[at] = settings.map.wall_h[at] = 0;
                 }
 }
 
-// The screen at the table's index at, width by height, as its wallpaper on the node: made again only when what it is made of changed.
+static unsigned int settings_fnv32_str(unsigned int h, const char address_to s)
+{
+        for (; *s; s++)
+                h = (h ^ (p8)*s) * 16777619u;
+        return h;
+}
+
 static fn settings_map_wall(struct windows address_to table, unsigned int at, struct ui_graph_node address_to n, int width, int height)
 {
         char kind[16], dark_word[16], maria[8], glow[24], ground[16], path[96];
         unsigned int key = 2166136261u, stamp = 0, dark = !(table->themed && table->theme == UI_THEME_LIGHT);
-        // The accent the moon's glow is in, as the taskbar's (taskbar_accent): a grey one is the standard blue.
         unsigned int accent = table->themed ? table->accent & 0xffffffu : 0;
         int ar = (int)(accent >> 16 & 255), ag = (int)(accent >> 8 & 255), ab = (int)(accent & 255);
         int most = ar > ag ? (ar > ab ? ar : ab) : (ag > ab ? ag : ab), least = ar < ag ? (ar < ab ? ar : ab) : (ag < ab ? ag : ab);
@@ -1937,10 +1677,7 @@ static fn settings_map_wall(struct windows address_to table, unsigned int at, st
                           (string_copy((string_address)path, (string_address)SETTINGS_WALL_DIR "/all.png"), settings_wall_look(path, null) == 0100000u));
         if (picture)
                 settings_wall_look(path, &stamp);
-        for (const char address_to word = kind; *word; word++)
-                key = (key ^ (p8)*word) * 16777619u;
-        for (const char address_to word = picture ? path : ""; *word; word++)
-                key = (key ^ (p8)*word) * 16777619u;
+        key = settings_fnv32_str(settings_fnv32_str(key, kind), picture ? path : "");
         key = (key ^ stamp) * 16777619u, key = (key ^ dark) * 16777619u, key = (key ^ (unsigned int)w << 12 ^ (unsigned int)h) * 16777619u;
         accent = most - least < 40 ? 0x5b7fa6u : accent;
         key = (key ^ accent ^ (p8)dark_word[0] << 24 ^ (p8)glow[1] << 16 ^ (p8)maria[0] << 8 ^ (p8)maria[1] ^ (p8)ground[1] << 4 ^ (p8)ground[3]) * 16777619u;
@@ -2103,16 +1840,7 @@ static unsigned int settings_rates_of(int chosen)
         return rates > WINDOWS_OUTPUT_HZ ? WINDOWS_OUTPUT_HZ : rates;
 }
 
-/*
-        The Resolution row: every size the chosen screen lists (the table's output_size, the most pixels first), the one it marks
-        preferred said so, as many as a menu holds less the one a change waiting to be kept takes at its top.
-
-        A size chosen is a change the screen may not show well, or at all: it is sent (canvas display NAME mode WxH) and then is
-        to be kept, the menu's first item saying so with the seconds left (Keep 1920x1080, back in 12 s). Unless it is kept within
-        SETTINGS_KEEP_NS, or when the compositor says the screen did not take it (the table's WINDOWS_REFUSED_SIZE for that ask),
-        the size it had before is sent back: its own line's size, or preferred when its line asked none. Kept by connector name in
-        the displays file, so a screen plugged in again, or the next boot, is at the size kept.
-*/
+// Resolution change confirmation: revert after SETTINGS_KEEP_NS or refusal unless kept.
 #define SETTINGS_KEEP_NS 15000000000ull
 #define SETTINGS_SIZES_SHOWN (UI_MENU_ITEMS - 1)
 
@@ -2159,42 +1887,48 @@ static positive settings_keep_left(void)
 
 static fn settings_change(int row, const char address_to value);
 
-// The size the screen had sent back, and said: a size not kept in time, or one the screen did not take (refused).
+static fn settings_say_redraw(const char address_to line)
+{
+        settings_say((string_address)line);
+        ui_page_redraw(&settings.page);
+}
+
+static positive settings_mode_cmd(char address_to value, positive room, const char address_to name, const char address_to verb,
+                                  unsigned int w, unsigned int h, char address_to back, positive back_room)
+{
+        positive length = settings_map_add(value, room, 0, name);
+
+        length = settings_map_add(value, room, length, verb);
+        if (w)
+        {
+                positive at = settings_map_number(back, back_room, 0, (long)w);
+
+                at = settings_map_add(back, back_room, at, "x");
+                settings_map_number(back, back_room, at, (long)h);
+        }
+        else
+                settings_map_add(back, back_room, 0, "preferred");
+        return settings_map_add(value, room, length, back);
+}
+
 static fn settings_keep_back(b32 refused)
 {
         char value[SETTINGS_TYPED], back[32], line[SETTINGS_STATUS];
-        positive length;
         int row = settings_output_row(SETTINGS_OUT_SIZE);
 
         settings_resize.on = false;
         if (row < 0)
                 return;
-        length = settings_map_add(value, sizeof(value), 0, settings_resize.name);
-        length = settings_map_add(value, sizeof(value), length, " mode ");
-        if (settings_resize.old_w)
-        {
-                positive at = settings_map_number(back, sizeof(back), 0, (long)settings_resize.old_w);
-
-                at = settings_map_add(back, sizeof(back), at, "x");
-                settings_map_number(back, sizeof(back), at, (long)settings_resize.old_h);
-        }
-        else
-                settings_map_add(back, sizeof(back), 0, "preferred");
-        settings_map_add(value, sizeof(value), length, back);
+        settings_mode_cmd(value, sizeof(value), settings_resize.name, " mode ", settings_resize.old_w, settings_resize.old_h, back, sizeof(back));
         settings_change(row, value);
         if (refused)
                 language_format(line, sizeof(line), WORDS(settings_size_refused), (long)settings_resize.width, (long)settings_resize.height,
                                 settings_resize.old_w ? back : WORDS(settings_size_own));
         else
                 language_format(line, sizeof(line), WORDS(settings_size_back), settings_resize.old_w ? back : WORDS(settings_size_own));
-        settings_say((string_address)line);
-        ui_page_redraw(&settings.page);
+        settings_say_redraw(line);
 }
 
-/*
-        A size waiting to be kept, looked at from the window's timers: sent back when its time is up or the compositor says the screen
-        did not take it, its row drawn again each second so the seconds count down. Answers the time to the next look, -1 for none.
-*/
 static long settings_keep_tick(void)
 {
         struct windows address_to table = settings.own.table;
@@ -2208,7 +1942,6 @@ static long settings_keep_tick(void)
                         continue;
                 if (table->output_mode_w[at] == settings_resize.width && table->output_mode_h[at] == settings_resize.height)
                         settings_resize.seen = true;
-                // The line asks the size sent and the screen is at another: the compositor did not take it.
                 else if (table->output_asked_w[at] == settings_resize.width && table->output_asked_h[at] == settings_resize.height &&
                          (table->output_refused[at] & WINDOWS_REFUSED_SIZE))
                 {
@@ -2247,7 +1980,12 @@ static const struct settings_out_spec
     [SETTINGS_OUT_WALLPAPER] = {0, 0, 0, {LANGUAGE_settings_wall_same, LANGUAGE_settings_wall_own}, null, false},
 };
 
-// What a Display row shows for the chosen screen now: its label, its turn's word, or its rate's.
+static fn settings_keep_label(char address_to into, positive room)
+{
+        language_format(into, room, WORDS(settings_size_keep), (long)settings_resize.width, (long)settings_resize.height, (long)settings_keep_left());
+}
+
+// Current Display row text for the chosen screen.
 static const char address_to settings_output_text(int row, int chosen)
 {
         struct windows address_to table = settings.own.table;
@@ -2272,8 +2010,7 @@ static const char address_to settings_output_text(int row, int chosen)
 
                 if (settings_keep_here(chosen))
                 {
-                        language_format(settings_shown_rate, sizeof(settings_shown_rate), WORDS(settings_size_keep), (long)settings_resize.width,
-                                        (long)settings_resize.height, (long)settings_keep_left());
+                        settings_keep_label(settings_shown_rate, sizeof(settings_shown_rate));
                         return settings_shown_rate;
                 }
                 for (unsigned int at = 0; at < settings_sizes_of(chosen); at++)
@@ -2305,8 +2042,7 @@ static const char address_to settings_output_text(int row, int chosen)
                 return settings_shown_rate;
         default:
                 windows_screen_numbers(table, number);
-                settings_screen_label(number[chosen], table->output_name[chosen], table->output_model[chosen], settings_shown_screen,
-                                      sizeof(settings_shown_screen));
+                settings_screen_label(number[chosen], table->output_name[chosen], table->output_model[chosen], settings_shown_screen, sizeof(settings_shown_screen));
                 return settings_shown_screen;
         }
 }
@@ -2416,16 +2152,7 @@ static void settings_map_draw(struct ui address_to ui)
 static fn settings_describe(int id, struct ui_row address_to row);
 static fn settings_size(unsigned int width, unsigned int height);
 
-/*
-        The window's least size (device pixels), and the table told it in logical pixels, which the compositor holds a resize to. Its
-        width is the page's least (ui_page_least): the title's band whole, the column of groups at its least, and the list as wide as
-        the widest of every row of every group needs, as the machine has said them (a switch, tabs, a slider beside a label of a few
-        words), whether the window shows the rows or a card. Its height is what the Display group needs to show a row: the title's
-        band, the map of the screens with its caption on two lines, and a row. Worked out again only when what it depends on changed:
-        the scale, the text's size, the way the window reads, the language and the rows' readings (the list's revision). Answers 2
-        when it was worked out again, 1 when the one kept holds, and 0 when there is none: the gallery has none of its own, and there
-        is none before the page's frame is or with no face to measure the rows in.
-*/
+// Minimum window size in device pixels (cached by scale/text/RTL/language/list revision) and reported to table.
 static int settings_least(void)
 {
         struct ui address_to ui = &settings.ui;
@@ -2440,8 +2167,6 @@ static int settings_least(void)
         if (key == settings.least_key && settings.least_w > 0)
                 return 1;
         settings.least_key = key;
-        // The rows with the column beside them and the title they have, whichever the window shows now: a card, which has no column, needs
-        // less, and its title is cut to its band.
         column = settings.page.column_on, shown = settings.page.title;
         settings.page.column_on = true, settings.page.title = language_of("Settings");
         settings.least_w = ui_page_least(ui, &settings.page, &settings.list, settings.page.title);
@@ -2458,14 +2183,12 @@ static int settings_least(void)
 static const struct ui_list_menu settings_list_menu;
 static fn settings_columns_sorted(struct ui_columns address_to hit);
 
-// The page laid out for the window's size: the kit's frame, its column and the list in the body, the map above the list while it is shown.
 static fn settings_layout(void)
 {
         struct ui address_to ui = &settings.ui;
 
         if (!settings_map())
                 return;
-        // What the list shows is the app's: its rows, described by settings_describe, and where a change is drawn again.
         if (!settings.list.ids)
         {
                 settings.list.ids = SETTINGS_LIST_IDS;
@@ -2474,7 +2197,7 @@ static fn settings_layout(void)
                 settings.list.menu = &settings_list_menu;
                 settings.list.sorted = settings_columns_sorted;
                 settings.list.hover = settings.list.down = -1;
-                settings.list.wrap = true; // a label, a value or a note too long for its row's room goes onto more lines, and the row with it
+                settings.list.wrap = true;
                 settings.map.display = -1;
                 ui_graph_start(&settings.map.graph);
                 for (positive k = 0; k < sizeof(settings_accents) / sizeof(settings_accents[0]); k++)
@@ -2484,7 +2207,6 @@ static fn settings_layout(void)
                         string_append_bounded((string_address)settings.accents, (string_address)settings_accents[k].colour, sizeof(settings.accents));
                 }
         }
-        // The page's column shows with the rows and not with a card, which has the body and the whole width.
         settings.page.column_on = !settings.page.card;
         settings.page.body = settings.page.card ? &settings.card : &settings.list.scroll;
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
@@ -2492,8 +2214,6 @@ static fn settings_layout(void)
         settings.page.above = settings_map_above;
         settings.page.popup = &settings.popup;
         settings.page.own = &settings.own;
-        // The least as it is now: the frame gives the rows what they need before the column has its share (a window narrower than the least
-        // is drawn at it by the next picture, settings_frame).
         settings_least();
         ui_page_fit(ui, &settings.page, &settings.list, settings.width, settings.height, &settings.card, ui_lines_height(ui, settings.card_text.count));
 }
@@ -2503,21 +2223,13 @@ static int settings_drive_rows(int row, int count);
 static fn settings_edit_begin(int row, const char address_to text, b32 masked);
 static b32 settings_row_is(int at, const char address_to path);
 
-/* ---- the rows that show a setting ---- */
-/*
-        Where seeing a setting beats reading it, a row of its own shows it beside the setting's row (found by its file), in that row's part,
-        listed with its group and never while the filter lists rows of every group, and drawn in the kit's own words and shapes, nothing
-        new: a field to hold a key in, where the key's repeat is felt (after the repeat rate); a row to double-click, which says how far
-        apart the two clicks came, in the selected tab's pill when that is within the double-click time (after the time); and the pointer
-        as the style, the size and the look draw it, at the head of the Pointer part: the arrow and the I-beam, or the dynamic shape at
-        rest and the bar it is over text, side by side at the row's end, made by the compositor's own code (compositor_pointer_row), and
-        smaller while a press holds the row, by the squeeze a held button gives the pointer.
-*/
+/* ---- interactive preview ("try") rows ---- */
+
 static const struct settings_try
 {
-        const char address_to path;     // the setting's row it is listed beside
-        b32 before;                     // before that row, else after it
-        const char address_to shows[6]; // the files of the rows it draws, which draw it again when they change
+        const char address_to path;
+        b32 before;
+        const char address_to shows[6];
 } settings_tries[SETTINGS_TRIES] = {
     [SETTINGS_TRY_REPEAT] = {SETTING_REPEAT_RATE_PATH, false, {null}},
     [SETTINGS_TRY_CLICK] = {SETTING_DOUBLE_CLICK_PATH, false, {SETTING_DOUBLE_CLICK_PATH}},
@@ -2729,18 +2441,11 @@ static fn settings_try_changed(int row)
 }
 
 /* ---- the About section (Moonwater logo, author and links) ---- */
-/*
-        Shown at the bottom of the System group: the built-in Moonwater wordmark from splash_mark.c alongside "Made By Dawn Larsson"
-        and "dawning.dev", followed by links to Discord and GitHub issues for bug reports. Activating a link opens it in an installed
-        bowl web browser when one is available, and otherwise copies the URL to the clipboard.
-*/
+
 static const struct settings_about_spec
 {
-        const char address_to url;
-        const char address_to label;
-        const char address_to target;
-        unsigned int label_id;
-        unsigned int sub_id;
+        const char address_to url, address_to label, address_to target;
+        unsigned int label_id, sub_id;
 } settings_about_specs[SETTINGS_ABOUT_COUNT] = {
     [SETTINGS_ABOUT_BRAND]   = {"https://dawning.dev", null, "dawning.dev", LANGUAGE_settings_about_made_by, 0},
     [SETTINGS_ABOUT_DISCORD] = {"https://discord.gg/nwvFVGYJhR", "Discord", "discord.gg/nwvFVGYJhR", 0, LANGUAGE_settings_about_discord},
@@ -2769,11 +2474,8 @@ static const char address_to settings_about_label(int which)
 static const char address_to settings_about_sub(int which, char address_to into, positive room)
 {
         if (which < 0 || which >= SETTINGS_ABOUT_COUNT)
-        {
                 into[0] = 0;
-                return into;
-        }
-        if (settings_about_specs[which].sub_id)
+        else if (settings_about_specs[which].sub_id)
                 language_format(into, room, language_text(settings_about_specs[which].sub_id), settings_about_specs[which].target);
         else
                 string_copy_bounded((string_address)into, (string_address)settings_about_specs[which].target, room);
@@ -2984,34 +2686,31 @@ static fn settings_layout_check(void)
         settings_layout_seen = key;
 }
 
-/*
-        The rows that match the filter, laid out; the focus stays on its row
-        when that still shows, and else goes to the first. The view stays
-        where it is, which is what a list read again must not move.
-*/
+static int settings_try_emit(int row, b32 before, int count)
+{
+        for (int which = 0; which < SETTINGS_TRIES && !settings_filter_length(); which++)
+                if (settings_tries[which].before == before && settings_row_is(row, settings_tries[which].path) && count < UI_LIST_MOST)
+                        settings.list.id[count++] = (unsigned short)(SETTINGS_TRY + which);
+        return count;
+}
+
+// Rebuild visible list ids for current group or active filter, preserving scroll and focus when possible.
 static fn settings_rebuild(void)
 {
         int count = 0;
+        b32 filtered = settings_filter_length() != 0;
 
         string_copy_bounded((string_address)settings_metric_shown, (string_address)settings_metric_line, sizeof(settings_metric_shown));
-        // What is typed lists the rows that mention it, in every group; with none typed, the rows of the group chosen.
-        // Every id written is a place of the kit's list (UI_LIST_MOST): the lines under the rows take what the rows leave, and a row past
-        // that is not listed.
         settings_sub_count = 0, settings_sub_cut = 0;
         for (positive row = 0; row < settings_rows_count(); row++)
-                if (count < UI_LIST_MOST && (settings_filter_length() ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen))
+                if (count < UI_LIST_MOST && (filtered ? settings_matches((int)row) : settings_group_of((int)row) == settings.page.chosen))
                 {
-                        // A row that shows a setting is listed beside its row with the group, and not while the filter lists rows.
-                        for (int which = 0; which < SETTINGS_TRIES && !settings_filter_length(); which++)
-                                if (settings_tries[which].before && settings_row_is((int)row, settings_tries[which].path) && count < UI_LIST_MOST)
-                                        settings.list.id[count++] = (unsigned short)(SETTINGS_TRY + which);
-                        settings.list.id[count++] = (unsigned short)row;
+                        count = settings_try_emit((int)row, true, count);
+                        if (count < UI_LIST_MOST)
+                                settings.list.id[count++] = (unsigned short)row;
                         count = settings_sub_rows((int)row, count);
-                        for (int which = 0; which < SETTINGS_TRIES && !settings_filter_length(); which++)
-                                if (!settings_tries[which].before && settings_row_is((int)row, settings_tries[which].path) && count < UI_LIST_MOST)
-                                        settings.list.id[count++] = (unsigned short)(SETTINGS_TRY + which);
+                        count = settings_try_emit((int)row, false, count);
                 }
-        // The rows of a list come after, each in the group of its feed: the group is the list's, so it is found once for the list.
         for (int list = 0; list < SETTINGS_LISTS; list++)
         {
                 int group = settings_group_of((int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS);
@@ -3020,24 +2719,18 @@ static fn settings_rebuild(void)
                 {
                         int row = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + at;
 
-                        if (count < UI_LIST_MOST && (settings_filter_length() ? settings_matches(row) : group == settings.page.chosen))
-                        {
-                                settings.list.id[count++] = (unsigned short)row;
-                                count = settings_drive_rows(row, count);
-                        }
+                        if (count < UI_LIST_MOST && (filtered ? settings_matches(row) : group == settings.page.chosen))
+                                settings.list.id[count++] = (unsigned short)row, count = settings_drive_rows(row, count);
                 }
         }
-        // The About section (Moonwater logo, Made By Dawn Larsson / dawning.dev, Discord, GitHub): at the bottom of System, and found by the filter.
         for (int which = 0; which < SETTINGS_ABOUT_COUNT && count < UI_LIST_MOST; which++)
         {
                 int id = SETTINGS_ABOUT + which;
 
-                if (settings_filter_length() ? settings_matches(id) : settings.page.chosen == settings_system_group())
+                if (filtered ? settings_matches(id) : settings.page.chosen == settings_system_group())
                         settings.list.id[count++] = (unsigned short)id;
         }
         settings.list.count = count;
-        // A row typed in that is no longer listed (the group changed under it, or a window asked for another page) is not typed in any more:
-        // its field closes, so the keys do not go on into a field nobody sees.
         if (settings_editing() >= 0 && settings_pos(settings_editing()) < 0)
                 settings_edit_end();
         if (settings.page.menu_row >= 0 && settings_pos(settings.page.menu_row) < 0)
@@ -3146,15 +2839,7 @@ static fn settings_generic_more(const char address_to text, positive size)
         settings.pool_used = at + size + 1;
 }
 
-/*
-        The rows of moonwater help's main page as rows of All commands. A row
-        is two blanks, its command, two blanks or more and what it does; a
-        command too long for that has what it does on the line under it, and
-        a line indented far under a row is more of what that row does. The
-        section names (no indent) and the blank lines between the sections are
-        skipped; the notes are indented past a row's two blanks, so they are
-        no row.
-*/
+// Parse `moonwater help` output into All commands rows.
 static fn settings_help(const char address_to said, positive length)
 {
         char line[SETTINGS_PROBE];
@@ -3191,13 +2876,6 @@ static fn settings_help(const char address_to said, positive length)
 
 /* ---- what to run ---- */
 
-/*
-        The words that change a row: the command, the row's verb and the
-        value (none for an action), into words with a null after them. A
-        value that is a list is its words. Never a shell's: a name typed is
-        one word, whatever is in it. Answers how many, none when they do
-        not fit.
-*/
 static positive settings_command(const struct settings_row address_to row, string_address command, const char address_to value,
                                  string_address address_to words, positive room, b32 asking)
 {
@@ -3214,26 +2892,18 @@ static positive settings_command(const struct settings_row address_to row, strin
                 if (row->flags & SETTINGS_SPLIT)
                         return settings_tokens(value, settings_large->split, sizeof(settings_large->split), words, count, room);
                 words[count++] = (string_address)value;
-                // An ink is chosen by its name and set by its rrggbb.
                 if (row->flags & SETTINGS_INK)
                 {
-                        positive inks;
-                        const struct settings_ink address_to table = settings_ink_table(row, &inks);
+                        const struct settings_ink address_to ink = settings_ink_find(row, value, false);
 
-                        for (positive at = 0; at < inks; at++)
-                                if (string_equals((string_address)value, (string_address)table[at].name))
-                                        words[count - 1] = (string_address)table[at].colour;
+                        if (ink)
+                                words[count - 1] = (string_address)ink->colour;
                 }
         }
         words[count] = null;
         return count;
 }
 
-/*
-        The words that run a row of All commands with args: the command, the
-        row's verb and then args as words. The any row has the verb in args.
-        Answers how many, none when they do not fit.
-*/
 static positive settings_generic_words(int row, const char address_to args, string_address address_to words, positive room)
 {
         char joined[SETTINGS_VALUE + SETTINGS_TYPED + 2] = {0};
@@ -3253,7 +2923,6 @@ static positive settings_generic_words(int row, const char address_to args, stri
         return settings_tokens(joined, settings_large->split, sizeof(settings_large->split), words, 1, room);
 }
 
-// Whether words (what follows moonwater) are a command that ends what a person has or has going, and so asks twice.
 static b32 settings_asks_for(string_address address_to words, positive count)
 {
         for (positive each = 0; each < sizeof(settings_asks) / sizeof(settings_asks[0]); each++)
@@ -3269,31 +2938,23 @@ static b32 settings_asks_for(string_address address_to words, positive count)
         return false;
 }
 
-// Whether a row of All commands asks twice whatever is typed after its verb.
 static b32 settings_row_asks(int row)
 {
         const struct settings_generic address_to generic = settings_generic_of(row);
         char head[SETTINGS_VALUE];
         string_address words[SETTINGS_WORDS];
-        positive count = 0, size;
+        positive count;
 
         if (!generic)
                 return false;
-        size = generic->verb;
-        memory_copy(head, settings_large->pool + generic->command, size);
-        head[size] = 0;
+        memory_copy(head, settings_large->pool + generic->command, generic->verb);
+        head[generic->verb] = 0;
         count = settings_tokens(head, settings_large->split, sizeof(settings_large->split), words, 0, SETTINGS_WORDS);
         return count && settings_asks_for(words, count);
 }
 
 /* ---- what a command said, as a card ---- */
 
-/*
-        What the verb said, kept in the card: its lines with the escapes and
-        the control characters taken out and the blanks at their ends, the
-        "[Moonwater] " a verb starts its lines with taken off, and its
-        indentation kept. No blank line ends it.
-*/
 static fn settings_card_fill(void)
 {
         char line[SETTINGS_PROBE];
@@ -3314,7 +2975,6 @@ static fn settings_card_fill(void)
         }
         while (made && settings_large->card[made - 1] == '\n')
                 made--;
-        // The lines the buffer did not keep are the card's last line: how many there were.
         if (settings.runner.cut_lines && made + SETTINGS_ITEM_LABEL < sizeof(settings_large->card))
         {
                 char note[SETTINGS_ITEM_LABEL];
@@ -3330,13 +2990,11 @@ static fn settings_card_fill(void)
         ui_lines_set(&settings.card_text, settings_large->card, made, settings_large->card_at, settings_large->card_size, SETTINGS_CARD_LINES);
 }
 
-// The card shown with the title of the command that made it.
 static fn settings_card_open(const char address_to title)
 {
         settings_card_fill();
         string_copy_bounded((string_address)settings.card_title, (string_address)title, sizeof(settings.card_title));
-        settings.page.card = true;
-        settings.card.scroll = 0;
+        settings.page.card = true, settings.card.scroll = 0;
         ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
         settings_layout();
         ui_page_redraw(&settings.page);
@@ -3344,43 +3002,21 @@ static fn settings_card_open(const char address_to title)
 
 static fn settings_card_leave(void)
 {
-        settings.page.card = false;
-        settings.status[0] = 0;
+        settings.page.card = false, settings.status[0] = 0;
         settings_layout();
         ui_page_redraw(&settings.page);
 }
 
 /* ---- the verbs ---- */
 
-// What the window says of what was just done or refused. The words are kept; the page has no status line, so they are drawn nowhere.
-static fn settings_say(string_address text)
-{
-        string_copy_bounded((string_address)settings.status, text, sizeof(settings.status));
-}
-
+static fn settings_say(string_address text) { string_copy_bounded((string_address)settings.status, text, sizeof(settings.status)); }
 static fn settings_complete(b32 killed, positive status);
 static fn settings_waiting_say(void);
 static b32 settings_waits(int row);
+static fn settings_job_done(struct ui_job address_to j, b32 killed, positive status) { (void)j; settings_complete(killed, status); }
+static fn settings_job_data(struct ui_job address_to j) { (void)j; settings_waiting_say(); }
+static fn settings_runner_ready(void) { settings.runner.done = settings_job_done; settings.runner.data = settings_job_data; }
 
-static fn settings_job_done(struct ui_job address_to j, b32 killed, positive status)
-{
-        (void)j;
-        settings_complete(killed, status);
-}
-
-static fn settings_job_data(struct ui_job address_to j)
-{
-        (void)j;
-        settings_waiting_say();
-}
-
-static fn settings_runner_ready(void)
-{
-        settings.runner.done = settings_job_done;
-        settings.runner.data = settings_job_data;
-}
-
-// How long the verb running may take, in nanoseconds: a feed's reading, a join's handshake, a pairing's code, or the standard.
 static positive settings_most(void)
 {
         return settings.job == SETTINGS_JOB_FEED  ? (positive)SETTINGS_FEED_WAIT_NS
@@ -3389,12 +3025,6 @@ static positive settings_most(void)
                                                   : (positive)SETTINGS_WAIT_NS;
 }
 
-/*
-        A verb run with its output to a pipe this end reads, and for its input
-        what is in input (a password, which the verb takes from a line of its
-        standard input and not from its words, where ps would show it) or
-        nothing; false when it could not be.
-*/
 static b32 settings_start(string_address address_to words, positive count, const char address_to input)
 {
         positive limit = settings.job_sets && settings.job >= SETTINGS_ANY ? 0 : settings_most();
@@ -3403,15 +3033,12 @@ static b32 settings_start(string_address address_to words, positive count, const
         return ui_job_start(&settings.runner, words, count, input, settings_large->said, sizeof(settings_large->said), limit);
 }
 
-// The command's words as one line, after "moonwater", into text.
 static fn settings_join(string_address address_to words, positive count, char address_to text, positive room)
 {
         string_copy_bounded((string_address)text, (string_address) "moonwater", room);
         for (positive at = 1; at < count; at++)
-        {
-                string_append_bounded((string_address)text, (string_address) " ", room);
+                string_append_bounded((string_address)text, (string_address) " ", room),
                 string_append_bounded((string_address)text, words[at], room);
-        }
 }
 
 /*
@@ -3520,7 +3147,7 @@ static positive settings_not_understood(void)
         return failed;
 }
 
-// The next verb to run: a change first, then the rows not yet asked, then help.
+// Next verb to run: queued changes first, then unread rows, then help.
 static fn settings_next_job(void)
 {
         string_address words[SETTINGS_WORDS];
@@ -3530,12 +3157,10 @@ static fn settings_next_job(void)
         {
                 if (settings.queued)
                 {
-                        settings.job = settings.queue[0].row;
-                        settings.job_sets = true;
+                        settings.job = settings.queue[0].row, settings.job_sets = true;
                         memory_copy(settings.job_value, settings.queue[0].value, sizeof(settings.job_value));
                         settings.queued--;
                         memory_copy(settings.queue, settings.queue + 1, settings.queued * sizeof(settings.queue[0]));
-                        // Nothing a change carried (a passphrase) stays in the slot it leaves.
                         memory_zero(&settings.queue[settings.queued], sizeof(settings.queue[0]));
                 }
                 else if (settings_unread_any())
@@ -3544,59 +3169,37 @@ static fn settings_next_job(void)
 
                         while (!settings_unread_is(first))
                                 first++;
-                        settings.job = (int)first;
+                        settings.job = (int)first, settings.job_sets = false;
                         settings_unread_set(first, 0);
-                        settings.job_sets = false;
                 }
                 else if (settings.help == 1)
-                {
-                        settings.job = SETTINGS_JOB_HELP;
-                        settings.job_sets = false;
-                        settings.help = 2;
-                }
+                        settings.job = SETTINGS_JOB_HELP, settings.job_sets = false, settings.help = 2;
                 else
                         return;
 
                 if (settings.job == SETTINGS_JOB_HELP)
-                {
-                        words[0] = settings.moonwater;
-                        words[1] = (string_address) "help";
-                        words[2] = null;
-                        count = 2;
-                }
+                        words[0] = settings.moonwater, words[1] = (string_address) "help", words[2] = null, count = 2;
+                else if (settings.job == SETTINGS_JOB_IDENTIFY)
+                        words[0] = settings.moonwater, words[1] = (string_address) "canvas", words[2] = (string_address) "identify", words[3] = null, count = 3;
                 else if (settings.job == SETTINGS_JOB_ACT)
                 {
                         const char address_to pass = settings_act_words(words);
+                        b32 started = words[0] && settings_start(words, 4 + (positive)(pass != null), pass);
 
-                        count = words[0] ? 4 + (positive)(pass != null) : 0;
-                        if (count && settings_start(words, count, pass))
-                        {
-                                // The password went to the verb's input; none is left here.
-                                memory_zero(settings.job_value, sizeof(settings.job_value));
-                                return;
-                        }
                         memory_zero(settings.job_value, sizeof(settings.job_value));
+                        if (started)
+                                return;
                         count = 0;
-                }
-                else if (settings.job == SETTINGS_JOB_IDENTIFY)
-                {
-                        words[0] = settings.moonwater;
-                        words[1] = (string_address) "canvas";
-                        words[2] = (string_address) "identify";
-                        words[3] = null;
-                        count = 3;
                 }
                 else if (settings.job >= SETTINGS_ANY)
                         count = settings_generic_words(settings.job, settings.job_value, words, SETTINGS_WORDS);
                 else
-                        count = settings_command(&settings_rows[settings.job], settings.moonwater, settings.job_value, words,
-                                                 SETTINGS_WORDS, !settings.job_sets);
+                        count = settings_command(&settings_rows[settings.job], settings.moonwater, settings.job_value, words, SETTINGS_WORDS, !settings.job_sets);
                 if (count && settings_start(words, count, null))
                 {
                         if (settings.job >= SETTINGS_ANY)
                         {
-                                char text[SETTINGS_STATUS - 24];
-                                char line[SETTINGS_STATUS];
+                                char text[SETTINGS_STATUS - 24], line[SETTINGS_STATUS];
 
                                 settings_join(words, count, text, sizeof(text));
                                 language_format(line, sizeof(line), WORDS(settings_running), text);
@@ -3604,11 +3207,8 @@ static fn settings_next_job(void)
                         }
                         return;
                 }
-
                 if (settings.job_sets)
-                        settings_say((string_address)(count || settings.job < SETTINGS_ANY
-                                                          ? WORDS(settings_cannot_run)
-                                                          : WORDS(settings_too_many)));
+                        settings_say((string_address)(count || settings.job < SETTINGS_ANY ? WORDS(settings_cannot_run) : WORDS(settings_too_many)));
                 else if (settings.job >= 0)
                         settings.state[settings.job] = SETTINGS_FAILED;
                 ui_page_redraw(&settings.page);
@@ -3787,29 +3387,40 @@ static b32 settings_starts(const char address_to line, const char address_to pre
         return !memory_compare(line, prefix, size);
 }
 
-// A name into an item's label, cut to what it holds; a name a person did not make is shown as it was said.
+// Copy bounded slice into buffer, NUL-terminated.
+static fn settings_item_word(char address_to into, positive room, const char address_to text, positive size)
+{
+        positive took = size >= room ? room - 1 : size;
+
+        memory_copy(into, text, took);
+        into[took] = 0;
+}
+
 static fn settings_item_label(struct settings_item address_to item, const char address_to name, positive size)
 {
-        size = size >= sizeof(item->label) ? sizeof(item->label) - 1 : size;
-        memory_copy(item->label, name, size);
-        item->label[size] = 0;
+        settings_item_word(item->label, sizeof(item->label), name, size);
 }
 
-// Whether moonwater can join what a network asks for: open, WPA2, WPA3 and the two together, with protected management frames.
+static fn settings_note_add(struct settings_item address_to items, positive address_to count, unsigned char where, const char address_to text, positive size)
+{
+        if (*count >= SETTINGS_LIST_ROWS)
+                return;
+        items[*count].kind = SETTINGS_NOTE;
+        items[*count].where = where;
+        settings_item_label(&items[(*count)++], text, size);
+}
+
+// Whether moonwater can join this Wi-Fi security type.
 static b32 settings_joinable(const char address_to security)
 {
-        return string_equals((string_address)security, (string_address) "open") ||
-               string_equals((string_address)security, (string_address) "WPA2") ||
-               string_equals((string_address)security, (string_address) "WPA2/3") ||
-               string_equals((string_address)security, (string_address) "WPA3") || string_equals((string_address)security, (string_address) "PMF");
+        static const char address_to const ok[] = {"open", "WPA2", "WPA2/3", "WPA3", "PMF"};
+
+        for (positive k = 0; k < sizeof(ok) / sizeof(ok[0]); k++)
+                if (string_equals((string_address)security, (string_address)ok[k]))
+                        return true;
+        return false;
 }
 
-/*
-        One line of what a verb said, past its label: where it is in line
-        (kept with its indentation, which says what kind of line it is), its
-        length without the blanks that end it. False at the end of what was
-        said.
-*/
 static b32 settings_feed_line(positive address_to at, char address_to line, positive room, char address_to address_to text,
                               positive address_to size)
 {
@@ -3822,15 +3433,11 @@ static b32 settings_feed_line(positive address_to at, char address_to line, posi
         while (length > skip && line[length - 1] == ' ')
                 length--;
         line[length] = 0;
-        address_to text = line + skip;
-        address_to size = length - skip;
+        address_to text = line + skip, address_to size = length - skip;
         return true;
 }
 
-/*
-        What moonwater wifi said, as the list of networks: parsed by ui_wifi_parse (heard strongest first, then saved
-        not heard, plus any status note line), and mapped into settings_large->item[0].
-*/
+// Parse `moonwater wifi` output via ui_wifi_parse into settings_large->item[0].
 static fn settings_feed_wifi(void)
 {
         struct settings_item address_to items = settings_large->item[0];
@@ -3854,11 +3461,8 @@ static fn settings_feed_wifi(void)
                               (nets[i].flags & UI_WIFI_OPEN ? SETTINGS_ITEM_OPEN : 0) |
                               ((nets[i].flags & UI_WIFI_HEARD) && !settings_joinable(item->security) ? SETTINGS_ITEM_CANNOT : 0);
         }
-        if (note[0] && count < SETTINGS_LIST_ROWS)
-        {
-                items[count].kind = SETTINGS_NOTE;
-                string_copy_bounded((string_address)items[count++].label, (string_address)note, sizeof(items[0].label));
-        }
+        if (note[0])
+                settings_note_add(items, &count, 0, note, string_length((string_address)note));
         settings.item_count[0] = (unsigned short)count;
 }
 
@@ -4017,21 +3621,22 @@ static long settings_share_of(unsigned long long part, unsigned long long whole,
         return whole ? (long)((part * scale + whole / 2) / whole) : 0;
 }
 
-/*
-        A drive's heading over its strip: at its start the share of the disk its partitions take (all but the free room the host
-        lists, so the alignment no segment shows and the partitions not shown are in it), at its end how many bytes that is of the
-        whole, as the sizes are said: 97% partitioned, 917 GB / 947 GB. A disk with no partition table says so, and its size.
-*/
 static char settings_drive_share[SETTINGS_ITEM_LABEL], settings_drive_amount[2 * SETTINGS_SIZE_TEXT + 16];
+
+static unsigned long long settings_drive_free(const struct settings_item address_to item)
+{
+        unsigned long long free = 0;
+
+        for (positive at = 0; at < item->segment_count; at++)
+                free += item->segment_role[at] == UI_STRIP_FREE ? item->segment_bytes[at] : 0;
+        return free;
+}
 
 static fn settings_drive_heading(const struct settings_item address_to item, struct ui_row address_to row)
 {
         char used_text[SETTINGS_SIZE_TEXT], total_text[SETTINGS_SIZE_TEXT];
-        unsigned long long free = 0, used;
+        unsigned long long free = settings_drive_free(item), used = item->total > free ? item->total - free : 0;
 
-        for (positive at = 0; at < item->segment_count; at++)
-                free += item->segment_role[at] == UI_STRIP_FREE ? item->segment_bytes[at] : 0;
-        used = item->total > free ? item->total - free : 0;
         settings_size_text(item->total, total_text, sizeof(total_text));
         settings_size_text(used, used_text, sizeof(used_text));
         if (item->segment_count == 1 && item->segment_role[0] == UI_STRIP_UNPARTITIONED)
@@ -4043,7 +3648,6 @@ static fn settings_drive_heading(const struct settings_item address_to item, str
         {
                 long percent = settings_share_of(used, item->total, 100);
 
-                // A disk with free room is not said to be wholly partitioned, however little the room is.
                 language_format(settings_drive_share, sizeof(settings_drive_share), WORDS(settings_partitioned), free && percent > 99 ? 99l : percent);
                 language_format(settings_drive_amount, sizeof(settings_drive_amount), WORDS(settings_used_of), used_text, total_text);
         }
@@ -4054,26 +3658,13 @@ static fn settings_drive_strip(const struct settings_item address_to item, struc
 {
         if (!item->segment_count || !item->segment_role)
                 return;
-        row->tall = true;
-        row->strip_bytes = item->segment_bytes;
-        row->strip_roles = item->segment_role;
-        row->strip_count = item->segment_count;
+        row->tall = true, row->strip_bytes = item->segment_bytes, row->strip_roles = item->segment_role, row->strip_count = item->segment_count;
         settings_drive_heading(item, row);
 }
 
-// Whether a device of the list is a drive: one of the machine's, or a USB device that holds one.
-static b32 settings_item_storage(const struct settings_item address_to item)
-{
-        return item && (item->flags & (SETTINGS_ITEM_DRIVE | SETTINGS_ITEM_DISK));
-}
+static b32 settings_item_storage(const struct settings_item address_to item) { return item && (item->flags & (SETTINGS_ITEM_DRIVE | SETTINGS_ITEM_DISK)); }
+static const char address_to settings_drive_name(const struct settings_item address_to item) { return item->flags & SETTINGS_ITEM_DISK ? item->port : item->label; }
 
-// The name a drive's partitions are remembered as showing by: a USB drive's port (two of one kind have one name), any other its name.
-static const char address_to settings_drive_name(const struct settings_item address_to item)
-{
-        return item->flags & SETTINGS_ITEM_DISK ? item->port : item->label;
-}
-
-// A drive's partitions: its segments that are not free room (a disk with no table has none).
 static int settings_partitions_of(const struct settings_item address_to item)
 {
         int count = 0;
@@ -4083,12 +3674,6 @@ static int settings_partitions_of(const struct settings_item address_to item)
         return count;
 }
 
-/*
-        The rows under a drive's row, listed after it from position count: the disclosure, whenever the drive has partitions or the
-        host says some are not shown; and while they are open, and while they shut (they fold away on the spring), a row for each
-        partition in the order they are on the disk, a row of the partitions not shown, and a row of the free room, the last.
-        Returns the new count.
-*/
 static int settings_drive_rows(int row, int count)
 {
         const struct settings_item address_to item = settings_item(row);
@@ -4098,10 +3683,9 @@ static int settings_drive_rows(int row, int count)
         if (!settings_item_storage(item) || !(settings_partitions_of(item) || item->segment_more))
                 return count;
         settings_sub_owner = row;
-        next = settings_sub_put(section, false, null, "", count);
+        next = settings_sub_add(section, false, null, "", 0, SETTINGS_SUB_PARTITIONS, 0, count);
         if (next == count)
                 return count;
-        settings_sub[settings_sub_count - 1].action = SETTINGS_SUB_PARTITIONS;
         count = next;
         if (!settings_expanded[row] && !settings_fold_at[row])
                 return count;
@@ -4116,17 +3700,14 @@ static int settings_drive_rows(int row, int count)
                 }
                 if ((part == SETTINGS_PART_MORE && !item->segment_more) || (part == SETTINGS_PART_FREE && !free))
                         continue;
-                next = settings_sub_put(section, false, null, "", count);
+                next = settings_sub_add(section, false, null, "", 0, SETTINGS_SUB_PARTITION, part, count);
                 if (next == count)
                         break;
-                settings_sub[settings_sub_count - 1].action = SETTINGS_SUB_PARTITION;
-                settings_sub[settings_sub_count - 1].part = part;
                 count = next;
         }
         return count;
 }
 
-// The drive whose disclosure a row is (a line under its row), or -1.
 static int settings_partitions_owner(int row)
 {
         int at;
@@ -4135,13 +3716,6 @@ static int settings_partitions_owner(int row)
                settings_sub[at].action == SETTINGS_SUB_PARTITIONS ? settings_sub[at].owner : -1;
 }
 
-/*
-        A row under a drive, described for the kit as a share row (UI_ROW_SHARE). The disclosure: its chevron, turning with the fold,
-        the word for partitions and how many the host shows. A partition: its square of its role's colour, its name (the partition's,
-        else its role's word), its role's word in the quiet ink after a name that does not say it, its size and its share of the drive
-        to a tenth of a percent. The partitions not shown: how many, in the quiet ink, with the bytes the other rows leave. The free
-        room: all that the host lists, its square the track's. Each but the disclosure is as tall as the drive's fold.
-*/
 static char settings_part_size[SETTINGS_SIZE_TEXT], settings_part_share[SETTINGS_ITEM_LABEL], settings_part_label[SETTINGS_ITEM_LABEL];
 
 static fn settings_part_describe(const struct settings_sub address_to sub, struct ui_row address_to row)
@@ -4173,11 +3747,7 @@ static fn settings_part_describe(const struct settings_sub address_to sub, struc
                 row->aside = name[0] && !settings_name_says(name, role) ? role : null;
         }
         else if (sub->part == SETTINGS_PART_FREE)
-        {
-                for (positive at = 0; at < item->segment_count; at++)
-                        bytes += item->segment_role[at] == UI_STRIP_FREE ? item->segment_bytes[at] : 0;
-                row->swatch = UI_STRIP_FREE + 1, row->label = WORDS(settings_role_free);
-        }
+                bytes = settings_drive_free(item), row->swatch = UI_STRIP_FREE + 1, row->label = WORDS(settings_role_free);
         else
         {
                 unsigned long long shown = 0;
@@ -4196,10 +3766,6 @@ static fn settings_part_describe(const struct settings_sub address_to sub, struc
         row->amount = settings_part_size, row->share = settings_part_share;
 }
 
-/*
-        After a reading of the device list, each row of it shows its partitions as its drive's name says (settings_drives_open): one
-        whose drive is not what the row showed is open or shut at once, and a row that is no drive's is shut.
-*/
 static fn settings_drive_follow(void)
 {
         for (int at = 0; at < SETTINGS_LIST_ROWS; at++)
@@ -4214,7 +3780,6 @@ static fn settings_drive_follow(void)
         }
 }
 
-// A device's state in the language: the host's word for it, or what the host said when it is none of them.
 static const char address_to settings_state_word(const char address_to state)
 {
         static const struct
@@ -4232,15 +3797,6 @@ static const char address_to settings_state_word(const char address_to state)
                 if (string_equals((string_address)state, (string_address)table[at].key))
                         return language_text(table[at].text);
         return state;
-}
-
-// A word of a line into room bytes: what does not fit is cut off.
-static fn settings_item_word(char address_to into, positive room, const char address_to text, positive size)
-{
-        positive took = size >= room ? room - 1 : size;
-
-        memory_copy(into, text, took);
-        into[took] = 0;
 }
 
 /*
@@ -4308,17 +3864,7 @@ static fn settings_segment_name(char address_to into, const char address_to text
         into[took] = 0;
 }
 
-/*
-        The devices the system sees, as device list says them: two blanks, then the name a press allows or blocks (a port,
-        or a drive's name), the kind, the size and the state, which ends the line: allowed, blocked or waiting. A line that does
-        not say allowed is not allowed. A drive's line has drive as its second word and is a note: no verb holds a drive, so a
-        press on it does nothing. A drive's segment lines come after it, four blanks and part START BYTES ROLE NAME, and the
-        strip is those; a list from before the strip has none and reads as it did.
-*/
-/*
-        A drive's line from its word after the name (word is the blank after it): "NAME drive N MB STATE". The name is the label, N MB
-        is the size (in GB from 1000 MB, as the heading says it), and the state is what the line says after the size.
-*/
+// Parse a drive line ("NAME drive N MB STATE") from after " drive ".
 static fn settings_item_drive(struct settings_item address_to item, const char address_to name, positive name_len, struct settings_cursor c)
 {
         unsigned long long megabytes = sc_u64(&c, 1000000000000ull);
@@ -4332,43 +3878,39 @@ static fn settings_item_drive(struct settings_item address_to item, const char a
         settings_item_word(item->state, sizeof(item->state), c.s, c.n);
 }
 
-// The devices of the device list in the order of their sections (settings_device_section), each section's in the order they came.
+static fn settings_item_swap(struct settings_item address_to a, struct settings_item address_to b)
+{
+        struct settings_item tmp = *a;
+
+        *a = *b, *b = tmp;
+}
+
 static fn settings_device_order(struct settings_item address_to items, positive count)
 {
         for (positive at = 1; at < count; at++)
                 for (positive back = at; back > 0 && settings_device_section(&items[back]) < settings_device_section(&items[back - 1]); back--)
-                {
-                        struct settings_item moved = items[back];
-
-                        items[back] = items[back - 1];
-                        items[back - 1] = moved;
-                }
+                        settings_item_swap(&items[back], &items[back - 1]);
 }
 
-// Binds a drive's segment arrays to the next free slot in settings_large->drive (false when all SETTINGS_DRIVES slots are in use).
 static b32 settings_drive_bind(struct settings_item address_to item, positive address_to used)
 {
+        struct settings_drive address_to d;
+
         if (*used >= SETTINGS_DRIVES)
                 return false;
-        {
-                struct settings_drive address_to d = &settings_large->drive[(*used)++];
-
-                item->segment_role = d->role;
-                item->segment_bytes = d->bytes;
-                item->segment_name = d->name;
-        }
+        d = &settings_large->drive[(*used)++];
+        item->segment_role = d->role, item->segment_bytes = d->bytes, item->segment_name = d->name;
         return true;
 }
 
 static fn settings_feed_hardware(void)
 {
-        struct settings_item address_to items = settings_large->item[2];
+        struct settings_item address_to items = settings_large->item[2], address_to last = null;
         char line[SETTINGS_PROBE];
         char address_to text;
         positive at, size, count = 0, hidden = 0, drives = 0;
-        b32 open = false; // the row before is a drive that is kept: the part lines after it are its strip
-        unsigned long long spanned = 0; // the bytes of the open drive's part lines so far, those no segment shows among them
-        struct settings_item address_to last = null; // the device of the last device line, null where that line was past the rows
+        b32 open = false;
+        unsigned long long spanned = 0;
 
         memory_zero(items, sizeof(settings_large->item[2]));
         memory_zero(settings_large->drive, sizeof(settings_large->drive));
@@ -4376,79 +3918,60 @@ static fn settings_feed_hardware(void)
         {
                 struct settings_cursor c = {text, size};
 
-                if (sc_eat(&c, "    part "))
+                if (sc_eat(&c, "    "))
                 {
-                        struct settings_item address_to drive = open ? &items[count - 1] : null;
-                        unsigned long long bytes;
-                        positive role_len;
-                        const char address_to role;
-                        int code;
-
-                        sc_word(&c, null);
-                        sc_spaces(&c);
-                        bytes = sc_u64(&c, 1844674407370955160ull);
-                        sc_spaces(&c);
-                        role = sc_word(&c, &role_len);
-                        code = settings_role_code(role, role_len);
-                        sc_spaces(&c);
-                        // The drive is as large as its line says or as its part lines add up to, whichever is more (the line's MB is cut).
-                        if (drive)
+                        if (sc_eat(&c, "part "))
                         {
-                                spanned = spanned + bytes < spanned ? ~0ull : spanned + bytes;
-                                drive->total = spanned > drive->total ? spanned : drive->total;
+                                struct settings_item address_to drive = open ? &items[count - 1] : null;
+                                unsigned long long bytes;
+                                positive role_len;
+                                int code;
+
+                                sc_word(&c, null), sc_spaces(&c);
+                                bytes = sc_u64(&c, 1844674407370955160ull), sc_spaces(&c);
+                                code = settings_role_code(sc_word(&c, &role_len), role_len), sc_spaces(&c);
+                                if (drive)
+                                        spanned = spanned + bytes < spanned ? ~0ull : spanned + bytes,
+                                        drive->total = spanned > drive->total ? spanned : drive->total;
+                                if (drive && drive->segment_role && code >= 0 && drive->segment_count < SETTINGS_SEGMENTS && (code != 4 || bytes > SETTINGS_ALIGNMENT))
+                                        drive->segment_bytes[drive->segment_count] = bytes,
+                                        settings_segment_name(drive->segment_name[drive->segment_count], c.s, c.n),
+                                        drive->segment_role[drive->segment_count++] = (unsigned char)code;
                         }
-                        // Free room no bigger than the alignment the partitions keep is no room a person can use: it has no segment.
-                        if (drive && drive->segment_role && code >= 0 && drive->segment_count < SETTINGS_SEGMENTS &&
-                            (code != 4 || bytes > SETTINGS_ALIGNMENT))
+                        else if (open && sc_eat(&c, "more "))
                         {
-                                drive->segment_bytes[drive->segment_count] = bytes;
-                                settings_segment_name(drive->segment_name[drive->segment_count], c.s, c.n);
-                                drive->segment_role[drive->segment_count++] = (unsigned char)code;
+                                unsigned long long more = sc_u64(&c, 65535);
+
+                                items[count - 1].segment_more = more > 65535 ? 65535 : (unsigned short)more;
                         }
-                        continue;
-                }
-                // A drive's "more" line, after its parts: the partitions its strip does not show, said in a row under it.
-                if (open && sc_eat(&c, "    more "))
-                {
-                        unsigned long long more = sc_u64(&c, 65535);
-
-                        items[count - 1].segment_more = more > 65535 ? 65535 : (unsigned short)more;
-                        continue;
-                }
-                // A USB device's drive, "    drive NAME N MB" under its line: its size, and the part lines after it are its strip. A
-                // device's second drive is not shown (its part lines are no one's).
-                if (sc_eat(&c, "    drive "))
-                {
-                        struct settings_item address_to port = last;
-                        unsigned long long megabytes;
-
-                        open = port && port->kind == SETTINGS_PORT && !(port->flags & SETTINGS_ITEM_DISK);
-                        sc_word(&c, null);
-                        sc_spaces(&c);
-                        megabytes = sc_u64(&c, 1000000000000ull);
-                        if (open)
+                        else if (sc_eat(&c, "drive "))
                         {
-                                port->flags |= SETTINGS_ITEM_DISK;
-                                port->total = megabytes * 1000000ull;
-                                settings_size_text(port->total, port->size, sizeof(port->size));
-                                open = settings_drive_bind(port, &drives);
-                        }
-                        spanned = 0;
-                        continue;
-                }
-                // Where a drive is, after its segments: "    where internal BUS" or "    where external BUS", an SD card's bus sd.
-                if (sc_eat(&c, "    where "))
-                {
-                        struct settings_item address_to drive = last;
+                                struct settings_item address_to port = last;
+                                unsigned long long megabytes;
 
-                        if (drive && (drive->flags & SETTINGS_ITEM_DRIVE))
-                                drive->where = sc_eat(&c, "external")
-                                                   ? (c.n >= 3 && !memory_compare(c.s + c.n - 3, " sd", 3) ? SETTINGS_WHERE_SD : SETTINGS_WHERE_EXTERNAL)
-                                                   : SETTINGS_WHERE_INTERNAL;
-                        open = false;
+                                open = port && port->kind == SETTINGS_PORT && !(port->flags & SETTINGS_ITEM_DISK);
+                                sc_word(&c, null), sc_spaces(&c);
+                                megabytes = sc_u64(&c, 1000000000000ull);
+                                if (open)
+                                {
+                                        port->flags |= SETTINGS_ITEM_DISK, port->total = megabytes * 1000000ull;
+                                        settings_size_text(port->total, port->size, sizeof(port->size));
+                                        open = settings_drive_bind(port, &drives);
+                                }
+                                spanned = 0;
+                        }
+                        else if (sc_eat(&c, "where "))
+                        {
+                                if (last && (last->flags & SETTINGS_ITEM_DRIVE))
+                                        last->where = sc_eat(&c, "external")
+                                                          ? (c.n >= 3 && !memory_compare(c.s + c.n - 3, " sd", 3) ? SETTINGS_WHERE_SD : SETTINGS_WHERE_EXTERNAL)
+                                                          : SETTINGS_WHERE_INTERNAL;
+                                open = false;
+                        }
+                        else
+                                open = false;
                         continue;
                 }
-                // Any other line ends the open drive, kept or not: a drive whose row is past the list's rows has no strip to read into.
                 open = false;
                 if (sc_eat(&c, "  ") && c.n && c.s[0] != ' ')
                 {
@@ -4456,61 +3979,41 @@ static fn settings_feed_hardware(void)
                         positive name_len;
                         const char address_to name;
 
-                        // A row past the list's rows is not shown: it is counted, and the note under the rows says how many.
                         if (count + 1 >= SETTINGS_LIST_ROWS)
                         {
                                 hidden++, last = null;
                                 continue;
                         }
-                        // A drive (its second word is drive) is a note: shown, and no press reaches a verb that holds nothing.
                         name = sc_word(&c, &name_len);
                         open = sc_eat(&c, " drive ");
                         items[count].kind = open ? SETTINGS_NOTE : SETTINGS_PORT;
                         items[count].flags = (whole.n > 8 && !memory_compare(whole.s + whole.n - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0) |
                                              (open ? SETTINGS_ITEM_DRIVE : 0);
-                        // A drive is inside the machine until its "where" line says otherwise; a USB device, any port, is plugged in.
                         items[count].where = open ? SETTINGS_WHERE_INTERNAL : SETTINGS_WHERE_EXTERNAL;
                         spanned = 0, last = &items[count];
                         if (open)
-                        {
-                                settings_item_drive(&items[count], name, name_len, c);
-                                open = settings_drive_bind(&items[count], &drives);
-                        }
+                                settings_item_drive(&items[count], name, name_len, c), open = settings_drive_bind(&items[count], &drives);
                         else
                                 settings_item_port(&items[count], whole.s, whole.n);
                         count++;
                 }
         }
-        // The devices in the order of their sections, Internal storage and then External devices, each in the order the host said them.
         settings_device_order(items, count);
-        // The rows the list does not hold, and the lines the buffer cut, are a last note: how many were not shown, in the last section.
         hidden += settings.runner.cut_rows;
-        if (hidden && count < SETTINGS_LIST_ROWS)
+        if (hidden)
         {
                 char note[SETTINGS_ITEM_LABEL];
 
                 language_format(note, sizeof(note), WORDS(settings_not_shown), (long)hidden);
-                items[count].kind = SETTINGS_NOTE;
-                items[count].where = count ? items[count - 1].where : SETTINGS_WHERE_NONE;
-                settings_item_label(&items[count++], note, string_length((string_address)note));
+                settings_note_add(items, &count, count ? items[count - 1].where : SETTINGS_WHERE_NONE, note, string_length((string_address)note));
         }
-        // A reading that lists nothing says so, where the devices would be, under no header.
         if (!count)
-        {
-                items[count].kind = SETTINGS_NOTE;
-                items[count].where = SETTINGS_WHERE_NONE;
-                settings_item_label(&items[count++], WORDS(settings_device_none), string_length((string_address)WORDS(settings_device_none)));
-        }
+                settings_note_add(items, &count, SETTINGS_WHERE_NONE, WORDS(settings_device_none), string_length((string_address)WORDS(settings_device_none)));
         settings.item_count[2] = (unsigned short)count;
         settings_drive_follow();
 }
 
-/*
-        What moonwater link said, as the machines linked: a machine's line is its name, two blanks, its key and what it may do
-        (so the name is what comes before the first two blanks, and the line has "...  may " in it); the lines under it, six
-        blanks in, say what the listener last heard of it, stored in detail (with any trailing "  next: ..." CLI hint stripped).
-        A line that says nobody is linked is the list's note. The key is never shown: a person knows a machine by its name.
-*/
+// Parse `moonwater link` peers and last-heard detail lines into settings_large->item[3].
 static fn settings_feed_links(void)
 {
         struct settings_item address_to items = settings_large->item[3];
@@ -4534,10 +4037,8 @@ static fn settings_feed_links(void)
 
                                         settings_item_word(piece, sizeof(piece), c.s, c.n);
                                         if (items[count - 1].detail[0])
-                                                string_append_bounded((string_address)items[count - 1].detail, (string_address) "; ",
-                                                                      sizeof(items[0].detail));
-                                        string_append_bounded((string_address)items[count - 1].detail, (string_address)piece,
-                                                              sizeof(items[0].detail));
+                                                string_append_bounded((string_address)items[count - 1].detail, (string_address) "; ", sizeof(items[0].detail));
+                                        string_append_bounded((string_address)items[count - 1].detail, (string_address)piece, sizeof(items[0].detail));
                                 }
                         }
                 }
@@ -4553,24 +4054,31 @@ static fn settings_feed_links(void)
                                 while (cut + 1 < c.n && (c.s[cut] != ' ' || c.s[cut + 1] != ' '))
                                         cut++;
                                 sc_trim_at(&grants, "  next:");
-                                items[count].kind = SETTINGS_LINK;
-                                items[count].flags = SETTINGS_ITEM_SAVED;
+                                items[count].kind = SETTINGS_LINK, items[count].flags = SETTINGS_ITEM_SAVED;
                                 settings_item_word(items[count].access, sizeof(items[count].access), grants.s, grants.n);
                                 settings_item_label(&items[count++], c.s, cut);
                         }
                         else if (settings_starts(c.s, "nobody"))
-                        {
-                                items[count].kind = SETTINGS_NOTE;
-                                settings_item_label(&items[count++], c.s, c.n);
-                        }
+                                settings_note_add(items, &count, 0, c.s, c.n);
                 }
         }
         settings.item_count[3] = (unsigned short)count;
 }
 
-// Details column headers for the four feed lists (Wi-Fi, Bluetooth, External devices, Waterlink), refreshed on each use for the active language.
+// Details column headers for the four feed lists (Wi-Fi, Bluetooth, External devices, Waterlink).
 static struct ui_columns address_to settings_columns_for(int list)
 {
+        static const struct
+        {
+                unsigned char count, at_end;
+                unsigned short w[4];
+                unsigned int title_id[4];
+        } specs[SETTINGS_LISTS] = {
+            {4, 3, {0, 84, 84, 72},   {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, LANGUAGE_settings_column_security, LANGUAGE_settings_column_signal}},
+            {2, 1, {0, 100, 0, 0},    {LANGUAGE_files_column_name, LANGUAGE_settings_column_status, 0, 0}},
+            {4, 3, {0, 108, 84, 128}, {LANGUAGE_files_column_name, 0, LANGUAGE_settings_column_status, LANGUAGE_settings_column_access}},
+            {3, 0, {0, 140, 180, 0},  {LANGUAGE_files_column_name, LANGUAGE_settings_column_access, LANGUAGE_settings_column_status, 0}},
+        };
         struct ui_columns address_to c;
 
         if (!settings_large || list < 0 || list >= SETTINGS_LISTS)
@@ -4578,26 +4086,15 @@ static struct ui_columns address_to settings_columns_for(int list)
         c = &settings_large->columns[list];
         if (!c->count)
         {
-                c->sorted = -1;
-                c->hover = c->held = -1;
-                if (list == 0)
-                        c->count = 4, c->width[1] = 84, c->width[2] = 84, c->width[3] = 72, c->at_end[3] = true;
-                else if (list == 1)
-                        c->count = 2, c->width[1] = 100, c->at_end[1] = true;
-                else if (list == 2)
-                        c->count = 4, c->width[1] = 108, c->width[2] = 84, c->width[3] = 128, c->at_end[3] = true;
-                else
-                        c->count = 3, c->width[1] = 140, c->width[2] = 180;
+                c->sorted = c->hover = c->held = -1;
+                c->count = specs[list].count;
+                for (int k = 1; k < specs[list].count; k++)
+                        c->width[k] = specs[list].w[k];
+                if (specs[list].at_end)
+                        c->at_end[specs[list].at_end] = true;
         }
-        c->title[0] = WORDS(files_column_name);
-        if (list == 0)
-                c->title[1] = WORDS(settings_column_status), c->title[2] = WORDS(settings_column_security), c->title[3] = WORDS(settings_column_signal);
-        else if (list == 1)
-                c->title[1] = WORDS(settings_column_status);
-        else if (list == 2)
-                c->title[1] = language_of("Port"), c->title[2] = WORDS(settings_column_status), c->title[3] = WORDS(settings_column_access);
-        else
-                c->title[1] = WORDS(settings_column_access), c->title[2] = WORDS(settings_column_status);
+        for (int k = 0; k < specs[list].count; k++)
+                c->title[k] = specs[list].title_id[k] ? language_text(specs[list].title_id[k]) : language_of("Port");
         return c;
 }
 
@@ -4605,55 +4102,35 @@ static int settings_list_compare(int list, int col, const struct settings_item a
 {
         int cmp = 0;
 
-        if (list == 0)
+        if (list == 0 && col == 1)
+                cmp = (a->flags & SETTINGS_ITEM_JOINED ? 0 : a->flags & SETTINGS_ITEM_SAVED ? 1 : 2) -
+                      (b->flags & SETTINGS_ITEM_JOINED ? 0 : b->flags & SETTINGS_ITEM_SAVED ? 1 : 2);
+        else if (list == 0 && col == 2)
+                cmp = (int)string_compare_folded((string_address)a->security, (string_address)b->security);
+        else if (list == 0 && col == 3)
         {
-                if (col == 1)
-                {
-                        int ra = a->flags & SETTINGS_ITEM_JOINED ? 0 : a->flags & SETTINGS_ITEM_SAVED ? 1 : 2;
-                        int rb = b->flags & SETTINGS_ITEM_JOINED ? 0 : b->flags & SETTINGS_ITEM_SAVED ? 1 : 2;
+                int ha = (a->flags & SETTINGS_ITEM_HEARD) != 0, hb = (b->flags & SETTINGS_ITEM_HEARD) != 0;
 
-                        cmp = ra - rb;
-                }
-                else if (col == 2)
-                        cmp = (int)string_compare_folded((string_address)a->security, (string_address)b->security);
-                else if (col == 3)
-                {
-                        int ha = (a->flags & SETTINGS_ITEM_HEARD) != 0, hb = (b->flags & SETTINGS_ITEM_HEARD) != 0;
-
-                        cmp = ha != hb ? ha - hb : (int)a->dbm - (int)b->dbm;
-                }
+                cmp = ha != hb ? ha - hb : (int)a->dbm - (int)b->dbm;
         }
-        else if (list == 2)
-        {
-                if (col == 1)
-                        cmp = (int)string_compare_folded((string_address)a->port, (string_address)b->port);
-                else if (col == 2)
-                        cmp = (int)string_compare_folded((string_address)settings_state_word(a->state), (string_address)settings_state_word(b->state));
-                else if (col == 3)
-                        cmp = ((a->flags & SETTINGS_ITEM_JOINED) ? 0 : 1) - ((b->flags & SETTINGS_ITEM_JOINED) ? 0 : 1);
-        }
-        else if (list == 3)
-        {
-                if (col == 1)
-                        cmp = (int)string_compare_folded((string_address)a->access, (string_address)b->access);
-                else if (col == 2)
-                        cmp = (int)string_compare_folded((string_address)a->detail, (string_address)b->detail);
-        }
-        if (!cmp)
-                cmp = (int)string_compare_folded((string_address)a->label, (string_address)b->label);
-        return cmp;
+        else if (list == 2 && col == 1)
+                cmp = (int)string_compare_folded((string_address)a->port, (string_address)b->port);
+        else if (list == 2 && col == 2)
+                cmp = (int)string_compare_folded((string_address)settings_state_word(a->state), (string_address)settings_state_word(b->state));
+        else if (list == 2 && col == 3)
+                cmp = ((a->flags & SETTINGS_ITEM_JOINED) ? 0 : 1) - ((b->flags & SETTINGS_ITEM_JOINED) ? 0 : 1);
+        else if (list == 3 && col == 1)
+                cmp = (int)string_compare_folded((string_address)a->access, (string_address)b->access);
+        else if (list == 3 && col == 2)
+                cmp = (int)string_compare_folded((string_address)a->detail, (string_address)b->detail);
+        return cmp ? cmp : (int)string_compare_folded((string_address)a->label, (string_address)b->label);
 }
 
 static b32 settings_item_sortable(int list, const struct settings_item address_to item)
 {
-        if (item->kind == SETTINGS_NOTE || item->kind == SETTINGS_ADD)
-                return false;
-        if (list == 2 && settings_device_section(item) != 1)
-                return false;
-        return true;
+        return item->kind != SETTINGS_NOTE && item->kind != SETTINGS_ADD && (list != 2 || settings_device_section(item) == 1);
 }
 
-// Sorts the table rows of feed list according to its ui_columns state, keeping non-table rows (Internal storage, notes, add) in place.
 static fn settings_list_sort(int list)
 {
         struct ui_columns address_to c = settings_columns_for(list);
@@ -4662,36 +4139,48 @@ static fn settings_list_sort(int list)
 
         if (!c || c->sorted < 0 || list < 0 || list >= SETTINGS_LISTS)
                 return;
-        items = settings_large->item[list];
-        count = settings.item_count[list];
+        items = settings_large->item[list], count = settings.item_count[list];
         for (int at = 1; at < count; at++)
-        {
-                if (!settings_item_sortable(list, &items[at]))
-                        continue;
-                for (int back = at; back > 0 && settings_item_sortable(list, &items[back - 1]); back--)
-                {
-                        int cmp = settings_list_compare(list, c->sorted, &items[back - 1], &items[back]);
-
-                        if (c->descending)
-                                cmp = -cmp;
-                        if (cmp <= 0)
-                                break;
+                if (settings_item_sortable(list, &items[at]))
+                        for (int back = at; back > 0 && settings_item_sortable(list, &items[back - 1]); back--)
                         {
-                                struct settings_item moved = items[back];
+                                int cmp = settings_list_compare(list, c->sorted, &items[back - 1], &items[back]);
 
-                                items[back] = items[back - 1];
-                                items[back - 1] = moved;
+                                if ((c->descending ? -cmp : cmp) <= 0)
+                                        break;
+                                settings_item_swap(&items[back], &items[back - 1]);
                         }
-                }
-        }
         if (list == 2)
                 settings_drive_follow();
+}
+
+static fn settings_focus_keep(int list, char address_to keep, positive room)
+{
+        keep[0] = 0;
+        if (settings_list_of(settings.list.focus) == list && settings_item(settings.list.focus))
+                string_copy_bounded((string_address)keep, (string_address)settings_item(settings.list.focus)->label, room);
+}
+
+static fn settings_focus_restore(int list, const char address_to keep, int fallback)
+{
+        int found = fallback;
+
+        if (!keep[0])
+                return;
+        for (int each = 0; each < settings.item_count[list]; each++)
+                if (string_equals((string_address)settings_large->item[list][each].label, (string_address)keep))
+                {
+                        found = each;
+                        break;
+                }
+        if (found >= 0)
+                settings.list.focus = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + found;
 }
 
 static fn settings_columns_sorted(struct ui_columns address_to hit)
 {
         int list = -1;
-        char keep[SETTINGS_ITEM_LABEL] = {0};
+        char keep[SETTINGS_ITEM_LABEL];
 
         if (!settings_large || !hit)
                 return;
@@ -4703,20 +4192,12 @@ static fn settings_columns_sorted(struct ui_columns address_to hit)
                 }
         if (list < 0)
                 return;
-        if (settings_list_of(settings.list.focus) == list && settings_item(settings.list.focus))
-                string_copy_bounded((string_address)keep, (string_address)settings_item(settings.list.focus)->label, sizeof(keep));
+        settings_focus_keep(list, keep, sizeof(keep));
         settings_list_sort(list);
-        if (keep[0])
-                for (int each = 0; each < settings.item_count[list]; each++)
-                        if (string_equals((string_address)settings_large->item[list][each].label, (string_address)keep))
-                        {
-                                settings.list.focus = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + each;
-                                break;
-                        }
+        settings_focus_restore(list, keep, -1);
         settings_rebuild();
 }
 
-// A sum of a list as it stands, to tell whether a reading changed what is shown.
 static positive settings_list_sum(int list)
 {
         positive sum = settings_fnv64_bytes(SETTINGS_FNV64_SEED, settings_large->item[list], sizeof(settings_large->item[list]));
@@ -4726,7 +4207,6 @@ static positive settings_list_sum(int list)
         return sum ^ settings.item_count[list];
 }
 
-// The row whose switch a feed's verb also says the state of, or none.
 static int settings_feed_owner(int feed)
 {
         for (positive at = 0; at < SETTINGS_ROWS && settings_feeds[feed].owner; at++)
@@ -4735,7 +4215,6 @@ static int settings_feed_owner(int feed)
         return -1;
 }
 
-// The feed that keeps up with the group shown, or none.
 static int settings_feed_of_group(void)
 {
         for (positive feed = 0; feed < SETTINGS_FEEDS; feed++)
@@ -4744,21 +4223,20 @@ static int settings_feed_of_group(void)
         return -1;
 }
 
-/*
-        A feed's verb has said its words, or was stopped: they are the rows
-        of its list and the state of its switch. The row the keys are on is
-        found again by its name, so a list that moves under it does not move
-        the keys, and a reading that says what the last said draws nothing.
-*/
 static fn settings_feed_read(b32 killed, b32 failed)
 {
+        static fn (*const parsers[])(void) = {
+            [SETTINGS_FEED_WIFI] = settings_feed_wifi,
+            [SETTINGS_FEED_DEVICES] = settings_feed_devices,
+            [SETTINGS_FEED_HARDWARE] = settings_feed_hardware,
+            [SETTINGS_FEED_LINKS] = settings_feed_links,
+        };
         int feed = settings.feed_list, list = feed, owner = settings_feed_owner(feed), at;
-        char keep[SETTINGS_ITEM_LABEL] = {0};
+        char keep[SETTINGS_ITEM_LABEL];
         positive before, was = 0;
-        b32 changed;
+        b32 changed = false;
 
         settings.feed_due = (positive)ui_kit.now + (positive)settings_feeds[feed].every * 1000000ull;
-        // What is being typed for a row of the list is for the row as it was: nothing is changed under it.
         if (killed || settings_editing() >= (int)SETTINGS_LIST)
                 return;
         if (owner >= 0)
@@ -4771,38 +4249,18 @@ static fn settings_feed_read(b32 killed, b32 failed)
                                                                      settings.value[owner], SETTINGS_VALUE, failed);
                 changed = was != settings.state[owner] || !string_equals((string_address)value, (string_address)settings.value[owner]);
         }
-        else
-                changed = false;
         before = settings_list_sum(list);
-        if (settings_list_of(settings.list.focus) == list && settings_item(settings.list.focus))
-                string_copy_bounded((string_address)keep, (string_address)settings_item(settings.list.focus)->label, sizeof(keep));
+        settings_focus_keep(list, keep, sizeof(keep));
         at = settings.list.focus - (int)SETTINGS_LIST - list * SETTINGS_LIST_ROWS;
-
-        if (settings_feeds[feed].kind == SETTINGS_FEED_WIFI)
-                settings_feed_wifi();
-        else if (settings_feeds[feed].kind == SETTINGS_FEED_HARDWARE)
-                settings_feed_hardware();
-        else if (settings_feeds[feed].kind == SETTINGS_FEED_LINKS)
-                settings_feed_links();
-        else
-                settings_feed_devices();
+        parsers[settings_feeds[feed].kind]();
         settings_list_sort(list);
         settings_layout_check();
         if (settings_list_sum(list) == before && !changed)
                 return;
-
-        // The keys stay on the row of that name; one gone leaves them at the place it was, or the last.
-        if (keep[0])
         {
-                int found = at < settings.item_count[list] ? at : settings.item_count[list] - 1;
+                int fallback = at < settings.item_count[list] ? at : settings.item_count[list] - 1;
 
-                for (int each = 0; each < settings.item_count[list]; each++)
-                        if (string_equals((string_address)settings_large->item[list][each].label, (string_address)keep))
-                        {
-                                found = each;
-                                break;
-                        }
-                settings.list.focus = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + (found < 0 ? 0 : found);
+                settings_focus_restore(list, keep, fallback < 0 ? 0 : fallback);
         }
         settings_rebuild();
 }
@@ -5036,10 +4494,7 @@ static fn settings_waiting_say(void)
         }
 }
 
-/*
-        The verb running has ended, its child reaped: what it said, put where it belongs. killed is a verb stopped for taking too long, or a
-        feed dropped for a change (settings_finished), and status is the child's wait status.
-*/
+// Verb completion: distribute output, trigger follow-up reads, and start next queued job.
 static fn settings_complete(b32 killed, positive status)
 {
         int row = settings.job;
@@ -5048,26 +4503,18 @@ static fn settings_complete(b32 killed, positive status)
         if (settings.job_sets)
         {
                 char line[SETTINGS_STATUS];
-                positive size = 0;
+                positive size;
 
                 if (row >= SETTINGS_ANY)
                         settings_report(killed, status);
                 else
                 {
-                        // The verb's own first words, which say what it did or why it would not; a verb that waits for another
-                        // machine says its last, which is the result of the pairing.
                         size = settings_said_line(line, sizeof(line), settings_waits(row));
-                        if (killed)
-                                settings_say((string_address)WORDS(settings_too_long));
-                        else if (size)
-                                settings_say((string_address)line);
-                        else
-                                settings_say((string_address)(wait_status_code(status) ? WORDS(settings_refused) : WORDS(settings_done)));
+                        settings_say((string_address)(killed ? WORDS(settings_too_long)
+                                                      : size ? line : wait_status_code(status) ? WORDS(settings_refused) : WORDS(settings_done)));
                 }
-                // The pairing's card, if it is up, is made again with the outcome the CLI said last.
                 if (settings_pair_on)
                         settings_pair_end();
-                // What was done to a row of a list is seen at once in the list; any other change may move another row.
                 if (row == SETTINGS_JOB_ACT)
                         settings.feed_due = 0;
                 else
@@ -5084,74 +4531,39 @@ static fn settings_complete(b32 killed, positive status)
                         settings_say((string_address)WORDS(settings_help_more));
         }
         else
-        {
-                // What a row's verb said is what every row waiting to be asked the same of says too: one run for them all.
                 for (positive other = 0; other < SETTINGS_ROWS; other++)
                 {
                         char before[SETTINGS_VALUE];
                         unsigned char was = settings.state[other];
 
-                        if ((int)other != row && !settings_unread_is(other))
-                                continue;
-                        if (!settings_same_verb(&settings_rows[row], &settings_rows[other]))
+                        if (((int)other != row && !settings_unread_is(other)) || !settings_same_verb(&settings_rows[row], &settings_rows[other]))
                                 continue;
                         settings_unread_set(other, 0);
                         string_copy_bounded((string_address)before, (string_address)settings.value[other], sizeof(before));
                         settings.state[other] = killed ? SETTINGS_FAILED
-                                                       : (unsigned char)settings_read(&settings_rows[other], settings_large->said,
-                                                                                       settings.said_length, settings.value[other],
-                                                                                       SETTINGS_VALUE, wait_status_code(status) != 0);
-                        // A row asked again that says what it said is no change to draw.
-                        if (settings.state[other] != was ||
-                            !string_equals((string_address)before, (string_address)settings.value[other]))
+                                                       : (unsigned char)settings_read(&settings_rows[other], settings_large->said, settings.said_length,
+                                                                                      settings.value[other], SETTINGS_VALUE, wait_status_code(status) != 0);
+                        if (settings.state[other] != was || !string_equals((string_address)before, (string_address)settings.value[other]))
                                 settings_reading_changed((int)other);
                 }
-        }
-
         settings_next_job();
-        // An action's button is ready again (or says the next of it is still waiting).
         if (action)
                 ui_page_redraw(&settings.page);
-
-        // The first reading of every row, said once where the machine's log is: how many were unread or not understood.
         if (!settings.told && !settings_unread_any() && settings.child <= 0 && !settings.queued)
         {
                 positive failed = settings_not_understood();
 
                 settings.told = true;
-                // None is a number too: compositor_kmsg writes no number for a zero, which is its way to say none, so the
-                // 0 is the tail here.
                 compositor_kmsg((string_address) "settings: rows unread or not understood when first asked: ", failed,
                                 failed ? (string_address) "" : (string_address) "0");
         }
 }
 
-// Child reaping, state-D leave table, spill counting and non-blocking drain are backed by the kit's struct ui_job runner.
 #define settings_left ui_job_left
-
-static b32 settings_reap(void)
-{
-        settings_runner_ready();
-        return ui_job_reap(&settings.runner);
-}
-
-static b32 settings_left_reap(void)
-{
-        return ui_job_left_reap();
-}
-
-static fn settings_finished(b32 killed)
-{
-        settings_runner_ready();
-        ui_job_finish(&settings.runner, killed);
-}
-
-// A feed's reading under way is dropped, for a change that is wanted now.
-static fn settings_feed_drop(void)
-{
-        if (settings.child > 0 && settings.job == SETTINGS_JOB_FEED)
-                settings_finished(true);
-}
+static b32 settings_reap(void) { settings_runner_ready(); return ui_job_reap(&settings.runner); }
+static b32 settings_left_reap(void) { return ui_job_left_reap(); }
+static fn settings_finished(b32 killed) { settings_runner_ready(); ui_job_finish(&settings.runner, killed); }
+static fn settings_feed_drop(void) { if (settings.child > 0 && settings.job == SETTINGS_JOB_FEED) settings_finished(true); }
 
 /* ---- what a person does ---- */
 
@@ -5161,31 +4573,32 @@ static fn settings_feed_drop(void)
         were too many words, or it ends what a person has and asked for a
         second Enter.
 */
+static fn settings_confirm_say(const char address_to text)
+{
+        char line[SETTINGS_STATUS];
+
+        ui_confirm_line(line, sizeof(line), text);
+        settings_say((string_address)line);
+}
+
 static b32 settings_run(int row, const char address_to args)
 {
         string_address words[SETTINGS_WORDS];
         positive count = settings_generic_words(row, args, words, SETTINGS_WORDS);
 
-        if (!count)
+        if (!count || count == 1)
         {
-                settings_say((string_address)WORDS(settings_too_many));
-                return false;
-        }
-        if (count == 1)
-        {
-                settings_say((string_address)WORDS(settings_type_command));
+                settings_say((string_address)(count ? WORDS(settings_type_command) : WORDS(settings_too_many)));
                 return false;
         }
         if (settings_asks_for(words + 1, count - 1) && !ui_confirm_ask(&settings.confirm, row + 1, args))
         {
-                char line[SETTINGS_STATUS], text[SETTINGS_STATUS];
+                char text[SETTINGS_STATUS];
 
                 settings_join(words, count, text, sizeof(text));
-                ui_confirm_line(line, sizeof(line), text);
-                settings_say((string_address)line);
+                settings_confirm_say(text);
                 return false;
         }
-        // A deliberate command a virtual device typed is not run, and the field keeps it for a hand's Enter.
         if (settings_refused(row, args))
                 return false;
         settings_change(row, args);
@@ -5203,22 +4616,6 @@ static b32 settings_stop(void)
 
 /* ---- the list a choice opens ---- */
 
-/*
-        A choice row opens a list of all its choices under it, the one it
-        has now lit and the keys on it. The list takes every key and every
-        press until it is closed: Up, Down, Home, End, Page Up and Page Down
-        move the keys, a letter goes to the next choice that starts with it,
-        Enter or Space (or a press on a choice) sets the choice the keys
-        are on and closes it, Escape (or a press anywhere else) closes it
-        and leaves the row as it was, and the wheel scrolls it.
-*/
-
-/*
-        The words of a choice: the row's own, or for the Battery picker auto
-        (the first present battery, the default), then each battery the list
-        was taken with, then none. The list is taken when the list opens and
-        kept, so drawing it reads no kernel file.
-*/
 static b32 settings_output_choice(const struct settings_row address_to which, positive index, char address_to into, positive room);
 
 // The row that says whether the audio modem is ready: the Audio modem row, which reads what moonwater link transport says; or -1.
@@ -5415,21 +4812,16 @@ static b32 settings_output_choice(const struct settings_row address_to which, po
         case SETTINGS_OUT_SIZE:
                 if (chosen < 0)
                         return false;
+                if (settings_keep_here(chosen) && index == 0)
                 {
-                        b32 keep = settings_keep_here(chosen);
-
-                        if (keep && index == 0)
-                        {
-                                language_format(into, room, WORDS(settings_size_keep), (long)settings_resize.width, (long)settings_resize.height,
-                                                (long)settings_keep_left());
-                                return true;
-                        }
-                        index -= keep;
-                        if (index >= settings_sizes_of(chosen))
-                                return false;
-                        settings_size_label(table, chosen, (unsigned int)index, into, room);
+                        settings_keep_label(into, room);
                         return true;
                 }
+                index -= settings_keep_here(chosen);
+                if (index >= settings_sizes_of(chosen))
+                        return false;
+                settings_size_label(table, chosen, (unsigned int)index, into, room);
+                return true;
         }
         return false;
 }
@@ -5506,15 +4898,13 @@ static void settings_describe_output(int id, struct ui_row address_to row)
         row->value = settings_row_text(id, chosen);
 }
 
-// A Display dropdown's choice, made: the screen the rows are for, or a turn or a refresh rate the verb is run with for the
-// chosen screen by its name (canvas display NAME rotation|refresh ...). A choice the screen has already is sent nothing.
 static fn settings_output_apply(int row, const char address_to label)
 {
         const struct settings_row address_to which = &settings_rows[row];
         const struct settings_out_spec address_to spec = which->output < 10 ? &settings_out_specs[which->output] : null;
         struct windows address_to table = settings.own.table;
         int at = settings_choice_index(row, label), chosen = settings_map_chosen();
-        char value[SETTINGS_TYPED];
+        char value[SETTINGS_TYPED], back[32], line[SETTINGS_STATUS];
         positive length;
 
         if (at < 0 || !table)
@@ -5527,12 +4917,9 @@ static fn settings_output_apply(int row, const char address_to label)
                 windows_screen_numbers(table, number);
                 screen = settings_map_numbered(number, settings_map_count(), (unsigned int)at + 1);
                 if (screen == chosen)
-                {
                         settings_say((string_address)WORDS(settings_already_set));
-                        return;
-                }
-                settings.map.display = screen;
-                ui_page_redraw(&settings.page);
+                else
+                        settings.map.display = screen, ui_page_redraw(&settings.page);
                 return;
         }
         if (chosen < 0)
@@ -5540,8 +4927,6 @@ static fn settings_output_apply(int row, const char address_to label)
                 settings_say((string_address)WORDS(settings_no_screen));
                 return;
         }
-        // The wallpaper: the same as every screen's takes the screen's own picture away (canvas wallpaper picture none NAME); a picture of
-        // its own is chosen in Files, which has the file.
         if (which->output == SETTINGS_OUT_WALLPAPER)
         {
                 char path[96];
@@ -5559,20 +4944,16 @@ static fn settings_output_apply(int row, const char address_to label)
                 }
                 return;
         }
-        length = settings_map_add(value, sizeof(value), 0, table->output_name[chosen]);
         if (which->output == SETTINGS_OUT_SIZE)
         {
                 b32 keep = settings_keep_here(chosen);
                 unsigned int w, h;
-                char line[SETTINGS_STATUS];
 
-                // The first item while a size waits keeps it.
                 if (keep && at == 0)
                 {
                         settings_resize.on = false;
                         language_format(line, sizeof(line), WORDS(settings_size_kept), (long)settings_resize.width, (long)settings_resize.height);
-                        settings_say((string_address)line);
-                        ui_page_redraw(&settings.page);
+                        settings_say_redraw(line);
                         return;
                 }
                 at -= keep;
@@ -5584,40 +4965,28 @@ static fn settings_output_apply(int row, const char address_to label)
                         settings_say((string_address)WORDS(settings_already_set));
                         return;
                 }
-                // The size it had before is the one a size not kept goes back to; a size chosen while another waits keeps the first one's.
                 if (!keep)
                         settings_resize.old_w = table->output_asked_w[chosen], settings_resize.old_h = table->output_asked_h[chosen];
                 string_copy_bounded((string_address)settings_resize.name, (string_address)table->output_name[chosen], sizeof(settings_resize.name));
                 settings_resize.width = w, settings_resize.height = h;
                 settings_resize.due = (positive)ui_kit.now + SETTINGS_KEEP_NS, settings_resize.seen = false, settings_resize.on = true;
-                length = settings_map_add(value, sizeof(value), length, spec->verb);
-                length = settings_map_number(value, sizeof(value), length, (long)w);
-                length = settings_map_add(value, sizeof(value), length, "x");
-                settings_map_number(value, sizeof(value), length, (long)h);
+                settings_mode_cmd(value, sizeof(value), table->output_name[chosen], spec->verb, w, h, back, sizeof(back));
                 settings_change(row, value);
                 language_format(line, sizeof(line), WORDS(settings_size_ask), (long)w, (long)h, (long)(SETTINGS_KEEP_NS / 1000000000ull));
-                settings_say((string_address)line);
-                ui_page_redraw(&settings.page);
+                settings_say_redraw(line);
                 return;
         }
+        length = settings_map_add(value, sizeof(value), 0, table->output_name[chosen]);
         if (which->output == SETTINGS_OUT_PRIMARY)
         {
                 if ((at == 0) == (chosen == 0))
-                {
                         settings_say((string_address)WORDS(settings_already_set));
-                        return;
-                }
-                // A screen is made the primary; one is not made less than primary except by making another the primary.
-                if (at != 0)
-                {
+                else if (at != 0)
                         settings_say((string_address)WORDS(settings_primary_other));
-                        return;
-                }
-                settings_map_add(value, sizeof(value), length, spec->verb);
-                settings_change(row, value);
+                else
+                        settings_map_add(value, sizeof(value), length, spec->verb), settings_change(row, value);
                 return;
         }
-        // Simple numeric output verbs (rotation, scale, refresh): skip if unchanged, else emit "NAME <verb><value>".
         {
                 long target = 0, current = -1;
                 b32 preferred = false;
@@ -5644,16 +5013,7 @@ static fn settings_output_apply(int row, const char address_to label)
         }
 }
 
-/*
-        A choice's menu is the kit's popup (ui.c's menu defaults), opened on the settings window: its words are its items,
-        the one the row has now is marked and lit, and it is glass, a temporary overlay. It chooses on a release, closes on
-        a press outside, Escape or Left, and its keys are the popup's: the settings window does not see them while it is open.
-        Its words are copied here, since a popup keeps the labels it is given (a & is doubled, so it is no mnemonic).
-*/
-/*
-        The menu's answer, as the runner gives it (ui_popmenu_pump): the popup closes as it answers, and the answer goes to the app.
-        A negative answer is the menu gone (Escape, Left, or the compositor's press outside), and closes the choice.
-*/
+// Choice popup menu handlers.
 static fn settings_chose(int id);
 
 static fn settings_menu_answer(int answer)
@@ -5728,54 +5088,34 @@ static fn settings_menu_apply(int at)
                 settings_say((string_address)WORDS(settings_already_set));
 }
 
-/*
-        What is done to a network or a device, as a change for the verb:
-        a letter (j joins a network, f forgets it, a keeps a device, d
-        forgets it), a newline, the name and for a join a newline and its
-        passphrase. What is built here is not left behind.
-*/
+// Queue a list-item action: "<code char>\n<name>[\n<pass>]" (wiped from stack after queueing).
 static fn settings_act(char what, const char address_to name, const char address_to pass)
 {
         char value[SETTINGS_TYPED];
-        positive size = 0;
+        positive size = 2;
 
-        value[size++] = what;
-        value[size++] = '\n';
+        value[0] = what, value[1] = '\n';
         size = settings_map_add(value, sizeof(value) - 1, size, name);
         if (pass && pass[0])
-        {
-                value[size++] = '\n';
-                size = settings_map_add(value, sizeof(value), size, pass);
-        }
+                value[size++] = '\n', size = settings_map_add(value, sizeof(value), size, pass);
         value[size] = 0;
         settings_change(SETTINGS_JOB_ACT, value);
         memory_zero(value, sizeof(value));
 }
 
-// What a machine's name may hold, said as the verb says it: letters, digits and hyphens (the kit's field asks it of each).
 static const char address_to settings_name_accepts(p32 code)
 {
-        return (code >= '0' && code <= '9') || ((code | 32) >= 'a' && (code | 32) <= 'z') || code == '-' ? null
-                                                                                                     : WORDS(settings_name_chars);
+        return (code >= '0' && code <= '9') || ((code | 32) >= 'a' && (code | 32) <= 'z') || code == '-' ? null : WORDS(settings_name_chars);
 }
 
-/*
-        A row typed in: the kit's field opened on what it holds now (text), with the row's rules -- a name's characters
-        and its length, a passphrase's dots, the room its value has (one word or line is kept in what a row reads; what
-        is typed for a list or a command is longer) -- and the keys in it, the caret at its end.
-*/
 static fn settings_edit_begin(int row, const char address_to text, b32 masked)
 {
         struct ui_text address_to t = &settings.edit;
         int dom = settings_domain_of(row, null);
 
-        // What it opens on is the document's own first text (kept here while it is open), so undo goes back to it and no further.
         string_copy_bounded((string_address)settings.edit_from, (string_address)text, sizeof(settings.edit_from));
         ui_field_begin(t, &settings.own, settings.edit_from, row);
         t->masked = masked;
-        // The field has the keys from its first character, and a passphrase or a network's, device's or command's is a command:
-        // a press outside it cancels (the kit's rule), where a plain value is kept. A command's row is one of All commands, which
-        // is no item of a list: every row from the any row on is a command's or a list's, so a click never runs what was typed.
         ui_field_focus(t, true);
         t->cancels = dom != SETTINGS_DOM_ROW;
         t->most = dom == SETTINGS_DOM_LIST || dom == SETTINGS_DOM_TRY ? SETTINGS_ITEM_LABEL - 1
@@ -5786,14 +5126,8 @@ static fn settings_edit_begin(int row, const char address_to text, b32 masked)
         ui_page_redraw(&settings.page);
 }
 
-// A field typed in is done with: closed, and a passphrase typed in it wiped (the kit's field close).
-static fn settings_edit_end(void)
-{
-        ui_field_close(&settings.edit);
-        ui_page_redraw(&settings.page);
-}
+static fn settings_edit_end(void) { ui_field_close(&settings.edit); ui_page_redraw(&settings.page); }
 
-// Whether the row typed in is in view, so that the well its field was last drawn in is where it is.
 static b32 settings_edit_shown(void)
 {
         int at = settings_pos(settings_editing()), top = at >= 0 ? ui_list_row_y(&settings.list, at) : 0;
@@ -5802,13 +5136,8 @@ static b32 settings_edit_shown(void)
         return at >= 0 && top + tall > settings.list.y && top < settings.list.y + settings.list.h;
 }
 
-// A port is allowed (allow) or denied (deny) by its name, the first word of its line that device allow and device deny take.
-static fn settings_port_set(const struct settings_item address_to item, b32 allow)
-{
-        settings_act(allow ? 'v' : 'x', item->port, null);
-}
+static fn settings_port_set(const struct settings_item address_to item, b32 allow) { settings_act(allow ? 'v' : 'x', item->port, null); }
 
-// A row of a list pressed: a network is joined (asking its passphrase when it has one), a device is said what can be done.
 static fn settings_item_activate(int row, const struct settings_item address_to item)
 {
         char line[SETTINGS_STATUS];
@@ -5816,10 +5145,7 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
         if (item->kind == SETTINGS_NETWORK)
         {
                 if (item->flags & SETTINGS_ITEM_JOINED)
-                {
-                        language_format(line, sizeof(line), WORDS(settings_already_joined), item->label);
-                        settings_say((string_address)line);
-                }
+                        language_format(line, sizeof(line), WORDS(settings_already_joined), item->label), settings_say((string_address)line);
                 else if (item->flags & SETTINGS_ITEM_CANNOT)
                         settings_say((string_address)WORDS(settings_cannot_join));
                 else if (item->flags & SETTINGS_ITEM_OPEN)
@@ -5831,15 +5157,10 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
                         settings_say((string_address)WORDS(settings_type_passphrase));
                 }
         }
-        // A press on a port's row turns it: allowed, it is denied; else it is allowed.
         else if (item->kind == SETTINGS_PORT)
                 settings_port_set(item, !(item->flags & SETTINGS_ITEM_JOINED));
         else if (item->kind == SETTINGS_ADD)
-        {
-                settings_edit_begin(row, "", false);
-                settings_say((string_address)WORDS(settings_type_device));
-        }
-        // A drive runs no verb: the status says that it is shown and held by none.
+                settings_edit_begin(row, "", false), settings_say((string_address)WORDS(settings_type_device));
         else if (item->flags & SETTINGS_ITEM_DRIVE)
                 settings_say((string_address)WORDS(settings_item_drive));
         else if (item->kind != SETTINGS_NOTE)
@@ -5847,24 +5168,33 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
         ui_page_redraw(&settings.page);
 }
 
-// Delete on a saved network, a kept device or a linked machine forgets/removes it, when it is pressed twice.
+static char settings_forget_code(unsigned char kind)
+{
+        return kind == SETTINGS_NETWORK ? 'f' : kind == SETTINGS_DEVICE ? 'd' : kind == SETTINGS_LINK ? 'r' : 0;
+}
+
+static fn settings_dismiss_notice(unsigned int code)
+{
+        if (windows_issue_kernel(code))
+                windows_kernel_dismiss(settings.own.table, 1u << (code - WINDOWS_ISSUE_KERNEL_GPU));
+}
+
+// Delete twice on a saved network, kept device, or linked machine forgets/removes it.
 static fn settings_forget(void)
 {
         const struct settings_item address_to item = settings_item(settings.list.focus);
-        char line[SETTINGS_STATUS], text[SETTINGS_STATUS];
+        char code = item && (item->flags & SETTINGS_ITEM_SAVED) ? settings_forget_code(item->kind) : 0;
+        char text[SETTINGS_STATUS];
 
-        if (!item || !(item->flags & SETTINGS_ITEM_SAVED) ||
-            (item->kind != SETTINGS_NETWORK && item->kind != SETTINGS_DEVICE && item->kind != SETTINGS_LINK))
+        if (!code)
                 return;
-        // A forget is armed by its kind (a number no row has, below zero) and the label it is for.
         if (!ui_confirm_ask(&settings.confirm, -1 - (int)item->kind, item->label))
         {
                 language_format(text, sizeof(text), WORDS(settings_forget), item->label);
-                ui_confirm_line(line, sizeof(line), text);
-                settings_say((string_address)line);
+                settings_confirm_say(text);
                 return;
         }
-        settings_act(item->kind == SETTINGS_NETWORK ? 'f' : item->kind == SETTINGS_LINK ? 'r' : 'd', item->label, null);
+        settings_act(code, item->label, null);
 }
 
 // A row changed one way or the other: a switch thrown, a choice or a step moved, a field opened, an action run.
@@ -5933,10 +5263,36 @@ static fn settings_row_activate(int row, int offset, int way)
 
 static fn settings_activate(int row, int way)
 {
-        int offset, dom = settings_domain_of(row, &offset);
+        int offset;
 
-        if (dom >= 0 && settings_domains[dom].activate)
-                settings_domains[dom].activate(row, offset, way);
+        switch (settings_domain_of(row, &offset))
+        {
+        case SETTINGS_DOM_ROW:
+                settings_row_activate(row, offset, way);
+                break;
+        case SETTINGS_DOM_COMMAND:
+                if (settings_takes(row))
+                        settings_edit_begin(row, "", false);
+                else
+                        settings_run(row, "");
+                break;
+        case SETTINGS_DOM_LIST:
+                if (settings_item(row))
+                        settings_item_activate(row, settings_item(row));
+                break;
+        case SETTINGS_DOM_SUB:
+                if (settings_partitions_owner(row) >= 0)
+                        settings_toggle(settings_partitions_owner(row)), ui_page_redraw(&settings.page);
+                break;
+        case SETTINGS_DOM_TRY:
+                if (offset == SETTINGS_TRY_REPEAT)
+                        settings_edit_begin(row, "", false);
+                break;
+        case SETTINGS_DOM_ABOUT:
+                settings_about_press(row);
+                ui_page_redraw(&settings.page);
+                break;
+        }
 }
 
 // The status as the keys come to a row from another: a command says what it does, and leaving one clears it.
@@ -5950,12 +5306,6 @@ static fn settings_said_of(int before)
                 settings_say((string_address) "");
 }
 
-/*
-        The rows of another group at the right, as the column of groups is
-        moved: what is typed is cleared (it listed the rows of every group),
-        and the focus goes to the first row, which is where the keys go
-        when the rows are entered.
-*/
 static fn settings_filter_clear(void);
 static b32 settings_filter_typed(void);
 
@@ -5967,9 +5317,7 @@ static fn settings_group_choose(int group)
         group = group < 0 ? 0 : group > last ? last : group;
         if (group == before && !typed)
                 return;
-        settings.page.chosen = group;
-        settings.map.keys = false;
-        settings.feed_due = 0;
+        settings.page.chosen = group, settings.map.keys = false, settings.feed_due = 0;
         settings_filter_clear();
         ui_scroll_set(&settings.list.scroll, 0);
         ui_confirm_drop(&settings.confirm);
@@ -5977,16 +5325,9 @@ static fn settings_group_choose(int group)
         if (settings.list.count)
                 settings.list.focus = settings.list.id[0];
         ui_page_column_show(&settings.ui, &settings.page);
-        settings_say((string_address)(settings.list.focus >= SETTINGS_ANY ? settings_text(settings.list.focus) : ""));
-        ui_page_redraw(&settings.page);
+        settings_say_redraw(settings.list.focus >= SETTINGS_ANY ? settings_text(settings.list.focus) : "");
 }
 
-/*
-        Enter in the field a row is typed in: what it holds is done with as the row says, its blanks at either end left
-        off (a passphrase's are its own, and kept). A passphrase joins the network and a name keeps the device, neither
-        kept here after; a command runs with what is typed, which may be nothing, the field staying when it asked for
-        another Enter; a value kept as it was, or typed to what it is, is no change and sends nothing.
-*/
 static fn settings_edit_commit(void)
 {
         char typed[SETTINGS_TYPED];
@@ -5997,15 +5338,12 @@ static fn settings_edit_commit(void)
                 start++;
         while (!settings.edit.masked && length > start && typed[length - 1] == ' ')
                 length--;
-        typed[length] = 0;
-        length -= start;
+        typed[length] = 0, length -= start;
         switch (settings_domain_of(row, null))
         {
         case SETTINGS_DOM_TRY:
-                // What is typed to feel the key repeat is kept nowhere.
                 memory_zero(typed, sizeof(typed));
-                settings_edit_end();
-                return;
+                break;
         case SETTINGS_DOM_LIST:
         {
                 const struct settings_item address_to item = settings_item(row);
@@ -6017,15 +5355,13 @@ static fn settings_edit_commit(void)
                 else if (item && item->kind == SETTINGS_ADD)
                         settings_act('a', typed + start, null);
                 memory_zero(typed, sizeof(typed));
-                settings_edit_end();
-                return;
+                break;
         }
         case SETTINGS_DOM_COMMAND:
-                if (settings_run(row, typed + start))
-                        settings_edit_end();
-                return;
+                if (!settings_run(row, typed + start))
+                        return;
+                break;
         case SETTINGS_DOM_ROW:
-                // What the field opened on is kept as it was: a value that changed under the field is not written back over with it.
                 if (!length)
                         settings_say((string_address)WORDS(settings_nothing_kept));
                 else if (!string_equals((string_address)typed + start, (string_address)settings.edit_from) &&
@@ -6038,7 +5374,6 @@ static fn settings_edit_commit(void)
 
 static fn settings_field_menu(void);
 
-// What the field a row is typed in asked after an event: Enter keeps it, Escape leaves it, a refusal is said, its menu opened.
 static fn settings_edit_asked(p32 asks)
 {
         if (asks & UI_TEXT_MENU)
@@ -6053,57 +5388,39 @@ static fn settings_edit_asked(p32 asks)
                 ui_page_redraw(&settings.page);
 }
 
-// A key in a field being typed in: the field's (a key between a command's two Enters asks again).
 static fn settings_type(const struct window_event address_to event)
 {
         if (event->a != UI_KEY_ENTER && event->a != UI_KEY_ENTER_PAD)
                 ui_confirm_drop(&settings.confirm);
         ui_field_focus(&settings.edit, true);
-        // No popup is the field's to open: its menu is the window's, with the row's copies after the field's own (settings_field_menu).
         settings_edit_asked(ui_field_event(&settings.ui, &settings.edit, null, event, 0, 0));
 }
 
-// The filter's field, made the first time it is wanted: one line of the text engine, its clipboard this window's.
 static struct ui_text address_to settings_filter_field(void)
 {
         if (!settings.filter_open)
         {
                 ui_field_open(&settings.filter_edit, &settings.own, "");
-                settings.filter_edit.most = SETTINGS_FILTER - 1;
-                settings.filter_edit.keeps_vertical = true; // Up and Down move the rows
+                settings.filter_edit.most = SETTINGS_FILTER - 1, settings.filter_edit.keeps_vertical = true;
                 settings.filter_open = true;
         }
         return &settings.filter_edit;
 }
 
-// Whether the filter's field holds anything, a blank of its own as well.
-static b32 settings_filter_typed(void)
-{
-        return settings.filter_open && doc_length(&settings.filter_edit.doc) != 0;
-}
+static b32 settings_filter_typed(void) { return settings.filter_open && doc_length(&settings.filter_edit.doc) != 0; }
 
-
-// The filter emptied: its field, and the rows of the group chosen again.
 static fn settings_filter_clear(void)
 {
         if (settings.filter_open)
-        {
-                ui_text_set(&settings.filter_edit, (const p8 address_to) "", 0);
-                ui_text_search_changed(&settings.filter_edit);
-        }
+                ui_text_set(&settings.filter_edit, (const p8 address_to) "", 0), ui_text_search_changed(&settings.filter_edit);
 }
 
-/*
-        What the filter's field asked after an event: a new filter lists the rows that match it from every group,
-        with the keys on the first of them; Escape (its cancel) is the window's to do, and a refusal is said.
-*/
 static fn settings_filter_asked(p32 asks)
 {
         if (asks & UI_TEXT_REFUSED)
                 settings_say((string_address)settings.filter_edit.refused);
         if (!asks || (asks & (UI_TEXT_SUBMIT | UI_TEXT_CANCEL)))
                 return;
-        // Whether the filter's key changed with the last event (the kit keeps the key it last answered: a blank typed at the end is none).
         if (!ui_text_search_changed(settings_filter_field()))
         {
                 ui_page_redraw(&settings.page);
@@ -6113,13 +5430,9 @@ static fn settings_filter_asked(p32 asks)
         settings.page.pane = 1;
         settings_refilter();
         if (settings.list.count)
-        {
-                settings.list.focus = settings.list.id[0];
-                ui_page_reveal(&settings.ui, &settings.page, &settings.list);
-        }
+                settings.list.focus = settings.list.id[0], ui_page_reveal(&settings.ui, &settings.page, &settings.list);
 }
 
-// A key to the filter's field, which has the keys while no row is typed in: what it asked (0: not its key).
 static p32 settings_filter_key(const struct window_event address_to event)
 {
         struct ui_text address_to field = settings_filter_field();
@@ -6131,11 +5444,6 @@ static p32 settings_filter_key(const struct window_event address_to event)
         return asks;
 }
 
-/*
-        Whether a key goes to the filter's field when it holds nothing: what starts a filter does (a character, a
-        paste, an undo), and what works the rows does not -- Space, Enter, Escape, Tab, the arrows, Home, End, the
-        pages and Delete, which are the rows' and the column's.
-*/
 static b32 settings_filter_starts(const struct window_event address_to event)
 {
         switch (event->a)
@@ -6148,13 +5456,11 @@ static b32 settings_filter_starts(const struct window_event address_to event)
         return event->b != ' ';
 }
 
-// Whether Left and Right move a row: a step does, and a slider by its step. A switch is turned by Enter or Space only, so the arrows never change it.
 static b32 settings_steps(int row)
 {
         return row < SETTINGS_ANY && (settings_rows[row].kind == SETTINGS_STEP || settings_rows[row].kind == SETTINGS_SLIDER);
 }
 
-// A key on the card of what a command said: it scrolls as a page of text does, and Escape, Enter, Space or Backspace go back to the list.
 static fn settings_card_key(const struct window_event address_to event)
 {
         b32 moved = false;
@@ -6167,22 +5473,13 @@ static fn settings_card_key(const struct window_event address_to event)
         }
         switch (event->a)
         {
-        case UI_KEY_ESCAPE:
-        case UI_KEY_ENTER:
-        case UI_KEY_ENTER_PAD:
-        case UI_KEY_SPACE:
-        case UI_KEY_BACKSPACE:
+        case UI_KEY_ESCAPE: case UI_KEY_ENTER: case UI_KEY_ENTER_PAD: case UI_KEY_SPACE: case UI_KEY_BACKSPACE:
                 settings_card_leave();
                 break;
         }
 }
 
-// A key: false when it closes the window.
-/*
-        The desk with screen at moved to x, y (the desk's pixels), its top left put at 0, 0 as the compositor puts it: each screen's
-        place in the table's order (sent_x, sent_y), and as the words of the Rotation row's verb, every screen's name and place in that
-        order (NAME place X Y NAME place X Y ...), into value. Answers the words' length, 0 when they do not fit or there is no such screen.
-*/
+// Format full desk layout (normalised to 0,0) as "NAME place X Y ..." into value.
 static positive settings_map_layout(int at, int x, int y, char address_to value, positive room)
 {
         int low_x = x, low_y = y, count = settings.map.graph.nodes;
@@ -6192,10 +5489,7 @@ static positive settings_map_layout(int at, int x, int y, char address_to value,
         if (at < 0 || !settings.own.table || at >= count || !room)
                 return 0;
         for (int k = 0; k < count; k++)
-        {
-                low_x = k != at && node[k].x < low_x ? node[k].x : low_x;
-                low_y = k != at && node[k].y < low_y ? node[k].y : low_y;
-        }
+                low_x = k != at && node[k].x < low_x ? node[k].x : low_x, low_y = k != at && node[k].y < low_y ? node[k].y : low_y;
         for (int k = 0; k < count; k++)
         {
                 settings.map.sent_x[k] = (k == at ? x : node[k].x) - low_x, settings.map.sent_y[k] = (k == at ? y : node[k].y) - low_y;
@@ -6209,13 +5503,6 @@ static positive settings_map_layout(int at, int x, int y, char address_to value,
         return length + 1 < room ? length : 0;
 }
 
-/*
-        A screen let go at x, y (a drag's release, a key's step): the desk written whole (settings_map_layout), so a screen no hand
-        moved stays where it is beside the others, and the order the compositor lays them in, the primary first, is kept (the verb
-        puts their lines first in that order). The layout is shown until the table has it, and the moved screen is taken as shown
-        where it was let go, so the move of the rest (the desk's new top left) is the camera's (settings_map_follow). Nothing is sent
-        when the row is not there or the words do not fit.
-*/
 static void settings_map_place(int at, int x, int y)
 {
         int row = settings_output_row(SETTINGS_OUT_TURN);
@@ -6229,15 +5516,8 @@ static void settings_map_place(int at, int x, int y)
         settings_change(row, value);
 }
 
-// The step a Shift and an arrow takes a screen by, in the desk's pixels.
 #define SETTINGS_MAP_STEP 10
 
-/*
-        Where the chosen screen goes for a key's step (dx, dy steps of SETTINGS_MAP_STEP), kept apart from the others and against one
-        of them as a drag is (ui_graph_settle, not pulled: a step is the person's to make), and answered as x and y. It starts from
-        where the map shows it, which is where it was last sent while the table has not caught up with that (so a held key takes a
-        step each time, not the same one). A lone screen has nothing to move against. Answers whether it moved.
-*/
 static b32 settings_map_stepped(int dx, int dy, int *x, int *y)
 {
         unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(number);
@@ -6251,43 +5531,20 @@ static b32 settings_map_stepped(int dx, int dy, int *x, int *y)
         return *x != settings.map.node[at].x || *y != settings.map.node[at].y;
 }
 
-// The map's panel is to be drawn again, and only it (the kit's graph moved, or its camera).
-static fn settings_map_damage(void)
-{
-        ui_page_damage(&settings.page, settings.map.panel.y, settings.map.panel.y + settings.map.panel.h);
-}
+static fn settings_map_damage(void) { ui_page_damage(&settings.page, settings.map.panel.y, settings.map.panel.y + settings.map.panel.h); }
 
-/*
-        The map's keys, while it has them: the arrows choose a screen by its number (Left and Up the one before, Right the one after,
-        clamped), Shift with an arrow moves the chosen screen a step, Enter identifies the screens, Down leaves the map for the rows,
-        and the graph's own keys work its view (ui_graph_key: Home and F show every screen, + and - zoom, Space held pans with a press).
-        Answers whether it took the key; any other key leaves the map and goes on to the rows, as Tab and Escape do.
-*/
 static b32 settings_map_key(const struct window_event address_to event)
 {
         unsigned int number[WINDOWS_OUTPUTS] = {0}, count = settings_map_load(number), did;
-        int at = settings.map.display, dx = 0, dy = 0, x, y, wanted;
-        b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
+        int at = settings.map.display, dx = (event->a == UI_KEY_RIGHT) - (event->a == UI_KEY_LEFT), dy = (event->a == UI_KEY_DOWN) - (event->a == UI_KEY_UP), x, y;
 
-        switch (event->a)
+        if (event->a == UI_KEY_ENTER || event->a == UI_KEY_ENTER_PAD)
         {
-        case UI_KEY_LEFT:
-                dx = -1;
-                break;
-        case UI_KEY_RIGHT:
-                dx = 1;
-                break;
-        case UI_KEY_UP:
-                dy = -1;
-                break;
-        case UI_KEY_DOWN:
-                dy = 1;
-                break;
-        case UI_KEY_ENTER:
-        case UI_KEY_ENTER_PAD:
                 settings_change(SETTINGS_JOB_IDENTIFY, "");
                 return true;
-        default:
+        }
+        if (!dx && !dy)
+        {
                 settings_map_frame();
                 did = ui_graph_key(&settings.ui, &settings.map.graph, event);
                 if (did & UI_GRAPH_DRAW)
@@ -6297,49 +5554,39 @@ static b32 settings_map_key(const struct window_event address_to event)
                 settings.map.keys = false;
                 return false;
         }
-        if (shift)
+        if (event->flags & WINDOW_KEY_SHIFT)
         {
                 if (settings_map_stepped(dx, dy, &x, &y))
                         settings_map_place(at, x, y);
-                ui_page_redraw(&settings.page);
-                return true;
         }
-        if (event->a == UI_KEY_DOWN)
-        {
+        else if (dy > 0)
                 settings.map.keys = false;
-                ui_page_redraw(&settings.page);
-                return true;
-        }
-        if (count && at >= 0 && at < (int)count)
+        else if (count && at >= 0 && at < (int)count)
         {
-                wanted = (int)number[at] + (event->a == UI_KEY_LEFT || event->a == UI_KEY_UP ? -1 : 1);
-                wanted = wanted < 1 ? 1 : wanted > (int)count ? (int)count : wanted;
-                if (settings_map_numbered(number, count, (unsigned int)wanted) >= 0)
-                        settings.map.display = settings_map_numbered(number, count, (unsigned int)wanted);
+                int wanted = (int)number[at] + (dx < 0 || dy < 0 ? -1 : 1);
+                int hit = settings_map_numbered(number, count, (unsigned int)(wanted < 1 ? 1 : wanted > (int)count ? (int)count : wanted));
+
+                if (hit >= 0)
+                        settings.map.display = hit;
         }
         ui_page_redraw(&settings.page);
         return true;
 }
 
-// What the page's keys ask of the settings: a row's step and its action, the said line, the group the column chose, and Delete.
 static const struct ui_page_keys settings_page_keys = {settings_steps, settings_activate, settings_said_of, settings_group_choose, settings_forget};
 
 static b32 settings_key(const struct window_event address_to event)
 {
-        // A key let go is no one's but the map's, whose Space held makes a press pan (ui_graph_key).
         if (!(event->flags & WINDOW_KEY_DOWN))
         {
                 ui_graph_key(&settings.ui, &settings.map.graph, event);
                 return true;
         }
-        // A choice's menu has every key, and so has a row's context menu: its popup has them while it is open, and a key that comes here is the menu's too.
         if (settings.page.menu_row >= 0 || (settings.popup.open && settings.popup.list && !settings.popup.field))
         {
                 settings_menu_answer(ui_popmenu_event(&settings.ui, &settings.popup.menu, event, 0, 0));
                 return true;
         }
-        // A row typed in that has scrolled out of view ends its typing as a press outside does (a value kept, a command cancelled):
-        // its field is not drawn, so it must not keep the keys.
         if (settings_editing() >= 0 && !settings_edit_shown())
         {
                 if (settings.edit.cancels)
@@ -6358,23 +5605,15 @@ static b32 settings_key(const struct window_event address_to event)
                 settings_card_key(event);
                 return true;
         }
-        // The menu key, or Shift-F10, with the keys in the rows: handled by the kit's declarative list menu.
         if (ui_page_context_key(&settings.ui, &settings.page, &settings.list, event))
                 return true;
-        // Delete on a kernel notice's line dismisses its class (the feeder starts it again from nothing); a line is no row, so the keys stop there.
         if (event->a == UI_KEY_DELETE && !settings_filter_typed() && settings.list.focus >= (int)SETTINGS_ALL && settings.list.focus - (int)SETTINGS_ALL < settings_sub_count)
         {
-                unsigned int code = settings_sub[settings.list.focus - (int)SETTINGS_ALL].code;
-
-                if (windows_issue_kernel(code))
-                        windows_kernel_dismiss(settings.own.table, 1u << (code - WINDOWS_ISSUE_KERNEL_GPU));
+                settings_dismiss_notice(settings_sub[settings.list.focus - (int)SETTINGS_ALL].code);
                 return true;
         }
-        // Right opens the lines under the row the keys are on, and Left shuts them (an expander's keys); any other key is the row's.
-        // While the filter holds something its field has the arrows first (the caret), so they open and shut nothing then.
         if ((event->a == UI_KEY_RIGHT || event->a == UI_KEY_LEFT) && settings.list.focus >= 0 && settings_editing() < 0 && !settings_filter_typed())
         {
-                // A drive's disclosure is its drive's expander.
                 int drive = settings_partitions_owner(settings.list.focus), row = drive >= 0 ? drive : settings.list.focus;
                 int expander = drive >= 0 ? (settings_expanded[drive] ? UI_ROW_EXPANDER_OPEN : UI_ROW_EXPANDER_SHUT)
                                : row < SETTINGS_ANY ? settings_expander(row) : 0;
@@ -6386,55 +5625,37 @@ static b32 settings_key(const struct window_event address_to event)
                         return true;
                 }
         }
-        // The map has the keys while it has the focus (settings_map_key), before a letter starts a filter (F is its view's); what it
-        // does not take goes on to the rows below.
         if (settings.map.keys)
         {
                 if (settings_map_on() && settings.page.pane && settings_map_key(event))
                         return true;
                 settings.map.keys = false;
         }
-        // A key between a confirm and its next press drops it: Enter or Space fires a command's, Delete a forget's.
         if (settings.confirm.what < 0 ? event->a != UI_KEY_DELETE
                                       : event->a != UI_KEY_ENTER && event->a != UI_KEY_ENTER_PAD && event->a != UI_KEY_SPACE)
                 ui_confirm_drop(&settings.confirm);
-        /*
-                The search field has the keys while no row is typed in, and gets each key first: with something in it,
-                every key (the caret's moves and selections, Backspace and Delete, a blank, the clipboard, undo; Enter
-                and Escape come back as its submit and cancel), and with nothing in it what starts a filter. What it
-                does not take (Up, Down, the pages, Tab, a chord) is the rows' and the column's, below.
-        */
         if (settings_filter_typed() || settings_filter_starts(event))
         {
                 p32 asks = settings_filter_key(event);
 
                 if (asks & UI_TEXT_CANCEL)
                 {
-                        // What is typed is cleared first, a command running is stopped next, and only then the window closes.
-                        settings_filter_clear();
-                        settings_refilter();
+                        settings_filter_clear(), settings_refilter();
                         return true;
                 }
                 if ((asks & UI_TEXT_SUBMIT) && settings_pos(settings.list.focus) >= 0)
-                {
-                        settings.page.pane = 1;
-                        settings_activate(settings.list.focus, 1);
-                }
+                        settings.page.pane = 1, settings_activate(settings.list.focus, 1);
                 if (asks)
                         return true;
         }
-
         if (event->a == UI_KEY_ESCAPE)
                 return settings_stop();
-        // Up from the first row of the Display group goes up to the map above it, which has the keys then.
         if (settings.page.pane && event->a == UI_KEY_UP && settings_map_on() && settings.list.focus == settings_output_row(SETTINGS_OUT_SCREEN) &&
             settings_map_count())
         {
-                settings.map.keys = true;
-                ui_page_redraw(&settings.page);
+                settings.map.keys = true, ui_page_redraw(&settings.page);
                 return true;
         }
-        // The page's keys: Tab, the moves, Enter and Space, Delete and the arrows (what each row does is the app's, in settings_page_keys).
         ui_page_key(&settings.ui, &settings.page, &settings.list, (int)event->a, &settings_page_keys);
         return true;
 }
@@ -6446,22 +5667,7 @@ static b32 settings_row_is(int at, const char address_to path)
         return at >= 0 && at < (int)SETTINGS_ROWS && settings_rows[at].path && string_equals((string_address)settings_rows[at].path, (string_address)path);
 }
 
-/*
-        What a row shows, for the kit's list: its label, its section and the section's header, and its value as the kind
-        the verb gives it -- a switch is the kit's switch (it moves when the verb says it changed), a choice of three words or
-        fewer the kit's segmented tabs (settings_is_tabs), a port's allow or deny the same tabs, the accent a swatch for each
-        named accent, any other choice opens a menu, a step moves either way, and a field typed in is the kit's field. A network
-        is its name, marked when it is the one joined,
-        with what is said of it, what it asks for and the bars of its signal; a device kept, the row that keeps
-        another, the line the verb said that is no row; a command, and whether it asks first. A value not read yet,
-        not on this machine or not understood says so, quietly.
-*/
-/*
-        A choice is drawn as the kit's segmented tabs (the theme's and the motion's, and every choice of three words or fewer
-        whose words the language says as one word each) and not as a menu. The kit's tabs split their words on a blank, so a
-        choice that is more than one word stays a menu: Screen modes and the on-screen keyboard say so, and so does a row
-        whose choices are a set the machine makes (the batteries, the modem while it is ready), a language or a colour.
-*/
+// Whether a choice row renders as inline segmented tabs (<= 3 single-word labels, not dynamic/ink/language).
 static b32 settings_is_tabs(int row)
 {
         const struct settings_row address_to which = &settings_rows[row];
@@ -6485,48 +5691,36 @@ static b32 settings_is_tabs(int row)
         return count > 0;
 }
 
-// The words of a row of tabs as the language says them, one word each with a blank between (settings_is_tabs holds each to one
-// word). The kit copies them into its control as it lists the row, so one buffer serves every row.
+static positive settings_word_append(char address_to into, positive room, positive at, const char address_to word)
+{
+        positive len = string_length((string_address)word);
+
+        if (at + len + 2 >= room)
+                return at;
+        if (at)
+                into[at++] = ' ';
+        string_copy_bounded((string_address)into + at, (string_address)word, room - at);
+        return at + len;
+}
+
 static const char address_to settings_tab_words(int row)
 {
         static char shown[SETTINGS_VALUE];
+        char each[SETTINGS_VALUE];
         positive at = 0;
 
         shown[0] = 0;
-        for (positive k = 0; ; k++)
-        {
-                char each[SETTINGS_VALUE];
-                const char address_to said;
-
-                if (!settings_word(settings_rows[row].choices, k, each, sizeof(each)))
-                        break;
-                said = settings_label_of(row, each);
-                if (at + string_length((string_address)said) + 2 >= sizeof(shown))
-                        break;
-                if (at)
-                        shown[at++] = ' ';
-                string_copy_bounded((string_address)shown + at, (string_address)said, sizeof(shown) - at);
-                at += string_length((string_address)said);
-        }
+        for (positive k = 0; settings_word(settings_rows[row].choices, k, each, sizeof(each)); k++)
+                at = settings_word_append(shown, sizeof(shown), at, settings_label_of(row, each));
         return shown;
 }
 
-// The two words a port's segments say, allow then deny, as the language says them, one blank between (the kit's tabs take them so).
 static const char address_to settings_port_words(void)
 {
         static char shown[SETTINGS_VALUE];
-        const char address_to words[2] = {language_of("allow"), language_of("deny")};
-        positive at = 0;
+        positive at = settings_word_append(shown, sizeof(shown), 0, language_of("allow"));
 
-        for (positive k = 0; k < 2; k++)
-        {
-                if (at + string_length((string_address)words[k]) + 2 >= sizeof(shown))
-                        break;
-                if (at)
-                        shown[at++] = ' ';
-                string_copy_bounded((string_address)shown + at, (string_address)words[k], sizeof(shown) - at);
-                at += string_length((string_address)words[k]);
-        }
+        settings_word_append(shown, sizeof(shown), at, language_of("deny"));
         return shown;
 }
 
@@ -6556,6 +5750,93 @@ static const char address_to settings_number_shown(int row, const char address_t
         return shown;
 }
 
+static const char address_to settings_state_text(int id, unsigned int state, const char address_to shown)
+{
+        return state == SETTINGS_UNREAD ? "..." : state == SETTINGS_ABSENT ? WORDS(settings_not_here)
+               : state == SETTINGS_FAILED || !shown[0] ? WORDS(settings_unknown) : settings_number_shown(id, shown);
+}
+
+static fn settings_describe_item(int id, const struct settings_item address_to item, struct ui_row address_to row)
+{
+        int list = settings_list_of(id);
+
+        if (item->kind == SETTINGS_NETWORK)
+        {
+                row->columns = settings_columns_for(0);
+                row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
+                row->note = item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_joined) : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_saved) : null;
+                row->value = item->security[0] ? item->security : null;
+                row->bars = item->flags & SETTINGS_ITEM_HEARD ? item->bars : -1;
+                row->dim = !(item->flags & SETTINGS_ITEM_HEARD);
+                row->cells[1] = row->note, row->cells[2] = row->value;
+        }
+        else if (item->kind == SETTINGS_DEVICE || item->kind == SETTINGS_ADD)
+        {
+                row->columns = settings_columns_for(1);
+                if (item->kind == SETTINGS_DEVICE)
+                        row->value = row->cells[1] = WORDS(settings_kept);
+        }
+        else if (item->kind == SETTINGS_PORT)
+        {
+                b32 waiting = string_equals((string_address)item->state, (string_address) "waiting");
+                const char address_to state_w = item->state[0] ? settings_state_word(item->state) : null;
+
+                row->columns = settings_columns_for(2);
+                row->kind = UI_ROW_TABS, row->words = settings_port_words();
+                row->at = item->flags & SETTINGS_ITEM_JOINED ? 0 : 1;
+                if (item->flags & SETTINGS_ITEM_DISK)
+                {
+                        language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb_drive), item->port);
+                        string_copy_bounded((string_address)settings_device_port_cell, (string_address)settings_device_note, sizeof(settings_device_port_cell));
+                        settings_drive_strip(item, row);
+                }
+                else if (item->flags & SETTINGS_ITEM_USB)
+                {
+                        language_format(settings_device_port_cell, sizeof(settings_device_port_cell), WORDS(settings_device_usb_port), item->port);
+                        if (waiting)
+                                language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb), item->port, state_w);
+                        else
+                                string_copy_bounded((string_address)settings_device_note, (string_address)settings_device_port_cell, sizeof(settings_device_note));
+                }
+                else
+                {
+                        string_copy_bounded((string_address)settings_device_note, (string_address)(waiting ? state_w : ""), sizeof(settings_device_note));
+                        string_copy_bounded((string_address)settings_device_port_cell, (string_address)item->port, sizeof(settings_device_port_cell));
+                }
+                row->note = settings_device_note[0] ? settings_device_note : null;
+                row->cells[1] = settings_device_port_cell[0] ? settings_device_port_cell : null;
+                row->cells[2] = state_w;
+        }
+        else if (item->flags & SETTINGS_ITEM_DRIVE)
+        {
+                language_format(settings_device_note, sizeof(settings_device_note),
+                                item->where == SETTINGS_WHERE_SD ? WORDS(settings_device_sd) : WORDS(settings_device_drive), settings_state_word(item->state));
+                row->note = settings_device_note;
+                row->value = item->segment_count ? null : item->size;
+                if (settings_device_section(item) == 1)
+                {
+                        row->columns = settings_columns_for(2);
+                        row->cells[1] = settings_device_note;
+                        row->cells[2] = item->state[0] ? settings_state_word(item->state) : null;
+                        row->cells[3] = row->value;
+                }
+                settings_drive_strip(item, row);
+        }
+        else if (item->kind == SETTINGS_LINK)
+        {
+                row->columns = settings_columns_for(3);
+                row->cells[1] = item->access[0] ? item->access : null;
+                row->cells[2] = item->detail[0] ? item->detail : null;
+                row->value = row->cells[2] ? row->cells[2] : row->cells[1];
+        }
+        else if (item->kind == SETTINGS_NOTE)
+        {
+                if (((list == 0 || list == 3) && settings.item_count[list] > 1) || (list == 2 && settings_device_section(item) == 1))
+                        row->columns = settings_columns_for(list);
+                row->dim = true;
+        }
+}
+
 static fn settings_describe(int id, struct ui_row address_to row)
 {
         int offset, dom = settings_domain_of(id, &offset);
@@ -6563,30 +5844,29 @@ static fn settings_describe(int id, struct ui_row address_to row)
         const struct settings_item address_to item = dom == SETTINGS_DOM_LIST ? settings_item(id) : null;
         unsigned int state = which ? settings.state[offset] : SETTINGS_READ;
         const char address_to shown = which ? settings.value[offset] : "";
+        const char address_to header;
 
         if (dom < 0)
                 return;
-        if (settings_domains[dom].describe)
+        if (dom == SETTINGS_DOM_SUB)
         {
-                settings_domains[dom].describe(id, offset, row);
+                if (offset < settings_sub_count)
+                        settings_sub_describe(offset, row);
                 return;
         }
+        if (dom == SETTINGS_DOM_TRY)
+                return settings_try_describe(id, row);
+        if (dom == SETTINGS_DOM_ABOUT)
+                return settings_about_describe(id, row);
         row->section = settings_section_start(id);
-        // A row's header is its part's or its group's; a section whose header is empty (the note that no device was found) is under none.
-        {
-                const char address_to header = settings_header(id);
-
-                row->header = header && !header[0] ? null : language_of(header);
-        }
+        header = settings_header(id);
+        row->header = header && !header[0] ? null : language_of(header);
         row->label = settings_label_window(id);
         if (which)
         {
-                // What it does, in a line of the quiet ink under its label.
                 row->about = language_of(which->about);
                 settings_badge(id, row);
-                row->expander = settings_expander(id);
-                // The chevron turns with the fold: pointing right shut, down open, and between them while the spring moves it.
-                row->turn = settings_fold_at[id];
+                row->expander = settings_expander(id), row->turn = settings_fold_at[id];
         }
         if (id == settings_editing())
         {
@@ -6597,14 +5877,10 @@ static fn settings_describe(int id, struct ui_row address_to row)
                         row->label = item->kind == SETTINGS_ADD ? WORDS(settings_device_name) : settings.joining;
                 else if (!which)
                 {
-                        // A command being typed: its verb, and the field for what follows it, which says what it takes.
                         const char address_to hint = generic ? settings_large->pool + generic->command + generic->verb : WORDS(settings_verb_hint);
 
                         if (generic)
-                        {
-                                memory_copy(settings.head, settings_large->pool + generic->command, generic->verb);
-                                settings.head[generic->verb] = 0;
-                        }
+                                settings_item_word(settings.head, sizeof(settings.head), settings_large->pool + generic->command, generic->verb);
                         else
                                 string_copy_bounded((string_address)settings.head, (string_address) "moonwater", sizeof(settings.head));
                         while (*hint == ' ')
@@ -6615,108 +5891,7 @@ static fn settings_describe(int id, struct ui_row address_to row)
         }
         if (item)
         {
-                int list = settings_list_of(id);
-
-                if (item->kind == SETTINGS_NETWORK)
-                {
-                        row->columns = settings_columns_for(0);
-                        row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
-                        row->note = item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_joined) : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_saved) : null;
-                        row->value = item->security[0] ? item->security : null;
-                        row->bars = item->flags & SETTINGS_ITEM_HEARD ? item->bars : -1;
-                        row->dim = !(item->flags & SETTINGS_ITEM_HEARD);
-                        row->cells[1] = row->note;
-                        row->cells[2] = item->security[0] ? item->security : null;
-                }
-                else if (item->kind == SETTINGS_DEVICE)
-                {
-                        row->columns = settings_columns_for(1);
-                        row->value = WORDS(settings_kept);
-                        row->cells[1] = row->value;
-                }
-                else if (item->kind == SETTINGS_ADD)
-                {
-                        row->columns = settings_columns_for(1);
-                }
-                /*
-                        Every device's line is one design: its name, then in the quiet ink what kind it is, then its size and its state (a
-                        drive) or the kit's two tabs, allow and deny, the one its state is selected (a port: one not allowed is denied). The
-                        tabs say allowed and blocked, so a port's line does not say them again; it says waiting, a port held until it is
-                        allowed, which the tabs cannot tell from one denied. External devices render as a file-explorer-style details table
-                        (Name, Port, Status, Access) while keeping note populated for summaries and checks.
-                */
-                else if (item->kind == SETTINGS_PORT)
-                {
-                        b32 waiting = string_equals((string_address)item->state, (string_address) "waiting");
-
-                        row->columns = settings_columns_for(2);
-                        row->kind = UI_ROW_TABS, row->words = settings_port_words();
-                        row->at = item->flags & SETTINGS_ITEM_JOINED ? 0 : 1;
-                        // A USB device that holds a drive is a drive's row too: its line is the port's, its kind USB drive and its port, its
-                        // allow and deny at its end, and under them the drive's heading and its strip, and its partitions under its row.
-                        if (item->flags & SETTINGS_ITEM_DISK)
-                        {
-                                language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb_drive), item->port);
-                                string_copy_bounded((string_address)settings_device_port_cell, (string_address)settings_device_note,
-                                                    sizeof(settings_device_port_cell));
-                        }
-                        else if (item->flags & SETTINGS_ITEM_USB && waiting)
-                        {
-                                language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb), item->port,
-                                                settings_state_word(item->state));
-                                language_format(settings_device_port_cell, sizeof(settings_device_port_cell), WORDS(settings_device_usb_port), item->port);
-                        }
-                        else if (item->flags & SETTINGS_ITEM_USB)
-                        {
-                                language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb_port), item->port);
-                                string_copy_bounded((string_address)settings_device_port_cell, (string_address)settings_device_note,
-                                                    sizeof(settings_device_port_cell));
-                        }
-                        else
-                        {
-                                string_copy_bounded((string_address)settings_device_note, (string_address)(waiting ? settings_state_word(item->state) : ""),
-                                                    sizeof(settings_device_note));
-                                string_copy_bounded((string_address)settings_device_port_cell, (string_address)item->port,
-                                                    sizeof(settings_device_port_cell));
-                        }
-                        row->note = settings_device_note[0] ? settings_device_note : null;
-                        row->cells[1] = settings_device_port_cell[0] ? settings_device_port_cell : null;
-                        row->cells[2] = item->state[0] ? settings_state_word(item->state) : null;
-                        if (item->flags & SETTINGS_ITEM_DISK)
-                                settings_drive_strip(item, row);
-                }
-                else if (item->flags & SETTINGS_ITEM_DRIVE)
-                {
-                        // A drive with a strip is as tall as its line, the heading and the strip under it; the heading says its size, and its
-                        // partitions are the rows under it (settings_drive_rows). A drive the host lists no segments of says its size at its line's end.
-                        language_format(settings_device_note, sizeof(settings_device_note),
-                                        item->where == SETTINGS_WHERE_SD ? WORDS(settings_device_sd) : WORDS(settings_device_drive), settings_state_word(item->state));
-                        row->note = settings_device_note;
-                        row->value = item->segment_count ? null : item->size;
-                        if (settings_device_section(item) == 1)
-                        {
-                                row->columns = settings_columns_for(2);
-                                row->cells[1] = settings_device_note;
-                                row->cells[2] = item->state[0] ? settings_state_word(item->state) : null;
-                                row->cells[3] = row->value;
-                        }
-                        settings_drive_strip(item, row);
-                }
-                else if (item->kind == SETTINGS_LINK)
-                {
-                        row->columns = settings_columns_for(3);
-                        row->cells[1] = item->access[0] ? item->access : null;
-                        row->cells[2] = item->detail[0] ? item->detail : null;
-                        row->value = item->detail[0] ? item->detail : item->access[0] ? item->access : null;
-                }
-                else if (item->kind == SETTINGS_NOTE)
-                {
-                        if ((list == 0 || list == 3) && settings.item_count[list] > 1)
-                                row->columns = settings_columns_for(list);
-                        else if (list == 2 && settings_device_section(item) == 1)
-                                row->columns = settings_columns_for(2);
-                }
-                row->dim |= item->kind == SETTINGS_NOTE;
+                settings_describe_item(id, item, row);
                 return;
         }
         if (!which)
@@ -6729,112 +5904,155 @@ static fn settings_describe(int id, struct ui_row address_to row)
                 settings_describe_output(id, row);
                 return;
         }
-        /*
-                An action is the kit's button at the row's end, its label at the start as every row's: the button says what it does,
-                and while the verb waits to run or runs it says so and is greyed (settings_action_busy). What a verb reads for it (the
-                clock) is said before the button; an action that reads nothing says nothing there.
-        */
         if (which->kind == SETTINGS_ACTION)
         {
                 row->kind = UI_ROW_BUTTON, row->words = settings_button_words(id);
                 row->dim = state == SETTINGS_UNREAD || state == SETTINGS_ABSENT || (settings_action_busy(id) && !settings_pair_waiting(id));
-                if (!which->read[0])
-                        row->note = null;
-                else if (state == SETTINGS_UNREAD)
-                        row->note = "...";
-                else if (state == SETTINGS_ABSENT)
-                        row->note = WORDS(settings_not_here);
-                else if (state == SETTINGS_FAILED || !shown[0])
-                        row->note = WORDS(settings_unknown);
-                else
-                        row->note = settings_number_shown(id, shown);
+                row->note = which->read[0] ? settings_state_text(id, state, shown) : null;
                 return;
         }
         row->dim = state == SETTINGS_UNREAD || state == SETTINGS_ABSENT;
-        row->value = state == SETTINGS_UNREAD ? "..." : state == SETTINGS_ABSENT ? WORDS(settings_not_here)
-                     : state == SETTINGS_FAILED || !shown[0] ? WORDS(settings_unknown) : settings_number_shown(id, shown);
+        row->value = settings_state_text(id, state, shown);
         if (state != SETTINGS_READ)
                 return;
-        if (which->kind == SETTINGS_SWITCH)
+        switch (which->kind)
+        {
+        case SETTINGS_SWITCH:
                 row->kind = UI_ROW_SWITCH, row->on = string_equals((string_address)shown, (string_address) "on");
-        else if (which->kind == SETTINGS_CHOICE && settings_is_tabs(id) && setting_place(which->choices, (string_address)shown) >= 0)
-                row->kind = UI_ROW_TABS, row->words = settings_tab_words(id),
-                row->at = (int)setting_place(which->choices, (string_address)shown);
-        else if (settings_row_is(id, SETTING_ACCENT_PATH) && which->kind == SETTINGS_CHOICE)
-        {
-                row->kind = UI_ROW_SWATCHES, row->words = settings.accents;
-                for (positive k = 0; k < sizeof(settings_accents) / sizeof(settings_accents[0]); k++)
-                        if (string_equals((string_address)shown, (string_address)settings_accents[k].name))
-                                row->at = (int)k;
-        }
-        else if (which->kind == SETTINGS_CHOICE)
-                row->kind = UI_ROW_CHOICE;
-        else if (which->kind == SETTINGS_STEP)
+                break;
+        case SETTINGS_CHOICE:
+                if (settings_is_tabs(id) && setting_place(which->choices, (string_address)shown) >= 0)
+                        row->kind = UI_ROW_TABS, row->words = settings_tab_words(id), row->at = (int)setting_place(which->choices, (string_address)shown);
+                else if (settings_row_is(id, SETTING_ACCENT_PATH))
+                {
+                        const struct settings_ink address_to ink = settings_ink_find(which, shown, false);
+
+                        row->kind = UI_ROW_SWATCHES, row->words = settings.accents;
+                        if (ink)
+                                row->at = (int)(ink - settings_accents);
+                }
+                else
+                        row->kind = UI_ROW_CHOICE;
+                break;
+        case SETTINGS_STEP:
                 row->kind = UI_ROW_STEP;
-        else if (which->kind == SETTINGS_SLIDER)
+                break;
+        case SETTINGS_SLIDER:
         {
-                // The number the verb says, on a slider from the row's least to its greatest; its unit is said after the number. A number the
-                // verb says outside the range (a file written before the range was) rests at the nearer end: the kit draws it on its track.
                 long number = 0;
 
                 setting_typed_number(which, (string_address)shown, &number);
                 number = number < which->low ? which->low : number > which->high ? which->high : number;
                 row->kind = UI_ROW_SLIDER, row->at = (int)number, row->low = (int)which->low, row->high = (int)which->high;
                 row->step = settings_slider_step(which), row->words = setting_percent(which) ? "%" : language_of(which->unit);
+                break;
+        }
         }
 }
 
-/*
-        A row's context menu: built from the kit's base list context menu actions (ui_list_menu_items: Copy, Copy row, and
-        optional Remove), with per-list primary actions (Join on Wi-Fi, Allow/Deny on External devices) prepended where relevant.
-        Regular setting rows use Copy value / Copy label and value; a row typed in appends them after its field's own items.
-        A copy is read only: it is the clipboard's and sets nothing, so a virtual device's right button copies as a hand's does.
-*/
-#define SETTINGS_COPY_VALUE UI_LIST_MENU_COPY // the items' ids, past the field menu's own (UI_TEXT_MENU_*)
+// Row context menu ids (extending ui_list_menu_items).
+#define SETTINGS_COPY_VALUE UI_LIST_MENU_COPY
 #define SETTINGS_COPY_BOTH UI_LIST_MENU_COPY_ROW
 #define SETTINGS_MENU_REMOVE UI_LIST_MENU_REMOVE
 #define SETTINGS_MENU_ACT 0x103 // row-specific action (Join network, Allow/Deny port)
 #define SETTINGS_KEY_MENU UI_KEY_MENU
 #define SETTINGS_KEY_F10 UI_KEY_F10
 
-// The primary text copied by Copy / Copy value: the value for a setting row or About link, the item's name for a list row, or
-// the text of a sub-row/command. Null when the row has nothing to copy.
+// Primary copy text for Copy / Copy value (null when nothing to copy).
 static const char address_to settings_copy_text(int id)
 {
         int offset, dom = settings_domain_of(id, &offset);
 
-        if (dom < 0 || !settings_domains[dom].copy_text)
+        if (dom < 0 || (dom != SETTINGS_DOM_ABOUT && !settings_large))
                 return null;
-        if (dom != SETTINGS_DOM_ABOUT && !settings_large)
+        switch (dom)
+        {
+        case SETTINGS_DOM_ROW:
+        {
+                struct ui_row row;
+
+                if (settings_rows[offset].output == SETTINGS_OUT_NONE)
+                        return settings.state[offset] == SETTINGS_READ && settings.value[offset][0] ? settings_number_shown(offset, settings.value[offset]) : null;
+                memory_zero(&row, sizeof(row));
+                settings_describe(id, &row);
+                return !row.dim && row.value && row.value[0] ? row.value : null;
+        }
+        case SETTINGS_DOM_COMMAND:
+                return offset > 0 ? settings_label_shown(id) : null;
+        case SETTINGS_DOM_LIST:
+        {
+                const struct settings_item address_to item = settings_item(id);
+
+                return item && item->kind != SETTINGS_ADD && item->label[0] ? item->label : null;
+        }
+        case SETTINGS_DOM_SUB:
+                if (offset >= settings_sub_count)
+                        return null;
+                if (settings_sub[offset].action == SETTINGS_SUB_COPY)
+                        return settings_sub[offset].text[0] ? settings_sub[offset].text : null;
+                if (settings_sub[offset].action == SETTINGS_SUB_PARTITION)
+                {
+                        struct ui_row row;
+
+                        memory_zero(&row, sizeof(row));
+                        settings_describe(id, &row);
+                        return row.label && row.label[0] ? row.label : null;
+                }
                 return null;
-        return settings_domains[dom].copy_text(id, offset);
+        case SETTINGS_DOM_ABOUT:
+                return settings_about_url(offset);
+        default:
+                return null;
+        }
 }
 
 // Base ui_list_menu_items flags for row id (0 when the row offers no context menu).
 static p32 settings_row_menu_flags(int id)
 {
         int offset, dom = settings_domain_of(id, &offset);
+        b32 has = dom >= 0 && settings_copy_text(id) != null;
 
-        if (dom < 0 || !settings_domains[dom].menu_flags)
+        switch (dom)
+        {
+        case SETTINGS_DOM_ROW:
+        case SETTINGS_DOM_ABOUT:
+                return UI_LIST_MENU_VALUE_WORDS | UI_LIST_MENU_HAS_COPY_ROW | (has ? UI_LIST_MENU_HAS_COPY : 0);
+        case SETTINGS_DOM_COMMAND:
+                return offset > 0 && has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
+        case SETTINGS_DOM_LIST:
+        {
+                const struct settings_item address_to item = settings_item(id);
+                p32 copy = has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
+
+                if (!item || item->kind == SETTINGS_ADD)
+                        return 0;
+                if (item->kind == SETTINGS_NOTE)
+                        return has ? UI_LIST_MENU_HAS_COPY : 0;
+                if (item->kind == SETTINGS_NETWORK)
+                        return copy | ((item->flags & SETTINGS_ITEM_SAVED) ? UI_LIST_MENU_CAN_REMOVE : 0);
+                return copy | (item->kind == SETTINGS_DEVICE || item->kind == SETTINGS_LINK ? UI_LIST_MENU_CAN_REMOVE : 0);
+        }
+        case SETTINGS_DOM_SUB:
+                if (offset >= settings_sub_count)
+                        return 0;
+                if (settings_sub[offset].action == SETTINGS_SUB_COPY)
+                        return (has ? UI_LIST_MENU_HAS_COPY : 0) | (windows_issue_kernel(settings_sub[offset].code) ? UI_LIST_MENU_CAN_REMOVE : 0);
+                return settings_sub[offset].action == SETTINGS_SUB_PARTITION && has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
+        default:
                 return 0;
-        return settings_domains[dom].menu_flags(id, offset, settings_copy_text(id) != null);
+        }
 }
 
-// Per-row actions prepended before the kit's base list context menu items (ui_list_menu_items).
 static fn settings_row_menu_extra(struct ui_popmenu address_to m, int id)
 {
         const struct settings_item address_to item = settings_item(id);
+        const char address_to label =
+            !item ? null
+            : item->kind == SETTINGS_NETWORK && !(item->flags & (SETTINGS_ITEM_JOINED | SETTINGS_ITEM_CANNOT)) ? WORDS(installer_wifi_join)
+            : item->kind == SETTINGS_PORT ? ((item->flags & SETTINGS_ITEM_JOINED) ? WORDS(settings_device_deny) : WORDS(mixer_allow)) : null;
 
-        if (item && item->kind == SETTINGS_NETWORK && !(item->flags & (SETTINGS_ITEM_JOINED | SETTINGS_ITEM_CANNOT)))
-        {
-                ui_popmenu_add(m, WORDS(installer_wifi_join), null, 0, SETTINGS_MENU_ACT);
-                ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        }
-        else if (item && item->kind == SETTINGS_PORT)
-        {
-                ui_popmenu_add(m, (item->flags & SETTINGS_ITEM_JOINED) ? WORDS(settings_device_deny) : WORDS(mixer_allow), null, 0, SETTINGS_MENU_ACT);
-                ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        }
+        if (label)
+                ui_popmenu_add(m, label, null, 0, SETTINGS_MENU_ACT), ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
 }
 
 static fn settings_copy_append(char address_to into, positive room, const char address_to sep, const char address_to part)
@@ -6846,11 +6064,11 @@ static fn settings_copy_append(char address_to into, positive room, const char a
         string_append_bounded((string_address)into, (string_address)part, room);
 }
 
-// Formats the full-row copy string for row id into into[room], derived directly from settings_describe().
 static fn settings_copy_row_text(int id, char address_to into, positive room)
 {
         int offset, dom = settings_domain_of(id, &offset);
-        const char address_to value = settings_copy_text(id);
+        const char address_to value = settings_copy_text(id), address_to second = null;
+        char summary[SETTINGS_SUB_TEXT] = {0};
 
         into[0] = 0;
         if (!value)
@@ -6861,69 +6079,43 @@ static fn settings_copy_row_text(int id, char address_to into, positive room)
                 return;
         }
         if (dom == SETTINGS_DOM_COMMAND && offset > 0)
-        {
-                const char address_to desc = settings_text(id);
-
-                if (desc && desc[0])
-                        language_format(into, room, WORDS(settings_copy_line), value, desc);
-                else
-                        string_copy_bounded((string_address)into, (string_address)value, room);
-                return;
-        }
-        if (dom == SETTINGS_DOM_LIST || (dom == SETTINGS_DOM_SUB && offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_PARTITION))
+                second = settings_text(id);
+        else if (dom == SETTINGS_DOM_LIST || (dom == SETTINGS_DOM_SUB && offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_PARTITION))
         {
                 struct ui_row row;
-                char summary[SETTINGS_SUB_TEXT] = {0};
 
                 memory_zero(&row, sizeof(row));
                 settings_describe(id, &row);
                 if (dom == SETTINGS_DOM_SUB)
-                {
-                        settings_copy_append(summary, sizeof(summary), " ", row.amount);
-                        settings_copy_append(summary, sizeof(summary), " ", row.share);
-                }
+                        settings_copy_append(summary, sizeof(summary), " ", row.amount), settings_copy_append(summary, sizeof(summary), " ", row.share);
                 else
                 {
                         const struct settings_item address_to item = settings_item(id);
 
                         if (item && item->kind == SETTINGS_PORT)
-                        {
-                                settings_copy_append(summary, sizeof(summary), ", ", row.cells[1]);
-                                settings_copy_append(summary, sizeof(summary), ", ", row.cells[2]);
-                        }
+                                settings_copy_append(summary, sizeof(summary), ", ", row.cells[1]), settings_copy_append(summary, sizeof(summary), ", ", row.cells[2]);
                         else
-                        {
-                                settings_copy_append(summary, sizeof(summary), ", ", row.note);
+                                settings_copy_append(summary, sizeof(summary), ", ", row.note),
                                 settings_copy_append(summary, sizeof(summary), ", ",
                                                      row.value ? row.value : (item && (item->flags & SETTINGS_ITEM_DRIVE) ? item->size : null));
-                        }
                 }
-                if (summary[0])
-                        language_format(into, room, WORDS(settings_copy_line), value, summary);
-                else
-                        string_copy_bounded((string_address)into, (string_address)value, room);
-                return;
+                second = summary;
         }
-        string_copy_bounded((string_address)into, (string_address)value, room);
+        if (second && second[0])
+                language_format(into, room, WORDS(settings_copy_line), value, second);
+        else
+                string_copy_bounded((string_address)into, (string_address)value, room);
 }
 
-static fn settings_row_copied(int id)
-{
-        (void)id;
-        settings_say((string_address)WORDS(settings_copied));
-}
+static fn settings_row_copied(int id) { (void)id; settings_say((string_address)WORDS(settings_copied)); }
 
 static fn settings_row_before_menu(int before, int row)
 {
         settings_menu_close();
         if (row != before)
-        {
-                ui_confirm_drop(&settings.confirm);
-                settings_said_of(before);
-        }
+                ui_confirm_drop(&settings.confirm), settings_said_of(before);
 }
 
-// Context menu Remove or per-list action chosen, dispatched by ui_list_menu_do.
 static fn settings_row_menu_act(int id, int item_id)
 {
         if (item_id == SETTINGS_MENU_REMOVE)
@@ -6933,18 +6125,13 @@ static fn settings_row_menu_act(int id, int item_id)
                 if (dom == SETTINGS_DOM_LIST)
                 {
                         const struct settings_item address_to item = settings_item(id);
+                        char code = item && (item->flags & SETTINGS_ITEM_SAVED) ? settings_forget_code(item->kind) : 0;
 
-                        if (!item || !(item->flags & SETTINGS_ITEM_SAVED))
-                                return;
-                        if (item->kind == SETTINGS_NETWORK)
-                                settings_act('f', item->label, null);
-                        else if (item->kind == SETTINGS_DEVICE)
-                                settings_act('d', item->label, null);
-                        else if (item->kind == SETTINGS_LINK)
-                                settings_act('r', item->label, null);
+                        if (code)
+                                settings_act(code, item->label, null);
                 }
-                else if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count && windows_issue_kernel(settings_sub[offset].code))
-                        windows_kernel_dismiss(settings.own.table, 1u << (settings_sub[offset].code - WINDOWS_ISSUE_KERNEL_GPU));
+                else if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count)
+                        settings_dismiss_notice(settings_sub[offset].code);
         }
         else if (item_id == SETTINGS_MENU_ACT)
         {
@@ -6989,15 +6176,6 @@ static fn settings_field_menu(void)
 
 /* ---- the pointer and a finger: the kit's page (ui_page_pointer) ---- */
 
-
-/*
-        The map's share of a window's event, while it is shown: a press on a button across the panel's top runs it (identify, or every
-        screen shown again), and the rest is the kit's graph (ui_graph_event): a press on a screen chooses it for the rows and takes it,
-        its drag shows where it would land, apart from the others and against one, and its release writes the desk (settings_map_place);
-        a press on the grid, the middle button and a trackpad pan the view, and the wheel zooms it. A finger does the same, and a drag
-        that starts on the map never scrolls the page under it; a pen is a pointer. Answers whether the event was the map's: a motion is
-        only while the map has the hand, so the rows keep their hover.
-*/
 static b32 settings_map_event(const struct window_event address_to event)
 {
         struct ui_graph address_to g = &settings.map.graph;
@@ -7010,8 +6188,7 @@ static b32 settings_map_event(const struct window_event address_to event)
         settings_map_frame();
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && inside)
         {
-                settings.map.keys = g->keys = false; // a pointer has the map now, and its focus with it
-                // ui_control_hit answers 0 for a hit on a button and -1 for a miss, so the test is that it hits, not that it answers.
+                settings.map.keys = g->keys = false;
                 if (event->a == UI_POINTER_LEFT && ui_control_hit(&settings.ui, &settings.map.identify, x, y) >= 0)
                 {
                         settings_change(SETTINGS_JOB_IDENTIFY, "");
@@ -7019,8 +6196,7 @@ static b32 settings_map_event(const struct window_event address_to event)
                 }
                 if (event->a == UI_POINTER_LEFT && ui_control_hit(&settings.ui, &settings.map.fit, x, y) >= 0)
                 {
-                        ui_graph_home(&settings.ui, g);
-                        settings_map_damage();
+                        ui_graph_home(&settings.ui, g), settings_map_damage();
                         return true;
                 }
         }
@@ -7029,7 +6205,6 @@ static b32 settings_map_event(const struct window_event address_to event)
                 settings.map.display = g->chosen;
         if (did & UI_GRAPH_DROP)
                 settings_map_place(g->dropped, g->at_x, g->at_y);
-        // A screen chosen changes the rows, and a drag begun or let go the caption: the page; else only the panel.
         if ((did & (UI_GRAPH_CHOSE | UI_GRAPH_DROP)) || (event->type == WINDOW_EVENT_BUTTON && (did & UI_GRAPH_TAKEN)) ||
             ((did & UI_GRAPH_DRAG) && !had))
                 ui_page_redraw(&settings.page);
@@ -7040,7 +6215,6 @@ static b32 settings_map_event(const struct window_event address_to event)
 
 static fn settings_press_at(void);
 
-// A slider the hand let go of (the kit's ui_list_slider): its row is changed to the value it was left at, once.
 static void settings_slid(void)
 {
         int row = settings.list.slid - 1;
@@ -7052,10 +6226,8 @@ static void settings_slid(void)
         if (row < 0 || row >= SETTINGS_ANY || settings_rows[row].kind != SETTINGS_SLIDER || settings.state[row] != SETTINGS_READ)
                 return;
         positive_into_string((p8 address_to)word, (positive)settings.list.slid_value);
-        // A hand let go where the row already is is no change: the verb is not run for it.
-        if (string_equals((string_address)word, (string_address)settings.value[row]))
-                return;
-        settings_change(row, word);
+        if (!string_equals((string_address)word, (string_address)settings.value[row]))
+                settings_change(row, word);
 }
 
 static b32 settings_event_take(const struct window_event address_to event)
@@ -7070,7 +6242,6 @@ static b32 settings_event_take(const struct window_event address_to event)
                         ui_page_redraw(&settings.page);
                 return keep;
         }
-        // The map of the screens (above the Display rows) takes its share first (settings_map_event); a map not shown holds no hand.
         if (settings_map_on() && settings.page.menu_row < 0 && event->type != WINDOW_EVENT_KEY)
         {
                 if (settings_map_event(event))
@@ -7078,30 +6249,17 @@ static b32 settings_event_take(const struct window_event address_to event)
         }
         else if (!settings_map_on())
                 ui_graph_let_go(&settings.map.graph);
-        // A press anywhere else is the pointer's, and the keys leave the map for it.
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
                 settings.map.keys = false;
-        // The scrollbars take a pointer's motion, press and release on them, and a finger's on a thumb (the kit knows which it is).
         if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) &&
             (event->type != WINDOW_EVENT_BUTTON || event->a == UI_POINTER_LEFT) &&
             ui_page_bars(&settings.ui, &settings.page, (int)event->type, (event->flags & WINDOW_KEY_DOWN) != 0))
                 return true;
-        /*
-                The fields take the pointer on their wells (a caret, a drag, a double or triple click, the middle
-                button's paste, the right button's menu), the motion and release of a drag they began, and the
-                clipboard's answer to a paste they asked for: the field a row is typed in while it shows, and the
-                search field. A press on the search field ends the typing in a row, as a press anywhere else does.
-        */
         if (event->type != WINDOW_EVENT_KEY && event->type != WINDOW_EVENT_WHEEL && !settings.page.card && settings.page.menu_row < 0)
         {
                 int x = ui_kit.pointer_x, y = ui_kit.pointer_y;
                 p32 asks;
 
-                /*
-                        A press outside the field a row is typed in ends the typing, by the kit's one rule (ui_field_event answers
-                        UI_TEXT_COMMIT for a plain value, UI_TEXT_CANCEL for a command): the press then goes on to the row it is on,
-                        unless that is the row typed in, whose label a press only leaves.
-                */
                 if (settings_editing() >= 0 && (settings_edit_shown() || event->type != WINDOW_EVENT_MOTION || settings.edit.sel.dragging) &&
                     (asks = ui_field_event(&settings.ui, &settings.edit, null, event, x, y)))
                 {
@@ -7115,14 +6273,11 @@ static b32 settings_event_take(const struct window_event address_to event)
                                 return true;
                         }
                 }
-                if (settings.filter_open && (asks = ui_field_event(&settings.ui, &settings.filter_edit, &settings.popup, event, x, y)))
+                if (settings.filter_open && (asks = ui_field_event(&settings.ui, &settings.filter_edit, &settings.popup, event, x, y)) &&
+                    (event->type != WINDOW_EVENT_BUTTON || (asks != UI_TEXT_COMMIT && asks != UI_TEXT_CANCEL)))
                 {
-                        if (event->type != WINDOW_EVENT_BUTTON || (asks != UI_TEXT_COMMIT && asks != UI_TEXT_CANCEL))
-                        {
-                                settings_filter_asked(asks);
-                                ui_page_redraw(&settings.page);
-                                return true;
-                        }
+                        settings_filter_asked(asks), ui_page_redraw(&settings.page);
+                        return true;
                 }
         }
         switch (event->type)
@@ -7131,19 +6286,16 @@ static b32 settings_event_take(const struct window_event address_to event)
                 return settings_key(event);
         case WINDOW_EVENT_MOTION:
         case WINDOW_EVENT_BUTTON:
-                // The rows, the column, sectioned column headers, right-click context menus, a press and a finger: all handled by ui_page_pointer.
                 ui_page_pointer(&settings.ui, &settings.page, &settings.list, event, settings_press_at);
                 settings_slid();
                 break;
         case WINDOW_EVENT_WHEEL:
-                // The menu turns under the wheel, and nothing else does while it is open; else what is under the pointer.
                 ui_page_wheel(&settings.ui, &settings.page, event);
                 break;
         }
         return true;
 }
 
-// An event, taken with whether it is a key or a press a device plugged into the machine sent (settings.hand, for settings_refused).
 static b32 settings_event(const struct window_event address_to event)
 {
         b32 taken;
@@ -7154,28 +6306,18 @@ static b32 settings_event(const struct window_event address_to event)
         return taken;
 }
 
-// A press at the pointer, a mouse's at once and a finger's as it comes up where it went down: what it is on is done.
 static fn settings_press_at(void)
 {
         int x = ui_kit.pointer_x, y = ui_kit.pointer_y, row, before = settings.list.focus;
 
-        // A press on the card of what a command said is done with it.
         if (settings.page.card)
-        {
-                settings_card_leave();
-                return;
-        }
-        // A press on a group chooses it, rippling it; the keys are then in the column, and Enter goes to its rows.
+                return settings_card_leave();
         row = ui_page_column_hit(&settings.ui, &settings.page, x, y);
         if (row >= 0)
         {
-                settings_edit_end();
-                settings.page.pane = 0;
-                settings_group_choose(row);
-                ui_page_redraw(&settings.page);
+                settings_edit_end(), settings.page.pane = 0, settings_group_choose(row), ui_page_redraw(&settings.page);
                 return;
         }
-        // A row: the kit gives it the keys, shows it pressed and ripples it from the press.
         row = ui_list_pointer(&settings.ui, &settings.list, WINDOW_EVENT_BUTTON, x, y, true);
         if (settings_editing() >= 0 && row != settings_editing())
                 settings_edit_end();
@@ -7184,23 +6326,36 @@ static fn settings_press_at(void)
         {
                 int offset, dom = settings_domain_of(row, &offset);
 
-                if (dom >= 0 && settings_domains[dom].press && settings_domains[dom].press(row, offset, x, y))
+                if (dom == SETTINGS_DOM_SUB)
+                {
+                        if (settings_partitions_owner(row) >= 0)
+                                settings_toggle(settings_partitions_owner(row));
+                        else if (offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_DISMISS_ALL)
+                                windows_kernel_dismiss(settings.own.table, KERNEL_NOTICE_ALL);
+                        else if (offset < settings_sub_count && settings_sub[offset].action != SETTINGS_SUB_PARTITION)
+                                settings_copy(offset);
+                        ui_page_redraw(&settings.page);
                         return;
+                }
+                if (dom == SETTINGS_DOM_TRY || dom == SETTINGS_DOM_ABOUT)
+                {
+                        settings.page.pane = 1;
+                        if (dom == SETTINGS_DOM_TRY)
+                                settings_try_press(row, x, y);
+                        else
+                                settings_about_press(row);
+                        ui_page_redraw(&settings.page);
+                        return;
+                }
         }
         if (row < SETTINGS_ANY && ui_list_expander_at(&settings.ui, &settings.list, row, x))
         {
-                settings_toggle(row);
-                ui_page_redraw(&settings.page);
+                settings_toggle(row), ui_page_redraw(&settings.page);
                 return;
         }
         if (row != before)
-        {
-                ui_confirm_drop(&settings.confirm);
-                settings_said_of(before);
-        }
-        settings.page.pane = 1;
-        ui_page_redraw(&settings.page);
-        // A port's segment: allow (the first) or deny (the second) that port; the segment the port is in is no change.
+                ui_confirm_drop(&settings.confirm), settings_said_of(before);
+        settings.page.pane = 1, ui_page_redraw(&settings.page);
         if (settings.list.part >= 0 && row < (int)SETTINGS_ALL && settings_item(row) && settings_item(row)->kind == SETTINGS_PORT)
         {
                 const struct settings_item address_to item = settings_item(row);
@@ -7209,7 +6364,6 @@ static fn settings_press_at(void)
                         settings_port_set(item, settings.list.part == 0);
                 return;
         }
-        // A segment or a swatch is set where it is pressed.
         if (settings.list.part >= 0 && row < SETTINGS_ANY && settings.state[row] == SETTINGS_READ)
         {
                 char word[SETTINGS_VALUE];
@@ -7218,7 +6372,6 @@ static fn settings_press_at(void)
                         settings_change(row, settings_accents[settings.list.part].name);
                 else if (settings_word(settings_rows[row].choices, (positive)settings.list.part, word, sizeof(word)))
                 {
-                        // The segment the row already shows sends nothing, as the menu's word does, and says so.
                         if (string_equals((string_address)word, (string_address)settings.value[row]))
                                 settings_say((string_address)WORDS(settings_already_set));
                         else
@@ -7226,338 +6379,16 @@ static fn settings_press_at(void)
                 }
                 return;
         }
-        // A USB drive's row is tall: a press on its heading or its strip, outside its tabs, allows or blocks nothing.
         if (settings_item(row) && (settings_item(row)->flags & SETTINGS_ITEM_DISK))
                 return;
         if (settings_editing() != row && !(row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_SLIDER))
                 settings_activate(row, settings.list.way);
 }
 
-/* ---- domain vtable (registry rows, commands, feed lists, sub-rows, interactive try rows, about) ---- */
-
-static const char address_to settings_dom_row_label(int id, int offset, b32 shown)
-{
-        (void)id;
-        return shown ? language_of(settings_rows[offset].label) : settings_rows[offset].label;
-}
-
-static int settings_dom_row_section_start(int id, int offset)
-{
-        (void)offset;
-        while (id > 0 && !settings_rows[id].section && !settings_rows[id].part)
-                id--;
-        return id;
-}
-
-static const char address_to settings_dom_row_section(int id, int offset)
-{
-        (void)offset;
-        while (id > 0 && !settings_rows[id].section)
-                id--;
-        return settings_rows[id].section;
-}
-
-static int settings_dom_row_group(int id, int offset)
-{
-        int group = -1;
-
-        (void)id;
-        for (int at = 0; at <= offset; at++)
-                group += settings_rows[at].section != null;
-        return group;
-}
-
-static b32 settings_dom_row_matches(int id, int offset, const char address_to word, positive size)
-{
-        const struct settings_row address_to which = &settings_rows[offset];
-
-        for (positive at = 0; at < SETTING_WORDS; at++)
-                if (settings_has(which->read[at], word, size) || settings_has(which->set[at], word, size))
-                        return true;
-        return settings_has(settings.value[offset], word, size) || settings_matches_name(which->label, settings_section(id), word, size) ||
-               settings_matches_name(which->about, settings_rows[settings_section_start(id)].part, word, size);
-}
-
-static const char address_to settings_dom_row_copy(int id, int offset)
-{
-        struct ui_row row;
-
-        if (settings_rows[offset].output == SETTINGS_OUT_NONE)
-                return settings.state[offset] == SETTINGS_READ && settings.value[offset][0] ? settings_number_shown(offset, settings.value[offset]) : null;
-        memory_zero(&row, sizeof(row));
-        settings_describe(id, &row);
-        return !row.dim && row.value && row.value[0] ? row.value : null;
-}
-
-static p32 settings_dom_value_menu(int id, int offset, b32 has)
-{
-        (void)id, (void)offset;
-        return UI_LIST_MENU_VALUE_WORDS | UI_LIST_MENU_HAS_COPY_ROW | (has ? UI_LIST_MENU_HAS_COPY : 0);
-}
-
-static const char address_to settings_dom_cmd_label(int id, int offset, b32 shown)
-{
-        (void)id, (void)shown;
-        return offset > 0 ? settings_large->pool + settings.generic[offset - 1].command : WORDS(settings_run_any);
-}
-
-static int settings_dom_cmd_section_start(int id, int offset) { (void)id, (void)offset; return SETTINGS_ANY; }
-static const char address_to settings_dom_cmd_section(int id, int offset) { (void)id, (void)offset; return SETTINGS_ALL_HEADER; }
-static int settings_dom_cmd_group(int id, int offset) { (void)id, (void)offset; return settings_groups() - 1; }
-
-static b32 settings_dom_cmd_matches(int id, int offset, const char address_to word, positive size)
-{
-        (void)offset;
-        return settings_has(settings_label(id), word, size) || settings_has(settings_text(id), word, size) ||
-               (id == SETTINGS_ANY && settings_has("anything", word, size));
-}
-
-static fn settings_dom_cmd_activate(int id, int offset, int way)
-{
-        (void)offset, (void)way;
-        if (settings_takes(id))
-                settings_edit_begin(id, "", false);
-        else
-                settings_run(id, "");
-}
-
-static const char address_to settings_dom_cmd_copy(int id, int offset) { return offset > 0 ? settings_label_shown(id) : null; }
-static p32 settings_dom_cmd_menu(int id, int offset, b32 has) { (void)id; return offset > 0 && has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0; }
-
-static const char address_to settings_dom_list_label(int id, int offset, b32 shown)
-{
-        const struct settings_item address_to item = settings_item(id);
-
-        (void)offset;
-        return !item ? WORDS(settings_run_any) : shown && item->kind == SETTINGS_ADD ? language_of(item->label) : item->label;
-}
-
-static int settings_dom_list_section_start(int id, int offset)
-{
-        int list = offset / SETTINGS_LIST_ROWS, at = offset % SETTINGS_LIST_ROWS;
-
-        if (list == 2 && settings_item(id))
-        {
-                int section = settings_device_section(settings_item(id));
-
-                while (at > 0 && settings_device_section(&settings_large->item[2][at - 1]) == section)
-                        at--;
-                return (int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + at;
-        }
-        return (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS;
-}
-
-static const char address_to settings_dom_list_section(int id, int offset)
-{
-        int list = offset / SETTINGS_LIST_ROWS;
-        const struct settings_item address_to item = settings_item(id);
-
-        if (list == 2 && item && settings_device_section(item))
-                return settings_device_section(item) == 1 ? SETTINGS_EXTERNAL_HEADER : "";
-        return settings_feeds[list].heading;
-}
-
-static int settings_dom_list_group(int id, int offset)
-{
-        (void)id;
-        for (int at = 0; at < settings_groups(); at++)
-                if (string_equals((string_address)settings_group_name(at), (string_address)settings_feeds[offset / SETTINGS_LIST_ROWS].group))
-                        return at;
-        return 0;
-}
-
-static b32 settings_dom_list_matches(int id, int offset, const char address_to word, positive size)
-{
-        (void)offset;
-        return settings_matches_name(settings_label(id), settings_section(id), word, size);
-}
-
-static fn settings_dom_list_activate(int id, int offset, int way)
-{
-        (void)offset, (void)way;
-        if (settings_item(id))
-                settings_item_activate(id, settings_item(id));
-}
-
-static const char address_to settings_dom_list_copy(int id, int offset)
-{
-        const struct settings_item address_to item = settings_item(id);
-
-        (void)offset;
-        return item && item->kind != SETTINGS_ADD && item->label[0] ? item->label : null;
-}
-
-static p32 settings_dom_list_menu(int id, int offset, b32 has)
-{
-        const struct settings_item address_to item = settings_item(id);
-        p32 copy = has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
-
-        (void)offset;
-        if (!item || item->kind == SETTINGS_ADD)
-                return 0;
-        if (item->kind == SETTINGS_NOTE)
-                return has ? UI_LIST_MENU_HAS_COPY : 0;
-        if (item->kind == SETTINGS_NETWORK)
-                return copy | ((item->flags & SETTINGS_ITEM_SAVED) ? UI_LIST_MENU_CAN_REMOVE : 0);
-        if (item->kind == SETTINGS_DEVICE || item->kind == SETTINGS_LINK)
-                return copy | UI_LIST_MENU_CAN_REMOVE;
-        return copy;
-}
-
-static fn settings_dom_sub_describe(int id, int offset, struct ui_row address_to row)
-{
-        (void)id;
-        if (offset < settings_sub_count)
-                settings_sub_describe(offset, row);
-}
-
-static fn settings_dom_sub_activate(int id, int offset, int way)
-{
-        (void)offset, (void)way;
-        if (settings_partitions_owner(id) >= 0)
-        {
-                settings_toggle(settings_partitions_owner(id));
-                ui_page_redraw(&settings.page);
-        }
-}
-
-static b32 settings_dom_sub_press(int id, int offset, int x, int y)
-{
-        (void)x, (void)y;
-        if (settings_partitions_owner(id) >= 0)
-                settings_toggle(settings_partitions_owner(id));
-        else if (offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_DISMISS_ALL)
-                windows_kernel_dismiss(settings.own.table, KERNEL_NOTICE_ALL);
-        else if (offset < settings_sub_count && settings_sub[offset].action != SETTINGS_SUB_PARTITION)
-                settings_copy(offset);
-        ui_page_redraw(&settings.page);
-        return true;
-}
-
-static const char address_to settings_dom_sub_copy(int id, int offset)
-{
-        struct ui_row row;
-
-        if (offset >= settings_sub_count)
-                return null;
-        if (settings_sub[offset].action == SETTINGS_SUB_COPY)
-                return settings_sub[offset].text[0] ? settings_sub[offset].text : null;
-        if (settings_sub[offset].action == SETTINGS_SUB_PARTITION)
-        {
-                memory_zero(&row, sizeof(row));
-                settings_describe(id, &row);
-                return row.label && row.label[0] ? row.label : null;
-        }
-        return null;
-}
-
-static p32 settings_dom_sub_menu(int id, int offset, b32 has)
-{
-        (void)id;
-        if (offset >= settings_sub_count)
-                return 0;
-        if (settings_sub[offset].action == SETTINGS_SUB_COPY)
-                return (has ? UI_LIST_MENU_HAS_COPY : 0) | (windows_issue_kernel(settings_sub[offset].code) ? UI_LIST_MENU_CAN_REMOVE : 0);
-        return settings_sub[offset].action == SETTINGS_SUB_PARTITION && has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
-}
-
-static fn settings_dom_try_describe(int id, int offset, struct ui_row address_to row) { (void)offset; settings_try_describe(id, row); }
-
-static fn settings_dom_try_activate(int id, int offset, int way)
-{
-        (void)way;
-        if (offset == SETTINGS_TRY_REPEAT)
-                settings_edit_begin(id, "", false);
-}
-
-static b32 settings_dom_try_press(int id, int offset, int x, int y)
-{
-        (void)offset;
-        settings.page.pane = 1;
-        settings_try_press(id, x, y);
-        ui_page_redraw(&settings.page);
-        return true;
-}
-
-static const char address_to settings_dom_about_label(int id, int offset, b32 shown)
-{
-        (void)id;
-        return shown ? settings_about_label(offset) : WORDS(settings_run_any);
-}
-
-static int settings_dom_about_group(int id, int offset) { (void)id, (void)offset; return settings_system_group(); }
-
-static b32 settings_dom_about_matches(int id, int offset, const char address_to word, positive size)
-{
-        (void)id;
-        return settings_about_matches_word(offset, word, size);
-}
-
-static fn settings_dom_about_describe(int id, int offset, struct ui_row address_to row) { (void)offset; settings_about_describe(id, row); }
-
-static fn settings_dom_about_activate(int id, int offset, int way)
-{
-        (void)offset, (void)way;
-        settings_about_press(id);
-        ui_page_redraw(&settings.page);
-}
-
-static b32 settings_dom_about_press(int id, int offset, int x, int y)
-{
-        (void)offset, (void)x, (void)y;
-        settings.page.pane = 1;
-        settings_about_press(id);
-        ui_page_redraw(&settings.page);
-        return true;
-}
-
-static const char address_to settings_dom_about_copy(int id, int offset) { (void)id; return settings_about_url(offset); }
-
-static const struct settings_domain_ops settings_domains[6] = {
-    [SETTINGS_DOM_ROW] = {
-        0, SETTINGS_ANY, settings_dom_row_label, settings_dom_row_section_start, settings_dom_row_section,
-        settings_dom_row_group, settings_dom_row_matches, null, settings_row_activate, null, settings_dom_row_copy, settings_dom_value_menu,
-    },
-    [SETTINGS_DOM_COMMAND] = {
-        SETTINGS_ANY, (int)SETTINGS_LIST, settings_dom_cmd_label, settings_dom_cmd_section_start, settings_dom_cmd_section,
-        settings_dom_cmd_group, settings_dom_cmd_matches, null, settings_dom_cmd_activate, null, settings_dom_cmd_copy, settings_dom_cmd_menu,
-    },
-    [SETTINGS_DOM_LIST] = {
-        (int)SETTINGS_LIST, (int)SETTINGS_ALL, settings_dom_list_label, settings_dom_list_section_start, settings_dom_list_section,
-        settings_dom_list_group, settings_dom_list_matches, null, settings_dom_list_activate, null, settings_dom_list_copy, settings_dom_list_menu,
-    },
-    [SETTINGS_DOM_SUB] = {
-        (int)SETTINGS_ALL, SETTINGS_TRY, null, null, null,
-        null, settings_dom_cmd_matches, settings_dom_sub_describe, settings_dom_sub_activate, settings_dom_sub_press, settings_dom_sub_copy, settings_dom_sub_menu,
-    },
-    [SETTINGS_DOM_TRY] = {
-        SETTINGS_TRY, SETTINGS_ABOUT, null, null, null,
-        null, settings_dom_cmd_matches, settings_dom_try_describe, settings_dom_try_activate, settings_dom_try_press, null, null,
-    },
-    [SETTINGS_DOM_ABOUT] = {
-        SETTINGS_ABOUT, SETTINGS_LIST_IDS, settings_dom_about_label, null, null,
-        settings_dom_about_group, settings_dom_about_matches, settings_dom_about_describe, settings_dom_about_activate, settings_dom_about_press,
-        settings_dom_about_copy, settings_dom_value_menu,
-    },
-};
-
 /* ---- the picture ---- */
 
+static void settings_map_paint(struct ui address_to ui) { if (settings_map_on()) settings_map_draw(ui); }
 
-/*
-        The picture drawn into pixels, every row of it that lies in the band [band_top, band_bottom): the kit's page
-        (its title, the search field that shows the filter), the column of groups and the rows of the group chosen, or
-        the card, and over them the menu a choice opened. settings_paint calls it only for a band with rows in it
-        (ui_buffers_present calls it).
-*/
-// The map above the rows, drawn between the column and the rows: the panel the page's frame has there, when the map is shown.
-static void settings_map_paint(struct ui address_to ui)
-{
-        if (settings_map_on())
-                settings_map_draw(ui);
-}
-
-// The card's lines, in place of the rows when the page is a card.
 static void settings_card_paint(struct ui address_to ui)
 {
         if (settings_pair_on && settings.child > 0)
@@ -7573,40 +6404,23 @@ static fn settings_draw_rows(unsigned int address_to pixels, int band_top, int b
 
         ui_paint_into(ui, pixels, settings.own.table->stride, settings.width, settings.height, band_top, band_bottom);
         if (gallery.on)
-        {
-                gallery_draw(ui);
-                return;
-        }
+                return gallery_draw(ui);
         settings.page.title = settings.page.card ? settings.card_title : language_of("Settings");
         settings.list.empty = WORDS(settings_nothing_matches);
-        // The search field is the filter: the kit's bare field, the text engine's field in it (typing, a selection, the
-        // clipboard, its caret), with the keys while the window has them and no row is typed in.
         settings.page.search.items[0] = settings.page.card ? null : WORDS(settings_filter_hint);
         settings.page.search.edit = settings.page.card ? null : settings_filter_field();
         memory_zero(&parts, sizeof(parts));
         parts.keys = settings_editing() < 0 && settings.focused;
-        parts.group_name = settings_group_text;
-        parts.groups = settings_groups();
-        parts.column_keys = settings.focused && !settings.page.pane;
-        parts.column_off = settings_filter_length() != 0;
-        // A row typed in is a field on the page, not a band: its well is the only thing lit there. The map has the keys while it
-        // is focused, so no row is lit or has the focus then.
+        parts.group_name = settings_group_text, parts.groups = settings_groups();
+        parts.column_keys = settings.focused && !settings.page.pane, parts.column_off = settings_filter_length() != 0;
         parts.list_lit = (settings.page.pane || settings_filter_length()) && settings_editing() < 0 && !settings.map.keys;
         parts.list_keys = settings.focused && settings.page.pane && !settings.map.keys;
-        parts.list = &settings.list;
-        parts.between = settings_map_paint;
-        parts.card = settings_card_paint;
-        // A finger's selection in the field a row is typed in, or in the filter: its handles and actions bar, over the rows.
+        parts.list = &settings.list, parts.between = settings_map_paint, parts.card = settings_card_paint;
         parts.overlays[0] = settings_editing() >= 0 && settings_edit_shown() ? &settings.edit : null;
         parts.overlays[1] = settings.filter_open && !settings.page.card ? &settings.filter_edit : null;
         ui_page_paint(ui, &settings.page, &parts);
 }
 
-/*
-        The folds, one frame's step: each row whose spring moves takes its fold from it (ui_spring_at, the kit's spring), and the list is laid
-        out again, so the rows under a folding line move with it. The damage starts at the topmost row that moved (its own place does not
-        move, only what is under it). A row that has shut has no lines any more: the rows are listed again without them.
-*/
 static fn settings_fold_step(void)
 {
         b32 moved = false, shut = false;
@@ -7614,28 +6428,24 @@ static fn settings_fold_step(void)
 
         for (positive k = 0; k < SETTINGS_FOLD_POOL; k++)
         {
-                int row = settings_fold_pool[k].row - 1;
+                int row = settings_fold_pool[k].row - 1, at;
                 b64 target, was, now;
                 b32 live;
-                int at;
 
                 if (row < 0 || row >= (int)SETTINGS_ALL || !settings_fold_live[row])
                 {
                         settings_fold_pool[k].row = 0;
                         continue;
                 }
-                target = settings_expanded[row] ? UI_ONE : 0;
-                was = settings_fold_at[row];
+                target = settings_expanded[row] ? UI_ONE : 0, was = settings_fold_at[row];
                 live = ui_spring_at(&settings_fold_pool[k].spring);
                 now = live ? target + settings_fold_pool[k].spring.value[0] : target;
                 now = now < 0 ? 0 : now > UI_ONE ? UI_ONE : now;
-                settings_fold_at[row] = now;
-                settings_fold_live[row] = live;
+                settings_fold_at[row] = now, settings_fold_live[row] = live;
                 if (!live)
                         settings_fold_pool[k].row = 0;
                 ui_kit.busy |= live;
-                if (!live && !target)
-                        shut = true;
+                shut |= !live && !target;
                 if (now == was)
                         continue;
                 moved = true;
@@ -7653,15 +6463,9 @@ static fn settings_fold_step(void)
         }
 }
 
-/*
-        One picture into the kit's buffers (ui_buffers_present draws the rows that changed or were spoiled, and shows the
-        buffer): the picture is due until the compositor has taken the last one, and clean after it.
-*/
 static b32 settings_frame(void)
 {
         settings_fold_step();
-        // A reading since the last picture may have made a row want more room (a switch, tabs, a slider read), and the text may be larger:
-        // the least is worked out again where it is due, and a window narrower or shorter than it is drawn at it.
         if (settings.own.table && settings.width > 0 && settings_least() &&
             ((settings.width < settings.least_w && settings.width < (int)settings.own.table->output_width &&
               (!settings.own.table->stride || settings.width < (int)settings.own.table->stride)) ||
@@ -7675,18 +6479,14 @@ static b32 settings_frame(void)
 
 /* ---- the program ---- */
 
-// The size the window is drawn at: its own, or what the compositor asked, never under its least (settings_least) and never past the output
-// or its buffer's rows, which win where the two meet.
 static fn settings_size(unsigned int width, unsigned int height)
 {
         struct windows address_to table = settings.own.table;
         unsigned int most = table->stride && table->stride < table->output_width ? table->stride : table->output_width;
 
         if (settings_least())
-        {
-                width = width < (unsigned int)settings.least_w ? (unsigned int)settings.least_w : width;
+                width = width < (unsigned int)settings.least_w ? (unsigned int)settings.least_w : width,
                 height = height < (unsigned int)settings.least_h ? (unsigned int)settings.least_h : height;
-        }
         settings.width = (int)(width > most ? most : width);
         settings.height = (int)(height > table->output_height ? table->output_height : height);
         ui_scratch_fit(&settings.ui, (unsigned int)settings.width);
@@ -7694,25 +6494,19 @@ static fn settings_size(unsigned int width, unsigned int height)
                 ui_lines_wrap(&settings.ui, &settings.card_text, settings.width);
         settings_layout();
         ui_page_column_show(&settings.ui, &settings.page);
-        // A choice's menu is a popup under its row, which the layout may have moved: it closes, and the row is asked again.
         ui_page_menu_close(&settings.page, &settings.popup);
         ui_page_redraw(&settings.page);
 }
 
-// The settings' start, once its window is taken: the lift, the layout and the first picture. -1 runs the loop.
-// The status line holds a message of the language it was said in, so a change of language ends it.
 static fn settings_language(void)
 {
         settings_say((string_address) "");
-        settings_gpu_key = 0xffffffffu; // the status line is said again in the new language at the next board tick
-        // A language that reads the other way is a page laid out the other way: the column, the bars and the rows' extent are placed again.
+        settings_gpu_key = 0xffffffffu;
         if (settings.width > 0 && settings.height > 0)
                 settings_layout();
         ui_page_redraw(&settings.page);
 }
 
-// -n: the start that the notices popup makes (notices.c): Settings opens on its System group, where the kernel's notices are. A Settings
-// already up is lifted and asked for the same page (ui_lift_row), its page hook choosing it.
 static b32 settings_notices_asked;
 static int settings_system_group(void)
 {
@@ -7722,63 +6516,46 @@ static int settings_system_group(void)
         return 0;
 }
 
-static void settings_asked(unsigned int page)
-{
-        settings_group_choose((int)page);
-}
+static void settings_asked(unsigned int page) { settings_group_choose((int)page); }
 
 static int settings_open(void)
 {
         struct windows address_to table = settings.own.table;
         unsigned int row = settings.own.row;
+        int width = ui_px(&settings.ui, gallery.on ? GALLERY_W : SETTINGS_WIDTH);
+        int height = ui_px(&settings.ui, gallery.on ? GALLERY_H : SETTINGS_HEIGHT);
+        int room = (int)table->output_height - ui_px(&settings.ui, 2 * (24 + 24));
 
         if (!gallery.on && (settings_notices_asked ? ui_lift_row(&settings.own, (string_address) "settings", false, ((unsigned int)((unsigned int)settings_system_group())) + 1)
                                                    : ui_lift_other(&settings.own, (string_address) "settings", false)))
                 return 0;
-
-        // The group is chosen before the rows are listed: the rows are those of the group the column shows.
         if (settings_notices_asked)
                 settings.page.chosen = settings_system_group();
         settings_refilter();
         if (gallery.on)
-        {
-                int width = ui_px(&settings.ui, GALLERY_W), height = ui_px(&settings.ui, GALLERY_H);
-                int room = (int)table->output_height - ui_px(&settings.ui, 2 * (24 + 24));
-
                 gallery_build(&settings.own, settings_name_accepts, SETTINGS_NAME_MOST);
-                settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
-                ui_free(table, row, settings.width, settings.height, 0);
-                settings_frame();
-                return -1;
-        }
+        settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
+        ui_free(table, row, settings.width, settings.height, gallery.on ? 0 : ui_px(&settings.ui, 12));
+        if (!gallery.on)
         {
-                int width = ui_px(&settings.ui, SETTINGS_WIDTH), height = ui_px(&settings.ui, SETTINGS_HEIGHT);
-                int room = (int)table->output_height - ui_px(&settings.ui, 2 * (24 + 24));
-
-                settings_size((unsigned int)width, (unsigned int)(height < room ? height : room > 0 ? room : height));
-                ui_free(table, row, settings.width, settings.height, ui_px(&settings.ui, 12));
+                settings_say((string_address) "");
+                settings_ask_all();
+                settings.help = 1;
+                settings_next_job();
         }
-        settings_say((string_address) "");
-
-        settings_ask_all();
-        settings.help = 1;
-        settings_next_job();
         settings_frame();
         return -1;
 }
 
-// An item of a field's context menu, done to the field it was opened for.
 static fn settings_chose(int id)
 {
         struct ui_text address_to t = settings.popup.field;
 
-        // A row's declarative list context menu (Copy, Copy row, Remove, or extra): handled by the kit with zero app state.
         if (ui_list_menu_do(&settings.popup, &settings.own, id))
         {
                 ui_page_redraw(&settings.page);
                 return;
         }
-        // A choice's menu: the item it chose, or a negative id when it closed (the compositor's press outside, or Escape).
         if (!t && settings.page.menu_row >= 0)
         {
                 if (id >= 0)
@@ -7790,39 +6567,23 @@ static fn settings_chose(int id)
         if (t == &settings.edit && settings_editing() >= 0)
                 settings_edit_asked(ui_text_menu_do(&settings.ui, t, id));
         else if (t == &settings.filter_edit && settings_editing() < 0)
-        {
-                p32 asks = ui_text_menu_do(&settings.ui, t, id);
-
-                settings_filter_asked(asks);
-                ui_page_redraw(&settings.page);
-        }
+                settings_filter_asked(ui_text_menu_do(&settings.ui, t, id)), ui_page_redraw(&settings.page);
         else if (t && (t == &gallery.field[0] || t == &gallery.field[1]))
-        {
-                ui_text_menu_do(&settings.ui, t, id);
-                ui_page_redraw(&settings.page);
-        }
+                ui_text_menu_do(&settings.ui, t, id), ui_page_redraw(&settings.page);
 }
 
-// The settings' timers: the caret's blink, a verb's time, the due reading of a feed, and the descriptor of a verb running.
-// 0 runs the loop again.
 static long settings_tick(long timeout, long address_to other)
 {
-        // A pairing's card counts its seconds: it is drawn again each second while it is up and its wait runs.
         if (settings_pair_on && settings.page.card && settings.child > 0)
         {
                 positive now = (positive)ui_kit.now;
 
                 if (now >= settings_pair_due)
-                {
-                        settings_pair_due = now + (positive)SETTINGS_PAIR_TICK_NS;
-                        ui_page_redraw(&settings.page);
-                }
+                        settings_pair_due = now + (positive)SETTINGS_PAIR_TICK_NS, ui_page_redraw(&settings.page);
                 timeout = ui_deadline_wait(timeout, (b64)now, (b64)settings_pair_due);
         }
-        // The board, read once a second (settings_board_tick): when the rows' lines change, the page is laid out again.
         if (settings.list.ids)
                 timeout = ui_timeout_min(timeout, settings_board_tick());
-        // The field with the keys blinks its caret a while after its last key, its well drawn again at each turn.
         if (!settings.page.card && (gallery.on || settings_editing() >= 0 || settings.filter_open))
         {
                 struct ui_text address_to t = gallery.on ? &gallery.field[gallery.field[1].focused]
@@ -7830,12 +6591,10 @@ static long settings_tick(long timeout, long address_to other)
 
                 timeout = ui_field_tick(&settings.ui, &settings.page, t, timeout, gallery.on ? t->focused : settings.focused);
         }
-        // A size sent and waiting to be kept counts down, and goes back when its time is up (settings_keep_tick).
         timeout = ui_timeout_min(timeout, settings_keep_tick());
         if (other)
                 *other = -1;
         settings_runner_ready();
-        // A verb whose output ended and that still does not exit is killed once its time is up.
         if (settings.runner.child > 0 && settings.runner.ending == 1 && settings.runner.timeout_ns &&
             (positive)ui_kit.now >= settings.runner.began + settings.runner.timeout_ns)
         {
@@ -7845,7 +6604,6 @@ static long settings_tick(long timeout, long address_to other)
         timeout = ui_job_tick(&settings.runner, timeout, other);
         if (settings.runner.child <= 0)
         {
-                // What the group shown keeps up with, when it is due; otherwise how long till it is.
                 timeout = ui_timeout_min(timeout, settings_feed_tick());
                 if (settings.runner.child > 0)
                         return 0;
@@ -7853,11 +6611,6 @@ static long settings_tick(long timeout, long address_to other)
         return timeout;
 }
 
-/*
-        A verb still running when the window closes is stopped, and not waited for: one in the kernel's uninterruptible sleep does not
-        exit on its kill (settings_left), and the close that waited for it kept the settings' process, and its window, there for good.
-        It is reaped if it has already exited; otherwise init has it once the settings are gone, as it has the children left before.
-*/
 static fn settings_close(void)
 {
         settings_wall_free();
@@ -7865,7 +6618,6 @@ static fn settings_close(void)
         {
                 positive status = 0;
 
-                // A pairing is stopped as a press on its row stops it: the CLI closes the code it made, and it answers SIGTERM at once.
                 system_call_2(syscall(kill), (positive)settings.child, settings_pair_on ? SIGTERM : SIGKILL);
                 system_wait4_retry(settings.child, address_of status, 1, null);
         }
@@ -7878,33 +6630,17 @@ static b32 settings_focus(b32 focused)
         return true;
 }
 
-// The kit's controls moved this frame: their rows are drawn again at the next (the whole picture while the theme turns).
 static struct ui_app settings_app = {
-        .own = &settings.own,
-        .ui = &settings.ui,
+        .own = &settings.own, .ui = &settings.ui,
         .missing = (string_address) "settings: no window: the compositor's desktop is not up\n",
-        .title = (string_address) "Settings",
-        .name = (string_address) "settings",
-        .glass = 0, // the kit's surface: the window is the theme's, opaque, as every kit window is,
-        .side = true, // but for its column of groups, the window's glass pane (ui_page_view)
-        .font = null,
+        .title = (string_address) "Settings", .name = (string_address) "settings",
+        .glass = 0, .side = true, .font = null,
         .nofont = (string_address) "settings: no font to draw with (-f FONT.ttf), pid ",
-        .dirty = &settings.page.dirty,
-        .focused = &settings.focused,
-        .ground = &settings.ground,
-        .open = settings_open,
-        .page = settings_asked,
-        .frame = settings_frame,
-        .language = settings_language,
-        .event = settings_event,
-        .focus = settings_focus,
-        .buffers = &settings.page.buffers,
-        .size = settings_size,
-        .tick = settings_tick,
-        .job = &settings.runner,
-        .close = settings_close,
-        .popup = &settings.popup,
-        .chose = settings_chose,
+        .dirty = &settings.page.dirty, .focused = &settings.focused, .ground = &settings.ground,
+        .open = settings_open, .page = settings_asked, .frame = settings_frame,
+        .language = settings_language, .event = settings_event, .focus = settings_focus,
+        .buffers = &settings.page.buffers, .size = settings_size, .tick = settings_tick,
+        .job = &settings.runner, .close = settings_close, .popup = &settings.popup, .chose = settings_chose,
 };
 
 static b32 settings_main()
@@ -7912,11 +6648,8 @@ static b32 settings_main()
         memory_zero(&settings, sizeof(settings));
         settings.moonwater = (string_address) "/moonwater";
         ui_buffers_start(&settings.page.buffers);
-        settings.output = -1;
+        settings.output = -1, settings.page.pane = 1, settings.page.menu_row = -1;
         settings_runner_ready();
-        settings.page.pane = 1; // the keys start in the rows, on the first of them
-        settings.page.menu_row = -1;
-
         for (positive at = 1; at < (positive)program_argument_count();)
         {
                 positive used = ui_app_option(&settings_app, at);
@@ -7929,26 +6662,17 @@ static b32 settings_main()
                 else if (string_equals(program_argument(at), (string_address) "-n"))
                         settings_notices_asked = true, at++;
                 else if (string_equals(program_argument(at), (string_address) "-g"))
-                {
-                        // -g: the kit's gallery, on its own paper and not glass, with the mono for its tags and code.
-                        gallery.on = 1;
-                        settings_app.glass = 0, settings_app.side = false;
-                        settings_app.mono = 1;
-                        settings_app.title = (string_address) "Gallery";
-                        settings_app.name = (string_address) "gallery";
-                        at++;
-                }
+                        gallery.on = 1, settings_app.glass = 0, settings_app.side = false, settings_app.mono = 1,
+                        settings_app.title = (string_address) "Gallery", settings_app.name = (string_address) "gallery", at++;
                 else
                         at++;
         }
-
         if (!settings_map())
         {
                 compositor_kmsg((string_address) "settings: no memory, pid ",
                                 (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                 return 1;
         }
-
         return ui_app_run(&settings_app);
 }
 
