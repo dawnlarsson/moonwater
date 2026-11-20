@@ -2461,7 +2461,7 @@ static void gpu_fault_rows(void)
 
                 compositor_wl.started = 1;
                 kept = compositor_wl_slots_reach(2) && wayland_rows_reach(2); // the slots first: they give the shim's tables their host
-                wayland.row_client[2] = 1, compositor_wl.barred[1] = 0, compositor_wl.source[2].va = 0x40000000ull;
+                wayland.row[2].client = 1, compositor_wl.barred[1] = 0, compositor_wl.source[2].va = 0x40000000ull;
                 gpu.imports = 1, gpu.imported[0] = 5, gpu.imported_va[0] = 0x40000000ull, gpu.imported_bytes[0] = 8192, gpu.imported_dead[0] = 0;
                 compositor_gpu = 1, compositor_gpu_state.up = 1, compositor_gpu_state.blamed_at = 0, compositor_gpu_state.blamed = 0;
                 for (unsigned int i = 0; i < 3; i++)
@@ -2484,7 +2484,7 @@ static void gpu_fault_rows(void)
                 card = compositor_gpu_state.hung_off && !compositor_wl_card_barred(2);
                 check("hang: three hangs in a minute in a client's import bar that client from the card and keep the card; one in no import is the card's again",
                       kept && barred && fresh && others && card);
-                wayland.row_client[2] = -1, compositor_wl.source[2].va = saved_va, compositor_wl.started = saved_started;
+                wayland.row[2].client = -1, compositor_wl.source[2].va = saved_va, compositor_wl.started = saved_started;
                 compositor_gpu_state.dead = 0, compositor_gpu_state.hung_off = 0, compositor_gpu_state.cool_until = 0, compositor_gpu_state.hung_at = 0;
                 compositor_gpu_state.restart_due = 0, compositor_gpu_state.failures = 0, compositor_gpu_state.cool_steps = 0, compositor_gpu_state.up = 0;
                 compositor_gpu_state.blamed_at = 0, compositor_gpu_state.blamed = 0;
