@@ -2204,11 +2204,7 @@ static int windows_buf_put(char *into, unsigned int room, unsigned int *at, cons
 
 static int windows_buf_str(char *into, unsigned int room, unsigned int *at, const char *text)
 {
-        unsigned int length = 0;
-
-        while (text[length])
-                length++;
-        return windows_buf_put(into, room, at, text, length);
+        return windows_buf_put(into, room, at, text, (unsigned int)string_length((const_string)text));
 }
 
 // Appends value in decimal (a minus first when negative) to into at *at.
@@ -2277,9 +2273,11 @@ static int windows_arrange_word(const char *word, unsigned int length, unsigned 
                 *how = WINDOWS_PLACE_OFF;
                 return 1;
         }
-        comma = at;
-        while (comma < length && word[comma] != ',')
-                comma++;
+        {
+                const char *hit = (const char *)memory_first_of(word + at, ',', length - at);
+
+                comma = hit ? (unsigned int)(hit - word) : length;
+        }
         if (comma == length ||
             !windows_scan_int(word + at, comma - at, -WINDOWS_PLACE_MOST, WINDOWS_PLACE_MOST, 6, 0, x) ||
             !windows_scan_int(word + comma + 1, length - comma - 1, -WINDOWS_PLACE_MOST, WINDOWS_PLACE_MOST, 6, 0, y))
@@ -2291,9 +2289,7 @@ static int windows_arrange_word(const char *word, unsigned int length, unsigned 
 // Whether count bytes at a and at b are the same.
 static int windows_same(const char *a, const char *b, unsigned int count)
 {
-        while (count && *a == *b)
-                a++, b++, count--;
-        return !count;
+        return !memory_compare(a, b, count);
 }
 
 // Whether a whole arrangement is one: default or nothing, or words each of which is one, a name once.
@@ -2861,10 +2857,8 @@ static void windows_rotate_panel(unsigned int lw, unsigned int lh, unsigned int 
 // Scans one line of text from start: sets *stop to line end and *word..*word_end to its leading token.
 static void windows_line_first_word(const char *text, unsigned int start, unsigned int *stop, unsigned int *word, unsigned int *word_end)
 {
-        unsigned int s = start, w, e;
+        unsigned int s = (unsigned int)(string_first_of_or_end((string_address)text + start, '\n') - (string_address)text), w, e;
 
-        while (text[s] && text[s] != '\n')
-                s++;
         w = start;
         while (w < s && (text[w] == ' ' || text[w] == '\t'))
                 w++;
@@ -3043,8 +3037,7 @@ static int windows_displays_primary(char *into, char *work, unsigned int room, c
         into[0] = 0;
         if (name)
         {
-                while (name_len < WINDOWS_OUTPUT_NAME && name[name_len])
-                        name_len++;
+                name_len = (unsigned int)string_length_max((string_address)name, WINDOWS_OUTPUT_NAME);
                 if (!windows_display_name(name, name_len, valid_name))
                         return -1;
         }

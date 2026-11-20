@@ -1935,11 +1935,12 @@ static int files_drives_parse(const p8 address_to text, positive length, struct 
                 p8 dev[32], root[256], target[FILES_PATH], fs[64], src[256];
                 b32 dup = false;
 
-                while (at < length && text[at] != '\n')
-                        at++;
-                line_end = at;
-                if (at < length)
-                        at++;
+                {
+                        const p8 address_to nl = (const p8 address_to)memory_first_of(text + at, '\n', length - at);
+
+                        line_end = nl ? (positive)(nl - text) : length;
+                        at = nl ? line_end + 1 : length;
+                }
                 for (positive p = line_start; p < line_end && ntok < 16;)
                 {
                         while (p < line_end && (text[p] == ' ' || text[p] == '\t'))
@@ -1973,14 +1974,15 @@ static int files_drives_parse(const p8 address_to text, positive length, struct 
                 if (dup)
                         continue;
                 {
-                        positive tlen = string_length((string_address)target), base = tlen;
+                        positive tlen = string_length((string_address)target);
 
-                        while (base > 1 && target[base - 1] == '/')
-                                target[--base] = end, tlen--;
-                        while (base > 0 && target[base - 1] != '/')
-                                base--;
+                        while (tlen > 1 && target[tlen - 1] == '/')
+                                target[--tlen] = end;
                         string_copy_bounded((string_address)out[count].path, (string_address)target, sizeof(out[count].path));
-                        string_copy_bounded((string_address)out[count].label, (string_address)(target + base), sizeof(out[count].label));
+                        if (tlen <= 1 && target[0] == '/')
+                                out[count].label[0] = 0;
+                        else
+                                path_tail_copy((p8 address_to)out[count].label, sizeof(out[count].label), target);
                         string_copy_bounded((string_address)out[count].device, (string_address)dev, sizeof(out[count].device));
                         string_copy_bounded((string_address)out[count].root, (string_address)root, sizeof(out[count].root));
                         for (positive i = 0; i < tlen; i++)

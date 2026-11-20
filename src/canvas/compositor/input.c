@@ -88,19 +88,10 @@ static int compositor_game_epp_active;
 
 static void compositor_num_path(char *out, const char *pre, unsigned int num, const char *post)
 {
-        char digits[12];
-        unsigned int n = 0;
+        p8 *at = string_copy_end((string_address)out, (string_address)pre);
 
-        while (*pre)
-                *out++ = *pre++;
-        do
-                digits[n++] = (char)('0' + (num % 10u));
-        while (num /= 10u);
-        while (n)
-                *out++ = digits[--n];
-        while (*post)
-                *out++ = *post++;
-        *out = 0;
+        at += positive_into(at, (positive)num);
+        (void)string_copy_end(at, (string_address)post);
 }
 
 static void compositor_game_epp(int on)
