@@ -5499,17 +5499,30 @@ static int windows_clip_same(const char *a, unsigned long a_length, const char *
 }
 
 /*
+        Canonical text MIME preference rank (1 = highest, 5 = lowest, 0 = not a text MIME):
+        1: text/plain;charset=utf-8, 2: UTF8_STRING, 3: text/plain, 4: STRING, 5: TEXT. Case-insensitive.
+*/
+static int windows_clip_text_rank(const char *mime, unsigned long len)
+{
+        static const char *const names[5] = {WINDOWS_CLIP_TEXT, "UTF8_STRING", "text/plain", "STRING", "TEXT"};
+
+        if (!mime)
+                return 0;
+        for (int at = 0; at < 5; at++)
+                if (windows_clip_same(mime, len, names[at]))
+                        return at + 1;
+        return 0;
+}
+
+/*
         Whether a name is one text goes by: 1 for the Wayland ones (text/plain;charset=utf-8, UTF8_STRING, text/plain), 2 for X's own
         (TEXT, and STRING, which is Latin-1), 0 for any other. Either case.
 */
 static int windows_clip_alias(const char *name, unsigned long length)
 {
-        static const char *const names[5] = {WINDOWS_CLIP_TEXT, "UTF8_STRING", "text/plain", "TEXT", "STRING"};
+        int rank = windows_clip_text_rank(name, length);
 
-        for (int at = 0; at < 5; at++)
-                if (windows_clip_same(name, length, names[at]))
-                        return at < 3 ? 1 : 2;
-        return 0;
+        return !rank ? 0 : rank <= 3 ? 1 : 2;
 }
 
 // Whether bytes are text a selection may hold: UTF-8, every sequence whole and shortest, no surrogate, no NUL.

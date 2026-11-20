@@ -3267,11 +3267,126 @@ static void compositor_loop_wanted(struct compositor_poll *wanted, struct compos
         slots->count = count;
 }
 
-// A deadline of the loop's wait merged into until, the earliest of them (until 0: none yet, the wait for ever); due 0 is none.
-static void compositor_deadline(positive *until, positive due)
+// Fixed-slot timer table for compositor_main: replaces ad-hoc deadline merging with explicit timer IDs.
+enum compositor_timer_id
 {
-        if (due && (!*until || due < *until))
-                *until = due;
+        COMPOSITOR_TIMER_WAKE = 0,
+        COMPOSITOR_TIMER_HOLD,
+        COMPOSITOR_TIMER_MAGNIFY,
+        COMPOSITOR_TIMER_CURSOR,
+        COMPOSITOR_TIMER_VOLUME,
+        COMPOSITOR_TIMER_PREDICT,
+        COMPOSITOR_TIMER_TOUCH,
+        COMPOSITOR_TIMER_SNAP,
+        COMPOSITOR_TIMER_SPOTS,
+        COMPOSITOR_TIMER_WALL,
+        COMPOSITOR_TIMER_MOON,
+        COMPOSITOR_TIMER_LIST_LATER,
+        COMPOSITOR_TIMER_STARTING,
+        COMPOSITOR_TIMER_MINUTE,
+        COMPOSITOR_TIMER_WL_FRAME,
+        COMPOSITOR_TIMER_WL_CLIP,
+        COMPOSITOR_TIMER_SCREENS,
+        COMPOSITOR_TIMER_PRESENT,
+        COMPOSITOR_TIMER_CARD_DUE,
+        COMPOSITOR_TIMER_CARD_HELD,
+        COMPOSITOR_TIMER_GPU_LATE,
+        COMPOSITOR_TIMER_GPU_CLOCKS,
+        COMPOSITOR_TIMER_WL_REFLEX,
+        COMPOSITOR_TIMERS,
+};
+
+static positive compositor_timers[COMPOSITOR_TIMERS];
+
+static void compositor_timer_set(unsigned int id, positive due_ns)
+{
+        if (id < COMPOSITOR_TIMERS)
+                compositor_timers[id] = due_ns;
+}
+
+static positive compositor_timer_next(void)
+{
+        positive until = 0;
+
+        for (unsigned int id = 0; id < COMPOSITOR_TIMERS; id++)
+        {
+                positive due = compositor_timers[id];
+
+                if (due && (!until || due < until))
+                        until = due;
+        }
+        return until;
+}
+
+// Arms all active loop timers for the current turn and returns the earliest deadline (0 = wait forever).
+static positive compositor_timers_arm(positive now, unsigned int fence_at, int held)
+{
+        positive period = compositor.period ? compositor.period : 16666667ull;
+
+        (void)fence_at;
+        (void)held;
+        compositor_timer_set(COMPOSITOR_TIMER_WAKE, compositor.wake_stage ? compositor.wake_at : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_HOLD, compositor.hold >= 0 ? compositor.hold_until : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_MAGNIFY, compositor.cursor.magnified ? compositor.cursor.magnified_until : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_CURSOR, compositor_cursor_due());
+        compositor_timer_set(COMPOSITOR_TIMER_VOLUME, compositor.band ? (compositor_volume.look_at ? compositor_volume.look_at : 1) : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_PREDICT, compositor_predict_due());
+        compositor_timer_set(COMPOSITOR_TIMER_TOUCH, compositor_touch_due());
+        compositor_timer_set(COMPOSITOR_TIMER_SNAP, compositor_snap_due());
+        compositor_timer_set(COMPOSITOR_TIMER_SPOTS,
+                             compositor_spots_any(1) ? (compositor.presented + period > now ? compositor.presented + period : now) : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_WALL, compositor_wall_due(now));
+        compositor_timer_set(COMPOSITOR_TIMER_MOON, compositor.band ? taskbar_moon_due(now) : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_LIST_LATER, rows_any(&compositor.list_later) ? now + 1000000ull : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_STARTING, compositor.band ? taskbar_starting_due() : 0);
+        if (compositor.band || compositor.theme_word == 2)
+        {
+                timespec real = {0, 0};
+
+                clock_gettime(CLOCK_REALTIME, address_of real);
+                compositor_timer_set(COMPOSITOR_TIMER_MINUTE,
+                                     now + (positive)(59 - real.tv_sec % 60) * 1000000000ull +
+                                         (positive)(1000000000l - real.tv_nsec) + 1000000ull);
+        }
+        else
+                compositor_timer_set(COMPOSITOR_TIMER_MINUTE, 0);
+#ifdef CONFIG_MOONWATER_WAYLAND
+        compositor_timer_set(COMPOSITOR_TIMER_WL_FRAME,
+                             (compositor_wl.started && wayland_frame_wanted() && !compositor.damages && !compositor_card.on)
+                                 ? (now - compositor.presented < period ? compositor.presented + period : now)
+                                 : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_WL_CLIP, compositor_wl.started ? compositor_wl_due() : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_WL_REFLEX, compositor_wl_frame_at);
+#else
+        compositor_timer_set(COMPOSITOR_TIMER_WL_FRAME, 0);
+        compositor_timer_set(COMPOSITOR_TIMER_WL_CLIP, 0);
+        compositor_timer_set(COMPOSITOR_TIMER_WL_REFLEX, 0);
+#endif
+        if (compositor.screens_gone && !compositor.screens_look)
+                compositor.screens_look = now + COMPOSITOR_SCREEN_LOOK;
+        compositor_timer_set(COMPOSITOR_TIMER_SCREENS, compositor.screens_gone ? compositor.screens_look : 0);
+        if ((compositor.damages || compositor.vrr_kick) && !compositor_card_holds())
+        {
+                positive waiting = compositor_flip_wait(now);
+
+                compositor_timer_set(COMPOSITOR_TIMER_PRESENT,
+                                     waiting ? waiting
+                                             : compositor_present_at(compositor_tearing(), compositor_tearing() ? 0 : compositor_present_lead(), now));
+        }
+        else
+                compositor_timer_set(COMPOSITOR_TIMER_PRESENT, 0);
+#ifdef MOONWATER_GPU_C
+        compositor_timer_set(COMPOSITOR_TIMER_CARD_DUE, fence_at ? compositor_card_due(now) : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_CARD_HELD, held ? compositor_card_held_until() : 0);
+        compositor_timer_set(COMPOSITOR_TIMER_GPU_LATE, compositor_gpu_late_at(now));
+        compositor_timer_set(COMPOSITOR_TIMER_GPU_CLOCKS, compositor_gpu_clocks_at());
+#else
+        compositor_timer_set(COMPOSITOR_TIMER_CARD_DUE, 0);
+        compositor_timer_set(COMPOSITOR_TIMER_CARD_HELD, 0);
+        compositor_timer_set(COMPOSITOR_TIMER_GPU_LATE, 0);
+        compositor_timer_set(COMPOSITOR_TIMER_GPU_CLOCKS, 0);
+#endif
+        return compositor_timer_next();
 }
 
 /*
@@ -3741,128 +3856,13 @@ static b32 compositor_main()
                 // card can scan costs one composition a frame and not one a
                 // picture. The time in the tray is drawn at the next minute.
                 now = clock_monotonic_nanoseconds();
-                if (compositor.wake_stage)
-                        compositor_deadline(&until, compositor.wake_at);
-
-                if (compositor.hold >= 0)
-                        compositor_deadline(&until, compositor.hold_until);
-
-                if (compositor.cursor.magnified)
-                        compositor_deadline(&until, compositor.cursor.magnified_until);
-
-                // The pointer's own times: the next frame of a held button's change of size or of the dynamic shape's, and its stretch letting go.
-                compositor_deadline(&until, compositor_cursor_due());
-
-                // The sound server's volume, looked at for the tray's cell, while there is a band to show it on.
-                if (compositor.band)
-                {
-                        positive due = compositor_volume.look_at ? compositor_volume.look_at : 1; // 1: not yet looked, so now
-
-                        compositor_deadline(&until, due);
-                }
-
-                // A lead is cleared a frame after its newest place, so the loop wakes for it.
-                compositor_deadline(&until, compositor_predict_due());
-
-                // A finger held still is the right button when its time is up; a finger's mark fades a frame at a time.
-                // Neither wakes the loop while no finger is down and no mark is fading.
-                compositor_deadline(&until, compositor_touch_due());
-                // A drag's pointer resting in the top band brings the grid up when its time is up, with no motion.
-                compositor_deadline(&until, compositor_snap_due());
-                if (compositor_spots_any(1))
-                {
-                        positive period = compositor.period ? compositor.period : 16666667ull;
-                        positive frame = compositor.presented + period;
-
-                        frame = frame > now ? frame : now;
-                        compositor_deadline(&until, frame);
-                }
-
-                // The wallpaper: one held back for the first frame, or one made on its thread with no knock to say it is done.
-                compositor_deadline(&until, compositor_wall_due(now));
-                // The moon's next step of its turn, while it turns.
-                if (compositor.band)
-                        compositor_deadline(&until, taskbar_moon_due(now));
-                // A list waiting on the card: looked at again a millisecond on, if no fence wakes the loop first.
-                if (rows_any(&compositor.list_later))
-                        compositor_deadline(&until, now + 1000000ull);
-                // The next turn of an app being started, while one is.
-                if (compositor.band)
-                        compositor_deadline(&until, taskbar_starting_due());
-                if (compositor.band || compositor.theme_word == 2)
-                {
-                        timespec real = {0, 0};
-                        positive minute;
-
-                        clock_gettime(CLOCK_REALTIME, address_of real);
-                        minute = now + (positive)(59 - real.tv_sec % 60) * 1000000000ull +
-                                 (positive)(1000000000l - real.tv_nsec) + 1000000ull;
-                        compositor_deadline(&until, minute);
-                }
-
-#ifdef CONFIG_MOONWATER_WAYLAND
-                // A client that asked for a frame is told of one a frame's time after the last, whether or not anything was drawn (a present's jobs
-                // on the card answer it when they are done).
-                if (compositor_wl.started && wayland_frame_wanted() && !compositor.damages && !compositor_card.on)
-                {
-                        positive period = compositor.period ? compositor.period : 16666667ull;
-                        positive frame = now - compositor.presented < period ? compositor.presented + period : now;
-
-                        compositor_deadline(&until, frame);
-                }
-                // A copy or a paste that stalls is ended when its time is up.
-                compositor_deadline(&until, compositor_wl.started ? compositor_wl_due() : 0);
-#endif
                 if (compositor.flip_pending && compositor_flip_lost(now))
                 {
                         compositor_flip_done();
                         compositor_damage_space();
                 }
-                // No screen is connected: the connectors are asked again in a while, for a uevent that was lost and a connector that says none.
-                if (compositor.screens_gone)
-                {
-                        if (!compositor.screens_look)
-                                compositor.screens_look = now + COMPOSITOR_SCREEN_LOOK;
-                        compositor_deadline(&until, compositor.screens_look);
-                }
-                // While the card holds the present (its jobs, or a job given up on still running) its fence wakes the loop, and the card's own
-                // times below: the present is not due before.
-                if (compositor.damages && !compositor_card_holds())
-                {
-                        positive frame, waiting = compositor_flip_wait(now);
-
-                        // The flip's event wakes the loop; else the present is made when it is due (compositor_present_due).
-                        frame = waiting ? waiting
-                                        : compositor_present_at(compositor_tearing(), compositor_tearing() ? 0 : compositor_present_lead(), now);
-                        compositor_deadline(&until, frame);
-                }
-                // A pointer moved on its plane at variable refresh with nothing to draw: its kick is due when a present would be (compositor_vrr_kick).
-                else if (compositor.vrr_kick && !compositor.damages && !compositor_card_holds())
-                {
-                        positive waiting = compositor_flip_wait(now);
-                        positive frame = waiting ? waiting
-                                                 : compositor_present_at(compositor_tearing(), compositor_tearing() ? 0 : compositor_present_lead(), now);
-
-                        compositor_deadline(&until, frame);
-                }
-#ifdef MOONWATER_GPU_C
-                // A job the loop waits on: its deadline, the next look for its fault, a millisecond with no sync_file to poll; and the clients' hold ends
-                // GPU_LATE_NS after the present began, whether or not the job has.
-                if (fence_at)
-                        compositor_deadline(&until, compositor_card_due(now));
-                if (held)
-                        compositor_deadline(&until, compositor_card_held_until());
-#endif
-#ifdef MOONWATER_GPU_C
-                // The GPU's late probe: a card that is not there is looked for again when its time comes. Nothing is waited for while the card is up or off.
-                compositor_deadline(&until, compositor_gpu_late_at(now));
-                compositor_deadline(&until, compositor_gpu_clocks_at());
-#endif
-
+                until = compositor_timers_arm(now, fence_at, held);
 #ifdef CONFIG_MOONWATER_WAYLAND
-                // Automatic Reflex / Anti-Lag: wake just in time to send wl_surface.frame before the next vblank.
-                if (compositor_wl_frame_at)
-                        compositor_deadline(&until, compositor_wl_frame_at);
         compositor_sling_poll:
 #endif
                 // A timespec: a wait past a second in its nanoseconds is EINVAL, and the loop would spin on it.

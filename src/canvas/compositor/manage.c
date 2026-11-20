@@ -2505,25 +2505,20 @@ static b32 compositor_same_file(const char *path, const unsigned char *mine)
 static b32 compositor_osk_is(unsigned int pid)
 {
         unsigned char mine[256];
-        char path[40] = "/proc/", comm[8] = {0};
-        bipolar handle;
-        positive length;
+        char path[40], comm[8];
 
         if (!pid)
                 return 0;
         memory_zero(mine, sizeof(mine));
         if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive) "/proc/self/exe", 0, 0x7ff, (positive)mine, 0) < 0)
                 return 0;
-        length = positive_into_string((string_address)path + 6, (positive)pid);
-        string_copy((string_address)path + 6 + length, (string_address) "/exe");
+        windows_num_path(path, sizeof(path), "/proc/", pid, "/exe");
         if (!compositor_same_file(path, mine))
                 return 0;
-        string_copy((string_address)path + 6 + length, (string_address) "/comm");
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC);
-        if (handle < 0)
+        windows_num_path(path, sizeof(path), "/proc/", pid, "/comm");
+        memory_zero(comm, sizeof(comm));
+        if (windows_read_line(path, comm, sizeof(comm), FILE_READ | O_CLOEXEC) < 0)
                 return 0;
-        (void)system_read_once((b32)handle, comm, sizeof(comm) - 1); // a read of nothing leaves the zeros, which are no name
-        system_close(handle);
         return !memory_compare(comm, COMPOSITOR_OSK_NAME, sizeof(COMPOSITOR_OSK_NAME) - 1);
 }
 
@@ -3608,6 +3603,35 @@ static void compositor_drag_door(int row);
 static void compositor_drag_gone(int row);
 #endif
 
+// Canonical clipboard paste/read access policy: service enabled, row's root has focus,
+// and the user performed an input gesture on row within COMPOSITOR_CLIP_GESTURE_NS.
+static b32 compositor_clip_may_access(int row, positive now)
+{
+        int root;
+
+        if (!compositor.table || !compositor.table->clip_on || row < 0 || row >= COMPOSITOR_ROWS)
+                return 0;
+        root = compositor_clip_root(row);
+        return root >= 0 && root == compositor.focus &&
+               now - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS;
+}
+
+// Validates and installs a sealed clipboard memfd owned by this compositor process
+// (shared by native, Wayland, and XWM selection bridges). Returns 1 if installed, 0 on failure.
+static b32 compositor_clip_set_memfd(unsigned int which, int fd, int owner)
+{
+        unsigned long length = 0;
+        int opened;
+
+        if (!compositor.table || which > 1 || fd < 0)
+                return 0;
+        opened = compositor_clip_open(compositor.table->clip_pid, fd, &length);
+        if (opened < 0)
+                return 0;
+        compositor_clip_keep(which, opened, length, owner);
+        return 1;
+}
+
 // What a row's knock may carry for the clipboard: an offer of a copy, a paste asked for, a drag and a drop (compositor_drag_door). The
 // keyboard's key requests are read here too.
 static void compositor_clip_door(int row)
@@ -3645,9 +3669,7 @@ static void compositor_clip_door(int row)
         if (ask != compositor_clip.ask_seen[row])
         {
                 unsigned int which = table->clip_ask_which[row] & 1u;
-                int root = compositor_clip_root(row);
-                b32 may = table->clip_on && compositor_clip.fd[which] >= 0 && root >= 0 && root == compositor.focus &&
-                          now - compositor_clip.gesture[row] <= COMPOSITOR_CLIP_GESTURE_NS;
+                b32 may = compositor_clip.fd[which] >= 0 && compositor_clip_may_access(row, now);
 
                 compositor_clip.ask_seen[row] = ask;
                 if (may)
