@@ -27434,7 +27434,7 @@ static unsigned int ui_list_stripe_colour(const struct ui address_to ui, const s
                 return l->stripe_tint;
         if (l->stripe_accent)
                 return (unsigned int)UI_LIST_STRIPE_ACCENT << 24 | (ui_role(UI_PRIMARY) & 0xffffffu);
-        alpha = !ui_kit.dark && !ui->glass ? UI_LIST_STRIPE_INK_LIGHT : UI_LIST_STRIPE_INK;
+        alpha = ui_kit.mode == UI_THEME_LIGHT && !ui->glass ? UI_LIST_STRIPE_INK_LIGHT : UI_LIST_STRIPE_INK;
         return alpha << 24 | (ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu);
 }
 
