@@ -1881,13 +1881,17 @@ static void test_sdl_show(void)
         struct wlc *c;
         struct wl_event_seen *e;
         unsigned long gl_frame, damage_frame, sync, first_serial, buffer;
-        long decoration_events = 0;
+        long decoration_globals = 0, decoration_events = 0;
 
         wl_reset();
         wayland_start(&fake_host);
         session_open(&s);
         c = s.c;
-        WLCHECK(wl_global(c, s.registry, WLI_zxdg_decoration_manager_v1, 1) == 0,
+        for (long at = 0; at < c->events; at++)
+                if (c->ev[at].iface == WLI_wl_registry && c->ev[at].opcode == WLE_wl_registry_global &&
+                    !strcmp(c->ev[at].text[1], "zxdg_decoration_manager_v1"))
+                        decoration_globals++;
+        WLCHECK(decoration_globals == 0,
                 "sdl: the registry offers no xdg-decoration (a client that lacks it draws its own header, as this compositor wants)");
         /* SDL_CreateWindow, hidden: the surface and its two frame callbacks (Mesa's swap queue and SDL's damage), no commit */
         s.surface = wlc_id(c, WLI_wl_surface, 6);
@@ -1917,7 +1921,8 @@ static void test_sdl_show(void)
         WLCHECK(wlc_count(c, WLI_xdg_toplevel, WLE_xdg_toplevel_configure) == 1 && wlc_count(c, WLI_xdg_surface, WLE_xdg_surface_configure) == 1,
                 "sdl: the first commit of the toplevel is answered with its configure, then the surface's, in the same batch");
         for (long at = 0; at < c->events; at++)
-                decoration_events += c->ev[at].iface == WLI_zxdg_toplevel_decoration_v1;
+                decoration_events += c->ev[at].iface < WLI_COUNT && wl_interfaces[c->ev[at].iface].name &&
+                                     !strcmp(wl_interfaces[c->ev[at].iface].name, "zxdg_toplevel_decoration_v1");
         WLCHECK(decoration_events == 0, "sdl: and nothing in that batch tells it a decoration mode (%ld)", decoration_events);
         e = wlc_take(c, WLI_xdg_surface, WLE_xdg_surface_configure);
         first_serial = e ? e->u[0] : 0;

@@ -31,8 +31,6 @@ enum {
         WLI_xdg_popup,
         WLI_zxdg_output_manager_v1,
         WLI_zxdg_output_v1,
-        WLI_zxdg_decoration_manager_v1,
-        WLI_zxdg_toplevel_decoration_v1,
         WLI_wp_viewporter,
         WLI_wp_viewport,
         WLI_wp_fractional_scale_manager_v1,
@@ -41,7 +39,6 @@ enum {
         WLI_wp_cursor_shape_device_v1,
         WLI_wp_presentation,
         WLI_wp_presentation_feedback,
-        WLI_wp_single_pixel_buffer_manager_v1,
         WLI_xdg_activation_v1,
         WLI_xdg_activation_token_v1,
         WLI_zwp_primary_selection_device_manager_v1,
@@ -124,8 +121,6 @@ enum {
 #define WLV_xdg_popup 7
 #define WLV_zxdg_output_manager_v1 3
 #define WLV_zxdg_output_v1 3
-#define WLV_zxdg_decoration_manager_v1 2
-#define WLV_zxdg_toplevel_decoration_v1 2
 #define WLV_wp_viewporter 1
 #define WLV_wp_viewport 1
 #define WLV_wp_fractional_scale_manager_v1 1
@@ -134,7 +129,6 @@ enum {
 #define WLV_wp_cursor_shape_device_v1 2
 #define WLV_wp_presentation 2
 #define WLV_wp_presentation_feedback 2
-#define WLV_wp_single_pixel_buffer_manager_v1 1
 #define WLV_xdg_activation_v1 1
 #define WLV_xdg_activation_token_v1 1
 #define WLV_zwp_primary_selection_device_manager_v1 1
@@ -497,18 +491,6 @@ enum {
 #define WLE_zxdg_output_v1_done 2
 #define WLE_zxdg_output_v1_name 3
 #define WLE_zxdg_output_v1_description 4
-#define WLQ_zxdg_decoration_manager_v1_destroy 0
-#define WLQ_zxdg_decoration_manager_v1_get_toplevel_decoration 1
-#define WLQ_zxdg_toplevel_decoration_v1_destroy 0
-#define WLQ_zxdg_toplevel_decoration_v1_set_mode 1
-#define WLQ_zxdg_toplevel_decoration_v1_unset_mode 2
-#define WLE_zxdg_toplevel_decoration_v1_configure 0
-#define WLN_zxdg_toplevel_decoration_v1_error_unconfigured_buffer 0
-#define WLN_zxdg_toplevel_decoration_v1_error_already_constructed 1
-#define WLN_zxdg_toplevel_decoration_v1_error_orphaned 2
-#define WLN_zxdg_toplevel_decoration_v1_error_invalid_mode 3
-#define WLN_zxdg_toplevel_decoration_v1_mode_client_side 1
-#define WLN_zxdg_toplevel_decoration_v1_mode_server_side 2
 #define WLQ_wp_viewporter_destroy 0
 #define WLQ_wp_viewporter_get_viewport 1
 #define WLN_wp_viewporter_error_viewport_exists 0
@@ -578,8 +560,6 @@ enum {
 #define WLN_wp_presentation_feedback_kind_hw_clock 0x2
 #define WLN_wp_presentation_feedback_kind_hw_completion 0x4
 #define WLN_wp_presentation_feedback_kind_zero_copy 0x8
-#define WLQ_wp_single_pixel_buffer_manager_v1_destroy 0
-#define WLQ_wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer 1
 #define WLQ_xdg_activation_v1_destroy 0
 #define WLQ_xdg_activation_v1_get_activation_token 1
 #define WLQ_xdg_activation_v1_activate 2
@@ -1117,12 +1097,6 @@ static const unsigned char wl_e_zxdg_output_v1_logical_size[] = {'i', 0, 'i', 0,
 static const unsigned char wl_e_zxdg_output_v1_done[] = {0, 0};
 static const unsigned char wl_e_zxdg_output_v1_name[] = {'s', 0, 0, 0};
 static const unsigned char wl_e_zxdg_output_v1_description[] = {'s', 0, 0, 0};
-static const unsigned char wl_q_zxdg_decoration_manager_v1_destroy[] = {0, 0};
-static const unsigned char wl_q_zxdg_decoration_manager_v1_get_toplevel_decoration[] = {'n', WLI_zxdg_toplevel_decoration_v1, 'o', WLI_xdg_toplevel, 0, 0};
-static const unsigned char wl_q_zxdg_toplevel_decoration_v1_destroy[] = {0, 0};
-static const unsigned char wl_q_zxdg_toplevel_decoration_v1_set_mode[] = {'u', 0, 0, 0};
-static const unsigned char wl_q_zxdg_toplevel_decoration_v1_unset_mode[] = {0, 0};
-static const unsigned char wl_e_zxdg_toplevel_decoration_v1_configure[] = {'u', 0, 0, 0};
 static const unsigned char wl_q_wp_viewporter_destroy[] = {0, 0};
 static const unsigned char wl_q_wp_viewporter_get_viewport[] = {'n', WLI_wp_viewport, 'o', WLI_wl_surface, 0, 0};
 static const unsigned char wl_q_wp_viewport_destroy[] = {0, 0};
@@ -1143,8 +1117,6 @@ static const unsigned char wl_e_wp_presentation_clock_id[] = {'u', 0, 0, 0};
 static const unsigned char wl_e_wp_presentation_feedback_sync_output[] = {'o', WLI_wl_output, 0, 0};
 static const unsigned char wl_e_wp_presentation_feedback_presented[] = {'u', 0, 'u', 0, 'u', 0, 'u', 0, 'u', 0, 'u', 0, 'u', 0, 0, 0};
 static const unsigned char wl_e_wp_presentation_feedback_discarded[] = {0, 0};
-static const unsigned char wl_q_wp_single_pixel_buffer_manager_v1_destroy[] = {0, 0};
-static const unsigned char wl_q_wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer[] = {'n', WLI_wl_buffer, 'u', 0, 'u', 0, 'u', 0, 'u', 0, 0, 0};
 static const unsigned char wl_q_xdg_activation_v1_destroy[] = {0, 0};
 static const unsigned char wl_q_xdg_activation_v1_get_activation_token[] = {'n', WLI_xdg_activation_token_v1, 0, 0};
 static const unsigned char wl_q_xdg_activation_v1_activate[] = {'s', 0, 'o', WLI_wl_surface, 0, 0};
@@ -1588,18 +1560,6 @@ static const struct wl_message wl_events_zxdg_output_v1[] = {
         {2, 0, wl_e_zxdg_output_v1_name},
         {2, 0, wl_e_zxdg_output_v1_description},
 };
-static const struct wl_message wl_requests_zxdg_decoration_manager_v1[] = {
-        {1, 1, wl_q_zxdg_decoration_manager_v1_destroy},
-        {1, 0, wl_q_zxdg_decoration_manager_v1_get_toplevel_decoration},
-};
-static const struct wl_message wl_requests_zxdg_toplevel_decoration_v1[] = {
-        {1, 1, wl_q_zxdg_toplevel_decoration_v1_destroy},
-        {1, 0, wl_q_zxdg_toplevel_decoration_v1_set_mode},
-        {1, 0, wl_q_zxdg_toplevel_decoration_v1_unset_mode},
-};
-static const struct wl_message wl_events_zxdg_toplevel_decoration_v1[] = {
-        {1, 0, wl_e_zxdg_toplevel_decoration_v1_configure},
-};
 static const struct wl_message wl_requests_wp_viewporter[] = {
         {1, 1, wl_q_wp_viewporter_destroy},
         {1, 0, wl_q_wp_viewporter_get_viewport},
@@ -1639,10 +1599,6 @@ static const struct wl_message wl_events_wp_presentation_feedback[] = {
         {1, 0, wl_e_wp_presentation_feedback_sync_output},
         {1, 1, wl_e_wp_presentation_feedback_presented},
         {1, 1, wl_e_wp_presentation_feedback_discarded},
-};
-static const struct wl_message wl_requests_wp_single_pixel_buffer_manager_v1[] = {
-        {1, 1, wl_q_wp_single_pixel_buffer_manager_v1_destroy},
-        {1, 0, wl_q_wp_single_pixel_buffer_manager_v1_create_u32_rgba_buffer},
 };
 static const struct wl_message wl_requests_xdg_activation_v1[] = {
         {1, 1, wl_q_xdg_activation_v1_destroy},
@@ -1996,8 +1952,6 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_xdg_popup] = {"xdg_popup", 7, 3, 3, wl_requests_xdg_popup, wl_events_xdg_popup},
         [WLI_zxdg_output_manager_v1] = {"zxdg_output_manager_v1", 3, 2, 0, wl_requests_zxdg_output_manager_v1, 0},
         [WLI_zxdg_output_v1] = {"zxdg_output_v1", 3, 1, 5, wl_requests_zxdg_output_v1, wl_events_zxdg_output_v1},
-        [WLI_zxdg_decoration_manager_v1] = {"zxdg_decoration_manager_v1", 2, 2, 0, wl_requests_zxdg_decoration_manager_v1, 0},
-        [WLI_zxdg_toplevel_decoration_v1] = {"zxdg_toplevel_decoration_v1", 2, 3, 1, wl_requests_zxdg_toplevel_decoration_v1, wl_events_zxdg_toplevel_decoration_v1},
         [WLI_wp_viewporter] = {"wp_viewporter", 1, 2, 0, wl_requests_wp_viewporter, 0},
         [WLI_wp_viewport] = {"wp_viewport", 1, 3, 0, wl_requests_wp_viewport, 0},
         [WLI_wp_fractional_scale_manager_v1] = {"wp_fractional_scale_manager_v1", 1, 2, 0, wl_requests_wp_fractional_scale_manager_v1, 0},
@@ -2006,7 +1960,6 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_wp_cursor_shape_device_v1] = {"wp_cursor_shape_device_v1", 2, 2, 0, wl_requests_wp_cursor_shape_device_v1, 0},
         [WLI_wp_presentation] = {"wp_presentation", 2, 2, 1, wl_requests_wp_presentation, wl_events_wp_presentation},
         [WLI_wp_presentation_feedback] = {"wp_presentation_feedback", 2, 0, 3, 0, wl_events_wp_presentation_feedback},
-        [WLI_wp_single_pixel_buffer_manager_v1] = {"wp_single_pixel_buffer_manager_v1", 1, 2, 0, wl_requests_wp_single_pixel_buffer_manager_v1, 0},
         [WLI_xdg_activation_v1] = {"xdg_activation_v1", 1, 3, 0, wl_requests_xdg_activation_v1, 0},
         [WLI_xdg_activation_token_v1] = {"xdg_activation_token_v1", 1, 5, 1, wl_requests_xdg_activation_token_v1, wl_events_xdg_activation_token_v1},
         [WLI_zwp_primary_selection_device_manager_v1] = {"zwp_primary_selection_device_manager_v1", 1, 3, 0, wl_requests_zwp_primary_selection_device_manager_v1, 0},

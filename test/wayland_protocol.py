@@ -38,9 +38,6 @@ CONFIG = [
     ("protocols", "unstable/xdg-output/xdg-output-unstable-v1.xml", [
         "zxdg_output_manager_v1", "zxdg_output_v1",
     ]),
-    ("protocols", "unstable/xdg-decoration/xdg-decoration-unstable-v1.xml", [
-        "zxdg_decoration_manager_v1", "zxdg_toplevel_decoration_v1",
-    ]),
     ("protocols", "stable/viewporter/viewporter.xml", [
         "wp_viewporter", "wp_viewport",
     ]),
@@ -52,9 +49,6 @@ CONFIG = [
     ]),
     ("protocols", "stable/presentation-time/presentation-time.xml", [
         "wp_presentation", "wp_presentation_feedback",
-    ]),
-    ("protocols", "staging/single-pixel-buffer/single-pixel-buffer-v1.xml", [
-        "wp_single_pixel_buffer_manager_v1",
     ]),
     ("protocols", "staging/xdg-activation/xdg-activation-v1.xml", [
         "xdg_activation_v1", "xdg_activation_token_v1",

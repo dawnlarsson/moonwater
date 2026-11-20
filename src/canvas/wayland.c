@@ -1600,6 +1600,38 @@ static void wayland_end(struct wayland_event *e)
         }
 }
 
+/* Compact event emitters: 0-word, N-word (wire_event), single/nullable string, and string+fd. */
+static inline void wayland_ev0(struct wayland_client *c, unsigned long object, long opcode)
+{
+        wayland_send(c, object, opcode, 0, 0);
+}
+
+#define wayland_ev(c, obj, op, ...) do { \
+        const unsigned int _wl_w[] = {__VA_ARGS__}; \
+        wayland_send((c), (obj), (op), _wl_w, (long)(sizeof _wl_w / sizeof _wl_w[0])); \
+} while (0)
+
+static void wayland_ev_str(struct wayland_client *c, unsigned long object, long opcode, const char *text)
+{
+        struct wayland_event e = wayland_begin(c, object, opcode);
+
+        if (text)
+                wayland_string(&e, text);
+        else
+                wayland_word(&e, 0);
+        wayland_end(&e);
+}
+
+static void wayland_ev_fd(struct wayland_client *c, unsigned long object, long opcode, const char *text, long fd, long owned)
+{
+        struct wayland_event e = wayland_begin(c, object, opcode);
+
+        if (text)
+                wayland_string(&e, text);
+        wayland_out_fd_put(c, fd, owned, e.start);
+        wayland_end(&e);
+}
+
 /* A protocol error: wl_display.error on the object, and the client is dead after it. */
 static int wayland_fail(struct wayland_client *c, unsigned long object, unsigned long code, const char *text)
 {
@@ -2128,32 +2160,18 @@ static void wayland_output_send(struct wayland_client *c, long slot)
         wayland_string(&e, screen->name);
         wayland_word(&e, WLN_wl_output_transform_normal);
         wayland_end(&e);
-        e = wayland_begin(c, o->id, WLE_wl_output_mode);
-        wayland_word(&e, WLN_wl_output_mode_current | WLN_wl_output_mode_preferred);
-        wayland_word(&e, (unsigned long)screen->width);
-        wayland_word(&e, (unsigned long)screen->height);
-        wayland_word(&e, (unsigned long)screen->refresh);
-        wayland_end(&e);
+        wayland_ev(c, o->id, WLE_wl_output_mode, WLN_wl_output_mode_current | WLN_wl_output_mode_preferred,
+                   (unsigned int)screen->width, (unsigned int)screen->height, (unsigned int)screen->refresh);
         if (o->version >= 2)
-        {
-                e = wayland_begin(c, o->id, WLE_wl_output_scale);
-                wayland_word(&e, xspace ? 1ul : (unsigned long)wayland_max(1, (wayland_min(((long)(screen->scale)), 800) + 99) / 100));
-                wayland_end(&e);
-        }
+                wayland_ev(c, o->id, WLE_wl_output_scale,
+                           xspace ? 1u : (unsigned int)wayland_max(1, (wayland_min(((long)(screen->scale)), 800) + 99) / 100));
         if (o->version >= 4)
         {
-                e = wayland_begin(c, o->id, WLE_wl_output_name);
-                wayland_string(&e, screen->name);
-                wayland_end(&e);
-                e = wayland_begin(c, o->id, WLE_wl_output_description);
-                wayland_string(&e, screen->name);
-                wayland_end(&e);
+                wayland_ev_str(c, o->id, WLE_wl_output_name, screen->name);
+                wayland_ev_str(c, o->id, WLE_wl_output_description, screen->name);
         }
         if (o->version >= 2)
-        {
-                e = wayland_begin(c, o->id, WLE_wl_output_done);
-                wayland_end(&e);
-        }
+                wayland_ev0(c, o->id, WLE_wl_output_done);
 }
 
 /*
@@ -2221,7 +2239,7 @@ static void wayland_x_screen(long output, long *x, long *y)
 static void wayland_xdg_output_send(struct wayland_client *c, long slot, long output)
 {
         const struct wayland_screen *screen;
-        struct wayland_event e;
+        unsigned long id = c->objects[slot].id;
         long scale120, x, y;
         int xspace = c->xspace;
 
@@ -2233,28 +2251,16 @@ static void wayland_xdg_output_send(struct wayland_client *c, long slot, long ou
                 wayland_x_screen(output, &x, &y);
         else
                 x = wayland_logical_axis(output, 0, 0), y = wayland_logical_axis(output, 1, 0);
-        e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_logical_position);
-        wayland_word(&e, (unsigned long)x);
-        wayland_word(&e, (unsigned long)y);
-        wayland_end(&e);
-        e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_logical_size);
-        wayland_word(&e, (unsigned long)wayland_units(screen->width, scale120));
-        wayland_word(&e, (unsigned long)wayland_units(screen->height, scale120));
-        wayland_end(&e);
+        wayland_ev(c, id, WLE_zxdg_output_v1_logical_position, (unsigned int)x, (unsigned int)y);
+        wayland_ev(c, id, WLE_zxdg_output_v1_logical_size,
+                   (unsigned int)wayland_units(screen->width, scale120), (unsigned int)wayland_units(screen->height, scale120));
         if (c->objects[slot].version >= 2)
         {
-                e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_name);
-                wayland_string(&e, screen->name);
-                wayland_end(&e);
-                e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_description);
-                wayland_string(&e, screen->name);
-                wayland_end(&e);
+                wayland_ev_str(c, id, WLE_zxdg_output_v1_name, screen->name);
+                wayland_ev_str(c, id, WLE_zxdg_output_v1_description, screen->name);
         }
         if (c->objects[slot].version < 3)
-        {
-                e = wayland_begin(c, c->objects[slot].id, WLE_zxdg_output_v1_done);
-                wayland_end(&e);
-        }
+                wayland_ev0(c, id, WLE_zxdg_output_v1_done);
 }
 
 /*
@@ -2316,36 +2322,26 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
         }
         if (s->role == WAYLAND_ROLE_TOPLEVEL)
         {
+                static const struct { long mask; unsigned char min_ver; unsigned int wln; } state_map[] = {
+                        {WAYLAND_STATE_MAXIMIZED,    1, WLN_xdg_toplevel_state_maximized},
+                        {WAYLAND_STATE_FULLSCREEN,   1, WLN_xdg_toplevel_state_fullscreen},
+                        {WAYLAND_STATE_RESIZING,     1, WLN_xdg_toplevel_state_resizing},
+                        {WAYLAND_STATE_ACTIVATED,    1, WLN_xdg_toplevel_state_activated},
+                        {WAYLAND_STATE_TILED_LEFT,   2, WLN_xdg_toplevel_state_tiled_left},
+                        {WAYLAND_STATE_TILED_RIGHT,  2, WLN_xdg_toplevel_state_tiled_right},
+                        {WAYLAND_STATE_TILED_TOP,    2, WLN_xdg_toplevel_state_tiled_top},
+                        {WAYLAND_STATE_TILED_BOTTOM, 2, WLN_xdg_toplevel_state_tiled_bottom},
+                        {WAYLAND_STATE_SUSPENDED,    6, WLN_xdg_toplevel_state_suspended},
+                };
                 long all = ask.states, version;
 
                 slot = wayland_find(c, s->role_id, WLI_xdg_toplevel);
                 if (slot < 0)
                         return;
-                // A state is said to a toplevel whose version has it: the tiled ones are from version 2 and suspended from 6, and a
-                // client bound below that was never told what the number means (the protocol forbids sending it one).
                 version = c->objects[slot].version;
-                if (version < 2)
-                        all &= ~(long)(WAYLAND_STATE_TILED_LEFT | WAYLAND_STATE_TILED_RIGHT | WAYLAND_STATE_TILED_TOP | WAYLAND_STATE_TILED_BOTTOM);
-                if (version < 6)
-                        all &= ~(long)WAYLAND_STATE_SUSPENDED;
-                if (all & WAYLAND_STATE_MAXIMIZED)
-                        states[count++] = WLN_xdg_toplevel_state_maximized;
-                if (all & WAYLAND_STATE_FULLSCREEN)
-                        states[count++] = WLN_xdg_toplevel_state_fullscreen;
-                if (all & WAYLAND_STATE_RESIZING)
-                        states[count++] = WLN_xdg_toplevel_state_resizing;
-                if (all & WAYLAND_STATE_ACTIVATED)
-                        states[count++] = WLN_xdg_toplevel_state_activated;
-                if (all & WAYLAND_STATE_TILED_LEFT)
-                        states[count++] = WLN_xdg_toplevel_state_tiled_left;
-                if (all & WAYLAND_STATE_TILED_RIGHT)
-                        states[count++] = WLN_xdg_toplevel_state_tiled_right;
-                if (all & WAYLAND_STATE_TILED_TOP)
-                        states[count++] = WLN_xdg_toplevel_state_tiled_top;
-                if (all & WAYLAND_STATE_TILED_BOTTOM)
-                        states[count++] = WLN_xdg_toplevel_state_tiled_bottom;
-                if (all & WAYLAND_STATE_SUSPENDED)
-                        states[count++] = WLN_xdg_toplevel_state_suspended;
+                for (unsigned long i = 0; i < sizeof state_map / sizeof state_map[0]; i++)
+                        if (version >= state_map[i].min_ver && (all & state_map[i].mask))
+                                states[count++] = state_map[i].wln;
                 if (initial && wayland.screens)
                 {
                         const struct wayland_screen *own = &wayland.screen[wayland_screen_at(ask.x, ask.y)];
@@ -2363,12 +2359,7 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                         wayland_end(&e);
                 }
                 if (initial && c->objects[slot].version >= 4 && bounds_w > 0)
-                {
-                        e = wayland_begin(c, c->objects[slot].id, WLE_xdg_toplevel_configure_bounds);
-                        wayland_word(&e, (unsigned long)bounds_w);
-                        wayland_word(&e, (unsigned long)bounds_h);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, c->objects[slot].id, WLE_xdg_toplevel_configure_bounds, (unsigned int)bounds_w, (unsigned int)bounds_h);
                 {
                         long cw = ask.width > 0 ? wayland_max(1, wayland_units(ask.width, wayland_surface_unit(s))) : 0;
                         long ch = ask.height > 0 ? wayland_max(1, wayland_units(ask.height, wayland_surface_unit(s))) : 0;
@@ -2400,9 +2391,7 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
         slot = wayland_find(c, s->xdg_id, WLI_xdg_surface);
         if (slot < 0)
                 return;
-        e = wayland_begin(c, c->objects[slot].id, WLE_xdg_surface_configure);
-        wayland_word(&e, serial);
-        wayland_end(&e);
+        wayland_ev(c, c->objects[slot].id, WLE_xdg_surface_configure, (unsigned int)serial);
         s->serial[s->serials++] = (unsigned int)serial;
         s->flags |= WAYLAND_SURFACE_SENT;
         if (s->role == WAYLAND_ROLE_TOPLEVEL)
@@ -2519,11 +2508,7 @@ static void wayland_feedback_discard(struct wayland_client *c, unsigned int id)
 
         if (slot < 0)
                 return;
-        {
-                struct wayland_event e = wayland_begin(c, id, WLE_wp_presentation_feedback_discarded);
-
-                wayland_end(&e);
-        }
+        wayland_ev0(c, id, WLE_wp_presentation_feedback_discarded);
         wayland_object_delete(c, slot);
 }
 
@@ -3897,35 +3882,20 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
         }
         else if (iface == WLI_wl_shm)
         {
-                static const unsigned long formats[] = {WLN_wl_shm_format_argb8888, WLN_wl_shm_format_xrgb8888,
+                static const unsigned int formats[4] = {WLN_wl_shm_format_argb8888, WLN_wl_shm_format_xrgb8888,
                                                         WLN_wl_shm_format_abgr8888, WLN_wl_shm_format_xbgr8888};
 
                 for (long at = 0; at < 4; at++)
-                {
-                        struct wayland_event e = wayland_begin(c, id, WLE_wl_shm_format);
-
-                        wayland_word(&e, formats[at]);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, id, WLE_wl_shm_format, formats[at]);
         }
         else if (iface == WLI_zwp_linux_dmabuf_v1 && a[1].version < 4)
                 wayland_dmabuf_formats(c, id, a[1].version);
         else if (iface == WLI_wl_drm)
         {
                 if (wayland.drm_node[0])
-                {
-                        struct wayland_event e = wayland_begin(c, id, WLE_wl_drm_device);
-
-                        wayland_string(&e, wayland.drm_node);
-                        wayland_end(&e);
-                }
+                        wayland_ev_str(c, id, WLE_wl_drm_device, wayland.drm_node);
                 if (a[1].version >= 2)
-                {
-                        struct wayland_event e = wayland_begin(c, id, WLE_wl_drm_capabilities);
-
-                        wayland_word(&e, WLN_wl_drm_capability_prime);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, id, WLE_wl_drm_capabilities, WLN_wl_drm_capability_prime);
                 for (long at = 0; at < wayland.dmabuf.count; at++)
                 {
                         int again = 0;
@@ -3933,41 +3903,18 @@ static int wayland_registry_request(struct wayland_client *c, struct wayland_obj
                         for (long before = 0; before < at && !again; before++)
                                 again = wayland.dmabuf.entry[before].format == wayland.dmabuf.entry[at].format;
                         if (!again)
-                        {
-                                struct wayland_event e = wayland_begin(c, id, WLE_wl_drm_format);
-
-                                wayland_word(&e, wayland.dmabuf.entry[at].format);
-                                wayland_end(&e);
-                        }
+                                wayland_ev(c, id, WLE_wl_drm_format, wayland.dmabuf.entry[at].format);
                 }
         }
         else if (iface == WLI_xdg_toplevel_icon_manager_v1)
-        {
-                // No icon size is preferred, so the done event alone (the protocol sends it when there is no preference).
-                struct wayland_event e = wayland_begin(c, id, WLE_xdg_toplevel_icon_manager_v1_done);
-
-                wayland_end(&e);
-        }
+                wayland_ev0(c, id, WLE_xdg_toplevel_icon_manager_v1_done);
         else if (iface == WLI_wp_presentation)
-        {
-                // The clock every presented time is on: CLOCK_MONOTONIC (1), the clock the compositor's frames are timed by.
-                struct wayland_event e = wayland_begin(c, id, WLE_wp_presentation_clock_id);
-
-                wayland_word(&e, 1);
-                wayland_end(&e);
-        }
+                wayland_ev(c, id, WLE_wp_presentation_clock_id, 1u);
         else if (iface == WLI_wl_seat)
         {
-                struct wayland_event e = wayland_begin(c, id, WLE_wl_seat_capabilities);
-
-                wayland_word(&e, (unsigned long)wayland.host->seat(wayland.host->context));
-                wayland_end(&e);
+                wayland_ev(c, id, WLE_wl_seat_capabilities, (unsigned int)wayland.host->seat(wayland.host->context));
                 if (a[1].version >= 2)
-                {
-                        e = wayland_begin(c, id, WLE_wl_seat_name);
-                        wayland_string(&e, "seat0");
-                        wayland_end(&e);
-                }
+                        wayland_ev_str(c, id, WLE_wl_seat_name, "seat0");
         }
         return WAYLAND_OK;
 }
@@ -3983,23 +3930,14 @@ static void wayland_scale_tell(struct wayland_client *c, struct wayland_surface 
         if (c->xspace)
                 percent = 100;
         long scale120 = wayland_percent120(percent), whole = wayland_max(1, (wayland_min(((long)(percent)), 800) + 99) / 100), slot;
-        struct wayland_event e;
 
         if (s->told120 == scale120 && s->told_whole == whole)
                 return;
         if (s->fractional_id && s->told120 != scale120)
-        {
-                e = wayland_begin(c, s->fractional_id, WLE_wp_fractional_scale_v1_preferred_scale);
-                wayland_word(&e, (unsigned long)scale120);
-                wayland_end(&e);
-        }
+                wayland_ev(c, s->fractional_id, WLE_wp_fractional_scale_v1_preferred_scale, (unsigned int)scale120);
         slot = wayland_find(c, s->id, WLI_wl_surface);
         if (slot >= 0 && c->objects[slot].version >= 6 && s->told_whole != whole)
-        {
-                e = wayland_begin(c, s->id, WLE_wl_surface_preferred_buffer_scale);
-                wayland_word(&e, (unsigned long)whole);
-                wayland_end(&e);
-        }
+                wayland_ev(c, s->id, WLE_wl_surface_preferred_buffer_scale, (unsigned int)whole);
         s->told120 = scale120;
         s->told_whole = whole;
 }
@@ -4036,12 +3974,7 @@ static int wayland_compositor_request(struct wayland_client *c, struct wayland_o
         wayland.surfaces++;
         wayland_scale_tell(c, s, screen_scale);
         if (c->objects[a[0].slot].version >= 6)
-        {
-                struct wayland_event e = wayland_begin(c, s->id, WLE_wl_surface_preferred_buffer_transform);
-
-                wayland_word(&e, WLN_wl_output_transform_normal);
-                wayland_end(&e);
-        }
+                wayland_ev(c, s->id, WLE_wl_surface_preferred_buffer_transform, WLN_wl_output_transform_normal);
         return WAYLAND_OK;
 }
 
@@ -4379,22 +4312,13 @@ static void wayland_surface_screens(struct wayland_client *c, struct wayland_sur
         for (long at = 0; at < c->tbl[WLT_OBJECT].count; at++)
         {
                 struct wayland_object *o = &c->objects[at];
-                struct wayland_event e;
 
                 if (o->iface != WLI_wl_output || o->aux >= WAYLAND_SCREENS)
                         continue;
                 if ((s->entered & (1u << o->aux)) && !(now & (1u << o->aux)))
-                {
-                        e = wayland_begin(c, s->id, WLE_wl_surface_leave);
-                        wayland_word(&e, o->id);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, s->id, WLE_wl_surface_leave, o->id);
                 else if (!(s->entered & (1u << o->aux)) && (now & (1u << o->aux)))
-                {
-                        e = wayland_begin(c, s->id, WLE_wl_surface_enter);
-                        wayland_word(&e, o->id);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, s->id, WLE_wl_surface_enter, o->id);
         }
         s->entered = now;
 }
@@ -4942,15 +4866,10 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
                         long sh = wayland.screens ? wayland.screen[out].height : 1080;
                         long cw = s->u.top.layer_w > 0 ? s->u.top.layer_w : sw;
                         long ch = s->u.top.layer_h > 0 ? s->u.top.layer_h : sh;
-                        struct wayland_event e;
-
                         s->u.top.layer_configured = 1;
                         s->flags |= WAYLAND_SURFACE_SENT | WAYLAND_SURFACE_CONFIGURED;
-                        e = wayland_begin(c, s->role_id, WLE_zwlr_layer_surface_v1_configure);
-                        wayland_word(&e, wayland_serial(c));
-                        wayland_word(&e, (unsigned long)cw);
-                        wayland_word(&e, (unsigned long)ch);
-                        wayland_end(&e);
+                        wayland_ev(c, s->role_id, WLE_zwlr_layer_surface_v1_configure,
+                                   (unsigned int)wayland_serial(c), (unsigned int)cw, (unsigned int)ch);
                 }
                 else if (s->role == WAYLAND_ROLE_TOPLEVEL)
                         wayland_configure(c, s, 1);
@@ -5416,70 +5335,45 @@ static int wayland_subsurface_request(struct wayland_client *c, struct wayland_o
         on an axis and only as far as the positioner allows. The rectangle answered is relative to the parent's window
         geometry; origin is where that is on the desktop, and the screen is what must hold it.
 */
+/* Direction table for xdg_positioner anchor/gravity (identical 0..8 enum layout): dx/dy in {-1, 0, +1}. */
+static void wayland_pos_dir(long code, long flip_x, long flip_y, long *dx, long *dy)
+{
+        static const signed char dir[9][2] = {
+                [WLN_xdg_positioner_anchor_none]         = { 0,  0},
+                [WLN_xdg_positioner_anchor_top]          = { 0, -1},
+                [WLN_xdg_positioner_anchor_bottom]       = { 0,  1},
+                [WLN_xdg_positioner_anchor_left]         = {-1,  0},
+                [WLN_xdg_positioner_anchor_right]        = { 1,  0},
+                [WLN_xdg_positioner_anchor_top_left]     = {-1, -1},
+                [WLN_xdg_positioner_anchor_bottom_left]  = {-1,  1},
+                [WLN_xdg_positioner_anchor_top_right]    = { 1, -1},
+                [WLN_xdg_positioner_anchor_bottom_right] = { 1,  1},
+        };
+        long ix = code >= 0 && code < 9 ? dir[code][0] : 0;
+        long iy = code >= 0 && code < 9 ? dir[code][1] : 0;
+
+        *dx = flip_x ? -ix : ix;
+        *dy = flip_y ? -iy : iy;
+}
+
 static void wayland_anchor_point(const struct wayland_positioner *p, long flip_x, long flip_y, long *x, long *y)
 {
-        long anchor = p->anchor, left, right, top, bottom;
+        long dx, dy;
 
-        left = anchor == WLN_xdg_positioner_anchor_left || anchor == WLN_xdg_positioner_anchor_top_left ||
-               anchor == WLN_xdg_positioner_anchor_bottom_left;
-        right = anchor == WLN_xdg_positioner_anchor_right || anchor == WLN_xdg_positioner_anchor_top_right ||
-                anchor == WLN_xdg_positioner_anchor_bottom_right;
-        top = anchor == WLN_xdg_positioner_anchor_top || anchor == WLN_xdg_positioner_anchor_top_left ||
-              anchor == WLN_xdg_positioner_anchor_top_right;
-        bottom = anchor == WLN_xdg_positioner_anchor_bottom || anchor == WLN_xdg_positioner_anchor_bottom_left ||
-                 anchor == WLN_xdg_positioner_anchor_bottom_right;
-        if (flip_x)
-        {
-                long swap = left;
-
-                left = right;
-                right = swap;
-        }
-        if (flip_y)
-        {
-                long swap = top;
-
-                top = bottom;
-                bottom = swap;
-        }
-        *x = p->anchor_x + (left ? 0 : right ? p->anchor_width : p->anchor_width / 2);
-        *y = p->anchor_y + (top ? 0 : bottom ? p->anchor_height : p->anchor_height / 2);
+        wayland_pos_dir(p->anchor, flip_x, flip_y, &dx, &dy);
+        *x = p->anchor_x + (dx < 0 ? 0 : dx > 0 ? p->anchor_width : p->anchor_width / 2);
+        *y = p->anchor_y + (dy < 0 ? 0 : dy > 0 ? p->anchor_height : p->anchor_height / 2);
 }
 
 static void wayland_gravity_place(const struct wayland_positioner *p, long flip_x, long flip_y, long width, long height,
                                   long *x, long *y)
 {
-        long gravity = p->gravity, left, right, top, bottom, px, py;
+        long dx, dy, px, py;
 
         wayland_anchor_point(p, flip_x, flip_y, &px, &py);
-        left = gravity == WLN_xdg_positioner_gravity_left || gravity == WLN_xdg_positioner_gravity_top_left ||
-               gravity == WLN_xdg_positioner_gravity_bottom_left;
-        right = gravity == WLN_xdg_positioner_gravity_right || gravity == WLN_xdg_positioner_gravity_top_right ||
-                gravity == WLN_xdg_positioner_gravity_bottom_right;
-        top = gravity == WLN_xdg_positioner_gravity_top || gravity == WLN_xdg_positioner_gravity_top_left ||
-              gravity == WLN_xdg_positioner_gravity_top_right;
-        bottom = gravity == WLN_xdg_positioner_gravity_bottom || gravity == WLN_xdg_positioner_gravity_bottom_left ||
-                 gravity == WLN_xdg_positioner_gravity_bottom_right;
-        if (flip_x)
-        {
-                long swap = left;
-
-                left = right;
-                right = swap;
-        }
-        if (flip_y)
-        {
-                long swap = top;
-
-                top = bottom;
-                bottom = swap;
-        }
-        *x = px + p->offset_x - (left ? width : right ? 0 : width / 2);
-        *y = py + p->offset_y - (top ? height : bottom ? 0 : height / 2);
-        if (flip_x)
-                *x -= 2 * p->offset_x;
-        if (flip_y)
-                *y -= 2 * p->offset_y;
+        wayland_pos_dir(p->gravity, flip_x, flip_y, &dx, &dy);
+        *x = px + (flip_x ? -p->offset_x : p->offset_x) - (dx < 0 ? width : dx > 0 ? 0 : width / 2);
+        *y = py + (flip_y ? -p->offset_y : p->offset_y) - (dy < 0 ? height : dy > 0 ? 0 : height / 2);
 }
 
 static void wayland_popup_place(const struct wayland_positioner *p, long origin_x, long origin_y,
@@ -5559,7 +5453,6 @@ static void wayland_popup_configure(struct wayland_client *c, struct wayland_sur
         struct wayland_rect screen = {0, 0, 1 << 20, 1 << 20};
         struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
         long origin_x = 0, origin_y = 0, x, y, w, h, slot, unit = parent ? wayland_surface_unit(parent) : WAYLAND_UNIT;
-        struct wayland_event e;
         unsigned long serial;
 
         // The positioner is in the parent's units, and so is the place it gives: the window's place and the screens' are
@@ -5586,19 +5479,12 @@ static void wayland_popup_configure(struct wayland_client *c, struct wayland_sur
         slot = wayland_find(c, s->role_id, WLI_xdg_popup);
         if (slot < 0 || s->serials >= WAYLAND_SERIALS)
                 return;
-        e = wayland_begin(c, s->role_id, WLE_xdg_popup_configure);
-        wayland_word(&e, (unsigned long)x);
-        wayland_word(&e, (unsigned long)y);
-        wayland_word(&e, (unsigned long)w);
-        wayland_word(&e, (unsigned long)h);
-        wayland_end(&e);
+        wayland_ev(c, s->role_id, WLE_xdg_popup_configure, (unsigned int)x, (unsigned int)y, (unsigned int)w, (unsigned int)h);
         serial = wayland_serial(c);
         slot = wayland_find(c, s->xdg_id, WLI_xdg_surface);
         if (slot < 0)
                 return;
-        e = wayland_begin(c, s->xdg_id, WLE_xdg_surface_configure);
-        wayland_word(&e, serial);
-        wayland_end(&e);
+        wayland_ev(c, s->xdg_id, WLE_xdg_surface_configure, (unsigned int)serial);
         s->serial[s->serials++] = (unsigned int)serial;
         s->flags |= WAYLAND_SURFACE_SENT;
 }
@@ -5969,10 +5855,8 @@ static int wayland_popup_request(struct wayland_client *c, struct wayland_object
         {
                 struct wayland_positioner *p = &c->positioners[c->objects[a[0].slot].link];
                 struct wayland_surface *parent = s->parent ? &c->surfaces[s->parent - 1] : 0;
-                struct wayland_event e = wayland_begin(c, self->id, WLE_xdg_popup_repositioned);
 
-                wayland_word(&e, a[1].u);
-                wayland_end(&e);
+                wayland_ev(c, self->id, WLE_xdg_popup_repositioned, (unsigned int)a[1].u);
                 wayland_popup_configure(c, s, p, parent);
                 if (s->row >= 0)
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_PLACE, s->u.popup.x, s->u.popup.y);
@@ -5990,11 +5874,7 @@ static int wayland_output_manager_request(struct wayland_client *c, struct wayla
                 c->objects[slot].aux = c->objects[a[1].slot].aux;
                 wayland_xdg_output_send(c, slot, c->objects[slot].aux);
                 if (c->objects[slot].version >= 3 && c->objects[a[1].slot].version >= 2)
-                {
-                        struct wayland_event e = wayland_begin(c, c->objects[a[1].slot].id, WLE_wl_output_done);
-
-                        wayland_end(&e);
-                }
+                        wayland_ev0(c, c->objects[a[1].slot].id, WLE_wl_output_done);
         }
         (void)self;
         return WAYLAND_OK;
@@ -6182,13 +6062,8 @@ static struct wayland_surface *wayland_pick(struct wayland_client *c, struct way
 
 static void wayland_pointer_enter_one(struct wayland_client *c, long slot, struct wayland_surface *s, unsigned long serial, long sx, long sy)
 {
-        struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_pointer_enter);
-
-        wayland_word(&e, serial);
-        wayland_word(&e, s->id);
-        wayland_word(&e, wayland_fixed(sx, s->scale120));
-        wayland_word(&e, wayland_fixed(sy, s->scale120));
-        wayland_end(&e);
+        wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_enter, (unsigned int)serial, s->id,
+                   (unsigned int)wayland_fixed(sx, s->scale120), (unsigned int)wayland_fixed(sy, s->scale120));
         wayland_pointer_frame(c, slot);
 }
 
@@ -6198,11 +6073,7 @@ static void wayland_pointer_leave_all(struct wayland_client *c, struct wayland_s
 
         for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
         {
-                struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_pointer_leave);
-
-                wayland_word(&e, serial);
-                wayland_word(&e, s->id);
-                wayland_end(&e);
+                wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_leave, (unsigned int)serial, s->id);
                 wayland_pointer_frame(c, slot);
         }
 }
@@ -6335,16 +6206,14 @@ static int wayland_touch_find(long id)
 */
 static void wayland_touch_send(struct wayland_client *c, long event, const unsigned long *words, long count)
 {
+        unsigned int w[6];
+
+        for (long i = 0; i < count; i++)
+                w[i] = (unsigned int)words[i];
         for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_touch, &at)) >= 0;)
         {
-                struct wayland_event e = wayland_begin(c, c->objects[slot].id, event);
-                struct wayland_event frame;
-
-                for (long word = 0; word < count; word++)
-                        wayland_word(&e, words[word]);
-                wayland_end(&e);
-                frame = wayland_begin(c, c->objects[slot].id, WLE_wl_touch_frame);
-                wayland_end(&frame);
+                wayland_send(c, c->objects[slot].id, event, w, count);
+                wayland_ev0(c, c->objects[slot].id, WLE_wl_touch_frame);
         }
 }
 
@@ -6533,29 +6402,15 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
         for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
         {
                 struct wayland_object *o = &c->objects[slot];
-                struct wayland_event e;
 
                 if (o->version >= 5)
-                {
-                        e = wayland_begin(c, o->id, WLE_wl_pointer_axis_source);
-                        wayland_word(&e, precise ? WLN_wl_pointer_axis_source_finger : WLN_wl_pointer_axis_source_wheel);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, o->id, WLE_wl_pointer_axis_source,
+                                   precise ? WLN_wl_pointer_axis_source_finger : WLN_wl_pointer_axis_source_wheel);
                 if (o->version >= 9)
-                {
-                        // The direction of the axis against the fingers or the wheel: a scroll is as it was given, not inverted.
-                        e = wayland_begin(c, o->id, WLE_wl_pointer_axis_relative_direction);
-                        wayland_word(&e, (unsigned long)axis);
-                        wayland_word(&e, WLN_wl_pointer_axis_relative_direction_identical);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, o->id, WLE_wl_pointer_axis_relative_direction,
+                                   (unsigned int)axis, WLN_wl_pointer_axis_relative_direction_identical);
                 if (!precise && o->version >= 8)
-                {
-                        e = wayland_begin(c, o->id, WLE_wl_pointer_axis_value120);
-                        wayland_word(&e, (unsigned long)axis);
-                        wayland_word(&e, (unsigned long)v120);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, o->id, WLE_wl_pointer_axis_value120, (unsigned int)axis, (unsigned int)v120);
                 else if (!precise && o->version >= 5)
                 {
                         long notches;
@@ -6564,18 +6419,10 @@ WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long
                         notches = c->axis_left[horizontal ? 1 : 0] / 120;
                         c->axis_left[horizontal ? 1 : 0] -= notches * 120;
                         if (notches)
-                        {
-                                e = wayland_begin(c, o->id, WLE_wl_pointer_axis_discrete);
-                                wayland_word(&e, (unsigned long)axis);
-                                wayland_word(&e, (unsigned long)notches);
-                                wayland_end(&e);
-                        }
+                                wayland_ev(c, o->id, WLE_wl_pointer_axis_discrete, (unsigned int)axis, (unsigned int)notches);
                 }
-                e = wayland_begin(c, o->id, WLE_wl_pointer_axis);
-                wayland_word(&e, (unsigned long)time);
-                wayland_word(&e, (unsigned long)axis);
-                wayland_word(&e, (unsigned long)(v120 * (precise ? notch_px : WAYLAND_NOTCH) * 256 / 120));
-                wayland_end(&e);
+                wayland_ev(c, o->id, WLE_wl_pointer_axis, (unsigned int)time, (unsigned int)axis,
+                           (unsigned int)(v120 * (precise ? notch_px : WAYLAND_NOTCH) * 256 / 120));
                 wayland_pointer_frame(c, slot);
         }
 }
@@ -6597,11 +6444,8 @@ WAYLAND_API void wayland_pointer_axis_stop(long row)
         for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
                 for (long axis = 0; axis < 2 && c->objects[slot].version >= 5; axis++)
                 {
-                        struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_pointer_axis_stop);
-
-                        wayland_word(&e, (unsigned long)time);
-                        wayland_word(&e, axis ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll);
-                        wayland_end(&e);
+                        wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_axis_stop, (unsigned int)time,
+                                   axis ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll);
                         wayland_pointer_frame(c, slot);
                 }
 }
@@ -6659,14 +6503,11 @@ static void wayland_texts_focus(struct wayland_client *c, long row, unsigned int
         for (long at = 0; at < c->tbl[WLT_TEXT].count; at++)
         {
                 struct wayland_text *t = &c->texts[at];
-                struct wayland_event e;
 
                 if (!t->live || (!entered && t->row != row))
                         continue;
                 t->row = entered ? (int)row : -1;
-                e = wayland_begin(c, t->id, entered ? WLE_zwp_text_input_v3_enter : WLE_zwp_text_input_v3_leave);
-                wayland_word(&e, surface);
-                wayland_end(&e);
+                wayland_ev(c, t->id, entered ? WLE_zwp_text_input_v3_enter : WLE_zwp_text_input_v3_leave, surface);
                 wayland_text_sync(c, t);
         }
 }
@@ -6741,19 +6582,13 @@ static int wayland_text_request(struct wayland_client *c, struct wayland_object 
                 t->pending_caret = a[2].i < 0 || a[3].i < 0 || (long)a[1].i + (long)a[3].i < 0 ? -1 : (long)a[1].i + (long)a[3].i;
                 break;
         case WLQ_zwp_text_input_v3_commit:
-        {
-                struct wayland_event e;
-
                 t->enabled = t->pending_enabled;
                 t->purpose = t->pending_purpose;
                 t->caret = t->pending_caret;
                 wayland_text_sync(c, t);
                 t->serial++;
-                e = wayland_begin(c, t->id, WLE_zwp_text_input_v3_done);
-                wayland_word(&e, (unsigned long)t->serial);
-                wayland_end(&e);
+                wayland_ev(c, t->id, WLE_zwp_text_input_v3_done, (unsigned int)t->serial);
                 break;
-        }
         default: // set_surrounding_text and set_text_change_cause are taken and not used
                 break;
         }
@@ -6763,16 +6598,12 @@ static int wayland_text_request(struct wayland_client *c, struct wayland_object 
 /* How fast a held key repeats, to one keyboard (from version 4): the rate a second and the delay in milliseconds. */
 static void wayland_keyboard_repeat(struct wayland_client *c, long slot)
 {
-        struct wayland_event e;
         long rate = 25, delay = 600;
 
         if (c->objects[slot].version < 4)
                 return;
         wayland.host->repeat(wayland.host->context, &rate, &delay);
-        e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_repeat_info);
-        wayland_word(&e, (unsigned long)rate);
-        wayland_word(&e, (unsigned long)delay);
-        wayland_end(&e);
+        wayland_ev(c, c->objects[slot].id, WLE_wl_keyboard_repeat_info, (unsigned int)rate, (unsigned int)delay);
 }
 
 /* The keymap to one keyboard: a descriptor beside the event, and how fast a held key repeats. */
@@ -6823,14 +6654,8 @@ static unsigned long wayland_depressed(void)
 
 static void wayland_modifiers_to(struct wayland_client *c, long slot)
 {
-        struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_modifiers);
-
-        wayland_word(&e, wayland_serial(c));
-        wayland_word(&e, (unsigned long)wayland.mods[0]);
-        wayland_word(&e, (unsigned long)wayland.mods[1]);
-        wayland_word(&e, (unsigned long)wayland.mods[2]);
-        wayland_word(&e, (unsigned long)wayland.mods[3]);
-        wayland_end(&e);
+        wayland_ev(c, c->objects[slot].id, WLE_wl_keyboard_modifiers, (unsigned int)wayland_serial(c),
+                   (unsigned int)wayland.mods[0], (unsigned int)wayland.mods[1], (unsigned int)wayland.mods[2], (unsigned int)wayland.mods[3]);
 }
 
 static void wayland_keyboard_enter_one(struct wayland_client *c, long slot, struct wayland_surface *s, unsigned long serial)
@@ -6869,13 +6694,7 @@ WAYLAND_API void wayland_keyboard_to(long row)
                 unsigned long serial = wayland_serial(old);
 
                 for (long at = 0, slot; (slot = wayland_seat_next(old, WLI_wl_keyboard, &at)) >= 0;)
-                {
-                        struct wayland_event e = wayland_begin(old, old->objects[slot].id, WLE_wl_keyboard_leave);
-
-                        wayland_word(&e, serial);
-                        wayland_word(&e, was->id);
-                        wayland_end(&e);
-                }
+                        wayland_ev(old, old->objects[slot].id, WLE_wl_keyboard_leave, (unsigned int)serial, was->id);
                 wayland_texts_focus(old, wayland.keyboard_row, was->id, 0);
         }
         wayland.keyboard_row = is ? row : -1;
@@ -7159,50 +6978,102 @@ static unsigned long wayland_server_id(struct wayland_client *c)
         return 0;
 }
 
+/* Packed NUL-terminated MIME buffer helpers shared by clipboard/primary sources and XDND/host drags. */
+static int wayland_mime_buf_append(struct wayland_table *tbl, long *bytes, const unsigned char *text, long len)
+{
+        if (!text || len < 1)
+                return 0;
+        tbl->unit = 1;
+        if (!wayland_table_reach(tbl, *bytes + len + 1))
+                return 0;
+        for (long at = 0; at < len; at++)
+                tbl->at[*bytes + at] = text[at];
+        tbl->at[*bytes + len] = 0;
+        *bytes += len + 1;
+        return 1;
+}
+
+static const char *wayland_mime_buf_nth(const unsigned char *buf, long bytes, long nth)
+{
+        for (long at = 0; buf && at < bytes;)
+        {
+                const char *type = (const char *)buf + at;
+                long length = 0;
+
+                while (at + length < bytes && type[length])
+                        length++;
+                if (!nth--)
+                        return type;
+                at += length + 1;
+        }
+        return 0;
+}
+
+/* Unified offer creation + data_offer/offer(/source_actions) emission for selection (is_drag=0) and DND (is_drag=1). */
+static unsigned long wayland_offer_create_and_send(struct wayland_client *c, long device_slot, long which, int is_drag,
+                                                   const unsigned char *types, long type_bytes, unsigned int src_actions, long *out_index)
+{
+        long index = wayland_tbl_alloc(c, WLT_OFFER), offer = -1;
+        unsigned long id = index >= 0 ? wayland_server_id(c) : 0;
+
+        if (out_index)
+                *out_index = -1;
+        if (id)
+                offer = wayland_object_new(c, id, which ? WLI_zwp_primary_selection_offer_v1 : WLI_wl_data_offer,
+                                           c->objects[device_slot].version);
+        if (offer < 0)
+        {
+                if (index >= 0)
+                        wayland_tbl_free(c, WLT_OFFER, index);
+                return 0;
+        }
+        c->offers[index].id = (unsigned int)id;
+        c->offers[index].live = 1;
+        c->offers[index].which = (unsigned char)which;
+        if (is_drag)
+                c->offers[index].drag = 1;
+        else
+                c->offers[index].serial = wayland.selection_serial[which];
+        c->objects[offer].link = (int)index;
+        if (out_index)
+                *out_index = index;
+        wayland_ev(c, c->objects[device_slot].id,
+                   which ? WLE_zwp_primary_selection_device_v1_data_offer : WLE_wl_data_device_data_offer, (unsigned int)id);
+        for (long nth = 0;; nth++)
+        {
+                const char *type = is_drag ? wayland_mime_buf_nth(types, type_bytes, nth)
+                                           : wayland.host->clip_type(wayland.host->context, which, nth);
+                if (!type)
+                        break;
+                wayland_ev_str(c, id, which ? WLE_zwp_primary_selection_offer_v1_offer : WLE_wl_data_offer_offer, type);
+        }
+        if (is_drag && c->objects[offer].version >= 3)
+                wayland_ev(c, id, WLE_wl_data_offer_source_actions, src_actions);
+        return id;
+}
+
+/* Unified data_source/primary_selection_source send+fd emitter (from_host=1 increments wayland.fds). */
+static int wayland_source_send_fd(struct wayland_client *c, const struct wayland_source *source, const char *mime, long fd, int from_host)
+{
+        if (!c || !source || !mime || fd < 0 || wayland_slot_of(c, source->id) < 0 || !wayland_out_fd_room(c))
+                return 0;
+        wayland_ev_fd(c, source->id, source->which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send, mime, fd, 1);
+        if (from_host)
+                wayland.fds++;
+        return 1;
+}
+
 /*
         The copy the compositor holds for a selection, to one of a client's devices: a new offer of it with its types, then the
         selection naming the offer; or the selection with none when there is nothing, or no room for an offer.
 */
 static void wayland_selection_to(struct wayland_client *c, long slot, long which)
 {
-        unsigned long device = c->objects[slot].id, id = 0;
-        struct wayland_event e;
-        long index = -1, offer = -1;
+        unsigned long id = 0;
 
         if (wayland.host->clip_type(wayland.host->context, which, 0))
-        {
-                index = wayland_tbl_alloc(c, WLT_OFFER);
-                id = index >= 0 ? wayland_server_id(c) : 0;
-                if (id)
-                        offer = wayland_object_new(c, id, which ? WLI_zwp_primary_selection_offer_v1 : WLI_wl_data_offer,
-                                                   c->objects[slot].version);
-                if (index >= 0 && offer < 0)
-                        wayland_tbl_free(c, WLT_OFFER, index);
-        }
-        if (offer >= 0)
-        {
-                const char *type;
-
-                c->offers[index].id = (unsigned int)id;
-                c->offers[index].live = 1;
-                c->offers[index].which = (unsigned char)which;
-                c->offers[index].serial = wayland.selection_serial[which];
-                c->objects[offer].link = (int)index;
-                e = wayland_begin(c, device, which ? WLE_zwp_primary_selection_device_v1_data_offer : WLE_wl_data_device_data_offer);
-                wayland_word(&e, id);
-                wayland_end(&e);
-                for (long nth = 0; (type = wayland.host->clip_type(wayland.host->context, which, nth)); nth++)
-                {
-                        e = wayland_begin(c, id, which ? WLE_zwp_primary_selection_offer_v1_offer : WLE_wl_data_offer_offer);
-                        wayland_string(&e, type);
-                        wayland_end(&e);
-                }
-        }
-        else
-                id = 0;
-        e = wayland_begin(c, device, which ? WLE_zwp_primary_selection_device_v1_selection : WLE_wl_data_device_selection);
-        wayland_word(&e, id);
-        wayland_end(&e);
+                id = wayland_offer_create_and_send(c, slot, which, 0, 0, 0, 0, 0);
+        wayland_ev(c, c->objects[slot].id, which ? WLE_zwp_primary_selection_device_v1_selection : WLE_wl_data_device_selection, (unsigned int)id);
 }
 
 // Both selections to a client's devices: what it is shown when it gets the keys.
@@ -7217,13 +7088,11 @@ static void wayland_selections_to(struct wayland_client *c)
 static void wayland_source_cancel(struct wayland_client *c, long index)
 {
         struct wayland_source *source = &c->sources[index];
-        struct wayland_event e;
 
         source->state = 3;
         if (wayland_slot_of(c, source->id) < 0)
                 return;
-        e = wayland_begin(c, source->id, source->which ? WLE_zwp_primary_selection_source_v1_cancelled : WLE_wl_data_source_cancelled);
-        wayland_end(&e);
+        wayland_ev0(c, source->id, source->which ? WLE_zwp_primary_selection_source_v1_cancelled : WLE_wl_data_source_cancelled);
 }
 
 static void wayland_drag_end(int how);
@@ -7298,38 +7167,21 @@ WAYLAND_API const char *wayland_clip_type(long client, long which, long nth)
         struct wayland_client *c = 0;
         struct wayland_source *source = wayland_clip_pending(client, which, &c);
 
-        for (long at = 0; source && at < source->mime_bytes;)
-        {
-                const char *type = (const char *)source->mime_table.at + at;
-                long length = 0;
-
-                while (at + length < source->mime_bytes && type[length])
-                        length++;
-                if (!nth--)
-                        return type;
-                at += length + 1;
-        }
-        return 0;
+        return source ? wayland_mime_buf_nth(source->mime_table.at, source->mime_bytes, nth) : 0;
 }
 
 WAYLAND_API int wayland_clip_send(long client, long which, long nth, long fd)
 {
         struct wayland_client *c = 0;
         struct wayland_source *source = wayland_clip_pending(client, which, &c);
-        const char *type = wayland_clip_type(client, which, nth);
-        struct wayland_event e;
+        const char *type = source ? wayland_mime_buf_nth(source->mime_table.at, source->mime_bytes, nth) : 0;
 
-        if (!source || !type || !wayland_out_fd_room(c) || wayland_slot_of(c, source->id) < 0)
+        if (!wayland_source_send_fd(c, source, type, fd, 1))
         {
                 if (fd >= 0 && wayland.host->close)
                         wayland.host->close(wayland.host->context, fd);
                 return 0;
         }
-        e = wayland_begin(c, source->id, which ? WLE_zwp_primary_selection_source_v1_send : WLE_wl_data_source_send);
-        wayland_string(&e, type);
-        wayland_out_fd_put(c, fd, 1, e.start);
-        wayland.fds++;
-        wayland_end(&e);
         return 1;
 }
 
@@ -7473,15 +7325,7 @@ static void wayland_source_type(struct wayland_client *c, long index, const unsi
 {
         struct wayland_source *source = &c->sources[index];
 
-        if (!text || length < 1)
-                return;
-        // A string's length is its bytes without the null: the type is kept whole, then its null (its last byte was the null's place).
-        source->mime_table.unit = 1;
-        if (!wayland_table_reach(&source->mime_table, source->mime_bytes + length + 1))
-                return;
-        for (long at = 0; at <= length; at++)
-                source->mime_table.at[source->mime_bytes + at] = at < length ? text[at] : 0;
-        source->mime_bytes += length + 1;
+        wayland_mime_buf_append(&source->mime_table, &source->mime_bytes, text, length);
 }
 
 static struct wayland_client *wayland_drag_client(void)
@@ -7517,14 +7361,13 @@ static void wayland_drag_tell_source(long op, long version, long word, int has_w
         struct wayland_client *c = wayland_drag_client();
         struct wayland_source *source = wayland_drag_source();
         long slot = source ? wayland_slot_of(c, source->id) : -1;
-        struct wayland_event e;
 
         if (slot < 0 || c->objects[slot].version < version)
                 return;
-        e = wayland_begin(c, source->id, op);
         if (has_word)
-                wayland_word(&e, (unsigned long)word);
-        wayland_end(&e);
+                wayland_ev(c, source->id, op, (unsigned int)word);
+        else
+                wayland_ev0(c, source->id, op);
 }
 
 static long wayland_xdrag(long what, long row, long x, long y)
@@ -7563,28 +7406,11 @@ static void wayland_drag_actions(void)
                 return;
         wayland.drag.action = action;
         wayland_drag_tell_source(WLE_wl_data_source_action, 3, action, 1);
-        if (wayland.drag.released && o->accepted && action)
-        {
-                long slot0 = wayland_slot_of(t, o->id);
-
-                if (slot0 >= 0 && t->objects[slot0].version >= 3)
-                {
-                        struct wayland_event e0 = wayland_begin(t, o->id, WLE_wl_data_offer_action);
-
-                        wayland_word(&e0, action);
-                        wayland_end(&e0);
-                }
-                wayland_drag_decide();
-                return;
-        }
         slot = wayland_slot_of(t, o->id);
         if (slot >= 0 && t->objects[slot].version >= 3)
-        {
-                struct wayland_event e = wayland_begin(t, o->id, WLE_wl_data_offer_action);
-
-                wayland_word(&e, action);
-                wayland_end(&e);
-        }
+                wayland_ev(t, o->id, WLE_wl_data_offer_action, action);
+        if (wayland.drag.released && o->accepted && action)
+                wayland_drag_decide();
 }
 
 // The target told the drag left it (its offer stays the client's until it destroys it).
@@ -7594,11 +7420,7 @@ static void wayland_drag_leave(void)
         long device = t ? wayland_drag_device(t) : -1;
 
         if (device >= 0)
-        {
-                struct wayland_event e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_leave);
-
-                wayland_end(&e);
-        }
+                wayland_ev0(t, t->objects[device].id, WLE_wl_data_device_leave);
         if (t && wayland.drag.offer >= 0 && wayland.drag.offer < t->tbl[WLT_OFFER].count)
                 t->offers[wayland.drag.offer].drag = 0;
         if (t && wayland.drag.target != wayland.drag.client)
@@ -7644,7 +7466,6 @@ static void wayland_drag_over(long row, long x, long y)
         struct wayland_surface *root = row >= 0 ? wayland_row_surface(row, &t) : 0, *is = 0;
         struct wayland_source *source = wayland_drag_source();
         long sx = 0, sy = 0, device;
-        struct wayland_event e;
 
         if ((!c && !wayland.drag.xsource) || wayland.drag.dropped)
                 return;
@@ -7680,11 +7501,9 @@ static void wayland_drag_over(long row, long x, long y)
                 wayland_drag_xleave();
         if (is && wayland.drag.target == t->slot && wayland.drag.surface == wayland_surface_index(t, is))
         {
-                e = wayland_begin(t, t->objects[wayland_drag_device(t)].id, WLE_wl_data_device_motion);
-                wayland_word(&e, (unsigned long)wayland.host->now(wayland.host->context));
-                wayland_word(&e, wayland_fixed(sx, is->scale120));
-                wayland_word(&e, wayland_fixed(sy, is->scale120));
-                wayland_end(&e);
+                wayland_ev(t, t->objects[wayland_drag_device(t)].id, WLE_wl_data_device_motion,
+                           (unsigned int)wayland.host->now(wayland.host->context),
+                           (unsigned int)wayland_fixed(sx, is->scale120), (unsigned int)wayland_fixed(sy, is->scale120));
                 return;
         }
         if (wayland_drag_target())
@@ -7693,61 +7512,22 @@ static void wayland_drag_over(long row, long x, long y)
                 return;
         device = wayland_drag_device(t);
         {
-                long index = -1, offer = -1;
+                long index = -1;
                 unsigned long id = 0;
-
-                const unsigned char *types = source ? source->mime_table.at : wayland.drag.x_types.at;
-                long type_bytes = source ? source->mime_bytes : wayland.drag.x_bytes;
 
                 if (source || wayland.drag.xsource)
                 {
-                        index = wayland_tbl_alloc(t, WLT_OFFER);
-                        id = index >= 0 ? wayland_server_id(t) : 0;
-                        if (id)
-                                offer = wayland_object_new(t, id, WLI_wl_data_offer, t->objects[device].version);
-                        // No room for the target's offer: it is not entered, as a target with no device is not.
-                        if (offer < 0)
-                        {
-                                if (index >= 0)
-                                        wayland_tbl_free(t, WLT_OFFER, index);
+                        id = wayland_offer_create_and_send(t, device, 0, 1,
+                                                           source ? source->mime_table.at : wayland.drag.x_types.at,
+                                                           source ? source->mime_bytes : wayland.drag.x_bytes,
+                                                           source ? source->actions : wayland.drag.x_actions, &index);
+                        if (!id)
                                 return;
-                        }
-                        t->offers[index].id = (unsigned int)id;
-                        t->offers[index].live = t->offers[index].drag = 1;
-                        t->offers[index].which = 0;
-                        t->offers[index].accepted = t->offers[index].finished = 0;
-                        t->offers[index].actions = t->offers[index].preferred = 0;
-                        t->objects[offer].link = (int)index;
-                        e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_data_offer);
-                        wayland_word(&e, id);
-                        wayland_end(&e);
-                        for (long at = 0; at < type_bytes;)
-                        {
-                                const char *type = (const char *)types + at;
-                                long length = 1;
-
-                                while (at + length < type_bytes && type[length - 1])
-                                        length++;
-                                e = wayland_begin(t, id, WLE_wl_data_offer_offer);
-                                wayland_string(&e, type);
-                                wayland_end(&e);
-                                at += length;
-                        }
-                        if (t->objects[offer].version >= 3)
-                        {
-                                e = wayland_begin(t, id, WLE_wl_data_offer_source_actions);
-                                wayland_word(&e, source ? source->actions : wayland.drag.x_actions);
-                                wayland_end(&e);
-                        }
                 }
                 wayland.drag.target = t->slot, wayland.drag.surface = wayland_surface_index(t, is), wayland.drag.offer = index;
-                e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_enter);
-                wayland_word(&e, wayland_input_serial(t));
-                wayland_word(&e, is->id);
-                wayland_word(&e, wayland_fixed(sx, is->scale120));
-                wayland_word(&e, wayland_fixed(sy, is->scale120));
-                wayland_word(&e, id);
-                wayland_end(&e);
+                wayland_ev(t, t->objects[device].id, WLE_wl_data_device_enter,
+                           (unsigned int)wayland_input_serial(t), is->id,
+                           (unsigned int)wayland_fixed(sx, is->scale120), (unsigned int)wayland_fixed(sy, is->scale120), (unsigned int)id);
         }
 }
 
@@ -7784,7 +7564,6 @@ static void wayland_drag_accept(struct wayland_client *c, long offer, const char
 {
         struct wayland_client *source_client = wayland_drag_client();
         struct wayland_source *source = wayland_drag_source();
-        struct wayland_event e;
         long slot;
 
         if (!wayland.drag.live || wayland.drag.target != c->slot || wayland.drag.offer != offer || wayland.drag.dropped)
@@ -7792,14 +7571,7 @@ static void wayland_drag_accept(struct wayland_client *c, long offer, const char
         c->offers[offer].accepted = type != 0;
         slot = source ? wayland_slot_of(source_client, source->id) : -1;
         if (slot >= 0)
-        {
-                e = wayland_begin(source_client, source->id, WLE_wl_data_source_target);
-                if (type)
-                        wayland_string(&e, type);
-                else
-                        wayland_word(&e, 0);
-                wayland_end(&e);
-        }
+                wayland_ev_str(source_client, source->id, WLE_wl_data_source_target, type);
         // Released before this answer: a type and an action taken (or a version with no actions) is the drop; no type is the cancel.
         if (wayland.drag.released)
         {
@@ -7860,9 +7632,7 @@ static void wayland_drag_decide(void)
         if (wayland.drag.source < 0 && !wayland.drag.xsource && t && device >= 0)
         {
                 // A drag of the client's own, with nothing carried: dropped, and over.
-                struct wayland_event e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_drop);
-
-                wayland_end(&e);
+                wayland_ev0(t, t->objects[device].id, WLE_wl_data_device_drop);
                 wayland.drag.dropped = 1;
                 wayland_drag_end(1);
                 return;
@@ -7872,11 +7642,7 @@ static void wayland_drag_decide(void)
                 wayland_drag_end(0);
                 return;
         }
-        {
-                struct wayland_event e = wayland_begin(t, t->objects[device].id, WLE_wl_data_device_drop);
-
-                wayland_end(&e);
-        }
+        wayland_ev0(t, t->objects[device].id, WLE_wl_data_device_drop);
         wayland.drag.dropped = 1;
         wayland_drag_tell_source(WLE_wl_data_source_dnd_drop_performed, 3, 0, 0);
 }
@@ -7886,8 +7652,6 @@ static int wayland_drag_receive(struct wayland_client *c, struct wayland_object 
 {
         struct wayland_client *source_client = wayland_drag_client();
         struct wayland_source *source = wayland_drag_source();
-        long slot = source ? wayland_slot_of(source_client, source->id) : -1;
-        struct wayland_event e;
 
         // An X drag's: the X side converts its selection into the descriptor.
         if (wayland.drag.live && wayland.drag.xsource && wayland.drag.target == c->slot && wayland.drag.offer == self->link && a[0].text &&
@@ -7898,14 +7662,9 @@ static int wayland_drag_receive(struct wayland_client *c, struct wayland_object 
                 a[1].fd = -1;
                 return WAYLAND_OK;
         }
-        if (!wayland.drag.live || wayland.drag.target != c->slot || wayland.drag.offer != self->link || slot < 0 || !a[0].text ||
-            a[0].length <= 1 || !wayland_out_fd_room(source_client))
-                return WAYLAND_OK; // the descriptor is closed with the request's: the target reads an end
-        e = wayland_begin(source_client, source->id, WLE_wl_data_source_send);
-        wayland_string(&e, (const char *)a[0].text);
-        wayland_out_fd_put(source_client, a[1].fd, 1, e.start);
-        a[1].fd = -1; // the source's now, counted as the shim's until it is sent
-        wayland_end(&e);
+        if (wayland.drag.live && wayland.drag.target == c->slot && wayland.drag.offer == self->link && a[0].text && a[0].length > 1 &&
+            wayland_source_send_fd(source_client, source, (const char *)a[0].text, a[1].fd, 0))
+                a[1].fd = -1; // the source's now, already counted in wayland.fds until sent
         return WAYLAND_OK;
 }
 
@@ -7977,15 +7736,8 @@ WAYLAND_API void wayland_drag_x_status(long accepted, unsigned long action)
 
                 wayland.drag.x_accepted = !!accepted;
                 if (slot >= 0)
-                {
-                        struct wayland_event e = wayland_begin(sc, source->id, WLE_wl_data_source_target);
-
-                        if (accepted && source->mime_bytes)
-                                wayland_string(&e, (const char *)source->mime_table.at);
-                        else
-                                wayland_word(&e, 0);
-                        wayland_end(&e);
-                }
+                        wayland_ev_str(sc, source->id, WLE_wl_data_source_target,
+                                       accepted && source->mime_bytes ? (const char *)source->mime_table.at : 0);
         }
         if (action != wayland.drag.action)
         {
@@ -7998,19 +7750,9 @@ WAYLAND_API void wayland_drag_x_status(long accepted, unsigned long action)
 
 WAYLAND_API int wayland_drag_x_send(const char *mime, long fd)
 {
-        struct wayland_client *sc = wayland_drag_client();
-        struct wayland_source *source = wayland_drag_source();
-        struct wayland_event e;
-
-        if (!wayland.drag.live || (!wayland.drag.dropped && wayland.drag.xtarget < 0) || !source || !mime || fd < 0 || wayland_slot_of(sc, source->id) < 0 ||
-            !wayland_out_fd_room(sc))
+        if (!wayland.drag.live || (!wayland.drag.dropped && wayland.drag.xtarget < 0))
                 return 0;
-        e = wayland_begin(sc, source->id, WLE_wl_data_source_send);
-        wayland_string(&e, mime);
-        wayland_out_fd_put(sc, fd, 1, e.start);
-        wayland.fds++;
-        wayland_end(&e);
-        return 1;
+        return wayland_source_send_fd(wayland_drag_client(), wayland_drag_source(), mime, fd, 1);
 }
 
 // The host's target (an X window, a program's) is done with the drop: the drag ends, finished or not.
@@ -8024,12 +7766,9 @@ WAYLAND_API int wayland_drag_x_begin(const char *types, long bytes, unsigned lon
 {
         if (!wayland.host || wayland.drag.live || !types || bytes <= 0)
                 return 0;
-        wayland.drag.x_types.unit = 1;
-        if (!wayland_table_reach(&wayland.drag.x_types, bytes + 1))
+        wayland.drag.x_bytes = 0;
+        if (!wayland_mime_buf_append(&wayland.drag.x_types, &wayland.drag.x_bytes, (const unsigned char *)types, bytes))
                 return 0;
-        for (long at = 0; at < bytes; at++)
-                wayland.drag.x_types.at[at] = (unsigned char)types[at];
-        wayland.drag.x_types.at[bytes] = 0;
         wayland.drag.x_bytes = bytes;
         wayland.drag.live = 1, wayland.drag.dropped = wayland.drag.released = 0, wayland.drag.xsource = 1;
         wayland.drag.x_actions = (unsigned int)(actions & WAYLAND_DRAG_ACTIONS ? actions & WAYLAND_DRAG_ACTIONS : 1u);
@@ -8051,12 +7790,7 @@ WAYLAND_API void wayland_drag_x_actions(unsigned long actions)
                 return;
         wayland.drag.x_actions = (unsigned int)actions;
         if (slot >= 0 && t->objects[slot].version >= 3)
-        {
-                struct wayland_event e = wayland_begin(t, o->id, WLE_wl_data_offer_source_actions);
-
-                wayland_word(&e, actions);
-                wayland_end(&e);
-        }
+                wayland_ev(t, o->id, WLE_wl_data_offer_source_actions, (unsigned int)actions);
         wayland_drag_actions();
 }
 
@@ -8232,24 +7966,97 @@ static int wayland_data_request(struct wayland_client *c, struct wayland_object 
         is the buffer's pixels over the destination). Every number is a client's: it is checked as the protocol says, and a
         size that is not a pixel count the shim could hold is a bad value.
 */
+/*
+        An object made for a surface takes the surface's slot and generation, so wayland_surface_of finds it in O(1) and returns 0 once gone.
+        Declarative table for all 12 surface-extension manager bind requests (uniqueness check, dead-surface policy, role check).
+*/
+static void wayland_surface_link(struct wayland_client *c, long slot, struct wayland_surface *s)
+{
+        if (slot < 0 || !s)
+                return;
+        c->objects[slot].link = (int)wayland_surface_index(c, s);
+        c->objects[slot].aux = s->gen;
+}
+
+#define WAYLAND_SOFF(field) ((long)(unsigned long)&((struct wayland_surface *)0)->field)
+
+struct wayland_ext_spec
+{
+        unsigned char iface, bind_op, fail_dead, check_role, uniq_size;
+        long uniq_off;
+        unsigned int uniq_err;
+        const char *uniq_msg;
+};
+
+static const struct wayland_ext_spec wayland_ext_specs[] = {
+        {WLI_wp_viewporter, WLQ_wp_viewporter_get_viewport, 0, 0, 4, WAYLAND_SOFF(viewport_id),
+         WLN_wp_viewporter_error_viewport_exists, "the surface has a viewport"},
+        {WLI_wp_fractional_scale_manager_v1, WLQ_wp_fractional_scale_manager_v1_get_fractional_scale, 0, 0, 4, WAYLAND_SOFF(fractional_id),
+         WLN_wp_fractional_scale_manager_v1_error_fractional_scale_exists, "the surface has a fractional scale"},
+        {WLI_wp_linux_drm_syncobj_manager_v1, WLQ_wp_linux_drm_syncobj_manager_v1_get_surface, 0, 0, 4, WAYLAND_SOFF(syncobj_id),
+         WLN_wp_linux_drm_syncobj_manager_v1_error_surface_exists, "the surface already has a syncobj surface"},
+        {WLI_xdg_wm_dialog_v1, WLQ_xdg_wm_dialog_v1_get_xdg_dialog, 1, 1, 0, -1, 0, 0},
+        {WLI_wp_content_type_manager_v1, WLQ_wp_content_type_manager_v1_get_surface_content_type, 1, 0, 0, -1, 0, 0},
+        {WLI_wp_alpha_modifier_v1, WLQ_wp_alpha_modifier_v1_get_surface, 1, 0, 0, -1, 0, 0},
+        {WLI_wp_fifo_manager_v1, WLQ_wp_fifo_manager_v1_get_fifo, 1, 0, 0, -1, 0, 0},
+        {WLI_wp_commit_timing_manager_v1, WLQ_wp_commit_timing_manager_v1_get_timer, 1, 0, 0, -1, 0, 0},
+        {WLI_zwp_xwayland_keyboard_grab_manager_v1, WLQ_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard, 1, 0, 0, -1, 0, 0},
+        {WLI_zwp_keyboard_shortcuts_inhibit_manager_v1, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, 1, 0, 1, WAYLAND_SOFF(shortcuts),
+         WLN_zwp_keyboard_shortcuts_inhibit_manager_v1_error_already_inhibited, "the surface has an inhibitor"},
+        {WLI_wp_tearing_control_manager_v1, WLQ_wp_tearing_control_manager_v1_get_tearing_control, 1, 0, 1, WAYLAND_SOFF(tearing),
+         WLN_wp_tearing_control_manager_v1_error_tearing_control_exists, "the surface has a tearing control"},
+        {WLI_zwp_idle_inhibit_manager_v1, WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor, 1, 0, 0, -1, 0, 0},
+};
+
+static int wayland_ext_bind(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a, struct wayland_surface **out_s)
+{
+        const struct wayland_ext_spec *sp = 0;
+        struct wayland_surface *s;
+
+        if (out_s)
+                *out_s = 0;
+        for (unsigned long i = 0; i < sizeof wayland_ext_specs / sizeof wayland_ext_specs[0]; i++)
+                if (wayland_ext_specs[i].iface == self->iface)
+                {
+                        sp = &wayland_ext_specs[i];
+                        break;
+                }
+        if (!sp || op != sp->bind_op)
+                return WAYLAND_OK;
+        s = wayland_surface_of(c, a[1].slot);
+        if (s && sp->check_role && s->role_id != c->objects[a[1].slot].id)
+                s = 0;
+        if (!s)
+                return sp->fail_dead ? wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, sp->check_role ? "no such toplevel" : "a surface is gone")
+                                     : WAYLAND_OK;
+        if (sp->uniq_size == 4)
+        {
+                unsigned int *field = (unsigned int *)((unsigned char *)s + sp->uniq_off);
+
+                if (*field)
+                        return wayland_fail(c, self->id, sp->uniq_err, sp->uniq_msg);
+                *field = c->objects[a[0].slot].id;
+        }
+        else if (sp->uniq_size == 1)
+        {
+                unsigned char *field = (unsigned char *)s + sp->uniq_off;
+
+                if (*field)
+                        return wayland_fail(c, self->id, sp->uniq_err, sp->uniq_msg);
+                *field = 1;
+        }
+        wayland_surface_link(c, a[0].slot, s);
+        if (out_s)
+                *out_s = s;
+        return WAYLAND_OK;
+}
+
 static int wayland_viewport_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *s;
 
         if (self->iface == WLI_wp_viewporter)
-        {
-                if (op == WLQ_wp_viewporter_destroy)
-                        return WAYLAND_OK;
-                s = wayland_surface_of(c, a[1].slot);
-                if (!s)
-                        return WAYLAND_OK;
-                if (s->viewport_id)
-                        return wayland_fail(c, self->id, WLN_wp_viewporter_error_viewport_exists, "the surface has a viewport");
-                s->viewport_id = c->objects[a[0].slot].id;
-                c->objects[a[0].slot].link = (int)wayland_surface_index(c, s);
-                c->objects[a[0].slot].aux = s->gen;
-                return WAYLAND_OK;
-        }
+                return wayland_ext_bind(c, self, op, a, 0);
         s = wayland_surface_of(c, self - c->objects);
         if (op == WLQ_wp_viewport_destroy)
         {
@@ -8296,6 +8103,7 @@ static int wayland_viewport_request(struct wayland_client *c, struct wayland_obj
 static int wayland_fractional_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *s;
+        int status;
 
         if (self->iface == WLI_wp_fractional_scale_v1)
         {
@@ -8304,71 +8112,46 @@ static int wayland_fractional_request(struct wayland_client *c, struct wayland_o
                         s->fractional_id = 0;
                 return WAYLAND_OK;
         }
-        if (op == WLQ_wp_fractional_scale_manager_v1_destroy)
-                return WAYLAND_OK;
-        s = wayland_surface_of(c, a[1].slot);
-        if (!s)
-                return WAYLAND_OK;
-        if (s->fractional_id)
-                return wayland_fail(c, self->id, WLN_wp_fractional_scale_manager_v1_error_fractional_scale_exists,
-                                    "the surface has a fractional scale");
-        s->fractional_id = c->objects[a[0].slot].id;
-        c->objects[a[0].slot].link = (int)wayland_surface_index(c, s);
-        c->objects[a[0].slot].aux = s->gen;
-        {
-                // Said at once, in what it was told before it asked: the preferred scale is the first event of the object.
-                struct wayland_event e = wayland_begin(c, s->fractional_id, WLE_wp_fractional_scale_v1_preferred_scale);
-
-                wayland_word(&e, (unsigned long)(s->told120 > 0 ? s->told120 : WAYLAND_UNIT));
-                wayland_end(&e);
-        }
-        return WAYLAND_OK;
+        status = wayland_ext_bind(c, self, op, a, &s);
+        if (status == WAYLAND_OK && s)
+                wayland_ev(c, s->fractional_id, WLE_wp_fractional_scale_v1_preferred_scale,
+                           (unsigned int)(s->told120 > 0 ? s->told120 : WAYLAND_UNIT));
+        return status;
 }
 
-/* The compositor's shape for a protocol shape: the ones it draws, and the arrow for the rest (a hand, a wait, a move it lacks). */
+/* The compositor's shape for a protocol shape: the ones it draws, and the arrow (0) for the rest. */
 static long wayland_cursor_code(unsigned long shape)
 {
-        switch (shape)
-        {
-        case WLN_wp_cursor_shape_device_v1_shape_text:
-        case WLN_wp_cursor_shape_device_v1_shape_vertical_text:
-                return WAYLAND_CURSOR_TEXT;
-        case WLN_wp_cursor_shape_device_v1_shape_crosshair:
-                return WAYLAND_CURSOR_CROSS;
-        case WLN_wp_cursor_shape_device_v1_shape_move:
-        case WLN_wp_cursor_shape_device_v1_shape_all_scroll:
-                return WAYLAND_CURSOR_MOVE;
-        case WLN_wp_cursor_shape_device_v1_shape_e_resize:
-        case WLN_wp_cursor_shape_device_v1_shape_w_resize:
-        case WLN_wp_cursor_shape_device_v1_shape_ew_resize:
-        case WLN_wp_cursor_shape_device_v1_shape_col_resize:
-                return WAYLAND_CURSOR_RESIZE_H;
-        case WLN_wp_cursor_shape_device_v1_shape_n_resize:
-        case WLN_wp_cursor_shape_device_v1_shape_s_resize:
-        case WLN_wp_cursor_shape_device_v1_shape_ns_resize:
-        case WLN_wp_cursor_shape_device_v1_shape_row_resize:
-                return WAYLAND_CURSOR_RESIZE_V;
-        case WLN_wp_cursor_shape_device_v1_shape_nw_resize:
-        case WLN_wp_cursor_shape_device_v1_shape_se_resize:
-        case WLN_wp_cursor_shape_device_v1_shape_nwse_resize:
-                return WAYLAND_CURSOR_RESIZE_NWSE;
-        case WLN_wp_cursor_shape_device_v1_shape_ne_resize:
-        case WLN_wp_cursor_shape_device_v1_shape_sw_resize:
-        case WLN_wp_cursor_shape_device_v1_shape_nesw_resize:
-                return WAYLAND_CURSOR_RESIZE_NESW;
-        case WLN_wp_cursor_shape_device_v1_shape_pointer:
-        case WLN_wp_cursor_shape_device_v1_shape_grab:
-        case WLN_wp_cursor_shape_device_v1_shape_grabbing:
-                return WAYLAND_CURSOR_HAND;
-        case WLN_wp_cursor_shape_device_v1_shape_progress:
-        case WLN_wp_cursor_shape_device_v1_shape_wait:
-                return WAYLAND_CURSOR_WAIT;
-        case WLN_wp_cursor_shape_device_v1_shape_not_allowed:
-        case WLN_wp_cursor_shape_device_v1_shape_no_drop:
-                return WAYLAND_CURSOR_NOTALLOWED;
-        default:
-                return WAYLAND_CURSOR_ARROW;
-        }
+        static const signed char map[WLN_wp_cursor_shape_device_v1_shape_all_resize + 1] = {
+                [WLN_wp_cursor_shape_device_v1_shape_text] = WAYLAND_CURSOR_TEXT,
+                [WLN_wp_cursor_shape_device_v1_shape_vertical_text] = WAYLAND_CURSOR_TEXT,
+                [WLN_wp_cursor_shape_device_v1_shape_crosshair] = WAYLAND_CURSOR_CROSS,
+                [WLN_wp_cursor_shape_device_v1_shape_move] = WAYLAND_CURSOR_MOVE,
+                [WLN_wp_cursor_shape_device_v1_shape_all_scroll] = WAYLAND_CURSOR_MOVE,
+                [WLN_wp_cursor_shape_device_v1_shape_e_resize] = WAYLAND_CURSOR_RESIZE_H,
+                [WLN_wp_cursor_shape_device_v1_shape_w_resize] = WAYLAND_CURSOR_RESIZE_H,
+                [WLN_wp_cursor_shape_device_v1_shape_ew_resize] = WAYLAND_CURSOR_RESIZE_H,
+                [WLN_wp_cursor_shape_device_v1_shape_col_resize] = WAYLAND_CURSOR_RESIZE_H,
+                [WLN_wp_cursor_shape_device_v1_shape_n_resize] = WAYLAND_CURSOR_RESIZE_V,
+                [WLN_wp_cursor_shape_device_v1_shape_s_resize] = WAYLAND_CURSOR_RESIZE_V,
+                [WLN_wp_cursor_shape_device_v1_shape_ns_resize] = WAYLAND_CURSOR_RESIZE_V,
+                [WLN_wp_cursor_shape_device_v1_shape_row_resize] = WAYLAND_CURSOR_RESIZE_V,
+                [WLN_wp_cursor_shape_device_v1_shape_nw_resize] = WAYLAND_CURSOR_RESIZE_NWSE,
+                [WLN_wp_cursor_shape_device_v1_shape_se_resize] = WAYLAND_CURSOR_RESIZE_NWSE,
+                [WLN_wp_cursor_shape_device_v1_shape_nwse_resize] = WAYLAND_CURSOR_RESIZE_NWSE,
+                [WLN_wp_cursor_shape_device_v1_shape_ne_resize] = WAYLAND_CURSOR_RESIZE_NESW,
+                [WLN_wp_cursor_shape_device_v1_shape_sw_resize] = WAYLAND_CURSOR_RESIZE_NESW,
+                [WLN_wp_cursor_shape_device_v1_shape_nesw_resize] = WAYLAND_CURSOR_RESIZE_NESW,
+                [WLN_wp_cursor_shape_device_v1_shape_pointer] = WAYLAND_CURSOR_HAND,
+                [WLN_wp_cursor_shape_device_v1_shape_grab] = WAYLAND_CURSOR_HAND,
+                [WLN_wp_cursor_shape_device_v1_shape_grabbing] = WAYLAND_CURSOR_HAND,
+                [WLN_wp_cursor_shape_device_v1_shape_progress] = WAYLAND_CURSOR_WAIT,
+                [WLN_wp_cursor_shape_device_v1_shape_wait] = WAYLAND_CURSOR_WAIT,
+                [WLN_wp_cursor_shape_device_v1_shape_not_allowed] = WAYLAND_CURSOR_NOTALLOWED,
+                [WLN_wp_cursor_shape_device_v1_shape_no_drop] = WAYLAND_CURSOR_NOTALLOWED,
+        };
+
+        return shape < sizeof map ? map[shape] : WAYLAND_CURSOR_ARROW;
 }
 
 /*
@@ -8449,21 +8232,10 @@ static void wayland_dmabuf_formats(struct wayland_client *c, unsigned long id, l
                 for (long before = 0; before < at && !again; before++)
                         again = info->entry[before].format == info->entry[at].format;
                 if (!again)
-                {
-                        struct wayland_event e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_v1_format);
-
-                        wayland_word(&e, info->entry[at].format);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, id, WLE_zwp_linux_dmabuf_v1_format, info->entry[at].format);
                 if (version >= 3)
-                {
-                        struct wayland_event e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_v1_modifier);
-
-                        wayland_word(&e, info->entry[at].format);
-                        wayland_word(&e, (unsigned long)(info->entry[at].modifier >> 32));
-                        wayland_word(&e, (unsigned long)(info->entry[at].modifier & 0xffffffffUL));
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, id, WLE_zwp_linux_dmabuf_v1_modifier, info->entry[at].format,
+                                   (unsigned int)(info->entry[at].modifier >> 32), (unsigned int)(info->entry[at].modifier & 0xffffffffUL));
         }
 }
 
@@ -8537,9 +8309,7 @@ static void wayland_feedback_send(struct wayland_client *c, long slot)
                 e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_target_device);
                 wayland_device_array(&e, info->tranche[at].device);
                 wayland_end(&e);
-                e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_flags);
-                wayland_word(&e, info->tranche[at].flags);
-                wayland_end(&e);
+                wayland_ev(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_flags, (unsigned int)info->tranche[at].flags);
                 for (long each = 0; each < info->tranche[at].count; each++)
                 {
                         indices[each * 2] = info->tranche[at].index[each];
@@ -8548,11 +8318,9 @@ static void wayland_feedback_send(struct wayland_client *c, long slot)
                 e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_formats);
                 wayland_array(&e, indices, (unsigned long)info->tranche[at].count * 2);
                 wayland_end(&e);
-                e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_done);
-                wayland_end(&e);
+                wayland_ev0(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_done);
         }
-        e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_done);
-        wayland_end(&e);
+        wayland_ev0(c, id, WLE_zwp_linux_dmabuf_feedback_v1_done);
 }
 
 static void wayland_feedback_flush(struct wayland_client *c)
@@ -8627,10 +8395,7 @@ none:
 
 static void wayland_global_remove_send(struct wayland_client *c, unsigned long registry, long name)
 {
-        struct wayland_event e = wayland_begin(c, registry, WLE_wl_registry_global_remove);
-
-        wayland_word(&e, (unsigned long)name);
-        wayland_end(&e);
+        wayland_ev(c, registry, WLE_wl_registry_global_remove, (unsigned int)name);
 }
 
 static long wayland_global_name(long iface)
@@ -8799,11 +8564,42 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
         -2 for a buffer that cannot be made (async: failed; immediate: invalid_wl_buffer). The descriptors go to a pool of
         their own.
 */
+/* Shared dma-buf/prime plane geometry validation: returns 0 OK, 1 incomplete, 2 dims, 3 format, 4 bounds. */
+static int wayland_dmabuf_validate(unsigned long width, unsigned long height, unsigned long format,
+                                   long plane_count, int linear, const unsigned long *offsets, const unsigned long *strides)
+{
+        if (plane_count < 1)
+                return 1;
+        if (width < 1 || height < 1 || width > WAYLAND_DIMENSION || height > WAYLAND_DIMENSION)
+                return 2;
+        if (!wayland_fourcc_supported((unsigned int)format))
+                return 3;
+        if (format == WAYLAND_FOURCC_NV12)
+        {
+                if (plane_count != 2 || (width & 1) || (height & 1))
+                        return 1;
+                if (offsets[0] > 0x7fffffffUL || offsets[1] > 0x7fffffffUL || strides[0] > (1UL << 20) || strides[1] > (1UL << 20) ||
+                    strides[0] < width || strides[1] < width)
+                        return 4;
+                return 0;
+        }
+        if (linear && plane_count != 1)
+                return 1;
+        if (offsets[0] > 0x7fffffffUL || strides[0] == 0 || strides[0] > (1UL << 20) ||
+            (linear && (strides[0] < width * 4 || (strides[0] & 3))))
+                return 4;
+        for (long k = 1; k < plane_count; k++)
+                if (offsets[k] > 0x7fffffffUL || strides[k] > (1UL << 20))
+                        return 4;
+        return 0;
+}
+
 static long wayland_dmabuf_make(struct wayland_client *c, struct wayland_object *self, struct wayland_params *p, const struct wayland_arg *a,
                                 long id_slot)
 {
         unsigned long width = a[0].u, height = a[1].u, format = a[2].u, flags = a[3].u;
         long plane_count = 0;
+        int linear, err;
 
         p->used = 1; // a params object used (and checked unused before, by the request) makes one buffer, made or not
         for (long k = 0; k < 4; k++)
@@ -8814,32 +8610,18 @@ static long wayland_dmabuf_make(struct wayland_client *c, struct wayland_object 
                         return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "planes must be contiguous from 0"), -1;
                 plane_count++;
         }
-        if (plane_count < 1)
-                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "no planes given"), -1;
-        if (width < 1 || height < 1 || width > WAYLAND_DIMENSION || height > WAYLAND_DIMENSION)
-                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_dimensions, "the size is out of range"), -1;
-        if (!wayland_fourcc_supported((unsigned int)format))
-                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_format, "the format is not offered"), -1;
-        if (format == WAYLAND_FOURCC_NV12)
+        linear = p->modifier[0] == 0 || p->modifier[0] == WAYLAND_MODIFIER_INVALID;
+        err = wayland_dmabuf_validate(width, height, format, plane_count, linear, p->offset, p->stride);
+        if (err)
         {
-                if (plane_count != 2 || (width & 1) || (height & 1))
-                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "nv12 needs two even planes"), -1;
-                if (p->offset[0] > 0x7fffffffUL || p->offset[1] > 0x7fffffffUL || p->stride[0] > (1UL << 20) || p->stride[1] > (1UL << 20) ||
-                    p->stride[0] < width || p->stride[1] < width)
-                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_out_of_bounds, "the plane does not fit its size"), -1;
-        }
-        else
-        {
-                int linear = p->modifier[0] == 0 || p->modifier[0] == WAYLAND_MODIFIER_INVALID;
+                static const unsigned int codes[5] = {0, WLN_zwp_linux_buffer_params_v1_error_incomplete,
+                                                      WLN_zwp_linux_buffer_params_v1_error_invalid_dimensions,
+                                                      WLN_zwp_linux_buffer_params_v1_error_invalid_format,
+                                                      WLN_zwp_linux_buffer_params_v1_error_out_of_bounds};
+                static const char *const msgs[5] = {0, "incomplete planes", "the size is out of range",
+                                                    "the format is not offered", "the plane does not fit its size"};
 
-                if (linear && plane_count != 1)
-                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "one plane is what a linear format has"), -1;
-                if (p->offset[0] > 0x7fffffffUL || p->stride[0] == 0 || p->stride[0] > (1UL << 20) ||
-                    (linear && (p->stride[0] < width * 4 || (p->stride[0] & 3))))
-                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_out_of_bounds, "the plane does not fit its size"), -1;
-                for (long k = 1; k < plane_count; k++)
-                        if (p->offset[k] > 0x7fffffffUL || p->stride[k] > (1UL << 20))
-                                return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_out_of_bounds, "aux plane out of bounds"), -1;
+                return wayland_fail(c, self->id, codes[err], msgs[err]), -1;
         }
         for (long k = 1; k < plane_count; k++)
                 if (p->modifier[k] != p->modifier[0])
@@ -8917,7 +8699,6 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
                 return WAYLAND_OK;
         if (op == WLQ_zwp_linux_buffer_params_v1_create)
         {
-                struct wayland_event e;
                 unsigned long id = wayland_server_id(c);
                 long object = id ? wayland_object_new(c, id, WLI_wl_buffer, 1) : -1, made;
                 struct wayland_arg wa[4] = {a[0], a[1], a[2], a[3]};
@@ -8933,13 +8714,10 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
                 {
                         if (object >= 0)
                                 wayland_object_free(c, object);
-                        e = wayland_begin(c, self->id, WLE_zwp_linux_buffer_params_v1_failed);
-                        wayland_end(&e);
+                        wayland_ev0(c, self->id, WLE_zwp_linux_buffer_params_v1_failed);
                         return WAYLAND_OK;
                 }
-                e = wayland_begin(c, self->id, WLE_zwp_linux_buffer_params_v1_created);
-                wayland_word(&e, id);
-                wayland_end(&e);
+                wayland_ev(c, self->id, WLE_zwp_linux_buffer_params_v1_created, (unsigned int)id);
                 return WAYLAND_OK;
         }
         // create_immed: the buffer is the id the client chose, and a buffer that cannot be made is the client's error.
@@ -8960,9 +8738,7 @@ static int wayland_drm_request(struct wayland_client *c, struct wayland_object *
 {
         if (op == WLQ_wl_drm_authenticate)
         {
-                struct wayland_event e = wayland_begin(c, self->id, WLE_wl_drm_authenticated);
-
-                wayland_end(&e);
+                wayland_ev0(c, self->id, WLE_wl_drm_authenticated);
                 return WAYLAND_OK;
         }
         if (op == WLQ_wl_drm_create_prime_buffer)
@@ -8975,14 +8751,8 @@ static int wayland_drm_request(struct wayland_client *c, struct wayland_object *
                 long plane_count = format == WAYLAND_FOURCC_NV12 ? 2 : 1;
                 long made;
 
-                if (width < 1 || height < 1 || width > WAYLAND_DIMENSION || height > WAYLAND_DIMENSION)
-                        return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_format, "invalid prime dimensions");
-                if (!wayland_fourcc_supported((unsigned int)format))
-                        return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_format, "unsupported prime format");
-                if (a[5].i < 0 || a[6].i <= 0 || a[6].i > (1L << 20) ||
-                    (format != WAYLAND_FOURCC_NV12 && (a[6].i < width * 4 || (a[6].i & 3))) ||
-                    (format == WAYLAND_FOURCC_NV12 && ((width & 1) || (height & 1) || a[7].i < 0 || a[8].i < width || a[8].i > (1L << 20))))
-                        return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_format, "invalid prime stride or offset");
+                if (wayland_dmabuf_validate((unsigned long)width, (unsigned long)height, format, plane_count, 1, offsets, strides))
+                        return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_format, "invalid prime buffer parameters");
                 made = wayland_dmabuf_alloc_buffer(c, (unsigned long)width, (unsigned long)height, format, 0, plane_count, fds, offsets,
                                                    strides, WAYLAND_MODIFIER_INVALID, a[0].slot);
                 a[1].fd = fds[0]; // -1 if taken by pool
@@ -8999,21 +8769,8 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
 
         if (self->iface == WLI_wp_linux_drm_syncobj_manager_v1)
         {
-                if (op == WLQ_wp_linux_drm_syncobj_manager_v1_destroy)
-                        return WAYLAND_OK;
                 if (op == WLQ_wp_linux_drm_syncobj_manager_v1_get_surface)
-                {
-                        s = wayland_surface_of(c, a[1].slot);
-                        if (!s)
-                                return WAYLAND_OK;
-                        if (s->syncobj_id)
-                                return wayland_fail(c, self->id, WLN_wp_linux_drm_syncobj_manager_v1_error_surface_exists,
-                                                    "the surface already has a syncobj surface");
-                        s->syncobj_id = c->objects[a[0].slot].id;
-                        c->objects[a[0].slot].link = (int)wayland_surface_index(c, s);
-                        c->objects[a[0].slot].aux = s->gen;
-                        return WAYLAND_OK;
-                }
+                        return wayland_ext_bind(c, self, op, a, 0);
                 if (op == WLQ_wp_linux_drm_syncobj_manager_v1_import_timeline)
                 {
                         long idx = wayland_tbl_alloc(c, WLT_TIMELINE), handle;
@@ -9275,15 +9032,11 @@ WAYLAND_API unsigned long wayland_fixed_of(long pixels, long scale120)
 
 static void wayland_constraint_event(struct wayland_client *c, struct wayland_constraint *con, int on)
 {
-        struct wayland_event e;
-
         if (wayland_slot_of(c, con->id) < 0)
                 return;
-        if (con->kind == 1)
-                e = wayland_begin(c, con->id, on ? WLE_zwp_locked_pointer_v1_locked : WLE_zwp_locked_pointer_v1_unlocked);
-        else
-                e = wayland_begin(c, con->id, on ? WLE_zwp_confined_pointer_v1_confined : WLE_zwp_confined_pointer_v1_unconfined);
-        wayland_end(&e);
+        wayland_ev0(c, con->id, con->kind == 1
+                                    ? (on ? WLE_zwp_locked_pointer_v1_locked : WLE_zwp_locked_pointer_v1_unlocked)
+                                    : (on ? WLE_zwp_confined_pointer_v1_confined : WLE_zwp_confined_pointer_v1_unconfined));
 }
 
 // A constraint let go of: it says so (unless its object is going), and a one-shot one is over.
@@ -9410,32 +9163,6 @@ static int wayland_presentation_request(struct wayland_client *c, struct wayland
 }
 
 /*
-        An object made for a surface (content_type, alpha_modifier, fifo, commit_timer, xdg_dialog, xwayland, inhibitors, tearing)
-        takes the surface's slot and generation, so wayland_surface_of finds the surface it is for, and returns 0 once gone.
-*/
-static void wayland_surface_link(struct wayland_client *c, long slot, struct wayland_surface *s)
-{
-        if (slot < 0 || !s)
-                return;
-        c->objects[slot].link = (int)wayland_surface_index(c, s);
-        c->objects[slot].aux = s->gen;
-}
-
-static struct wayland_surface *wayland_bind_surface(struct wayland_client *c, struct wayland_object *self, struct wayland_arg *a, int *status)
-{
-        struct wayland_surface *s = wayland_surface_of(c, a[1].slot);
-
-        if (!s)
-        {
-                *status = wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-                return 0;
-        }
-        wayland_surface_link(c, a[0].slot, s);
-        *status = WAYLAND_OK;
-        return s;
-}
-
-/*
         xdg-toplevel-icon. An icon is made with pixels or a name (its flags say which: WAYLAND_ICON_CONTENT) and is immutable once it is set
         on a toplevel (WAYLAND_ICON_SET). set_icon is double-buffered: the toplevel's icon is the one set when its surface next commits,
         and an icon with neither pixels nor a name resets it to the default. The pixels are not kept: nothing draws an icon yet.
@@ -9445,15 +9172,11 @@ static struct wayland_surface *wayland_bind_surface(struct wayland_client *c, st
 
 static void wayland_icon_set(struct wayland_client *c, long toplevel, long icon)
 {
-        unsigned int id = c->objects[toplevel].id;
-        struct wayland_surface *s = 0;
+        struct wayland_surface *s = wayland_surface_of(c, toplevel);
 
         if (icon >= 0)
                 c->objects[icon].flags |= WAYLAND_ICON_SET;
-        for (long at = 0; at < c->tbl[WLT_SURFACE].count && !s; at++)
-                if (c->surfaces[at].live && c->surfaces[at].role_id == id)
-                        s = &c->surfaces[at];
-        if (!s)
+        if (!s || s->role_id != c->objects[toplevel].id)
                 return;
         s->pending.icon = icon >= 0 && (c->objects[icon].flags & WAYLAND_ICON_CONTENT) ? 1 : 0;
         if (s->pending.icon)
@@ -9470,20 +9193,15 @@ static void wayland_icon_set(struct wayland_client *c, long toplevel, long icon)
 static int wayland_hints_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *s;
-        int status = WAYLAND_OK;
 
         switch (self->iface)
         {
         case WLI_xdg_wm_dialog_v1:
-                if (op != WLQ_xdg_wm_dialog_v1_get_xdg_dialog)
-                        return WAYLAND_OK;
-                for (long at = 0; at < c->tbl[WLT_SURFACE].count; at++)
-                        if (c->surfaces[at].live && c->surfaces[at].role_id == c->objects[a[1].slot].id)
-                        {
-                                wayland_surface_link(c, a[0].slot, &c->surfaces[at]);
-                                return WAYLAND_OK;
-                        }
-                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "no such toplevel");
+        case WLI_wp_content_type_manager_v1:
+        case WLI_wp_alpha_modifier_v1:
+        case WLI_wp_fifo_manager_v1:
+        case WLI_wp_commit_timing_manager_v1:
+                return wayland_ext_bind(c, self, op, a, 0);
         case WLI_xdg_dialog_v1:
                 s = wayland_surface_of(c, self - c->objects);
                 if (op == WLQ_xdg_dialog_v1_set_modal && s)
@@ -9491,10 +9209,6 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                 else if ((op == WLQ_xdg_dialog_v1_unset_modal || op == WLQ_xdg_dialog_v1_destroy) && s)
                         s->modal = 0;
                 return WAYLAND_OK;
-        case WLI_wp_content_type_manager_v1:
-                if (op == WLQ_wp_content_type_manager_v1_get_surface_content_type)
-                        wayland_bind_surface(c, self, a, &status);
-                return status;
         case WLI_wp_content_type_v1:
                 s = wayland_surface_of(c, self - c->objects);
                 if (op == WLQ_wp_content_type_v1_set_content_type && s)
@@ -9502,10 +9216,6 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                 else if (op == WLQ_wp_content_type_v1_destroy && s)
                         s->content = WLN_wp_content_type_v1_type_none;
                 return WAYLAND_OK;
-        case WLI_wp_alpha_modifier_v1:
-                if (op == WLQ_wp_alpha_modifier_v1_get_surface)
-                        wayland_bind_surface(c, self, a, &status);
-                return status;
         case WLI_wp_alpha_modifier_surface_v1:
                 s = wayland_surface_of(c, self - c->objects);
                 if (op == WLQ_wp_alpha_modifier_surface_v1_set_multiplier && s)
@@ -9513,10 +9223,6 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                 else if (op == WLQ_wp_alpha_modifier_surface_v1_destroy && s)
                         s->pending.alpha = 0xffffffffu;
                 return WAYLAND_OK;
-        case WLI_wp_fifo_manager_v1:
-                if (op == WLQ_wp_fifo_manager_v1_get_fifo)
-                        wayland_bind_surface(c, self, a, &status);
-                return status;
         case WLI_wp_fifo_v1:
                 // The barrier is the next commit's (wait_barrier); set_barrier is the one the compositor's latch releases.
                 s = wayland_surface_of(c, self - c->objects);
@@ -9525,10 +9231,6 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                 else if (op == WLQ_wp_fifo_v1_set_barrier && s)
                         s->pending.barrier = 1;
                 return WAYLAND_OK;
-        case WLI_wp_commit_timing_manager_v1:
-                if (op == WLQ_wp_commit_timing_manager_v1_get_timer)
-                        wayland_bind_surface(c, self, a, &status);
-                return status;
         case WLI_wp_commit_timer_v1:
                 s = wayland_surface_of(c, self - c->objects);
                 if (op != WLQ_wp_commit_timer_v1_set_timestamp || !s)
@@ -9700,8 +9402,6 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
         {
                 if (t && !t->committed)
                 {
-                        struct wayland_event e;
-
                         if (!wayland_token_make(t))
                         {
                                 t->live = 0;
@@ -9709,9 +9409,7 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
                         }
                         t->committed = 1;
                         t->when = wayland.host->now(wayland.host->context);
-                        e = wayland_begin(c, self->id, WLE_xdg_activation_token_v1_done);
-                        wayland_string(&e, t->text);
-                        wayland_end(&e);
+                        wayland_ev_str(c, self->id, WLE_xdg_activation_token_v1_done, t->text);
                 }
         }
         else if (op == WLQ_xdg_activation_token_v1_destroy)
@@ -9772,11 +9470,9 @@ static int wayland_xwayland_request(struct wayland_client *c, struct wayland_obj
         }
         if (self->iface == WLI_zwp_xwayland_keyboard_grab_manager_v1)
         {
-                if (op == WLQ_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard)
+                status = wayland_ext_bind(c, self, op, a, &surface);
+                if (status == WAYLAND_OK && surface)
                 {
-                        surface = wayland_bind_surface(c, self, a, &status);
-                        if (!surface)
-                                return status;
                         surface->xgrab = 1;
                         if (surface->row >= 0 && surface->row == wayland.keyboard_row && !surface->shortcut_active)
                         {
@@ -9784,7 +9480,7 @@ static int wayland_xwayland_request(struct wayland_client *c, struct wayland_obj
                                 surface->escape_down = 0;
                         }
                 }
-                return WAYLAND_OK;
+                return status;
         }
         if (self->iface == WLI_zwp_xwayland_keyboard_grab_v1)
         {
@@ -9875,24 +9571,20 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                 }
                 return WAYLAND_OK;
         case WLI_zwp_keyboard_shortcuts_inhibit_manager_v1:
-                if (op == WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts)
+        {
+                int status = wayland_ext_bind(c, self, op, a, &surface);
+
+                if (status == WAYLAND_OK && surface)
                 {
-                        surface = wayland_surface_of(c, a[1].slot);
-                        if (!surface)
-                                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-                        if (surface->shortcuts)
-                                return wayland_fail(c, self->id, WLN_zwp_keyboard_shortcuts_inhibit_manager_v1_error_already_inhibited,
-                                                    "the surface has an inhibitor");
-                        surface->shortcuts = 1;
                         surface->shortcut_id = c->objects[a[0].slot].id;
-                        wayland_surface_link(c, a[0].slot, surface);
                         if (surface->row >= 0 && surface->row == wayland.keyboard_row)
                         {
                                 surface->shortcut_active = 1;
-                                wayland_send(c, surface->shortcut_id, WLE_zwp_keyboard_shortcuts_inhibitor_v1_active, 0, 0);
+                                wayland_ev0(c, surface->shortcut_id, WLE_zwp_keyboard_shortcuts_inhibitor_v1_active);
                         }
                 }
-                return WAYLAND_OK;
+                return status;
+        }
         case WLI_zwp_keyboard_shortcuts_inhibitor_v1:
                 surface = wayland_surface_of(c, self - c->objects);
                 if (surface)
@@ -9903,18 +9595,7 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                 }
                 return WAYLAND_OK;
         case WLI_wp_tearing_control_manager_v1:
-                if (op == WLQ_wp_tearing_control_manager_v1_get_tearing_control)
-                {
-                        surface = wayland_surface_of(c, a[1].slot);
-                        if (!surface)
-                                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
-                        if (surface->tearing)
-                                return wayland_fail(c, self->id, WLN_wp_tearing_control_manager_v1_error_tearing_control_exists,
-                                                    "the surface has a tearing control");
-                        surface->tearing = 1;
-                        wayland_surface_link(c, a[0].slot, surface);
-                }
-                return WAYLAND_OK;
+                return wayland_ext_bind(c, self, op, a, 0);
         case WLI_wp_tearing_control_v1:
                 surface = wayland_surface_of(c, self - c->objects);
                 if (op == WLQ_wp_tearing_control_v1_destroy)
@@ -9930,17 +9611,13 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                         surface->pending.async_hint = a[0].u == WLN_wp_tearing_control_v1_presentation_hint_async;
                 return WAYLAND_OK;
         case WLI_zwp_idle_inhibit_manager_v1:
-                if (op == WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor)
-                {
-                        int status;
+        {
+                int status = wayland_ext_bind(c, self, op, a, &surface);
 
-                        // The inhibitor is linked to its surface, as a shortcuts inhibitor is: it holds while that surface is shown
-                        // (wayland_inhibitors_now), and ends with its surface or its own destroy, which is the object going.
-                        if (!wayland_bind_surface(c, self, a, &status))
-                                return status;
+                if (status == WAYLAND_OK && surface)
                         c->inhibitors++;
-                }
-                return WAYLAND_OK;
+                return status;
+        }
         case WLI_zwp_idle_inhibitor_v1:
                 return WAYLAND_OK;
         default:
@@ -9993,9 +9670,7 @@ static long wayland_inhibitors_now(void)
 
 static void wayland_notify_say(struct wayland_client *c, struct wayland_notify *n, long opcode)
 {
-        struct wayland_event e = wayland_begin(c, n->id, opcode);
-
-        wayland_end(&e);
+        wayland_ev0(c, n->id, opcode);
 }
 
 /*
@@ -10982,12 +10657,7 @@ WAYLAND_API void wayland_screens_changed(void)
                                         continue;
                                 for (long object = 0; object < c->tbl[WLT_OBJECT].count; object++)
                                         if (c->objects[object].iface == WLI_wl_output && c->objects[object].aux == screen)
-                                        {
-                                                struct wayland_event e = wayland_begin(c, surface->id, WLE_wl_surface_leave);
-
-                                                wayland_word(&e, c->objects[object].id);
-                                                wayland_end(&e);
-                                        }
+                                                wayland_ev(c, surface->id, WLE_wl_surface_leave, c->objects[object].id);
                                 surface->entered &= ~(1u << screen);
                         }
                         for (long object = 0; object < c->tbl[WLT_OBJECT].count; object++)
@@ -11073,15 +10743,11 @@ WAYLAND_API void wayland_row_wake(long row)
                 return;
         if (facts.closing && facts.closing != s->closes)
         {
-                struct wayland_event e;
                 int popup = s->role == WAYLAND_ROLE_POPUP;
 
                 slot = wayland_find(c, s->role_id, popup ? WLI_xdg_popup : WLI_xdg_toplevel);
                 if (slot >= 0)
-                {
-                        e = wayland_begin(c, s->role_id, popup ? WLE_xdg_popup_popup_done : WLE_xdg_toplevel_close);
-                        wayland_end(&e);
-                }
+                        wayland_ev0(c, s->role_id, popup ? WLE_xdg_popup_popup_done : WLE_xdg_toplevel_close);
                 // This ask is told, or has nobody here to tell (an X window, which its window manager asks): it is not looked at again.
                 s->closes = facts.closing;
         }
@@ -11553,35 +11219,15 @@ WAYLAND_API void wayland_pointer_pinch(long row, long phase, long scale, long fx
                         continue;
                 left--;
                 if (phase == 1)
-                {
-                        struct wayland_event e = wayland_begin(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_begin);
-
-                        wayland_word(&e, serial);
-                        wayland_word(&e, (unsigned long)time);
-                        wayland_word(&e, s->id);
-                        wayland_word(&e, 2);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_begin,
+                                   (unsigned int)serial, (unsigned int)time, s->id, 2u);
                 else if (phase == 2)
-                {
-                        struct wayland_event e = wayland_begin(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_end);
-
-                        wayland_word(&e, serial);
-                        wayland_word(&e, (unsigned long)time);
-                        wayland_word(&e, 0);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_end,
+                                   (unsigned int)serial, (unsigned int)time, 0u);
                 else
-                {
-                        struct wayland_event e = wayland_begin(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_update);
-
-                        wayland_word(&e, (unsigned long)time);
-                        wayland_word(&e, wayland_fixed(dx, s->scale120));
-                        wayland_word(&e, wayland_fixed(dy, s->scale120));
-                        wayland_word(&e, (unsigned long)(scale > 0 ? scale / 4 : 0)); // 1024ths to fixed (256 is 1.0)
-                        wayland_word(&e, 0);
-                        wayland_end(&e);
-                }
+                        wayland_ev(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_update,
+                                   (unsigned int)time, (unsigned int)wayland_fixed(dx, s->scale120),
+                                   (unsigned int)wayland_fixed(dy, s->scale120), (unsigned int)(scale > 0 ? scale / 4 : 0), 0u);
         }
 }
 
@@ -11600,24 +11246,12 @@ WAYLAND_API long wayland_client_pid(long slot)
         return c && c->live ? c->pid : -1;
 }
 
-WAYLAND_API long wayland_serial_row(long client, unsigned long long serial)
+static struct wayland_surface *wayland_xserial_surface(long client, unsigned long long serial, struct wayland_client **out_c)
 {
         struct wayland_client *c = client >= 0 && client < wayland.client_slots ? wayland.client[client] : 0;
 
-        for (long slot = 0; c && slot < c->tbl[WLT_SURFACE].count; slot++)
-        {
-                struct wayland_surface *s = &c->surfaces[slot];
-
-                if (s->live && s->xsurface && s->u.xwin.serial_set && s->u.xwin.serial == serial)
-                        return s->row >= 0 && s->row < wayland.row_made ? s->row : -1;
-        }
-        return -2;
-}
-
-static struct wayland_surface *wayland_xserial_surface(long client, unsigned long long serial)
-{
-        struct wayland_client *c = client >= 0 && client < wayland.client_slots ? wayland.client[client] : 0;
-
+        if (out_c)
+                *out_c = c;
         for (long slot = 0; c && slot < c->tbl[WLT_SURFACE].count; slot++)
         {
                 struct wayland_surface *s = &c->surfaces[slot];
@@ -11626,6 +11260,15 @@ static struct wayland_surface *wayland_xserial_surface(long client, unsigned lon
                         return s;
         }
         return 0;
+}
+
+WAYLAND_API long wayland_serial_row(long client, unsigned long long serial)
+{
+        struct wayland_surface *s = wayland_xserial_surface(client, serial, 0);
+
+        if (!s)
+                return -2;
+        return s->row >= 0 && s->row < wayland.row_made ? s->row : -1;
 }
 
 /*
@@ -11638,8 +11281,8 @@ static struct wayland_surface *wayland_xserial_surface(long client, unsigned lon
 WAYLAND_API long wayland_xwindow_adopt(long client, unsigned long long serial, long popup, long x, long y, const char *title)
 {
         long how = popup;
-
-        struct wayland_surface *s = wayland_xserial_surface(client, serial);
+        struct wayland_client *c = 0;
+        struct wayland_surface *s = wayland_xserial_surface(client, serial, &c);
         char text[WAYLAND_TEXT];
         long at = 0;
 
@@ -11658,16 +11301,8 @@ WAYLAND_API long wayland_xwindow_adopt(long client, unsigned long long serial, l
         else if (s->u.xwin.popup && wayland.host && (s->u.xwin.x != x || s->u.xwin.y != y))
         {
                 // A popup its window manager moved while it is shown goes to its new place in the host, relative to its parent.
-                struct wayland_client *c = 0;
                 long px = 0, py = 0;
 
-                for (long at = 0; at < wayland.client_slots && !c; at++)
-                {
-                        struct wayland_client *o = wayland.client[at];
-
-                        if (o && s >= o->surfaces && s < o->surfaces + o->tbl[WLT_SURFACE].count)
-                                c = o;
-                }
                 s->u.xwin.x = x;
                 s->u.xwin.y = y;
                 if (c && !s->u.xwin.alone && wayland_xparent(c, s, &px, &py) >= 0)
@@ -11694,17 +11329,10 @@ WAYLAND_API long wayland_xwindow_adopt(long client, unsigned long long serial, l
 WAYLAND_API void wayland_xwindow_gone(long client, unsigned long long serial)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = wayland_xserial_surface(client, serial);
+        struct wayland_surface *s = wayland_xserial_surface(client, serial, &c);
 
         if (!s || !s->xsurface)
                 return;
-        for (long at = 0; at < wayland.client_slots && !c; at++)
-        {
-                struct wayland_client *o = wayland.client[at];
-
-                if (o && s >= o->surfaces && s < o->surfaces + o->tbl[WLT_SURFACE].count)
-                        c = o;
-        }
         s->u.xwin.dead = 1;
         s->u.xwin.adopted = 0;
         if (c)
@@ -11731,12 +11359,8 @@ static void wayland_shortcuts_send(struct wayland_client *c, struct wayland_surf
         s->shortcut_active = (unsigned char)active;
         s->escape_down = 0;
         if (slot >= 0)
-        {
-                struct wayland_event e = wayland_begin(c, s->shortcut_id, active ? WLE_zwp_keyboard_shortcuts_inhibitor_v1_active
-                                                                                 : WLE_zwp_keyboard_shortcuts_inhibitor_v1_inactive);
-
-                wayland_end(&e);
-        }
+                wayland_ev0(c, s->shortcut_id, active ? WLE_zwp_keyboard_shortcuts_inhibitor_v1_active
+                                                      : WLE_zwp_keyboard_shortcuts_inhibitor_v1_inactive);
 }
 
 // Keys said to the compositor's chords, for the window that has them: whether a shortcuts inhibitor is active there. Where the
