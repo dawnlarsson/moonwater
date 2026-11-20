@@ -1,62 +1,13 @@
 /*
-        Moonwater Canvas
-
-        The kernel's half of the desktop, on the DRM client API the
-        framebuffer console and drm_log already use. Attaches without patching
-        the kernel: a DRM device can be opened like any other file, and struct
-        drm_file leads back to the drm_device behind it.
-
-        The desktop is the compositor's, a program (src/canvas/compositor.c)
-        that opens the card, becomes its master, and reads the keyboard and the
-        pointer itself. What Canvas does is what a program cannot do before it
-        starts and what has to be done when it has gone: it finds the cards
-        and claims them as a DRM client, chooses each screen's mode and the
-        scale, commits one first picture, which is a ground of one colour, and
-        holds the card in the meantime. A client in the kernel is never master,
-        so the compositor's takes it without a fight, and Canvas draws nothing
-        and listens for nothing more than two chords while it has it; when the
-        last close of the card is the compositor's, the restore hook draws
-        the ground again.
-
-        The rest is the sections below, in dependency order: output, keys,
-        client, pointer (the input handler, the console keyboard, the machine's
-        sleep and the thread), and last the ioctls the device hands on.
-
-        It is a kernel object of its own, built beside the core and linked
-        into the same image. What it asks of the core is src/moonwater/seam.h
-        and what the core asks of it is the declarations below; the bottom of this file is
-        the calls it answers. The library is declared to it and emitted by the
-        core, bar the pixel loops, which are its own.
+        Moonwater Canvas — kernel DRM client holding the boot splash until the userspace
+        compositor takes master, plus global rescue chords (Ctrl-Alt-Backspace / +Shift)
+        and /dev/spark canvas & window-table ioctls.
 */
 
-/*
-        The ABI: what a program that is not Canvas can ask of it. This part includes
-        nothing and compiles alone, so window.c and spark.c take it with
-        CANVAS_ABI_ONLY defined and no kernel headers.
-*/
+// Userspace-safe ABI region (included with CANVAS_ABI_ONLY and no kernel headers).
 #ifndef CANVAS_ABI_INCLUDED
 #define CANVAS_ABI_INCLUDED
 
-/*
-        What the input handlers cost, and when Canvas keeps out of the way.
-
-        Every report of every device goes through every handler attached to
-        it, so whatever a handler does with one it does for each of them, for
-        as long as the machine is up. These are the numbers `moonwater
-        latency` shows for the two that are Moonwater's: Canvas's, which
-        hears the two chords that end a program or Canvas, and the machine's
-        key watch, which fires the bound events. Events are every report counted; one in
-        sixteen is timed, so the time is a sample and worst is the worst
-        sample. Reading needs nothing, reset needs CAP_SYS_ADMIN and zeroes
-        the counts: how much a handler costs over a minute of moving a mouse
-        is a reset, the minute and a read.
-
-        yielded is 1 while another program is master of a card Canvas draws
-        on. quiet is the reports Canvas's handler had nothing to do with,
-        which is every one but the modifiers and Backspace: the compositor
-        reads the same devices itself, and a handler that woke a thread for
-        each report beside it was a wakeup for every one.
-*/
 struct latency_cost {
         unsigned long events;   // reports the handler was called with
         unsigned long samples;  // the ones that were timed
@@ -70,48 +21,23 @@ struct latency_cost {
 struct latency_stats {
         unsigned int request;      // SPARK_LATENCY_*
         unsigned int yielded;      // 1 while another program has the display
-        unsigned int retired_hold;  // not filled in since the kernel's own desktop went
-        unsigned int retired_holds; // likewise
+        unsigned int retired_hold;
+        unsigned int retired_holds;
         unsigned int thread_passes; // times the canvas thread woke
-        unsigned int retired_ticks; // likewise
+        unsigned int retired_ticks;
         struct latency_cost canvas; // Canvas's input handler
         struct latency_cost bind;   // the machine's key watch
-        unsigned long quiet;        // of the canvas events, those it had nothing to do with
-        unsigned long elapsed_ns;   // since the counts were last reset, or boot
+        unsigned long quiet;        // canvas events ignored
+        unsigned long elapsed_ns;   // since reset or boot
         unsigned long reserved;
 };
 
 _Static_assert(sizeof(struct latency_cost) == 32, "spark latency cost ABI");
 _Static_assert(sizeof(struct latency_stats) == 112, "spark latency ABI");
 
-// _IOWR('s', 8, struct latency_stats)
 #define SPARK_IOCTL_LATENCY 0xc0707308u
 
-/*
-        Canvas, on and off.
-
-        Off gives the display back: the input handler and the thread stop,
-        the DRM clients are released, every console gets its keyboard back,
-        and the kernel's framebuffer console takes each screen. On takes the
-        cards again and fires canvas on, and the runner (src/rover/runner.c,
-        the machine process) starts the compositor on that event. It refuses while another program is master
-        of a card, and names that program.
-
-        The state below comes back whatever the request answers. Reading it
-        needs nothing; on and off need CAP_SYS_ADMIN.
-
-        SET_SCALE and SET_MODES say how the desktop is drawn, and need
-        CAP_SYS_ADMIN. They are kept when Canvas is off and taken when it
-        starts, so the answer is 0 either way; what is asked is in
-        scale_setting and modes, and the state that comes back says what is
-        in force. A compositor reads the scale when it starts, and a mode is
-        taken at the card's next hotplug. A scale outside 1 to
-        SPARK_CANVAS_SCALE_MOST is -EINVAL.
-
-        3, 4 and 5 were the keymap, the kernel log window and a terminal of
-        the kernel's own desktop. Nothing answers them, and they stay
-        numbers nothing is given: they are -EINVAL.
-*/
+// 3, 4 and 5 are retired and return -EINVAL.
 #define SPARK_CANVAS_STATUS 0u
 #define SPARK_CANVAS_ON 1u
 #define SPARK_CANVAS_OFF 2u
@@ -119,16 +45,12 @@ _Static_assert(sizeof(struct latency_stats) == 112, "spark latency ABI");
 #define SPARK_CANVAS_SET_MODES 7u
 #define SPARK_CANVAS_OUTPUTS 4u
 
-// How many device pixels one drawn pixel is: 0 asks the screens, a number is
-// that number. Where the setting in force came from is the origin.
 #define SPARK_CANVAS_SCALE_AUTO 0u
 #define SPARK_CANVAS_SCALE_MOST 4u
 #define SPARK_CANVAS_ORIGIN_DEFAULT 0u
 #define SPARK_CANVAS_ORIGIN_COMMAND_LINE 1u
 #define SPARK_CANVAS_ORIGIN_SET 2u
 
-// Which mode a screen is driven at: the largest it lists, or the one it marks
-// preferred.
 #define SPARK_CANVAS_MODES_LARGEST 0u
 #define SPARK_CANVAS_MODES_PREFERRED 1u
 
@@ -142,21 +64,21 @@ struct canvas_control {
         unsigned int request;      // SPARK_CANVAS_*
         unsigned int running;      // 1 while Canvas holds a card
         unsigned int cards;        // cards Canvas holds
-        unsigned int retired_windows;  // not filled in since the kernel's own desktop went
-        unsigned int retired_detached; // likewise
+        unsigned int retired_windows;
+        unsigned int retired_detached;
         unsigned int suspended;    // 1 while another program is a card's master
-        int master_pid;            // who held a card on refused, 0 for nobody
-        unsigned int output_count; // outputs below, at most SPARK_CANVAS_OUTPUTS
+        int master_pid;            // holder on refusal, 0 for nobody
+        unsigned int output_count; // at most SPARK_CANVAS_OUTPUTS
         char master_command[16];
-        char driver[16];           // the first card's driver
+        char driver[16];           // first card's driver
         struct canvas_output_state output[SPARK_CANVAS_OUTPUTS];
-        unsigned int retired_hold;  // likewise
-        unsigned int retired_holds; // likewise
-        unsigned int thread_passes; // times the canvas thread woke
-        unsigned int retired_ticks; // likewise
-        unsigned int scale;         // device pixels one drawn pixel is, now
-        unsigned int scale_setting; // SPARK_CANVAS_SCALE_AUTO or the number asked
-        unsigned int scale_dpi;     // what auto went by, 0 when no screen could say
+        unsigned int retired_hold;
+        unsigned int retired_holds;
+        unsigned int thread_passes;
+        unsigned int retired_ticks;
+        unsigned int scale;
+        unsigned int scale_setting; // SPARK_CANVAS_SCALE_AUTO or requested
+        unsigned int scale_dpi;
         unsigned int scale_origin;  // SPARK_CANVAS_ORIGIN_*
         unsigned int modes;         // SPARK_CANVAS_MODES_*
         unsigned int reserved;
@@ -165,32 +87,20 @@ struct canvas_control {
 _Static_assert(sizeof(struct canvas_output_state) == 32, "spark canvas output ABI");
 _Static_assert(sizeof(struct canvas_control) == 232, "spark canvas control ABI");
 
-// _IOWR('s', 10, struct canvas_control)
 #define SPARK_IOCTL_CANVAS 0xc0e8730au
-
-// _IO('s', 17) -- the compositor's window table given to the device: the
-// argument its descriptor, -1 none; root's only
 #define WINDOWS_IOCTL_TABLE_SET 0x00007311u
-
-// _IO('s', 18) -- a descriptor of the window table, close-on-exec; ENOENT
-// when no compositor has given one
 #define WINDOWS_IOCTL_TABLE_GET 0x00007312u
 
-/* Each request's size field is the size of its struct, or the kernel copies
-   the wrong number of bytes and answers as if it had not. */
 #define SPARK_IOCTL_SIZE(request) (((request) >> 16) & 0x3fffu)
 _Static_assert(SPARK_IOCTL_SIZE(SPARK_IOCTL_LATENCY) == sizeof(struct latency_stats), "spark ioctl size");
 _Static_assert(SPARK_IOCTL_SIZE(SPARK_IOCTL_CANVAS) == sizeof(struct canvas_control), "spark ioctl size");
 
-// Bindings, which are spark.c's table: the events a desktop fires when it
-// starts and when it stops, in the table's order and under its names.
 #define SPARK_BIND_CANVAS_ON 12u
 #define SPARK_BIND_CANVAS_OFF 13u
 #define SPARK_BIND_CANVAS_ON_NAME "canvas on"
 #define SPARK_BIND_CANVAS_OFF_NAME "canvas off"
 
-// In the boot settings' flags, whose other bits are spark.c's.
-#define SPARK_SETTINGS_CANVAS_OFF 0x1u // Canvas does not start at boot
+#define SPARK_SETTINGS_CANVAS_OFF 0x1u
 
 #endif // CANVAS_ABI_INCLUDED
 
@@ -306,18 +216,10 @@ static inline void canvas_client_release(struct file *file) {}
 #define STANDARD_MODERN_C_KERNEL
 #include "../lib.util.c"
 
-/*
-        The ground: the boot splash Canvas holds until the compositor starts.
-
-        Pure white with the centered black Moonwater wordmark, matching the
-        pre-kernel EFI boot splash (kernel/patch/splash-stub.c), so the white
-        splash persists seamlessly across kernel modesetting until the
-        userspace compositor takes master and paints the desktop.
-*/
+// White boot splash ground matching the EFI splash stub.
 #define CANVAS_GROUND 0xffffff
+#define CANVAS_LOG "[moonwater canvas] "
 
-/* The kernel's guard for the lock the desktop is taken under; it has one for
-   mutex and spinlock but none for rt_mutex. */
 DEFINE_GUARD(rt_mutex, struct rt_mutex *, rt_mutex_lock(_T), rt_mutex_unlock(_T))
 
 struct output
@@ -326,18 +228,10 @@ struct output
         struct canvas *canvas;
         struct drm_client_buffer *buffer;
         struct drm_mode_set *mode_set;
-
         unsigned int width, height;
         u32 opaque;
-
-        // Said once. Everything drawn goes through the mapping, so a failure
-        // to make one is a screen with nothing on it, not a dropped frame.
         _Bool unmappable;
-
-        // The scanout the CRTC still holds after a grow, freed once the
-        // commit that replaces it has landed. Destroying it sooner blanks
-        // the pipe.
-        struct drm_client_buffer *replaced;
+        struct drm_client_buffer *replaced; // freed after replacement commit lands
 };
 
 struct canvas
@@ -345,90 +239,25 @@ struct canvas
         struct list_head link;
         struct drm_client_dev client;
         _Bool started;
-
-        // What the last commit answered, so the same answer is not said
-        // twice. One, because no commit ever answers that: nothing has been
-        // put on this card's screens yet.
-        int set_result;
-
-        // Hotplug runs here, never on the DRM helper workqueue. A commit
-        // from that queue can wait on the same queue, which is a lockup.
-        struct work_struct plug;
-
-        // A hotplug that arrived while the machine slept: the card's power was
-        // going or half back, so it waits for the wake to run.
-        _Bool replug;
-
-        // The next hotplug is a change of which mode to take, and the screen
-        // may get smaller by it as well as larger.
-        _Bool retarget;
-
-        // What this card's connectors said at its last hotplug, for rover's
-        // display events: a bit a connector index, and how many of them are
-        // connected and not the machine's own panel.
+        int set_result;           // 1 before first commit so every real result logs once
+        struct work_struct plug;  // runs on moonwater/plug, never DRM helper wq
+        _Bool replug;             // hotplug deferred while asleep
+        _Bool retarget;           // next hotplug may change mode size either way
         u32 rules_connected;
-        unsigned int rules_count;
-        unsigned int rules_external;
+        unsigned int rules_count, rules_external;
 };
 
 static struct desktop
 {
-        /*
-                An rt_mutex, so whoever holds it runs at the priority of whoever
-                waits for it: the canvas thread is SCHED_FIFO, and a plain mutex
-                would leave it waiting behind an ordinary task that holds it.
-        */
-        struct rt_mutex lock;
-
-        /*
-                Serialises the input handler against itself.
-
-                It is called straight from the input core, once per device,
-                and every device has its own lock there, so two devices
-                reporting at the same moment were two writers on one word of
-                modifiers. A leaf lock held for the length of one event.
-        */
-        spinlock_t input_lock;
+        struct rt_mutex lock;     // priority-inheriting for SCHED_FIFO canvas thread
+        spinlock_t input_lock;    // leaf lock serialising input callbacks across devices
         struct list_head outputs;
-
-        /*
-                Another program is master of a card Canvas draws on. Nothing
-                drawn would land. Written under the lock; see
-                canvas_suspend_check.
-        */
-        _Bool suspended;
-
-        /*
-                The machine is going to sleep, or has not finished waking.
-
-                Not the same as suspended: no program holds the card, the card
-                is about to have its power taken. Anything Canvas sent it from
-                here on -- a modeset commit, a dirtyfb -- reached a device
-                that was off or half back, and a driver that waits on its own
-                hardware for such a call never returned. So it counts as the
-                card being taken (desktop_taken). Written under the lock.
-        */
-        _Bool asleep;
-
-        /*
-                How many device pixels one drawn pixel is. Canvas draws
-                nothing that has a size, but the compositor asks for the
-                number the screens say (compositor.c, SPARK_CANVAS_STATUS) so
-                that the same window is the same size in millimetres on a
-                ninety dot inch screen and on a Retina one.
-        */
+        _Bool suspended;          // another program holds DRM master
+        _Bool asleep;             // machine suspending/resuming
         unsigned int scale;
-
-        // The bounding box of every output. Read by the input handler in
-        // atomic context, where it cannot walk the list.
         int width, height;
-
-        // The modifier keys held, as the handler last recorded them.
         atomic_t modifiers;
-
-        // Control-Alt-Backspace, as the handler recorded it: the thread acts,
-        // and only after it has looked at who holds the display.
-        atomic_t reclaim;
+        atomic_t reclaim;         // Ctrl-Alt-Backspace pending for thread
 } desktop = {
     .lock = __RT_MUTEX_INITIALIZER(desktop.lock),
     .input_lock = __SPIN_LOCK_UNLOCKED(desktop.input_lock),
@@ -442,69 +271,39 @@ static LIST_HEAD(canvas_list);
 static _Bool canvas_thread_start(void);
 static void canvas_thread_stop(void);
 static void canvas_thread_wake(void);
+static void output_free(struct output *output);
+static void desktop_redraw(void);
+static void desktop_recompose(void);
+static _Bool canvas_scale_refresh(void);
+static _Bool desktop_taken(void);
+static _Bool desktop_lit(void);
+void canvas_rect_fill(u32 *at, unsigned long pitch, unsigned long width,
+                      unsigned long height, u32 colour);
 
-// Counted for `moonwater canvas`: how often the thread wakes while idle.
 static unsigned int canvas_passes;
-
-/*
-        Whether another program is master of a card Canvas draws on, as the
-        canvas thread last found it, and what the input handler costs: the
-        reports it was called with, and those it had nothing to do with.
-
-        canvas_suspend_check is the only writer; `moonwater latency` reads it.
-*/
 static _Bool canvas_yielded;
 static DEFINE_PER_CPU(unsigned long, canvas_quiet);
 static DEFINE_PER_CPU(struct handler_cost, canvas_cost);
 
-static void output_free(struct output *output);
-static void desktop_redraw(void);
-static void desktop_recompose(void);
-
-static _Bool canvas_scale_refresh(void);
-
-static _Bool desktop_taken(void);
-static _Bool desktop_lit(void);
-
-void canvas_rect_fill(u32 *at, unsigned long pitch, unsigned long width,
-                      unsigned long height, u32 colour);
-
-/*
-        moonwater.desktop is the runner's switch: it reads the word
-        from /proc/cmdline and decides what to start (the compositor, a
-        profile's session, or nothing). This is only here so that the kernel
-        knows the word and does not warn about a parameter it has never heard
-        of.
-*/
 static char *canvas_desktop;
-
 module_param_named(desktop, canvas_desktop, charp, 0444);
+
+static p8 canvas_cursor_plane = true;
+module_param_named(cursor_plane, canvas_cursor_plane, bool, 0444);
 
 static CONST struct canvas *canvas_from_client(struct drm_client_dev *client)
 {
         return container_of(client, struct canvas, client);
 }
 
-// The first format in the plane's own order that is one of the two wanted.
 static PURE u32 canvas_plane_pick_format(struct drm_plane *plane, u32 first, u32 second)
 {
-        unsigned int i;
-
-        for (i = 0; i < plane->format_count; i++)
-                if (plane->format_types[i] == first ||
-                    plane->format_types[i] == second)
+        for (unsigned int i = 0; i < plane->format_count; i++)
+                if (plane->format_types[i] == first || plane->format_types[i] == second)
                         return plane->format_types[i];
-
         return DRM_FORMAT_INVALID;
 }
 
-/*
-        The scanout buffer, mapped.
-
-        Everything Canvas draws goes through this pointer, so failing to get
-        one is not a dropped frame, it is a screen that stays as it was. It
-        used to be a bare return.
-*/
 static _Bool output_map(struct output *output, struct iosys_map *map)
 {
         int ret = drm_client_buffer_vmap_local(output->buffer, map);
@@ -514,28 +313,14 @@ static _Bool output_map(struct output *output, struct iosys_map *map)
                 output->unmappable = false;
                 return true;
         }
-
         if (!output->unmappable)
         {
                 output->unmappable = true;
-                pr_err("[moonwater canvas] " "the scanout buffer will not map (%d), "
-                                                 "so nothing can be drawn on it\n", ret);
+                pr_err(CANVAS_LOG "the scanout buffer will not map (%d), so nothing can be drawn on it\n", ret);
         }
-
         return false;
 }
 
-/*
-        What the driver actually gave us to scan out, and whether it can be
-        written to at all.
-
-        The mapping is made once here rather than first discovered halfway
-        through a fill. Everything Canvas draws goes through it, so a driver
-        that will not give us one is a screen that stays exactly as it was
-        while mode setting and the cursor plane both go on working -- black
-        from the first moment, with a cursor moving over it. Answering no here
-        is what lets that screen be handed back instead of held.
-*/
 static _Bool output_describe(struct output *output)
 {
         struct drm_framebuffer *fb = output->buffer->fb;
@@ -543,116 +328,39 @@ static _Bool output_describe(struct output *output)
 
         if (!output_map(output, &map))
                 return false;
-
-        pr_info("[moonwater canvas] " "scanout %p4cc, %u bytes a row (%lu KiB), modifier %llx, "
-                           "%s memory\n", &fb->format->format, fb->pitches[0], ((unsigned long)fb->pitches[0] * output->height) >> 10, (unsigned long long)fb->modifier, map.is_iomem ? "device" : "system");
-
+        pr_info(CANVAS_LOG "scanout %p4cc, %u bytes a row (%lu KiB), modifier %llx, %s memory\n",
+                &fb->format->format, fb->pitches[0], ((unsigned long)fb->pitches[0] * output->height) >> 10,
+                (unsigned long long)fb->modifier, map.is_iomem ? "device" : "system");
         drm_client_buffer_vunmap_local(output->buffer);
         return true;
 }
 
-/*
-        moonwater.cursor_plane=0 turns the cursor plane off: the compositor
-        reads it, from /sys/module/moonwater/parameters, and draws the pointer
-        into its own scanout buffer, as it does on a card with no cursor plane.
+/* ---- output: outputs, modes, and scale ---- */
 
-        The escape hatch for a machine whose cursor plane is broken --
-        misplaced, stale, or never shown -- on a card where the software
-        pointer still works, slower on every move and otherwise the same. The
-        canvas lane boots with it too, because QEMU's screendump holds the
-        primary plane only.
-*/
-static p8 canvas_cursor_plane = true;
-
-module_param_named(cursor_plane, canvas_cursor_plane, bool, 0444);
-
-/* ---- output: outputs, what the hardware offers and what is taken from it ---- */
-
-/*
-        Canvas -- outputs
-
-        An output is a rectangle of the desktop that one crtc scans out. They
-        are laid left to right in the order their cards attached, which is the
-        placement; the desktop is their bounding box.
-*/
-
-/* Is this device's driver one of these? Asked of two lists below, with
-   the same answer for a device that has no driver or no name. */
 static PURE _Bool canvas_driver_among(struct drm_device *dev,
                                       const char *const *names, positive count)
 {
-        if (!dev->driver || !dev->driver->name)
-                return false;
-
-        return string_table_find((string_address)dev->driver->name, names,
+        return dev->driver && dev->driver->name &&
+               string_table_find((string_address)dev->driver->name, names,
                                  sizeof(names[0]), count) < count;
 }
 
-/*
-        Whether this display is a window on somebody else's screen.
-
-        The driver's own name, which is the only thing here that actually
-        knows. Working it out from what the display reports does not succeed:
-        a virtual one answers a physical size anyway, bochs says 320 by 200
-        millimetres whatever mode it is in, and QEMU synthesises an EDID too,
-        so neither the size nor the presence of one separates them.
-*/
 static PURE _Bool canvas_is_virtual(struct drm_device *dev)
 {
         static const char *const guests[] = {
-            "bochs-drm", "virtio_gpu", "qxl", "vmwgfx", "cirrus-qemu",
-            "hyperv_drm", "vkms"};
-
+            "bochs-drm", "virtio_gpu", "qxl", "vmwgfx", "cirrus-qemu", "hyperv_drm", "vkms"};
         return canvas_driver_among(dev, guests, array_count(guests));
 }
 
-/*
-        The firmware's leftover framebuffer, not a GPU.
-
-        simpledrm (and efidrm) bind to whatever GOP left in sysfb. On a
-        Dell with i915 that is card0 at the firmware's size -- often
-        1024x768 -- and Canvas starting there scans its ground into that
-        buffer. i915 then takes the same pipe; the firmware client is
-        kicked with a picture on it, and the machine freezes. It is a last
-        resort when no real card appears.
-*/
+// Firmware GOP framebuffer (simpledrm/efidrm); deferred so real GPUs probe first.
 static PURE _Bool canvas_is_firmware(struct drm_device *dev)
 {
         static const char *const firmware[] = {"simpledrm", "efidrm"};
-
         return canvas_driver_among(dev, firmware, array_count(firmware));
 }
 
-/*
-        How many device pixels one drawn pixel is.
-
-        A cell is eight by sixteen and a titlebar is twenty. Those are the
-        right numbers on an ordinary screen and a quarter of the right
-        numbers on a dense one, where everything comes out too small to read.
-        The scale multiplies every metric the compositor draws for itself,
-        so the same window covers the same area of glass whatever the panel
-        is. It is a setting, kept by `moonwater canvas scale`, and not a
-        build option, because it is the machine's and not the image's.
-
-        The setting is a number, or auto. Auto asks the screens, and trusts
-        only the ones that can say: a real panel, whose connector is one a
-        panel is wired to and whose EDID gives a size that fits the shape of
-        its mode. It is not the size a virtual display reports -- bochs
-        answers 320 by 200 millimetres whatever mode it is in, and QEMU
-        synthesises an EDID too, so dots per inch worked out from either
-        swings with the resolution and says nothing. A screen that cannot
-        say is one: what auto changes is only a panel that is dense.
-        Two from 150 dots to the inch, three from 260, and never so many
-        that the desktop is left under 1280 by 640 of the pixels it draws.
-
-        A kernel command line gives the first frame its setting
-        (canvas.scale=2 or canvas.scale=auto); the machine's own, kept in
-        /root, arrives with the machine process seconds after.
-*/
 static unsigned int canvas_scale_setting = SPARK_CANVAS_SCALE_AUTO;
 static unsigned int canvas_scale_origin = SPARK_CANVAS_ORIGIN_DEFAULT;
-
-// Which mode a real screen is driven at; a virtual one is a window and has none.
 static _Bool canvas_modes_largest = true;
 
 static _Bool canvas_connector_is_panel(const struct drm_connector *connector)
@@ -668,36 +376,26 @@ static _Bool canvas_connector_is_panel(const struct drm_connector *connector)
         case DRM_MODE_CONNECTOR_DSI:
                 return true;
         }
-
         return false;
 }
 
-// What one screen's mode, on its own panel, says the scale should be: 0 when
-// it cannot say, and the dots per inch that decided it.
-static unsigned int canvas_scale_of(const struct drm_mode_set *set,
-                                    unsigned int *dpi)
+// Scale (2 from 150 DPI, 3 from 260 DPI, floor 1280x640 logical) or 0 when panel cannot say.
+static unsigned int canvas_scale_of(const struct drm_mode_set *set, unsigned int *dpi)
 {
         const struct drm_connector *connector;
         unsigned long width, height, width_mm, height_mm;
         unsigned int scale;
 
-        if (!set || !set->mode || !set->num_connectors || !set->connectors ||
-            !set->connectors[0])
+        if (!set || !set->mode || !set->num_connectors || !set->connectors || !set->connectors[0])
                 return 0;
-
         connector = set->connectors[0];
-        if (!canvas_connector_is_panel(connector) ||
-            canvas_is_virtual(connector->dev))
+        if (!canvas_connector_is_panel(connector) || canvas_is_virtual(connector->dev))
                 return 0;
 
         width = set->mode->hdisplay;
         height = set->mode->vdisplay;
         width_mm = connector->display_info.width_mm;
         height_mm = connector->display_info.height_mm;
-
-        // A size is a size when it is a panel's and its shape is the mode's,
-        // to within a seventh: EDID counts whole centimetres, and a zero, a
-        // one or a 16:9 claimed of a 4:3 mode is somebody filling a field.
         if (width_mm < 50 || width_mm > 3000 || height_mm < 30 || height_mm > 2000 ||
             (unsigned long)abs((long)(width_mm * height) - (long)(height_mm * width)) * 7 >
                 height_mm * width)
@@ -705,60 +403,42 @@ static unsigned int canvas_scale_of(const struct drm_mode_set *set,
 
         *dpi = (unsigned int)(width * 254 / (width_mm * 10));
         scale = *dpi >= 260 ? 3 : *dpi >= 150 ? 2 : 1;
-
         while (scale > 1 && (width / scale < 1280 || height / scale < 640))
                 scale--;
-
         return scale;
 }
 
-// The first screen of the desktop that can say, then the ones about to join it.
-static unsigned int canvas_scale_auto(struct drm_client_dev *joining,
-                                      unsigned int *dpi)
+static unsigned int canvas_scale_auto(struct drm_client_dev *joining, unsigned int *dpi)
 {
         struct drm_mode_set *set;
         struct output *output;
         unsigned int scale;
 
         *dpi = 0;
-
         list_for_each_entry(output, &desktop.outputs, link)
-        {
-                scale = canvas_scale_of(output->mode_set, dpi);
-                if (scale)
+                if ((scale = canvas_scale_of(output->mode_set, dpi)))
                         return scale;
-        }
-
         if (joining)
                 drm_client_for_each_modeset(set, joining)
-                {
-                        scale = canvas_scale_of(set, dpi);
-                        if (scale)
+                        if ((scale = canvas_scale_of(set, dpi)))
                                 return scale;
-                }
-
         return 1;
 }
 
 static unsigned int canvas_scale_wanted(struct drm_client_dev *joining)
 {
         unsigned int dpi;
-
-        return canvas_scale_setting ? canvas_scale_setting
-                                    : canvas_scale_auto(joining, &dpi);
+        return canvas_scale_setting ? canvas_scale_setting : canvas_scale_auto(joining, &dpi);
 }
 
-//      The kernel command line's: canvas.scale=2, canvas.scale=auto.
 static int canvas_scale_param_set(const char *value, const struct kernel_param *kp)
 {
         unsigned int number;
 
         if (sysfs_streq(value, "auto"))
                 number = SPARK_CANVAS_SCALE_AUTO;
-        else if (kstrtouint(value, 10, &number) || !number ||
-                 number > SPARK_CANVAS_SCALE_MOST)
+        else if (kstrtouint(value, 10, &number) || !number || number > SPARK_CANVAS_SCALE_MOST)
                 return -EINVAL;
-
         canvas_scale_setting = number;
         canvas_scale_origin = SPARK_CANVAS_ORIGIN_COMMAND_LINE;
         return 0;
@@ -771,8 +451,7 @@ static int canvas_scale_param_get(char *buffer, const struct kernel_param *kp)
 }
 
 static const struct kernel_param_ops canvas_scale_ops = {
-    .set = canvas_scale_param_set,
-    .get = canvas_scale_param_get,
+    .set = canvas_scale_param_set, .get = canvas_scale_param_get,
 };
 
 static int canvas_modes_param_set(const char *value, const struct kernel_param *kp)
@@ -783,7 +462,6 @@ static int canvas_modes_param_set(const char *value, const struct kernel_param *
                 canvas_modes_largest = false;
         else
                 return -EINVAL;
-
         return 0;
 }
 
@@ -793,8 +471,7 @@ static int canvas_modes_param_get(char *buffer, const struct kernel_param *kp)
 }
 
 static const struct kernel_param_ops canvas_modes_ops = {
-    .set = canvas_modes_param_set,
-    .get = canvas_modes_param_get,
+    .set = canvas_modes_param_set, .get = canvas_modes_param_get,
 };
 
 // Read-only: a running desktop is changed by moonwater canvas, which relays it.
@@ -810,6 +487,11 @@ module_param_cb(modes, &canvas_modes_ops, null, 0444);
 
 #define MODULE_PARAM_PREFIX "moonwater."
 
+static struct drm_connector *modeset_connector(const struct drm_mode_set *set)
+{
+        return set && set->num_connectors && set->connectors ? set->connectors[0] : null;
+}
+
 static PURE unsigned int output_mode_count(struct drm_connector *connector)
 {
         struct drm_display_mode *mode;
@@ -817,27 +499,13 @@ static PURE unsigned int output_mode_count(struct drm_connector *connector)
 
         list_for_each_entry(mode, &connector->modes, head)
                 count++;
-
         return count;
 }
 
-/*
-        The best mode a connector lists among those that pass: every bit of
-        type set, a type of 0 being any, and when width is not 0 a size equal
-        to width by height or, unless exact, one that fits under it. Of those:
-        a refresh equal to prefer_refresh first when it is positive, then the
-        most pixels, then the highest refresh.
-
-        Same size at 60 Hz and 120 Hz is the 120 Hz entry: that is what a
-        Mac's virtio EDID actually offers, and what the cursor needs. A guest
-        cap of seventy percent of a 120 Hz panel often still lists a larger
-        60 Hz established timing under that cap; pixels first would take it
-        and throw the refresh away, so the screen's rate comes first.
-*/
+// Best non-interlaced mode matching type and size: prefer_refresh first, then pixels, then refresh.
 static struct drm_display_mode *output_pick_mode(struct drm_connector *connector,
                                                  unsigned int type, int width,
-                                                 int height, _Bool exact,
-                                                 int prefer_refresh)
+                                                 int height, _Bool exact, int prefer_refresh)
 {
         struct drm_display_mode *mode, *best = null;
         int best_score = 0, best_refresh = 0;
@@ -848,14 +516,11 @@ static struct drm_display_mode *output_pick_mode(struct drm_connector *connector
                 int score, refresh;
                 _Bool preferred;
 
-                if ((mode->type & type) != type)
+                if ((mode->type & type) != type ||
+                    (mode->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN)))
                         continue;
-                if (width && (exact ? mode->hdisplay != width ||
-                                          mode->vdisplay != height
-                                    : mode->hdisplay > width ||
-                                          mode->vdisplay > height))
-                        continue;
-                if (mode->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN))
+                if (width && (exact ? mode->hdisplay != width || mode->vdisplay != height
+                                    : mode->hdisplay > width || mode->vdisplay > height))
                         continue;
 
                 refresh = drm_mode_vrefresh(mode);
@@ -863,80 +528,51 @@ static struct drm_display_mode *output_pick_mode(struct drm_connector *connector
                 preferred = prefer_refresh > 0 && refresh == prefer_refresh;
                 if (best && (preferred < best_preferred ||
                              (preferred == best_preferred &&
-                              (score < best_score ||
-                               (score == best_score && refresh <= best_refresh)))))
+                              (score < best_score || (score == best_score && refresh <= best_refresh)))))
                         continue;
-
                 best = mode;
                 best_score = score;
                 best_refresh = refresh;
                 best_preferred = preferred;
         }
-
         return best;
 }
 
-/*
-        The mode the first successful start put on a connector.
-
-        Off and on probes again. A guest's preferred size is then the window
-        already committed -- seventy percent of that, not of the host -- and
-        a real screen's probe is the preferred mode, not the largest one
-        startup took. Remembering the committed size keeps restart on the
-        same picture.
-*/
+// First committed mode per connector, restored across canvas off/on.
 #define CANVAS_SAVED_MODES 8
 
-struct canvas_saved_mode
-{
-        char name[32];
-        int hdisplay;
-        int vdisplay;
-        int vrefresh;
-};
+struct canvas_saved_mode { char name[32]; int hdisplay, vdisplay, vrefresh; };
 
 static struct canvas_saved_mode canvas_saved_mode[CANVAS_SAVED_MODES];
 static unsigned int canvas_saved_modes;
 
-static const struct canvas_saved_mode *canvas_mode_saved(const char *name)
+static struct canvas_saved_mode *canvas_mode_saved(const char *name)
 {
-        unsigned int i;
-
         if (!name)
                 return null;
-
-        for (i = 0; i < canvas_saved_modes; i++)
+        for (unsigned int i = 0; i < canvas_saved_modes; i++)
                 if (string_equals((string_address)canvas_saved_mode[i].name, (string_address)name))
                         return &canvas_saved_mode[i];
-
         return null;
 }
 
 static void canvas_mode_keep(const char *name, const struct drm_display_mode *mode)
 {
-        unsigned int i;
+        struct canvas_saved_mode *slot;
 
         if (!name || !mode)
                 return;
-
-        for (i = 0; i < canvas_saved_modes; i++)
-                if (string_equals((string_address)canvas_saved_mode[i].name, (string_address)name))
-                {
-                        canvas_saved_mode[i].hdisplay = mode->hdisplay;
-                        canvas_saved_mode[i].vdisplay = mode->vdisplay;
-                        canvas_saved_mode[i].vrefresh = drm_mode_vrefresh(mode);
+        slot = canvas_mode_saved(name);
+        if (!slot)
+        {
+                if (canvas_saved_modes >= CANVAS_SAVED_MODES)
                         return;
-                }
-
-        if (canvas_saved_modes >= CANVAS_SAVED_MODES)
-                return;
-
-        strscpy(canvas_saved_mode[canvas_saved_modes].name, name,
-                sizeof(canvas_saved_mode[0].name));
-        canvas_saved_mode[canvas_saved_modes].hdisplay = mode->hdisplay;
-        canvas_saved_mode[canvas_saved_modes].vdisplay = mode->vdisplay;
-        canvas_saved_mode[canvas_saved_modes].vrefresh = drm_mode_vrefresh(mode);
-        canvas_saved_modes++;
+                slot = &canvas_saved_mode[canvas_saved_modes++];
+                strscpy(slot->name, name, sizeof(slot->name));
+        }
+        slot->hdisplay = mode->hdisplay;
+        slot->vdisplay = mode->vdisplay;
+        slot->vrefresh = drm_mode_vrefresh(mode);
 }
 
 static void canvas_modes_keep(void)
@@ -946,133 +582,59 @@ static void canvas_modes_keep(void)
         list_for_each_entry(output, &desktop.outputs, link)
         {
                 struct drm_mode_set *set = output->mode_set;
+                struct drm_connector *connector = modeset_connector(set);
 
-                if (!set || !set->mode || !set->num_connectors ||
-                    !set->connectors || !set->connectors[0] ||
-                    !set->connectors[0]->name)
+                if (!set || !set->mode || !connector || !connector->name)
                         continue;
-
-                /*
-                        A real screen with no EDID is at a size from the no-EDID
-                        list (up to 1024x768), which is no size of the screen's:
-                        kept, it was the size the next start asked first, and a
-                        start after the EDID came put the screen back at it.
-                */
-                if (!READ_ONCE(set->connectors[0]->edid_blob_ptr) &&
-                    !canvas_is_virtual(output->canvas->client.dev))
+                // Skip no-EDID fallback modes on real screens so later restarts don't pin 1024x768.
+                if (!READ_ONCE(connector->edid_blob_ptr) && !canvas_is_virtual(output->canvas->client.dev))
                         continue;
-
-                canvas_mode_keep(set->connectors[0]->name, set->mode);
+                canvas_mode_keep(connector->name, set->mode);
         }
 }
 
-/*
-        The host's idea of the screen: the preferred mode, or the largest
-        if the connector did not mark one.
-*/
 static struct drm_display_mode *output_screen_mode(struct drm_connector *connector)
 {
-        struct drm_display_mode *preferred = output_pick_mode(
-            connector, DRM_MODE_TYPE_PREFERRED, 0, 0, false, 0);
-
-        return preferred ? preferred
-                         : output_pick_mode(connector, 0, 0, 0, false, 0);
+        struct drm_display_mode *preferred = output_pick_mode(connector, DRM_MODE_TYPE_PREFERRED, 0, 0, false, 0);
+        return preferred ? preferred : output_pick_mode(connector, 0, 0, 0, false, 0);
 }
 
-/*
-        A copy of src with its CRTC timings filled, or nothing.
-
-        Connector modes leave crtc_clock at 0 until a modeset fills it.
-        virtio-gpu's vblank timer reads that field; 0 means no vblank, and
-        the next flip waits ten seconds then warns.
-*/
-static struct drm_display_mode *output_mode_take(struct drm_device *dev,
-                                                 const struct drm_display_mode *src)
+// Duplicate src with CRTC timings filled (virtio-gpu vblank timer needs crtc_clock > 0).
+static struct drm_display_mode *output_mode_take(struct drm_device *dev, const struct drm_display_mode *src)
 {
         struct drm_display_mode *taken;
 
         if (!src || src->clock <= 0)
                 return null;
-
         taken = drm_mode_duplicate(dev, src);
         if (!taken)
                 return null;
-
         drm_mode_set_crtcinfo(taken, CRTC_INTERLACE_HALVE_V);
         if (taken->crtc_clock <= 0)
         {
                 drm_mode_destroy(dev, taken);
                 return null;
         }
-
         return taken;
 }
 
-/*
-        A guest is a window on somebody else's screen, so it cannot take the
-        whole of that screen. Seventy percent of the host, in the pixels the
-        host already scaled: cocoa then divides by the backing factor and
-        centres the window, which is seventy percent of the DIP screen on a
-        Retina panel.
-
-        The mode has to be one the connector already listed. A CVT line for
-        this size is a size virtio-gpu will scan out, but it arrives with
-        crtc_clock still 0, the CRTC never generates vblank, and the first
-        flip after the picture is on screen waits forever. The 120 Hz entry
-        of a listed size is still preferred over a 60 Hz established timing
-        of the same width and height. When seventy percent itself is not
-        listed, the under-cap pick prefers the screen's refresh before it
-        prefers more pixels.
-*/
-static struct drm_display_mode *output_guest_mode(struct drm_device *dev,
-                                                  struct drm_connector *connector)
+// Guest window mode: listed mode at/under 70% of host screen, preferring screen refresh.
+static struct drm_display_mode *output_guest_mode(struct drm_device *dev, struct drm_connector *connector)
 {
-        struct drm_display_mode *screen, *listed;
+        struct drm_display_mode *screen = output_screen_mode(connector), *listed;
         int w, h;
 
-        screen = output_screen_mode(connector);
         if (!screen)
                 return null;
-
-        w = screen->hdisplay * 7 / 10;
-        h = screen->vdisplay * 7 / 10;
-        w &= ~1;
-        h &= ~1;
-        if (w < 2)
-                w = 2;
-        if (h < 2)
-                h = 2;
-
+        w = max((screen->hdisplay * 7 / 10) & ~1, 2);
+        h = max((screen->vdisplay * 7 / 10) & ~1, 2);
         listed = output_pick_mode(connector, 0, w, h, true, 0);
-        if (listed)
-                return output_mode_take(dev, listed);
-
-        listed = output_pick_mode(connector, 0, w, h, false, drm_mode_vrefresh(screen));
-        if (listed)
-                return output_mode_take(dev, listed);
-
-        return output_mode_take(dev, screen);
+        if (!listed)
+                listed = output_pick_mode(connector, 0, w, h, false, drm_mode_vrefresh(screen));
+        return output_mode_take(dev, listed ? listed : screen);
 }
 
-/*
-        Whether a real card has not looked at its connectors yet: not one says
-        connected, and one or more says unknown, the status a connector is
-        made with.
-
-        i915 answers a detect from any task but its own with the status it
-        already has until its registration lets the display be reached
-        (intel_display_driver_check_access, opened by
-        intel_display_driver_enable_user_access), and that comes after
-        drm_dev_register, which is when Canvas attaches. Every connector then
-        says unknown, the probe helper gives each the no-EDID list (up to
-        1024x768), and the modeset probe, finding none connected, takes every
-        unknown one: on the Dell all-in-one (UHD 630, one panel on HDMI-A-2)
-        the first picture was three screens, DP-1, HDMI-A-2 and HDMI-A-3 at
-        1024x768 (DP-1's would not set, and 640x480 was taken), a desktop of
-        2688x768, and the compositor that started a moment later took the
-        panel's crtc at the 1024x768 it was at. A guest's card and the
-        firmware's framebuffer always know.
-*/
+// Real card whose connectors are still all unknown (e.g. i915 before user_access opens).
 #define CANVAS_UNSETTLED_TRIES 50
 #define CANVAS_UNSETTLED_MS 20
 
@@ -1084,36 +646,18 @@ static _Bool canvas_unsettled(struct drm_device *dev)
 
         if (canvas_is_virtual(dev) || canvas_is_firmware(dev))
                 return false;
-
         drm_connector_list_iter_begin(dev, &iter);
         drm_for_each_connector_iter(connector, &iter)
         {
                 enum drm_connector_status status = READ_ONCE(connector->status);
-
                 connected |= status == connector_status_connected;
                 unknown |= status == connector_status_unknown;
         }
         drm_connector_list_iter_end(&iter);
-
         return unknown && !connected;
 }
 
-/*
-        Probes every connector and puts the best mode on each modeset.
-
-        The lock order is the one drm_client_modeset_probe uses: the client's
-        modesets, then the device's mode configuration, which is what guards a
-        connector's list of modes.
-
-        A start (keep_saved) on a card that has not looked at its connectors
-        yet (canvas_unsettled) probes again every CANVAS_UNSETTLED_MS, for a
-        second at most, until one is connected or none is unknown; each probe
-        is a detect of every connector, which is what settles them once the
-        driver answers. Then it takes what there is, as it did before. A card
-        that knows its connectors is probed once, as before.
-*/
-static COLD int canvas_probe_modes(struct canvas *canvas, _Bool biggest,
-                                   _Bool keep_saved)
+static COLD int canvas_probe_modes(struct canvas *canvas, _Bool biggest, _Bool keep_saved)
 {
         struct drm_client_dev *client = &canvas->client;
         struct drm_device *dev = client->dev;
@@ -1124,181 +668,102 @@ static COLD int canvas_probe_modes(struct canvas *canvas, _Bool biggest,
         {
                 if (drm_client_modeset_probe(client, 0, 0))
                         return -ENODEV;
-                if (!keep_saved || waited >= CANVAS_UNSETTLED_TRIES ||
-                    !canvas_unsettled(dev))
+                if (!keep_saved || waited >= CANVAS_UNSETTLED_TRIES || !canvas_unsettled(dev))
                         break;
                 msleep(CANVAS_UNSETTLED_MS);
                 waited++;
         }
         if (waited)
-                pr_info("[moonwater canvas] " "%s: no connector was known, waited %u ms for them%s\n",
+                pr_info(CANVAS_LOG "%s: no connector was known, waited %u ms for them%s\n",
                         dev->driver->name, waited * CANVAS_UNSETTLED_MS,
                         canvas_unsettled(dev) ? ", and they still are not" : "");
 
         mutex_lock(&client->modeset_mutex);
         mutex_lock(&dev->mode_config.mutex);
-
         drm_client_for_each_modeset(mode_set, client)
         {
-                struct drm_connector *connector;
-                struct drm_display_mode *want, *taken;
+                struct drm_connector *connector = modeset_connector(mode_set);
+                struct drm_display_mode *want = null, *taken = null;
                 const struct canvas_saved_mode *saved;
 
-                if (!mode_set->mode || !mode_set->num_connectors ||
-                    !mode_set->connectors || !mode_set->connectors[0])
+                if (!mode_set->mode || !connector)
                         continue;
-
-                connector = mode_set->connectors[0];
-                saved = keep_saved && connector->name
-                                ? canvas_mode_saved(connector->name)
-                                : null;
-                /*
-                        A guest stays a window even when the first modeset is
-                        refused. The retry used to take the probe's preferred
-                        size, which is the host's whole screen, and that is
-                        the blow-out the seventy percent cap exists to stop.
-
-                        A later start has already committed once: take that
-                        size rather than seventy percent of the window, or
-                        the probe's preferred instead of the largest.
-
-                        A hotplug on a running card must not: the first
-                        picture is often a fallback written before EDID
-                        finished, and restoring that size leaves a real
-                        screen at 1024x768 for the rest of the boot.
-                */
+                saved = keep_saved ? canvas_mode_saved(connector->name) : null;
                 if (connector->cmdline_mode.specified)
-                {
-                        // A mode the kernel command line names for this
-                        // connector (video=Virtual-2:1920x1080) is the
-                        // person's word, and the probe has already put it
-                        // here: it is kept, with its crtc timings filled, over
-                        // anything Canvas would choose and over a saved size.
                         taken = output_mode_take(dev, mode_set->mode);
-                        if (!taken)
-                                continue;
-                }
                 else if (saved)
-                {
-                        want = output_pick_mode(connector, 0, saved->hdisplay,
-                                                saved->vdisplay, true,
-                                                saved->vrefresh);
-                        if (!want || drm_mode_equal(want, mode_set->mode))
-                                continue;
-                        taken = output_mode_take(dev, want);
-                        if (!taken)
-                                continue;
-                }
+                        want = output_pick_mode(connector, 0, saved->hdisplay, saved->vdisplay, true, saved->vrefresh);
                 else if (canvas_is_virtual(dev))
-                {
                         taken = output_guest_mode(dev, connector);
-                        if (!taken)
-                                continue;
-                        if (drm_mode_equal(taken, mode_set->mode))
-                        {
-                                drm_mode_destroy(dev, taken);
-                                continue;
-                        }
-                }
                 else
                 {
-                        want = biggest ? output_pick_mode(connector, 0, 0, 0, false, 0)
-                                       : output_pick_mode(connector, DRM_MODE_TYPE_PREFERRED,
-                                                          0, 0, false, 0);
+                        want = output_pick_mode(connector, biggest ? 0 : DRM_MODE_TYPE_PREFERRED, 0, 0, false, 0);
                         if (!want && !biggest)
-                                want = output_pick_mode(connector, 0,
-                                                        mode_set->mode->hdisplay,
-                                                        mode_set->mode->vdisplay,
-                                                        true, 0);
-                        if (!want || drm_mode_equal(want, mode_set->mode))
-                                continue;
-                        taken = output_mode_take(dev, want);
-                        if (!taken)
-                                continue;
+                                want = output_pick_mode(connector, 0, mode_set->mode->hdisplay,
+                                                        mode_set->mode->vdisplay, true, 0);
                 }
 
+                if (want)
+                {
+                        if (drm_mode_equal(want, mode_set->mode))
+                                continue;
+                        taken = output_mode_take(dev, want);
+                }
+                if (!taken)
+                        continue;
+                if (!connector->cmdline_mode.specified && drm_mode_equal(taken, mode_set->mode))
+                {
+                        drm_mode_destroy(dev, taken);
+                        continue;
+                }
                 drm_mode_destroy(dev, mode_set->mode);
                 mode_set->mode = taken;
         }
-
         mutex_unlock(&dev->mode_config.mutex);
         mutex_unlock(&client->modeset_mutex);
-
         return 0;
 }
 
-static struct output *output_for_modeset(struct canvas *canvas,
-                                         struct drm_mode_set *mode_set)
+static struct output *output_for_modeset(struct canvas *canvas, struct drm_mode_set *mode_set)
 {
         struct output *output;
 
         list_for_each_entry(output, &desktop.outputs, link)
                 if (output->canvas == canvas && output->mode_set == mode_set)
                         return output;
-
         return null;
 }
 
-/*
-        Puts this output's buffer back on the modeset that is scanning it.
-
-        A probe may have replaced the mode with a different size. The buffer
-        we already have is the one on the CRTC; a modeset of a new size and
-        the old framebuffer is refused, and destroying that framebuffer while
-        the CRTC still holds it blanks the scanout. So the running size is
-        restored, and a guest window that grew can wait.
-*/
 static void output_attach(struct output *output)
 {
         struct drm_mode_set *mode_set = output->mode_set;
-        struct drm_device *dev;
         struct drm_connector *connector;
+        struct drm_device *dev;
         struct drm_display_mode *want, *taken;
 
-        if (!mode_set || !output->buffer)
+        if (!mode_set || !output->buffer || !mode_set->mode)
                 return;
-
-        if (!mode_set->mode)
-                return;
-
         if (mode_set->mode->hdisplay == (int)output->width &&
             mode_set->mode->vdisplay == (int)output->height)
         {
                 mode_set->fb = output->buffer->fb;
                 return;
         }
-
-        dev = output->canvas->client.dev;
-        connector = (mode_set->connectors && mode_set->num_connectors)
-                        ? mode_set->connectors[0]
-                        : null;
+        connector = modeset_connector(mode_set);
         if (!connector)
                 return;
-
+        dev = output->canvas->client.dev;
         mutex_lock(&dev->mode_config.mutex);
-        want = output_pick_mode(connector, 0, (int)output->width,
-                                (int)output->height, true, 0);
+        want = output_pick_mode(connector, 0, (int)output->width, (int)output->height, true, 0);
         taken = output_mode_take(dev, want);
         mutex_unlock(&dev->mode_config.mutex);
-
         if (!taken)
                 return;
-
         drm_mode_destroy(dev, mode_set->mode);
         mode_set->mode = taken;
         mode_set->fb = output->buffer->fb;
 }
 
-/*
-        A later probe listed a larger mode than the one already scanning.
-
-        The first picture is often a fallback: i915 writes 1024x768 before
-        EDID finishes, then hotplugs with the panel's real list. The buffer
-        on the CRTC is the old size, so a modeset of the new size with that
-        framebuffer is refused. A new buffer is made first; the old one is
-        kept until the commit that points the pipe at the new one has
-        landed, because freeing it sooner blanks the scanout.
-*/
 // Walk each unique card on desktop.outputs (a card's outputs are consecutive); caller initializes seen = null.
 #define desktop_for_each_card(output, seen)                        \
         list_for_each_entry((output), &desktop.outputs, link)      \
@@ -1308,58 +773,44 @@ static void output_attach(struct output *output)
                         ;                                          \
                 else
 
-// Pick a 32-bit format on mode_set's primary plane and create a dumb scanout buffer; writes alpha mask into *opaque.
 static struct drm_client_buffer *output_buffer_make(struct canvas *canvas,
                                                     struct drm_mode_set *mode_set,
-                                                    unsigned int width,
-                                                    unsigned int height,
+                                                    unsigned int width, unsigned int height,
                                                     u32 *opaque)
 {
         u32 format = canvas_plane_pick_format(mode_set->crtc->primary,
-                                              DRM_FORMAT_XRGB8888,
-                                              DRM_FORMAT_ARGB8888);
+                                              DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888);
         struct drm_client_buffer *buffer;
 
         if (format == DRM_FORMAT_INVALID)
                 return ERR_PTR(-ENODEV);
-
         buffer = drm_client_buffer_create_dumb(&canvas->client, width, height, format);
         if (IS_ERR(buffer))
                 return buffer;
-
         *opaque = format == DRM_FORMAT_ARGB8888 ? 0xff000000 : 0;
         return buffer;
 }
 
-static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set,
-                         _Bool either)
+static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set, _Bool either)
 {
         unsigned int width, height;
         u32 opaque;
         struct drm_client_buffer *fresh;
 
-        if (!mode_set || !mode_set->mode || !mode_set->crtc ||
-            !mode_set->crtc->primary)
+        if (!mode_set || !mode_set->mode || !mode_set->crtc || !mode_set->crtc->primary)
                 return false;
-
         width = mode_set->mode->hdisplay;
         height = mode_set->mode->vdisplay;
-        // A hotplug only takes a screen that got larger; a change of which
-        // mode to take takes the one that is not the size it has.
         if (either ? width == output->width && height == output->height
-                   : (unsigned long)width * height <=
-                         (unsigned long)output->width * output->height)
+                   : (unsigned long)width * height <= (unsigned long)output->width * output->height)
                 return false;
-
         fresh = output_buffer_make(output->canvas, mode_set, width, height, &opaque);
         if (IS_ERR(fresh))
                 return false;
-
         if (output->replaced)
                 drm_client_buffer_delete(output->buffer);
         else
                 output->replaced = output->buffer;
-
         output->buffer = fresh;
         output->width = width;
         output->height = height;
@@ -1371,71 +822,37 @@ static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set,
 static void desktop_place_outputs(void);
 static void output_drop(struct output *output);
 static struct output *output_add(struct canvas *canvas, struct drm_mode_set *mode_set);
-static void output_disable_modeset(struct drm_device *dev,
-                                   struct drm_mode_set *mode_set);
+static void output_disable_modeset(struct drm_device *dev, struct drm_mode_set *mode_set);
 
-/*
-        A screen with a mode: say which, and how much of a choice there was,
-        then put an output on it. A mode that turns out to be wrong on a
-        machine that is not here is answered by what its connector offered,
-        not by what was picked out of it. A screen that cannot take an output
-        has its mode set turned off.
-*/
 static _Bool output_bring_up(struct canvas *canvas, struct drm_mode_set *mode_set)
 {
-        struct drm_connector *connector =
-            mode_set->num_connectors ? mode_set->connectors[0] : null;
+        struct drm_connector *connector = modeset_connector(mode_set);
         struct output *output;
 
-        pr_info("[moonwater canvas] " "screen %s %ux%u at %u Hz, drawn %ux, %u mode(s) offered\n", connector && connector->name ? connector->name : "?", mode_set->mode->hdisplay, mode_set->mode->vdisplay, drm_mode_vrefresh(mode_set->mode), desktop.scale, connector ? output_mode_count(connector) : 0);
-
+        pr_info(CANVAS_LOG "screen %s %ux%u at %u Hz, drawn %ux, %u mode(s) offered\n",
+                connector && connector->name ? connector->name : "?",
+                mode_set->mode->hdisplay, mode_set->mode->vdisplay, drm_mode_vrefresh(mode_set->mode),
+                desktop.scale, connector ? output_mode_count(connector) : 0);
         output = output_add(canvas, mode_set);
         if (!output)
         {
                 output_disable_modeset(canvas->client.dev, mode_set);
                 return false;
         }
-
         list_add_tail(&output->link, &desktop.outputs);
         return true;
 }
 
-/*
-        A hotplug after the first picture.
-
-        drm_client_modeset_probe drops every modeset's framebuffer pointer.
-        The old path treated a different mode -- or a different count of them
-        -- as a reason to destroy the buffers still on the CRTCs. That is
-        SET_SCANOUT 0. virtio-gpu then replaces the host window with
-        "Display output is not active", and a later commit does not always
-        get that window back.
-
-        Guest displays also fire a hotplug about a second after the first
-        scanout, when the host window is up. That callback runs on the DRM
-        helper workqueue. A commit from here disables every cursor plane
-        (drm_client_modeset_commit does) and can wait on that same queue,
-        so the canvas thread never runs again and the plane is left off.
-        The mode already scanning is the one the window has; leave it.
-
-        A real card is the same queue. i915 hotplugs after EDID, and with a
-        cursor plane the commit from here is the virtio lockup: low-res
-        kernel log, no pointer, no terminal. The callback only queues; this
-        runs on moonwater/plug. A guest still returns above. A real screen
-        may grow if the connector now lists more pixels than the fallback
-        that was committed first; a hotplug that does not grow does not
-        commit, so the cursor plane stays up.
-*/
+// Hotplug handler on moonwater/plug: grow/add/drop outputs on real cards without dropping live CRTCs.
 static int canvas_rebind(struct canvas *canvas)
 {
         struct drm_client_dev *client = &canvas->client;
         struct drm_mode_set *mode_set;
         struct output *output;
-        _Bool placed = false;
-        _Bool retarget = xchg(&canvas->retarget, false);
+        _Bool placed = false, retarget = xchg(&canvas->retarget, false);
 
         if (canvas_is_virtual(client->dev))
                 return 0;
-
         if (canvas_probe_modes(canvas, READ_ONCE(canvas_modes_largest), false))
         {
                 desktop_redraw();
@@ -1446,44 +863,29 @@ static int canvas_rebind(struct canvas *canvas)
         drm_client_for_each_modeset(mode_set, client)
         {
                 output = output_for_modeset(canvas, mode_set);
-
-                /*
-                        The probe left this crtc nothing to show: its screen
-                        was unplugged, or went to another crtc. Its output
-                        goes with it. Kept, its buffer was set on a modeset
-                        with no mode before every commit, which the commit
-                        warns of each time, and the screen stayed in the
-                        desktop's size and in what moonwater canvas lists.
-                */
                 if (!mode_set->mode)
                 {
                         if (output)
                         {
-                                pr_info("[moonwater canvas] " "a screen went, and its %ux%u output with it\n", output->width, output->height);
+                                pr_info(CANVAS_LOG "a screen went, and its %ux%u output with it\n",
+                                        output->width, output->height);
                                 output_drop(output);
                                 placed = true;
                         }
-                        continue;
                 }
-
-                if (output)
+                else if (output)
                 {
                         if (output_grow(output, mode_set, retarget))
                                 placed = true;
                         else
                                 output_attach(output);
-                        continue;
                 }
-
-                if (output_bring_up(canvas, mode_set))
+                else if (output_bring_up(canvas, mode_set))
                         placed = true;
         }
         mutex_unlock(&client->modeset_mutex);
 
-        // A change of which mode to take is a commit whatever sizes came of it:
-        // the largest and the preferred can be the one size at two refresh rates.
         placed |= retarget;
-
         if (placed)
         {
                 desktop_place_outputs();
@@ -1491,21 +893,11 @@ static int canvas_rebind(struct canvas *canvas)
                 canvas_modes_keep();
                 desktop_redraw();
         }
-        else if (!desktop_lit())
+        else if (!desktop_lit() && !desktop_taken())
         {
-                /*
-                        Nothing grew, and the driver no longer shows Canvas's
-                        picture: a connector that went and came back (a panel
-                        after a wake) leaves a mode of the same size, which
-                        used to mean no commit and a screen that stayed off.
-                */
-                if (!desktop_taken())
-                {
-                        pr_info("[moonwater canvas] " "hotplug: the screen is not showing the desktop, drawing it again\n");
-                        desktop_redraw();
-                }
+                pr_info(CANVAS_LOG "hotplug: the screen is not showing the desktop, drawing it again\n");
+                desktop_redraw();
         }
-
         return 0;
 }
 
@@ -1519,15 +911,13 @@ static void desktop_place_outputs(void)
                 x += (int)output->width;
                 height = max(height, (int)output->height);
         }
-
         desktop.width = x;
         desktop.height = height;
 }
 
 static struct output *output_add(struct canvas *canvas, struct drm_mode_set *mode_set)
 {
-        unsigned int width = mode_set->mode->hdisplay;
-        unsigned int height = mode_set->mode->vdisplay;
+        unsigned int width = mode_set->mode->hdisplay, height = mode_set->mode->vdisplay;
         struct drm_client_buffer *buffer;
         struct output *output;
         u32 opaque;
@@ -1536,69 +926,48 @@ static struct output *output_add(struct canvas *canvas, struct drm_mode_set *mod
         if (IS_ERR(buffer))
         {
                 if (PTR_ERR(buffer) == -ENODEV)
-                        pr_err("[moonwater canvas] " "no 32 bit format on this plane, skipping output\n");
+                        pr_err(CANVAS_LOG "no 32 bit format on this plane, skipping output\n");
                 else
-                        pr_err("[moonwater canvas] " "could not create a %ux%u scanout buffer\n", width, height);
+                        pr_err(CANVAS_LOG "could not create a %ux%u scanout buffer\n", width, height);
                 return null;
         }
-
         output = kzalloc(sizeof(*output), GFP_KERNEL);
         if (!output)
         {
                 drm_client_buffer_delete(buffer);
                 return null;
         }
-
         output->buffer = buffer;
         output->canvas = canvas;
         output->mode_set = mode_set;
         output->width = width;
         output->height = height;
         output->opaque = opaque;
-        mode_set->fb = output->buffer->fb;
-
+        mode_set->fb = buffer->fb;
         if (!output_describe(output))
         {
-                drm_client_buffer_delete(output->buffer);
+                drm_client_buffer_delete(buffer);
                 mode_set->fb = null;
                 kfree(output);
                 return null;
         }
-
         return output;
 }
 
-/*
-        A modeset nothing will be drawn on, left the way a probe leaves one.
-
-        A screen that could not be given a buffer -- no 32 bit format on its
-        plane, no memory for one -- still carries the mode the probe chose and
-        no framebuffer to go with it, and that combination is not one screen
-        missing: the commit carrying it is refused whole, so one connector
-        nobody can draw on takes every other screen on the card down with it.
-
-        Clearing it is what says "this crtc is off", and then the screens that
-        did build commit without it.
-*/
-static void output_disable_modeset(struct drm_device *dev,
-                                   struct drm_mode_set *mode_set)
+// Clear an unusable modeset so it does not cause the card's entire atomic commit to fail.
+static void output_disable_modeset(struct drm_device *dev, struct drm_mode_set *mode_set)
 {
-        unsigned int i;
-
         if (mode_set->mode)
         {
                 drm_mode_destroy(dev, mode_set->mode);
                 mode_set->mode = null;
         }
-
         mode_set->fb = null;
-
-        for (i = 0; mode_set->connectors && i < (unsigned int)mode_set->num_connectors; i++)
+        for (unsigned int i = 0; mode_set->connectors && i < (unsigned int)mode_set->num_connectors; i++)
         {
                 drm_connector_put(mode_set->connectors[i]);
                 mode_set->connectors[i] = null;
         }
-
         mode_set->num_connectors = 0;
 }
 
@@ -1615,19 +984,7 @@ static void output_drop(struct output *output)
         output_free(output);
 }
 
-/*
-        Puts every output's buffer back on the modeset that scans it out.
-
-        A probe releases every modeset, and releasing one takes its framebuffer
-        away. A modeset carrying a mode and no framebuffer is refused, the
-        whole commit with it, and what stays on the screen is whatever was
-        there before this ever ran: on a machine that inherits the firmware's
-        picture that is a cursor moving over it and nothing else.
-
-        So it is set before every commit rather than once when the output was
-        made. Whoever cleared it, and for whatever reason, it is right again by
-        the time it matters.
-*/
+// Re-attach framebuffers before commit (probes clear mode_set->fb).
 static void desktop_attach_buffers(void)
 {
         struct output *output;
@@ -1638,27 +995,13 @@ static void desktop_attach_buffers(void)
 
                 if (!output->buffer)
                         continue;
-
                 mutex_lock(&client->modeset_mutex);
                 output->mode_set->fb = output->buffer->fb;
                 mutex_unlock(&client->modeset_mutex);
         }
 }
 
-/*
-        A card's outputs are added together, so they are consecutive here and
-        remembering the last one is enough to commit each card once.
-
-        The answer used to be thrown away. A commit is the only thing that puts
-        a mode on a screen, and one that refuses says so in the one place that
-        could have noticed.
-
-        known is a card committed a moment ago whose answer was known_set; it
-        is not committed a second time. canvas_start commits a new card on its
-        own to learn whether the mode sets, and committing it again straight
-        after meant a second atomic commit queued behind the first one's
-        vblank before the first picture was flushed.
-*/
+// Commit every card once; skip re-committing `known` whose result was already `known_set`.
 static _Bool desktop_commit_known(struct canvas *known, int known_set)
 {
         struct canvas *committed = null;
@@ -1666,16 +1009,12 @@ static _Bool desktop_commit_known(struct canvas *known, int known_set)
         _Bool complete = true;
 
         desktop_attach_buffers();
-
         desktop_for_each_card(output, committed)
         {
-                int set = committed == known
-                              ? known_set
-                              : drm_client_modeset_commit(&committed->client);
+                int set = committed == known ? known_set : drm_client_modeset_commit(&committed->client);
                 if (!set)
                 {
                         struct output *grown;
-
                         list_for_each_entry(grown, &desktop.outputs, link)
                                 if (grown->canvas == committed && grown->replaced)
                                 {
@@ -1683,76 +1022,46 @@ static _Bool desktop_commit_known(struct canvas *known, int known_set)
                                         grown->replaced = null;
                                 }
                 }
-
-                // Somebody else is master, and the card is not ours to draw
-                // on until they let go. The loop is woken so it watches for that.
                 if (set == -EBUSY || set == -EACCES)
                 {
                         desktop.suspended = true;
                         canvas_thread_wake();
                 }
-
                 if (set)
                         complete = false;
-
-                // EBUSY is not now: something else is the device's master and
-                // the next commit is the one that lands.
                 if (set == -EBUSY || set == committed->set_result)
                         continue;
-
                 committed->set_result = set;
-
                 if (set)
-                        pr_info("[moonwater canvas] " "%ux%u would not go on the screen (%d)\n", output->width, output->height, set);
+                        pr_info(CANVAS_LOG "%ux%u would not go on the screen (%d)\n", output->width, output->height, set);
                 else
-                        pr_info("[moonwater canvas] " "%ux%u is on the screen\n", output->width, output->height);
+                        pr_info(CANVAS_LOG "%ux%u is on the screen\n", output->width, output->height);
         }
-
         return complete;
 }
 
-
-/*
-        Every output filled with the ground and handed to the driver.
-
-        Canvas draws nothing else. The desktop is the compositor's, a program
-        that opens the card and becomes its master; what this puts on a
-        screen is the picture before it starts, the one a card shows if the
-        compositor is stopped or has gone, and the colour it clears to
-        (CANVAS_GROUND, the compositor's own default ground) so that the one
-        is not a flash of another.
-
-        The general-register fill, never a wide one: the buffer may be device
-        memory. The driver is told the whole buffer changed. It is not only for
-        drivers that shadow the framebuffer: i915 maps a dumb buffer write-back
-        cached and implements dirty as a frontbuffer flush, which is what
-        invalidates framebuffer compression and panel self refresh.
-*/
+// Paint the white ground + centered wordmark via scalar writes (safe for device memory) and flush.
 static void output_ground(struct output *output)
 {
-        struct splash_image mark = { SPLASH_MARK_W, SPLASH_MARK_H, null };
+        struct splash_image mark = {SPLASH_MARK_W, SPLASH_MARK_H, null};
         struct splash_place place;
         struct iosys_map map;
         unsigned long pitch;
 
         if (!output_map(output, &map))
                 return;
-
         pitch = output->buffer->fb->pitches[0] / sizeof(u32);
-        canvas_rect_fill(map.vaddr, pitch, output->width, output->height,
-                         CANVAS_GROUND | output->opaque);
+        canvas_rect_fill(map.vaddr, pitch, output->width, output->height, CANVAS_GROUND | output->opaque);
         splash_place(&mark, output->width, output->height, &place);
         for (unsigned int row = 0; row < place.height; row++)
         {
                 unsigned long offset = ((unsigned long)(place.y + row) * pitch + place.x) * sizeof(u32);
-
                 for (unsigned int col = 0; col < place.width; col++)
                 {
                         unsigned long at = (unsigned long)(place.source_y + row) * SPLASH_MARK_W + (place.source_x + col);
                         u32 grey = 255u - (((unsigned int)splash_mark[at >> 2] >> (6 - 2 * (at & 3))) & 3u) * 85u;
-                        u32 pixel = (grey << 16) | (grey << 8) | grey | output->opaque;
-
-                        iosys_map_wr(&map, offset + (unsigned long)col * sizeof(u32), u32, pixel);
+                        iosys_map_wr(&map, offset + (unsigned long)col * sizeof(u32), u32,
+                                     (grey << 16) | (grey << 8) | grey | output->opaque);
                 }
         }
         drm_client_buffer_vunmap_local(output->buffer);
@@ -1762,7 +1071,6 @@ static void output_ground(struct output *output)
 static void desktop_recompose(void)
 {
         struct output *output;
-
         list_for_each_entry(output, &desktop.outputs, link)
                 output_ground(output);
 }
@@ -1774,40 +1082,24 @@ static void desktop_redraw(void)
 }
 
 /*
-        The scale the desktop is drawn at, with desktop.lock held, and whether
-        it changed.
-
-        Canvas draws nothing that has a size: the number is only what the
-        compositor reads when it starts (SPARK_CANVAS_STATUS) and what
-        `moonwater canvas` says is in force.
+        The scale the desktop is drawn at, with desktop.lock held, and whether it changed.
 */
 static _Bool desktop_rescale(unsigned int scale)
 {
         if (scale == desktop.scale)
                 return false;
-
         desktop.scale = scale;
         return true;
 }
 
-// The scale the screens now ask for, when the setting is to ask them.
 static _Bool canvas_scale_refresh(void)
 {
         unsigned int dpi;
-
-        return !canvas_scale_setting &&
-               desktop_rescale(canvas_scale_auto(null, &dpi));
+        return !canvas_scale_setting && desktop_rescale(canvas_scale_auto(null, &dpi));
 }
 
 /*
-        Whether a program other than this one is master of a card Canvas draws
-        on: Weston, a game, anything that opened the card for itself.
-
-        In-kernel clients never become master, so a device with one has a
-        program in front of it. Tested under the device's master_mutex, taken
-        inside desktop.lock the way drm_client_modeset_commit already takes
-        it, and never dereferenced: the master can go the moment the lock is
-        dropped, and all this answers is whether there was one.
+        Whether a program other than this one is master of a card Canvas draws on (or machine asleep).
 */
 static _Bool desktop_taken(void)
 {
@@ -1815,55 +1107,28 @@ static _Bool desktop_taken(void)
         struct output *output;
         _Bool taken = false;
 
-        // The card's power is going, or has not come back: as good as taken.
         if (desktop.asleep)
                 return true;
-
         desktop_for_each_card(output, checked)
         {
                 struct drm_device *dev = checked->client.dev;
-
                 mutex_lock(&dev->master_mutex);
                 taken = dev->master != null;
                 mutex_unlock(&dev->master_mutex);
-
                 if (taken)
                         break;
         }
-
         return taken;
 }
 
-/*
-        The card is Canvas's again.
-
-        Nothing Canvas remembers about the screen can be trusted after another
-        program had it: the mode on each crtc is theirs, and so may be the
-        image. So the ground is drawn and committed, which puts Canvas's modes
-        back and disables every plane but the primary.
-*/
 static void desktop_resume(void)
 {
         desktop.suspended = false;
-
-        // Before anything is drawn: nobody has the card now.
         WRITE_ONCE(canvas_yielded, false);
-
         desktop_redraw();
-
-        pr_info("[moonwater canvas] " "the card is Canvas's again, and the desktop is drawn\n");
+        pr_info(CANVAS_LOG "the card is Canvas's again, and the desktop is drawn\n");
 }
 
-/*
-        Whether the driver's own record has every screen showing what Canvas
-        drew, and what it says, said.
-
-        A wake, or a hotplug that changes no size, leaves nothing else to go on:
-        the commit that answered zero may have been for a pipe the driver had
-        already written off, and a probe that did not grow the mode used to
-        commit nothing at all. Read under the device's modeset locks, the order
-        drm_client_modeset_commit takes them in after desktop.lock.
-*/
 static _Bool output_lit_locked(struct output *output)
 {
         struct drm_crtc *crtc = output->mode_set ? output->mode_set->crtc : null;
@@ -1883,12 +1148,10 @@ static _Bool desktop_lit(void)
         list_for_each_entry(output, &desktop.outputs, link)
         {
                 struct drm_device *dev = output->canvas->client.dev;
-
                 drm_modeset_lock_all(dev);
                 lit &= output_lit_locked(output);
                 drm_modeset_unlock_all(dev);
         }
-
         return lit;
 }
 
@@ -1900,9 +1163,7 @@ static void desktop_report(const char *tag)
         {
                 struct drm_device *dev = output->canvas->client.dev;
                 struct drm_crtc *crtc = output->mode_set->crtc;
-                struct drm_connector *connector = output->mode_set->num_connectors
-                                                      ? output->mode_set->connectors[0]
-                                                      : null;
+                struct drm_connector *connector = modeset_connector(output->mode_set);
                 struct iosys_map map;
                 _Bool mapped = output_map(output, &map);
                 int active, enable, lit;
@@ -1912,39 +1173,26 @@ static void desktop_report(const char *tag)
                 enable = crtc && crtc->state ? crtc->state->enable : -1;
                 lit = output_lit_locked(output);
                 drm_modeset_unlock_all(dev);
-
                 if (mapped)
                         drm_client_buffer_vunmap_local(output->buffer);
-
-                pr_info("[moonwater canvas] " "%s: %s: crtc active %d enabled %d, %s, connector status %d dpms %d, buffer %s, last commit %d\n",
+                pr_info(CANVAS_LOG "%s: %s: crtc active %d enabled %d, %s, connector status %d dpms %d, buffer %s, last commit %d\n",
                         tag, connector && connector->name ? connector->name : "?",
                         active, enable, lit ? "primary shows ours" : "primary does NOT show ours",
-                        connector ? (int)connector->status : -1,
-                        connector ? connector->dpms : -1,
+                        connector ? (int)connector->status : -1, connector ? connector->dpms : -1,
                         mapped ? (map.is_iomem ? "maps (device memory)" : "maps") : "does NOT map",
                         output->canvas->set_result);
         }
 }
 
-/*
-        Every screen off or on through the client's own modesets, one card at a
-        time: an active-false commit, and the on that follows it is an
-        active-changed one, which is the only kind a driver whose idea of the
-        pipe has drifted from the hardware's cannot skip.
-*/
 static void desktop_dpms(int mode)
 {
         struct canvas *done = null;
         struct output *output;
 
         desktop_attach_buffers();
-
         desktop_for_each_card(output, done)
-        {
-                int ret = drm_client_modeset_dpms(&done->client, mode);
-
-                pr_info("[moonwater canvas] " "screens %s: %d\n", mode == DRM_MODE_DPMS_ON ? "on" : "off", ret);
-        }
+                pr_info(CANVAS_LOG "screens %s: %d\n", mode == DRM_MODE_DPMS_ON ? "on" : "off",
+                        drm_client_modeset_dpms(&done->client, mode));
 }
 
 static COLD void canvas_release(struct canvas *canvas);
@@ -1957,73 +1205,35 @@ static int canvas_build(struct canvas *canvas, _Bool biggest)
 
         if (canvas_probe_modes(canvas, biggest, true))
                 return -ENODEV;
-
         mutex_lock(&client->modeset_mutex);
         desktop.scale = canvas_scale_wanted(client);
-
         drm_client_for_each_modeset(mode_set, client)
-        {
-                if (!mode_set->mode)
-                        continue;
-
-                if (output_bring_up(canvas, mode_set))
+                if (mode_set->mode && output_bring_up(canvas, mode_set))
                         count++;
-        }
         mutex_unlock(&client->modeset_mutex);
-
         if (!count)
                 return -ENODEV;
-
         desktop_place_outputs();
-
         return 0;
 }
 
-/*
-        The biggest mode every screen offers, and what to do when it will not
-        set.
-
-        A monitor listing a mode is not a promise the link can carry it,
-        especially with more than one screen sharing the bandwidth, so a
-        refused commit falls back to the mode the probe would have chosen --
-        which is the one that used to be taken unconditionally. A guest is
-        already capped: retrying still asks for seventy percent of the host,
-        not the probe's native size.
-*/
 static int canvas_start(struct canvas *canvas)
 {
-        /*
-                A refused commit means the mode, not the moment.
-
-                The claim file is closed before drm_client_register, and this
-                runs from moonwater/plug after that, so a commit is not EBUSY
-                because we still hold master. EBUSY here is another program.
-                Falling back on that threw away every mode this ever chose and
-                quietly took the probe's, which is the opposite of the point.
-        */
         int ret;
 
         for (unsigned int attempt = 0; ; attempt++)
         {
                 ret = canvas_build(canvas, !attempt && READ_ONCE(canvas_modes_largest));
-
                 if (ret)
                 {
                         pr_err("[moonwater canvas] " "no screen to draw on (%d), leaving the display alone\n", ret);
                         return ret;
                 }
-
-                // Paint the white splash before the first commit so the scanout
-                // never flashes a freshly allocated black buffer between EFI
-                // and the compositor.
                 desktop_recompose();
                 desktop_attach_buffers();
                 ret = drm_client_modeset_commit(&canvas->client);
                 if (!ret || ret == -EBUSY)
                         break;
-
-                // A rejected mode owns no useful picture. Release its outputs
-                // before retrying, or standing aside for the console client.
                 if (attempt)
                         pr_err("[moonwater canvas] " "no mode would set (%d), leaving the display alone\n", ret);
                 else
@@ -2034,21 +1244,14 @@ static int canvas_start(struct canvas *canvas)
         }
 
         canvas_modes_keep();
-
-        // Any other cards commit their updated ground; this card was painted
-        // and committed above.
         desktop_commit_known(canvas, ret);
-
         {
                 struct output *output;
                 unsigned int count = 0;
-
                 list_for_each_entry(output, &desktop.outputs, link)
                         count++;
-
-                pr_info("[moonwater canvas] " "desktop %dx%d, %u output(s)\n", desktop.width, desktop.height, count);
+                pr_info(CANVAS_LOG "desktop %dx%d, %u output(s)\n", desktop.width, desktop.height, count);
         }
-
         return 0;
 }
 
@@ -2059,49 +1262,20 @@ static COLD void canvas_release(struct canvas *canvas)
         list_for_each_entry_safe(output, next, &desktop.outputs, link)
                 if (output->canvas == canvas)
                         output_drop(output);
-
         desktop_place_outputs();
-
         if (!list_empty(&desktop.outputs))
                 desktop_redraw();
 }
 
-/* ---- keys: the keyboard ---- */
+/* ---- keys: rescue chords (Ctrl-Alt-Backspace / Ctrl-Alt-Shift-Backspace) ---- */
 
-/*
-        Canvas -- keys
-
-        Canvas hears the keyboard for two chords and nothing else. What a
-        keyboard means -- the keymap, which window has the keys -- is the
-        compositor's, a program that reads the same devices itself.
-
-        Control-Alt-Backspace ends a program that holds the display and will
-        not give it back, and Control-Alt-Shift-Backspace turns Canvas off to
-        the text console. Both are made of the modifiers, which are tracked
-        here, and Backspace.
-*/
-
-// Wide enough for every modifier key, and for Backspace.
 #define KEY_TABLE 128
 
-// The modifiers the chords are made of.
 #define CHORD_SHIFT 2u
 #define CHORD_CONTROL 4u
 #define CHORD_ALT 8u
 #define CHORD_ALTGR 64u
-
-/*
-        Which modifier a key is, in the held word's own spelling.
-
-        A right-hand key is its left-hand flag moved up four bits, so
-        keyboard_modifiers can put the side back by shifting down and one word
-        carries both hands. AltGr is the one that does not fit: CHORD_CONTROL
-        << 4 is 64 and CHORD_ALTGR is 64, so right Alt gets a bit of its own,
-        above everything the shift can reach, and keyboard_modifiers spells it
-        as CHORD_ALTGR on the way out. AltGr is not the other side of Alt: the
-        chords are made of the left Alt only.
-*/
-#define KEY_HELD_ALTGR 256u
+#define KEY_HELD_ALTGR 256u // separate from CHORD_CONTROL << 4 (64)
 
 static unsigned short key_mod[KEY_TABLE] = {
     [KEY_LEFTSHIFT] = CHORD_SHIFT,
@@ -2112,70 +1286,14 @@ static unsigned short key_mod[KEY_TABLE] = {
     [KEY_RIGHTALT] = KEY_HELD_ALTGR,
 };
 
-// The input handler owns each device's held bits and the list to combine.
 static unsigned int *keyboard_held(struct input_handle *handle);
 static unsigned int keyboard_modifiers(void);
-
-/*
-        Control-Alt-Backspace ends a program that has the display and will not
-        give it back.
-
-        A compositor with no input, or no picture, or neither, holds the card
-        against Canvas and the text console: nothing typed gets the machine
-        out. This one is noticed here and acted on by the thread, which does
-        it only when somebody holds the card.
-*/
-static void keyboard_reclaim(unsigned int modifiers, unsigned int code, int value)
-{
-        if ((modifiers & (CHORD_ALT | CHORD_SHIFT |
-                          CHORD_CONTROL)) !=
-                (CHORD_ALT | CHORD_CONTROL) ||
-            code != KEY_BACKSPACE || value != 1)
-                return;
-
-        atomic_set(&desktop.reclaim, 1);
-        canvas_thread_wake();
-}
-
-/*
-        Control-Alt-Shift-Backspace turns Canvas off, to the kernel's text
-        console, whoever holds the card.
-
-        Control-Alt-Backspace ends the program that holds it, and a supervisor
-        starts the next; this is for a desktop that will not stay up. It is
-        heard here, in the input core, and never passes through the compositor
-        or the canvas thread, so a compositor that has stopped answering
-        cannot swallow it. Turning Canvas off stops the thread and waits on
-        locks, so a work item does it.
-*/
 static void canvas_exit_request(void);
 
-static _Bool keyboard_exit(unsigned int modifiers, unsigned int code, int value)
-{
-        if ((modifiers & (CHORD_ALT | CHORD_SHIFT |
-                          CHORD_CONTROL)) !=
-                (CHORD_ALT | CHORD_SHIFT | CHORD_CONTROL) ||
-            code != KEY_BACKSPACE)
-                return false;
-
-        if (value == 1)
-                canvas_exit_request();
-
-        return true;
-}
-
-/*
-        Called by the input core, so no lock and no sleeping. It records what
-        happened and the thread acts: whatever the chord asks takes locks and
-        sleeps.
-*/
 static void keyboard_event(struct input_handle *handle, unsigned int code, int value)
 {
-        unsigned int modifiers;
-        unsigned int bit;
-
-        modifiers = (unsigned int)atomic_read(&desktop.modifiers);
-        bit = code < KEY_TABLE ? key_mod[code] : 0;
+        unsigned int modifiers = (unsigned int)atomic_read(&desktop.modifiers);
+        unsigned int bit = code < KEY_TABLE ? key_mod[code] : 0;
 
         if (bit)
         {
@@ -2184,42 +1302,24 @@ static void keyboard_event(struct input_handle *handle, unsigned int code, int v
                 atomic_set(&desktop.modifiers, (int)keyboard_modifiers());
                 return;
         }
-
-        // Before anything is asked of a program: a compositor that hangs
-        // holds the card and every key, and this is the way out.
-        if (keyboard_exit(modifiers, code, value))
+        if (code != KEY_BACKSPACE || value != 1)
                 return;
 
-        keyboard_reclaim(modifiers, code, value);
+        modifiers &= CHORD_ALT | CHORD_SHIFT | CHORD_CONTROL;
+        if (modifiers == (CHORD_ALT | CHORD_SHIFT | CHORD_CONTROL))
+                canvas_exit_request();
+        else if (modifiers == (CHORD_ALT | CHORD_CONTROL))
+        {
+                atomic_set(&desktop.reclaim, 1);
+                canvas_thread_wake();
+        }
 }
 
 /* ---- client: a client, and what it is allowed to ask for ---- */
 
-/*
-        Canvas -- attaching to DRM
-
-        Opening the node runs the driver's open path and hands back a
-        drm_file, which knows its minor, which knows its device. The file is
-        closed immediately; drm_client_init takes its own reference.
-
-        Every card is taken, not just the first. The poll is here because the
-        nodes appear when devtmpfs is mounted, after the initcalls that could
-        otherwise have started this.
-*/
-
-/*
-        The outputs come off the desktop before the card they belong to is
-        released, or output->canvas dangles for anything still composing.
-        canvas_thread_stop joins a thread that takes desktop.lock, so it runs under
-        canvas_list_lock and never under desktop.lock. The plug work is cancelled
-        first, so it cannot start or rebind a card that is leaving.
-*/
 static struct workqueue_struct *canvas_plug_wq;
-
 static void canvas_claimed_forget(struct drm_device *dev);
 
-// Made once: the take-over (under canvas_control_lock), a hotplug (under a card's clientlist_mutex) and a change of
-// modes (no lock) can each be first, and only one queue is kept; the one a racing caller made is let go.
 static void canvas_plug_ensure(void)
 {
         struct workqueue_struct *made;
@@ -2231,39 +1331,23 @@ static void canvas_plug_ensure(void)
                 destroy_workqueue(made);
 }
 
+static void canvas_plug_queue(struct canvas *canvas)
+{
+        queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq, &canvas->plug);
+}
+
 static void canvas_plug_work(struct work_struct *work)
 {
         struct canvas *canvas = container_of(work, struct canvas, plug);
-        int ret = 0;
 
         rt_mutex_lock(&desktop.lock);
-
-        /*
-                Not while the card sleeps.
-
-                A driver reports a connector as it comes back from suspend
-                (amdgpu's resume ends with a hotplug event, and the DRM core
-                hands it to a client only when that client's resume returns),
-                and a rebind commits. The commit belongs after the wake has
-                redrawn, not in the middle of the driver's own resume.
-        */
         if (canvas->started && READ_ONCE(desktop.asleep))
-        {
                 canvas->replug = true;
-                rt_mutex_unlock(&desktop.lock);
-                return;
-        }
-
-        if (!canvas->started)
-        {
-                ret = canvas_start(canvas);
-                canvas->started = (ret == 0);
-        }
+        else if (!canvas->started)
+                canvas->started = (canvas_start(canvas) == 0);
         else
-                ret = canvas_rebind(canvas);
-
+                (void)canvas_rebind(canvas);
         rt_mutex_unlock(&desktop.lock);
-        (void)ret;
 }
 
 static COLD void client_unregister(struct drm_client_dev *client)
@@ -2271,7 +1355,6 @@ static COLD void client_unregister(struct drm_client_dev *client)
         struct canvas *canvas = canvas_from_client(client);
 
         canvas_claimed_forget(client->dev);
-
         mutex_lock(&canvas_list_lock);
         list_del(&canvas->link);
         cancel_work_sync(&canvas->plug);
@@ -2283,7 +1366,6 @@ static COLD void client_unregister(struct drm_client_dev *client)
         canvas->started = 0;
         canvas_release(canvas);
         rt_mutex_unlock(&desktop.lock);
-
         drm_client_release(client);
 }
 
@@ -2292,14 +1374,7 @@ static COLD void client_free(struct drm_client_dev *client)
         kfree(canvas_from_client(client));
 }
 
-/*
-        Rover's display events and counts, at the earliest point the kernel
-        offers a connector's change to anything that is not its driver: the
-        DRM core's client hotplug, which runs after the probe helper has set
-        each connector's status. Counted over every card; a connector that
-        came or went is one event, and a hotplug that changed none still
-        writes the counts. Sleeps (the list's mutex), which the hotplug may.
-*/
+// Notify rover of connector changes and total/external display counts.
 static void canvas_rules_hotplug(struct canvas *canvas)
 {
         struct drm_connector_list_iter iter;
@@ -2355,56 +1430,23 @@ static int client_hotplug(struct drm_client_dev *client)
 {
         struct canvas *canvas = canvas_from_client(client);
 
-        // The DRM core's call, made with the card's client list held (drm_client_register and
-        // drm_client_dev_hotplug): canvas_rules_hotplug takes canvas_list_lock after it, the lock order's.
         lockdep_assert_held(&client->dev->clientlist_mutex);
-
         canvas_rules_hotplug(canvas);
-
-        /*
-                Never start or rebind on the caller's workqueue.
-
-                drm_client_register calls this itself, which is fine, but a
-                later connector hotplug runs on the DRM helper workqueue. A
-                modeset commit from there disables every cursor plane and can
-                wait on that same queue: on i915 that froze with a low-res
-                kernel log and no pointer. Queue on moonwater/plug, which
-                nothing in DRM flushes.
-        */
         canvas_plug_ensure();
-        queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq,
-                   &canvas->plug);
+        canvas_plug_queue(canvas);
         return 0;
 }
 
-// The bool argument is whether the restore happens from an atomic context.
 static int client_restore(struct drm_client_dev *client, _Bool in_atomic)
 {
         struct canvas *canvas = canvas_from_client(client);
 
         if (in_atomic)
                 return -EBUSY;
-
         rt_mutex_lock(&desktop.lock);
-        // The wake's own redraw is the restore; a commit now is the one into
-        // a card whose power is going or has not come back.
-        if (canvas->started && !READ_ONCE(desktop.asleep))
-        {
-                /*
-                        The last program that held the card has closed it.
-
-                        Drawn again when the thread had noticed the card was
-                        another program's, and otherwise only where the screen
-                        does not show Canvas's picture: a second commit is a
-                        modeset under desktop.lock on the exit of the program
-                        that closed the card -- 49 ms on the parent after a
-                        SIGKILL, the compositor's next start waiting behind it.
-                */
-                if (desktop.suspended || !desktop_lit())
-                        desktop_resume();
-        }
+        if (canvas->started && !READ_ONCE(desktop.asleep) && (desktop.suspended || !desktop_lit()))
+                desktop_resume();
         rt_mutex_unlock(&desktop.lock);
-
         return 0;
 }
 
@@ -2423,23 +1465,15 @@ static _Bool canvas_holds(struct drm_device *dev)
 
         mutex_lock(&canvas_list_lock);
         list_for_each_entry(canvas, &canvas_list, link)
-        {
                 if (canvas->client.dev == dev)
                 {
                         held = true;
                         break;
                 }
-        }
         mutex_unlock(&canvas_list_lock);
-
         return held;
 }
 
-/*
-        Everything but the registering, which is deliberately not done here:
-        registering fires the hotplug that chooses a mode and commits it, and
-        that has to happen with no file open on the card. See canvas_claim.
-*/
 static struct canvas *canvas_take_over(struct drm_device *dev)
 {
         struct canvas *canvas;
@@ -2447,29 +1481,18 @@ static struct canvas *canvas_take_over(struct drm_device *dev)
 
         if (!drm_core_check_feature(dev, DRIVER_MODESET) || canvas_holds(dev))
                 return null;
-
         canvas = kzalloc(sizeof(*canvas), GFP_KERNEL);
         if (!canvas)
                 return null;
-
         canvas->set_result = 1;
-
         if (drm_client_init(dev, &canvas->client, "moonwater", &client_funcs))
         {
                 kfree(canvas);
                 return null;
         }
-
         canvas_plug_ensure();
         INIT_WORK(&canvas->plug, canvas_plug_work);
 
-        /*
-                A first card with no thread is not taken: the thread is what
-                takes the console's keyboard (canvas_keyboard_take) and hears
-                the chords, so a card attached without it left the console's
-                keyboard live under a desktop, typing into the root shell of
-                the console behind it.
-        */
         mutex_lock(&canvas_list_lock);
         first = list_empty(&canvas_list);
         list_add_tail(&canvas->link, &canvas_list);
@@ -2477,45 +1500,31 @@ static struct canvas *canvas_take_over(struct drm_device *dev)
         {
                 list_del(&canvas->link);
                 mutex_unlock(&canvas_list_lock);
-                drm_client_release(&canvas->client); // frees canvas (client_free)
+                drm_client_release(&canvas->client);
                 return null;
         }
         mutex_unlock(&canvas_list_lock);
-
         return canvas;
 }
 
-// Retried fast: the node appears the moment devtmpfs is mounted, and every
-// millisecond spent waiting after that is a millisecond of black screen.
 #define CANVAS_RETRY_MS 5
 #define CANVAS_ATTEMPTS 1000
-
-// Rounds to keep looking after the first card, so a sibling that probes late
-// is found too.
-//
-// A hundred rounds at CANVAS_RETRY_MS is half a second of polling after the
-// screen is already up, which reads like an obvious thing to cut. It is not:
-// measured at 10 rounds against 100, moonwater starts, the canvas is drawn
-// and the shell runs at the same times to within the noise of five boots
-// each. The poll is a delayed work item that sleeps between rounds, so what
-// it costs the boot is not the half second it spans. Cutting it would buy
-// nothing and lose the late sibling it is here for.
 #define CANVAS_SETTLE 100
 
-/* Every in-kernel client on a card but Canvas's, as drm_client_dev_unregister takes them. */
-static void canvas_clients_clear(struct drm_device *dev)
+// Unregister either Canvas's own client (own=true) or every other in-kernel client (own=false).
+static void canvas_clients_drop(struct drm_device *dev, _Bool own)
 {
         struct drm_client_dev *client, *next;
 
         mutex_lock(&dev->clientlist_mutex);
         list_for_each_entry_safe(client, next, &dev->clientlist, list)
         {
-                if (client->funcs == &client_funcs)
+                if ((client->funcs == &client_funcs) != own)
                         continue;
-
-                // Unregistering consumes and frees the client.
                 list_del(&client->list);
-                if (client->funcs && client->funcs->unregister)
+                if (own)
+                        client_unregister(client);
+                else if (client->funcs && client->funcs->unregister)
                         client->funcs->unregister(client);
                 else
                         drm_client_release(client);
@@ -2523,12 +1532,7 @@ static void canvas_clients_clear(struct drm_device *dev)
         mutex_unlock(&dev->clientlist_mutex);
 }
 
-/*
-        Find the current DRM master task of dev under dev->filelist_mutex + RCU:
-        copies and sanitizes its comm into command[room], returns its tgid (in
-        current's pid namespace when in_current_ns, else init pid ns), and
-        optionally takes referenced struct pids for process and session.
-*/
+// Find dev's current DRM master: sanitized comm, tgid, and optional referenced pids.
 static int canvas_master_find(struct drm_device *dev, char *command, positive room,
                               _Bool in_current_ns, struct pid **out_process,
                               struct pid **out_session)
@@ -2543,20 +1547,17 @@ static int canvas_master_find(struct drm_device *dev, char *command, positive ro
 
                 if (!drm_is_current_master(file))
                         continue;
-
                 rcu_read_lock();
                 task = pid_task(rcu_dereference(file->pid), PIDTYPE_TGID);
                 if (task)
                 {
-                        holder = in_current_ns
-                                     ? task_tgid_nr_ns(task, task_active_pid_ns(current))
-                                     : task_tgid_nr(task);
+                        holder = in_current_ns ? task_tgid_nr_ns(task, task_active_pid_ns(current))
+                                               : task_tgid_nr(task);
                         if (out_process)
                                 *out_process = get_pid(task_tgid(task));
                         if (out_session)
                                 *out_session = get_pid(task_session(task));
                         strscpy(command, task->comm, room);
-                        // A program names itself with prctl, so only printable bytes go to logs/terminals.
                         for (char *at = command; *at; at++)
                                 if (*at < ' ' || *at > '~')
                                         *at = '?';
@@ -2565,36 +1566,12 @@ static int canvas_master_find(struct drm_device *dev, char *command, positive ro
                 break;
         }
         mutex_unlock(&dev->filelist_mutex);
-
         return holder;
 }
 
-/* Which program is master of a card, for a refusal to say. */
-static int canvas_master_holder(struct drm_device *dev, char *command, positive room)
-{
-        return canvas_master_find(dev, command, room, true, null, null);
-}
-
 static struct delayed_work canvas_probe_work;
-static unsigned int canvas_attempts;
-static unsigned int canvas_settled_at;
-
-/*
-        Which primary nodes are already ours.
-
-        Not an optimisation. Opening a node we already hold and closing it
-        again is a client releasing the device as far as DRM is concerned, and
-        it answers by telling every client to restore -- a full repaint of
-        every screen. The poll below runs for a hundred rounds, so booting
-        cost a hundred and one full redraws, about two hundred milliseconds
-        of drawing nobody asked for.
-
-        One bit per minor, which is the whole of DRM's minor space.
-*/
-// A bit a card minor (0 to 63), set and cleared with the atomic bit operations: canvas_claim sets one under
-// canvas_control_lock and a driver's unregister clears one under its card's clientlist_mutex, so a plain |= and &=
-// could each undo the other.
-static unsigned long canvas_claimed;
+static unsigned int canvas_attempts, canvas_settled_at;
+static unsigned long canvas_claimed; // atomic bitmask of claimed DRM minors 0..63
 static_assert(BITS_PER_LONG >= 64, "a card minor up to 63 is a bit of canvas_claimed");
 
 static void canvas_firmware_yield(void);
@@ -2605,7 +1582,6 @@ static void canvas_claimed_forget(struct drm_device *dev)
 
         if (!dev || !dev->primary)
                 return;
-
         minor = dev->primary->index;
         if (minor >= 0 && minor < 64)
                 clear_bit(minor, &canvas_claimed);
@@ -2624,30 +1600,11 @@ static _Bool canvas_has_native(void)
                         break;
                 }
         mutex_unlock(&canvas_list_lock);
-
         return native;
 }
 
-/*
-        Close a node this code opened, and have it gone before returning.
-
-        A plain close from a program's ioctl puts the last fput on the task's
-        work list, which runs as the call returns to the program, and on a
-        kernel thread on a worker a jiffy later. Until it runs, the file is
-        still open on the card, and the first program to open a card is its
-        master. So a refused pass held the card against the next pass of the
-        same call: with a firmware card as the only one, the first pass opens
-        and skips it, the second opens it again, finds the first still master
-        and the refusal names the caller itself -- a shell that is gone by the
-        time anyone looks, and a different one on every retry. And the first
-        commit of a card taken from a kernel thread lost the same race, so
-        the desktop began suspended. This is the only reference, so the last
-        put is done here.
-*/
-static void canvas_node_close(struct file *filp)
-{
-        __fput_sync(filp);
-}
+// Synchronous last fput so the card's master is released before drm_client_register / retries.
+static void canvas_node_close(struct file *filp) { __fput_sync(filp); }
 
 static int canvas_claim(const char *path, unsigned int minor,
                         struct canvas_control *on, _Bool firmware_ok)
@@ -2659,160 +1616,87 @@ static int canvas_claim(const char *path, unsigned int minor,
 
         if (test_bit(minor, &canvas_claimed))
                 return -EBUSY;
-
         filp = filp_open(path, O_RDWR, 0);
         if (IS_ERR(filp))
                 return PTR_ERR(filp);
-
         file_priv = filp->private_data;
-
         if (!file_priv || !file_priv->minor || !file_priv->minor->dev)
         {
                 canvas_node_close(filp);
                 return -ENODEV;
         }
 
-        /*
-                simpledrm is card0 on a Dell with i915: GOP's leftover
-                size, often 1024x768. Canvas, when it began there, painted
-                the kernel log; then i915 took the same pipe and the machine
-                froze. Leave it until a GPU appears, or until the
-                settle rounds have passed with none. Userspace on still
-                takes it when it is the only card -- the first pass of
-                claim_all skips firmware so card0 cannot start before
-                card1 is tried.
-        */
         dev = file_priv->minor->dev;
         if (canvas_is_firmware(dev))
         {
-                int skip = 0;
-
-                if (!firmware_ok)
-                        skip = -EAGAIN;
-                else if (canvas_has_native())
-                        skip = -ENODEV;
-                else if (!on && canvas_attempts < CANVAS_SETTLE)
-                        skip = -EAGAIN;
-
+                int skip = !firmware_ok ? -EAGAIN : canvas_has_native() ? -ENODEV
+                           : (!on && canvas_attempts < CANVAS_SETTLE) ? -EAGAIN : 0;
                 if (skip)
                 {
                         canvas_node_close(filp);
                         return skip;
                 }
         }
-
-        /*
-                Turned on from userspace, a card is taken only from nobody.
-
-                This open is the card's master unless another program already
-                is, and a Canvas started behind that program would only sit
-                suspended, so the refusal names it instead. The kernel
-                console's client, which off left on the card, goes while this
-                file is still the master, so the close below restores nothing.
-        */
         if (on && drm_core_check_feature(dev, DRIVER_MODESET))
         {
                 if (!drm_is_current_master(file_priv))
                 {
                         if (!on->master_pid && !on->master_command[0])
-                                on->master_pid = canvas_master_holder(
-                                    dev, on->master_command,
-                                    sizeof(on->master_command));
+                                on->master_pid = canvas_master_find(
+                                    dev, on->master_command, sizeof(on->master_command), true, null, null);
                         canvas_node_close(filp);
                         return -EACCES;
                 }
-
-                canvas_clients_clear(dev);
+                canvas_clients_drop(dev, false);
         }
 
         canvas = canvas_take_over(dev);
-
         if (canvas)
                 set_bit(minor, &canvas_claimed);
-
-        /*
-                Closed before the client is registered, and drm_client_init has
-                taken its own reference to the device by now.
-
-                Registering fires the hotplug that picks a mode and commits it,
-                and a commit is refused out of hand while anything else is the
-                device's master -- which this file is until it is closed. With
-                it still open the first commit always answered EBUSY, so
-                "that mode would not set, take the offered one" could never
-                run: the one answer it was written to read was the one answer
-                it could never get.
-        */
         canvas_node_close(filp);
-
         if (!canvas)
                 return -EBUSY;
 
         drm_client_register(&canvas->client);
-        pr_info("[moonwater canvas] " "attached to %s, %s display\n", canvas->client.dev->driver->name, canvas_is_virtual(canvas->client.dev) ? "a guest's" : "a real");
-
+        pr_info(CANVAS_LOG "attached to %s, %s display\n",
+                canvas->client.dev->driver->name,
+                canvas_is_virtual(canvas->client.dev) ? "a guest's" : "a real");
         if (!canvas_is_firmware(canvas->client.dev))
                 canvas_firmware_yield();
-
         return 0;
 }
 
-/*
-        Every primary node, every round. DRM allocates card minors out of an
-        idr with no promise they are contiguous, and a card that probes late
-        would be missed by a scan that stopped at the first gap. The whole
-        minor space is cheap to try: an absent node fails in filp_open.
-*/
 static unsigned int canvas_claim_range(struct canvas_control *on,
-                                       unsigned int *refused,
-                                       _Bool firmware_ok)
+                                       unsigned int *refused, _Bool firmware_ok)
 {
         char path[24];
-        unsigned int minor, taken = 0;
+        unsigned int taken = 0;
 
-        for (minor = 0; minor < 64; minor++)
+        for (unsigned int minor = 0; minor < 64; minor++)
         {
                 if (test_bit(minor, &canvas_claimed))
                         continue;
-
-                positive_into_string(
-                    memory_copy_apart_end(path, "/dev/dri/card",
-                                         sizeof("/dev/dri/card") - 1),
-                    minor);
-
+                positive_into_string(memory_copy_apart_end(path, "/dev/dri/card",
+                                                           sizeof("/dev/dri/card") - 1), minor);
                 switch (canvas_claim(path, minor, on, firmware_ok))
                 {
-                case 0:
-                        taken++;
-                        break;
-                case -EACCES:
-                        if (refused)
-                                (*refused)++;
-                        break;
+                case 0: taken++; break;
+                case -EACCES: if (refused) (*refused)++; break;
                 }
         }
-
         return taken;
 }
 
-static unsigned int canvas_claim_all(struct canvas_control *on,
-                                     unsigned int *refused)
+static unsigned int canvas_claim_all(struct canvas_control *on, unsigned int *refused)
 {
         unsigned int taken = canvas_claim_range(on, refused, false);
-
-        /* Firmware last: card0 is often simpledrm, and starting it
-           before i915 is the freeze. If nothing else attached, take it. */
-        if (!taken)
-                taken = canvas_claim_range(on, refused, true);
-
-        return taken;
+        return taken ? taken : canvas_claim_range(on, refused, true);
 }
 
 static COLD void canvas_probe(struct work_struct *work)
 {
         _Bool was_on = canvas_is_on();
 
-        // A kernel worker's root is the empty nullfs, where /dev/dri is
-        // not; the cards are looked up from the root /init sees.
         scoped_with_init_fs()
                 canvas_claim_all(null, null);
         if (!was_on && canvas_is_on())
@@ -2821,36 +1705,17 @@ static COLD void canvas_probe(struct work_struct *work)
 
         if (!canvas_settled_at && !list_empty(&canvas_list))
                 canvas_settled_at = canvas_attempts + CANVAS_SETTLE;
-
         if (canvas_settled_at && canvas_attempts >= canvas_settled_at)
                 return;
-
         if (canvas_attempts >= CANVAS_ATTEMPTS)
         {
-                pr_info("[moonwater canvas] " "gave up waiting for a card\n");
+                pr_info(CANVAS_LOG "gave up waiting for a card\n");
                 return;
         }
-
         schedule_delayed_work(&canvas_probe_work, msecs_to_jiffies(CANVAS_RETRY_MS));
 }
 
-
-/*
-        Canvas, off and on, from userspace.
-
-        Off undoes what attaching did, in this order: the input handler and
-        the thread go, which gives every console its keyboard back; each
-        card's client is released; and the kernel's own framebuffer console
-        is set up on each card, which drm_client_lib.active= kept from ever
-        having one. The runner ends the compositor on the event. On
-        claims the cards again the way the boot does and fires canvas on, and
-        the runner starts the compositor again.
-
-        Lock order: canvas_control_lock, then a card's clientlist_mutex, then
-        canvas_list_lock, then desktop.lock, then a card's master_mutex.
-        canvas_thread_stop joins a thread that takes desktop.lock, so it is
-        called under canvas_list_lock and never under desktop.lock.
-*/
+// Lock order: canvas_control_lock -> dev->clientlist_mutex -> canvas_list_lock -> desktop.lock -> master_mutex.
 static DEFINE_MUTEX(canvas_control_lock);
 
 _Bool canvas_is_on(void)
@@ -2860,84 +1725,53 @@ _Bool canvas_is_on(void)
         mutex_lock(&canvas_list_lock);
         on = !list_empty(&canvas_list);
         mutex_unlock(&canvas_list_lock);
-
         return on;
 }
 
-/*
-        One card's client off DRM's list and released, unless the card is
-        going away at this moment and its own unregister already has it.
-*/
-static void canvas_client_drop(struct drm_device *dev)
+static struct drm_device *canvas_next_dev(_Bool firmware_only)
 {
-        struct drm_client_dev *client, *next;
+        struct canvas *canvas;
+        struct drm_device *dev = null;
 
-        mutex_lock(&dev->clientlist_mutex);
-        list_for_each_entry_safe(client, next, &dev->clientlist, list)
-        {
-                if (client->funcs != &client_funcs)
-                        continue;
-                list_del(&client->list);
-                client_unregister(client);
-        }
-        mutex_unlock(&dev->clientlist_mutex);
+        mutex_lock(&canvas_list_lock);
+        list_for_each_entry(canvas, &canvas_list, link)
+                if (!firmware_only || canvas_is_firmware(canvas->client.dev))
+                {
+                        dev = canvas->client.dev;
+                        drm_dev_get(dev);
+                        break;
+                }
+        mutex_unlock(&canvas_list_lock);
+        return dev;
 }
 
-/*
-        A GPU is attached: the firmware framebuffer is not a second
-        screen, it is the same pipe. Leaving a client on it is what
-        froze the OptiPlex -- i915 taking that pipe with a picture
-        still scanning from simpledrm.
-*/
 static void canvas_firmware_yield(void)
 {
-        for (;;)
+        struct drm_device *dev;
+
+        while ((dev = canvas_next_dev(true)))
         {
-                struct canvas *canvas;
-                struct drm_device *dev = null;
-
-                mutex_lock(&canvas_list_lock);
-                list_for_each_entry(canvas, &canvas_list, link)
-                        if (canvas_is_firmware(canvas->client.dev))
-                        {
-                                /* The device only: DRM can unregister this
-                                   client between the unlock and the drop. */
-                                dev = canvas->client.dev;
-                                drm_dev_get(dev);
-                                break;
-                        }
-                mutex_unlock(&canvas_list_lock);
-
-                if (!dev)
-                        return;
-
-                pr_info("[moonwater canvas] " "dropping %s, a GPU is attached\n",
-                        dev->driver->name);
-                canvas_client_drop(dev);
+                pr_info(CANVAS_LOG "dropping %s, a GPU is attached\n", dev->driver->name);
+                canvas_clients_drop(dev, true);
                 drm_dev_put(dev);
         }
 }
 
 static long canvas_turn_off(void)
 {
-        struct drm_device *released[8];
+        struct drm_device *released[8], *dev;
         unsigned int count = 0;
 
         if (mutex_lock_killable(&canvas_control_lock))
                 return -EINTR;
-
         if (!canvas_is_on())
         {
                 mutex_unlock(&canvas_control_lock);
                 return -EALREADY;
         }
-
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
         cancel_delayed_work_sync(&canvas_probe_work);
 #endif
-
-        // Input and the thread before any output goes, so nothing draws on
-        // an output being released.
         mutex_lock(&canvas_list_lock);
         atomic_set(&desktop.reclaim, 0);
         canvas_thread_stop();
@@ -2948,34 +1782,16 @@ static long canvas_turn_off(void)
         WRITE_ONCE(canvas_yielded, false);
         rt_mutex_unlock(&desktop.lock);
 
-        for (;;)
+        while ((dev = canvas_next_dev(false)))
         {
-                struct canvas *canvas;
-                struct drm_device *dev = null;
-
-                mutex_lock(&canvas_list_lock);
-                canvas = list_first_entry_or_null(&canvas_list, struct canvas, link);
-                if (canvas)
-                {
-                        dev = canvas->client.dev;
-                        drm_dev_get(dev);
-                }
-                mutex_unlock(&canvas_list_lock);
-
-                if (!canvas)
-                        break;
-
-                canvas_client_drop(dev);
-
+                canvas_clients_drop(dev, true);
                 if (count < ARRAY_SIZE(released))
                         released[count++] = dev;
                 else
                         drm_dev_put(dev);
         }
-
         WRITE_ONCE(canvas_claimed, 0);
 
-        // The kernel's console takes each screen back.
         for (unsigned int i = 0; i < count; i++)
         {
 #ifndef MODULE
@@ -2984,9 +1800,7 @@ static long canvas_turn_off(void)
 #endif
                 drm_dev_put(released[i]);
         }
-
-        pr_info("[moonwater canvas] " "off: %u card(s) given back to the console\n", count);
-
+        pr_info(CANVAS_LOG "off: %u card(s) given back to the console\n", count);
         mutex_unlock(&canvas_control_lock);
         moonwater_bind_fire(SPARK_BIND_CANVAS_OFF);
         return 0;
@@ -2998,38 +1812,24 @@ static long canvas_turn_on(struct canvas_control *answer)
 
         if (mutex_lock_killable(&canvas_control_lock))
                 return -EINTR;
-
         if (canvas_is_on())
         {
                 mutex_unlock(&canvas_control_lock);
                 return -EALREADY;
         }
-
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
         cancel_delayed_work_sync(&canvas_probe_work);
 #endif
-
         taken = canvas_claim_all(answer, &refused);
-
         mutex_unlock(&canvas_control_lock);
-
         if (taken)
         {
                 moonwater_bind_fire(SPARK_BIND_CANVAS_ON);
                 return 0;
         }
-
         return refused ? -EBUSY : -ENODEV;
 }
 
-/* What Canvas holds, for `moonwater canvas`. */
-/*
-        The waits a request from a program makes are killable: a lock held by
-        something that does not let go (a commit the driver never finishes,
-        under desktop.lock) left the asker in state D, where its SIGKILL is
-        not taken, and the program that started it (the settings) waiting on
-        a child nothing could end. A killed wait answers -EINTR.
-*/
 static long canvas_state(struct canvas_control *answer)
 {
         struct canvas *canvas;
@@ -3039,79 +1839,52 @@ static long canvas_state(struct canvas_control *answer)
                 return -EINTR;
         list_for_each_entry(canvas, &canvas_list, link)
                 if (!answer->cards++)
-                        strscpy(answer->driver, canvas->client.dev->driver->name,
-                                sizeof(answer->driver));
+                        strscpy(answer->driver, canvas->client.dev->driver->name, sizeof(answer->driver));
         mutex_unlock(&canvas_list_lock);
-
         answer->running = answer->cards != 0;
 
         if (rt_mutex_lock_killable(&desktop.lock))
                 return -EINTR;
-
-        // Asked now and not as the thread last found it: a program that took
-        // the display a moment ago is held to be holding it.
         answer->suspended = desktop_taken();
         answer->thread_passes = READ_ONCE(canvas_passes);
-
         answer->scale = desktop.scale;
         answer->scale_setting = canvas_scale_setting;
         answer->scale_origin = canvas_scale_origin;
         (void)canvas_scale_auto(null, &answer->scale_dpi);
-        answer->modes = READ_ONCE(canvas_modes_largest)
-                            ? SPARK_CANVAS_MODES_LARGEST
-                            : SPARK_CANVAS_MODES_PREFERRED;
+        answer->modes = READ_ONCE(canvas_modes_largest) ? SPARK_CANVAS_MODES_LARGEST : SPARK_CANVAS_MODES_PREFERRED;
 
         list_for_each_entry(output, &desktop.outputs, link)
         {
                 struct canvas_output_state *state;
                 struct drm_mode_set *set = output->mode_set;
+                struct drm_connector *connector = modeset_connector(set);
 
                 if (answer->output_count == SPARK_CANVAS_OUTPUTS)
                         break;
-
                 state = &answer->output[answer->output_count++];
                 state->width = output->width;
                 state->height = output->height;
-
                 if (set && set->mode)
                         state->refresh = drm_mode_vrefresh(set->mode);
-                if (set && set->num_connectors && set->connectors[0])
-                        strscpy(state->connector, set->connectors[0]->name,
-                                sizeof(state->connector));
+                if (connector)
+                        strscpy(state->connector, connector->name, sizeof(state->connector));
         }
-
         rt_mutex_unlock(&desktop.lock);
         return 0;
 }
 
-/*
-        The scale and which mode to take, changed while the desktop is up.
-
-        Both are the machine's setting first and the desktop's second: they
-        are kept with Canvas off and taken when it starts, so the answer is
-        the same either way. A scale is the number the compositor reads when
-        it starts, so one that is already running keeps what it read, and one
-        number or auto is all there is to say. A mode is the hotplug's
-        business, which is where a card is looked at again, so each card is
-        told it has one; a screen that is a window on another one's has no
-        mode of its own and takes none.
-*/
 static long canvas_scale_set(unsigned int setting)
 {
         unsigned int dpi;
 
         if (setting > SPARK_CANVAS_SCALE_MOST)
                 return -EINVAL;
-
         if (rt_mutex_lock_killable(&desktop.lock))
                 return -EINTR;
-
         canvas_scale_setting = setting;
         canvas_scale_origin = SPARK_CANVAS_ORIGIN_SET;
-
         if (!list_empty(&desktop.outputs))
                 desktop_rescale(setting ? setting : canvas_scale_auto(null, &dpi));
-
         rt_mutex_unlock(&desktop.lock);
         return 0;
 }
@@ -3122,64 +1895,26 @@ static long canvas_modes_set(unsigned int modes)
 
         if (modes > SPARK_CANVAS_MODES_PREFERRED)
                 return -EINVAL;
-
         if (READ_ONCE(canvas_modes_largest) == (modes == SPARK_CANVAS_MODES_LARGEST))
                 return 0;
-
-        /*
-                Each card's plug work is queued here, and client_hotplug is not
-                called: it starts with canvas_rules_hotplug, which takes
-                canvas_list_lock, the lock this loop holds. A mutex is not
-                taken twice, so the call that set the word never returned, in
-                state D for good, and every later STATUS (moonwater canvas,
-                moonwater canvas modes, the settings' reading of either) waited
-                behind it on the same lock. No connector changed, so there is
-                nothing for rover's display counts either.
-        */
         canvas_plug_ensure();
         if (mutex_lock_killable(&canvas_list_lock))
                 return -EINTR;
-        // Under the lock, so a killed wait changes nothing.
         WRITE_ONCE(canvas_modes_largest, modes == SPARK_CANVAS_MODES_LARGEST);
         list_for_each_entry(canvas, &canvas_list, link)
         {
                 canvas->retarget = true;
-                queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq,
-                           &canvas->plug);
+                queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq, &canvas->plug);
         }
         mutex_unlock(&canvas_list_lock);
-
         return 0;
 }
 
 /* ---- pointer: the pointer ---- */
 
-/*
-        Canvas -- input
-
-        The handler below is called by the input core directly, in the same
-        path that received the event, for every report of every device with
-        keys. It hears two chords and records them; the thread acts on them,
-        because what they ask takes locks and sleeps. The pointer, the
-        keyboard and everything else are the compositor's, which opens the
-        same devices itself.
-*/
-
 static struct task_struct __rcu *canvas_thread;
-
 static _Bool pointer_handler_registered;
 
-/*
-        One attached device, with the modifier keys it holds.
-
-        The list is kept here under the input lock rather than read out of
-        the input core, whose handle list has a lock of its own.
-
-        An open that fails is tried again. The input core drops a device a
-        connect refuses, and a keyboard the BIOS was still driving when the
-        kernel took the controller can refuse its first open and accept the
-        next; a device that stays refused is logged and left.
-*/
 #define POINTER_OPEN_TRIES 30
 
 struct pointer_handle
@@ -3188,8 +1923,7 @@ struct pointer_handle
         struct list_head link;
         struct delayed_work reopen;
         int opened;
-        unsigned int tries;
-        unsigned int modifiers;
+        unsigned int tries, modifiers;
 };
 
 static LIST_HEAD(pointer_handles);
@@ -3211,24 +1945,13 @@ static unsigned int keyboard_modifiers(void)
 
         list_for_each_entry(pointer, &pointer_handles, link)
                 held |= pointer->modifiers;
-        return ((held | (held >> 4)) &
-                (CHORD_SHIFT | CHORD_CONTROL | CHORD_ALT)) |
+        return ((held | (held >> 4)) & (CHORD_SHIFT | CHORD_CONTROL | CHORD_ALT)) |
                ((held & KEY_HELD_ALTGR) ? CHORD_ALTGR : 0);
 }
 
-/*
-        What Canvas hears: modifiers, which the chords that end a program or
-        Canvas are made of, and Backspace, which completes them. Every other
-        report is the compositor's, which reads the same devices itself and
-        loses nothing by this handler saying nothing, and which a handler that
-        did a good deal with each one would be slowed by: every report of every
-        device goes through every handler. A key that is no part of a chord
-        takes no lock either.
-*/
 static _Bool pointer_hears(unsigned int type, unsigned int code)
 {
-        return type == EV_KEY && code < KEY_TABLE &&
-               (key_mod[code] || code == KEY_BACKSPACE);
+        return type == EV_KEY && code < KEY_TABLE && (key_mod[code] || code == KEY_BACKSPACE);
 }
 
 static HOT void pointer_event_run(struct input_handle *handle, unsigned int type,
@@ -3241,18 +1964,15 @@ static HOT void pointer_event_run(struct input_handle *handle, unsigned int type
                 __this_cpu_inc(canvas_quiet);
                 return;
         }
-
         spin_lock_irqsave(&desktop.input_lock, flags);
         keyboard_event(handle, code, value);
         spin_unlock_irqrestore(&desktop.input_lock, flags);
 }
 
-// Counted and, one in sixteen, timed: what `moonwater latency` shows.
 static HOT void pointer_event(struct input_handle *handle, unsigned int type,
                               unsigned int code, int value)
 {
         u64 started = moonwater_cost_begin(&canvas_cost);
-
         pointer_event_run(handle, type, code, value);
         moonwater_cost_end(&canvas_cost, started);
 }
@@ -3266,40 +1986,35 @@ static void pointer_reopen(struct work_struct *work)
 {
         struct pointer_handle *pointer =
             container_of(to_delayed_work(work), struct pointer_handle, reopen);
+        const char *name = pointer_device_name(&pointer->handle);
         int ret = input_open_device(&pointer->handle);
 
         pointer->opened = ret;
-
         if (!ret)
         {
                 if (pointer->tries)
-                        pr_info("[moonwater canvas] " "input: %s opened on try %u\n", pointer_device_name(&pointer->handle), pointer->tries + 1);
+                        pr_info(CANVAS_LOG "input: %s opened on try %u\n", name, pointer->tries + 1);
                 else
-                        pr_info("[moonwater canvas] " "input: %s\n", pointer_device_name(&pointer->handle));
+                        pr_info(CANVAS_LOG "input: %s\n", name);
                 return;
         }
-
         if (!pointer->tries)
-                pr_info("[moonwater canvas] " "input: %s would not open (%d), trying again\n", pointer_device_name(&pointer->handle), ret);
-
+                pr_info(CANVAS_LOG "input: %s would not open (%d), trying again\n", name, ret);
         if (++pointer->tries < POINTER_OPEN_TRIES)
                 schedule_delayed_work(&pointer->reopen, HZ);
         else
-                pr_info("[moonwater canvas] " "input: %s would not open (%d), given up\n", pointer_device_name(&pointer->handle), ret);
+                pr_info(CANVAS_LOG "input: %s would not open (%d), given up\n", name, ret);
 }
 
-static COLD int pointer_connect(struct input_handler *handler,
-                                struct input_dev *dev,
+static COLD int pointer_connect(struct input_handler *handler, struct input_dev *dev,
                                 const struct input_device_id *id)
 {
-        struct pointer_handle *pointer;
+        struct pointer_handle *pointer = kzalloc(sizeof(*pointer), GFP_KERNEL);
         unsigned long flags;
         int ret;
 
-        pointer = kzalloc(sizeof(*pointer), GFP_KERNEL);
         if (!pointer)
                 return -ENOMEM;
-
         pointer->handle.dev = dev;
         pointer->handle.handler = handler;
         pointer->handle.name = "moonwater";
@@ -3311,27 +2026,13 @@ static COLD int pointer_connect(struct input_handler *handler,
                 kfree(pointer);
                 return ret;
         }
-
         spin_lock_irqsave(&desktop.input_lock, flags);
         list_add_tail(&pointer->link, &pointer_handles);
         spin_unlock_irqrestore(&desktop.input_lock, flags);
 
-        /*
-                Opened from a worker, not here.
-
-                A connect runs inside the bus probe that registered the
-                device, with the input core's mutex held, and opening a USB
-                HID device sleeps fifty milliseconds in usbhid_open before it
-                returns. Done here, that sleep sat in front of every device
-                after this one on the same hub -- a mouse enumerated first
-                held the keyboard back by it, and a keyboard with a media-key
-                interface paid it twice -- and in front of every other input
-                device registering anywhere. Nothing is lost by the worker: a
-                device delivers nothing until it is open either way.
-        */
+        // Open asynchronously so USB HID open sleeps do not stall bus enumeration.
         pointer->opened = -EINPROGRESS;
         schedule_delayed_work(&pointer->reopen, 0);
-
         return 0;
 }
 
@@ -3341,120 +2042,63 @@ static COLD void pointer_disconnect(struct input_handle *handle)
         unsigned long flags;
 
         cancel_delayed_work_sync(&pointer->reopen);
-
-        // Stop callbacks before releasing held keys; no late press may
-        // resurrect a modifier after this device leaves the list.
         if (!pointer->opened)
                 input_close_device(handle);
-
         spin_lock_irqsave(&desktop.input_lock, flags);
         for (unsigned int code = 0; code < KEY_TABLE; code++)
                 if (pointer->modifiers & key_mod[code])
                         keyboard_event(handle, code, 0);
         list_del(&pointer->link);
         spin_unlock_irqrestore(&desktop.input_lock, flags);
-
         input_unregister_handle(handle);
         kfree(pointer);
 }
 
-/*
-        The console's keyboard, off while Canvas has the keys.
-
-        The input core hands every key to every handler, and the VT's keyboard
-        is one of them: it turns keys into input on the foreground console's
-        tty. A machine booted without console= -- every real install -- points
-        /dev/console at that tty, and init's shell reads it. So every line
-        typed into a window here was typed a second time, unseen, into a root
-        shell on tty1, and ran there too.
-
-        K_OFF stops the VT turning keys into tty input and nothing else. evdev
-        readers and sysrq are handlers of their own and still hear every key,
-        which an exclusive grab would have taken from them, and the shell on
-        tty1 stays where it is for whoever is at the console once Canvas lets
-        go. Switching consoles from the keyboard is off with it, as it is under
-        any display server that sets K_OFF.
-
-        Every console, not only the one in front. Muting just that one left a
-        console switch as the way round it: a program calling VT_ACTIVATE puts
-        another console in front with its keyboard still on, and the keys go
-        to whatever reads that tty. And a console is not muted once for good:
-        allocating one runs vc_init, whose reset_vc puts its keyboard back to
-        unicode, and a switch away from a VT_PROCESS owner that has died does
-        the same. So the VT's own notifier is watched while Canvas has the
-        keys, and a console it says was allocated or redrawn -- a switch is a
-        redraw of the console coming to the front -- is muted again.
-
-        Each console muted is remembered with the mode it had when it was
-        first muted, and that is what it gets back. A mode somebody else set
-        in the meantime is theirs and is left alone, and so is a console that
-        was already off when Canvas arrived.
-
-        The notifier runs with the console lock held and nothing may sleep, so
-        what it and the two ends share is under a spinlock, taken outside the
-        keyboard's own lock and never inside it.
-*/
+// Mute VT keyboard (K_OFF) on all consoles while Canvas is active; restore original modes on exit.
 #ifdef CONFIG_VT
 
 static DEFINE_SPINLOCK(canvas_vt_lock);
-static _Bool canvas_vt_owned;
-static _Bool canvas_vt_watching;
-static signed char canvas_vt_mode[MAX_NR_CONSOLES] = {
-        [0 ... MAX_NR_CONSOLES - 1] = -1,
-};
+static _Bool canvas_vt_owned, canvas_vt_watching;
+static signed char canvas_vt_mode[MAX_NR_CONSOLES] = {[0 ... MAX_NR_CONSOLES - 1] = -1};
 
-// Under canvas_vt_lock.
 static void canvas_keyboard_mute(unsigned int console)
 {
         int mode;
 
         if (console >= MAX_NR_CONSOLES)
                 return;
-
         mode = vt_do_kdgkbmode(console);
         if (mode == K_OFF || vt_do_kdskbmode(console, K_OFF))
                 return;
-
         if (canvas_vt_mode[console] < 0)
                 canvas_vt_mode[console] = (signed char)mode;
 }
 
-static int canvas_keyboard_follow(struct notifier_block *block,
-                                  unsigned long event, void *data)
+static int canvas_keyboard_follow(struct notifier_block *block, unsigned long event, void *data)
 {
         struct vt_notifier_param *param = data;
         unsigned long flags;
 
-        (void)block;
-
         if ((event != VT_ALLOCATE && event != VT_UPDATE) || !param || !param->vc)
                 return NOTIFY_DONE;
-
         spin_lock_irqsave(&canvas_vt_lock, flags);
         if (canvas_vt_owned)
                 canvas_keyboard_mute(param->vc->vc_num);
         spin_unlock_irqrestore(&canvas_vt_lock, flags);
-
         return NOTIFY_DONE;
 }
 
-static struct notifier_block canvas_keyboard_watch = {
-        .notifier_call = canvas_keyboard_follow,
-};
+static struct notifier_block canvas_keyboard_watch = {.notifier_call = canvas_keyboard_follow};
 
 static void canvas_keyboard_take(void)
 {
         unsigned long flags;
-        unsigned int console;
 
-        // Watching first: a console allocated between the loop below and
-        // the watch starting would come up unmuted and never be told of.
         if (!canvas_vt_watching && !register_vt_notifier(&canvas_keyboard_watch))
                 canvas_vt_watching = true;
-
         spin_lock_irqsave(&canvas_vt_lock, flags);
         canvas_vt_owned = true;
-        for (console = 0; console < MAX_NR_CONSOLES; console++)
+        for (unsigned int console = 0; console < MAX_NR_CONSOLES; console++)
                 canvas_keyboard_mute(console);
         spin_unlock_irqrestore(&canvas_vt_lock, flags);
 }
@@ -3462,44 +2106,33 @@ static void canvas_keyboard_take(void)
 static void canvas_keyboard_give(void)
 {
         unsigned long flags;
-        unsigned int console;
 
-        // Unregistering waits out a notifier already running, so nothing
-        // mutes a console again behind the loop below.
         if (canvas_vt_watching)
         {
                 unregister_vt_notifier(&canvas_keyboard_watch);
                 canvas_vt_watching = false;
         }
-
         spin_lock_irqsave(&canvas_vt_lock, flags);
         canvas_vt_owned = false;
-        for (console = 0; console < MAX_NR_CONSOLES; console++)
+        for (unsigned int console = 0; console < MAX_NR_CONSOLES; console++)
         {
                 if (canvas_vt_mode[console] < 0)
                         continue;
-
                 if (vt_do_kdgkbmode(console) == K_OFF)
                         vt_do_kdskbmode(console, (unsigned int)canvas_vt_mode[console]);
-
                 canvas_vt_mode[console] = -1;
         }
         spin_unlock_irqrestore(&canvas_vt_lock, flags);
 }
 
 #else
-
 #define canvas_keyboard_take() ((void)0)
 #define canvas_keyboard_give() ((void)0)
-
 #endif
 
 // Anything with keys, which is every keyboard and a mouse by its buttons.
 static const struct input_device_id pointer_ids[] = {
-    {
-        .flags = INPUT_DEVICE_ID_MATCH_EVBIT,
-        .evbit = {BIT_MASK(EV_KEY)},
-    },
+    {.flags = INPUT_DEVICE_ID_MATCH_EVBIT, .evbit = {BIT_MASK(EV_KEY)}},
     {},
 };
 
@@ -3511,23 +2144,8 @@ static struct input_handler pointer_handler = {
     .id_table = pointer_ids,
 };
 
-/*
-        The first redraw after a wake can land before the panel has its link
-        back: the driver's resume returns, the panel is still training, and a
-        commit made then is accepted and shows nothing. The desktop is drawn
-        again from scratch half a second and two and a half seconds later,
-        which costs nothing when the first one took.
-*/
 static int canvas_pm_again_left;
 
-/*
-        Whether the wake should turn the screens off and on again before the
-        redraw. A real card's driver restores the state it saved, and a panel
-        that state says is on but the hardware is not showing is answered by
-        a plane update as if nothing had happened; only an active change makes
-        it program the pipe again. A guest's display has no such drift, and
-        virtio-gpu does not always get its host window back from an off.
-*/
 static _Bool desktop_cycle_wanted(void)
 {
         struct output *output;
@@ -3535,12 +2153,10 @@ static _Bool desktop_cycle_wanted(void)
         list_for_each_entry(output, &desktop.outputs, link)
                 if (!canvas_is_virtual(output->canvas->client.dev))
                         return true;
-
         return false;
 }
 
 static void canvas_pm_again_work(struct work_struct *work);
-
 static DECLARE_DELAYED_WORK(canvas_pm_again, canvas_pm_again_work);
 
 static void canvas_pm_again_work(struct work_struct *work)
@@ -3552,12 +2168,10 @@ static void canvas_pm_again_work(struct work_struct *work)
         {
                 if (pass == 1 && desktop_cycle_wanted())
                         desktop_dpms(DRM_MODE_DPMS_OFF);
-
                 desktop_resume();
                 desktop_report(pass == 1 ? "wake +0.5 s" : "wake +2.5 s");
         }
         rt_mutex_unlock(&desktop.lock);
-
         if (--canvas_pm_again_left > 0)
                 schedule_delayed_work(&canvas_pm_again, msecs_to_jiffies(2000));
 }
@@ -3567,7 +2181,6 @@ static void canvas_pm_sleep(_Bool sleeping)
         struct output *output;
 
         rt_mutex_lock(&desktop.lock);
-
         if (sleeping)
         {
                 WRITE_ONCE(desktop.asleep, true);
@@ -3576,39 +2189,30 @@ static void canvas_pm_sleep(_Bool sleeping)
         }
         else
         {
-                WRITE_ONCE(desktop.asleep, false);
+                struct canvas *seen = null;
 
-                // The other program that took the card while this slept is
-                // still there: the thread draws when it lets go.
+                WRITE_ONCE(desktop.asleep, false);
                 if (desktop.suspended && !desktop_taken())
                 {
                         desktop_resume();
                         desktop_report("wake");
                 }
                 else
-                        pr_info("[moonwater canvas] " "wake: another program has the card, the redraw waits for it\n");
+                        pr_info(CANVAS_LOG "wake: another program has the card, the redraw waits for it\n");
 
-                // What the driver reported while it came back, run now that
-                // the desktop is drawn.
-                {
-                        struct canvas *seen = null;
-
-                        desktop_for_each_card(output, seen)
-                                if (seen->replug)
-                                {
-                                        seen->replug = false;
-                                        queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq,
-                                                   &seen->plug);
-                                }
-                }
+                desktop_for_each_card(output, seen)
+                        if (seen->replug)
+                        {
+                                seen->replug = false;
+                                canvas_plug_queue(seen);
+                        }
         }
-
         rt_mutex_unlock(&desktop.lock);
 
         if (sleeping)
         {
                 cancel_delayed_work_sync(&canvas_pm_again);
-                pr_info("[moonwater canvas] " "sleep: quiet\n");
+                pr_info(CANVAS_LOG "sleep: quiet\n");
         }
         else
         {
@@ -3618,8 +2222,7 @@ static void canvas_pm_sleep(_Bool sleeping)
         }
 }
 
-static int canvas_pm_event(struct notifier_block *block, unsigned long event,
-                           void *unused)
+static int canvas_pm_event(struct notifier_block *block, unsigned long event, void *unused)
 {
         switch (event)
         {
@@ -3634,14 +2237,10 @@ static int canvas_pm_event(struct notifier_block *block, unsigned long event,
                 canvas_pm_sleep(false);
                 break;
         }
-
         return NOTIFY_DONE;
 }
 
-static struct notifier_block canvas_pm_notifier = {
-    .notifier_call = canvas_pm_event,
-};
-
+static struct notifier_block canvas_pm_notifier = {.notifier_call = canvas_pm_event};
 static _Bool canvas_pm_registered;
 
 static void canvas_thread_stop(void)
@@ -3652,7 +2251,6 @@ static void canvas_thread_stop(void)
         if (!thread)
                 return;
         RCU_INIT_POINTER(canvas_thread, null);
-
         if (canvas_pm_registered)
         {
                 unregister_pm_notifier(&canvas_pm_notifier);
@@ -3660,23 +2258,14 @@ static void canvas_thread_stop(void)
         }
         WRITE_ONCE(desktop.asleep, false);
         cancel_delayed_work_sync(&canvas_pm_again);
-
-        /* Registration can be interrupted before the input core initializes
-           the handler's lists.  Only hand a handler back after the matching
-           registration completed. */
         if (pointer_handler_registered)
         {
                 input_unregister_handler(&pointer_handler);
                 pointer_handler_registered = false;
         }
-
-        // Only once no key can reach the handler: from here the console's
-        // keyboard is the only one again.
         canvas_keyboard_give();
-
         synchronize_rcu();
         kthread_stop(thread);
-
         if (canvas_plug_wq)
         {
                 destroy_workqueue(canvas_plug_wq);
@@ -3684,10 +2273,6 @@ static void canvas_thread_stop(void)
         }
 }
 
-/*
-        Wakes the canvas thread, if it is running, so that it looks now rather
-        than at its next poll. With no thread there is nothing to wake.
-*/
 static void canvas_thread_wake(void)
 {
         struct task_struct *thread;
@@ -3699,90 +2284,46 @@ static void canvas_thread_wake(void)
         rcu_read_unlock();
 }
 
-/*
-        While another program is master of a card Canvas draws on.
-
-        Nothing Canvas drew would land, so it draws nothing, and the consoles
-        stay off throughout: the other program (the compositor, Weston)
-        reads the devices itself.
-
-        The test is made every ~250 ms, and when the thread wakes for a
-        chord, so a program that drops master and stays running does not leave
-        a frozen screen: the ground is drawn again within a poll of the card
-        coming back. A commit made while the other program was master answered
-        EBUSY and changed nothing.
-*/
 #define CANVAS_SUSPENDED_POLL_MS 250
 
 /*
         The session of whatever holds the display, ended.
-
-        Only the holder dying is not enough: a wrapper or a loop that starts
-        it again has the new one take the card straight back. So its session goes with
-        it, which is every program the desktop started -- unless the session
-        is init's own, which is every shell on a console that was never given
-        another, and which is not this key's to end: the holder alone is then.
-        Not its process group either, which a shell with no job control makes
-        of itself and everything it starts. Kernel threads and init are never
-        signalled.
 */
 static void canvas_session_end(struct pid *process, struct pid *session)
 {
-        struct task_struct *task;
-        struct task_struct *init;
+        struct task_struct *task, *init;
         struct pid *shared;
 
         kill_pid(process, SIGKILL, 1);
-
         rcu_read_lock();
         init = find_task_by_pid_ns(1, &init_pid_ns);
         shared = init ? task_session(init) : null;
-
         if (session && session != shared)
                 do_each_pid_task(session, PIDTYPE_SID, task)
                 {
-                        if (is_global_init(task) || (task->flags & PF_KTHREAD))
-                                continue;
-                        group_send_sig_info(SIGKILL, SEND_SIG_PRIV, task,
-                                            PIDTYPE_TGID);
+                        if (!is_global_init(task) && !(task->flags & PF_KTHREAD))
+                                group_send_sig_info(SIGKILL, SEND_SIG_PRIV, task, PIDTYPE_TGID);
                 }
                 while_each_pid_task(session, PIDTYPE_SID, task);
         rcu_read_unlock();
 }
 
-// One card's master, found via canvas_master_find, and ended.
 static void canvas_master_end(struct drm_device *dev)
 {
-        struct pid *process = null;
-        struct pid *session = null;
+        struct pid *process = null, *session = null;
         char command[TASK_COMM_LEN] = "";
         int number = canvas_master_find(dev, command, sizeof(command), false, &process, &session);
 
         if (process)
         {
-                pr_info("[moonwater canvas] " "Control-Alt-Backspace: %s (pid %d) holds the display, and it and its session are ended\n", command, number);
+                pr_info(CANVAS_LOG "Control-Alt-Backspace: %s (pid %d) holds the display, and it and its session are ended\n",
+                        command, number);
                 canvas_session_end(process, session);
         }
-
         put_pid(process);
         put_pid(session);
 }
 
-/*
-        Take the display back from the program that holds it.
-
-        Outside desktop.lock and every other lock of this file: it takes a
-        card's filelist_mutex, which drm_open and drm_release hold, and the
-        cards are only referenced here, not locked, while it does.
-
-        The cards are the desktop's, the ones desktop_taken asked of, taken
-        under desktop.lock (a card's outputs are consecutive). Not the list
-        under canvas_list_lock: the thread runs this, and the thread is
-        joined by callers holding that lock (canvas_thread_stop), so a pass
-        that waited for it was never joined -- Control-Alt-Backspace as
-        Canvas was turned off or its last card went hung the thread, the one
-        turning it off, and every request after them that asks for the lock.
-*/
 #define CANVAS_RECLAIM_CARDS 4
 
 static void canvas_reclaim(void)
@@ -3796,14 +2337,12 @@ static void canvas_reclaim(void)
         desktop_for_each_card(output, seen)
         {
                 struct drm_device *dev = seen->client.dev;
-
                 if (count == CANVAS_RECLAIM_CARDS)
                         break;
                 drm_dev_get(dev);
                 cards[count++] = dev;
         }
         rt_mutex_unlock(&desktop.lock);
-
         while (count)
         {
                 canvas_master_end(cards[--count]);
@@ -3811,155 +2350,89 @@ static void canvas_reclaim(void)
         }
 }
 
-/*
-        The work behind Control-Alt-Shift-Backspace.
-
-        The holder of the card and its session are ended first, as
-        Control-Alt-Backspace ends them: a stopped or hung program holds the
-        card against the text console, which cannot take a screen that has a
-        master. SIGKILL reaches a stopped process. Canvas is turned off once
-        nobody is master, or after CANVAS_EXIT_WAIT_MS if somebody still is,
-        so a holder that cannot die does not keep the machine from at least
-        leaving Canvas; the console takes the card when it lets go.
-*/
 #define CANVAS_EXIT_WAIT_MS 2000
 
 static void canvas_exit_work(struct work_struct *work)
 {
-        unsigned int waited;
         _Bool taken = false;
 
-        pr_info("[moonwater canvas] " "Control-Alt-Shift-Backspace: Canvas off, to the text console\n");
+        pr_info(CANVAS_LOG "Control-Alt-Shift-Backspace: Canvas off, to the text console\n");
         canvas_reclaim();
-
-        for (waited = 0; waited < CANVAS_EXIT_WAIT_MS; waited += 5)
+        for (unsigned int waited = 0; waited < CANVAS_EXIT_WAIT_MS; waited += 5)
         {
                 rt_mutex_lock(&desktop.lock);
                 taken = desktop_taken();
                 rt_mutex_unlock(&desktop.lock);
-
                 if (!taken)
                         break;
-
                 msleep(5);
         }
-
         canvas_turn_off();
 }
 
 static DECLARE_WORK(canvas_exit, canvas_exit_work);
 
-static void canvas_exit_request(void)
-{
-        queue_work(system_dfl_long_wq, &canvas_exit);
-}
+static void canvas_exit_request(void) { queue_work(system_dfl_long_wq, &canvas_exit); }
 
 static _Bool canvas_suspend_check(void)
 {
         _Bool taken;
 
         rt_mutex_lock(&desktop.lock);
-
         taken = desktop_taken();
-
-        // A card that only sleeps has no program in front of it.
         WRITE_ONCE(canvas_yielded, taken && !READ_ONCE(desktop.asleep));
-
         if (taken)
                 desktop.suspended = true;
         else if (desktop.suspended)
                 desktop_resume();
-
         rt_mutex_unlock(&desktop.lock);
 
-        /*
-                The chord is answered here, where who holds the card was just
-                asked. A card that is only asleep has no holder to end.
-        */
         if (atomic_xchg(&desktop.reclaim, 0) && taken && !READ_ONCE(desktop.asleep))
                 canvas_reclaim();
-
         return taken;
 }
 
 /*
-        Looks at who holds the cards four times a second, and at once when a
-        chord asks for something.
-
-        Nothing tells Canvas that a program took the display or gave it back
-        without closing it: no hook runs when a master is dropped, only when
-        the last file of a card closes. So the thread looks, and says so
-        (`moonwater canvas`) while another program is master, and draws the
-        ground again within a poll of the card coming back. A machine that
-        sleeps is not looked at.
-
-        set_current_state before the flag is read, which is what makes the
-        sleep safe: a wake arriving between the two finds the task already
-        marked and schedule_timeout returns at once rather than losing the
-        event.
+        Looks at who holds the cards four times a second, and immediately on a chord.
 */
 static int canvas_loop(void *unused)
 {
         while (!kthread_should_stop())
         {
                 set_current_state(TASK_IDLE);
-
                 if (!atomic_read(&desktop.reclaim))
                         schedule_timeout(READ_ONCE(desktop.asleep)
                                              ? MAX_SCHEDULE_TIMEOUT
                                              : msecs_to_jiffies(CANVAS_SUSPENDED_POLL_MS));
-
                 __set_current_state(TASK_RUNNING);
                 WRITE_ONCE(canvas_passes, canvas_passes + 1);
-
                 canvas_suspend_check();
         }
-
         return 0;
 }
 
 static _Bool canvas_thread_start(void)
 {
-        /*
-                A thread rather than a workqueue.
-
-                WQ_HIGHPRI raises a kworker's nice level and leaves it an
-                ordinary task, so it is still scheduled against everything
-                else running. SCHED_FIFO is a different queue entirely: the
-                scheduler picks it before any normal task, which is what lets
-                the chord that ends a program that has the display be acted on
-                while a runaway one holds every processor. Priority 1, as
-                sched_set_fifo_low gives: ahead of every SCHED_OTHER task and
-                behind anything the machine considers more urgent.
-        */
         static const struct sched_attr canvas_policy = {
-                .size = sizeof(struct sched_attr),
-                .sched_policy = SCHED_FIFO,
-                .sched_priority = 1,
+            .size = sizeof(struct sched_attr), .sched_policy = SCHED_FIFO, .sched_priority = 1,
         };
         struct task_struct *thread;
 
         WRITE_ONCE(canvas_yielded, false);
         thread = kthread_run(canvas_loop, null, "moonwater/canvas");
-
         if (IS_ERR(thread))
         {
-                pr_info("[moonwater canvas] " "no thread for input\n");
+                pr_info(CANVAS_LOG "no thread for input\n");
                 return false;
         }
-
         rcu_assign_pointer(canvas_thread, thread);
         WARN_ON_ONCE(sched_setattr_nocheck(thread, &canvas_policy));
-
         if (!register_pm_notifier(&canvas_pm_notifier))
                 canvas_pm_registered = true;
-
-        // Before the handler, so no key is ever delivered to both.
         canvas_keyboard_take();
-
         if (input_register_handler(&pointer_handler))
         {
-                pr_info("[moonwater canvas] " "could not register the input handler\n");
+                pr_info(CANVAS_LOG "could not register the input handler\n");
                 canvas_keyboard_give();
         }
         else
@@ -3967,11 +2440,6 @@ static _Bool canvas_thread_start(void)
         return true;
 }
 
-/*
-        What the input handler costs and whether it is keeping out of the way,
-        for `moonwater latency`; the core adds the key watch's. A reset zeroes
-        what is counted, and answers with the zeros.
-*/
 void canvas_latency(struct latency_stats *out, unsigned int request)
 {
         struct handler_cost heard = {};
@@ -3983,43 +2451,25 @@ void canvas_latency(struct latency_stats *out, unsigned int request)
                 for_each_possible_cpu(cpu)
                         WRITE_ONCE(*per_cpu_ptr(&canvas_quiet, cpu), 0);
         }
-
         out->yielded = READ_ONCE(canvas_yielded);
         out->thread_passes = READ_ONCE(canvas_passes);
-
         moonwater_cost_read(&canvas_cost, &heard);
-        out->canvas.events = heard.events;
-        out->canvas.samples = heard.samples;
-        out->canvas.total_ns = heard.total_ns;
-        out->canvas.worst_ns = heard.worst_ns;
+        out->canvas = (struct latency_cost){heard.events, heard.samples, heard.total_ns, heard.worst_ns};
         for_each_possible_cpu(cpu)
                 out->quiet += READ_ONCE(*per_cpu_ptr(&canvas_quiet, cpu));
 }
 
-/*
-        Canvas off and on, and what it holds.
-
-        The state is copied back whatever the request answers, so a refused
-        on can name the program that holds the display. Reading needs nothing;
-        on and off stop and start the desktop everyone at the machine is
-        using, so they need CAP_SYS_ADMIN. The three numbers the kernel's own
-        desktop answered (the keymap, its log window and its terminal) are
-        answered by nothing any more.
-*/
 static long report_canvas(struct canvas_control __user *out)
 {
         struct canvas_control control;
-        unsigned int request;
+        unsigned int request, asked_scale, asked_modes;
         long answer = 0;
-        unsigned int asked_scale, asked_modes;
 
         if (copy_from_user(&control, out, sizeof(control)))
                 return -EFAULT;
-
         request = control.request;
         asked_scale = control.scale_setting;
         asked_modes = control.modes;
-        // 3, 4 and 5 were the kernel's own desktop's, and are answered by nothing.
         if (request > SPARK_CANVAS_SET_MODES || (request >= 3u && request <= 5u))
                 return -EINVAL;
         if (request != SPARK_CANVAS_STATUS && !capable(CAP_SYS_ADMIN))
@@ -4027,35 +2477,22 @@ static long report_canvas(struct canvas_control __user *out)
 
         memory_zero(&control, sizeof(control));
         control.request = request;
-
-        if (request == SPARK_CANVAS_ON)
-                answer = canvas_turn_on(&control);
-        else if (request == SPARK_CANVAS_OFF)
-                answer = canvas_turn_off();
-        else if (request == SPARK_CANVAS_SET_SCALE)
-                answer = canvas_scale_set(asked_scale);
-        else if (request == SPARK_CANVAS_SET_MODES)
-                answer = canvas_modes_set(asked_modes);
-
+        switch (request)
+        {
+        case SPARK_CANVAS_ON: answer = canvas_turn_on(&control); break;
+        case SPARK_CANVAS_OFF: answer = canvas_turn_off(); break;
+        case SPARK_CANVAS_SET_SCALE: answer = canvas_scale_set(asked_scale); break;
+        case SPARK_CANVAS_SET_MODES: answer = canvas_modes_set(asked_modes); break;
+        }
         if (canvas_state(&control))
                 return answer ? answer : -EINTR;
-
         if (copy_to_user(out, &control, sizeof(control)))
                 return -EFAULT;
-
         return answer;
 }
 
 /*
-        The window table the compositor shares is a memfd, which no path names
-        that another process may open: its /proc/<pid>/fd link asks for the
-        right to trace the compositor. The compositor gives it here, as root,
-        and a root program takes a descriptor of it (close-on-exec) from the
-        device, as it could open the table's file. Only root: the table is
-        every window's picture and input ring in one writable mapping (see
-        window.c WINDOWS_MODE), so a program that is not root is refused, as it
-        is at the 0600 file. The table is let go when the compositor gives
-        another or none, or closes the /dev/spark descriptor it gave it with.
+        The window table the compositor shares is a memfd, passed root-to-root via /dev/spark.
 */
 static DEFINE_SPINLOCK(windows_table_lock);
 static struct file *windows_table, *windows_table_giver;
@@ -4092,19 +2529,8 @@ static long windows_table_get(void)
         struct file *table;
         int fd;
 
-        /*
-                The table is every window's pixels and input ring in one
-                writable mapping. A descriptor of it lets its holder read the
-                root terminal's picture and write keys into the root shell's
-                window, so it is handed only to root, as its file (0600) and
-                WINDOWS_IOCTL_TABLE_SET already are. The compositor and the
-                windows the runner starts are root; a program that is
-                not (a local user, or a bowl program on a real unprivileged
-                uid) is refused here as it is at the file.
-        */
         if (!capable(CAP_SYS_ADMIN))
                 return -EPERM;
-
         spin_lock(&windows_table_lock);
         table = windows_table ? get_file(windows_table) : null;
         spin_unlock(&windows_table_lock);
@@ -4136,52 +2562,32 @@ static void windows_table_release(struct file *giver)
 }
 
 IOCTL_IS(SPARK_IOCTL_CANVAS, IOCTL_BOTH, 10, sizeof(struct canvas_control));
-
 IOCTL_IS(WINDOWS_IOCTL_TABLE_SET, IOCTL_NONE, 17, 0);
-
 IOCTL_IS(WINDOWS_IOCTL_TABLE_GET, IOCTL_NONE, 18, 0);
 
 long canvas_client_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
         switch (cmd)
         {
-        case SPARK_IOCTL_CANVAS:
-                return report_canvas((struct canvas_control __user *)arg);
-        case WINDOWS_IOCTL_TABLE_SET:
-                return windows_table_set(file, arg);
-        case WINDOWS_IOCTL_TABLE_GET:
-                return windows_table_get();
+        case SPARK_IOCTL_CANVAS: return report_canvas((struct canvas_control __user *)arg);
+        case WINDOWS_IOCTL_TABLE_SET: return windows_table_set(file, arg);
+        case WINDOWS_IOCTL_TABLE_GET: return windows_table_get();
         }
-
         return -ENOTTY;
 }
 
-void canvas_client_release(struct file *file)
-{
-        windows_table_release(file);
-}
+void canvas_client_release(struct file *file) { windows_table_release(file); }
 
-// The device is registered and the bindings work: look for a card.
 void canvas_boot(void)
 {
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
-        // Set up whether or not it is scheduled: turning Canvas on cancels it.
         INIT_DELAYED_WORK(&canvas_probe_work, canvas_probe);
 #endif
-
-        /*
-                The image's settings can say Canvas stays off at boot
-                (moonwater init canvas off), and the text console is then
-                what is on the screen. The settings are read before this runs,
-                at the start of the core. moonwater desktop on starts Canvas
-                afterwards as it would after any off.
-        */
         if (moonwater_settings_flags() & SPARK_SETTINGS_CANVAS_OFF)
         {
-                pr_info("[moonwater canvas] " "off at boot, as the image's settings say; moonwater desktop on starts it\n");
+                pr_info(CANVAS_LOG "off at boot, as the image's settings say; moonwater desktop on starts it\n");
                 return;
         }
-
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
         schedule_delayed_work(&canvas_probe_work, 0);
 #endif
@@ -4190,8 +2596,6 @@ void canvas_boot(void)
 void canvas_unload(void)
 {
 #ifdef CONFIG_MOONWATER_CANVAS_AUTOSTART
-        // The probe calls into the core (moonwater_bind_fire), so it has to be
-        // stopped before the core's own state goes.
         cancel_delayed_work_sync(&canvas_probe_work);
 #endif
 }
