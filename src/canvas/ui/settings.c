@@ -420,9 +420,9 @@ static positive settings_keep(const char address_to said, positive length, posit
 // The "[Moonwater] " a verb starts its lines with: how many bytes it is at the start of a line, or none.
 static positive settings_label_length(const char address_to line, positive length)
 {
-        static const char label[] = "[Moonwater] ";
+        positive rest = length;
 
-        return length >= sizeof(label) - 1 && !memory_compare(line, label, sizeof(label) - 1) ? sizeof(label) - 1 : 0;
+        return (positive)(ui_strip_verb_prefix(line, &rest) - line);
 }
 
 /*
@@ -821,20 +821,22 @@ static struct
         // a one makes a deliberate change (settings_refused). False between events, so a timer's change is never one.
         b32 hand;
 
-        // The verb being run: its process, the read end of its output, what it said, when it began, for which row.
-        bipolar child;
-        b32 output;
-        // The child is ending: 1 its output ended and it is not yet reaped, 2 it was killed and is not yet reaped. Its exit is polled
-        // (settings_reap) from the window's timers, never waited for, so the window's events go on while it goes.
-        int ending;
-        // The child has exited but its output has not ended (a process it left behind holds the output open): what is written is read to
-        // where it stops, and then it is reaped (settings_tick, settings_drain).
-        b32 exited;
-        positive said_length, began;
-        // What the buffer does not keep: once it is full it is cut back to its last whole line, and what follows is counted (the
-        // lines, and the rows a list reads: two blanks and a word), for the note of how many were not shown.
-        b32 said_cut;
-        positive cut_lines, cut_rows, cut_at, cut_blank;
+        // The verb being run: backed by the kit's ui_job runner (anonymous layout alias preserves direct field access for checks).
+        union
+        {
+                struct ui_job runner;
+                struct
+                {
+                        bipolar child;
+                        int output;
+                        int ending;
+                        b32 exited;
+                        positive began;
+                        positive runner_timeout;
+                        char address_to runner_buf;
+                        positive runner_room, said_length;
+                };
+        };
         int job;
         b32 job_sets;
         char job_value[SETTINGS_TYPED];
@@ -1379,17 +1381,22 @@ enum settings_domain_kind
         SETTINGS_DOM_ABOUT = 5,   // [SETTINGS_ABOUT, SETTINGS_LIST_IDS): About section rows
 };
 
-static const struct settings_domain
+struct settings_domain_ops
 {
         int first, stop;
-} settings_domains[6] = {
-    [SETTINGS_DOM_ROW]     = {0, SETTINGS_ANY},
-    [SETTINGS_DOM_COMMAND] = {SETTINGS_ANY, (int)SETTINGS_LIST},
-    [SETTINGS_DOM_LIST]    = {(int)SETTINGS_LIST, (int)SETTINGS_ALL},
-    [SETTINGS_DOM_SUB]     = {(int)SETTINGS_ALL, SETTINGS_TRY},
-    [SETTINGS_DOM_TRY]     = {SETTINGS_TRY, SETTINGS_ABOUT},
-    [SETTINGS_DOM_ABOUT]   = {SETTINGS_ABOUT, SETTINGS_LIST_IDS},
+        const char address_to (*label)(int id, int offset, b32 shown);
+        int (*section_start)(int id, int offset);
+        const char address_to (*section)(int id, int offset);
+        int (*group_of)(int id, int offset);
+        b32 (*matches_word)(int id, int offset, const char address_to word, positive size);
+        fn (*describe)(int id, int offset, struct ui_row address_to row);
+        fn (*activate)(int id, int offset, int way);
+        b32 (*press)(int id, int offset, int x, int y);
+        const char address_to (*copy_text)(int id, int offset);
+        p32 (*menu_flags)(int id, int offset, b32 has);
 };
+
+static const struct settings_domain_ops settings_domains[6];
 
 static int settings_domain_of(int id, int address_to offset)
 {
@@ -1443,15 +1450,9 @@ static struct settings_item address_to settings_item(int row)
 
 static const char address_to settings_label(int row)
 {
-        int at;
+        int at, dom = settings_domain_of(row, &at);
 
-        switch (settings_domain_of(row, &at))
-        {
-        case SETTINGS_DOM_ROW: return settings_rows[at].label;
-        case SETTINGS_DOM_LIST: return settings_item(row) ? settings_item(row)->label : WORDS(settings_run_any);
-        case SETTINGS_DOM_COMMAND: return at > 0 ? settings_large->pool + settings.generic[at - 1].command : WORDS(settings_run_any);
-        default: return WORDS(settings_run_any);
-        }
+        return dom >= 0 && settings_domains[dom].label ? settings_domains[dom].label(row, at, false) : WORDS(settings_run_any);
 }
 
 /*
@@ -1460,21 +1461,9 @@ static const char address_to settings_label(int row)
 */
 static const char address_to settings_label_shown(int row)
 {
-        int at;
+        int at, dom = settings_domain_of(row, &at);
 
-        switch (settings_domain_of(row, &at))
-        {
-        case SETTINGS_DOM_ABOUT: return settings_about_label(at);
-        case SETTINGS_DOM_ROW: return language_of(settings_rows[at].label);
-        case SETTINGS_DOM_LIST:
-        {
-                const struct settings_item address_to item = settings_item(row);
-
-                return !item ? WORDS(settings_run_any) : item->kind == SETTINGS_ADD ? language_of(item->label) : item->label;
-        }
-        case SETTINGS_DOM_COMMAND: return at > 0 ? settings_large->pool + settings.generic[at - 1].command : WORDS(settings_run_any);
-        default: return WORDS(settings_run_any);
-        }
+        return dom >= 0 && settings_domains[dom].label ? settings_domains[dom].label(row, at, true) : WORDS(settings_run_any);
 }
 
 /*
@@ -1554,56 +1543,17 @@ static int settings_device_section(const struct settings_item address_to item)
 // of its own, and the device list is one for each place a device is.
 static int settings_section_start(int row)
 {
-        int offset;
+        int offset, dom = settings_domain_of(row, &offset);
 
-        switch (settings_domain_of(row, &offset))
-        {
-        case SETTINGS_DOM_LIST:
-        {
-                int list = offset / SETTINGS_LIST_ROWS, at = offset % SETTINGS_LIST_ROWS;
-
-                if (list == 2 && settings_item(row))
-                {
-                        int section = settings_device_section(settings_item(row));
-
-                        while (at > 0 && settings_device_section(&settings_large->item[2][at - 1]) == section)
-                                at--;
-                        return (int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + at;
-                }
-                return (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS;
-        }
-        case SETTINGS_DOM_COMMAND: return SETTINGS_ANY;
-        case SETTINGS_DOM_ROW:
-                while (row > 0 && !settings_rows[row].section && !settings_rows[row].part)
-                        row--;
-                return row;
-        default: return row;
-        }
+        return dom >= 0 && settings_domains[dom].section_start ? settings_domains[dom].section_start(row, offset) : row;
 }
 
 // The name of the group a row is in (a list's heading for a row of a list), which the filter finds it by.
 static const char address_to settings_section(int row)
 {
-        int offset;
+        int offset, dom = settings_domain_of(row, &offset);
 
-        switch (settings_domain_of(row, &offset))
-        {
-        case SETTINGS_DOM_LIST:
-        {
-                int list = offset / SETTINGS_LIST_ROWS;
-                const struct settings_item address_to item = settings_item(row);
-
-                if (list == 2 && item && settings_device_section(item))
-                        return settings_device_section(item) == 1 ? SETTINGS_EXTERNAL_HEADER : "";
-                return settings_feeds[list].heading;
-        }
-        case SETTINGS_DOM_COMMAND: return SETTINGS_ALL_HEADER;
-        case SETTINGS_DOM_ROW:
-                while (row > 0 && !settings_rows[row].section)
-                        row--;
-                return settings_rows[row].section;
-        default: return "";
-        }
+        return dom >= 0 && settings_domains[dom].section ? settings_domains[dom].section(row, offset) : "";
 }
 
 // The header a row is listed under: the name of its part, or of its group for a row before the group's first part.
@@ -1647,24 +1597,9 @@ static const char address_to settings_group_text(int group)
 // The group a row is in; a list is in the group its feed keeps up with.
 static int settings_group_of(int row)
 {
-        int offset, group = -1;
+        int offset, dom = settings_domain_of(row, &offset);
 
-        switch (settings_domain_of(row, &offset))
-        {
-        case SETTINGS_DOM_ABOUT: return settings_system_group();
-        case SETTINGS_DOM_LIST:
-                for (int at = 0; at < settings_groups(); at++)
-                        if (string_equals((string_address)settings_group_name(at),
-                                          (string_address)settings_feeds[offset / SETTINGS_LIST_ROWS].group))
-                                return at;
-                return 0;
-        case SETTINGS_DOM_COMMAND: return settings_groups() - 1;
-        case SETTINGS_DOM_ROW:
-                for (int at = 0; at <= offset; at++)
-                        group += settings_rows[at].section != null;
-                return group;
-        default: return 0;
-        }
+        return dom >= 0 && settings_domains[dom].group_of ? settings_domains[dom].group_of(row, offset) : 0;
 }
 
 // Where a row is in the rows that show, or -1.
@@ -1696,28 +1631,9 @@ static b32 settings_matches_name(const char address_to label, const char address
 
 static b32 settings_matches_word(int row, const char address_to word, positive size)
 {
-        int offset;
+        int offset, dom = settings_domain_of(row, &offset);
 
-        switch (settings_domain_of(row, &offset))
-        {
-        case SETTINGS_DOM_ABOUT: return settings_about_matches_word(offset, word, size);
-        case SETTINGS_DOM_LIST: return settings_matches_name(settings_label(row), settings_section(row), word, size);
-        case SETTINGS_DOM_ROW:
-        {
-                const struct settings_row address_to which = &settings_rows[offset];
-
-                for (positive at = 0; at < SETTING_WORDS; at++)
-                        if (settings_has(which->read[at], word, size) || settings_has(which->set[at], word, size))
-                                return true;
-                // Its value is what the row holds: the filter finds a row by it too, as its comment says; and by the name of its part
-                // and what it does, the words its line shows.
-                return settings_has(settings.value[offset], word, size) || settings_matches_name(which->label, settings_section(row), word, size) ||
-                       settings_matches_name(which->about, settings_rows[settings_section_start(row)].part, word, size);
-        }
-        default:
-                return settings_has(settings_label(row), word, size) || settings_has(settings_text(row), word, size) ||
-                       (row == SETTINGS_ANY && settings_has("anything", word, size));
-        }
+        return dom >= 0 && settings_domains[dom].matches_word ? settings_domains[dom].matches_word(row, offset, word, size) : false;
 }
 
 /*
@@ -3399,12 +3315,12 @@ static fn settings_card_fill(void)
         while (made && settings_large->card[made - 1] == '\n')
                 made--;
         // The lines the buffer did not keep are the card's last line: how many there were.
-        if (settings.cut_lines && made + SETTINGS_ITEM_LABEL < sizeof(settings_large->card))
+        if (settings.runner.cut_lines && made + SETTINGS_ITEM_LABEL < sizeof(settings_large->card))
         {
                 char note[SETTINGS_ITEM_LABEL];
                 positive size;
 
-                language_format(note, sizeof(note), WORDS(settings_not_shown), (long)settings.cut_lines);
+                language_format(note, sizeof(note), WORDS(settings_not_shown), (long)settings.runner.cut_lines);
                 size = string_length((string_address)note);
                 if (made)
                         settings_large->card[made++] = '\n';
@@ -3442,6 +3358,37 @@ static fn settings_say(string_address text)
         string_copy_bounded((string_address)settings.status, text, sizeof(settings.status));
 }
 
+static fn settings_complete(b32 killed, positive status);
+static fn settings_waiting_say(void);
+static b32 settings_waits(int row);
+
+static fn settings_job_done(struct ui_job address_to j, b32 killed, positive status)
+{
+        (void)j;
+        settings_complete(killed, status);
+}
+
+static fn settings_job_data(struct ui_job address_to j)
+{
+        (void)j;
+        settings_waiting_say();
+}
+
+static fn settings_runner_ready(void)
+{
+        settings.runner.done = settings_job_done;
+        settings.runner.data = settings_job_data;
+}
+
+// How long the verb running may take, in nanoseconds: a feed's reading, a join's handshake, a pairing's code, or the standard.
+static positive settings_most(void)
+{
+        return settings.job == SETTINGS_JOB_FEED  ? (positive)SETTINGS_FEED_WAIT_NS
+               : settings.job == SETTINGS_JOB_ACT ? (positive)SETTINGS_ACT_WAIT_NS
+               : settings_waits(settings.job)     ? (positive)SETTINGS_WAIT_PAIR_NS
+                                                  : (positive)SETTINGS_WAIT_NS;
+}
+
 /*
         A verb run with its output to a pipe this end reads, and for its input
         what is in input (a password, which the verb takes from a line of its
@@ -3450,15 +3397,10 @@ static fn settings_say(string_address text)
 */
 static b32 settings_start(string_address address_to words, positive count, const char address_to input)
 {
-        if (!ui_start_piped(words, count, input, &settings.child, &settings.output))
-                return false;
-        settings.ending = 0;
-        settings.exited = 0;
-        settings.said_length = 0;
-        settings.said_cut = false;
-        settings.cut_lines = settings.cut_rows = settings.cut_at = settings.cut_blank = 0;
-        settings.began = (positive)ui_kit.now;
-        return true;
+        positive limit = settings.job_sets && settings.job >= SETTINGS_ANY ? 0 : settings_most();
+
+        settings_runner_ready();
+        return ui_job_start(&settings.runner, words, count, input, settings_large->said, sizeof(settings_large->said), limit);
 }
 
 // The command's words as one line, after "moonwater", into text.
@@ -3853,19 +3795,6 @@ static fn settings_item_label(struct settings_item address_to item, const char a
         item->label[size] = 0;
 }
 
-static struct settings_item address_to settings_item_find(int list, const char address_to name, positive size)
-{
-        for (int at = 0; at < settings.item_count[list]; at++)
-        {
-                struct settings_item address_to item = &settings_large->item[list][at];
-
-                if (item->kind != SETTINGS_NOTE && string_length((string_address)item->label) == size &&
-                    !memory_compare(item->label, name, size))
-                        return item;
-        }
-        return null;
-}
-
 // Whether moonwater can join what a network asks for: open, WPA2, WPA3 and the two together, with protected management frames.
 static b32 settings_joinable(const char address_to security)
 {
@@ -3899,95 +3828,94 @@ static b32 settings_feed_line(positive address_to at, char address_to line, posi
 }
 
 /*
-        What moonwater wifi said, as the list of networks: the ones heard,
-        strongest first as it prints them (marker, name, dBm, bars, what it
-        asks for), then the saved ones not heard, then the one line it said
-        that is about none of them (no networks heard, why it is not joined).
+        What moonwater wifi said, as the list of networks: parsed by ui_wifi_parse (heard strongest first, then saved
+        not heard, plus any status note line), and mapped into settings_large->item[0].
 */
 static fn settings_feed_wifi(void)
 {
         struct settings_item address_to items = settings_large->item[0];
-        char line[SETTINGS_PROBE], note[SETTINGS_ITEM_LABEL] = {0};
-        char address_to text;
-        positive at, size, count = 0;
+        struct ui_wifi_net nets[SETTINGS_LIST_ROWS];
+        char note[SETTINGS_ITEM_LABEL] = {0};
+        int n = ui_wifi_parse(settings_large->said, settings.said_length, nets, SETTINGS_LIST_ROWS - 1, null, note, sizeof(note));
+        positive count = 0;
 
         memory_zero(items, sizeof(settings_large->item[0]));
-        for (int pass = 0; pass < 2; pass++)
-                for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
-                {
-                        positive dbm_at = size > 7 ? settings_find_last(text, size, " dBm ") : size;
+        for (int i = 0; i < n; i++)
+        {
+                struct settings_item address_to item = &items[count++];
 
-                        if (!pass && dbm_at < size && dbm_at > 2)
-                        {
-                                // marker, name, blanks, the signal in dBm, " dBm ", four bars, what it asks for, band and channel.
-                                positive number = dbm_at, name_end, word;
-                                struct settings_item address_to item;
-                                int level = 0;
-                                b32 below = false;
-
-                                while (number > 2 && ((text[number - 1] >= '0' && text[number - 1] <= '9') || text[number - 1] == '-'))
-                                        number--;
-                                name_end = number;
-                                while (name_end > 2 && text[name_end - 1] == ' ')
-                                        name_end--;
-                                if (name_end <= 2 || count + 1 >= SETTINGS_LIST_ROWS)
-                                        continue;
-                                item = &items[count++];
-                                item->kind = SETTINGS_NETWORK;
-                                settings_item_label(item, text + 2, name_end - 2);
-                                item->flags = SETTINGS_ITEM_HEARD | (text[0] == '*' ? SETTINGS_ITEM_JOINED | SETTINGS_ITEM_SAVED
-                                                                      : text[0] == '+' ? SETTINGS_ITEM_SAVED : 0);
-                                for (positive digit = number; digit < dbm_at; digit++)
-                                        if (text[digit] == '-')
-                                                below = true;
-                                        else
-                                                level = level * 10 + (text[digit] - '0');
-                                item->dbm = (signed short)(below ? -level : level);
-                                word = dbm_at + 5;
-                                for (positive bar = 0; bar < 4 && word < size; bar++, word++)
-                                        item->bars += text[word] == '#';
-                                while (word < size && text[word] == ' ')
-                                        word++;
-                                for (positive own = 0; word + own < size && text[word + own] != ' ' && own + 1 < sizeof(item->security); own++)
-                                        item->security[own] = text[word + own];
-                                if (string_equals((string_address)item->security, (string_address) "open"))
-                                        item->flags |= SETTINGS_ITEM_OPEN;
-                                if (!settings_joinable(item->security))
-                                        item->flags |= SETTINGS_ITEM_CANNOT;
-                        }
-                        else if (pass && dbm_at >= size && size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ')
-                        {
-                                // A saved network, as a name with two blanks before it, and not "and 3 more".
-                                struct settings_item address_to item = settings_item_find(0, text + 2, size - 2);
-
-                                if (settings_starts(text + 2, "and ") && size > 7 && !memory_compare(text + size - 5, " more", 5))
-                                        continue;
-                                settings.item_count[0] = (unsigned short)count;
-                                if (item)
-                                        item->flags |= SETTINGS_ITEM_SAVED;
-                                else if (count + 1 < SETTINGS_LIST_ROWS)
-                                {
-                                        item = &items[count++];
-                                        item->kind = SETTINGS_NETWORK;
-                                        item->flags = SETTINGS_ITEM_SAVED;
-                                        settings_item_label(item, text + 2, size - 2);
-                                }
-                        }
-                        else if (pass && dbm_at >= size && size && text[0] != ' ' && !note[0] && !settings_starts(text, "wifi ") &&
-                                 !settings_starts(text, "* joined"))
-                        {
-                                size = size >= sizeof(note) ? sizeof(note) - 1 : size;
-                                memory_copy(note, text, size);
-                                note[size] = 0;
-                        }
-                        settings.item_count[0] = (unsigned short)count;
-                }
+                item->kind = SETTINGS_NETWORK;
+                string_copy_bounded((string_address)item->label, (string_address)nets[i].name, sizeof(item->label));
+                string_copy_bounded((string_address)item->security, (string_address)nets[i].security, sizeof(item->security));
+                item->dbm = nets[i].dbm, item->bars = nets[i].bars;
+                item->flags = (nets[i].flags & UI_WIFI_HEARD ? SETTINGS_ITEM_HEARD : 0) |
+                              (nets[i].flags & UI_WIFI_JOINED ? SETTINGS_ITEM_JOINED : 0) |
+                              (nets[i].flags & UI_WIFI_SAVED ? SETTINGS_ITEM_SAVED : 0) |
+                              (nets[i].flags & UI_WIFI_OPEN ? SETTINGS_ITEM_OPEN : 0) |
+                              ((nets[i].flags & UI_WIFI_HEARD) && !settings_joinable(item->security) ? SETTINGS_ITEM_CANNOT : 0);
+        }
         if (note[0] && count < SETTINGS_LIST_ROWS)
         {
                 items[count].kind = SETTINGS_NOTE;
-                settings_item_label(&items[count++], note, string_length((string_address)note));
+                string_copy_bounded((string_address)items[count++].label, (string_address)note, sizeof(items[0].label));
         }
         settings.item_count[0] = (unsigned short)count;
+}
+
+// Tiny slice cursor for feed line parsing (hardware, bluetooth devices, waterlink peers).
+struct settings_cursor
+{
+        const char address_to s;
+        positive n;
+};
+
+static inline b32 sc_eat(struct settings_cursor address_to c, const char address_to prefix)
+{
+        positive len = string_length((string_address)prefix);
+
+        if (c->n < len || memory_compare(c->s, prefix, len))
+                return false;
+        c->s += len, c->n -= len;
+        return true;
+}
+
+static inline fn sc_spaces(struct settings_cursor address_to c)
+{
+        while (c->n && c->s[0] == ' ')
+                c->s++, c->n--;
+}
+
+static inline unsigned long long sc_u64(struct settings_cursor address_to c, unsigned long long cap)
+{
+        unsigned long long v = 0;
+
+        for (; c->n && c->s[0] >= '0' && c->s[0] <= '9'; c->s++, c->n--)
+                if (v <= cap)
+                        v = v * 10 + (unsigned long long)(c->s[0] - '0');
+        return v;
+}
+
+static inline const char address_to sc_word(struct settings_cursor address_to c, positive address_to len)
+{
+        const char address_to start = c->s;
+        positive n = 0;
+
+        while (n < c->n && c->s[n] != ' ')
+                n++;
+        c->s += n, c->n -= n;
+        if (len)
+                *len = n;
+        return start;
+}
+
+static inline fn sc_trim_at(struct settings_cursor address_to c, const char address_to needle)
+{
+        positive at = settings_find_last(c->s, c->n, needle);
+
+        if (at < c->n)
+                c->n = at;
+        while (c->n && c->s[c->n - 1] == ' ')
+                c->n--;
 }
 
 // What moonwater bluetooth said, as the list of devices kept: the lines after its first, a name each, and a last row that keeps one more.
@@ -4000,12 +3928,16 @@ static fn settings_feed_devices(void)
 
         memory_zero(items, sizeof(settings_large->item[1]));
         for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
-                if (size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
+        {
+                struct settings_cursor c = {text, size};
+
+                if (sc_eat(&c, "  ") && c.n && c.s[0] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
                 {
                         items[count].kind = SETTINGS_DEVICE;
                         items[count].flags = SETTINGS_ITEM_SAVED;
-                        settings_item_label(&items[count++], text + 2, size - 2);
+                        settings_item_label(&items[count++], c.s, c.n);
                 }
+        }
         items[count].kind = SETTINGS_ADD;
         {
                 const char address_to keep = language_of("Keep a device by its name");
@@ -4043,22 +3975,21 @@ static const char address_to settings_role_word(unsigned int role)
         return language_text(ids[role < 5 ? role : 5]);
 }
 
-// A size in a whole number of GB (from 1 GB) or MB, as a drive's heading and the rows of its partitions say it.
+// A size in a whole number of GB (from 1 GB, keeping GB at >= 1000 GB for drive headings) or MB, delegating mid-range to ui_size_decimal.
 static fn settings_size_text(unsigned long long bytes, char address_to into, positive room)
 {
-        unsigned long long scaled = bytes >= 1000000000ull ? bytes / 1000000000ull : bytes / 1000000ull;
         char digits[24];
-        positive count = 0, length = 0;
+        unsigned long long scaled;
 
-        do
+        if (bytes >= 1000000ull && bytes < 1000000000000ull)
         {
-                digits[count++] = (char)('0' + scaled % 10);
-                scaled /= 10;
-        } while (scaled && count < sizeof(digits));
-        while (count && length + 1 < room)
-                into[length++] = digits[--count];
-        into[length] = 0;
-        string_append_bounded((string_address)into, bytes >= 1000000000ull ? (string_address)" GB" : (string_address)" MB", room);
+                ui_size_decimal(bytes, into, room);
+                return;
+        }
+        scaled = bytes >= 1000000000ull ? bytes / 1000000000ull : bytes / 1000000ull;
+        digits[positive_into_string((p8 address_to)digits, (positive)scaled)] = 0;
+        string_copy_bounded((string_address)into, (string_address)digits, room);
+        string_append_bounded((string_address)into, (string_address)(bytes >= 1000000000ull ? " GB" : " MB"), room);
 }
 
 /*
@@ -4388,23 +4319,17 @@ static fn settings_segment_name(char address_to into, const char address_to text
         A drive's line from its word after the name (word is the blank after it): "NAME drive N MB STATE". The name is the label, N MB
         is the size (in GB from 1000 MB, as the heading says it), and the state is what the line says after the size.
 */
-static fn settings_item_drive(struct settings_item address_to item, const char address_to text, positive size, positive word)
+static fn settings_item_drive(struct settings_item address_to item, const char address_to name, positive name_len, struct settings_cursor c)
 {
-        positive at = word + 7, megabytes = 0;
+        unsigned long long megabytes = sc_u64(&c, 1000000000000ull);
 
-        settings_item_label(item, text + 2, word - 2);
-        for (; at < size && text[at] >= '0' && text[at] <= '9'; at++)
-                if (megabytes < 1000000000000ull)
-                        megabytes = megabytes * 10 + (positive)(text[at] - '0');
-        while (at < size && text[at] == ' ')
-                at++;
-        if (at + 1 < size && text[at] == 'M' && text[at + 1] == 'B')
-                at += 2;
-        while (at < size && text[at] == ' ')
-                at++;
+        settings_item_label(item, name, name_len);
+        sc_spaces(&c);
+        sc_eat(&c, "MB");
+        sc_spaces(&c);
         item->total = megabytes * 1000000ull;
         settings_size_text(item->total, item->size, sizeof(item->size));
-        settings_item_word(item->state, sizeof(item->state), text + at, size - at);
+        settings_item_word(item->state, sizeof(item->state), c.s, c.n);
 }
 
 // The devices of the device list in the order of their sections (settings_device_section), each section's in the order they came.
@@ -4449,29 +4374,23 @@ static fn settings_feed_hardware(void)
         memory_zero(settings_large->drive, sizeof(settings_large->drive));
         for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
         {
-                if (size > 9 && text[0] == ' ' && text[1] == ' ' && text[2] == ' ' && text[3] == ' ' && !memory_compare(text + 4, "part ", 5))
+                struct settings_cursor c = {text, size};
+
+                if (sc_eat(&c, "    part "))
                 {
                         struct settings_item address_to drive = open ? &items[count - 1] : null;
-                        positive word = 9, role_at, role_length;
-                        unsigned long long bytes = 0;
+                        unsigned long long bytes;
+                        positive role_len;
+                        const char address_to role;
                         int code;
 
-                        while (word < size && text[word] >= '0' && text[word] <= '9')
-                                word++;
-                        while (word < size && text[word] == ' ')
-                                word++;
-                        for (; word < size && text[word] >= '0' && text[word] <= '9'; word++)
-                                if (bytes <= 1844674407370955160ull)
-                                        bytes = bytes * 10 + (unsigned long long)(text[word] - '0');
-                        while (word < size && text[word] == ' ')
-                                word++;
-                        role_at = word;
-                        while (word < size && text[word] != ' ')
-                                word++;
-                        role_length = word - role_at;
-                        code = settings_role_code(text + role_at, role_length);
-                        while (word < size && text[word] == ' ')
-                                word++;
+                        sc_word(&c, null);
+                        sc_spaces(&c);
+                        bytes = sc_u64(&c, 1844674407370955160ull);
+                        sc_spaces(&c);
+                        role = sc_word(&c, &role_len);
+                        code = settings_role_code(role, role_len);
+                        sc_spaces(&c);
                         // The drive is as large as its line says or as its part lines add up to, whichever is more (the line's MB is cut).
                         if (drive)
                         {
@@ -4483,37 +4402,30 @@ static fn settings_feed_hardware(void)
                             (code != 4 || bytes > SETTINGS_ALIGNMENT))
                         {
                                 drive->segment_bytes[drive->segment_count] = bytes;
-                                settings_segment_name(drive->segment_name[drive->segment_count], text + word, size - word);
+                                settings_segment_name(drive->segment_name[drive->segment_count], c.s, c.n);
                                 drive->segment_role[drive->segment_count++] = (unsigned char)code;
                         }
                         continue;
                 }
                 // A drive's "more" line, after its parts: the partitions its strip does not show, said in a row under it.
-                if (open && size > 9 && !memory_compare(text, "    more ", 9))
+                if (open && sc_eat(&c, "    more "))
                 {
-                        positive more = 0;
+                        unsigned long long more = sc_u64(&c, 65535);
 
-                        for (positive digit = 9; digit < size && text[digit] >= '0' && text[digit] <= '9'; digit++)
-                                if (more <= 65535)
-                                        more = more * 10 + (positive)(text[digit] - '0');
                         items[count - 1].segment_more = more > 65535 ? 65535 : (unsigned short)more;
                         continue;
                 }
                 // A USB device's drive, "    drive NAME N MB" under its line: its size, and the part lines after it are its strip. A
                 // device's second drive is not shown (its part lines are no one's).
-                if (size > 10 && !memory_compare(text, "    drive ", 10))
+                if (sc_eat(&c, "    drive "))
                 {
                         struct settings_item address_to port = last;
-                        positive word = 10, megabytes = 0;
+                        unsigned long long megabytes;
 
                         open = port && port->kind == SETTINGS_PORT && !(port->flags & SETTINGS_ITEM_DISK);
-                        while (word < size && text[word] != ' ')
-                                word++;
-                        while (word < size && text[word] == ' ')
-                                word++;
-                        for (; word < size && text[word] >= '0' && text[word] <= '9'; word++)
-                                if (megabytes < 1000000000000ull)
-                                        megabytes = megabytes * 10 + (positive)(text[word] - '0');
+                        sc_word(&c, null);
+                        sc_spaces(&c);
+                        megabytes = sc_u64(&c, 1000000000000ull);
                         if (open)
                         {
                                 port->flags |= SETTINGS_ITEM_DISK;
@@ -4525,22 +4437,24 @@ static fn settings_feed_hardware(void)
                         continue;
                 }
                 // Where a drive is, after its segments: "    where internal BUS" or "    where external BUS", an SD card's bus sd.
-                if (size > 10 && !memory_compare(text, "    where ", 10))
+                if (sc_eat(&c, "    where "))
                 {
                         struct settings_item address_to drive = last;
 
                         if (drive && (drive->flags & SETTINGS_ITEM_DRIVE))
-                                drive->where = size >= 18 && !memory_compare(text + 10, "external", 8)
-                                                   ? (size >= 21 && !memory_compare(text + size - 3, " sd", 3) ? SETTINGS_WHERE_SD : SETTINGS_WHERE_EXTERNAL)
+                                drive->where = sc_eat(&c, "external")
+                                                   ? (c.n >= 3 && !memory_compare(c.s + c.n - 3, " sd", 3) ? SETTINGS_WHERE_SD : SETTINGS_WHERE_EXTERNAL)
                                                    : SETTINGS_WHERE_INTERNAL;
                         open = false;
                         continue;
                 }
                 // Any other line ends the open drive, kept or not: a drive whose row is past the list's rows has no strip to read into.
                 open = false;
-                if (size > 2 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ')
+                if (sc_eat(&c, "  ") && c.n && c.s[0] != ' ')
                 {
-                        positive word = 2;
+                        struct settings_cursor whole = c;
+                        positive name_len;
+                        const char address_to name;
 
                         // A row past the list's rows is not shown: it is counted, and the note under the rows says how many.
                         if (count + 1 >= SETTINGS_LIST_ROWS)
@@ -4549,30 +4463,28 @@ static fn settings_feed_hardware(void)
                                 continue;
                         }
                         // A drive (its second word is drive) is a note: shown, and no press reaches a verb that holds nothing.
-                        // The name starts at text[2], so the first blank after it ends the first word.
-                        while (word < size && text[word] != ' ')
-                                word++;
-                        items[count].kind = word + 7 <= size && !memory_compare(text + word + 1, "drive ", 6) ? SETTINGS_NOTE : SETTINGS_PORT;
-                        items[count].flags = (size > 10 && !memory_compare(text + size - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0) |
-                                             (items[count].kind == SETTINGS_NOTE ? SETTINGS_ITEM_DRIVE : 0);
+                        name = sc_word(&c, &name_len);
+                        open = sc_eat(&c, " drive ");
+                        items[count].kind = open ? SETTINGS_NOTE : SETTINGS_PORT;
+                        items[count].flags = (whole.n > 8 && !memory_compare(whole.s + whole.n - 8, " allowed", 8) ? SETTINGS_ITEM_JOINED : 0) |
+                                             (open ? SETTINGS_ITEM_DRIVE : 0);
                         // A drive is inside the machine until its "where" line says otherwise; a USB device, any port, is plugged in.
-                        items[count].where = items[count].kind == SETTINGS_NOTE ? SETTINGS_WHERE_INTERNAL : SETTINGS_WHERE_EXTERNAL;
-                        open = items[count].kind == SETTINGS_NOTE;
+                        items[count].where = open ? SETTINGS_WHERE_INTERNAL : SETTINGS_WHERE_EXTERNAL;
                         spanned = 0, last = &items[count];
                         if (open)
                         {
-                                settings_item_drive(&items[count], text, size, word);
+                                settings_item_drive(&items[count], name, name_len, c);
                                 open = settings_drive_bind(&items[count], &drives);
                         }
                         else
-                                settings_item_port(&items[count], text + 2, size - 2);
+                                settings_item_port(&items[count], whole.s, whole.n);
                         count++;
                 }
         }
         // The devices in the order of their sections, Internal storage and then External devices, each in the order the host said them.
         settings_device_order(items, count);
         // The rows the list does not hold, and the lines the buffer cut, are a last note: how many were not shown, in the last section.
-        hidden += settings.cut_rows;
+        hidden += settings.runner.cut_rows;
         if (hidden && count < SETTINGS_LIST_ROWS)
         {
                 char note[SETTINGS_ITEM_LABEL];
@@ -4608,23 +4520,19 @@ static fn settings_feed_links(void)
 
         memory_zero(items, sizeof(settings_large->item[3]));
         for (at = 0; settings_feed_line(&at, line, sizeof(line), &text, &size);)
-                if (size > 6 && !memory_compare(text, "      ", 6) && text[6] != ' ')
+        {
+                struct settings_cursor c = {text, size};
+
+                if (sc_eat(&c, "      ") && c.n && c.s[0] != ' ')
                 {
                         if (count && items[count - 1].kind == SETTINGS_LINK)
                         {
-                                const char address_to info = text + 6;
-                                positive info_len = size - 6;
-                                positive next_at = settings_find_last(info, info_len, "  next:");
-
-                                if (next_at < info_len)
-                                        info_len = next_at;
-                                while (info_len > 0 && info[info_len - 1] == ' ')
-                                        info_len--;
-                                if (info_len)
+                                sc_trim_at(&c, "  next:");
+                                if (c.n)
                                 {
                                         char piece[SETTINGS_ITEM_LABEL];
 
-                                        settings_item_word(piece, sizeof(piece), info, info_len);
+                                        settings_item_word(piece, sizeof(piece), c.s, c.n);
                                         if (items[count - 1].detail[0])
                                                 string_append_bounded((string_address)items[count - 1].detail, (string_address) "; ",
                                                                       sizeof(items[0].detail));
@@ -4633,31 +4541,30 @@ static fn settings_feed_links(void)
                                 }
                         }
                 }
-                else if (size > 4 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
+                else if (sc_eat(&c, "  ") && c.n > 2 && c.s[0] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
                 {
-                        positive may_at = settings_find_last(text, size, "...  may ");
+                        positive may_at = settings_find_last(c.s, c.n, "...  may ");
 
-                        if (may_at < size)
+                        if (may_at < c.n)
                         {
-                                positive cut = 2, grants_at = may_at + 9, grants_end = size;
-                                positive next_at = settings_find_last(text + grants_at, size - grants_at, "  next:");
+                                positive cut = 0;
+                                struct settings_cursor grants = {c.s + may_at + 9, c.n - may_at - 9};
 
-                                while (cut + 1 < size && (text[cut] != ' ' || text[cut + 1] != ' '))
+                                while (cut + 1 < c.n && (c.s[cut] != ' ' || c.s[cut + 1] != ' '))
                                         cut++;
-                                if (next_at < size - grants_at)
-                                        grants_end = grants_at + next_at;
+                                sc_trim_at(&grants, "  next:");
                                 items[count].kind = SETTINGS_LINK;
                                 items[count].flags = SETTINGS_ITEM_SAVED;
-                                settings_item_word(items[count].access, sizeof(items[count].access), text + grants_at,
-                                                   grants_end > grants_at ? grants_end - grants_at : 0);
-                                settings_item_label(&items[count++], text + 2, cut - 2);
+                                settings_item_word(items[count].access, sizeof(items[count].access), grants.s, grants.n);
+                                settings_item_label(&items[count++], c.s, cut);
                         }
-                        else if (settings_starts(text + 2, "nobody"))
+                        else if (settings_starts(c.s, "nobody"))
                         {
                                 items[count].kind = SETTINGS_NOTE;
-                                settings_item_label(&items[count++], text + 2, size - 2);
+                                settings_item_label(&items[count++], c.s, c.n);
                         }
                 }
+        }
         settings.item_count[3] = (unsigned short)count;
 }
 
@@ -4941,12 +4848,10 @@ static long settings_feed_tick(void)
         for (positive at = 0; at < 3 && settings_feeds[feed].read[at]; at++)
                 words[count++] = (string_address)settings_feeds[feed].read[at];
         words[count] = null;
-        if (settings_start(words, count, null))
-        {
-                settings.job = SETTINGS_JOB_FEED;
-                settings.job_sets = false;
-                settings.feed_list = feed;
-        }
+        settings.job = SETTINGS_JOB_FEED;
+        settings.job_sets = false;
+        settings.feed_list = feed;
+        settings_start(words, count, null);
         return -1;
 }
 
@@ -5221,106 +5126,24 @@ static fn settings_complete(b32 killed, positive status)
         }
 }
 
-// Whether the child has exited, its exit left in place for the reap: waitid with WNOWAIT and WNOHANG (WEXITED 4, WNOWAIT 0x01000000).
-static b32 settings_exited(void)
-{
-        b32 info[32] = {0};
-        bipolar got = system_call_5(syscall(waitid), 1, (positive)settings.child, (positive)info, 4 | 0x01000000 | 1, 0);
-        bipolar pid = (bipolar)info[4];
+// Child reaping, state-D leave table, spill counting and non-blocking drain are backed by the kit's struct ui_job runner.
+#define settings_left ui_job_left
 
-        return got == 0 && pid == settings.child;
-}
-
-/*
-        The child that is ending is reaped without waiting for it (WNOHANG, the wait's 1): true when it had exited and the verb is complete
-        (settings_complete), false while it has not, which settings_tick asks again every SETTINGS_REAP_NS. A child that has gone already is
-        complete with no status to tell it by.
-*/
 static b32 settings_reap(void)
 {
-        positive status = 0;
-        b32 killed = settings.ending == 2;
-        bipolar got;
-
-        if (settings.child <= 0 || !settings.ending)
-                return false;
-        got = system_wait4_retry(settings.child, address_of status, 1, null);
-        if (got == 0)
-                return false;
-        if (got < 0)
-                status = 0;
-        system_close(settings.output);
-        settings.child = 0;
-        settings.output = -1;
-        settings.ending = 0;
-        settings_complete(killed, status);
-        return true;
+        settings_runner_ready();
+        return ui_job_reap(&settings.runner);
 }
 
-/*
-        Children killed and not yet exited, left: a process in the kernel's uninterruptible sleep (state D) is not ended by SIGKILL until
-        it leaves that sleep, which a call stuck in the kernel never does. snug-asteroid's `moonwater canvas modes` was such a one, and
-        the settings polled it for ever: no other verb ran after it, so the page stayed unread, and the close waited for it, so the window
-        could only be taken down from outside. A child that has not exited SETTINGS_LEFT_NS after its kill is left (settings_leave): its
-        output closed, its row said to have taken too long, and the next verb run; it is reaped here when it does exit, or by init once
-        the settings have gone. More than SETTINGS_LEFT at once are left to init alone.
-*/
-static bipolar settings_left[SETTINGS_LEFT];
-
-// The children left that have exited, reaped (WNOHANG): whether any is still there.
 static b32 settings_left_reap(void)
 {
-        b32 any = false;
-
-        for (positive at = 0; at < SETTINGS_LEFT; at++)
-        {
-                positive status = 0;
-
-                if (settings_left[at] <= 0)
-                        continue;
-                if (system_wait4_retry(settings_left[at], address_of status, 1, null) == 0)
-                        any = true;
-                else
-                        settings_left[at] = 0;
-        }
-        return any;
+        return ui_job_left_reap();
 }
 
-// The killed child that will not exit, left: the verb is complete as one that took too long, and the next one runs.
-static fn settings_leave(void)
-{
-        for (positive at = 0; at < SETTINGS_LEFT; at++)
-                if (settings_left[at] <= 0)
-                {
-                        settings_left[at] = settings.child;
-                        break;
-                }
-        system_close(settings.output);
-        settings.child = 0;
-        settings.output = -1;
-        settings.ending = 0;
-        settings_complete(true, 0);
-}
-
-/*
-        The verb running has finished, or taken too long (killed): a child that was killed, or whose output ended, is reaped by settings_reap
-        when it has exited, and until then the window goes on, polling it from settings_tick (settings.ending).
-*/
 static fn settings_finished(b32 killed)
 {
-        // No child, nothing to end: an ending with no child to reap would be a state no verb starts from (settings_start clears it), and
-        // a kill of pid 0 would reach the whole process group.
-        if (settings.child <= 0)
-                return;
-        if (killed)
-        {
-                system_call_2(syscall(kill), (positive)settings.child, SIGKILL);
-                settings.ending = 2;
-                settings.began = (positive)ui_kit.now; // the time it was killed, which settings_leave counts from
-        }
-        else if (!settings.ending)
-                settings.ending = 1;
-        settings_reap();
+        settings_runner_ready();
+        ui_job_finish(&settings.runner, killed);
 }
 
 // A feed's reading under way is dropped, for a change that is wanted now.
@@ -5328,95 +5151,6 @@ static fn settings_feed_drop(void)
 {
         if (settings.child > 0 && settings.job == SETTINGS_JOB_FEED)
                 settings_finished(true);
-}
-
-//      Read in one turn at most this much: a verb writing forever (yes, a log
-//      that never stops) never answers EAGAIN, and the loop read it for ever
-//      with the window frozen. What is left is read on the next wake.
-#define SETTINGS_DRAIN_BUDGET (64u << 10)
-
-// What the buffer does not keep, counted as it goes past: its lines, and its rows (a line that starts with two blanks and a
-// word, the shape a list reads as a row). The counts are what the note of how many were not shown says.
-static fn settings_cut_count(const char address_to bytes, positive count)
-{
-        for (positive at = 0; at < count; at++)
-        {
-                char c = bytes[at];
-
-                if (c == '\n')
-                {
-                        settings.cut_lines++;
-                        settings.cut_at = 0;
-                        settings.cut_blank = 0;
-                        continue;
-                }
-                if (settings.cut_at == 2 && c != ' ' && settings.cut_blank == 2)
-                        settings.cut_rows++;
-                if (settings.cut_at < 2 && c == ' ')
-                        settings.cut_blank++;
-                if (settings.cut_at < 3)
-                        settings.cut_at++;
-        }
-}
-
-// The buffer is full: it is cut back to its last whole line, so that no line is cut in two, and what comes after is counted.
-// A buffer with no line end in it keeps what it holds, its one line cut where the buffer ends.
-static fn settings_said_cut(void)
-{
-        positive at = settings.said_length;
-
-        while (at > 0 && settings_large->said[at - 1] != '\n')
-                at--;
-        if (at)
-        {
-                settings_cut_count(settings_large->said + at, settings.said_length - at);
-                settings.said_length = at;
-        }
-        settings.said_cut = true;
-}
-
-// What the verb running has said, read; its end, heard.
-static fn settings_drain(void)
-{
-        positive budget = SETTINGS_DRAIN_BUDGET;
-
-        // The kit calls this after a wait that the output was in, and an event of that wait may have reaped the child and closed its output:
-        // then there is nothing to read, and a read of the closed descriptor would end a verb that is no longer running.
-        if (settings.child <= 0 || settings.output < 0)
-                return;
-        for (;;)
-        {
-                bipolar got;
-                char spill[256];
-
-                if (!settings.said_cut && settings.said_length >= sizeof(settings_large->said))
-                        settings_said_cut();
-                if (settings.said_cut)
-                {
-                        got = system_read_once(settings.output, spill, sizeof(spill));
-                        if (got > 0)
-                                settings_cut_count(spill, (positive)got);
-                }
-                else
-                {
-                        got = system_read_once(settings.output, settings_large->said + settings.said_length,
-                                               sizeof(settings_large->said) - settings.said_length);
-                        if (got > 0)
-                                settings.said_length += (positive)got;
-                }
-                if (got > 0)
-                {
-                        settings_waiting_say();
-                        budget = budget > (positive)got ? budget - (positive)got : 0;
-                        if (!budget)
-                                return;
-                        continue;
-                }
-                // Nothing more to read: the output's end, a read that failed, or (the child having exited) nothing there now.
-                if (got == 0 || (got != -EAGAIN && got != -EINTR) || (got == -EAGAIN && settings.exited))
-                        settings_finished(false);
-                return;
-        }
 }
 
 /* ---- what a person does ---- */
@@ -6134,49 +5868,11 @@ static fn settings_forget(void)
 }
 
 // A row changed one way or the other: a switch thrown, a choice or a step moved, a field opened, an action run.
-static fn settings_activate(int row, int way)
+static fn settings_row_activate(int row, int offset, int way)
 {
-        const struct settings_row address_to which;
+        const struct settings_row address_to which = &settings_rows[offset];
         char next[SETTINGS_VALUE];
-        int offset;
 
-        switch (settings_domain_of(row, &offset))
-        {
-        case SETTINGS_DOM_TRY:
-                // The key repeat's field opens on Enter, as on a press; the other rows that show a setting take no key.
-                if (offset == SETTINGS_TRY_REPEAT)
-                        settings_edit_begin(row, "", false);
-                return;
-        case SETTINGS_DOM_ABOUT:
-                settings_about_press(row);
-                ui_page_redraw(&settings.page);
-                return;
-        case SETTINGS_DOM_SUB:
-                // A line under a row (an issue, a status) is no row: Enter on it does nothing, but on a drive's disclosure it opens or shuts the
-                // drive's partitions.
-                if (settings_partitions_owner(row) >= 0)
-                {
-                        settings_toggle(settings_partitions_owner(row));
-                        ui_page_redraw(&settings.page);
-                }
-                return;
-        case SETTINGS_DOM_LIST:
-                if (settings_item(row))
-                        settings_item_activate(row, settings_item(row));
-                return;
-        case SETTINGS_DOM_COMMAND:
-                // A command with something to type opens a field; one without is run.
-                if (settings_takes(row))
-                        settings_edit_begin(row, "", false);
-                else
-                        settings_run(row, "");
-                return;
-        case SETTINGS_DOM_ROW:
-                which = &settings_rows[offset];
-                break;
-        default:
-                return;
-        }
         // A press on a pairing's row while it waits stops the wait: SIGTERM, which the CLI answers by closing the code and saying so.
         if (settings_pair_waiting(row))
         {
@@ -6233,6 +5929,14 @@ static fn settings_activate(int row, int way)
         settings_next(which, settings.value[row], way, next, sizeof(next));
         if (next[0] && !string_equals((string_address)next, (string_address)settings.value[row]))
                 settings_change(row, next);
+}
+
+static fn settings_activate(int row, int way)
+{
+        int offset, dom = settings_domain_of(row, &offset);
+
+        if (dom >= 0 && settings_domains[dom].activate)
+                settings_domains[dom].activate(row, offset, way);
 }
 
 // The status as the keys come to a row from another: a command says what it does, and leaving one clears it.
@@ -6860,19 +6564,11 @@ static fn settings_describe(int id, struct ui_row address_to row)
         unsigned int state = which ? settings.state[offset] : SETTINGS_READ;
         const char address_to shown = which ? settings.value[offset] : "";
 
-        switch (dom)
+        if (dom < 0)
+                return;
+        if (settings_domains[dom].describe)
         {
-        case SETTINGS_DOM_TRY:
-                settings_try_describe(id, row);
-                return;
-        case SETTINGS_DOM_ABOUT:
-                settings_about_describe(id, row);
-                return;
-        case SETTINGS_DOM_SUB:
-                if (offset < settings_sub_count)
-                        settings_sub_describe(offset, row);
-                return;
-        case SETTINGS_DOM_NONE:
+                settings_domains[dom].describe(id, offset, row);
                 return;
         }
         row->section = settings_section_start(id);
@@ -7105,87 +6801,23 @@ static fn settings_describe(int id, struct ui_row address_to row)
 // the text of a sub-row/command. Null when the row has nothing to copy.
 static const char address_to settings_copy_text(int id)
 {
-        struct ui_row row;
         int offset, dom = settings_domain_of(id, &offset);
 
-        if (dom == SETTINGS_DOM_ABOUT)
-                return settings_about_url(offset);
-        if (!settings_large)
+        if (dom < 0 || !settings_domains[dom].copy_text)
                 return null;
-        if (dom == SETTINGS_DOM_ROW)
-        {
-                if (settings_rows[offset].output == SETTINGS_OUT_NONE)
-                {
-                        if (settings.state[offset] != SETTINGS_READ || !settings.value[offset][0])
-                                return null;
-                        return settings_number_shown(offset, settings.value[offset]);
-                }
-                memory_zero(&row, sizeof(row));
-                settings_describe(id, &row);
-                if (row.dim || !row.value || !row.value[0])
-                        return null;
-                return row.value;
-        }
-        if (dom == SETTINGS_DOM_LIST)
-        {
-                const struct settings_item address_to item = settings_item(id);
-
-                if (!item || item->kind == SETTINGS_ADD || !item->label[0])
-                        return null;
-                return item->label;
-        }
-        if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count)
-        {
-                if (settings_sub[offset].action == SETTINGS_SUB_COPY)
-                        return settings_sub[offset].text[0] ? settings_sub[offset].text : null;
-                if (settings_sub[offset].action == SETTINGS_SUB_PARTITION)
-                {
-                        memory_zero(&row, sizeof(row));
-                        settings_describe(id, &row);
-                        return row.label && row.label[0] ? row.label : null;
-                }
+        if (dom != SETTINGS_DOM_ABOUT && !settings_large)
                 return null;
-        }
-        if (dom == SETTINGS_DOM_COMMAND && offset > 0)
-                return settings_label_shown(id);
-        return null;
+        return settings_domains[dom].copy_text(id, offset);
 }
 
 // Base ui_list_menu_items flags for row id (0 when the row offers no context menu).
 static p32 settings_row_menu_flags(int id)
 {
         int offset, dom = settings_domain_of(id, &offset);
-        b32 has = settings_copy_text(id) != null;
 
-        if (dom == SETTINGS_DOM_ROW || dom == SETTINGS_DOM_ABOUT)
-                return UI_LIST_MENU_VALUE_WORDS | UI_LIST_MENU_HAS_COPY_ROW | (has ? UI_LIST_MENU_HAS_COPY : 0);
-        if (dom == SETTINGS_DOM_LIST)
-        {
-                const struct settings_item address_to item = settings_item(id);
-
-                if (!item || item->kind == SETTINGS_ADD)
-                        return 0;
-                if (item->kind == SETTINGS_NOTE)
-                        return has ? UI_LIST_MENU_HAS_COPY : 0;
-                if (item->kind == SETTINGS_NETWORK)
-                        return (has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0) |
-                               ((item->flags & SETTINGS_ITEM_SAVED) ? UI_LIST_MENU_CAN_REMOVE : 0);
-                if (item->kind == SETTINGS_DEVICE || item->kind == SETTINGS_LINK)
-                        return (has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0) | UI_LIST_MENU_CAN_REMOVE;
-                return has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
-        }
-        if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count)
-        {
-                if (settings_sub[offset].action == SETTINGS_SUB_COPY)
-                        return (has ? UI_LIST_MENU_HAS_COPY : 0) |
-                               (windows_issue_kernel(settings_sub[offset].code) ? UI_LIST_MENU_CAN_REMOVE : 0);
-                if (settings_sub[offset].action == SETTINGS_SUB_PARTITION)
-                        return has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
+        if (dom < 0 || !settings_domains[dom].menu_flags)
                 return 0;
-        }
-        if (dom == SETTINGS_DOM_COMMAND && offset > 0)
-                return has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
-        return 0;
+        return settings_domains[dom].menu_flags(id, offset, settings_copy_text(id) != null);
 }
 
 // Per-row actions prepended before the kit's base list context menu items (ui_list_menu_items).
@@ -7205,7 +6837,16 @@ static fn settings_row_menu_extra(struct ui_popmenu address_to m, int id)
         }
 }
 
-// Formats the full-row copy string for row id into into[room].
+static fn settings_copy_append(char address_to into, positive room, const char address_to sep, const char address_to part)
+{
+        if (!part || !part[0])
+                return;
+        if (into[0])
+                string_append_bounded((string_address)into, (string_address)sep, room);
+        string_append_bounded((string_address)into, (string_address)part, room);
+}
+
+// Formats the full-row copy string for row id into into[room], derived directly from settings_describe().
 static fn settings_copy_row_text(int id, char address_to into, positive room)
 {
         int offset, dom = settings_domain_of(id, &offset);
@@ -7216,90 +6857,7 @@ static fn settings_copy_row_text(int id, char address_to into, positive room)
                 return;
         if (dom == SETTINGS_DOM_ROW || dom == SETTINGS_DOM_ABOUT)
         {
-                language_format(into, room, WORDS(settings_copy_line), id < SETTINGS_ANY ? settings_label_window(id) : settings_label_shown(id), value);
-                return;
-        }
-        if (dom == SETTINGS_DOM_LIST)
-        {
-                const struct settings_item address_to item = settings_item(id);
-                char summary[SETTINGS_SUB_TEXT] = {0};
-
-                if (!item)
-                        return;
-                if (item->kind == SETTINGS_NETWORK)
-                {
-                        const char address_to st = item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_joined)
-                                                   : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_saved) : null;
-
-                        if (st)
-                                string_append_bounded((string_address)summary, (string_address)st, sizeof(summary));
-                        if (item->security[0])
-                        {
-                                if (summary[0])
-                                        string_append_bounded((string_address)summary, (string_address) ", ", sizeof(summary));
-                                string_append_bounded((string_address)summary, (string_address)item->security, sizeof(summary));
-                        }
-                }
-                else if (item->kind == SETTINGS_DEVICE)
-                        string_copy_bounded((string_address)summary, (string_address)WORDS(settings_kept), sizeof(summary));
-                else if (item->kind == SETTINGS_PORT)
-                {
-                        if (item->flags & SETTINGS_ITEM_DISK)
-                                language_format(summary, sizeof(summary), WORDS(settings_device_usb_drive), item->port);
-                        else if (item->flags & SETTINGS_ITEM_USB)
-                                language_format(summary, sizeof(summary), WORDS(settings_device_usb_port), item->port);
-                        else if (item->port[0])
-                                string_copy_bounded((string_address)summary, (string_address)item->port, sizeof(summary));
-                        if (item->state[0])
-                        {
-                                if (summary[0])
-                                        string_append_bounded((string_address)summary, (string_address) ", ", sizeof(summary));
-                                string_append_bounded((string_address)summary, (string_address)settings_state_word(item->state), sizeof(summary));
-                        }
-                }
-                else if (item->flags & SETTINGS_ITEM_DRIVE)
-                {
-                        language_format(summary, sizeof(summary),
-                                        item->where == SETTINGS_WHERE_SD ? WORDS(settings_device_sd) : WORDS(settings_device_drive),
-                                        settings_state_word(item->state));
-                        if (item->size[0])
-                        {
-                                string_append_bounded((string_address)summary, (string_address) ", ", sizeof(summary));
-                                string_append_bounded((string_address)summary, (string_address)item->size, sizeof(summary));
-                        }
-                }
-                else if (item->kind == SETTINGS_LINK)
-                {
-                        if (item->detail[0])
-                                string_copy_bounded((string_address)summary, (string_address)item->detail, sizeof(summary));
-                        else if (item->access[0])
-                                string_copy_bounded((string_address)summary, (string_address)item->access, sizeof(summary));
-                }
-                if (summary[0])
-                        language_format(into, room, WORDS(settings_copy_line), item->label, summary);
-                else
-                        string_copy_bounded((string_address)into, (string_address)item->label, room);
-                return;
-        }
-        if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_PARTITION)
-        {
-                struct ui_row row;
-                char summary[SETTINGS_ITEM_LABEL] = {0};
-
-                memory_zero(&row, sizeof(row));
-                settings_describe(id, &row);
-                if (row.amount && row.amount[0])
-                        string_append_bounded((string_address)summary, (string_address)row.amount, sizeof(summary));
-                if (row.share && row.share[0])
-                {
-                        if (summary[0])
-                                string_append_bounded((string_address)summary, (string_address) " ", sizeof(summary));
-                        string_append_bounded((string_address)summary, (string_address)row.share, sizeof(summary));
-                }
-                if (summary[0])
-                        language_format(into, room, WORDS(settings_copy_line), value, summary);
-                else
-                        string_copy_bounded((string_address)into, (string_address)value, room);
+                language_format(into, room, WORDS(settings_copy_line), dom == SETTINGS_DOM_ROW ? settings_label_window(id) : settings_label_shown(id), value);
                 return;
         }
         if (dom == SETTINGS_DOM_COMMAND && offset > 0)
@@ -7308,6 +6866,40 @@ static fn settings_copy_row_text(int id, char address_to into, positive room)
 
                 if (desc && desc[0])
                         language_format(into, room, WORDS(settings_copy_line), value, desc);
+                else
+                        string_copy_bounded((string_address)into, (string_address)value, room);
+                return;
+        }
+        if (dom == SETTINGS_DOM_LIST || (dom == SETTINGS_DOM_SUB && offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_PARTITION))
+        {
+                struct ui_row row;
+                char summary[SETTINGS_SUB_TEXT] = {0};
+
+                memory_zero(&row, sizeof(row));
+                settings_describe(id, &row);
+                if (dom == SETTINGS_DOM_SUB)
+                {
+                        settings_copy_append(summary, sizeof(summary), " ", row.amount);
+                        settings_copy_append(summary, sizeof(summary), " ", row.share);
+                }
+                else
+                {
+                        const struct settings_item address_to item = settings_item(id);
+
+                        if (item && item->kind == SETTINGS_PORT)
+                        {
+                                settings_copy_append(summary, sizeof(summary), ", ", row.cells[1]);
+                                settings_copy_append(summary, sizeof(summary), ", ", row.cells[2]);
+                        }
+                        else
+                        {
+                                settings_copy_append(summary, sizeof(summary), ", ", row.note);
+                                settings_copy_append(summary, sizeof(summary), ", ",
+                                                     row.value ? row.value : (item && (item->flags & SETTINGS_ITEM_DRIVE) ? item->size : null));
+                        }
+                }
+                if (summary[0])
+                        language_format(into, room, WORDS(settings_copy_line), value, summary);
                 else
                         string_copy_bounded((string_address)into, (string_address)value, room);
                 return;
@@ -7551,13 +7143,12 @@ static b32 settings_event_take(const struct window_event address_to event)
         return true;
 }
 
-// An event, taken with whether it is a key or a press a device plugged into the machine sent (settings.hand, for settings_refused). A
-// pinch's 0x8000 is its end, so the mark is read on a key or a button only.
+// An event, taken with whether it is a key or a press a device plugged into the machine sent (settings.hand, for settings_refused).
 static b32 settings_event(const struct window_event address_to event)
 {
         b32 taken;
 
-        settings.hand = (event->type == WINDOW_EVENT_KEY || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_EVENT_VIRTUAL);
+        settings.hand = ui_event_hand(event);
         taken = settings_event_take(event);
         settings.hand = false;
         return taken;
@@ -7591,30 +7182,10 @@ static fn settings_press_at(void)
         if (row < 0)
                 return;
         {
-                int offset;
+                int offset, dom = settings_domain_of(row, &offset);
 
-                switch (settings_domain_of(row, &offset))
-                {
-                case SETTINGS_DOM_TRY:
-                        settings.page.pane = 1;
-                        settings_try_press(row, x, y);
-                        ui_page_redraw(&settings.page);
+                if (dom >= 0 && settings_domains[dom].press && settings_domains[dom].press(row, offset, x, y))
                         return;
-                case SETTINGS_DOM_ABOUT:
-                        settings.page.pane = 1;
-                        settings_about_press(row);
-                        ui_page_redraw(&settings.page);
-                        return;
-                case SETTINGS_DOM_SUB:
-                        if (settings_partitions_owner(row) >= 0)
-                                settings_toggle(settings_partitions_owner(row));
-                        else if (offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_DISMISS_ALL)
-                                windows_kernel_dismiss(settings.own.table, KERNEL_NOTICE_ALL);
-                        else if (offset < settings_sub_count && settings_sub[offset].action != SETTINGS_SUB_PARTITION)
-                                settings_copy(offset);
-                        ui_page_redraw(&settings.page);
-                        return;
-                }
         }
         if (row < SETTINGS_ANY && ui_list_expander_at(&settings.ui, &settings.list, row, x))
         {
@@ -7661,6 +7232,314 @@ static fn settings_press_at(void)
         if (settings_editing() != row && !(row < SETTINGS_ANY && settings_rows[row].kind == SETTINGS_SLIDER))
                 settings_activate(row, settings.list.way);
 }
+
+/* ---- domain vtable (registry rows, commands, feed lists, sub-rows, interactive try rows, about) ---- */
+
+static const char address_to settings_dom_row_label(int id, int offset, b32 shown)
+{
+        (void)id;
+        return shown ? language_of(settings_rows[offset].label) : settings_rows[offset].label;
+}
+
+static int settings_dom_row_section_start(int id, int offset)
+{
+        (void)offset;
+        while (id > 0 && !settings_rows[id].section && !settings_rows[id].part)
+                id--;
+        return id;
+}
+
+static const char address_to settings_dom_row_section(int id, int offset)
+{
+        (void)offset;
+        while (id > 0 && !settings_rows[id].section)
+                id--;
+        return settings_rows[id].section;
+}
+
+static int settings_dom_row_group(int id, int offset)
+{
+        int group = -1;
+
+        (void)id;
+        for (int at = 0; at <= offset; at++)
+                group += settings_rows[at].section != null;
+        return group;
+}
+
+static b32 settings_dom_row_matches(int id, int offset, const char address_to word, positive size)
+{
+        const struct settings_row address_to which = &settings_rows[offset];
+
+        for (positive at = 0; at < SETTING_WORDS; at++)
+                if (settings_has(which->read[at], word, size) || settings_has(which->set[at], word, size))
+                        return true;
+        return settings_has(settings.value[offset], word, size) || settings_matches_name(which->label, settings_section(id), word, size) ||
+               settings_matches_name(which->about, settings_rows[settings_section_start(id)].part, word, size);
+}
+
+static const char address_to settings_dom_row_copy(int id, int offset)
+{
+        struct ui_row row;
+
+        if (settings_rows[offset].output == SETTINGS_OUT_NONE)
+                return settings.state[offset] == SETTINGS_READ && settings.value[offset][0] ? settings_number_shown(offset, settings.value[offset]) : null;
+        memory_zero(&row, sizeof(row));
+        settings_describe(id, &row);
+        return !row.dim && row.value && row.value[0] ? row.value : null;
+}
+
+static p32 settings_dom_value_menu(int id, int offset, b32 has)
+{
+        (void)id, (void)offset;
+        return UI_LIST_MENU_VALUE_WORDS | UI_LIST_MENU_HAS_COPY_ROW | (has ? UI_LIST_MENU_HAS_COPY : 0);
+}
+
+static const char address_to settings_dom_cmd_label(int id, int offset, b32 shown)
+{
+        (void)id, (void)shown;
+        return offset > 0 ? settings_large->pool + settings.generic[offset - 1].command : WORDS(settings_run_any);
+}
+
+static int settings_dom_cmd_section_start(int id, int offset) { (void)id, (void)offset; return SETTINGS_ANY; }
+static const char address_to settings_dom_cmd_section(int id, int offset) { (void)id, (void)offset; return SETTINGS_ALL_HEADER; }
+static int settings_dom_cmd_group(int id, int offset) { (void)id, (void)offset; return settings_groups() - 1; }
+
+static b32 settings_dom_cmd_matches(int id, int offset, const char address_to word, positive size)
+{
+        (void)offset;
+        return settings_has(settings_label(id), word, size) || settings_has(settings_text(id), word, size) ||
+               (id == SETTINGS_ANY && settings_has("anything", word, size));
+}
+
+static fn settings_dom_cmd_activate(int id, int offset, int way)
+{
+        (void)offset, (void)way;
+        if (settings_takes(id))
+                settings_edit_begin(id, "", false);
+        else
+                settings_run(id, "");
+}
+
+static const char address_to settings_dom_cmd_copy(int id, int offset) { return offset > 0 ? settings_label_shown(id) : null; }
+static p32 settings_dom_cmd_menu(int id, int offset, b32 has) { (void)id; return offset > 0 && has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0; }
+
+static const char address_to settings_dom_list_label(int id, int offset, b32 shown)
+{
+        const struct settings_item address_to item = settings_item(id);
+
+        (void)offset;
+        return !item ? WORDS(settings_run_any) : shown && item->kind == SETTINGS_ADD ? language_of(item->label) : item->label;
+}
+
+static int settings_dom_list_section_start(int id, int offset)
+{
+        int list = offset / SETTINGS_LIST_ROWS, at = offset % SETTINGS_LIST_ROWS;
+
+        if (list == 2 && settings_item(id))
+        {
+                int section = settings_device_section(settings_item(id));
+
+                while (at > 0 && settings_device_section(&settings_large->item[2][at - 1]) == section)
+                        at--;
+                return (int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS + at;
+        }
+        return (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS;
+}
+
+static const char address_to settings_dom_list_section(int id, int offset)
+{
+        int list = offset / SETTINGS_LIST_ROWS;
+        const struct settings_item address_to item = settings_item(id);
+
+        if (list == 2 && item && settings_device_section(item))
+                return settings_device_section(item) == 1 ? SETTINGS_EXTERNAL_HEADER : "";
+        return settings_feeds[list].heading;
+}
+
+static int settings_dom_list_group(int id, int offset)
+{
+        (void)id;
+        for (int at = 0; at < settings_groups(); at++)
+                if (string_equals((string_address)settings_group_name(at), (string_address)settings_feeds[offset / SETTINGS_LIST_ROWS].group))
+                        return at;
+        return 0;
+}
+
+static b32 settings_dom_list_matches(int id, int offset, const char address_to word, positive size)
+{
+        (void)offset;
+        return settings_matches_name(settings_label(id), settings_section(id), word, size);
+}
+
+static fn settings_dom_list_activate(int id, int offset, int way)
+{
+        (void)offset, (void)way;
+        if (settings_item(id))
+                settings_item_activate(id, settings_item(id));
+}
+
+static const char address_to settings_dom_list_copy(int id, int offset)
+{
+        const struct settings_item address_to item = settings_item(id);
+
+        (void)offset;
+        return item && item->kind != SETTINGS_ADD && item->label[0] ? item->label : null;
+}
+
+static p32 settings_dom_list_menu(int id, int offset, b32 has)
+{
+        const struct settings_item address_to item = settings_item(id);
+        p32 copy = has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
+
+        (void)offset;
+        if (!item || item->kind == SETTINGS_ADD)
+                return 0;
+        if (item->kind == SETTINGS_NOTE)
+                return has ? UI_LIST_MENU_HAS_COPY : 0;
+        if (item->kind == SETTINGS_NETWORK)
+                return copy | ((item->flags & SETTINGS_ITEM_SAVED) ? UI_LIST_MENU_CAN_REMOVE : 0);
+        if (item->kind == SETTINGS_DEVICE || item->kind == SETTINGS_LINK)
+                return copy | UI_LIST_MENU_CAN_REMOVE;
+        return copy;
+}
+
+static fn settings_dom_sub_describe(int id, int offset, struct ui_row address_to row)
+{
+        (void)id;
+        if (offset < settings_sub_count)
+                settings_sub_describe(offset, row);
+}
+
+static fn settings_dom_sub_activate(int id, int offset, int way)
+{
+        (void)offset, (void)way;
+        if (settings_partitions_owner(id) >= 0)
+        {
+                settings_toggle(settings_partitions_owner(id));
+                ui_page_redraw(&settings.page);
+        }
+}
+
+static b32 settings_dom_sub_press(int id, int offset, int x, int y)
+{
+        (void)x, (void)y;
+        if (settings_partitions_owner(id) >= 0)
+                settings_toggle(settings_partitions_owner(id));
+        else if (offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_DISMISS_ALL)
+                windows_kernel_dismiss(settings.own.table, KERNEL_NOTICE_ALL);
+        else if (offset < settings_sub_count && settings_sub[offset].action != SETTINGS_SUB_PARTITION)
+                settings_copy(offset);
+        ui_page_redraw(&settings.page);
+        return true;
+}
+
+static const char address_to settings_dom_sub_copy(int id, int offset)
+{
+        struct ui_row row;
+
+        if (offset >= settings_sub_count)
+                return null;
+        if (settings_sub[offset].action == SETTINGS_SUB_COPY)
+                return settings_sub[offset].text[0] ? settings_sub[offset].text : null;
+        if (settings_sub[offset].action == SETTINGS_SUB_PARTITION)
+        {
+                memory_zero(&row, sizeof(row));
+                settings_describe(id, &row);
+                return row.label && row.label[0] ? row.label : null;
+        }
+        return null;
+}
+
+static p32 settings_dom_sub_menu(int id, int offset, b32 has)
+{
+        (void)id;
+        if (offset >= settings_sub_count)
+                return 0;
+        if (settings_sub[offset].action == SETTINGS_SUB_COPY)
+                return (has ? UI_LIST_MENU_HAS_COPY : 0) | (windows_issue_kernel(settings_sub[offset].code) ? UI_LIST_MENU_CAN_REMOVE : 0);
+        return settings_sub[offset].action == SETTINGS_SUB_PARTITION && has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
+}
+
+static fn settings_dom_try_describe(int id, int offset, struct ui_row address_to row) { (void)offset; settings_try_describe(id, row); }
+
+static fn settings_dom_try_activate(int id, int offset, int way)
+{
+        (void)way;
+        if (offset == SETTINGS_TRY_REPEAT)
+                settings_edit_begin(id, "", false);
+}
+
+static b32 settings_dom_try_press(int id, int offset, int x, int y)
+{
+        (void)offset;
+        settings.page.pane = 1;
+        settings_try_press(id, x, y);
+        ui_page_redraw(&settings.page);
+        return true;
+}
+
+static const char address_to settings_dom_about_label(int id, int offset, b32 shown)
+{
+        (void)id;
+        return shown ? settings_about_label(offset) : WORDS(settings_run_any);
+}
+
+static int settings_dom_about_group(int id, int offset) { (void)id, (void)offset; return settings_system_group(); }
+
+static b32 settings_dom_about_matches(int id, int offset, const char address_to word, positive size)
+{
+        (void)id;
+        return settings_about_matches_word(offset, word, size);
+}
+
+static fn settings_dom_about_describe(int id, int offset, struct ui_row address_to row) { (void)offset; settings_about_describe(id, row); }
+
+static fn settings_dom_about_activate(int id, int offset, int way)
+{
+        (void)offset, (void)way;
+        settings_about_press(id);
+        ui_page_redraw(&settings.page);
+}
+
+static b32 settings_dom_about_press(int id, int offset, int x, int y)
+{
+        (void)offset, (void)x, (void)y;
+        settings.page.pane = 1;
+        settings_about_press(id);
+        ui_page_redraw(&settings.page);
+        return true;
+}
+
+static const char address_to settings_dom_about_copy(int id, int offset) { (void)id; return settings_about_url(offset); }
+
+static const struct settings_domain_ops settings_domains[6] = {
+    [SETTINGS_DOM_ROW] = {
+        0, SETTINGS_ANY, settings_dom_row_label, settings_dom_row_section_start, settings_dom_row_section,
+        settings_dom_row_group, settings_dom_row_matches, null, settings_row_activate, null, settings_dom_row_copy, settings_dom_value_menu,
+    },
+    [SETTINGS_DOM_COMMAND] = {
+        SETTINGS_ANY, (int)SETTINGS_LIST, settings_dom_cmd_label, settings_dom_cmd_section_start, settings_dom_cmd_section,
+        settings_dom_cmd_group, settings_dom_cmd_matches, null, settings_dom_cmd_activate, null, settings_dom_cmd_copy, settings_dom_cmd_menu,
+    },
+    [SETTINGS_DOM_LIST] = {
+        (int)SETTINGS_LIST, (int)SETTINGS_ALL, settings_dom_list_label, settings_dom_list_section_start, settings_dom_list_section,
+        settings_dom_list_group, settings_dom_list_matches, null, settings_dom_list_activate, null, settings_dom_list_copy, settings_dom_list_menu,
+    },
+    [SETTINGS_DOM_SUB] = {
+        (int)SETTINGS_ALL, SETTINGS_TRY, null, null, null,
+        null, settings_dom_cmd_matches, settings_dom_sub_describe, settings_dom_sub_activate, settings_dom_sub_press, settings_dom_sub_copy, settings_dom_sub_menu,
+    },
+    [SETTINGS_DOM_TRY] = {
+        SETTINGS_TRY, SETTINGS_ABOUT, null, null, null,
+        null, settings_dom_cmd_matches, settings_dom_try_describe, settings_dom_try_activate, settings_dom_try_press, null, null,
+    },
+    [SETTINGS_DOM_ABOUT] = {
+        SETTINGS_ABOUT, SETTINGS_LIST_IDS, settings_dom_about_label, null, null,
+        settings_dom_about_group, settings_dom_about_matches, settings_dom_about_describe, settings_dom_about_activate, settings_dom_about_press,
+        settings_dom_about_copy, settings_dom_value_menu,
+    },
+};
 
 /* ---- the picture ---- */
 
@@ -7924,15 +7803,6 @@ static fn settings_chose(int id)
         }
 }
 
-// How long the verb running may take, in nanoseconds: a feed's reading, a join's handshake, a pairing's code, or the standard.
-static positive settings_most(void)
-{
-        return settings.job == SETTINGS_JOB_FEED  ? (positive)SETTINGS_FEED_WAIT_NS
-               : settings.job == SETTINGS_JOB_ACT ? (positive)SETTINGS_ACT_WAIT_NS
-               : settings_waits(settings.job)     ? (positive)SETTINGS_WAIT_PAIR_NS
-                                                  : (positive)SETTINGS_WAIT_NS;
-}
-
 // The settings' timers: the caret's blink, a verb's time, the due reading of a feed, and the descriptor of a verb running.
 // 0 runs the loop again.
 static long settings_tick(long timeout, long address_to other)
@@ -7947,17 +7817,11 @@ static long settings_tick(long timeout, long address_to other)
                         settings_pair_due = now + (positive)SETTINGS_PAIR_TICK_NS;
                         ui_page_redraw(&settings.page);
                 }
-                if (timeout < 0 || (long)(settings_pair_due - now) < timeout)
-                        timeout = (long)(settings_pair_due - now);
+                timeout = ui_deadline_wait(timeout, (b64)now, (b64)settings_pair_due);
         }
         // The board, read once a second (settings_board_tick): when the rows' lines change, the page is laid out again.
         if (settings.list.ids)
-        {
-                long board = settings_board_tick();
-
-                if (board >= 0 && (timeout < 0 || board < timeout))
-                        timeout = board;
-        }
+                timeout = ui_timeout_min(timeout, settings_board_tick());
         // The field with the keys blinks its caret a while after its last key, its well drawn again at each turn.
         if (!settings.page.card && (gallery.on || settings_editing() >= 0 || settings.filter_open))
         {
@@ -7967,69 +7831,25 @@ static long settings_tick(long timeout, long address_to other)
                 timeout = ui_field_tick(&settings.ui, &settings.page, t, timeout, gallery.on ? t->focused : settings.focused);
         }
         // A size sent and waiting to be kept counts down, and goes back when its time is up (settings_keep_tick).
-        {
-                long keep = settings_keep_tick();
-
-                if (keep >= 0 && (timeout < 0 || keep < timeout))
-                        timeout = keep;
-        }
-        // Children left (settings_leave) are asked once a second whether they have exited.
-        if (settings_left_reap() && (timeout < 0 || timeout > SETTINGS_BOARD_NS))
-                timeout = (long)SETTINGS_BOARD_NS;
-        // A child that is ending (its output ended, or it was killed) is reaped here when it has exited, never waited for: its output is not
-        // read any more, and the window's events go on meanwhile. A verb whose output ended and that does not exit is killed when its time is up.
-        if (settings.child > 0 && settings.ending)
-        {
-                positive now = (positive)ui_kit.now;
-
-                if (settings_reap())
-                        return 0;
-                if (settings.ending == 1 && !(settings.job_sets && settings.job >= SETTINGS_ANY) && now - settings.began >= settings_most())
-                {
-                        settings_finished(true);
-                        return 0;
-                }
-                if (settings.ending == 2 && now - settings.began >= (positive)SETTINGS_LEFT_NS)
-                {
-                        settings_leave();
-                        return 0;
-                }
+        timeout = ui_timeout_min(timeout, settings_keep_tick());
+        if (other)
                 *other = -1;
-                return timeout < 0 || timeout > SETTINGS_REAP_NS ? (long)SETTINGS_REAP_NS : timeout;
-        }
-        // A verb that has exited while a process it left behind holds its output open gets no end of output to hear: its exit is heard
-        // here, its output read to where it stops, and it is reaped then (settings_drain). Without this it was never finished, or was
-        // killed at its time as one that ran too long.
-        if (settings.child > 0 && !settings.ending && settings_exited())
+        settings_runner_ready();
+        // A verb whose output ended and that still does not exit is killed once its time is up.
+        if (settings.runner.child > 0 && settings.runner.ending == 1 && settings.runner.timeout_ns &&
+            (positive)ui_kit.now >= settings.runner.began + settings.runner.timeout_ns)
         {
-                settings.exited = true;
-                settings_drain();
+                ui_job_kill(&settings.runner);
                 return 0;
         }
-        if (settings.child > 0 && !(settings.job_sets && settings.job >= SETTINGS_ANY))
-        {
-                positive now = (positive)ui_kit.now, left;
-                positive most = settings_most();
-
-                if (now - settings.began >= most)
-                {
-                        settings_finished(true);
-                        return 0;
-                }
-                left = most - (now - settings.began);
-                timeout = timeout < 0 || (positive)timeout > left ? (long)left : timeout;
-        }
-        else if (settings.child <= 0)
+        timeout = ui_job_tick(&settings.runner, timeout, other);
+        if (settings.runner.child <= 0)
         {
                 // What the group shown keeps up with, when it is due; otherwise how long till it is.
-                long wait = settings_feed_tick();
-
-                if (wait >= 0 && (timeout < 0 || wait < timeout))
-                        timeout = wait;
-                if (settings.child > 0)
+                timeout = ui_timeout_min(timeout, settings_feed_tick());
+                if (settings.runner.child > 0)
                         return 0;
         }
-        *other = settings.child > 0 ? settings.output : -1;
         return timeout;
 }
 
@@ -8081,7 +7901,7 @@ static struct ui_app settings_app = {
         .buffers = &settings.page.buffers,
         .size = settings_size,
         .tick = settings_tick,
-        .ready = settings_drain,
+        .job = &settings.runner,
         .close = settings_close,
         .popup = &settings.popup,
         .chose = settings_chose,
@@ -8093,36 +7913,34 @@ static b32 settings_main()
         settings.moonwater = (string_address) "/moonwater";
         ui_buffers_start(&settings.page.buffers);
         settings.output = -1;
+        settings_runner_ready();
         settings.page.pane = 1; // the keys start in the rows, on the first of them
         settings.page.menu_row = -1;
 
-        for (positive at = 1; at + 1 < (positive)program_argument_count(); at++)
+        for (positive at = 1; at < (positive)program_argument_count();)
         {
+                positive used = ui_app_option(&settings_app, at);
                 string_address value;
 
-                if ((value = ui_argument(at, (string_address) "-f")))
-                        settings_app.font = value;
-                else if ((value = ui_argument(at, (string_address) "-b")))
-                        settings_app.bold = value;
+                if (used)
+                        at += used;
                 else if ((value = ui_argument(at, (string_address) "-m")))
-                        settings.moonwater = value;
-                else
-                        continue;
-                at++;
-        }
-        for (positive at = 1; at < (positive)program_argument_count(); at++)
-                if (string_equals(program_argument(at), (string_address) "-n"))
-                        settings_notices_asked = true;
-        // -g: the kit's gallery, on its own paper and not glass, with the mono for its tags and code.
-        for (positive at = 1; at < (positive)program_argument_count(); at++)
-                if (string_equals(program_argument(at), (string_address) "-g"))
+                        settings.moonwater = value, at += 2;
+                else if (string_equals(program_argument(at), (string_address) "-n"))
+                        settings_notices_asked = true, at++;
+                else if (string_equals(program_argument(at), (string_address) "-g"))
                 {
+                        // -g: the kit's gallery, on its own paper and not glass, with the mono for its tags and code.
                         gallery.on = 1;
                         settings_app.glass = 0, settings_app.side = false;
                         settings_app.mono = 1;
                         settings_app.title = (string_address) "Gallery";
                         settings_app.name = (string_address) "gallery";
+                        at++;
                 }
+                else
+                        at++;
+        }
 
         if (!settings_map())
         {
