@@ -2605,9 +2605,6 @@ static b32 compositor_osk_is(unsigned int pid)
         on the output, over the others and with the keys unless it asked to
         be put away.
 */
-#ifdef CONFIG_MOONWATER_WAYLAND
-static int compositor_wl_parts(int row, const int (**rects)[4]); // wayland_host.c: the rectangles the commit being taken changed, beside their box
-#endif
 
 /*
         Who the window in a row is, read from the table into the compositor's own columns: its app_id and its icon (window.c's
@@ -2844,18 +2841,15 @@ static void compositor_take(int row)
         {
                 long x1 = damage[0] < 0 ? 0 : damage[0], y1 = damage[1] < 0 ? 0 : damage[1];
                 long x2 = (long)damage[0] + damage[2], y2 = (long)damage[1] + damage[3];
-#ifdef CONFIG_MOONWATER_WAYLAND
                 const int (*part)[4] = 0;
                 int parts = 0;
-#endif
 
                 x2 = x2 > (long)width ? (long)width : x2;
                 y2 = y2 > (long)height ? (long)height : y2;
                 compositor.damage_by = row + 1;
                 if (damage[2] <= 0)
                         compositor_damage_row(row);
-#ifdef CONFIG_MOONWATER_WAYLAND
-                // A Wayland client's commit of several rectangles: each is damaged, cut to the picture as the box is, and not the box
+                // A client's commit of several rectangles: each is damaged, cut to the picture as the box is, and not the box
                 // round them all (compositor_wl_parts; the table has room for the box alone).
                 else if (x2 > x1 && y2 > y1 && (parts = compositor_wl_parts(row, &part)) > 0)
                         for (int at = 0; at < parts; at++)
@@ -2868,7 +2862,6 @@ static void compositor_take(int row)
                                 if (px2 > px1 && py2 > py1)
                                         compositor_damage(compositor.x[row] + (int)px1, compositor.y[row] + (int)py1, (int)(px2 - px1), (int)(py2 - py1));
                         }
-#endif
                 else if (x2 > x1 && y2 > y1)
                         compositor_damage(compositor.x[row] + (int)x1, compositor.y[row] + (int)y1, (int)(x2 - x1),
                                           (int)(y2 - y1));
@@ -3675,11 +3668,6 @@ static void compositor_osk_read(int row)
         }
 }
 
-#ifdef CONFIG_MOONWATER_WAYLAND
-static void compositor_drag_door(int row);
-static void compositor_drag_gone(int row);
-#endif
-
 /*
         Protocol-neutral Canvas drag-and-drop engine: drives native Canvas drags directly
         (working even without Wayland) and lets external protocols (Wayland/X11) register
@@ -3909,6 +3897,11 @@ static void compositor_dnd_end(int ok)
         compositor_dnd.action = compositor_dnd.told_action = compositor_dnd.source_actions = 0;
         compositor_dnd.dropped = compositor_dnd.named = 0;
         compositor_dnd.ext_bridge = compositor_dnd.target_bridge = 0;
+        if (source >= 0)
+                for (unsigned int i = 0; i < compositor_dnd.bridge_count; i++)
+                        if (compositor_dnd.bridges[i]->cancel && compositor_dnd.bridges[i]->active &&
+                            compositor_dnd.bridges[i]->active(compositor_dnd.bridges[i]->ctx))
+                                compositor_dnd.bridges[i]->cancel(compositor_dnd.bridges[i]->ctx);
         compositor_dnd_drop_copy();
         compositor_chip_drag(-1);
 }
@@ -3931,6 +3924,14 @@ static void compositor_dnd_motion(int under)
         nb = compositor_dnd_bridge_for(under);
         if (nb)
         {
+                if (compositor_dnd.active == 2 && nb == compositor_dnd.ext_bridge)
+                {
+                        if (compositor_dnd.target >= 0 && !compositor_dnd.target_bridge)
+                                compositor_dnd_tell(compositor_dnd.target, WINDOWS_DRAG_LEAVE, 0);
+                        compositor_dnd.target = -1, compositor_dnd.take = -1, compositor_dnd.action = 0;
+                        compositor_chip_drag(compositor_dnd_action());
+                        return;
+                }
                 if (compositor_dnd.target != under || compositor_dnd.target_bridge != nb)
                 {
                         if (compositor_dnd.target_bridge && compositor_dnd.target_bridge->target_event)
@@ -4235,12 +4236,7 @@ static void compositor_clip_door(int row)
 {
         struct windows address_to table = compositor.table;
 
-#ifdef CONFIG_MOONWATER_WAYLAND
-        if (!compositor_dnd.bridge_count && compositor_wl_started())
-                compositor_drag_door(row);
-        else
-#endif
-                compositor_dnd_door(row);
+        compositor_dnd_door(row);
         unsigned int offer = __atomic_load_n(&table->clip_offer_serial[row], __ATOMIC_ACQUIRE);
         unsigned int ask = __atomic_load_n(&table->clip_ask_serial[row], __ATOMIC_ACQUIRE);
 
@@ -4345,10 +4341,6 @@ static void compositor_clip_leave(int row)
         compositor_clip.offer_seen[row] = compositor.table->clip_offer_serial[row];
         compositor_clip.ask_seen[row] = compositor.table->clip_ask_serial[row];
         compositor_dnd_gone(row);
-#ifdef CONFIG_MOONWATER_WAYLAND
-        if (!compositor_dnd.bridge_count)
-                compositor_drag_gone(row);
-#endif
 }
 
 /* ---- popups: menus a window opens, placed and dismissed here ---- */

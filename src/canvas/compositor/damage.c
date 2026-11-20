@@ -823,6 +823,8 @@ struct canvas_ext_row_state
 
 struct canvas_ext_ops
 {
+        const unsigned int *(*lent_info)(int row, unsigned long *pitch, positive *va);
+        unsigned int (*row_flags)(int row, unsigned int mask);
         unsigned int (*scan_fb)(int row, int opaque);
         void (*scan_origin)(int row, int *x, int *y);
         void (*scan_fail)(int row);
@@ -837,6 +839,8 @@ struct canvas_ext_ops
         void (*tiled_settle)(void);
         unsigned int (*layers_frames)(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at);
         void (*gathers_fill)(void);
+        int (*row_parts)(int row, const int (**rects)[4]);
+        int (*asked_shape)(int row);
 };
 
 static struct canvas_ext_row_state *canvas_ext_rows;
@@ -887,148 +891,178 @@ static int canvas_ext_row_has(int row, unsigned int flag)
         return s && (s->flags & flag) != 0;
 }
 
-/*
-        Whether a row is an override-redirect X window's (a menu, a tooltip, a drag's window): it places itself and keeps its own grabs, as
-        it does under any X window manager, so it stays over the windows the compositor arranges (a press that raises one does not put it
-        under) and is not put away by a press elsewhere or its window losing the keys, as a popup of the compositor's is; its client ends
-        it, as its focus leaves. None without the Wayland shim.
-*/
-#ifdef CONFIG_MOONWATER_WAYLAND
-static int compositor_wl_row_xoverride(int row);
-#define compositor_row_xoverride(row) compositor_wl_row_xoverride(row)
-#else
-#define compositor_row_xoverride(row) 0
-#endif
+// Protocol-neutral external-surface dispatchers backed by canvas_ext_row_state and canvas_ext_host.
+static inline unsigned int canvas_ext_flags_of(int row, unsigned int mask)
+{
+        if (canvas_ext_host && canvas_ext_host->row_flags)
+                return canvas_ext_host->row_flags(row, mask);
+        {
+                const struct canvas_ext_row_state *s = canvas_ext_row_peek(row);
 
-// A row's picture the client's own buffer, read in place (wayland_host.c): its pixels and pitch, the card's address of them for a dma-buf, and
-// whether the row's picture is one at all. A row that is not one has its picture in the table.
-#ifdef CONFIG_MOONWATER_WAYLAND
-static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch);
-static positive compositor_lent_va(int row);
-static int compositor_lent(int row);
-static int compositor_lent_swap(int row);
-static unsigned int compositor_lent_fb(int row);
-static unsigned int compositor_lent_fb_opaque(int row);
-static void compositor_lent_fb_origin(int row, int *x, int *y);
-static void compositor_lent_fb_fail(int row);
-static int compositor_client_scans(int row);
-static void compositor_wl_straight_pays(int keep);
-static void compositor_wl_straight_settle(int row, long y0, long y1);
-static unsigned int compositor_straight_desc(int row, unsigned int desc[8]);
-static int compositor_wl_row_async(int row);
-static int compositor_wl_row_opaque(int row, int x1, int y1, int x2, int y2);
-static int compositor_wl_row_unscannable(int row);
-static int compositor_wl_held(void);
-static int compositor_wl_row_blend(int row);
-static void compositor_wl_settle(int row);
-static void compositor_wl_count_card(const unsigned int *rows, unsigned int windows);
-static void compositor_wl_lent_sync(int start);
-static void compositor_wl_tiled_settle(void);
-static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at);
-static void compositor_wl_gathers_fill(void);
-#else
+                return s ? (s->flags & mask) : 0u;
+        }
+}
+
+static inline int compositor_row_xoverride(int row)
+{
+        return (canvas_ext_flags_of(row, CANVAS_EXT_XOVERRIDE) & CANVAS_EXT_XOVERRIDE) != 0;
+}
+
 static const unsigned int *compositor_lent_pixels(int row, unsigned long *pitch)
 {
-        (void)row, (void)pitch;
-        return 0;
+        if (canvas_ext_host && canvas_ext_host->lent_info)
+                return canvas_ext_host->lent_info(row, pitch, 0);
+        {
+                const struct canvas_ext_row_state *s = canvas_ext_row_peek(row);
+
+                if (!s || !(s->flags & CANVAS_EXT_LENT))
+                        return 0;
+                if (pitch)
+                        *pitch = s->pitch;
+                return s->pixels;
+        }
 }
+
 static positive compositor_lent_va(int row)
 {
-        (void)row;
-        return 0;
+        positive va = 0;
+
+        if (canvas_ext_host && canvas_ext_host->lent_info)
+        {
+                canvas_ext_host->lent_info(row, 0, &va);
+                return va;
+        }
+        {
+                const struct canvas_ext_row_state *s = canvas_ext_row_peek(row);
+
+                return s && (s->flags & CANVAS_EXT_LENT) ? s->gpu_va : 0;
+        }
 }
-static int compositor_lent(int row)
+
+static inline int compositor_lent(int row)
 {
-        (void)row;
-        return 0;
+        return (canvas_ext_flags_of(row, CANVAS_EXT_LENT) & CANVAS_EXT_LENT) != 0;
 }
-static int compositor_lent_swap(int row)
+
+static inline int compositor_lent_swap(int row)
 {
-        (void)row;
-        return 0;
+        return (canvas_ext_flags_of(row, CANVAS_EXT_SWAP) & CANVAS_EXT_SWAP) != 0;
 }
+
+static inline int compositor_client_scans(int row)
+{
+        return (canvas_ext_flags_of(row, CANVAS_EXT_LENT | CANVAS_EXT_STRAIGHT) & (CANVAS_EXT_LENT | CANVAS_EXT_STRAIGHT)) != 0;
+}
+
+static inline int compositor_wl_row_async(int row)
+{
+        return (canvas_ext_flags_of(row, CANVAS_EXT_ASYNC) & CANVAS_EXT_ASYNC) != 0;
+}
+
+static inline int compositor_wl_row_unscannable(int row)
+{
+        return (canvas_ext_flags_of(row, CANVAS_EXT_UNSCANNABLE) & CANVAS_EXT_UNSCANNABLE) != 0;
+}
+
+static inline int compositor_wl_row_blend(int row)
+{
+        return (canvas_ext_flags_of(row, CANVAS_EXT_BLEND) & CANVAS_EXT_BLEND) != 0;
+}
+
 static unsigned int compositor_lent_fb(int row)
 {
-        (void)row;
-        return 0;
+        return canvas_ext_host && canvas_ext_host->scan_fb ? canvas_ext_host->scan_fb(row, -1) : 0;
 }
+
 static unsigned int compositor_lent_fb_opaque(int row)
 {
-        (void)row;
-        return 0;
+        return canvas_ext_host && canvas_ext_host->scan_fb ? canvas_ext_host->scan_fb(row, 1) : 0;
 }
+
 static void compositor_lent_fb_origin(int row, int *x, int *y)
 {
-        (void)row;
         *x = *y = 0;
+        if (canvas_ext_host && canvas_ext_host->scan_origin)
+                canvas_ext_host->scan_origin(row, x, y);
 }
+
 static void compositor_lent_fb_fail(int row)
 {
-        (void)row;
+        if (canvas_ext_host && canvas_ext_host->scan_fail)
+                canvas_ext_host->scan_fail(row);
 }
-static int compositor_client_scans(int row)
-{
-        (void)row;
-        return 0;
-}
+
 static void compositor_wl_straight_pays(int keep)
 {
-        (void)keep;
+        if (canvas_ext_host && canvas_ext_host->straight_pays)
+                canvas_ext_host->straight_pays(keep);
 }
+
 static void compositor_wl_straight_settle(int row, long y0, long y1)
 {
-        (void)row, (void)y0, (void)y1;
+        if (canvas_ext_host && canvas_ext_host->straight_settle)
+                canvas_ext_host->straight_settle(row, y0, y1);
 }
+
 static unsigned int compositor_straight_desc(int row, unsigned int desc[8])
 {
-        (void)row, (void)desc;
-        return 0;
+        return canvas_ext_host && canvas_ext_host->straight_desc ? canvas_ext_host->straight_desc(row, desc) : 0;
 }
-static int compositor_wl_row_async(int row)
-{
-        (void)row;
-        return 0;
-}
+
 static int compositor_wl_row_opaque(int row, int x1, int y1, int x2, int y2)
 {
-        (void)row, (void)x1, (void)y1, (void)x2, (void)y2;
-        return 0;
+        return canvas_ext_host && canvas_ext_host->row_opaque ? canvas_ext_host->row_opaque(row, x1, y1, x2, y2) : 0;
 }
-static int compositor_wl_row_unscannable(int row)
-{
-        (void)row;
-        return 0;
-}
+
 static int compositor_wl_held(void)
 {
-        return 0;
+        return canvas_ext_host && canvas_ext_host->held ? canvas_ext_host->held() : 0;
 }
-static int compositor_wl_row_blend(int row)
-{
-        (void)row;
-        return 0;
-}
+
 static void compositor_wl_settle(int row)
 {
-        (void)row;
+        if (canvas_ext_host && canvas_ext_host->settle)
+                canvas_ext_host->settle(row);
 }
+
 static void compositor_wl_count_card(const unsigned int *rows, unsigned int windows)
 {
-        (void)rows, (void)windows;
+        if (canvas_ext_host && canvas_ext_host->count_card)
+                canvas_ext_host->count_card(rows, windows);
 }
+
 static void compositor_wl_lent_sync(int start)
 {
-        (void)start;
+        if (canvas_ext_host && canvas_ext_host->lent_sync)
+                canvas_ext_host->lent_sync(start);
 }
+
+static void compositor_wl_tiled_settle(void)
+{
+        if (canvas_ext_host && canvas_ext_host->tiled_settle)
+                canvas_ext_host->tiled_settle();
+}
+
 static unsigned int compositor_wl_layers_frames(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at)
 {
-        (void)row, (void)frames, (void)rows, (void)at;
-        return 0;
+        return canvas_ext_host && canvas_ext_host->layers_frames ? canvas_ext_host->layers_frames(row, frames, rows, at) : 0;
 }
+
 static void compositor_wl_gathers_fill(void)
 {
+        if (canvas_ext_host && canvas_ext_host->gathers_fill)
+                canvas_ext_host->gathers_fill();
 }
-#endif
+
+static int compositor_wl_parts(int row, const int (**rects)[4])
+{
+        return canvas_ext_host && canvas_ext_host->row_parts ? canvas_ext_host->row_parts(row, rects) : 0;
+}
+
+static int compositor_wl_asked_shape(int row)
+{
+        return canvas_ext_host && canvas_ext_host->asked_shape ? canvas_ext_host->asked_shape(row) : -1;
+}
 
 // The buffer a window's picture is in, where the compositor made it: every row of it the output's width; a client's own buffer for a row that
 // shows one (compositor_lent_pixels).

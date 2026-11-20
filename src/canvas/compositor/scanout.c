@@ -534,7 +534,6 @@ static void canvas_scan_fb_reap(void);
 // The pictures held back are said taken: for the row the flip showed, once it shows that row's newest buffer.
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks a drawn frame took, answered at its flip
-static void compositor_wl_graves_sweep(void);   // wayland_host.c: the client framebuffers the card was still on, removed once it is off them
 static void compositor_wl_frame(void);           // wayland_host.c: a frame drawn: callbacks answered, buffers given back
 static int compositor_wl_frame_owed;             // a frame shown straight whose callbacks wait for its flip (compositor.c's loop)
 static positive compositor_wl_frame_at;          // Reflex/Anti-Lag: next just-in-time wl_surface.frame deadline (0 = none armed)
@@ -574,7 +573,6 @@ static void compositor_flip_done(void)
                 }
         canvas_scan_fb_reap();
 #ifdef CONFIG_MOONWATER_WAYLAND
-        compositor_wl_graves_sweep();
         // The feedbacks of the frame this flip showed are answered with the card's time for it.
         compositor_wl_flip_presented();
         if (compositor_wl_frame_owed)

@@ -3013,9 +3013,6 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor_wl.laying, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.parts, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.cursor_asked, COMPOSITOR_ROWS_ROW) \
-        X(compositor_wl.drag_seen, COMPOSITOR_ROWS_ROW) \
-        X(compositor_wl.take_seen, COMPOSITOR_ROWS_ROW) \
-        X(compositor_wl.done_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.row_blend, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.row_opaque, COMPOSITOR_ROWS_ROW) \
         X(compositor_wl.lent, COMPOSITOR_ROWS_ROW) \
@@ -3148,6 +3145,9 @@ static int compositor_rows_make(unsigned int rows)
                 compositor_row_at = (unsigned char *)got;
                 compositor_row_bytes = bytes;
                 compositor_rows_point();
+#ifdef CONFIG_MOONWATER_WAYLAND
+                compositor_wl_register_hooks();
+#endif
         }
         if (rows <= compositor_rows_made)
                 return 1;

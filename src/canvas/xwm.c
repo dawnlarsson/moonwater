@@ -3969,10 +3969,10 @@ static long compositor_xwm_drag_types(const char **types)
         return wayland_drag_x_types(types, &actions);
 }
 
-// A conversion of the drag's type for an X target: a Wayland source's send, or a program's copy pasted (compositor_drag_push).
+// A conversion of the drag's type for an X target: a Wayland source's send, or a program's copy pasted.
 static int compositor_xwm_drag_send(const char *mime, long fd)
 {
-        return compositor_drag.source >= 0 ? compositor_drag_push(mime, fd) : wayland_drag_x_send(mime, fd);
+        return compositor_dnd.active == 1 && compositor_dnd.source >= 0 ? compositor_wl_drag_push(mime, fd) : wayland_drag_x_send(mime, fd);
 }
 
 

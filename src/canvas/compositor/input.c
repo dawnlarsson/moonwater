@@ -1027,8 +1027,6 @@ static void compositor_screen_chord(unsigned int code)
 #ifdef CONFIG_MOONWATER_WAYLAND
 // A key a client's window reads as it is, from the keymap it was sent (wayland_host.c): true when the key was the client's.
 static int compositor_wl_key(unsigned int code, int value);
-static int compositor_wl_drag_escape(int value);
-static void compositor_drag_keys(void);
 static int compositor_wl_locked(void);
 static void compositor_wl_counts(int dx, int dy, int udx, int udy, positive now);
 static void compositor_wl_hold_keep(void);
@@ -1184,10 +1182,6 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
         }
         if (code == CK_KEY_ESC && value && compositor_dnd_escape(value))
                 return;
-#ifdef CONFIG_MOONWATER_WAYLAND
-        if (!compositor_dnd.bridge_count && code == CK_KEY_ESC && value && compositor_wl_drag_escape(value))
-                return;
-#endif
         if (compositor.assist_armed && value == 1 && !bit)
         {
                 compositor_assist_close();
@@ -1204,10 +1198,6 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 if (compositor.drag >= 0)
                         compositor_preview(compositor.drag);
                 compositor_dnd_keys();
-#ifdef CONFIG_MOONWATER_WAYLAND
-                if (!compositor_dnd.bridge_count)
-                        compositor_drag_keys();
-#endif
         }
         modifiers = compositor_modifiers();
         chord = modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
@@ -1415,7 +1405,6 @@ static void compositor_pointer_to(int row)
 }
 
 #ifdef CONFIG_MOONWATER_WAYLAND
-static int compositor_wl_asked_shape(int row); // wayland_host.c: the CP_ shape the row's client asked for, or -1
 static int compositor_picture_poll(int row);   // the picture row's client drew for the pointer, after the shim (below)
 #endif
 
@@ -1432,12 +1421,10 @@ static int compositor_picture_poll(int row);   // the picture row's client drew 
 */
 static int compositor_asked_shape(int row)
 {
-#ifdef CONFIG_MOONWATER_WAYLAND
         int asked = compositor_wl_asked_shape(row);
 
         if (asked == -2 || (asked >= 0 && CP_CLIENT_SHAPES))
                 return asked;
-#endif
         if (!compositor.table || row < 0 || row >= COMPOSITOR_ROWS)
                 return -1;
         // A program's shape is one of the CP_ codes it knows; any other value is the arrow, so a program cannot make the -2 of no pointer.
@@ -1670,12 +1657,6 @@ static int compositor_band_hand(unsigned int code, int down)
         return 0;
 }
 
-#ifdef CONFIG_MOONWATER_WAYLAND
-static void compositor_drag_follow(int under);
-static int compositor_drag_shape(void);
-static void compositor_drag_let_go(int to);
-#endif
-
 static void compositor_motion(void)
 {
         int under, tab, rect[4];
@@ -1702,10 +1683,6 @@ static void compositor_motion(void)
                                           : asked >= 0 ? (unsigned int)asked : CP_ARROW;
                 if (compositor_dnd_active())
                         compositor_dnd_motion(under), dnd_shape = compositor_dnd_shape();
-#ifdef CONFIG_MOONWATER_WAYLAND
-                else if (!compositor_dnd.bridge_count)
-                        compositor_drag_follow(under), dnd_shape = compositor_drag_shape();
-#endif
                 if (dnd_shape >= 0)
                         compositor.cursor.shape = (unsigned int)dnd_shape, asked = -1;
                 compositor.cursor.client_hidden = asked == -2;
@@ -1941,10 +1918,6 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                 compositor_grab_settle();
         }
         compositor_dnd_release(to);
-#ifdef CONFIG_MOONWATER_WAYLAND
-        if (!compositor_dnd.bridge_count)
-                compositor_drag_let_go(to);
-#endif
         compositor_post(to, WINDOW_EVENT_BUTTON,
                         flags | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)),
                         (int)code, 0);
