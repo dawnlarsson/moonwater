@@ -1698,22 +1698,27 @@ static bool ui_faces_first(string_address folder, bool regular, bool descend, p8
         return found;
 }
 
+static positive ui_read_text_file(const char address_to path, char address_to buf, positive room)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        bipolar got = 0;
+
+        if (handle >= 0)
+                got = system_read_once(handle, buf, room - 1), system_close(handle);
+        buf[got > 0 ? got : 0] = 0;
+        return got > 0 ? (positive)got : 0;
+}
+
 static const struct ui_faces address_to ui_faces(void)
 {
         static struct ui_faces faces;
         static bool asked;
-        bipolar handle;
 
         if (asked)
                 return &faces;
         asked = true;
-        handle = system_open_at(AT_FDCWD, (string_address) "/root/font", FILE_READ | O_CLOEXEC | O_NOFOLLOW);
-        if (handle >= 0)
+        if (ui_read_text_file("/root/font", (char address_to)faces.face, sizeof(faces.face)))
         {
-                bipolar got = system_read_once(handle, faces.face, sizeof(faces.face) - 1);
-
-                system_close(handle);
-                faces.face[got > 0 ? got : 0] = 0;
                 for (positive at = 0; faces.face[at]; at++)
                         if (faces.face[at] == '\n' || faces.face[at] == '\r')
                                 faces.face[at] = 0;
@@ -5361,68 +5366,17 @@ static positive doc_block_eol(const p8 address_to block, positive length)
         swapped as one replace, each selection going with its run. Nothing moves when a run is at the edge. The file's
         last line has no line end, so when it is in a swap the line ends are given and taken to keep it so.
 */
-static b32 doc_move_lines(struct doc address_to doc, b32 down)
+// Shared run-edit commit for doc_move_lines and doc_duplicate_lines: seals, groups, applies edits, remaps selections by run, and normalizes.
+static b32 doc_apply_run_edits(struct doc address_to doc, struct doc_edit address_to edits, positive count,
+                               const p64 address_to run_old, const p64 address_to run_shift, b32 relative_to_edit)
 {
-        p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
-        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, used = 0, total = 0;
-        struct doc_edit address_to edits = doc_edits_room(count);
-        p64 lines = doc_line_count(doc), delta = 0;
-        p8 address_to texts;
         struct doc_selection address_to before = null;
         positive before_room = 0, n = doc->selection_count;
-        p64 run_old[64], run_new[64];
         b32 done;
 
-        if (!edits || !count || count > 64)
-                return false;
-        for (positive r = 0; r < count; r++)
-        {
-                if (down ? runs[r][1] + 1 >= lines : runs[r][0] == 0)
-                        return false;
-                total += doc_line_start(doc, runs[r][1] + 2) - doc_line_start(doc, runs[r][0] - (down ? 0 : 1)) + 4;
-        }
-        texts = doc_bytes_room(total);
-        if (!texts || !array_store_reserve(before, before_room, 0, n, 16))
+        if (!array_store_reserve(before, before_room, 0, n, 16))
                 return false;
         memory_copy(before, doc->selections, n * sizeof(*before));
-        for (positive r = 0; r < count; r++)
-        {
-                p64 run_first = runs[r][0], run_last = runs[r][1];
-                p64 other = down ? run_last + 1 : run_first - 1;
-                p64 first = down ? run_first : other, last = down ? other : run_last;
-                p64 start = doc_line_start(doc, first), finish = doc_line_start(doc, last + 1);
-                b32 run_end, other_end, ends_file = last + 1 >= lines;
-                positive run_length, other_length;
-
-                // The two blocks laid side by side in their new order, each ending in a line end, and the very last
-                // line end taken off again when the swap ends the file.
-                {
-                        p8 address_to scratch = texts + used;
-                        positive put = 0;
-
-                        if (down)
-                        {
-                                other_length = doc_block(doc, other, other, scratch, &other_end);
-                                put += other_length;
-                                run_new[r] = put;
-                                run_length = doc_block(doc, run_first, run_last, scratch + put, &run_end);
-                                put += run_length;
-                        }
-                        else
-                        {
-                                run_new[r] = 0;
-                                run_length = doc_block(doc, run_first, run_last, scratch, &run_end);
-                                put += run_length;
-                                other_length = doc_block(doc, other, other, scratch + put, &other_end);
-                                put += other_length;
-                        }
-                        if (ends_file)
-                                put -= doc_block_eol(scratch, put);
-                        used += put;
-                        run_old[r] = doc_line_start(doc, run_first);
-                        edits[r] = (struct doc_edit){start, finish - start, scratch, put, DOC_NONE, DOC_NONE};
-                }
-        }
         doc_seal(doc);
         if (!doc_group_begin(doc, DOC_KIND_OTHER, 0))
         {
@@ -5432,18 +5386,19 @@ static b32 doc_move_lines(struct doc address_to doc, b32 down)
         done = doc_apply(doc, edits, count, DOC_KIND_OTHER, 0);
         if (done)
         {
-                // Each selection where its run went, its place in the run kept.
                 positive r = 0;
 
                 for (positive s = 0; s < n; s++)
                 {
+                        p64 delta = 0, off;
+
                         while (r + 1 < count && doc_sel_start(&before[s]) >= run_old[r + 1])
                                 r++;
-                        delta = 0;
                         for (positive k = 0; k < r; k++)
-                                delta += edits[k].length - edits[k].removed;
-                        before[s].anchor = edits[r].at + delta + run_new[r] + (before[s].anchor - run_old[r]);
-                        before[s].active = edits[r].at + delta + run_new[r] + (before[s].active - run_old[r]);
+                                delta += edits[k].length - (relative_to_edit ? edits[k].removed : 0);
+                        off = relative_to_edit ? edits[r].at + delta + run_shift[r] - run_old[r] : delta + run_shift[r];
+                        before[s].anchor += off;
+                        before[s].active += off;
                 }
                 memory_copy(doc->selections, before, n * sizeof(*before));
                 doc->selection_count = n;
@@ -5455,45 +5410,84 @@ static b32 doc_move_lines(struct doc address_to doc, b32 down)
         return done;
 }
 
+static b32 doc_move_lines(struct doc address_to doc, b32 down)
+{
+        p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
+        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, used = 0, total = 0;
+        struct doc_edit address_to edits = doc_edits_room(count);
+        p64 lines = doc_line_count(doc), run_old[64], run_new[64];
+        p8 address_to texts;
+
+        if (!edits || !count || count > 64)
+                return false;
+        for (positive r = 0; r < count; r++)
+        {
+                if (down ? runs[r][1] + 1 >= lines : runs[r][0] == 0)
+                        return false;
+                total += doc_line_start(doc, runs[r][1] + 2) - doc_line_start(doc, runs[r][0] - (down ? 0 : 1)) + 4;
+        }
+        if (!(texts = doc_bytes_room(total)))
+                return false;
+        for (positive r = 0; r < count; r++)
+        {
+                p64 rf = runs[r][0], rl = runs[r][1], other = down ? rl + 1 : rf - 1;
+                p64 first = down ? rf : other, last = down ? other : rl;
+                p64 start = doc_line_start(doc, first), finish = doc_line_start(doc, last + 1);
+                p8 address_to scratch = texts + used;
+                b32 e1, e2;
+                positive put = 0;
+
+                if (down)
+                {
+                        put += doc_block(doc, other, other, scratch, &e1);
+                        run_new[r] = put;
+                        put += doc_block(doc, rf, rl, scratch + put, &e2);
+                }
+                else
+                {
+                        run_new[r] = 0;
+                        put += doc_block(doc, rf, rl, scratch, &e2);
+                        put += doc_block(doc, other, other, scratch + put, &e1);
+                }
+                if (last + 1 >= lines)
+                        put -= doc_block_eol(scratch, put);
+                used += put;
+                run_old[r] = doc_line_start(doc, rf);
+                edits[r] = (struct doc_edit){start, finish - start, scratch, put, DOC_NONE, DOC_NONE};
+        }
+        return doc_apply_run_edits(doc, edits, count, run_old, run_new, true);
+}
+
 // The lines the selections touch copied below themselves (above false), the selections on the copy below.
 static b32 doc_duplicate_lines(struct doc address_to doc, b32 above)
 {
         p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
         positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, used = 0, total = 0;
         struct doc_edit address_to edits = doc_edits_room(count);
-        p64 lines = doc_line_count(doc);
-        p8 address_to texts;
-        struct doc_selection address_to before = null;
-        positive before_room = 0, n = doc->selection_count;
         p64 shift[64], run_old[64];
-        b32 done;
+        p8 address_to texts;
 
         if (!edits || !count || count > 64)
                 return false;
         for (positive r = 0; r < count; r++)
                 total += doc_line_start(doc, runs[r][1] + 1) - doc_line_start(doc, runs[r][0]) + 4;
-        texts = doc_bytes_room(total);
-        if (!texts || !array_store_reserve(before, before_room, 0, n, 16))
+        if (!(texts = doc_bytes_room(total)))
                 return false;
-        memory_copy(before, doc->selections, n * sizeof(*before));
         for (positive r = 0; r < count; r++)
         {
                 b32 had_end;
-                positive length = doc_block(doc, runs[r][0], runs[r][1], texts + used, &had_end);
+                p8 address_to block = texts + used;
+                positive length = doc_block(doc, runs[r][0], runs[r][1], block, &had_end);
                 p64 start = doc_line_start(doc, runs[r][0]);
 
                 run_old[r] = start;
                 if (above || had_end)
                 {
-                        // The copy before the run: the run itself moves down by the copy, and the selections stay on it
-                        // when copying up, or follow to the lower one when copying down.
-                        edits[r] = (struct doc_edit){start, 0, texts + used, length, DOC_NONE, DOC_NONE};
+                        edits[r] = (struct doc_edit){start, 0, block, length, DOC_NONE, DOC_NONE};
                         shift[r] = above ? 0 : length;
                 }
                 else
                 {
-                        // The file's last line copied down: a line end and the copy after it.
-                        p8 address_to block = texts + used;
                         positive eol = doc_block_eol(block, length);
 
                         memory_copy(block + eol, block, length - eol);
@@ -5502,38 +5496,8 @@ static b32 doc_duplicate_lines(struct doc address_to doc, b32 above)
                         shift[r] = doc_length(doc) - start + eol;
                 }
                 used += length;
-                (void)lines;
         }
-        doc_seal(doc);
-        if (!doc_group_begin(doc, DOC_KIND_OTHER, 0))
-        {
-                array_store_release(before, before_room, n);
-                return false;
-        }
-        done = doc_apply(doc, edits, count, DOC_KIND_OTHER, 0);
-        if (done)
-        {
-                positive r = 0;
-                p64 delta = 0;
-
-                for (positive s = 0; s < n; s++)
-                {
-                        while (r + 1 < count && doc_sel_start(&before[s]) >= run_old[r + 1])
-                                r++;
-                        delta = 0;
-                        for (positive k = 0; k < r; k++)
-                                delta += edits[k].length;
-                        before[s].anchor += delta + shift[r];
-                        before[s].active += delta + shift[r];
-                }
-                memory_copy(doc->selections, before, n * sizeof(*before));
-                doc->selection_count = n;
-                doc_normalize(doc);
-        }
-        doc_group_end(doc, 0);
-        doc_seal(doc);
-        array_store_release(before, before_room, n);
-        return done;
+        return doc_apply_run_edits(doc, edits, count, run_old, shift, false);
 }
 
 // The lines the selections touch taken out whole, each caret on the line that comes up at its column's start.
@@ -5692,20 +5656,16 @@ static b32 doc_comment(struct doc address_to doc, const char address_to prefix)
                 p64 least = DOC_NONE;
                 b32 all = true;
 
-                for (p64 line = runs[r][0]; line <= runs[r][1] && all; line++)
+                for (p64 line = runs[r][0]; line <= runs[r][1]; line++)
                 {
-                        p64 text = doc_first_text(doc, line);
+                        p64 text = doc_first_text(doc, line), indent = text - doc_line_start(doc, line);
                         p8 head[16];
 
                         if (text == doc_line_end(doc, line))
                                 continue;
-                        all = doc_read(doc, text, head, size) == size && !memory_compare(head, prefix, size);
-                }
-                for (p64 line = runs[r][0]; line <= runs[r][1]; line++)
-                {
-                        p64 text = doc_first_text(doc, line), indent = text - doc_line_start(doc, line);
-
-                        if (text != doc_line_end(doc, line) && indent < least)
+                        if (all)
+                                all = doc_read(doc, text, head, size) == size && !memory_compare(head, prefix, size);
+                        if (indent < least)
                                 least = indent;
                 }
                 for (p64 line = runs[r][0]; line <= runs[r][1] && least != DOC_NONE; line++)
@@ -5714,10 +5674,8 @@ static b32 doc_comment(struct doc address_to doc, const char address_to prefix)
 
                         if (text == doc_line_end(doc, line))
                                 continue;
-                        if (!all)
-                                edits[edit_count++] = (struct doc_edit){doc_line_start(doc, line) + least, 0, with_blank, size + 1, DOC_NONE, DOC_NONE};
-                        else
-                                edits[edit_count++] = (struct doc_edit){text, size + (doc_byte(doc, text + size) == ' '), null, 0, DOC_NONE, DOC_NONE};
+                        edits[edit_count++] = !all ? (struct doc_edit){doc_line_start(doc, line) + least, 0, with_blank, size + 1, DOC_NONE, DOC_NONE}
+                                                   : (struct doc_edit){text, size + (doc_byte(doc, text + size) == ' '), null, 0, DOC_NONE, DOC_NONE};
                 }
         }
         doc_seal(doc);
@@ -5793,100 +5751,79 @@ static b32 doc_case(struct doc address_to doc, p32 mode)
         The lines a selection holds sorted, by their bytes (descending when asked), each selection's lines on their
         own; a selection on one line sorts nothing. Equal lines keep their order.
 */
+static positive doc_block_line_len(const p8 address_to block, positive length, p64 at)
+{
+        positive n = 0;
+
+        while (at + n < length && block[at + n] != '\n' && block[at + n] != '\r')
+                n++;
+        return n;
+}
+
 static b32 doc_sort_lines(struct doc address_to doc, b32 descending)
 {
         p64 (address_to runs)[2] = doc_runs_room(doc->selection_count);
-        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, total = 0, used = 0, edit_count = 0;
+        positive count = runs ? doc_line_runs(doc, runs, doc->selection_count) : 0, total = 0, used = 0, edit_count = 0, starts_room = 0, none = 0;
         struct doc_edit address_to edits = doc_edits_room(count);
         p8 address_to texts;
         p64 address_to starts = null;
-        positive starts_room = 0;
 
         if (!edits || !count)
                 return false;
         for (positive r = 0; r < count; r++)
                 total += doc_line_start(doc, runs[r][1] + 1) - doc_line_start(doc, runs[r][0]) + 4;
-        texts = doc_bytes_room(total * 2);
-        if (!texts)
+        if (!(texts = doc_bytes_room(total * 2)))
                 return false;
         for (positive r = 0; r < count; r++)
         {
-                p64 first = runs[r][0], last = runs[r][1], line_count = last - first + 1;
+                p64 first = runs[r][0], last = runs[r][1], line_count = last - first + 1, start, finish;
                 p8 address_to block = texts + total + used;
                 b32 had_end;
-                positive length, out = 0;
+                positive length, out = 0, n = 0;
 
                 if (line_count < 2)
                         continue;
                 length = doc_block(doc, first, last, block, &had_end);
                 if (!array_store_reserve(starts, starts_room, 0, line_count + 1, 64))
                         return false;
-                // The lines' starts in the block, sorted by insertion (stable), then laid out again in that order.
+                for (positive at = 0; at < length && n < line_count; n++)
                 {
-                        positive n = 0;
+                        starts[n] = at;
+                        at += doc_block_line_len(block, length, at);
+                        at += at < length ? (block[at] == '\r' && at + 1 < length && block[at + 1] == '\n' ? 2 : 1) : 0;
+                }
+                starts[n] = length;
+                for (positive i = 1; i < n; i++)
+                {
+                        p64 moving = starts[i];
+                        positive j = i, lb = doc_block_line_len(block, length, moving);
 
-                        for (positive at = 0; at < length && n < line_count; n++)
+                        for (; j; j--)
                         {
-                                starts[n] = at;
-                                while (at < length && block[at] != '\n' && block[at] != '\r')
-                                        at++;
-                                at += at < length ? (block[at] == '\r' && at + 1 < length && block[at + 1] == '\n' ? 2 : 1) : 0;
+                                p64 a = starts[j - 1];
+                                positive la = doc_block_line_len(block, length, a);
+                                b32 c = memory_compare(block + a, block + moving, la < lb ? la : lb), cmp = c ? c : (b32)(la > lb) - (b32)(la < lb);
+
+                                if (descending ? cmp >= 0 : cmp <= 0)
+                                        break;
+                                starts[j] = a;
                         }
-                        starts[n] = length;
-                        for (positive i = 1; i < n; i++)
-                        {
-                                p64 moving = starts[i];
-                                positive j = i;
+                        starts[j] = moving;
+                }
+                for (positive i = 0; i < n; i++)
+                {
+                        positive la = doc_block_line_len(block, length, starts[i]);
 
-                                while (j)
-                                {
-                                        p64 a = starts[j - 1], b = moving;
-                                        positive la = 0, lb = 0;
-                                        b32 cmp;
-
-                                        while (a + la < length && block[a + la] != '\n' && block[a + la] != '\r')
-                                                la++;
-                                        while (b + lb < length && block[b + lb] != '\n' && block[b + lb] != '\r')
-                                                lb++;
-                                        {
-                                                b32 c = memory_compare(block + a, block + b, la < lb ? la : lb);
-
-                                                cmp = c ? c : (b32)(la > lb) - (b32)(la < lb);
-                                        }
-                                        if (descending ? cmp >= 0 : cmp <= 0)
-                                                break;
-                                        starts[j] = starts[j - 1];
-                                        j--;
-                                }
-                                starts[j] = moving;
-                        }
-                        for (positive i = 0; i < n; i++)
-                        {
-                                positive la = 0;
-
-                                while (starts[i] + la < length && block[starts[i] + la] != '\n' && block[starts[i] + la] != '\r')
-                                        la++;
-                                memory_copy(texts + used + out, block + starts[i], la);
-                                out += la;
-                                memory_copy(texts + used + out, doc_eol_text(doc), doc_eol_length(doc));
-                                out += doc_eol_length(doc);
-                        }
+                        memory_copy(texts + used + out, block + starts[i], la), out += la;
+                        memory_copy(texts + used + out, doc_eol_text(doc), doc_eol_length(doc)), out += doc_eol_length(doc);
                 }
                 if (!had_end)
                         out -= doc_eol_length(doc);
-                {
-                        p64 start = doc_line_start(doc, first);
-                        p64 finish = had_end ? doc_line_start(doc, last + 1) : doc_length(doc);
-
-                        edits[edit_count++] = (struct doc_edit){start, finish - start, texts + used, out, DOC_NONE, DOC_NONE};
-                }
+                start = doc_line_start(doc, first), finish = had_end ? doc_line_start(doc, last + 1) : doc_length(doc);
+                edits[edit_count++] = (struct doc_edit){start, finish - start, texts + used, out, DOC_NONE, DOC_NONE};
                 used += out;
         }
-        {
-                positive none = 0;
-
-                array_store_release(starts, starts_room, none);
-        }
+        array_store_release(starts, starts_room, none);
         if (!edit_count)
                 return false;
         doc_seal(doc);
@@ -6697,24 +6634,15 @@ static b32 doc_select_next(struct doc address_to doc)
         {
                 b32 taken = false;
 
-                if (!doc_find_next(doc, &find, after, false, true, &start, &finish))
+                if (!doc_find_next(doc, &find, tries ? 0 : after, false, !tries, &start, &finish))
                         break;
                 for (positive s = 0; s < doc->selection_count; s++)
                         taken |= doc_sel_start(&doc->selections[s]) == start && doc_sel_end(&doc->selections[s]) == finish;
-                if (taken)
+                if (!taken)
                 {
-                        after = 0;
-                        if (!doc_find_next(doc, &find, after, false, false, &start, &finish))
-                                break;
-                        taken = false;
-                        for (positive s = 0; s < doc->selection_count; s++)
-                                taken |= doc_sel_start(&doc->selections[s]) == start && doc_sel_end(&doc->selections[s]) == finish;
-                        // Every match is selected: nothing more to add.
-                        if (taken)
-                                break;
+                        doc_find_drop(&find);
+                        return doc_select_add(doc, start, finish);
                 }
-                doc_find_drop(&find);
-                return doc_select_add(doc, start, finish);
         }
         doc_find_drop(&find);
         return false;
@@ -6890,17 +6818,17 @@ static b32 doc_keymap_line(struct doc_keymap address_to map, const char address_
                         return false;
                 if (!last)
                 {
-                        if (word == 4 && !memory_compare(line + start, "ctrl", 4))
-                                binding.modifiers |= DOC_MOD_CONTROL;
-                        else if (word == 5 && !memory_compare(line + start, "shift", 5))
-                                binding.modifiers |= DOC_MOD_SHIFT;
-                        else if (word == 3 && !memory_compare(line + start, "alt", 3))
-                                binding.modifiers |= DOC_MOD_ALT;
-                        else if (word == 5 && !memory_compare(line + start, "super", 5))
-                                binding.modifiers |= DOC_MOD_SUPER;
-                        else
+                        static const struct { const char address_to name; p8 len, bit; } mods[] = {
+                            {"ctrl", 4, DOC_MOD_CONTROL}, {"shift", 5, DOC_MOD_SHIFT}, {"alt", 3, DOC_MOD_ALT}, {"super", 5, DOC_MOD_SUPER},
+                        };
+                        p8 bit = 0;
+
+                        for (p32 m = 0; m < 4; m++)
+                                if (word == mods[m].len && !memory_compare(line + start, mods[m].name, word))
+                                        bit = mods[m].bit;
+                        if (!bit)
                                 return false;
-                        at++;
+                        binding.modifiers |= bit, at++;
                         continue;
                 }
                 for (p32 k = 0; k < sizeof(doc_key_names) / sizeof(doc_key_names[0]); k++)
@@ -7046,62 +6974,41 @@ static positive doc_keymap_name(const struct doc_keymap address_to map, p32 comm
 */
 static b32 doc_command(struct doc address_to doc, p32 command, const char address_to comment)
 {
+        static const struct { p8 cmd, a, b, c; } moves[] = {
+            {DOC_CMD_LEFT, 0, 0, 0}, {DOC_CMD_SELECT_LEFT, 0, 0, 1}, {DOC_CMD_RIGHT, 1, 0, 0}, {DOC_CMD_SELECT_RIGHT, 1, 0, 1},
+            {DOC_CMD_WORD_LEFT, 0, 1, 0}, {DOC_CMD_SELECT_WORD_LEFT, 0, 1, 1}, {DOC_CMD_WORD_RIGHT, 1, 1, 0}, {DOC_CMD_SELECT_WORD_RIGHT, 1, 1, 1},
+            {DOC_CMD_BACKSPACE, 0, DOC_REACH_CLUSTER, 2}, {DOC_CMD_DELETE, 1, DOC_REACH_CLUSTER, 2},
+            {DOC_CMD_DELETE_WORD_LEFT, 0, DOC_REACH_WORD, 2}, {DOC_CMD_DELETE_WORD_RIGHT, 1, DOC_REACH_WORD, 2},
+            {DOC_CMD_DELETE_LINE_LEFT, 0, DOC_REACH_LINE, 2}, {DOC_CMD_DELETE_LINE_RIGHT, 1, DOC_REACH_LINE, 2},
+        };
+        static const struct { p8 cmd, extend; p64 (address_to step)(const struct doc address_to, p64); } steps[] = {
+            {DOC_CMD_HOME, 0, doc_step_home}, {DOC_CMD_SELECT_HOME, 1, doc_step_home}, {DOC_CMD_END, 0, doc_step_end},
+            {DOC_CMD_SELECT_END, 1, doc_step_end}, {DOC_CMD_TOP, 0, doc_step_top}, {DOC_CMD_SELECT_TOP, 1, doc_step_top},
+            {DOC_CMD_BOTTOM, 0, doc_step_bottom}, {DOC_CMD_SELECT_BOTTOM, 1, doc_step_bottom},
+        };
+
+        for (positive i = 0; i < sizeof(moves) / sizeof(moves[0]); i++)
+                if (moves[i].cmd == command)
+                {
+                        if (moves[i].c == 2)
+                                doc_delete(doc, moves[i].a, moves[i].b);
+                        else
+                                doc_move_horizontal(doc, moves[i].a, moves[i].b, moves[i].c);
+                        return true;
+                }
+        for (positive i = 0; i < sizeof(steps) / sizeof(steps[0]); i++)
+                if (steps[i].cmd == command)
+                {
+                        doc_move(doc, steps[i].step, steps[i].extend);
+                        return true;
+                }
         switch (command)
         {
-        case DOC_CMD_LEFT: case DOC_CMD_SELECT_LEFT:
-                doc_move_horizontal(doc, false, false, command == DOC_CMD_SELECT_LEFT);
-                return true;
-        case DOC_CMD_RIGHT: case DOC_CMD_SELECT_RIGHT:
-                doc_move_horizontal(doc, true, false, command == DOC_CMD_SELECT_RIGHT);
-                return true;
-        case DOC_CMD_WORD_LEFT: case DOC_CMD_SELECT_WORD_LEFT:
-                doc_move_horizontal(doc, false, true, command == DOC_CMD_SELECT_WORD_LEFT);
-                return true;
-        case DOC_CMD_WORD_RIGHT: case DOC_CMD_SELECT_WORD_RIGHT:
-                doc_move_horizontal(doc, true, true, command == DOC_CMD_SELECT_WORD_RIGHT);
-                return true;
-        case DOC_CMD_UP: case DOC_CMD_SELECT_UP:
-                doc_move_vertical(doc, -1, command == DOC_CMD_SELECT_UP);
-                return true;
-        case DOC_CMD_DOWN: case DOC_CMD_SELECT_DOWN:
-                doc_move_vertical(doc, 1, command == DOC_CMD_SELECT_DOWN);
-                return true;
-        case DOC_CMD_HOME: case DOC_CMD_SELECT_HOME:
-                doc_move(doc, doc_step_home, command == DOC_CMD_SELECT_HOME);
-                return true;
-        case DOC_CMD_END: case DOC_CMD_SELECT_END:
-                doc_move(doc, doc_step_end, command == DOC_CMD_SELECT_END);
-                return true;
-        case DOC_CMD_TOP: case DOC_CMD_SELECT_TOP:
-                doc_move(doc, doc_step_top, command == DOC_CMD_SELECT_TOP);
-                return true;
-        case DOC_CMD_BOTTOM: case DOC_CMD_SELECT_BOTTOM:
-                doc_move(doc, doc_step_bottom, command == DOC_CMD_SELECT_BOTTOM);
-                return true;
-        case DOC_CMD_BACKSPACE:
-                doc_delete(doc, false, DOC_REACH_CLUSTER);
-                return true;
-        case DOC_CMD_DELETE:
-                doc_delete(doc, true, DOC_REACH_CLUSTER);
-                return true;
-        case DOC_CMD_DELETE_WORD_LEFT:
-                doc_delete(doc, false, DOC_REACH_WORD);
-                return true;
-        case DOC_CMD_DELETE_WORD_RIGHT:
-                doc_delete(doc, true, DOC_REACH_WORD);
-                return true;
-        case DOC_CMD_DELETE_LINE_LEFT:
-                doc_delete(doc, false, DOC_REACH_LINE);
-                return true;
-        case DOC_CMD_DELETE_LINE_RIGHT:
-                doc_delete(doc, true, DOC_REACH_LINE);
-                return true;
-        case DOC_CMD_NEWLINE:
-                doc_newline(doc);
-                return true;
+        case DOC_CMD_UP: case DOC_CMD_SELECT_UP: doc_move_vertical(doc, -1, command == DOC_CMD_SELECT_UP); return true;
+        case DOC_CMD_DOWN: case DOC_CMD_SELECT_DOWN: doc_move_vertical(doc, 1, command == DOC_CMD_SELECT_DOWN); return true;
+        case DOC_CMD_NEWLINE: doc_newline(doc); return true;
         case DOC_CMD_TAB:
         {
-                // Tab: indent the lines of a selection that spans lines; type a stop's worth at the carets otherwise.
                 b32 lines = false;
 
                 for (positive s = 0; s < doc->selection_count; s++)
@@ -7111,8 +7018,7 @@ static b32 doc_command(struct doc address_to doc, p32 command, const char addres
                 else if (doc->insert_spaces)
                 {
                         static const p8 spaces[17] = "                ";
-                        p64 column = doc_column(doc, doc->selections[doc->primary].active);
-                        p32 size = doc->tab_size - (p32)(column % doc->tab_size);
+                        p32 size = doc->tab_size - (p32)(doc_column(doc, doc->selections[doc->primary].active) % doc->tab_size);
 
                         doc_type(doc, spaces, size < 16 ? size : 16);
                 }
@@ -7120,75 +7026,30 @@ static b32 doc_command(struct doc address_to doc, p32 command, const char addres
                         doc_type(doc, (const p8 address_to) "\t", 1);
                 return true;
         }
-        case DOC_CMD_OUTDENT:
-                doc_indent(doc, true);
-                return true;
-        case DOC_CMD_INDENT:
-                doc_indent(doc, false);
-                return true;
-        case DOC_CMD_MOVE_LINE_UP: case DOC_CMD_MOVE_LINE_DOWN:
-                doc_move_lines(doc, command == DOC_CMD_MOVE_LINE_DOWN);
-                return true;
-        case DOC_CMD_COPY_LINE_UP: case DOC_CMD_COPY_LINE_DOWN:
-                doc_duplicate_lines(doc, command == DOC_CMD_COPY_LINE_UP);
-                return true;
-        case DOC_CMD_DELETE_LINES:
-                doc_delete_lines(doc);
-                return true;
-        case DOC_CMD_JOIN_LINES:
-                doc_join_lines(doc);
-                return true;
-        case DOC_CMD_TRANSPOSE:
-                doc_transpose(doc);
-                return true;
-        case DOC_CMD_LINE_BELOW: case DOC_CMD_LINE_ABOVE:
-                doc_insert_line(doc, command == DOC_CMD_LINE_ABOVE);
-                return true;
-        case DOC_CMD_COMMENT:
-                doc_comment(doc, comment);
-                return true;
+        case DOC_CMD_OUTDENT: case DOC_CMD_INDENT: doc_indent(doc, command == DOC_CMD_OUTDENT); return true;
+        case DOC_CMD_MOVE_LINE_UP: case DOC_CMD_MOVE_LINE_DOWN: doc_move_lines(doc, command == DOC_CMD_MOVE_LINE_DOWN); return true;
+        case DOC_CMD_COPY_LINE_UP: case DOC_CMD_COPY_LINE_DOWN: doc_duplicate_lines(doc, command == DOC_CMD_COPY_LINE_UP); return true;
+        case DOC_CMD_DELETE_LINES: doc_delete_lines(doc); return true;
+        case DOC_CMD_JOIN_LINES: doc_join_lines(doc); return true;
+        case DOC_CMD_TRANSPOSE: doc_transpose(doc); return true;
+        case DOC_CMD_LINE_BELOW: case DOC_CMD_LINE_ABOVE: doc_insert_line(doc, command == DOC_CMD_LINE_ABOVE); return true;
+        case DOC_CMD_COMMENT: doc_comment(doc, comment); return true;
         case DOC_CMD_UPPER: case DOC_CMD_LOWER: case DOC_CMD_TITLE:
                 doc_case(doc, command == DOC_CMD_UPPER ? DOC_CASE_UPPER : command == DOC_CMD_LOWER ? DOC_CASE_LOWER : DOC_CASE_TITLE);
                 return true;
-        case DOC_CMD_SORT: case DOC_CMD_SORT_DESCENDING:
-                doc_sort_lines(doc, command == DOC_CMD_SORT_DESCENDING);
-                return true;
-        case DOC_CMD_UNDO:
-                doc_undo(doc);
-                return true;
-        case DOC_CMD_REDO:
-                doc_redo(doc);
-                return true;
-        case DOC_CMD_SELECT_ALL:
-                doc_select_set(doc, 0, doc_length(((struct doc *)(doc))));
-                return true;
-        case DOC_CMD_SELECT_LINE:
-                doc_select_lines(doc);
-                return true;
-        case DOC_CMD_EXPAND:
-                doc_expand(doc);
-                return true;
-        case DOC_CMD_SHRINK:
-                doc_shrink(doc);
-                return true;
-        case DOC_CMD_CURSOR_ABOVE: case DOC_CMD_CURSOR_BELOW:
-                doc_add_cursor(doc, command == DOC_CMD_CURSOR_BELOW);
-                return true;
-        case DOC_CMD_NEXT_MATCH:
-                doc_select_next(doc);
-                return true;
-        case DOC_CMD_ALL_MATCHES:
-                doc_select_all_matches(doc);
-                return true;
-        case DOC_CMD_SINGLE:
-                doc_single(doc);
-                return true;
-        case DOC_CMD_BRACKET:
-                doc_jump_bracket(doc);
-                return true;
-        case DOC_CMD_OVERWRITE:
-                doc->overwrite = !doc->overwrite;
-                return true;
+        case DOC_CMD_SORT: case DOC_CMD_SORT_DESCENDING: doc_sort_lines(doc, command == DOC_CMD_SORT_DESCENDING); return true;
+        case DOC_CMD_UNDO: doc_undo(doc); return true;
+        case DOC_CMD_REDO: doc_redo(doc); return true;
+        case DOC_CMD_SELECT_ALL: doc_select_set(doc, 0, doc_length(((struct doc *)(doc)))); return true;
+        case DOC_CMD_SELECT_LINE: doc_select_lines(doc); return true;
+        case DOC_CMD_EXPAND: doc_expand(doc); return true;
+        case DOC_CMD_SHRINK: doc_shrink(doc); return true;
+        case DOC_CMD_CURSOR_ABOVE: case DOC_CMD_CURSOR_BELOW: doc_add_cursor(doc, command == DOC_CMD_CURSOR_BELOW); return true;
+        case DOC_CMD_NEXT_MATCH: doc_select_next(doc); return true;
+        case DOC_CMD_ALL_MATCHES: doc_select_all_matches(doc); return true;
+        case DOC_CMD_SINGLE: doc_single(doc); return true;
+        case DOC_CMD_BRACKET: doc_jump_bracket(doc); return true;
+        case DOC_CMD_OVERWRITE: doc->overwrite = !doc->overwrite; return true;
         }
         return false;
 }
@@ -11864,6 +11725,11 @@ static struct ui_box ui_box_of(const struct ui address_to ui, b64 x, b64 y, b64 
         return box;
 }
 
+static inline struct ui_box ui_box_px(int x, int y, int w, int h, b32 r)
+{
+        return (struct ui_box){x * 256, y * 256, (x + w) * 256, (y + h) * 256, r, r};
+}
+
 // A box scaled by sx, sy (Q30) about the point ox, oy (256ths), then moved by tx, ty (256ths): a CSS transform
 // translate() scaleX() scaleY() with its origin. The corners scale with it, into ellipses.
 static struct ui_box ui_box_transform(struct ui_box box, b64 sx, b64 sy, b32 ox, b32 oy, b32 tx, b32 ty)
@@ -12387,6 +12253,21 @@ static b32 ui_kit_columns(const struct ui address_to ui, const struct ui_box add
         return *last > *first;
 }
 
+static fn ui_kit_straight_span(unsigned int address_to row, b32 first, b32 width, b32 left, b32 right, unsigned int argb, unsigned int whole)
+{
+        b32 p0, p1;
+        unsigned int c0, c1;
+
+        if (!ui_span_ends(first, width, left, right, &p0, &p1, &c0, &c1))
+                return;
+        ui_kit_put(row, p0, c0, argb);
+        if (p1 > p0)
+        {
+                ui_kit_run(row + p0 + 1, p1 - p0 - 1, whole);
+                ui_kit_put(row, p1, c1, argb);
+        }
+}
+
 // The columns [first, last) of a box filled (a chunk of ui_kit_fill, at most UI_KIT_LINE wide).
 static fn ui_kit_fill_cols(struct ui address_to ui, const struct ui_box address_to box, unsigned int argb, const struct ui_box address_to clip,
                            b32 first, b32 last)
@@ -12407,18 +12288,7 @@ static fn ui_kit_fill_cols(struct ui address_to ui, const struct ui_box address_
                         continue;
                 if (!clip && ui_box_straight(box, ry, y))
                 {
-                        b32 p0, p1;
-                        unsigned int c0, c1;
-
-                        if (!ui_span_ends(first, width, box->x0, box->x1, &p0, &p1, &c0, &c1))
-                                continue;
-                        row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
-                        ui_kit_put(row, p0, c0, argb);
-                        if (p1 > p0)
-                        {
-                                ui_kit_run(row + p0 + 1, p1 - p0 - 1, whole);
-                                ui_kit_put(row, p1, c1, argb);
-                        }
+                        ui_kit_straight_span(ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first, first, width, box->x0, box->x1, argb, whole);
                         continue;
                 }
                 {
@@ -12555,21 +12425,11 @@ static fn ui_kit_ring_cols(struct ui address_to ui, const struct ui_box address_
                                 spans[0][1] = box->x1;
                         if (above || (ui_box_straight(&inner, inner_ry, y) && (inner.x0 - 1) >> 8 < inner.x1 >> 8))
                         {
+                                unsigned int whole = ui_premultiplied(argb, UI_FULL);
+
                                 row = ui->pixels + (unsigned long)y * ui->pitch + (unsigned long)first;
                                 for (int k = 0; k < count; k++)
-                                {
-                                        b32 p0, p1;
-                                        unsigned int c0, c1;
-
-                                        if (!ui_span_ends(first, width, spans[k][0], spans[k][1], &p0, &p1, &c0, &c1))
-                                                continue;
-                                        ui_kit_put(row, p0, c0, argb);
-                                        if (p1 > p0)
-                                        {
-                                                ui_kit_run(row + p0 + 1, p1 - p0 - 1, ui_premultiplied(argb, UI_FULL));
-                                                ui_kit_put(row, p1, c1, argb);
-                                        }
-                                }
+                                        ui_kit_straight_span(row, first, width, spans[k][0], spans[k][1], argb, whole);
                                 continue;
                         }
                 }
@@ -12961,10 +12821,7 @@ struct ui_control
         int at;
         int x, y, w, h;                    // logical pixels
         const char address_to label;
-        const char address_to items[UI_ITEMS];
         int count;
-        b64 value, low, high, step;        // a slider's (Q30); progress 0 to UI_ONE, below 0 indeterminate
-        char text[64];                     // a field's
         int role;                          // a badge's, a callout's, a text's colour role; a text's type in variant
         // The pointer.
         b32 hover, down, moved, focused;
@@ -12975,31 +12832,55 @@ struct ui_control
         struct ui_squish squish;
         struct ui_chase drawn;
         struct ui_ripple ripple[3];
-        struct ui_tween layer, fill, ink, label_ink, stroke, scale, extent, pip_x, pip_w, pip_y;
+        struct ui_tween layer, fill, ink, label_ink, stroke, scale, extent;
         struct ui_stretch dom;
         int dom_origin;                    // -1 the far edge, 1 the near (left, top), 0 the middle
         struct ui_spring held_squish;      // --sw-squish or --squish let go
         b64 bend, bend_target;             // --sw-squish / --squish held, Q30 over one; the slider's jello target
         int squish_origin;                 // 1 left, -1 right
-        b64 pip_squash, pip_press;         // the radio pip's keyframes: their first frames (0 none, 1 pending)
-        // The slider.
-        struct ui_slide slide;
-        b32 sliding, bounce;
-        int hover_x;                       // where the pointer hovers over it, device pixels, or -1
-        b64 out_at;                        // the pointer left: hovering ends 200 ms after
-        b64 last_frame;
-        struct ui_text address_to edit;    // a field's text: the engine's widget, which types, selects, pastes and draws it
         b64 placed;                        // the kit's epoch it was last placed in; 0 before its first frame
         // The row the control is in, logical pixels: what its press ripples across and its hover lights, edge to edge.
         // None (row_w 0) is the kit's own: the box and the card's padding round it (24 across, 8 down, ui.css's ripple-clip).
         int row_x, row_y, row_w, row_h;
         p64 items_id;                      // key into ui_items_pool (0 none); value-copied with struct ui_control
-        unsigned int marks;                // tabs: bit k is a dot at the far end of item k (a file that has changes); last, for the layout's sake
-        b32 closable, addable;             // tabs: per-tab close button (x) + middle-click close, and trailing '+' new-tab button
-        int close_item, close_hover;       // tabs: item closed on click (-1 none); hovered close slot (-1 none, -2 add button)
-        b32 add_clicked;                   // tabs: '+' button clicked
-        int tab_right_click;               // tabs: item right-clicked (-1 none)
-        unsigned char hit_kind;            // tabs: UI_TAB_HIT_* captured on press
+        b64 value;                         // slider Q30; progress 0..UI_ONE, <0 indeterminate (kept outside union: gallery_made writes it on all kinds)
+        // Mutually exclusive kind-specific payloads.
+        union
+        {
+                struct // UI_SLIDER
+                {
+                        b64 low, high, step; // Q30
+                        struct ui_slide slide;
+                        b32 sliding, bounce;
+                        int hover_x;       // where the pointer hovers over it, device pixels, or -1
+                        b64 last_frame;
+                };
+                struct // UI_TABS, UI_RADIOS, UI_SWATCHES, UI_INPUT, UI_CALLOUT, UI_CODE_WELL
+                {
+                        const char address_to items[UI_ITEMS];
+                        char text[64];
+                        struct ui_tween pip_y;
+                        union
+                        {
+                                struct // UI_TABS
+                                {
+                                        struct ui_tween pip_x, pip_w;
+                                        unsigned int marks;
+                                        b32 closable, addable, add_clicked;
+                                        int close_item, close_hover, tab_right_click;
+                                        unsigned char hit_kind;
+                                };
+                                struct // UI_RADIOS
+                                {
+                                        b64 pip_squash, pip_press;
+                                };
+                                struct // UI_INPUT
+                                {
+                                        struct ui_text address_to edit;
+                                };
+                        };
+                };
+        };
 };
 
 // The row a control's ripple and hover cover, in logical pixels.
@@ -13130,11 +13011,12 @@ static fn ui_control_start(struct ui_control address_to c)
         ui_items_anim_reset(c);
         if (c->kind == UI_PROGRESS && c->value >= 0)
                 ui_tween_put(&c->extent, ui_progress_whole(c->value), UI_TWEEN_NUMBER);
-        c->hover_x = -1;
+        if (c->kind == UI_SLIDER)
+                c->hover_x = -1;
         c->item = -1;
-        c->pip_squash = c->pip_press = 0;
-        for (int k = 0; k < 4; k++)
-                c->drawn.from[k] = c->drawn.to[k] = 0;
+        if (c->kind == UI_RADIOS)
+                c->pip_squash = c->pip_press = 0;
+        memory_zero(&c->drawn, sizeof(c->drawn));
 }
 
 // A tween's value now, marking the frame busy while it moves.
@@ -14840,10 +14722,16 @@ static fn ui_control_draw(struct ui address_to ui, struct ui_control address_to 
 */
 static fn ui_control_place(struct ui_control address_to c)
 {
-        struct ui_tween address_to unplaced[] = {&c->layer, &c->fill, &c->ink, &c->label_ink, &c->stroke, &c->scale, &c->pip_x, &c->pip_w, &c->pip_y};
+        struct ui_tween address_to unplaced[] = {&c->layer, &c->fill, &c->ink, &c->label_ink, &c->stroke, &c->scale};
 
         for (positive k = 0; k < sizeof(unplaced) / sizeof(unplaced[0]); k++)
                 unplaced[k]->placed = 0;
+        if (c->kind == UI_TABS)
+                c->pip_x.placed = c->pip_w.placed = c->pip_y.placed = 0;
+        else if (c->kind == UI_RADIOS)
+                c->pip_y.placed = 0, c->pip_squash = c->pip_press = 0;
+        else if (c->kind == UI_SLIDER)
+                c->sliding = 0, c->slide.landed = 0;
         ui_items_anim_reset(c);
         // A slider's extent is not drawn: it is unplaced, as it was when it was the thumb's halo radius.
         if (c->kind == UI_SLIDER)
@@ -14859,9 +14747,6 @@ static fn ui_control_place(struct ui_control address_to c)
         ui_spring_stop(&c->held_squish);
         memory_zero(&c->drawn, sizeof(c->drawn));
         c->dom.at = 0;
-        c->pip_squash = c->pip_press = 0;
-        c->sliding = 0;
-        c->slide.landed = 0;
         c->bend = c->bend_target = 0;
         c->moved = c->down ? c->moved : 0; // a drag under way is still a drag: its release says whether it flips
         c->placed = ui_kit.epoch;
@@ -14940,14 +14825,19 @@ static fn ui_swatches_draw(struct ui address_to ui, struct ui_control address_to
         }
 }
 
+static fn ui_heading_text(struct ui address_to ui, int x, int y, int w, int variant, int role, const char address_to label)
+{
+        if (ui_rtl() && w > 0)
+                ui_kit_start(ui, ui_dev(ui, x + w), ui_kit_baseline(ui, ui_dev(ui, y), variant), (string_address)label, variant,
+                             ui_role(role), 0, ui_dev(ui, x), ui_dev(ui, x + w));
+        else
+                ui_kit_text_clip(ui, ui_dev(ui, x), ui_kit_baseline(ui, ui_dev(ui, y), variant), (string_address)label, variant,
+                                 ui_role(role), 0, w > 0 ? ui_dev(ui, x + w) : ui->width);
+}
+
 static fn ui_heading_draw(struct ui address_to ui, struct ui_control address_to c)
 {
-        if (ui_rtl() && c->w > 0)
-                ui_kit_start(ui, ui_dev(ui, c->x + c->w), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
-                             ui_role(c->role), 0, ui_dev(ui, c->x), ui_dev(ui, c->x + c->w));
-        else
-                ui_kit_text_clip(ui, ui_dev(ui, c->x), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
-                                 ui_role(c->role), 0, c->w > 0 ? ui_dev(ui, c->x + c->w) : ui->width);
+        ui_heading_text(ui, c->x, c->y, c->w, c->variant, c->role, c->label);
 }
 
 static fn ui_rule_draw(struct ui address_to ui, struct ui_control address_to c)
@@ -15183,7 +15073,6 @@ static void ui_kit_let_go_held(struct ui_control address_to c)
 {
         ui_kit_held = null;
         c->down = c->moved = 0;
-        c->sliding = c->sliding && c->kind == UI_SLIDER;
         ui_kit_ripples_exit(c);
         ui_squish_release(&c->squish);
         if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX)
@@ -15276,7 +15165,9 @@ static struct ui_control address_to ui_kit_pointer_press(struct ui address_to ui
 {
         ui_kit_held = c;
         c->down = 1, c->moved = 0, c->hover = 1;
-        c->item = hit, c->hit_kind = (unsigned char)hit_kind;
+        c->item = hit;
+        if (c->kind == UI_TABS)
+                c->hit_kind = (unsigned char)hit_kind;
         c->press_x = c->pointer_x = x, c->press_y = c->pointer_y = y;
         c->pressed_at = ui_kit.now;
         ui_squish_press(&c->squish);
@@ -15324,6 +15215,24 @@ static struct ui_control address_to ui_kit_pointer_press(struct ui address_to ui
         return null;
 }
 
+static inline int ui_tab_close_hover(struct ui_tab_hit th)
+{
+        return th.kind == UI_TAB_HIT_ADD ? -2 : th.kind == UI_TAB_HIT_CLOSE ? th.item : -1;
+}
+
+static inline struct ui_tab_hit ui_control_hit_tab(const struct ui address_to ui, const struct ui_control address_to c, int x, int y)
+{
+        if (!ui_control_live(c))
+                return (struct ui_tab_hit){UI_TAB_HIT_NONE, -1};
+        if (c->kind == UI_TABS)
+                return ui_tab_hit_at(ui, c, x, y);
+        {
+                int hit = ui_control_hit(ui, c, x, y);
+
+                return (struct ui_tab_hit){hit >= 0 ? UI_TAB_HIT_ITEM : UI_TAB_HIT_NONE, hit};
+        }
+}
+
 static struct ui_control address_to ui_kit_pointer_release(struct ui address_to ui, struct ui_control address_to c, int x, int y)
 {
         struct ui_control address_to changed = null;
@@ -15351,10 +15260,8 @@ static struct ui_control address_to ui_kit_pointer_release(struct ui address_to 
                         else if (th.kind == UI_TAB_HIT_ITEM)
                                 ui_tabs_choose(ui, c, th.item), changed = c;
                 }
-                c->hover = th.kind != UI_TAB_HIT_NONE;
-                c->item = th.item;
-                c->close_hover = th.kind == UI_TAB_HIT_ADD ? -2 : th.kind == UI_TAB_HIT_CLOSE ? th.item : -1;
-                c->hit_kind = UI_TAB_HIT_NONE;
+                c->hover = th.kind != UI_TAB_HIT_NONE, c->item = th.item;
+                c->close_hover = ui_tab_close_hover(th), c->hit_kind = UI_TAB_HIT_NONE;
                 return changed;
         }
         else if (ui_control_flags(c) & UI_CF_TOGGLE)
@@ -15377,16 +15284,14 @@ static struct ui_control address_to ui_kit_pointer_release(struct ui address_to 
 
                                         if (lx >= c->x + c->w - 40 && lx < c->x + c->w - 12)
                                         {
-                                                c->dom_origin = 0;
+                                                c->dom_origin = 0, c->pip_press = 1;
                                                 ui_stretch_go(&ui_items_anim_for(c)->dom[c->at], ui_kit.now, UI_Q2(84));
-                                                c->pip_press = 1;
                                         }
                                 }
                         }
                         else
                         {
-                                c->on = !c->on, changed = c;
-                                c->dom_origin = (c->on ? 1 : -1) * ui_dir();
+                                c->on = !c->on, changed = c, c->dom_origin = (c->on ? 1 : -1) * ui_dir();
                                 if (!ui_kit.motion)
                                         ui_stretch_go(&c->dom, ui_kit.now, UI_Q2(111));
                         }
@@ -15425,46 +15330,28 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
 {
         ui_kit_touch = (flags & WINDOW_KEY_TOUCH) != 0;
         if (type == WINDOW_EVENT_BUTTON && !down && (flags & WINDOW_KEY_CANCEL) && ui_kit_held)
-        {
-                ui_kit_let_go_held(ui_kit_held);
-                return null;
-        }
+                return ui_kit_let_go_held(ui_kit_held), null;
         if (type == WINDOW_EVENT_MOTION)
         {
                 struct ui_control address_to c = ui_kit_held;
 
                 if (c && !ui_control_live(c))
-                {
-                        ui_kit_let_go_held(c);
-                        return null;
-                }
+                        return ui_kit_let_go_held(c), null;
                 if (c)
                         return ui_kit_pointer_drag(ui, c, x, y);
                 for (int k = 0; k < count; k++)
                 {
                         struct ui_control address_to ctl = &controls[k];
-                        b32 live = ui_control_live(ctl);
-                        b32 hovered;
-                        int item_hit;
+                        struct ui_tab_hit th = ui_control_hit_tab(ui, ctl, x, y);
+                        b32 hovered = th.kind != UI_TAB_HIT_NONE;
 
                         if (ctl->kind == UI_TABS)
-                        {
-                                struct ui_tab_hit th = live ? ui_tab_hit_at(ui, ctl, x, y) : (struct ui_tab_hit){UI_TAB_HIT_NONE, -1};
-
-                                hovered = th.kind != UI_TAB_HIT_NONE;
-                                item_hit = th.item;
-                                ctl->close_hover = th.kind == UI_TAB_HIT_ADD ? -2 : th.kind == UI_TAB_HIT_CLOSE ? th.item : -1;
-                        }
-                        else
-                        {
-                                item_hit = live ? ui_control_hit(ui, ctl, x, y) : -1;
-                                hovered = item_hit >= 0;
-                        }
-                        if (hovered != ctl->hover || (hovered && item_hit != ctl->item))
+                                ctl->close_hover = ui_tab_close_hover(th);
+                        if (hovered != ctl->hover || (hovered && th.item != ctl->item))
                         {
                                 if (!hovered && ctl->hover)
                                         ui_kit_ripples_exit(ctl);
-                                ctl->hover = hovered, ctl->item = item_hit;
+                                ctl->hover = hovered, ctl->item = th.item;
                         }
                         if (hovered)
                                 ui_kit_shape_note(ctl);
@@ -15483,24 +15370,10 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         controls[k].focused = 0;
                 for (int k = 0; k < count; k++)
                 {
-                        struct ui_control address_to ctl = &controls[k];
+                        struct ui_tab_hit th = ui_control_hit_tab(ui, &controls[k], x, y);
 
-                        if (!ui_control_live(ctl))
-                                continue;
-                        if (ctl->kind == UI_TABS)
-                        {
-                                struct ui_tab_hit th = ui_tab_hit_at(ui, ctl, x, y);
-
-                                if (th.kind != UI_TAB_HIT_NONE)
-                                        return ui_kit_pointer_press(ui, ctl, x, y, th.item, th.kind);
-                        }
-                        else
-                        {
-                                int hit = ui_control_hit(ui, ctl, x, y);
-
-                                if (hit >= 0)
-                                        return ui_kit_pointer_press(ui, ctl, x, y, hit, UI_TAB_HIT_ITEM);
-                        }
+                        if (th.kind != UI_TAB_HIT_NONE)
+                                return ui_kit_pointer_press(ui, &controls[k], x, y, th.item, th.kind);
                 }
                 return null;
         }
@@ -15511,11 +15384,7 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 if (!c)
                         return null;
                 if (!ui_control_live(c))
-                {
-                        ui_kit_let_go_held(c);
-                        c->hover = 0, c->item = -1;
-                        return null;
-                }
+                        return ui_kit_let_go_held(c), c->hover = 0, c->item = -1, null;
                 return ui_kit_pointer_release(ui, c, x, y);
         }
 }
@@ -19292,11 +19161,6 @@ static positive ui_popmenu_shown_flags(const char address_to label, p32 flags, p
         return out;
 }
 
-static positive ui_popmenu_shown(const char address_to label, p8 address_to into, positive room, p32 address_to mnemonic)
-{
-        return ui_popmenu_shown_flags(label, 0, into, room, mnemonic);
-}
-
 /*
         The menu laid out in at most limit pixels of height (0: no limit), in device pixels: a tree of its own (ui_tree). The root is the
         menu, a column that scrolls, as wide as its widest item (UI_MENU_LEAST at least) and as tall as its items up to the limit. A
@@ -19383,13 +19247,6 @@ static fn ui_popmenu_ripple(struct ui address_to ui, struct ui_popmenu address_t
         the white that stands out from that ground. Its word asks UI_READABLE and its dot, a shape and not text, UI_MENU_SEEN, so the dot
         keeps more of the colour where a glass is near the middle grey. 0 for an item that is no notice.
 */
-// A menu's hot item's fill, straight: the fill every list of the kit lights its row with (ui_kit_lit), so a menu, a dropdown, a
-// list and the settings column all show the chosen row alike.
-static unsigned int ui_popmenu_hot_fill(const struct ui address_to ui)
-{
-        return ui_kit_lit(ui);
-}
-
 static unsigned int ui_popmenu_tone(const struct ui address_to ui, p32 flags, b32 hot, unsigned int least)
 {
         unsigned int ground, toward, colour;
@@ -19399,7 +19256,7 @@ static unsigned int ui_popmenu_tone(const struct ui address_to ui, p32 flags, b3
         ground = (ui->glass ? ui->ground : ui_role(UI_SURFACE)) & 0xffffffu;
         if (hot)
         {
-                unsigned int well = ui_popmenu_hot_fill(ui), cover = well >> 24;
+                unsigned int well = ui_kit_lit(ui), cover = well >> 24;
 
                 ground = window_mix(ground, well & 0xffffffu, cover + (cover >> 7));
         }
@@ -19438,7 +19295,7 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                 // The hot item's rect: ui_fill lays a premultiplied tone, and the well is straight (its alpha is its cover), so it is
                 // premultiplied first. It is a lit row's fill (ui_kit_lit). The press's ripple is laid over it, cut to the rect, and sinks toward the ground (ui_popmenu_ripple).
                 if (lit)
-                        ui_fill(ui, n->x, n->y, n->w, n->h, ui_premultiplied(ui_popmenu_hot_fill(ui), UI_FULL));
+                        ui_fill(ui, n->x, n->y, n->w, n->h, ui_premultiplied(ui_kit_lit(ui), UI_FULL));
                 if (at == m->ripple_at)
                         ui_popmenu_ripple(ui, m, n);
                 ui_popmenu_shown_flags(item->label, item->flags, shown, sizeof(shown), &mnemonic);
@@ -19509,18 +19366,14 @@ static fn ui_popmenu_step(struct ui_popmenu address_to m, int step)
 static fn ui_popmenu_page(struct ui_popmenu address_to m, int step)
 {
         int by = m->rows_shown > 0 ? m->rows_shown : 1, at = m->hot < 0 ? (step > 0 ? 0 : m->count - 1) : m->hot;
+        int dir = step > 0 ? 1 : -1, found = -1;
 
         at += step * by;
         at = at < 0 ? 0 : at >= m->count ? m->count - 1 : at;
-        // The nearest that can be chosen on from the landing, in the page's direction; else back from it; none leaves the hot item.
-        int dir = step > 0 ? 1 : -1, found = -1;
-
-        for (int k = at; found < 0 && k >= 0 && k < m->count; k += dir)
-                if (ui_popmenu_choosable(m, k))
-                        found = k;
-        for (int k = at; found < 0 && k >= 0 && k < m->count; k -= dir)
-                if (ui_popmenu_choosable(m, k))
-                        found = k;
+        for (int pass = 0; pass < 2 && found < 0; pass++)
+                for (int k = at, d = pass ? -dir : dir; found < 0 && k >= 0 && k < m->count; k += d)
+                        if (ui_popmenu_choosable(m, k))
+                                found = k;
         if (found >= 0)
                 m->hot = found;
         ui_popmenu_reveal(m);
@@ -19551,6 +19404,11 @@ static b32 ui_popmenu_bar(const struct ui address_to ui, struct ui_popmenu addre
 #define UI_MENU_GONE (-2)
 #define UI_MENU_OPEN (-3)
 
+static inline int ui_popmenu_pick(const struct ui_popmenu address_to m, int at)
+{
+        return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
+}
+
 static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_to m, const struct window_event address_to event, int x, int y)
 {
         ui_tree_ready(&m->tree);
@@ -19568,48 +19426,41 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                 case 109: ui_popmenu_page(m, 1); return UI_MENU_NOTHING;
                 case 1: return UI_MENU_GONE;
                 case 105: case 106:
-                        // The arrow toward the start of what is read closes the menu, the one toward its end opens a submenu (the mark is there).
                         if (ui_arrow((int)event->a) < 0)
                                 return UI_MENU_GONE;
                         return ui_popmenu_choosable(m, m->hot) && (m->items[m->hot].flags & UI_MENU_SUBMENU) ? UI_MENU_OPEN : UI_MENU_NOTHING;
                 case 28: case 96: case 57:
-                        if (!ui_popmenu_choosable(m, m->hot))
-                                return UI_MENU_NOTHING;
-                        return m->items[m->hot].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[m->hot].id;
+                        return ui_popmenu_choosable(m, m->hot) ? ui_popmenu_pick(m, m->hot) : UI_MENU_NOTHING;
                 }
                 if (c > ' ' && c < 127)
                 {
                         positive now = ui_kit_clock();
-                        p8 shown[96];
+                        p8 shown[96], low = (p8)byte_to_lower((b8)c);
                         p32 mnemonic;
+                        int prefix = -1;
 
                         if (now - m->typed_at > 1000000000ull || m->typed_length >= (int)sizeof(m->typed) - 1)
                                 m->typed_length = 0;
-                        m->typed[m->typed_length++] = (char)byte_to_lower((b8)c);
-                        m->typed_at = now;
-                        // A mnemonic chooses at once; else the first item the letters typed start.
-                        for (int at = 0; at < m->count; at++)
-                        {
-                                ui_popmenu_shown_flags(m->items[at].label, m->items[at].flags, shown, sizeof(shown), &mnemonic);
-                                if (ui_popmenu_choosable(m, at) && mnemonic == byte_to_lower((b8)c) && m->typed_length == 1)
-                                {
-                                        m->hot = at;
-                                        return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
-                                }
-                        }
+                        m->typed[m->typed_length++] = (char)low, m->typed_at = now;
                         for (int at = 0; at < m->count; at++)
                         {
                                 positive k = 0;
 
+                                if (!ui_popmenu_choosable(m, at))
+                                        continue;
                                 ui_popmenu_shown_flags(m->items[at].label, m->items[at].flags, shown, sizeof(shown), &mnemonic);
-                                while (k < (positive)m->typed_length && shown[k] && byte_to_lower((b8)shown[k]) == m->typed[k])
-                                        k++;
-                                if (ui_popmenu_choosable(m, at) && k == (positive)m->typed_length)
+                                if (m->typed_length == 1 && mnemonic == low)
+                                        return m->hot = at, ui_popmenu_pick(m, at);
+                                if (prefix < 0)
                                 {
-                                        m->hot = at;
-                                        break;
+                                        while (k < (positive)m->typed_length && shown[k] && byte_to_lower((b8)shown[k]) == m->typed[k])
+                                                k++;
+                                        if (k == (positive)m->typed_length)
+                                                prefix = at;
                                 }
                         }
+                        if (prefix >= 0)
+                                m->hot = prefix;
                 }
                 return UI_MENU_NOTHING;
         }
@@ -19617,16 +19468,12 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
         {
                 int at = ui_popmenu_at(m, x, y);
 
-                // A finger's press that moves past the slop is a drag, and its lift chooses nothing (the kit's press rule).
                 if (m->press.down && (event->flags & WINDOW_KEY_TOUCH))
                         ui_press_move(ui, &m->press, x, y);
                 if (!ui_popmenu_bar(ui, m, WINDOW_EVENT_MOTION, x, y, false))
                         m->hot = at;
                 return UI_MENU_NOTHING;
         }
-        // A scroll (the wheel's or a touchpad's) over a menu that fits closes it, as a scroll anywhere does (ui_popmenu_scroll). A menu taller
-        // than its window scrolls under a vertical turn, three items a notch (a trackpad's turns add up to the items they make), and stays open.
-        // A stop (WINDOW_WHEEL_STOP) is a touchpad's fingers lifting and turns nothing: it is no scroll, and closes no menu.
         if (event->type == WINDOW_EVENT_WHEEL)
         {
                 int row = ui_dev(ui, m->touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW);
@@ -19641,17 +19488,17 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
         if (event->type == WINDOW_EVENT_BUTTON && event->a >= UI_POINTER_LEFT && event->a <= UI_POINTER_MIDDLE)
         {
                 int at = ui_popmenu_at(m, x, y), clicked;
+                b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
 
                 m->touch |= (event->flags & WINDOW_KEY_TOUCH) != 0;
-                if (event->flags & WINDOW_KEY_DOWN)
+                if (ui_popmenu_bar(ui, m, WINDOW_EVENT_BUTTON, x, y, down))
+                        return UI_MENU_NOTHING;
+                if (down)
                 {
-                        if (ui_popmenu_bar(ui, m, WINDOW_EVENT_BUTTON, x, y, true))
-                                return UI_MENU_NOTHING;
                         ui_press_begin(&m->press, x, y, at, m->touch);
                         m->hot = at;
                         if (ui_popmenu_choosable(m, at))
                         {
-                                // The ripple starts from the press in the item's element, where the tree placed it.
                                 const struct ui_node address_to n = &m->tree.node[m->items[at].node];
 
                                 ui_ripple_go(&m->ripple, ui_qdiv(ui_q(x - n->x), ui_q(ui->scale) / 100), ui_qdiv(ui_q(y - n->y), ui_q(ui->scale) / 100),
@@ -19660,14 +19507,9 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                         }
                         return UI_MENU_NOTHING;
                 }
-                if (ui_popmenu_bar(ui, m, WINDOW_EVENT_BUTTON, x, y, false))
-                        return UI_MENU_NOTHING;
-                // The release chooses an item only where its press went down (the kit's press: a cancel, or no press, is none).
                 clicked = ui_press_release(&m->press, (event->flags & WINDOW_KEY_CANCEL) != 0, at);
                 ui_ripple_exit(&m->ripple);
-                if (clicked < 0 || !ui_popmenu_choosable(m, at))
-                        return UI_MENU_NOTHING;
-                return m->items[at].flags & UI_MENU_SUBMENU ? UI_MENU_OPEN : m->items[at].id;
+                return clicked >= 0 && ui_popmenu_choosable(m, at) ? ui_popmenu_pick(m, at) : UI_MENU_NOTHING;
         }
         return UI_MENU_NOTHING;
 }
@@ -19795,6 +19637,8 @@ static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_ro
         ui_popmenu_present(p);
         return true;
 }
+
+static unsigned int ui_popmenu_hot_fill(const struct ui address_to u) { return ui_kit_lit(u); }
 
 static b32 ui_popmenu_open(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
                          int x, int y, int width, int height, unsigned int flags, b32 touch)
@@ -20060,7 +19904,7 @@ static unsigned int ui_pinch_steps(const unsigned int *steps, unsigned int count
 struct ui_buttons
 {
         struct ui_control button[UI_BUTTONS_MOST];
-        struct ui_control line;                      // what an armed button says, at the row's left
+        struct { int x, y, w; unsigned char variant; } line; // confirm line box (logical px)
         const char address_to says[UI_BUTTONS_MOST]; // what each does, said when armed; none: it acts at once
         int count, keys, fired;                      // the buttons, the one the keys are on and 1 (0: the app's), the one that acted
         struct ui_confirm confirm;
@@ -20087,10 +19931,9 @@ static fn ui_buttons_place(struct ui address_to ui, struct ui_buttons address_to
                 c->x = right - (b->count - k) * UI_BUTTONS_W - (b->count - 1 - k) * UI_GAP2;
                 c->y = row + (UI_ROW - UI_BUTTONS_H) / 2;
         }
-        b->line.kind = UI_HEADING, b->line.variant = UI_BODY_MEDIUM, b->line.role = UI_ON_SURFACE_VARIANT;
+        b->line.variant = UI_BODY_MEDIUM;
         b->line.x = left * 100 / ui->scale, b->line.y = row + (UI_ROW - ui_types[UI_BODY_MEDIUM].line) / 2;
         b->line.w = b->button[0].x - UI_GAP2 - b->line.x;
-        // Reading from the right the row is the same row turned over its width: the buttons at its left, the first of them at its right end of them.
         if (ui_rtl())
         {
                 int across = left * 100 / ui->scale, span = (left + width) * 100 / ui->scale - across;
@@ -20108,8 +19951,7 @@ static fn ui_buttons_draw(struct ui address_to ui, struct ui_buttons address_to 
         if (b->confirm.armed && b->confirm.what >= 1 && b->confirm.what <= b->count && b->says[b->confirm.what - 1])
         {
                 ui_confirm_line(b->said, sizeof(b->said), b->says[b->confirm.what - 1]);
-                b->line.label = b->said;
-                ui_control_draw(ui, &b->line);
+                ui_heading_text(ui, b->line.x, b->line.y, b->line.w, b->line.variant, UI_ON_SURFACE_VARIANT, b->said);
         }
         for (int k = 0; k < b->count; k++)
         {
@@ -20174,7 +20016,15 @@ static p32 ui_buttons_key(struct ui_buttons address_to b, const struct window_ev
         return UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN;
 }
 
-// x, y: where the pointer is, for a button's press, which carries no place of its own.
+static p32 ui_buttons_drop(struct ui_buttons address_to b)
+{
+        p32 asks = b->keys || b->confirm.armed ? UI_BUTTONS_DRAW : 0;
+
+        b->keys = 0;
+        ui_confirm_drop(&b->confirm);
+        return asks;
+}
+
 static p32 ui_buttons_pointer(struct ui address_to ui, struct ui_buttons address_to b, const struct window_event address_to event, int x, int y)
 {
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, held = ui_kit_held >= b->button && ui_kit_held < b->button + b->count;
@@ -20183,41 +20033,19 @@ static p32 ui_buttons_pointer(struct ui address_to ui, struct ui_buttons address
         p32 asks = 0;
 
         if (event->type == WINDOW_EVENT_BUTTON && event->a != UI_POINTER_LEFT)
-        {
-                // Another button of the mouse is a press that is not a button's: it drops what was armed.
-                if (!down)
-                        return 0;
-                asks = b->keys || b->confirm.armed ? UI_BUTTONS_DRAW : 0;
-                b->keys = 0;
-                ui_confirm_drop(&b->confirm);
-                return asks;
-        }
+                return down ? ui_buttons_drop(b) : 0;
         if (event->type == WINDOW_EVENT_MOTION)
                 x = event->a, y = event->b;
         for (int k = 0; k < b->count; k++)
                 was |= (b->button[k].hover | b->button[k].down << 1) << (2 * k);
         clicked = ui_kit_pointer(ui, b->button, b->count, (int)event->type, x, y, down, event->flags);
         for (int k = 0; k < b->count; k++)
-        {
-                now |= (b->button[k].hover | b->button[k].down << 1) << (2 * k);
-                hit = b->button[k].down ? k : hit;
-        }
+                now |= (b->button[k].hover | b->button[k].down << 1) << (2 * k), hit = b->button[k].down ? k : hit;
         asks = was != now ? UI_BUTTONS_DRAW : 0;
         if (event->type != WINDOW_EVENT_BUTTON)
                 return asks;
         if (down)
-        {
-                if (hit >= 0)
-                {
-                        b->keys = hit + 1;
-                        return asks | UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN;
-                }
-                asks |= b->keys || b->confirm.armed ? UI_BUTTONS_DRAW : 0;
-                b->keys = 0;
-                ui_confirm_drop(&b->confirm);
-                return asks;
-        }
-        // A release that is another control's hold (captured from elsewhere on the page) clicks none of this row's buttons.
+                return hit >= 0 ? (b->keys = hit + 1, asks | UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN) : asks | ui_buttons_drop(b);
         if (clicked && clicked >= b->button && clicked < b->button + b->count)
                 return asks | ui_buttons_press(b, (int)(clicked - b->button));
         return asks | (held ? UI_BUTTONS_DRAW | UI_BUTTONS_TAKEN : 0);
@@ -22232,15 +22060,10 @@ static int ui_view_end(struct ui_view address_to v)
                 const struct ui_node address_to row = &v->tree.node[v->tree.node[first].parent];
                 int gap = ui_px(ui, UI_GAP2), start = row->x + row->pad[ui_rtl()], row_end = row->x + row->w - row->pad[!ui_rtl()];
                 int from = ui_rtl() ? high + gap : start, to = ui_rtl() ? row_end : low - gap;
-                struct ui_control address_to line = &v->group.line;
-
                 int armed = v->group.confirm.armed ? v->group.confirm.what - 1 : -1;
 
-                line->kind = UI_HEADING, line->variant = UI_BODY_MEDIUM, line->role = UI_ON_SURFACE_VARIANT;
-                // A row of several buttons can leave too little room before them for what an armed one will do (the launcher's four power
-                // buttons): then, while one is armed, the line is said in the room of the row's other buttons, on the side of the armed one
-                // where there is more of it, and those buttons are veiled (not drawn, and no press finds them) until it is fired or dropped.
-                if (armed >= 0 && armed < v->group.count && v->group.says[armed] && ui->regular) // no face, no measure: the line is where it was
+                v->group.line.variant = UI_BODY_MEDIUM;
+                if (armed >= 0 && armed < v->group.count && v->group.says[armed] && ui->regular)
                 {
                         char said[UI_CONFIRM_TEXT];
                         int at = -1;
@@ -22254,22 +22077,20 @@ static int ui_view_end(struct ui_view address_to v)
                                 int before = it->x - gap - start, beyond = row_end - (it->x + it->w + gap);
 
                                 from = before >= beyond ? start : it->x + it->w + gap, to = before >= beyond ? it->x - gap : row_end;
-                                // Still too little room for the line in its type: it is said in the smaller type of a status line.
                                 if (ui_kit_measure(ui, (string_address)said, UI_BODY_MEDIUM) > to - from)
-                                        line->variant = UI_LABEL_MEDIUM;
+                                        v->group.line.variant = UI_LABEL_MEDIUM;
                                 for (int k = first; k < v->tree.count; k++)
                                         if (v->item[k].kind == UI_ITEM_BUTTON && v->item[k].button >= 0 && v->item[k].button != armed &&
                                             v->tree.node[k].parent == it->parent)
                                         {
                                                 struct ui_control address_to veiled = &v->group.button[v->item[k].button];
 
-                                                // Nothing of it, and nowhere a finger's reach grown round a small box finds it (ui_hit).
                                                 veiled->x = veiled->y = -UI_TREE_MOST, veiled->w = veiled->h = 0;
                                         }
                         }
                 }
-                line->x = (int)((b64)from * 100 / scale), line->w = (int)((to > from ? (b64)to - from : 0) * 100 / scale);
-                line->y = (int)((b64)(row->y + (row->h - ui_dev(ui, ui_types[line->variant].line)) / 2) * 100 / scale);
+                v->group.line.x = (int)((b64)from * 100 / scale), v->group.line.w = (int)((to > from ? (b64)to - from : 0) * 100 / scale);
+                v->group.line.y = (int)((b64)(row->y + (row->h - ui_dev(ui, ui_types[v->group.line.variant].line)) / 2) * 100 / scale);
         }
         v->group.keys = v->group.keys > v->group.count ? 0 : v->group.keys;
         if (v->side_node >= 0 && v->side_node < v->tree.count)
@@ -22499,6 +22320,13 @@ static p32 ui_view_side_event(const struct ui address_to ui, struct ui_view addr
         return out;
 }
 
+static inline int ui_view_ctl_look(const struct ui_control address_to c)
+{
+        int ch = c->kind == UI_TABS ? c->close_hover : -1;
+
+        return c->hover << 16 | c->focused << 15 | ((ch + 4) & 63) << 8 | (c->item & 255);
+}
+
 static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event)
 {
         ui_view_ready(v);
@@ -22506,9 +22334,8 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0, lone;
         int x = motion ? event->a : ui_kit.pointer_x, y = motion ? event->b : ui_kit.pointer_y, own = -1, top, bottom;
         struct ui_scroll address_to under = ui_view_scroll_at(v, x, y);
-        p32 asks = 0;
+        p32 asks = ui_view_side_event(ui, v, event);
 
-        asks = ui_view_side_event(ui, v, event);
         if (asks & UI_VIEW_TAKEN)
                 return asks;
         if (event->type == WINDOW_EVENT_BUTTON && down && event->a != UI_POINTER_LEFT)
@@ -22521,7 +22348,6 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
                 for (int at = 0; at < v->tree.count; at++)
                         if (v->item[at].list && ui_view_list_bar_cancel(v->item[at].list))
                                 asks |= UI_VIEW_DRAW;
-                // Middle-click closes a closable tab; right-click reports tab_right_click for a tab context menu.
                 if (event->a == UI_POINTER_MIDDLE || event->a == UI_POINTER_RIGHT)
                         for (int at = 0; at < v->tree.count; at++)
                         {
@@ -22543,8 +22369,6 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
         }
         if (event->type == WINDOW_EVENT_WHEEL)
         {
-                // A list's rows under the pointer turn with the wheel, as a scroll container does: the list's own glide. Over no list and no
-                // container, the view's first list turns, wherever the pointer is: the rows a window is for (the launcher's under its field).
                 int first = -1;
 
                 for (int at = 0; !under && at < v->tree.count; at++)
@@ -22560,10 +22384,9 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
         }
         for (int k = 0; k < v->scrolls && (motion || button); k++)
         {
-                struct ui_scroll address_to s = &v->scroll[k];
-                b32 lit = s->hover;
+                b32 lit = v->scroll[k].hover;
 
-                asks |= ui_scroll_bar(ui, s, (int)event->type, x, y, down) ? UI_VIEW_DRAW | UI_VIEW_TAKEN : lit != s->hover ? UI_VIEW_DRAW : 0;
+                asks |= ui_scroll_bar(ui, &v->scroll[k], (int)event->type, x, y, down) ? UI_VIEW_DRAW | UI_VIEW_TAKEN : lit != v->scroll[k].hover ? UI_VIEW_DRAW : 0;
         }
         for (int at = 0; at < v->tree.count && (motion || button); at++)
                 if (v->item[at].list)
@@ -22599,13 +22422,10 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
 
                 if (!c)
                         continue;
-                // The pointer is on what shows of a control: not on a part its scroll container has scrolled out of sight, and not on a
-                // field whose text is an engine's, which has the pointer from its app (ui_field_event).
                 ui_view_rows(v, v->tree.node[at].parent, &top, &bottom);
                 on = y >= top && y < bottom && !(c->kind == UI_INPUT && c->edit);
-                // The control is where its picture drew it: a pull past an end of its container stretched that picture.
                 seen = on ? ui_view_unpull(ui, v, v->tree.node[at].parent, y) : y;
-                look = c->hover << 16 | c->focused << 15 | ((c->close_hover + 4) & 63) << 8 | (c->item & 255), ghost = c->hover_x;
+                look = ui_view_ctl_look(c), ghost = c->kind == UI_SLIDER ? c->hover_x : -1;
                 if (motion)
                         ui_kit_pointer(ui, c, 1, WINDOW_EVENT_MOTION, x, on ? seen : -UI_TREE_MOST, false, event->flags);
                 else
@@ -22616,27 +22436,18 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
                         if (ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, x, seen, true, event->flags))
                                 asks |= ui_view_act(&v->item[at]);
                 }
-                if (look != (c->hover << 16 | c->focused << 15 | ((c->close_hover + 4) & 63) << 8 | (c->item & 255)))
+                if (look != ui_view_ctl_look(c))
                         asks |= UI_VIEW_DRAW;
-                else if (ghost != c->hover_x)
+                else if (c->kind == UI_SLIDER && ghost != c->hover_x)
                         ui_view_due(v, ui_dev(ui, c->y - 8) < 0 ? 0 : ui_dev(ui, c->y - 8), ui_dev(ui, c->y + c->h + 8));
         }
-        // A finger: where it lands is the scroll container's too, a drag that no control holds moves the container, and its lift throws it.
-        // A mouse's press that drags (canvas scroll drag) is a finger's where nothing took it: not on a control, a bar or a field's text.
         if (button && down && under &&
-            ((event->flags & WINDOW_KEY_TOUCH) ||
-             (ui_press_drags(event->flags) && !ui_kit_held && !(asks & UI_VIEW_TAKEN) && !ui_view_text_at(ui, v, x, y))))
+            ((event->flags & WINDOW_KEY_TOUCH) || (ui_press_drags(event->flags) && !ui_kit_held && !(asks & UI_VIEW_TAKEN) && !ui_view_text_at(ui, v, x, y))))
                 ui_press_down(&v->finger, x, y, -1, under);
         else if (motion && v->finger.down && !ui_kit_held)
-        {
-                ui_press_follow(ui, &v->finger, x, y);
-                asks |= v->finger.dragged ? UI_VIEW_DRAW | UI_VIEW_TAKEN : 0;
-        }
+                ui_press_follow(ui, &v->finger, x, y), asks |= v->finger.dragged ? UI_VIEW_DRAW | UI_VIEW_TAKEN : 0;
         else if (button && !down && v->finger.down)
-        {
-                asks |= v->finger.dragged ? UI_VIEW_DRAW | UI_VIEW_TAKEN : 0;
-                ui_press_lift(&v->finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
-        }
+                asks |= v->finger.dragged ? UI_VIEW_DRAW | UI_VIEW_TAKEN : 0, ui_press_lift(&v->finger, (event->flags & WINDOW_KEY_CANCEL) != 0);
         if (event->type == WINDOW_EVENT_KEY && down && !(asks & UI_VIEW_TAKEN) && v->scrolls)
         {
                 b32 moved = false;
@@ -23708,6 +23519,23 @@ static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, 
         A square picture of any side made (premultiplied 0xaarrggbb both): smaller, area-weighted fractional box average;
         the same, a copy; larger, bilinear interpolation. ui_icon_scale is this from a window's icon.
 */
+static inline void ui_px_axis(int i, int side, int size, int address_to i0, int address_to i1, int address_to w1)
+{
+        int c = ((2 * i + 1) * side * 256) / (2 * size) - 128;
+
+        c = c < 0 ? 0 : c > (side - 1) * 256 ? (side - 1) * 256 : c;
+        *i0 = c >> 8, *i1 = *i0 + 1 < side ? *i0 + 1 : *i0, *w1 = c & 255;
+}
+
+static inline unsigned int ui_px_lerp(unsigned int a, unsigned int b, unsigned int w0, unsigned int w1)
+{
+        unsigned int out = 0;
+
+        for (unsigned int s = 0; s < 32; s += 8)
+                out |= ((((a >> s) & 255u) * w0 + ((b >> s) & 255u) * w1 + 128u) >> 8) << s;
+        return out;
+}
+
 static fn ui_picture_scale(unsigned int address_to into, int size, const unsigned int address_to from, int side)
 {
         if (size <= 0 || side <= 0)
@@ -23723,58 +23551,38 @@ static fn ui_picture_scale(unsigned int address_to into, int size, const unsigne
 
                 for (int y = 0; y < size; y++)
                 {
-                        int cy = ((2 * y + 1) * side * 256) / (2 * size) - 128;
                         int y0, y1, wy1;
 
-                        cy = cy < 0 ? 0 : cy > (side - 1) * 256 ? (side - 1) * 256 : cy;
-                        y0 = cy >> 8, y1 = y0 + 1 < side ? y0 + 1 : y0;
-                        wy1 = cy & 255;
+                        ui_px_axis(y, side, size, &y0, &y1, &wy1);
                         if (size <= UI_PICTURE_MOST)
                         {
                                 for (int x = 0; x < size; x++)
                                 {
-                                        int cx = ((2 * x + 1) * side * 256) / (2 * size) - 128;
-                                        int x0, x1, wx0, wx1;
-                                        unsigned int a0, a1, b0, b1;
+                                        int x0, x1, wx1;
 
-                                        cx = cx < 0 ? 0 : cx > (side - 1) * 256 ? (side - 1) * 256 : cx;
-                                        x0 = cx >> 8, x1 = x0 + 1 < side ? x0 + 1 : x0;
-                                        wx1 = cx & 255, wx0 = 256 - wx1;
-                                        a0 = from[y0 * side + x0], a1 = from[y0 * side + x1];
-                                        b0 = from[y1 * side + x0], b1 = from[y1 * side + x1];
-                                        row0[x] = (((a0 >> 24) * (unsigned int)wx0 + (a1 >> 24) * (unsigned int)wx1 + 128u) >> 8) << 24 |
-                                                  (((a0 >> 16 & 255) * (unsigned int)wx0 + (a1 >> 16 & 255) * (unsigned int)wx1 + 128u) >> 8) << 16 |
-                                                  (((a0 >> 8 & 255) * (unsigned int)wx0 + (a1 >> 8 & 255) * (unsigned int)wx1 + 128u) >> 8) << 8 |
-                                                  (((a0 & 255) * (unsigned int)wx0 + (a1 & 255) * (unsigned int)wx1 + 128u) >> 8);
-                                        row1[x] = (((b0 >> 24) * (unsigned int)wx0 + (b1 >> 24) * (unsigned int)wx1 + 128u) >> 8) << 24 |
-                                                  (((b0 >> 16 & 255) * (unsigned int)wx0 + (b1 >> 16 & 255) * (unsigned int)wx1 + 128u) >> 8) << 16 |
-                                                  (((b0 >> 8 & 255) * (unsigned int)wx0 + (b1 >> 8 & 255) * (unsigned int)wx1 + 128u) >> 8) << 8 |
-                                                  (((b0 & 255) * (unsigned int)wx0 + (b1 & 255) * (unsigned int)wx1 + 128u) >> 8);
+                                        ui_px_axis(x, side, size, &x0, &x1, &wx1);
+                                        row0[x] = ui_px_lerp(from[y0 * side + x0], from[y0 * side + x1], (unsigned int)(256 - wx1), (unsigned int)wx1);
+                                        row1[x] = ui_px_lerp(from[y1 * side + x0], from[y1 * side + x1], (unsigned int)(256 - wx1), (unsigned int)wx1);
                                 }
                                 memory_lerp_u32_row(into + y * size, row0, row1, (positive)size, (positive)wy1);
                         }
                         else
                         {
-                                int wy0 = 256 - wy1;
+                                unsigned int wy0 = (unsigned int)(256 - wy1);
 
                                 for (int x = 0; x < size; x++)
                                 {
-                                        int cx = ((2 * x + 1) * side * 256) / (2 * size) - 128;
-                                        int x0, x1, wx0, wx1;
-                                        unsigned int p00, p01, p10, p11, w00, w01, w10, w11;
+                                        int x0, x1, wx1;
+                                        unsigned int p00, p01, p10, p11, w00, w01, w10, w11, out = 0;
 
-                                        cx = cx < 0 ? 0 : cx > (side - 1) * 256 ? (side - 1) * 256 : cx;
-                                        x0 = cx >> 8, x1 = x0 + 1 < side ? x0 + 1 : x0;
-                                        wx1 = cx & 255, wx0 = 256 - wx1;
-                                        p00 = from[y0 * side + x0], p01 = from[y0 * side + x1];
-                                        p10 = from[y1 * side + x0], p11 = from[y1 * side + x1];
-                                        w00 = (unsigned int)(wy0 * wx0), w01 = (unsigned int)(wy0 * wx1);
-                                        w10 = (unsigned int)(wy1 * wx0), w11 = (unsigned int)(wy1 * wx1);
-                                        into[y * size + x] =
-                                            (((p00 >> 24) * w00 + (p01 >> 24) * w01 + (p10 >> 24) * w10 + (p11 >> 24) * w11 + 32768u) >> 16) << 24 |
-                                            (((p00 >> 16 & 255) * w00 + (p01 >> 16 & 255) * w01 + (p10 >> 16 & 255) * w10 + (p11 >> 16 & 255) * w11 + 32768u) >> 16) << 16 |
-                                            (((p00 >> 8 & 255) * w00 + (p01 >> 8 & 255) * w01 + (p10 >> 8 & 255) * w10 + (p11 >> 8 & 255) * w11 + 32768u) >> 16) << 8 |
-                                            (((p00 & 255) * w00 + (p01 & 255) * w01 + (p10 & 255) * w10 + (p11 & 255) * w11 + 32768u) >> 16);
+                                        ui_px_axis(x, side, size, &x0, &x1, &wx1);
+                                        p00 = from[y0 * side + x0], p01 = from[y0 * side + x1], p10 = from[y1 * side + x0], p11 = from[y1 * side + x1];
+                                        w00 = wy0 * (unsigned int)(256 - wx1), w01 = wy0 * (unsigned int)wx1;
+                                        w10 = (unsigned int)wy1 * (unsigned int)(256 - wx1), w11 = (unsigned int)wy1 * (unsigned int)wx1;
+                                        for (unsigned int s = 0; s < 32; s += 8)
+                                                out |= ((((p00 >> s) & 255u) * w00 + ((p01 >> s) & 255u) * w01 + ((p10 >> s) & 255u) * w10 +
+                                                         ((p11 >> s) & 255u) * w11 + 32768u) >> 16) << s;
+                                        into[y * size + x] = out;
                                 }
                         }
                 }
@@ -23783,44 +23591,34 @@ static fn ui_picture_scale(unsigned int address_to into, int size, const unsigne
         for (int y = 0; y < size; y++)
         {
                 int sy0 = y * side * 256 / size, sy1 = (y + 1) * side * 256 / size;
-                int y0 = sy0 >> 8, y1 = (sy1 - 1) >> 8;
+                int y0 = sy0 >> 8, y1 = (sy1 - 1) >> 8 >= side ? side - 1 : (sy1 - 1) >> 8;
 
-                if (y1 >= side)
-                        y1 = side - 1;
                 for (int x = 0; x < size; x++)
                 {
                         int sx0 = x * side * 256 / size, sx1 = (x + 1) * side * 256 / size;
-                        int x0 = sx0 >> 8, x1 = (sx1 - 1) >> 8;
+                        int x0 = sx0 >> 8, x1 = (sx1 - 1) >> 8 >= side ? side - 1 : (sx1 - 1) >> 8;
                         p64 sum[4] = {0, 0, 0, 0}, total = 0;
+                        unsigned int out = 0;
 
-                        if (x1 >= side)
-                                x1 = side - 1;
                         for (int sy = y0; sy <= y1; sy++)
                         {
-                                int ya = sy * 256 > sy0 ? sy * 256 : sy0;
-                                int yb = (sy + 1) * 256 < sy1 ? (sy + 1) * 256 : sy1;
-                                p64 wy = (p64)(yb - ya);
+                                p64 wy = (p64)(((sy + 1) * 256 < sy1 ? (sy + 1) * 256 : sy1) - (sy * 256 > sy0 ? sy * 256 : sy0));
 
                                 for (int sx = x0; sx <= x1; sx++)
                                 {
-                                        int xa = sx * 256 > sx0 ? sx * 256 : sx0;
-                                        int xb = (sx + 1) * 256 < sx1 ? (sx + 1) * 256 : sx1;
-                                        p64 w = wy * (p64)(xb - xa);
+                                        p64 w = wy * (p64)(((sx + 1) * 256 < sx1 ? (sx + 1) * 256 : sx1) - (sx * 256 > sx0 ? sx * 256 : sx0));
                                         unsigned int pixel = from[sy * side + sx];
 
-                                        sum[0] += (pixel >> 24) * w;
-                                        sum[1] += (pixel >> 16 & 255) * w;
-                                        sum[2] += (pixel >> 8 & 255) * w;
-                                        sum[3] += (pixel & 255) * w;
+                                        for (int ch = 0; ch < 4; ch++)
+                                                sum[ch] += ((pixel >> (24 - 8 * ch)) & 255u) * w;
                                         total += w;
                                 }
                         }
                         if (!total)
                                 total = 1;
-                        into[y * size + x] = (unsigned int)((sum[0] + total / 2) / total) << 24 |
-                                             (unsigned int)((sum[1] + total / 2) / total) << 16 |
-                                             (unsigned int)((sum[2] + total / 2) / total) << 8 |
-                                             (unsigned int)((sum[3] + total / 2) / total);
+                        for (int ch = 0; ch < 4; ch++)
+                                out |= (unsigned int)((sum[ch] + total / 2) / total) << (24 - 8 * ch);
+                        into[y * size + x] = out;
                 }
         }
 }
@@ -24064,19 +23862,20 @@ static b32 ui_desktop_parse(const char address_to text, positive size, unsigned 
 {
         char tongue[4] = {0, 0, 0, 0};
         b32 in = false, seen = false;
+        positive tongue_length;
 
         memory_zero(out, sizeof(*out));
         out->shown = true;
         for (int at = 0; at < 3 && code >> (8 * at) & 255; at++)
                 tongue[at] = (char)(code >> (8 * at) & 255);
+        tongue_length = string_length((string_address)tongue);
         for (positive at = 0; at < size;)
         {
                 positive line = at, stop = at, key, key_end, value, value_end, locale = 0, locale_end = 0;
 
                 while (stop < size && text[stop] != '\n')
                         stop++;
-                at = stop + 1;
-                value_end = stop;
+                at = stop + 1, value_end = stop;
                 if (value_end > line && text[value_end - 1] == '\r')
                         value_end--;
                 while (line < value_end && (text[line] == ' ' || text[line] == '\t'))
@@ -24085,51 +23884,37 @@ static b32 ui_desktop_parse(const char address_to text, positive size, unsigned 
                         continue;
                 if (text[line] == '[')
                 {
-                        // A group's header: the keys are the first group's, which is the entry's.
                         b32 entry = value_end - line >= 15 && !memory_compare(text + line, "[Desktop Entry]", 15);
 
                         if (!seen && !entry)
                                 return false;
-                        in = entry && !seen;
-                        seen = true;
+                        in = entry && !seen, seen = true;
                         continue;
                 }
                 if (!in)
                         continue;
-                key = line, key_end = line;
-                while (key_end < value_end && text[key_end] != '=' && text[key_end] != '[' && text[key_end] != ' ' && text[key_end] != '\t')
-                        key_end++;
+                for (key = key_end = line; key_end < value_end && text[key_end] != '=' && text[key_end] != '[' && text[key_end] != ' ' && text[key_end] != '\t'; key_end++)
+                        ;
                 value = key_end;
                 if (value < value_end && text[value] == '[')
                 {
-                        locale = value + 1;
-                        while (value < value_end && text[value] != ']')
-                                value++;
-                        locale_end = value;
-                        if (value < value_end)
-                                value++;
+                        for (locale = ++value; value < value_end && text[value] != ']'; value++)
+                                ;
+                        locale_end = value, value += value < value_end;
                 }
                 while (value < value_end && (text[value] == ' ' || text[value] == '\t'))
                         value++;
                 if (value >= value_end || text[value] != '=')
                         continue;
-                value++;
-                while (value < value_end && (text[value] == ' ' || text[value] == '\t'))
-                        value++;
+                for (value++; value < value_end && (text[value] == ' ' || text[value] == '\t'); value++)
+                        ;
                 {
                         positive length = key_end - key, said = value_end - value;
                         const char address_to v = text + value;
-                        b32 tongued = false;
+                        b32 tongued = locale != 0;
 
-                        if (locale)
-                        {
-                                // Only the language's own (Name[de]): a country's (Name[de_AT]) or a modifier's is another language's.
-                                positive tongue_length = string_length((string_address)tongue);
-
-                                if (!tongue_length || locale_end - locale != tongue_length || memory_compare(text + locale, tongue, tongue_length))
-                                        continue;
-                                tongued = true;
-                        }
+                        if (tongued && (!tongue_length || locale_end - locale != tongue_length || memory_compare(text + locale, tongue, tongue_length)))
+                                continue;
 #define UI_DESKTOP_KEY(word) (length == sizeof(word) - 1 && !memory_compare(text + key, word, sizeof(word) - 1))
                         if (UI_DESKTOP_KEY("Name") && (tongued || !out->name_local))
                                 ui_desktop_value(out->name, sizeof(out->name), v, said, false), out->name_local |= tongued;
@@ -24661,26 +24446,17 @@ static int ui_apps_find(const char address_to id)
 static int ui_app_list_read(const char address_to path, unsigned short address_to ids, int most, b32 (*allow)(positive which))
 {
         char text[2048];
-        bipolar handle, got = 0;
+        positive got;
         int count = 0;
 
-        if (!path || !ids || most <= 0)
+        if (!path || !ids || most <= 0 || !(got = ui_read_text_file(path, text, sizeof(text))))
                 return 0;
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-        if (handle >= 0)
-        {
-                got = system_read_once(handle, text, sizeof(text) - 1);
-                system_close(handle);
-        }
-        if (got <= 0)
-                return 0;
-        text[got] = 0;
-        for (positive at = 0; at < (positive)got && count < most;)
+        for (positive at = 0; at < got && count < most;)
         {
                 positive stop = at;
                 int which;
 
-                while (stop < (positive)got && text[stop] != '\n')
+                while (stop < got && text[stop] != '\n')
                         stop++;
                 text[stop] = 0;
                 which = ui_apps_find(text + at);
@@ -24703,8 +24479,8 @@ static b32 ui_app_list_push(const char address_to path, int which, int most)
 {
         char text[2048], made[2048 + WINDOWS_APP_ID + 2];
         const char address_to id;
-        positive id_len, length = 0, used = 0, lines = 1;
-        bipolar handle, got = 0;
+        positive id_len, length, used, lines = 1;
+        bipolar handle;
 
         if (!path || which < 0 || which >= ui_apps.count || !ui_apps.app || most <= 0)
                 return false;
@@ -24712,17 +24488,9 @@ static b32 ui_app_list_push(const char address_to path, int which, int most)
         id_len = string_length((string_address)id);
         if (!id_len || id_len >= WINDOWS_APP_ID)
                 return false;
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-        if (handle >= 0)
-        {
-                got = system_read_once(handle, text, sizeof(text) - 1);
-                system_close(handle);
-        }
-        length = got > 0 ? (positive)got : 0;
-        text[length] = 0;
+        length = ui_read_text_file(path, text, sizeof(text));
         memory_copy(made, id, id_len);
-        made[id_len] = '\n';
-        used = id_len + 1;
+        made[id_len] = '\n', used = id_len + 1;
         for (positive at = 0; at < length && lines < (positive)most;)
         {
                 positive stop = at;
@@ -25001,14 +24769,18 @@ static unsigned int address_to ui_png_decode(const p8 address_to file, positive 
 */
 #define UI_PNG_FILE_MOST (4 * 1024 * 1024)
 
+static inline b32 ui_apps_is_local(const struct ui_app_entry address_to app)
+{
+        return ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local);
+}
+
 static p8 address_to ui_apps_picture_file(const struct ui_app_entry address_to app, positive address_to size)
 {
         static const unsigned short sides[] = {512, 256, 192, 128, 96, 72, 64, 48, 32, 24, 22, 16};
         char path[UI_APP_PATH * 2], name[UI_APP_PATH];
-        bipolar inside, handle = -1;
+        bipolar inside, handle = -1, got;
         positive length = string_length((string_address)app->icon);
         p8 address_to bytes;
-        bipolar got;
 
         if (!app->root[0] || !length || (inside = system_open_at(AT_FDCWD, (string_address)app->root, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
                 return null;
@@ -25020,9 +24792,8 @@ static p8 address_to ui_apps_picture_file(const struct ui_app_entry address_to a
         }
         else if (!string_first_of((string_address)app->icon, '/'))
         {
-                b32 is_local = ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local);
+                b32 is_local = ui_apps_is_local(app);
 
-                // A name with .png, .svg or .xpm is the name before it, as the specification's older entries say it.
                 string_copy_bounded((p8 address_to)name, (string_address)app->icon, sizeof(name));
                 if (length > 4 && name[length - 4] == '.')
                         name[length - 4] = 0;
@@ -25179,14 +24950,9 @@ static b32 ui_apps_uninstallable(int which)
 {
         const struct ui_app_entry address_to app;
 
-        if (which < 0 || which >= ui_apps.count)
+        if (which < 0 || which >= ui_apps.count || (app = &ui_apps.app[which])->kit)
                 return false;
-        app = &ui_apps.app[which];
-        if (app->kit)
-                return false;
-        if (ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local))
-                return app->source[0] != 0;
-        return app->profile[0] != 0 || app->source[0] != 0;
+        return ui_apps_is_local(app) ? app->source[0] != 0 : (app->profile[0] != 0 || app->source[0] != 0);
 }
 
 // The file the pins are kept in under root (the machine's /, a check's own directory).
@@ -25196,29 +24962,33 @@ static fn ui_apps_pins_path(const char address_to root, char address_to path, po
         string_append_bounded((p8 address_to)path, (string_address)SETTING_TASKBAR_PINNED_PATH, room);
 }
 
-/*
-        The pins' line (`taskbar pinned`, registry.c) with an entry pinned (on) or not, written back to its file under root: an entry is
-        kept as its id, the file it is read from and its launcher (the line's three words; the id is what is pinned, and the other two
-        are a record of what it was), and one that is not pinned any more goes with every entry of its id. Entries the line had of other
-        programs stay as they are. 1 when the file was written, 0 when nothing changed, -1 when it could not be (no room in the line,
-        SETTING_PINS_ENTRIES of them, or the file).
-*/
 // Read and strip the pins file under root into line (room bytes), writing its resolved path into path.
 static b32 ui_apps_pins_read(const char address_to root, char address_to path, positive path_room, char address_to line, positive line_room)
 {
-        bipolar handle, got = 0;
+        positive got;
 
         ui_apps_pins_path(root, path, path_room);
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-        if (handle >= 0)
-        {
-                got = system_read_once(handle, line, line_room - 1);
-                system_close(handle);
-        }
-        line[got > 0 ? got : 0] = 0;
-        for (bipolar end_at = got - 1; end_at >= 0 && (line[end_at] == '\n' || line[end_at] == '\r'); end_at--)
-                line[end_at] = 0;
+        got = ui_read_text_file(path, line, line_room);
+        while (got > 0 && (line[got - 1] == '\n' || line[got - 1] == '\r'))
+                line[--got] = 0;
         return setting_pins_valid(line, null);
+}
+
+static b32 ui_apps_pin_sep(char address_to made, positive address_to used, positive room, b32 address_to first)
+{
+        if (!*first)
+        {
+                if (*used + 2 >= room)
+                        return false;
+                made[(*used)++] = ' ', made[(*used)++] = ';', made[*used] = 0;
+        }
+        *first = false;
+        return true;
+}
+
+static inline b32 ui_apps_pin_matches(const char address_to word, int which)
+{
+        return string_equals((string_address)word, (string_address)ui_apps.app[which].id) || ui_apps_match(word) == which;
 }
 
 static int ui_apps_pin(const char address_to root, int which, b32 on)
@@ -25236,7 +25006,6 @@ static int ui_apps_pin(const char address_to root, int which, b32 on)
         if (!ui_apps_pins_read(root, path, sizeof(path), line, sizeof(line)) || string_equals((string_address)line, (string_address) "none"))
                 line[0] = 0;
         made[0] = 0;
-        // Each entry of the line copied, but the ones of this id; then this one, where it is pinned.
         for (;;)
         {
                 kind = setting_pins_next(line, &at, word, sizeof(word));
@@ -25244,16 +25013,10 @@ static int ui_apps_pin(const char address_to root, int which, b32 on)
                 {
                         if (word_at++ == 0)
                         {
-                                skip = string_equals((string_address)word, (string_address)app->id) || ui_apps_match(word) == which;
+                                skip = ui_apps_pin_matches(word, which);
                                 had |= skip;
-                                if (!skip)
-                                {
-                                        if (!first && (used + 2 >= sizeof(made)))
-                                                return -1;
-                                        if (!first)
-                                                made[used++] = ' ', made[used++] = ';', made[used] = 0;
-                                        first = false, entries++;
-                                }
+                                if (!skip && (!ui_apps_pin_sep(made, &used, sizeof(made), &first) || (++entries, false)))
+                                        return -1;
                         }
                         if (!skip && !setting_pins_quote(made, &used, sizeof(made), word))
                                 return -1;
@@ -25265,55 +25028,35 @@ static int ui_apps_pin(const char address_to root, int which, b32 on)
         }
         if (on == had)
                 return 0;
-        if (on)
-        {
-                if (entries >= SETTING_PINS_ENTRIES)
-                        return -1;
-                if (!first)
-                {
-                        if (used + 2 >= sizeof(made))
-                                return -1;
-                        made[used++] = ' ', made[used++] = ';', made[used] = 0;
-                }
-                if (!setting_pins_quote(made, &used, sizeof(made), app->id) || !setting_pins_quote(made, &used, sizeof(made), app->source) ||
-                    !setting_pins_quote(made, &used, sizeof(made), app->launch))
-                        return -1;
-                first = false;
-        }
+        if (on && (entries >= SETTING_PINS_ENTRIES || !ui_apps_pin_sep(made, &used, sizeof(made), &first) ||
+                   !setting_pins_quote(made, &used, sizeof(made), app->id) || !setting_pins_quote(made, &used, sizeof(made), app->source) ||
+                   !setting_pins_quote(made, &used, sizeof(made), app->launch)))
+                return -1;
         if (first)
                 string_copy_bounded((p8 address_to)made, (string_address) "none", sizeof(made)), used = 4;
         if (!string_equals((string_address)made, (string_address) "none") && !setting_pins_valid(made, null))
                 return -1;
         made[used++] = '\n';
-        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
-        if (handle < 0)
+        if ((handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644)) < 0)
                 return -1;
         got = system_write_all((b32)handle, made, used);
         system_close(handle);
         return got < 0 ? -1 : 1;
 }
 
-// Whether an entry is pinned in the pins' file under root: an entry of the line names its id (or a window key it is matched by).
 static b32 ui_apps_pinned(const char address_to root, int which)
 {
         char path[160], line[SETTING_PINS_MOST + 16], word[SETTING_PINS_WORD];
         positive at = 0;
         int kind, word_at = 0;
 
-        if (which < 0 || which >= ui_apps.count)
-                return false;
-        if (!ui_apps_pins_read(root, path, sizeof(path), line, sizeof(line)))
+        if (which < 0 || which >= ui_apps.count || !ui_apps_pins_read(root, path, sizeof(path), line, sizeof(line)))
                 return false;
         while ((kind = setting_pins_next(line, &at, word, sizeof(word))) == SETTING_PINS_WORD_NEXT || kind == SETTING_PINS_SEPARATOR)
-        {
                 if (kind == SETTING_PINS_SEPARATOR)
-                {
                         word_at = 0;
-                        continue;
-                }
-                if (word_at++ == 0 && (string_equals((string_address)word, (string_address)ui_apps.app[which].id) || ui_apps_match(word) == which))
+                else if (word_at++ == 0 && ui_apps_pin_matches(word, which))
                         return true;
-        }
         return false;
 }
 
@@ -26098,6 +25841,17 @@ struct ui_list_slot
         struct ui_control c[2];    // [0] row's own (or switch), [1] trailing control
 };
 
+// Tagged pointer-grab state machine for ui_list_click (replaces loose drag_armed / right_down / band / chord booleans).
+enum ui_list_grab
+{
+        UI_LIST_GRAB_NONE = 0,
+        UI_LIST_GRAB_PRESS,       // row/ground press or scroll drag (l->press)
+        UI_LIST_GRAB_DRAG,        // selected row pressed, waiting for slop -> drag_began
+        UI_LIST_GRAB_RIGHT,       // right button held alone -> menu_asked on clean release
+        UI_LIST_GRAB_BAND,        // L+R chord rubber-band box selection active
+        UI_LIST_GRAB_CHORD,       // band ended, waiting for remaining chord button release
+};
+
 struct ui_list
 {
         // The app's: the row (its own number) each place shows, in order, how it is described, and where a change must
@@ -26142,40 +25896,23 @@ struct ui_list
         struct ui_columns address_to columns;  // a details view's: its rows are drawn as cells under these (ui_columns), none else
         b32 tree;                          // a tree's: each row's label set in by its indent, its expander's chevron before it (ui_list_cells)
         b32 beside;                        // a view's list beside another (two panes): its rows run across its own column, not the window
-        // A rubber band over the rows (ui_list_band_*): held while a press drags it, from its press (x0, y0) to the hand, device pixels, the
-        // press's y held to the rows as they scroll under it (band_at: the content's y it was pressed at).
-        b32 band;
+        // A rubber band over the rows (ui_list_band_*): held while grab == UI_LIST_GRAB_BAND.
+        unsigned char grab;                // enum ui_list_grab
+        unsigned char band, chord;         // mirrors grab == BAND and grab == BAND|CHORD for external readers/checks
+        unsigned char drag_began, band_began, band_moved, menu_asked, ground_clicked, double_clicked;
         int band_x0, band_x1, band_y1, band_at;
-        // Tiles (a virtual list's icon or list view): its rows laid out as tiles this many logical pixels wide, as many a line as the list
-        // is wide, each tile_h tall (0: UI_TILE_H, a symbol over its label; a row high or less, a small symbol before it). 0: rows.
-        // centre: each line of tiles in the middle of the list across, a short last line in the middle on its own (ui_list_tile_x), and
-        // Up and Down go to the nearest tile of the line above or below.
         int tiles, tile_h;
         b32 centre;
-        // Stripes: every stripe-th row (the stripe-th, the 2 stripe-th and on, counted from 1 down the list) tinted across its span
-        // (ui_list_stripe), under the row's lit fill, its hover, its press and its ring, which all draw over it; 0 or 1 none. The tint is
-        // stripe_tint (straight ARGB, its alpha how much of it) where the app gives one, else the theme's (UI_LIST_STRIPE_INK of the
-        // ink, or UI_LIST_STRIPE_ACCENT of the accent where stripe_accent), so it is a light theme's and a dark one's and a glass's alike.
         int stripe;
         unsigned int stripe_tint;
         b32 stripe_accent;
-        // Selection, drag, dual-button box selection (L+R), double-click, and right-click menu: standardized in ui_list_click.
-        // When selected is set: pressing a selected row drags it past slop (drag_began), pressing an unselected row or ground UI-scrolls
-        // the list like normal, holding both Left and Right box-drag-selects (band / band_began / band_moved), and a clean right click
-        // asks for the context menu on release (menu_asked).
         b32 (*selected)(int id);
         const struct ui_list_menu address_to menu;            // declarative row context menu (base Copy / Copy row / Remove + extra)
         void (*sorted)(struct ui_columns address_to columns); // called when a sectioned details header changes sort order
-        b32 drag_armed, drag_began;
         int drag_row, drag_x, drag_y;
-        b32 band_began, band_moved;
-        b32 chord, right_down;
-        b32 menu_asked;
         int menu_x, menu_y;
-        b32 ground_clicked;
         int last_clicked;                  // id + 1 of the row last clicked (0 none; apps clear to reset double-click)
         struct ui_click click;             // double-click tracking (ui_click_same)
-        b32 double_clicked;                // true when the row returned by ui_list_click was a double-click
 };
 
 #define UI_LIST_STRIPE_INK 0x0d       // the alpha of the ink a striped row is tinted with in dark mode (about 5 percent)
@@ -26836,7 +26573,7 @@ static fn ui_strip_widths(const unsigned long long address_to bytes, int count, 
 {
         unsigned long long scaled[UI_STRIP_MOST], most = 0, total;
         b32 small[UI_STRIP_MOST];
-        int shift = 0, sharing;
+        int shift = 0, sharing = 0;
         b64 left, given = 0;
 
         count = count < 0 ? 0 : count > UI_STRIP_MOST ? UI_STRIP_MOST : count;
@@ -26844,12 +26581,7 @@ static fn ui_strip_widths(const unsigned long long address_to bytes, int count, 
         if (!count)
                 return;
         if ((b64)count * least >= room)
-        {
-                for (int at = 0; at < count; at++)
-                        widths[at] = room / count + (at < room % count);
-                return;
-        }
-        // The bytes in a scale whose largest is under 2^40: a share is the room times them, in 64 bits.
+                goto even;
         for (int at = 0; at < count; at++)
                 most = bytes[at] > most ? bytes[at] : most;
         while (most >> shift >= 1ull << 40)
@@ -26872,21 +26604,17 @@ static fn ui_strip_widths(const unsigned long long address_to bytes, int count, 
                 if (!more)
                         break;
         }
-        // None shares only when none has a byte: then they are the room over the count.
-        sharing = 0;
         for (int at = 0; at < count; at++)
                 sharing += !small[at];
         if (!sharing)
         {
+even:
                 for (int at = 0; at < count; at++)
                         widths[at] = room / count + (at < room % count);
                 return;
         }
         for (int at = 0; at < count; at++)
-        {
-                widths[at] = small[at] ? least : (int)(left * (b64)scaled[at] / (b64)total);
-                given += small[at] ? 0 : widths[at];
-        }
+                widths[at] = small[at] ? least : (int)(left * (b64)scaled[at] / (b64)total), given += small[at] ? 0 : widths[at];
         for (int at = 0; at < count && given < left; at++)
                 if (!small[at])
                         widths[at]++, given++;
@@ -27448,13 +27176,16 @@ static fn ui_list_drive(struct ui address_to ui, const struct ui_row address_to 
                 }
         if (first)
         {
-                struct ui_box bar = {first->x * 256, first->y * 256, (last->x + last->w) * 256, (first->y + first->h) * 256, first->h * 128, first->h * 128};
+                struct ui_box bar = ui_box_px(first->x, first->y, last->x + last->w - first->x, first->h, first->h * 128);
 
                 ui_kit_fill(ui, &bar, ui_role(ui_strip_colour(UI_STRIP_FREE)), null);
                 for (int at = 0; at < count; at++)
                         if ((n = p->segment[at]) && n->w > 0 && row->strip_roles[at] != UI_STRIP_FREE)
-                                ui_kit_fill(ui, &(struct ui_box){n->x * 256, n->y * 256, (n->x + n->w) * 256, (n->y + n->h) * 256, 0, 0},
-                                            ui_role(ui_strip_colour(row->strip_roles[at])), &bar);
+                        {
+                                struct ui_box seg = ui_box_px(n->x, n->y, n->w, n->h, 0);
+
+                                ui_kit_fill(ui, &seg, ui_role(ui_strip_colour(row->strip_roles[at])), &bar);
+                        }
         }
 }
 
@@ -27660,35 +27391,22 @@ static fn ui_columns_layout(const struct ui address_to ui, struct ui_columns add
 
         c->count = c->count < 1 ? 1 : c->count > UI_COLUMNS_MOST ? UI_COLUMNS_MOST : c->count;
         c->x = x, c->y = y, c->w = w, c->h = ui_dev(ui, UI_COLUMNS_H);
-        if (c->width[0] > 0)
-        {
-                for (int k = 0; k < c->count; k++)
-                {
-                        c->width[k] = c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k];
-                        c->at[k] = at, c->wide[k] = ui_dev(ui, c->width[k]);
-                        at += c->wide[k];
-                }
-                return;
-        }
-        for (int k = 1; k < c->count; k++)
-        {
-                c->width[k] = c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k];
-                others += ui_dev(ui, c->width[k]);
-        }
+        for (int k = c->width[0] > 0 ? 0 : 1; k < c->count; k++)
+                c->width[k] = c->width[k] < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : c->width[k], others += ui_dev(ui, c->width[k]);
         for (int k = 0; k < c->count; k++)
         {
-                int wide = k ? ui_dev(ui, c->width[k]) : 0;
+                int wide = c->width[0] > 0 || k ? ui_dev(ui, c->width[k]) : 0;
 
-                if (k && others > room && others > 0)
+                if (c->width[0] <= 0 && k && others > room && others > 0)
                         wide = (int)((long)wide * (room > 0 ? room : 0) / others), wide = wide < least ? least : wide;
-                c->at[k] = at;
-                c->wide[k] = wide;
-                at += wide;
+                c->at[k] = at, c->wide[k] = wide, at += wide;
         }
-        // The first is what the others leave, and it is first: the others move along by it.
-        c->wide[0] = w - (at - x) > least ? w - (at - x) : least;
-        for (int k = 1; k < c->count; k++)
-                c->at[k] = c->at[k - 1] + c->wide[k - 1];
+        if (c->width[0] <= 0)
+        {
+                c->wide[0] = w - (at - x) > least ? w - (at - x) : least;
+                for (int k = 1; k < c->count; k++)
+                        c->at[k] = c->at[k - 1] + c->wide[k - 1];
+        }
 }
 
 // The edge a point is on (the number of the column it ends), or -1: each column's end, UI_COLUMN_EDGE either side, within the header; the
@@ -27750,18 +27468,18 @@ static fn ui_columns_draw(struct ui address_to ui, const struct ui_columns addre
                                 x += w - width;
                         ui_kit_text(ui, ui_mirror(x, width, c->x, c->w), baseline, shown, UI_LABEL_MEDIUM, sorted || k == c->hover ? strong : quiet, 0);
                 }
-                // The edge after it, a rule a third of the header tall: the one the hand holds in the ink. The last's where it is
-                // short of the header's end (where it is the end, the rule under the header ends it).
                 if (c->at[k] + c->wide[k] < c->x + c->w)
                 {
-                        int edge = c->at[k] + c->wide[k], top = c->y + c->h / 3;
-                        int ex = ui_mirror(edge, line, c->x, c->w);
+                        struct ui_box sep = ui_box_px(ui_mirror(c->at[k] + c->wide[k], line, c->x, c->w), c->y + c->h / 3, line, c->h / 3, 0);
 
-                        ui_kit_fill(ui, &(struct ui_box){(b32)ex << 8, (b32)top << 8, (b32)(ex + line) << 8, (b32)(top + c->h / 3) << 8, 0, 0},
-                                    c->held == k ? strong : rule, null);
+                        ui_kit_fill(ui, &sep, c->held == k ? strong : rule, null);
                 }
         }
-        ui_kit_fill(ui, &(struct ui_box){(b32)c->x << 8, (b32)(c->y + c->h - line) << 8, (b32)(c->x + c->w) << 8, (b32)(c->y + c->h) << 8, 0, 0}, rule, null);
+        {
+                struct ui_box bottom = ui_box_px(c->x, c->y + c->h - line, c->w, line, 0);
+
+                ui_kit_fill(ui, &bottom, rule, null);
+        }
 }
 
 /*
@@ -27866,56 +27584,58 @@ static p32 ui_list_columns_event(struct ui address_to ui, struct ui_list address
         accent when it is marked (one of many chosen); its symbol over its label, the label cut with dots to the tile and centred, or, for a
         tile a row high or less, a small symbol before its label. Reading from the right the tiles run from the right.
 */
+// Draws a row/tile symbol (app picture -> lettered tile -> file glyph -> vector icon), returning the rendered icon size.
+static int ui_list_paint_icon(struct ui address_to ui, const struct ui_row address_to row, int id, int x, int y, int size,
+                              int file_size, int file_y, const char address_to ext, unsigned int file_ink, unsigned int icon_ink, b32 mirror, int mx, int mw)
+{
+        const unsigned int address_to pic = row->tile_picture ? row->tile_picture(id, size) : null;
+        int dx = mirror ? ui_mirror(x, size, mx, mw) : x;
+
+        if (pic)
+                ui_icon_picture(ui, dx, y, size, pic);
+        else if (row->tile_name)
+                ui_icon_tile(ui, dx, y, size, row->tile_name);
+        else if (row->file && file_size > 0)
+        {
+                int fx = mirror ? ui_mirror(x, file_size, mx, mw) : mx + (mw - file_size) / 2;
+
+                ui_file_icon(ui, row->file - 1, ext, fx, file_y, file_size, file_ink);
+                return file_size;
+        }
+        else if (row->icon)
+                ui_icon(ui, row->icon - 1, dx, y, size, 0, icon_ink);
+        return size;
+}
+
 static fn ui_list_tile(struct ui address_to ui, struct ui_list address_to l, int id, int y, int height)
 {
         struct ui_row row;
-        int wide = ui_dev(ui, l->tiles), x = ui_list_tile_x(ui, l, id);
-        int pad = ui_dev(ui, 3), small = height <= ui_dev(ui, UI_ROW), size = small ? ui_dev(ui, 20) : ui_dev(ui, 40), width, at;
+        int wide = ui_dev(ui, l->tiles), x = ui_list_tile_x(ui, l, id), pad = ui_dev(ui, 3);
+        b32 small = height <= ui_dev(ui, UI_ROW);
+        int size = ui_dev(ui, small ? 20 : 40), width;
         unsigned int strong = ui_text_colour(ui, UI_ON_SURFACE), quiet = ui_text_colour(ui, UI_ON_SURFACE_VARIANT);
         char cut[UI_CUT_TEXT];
         string_address shown;
-        const unsigned int address_to picture;
-        struct ui_box box = {(b32)(x + pad) << 8, (b32)(y + pad) << 8, (b32)(x + wide - pad) << 8, (b32)(y + height - pad) << 8, 0, 0};
+        struct ui_box box = {(b32)(x + pad) << 8, (b32)(y + pad) << 8, (b32)(x + wide - pad) << 8, (b32)(y + height - pad) << 8, ui_q8(ui, 6), ui_q8(ui, 6)};
 
         ui_list_describe(l, id, &row);
-        box.rx = box.ry = ui_q8(ui, 6);
         if ((l->lit && id == l->focus) || row.glow)
                 ui_kit_fill(ui, &box, ui_kit_lit(ui), null);
         else if (l->hover == id)
                 ui_kit_fill(ui, &box, 0x18000000u | (strong & 0xffffffu), null);
         if (row.mark)
                 ui_kit_ring(ui, &box, ui_q8(ui, 2), ui_role(UI_PRIMARY) | 0xff000000u);
-        // The app's picture where it has one, else its lettered tile where it names one: either is the tile's symbol.
-        picture = row.tile_picture ? row.tile_picture(id, size) : null;
         if (small)
         {
-                // A small symbol before the label, both on the tile's line.
-                at = ui_dev(ui, 8);
-                if (picture)
-                        ui_icon_picture(ui, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, picture);
-                else if (row.tile_name)
-                        ui_icon_tile(ui, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, row.tile_name);
-                else if (row.file)
-                        size = ui_dev(ui, UI_FILE_ROW_ICON), ui_file_icon(ui, row.file - 1, null, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, quiet);
-                else if (row.icon)
-                        ui_icon(ui, row.icon - 1, ui_mirror(x + at, size, x, wide), y + (height - size) / 2, size, 0, strong);
-                at += size + ui_dev(ui, 8);
+                int at = ui_dev(ui, 8), fs = ui_dev(ui, UI_FILE_ROW_ICON);
+
+                at += ui_list_paint_icon(ui, &row, id, x + at, y + (height - size) / 2, size, fs, y + (height - fs) / 2, null, quiet, strong, true, x, wide) + ui_dev(ui, 8);
                 shown = ui_fit(ui, (string_address)(row.label ? row.label : ""), UI_BODY_MEDIUM, wide - at - ui_dev(ui, 8), cut, sizeof(cut));
                 width = ui_kit_measure(ui, shown, UI_BODY_MEDIUM);
-                ui_kit_text(ui, ui_mirror(x + at, width, x, wide), ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM), shown,
-                            UI_BODY_MEDIUM, strong, 0);
+                ui_kit_text(ui, ui_mirror(x + at, width, x, wide), ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM), shown, UI_BODY_MEDIUM, strong, 0);
                 return;
         }
-        // A file's symbol is 32 pixels a side, its extension on it, in the room a 40 pixel symbol has.
-        if (picture)
-                ui_icon_picture(ui, x + (wide - size) / 2, y + ui_dev(ui, 12), size, picture);
-        else if (row.tile_name)
-                ui_icon_tile(ui, x + (wide - size) / 2, y + ui_dev(ui, 12), size, row.tile_name);
-        else if (row.file)
-                size = ui_dev(ui, UI_FILE_TILE_ICON),
-                ui_file_icon(ui, row.file - 1, row.extension, x + (wide - size) / 2, y + ui_dev(ui, 16), size, strong);
-        else if (row.icon)
-                ui_icon(ui, row.icon - 1, x + (wide - size) / 2, y + ui_dev(ui, 12), size, 0, strong);
+        ui_list_paint_icon(ui, &row, id, x + (wide - size) / 2, y + ui_dev(ui, 12), size, ui_dev(ui, UI_FILE_TILE_ICON), y + ui_dev(ui, 16), row.extension, strong, strong, false, x, wide);
         shown = ui_fit(ui, (string_address)(row.label ? row.label : ""), UI_LABEL_MEDIUM, wide - 2 * pad - ui_dev(ui, 8), cut, sizeof(cut));
         width = ui_kit_measure(ui, shown, UI_LABEL_MEDIUM);
         ui_kit_text(ui, x + (wide - width) / 2, ui_kit_baseline(ui, y + ui_dev(ui, 60), UI_LABEL_MEDIUM), shown, UI_LABEL_MEDIUM, strong, 0);
@@ -27992,24 +27712,13 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                 if ((n = p->icon) && !cols && !l->tree && seen)
                 {
                         int icon_side = n->w < n->h ? n->w : n->h;
-                        int ix = n->x + (n->w - icon_side) / 2, iy = n->y + (n->h - icon_side) / 2;
-                        const unsigned int address_to pic = row.tile_picture ? row.tile_picture(id, icon_side) : null;
 
-                        if (pic)
-                                ui_icon_picture(ui, ix, iy, icon_side, pic);
-                        else if (row.tile_name)
-                                ui_icon_tile(ui, ix, iy, icon_side, row.tile_name);
-                        else if (row.icon)
-                                ui_icon(ui, row.icon - 1, ix, iy, icon_side, 0, strong);
+                        ui_list_paint_icon(ui, &row, id, n->x + (n->w - icon_side) / 2, n->y + (n->h - icon_side) / 2, icon_side, 0, 0, null, 0, strong, false, 0, 0);
                 }
-                // Under columns the row is its cells; with an indent (a tree's row) its label is set in by it, with the expander's chevron
-                // before it.
                 if (cols || l->tree)
                 {
                         if (cols && (cols->x != l->x || cols->w != l->w))
                                 ui_columns_layout(ui, cols, l->x, cols->y, l->w);
-                        // A row lit for a moment (a drop landed on it): the selection's own fill, which reads on a light theme and a dark one alike
-                        // (the accent may be white on the dark one), and a ring of the ink round it.
                         if (row.glow)
                         {
                                 struct ui_box glow = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
@@ -28017,21 +27726,14 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
                                 ui_kit_fill(ui, &glow, ui_kit_lit(ui), null);
                                 ui_kit_ring(ui, &glow, ui_q8(ui, 1), 0x90000000u | (strong & 0xffffffu));
                         }
-                        // A row that is one of many chosen (multi-select list) is a well of the accent across its span (the row the keys are on is lit over it too).
                         if (row.mark && l->selected)
                                 ui_kit_fill(ui, &(struct ui_box){across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0},
                                             0x38000000u | (ui_role(UI_PRIMARY) & 0xffffffu), null);
-                        if (row.tall)
-                        {
-                                ui_list_cells(ui, l, cols, &row, y + ui_dev(ui, UI_DRIVE_TOP), ui_drive_part(ui, UI_DRIVE_LINE), ink, quiet);
-                                if (trailing)
-                                        ui_control_draw(ui, trailing);
-                                ui_list_drive(ui, &row, seen, strong, quiet);
-                                return;
-                        }
-                        ui_list_cells(ui, l, cols, &row, y, height, ink, quiet);
+                        ui_list_cells(ui, l, cols, &row, row.tall ? y + ui_dev(ui, UI_DRIVE_TOP) : y, row.tall ? ui_drive_part(ui, UI_DRIVE_LINE) : height, ink, quiet);
                         if (trailing)
                                 ui_control_draw(ui, trailing);
+                        if (row.tall)
+                                ui_list_drive(ui, &row, seen, strong, quiet);
                         return;
                 }
         }
@@ -28222,44 +27924,40 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
         l->pointer_y = pointer_y;
         // The rows' own span, which a row's band reaches to the window's edge across (row_x, row_w), and the list's where it has none
         ui_scroll_pull(ui, &l->scroll, drawn, l->row_w ? l->row_x : l->x, l->y, l->row_w ? l->row_w : l->w, l->h);
-        // A rubber band: a well of the accent over what it holds, its edge in the accent.
         if (l->band)
         {
                 int top = l->y + l->band_at - l->scroll.scroll, bottom = l->band_y1;
                 int left = l->band_x0 < l->band_x1 ? l->band_x0 : l->band_x1, right = l->band_x0 < l->band_x1 ? l->band_x1 : l->band_x0;
                 unsigned int accent = ui_role(UI_PRIMARY) & 0xffffffu;
-                struct ui_box box;
 
                 if (bottom < top)
                         bottom = top, top = l->band_y1;
                 top = top < l->y ? l->y : top, bottom = bottom > l->y + l->h ? l->y + l->h : bottom;
                 ui->top = l->y, ui->bottom = l->y + l->h;
-                box = (struct ui_box){(b32)left << 8, (b32)top << 8, (b32)(right + 1) << 8, (b32)(bottom + 1) << 8, 0, 0};
                 if (bottom > top && right > left)
                 {
+                        struct ui_box box = ui_box_px(left, top, right - left + 1, bottom - top + 1, 0);
+
                         ui_kit_fill(ui, &box, 0x40000000u | accent, null);
                         ui_kit_ring(ui, &box, ui_q8(ui, 1), 0xff000000u | accent);
                 }
         }
-        // Where a drag over it would be dropped: the kit's focus ring round that row, or round the whole list.
         if (l->drop)
         {
                 int x = l->row_w ? l->row_x : l->x, w = l->row_w ? l->row_w : l->w, inset = ui_dev(ui, UI_FOCUS_GAP + UI_FOCUS_WIDTH);
                 int y = l->y, h = l->h;
                 b32 found = l->drop < 0;
-                struct ui_box box;
 
                 for (int at = 0; !found && at < l->count; at++)
                         if (ui_list_id(l, at) == l->drop - 1)
                                 y = ui_list_row_y(l, at), h = l->tall[at], found = true;
-                // A tile's ring is round the tile.
                 if (l->tiles && l->drop > 0 && found)
                         w = ui_dev(ui, l->tiles), x = ui_mirror(l->x + (l->drop - 1) % ui_list_per(ui, l) * w, w, l->x, l->w);
                 if (found)
                 {
+                        struct ui_box box = ui_box_px(x + inset, y + inset, w - 2 * inset, h - 2 * inset, ui_q8(ui, UI_FOCUS_WIDTH * 2));
+
                         ui->top = l->y, ui->bottom = l->y + l->h;
-                        box = (struct ui_box){(b32)(x + inset) << 8, (b32)(y + inset) << 8, (b32)(x + w - inset) << 8, (b32)(y + h - inset) << 8, 0, 0};
-                        box.rx = box.ry = ui_q8(ui, UI_FOCUS_WIDTH * 2);
                         ui_kit_focus_ring(ui, &box);
                 }
         }
@@ -28293,9 +27991,17 @@ static fn ui_list_let_go(const struct ui address_to ui, struct ui_list address_t
         for none). The press's end is held to the rows, so rows scrolled under a band that is held are still in it; ended at the release
         (ui_list_band_end). A virtual list's rows are one height, so the rows are worked out and not looked for.
 */
+static inline fn ui_list_grab_set(struct ui_list address_to l, unsigned char g)
+{
+        l->grab = g;
+        l->band = g == UI_LIST_GRAB_BAND;
+        l->chord = g == UI_LIST_GRAB_BAND || g == UI_LIST_GRAB_CHORD;
+}
+
 static fn ui_list_band_begin(struct ui_list address_to l, int x, int y)
 {
-        l->band = true, l->band_x0 = l->band_x1 = x, l->band_y1 = y;
+        ui_list_grab_set(l, UI_LIST_GRAB_BAND);
+        l->band_x0 = l->band_x1 = x, l->band_y1 = y;
         l->band_at = y - l->y + l->scroll.scroll;
 }
 
@@ -28309,15 +28015,20 @@ static b32 ui_list_band_follow(struct ui_list address_to l, int x, int y)
         return moved;
 }
 
+static fn ui_list_band_span(const struct ui_list address_to l, int address_to from, int address_to to)
+{
+        int a = l->band_at, b = l->band_y1 - l->y + l->scroll.scroll;
+
+        *from = a < b ? a : b, *to = a < b ? b : a;
+}
+
 static b32 ui_list_band_rows(const struct ui address_to ui, const struct ui_list address_to l, int address_to first, int address_to last)
 {
-        int row = ui_list_unit(ui, l), per = ui_list_per(ui, l), from = l->band_at, to = l->band_y1 - l->y + l->scroll.scroll, swap;
+        int row = ui_list_unit(ui, l), per = ui_list_per(ui, l), from, to;
 
         if (!l->band || !l->virtual || !l->total)
                 return false;
-        if (from > to)
-                swap = from, from = to, to = swap;
-        // Over tiles a band holds the whole lines it crosses.
+        ui_list_band_span(l, &from, &to);
         from = from < 0 ? 0 : from / row * per, to = to < 0 ? -1 : (to / row + 1) * per - 1;
         to = to >= l->total ? l->total - 1 : to;
         if (to < from || from >= l->total)
@@ -28328,20 +28039,17 @@ static b32 ui_list_band_rows(const struct ui address_to ui, const struct ui_list
 
 static fn ui_list_band_end(struct ui_list address_to l)
 {
-        l->band = false;
+        ui_list_grab_set(l, l->grab == UI_LIST_GRAB_BAND ? UI_LIST_GRAB_NONE : l->grab);
 }
 
-// Whether row/tile id overlaps the active rubber band: vertical overlap in a row list, 2D rectangle overlap in a tile grid.
 static b32 ui_list_band_has(const struct ui address_to ui, const struct ui_list address_to l, int id)
 {
-        int unit = ui_list_unit(ui, l), per = ui_list_per(ui, l), from = l->band_at, to = l->band_y1 - l->y + l->scroll.scroll;
-        int top = (id / per) * unit, bottom = top + unit, swap;
+        int unit = ui_list_unit(ui, l), per = ui_list_per(ui, l), from, to, top = (id / per) * unit;
 
         if (!l->band || !l->virtual || id < 0 || id >= l->total)
                 return false;
-        if (from > to)
-                swap = from, from = to, to = swap;
-        if (bottom <= from || top > to)
+        ui_list_band_span(l, &from, &to);
+        if (top + unit <= from || top > to)
                 return false;
         if (!l->tiles)
                 return true;
@@ -28353,11 +28061,6 @@ static b32 ui_list_band_has(const struct ui address_to ui, const struct ui_list 
         }
 }
 
-/*
-        The press on a list taken back (a drag starting, a right click cancelling a scroll, focus lost, a popup opening): the row no
-        longer shows pressed, any scroll hold or stretch springs home immediately, any scrollbar hold, rubber band or armed drag ends,
-        and nothing is clicked at release.
-*/
 static fn ui_press_cancel(struct ui_press address_to press)
 {
         if (!press->down)
@@ -28373,10 +28076,7 @@ static fn ui_list_press_cancel(const struct ui address_to ui, struct ui_list add
         ui_press_cancel(&l->press);
         l->scroll.held = false;
         ui_scroll_let_go(&l->scroll, 0);
-        l->band = false;
-        l->drag_armed = false;
-        l->right_down = false;
-        l->chord = false;
+        ui_list_grab_set(l, UI_LIST_GRAB_NONE);
         l->menu_asked = false;
         ui_list_let_go(ui, l);
 }
@@ -28487,31 +28187,36 @@ static int ui_list_note_click(struct ui_list address_to l, int row)
         return row;
 }
 
+static fn ui_list_chord_band(const struct ui address_to ui, struct ui_list address_to l, int x, int y)
+{
+        ui_list_press_cancel(ui, l);
+        ui_list_band_begin(l, x, y);
+        l->band_began = true;
+}
+
 static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, const struct window_event address_to event, int x, int y)
 {
         b32 touch = (event->flags & WINDOW_KEY_TOUCH) != 0, cancelled = (event->flags & WINDOW_KEY_CANCEL) != 0;
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
         int across, wide, row, clicked;
         b32 on_list;
 
         ui_list_across(l, &across, &wide);
         on_list = x >= across && x < across + wide && y >= l->y && y < l->y + l->h;
-        l->drag_began = l->band_began = l->band_moved = l->ground_clicked = l->double_clicked = false;
-        l->menu_asked = false;
+        l->drag_began = l->band_began = l->band_moved = l->ground_clicked = l->double_clicked = l->menu_asked = false;
         if (event->type == WINDOW_EVENT_MOTION)
         {
-                if (l->band)
+                if (l->grab == UI_LIST_GRAB_BAND)
                 {
                         l->band_moved = ui_list_band_follow(l, x, y);
                         return -1;
                 }
-                if (l->drag_armed)
+                if (l->grab == UI_LIST_GRAB_DRAG && ui_press_past(ui, l->drag_x, l->drag_y, x, y))
                 {
-                        if (ui_press_past(ui, l->drag_x, l->drag_y, x, y))
-                        {
-                                l->drag_armed = false, l->drag_began = true;
-                                ui_list_let_go(ui, l);
-                                return -1;
-                        }
+                        ui_list_grab_set(l, UI_LIST_GRAB_NONE);
+                        l->drag_began = true;
+                        ui_list_let_go(ui, l);
+                        return -1;
                 }
                 row = ui_list_hit(ui, l, x, y);
                 ui_list_pointer(ui, l, WINDOW_EVENT_MOTION, x, y, false);
@@ -28529,72 +28234,49 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
         }
         if (event->type != WINDOW_EVENT_BUTTON)
                 return -1;
-        // Right button: with Left already held on a selectable list begins dual-button box selection; otherwise cancels any active
-        // scroll/stretch so no list ever gets stuck, and on a clean release asks for the context menu.
         if (event->a == UI_POINTER_RIGHT)
         {
-                if (event->flags & WINDOW_KEY_DOWN)
+                if (down)
                 {
-                        if (l->selected && (l->press.down || l->drag_armed || ((ui_kit.buttons & UI_BTN_LEFT) && on_list)))
-                        {
-                                ui_list_press_cancel(ui, l);
-                                l->chord = true, l->right_down = true;
-                                ui_list_band_begin(l, x, y);
-                                l->band_began = true;
-                                return -1;
-                        }
-                        if (l->press.down || l->drag_armed || l->scroll.held)
+                        if (l->selected && (l->press.down || l->grab == UI_LIST_GRAB_DRAG || ((ui_kit.buttons & UI_BTN_LEFT) && on_list)))
+                                return ui_list_chord_band(ui, l, x, y), -1;
+                        if (l->press.down || l->grab == UI_LIST_GRAB_DRAG || l->scroll.held)
                                 ui_list_press_cancel(ui, l);
                         if ((l->selected || l->menu) && on_list)
-                                l->right_down = true;
+                                ui_list_grab_set(l, UI_LIST_GRAB_RIGHT);
                         return -1;
                 }
+                if (l->grab == UI_LIST_GRAB_BAND || l->grab == UI_LIST_GRAB_CHORD)
+                        ui_list_grab_set(l, (ui_kit.buttons & UI_BTN_LEFT) ? UI_LIST_GRAB_CHORD : UI_LIST_GRAB_NONE);
+                else if (l->grab == UI_LIST_GRAB_RIGHT)
                 {
-                        b32 was_right = l->right_down;
-
-                        l->right_down = false;
-                        if (l->band)
-                                ui_list_band_end(l);
-                        if (l->chord)
-                        {
-                                if (!(ui_kit.buttons & UI_BTN_LEFT))
-                                        l->chord = false;
-                                return -1;
-                        }
-                        if (was_right && !cancelled)
+                        ui_list_grab_set(l, UI_LIST_GRAB_NONE);
+                        if (!cancelled)
                                 l->menu_asked = true, l->menu_x = x, l->menu_y = y;
                 }
                 return -1;
         }
         if (event->a != UI_POINTER_LEFT)
         {
-                if ((event->flags & WINDOW_KEY_DOWN) && (l->press.down || l->drag_armed || l->scroll.held))
+                if (down && (l->press.down || l->grab == UI_LIST_GRAB_DRAG || l->scroll.held))
                         ui_list_press_cancel(ui, l);
                 return -1;
         }
-        if (event->flags & WINDOW_KEY_DOWN)
+        if (down)
         {
                 if (!on_list)
                         return -1;
-                l->drag_armed = false;
-                // Right already held + Left pressed: dual-button box drag select (cancels pending right-click menu).
-                if (l->selected && (l->right_down || (ui_kit.buttons & UI_BTN_RIGHT)))
-                {
-                        ui_list_press_cancel(ui, l);
-                        l->chord = true, l->right_down = true;
-                        ui_list_band_begin(l, x, y);
-                        l->band_began = true;
-                        return -1;
-                }
+                if (l->selected && (l->grab == UI_LIST_GRAB_RIGHT || (ui_kit.buttons & UI_BTN_RIGHT)))
+                        return ui_list_chord_band(ui, l, x, y), -1;
+                ui_list_grab_set(l, UI_LIST_GRAB_NONE);
                 row = ui_list_hit(ui, l, x, y);
-                // Selected item: left-hold drags the selection past slop rather than scrolling the list.
                 if (l->selected && !touch && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT)) && row >= 0 && l->selected(row))
                 {
-                        l->drag_armed = true, l->drag_row = row, l->drag_x = x, l->drag_y = y;
+                        ui_list_grab_set(l, UI_LIST_GRAB_DRAG);
+                        l->drag_row = row, l->drag_x = x, l->drag_y = y;
                         ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, true);
                         return -1;
                 }
-                // Unselected item, empty ground, or non-selectable list: UI scroll like normal.
                 if (!ui_press_drags(event->flags) && !l->selected)
                         ui_press_begin(&l->press, x, y, row, touch);
                 else
@@ -28603,34 +28285,29 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                         if (!touch && l->press.target < 0 && row >= 0)
                                 l->press.target = row;
                         if (l->press.target < 0 && row >= 0)
-                                return -1; // a finger press on rows running on stops them, and shows and clicks nothing
+                                return -1;
                 }
+                ui_list_grab_set(l, UI_LIST_GRAB_PRESS);
                 ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, true);
                 return -1;
         }
-        if (l->band)
+        if (l->grab == UI_LIST_GRAB_BAND || l->grab == UI_LIST_GRAB_CHORD)
         {
-                ui_list_band_end(l);
-                if (!(ui_kit.buttons & UI_BTN_RIGHT))
-                        l->chord = false;
+                ui_list_grab_set(l, (ui_kit.buttons & UI_BTN_RIGHT) ? UI_LIST_GRAB_CHORD : UI_LIST_GRAB_NONE);
                 return -1;
         }
-        if (l->chord)
-        {
-                if (!(ui_kit.buttons & UI_BTN_RIGHT))
-                        l->chord = false;
-                return -1;
-        }
-        if (l->drag_armed)
+        if (l->grab == UI_LIST_GRAB_DRAG)
         {
                 int armed = l->drag_row;
 
-                l->drag_armed = false;
+                ui_list_grab_set(l, UI_LIST_GRAB_NONE);
                 ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, false);
                 row = ui_list_hit(ui, l, x, y);
                 return !cancelled && row >= 0 && row == armed ? ui_list_note_click(l, row) : -1;
         }
         ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, false);
+        if (l->grab == UI_LIST_GRAB_PRESS)
+                ui_list_grab_set(l, UI_LIST_GRAB_NONE);
         if (!l->press.down)
                 return -1;
         {
@@ -28638,13 +28315,8 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                 int target = l->press.target;
 
                 row = ui_list_hit(ui, l, x, y);
-                if (!l->press.drags)
-                        clicked = ui_press_release(&l->press, cancelled, row);
-                else
-                {
-                        clicked = ui_press_lift(&l->press, cancelled);
-                        clicked = clicked >= 0 && clicked == row ? clicked : -1;
-                }
+                clicked = !l->press.drags ? ui_press_release(&l->press, cancelled, row)
+                                          : (clicked = ui_press_lift(&l->press, cancelled), clicked >= 0 && clicked == row ? clicked : -1);
                 if (!dragged && !cancelled && target < 0 && row < 0 && on_list)
                         l->ground_clicked = true;
                 return ui_list_note_click(l, clicked);
@@ -28654,7 +28326,7 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
 // Whether a list currently owns an active pointer interaction (press, item drag, rubber band, chord, or right-hold).
 static inline b32 ui_list_active(const struct ui_list address_to l)
 {
-        return l->press.down || l->drag_armed || l->band || l->right_down || l->chord;
+        return l->grab != UI_LIST_GRAB_NONE || l->press.down;
 }
 
 // Whether (x, y) in device pixels lies within the list's row span.
@@ -28678,18 +28350,7 @@ static int ui_view_list_click(struct ui address_to ui, struct ui_view address_to
         ui_view_ready(v);
         if (target)
                 *target = null;
-        for (int at = 0; at < v->tree.count; at++)
-        {
-                struct ui_list address_to l = v->item[at].list;
-
-                if (l && ui_list_active(l))
-                {
-                        if (target)
-                                *target = l;
-                        return ui_list_click(ui, l, event, x, y);
-                }
-        }
-        if (event->type == WINDOW_EVENT_MOTION)
+        for (int pass = 0; pass < 2; pass++)
         {
                 for (int at = 0; at < v->tree.count; at++)
                 {
@@ -28697,24 +28358,19 @@ static int ui_view_list_click(struct ui address_to ui, struct ui_view address_to
 
                         if (!l)
                                 continue;
-                        ui_list_click(ui, l, event, x, y);
-                        if (target && !*target && ui_list_in(l, x, y))
-                                *target = l;
-                }
-                return -1;
-        }
-        if (event->type == WINDOW_EVENT_BUTTON)
-        {
-                for (int at = 0; at < v->tree.count; at++)
-                {
-                        struct ui_list address_to l = v->item[at].list;
-
-                        if (l && ui_list_in(l, x, y))
+                        if (pass == 0)
                         {
-                                if (target)
-                                        *target = l;
-                                return ui_list_click(ui, l, event, x, y);
+                                if (ui_list_active(l))
+                                        return target ? (*target = l, ui_list_click(ui, l, event, x, y)) : ui_list_click(ui, l, event, x, y);
                         }
+                        else if (event->type == WINDOW_EVENT_MOTION)
+                        {
+                                ui_list_click(ui, l, event, x, y);
+                                if (target && !*target && ui_list_in(l, x, y))
+                                        *target = l;
+                        }
+                        else if (event->type == WINDOW_EVENT_BUTTON && ui_list_in(l, x, y))
+                                return target ? (*target = l, ui_list_click(ui, l, event, x, y)) : ui_list_click(ui, l, event, x, y);
                 }
         }
         return -1;
@@ -28762,15 +28418,18 @@ static fn ui_list_menu_populate(struct ui_popmenu address_to m, const struct ui_
         ui_list_menu_items(m, l->menu->flags(id));
 }
 
-// Opens a list row's context menu at (x, y) in window device pixels; tracks popup->list and popup->list_row automatically.
+static b32 ui_list_menu_ready(const struct ui address_to ui, const struct ui_list address_to l, const struct ui_popup address_to popup,
+                              const struct window_row address_to own, int id)
+{
+        return ui && l && l->menu && l->menu->flags && l->menu->copy && popup && own && ui->scale > 0 && l->menu->copy(id) && l->menu->flags(id);
+}
+
 static b32 ui_list_menu_open(struct ui address_to ui, struct ui_list address_to l, struct ui_popup address_to popup,
                              struct window_row address_to own, int id, int x, int y, b32 keys)
 {
         struct ui_popmenu address_to m;
 
-        if (!ui || !l || !l->menu || !l->menu->flags || !l->menu->copy || !popup || !own || ui->scale <= 0)
-                return false;
-        if (!l->menu->copy(id) || !l->menu->flags(id))
+        if (!ui_list_menu_ready(ui, l, popup, own, id))
                 return false;
         m = &popup->menu;
         m->count = 0, m->typed_length = 0;
@@ -28780,42 +28439,27 @@ static b32 ui_list_menu_open(struct ui address_to ui, struct ui_list address_to 
                 return false;
         popup->field = null;
         if (!ui_popmenu_open(popup, own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch))
-        {
-                popup->list = null, popup->list_row = -1;
-                return false;
-        }
+                return popup->list = null, popup->list_row = -1, false;
         popup->list = l, popup->list_row = id;
         if (keys)
-        {
-                m->hot = 0;
-                ui_popmenu_present(popup);
-        }
+                m->hot = 0, ui_popmenu_present(popup);
         return true;
 }
 
-// Opens the focused row's context menu under that row (Menu key or Shift+F10), revealing the row first and mirroring for RTL.
 static b32 ui_list_menu_open_keys(struct ui address_to ui, struct ui_list address_to l, struct ui_popup address_to popup,
                                   struct window_row address_to own, int room_h)
 {
-        int id, at, x, y, tall;
+        int id, at, x, y;
         struct ui measure;
-        struct ui_popmenu address_to m;
 
-        if (!ui || !l || !l->menu || !l->menu->flags || !l->menu->copy || !popup || !own)
-                return false;
-        id = l->focus;
-        at = ui_list_at(l, id);
-        if (at < 0 || !l->menu->copy(id) || !l->menu->flags(id))
+        if (!l || (id = l->focus, at = ui_list_at(l, id)) < 0 || !ui_list_menu_ready(ui, l, popup, own, id))
                 return false;
         ui_list_reveal(ui, l);
-        measure = *ui;
-        m = &popup->menu;
-        m->count = 0;
-        ui_list_menu_populate(m, l, id);
-        ui_popmenu_size(&measure, m, room_h);
-        tall = l->tall[at] > 0 ? l->tall[at] : ui_list_pitch(ui, l);
-        y = ui_list_row_y(l, at) + tall - ui_px(ui, UI_GAP1);
-        x = ui_rtl() ? l->x + l->w - ui_dev(ui, UI_INSET) - m->width : l->x + ui_dev(ui, UI_INSET);
+        measure = *ui, popup->menu.count = 0;
+        ui_list_menu_populate(&popup->menu, l, id);
+        ui_popmenu_size(&measure, &popup->menu, room_h);
+        y = ui_list_row_y(l, at) + (l->tall[at] > 0 ? l->tall[at] : ui_list_pitch(ui, l)) - ui_px(ui, UI_GAP1);
+        x = ui_rtl() ? l->x + l->w - ui_dev(ui, UI_INSET) - popup->menu.width : l->x + ui_dev(ui, UI_INSET);
         return ui_list_menu_open(ui, l, popup, own, id, x < 0 ? 0 : x, y, true);
 }
 
@@ -29135,45 +28779,31 @@ static int ui_page_least(struct ui address_to ui, struct ui_page address_to p, s
         return high;
 }
 
-// The group under a point of the window, or -1.
-// Whether a device x of the window is in the column's side of the page: left of the seam, or right of it reading from the right.
 static inline b32 ui_page_in_column(const struct ui_page address_to p, int x)
 {
         return ui_rtl() ? x >= p->seam && x < p->width : x >= 0 && x < p->seam;
 }
 
-// The column's band: its own where it is a side pane's (column_top under column_bottom), else the body's.
-static inline int ui_page_column_top(const struct ui_page address_to p)
-{
-        return p->column_bottom > p->column_top ? p->column_top : p->top;
-}
+static inline int ui_page_column_top(const struct ui_page address_to p) { return p->column_bottom > p->column_top ? p->column_top : p->top; }
+static inline int ui_page_column_bottom(const struct ui_page address_to p) { return p->column_bottom > p->column_top ? p->column_bottom : p->bottom; }
 
-static inline int ui_page_column_bottom(const struct ui_page address_to p)
-{
-        return p->column_bottom > p->column_top ? p->column_bottom : p->bottom;
-}
-
-// A row of the window as the column's groups have it drawn, its picture stretched by a pull past an end (ui_scroll_unpull).
 static int ui_page_column_unpull(const struct ui address_to ui, const struct ui_page address_to p, int y)
 {
-        return ui_scroll_unpull(ui, &p->column_scroll, p->column_scroll.scroll, ui_page_column_top(p), ui_page_column_bottom(p) - ui_page_column_top(p), y);
+        int top = ui_page_column_top(p);
+
+        return ui_scroll_unpull(ui, &p->column_scroll, p->column_scroll.scroll, top, ui_page_column_bottom(p) - top, y);
 }
 
 static int ui_page_column_hit(const struct ui address_to ui, const struct ui_page address_to p, int x, int y)
 {
-        // The groups are drawn at rest (ui_page_column): a pull past an end stretches the picture and moves no group, so the hit boxes
-        // are where the groups are drawn, at rest too, as a list's rows are (ui_list_hit).
-        int group;
+        int top = ui_page_column_top(p), bottom = ui_page_column_bottom(p), group;
 
-        if (!p->column_on || y < ui_page_column_top(p) || y >= ui_page_column_bottom(p) || !ui_page_in_column(p, x))
+        if (!p->column_on || y < top || y >= bottom || !ui_page_in_column(p, x))
                 return -1;
-        group = (ui_page_column_unpull(ui, p, y) - ui_page_column_top(p) +
-                 ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, ui_page_column_bottom(p) - ui_page_column_top(p))) / ui_dev(ui, UI_ROW);
-
+        group = (ui_page_column_unpull(ui, p, y) - top + ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, bottom - top)) / ui_dev(ui, UI_ROW);
         return group >= p->column.count ? -1 : group;
 }
 
-// The column's groups: their names, cut to the column, and how many.
 static fn ui_page_groups(struct ui address_to ui, struct ui_page address_to p, const char address_to (*name)(int group), int count)
 {
         p->column.count = count < UI_ITEMS ? count : UI_ITEMS;
@@ -29189,7 +28819,6 @@ static fn ui_page_groups(struct ui address_to ui, struct ui_page address_to p, c
         p->column_scroll.content = p->column.count * ui_dev(ui, UI_ROW);
 }
 
-// The group chosen kept in sight in a column that does not fit: true when it moved.
 static b32 ui_page_column_reveal(const struct ui address_to ui, struct ui_page address_to p, int group)
 {
         ui_scroll_extent(&p->column_scroll);
@@ -29199,19 +28828,6 @@ static b32 ui_page_column_reveal(const struct ui address_to ui, struct ui_page a
         return true;
 }
 
-/*
-        A page laid out in its window: its frame declared (ui_page_view), and its parts put where the frame has them. The body's band
-        is the height of its bar's track, down to the window's bottom edge, and its sides are the rows' box's; the column is as wide as
-        its box, and its rows end at the seam, the middle of its bar's track. Each bar is in its track: the column's, which scrolls as
-        a list does (its ends take a pull as the rubber band, and a wheel turn at an end), and the card's, which is the body's (a card
-        that scrolls takes a pull at its ends like a list, and at its top when it fits). The list is put in its box and laid out, and its
-        scroll kept in its range. The app sets the column, the body, the frame's view and what it shows above the rows first.
-
-        The body's rows run from the seam to the window's own edge, flush: the column's rows end at the middle of the column's scroll
-        track and these begin there, so the track lies across the join of two surfaces and not in a margin of either, and the list's
-        own track is drawn over its rows' last stretch, which is blank. The list's box (ui_list_place's) is unchanged: its words and
-        controls keep the page's margins at both ends, and nothing sits under a track. A page with no column starts at the window's edge.
-*/
 static fn ui_page_fit(struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int width, int height,
                       struct ui_scroll address_to card, int card_content)
 {
@@ -29221,13 +28837,10 @@ static fn ui_page_fit(struct ui address_to ui, struct ui_page address_to p, stru
         p->width = width, p->height = height;
         ui_page_view(ui, p);
         p->top = p->body_bar.y, p->bottom = p->top + p->body_bar.h;
-        // The column's band: the pane's whole height where it is a side pane (its first group in the window's top band), else the body's.
         p->column_top = p->side_box.w > 0 ? p->column_box.y : p->top;
         p->column_bottom = p->side_box.w > 0 ? p->column_box.y + p->column_box.h : p->bottom;
         p->left = box->x, p->right = box->x + box->w;
         p->column_w = p->column_on ? p->column_box.w : 0;
-        // The seam: the middle of the column's bar, or where the column is a glass side pane, the pane's own edge, so a group's row is the
-        // pane's whole width (flush with the body) and not short of it by half the bar's gutter.
         p->seam = !p->column_on ? 0 : p->side_box.w > 0 ? (ui_rtl() ? p->side_box.x : p->side_box.x + p->side_box.w) : ui_mirror(bar->x + bar->w / 2, 0, bar->x, bar->w);
         p->column_scroll.x = bar->x, p->column_scroll.content = p->column.count * ui_dev(ui, UI_ROW);
         card->x = p->body_bar.x, card->content = card_content;
@@ -29245,28 +28858,24 @@ static fn ui_page_fit(struct ui address_to ui, struct ui_page address_to p, stru
         ui_scroll_clamp(&l->scroll);
 }
 
-// The body scrolled to scroll: drawn again when it moved.
 static fn ui_page_scroll(struct ui_page address_to p, int scroll)
 {
         if (ui_scroll_set(p->body, scroll))
                 ui_page_changed(p);
 }
 
-// The list kept in sight on the body: its focus, unless the page is a card (which has no rows).
 static fn ui_page_reveal(const struct ui address_to ui, const struct ui_page address_to p, struct ui_list address_to l)
 {
         if (!p->card)
                 ui_list_reveal(ui, l);
 }
 
-// The chosen group kept in sight in a column that does not fit: drawn again when the column moved.
 static fn ui_page_column_show(const struct ui address_to ui, struct ui_page address_to p)
 {
         if (ui_page_column_reveal(ui, p, p->chosen))
                 ui_page_changed(p);
 }
 
-// A key in the column: the group it moves to (Up, Down, Home, End, three for a page), or -1 when it is not one of them.
 static int ui_page_column_key(const struct ui_page address_to p, int key, int group)
 {
         int last = p->column.count - 1;
@@ -29284,14 +28893,6 @@ static int ui_page_column_key(const struct ui_page address_to p, int key, int gr
         return group < 0 ? 0 : group > last ? last : group;
 }
 
-/*
-        The column drawn: the chosen group under the accent's pip, which slides to another however it is chosen (the pip is the keys'
-        mark too: the column has no ring); none chosen (disabled) while a search lists the rows of every group.
-*/
-// The column's groups across: in the column's box, in logical pixels from the edge they start at (the box's right, reading from the right),
-// and a group's row from the window's edge to the middle of the bar's track. Logical from device, one edge rule: a start floors and an end
-// ceils, so the groups reach every device column of the box and of the window's edge at any scale (truncated, at 125 percent a window
-// 1001 wide had a column of ground at its right edge).
 static fn ui_page_column_place(const struct ui address_to ui, struct ui_page address_to p)
 {
         struct ui_control address_to c = &p->column;
@@ -29307,68 +28908,48 @@ static fn ui_page_column_place(const struct ui address_to ui, struct ui_page add
 static fn ui_page_column(struct ui address_to ui, struct ui_page address_to p, b32 keys, b32 disabled)
 {
         struct ui_control address_to c = &p->column;
-        const struct ui_rect address_to box = &p->column_box;
-        int chosen = p->chosen, rest;
+        int top = ui_page_column_top(p), bottom = ui_page_column_bottom(p), chosen = p->chosen, rest;
 
         if (!p->column_on)
                 return;
         ui_scroll_frame(ui, &p->column_scroll);
-        ui->top = ui_page_column_top(p);
-        ui->bottom = ui_page_column_bottom(p);
+        ui->top = top, ui->bottom = bottom;
         if (c->kind != UI_TABS)
-        {
-                c->kind = UI_TABS, c->variant = UI_TABS_VERTICAL;
-                c->at = chosen;
-        }
+                c->kind = UI_TABS, c->variant = UI_TABS_VERTICAL, c->at = chosen;
         ui_page_column_place(ui, p);
-        // The groups are drawn at rest, inside the column's ends, and a pull past one is the picture stretched (ui_scroll_pull)
-        rest = ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, ui_page_column_bottom(p) - ui_page_column_top(p));
-        c->y = (ui_page_column_top(p) - rest) * 100 / ui->scale;
-        c->h = UI_ROW;
-        // A group is a whole row, flush with the window's edge, to the middle of the bar's track: logical px rounded up, the edge the list's rows
-        // begin at (ui_list_across_logical), so the two lie edge to edge at every scale.
-        c->disabled = disabled;
-        c->focused = keys;
-        // The group lit is the one the stretched picture draws under the pointer, as the one pressed is (ui_page_column_hit).
+        rest = ui_scroll_rest(&p->column_scroll, p->column_scroll.scroll, bottom - top);
+        c->y = (top - rest) * 100 / ui->scale, c->h = UI_ROW;
+        c->disabled = disabled, c->focused = keys;
         c->item = ui_control_hit(ui, c, ui_kit.pointer_x, ui_page_column_unpull(ui, p, ui_kit.pointer_y));
         c->hover = c->item >= 0;
         if (chosen != c->at)
-                ui_tabs_choose(ui, c, chosen); // placed at its first frame, moving after
+                ui_tabs_choose(ui, c, chosen);
         ui_control_draw(ui, c);
-        ui_scroll_pull(ui, &p->column_scroll, p->column_scroll.scroll, ui_rtl() ? p->seam : 0, ui_page_column_top(p), ui_rtl() ? p->width - p->seam : p->seam,
-                       ui_page_column_bottom(p) - ui_page_column_top(p));
+        ui_scroll_pull(ui, &p->column_scroll, p->column_scroll.scroll, ui_rtl() ? p->seam : 0, top, ui_rtl() ? p->width - p->seam : p->seam, bottom - top);
 }
 
-// The column's bar, drawn last of the page (after the body's rows): its track lies across the seam, so the body's rows (their hover,
-// their chosen band, their ripple) are under its right half, and drawn after it they would be over it.
 static fn ui_page_column_bar(struct ui address_to ui, struct ui_page address_to p)
 {
         if (!p->column_on)
                 return;
-        ui->top = ui_page_column_top(p);
-        ui->bottom = ui_page_column_bottom(p);
+        ui->top = ui_page_column_top(p), ui->bottom = ui_page_column_bottom(p);
         ui_scroll_draw(ui, &p->column_scroll);
 }
 
-/*
-        The page's regions: the column at the left of the gutter's middle, and the body. A region that moved is drawn again;
-        the column and the body are the body's band. A choice's menu is a popup of its own, with the wheel and the keys.
-*/
 static struct ui_scroll address_to ui_page_region(const struct ui address_to ui, struct ui_page address_to p, int x, int y)
 {
-        if (p->column_on && ui_page_in_column(p, x))
-                return &p->column_scroll;
-        return p->body;
+        (void)ui, (void)y;
+        return p->column_on && ui_page_in_column(p, x) ? &p->column_scroll : p->body;
 }
 
 static fn ui_page_moved(const struct ui address_to ui, struct ui_page address_to p, const struct ui_scroll address_to region)
 {
-        if (!region)
-                return;
-        ui_page_damage(p, (ui_page_column_top(p) < p->top ? ui_page_column_top(p) : p->top) - ui_dev(ui, UI_ROW), p->bottom + ui_dev(ui, UI_ROW));
+        int top = ui_page_column_top(p);
+
+        if (region)
+                ui_page_damage(p, (top < p->top ? top : p->top) - ui_dev(ui, UI_ROW), p->bottom + ui_dev(ui, UI_ROW));
 }
 
-// The wheel on the page: it turns the region under the pointer.
 static fn ui_page_wheel(const struct ui address_to ui, struct ui_page address_to p, const struct window_event address_to event)
 {
         struct ui_scroll address_to region = ui_page_region(ui, p, ui_kit.pointer_x, ui_kit.pointer_y);
@@ -29377,24 +28958,20 @@ static fn ui_page_wheel(const struct ui address_to ui, struct ui_page address_to
                 ui_page_moved(ui, p, region);
 }
 
-/*
-        A mouse's motion, press or release on the page's scrollbars (the body's and the column's), each as every region's bar takes
-        it (ui_scroll_bar): the thumb lights under the pointer and is dragged, a press on the track puts the thumb there and holds it,
-        and a thumb pulled past an end stretches its region and springs home when it is let go. True when it was a bar's.
-*/
 static b32 ui_page_bars(const struct ui address_to ui, struct ui_page address_to p, int type, b32 down)
 {
-        struct ui_scroll address_to bars[3] = {null, p->body, !p->column_on ? null : &p->column_scroll};
+        struct ui_scroll address_to bars[2] = {p->body, p->column_on ? &p->column_scroll : null};
         b32 taken = false;
 
-        for (int k = 0; k < 3; k++)
-        {
-                b32 lit = bars[k] ? bars[k]->hover : 0, took = bars[k] && ui_scroll_bar(ui, bars[k], type, ui_kit.pointer_x, ui_kit.pointer_y, down);
+        for (int k = 0; k < 2; k++)
+                if (bars[k])
+                {
+                        b32 lit = bars[k]->hover, took = ui_scroll_bar(ui, bars[k], type, ui_kit.pointer_x, ui_kit.pointer_y, down);
 
-                taken |= took;
-                if (bars[k] && (took || lit != bars[k]->hover))
-                        ui_page_moved(ui, p, bars[k]);
-        }
+                        taken |= took;
+                        if (took || lit != bars[k]->hover)
+                                ui_page_moved(ui, p, bars[k]);
+                }
         return taken;
 }
 
@@ -29510,6 +29087,17 @@ static fn ui_page_enter_rows(const struct ui address_to ui, struct ui_page addre
         ui_page_changed(p);
 }
 
+static fn ui_page_key_arrow(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int way,
+                            const struct ui_page_keys address_to k)
+{
+        if (p->pane && k->steps(l->focus))
+                k->act(l->focus, way);
+        else if (way < 0 && p->pane)
+                p->pane = 0, ui_page_changed(p);
+        else if (way > 0 && !p->pane)
+                ui_page_enter_rows(ui, p, l);
+}
+
 static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int key,
                        const struct ui_page_keys address_to k)
 {
@@ -29527,7 +29115,6 @@ static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to 
         case UI_KEY_END:
         case UI_KEY_PAGE_UP:
         case UI_KEY_PAGE_DOWN:
-                // The kit's moves: a row at a time, a view, an end in the rows; a group, three, an end in the column.
                 if (p->pane)
                 {
                         int before = l->focus;
@@ -29554,20 +29141,7 @@ static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to 
                 return true;
         case UI_KEY_LEFT:
         case UI_KEY_RIGHT:
-                if (ui_arrow(key) < 0)
-                {
-                        if (p->pane && k->steps(l->focus))
-                                k->act(l->focus, -1);
-                        else if (p->pane)
-                        {
-                                p->pane = 0;
-                                ui_page_changed(p);
-                        }
-                }
-                else if (!p->pane)
-                        ui_page_enter_rows(ui, p, l);
-                else if (k->steps(l->focus))
-                        k->act(l->focus, 1);
+                ui_page_key_arrow(ui, p, l, ui_arrow(key), k);
                 return true;
         }
         return false;
@@ -29671,58 +29245,6 @@ static fn ui_page_press_done(const struct ui address_to ui, struct ui_page addre
         ui_kit.pointer_x = x, ui_kit.pointer_y = y;
 }
 
-// A finger's motion: its press becomes a drag past the slop, and the region it drags follows it.
-static fn ui_page_finger_move(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l, int x, int y)
-{
-        b32 dragged = p->press.dragged;
-
-        if (!p->press.down)
-                return;
-        ui_press_follow(ui, &p->press, x, y);
-        if (!dragged && p->press.dragged)
-                ui_list_let_go(ui, l);
-        if (p->press.dragged)
-                ui_page_moved(ui, p, p->press.region);
-}
-
-// A finger's button: down, its target shows pressed and nothing is done yet; up, the press is done where it went down if it
-// did not move off its target, and the region is thrown if it was moving. A finger that lands on a region that still runs stops it
-// and has no target (ui_press_down): what shows pressed is what the press took, which is then nothing, and its lift does nothing.
-static fn ui_page_finger_button(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
-                                const struct window_event address_to event, void (*done)(void))
-{
-        int x = ui_kit.pointer_x, y = ui_kit.pointer_y;
-
-        if (event->flags & WINDOW_KEY_DOWN)
-        {
-                int target = ui_page_target(ui, p, l, x, y);
-
-                ui_press_down(&p->press, x, y, target, ui_page_region(ui, p, x, y));
-                ui_page_press_show(ui, p, l, p->press.target, x, y);
-                ui_page_changed(p);
-                return;
-        }
-        {
-                int clicked, release_x = x, release_y = y;
-
-                x = p->press.x, y = p->press.y;
-                clicked = ui_press_lift(&p->press, (event->flags & WINDOW_KEY_CANCEL) != 0);
-                ui_list_let_go(ui, l);
-                ui_page_changed(p);
-                if (clicked >= 0 && clicked == ui_page_target(ui, p, l, x, y))
-                        ui_page_press_done(ui, p, l, done, x, y, release_x, release_y);
-        }
-}
-
-/*
-        A slider row's drag (UI_ROW_SLIDER). A press on the row's slider is the slider's and not the row's click: the kit's slider takes the
-        pointer (ui_kit_pointer) and every motion until the release moves it, the value following the hand, or sliding to a click. The value is
-        the app's once, when the hand lets go: l->slid is the row (plus one) and l->slid_value the value, which the app takes and clears, so a
-        drag does not start a change at every step. A release the compositor takes back changes nothing, and neither does a slider the kit lets
-        go of (a finger that went along the other axis, or a control disabled mid-drag): it shows the app's value again (ui_list_slide_undo), and
-        the motion is the page's. A finger's press on a slider is the page's press too, with no target to click (ui_press_down), so the page
-        scrolls on a vertical drag from there. True when the event was the slider's.
-*/
 static void ui_list_slide_undo(const struct ui address_to ui, struct ui_list address_to l, int id, struct ui_control address_to c)
 {
         struct ui_row row;
@@ -29736,7 +29258,7 @@ static b32 ui_list_slider(struct ui address_to ui, struct ui_page address_to p, 
                           const struct window_event address_to event)
 {
         struct ui_control address_to c;
-        int id, x, y;
+        int id, x = ui_kit.pointer_x, y = ui_kit.pointer_y;
 
         if (l->slide)
         {
@@ -29744,7 +29266,6 @@ static b32 ui_list_slider(struct ui address_to ui, struct ui_page address_to p, 
                 c = ui_list_control(l, id, 1);
                 if (!c || c->kind != UI_SLIDER || ui_kit_held != c)
                 {
-                        // The row is gone or is no longer a slider, or its hold was let go: a hold left set would take every pointer event.
                         if (ui_kit_held)
                                 ui_kit_let_go_held(ui_kit_held);
                         l->slide = 0;
@@ -29752,12 +29273,11 @@ static b32 ui_list_slider(struct ui address_to ui, struct ui_page address_to p, 
                 }
                 if (event->type == WINDOW_EVENT_MOTION)
                 {
-                        if (ui_kit_pointer((struct ui address_to)ui, c, 1, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags))
+                        if (ui_kit_pointer(ui, c, 1, WINDOW_EVENT_MOTION, event->a, event->b, false, event->flags))
                                 l->slid_value = (int)((c->value + UI_HALF) >> UI_Q);
                         ui_list_damage(ui, l, id);
                         if (ui_kit_held == c)
                                 return true;
-                        // The kit let go of it: nothing changes, and this motion (and the rest of the drag) is the page's.
                         l->slide = 0;
                         ui_list_slide_undo(ui, l, id, c);
                         return false;
@@ -29766,28 +29286,22 @@ static b32 ui_list_slider(struct ui address_to ui, struct ui_page address_to p, 
                 {
                         b32 cancelled = (event->flags & WINDOW_KEY_CANCEL) != 0;
 
-                        ui_kit_pointer((struct ui address_to)ui, c, 1, WINDOW_EVENT_BUTTON, ui_kit.pointer_x, ui_kit.pointer_y, false, event->flags);
+                        ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, x, y, false, event->flags);
                         if (cancelled)
                                 ui_list_slide_undo(ui, l, id, c);
                         else
                                 l->slid = id + 1;
                         l->slide = 0;
                         if (event->flags & WINDOW_KEY_TOUCH)
-                                (void)ui_press_lift(&p->press, cancelled); // the finger's press the slider began: its target is none, so no click
+                                (void)ui_press_lift(&p->press, cancelled);
                         ui_list_damage(ui, l, id);
                         ui_page_changed(p);
                         return true;
                 }
                 return false;
         }
-        if (p->card || event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT || !(event->flags & WINDOW_KEY_DOWN))
-                return false;
-        x = ui_kit.pointer_x, y = ui_kit.pointer_y;
-        // A finger that lands on rows that still run stops them (ui_press_down) and takes no slider that was passing under it.
-        if ((event->flags & WINDOW_KEY_TOUCH) && ui_scroll_running(ui_page_region(ui, p, x, y)))
-                return false;
-        id = ui_list_hit(ui, l, x, y);
-        if (id < 0)
+        if (p->card || event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT || !(event->flags & WINDOW_KEY_DOWN) ||
+            ((event->flags & WINDOW_KEY_TOUCH) && ui_scroll_running(ui_page_region(ui, p, x, y))) || (id = ui_list_hit(ui, l, x, y)) < 0)
                 return false;
         {
                 struct ui_row row;
@@ -29799,13 +29313,13 @@ static b32 ui_list_slider(struct ui address_to ui, struct ui_page address_to p, 
         c = ui_list_control(l, id, 1);
         if (!c || c->kind != UI_SLIDER || ui_control_hit(ui, c, x, ui_list_unpull(ui, l, y)) < 0)
                 return false;
-        ui_kit_pointer((struct ui address_to)ui, c, 1, WINDOW_EVENT_BUTTON, x, ui_list_unpull(ui, l, y), true, event->flags);
+        ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, x, ui_list_unpull(ui, l, y), true, event->flags);
         if (ui_kit_held != c)
                 return false;
         l->slide = id + 1, l->slid = 0;
-        l->slid_value = (int)((ui_slider_at((struct ui address_to)ui, c, x, y) + UI_HALF) >> UI_Q);
+        l->slid_value = (int)((ui_slider_at(ui, c, x, y) + UI_HALF) >> UI_Q);
         if (event->flags & WINDOW_KEY_TOUCH)
-                ui_press_down(&p->press, x, y, -1, ui_page_region(ui, p, x, y)); // a finger's press is the page's too: a drag it turns into scrolls
+                ui_press_down(&p->press, x, y, -1, ui_page_region(ui, p, x, y));
         ui_list_damage(ui, l, l->focus);
         l->focus = id, l->hover = id;
         ui_list_damage(ui, l, id);
@@ -29814,15 +29328,15 @@ static b32 ui_list_slider(struct ui address_to ui, struct ui_page address_to p, 
         return true;
 }
 
-/*
-        The page's pointer: a motion or a button of the mouse or a finger, forwarded here by the app (its map, bars and fields
-        have had the first say). done is the app's press action.
-*/
+// Unified mouse + touch pointer routing for ui_page (folds side pane, context menu, column headers, sliders, list clicks, and column/card press).
 static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
                           const struct window_event address_to event, void (*done)(void))
 {
-        // The event's own touch flag, as ui_event_context sets it for the loop's events (a menu the press opens is a finger's).
-        ui_kit_touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
+        b32 touch = (event->flags & WINDOW_KEY_TOUCH) != 0, down = (event->flags & WINDOW_KEY_DOWN) != 0;
+        int x = event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x;
+        int y = event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y;
+
+        ui_kit_touch = touch;
         if (ui->sided && p->column_on && p->view)
         {
                 int was = p->view->side_w;
@@ -29835,21 +29349,18 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
                 if (side & UI_VIEW_TAKEN)
                         return;
         }
-        // Right-click on a list row opens its declarative context menu (ui_list.menu) automatically with zero app state.
         if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && !p->card && p->menu_row < 0 && p->popup && p->own && l->menu)
         {
                 ui_page_let_go(ui, p, l);
-                if (event->flags & WINDOW_KEY_DOWN)
+                if (down)
                 {
-                        int x = ui_kit.pointer_x, y = ui_kit.pointer_y, row = ui_page_target(ui, p, l, x, y);
+                        int row = ui_page_target(ui, p, l, x, y);
 
                         if (row >= 0 && row < UI_PAGE_GROUP)
                         {
                                 int before = l->focus;
 
-                                if (row != before)
-                                        l->focus = row;
-                                p->pane = 1;
+                                l->focus = row, p->pane = 1;
                                 if (l->menu->before_open)
                                         l->menu->before_open(before, row);
                                 ui_list_menu_open(ui, l, p->popup, p->own, row, x, y, false);
@@ -29858,12 +29369,10 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
                 }
                 return;
         }
-        // Sectioned details column headers inside the page's list: click to sort, drag edge to resize.
         if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !p->card && p->menu_row < 0)
         {
                 struct ui_columns address_to hit = null;
-                p32 took = ui_list_columns_event(ui, l, event, event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x,
-                                                 event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y, &hit);
+                p32 took = ui_list_columns_event(ui, l, event, x, y, &hit);
 
                 if ((took & UI_COLUMNS_SORTED) && l->sorted)
                         l->sorted(hit);
@@ -29874,104 +29383,91 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
         }
         if (ui_list_slider(ui, p, l, event))
                 return;
-        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a != UI_POINTER_LEFT && (p->press.down || l->press.down))
+        if (event->type == WINDOW_EVENT_BUTTON && down && event->a != UI_POINTER_LEFT && (p->press.down || l->press.down))
         {
                 ui_page_let_go(ui, p, l);
                 return;
         }
         // Route list-row pointer interactions (when the page body is the list's own scroll) through ui_list_click.
-        if (!p->card && (!p->body || p->body == &l->scroll) &&
-            (l->press.down ? (event->type == WINDOW_EVENT_MOTION || (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT))
-                           : (!p->press.down && event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_POINTER_LEFT &&
-                              ui_page_target(ui, p, l, ui_kit.pointer_x, ui_kit.pointer_y) >= 0 &&
-                              ui_page_target(ui, p, l, ui_kit.pointer_x, ui_kit.pointer_y) < UI_PAGE_GROUP)))
+        if (!p->card && (!p->body || p->body == &l->scroll))
         {
-                int px = event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x;
-                int py = event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y;
-                int press_x = l->press.x, press_y = l->press.y;
-                int clicked = ui_list_click(ui, l, event, px, py);
+                int t0 = l->press.down ? 0 : (event->type == WINDOW_EVENT_BUTTON && down && event->a == UI_POINTER_LEFT && !p->press.down ? ui_page_target(ui, p, l, x, y) : -1);
 
-                p->press = l->press;
-                if (l->press.down && l->press.dragged)
-                        ui_page_moved(ui, p, &l->scroll);
-                ui_page_changed(p);
-                if (clicked >= 0)
-                        ui_page_press_done(ui, p, l, done, press_x, press_y, px, py);
-                return;
+                if (l->press.down ? (event->type == WINDOW_EVENT_MOTION || (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT))
+                                  : (t0 >= 0 && t0 < UI_PAGE_GROUP))
+                {
+                        int press_x = l->press.x, press_y = l->press.y, clicked = ui_list_click(ui, l, event, x, y);
+
+                        p->press = l->press;
+                        if (l->press.down && l->press.dragged)
+                                ui_page_moved(ui, p, &l->scroll);
+                        ui_page_changed(p);
+                        if (clicked >= 0)
+                                ui_page_press_done(ui, p, l, done, press_x, press_y, x, y);
+                        return;
+                }
         }
         if (event->type == WINDOW_EVENT_MOTION)
         {
-                if (event->flags & WINDOW_KEY_TOUCH)
+                if (p->press.down && (touch || p->press.drags))
                 {
-                        ui_page_finger_move(ui, p, l, event->a, event->b);
-                        return;
-                }
-                // A mouse's press that drags (canvas scroll drag) is a finger's: past the slop the region follows it, and no row shows pressed.
-                if (p->press.down && p->press.drags)
-                {
-                        ui_page_finger_move(ui, p, l, event->a, event->b);
+                        b32 dragged = p->press.dragged;
+
+                        ui_press_follow(ui, &p->press, x, y);
+                        if (!dragged && p->press.dragged)
+                                ui_list_let_go(ui, l);
                         if (p->press.dragged)
+                        {
+                                ui_page_moved(ui, p, p->press.region);
+                                return;
+                        }
+                        if (touch)
                                 return;
                 }
-                // The mouse moved with its press held: a row is shown pressed while the pointer is on the row the press went down on.
-                if (p->press.down && p->press.target < UI_PAGE_GROUP && ui_list_press_slide(ui, l, &p->press, ui_page_target(ui, p, l, event->a, event->b)))
+                if (touch)
+                        return;
+                if (p->press.down && p->press.target < UI_PAGE_GROUP && ui_list_press_slide(ui, l, &p->press, ui_page_target(ui, p, l, x, y)))
                         ui_page_changed(p);
-                // The rows and the column: what is under the pointer is lit (a card has no rows).
                 if (!p->card)
                 {
-                        ui_list_pointer(ui, l, WINDOW_EVENT_MOTION, event->a, event->b, false);
-                        if (ui_control_hit(ui, &p->column, event->a, ui_page_column_unpull(ui, p, event->b)) != p->column.item)
+                        ui_list_pointer(ui, l, WINDOW_EVENT_MOTION, x, y, false);
+                        if (ui_control_hit(ui, &p->column, x, ui_page_column_unpull(ui, p, y)) != p->column.item)
                                 ui_page_changed(p);
-                        // A group under the pointer shows the hand: in a side pane the first is in the window's top band, which gives way to it.
-                        if (ui_page_column_hit(ui, p, event->a, event->b) >= 0)
+                        if (ui_page_column_hit(ui, p, x, y) >= 0)
                                 ui_kit_shape = WINDOW_POINTER_HAND;
                 }
                 return;
         }
         if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT)
                 return;
-        // The release: the column's ripple and the row's go out (a finger's as a mouse's).
-        if (!(event->flags & WINDOW_KEY_DOWN))
+        if (!down)
         {
                 ui_kit_ripples_exit(&p->column);
-                ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, ui_kit.pointer_x, ui_kit.pointer_y, false);
+                ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, false);
                 ui_page_changed(p);
-                // A mouse's release with its press held: done where it went down, if the release is on that target too; one taken back
-                // (WINDOW_KEY_CANCEL) is no click.
-                if (!(event->flags & WINDOW_KEY_TOUCH) && p->press.down)
+                if (p->press.down)
                 {
                         b32 cancelled = (event->flags & WINDOW_KEY_CANCEL) != 0;
-                        int at = ui_page_target(ui, p, l, ui_kit.pointer_x, ui_kit.pointer_y), clicked;
+                        int px = p->press.x, py = p->press.y, at = ui_page_target(ui, p, l, touch ? px : x, touch ? py : y), clicked;
 
-                        // One that drags lifts as a finger's does: a drag throws its region and clicks nothing.
-                        if (p->press.drags)
-                                clicked = ui_press_lift(&p->press, cancelled), clicked = clicked >= 0 && clicked == at ? clicked : -1;
-                        else
-                                clicked = ui_press_release(&p->press, cancelled, at);
+                        clicked = touch || p->press.drags ? (clicked = ui_press_lift(&p->press, cancelled), clicked >= 0 && clicked == at ? clicked : -1)
+                                                          : ui_press_release(&p->press, cancelled, at);
                         ui_list_let_go(ui, l);
                         ui_page_changed(p);
                         if (clicked >= 0)
-                                ui_page_press_done(ui, p, l, done, p->press.x, p->press.y, ui_kit.pointer_x, ui_kit.pointer_y);
+                                ui_page_press_done(ui, p, l, done, px, py, x, y);
                 }
-        }
-        if (event->flags & WINDOW_KEY_TOUCH)
-        {
-                ui_page_finger_button(ui, p, l, event, done);
                 return;
         }
-        if (event->flags & WINDOW_KEY_DOWN)
         {
-                // A mouse's press began: its target shows pressed. A press on nothing is done at once.
-                int x = ui_kit.pointer_x, y = ui_kit.pointer_y, target = ui_page_target(ui, p, l, x, y);
+                int target = ui_page_target(ui, p, l, x, y);
 
-                if (target < 0)
+                if (!touch && target < 0)
                 {
                         done();
                         return;
                 }
-                // One that drags (canvas scroll drag) takes the region under it as a finger's does: a press on rows in motion stops them
-                // and has no target. A card has no rows to drag.
-                if (ui_press_drags(event->flags) && target < UI_PAGE_CARD)
+                if (touch || (ui_press_drags(event->flags) && target < UI_PAGE_CARD))
                         ui_press_down(&p->press, x, y, target, ui_page_region(ui, p, x, y));
                 else
                         ui_press_begin(&p->press, x, y, target, false);
@@ -30517,9 +30013,9 @@ static const char address_to ui_strip_verb_prefix(const char address_to line, po
 // Formats a byte count in decimal SI units (B, KB, MB, GB, or TB with one decimal digit from 1000 GB up).
 static fn ui_size_decimal(unsigned long long bytes, char address_to into, positive room)
 {
+        static const struct { unsigned long long scale; const char address_to unit; } units[] = {
+            {1000000000ull, " GB"}, {1000000ull, " MB"}, {1000ull, " KB"}, {1ull, " B"}};
         char digits[24];
-        unsigned long long scaled;
-        const char address_to unit;
 
         if (!into || !room)
                 return;
@@ -30535,17 +30031,14 @@ static fn ui_size_decimal(unsigned long long bytes, char address_to into, positi
                 string_append_bounded((string_address)into, (string_address) " TB", room);
                 return;
         }
-        if (bytes >= 1000000000ull)
-                scaled = bytes / 1000000000ull, unit = " GB";
-        else if (bytes >= 1000000ull)
-                scaled = bytes / 1000000ull, unit = " MB";
-        else if (bytes >= 1000ull)
-                scaled = bytes / 1000ull, unit = " KB";
-        else
-                scaled = bytes, unit = " B";
-        digits[positive_into_string((p8 address_to)digits, (positive)scaled)] = 0;
-        string_copy_bounded((string_address)into, (string_address)digits, room);
-        string_append_bounded((string_address)into, (string_address)unit, room);
+        for (int k = 0; k < 4; k++)
+                if (bytes >= units[k].scale || k == 3)
+                {
+                        digits[positive_into_string((p8 address_to)digits, (positive)(bytes / units[k].scale))] = 0;
+                        string_copy_bounded((string_address)into, (string_address)digits, room);
+                        string_append_bounded((string_address)into, (string_address)units[k].unit, room);
+                        return;
+                }
 }
 
 #define UI_WIFI_HEARD 1u
@@ -30561,6 +30054,14 @@ struct ui_wifi_net
         unsigned char bars;
         p8 flags;
 };
+
+static fn ui_copy_span(char address_to dst, positive room, const char address_to src, positive len)
+{
+        positive n = len < room - 1 ? len : room - 1;
+
+        memory_copy(dst, src, n);
+        dst[n] = 0;
+}
 
 // Parses `moonwater wifi` output into heard and saved networks, radio-on state (*on), and optional first status note line.
 static int ui_wifi_parse(const char address_to text, positive length, struct ui_wifi_net address_to nets, int most, b32 address_to on,
@@ -30604,25 +30105,16 @@ static int ui_wifi_parse(const char address_to text, positive length, struct ui_
 
                                 while (number > 2 && ((line[number - 1] >= '0' && line[number - 1] <= '9') || line[number - 1] == '-'))
                                         number--;
-                                name_end = number;
-                                while (name_end > 2 && line[name_end - 1] == ' ')
-                                        name_end--;
+                                for (name_end = number; name_end > 2 && line[name_end - 1] == ' '; name_end--)
+                                        ;
                                 if (name_end <= 2 || count >= most)
                                         continue;
                                 n = &nets[count++];
                                 memory_zero(n, sizeof(*n));
-                                {
-                                        positive nlen = name_end - 2 < sizeof(n->name) - 1 ? name_end - 2 : sizeof(n->name) - 1;
-
-                                        memory_copy(n->name, line + 2, nlen);
-                                        n->name[nlen] = 0;
-                                }
+                                ui_copy_span(n->name, sizeof(n->name), line + 2, name_end - 2);
                                 n->flags = UI_WIFI_HEARD | (line[0] == '*' ? (UI_WIFI_JOINED | UI_WIFI_SAVED) : line[0] == '+' ? UI_WIFI_SAVED : 0);
                                 for (positive d = number; d < dbm_at; d++)
-                                        if (line[d] == '-')
-                                                below = true;
-                                        else
-                                                level = level * 10 + (line[d] - '0');
+                                        line[d] == '-' ? (void)(below = true) : (void)(level = level * 10 + (line[d] - '0'));
                                 n->dbm = (signed short)(below ? -level : level);
                                 for (positive bar = 0; bar < 4 && word < size; bar++, word++)
                                         n->bars += line[word] == '#';
@@ -30640,33 +30132,23 @@ static int ui_wifi_parse(const char address_to text, positive length, struct ui_
 
                                 if (nlen > 9 && !memory_compare(line + 2, "and ", 4) && !memory_compare(line + size - 5, " more", 5))
                                         continue;
-                                for (int k = 0; k < count; k++)
+                                for (int k = 0; k < count && found < 0; k++)
                                         if (string_length((string_address)nets[k].name) == nlen && !memory_compare(nets[k].name, line + 2, nlen))
-                                        {
                                                 found = k;
-                                                break;
-                                        }
                                 if (found >= 0)
                                         nets[found].flags |= UI_WIFI_SAVED;
                                 else if (count < most)
                                 {
                                         struct ui_wifi_net address_to n = &nets[count++];
-                                        positive copy = nlen < sizeof(n->name) - 1 ? nlen : sizeof(n->name) - 1;
 
                                         memory_zero(n, sizeof(*n));
-                                        memory_copy(n->name, line + 2, copy);
-                                        n->name[copy] = 0;
+                                        ui_copy_span(n->name, sizeof(n->name), line + 2, nlen);
                                         n->flags = UI_WIFI_SAVED;
                                 }
                         }
                         else if (pass && !dbm_at && size && line[0] != ' ' && note && note_room && !note[0] &&
                                  !(size >= 5 && !memory_compare(line, "wifi ", 5)) && !(size >= 8 && !memory_compare(line, "* joined", 8)))
-                        {
-                                positive copy = size < note_room - 1 ? size : note_room - 1;
-
-                                memory_copy(note, line, copy);
-                                note[copy] = 0;
-                        }
+                                ui_copy_span(note, note_room, line, size);
                 }
         }
         return count;
@@ -30895,45 +30377,28 @@ static b32 ui_run_wait(string_address address_to words)
 static b32 ui_apps_uninstall(const char address_to root, int which, const char address_to mono, const char address_to mono_bold)
 {
         const struct ui_app_entry address_to app;
-        b32 is_local;
 
         if (!ui_apps_uninstallable(which))
                 return false;
         app = &ui_apps.app[which];
-        is_local = ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local);
         ui_apps_pin(root, which, false);
-        if (!is_local && app->profile[0])
+        if (!ui_apps_is_local(app) && app->profile[0])
         {
                 string_address words[10];
                 positive count = 0;
 
                 words[count++] = (string_address) "/terminal";
                 if (mono && mono[0])
-                {
-                        words[count++] = (string_address) "-f";
-                        words[count++] = (string_address)mono;
-                }
+                        words[count++] = (string_address) "-f", words[count++] = (string_address)mono;
                 if (mono_bold && mono_bold[0])
-                {
-                        words[count++] = (string_address) "-b";
-                        words[count++] = (string_address)mono_bold;
-                }
-                words[count++] = (string_address) "-x";
-                words[count++] = (string_address) "/bowl";
-                words[count++] = (string_address) "profile";
-                words[count++] = (string_address)app->profile;
-                words[count++] = (string_address) "remove";
-                words[count] = null;
+                        words[count++] = (string_address) "-b", words[count++] = (string_address)mono_bold;
+                words[count++] = (string_address) "-x", words[count++] = (string_address) "/bowl";
+                words[count++] = (string_address) "profile", words[count++] = (string_address)app->profile;
+                words[count++] = (string_address) "remove", words[count] = null;
                 return ui_start_apart(words, count);
         }
-        if (!app->source[0])
+        if (!app->source[0] || !ui_run_wait((string_address[]){(string_address) "/bowl", (string_address) "uninstall", (string_address)app->source, null}))
                 return false;
-        {
-                string_address words[4] = {(string_address) "/bowl", (string_address) "uninstall", (string_address)app->source, null};
-
-                if (!ui_run_wait(words))
-                        return false;
-        }
         ui_apps_read();
         return true;
 }
@@ -31076,6 +30541,20 @@ static b32 ui_job_exited(const struct ui_job address_to j)
         return got == 0 && (bipolar)info[4] == j->child;
 }
 
+static fn ui_job_reset(struct ui_job address_to j, b32 orphan)
+{
+        if (orphan)
+                for (positive at = 0; at < UI_JOB_LEFT; at++)
+                        if (ui_job_left[at] <= 0)
+                        {
+                                ui_job_left[at] = j->child;
+                                break;
+                        }
+        if (j->output >= 0)
+                system_close(j->output);
+        j->child = 0, j->output = -1, j->ending = 0, j->exited = false;
+}
+
 static b32 ui_job_reap(struct ui_job address_to j)
 {
         positive status = 0;
@@ -31084,14 +30563,11 @@ static b32 ui_job_reap(struct ui_job address_to j)
 
         if (!j || j->child <= 0 || !j->ending)
                 return false;
-        got = system_wait4_retry(j->child, address_of status, 1, null);
-        if (got == 0)
+        if ((got = system_wait4_retry(j->child, address_of status, 1, null)) == 0)
                 return false;
         if (got < 0)
                 status = 0;
-        if (j->output >= 0)
-                system_close(j->output);
-        j->child = 0, j->output = -1, j->ending = 0, j->exited = false;
+        ui_job_reset(j, false);
         if (j->done)
                 j->done(j, killed, status);
         return true;
@@ -31099,15 +30575,7 @@ static b32 ui_job_reap(struct ui_job address_to j)
 
 static fn ui_job_leave(struct ui_job address_to j)
 {
-        for (positive at = 0; at < UI_JOB_LEFT; at++)
-                if (ui_job_left[at] <= 0)
-                {
-                        ui_job_left[at] = j->child;
-                        break;
-                }
-        if (j->output >= 0)
-                system_close(j->output);
-        j->child = 0, j->output = -1, j->ending = 0, j->exited = false;
+        ui_job_reset(j, true);
         if (j->done)
                 j->done(j, true, 0);
 }
@@ -31278,17 +30746,7 @@ static fn ui_job_close(struct ui_job address_to j)
         system_call_2(syscall(kill), (positive)j->child, 9);
         j->ending = 2;
         if (!ui_job_reap(j))
-        {
-                for (positive at = 0; at < UI_JOB_LEFT; at++)
-                        if (ui_job_left[at] <= 0)
-                        {
-                                ui_job_left[at] = j->child;
-                                break;
-                        }
-                if (j->output >= 0)
-                        system_close(j->output);
-                j->child = 0, j->output = -1, j->ending = 0, j->exited = false;
-        }
+                ui_job_reset(j, true);
 }
 
 // The kit's frame: the app's picture at its size, into the buffer the compositor is not reading (ui_app_present). An app's own frame instead, when it names one.
@@ -31328,6 +30786,16 @@ static fn ui_app_language(void)
 {
         if (ui_app_running)
                 ui_app_changed(ui_app_running);
+}
+
+static fn ui_app_popup_done(struct ui_app address_to app, int choice)
+{
+        if (choice == UI_MENU_NOTHING)
+                return;
+        if (app->chose)
+                app->chose(choice);
+        else if (ui_list_menu_do(app->popup, app->own, choice))
+                ui_app_changed(app);
 }
 
 static int ui_app_run(struct ui_app address_to app)
@@ -31411,6 +30879,7 @@ static int ui_app_run(struct ui_app address_to app)
         {
                 struct window_event event;
                 long timeout = -1, other = -1, ready;
+                positive period = table->period ? table->period : 16666667u;
 
                 if (app->pass)
                         app->pass();
@@ -31419,55 +30888,25 @@ static int ui_app_run(struct ui_app address_to app)
                         b32 keyed = ui_kit.keyed;
 
                         ui_event_context(&event);
-                        // The hand went to the keys or left them: a ring is due or is gone, wherever the event itself landed.
                         if (keyed != ui_kit.keyed)
                                 ui_app_changed(app);
-                        // A scroll over the window closes its open popup before the app has the scroll (ui_popmenu_scroll).
                         if (app->popup)
-                        {
-                                int gone = ui_popmenu_scroll(app->popup, &event);
-
-                                if (gone != UI_MENU_NOTHING)
-                                {
-                                        if (app->chose)
-                                                app->chose(gone);
-                                        else if (ui_list_menu_do(app->popup, app->own, gone))
-                                                ui_app_changed(app);
-                                }
-                        }
-                        if (!app->event(&event))
-                                running = false;
+                                ui_app_popup_done(app, ui_popmenu_scroll(app->popup, &event));
+                        running &= app->event(&event);
                 }
                 ui_kit_pass();
                 if (app->popup && app->popup->open)
                 {
-                        int chosen = ui_popmenu_pump(app->popup);
-
-                        if (chosen != UI_MENU_NOTHING)
-                        {
-                                if (app->chose)
-                                        app->chose(chosen);
-                                else if (ui_list_menu_do(app->popup, app->own, chosen))
-                                        ui_app_changed(app);
-                        }
-                        // A menu's ripple is moving: its next picture is due a display period on.
+                        ui_app_popup_done(app, ui_popmenu_pump(app->popup));
                         if (app->popup->open && app->popup->menu.moving)
                                 timeout = ui_kit_frame_ns();
                 }
-
                 if (windows_close_asked(app->own))
-                {
-                        if (app->closing)
-                                app->closing();
-                        else
-                                running = false;
-                }
-
+                        app->closing ? app->closing() : (void)(running = false);
                 ui_app_asked(app);
                 if ((table->focus == row) != *app->focused)
                 {
-                        *app->focused = table->focus == row;
-                        ui_kit.keyed = 0; // the keys came or went: no ring till a key moves the focus here
+                        *app->focused = table->focus == row, ui_kit.keyed = 0;
                         if (!*app->focused)
                         {
                                 ui_kit.buttons = 0;
@@ -31475,8 +30914,7 @@ static int ui_app_run(struct ui_app address_to app)
                                         ui_view_cancel(app->ui, app->view);
                         }
                         ui_app_changed(app);
-                        if (!ui_app_keys(app, *app->focused))
-                                running = false;
+                        running &= ui_app_keys(app, *app->focused);
                 }
                 if (table->ground[row] && table->ground[row] != *app->ground)
                 {
@@ -31487,32 +30925,25 @@ static int ui_app_run(struct ui_app address_to app)
                                 ui_inks(app->ui, *app->ground);
                         ui_app_changed(app);
                 }
-                // A new theme (the compositor counted it up and knocked): the whole picture turns to it.
                 if (__atomic_load_n(&table->themed, __ATOMIC_ACQUIRE) != ui_kit.themed)
                 {
-                        ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
                         unsigned int was = language.code;
 
+                        ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
                         ui_kit_sync_table(table);
-                        // The title is a text the kit copied for the app, so the kit sets it again when the language changed (a theme's
-                        // knock leaves it, and so does an app that names its window itself).
                         if (language.code != was && !app->own_title)
                                 string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
                         ui_kit_theme(table->theme, table->accent, table->motion);
                         ui_kit_inks(app->ui);
                         ui_app_changed(app);
                 }
-                // The compositor refused this window's last list (list_state 2): the picture is painted on the processor, and due now.
                 if (ui_app_list.ready && row == ui_app_row && __atomic_load_n(&table->list_state[row], __ATOMIC_ACQUIRE) == 2)
                 {
                         *app->dirty = true;
                         if (app->buffers)
                                 ui_buffers_all(app->buffers);
                 }
-                // The screen the window is on draws it at that screen's scale (the compositor counts it into the table): the
-                // picture is laid out again at the new scale, at the size it has, as a resize lays it out.
-                if (table->window_scale[row] >= 25 && table->window_scale[row] <= 800 &&
-                    (int)table->window_scale[row] != app->ui->scale)
+                if (table->window_scale[row] >= 25 && table->window_scale[row] <= 800 && (int)table->window_scale[row] != app->ui->scale)
                 {
                         app->ui->scale = (int)table->window_scale[row];
                         ui_kit_settle();
@@ -31523,40 +30954,27 @@ static int ui_app_run(struct ui_app address_to app)
                 if (table->want_width[row] && table->want_height[row] &&
                     (table->want_width[row] != app->asked_w || table->want_height[row] != app->asked_h))
                 {
-                        app->asked_w = table->want_width[row];
-                        app->asked_h = table->want_height[row];
+                        app->asked_w = table->want_width[row], app->asked_h = table->want_height[row];
                         ui_kit_settle();
                         ui_app_resize(app, table, app->asked_w, app->asked_h);
                 }
-
                 if (!running)
                         break;
-
-                // The scroll body that moved last, for moonwater debug (its row of the table).
                 ui_body_publish(table, row);
-                /*
-                        The kit's clock: a frame is drawn at its time, and while anything in it moves (a spring, a
-                        transition, a ripple, the theme turning) the next is due a display period after it, the
-                        picture marked due again. Nothing moving, the loop waits on the window and draws nothing.
-                */
                 if (*app->dirty)
                 {
-                        positive period = table->period ? table->period : 16666667u, now = (positive)ui_kit.now;
+                        positive now = (positive)ui_kit.now;
 
                         if (ui_kit.busy && now < (positive)ui_kit.drawn + period)
                                 timeout = (long)((positive)ui_kit.drawn + period - now);
                         else
                         {
-                                ui_kit.now = (b64)now;
-                                ui_kit.busy = 0;
-                                ui_kit.damage_top = ui_kit.damage_bottom = 0;
+                                ui_kit.now = (b64)now, ui_kit.busy = 0, ui_kit.damage_top = ui_kit.damage_bottom = 0;
                                 ui_kit_turn();
                                 if (!ui_app_frame(app))
                                         timeout = 50000000;
                                 else
                                 {
-                                        // The frame's place on the grid of periods: the line it was due at, when it was drawn within half a period after
-                                        // it (a wake a little late does not move the grid), else where it was drawn (the grid begins again).
                                         positive line = (positive)ui_kit.drawn + period;
 
                                         ui_kit.drawn = (b64)(ui_kit.drawn && now >= line && now < line + period / 2 ? line : now);
@@ -31569,30 +30987,15 @@ static int ui_app_run(struct ui_app address_to app)
                                 }
                         }
                 }
-                if (app->job)
-                {
-                        timeout = ui_job_tick(app->job, timeout, &other);
-                        if (timeout == 0 && !app->tick)
-                                continue;
-                }
-                if (app->tick)
-                {
-                        timeout = app->tick(timeout, &other);
-                        if (timeout == 0)
-                                continue;
-                }
+                if (app->job && !(timeout = ui_job_tick(app->job, timeout, &other)) && !app->tick)
+                        continue;
+                if (app->tick && !(timeout = app->tick(timeout, &other)))
+                        continue;
                 if (app->done && app->done())
                         break;
-
-                /*
-                        A frame that moves something is due a display period after the last one's start, not after its end: the wait the frame asks for
-                        (a period, from when the frame was drawn and sent) is taken to the next line of the grid of periods from the frame's start, so
-                        that a frame which takes a few milliseconds to draw is not a few milliseconds late each time, and the frames come at the
-                        display's rate, evenly, and not at its rate less what each one cost (a drift the eye sees as a motion that is not smooth).
-                */
                 if (timeout > 0 && ui_kit.drawn)
                 {
-                        positive period = table->period ? table->period : 16666667u, clock = ui_kit_clock(), since = clock - (positive)ui_kit.drawn;
+                        positive clock = ui_kit_clock(), since = clock - (positive)ui_kit.drawn;
 
                         if (clock >= (positive)ui_kit.drawn && (positive)timeout >= period / 2 && (positive)timeout <= period + period / 4 && since < 4 * period)
                         {
@@ -31606,7 +31009,6 @@ static int ui_app_run(struct ui_app address_to app)
                 ready = windows_wait_also(app->own, app->popup && app->popup->open ? app->popup->own.wake : -1, other, timeout);
                 if (ready < 0)
                         break;
-                // The wait is over: its ready (the app's other source, a child's output) is answered at this time, not the time before the wait.
                 ui_kit_pass();
                 if (other >= 0)
                 {
@@ -33539,14 +32941,47 @@ static b32 ui_text_visual(struct ui address_to ui, struct ui_text address_to t, 
         return true;
 }
 
-// Visual Up/Down stepping across soft-wrapped rows of a logical line (returns true if handled).
+static int ui_text_wrap_rows(int room, int indent, p32 address_to starts, p32 address_to ends, p64 active, int address_to cur)
+{
+        int rows = 0;
+
+        for (p32 from = 0; rows < 128;)
+        {
+                p32 to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
+
+                starts[rows] = from, ends[rows] = to;
+                if (cur && active >= ui_text_lay.offset[from] && (active < ui_text_lay.offset[to] || to >= ui_text_lay.count))
+                        *cur = rows;
+                rows++;
+                if (to >= ui_text_lay.count)
+                        break;
+                from = to;
+        }
+        return rows;
+}
+
+static fn ui_text_wrap_pick(struct ui_text address_to t, p32 start, p32 finish, int indent, int want_x, b32 has_next, b32 extend)
+{
+        int px = want_x + ui_text_lay.x[start] - (start ? indent : 0);
+        p64 target = ui_text_lay.offset[finish];
+
+        for (p32 k = start; k < finish; k++)
+                if (px < (ui_text_lay.x[k] + ui_text_lay.x[k + 1]) / 2)
+                {
+                        target = ui_text_lay.offset[k];
+                        break;
+                }
+        if (target == ui_text_lay.offset[finish] && has_next && finish > start && ui_text_lay.shown[ui_text_lay.shown_at[finish - 1]] == ' ')
+                target = ui_text_lay.offset[finish - 1];
+        doc_select_set(&t->doc, extend ? t->doc.selections[t->doc.primary].anchor : target, target);
+}
+
 static b32 ui_text_wrap_step(struct ui address_to ui, struct ui_text address_to t, int dir, b32 extend)
 {
         struct doc_selection address_to sel = &t->doc.selections[t->doc.primary];
         p64 line = doc_line_of(&t->doc, sel->active), lines = doc_line_count(&t->doc);
-        int room = t->right - t->left, indent, rows = 0, cur = 0, want_x = 0;
+        int room = t->right - t->left, indent, rows, cur = 0, want_x, r;
         p32 starts[128], ends[128];
-        p64 target;
 
         if (!t->wrap || t->hex || t->mode == UI_TEXT_FIELD || t->doc.selection_count != 1 || room <= 0)
                 return false;
@@ -33554,90 +32989,24 @@ static b32 ui_text_wrap_step(struct ui address_to ui, struct ui_text address_to 
         if (ui_text_lay.bidi)
                 return false;
         indent = ui_text_wrap_indent(&ui_text_lay, room);
-        for (p32 from = 0; rows < 128;)
-        {
-                p32 to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
-
-                starts[rows] = from, ends[rows] = to;
-                if (sel->active >= ui_text_lay.offset[from] && (sel->active < ui_text_lay.offset[to] || to >= ui_text_lay.count))
-                        cur = rows;
-                rows++;
-                if (to >= ui_text_lay.count)
-                        break;
-                from = to;
-        }
+        rows = ui_text_wrap_rows(room, indent, starts, ends, sel->active, &cur);
         want_x = ui_text_slice_x(&ui_text_lay, starts[cur], ends[cur], sel->active) - (ui_text_lay.x[starts[cur]] - (starts[cur] ? indent : 0));
-        if (dir < 0 && cur > 0)
+        if ((dir < 0 && cur > 0) || (dir > 0 && cur + 1 < rows))
         {
-                int r = cur - 1, px = want_x + ui_text_lay.x[starts[r]] - (starts[r] ? indent : 0);
-
-                target = ui_text_lay.offset[ends[r]];
-                for (p32 k = starts[r]; k < ends[r]; k++)
-                        if (px < (ui_text_lay.x[k] + ui_text_lay.x[k + 1]) / 2)
-                        {
-                                target = ui_text_lay.offset[k];
-                                break;
-                        }
-                if (target == ui_text_lay.offset[ends[r]] && ends[r] > starts[r] && ui_text_lay.shown[ui_text_lay.shown_at[ends[r] - 1]] == ' ')
-                        target = ui_text_lay.offset[ends[r] - 1];
-                doc_select_set(&t->doc, extend ? sel->anchor : target, target);
+                r = cur + (dir < 0 ? -1 : 1);
+                ui_text_wrap_pick(t, starts[r], ends[r], indent, want_x, r + 1 < rows, extend);
                 return true;
         }
-        if (dir > 0 && cur + 1 < rows)
-        {
-                int r = cur + 1, px = want_x + ui_text_lay.x[starts[r]] - (starts[r] ? indent : 0);
-
-                target = ui_text_lay.offset[ends[r]];
-                for (p32 k = starts[r]; k < ends[r]; k++)
-                        if (px < (ui_text_lay.x[k] + ui_text_lay.x[k + 1]) / 2)
-                        {
-                                target = ui_text_lay.offset[k];
-                                break;
-                        }
-                if (target == ui_text_lay.offset[ends[r]] && ends[r] < ui_text_lay.count && ends[r] > starts[r] &&
-                    ui_text_lay.shown[ui_text_lay.shown_at[ends[r] - 1]] == ' ')
-                        target = ui_text_lay.offset[ends[r] - 1];
-                doc_select_set(&t->doc, extend ? sel->anchor : target, target);
-                return true;
-        }
-        // Moving onto the previous/next logical line's last/first visual row preserves visual x cleanly.
         if ((dir < 0 && line == 0) || (dir > 0 && line + 1 >= lines))
                 return false;
-        {
-                p64 next_line = dir < 0 ? line - 1 : line + 1;
-                int nr = 0;
-
-                ui_text_layout_line(ui, t, next_line, &ui_text_lay);
-                if (ui_text_lay.bidi)
-                        return false;
-                indent = ui_text_wrap_indent(&ui_text_lay, room);
-                for (p32 from = 0; nr < 128;)
-                {
-                        p32 to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
-
-                        starts[nr] = from, ends[nr] = to, nr++;
-                        if (to >= ui_text_lay.count)
-                                break;
-                        from = to;
-                }
-                {
-                        int r = dir < 0 ? nr - 1 : 0;
-                        int px = want_x + ui_text_lay.x[starts[r]] - (starts[r] ? indent : 0);
-
-                        target = ui_text_lay.offset[ends[r]];
-                        for (p32 k = starts[r]; k < ends[r]; k++)
-                                if (px < (ui_text_lay.x[k] + ui_text_lay.x[k + 1]) / 2)
-                                {
-                                        target = ui_text_lay.offset[k];
-                                        break;
-                                }
-                        if (target == ui_text_lay.offset[ends[r]] && r + 1 < nr && ends[r] > starts[r] &&
-                            ui_text_lay.shown[ui_text_lay.shown_at[ends[r] - 1]] == ' ')
-                                target = ui_text_lay.offset[ends[r] - 1];
-                        doc_select_set(&t->doc, extend ? sel->anchor : target, target);
-                        return true;
-                }
-        }
+        ui_text_layout_line(ui, t, dir < 0 ? line - 1 : line + 1, &ui_text_lay);
+        if (ui_text_lay.bidi)
+                return false;
+        indent = ui_text_wrap_indent(&ui_text_lay, room);
+        rows = ui_text_wrap_rows(room, indent, starts, ends, 0, null);
+        r = dir < 0 ? rows - 1 : 0;
+        ui_text_wrap_pick(t, starts[r], ends[r], indent, want_x, r + 1 < rows, extend);
+        return true;
 }
 
 /* ---- hex editor mode over struct doc ---- */
@@ -33761,131 +33130,69 @@ static b32 ui_text_is_app_command(p32 command)
 
 static p32 ui_text_hex_command(struct ui address_to ui, struct ui_text address_to t, p32 command)
 {
-        p64 version = t->doc.version, len = doc_length(&t->doc);
-        p64 active = t->doc.selections[t->doc.primary].active;
+        p64 version = t->doc.version, len = doc_length(&t->doc), active = t->doc.selections[t->doc.primary].active;
         int page = ui_text_rows(t) > 1 ? ui_text_rows(t) - 1 : 1;
 
         switch (command)
         {
-        case DOC_CMD_HEX:
-                ui_text_hex_toggle(ui, t, false);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_TAB:
-        case DOC_CMD_OUTDENT:
-                t->hex_ascii = !t->hex_ascii;
+        case DOC_CMD_HEX: ui_text_hex_toggle(ui, t, false); return UI_TEXT_MOVED;
+        case DOC_CMD_TAB: case DOC_CMD_OUTDENT: t->hex_ascii = !t->hex_ascii, t->hex_nibble = false, ui_text_wake(t); return UI_TEXT_MOVED;
+        case DOC_CMD_OVERWRITE: t->hex_insert = !t->hex_insert, ui_text_wake(t); return UI_TEXT_MOVED;
+        case DOC_CMD_LEFT: case DOC_CMD_SELECT_LEFT: ui_text_hex_move(t, (b64)active - 1, command == DOC_CMD_SELECT_LEFT); return UI_TEXT_MOVED;
+        case DOC_CMD_RIGHT: case DOC_CMD_SELECT_RIGHT: ui_text_hex_move(t, (b64)active + 1, command == DOC_CMD_SELECT_RIGHT); return UI_TEXT_MOVED;
+        case DOC_CMD_UP: case DOC_CMD_SELECT_UP: ui_text_hex_move(t, (b64)active - 16, command == DOC_CMD_SELECT_UP); return UI_TEXT_MOVED;
+        case DOC_CMD_DOWN: case DOC_CMD_SELECT_DOWN: ui_text_hex_move(t, (b64)active + 16, command == DOC_CMD_SELECT_DOWN); return UI_TEXT_MOVED;
+        case DOC_CMD_HOME: case DOC_CMD_SELECT_HOME: ui_text_hex_move(t, (b64)(active & ~(p64)15), command == DOC_CMD_SELECT_HOME); return UI_TEXT_MOVED;
+        case DOC_CMD_END: case DOC_CMD_SELECT_END: ui_text_hex_move(t, (b64)((active | 15) < len ? (active | 15) : len), command == DOC_CMD_SELECT_END); return UI_TEXT_MOVED;
+        case DOC_CMD_TOP: case DOC_CMD_SELECT_TOP: ui_text_hex_move(t, 0, command == DOC_CMD_SELECT_TOP); return UI_TEXT_MOVED;
+        case DOC_CMD_BOTTOM: case DOC_CMD_SELECT_BOTTOM: ui_text_hex_move(t, (b64)len, command == DOC_CMD_SELECT_BOTTOM); return UI_TEXT_MOVED;
+        case DOC_CMD_PAGE_UP: case DOC_CMD_SELECT_PAGE_UP: ui_text_hex_move(t, (b64)active - (b64)page * 16, command == DOC_CMD_SELECT_PAGE_UP); return UI_TEXT_MOVED;
+        case DOC_CMD_PAGE_DOWN: case DOC_CMD_SELECT_PAGE_DOWN: ui_text_hex_move(t, (b64)active + (b64)page * 16, command == DOC_CMD_SELECT_PAGE_DOWN); return UI_TEXT_MOVED;
+        case DOC_CMD_SELECT_ALL: case DOC_CMD_SINGLE:
                 t->hex_nibble = false;
+                doc_select_set(&t->doc, command == DOC_CMD_SELECT_ALL ? 0 : active, command == DOC_CMD_SELECT_ALL ? len : active);
                 ui_text_wake(t);
                 return UI_TEXT_MOVED;
-        case DOC_CMD_OVERWRITE:
-                t->hex_insert = !t->hex_insert;
-                ui_text_wake(t);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_LEFT: case DOC_CMD_SELECT_LEFT:
-                ui_text_hex_move(t, (b64)active - 1, command == DOC_CMD_SELECT_LEFT);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_RIGHT: case DOC_CMD_SELECT_RIGHT:
-                ui_text_hex_move(t, (b64)active + 1, command == DOC_CMD_SELECT_RIGHT);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_UP: case DOC_CMD_SELECT_UP:
-                ui_text_hex_move(t, (b64)active - 16, command == DOC_CMD_SELECT_UP);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_DOWN: case DOC_CMD_SELECT_DOWN:
-                ui_text_hex_move(t, (b64)active + 16, command == DOC_CMD_SELECT_DOWN);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_HOME: case DOC_CMD_SELECT_HOME:
-                ui_text_hex_move(t, (b64)(active & ~(p64)15), command == DOC_CMD_SELECT_HOME);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_END: case DOC_CMD_SELECT_END:
-                ui_text_hex_move(t, (b64)((active | 15) < len ? (active | 15) : len), command == DOC_CMD_SELECT_END);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_TOP: case DOC_CMD_SELECT_TOP:
-                ui_text_hex_move(t, 0, command == DOC_CMD_SELECT_TOP);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_BOTTOM: case DOC_CMD_SELECT_BOTTOM:
-                ui_text_hex_move(t, (b64)len, command == DOC_CMD_SELECT_BOTTOM);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_PAGE_UP: case DOC_CMD_SELECT_PAGE_UP:
-                ui_text_hex_move(t, (b64)active - (b64)page * 16, command == DOC_CMD_SELECT_PAGE_UP);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_PAGE_DOWN: case DOC_CMD_SELECT_PAGE_DOWN:
-                ui_text_hex_move(t, (b64)active + (b64)page * 16, command == DOC_CMD_SELECT_PAGE_DOWN);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_SELECT_ALL:
-                t->hex_nibble = false;
-                doc_select_set(&t->doc, 0, len);
-                ui_text_wake(t);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_SINGLE:
-                t->hex_nibble = false;
-                doc_select_set(&t->doc, active, active);
-                ui_text_wake(t);
-                return UI_TEXT_MOVED;
-        case DOC_CMD_COPY:
-                return ui_text_hex_copy(t, WINDOWS_CLIP_CLIPBOARD) ? UI_TEXT_MOVED : UI_TEXT_MOVED | UI_TEXT_REFUSED;
-        case DOC_CMD_CUT:
+        case DOC_CMD_COPY: return ui_text_hex_copy(t, WINDOWS_CLIP_CLIPBOARD) ? UI_TEXT_MOVED : UI_TEXT_MOVED | UI_TEXT_REFUSED;
+        case DOC_CMD_PASTE: ui_text_ask(t, WINDOWS_CLIP_CLIPBOARD); return UI_TEXT_PASTE;
+        case DOC_CMD_CUT: case DOC_CMD_BACKSPACE: case DOC_CMD_DELETE:
                 if (t->read_only)
-                        return UI_TEXT_MOVED;
-                if (!ui_text_hex_copy(t, WINDOWS_CLIP_CLIPBOARD))
+                        return command == DOC_CMD_CUT ? UI_TEXT_MOVED : 0;
+                if (command == DOC_CMD_CUT && !ui_text_hex_copy(t, WINDOWS_CLIP_CLIPBOARD))
                         return UI_TEXT_MOVED | UI_TEXT_REFUSED;
-                if (doc_any_selected(&t->doc))
-                        doc_erase_selections(&t->doc);
-                else if (active < len)
-                        ui_doc_replace_one(&t->doc, active, 1, (const p8 address_to) "", 0, DOC_NONE);
-                t->hex_nibble = false;
-                ui_text_hex_reveal(t);
-                ui_text_wake(t);
-                return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
-        case DOC_CMD_PASTE:
-                ui_text_ask(t, WINDOWS_CLIP_CLIPBOARD);
-                return UI_TEXT_PASTE;
-        case DOC_CMD_BACKSPACE:
-                if (t->read_only)
-                        return 0;
                 t->hex_nibble = false;
                 if (doc_any_selected(&t->doc))
                         doc_erase_selections(&t->doc);
-                else if (active > 0)
-                        ui_doc_replace_one(&t->doc, active - 1, 1, (const p8 address_to) "", 0, active - 1);
+                else if (command == DOC_CMD_BACKSPACE ? active > 0 : active < len)
+                {
+                        p64 at = command == DOC_CMD_BACKSPACE ? active - 1 : active;
+
+                        ui_doc_replace_one(&t->doc, at, 1, (const p8 address_to) "", 0, command == DOC_CMD_CUT ? DOC_NONE : at);
+                }
                 ui_text_hex_reveal(t);
                 ui_text_wake(t);
                 return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
-        case DOC_CMD_DELETE:
-                if (t->read_only)
-                        return 0;
-                t->hex_nibble = false;
-                if (doc_any_selected(&t->doc))
-                        doc_erase_selections(&t->doc);
-                else if (active < len)
-                        ui_doc_replace_one(&t->doc, active, 1, (const p8 address_to) "", 0, active);
-                ui_text_hex_reveal(t);
-                ui_text_wake(t);
-                return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
-        case DOC_CMD_UNDO:
-        case DOC_CMD_REDO:
+        case DOC_CMD_UNDO: case DOC_CMD_REDO:
                 t->hex_nibble = false;
                 doc_command(&t->doc, command, t->comment);
                 ui_text_hex_reveal(t);
                 ui_text_wake(t);
                 return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
-        case DOC_CMD_ZOOM_IN: case DOC_CMD_ZOOM_OUT: case DOC_CMD_ZOOM_RESET:
-                return ui_text_zoom(ui, t, command);
+        case DOC_CMD_ZOOM_IN: case DOC_CMD_ZOOM_OUT: case DOC_CMD_ZOOM_RESET: return ui_text_zoom(ui, t, command);
         case DOC_CMD_MENU:
                 t->menu_x = t->well_left + t->cell * 12;
                 t->menu_y = t->top + (int)(active / 16 >= t->hex_top / 16 ? active / 16 - t->hex_top / 16 + 1 : 1) * t->line_height;
                 return UI_TEXT_MENU;
         default:
                 if (ui_text_is_app_command(command))
-                {
-                        t->command = command;
-                        return UI_TEXT_COMMAND;
-                }
+                        return t->command = command, UI_TEXT_COMMAND;
                 return 0;
         }
 }
 
 static p32 ui_text_hex_char(struct ui_text address_to t, p32 character)
 {
-        p64 len = doc_length(&t->doc), at, remove;
+        p64 len = doc_length(&t->doc), at, remove, caret;
         const struct doc_selection address_to sel = &t->doc.selections[t->doc.primary];
         p64 start = doc_sel_start(sel), finish = doc_sel_end(sel);
         p8 byte;
@@ -33893,56 +33200,57 @@ static p32 ui_text_hex_char(struct ui_text address_to t, p32 character)
         if (t->read_only)
                 return 0;
         t->doc.now = ui_kit_clock();
+        at = start;
         if (t->hex_ascii)
         {
                 if (character < 0x20 || character > 0x7e)
                         return 0;
                 byte = (p8)character;
-                at = start;
                 remove = finish > start ? finish - start : (!t->hex_insert && at < len ? 1 : 0);
-                ui_doc_replace_one(&t->doc, at, remove, &byte, 1, at + 1);
-                t->hex_nibble = false;
-                ui_text_hex_reveal(t);
-                ui_text_wake(t);
-                return UI_TEXT_CHANGED;
+                caret = at + 1, t->hex_nibble = false;
         }
+        else
         {
                 int nib = character < 128 ? ui_hex_digit((p8)character) : -1;
+
                 if (nib < 0)
                         return 0;
-                at = start;
                 if (finish > start)
-                {
-                        byte = (p8)(nib << 4);
-                        ui_doc_replace_one(&t->doc, at, finish - start, &byte, 1, at);
-                        t->hex_nibble = true;
-                }
+                        byte = (p8)(nib << 4), remove = finish - start, caret = at, t->hex_nibble = true;
                 else if (!t->hex_nibble)
                 {
-                        b32 inserting = t->hex_insert || at >= len;
-                        p8 cur = inserting ? 0 : (p8)doc_byte(&t->doc, at);
+                        b32 ins = t->hex_insert || at >= len;
 
-                        byte = (p8)((nib << 4) | (cur & 0x0f));
-                        ui_doc_replace_one(&t->doc, at, inserting ? 0 : 1, &byte, 1, at);
-                        t->hex_nibble = true;
+                        byte = (p8)((nib << 4) | ((ins ? 0 : (p8)doc_byte(&t->doc, at)) & 0x0f));
+                        remove = ins ? 0 : 1, caret = at, t->hex_nibble = true;
                 }
                 else
                 {
-                        p8 cur = at < len ? (p8)doc_byte(&t->doc, at) : 0;
-
-                        byte = (p8)((cur & 0xf0) | nib);
-                        ui_doc_replace_one(&t->doc, at, at < len ? 1 : 0, &byte, 1, at + 1);
-                        t->hex_nibble = false;
+                        byte = (p8)(((at < len ? (p8)doc_byte(&t->doc, at) : 0) & 0xf0) | nib);
+                        remove = at < len ? 1 : 0, caret = at + 1, t->hex_nibble = false;
                 }
-                ui_text_hex_reveal(t);
-                ui_text_wake(t);
-                return UI_TEXT_CHANGED;
         }
+        ui_doc_replace_one(&t->doc, at, remove, &byte, 1, caret);
+        ui_text_hex_reveal(t);
+        ui_text_wake(t);
+        return UI_TEXT_CHANGED;
+}
+
+static b32 ui_text_code_line_span(struct ui_text address_to t, p64 address_to start, p64 address_to finish)
+{
+        p64 line;
+
+        if (t->mode != UI_TEXT_CODE || doc_any_selected(&t->doc) || t->doc.selection_count != 1)
+                return false;
+        line = doc_line_of(&t->doc, t->doc.selections[0].active);
+        *start = doc_line_start(&t->doc, line);
+        *finish = line + 1 < doc_line_count(&t->doc) ? doc_line_start(&t->doc, line + 1) : doc_length(&t->doc);
+        return *finish > *start;
 }
 
 static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t, p32 command)
 {
-        p64 version = t->doc.version;
+        p64 version = t->doc.version, start, finish;
         int page = ui_text_rows(t) > 1 ? ui_text_rows(t) - 1 : 1;
 
         if (t->hex && t->mode != UI_TEXT_FIELD)
@@ -33952,63 +33260,40 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
         if (t->masked && (command = ui_text_masked_command(command)) == DOC_CMD_NONE)
                 return UI_TEXT_MOVED;
         if (ui_text_visual(ui, t, &command))
-        {
-                ui_text_wake(t);
-                ui_text_reveal(ui, t);
-                return UI_TEXT_MOVED;
-        }
+                return ui_text_wake(t), ui_text_reveal(ui, t), UI_TEXT_MOVED;
         switch (command)
         {
         case DOC_CMD_UP: case DOC_CMD_DOWN: case DOC_CMD_SELECT_UP: case DOC_CMD_SELECT_DOWN:
-                if (ui_text_wrap_step(ui, t, (command == DOC_CMD_UP || command == DOC_CMD_SELECT_UP) ? -1 : 1,
-                                      command == DOC_CMD_SELECT_UP || command == DOC_CMD_SELECT_DOWN))
-                        break;
-                doc_command(&t->doc, command, t->comment);
+                if (!ui_text_wrap_step(ui, t, (command == DOC_CMD_UP || command == DOC_CMD_SELECT_UP) ? -1 : 1,
+                                       command == DOC_CMD_SELECT_UP || command == DOC_CMD_SELECT_DOWN))
+                        doc_command(&t->doc, command, t->comment);
                 break;
         case DOC_CMD_COPY:
-                if (t->mode == UI_TEXT_CODE && !doc_any_selected(&t->doc) && t->doc.selection_count == 1)
+                if (ui_text_code_line_span(t, &start, &finish))
                 {
-                        p64 caret = t->doc.selections[0].active, line = doc_line_of(&t->doc, caret);
-                        p64 start = doc_line_start(&t->doc, line), finish = line + 1 < doc_line_count(&t->doc) ? doc_line_start(&t->doc, line + 1) : doc_length(&t->doc);
                         p8 address_to text = null;
                         positive room = 0, len = (positive)(finish - start);
 
-                        if (finish > start && finish - start <= KIT_COPY_MOST && array_store_reserve(text, room, 0, len, 4096))
-                        {
-                                len = doc_read(&t->doc, start, text, len);
-                                ui_clip_offer(t->own, WINDOWS_CLIP_CLIPBOARD, text, room, len);
-                        }
+                        if (finish - start <= KIT_COPY_MOST && array_store_reserve(text, room, 0, len, 4096))
+                                len = doc_read(&t->doc, start, text, len), ui_clip_offer(t->own, WINDOWS_CLIP_CLIPBOARD, text, room, len);
                         return UI_TEXT_MOVED;
                 }
                 return ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD) ? UI_TEXT_MOVED : UI_TEXT_MOVED | UI_TEXT_REFUSED;
         case DOC_CMD_CUT:
-                // A masked field's text is never copied out, and so never cut out; nor is one too large to copy, which is left as it is.
                 if (t->read_only || t->masked)
                         return UI_TEXT_MOVED;
-                if (t->mode == UI_TEXT_CODE && !doc_any_selected(&t->doc) && t->doc.selection_count == 1)
                 {
-                        p64 caret = t->doc.selections[0].active, line = doc_line_of(&t->doc, caret);
-                        p64 start = doc_line_start(&t->doc, line), finish = line + 1 < doc_line_count(&t->doc) ? doc_line_start(&t->doc, line + 1) : doc_length(&t->doc);
+                        b32 whole = ui_text_code_line_span(t, &start, &finish);
+                        p64 caret = t->doc.selections[0].active;
 
-                        if (finish > start)
-                        {
+                        if (whole)
                                 doc_select_set(&t->doc, start, finish);
-                                if (!ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD))
-                                {
-                                        doc_select_set(&t->doc, caret, caret);
-                                        return UI_TEXT_MOVED | UI_TEXT_REFUSED;
-                                }
-                                doc_erase_selections(&t->doc);
-                        }
-                        break;
+                        if (!ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD))
+                                return whole ? doc_select_set(&t->doc, caret, caret) : (void)0, UI_TEXT_MOVED | UI_TEXT_REFUSED;
+                        doc_erase_selections(&t->doc);
                 }
-                if (!ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD))
-                        return UI_TEXT_MOVED | UI_TEXT_REFUSED;
-                doc_erase_selections(&t->doc);
                 break;
-        case DOC_CMD_PASTE:
-                ui_text_ask(t, WINDOWS_CLIP_CLIPBOARD);
-                return UI_TEXT_PASTE;
+        case DOC_CMD_PASTE: ui_text_ask(t, WINDOWS_CLIP_CLIPBOARD); return UI_TEXT_PASTE;
         case DOC_CMD_PAGE_UP: case DOC_CMD_PAGE_DOWN: case DOC_CMD_SELECT_PAGE_UP: case DOC_CMD_SELECT_PAGE_DOWN:
         {
                 b32 up = command == DOC_CMD_PAGE_UP || command == DOC_CMD_SELECT_PAGE_UP;
@@ -34018,15 +33303,11 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
                 break;
         }
         case DOC_CMD_ZOOM_IN: case DOC_CMD_ZOOM_OUT: case DOC_CMD_ZOOM_RESET:
-                if (t->mode != UI_TEXT_CODE)
-                        return 0;
-                return ui_text_zoom(ui, t, command);
+                return t->mode == UI_TEXT_CODE ? ui_text_zoom(ui, t, command) : 0;
         case DOC_CMD_WRAP:
                 if (t->mode == UI_TEXT_FIELD)
                         return 0;
-                t->wrap = !t->wrap;
-                t->scroll_x = 0;
-                ui_text_reveal(ui, t);
+                t->wrap = !t->wrap, t->scroll_x = 0, ui_text_reveal(ui, t);
                 return UI_TEXT_MOVED;
         case DOC_CMD_HEX:
                 if (t->mode == UI_TEXT_FIELD)
@@ -34035,7 +33316,6 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
                 return UI_TEXT_MOVED;
         case DOC_CMD_MENU:
         {
-                // The menu at the caret, for a key that asks for it.
                 p64 caret = t->doc.selections[t->doc.primary].active, line = doc_line_of(&t->doc, caret);
 
                 ui_text_layout_line(ui, t, line, &ui_text_lay);
@@ -34052,10 +33332,7 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
                 if (t->mode == UI_TEXT_FIELD && command == DOC_CMD_NEWLINE)
                         return UI_TEXT_SUBMIT;
                 if (!doc_command(&t->doc, command, t->comment))
-                {
-                        t->command = command;
-                        return UI_TEXT_COMMAND;
-                }
+                        return t->command = command, UI_TEXT_COMMAND;
         }
         ui_text_wake(t);
         ui_text_reveal(ui, t);
@@ -34368,30 +33645,28 @@ static void ui_menu_clip_rows(struct ui_popmenu address_to m, int copy, const ch
 static fn ui_text_menu_items(struct ui_popmenu address_to m, const struct ui_text address_to t, b32 actions)
 {
         p32 none = doc_any_selected(&t->doc) ? 0 : UI_MENU_DISABLED, fixed = t->read_only ? UI_MENU_DISABLED : 0;
-        p32 hidden = t->masked ? UI_MENU_DISABLED : 0;
+        p32 hidden = t->masked ? UI_MENU_DISABLED : 0, paste = fixed | (t->own ? 0 : UI_MENU_DISABLED);
+        p32 all = doc_length(&t->doc) ? 0 : UI_MENU_DISABLED;
 
-        if (actions)
+        if (!actions)
         {
-                ui_popmenu_add(m, WORDS(menu_cut), ui_text_menu_key(t, UI_TEXT_MENU_CUT, DOC_CMD_CUT), none | fixed | hidden, UI_TEXT_MENU_CUT);
-                ui_menu_clip_rows(m, UI_TEXT_MENU_COPY, ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden,
-                                  UI_TEXT_MENU_PASTE, ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE),
-                                  fixed | (t->own ? 0 : UI_MENU_DISABLED), UI_TEXT_MENU_ALL,
-                                  ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL), doc_length(&t->doc) ? 0 : UI_MENU_DISABLED);
-                return;
+                ui_popmenu_add(m, WORDS(menu_undo), ui_text_menu_key(t, UI_TEXT_MENU_UNDO, DOC_CMD_UNDO), t->doc.done && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_UNDO);
+                ui_popmenu_add(m, WORDS(menu_redo), ui_text_menu_key(t, UI_TEXT_MENU_REDO, DOC_CMD_REDO), t->doc.done < t->doc.group_count && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_REDO);
+                ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
         }
-        ui_popmenu_add(m, WORDS(menu_undo), ui_text_menu_key(t, UI_TEXT_MENU_UNDO, DOC_CMD_UNDO),
-                       t->doc.done && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_UNDO);
-        ui_popmenu_add(m, WORDS(menu_redo), ui_text_menu_key(t, UI_TEXT_MENU_REDO, DOC_CMD_REDO),
-                       t->doc.done < t->doc.group_count && !fixed ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_REDO);
-        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
         ui_popmenu_add(m, WORDS(menu_cut), ui_text_menu_key(t, UI_TEXT_MENU_CUT, DOC_CMD_CUT), none | fixed | hidden, UI_TEXT_MENU_CUT);
-        ui_popmenu_add(m, WORDS(menu_copy), ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden, UI_TEXT_MENU_COPY);
-        ui_popmenu_add(m, WORDS(menu_paste), ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE),
-                       fixed | (t->own ? 0 : UI_MENU_DISABLED), UI_TEXT_MENU_PASTE);
-        ui_popmenu_add(m, WORDS(menu_delete), ui_text_menu_key(t, UI_TEXT_MENU_DELETE, DOC_CMD_DELETE), none | fixed, UI_TEXT_MENU_DELETE);
-        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, WORDS(menu_select_all), ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL),
-                       doc_length(&t->doc) ? 0 : UI_MENU_DISABLED, UI_TEXT_MENU_ALL);
+        if (actions)
+                ui_menu_clip_rows(m, UI_TEXT_MENU_COPY, ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden,
+                                  UI_TEXT_MENU_PASTE, ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE), paste,
+                                  UI_TEXT_MENU_ALL, ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL), all);
+        else
+        {
+                ui_popmenu_add(m, WORDS(menu_copy), ui_text_menu_key(t, UI_TEXT_MENU_COPY, DOC_CMD_COPY), none | hidden, UI_TEXT_MENU_COPY);
+                ui_popmenu_add(m, WORDS(menu_paste), ui_text_menu_key(t, UI_TEXT_MENU_PASTE, DOC_CMD_PASTE), paste, UI_TEXT_MENU_PASTE);
+                ui_popmenu_add(m, WORDS(menu_delete), ui_text_menu_key(t, UI_TEXT_MENU_DELETE, DOC_CMD_DELETE), none | fixed, UI_TEXT_MENU_DELETE);
+                ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(m, WORDS(menu_select_all), ui_text_menu_key(t, UI_TEXT_MENU_ALL, DOC_CMD_SELECT_ALL), all, UI_TEXT_MENU_ALL);
+        }
 }
 
 static b32 ui_text_menu_open(struct ui_popup address_to p, struct ui_text address_to t, const struct ui address_to ui, int x, int y, b32 touch)
@@ -34535,18 +33810,25 @@ static int ui_select_bar_item(const struct ui_select address_to s, int x, int y)
 
 // Which end's handle a finger at x, y is on (1 the start, 2 the end), or 0: the shape is the knob, its reach the finger's (ui_hit);
 // where the two reaches meet it is the nearer knob's. A handle whose row is out of the box is not there to be taken.
+static fn ui_select_ordered(const struct ui_select address_to s, p64 address_to start, p64 address_to finish)
+{
+        p64 anchor, active;
+
+        s->ops->get(s->self, &anchor, &active);
+        *start = anchor < active ? anchor : active, *finish = anchor < active ? active : anchor;
+}
+
 static int ui_select_handle_hit(struct ui address_to ui, struct ui_select address_to s, int x, int y)
 {
         struct ui_select_box b;
-        p64 anchor, active, start, finish;
+        p64 start, finish;
         int radius = ui_dev(ui, UI_SELECT_HANDLE), best = 0;
         long near = 0;
 
         if (!s->handles || !s->ops->shown(s->self))
                 return 0;
         s->ops->box(s->self, &b);
-        s->ops->get(s->self, &anchor, &active);
-        start = anchor < active ? anchor : active, finish = anchor < active ? active : anchor;
+        ui_select_ordered(s, &start, &finish);
         for (int side = 1; side <= 2; side++)
         {
                 int hx, top;
@@ -34584,8 +33866,7 @@ static b32 ui_select_bar_place(struct ui address_to ui, struct ui_select address
         int count;
 
         s->ops->box(s->self, &bx);
-        s->ops->get(s->self, &anchor, &active);
-        start = anchor < active ? anchor : active, finish = anchor < active ? active : anchor;
+        ui_select_ordered(s, &start, &finish);
         sx = bx.left, st = bx.top, ex = bx.right, et = bx.top;
         a = s->ops->where(ui, s->self, start, &sx, &st), z = s->ops->where(ui, s->self, finish, &ex, &et);
         count = s->ops->items(s->self, s->bar_id);
@@ -34641,8 +33922,7 @@ static fn ui_select_overlay_draw(struct ui address_to ui, struct ui_select addre
         {
                 unsigned int tone = ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, 255);
 
-                s->ops->get(s->self, &anchor, &active);
-                start = anchor < active ? anchor : active, finish = anchor < active ? active : anchor;
+                ui_select_ordered(s, &start, &finish);
                 for (int side = 0; side < 2; side++)
                 {
                         int x, top;
@@ -34721,8 +34001,7 @@ static p32 ui_select_finger_down(struct ui address_to ui, struct ui_select addre
                 int hx = 0, top = 0;
 
                 s->ops->box(s->self, &bx);
-                s->ops->get(s->self, &anchor, &active);
-                start = anchor < active ? anchor : active, finish = anchor < active ? active : anchor;
+                ui_select_ordered(s, &start, &finish);
                 s->ops->where(ui, s->self, grab == 2 ? finish : start, &hx, &top);
                 // The other end stays; the finger holds this one where it took it, so the end does not jump to the finger.
                 s->drag_kind = UI_SELECT_CHARS, s->drag_start = s->drag_end = grab == 2 ? start : finish;
@@ -34956,39 +34235,37 @@ static void ui_text_op_box(void address_to self, struct ui_select_box address_to
 {
         struct ui_text address_to t = self;
 
-        b->left = t->left, b->top = t->top, b->right = t->right, b->bottom = t->bottom, b->line_height = t->line_height;
-        b->field = t->mode == UI_TEXT_FIELD;
+        *b = (struct ui_select_box){t->left, t->top, t->right, t->bottom, t->line_height, t->mode == UI_TEXT_FIELD};
 }
-
-static p64 ui_text_op_place(struct ui address_to ui, void address_to self, int x, int y)
-{
-        return ui_text_hit(ui, (struct ui_text address_to)self, x, y);
-}
+static p64 ui_text_op_place(struct ui address_to ui, void address_to self, int x, int y) { return ui_text_hit(ui, (struct ui_text address_to)self, x, y); }
+static int ui_text_op_where(struct ui address_to ui, void address_to self, p64 at, int address_to x, int address_to top) { return ui_text_where(ui, (struct ui_text address_to)self, at, x, top); }
+static void ui_text_op_set(void address_to self, p64 anchor, p64 active) { doc_select_set(&((struct ui_text address_to)self)->doc, anchor, active); }
+static b32 ui_text_op_any(void address_to self) { return doc_any_selected(&((struct ui_text address_to)self)->doc) != 0; }
+static b32 ui_text_op_within(void address_to self, p64 at) { return ui_text_selected((struct ui_text address_to)self, at); }
+static b32 ui_text_op_inside(void address_to self, int x, int y) { return ui_text_inside((struct ui_text address_to)self, x, y); }
+static void ui_text_op_copy(void address_to self, unsigned int which) { ui_text_copy((struct ui_text address_to)self, which); }
+static int ui_text_menu_of(int id) { return id == UI_SELECT_CUT ? UI_TEXT_MENU_CUT : id == UI_SELECT_COPY ? UI_TEXT_MENU_COPY : id == UI_SELECT_PASTE ? UI_TEXT_MENU_PASTE : UI_TEXT_MENU_ALL; }
+static int ui_text_select_of(int id) { return id == UI_TEXT_MENU_CUT ? UI_SELECT_CUT : id == UI_TEXT_MENU_COPY ? UI_SELECT_COPY : id == UI_TEXT_MENU_PASTE ? UI_SELECT_PASTE : UI_SELECT_ALL; }
+static p32 ui_text_op_item(struct ui address_to ui, void address_to self, int id) { return ui_text_menu_do(ui, self, ui_text_menu_of(id)); }
 
 static void ui_text_op_span(void address_to self, int kind, p64 at, p64 address_to start, p64 address_to finish)
 {
         struct ui_text address_to t = self;
-        p64 line;
 
         *start = *finish = at;
         if (kind == UI_SELECT_LINES)
         {
-                line = doc_line_of(&t->doc, at);
+                p64 line = doc_line_of(&t->doc, at);
+
                 *start = doc_line_start(&t->doc, line), *finish = doc_line_start(&t->doc, line + 1);
         }
         else if (kind == UI_SELECT_WORDS)
         {
-                // A masked field has no words: a double click takes it all, as a triple does.
                 if (t->masked)
                         *start = 0, *finish = doc_length(&t->doc);
                 else
                         doc_word_at(&t->doc, at, start, finish);
         }
-}
-
-static int ui_text_op_where(struct ui address_to ui, void address_to self, p64 at, int address_to x, int address_to top)
-{
-        return ui_text_where(ui, (struct ui_text address_to)self, at, x, top);
 }
 
 static void ui_text_op_get(void address_to self, p64 address_to anchor, p64 address_to active)
@@ -34997,11 +34274,6 @@ static void ui_text_op_get(void address_to self, p64 address_to anchor, p64 addr
         const struct doc_selection address_to s = &t->doc.selections[t->doc.primary];
 
         *anchor = s->anchor, *active = s->active;
-}
-
-static void ui_text_op_set(void address_to self, p64 anchor, p64 active)
-{
-        doc_select_set(&((struct ui_text address_to)self)->doc, anchor, active);
 }
 
 static void ui_text_op_extend(void address_to self, p64 anchor, p64 active)
@@ -35014,11 +34286,6 @@ static void ui_text_op_extend(void address_to self, p64 anchor, p64 active)
         doc_seal(&t->doc);
 }
 
-static b32 ui_text_op_any(void address_to self)
-{
-        return doc_any_selected(&((struct ui_text address_to)self)->doc) != 0;
-}
-
 static b32 ui_text_op_shown(void address_to self)
 {
         struct ui_text address_to t = self;
@@ -35027,17 +34294,6 @@ static b32 ui_text_op_shown(void address_to self)
         return t->doc.selection_count == 1 && doc_sel_start(s) < doc_sel_end(s);
 }
 
-static b32 ui_text_op_within(void address_to self, p64 at)
-{
-        return ui_text_selected((struct ui_text address_to)self, at);
-}
-
-static b32 ui_text_op_inside(void address_to self, int x, int y)
-{
-        return ui_text_inside((struct ui_text address_to)self, x, y);
-}
-
-// The view moves by lines (down positive). At an edge a field moves its pixels sideways, as a code view moves its lines up and down.
 static void ui_text_op_scroll(struct ui address_to ui, void address_to self, long lines, b32 edge)
 {
         struct ui_text address_to t = self;
@@ -35063,30 +34319,11 @@ static void ui_text_op_scroll(struct ui address_to ui, void address_to self, lon
 
 static void ui_text_op_moved(struct ui address_to ui, void address_to self, b32 reveal)
 {
-        struct ui_text address_to t = self;
-
         if (reveal)
-                ui_text_reveal(ui, t);
-        ui_text_wake(t);
+                ui_text_reveal(ui, (struct ui_text address_to)self);
+        ui_text_wake((struct ui_text address_to)self);
 }
 
-static void ui_text_op_copy(void address_to self, unsigned int which)
-{
-        ui_text_copy((struct ui_text address_to)self, which);
-}
-
-// The text menu's id of an actions item, and the item's id of a text menu id.
-static int ui_text_menu_of(int id)
-{
-        return id == UI_SELECT_CUT ? UI_TEXT_MENU_CUT : id == UI_SELECT_COPY ? UI_TEXT_MENU_COPY : id == UI_SELECT_PASTE ? UI_TEXT_MENU_PASTE : UI_TEXT_MENU_ALL;
-}
-
-static int ui_text_select_of(int id)
-{
-        return id == UI_TEXT_MENU_CUT ? UI_SELECT_CUT : id == UI_TEXT_MENU_COPY ? UI_SELECT_COPY : id == UI_TEXT_MENU_PASTE ? UI_SELECT_PASTE : UI_SELECT_ALL;
-}
-
-// The bar's items now: the menu's four (ui_text_menu_items) the widget can do, Select All left off when everything is selected already.
 static int ui_text_op_items(void address_to self, int address_to ids)
 {
         struct ui_text address_to t = self;
@@ -35103,11 +34340,6 @@ static int ui_text_op_items(void address_to self, int address_to ids)
         return count;
 }
 
-static p32 ui_text_op_item(struct ui address_to ui, void address_to self, int id)
-{
-        return ui_text_menu_do(ui, self, ui_text_menu_of(id));
-}
-
 static const struct ui_select_ops ui_text_select_ops = {
         .box = ui_text_op_box,       .place = ui_text_op_place,   .span = ui_text_op_span,       .where = ui_text_op_where,
         .get = ui_text_op_get,       .set = ui_text_op_set,       .extend = ui_text_op_extend,   .any = ui_text_op_any,
@@ -35115,31 +34347,10 @@ static const struct ui_select_ops ui_text_select_ops = {
         .moved = ui_text_op_moved,   .copy = ui_text_op_copy,     .items = ui_text_op_items,     .item = ui_text_op_item,
 };
 
-// The text widget's controller, bound to it: its ops and self are set at each entry, so a widget that moved in memory is still its own.
-static struct ui_select address_to ui_text_sel(struct ui_text address_to t)
-{
-        t->sel.ops = &ui_text_select_ops;
-        t->sel.self = t;
-        t->sel.scrolls = true;
-        return &t->sel;
-}
-
-// The overlay of a text widget (its handles and bar), drawn over the picture by the app.
-static fn ui_text_overlay(struct ui address_to ui, struct ui_text address_to t)
-{
-        ui_select_overlay(ui, ui_text_sel(t));
-}
-
-// A finger on a text widget, and whether a press on it is the widget's: its well, its bar over whatever is under it, or a handle.
-static p32 ui_text_finger(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
-{
-        return ui_select_finger(ui, ui_text_sel(t), event, x, y);
-}
-
-static b32 ui_text_reach(struct ui address_to ui, struct ui_text address_to t, int x, int y)
-{
-        return ui_text_inside(t, x, y) || ui_select_reach(ui, ui_text_sel(t), x, y);
-}
+static struct ui_select address_to ui_text_sel(struct ui_text address_to t) { t->sel.ops = &ui_text_select_ops, t->sel.self = t, t->sel.scrolls = true; return &t->sel; }
+static fn ui_text_overlay(struct ui address_to ui, struct ui_text address_to t) { ui_select_overlay(ui, ui_text_sel(t)); }
+static p32 ui_text_finger(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y) { return ui_select_finger(ui, ui_text_sel(t), event, x, y); }
+static b32 ui_text_reach(struct ui address_to ui, struct ui_text address_to t, int x, int y) { return ui_text_inside(t, x, y) || ui_select_reach(ui, ui_text_sel(t), x, y); }
 
 /*
         A pinch on a code widget zooms it (ui_pinch_size, from the zoom it had when the pinch began, over the same range as the zoom
@@ -35284,8 +34495,13 @@ static p32 ui_text_hex_pointer(struct ui address_to ui, struct ui_text address_t
         return 0;
 }
 
-// The pointer's presses and drags on a text widget: a finger's are the controller's, and the mouse's clicks, drag, Shift, Alt and the
-// middle and right buttons are here. Answers what changed (UI_TEXT_*), and UI_TEXT_MENU for the right button.
+static fn ui_text_select_lines(struct ui_text address_to t, p64 a, p64 b, b32 directed)
+{
+        p64 lines = doc_line_count(&t->doc), lo = a < b ? a : b, hi = a > b ? a : b;
+        p64 s0 = doc_line_start(&t->doc, lo), s1 = hi + 1 < lines ? doc_line_start(&t->doc, hi + 1) : doc_length(&t->doc);
+
+        doc_select_set(&t->doc, directed && b < a ? s1 : s0, directed && b < a ? s0 : s1);
+}
 static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
 {
         if (event->type == WINDOW_EVENT_PINCH)
@@ -35331,24 +34547,17 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 }
                 if (event->type == WINDOW_EVENT_MOTION)
                 {
-                        p64 at = ui_text_hit(ui, t, t->left, y), line = doc_line_of(&t->doc, at), lines = doc_line_count(&t->doc);
-                        p64 lo = line < t->gutter_anchor ? line : t->gutter_anchor, hi = line > t->gutter_anchor ? line : t->gutter_anchor;
-                        p64 s0 = doc_line_start(&t->doc, lo), s1 = hi + 1 < lines ? doc_line_start(&t->doc, hi + 1) : doc_length(&t->doc);
-
-                        doc_select_set(&t->doc, line < t->gutter_anchor ? s1 : s0, line < t->gutter_anchor ? s0 : s1);
+                        ui_text_select_lines(t, t->gutter_anchor, doc_line_of(&t->doc, ui_text_hit(ui, t, t->left, y)), true);
                         return UI_TEXT_MOVED;
                 }
         }
         if (in_gutter && event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_POINTER_LEFT)
         {
-                p64 at = ui_text_hit(ui, t, t->left, y), line = doc_line_of(&t->doc, at), lines = doc_line_count(&t->doc);
-                p64 lo = shift ? doc_line_of(&t->doc, t->doc.selections[t->doc.primary].anchor) : line;
-                p64 hi = line > lo ? line : lo;
+                p64 line = doc_line_of(&t->doc, ui_text_hit(ui, t, t->left, y));
+                p64 anchor = shift ? doc_line_of(&t->doc, t->doc.selections[t->doc.primary].anchor) : line;
 
-                if (line < lo)
-                        hi = lo, lo = line;
-                doc_select_set(&t->doc, doc_line_start(&t->doc, lo), hi + 1 < lines ? doc_line_start(&t->doc, hi + 1) : doc_length(&t->doc));
-                t->gutter_drag = true, t->gutter_anchor = shift ? doc_line_of(&t->doc, t->doc.selections[t->doc.primary].anchor) : line;
+                ui_text_select_lines(t, anchor, line, false);
+                t->gutter_drag = true, t->gutter_anchor = anchor;
                 ui_text_wake(t);
                 return UI_TEXT_MOVED;
         }
@@ -35479,45 +34688,28 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 {
                         p64 at = ui_text_hit(ui, t, x, y);
                         int clicks = ui_click_count(ui, &s->click, x, y);
+                        b32 pick = false;
 
-                        if (alt && shift && t->mode != UI_TEXT_FIELD)
+                        if (clicks == 1 && !alt && !shift && !t->masked && t->mode != UI_TEXT_FIELD && doc_any_selected(&t->doc) && t->doc.selection_count == 1 &&
+                            at >= doc_sel_start(&t->doc.selections[0]) && at < doc_sel_end(&t->doc.selections[0]))
                         {
-                                // A box of columns, from the press (a rectangle, not a span of text).
-                                s->boxed = true;
-                                t->box_line = doc_line_of(&t->doc, at);
-                                t->box_column = doc_column(&t->doc, at);
-                                doc_select_box(&t->doc, t->box_line, t->box_column, t->box_line, t->box_column);
-                                ui_select_start(s, at, clicks, false);
-                        }
-                        else if (alt && clicks == 1)
-                        {
-                                s->boxed = false;
-                                doc_select_add(&t->doc, at, at);
-                                ui_select_start(s, at, clicks, false);
-                        }
-                        else if (shift && clicks == 1)
-                        {
-                                struct doc_selection address_to primary = &t->doc.selections[t->doc.primary];
-
-                                s->boxed = false;
-                                primary->active = at;
-                                doc_normalize(&t->doc);
-                                doc_seal(&t->doc);
-                                ui_select_start(s, at, clicks, false);
-                        }
-                        else if (clicks == 1 && !t->masked && t->mode != UI_TEXT_FIELD && doc_any_selected(&t->doc) && t->doc.selection_count == 1 &&
-                                 at >= doc_sel_start(&t->doc.selections[0]) && at < doc_sel_end(&t->doc.selections[0]))
-                        {
-                                // A press in the selection: it may be dragged out (ui_text_drag), and is a click if it is not.
                                 ui_drag_arm(&t->drag, x, y);
                                 t->drag_from = doc_sel_start(&t->doc.selections[0]), t->drag_to = doc_sel_end(&t->doc.selections[0]);
                                 return UI_TEXT_MOVED;
                         }
-                        else
+                        s->boxed = alt && shift && t->mode != UI_TEXT_FIELD;
+                        if (s->boxed)
                         {
-                                s->boxed = false;
-                                ui_select_start(s, at, clicks, true);
+                                t->box_line = doc_line_of(&t->doc, at), t->box_column = doc_column(&t->doc, at);
+                                doc_select_box(&t->doc, t->box_line, t->box_column, t->box_line, t->box_column);
                         }
+                        else if (alt && clicks == 1)
+                                doc_select_add(&t->doc, at, at);
+                        else if (shift && clicks == 1)
+                                t->doc.selections[t->doc.primary].active = at, doc_normalize(&t->doc), doc_seal(&t->doc);
+                        else
+                                pick = true;
+                        ui_select_start(s, at, clicks, pick);
                         s->dragging = true;
                         ui_text_wake(t);
                         return UI_TEXT_MOVED;
@@ -35699,75 +34891,78 @@ static fn ui_findbar_sync(struct ui_findbar address_to bar, struct ui_text addre
         }
 }
 
-// Opened for a file path prompt (UI_FINDBAR_OPEN or UI_FINDBAR_SAVE_AS), pre-filled with seed (directory or path).
+static fn ui_findbar_close(struct ui_findbar address_to bar, struct ui_text address_to view, b32 window, b32 clear_live)
+{
+        bar->mode = UI_FINDBAR_CLOSED;
+        if (clear_live)
+                view->live_find = null;
+        ui_field_focus(&bar->field, false);
+        ui_findbar_keys(bar, view, window);
+}
+
+static fn ui_findbar_begin(const struct window_row address_to own, struct ui_findbar address_to bar, struct ui_text address_to view,
+                           int mode, const char address_to (*accept)(p32), positive most, b32 window)
+{
+        if (!bar->field.doc.selections)
+                ui_field_open(&bar->field, own, "");
+        bar->field.accept = accept, bar->field.most = most;
+        bar->mode = mode;
+        ui_field_focus(&bar->field, true);
+        ui_findbar_keys(bar, view, window);
+}
+
 static fn ui_findbar_open_path(const struct window_row address_to own, struct ui_findbar address_to bar, struct ui_text address_to view,
                                int mode, const char address_to seed, b32 window)
 {
         positive length = seed ? string_length((string_address)seed) : 0;
 
-        if (!bar->field.doc.selections)
-                ui_field_open(&bar->field, own, "");
-        bar->field.accept = null;
-        bar->field.most = UI_FINDBAR_QUERY - 1;
+        ui_findbar_begin(own, bar, view, mode, null, UI_FINDBAR_QUERY - 1, window);
         ui_text_set(&bar->field, (const p8 address_to)(seed ? seed : ""), length);
         doc_select_set(&bar->field.doc, length, length);
-        bar->mode = mode;
         view->live_find = null;
-        ui_field_focus(&bar->field, true);
-        ui_findbar_keys(bar, view, window);
 }
 
-// Opened for mode: its field emptied for a line, holding the view's selection for a find; the bar has the keys.
 static fn ui_findbar_open(const struct window_row address_to own, struct ui_findbar address_to bar, struct ui_text address_to view, int mode,
                           b32 window)
 {
         p8 selected[256];
         positive length = 0;
 
-        if (!bar->field.doc.selections)
-                ui_field_open(&bar->field, own, "");
-        // A line is asked for by its number (digits only in text mode; hex/decimal offset in hex mode).
-        bar->field.accept = mode == UI_FINDBAR_LINE && !view->hex ? ui_field_digits : null;
-        bar->field.most = mode == UI_FINDBAR_LINE ? 19 : UI_FINDBAR_QUERY - 1;
+        ui_findbar_begin(own, bar, view, mode, mode == UI_FINDBAR_LINE && !view->hex ? ui_field_digits : null,
+                         mode == UI_FINDBAR_LINE ? 19 : UI_FINDBAR_QUERY - 1, window);
         if (mode != UI_FINDBAR_LINE && doc_any_selected(&view->doc))
         {
                 const struct doc_selection address_to s = &view->doc.selections[view->doc.primary];
+                p64 span = doc_sel_end(s) - doc_sel_start(s);
 
-                length = doc_sel_end(s) - doc_sel_start(s) < sizeof(selected) ? doc_read(&view->doc, doc_sel_start(s), selected, (positive)(doc_sel_end(s) - doc_sel_start(s))) : 0;
+                length = span < sizeof(selected) ? doc_read(&view->doc, doc_sel_start(s), selected, (positive)span) : 0;
         }
         if (mode == UI_FINDBAR_LINE || length)
                 ui_text_set(&bar->field, selected, length);
-        doc_select_set(&bar->field.doc, 0, doc_length(((struct doc *)(&bar->field.doc))));
-        bar->mode = mode;
+        doc_select_set(&bar->field.doc, 0, doc_length(&bar->field.doc));
         ui_findbar_sync(bar, view);
-        ui_field_focus(&bar->field, true);
-        ui_findbar_keys(bar, view, window);
 }
 
-// The next match of the query from the caret (back: before it), selected and shown; what it said.
 static int ui_findbar_step(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view, b32 back)
 {
         p8 query[UI_FINDBAR_QUERY];
         positive length = ui_text_string(&bar->field, query, sizeof(query));
-        p64 start, finish, from = back ? doc_sel_start(&view->doc.selections[view->doc.primary]) : doc_sel_end(&view->doc.selections[view->doc.primary]);
+        const struct doc_selection address_to sel = &view->doc.selections[view->doc.primary];
+        p64 start, finish, from = back ? doc_sel_start(sel) : doc_sel_end(sel);
 
         if (!doc_find_set(&bar->search, query, length, bar->flags))
                 return UI_FINDBAR_SAID_BAD_PATTERN;
         view->live_find = &bar->search;
-        if (doc_find_next(&view->doc, &bar->search, from, back, true, &start, &finish))
-        {
-                doc_select_set(&view->doc, start, finish);
-                if (view->hex)
-                        ui_text_hex_reveal(view);
-                else
-                        ui_text_reveal(ui, view);
-                return UI_FINDBAR_SAID_CLEAR;
-        }
-        return UI_FINDBAR_SAID_NO_MATCH;
+        if (!doc_find_next(&view->doc, &bar->search, from, back, true, &start, &finish))
+                return UI_FINDBAR_SAID_NO_MATCH;
+        doc_select_set(&view->doc, start, finish);
+        if (view->hex)
+                ui_text_hex_reveal(view);
+        else
+                ui_text_reveal(ui, view);
+        return UI_FINDBAR_SAID_CLEAR;
 }
 
-// What the bar's Enter does: find (back: the match before), replace every match with what follows a / in the query (count the
-// number), go to its line (or hex byte offset), or submit an Open / Save As path.
 static int ui_findbar_enter(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view, b32 back, b32 window,
                             positive address_to count)
 {
@@ -35779,9 +34974,7 @@ static int ui_findbar_enter(struct ui address_to ui, struct ui_findbar address_t
         {
                 int mode = bar->mode;
 
-                bar->mode = UI_FINDBAR_CLOSED;
-                ui_field_focus(&bar->field, false);
-                ui_findbar_keys(bar, view, window);
+                ui_findbar_close(bar, view, window, false);
                 return mode == UI_FINDBAR_OPEN ? UI_FINDBAR_SAID_OPEN : UI_FINDBAR_SAID_SAVE_AS;
         }
         if (bar->mode == UI_FINDBAR_LINE)
@@ -35804,24 +34997,17 @@ static int ui_findbar_enter(struct ui address_to ui, struct ui_findbar address_t
                                         offset = (offset << 4) | (p64)d;
                                 }
                         }
-                        if (offset > len)
-                                offset = len;
+                        offset = offset > len ? len : offset;
                         doc_select_set(&view->doc, offset, offset);
                         ui_text_hex_reveal(view);
                 }
                 else
-                {
-                        doc_goto_line(&view->doc, number ? number - 1 : 0);
-                        ui_text_reveal(ui, view);
-                }
-                bar->mode = UI_FINDBAR_CLOSED;
-                ui_field_focus(&bar->field, false);
-                ui_findbar_keys(bar, view, window);
+                        doc_goto_line(&view->doc, number ? number - 1 : 0), ui_text_reveal(ui, view);
+                ui_findbar_close(bar, view, window, false);
                 return UI_FINDBAR_SAID_NONE;
         }
         if (bar->mode == UI_FINDBAR_REPLACE)
         {
-                // The text before the first / is found, the rest replaces every match, as one undo.
                 positive slash = 0;
 
                 while (slash < length && text[slash] != '/')
@@ -35836,14 +35022,12 @@ static int ui_findbar_enter(struct ui address_to ui, struct ui_findbar address_t
         return ui_findbar_step(ui, bar, view, back);
 }
 
-// The bar's own commands: find, replace, go to a line, the next match and the one before. Anything else is the app's.
 static b32 ui_findbar_is_command(p32 command)
 {
         return command == DOC_CMD_FIND || command == DOC_CMD_REPLACE || command == DOC_CMD_GOTO_LINE || command == DOC_CMD_FIND_NEXT ||
                command == DOC_CMD_FIND_PREVIOUS;
 }
 
-// The bar's command, from the keys, the menu or the app's keys: it opens the bar, or finds (what it said, and its count).
 static int ui_findbar_command(struct ui address_to ui, const struct window_row address_to own, struct ui_findbar address_to bar, struct ui_text address_to view,
                               p32 command, b32 window, positive address_to count)
 {
@@ -35856,8 +35040,6 @@ static int ui_findbar_command(struct ui address_to ui, const struct window_row a
         return ui_findbar_step(ui, bar, view, command == DOC_CMD_FIND_PREVIOUS);
 }
 
-// Every event of the window while the bar has the keys or the pointer's press is in it (the view's are the view's). The view's keys
-// follow the bar's (ui_findbar_keys) after each. The answer says whether the event was the bar's, what it said, and a command for the app.
 static struct ui_findbar_said ui_findbar_event(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view,
                                                struct ui_popup address_to menu, const struct window_row address_to own, const struct window_event address_to event, b32 window)
 {
@@ -35869,7 +35051,6 @@ static struct ui_findbar_said ui_findbar_event(struct ui address_to ui, struct u
         if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN))
                 ui_field_focus(&bar->field, ui_text_reach(ui, &bar->field, ui_kit.pointer_x, ui_kit.pointer_y));
         asks = ui_field_send(ui, &bar->field, menu, event);
-        // A press outside the bar is the view's: the bar's answer to it (commit or cancel) changes nothing.
         if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
                 asks = 0;
         if (asks & UI_TEXT_CHANGED)
@@ -35879,21 +35060,14 @@ static struct ui_findbar_said ui_findbar_event(struct ui address_to ui, struct u
         if (asks & UI_TEXT_SUBMIT)
                 said.said = ui_findbar_enter(ui, bar, view, (event->flags & WINDOW_KEY_SHIFT) != 0, window, &said.count);
         else if (asks & UI_TEXT_CANCEL)
-        {
-                bar->mode = UI_FINDBAR_CLOSED;
-                view->live_find = null;
-                ui_field_focus(&bar->field, false);
-        }
+                ui_findbar_close(bar, view, window, true);
         else if (!asks && event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN))
         {
                 p32 c = (p32)event->b | 0x20, command = ui_key_command(event);
 
                 if ((event->flags & WINDOW_KEY_ALT) && (bar->mode == UI_FINDBAR_FIND || bar->mode == UI_FINDBAR_REPLACE) &&
                     memory_first_of((address_any) "cwr", (b8)c, 3))
-                {
-                        bar->flags ^= c == 'c' ? DOC_FIND_CASE : c == 'w' ? DOC_FIND_WORD : DOC_FIND_REGEX;
-                        ui_findbar_sync(bar, view);
-                }
+                        bar->flags ^= c == 'c' ? DOC_FIND_CASE : c == 'w' ? DOC_FIND_WORD : DOC_FIND_REGEX, ui_findbar_sync(bar, view);
                 else if (ui_findbar_is_command(command))
                         said.said = ui_findbar_command(ui, own, bar, view, command, window, &said.count);
                 else if (command >= DOC_CMD_FIND && command < DOC_CMDS && command != DOC_CMD_ZOOM_IN &&
@@ -35906,10 +35080,8 @@ static struct ui_findbar_said ui_findbar_event(struct ui address_to ui, struct u
         return said;
 }
 
-// The bar's frames with the view's: the view's (its throw, its blink, its drag), and the bar's while it is open or has the keys.
 static long ui_findbar_timeout(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view, long timeout, b32 address_to redraw)
 {
-        positive now = (positive)ui_kit_clock();
         timeout = ui_text_timeout(ui, view, timeout, redraw);
         if (bar->mode != UI_FINDBAR_CLOSED || bar->field.focused)
                 timeout = ui_text_timeout(ui, &bar->field, timeout, redraw);
@@ -35947,19 +35119,17 @@ static fn ui_findbar_overlay(struct ui address_to ui, struct ui_findbar address_
 // Each is readable as words on the paper and on a well (ui_ink_readable): the accent and the status colours keep their hues, deepened where they fall short.
 static unsigned int ui_text_role(int role)
 {
-        switch (role)
-        {
-        case DOC_ROLE_KEYWORD: return ui_ink_readable(ui_role(UI_PRIMARY));
-        case DOC_ROLE_TYPE: return ui_ink_readable(ui_role(UI_INFO));
-        case DOC_ROLE_STRING: return ui_ink_readable(ui_role(UI_SUCCESS));
-        case DOC_ROLE_NUMBER: return ui_ink_readable(ui_role(UI_WARNING));
-        case DOC_ROLE_COMMENT: return ui_role(UI_ON_SURFACE_VARIANT);
-        case DOC_ROLE_PREPROCESSOR: return ui_ink_readable(ui_role(UI_WARNING));
-        case DOC_ROLE_FUNCTION: return ui_role(UI_ON_SURFACE);
-        case DOC_ROLE_VARIABLE: return ui_ink_readable(ui_role(UI_INFO));
-        case DOC_ROLE_INVALID: return ui_ink_readable(ui_role(UI_ERROR));
-        default: return ui_role(UI_ON_SURFACE);
-        }
+        static const struct { unsigned char role, readable; } map[DOC_ROLE_INVALID + 1] = {
+            [DOC_ROLE_KEYWORD] = {UI_PRIMARY, 1},      [DOC_ROLE_TYPE] = {UI_INFO, 1},
+            [DOC_ROLE_STRING] = {UI_SUCCESS, 1},       [DOC_ROLE_NUMBER] = {UI_WARNING, 1},
+            [DOC_ROLE_COMMENT] = {UI_ON_SURFACE_VARIANT, 0}, [DOC_ROLE_PREPROCESSOR] = {UI_WARNING, 1},
+            [DOC_ROLE_FUNCTION] = {UI_ON_SURFACE, 0},  [DOC_ROLE_VARIABLE] = {UI_INFO, 1},
+            [DOC_ROLE_INVALID] = {UI_ERROR, 1},
+        };
+
+        if (role <= 0 || role > DOC_ROLE_INVALID)
+                return ui_role(UI_ON_SURFACE);
+        return map[role].readable ? ui_ink_readable(ui_role(map[role].role)) : ui_role(map[role].role);
 }
 
 // Whether offset is inside any selection (an empty one: none).
@@ -36069,6 +35239,27 @@ static fn ui_text_draw_gutter_bg(struct ui address_to ui, int gx, int y, int gw,
                 ui_fill(ui, hair_x, y, ui_px(ui, 1), h, ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, hair_alpha));
 }
 
+static fn ui_fill_clip_x(struct ui address_to ui, int x, int y, int w, int h, int right, unsigned int tone)
+{
+        if (x < right)
+                ui_fill(ui, x, y, x + w > right ? right - x : w, h, tone);
+}
+
+static fn ui_text_bar_draw(struct ui address_to ui, struct ui_text address_to t)
+{
+        struct ui_bar_rect r;
+
+        if (ui_text_bar_rect(ui, t, &r))
+                ui_bar_draw(ui, &t->bar, &r);
+}
+
+static unsigned int ui_text_token_ink(const struct doc_token address_to tokens, positive count, positive address_to idx, p64 off, unsigned int def)
+{
+        while (*idx < count && tokens[*idx].start + tokens[*idx].length <= off)
+                (*idx)++;
+        return *idx < count && tokens[*idx].start <= off ? ui_text_role(tokens[*idx].role) : def;
+}
+
 static fn ui_text_draw_caret(struct ui address_to ui, const struct ui_text address_to t, int cx, int y, int right_clip, b32 block, b32 text_clip)
 {
         unsigned int cover = UI_CARET_FULL - t->caret_fade;
@@ -36077,8 +35268,8 @@ static fn ui_text_draw_caret(struct ui address_to ui, const struct ui_text addre
 
         if (text_clip)
                 ui_text_fill(ui, t, cx, cy, cw, ch, tone);
-        else if (cx < right_clip)
-                ui_fill(ui, cx, cy, cx + cw > right_clip ? right_clip - cx : cw, ch, tone);
+        else
+                ui_fill_clip_x(ui, cx, cy, cw, ch, right_clip, tone);
 }
 
 static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t, struct ui_text_layout address_to l,
@@ -36193,79 +35384,46 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 // A run is the clusters of one role; each cluster of a single code point one cell is part of a run drawn
                 // with font_cells, any other (marks, wide, emoji) a font_draw of its own at its cell.
                 const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};
-                // The cells are drawn into the body alone: a target at the body's top left, so a cell past its left or right
-                // edge is cut there and not at the window's (the gutter's numbers are not painted over).
-                font_target target = {ui->pixels + (unsigned long)t->top * ui->pitch + t->left, (positive)ui->pitch, t->right - t->left,
-                                      t->bottom - t->top};
+                font_target target = {ui->pixels + (unsigned long)t->top * ui->pitch + t->left, (positive)ui->pitch, t->right - t->left, t->bottom - t->top};
                 font_metrics grid = font_metrics_at(faces[0], ui_text_em(ui, t));
-                p32 codes[256];
-                positive token = 0;
+                b32 cell_y = y + (t->line_height - grid.cell_height) / 2 - t->top;
+                p32 codes[256], cluster[8];
+                positive token = 0, cluster_n = 0;
                 static p8 cluster_cover[256 * 256];
-                p32 cluster[8];
-                positive cluster_n = 0;
 
                 for (p32 k = from; k < to;)
                 {
-                        p64 offset = l->offset[k] - l->offset[0];
-                        unsigned int ink = text;
+                        unsigned int ink = ui_text_token_ink(tokens, token_count, &token, l->offset[k] - l->offset[0], text);
                         p32 run = 0, start = k;
 
-                        while (token < token_count && tokens[token].start + tokens[token].length <= offset)
-                                token++;
-                        if (token < token_count && tokens[token].start <= offset)
-                                ink = ui_text_role(tokens[token].role);
                         while (k < to && run < 256)
                         {
                                 p32 code;
-                                positive size = l->shown_at[k + 1] - l->shown_at[k];
-                                p64 here = l->offset[k] - l->offset[0];
-                                unsigned int ink_here = text;
-                                positive look = token;
+                                positive size = l->shown_at[k + 1] - l->shown_at[k], look = token;
 
-                                while (look < token_count && tokens[look].start + tokens[look].length <= here)
-                                        look++;
-                                if (look < token_count && tokens[look].start <= here)
-                                        ink_here = ui_text_role(tokens[look].role);
-                                if (ink_here != ink || (k > start && ui_text_paper(t, l->offset[k], ground) != ui_text_paper(t, l->offset[start], ground)))
+                                if (ui_text_token_ink(tokens, token_count, &look, l->offset[k] - l->offset[0], text) != ink ||
+                                    (k > start && ui_text_paper(t, l->offset[k], ground) != ui_text_paper(t, l->offset[start], ground)))
                                         break;
                                 if (doc_decode(l->shown + l->shown_at[k], size, &code) != size || l->x[k + 1] - l->x[k] != t->cell)
                                 {
                                         if (k > start)
                                                 break;
-                                        // A tab is laid out as its columns of spaces (one cluster, wider than a cell, that decodes as no code point): under the
-                                        // recorder a run of blanks is skipped, since font_draw of blanks draws nothing, and does not take the font_blend path
-                                        // (lost). The processor's paint is unchanged (the editor rows check that the blanks draw nothing).
-                                        if (ui->scene && ui_shown_blank(l->shown + l->shown_at[k], size))
+                                        if (!(ui->scene && ui_shown_blank(l->shown + l->shown_at[k], size)) &&
+                                            origin + l->x[k] >= t->left - t->cell && origin + l->x[k] < t->right)
                                         {
-                                                k++;
-                                                run = 0;
-                                                goto next;
-                                        }
-                                        if (origin + l->x[k] >= t->left - t->cell && origin + l->x[k] < t->right)
-                                        {
+                                                unsigned int paper = ui_text_paper(t, l->offset[k], ground);
+                                                b32 cell_x = origin + l->x[k] - t->left;
                                                 p32 wide;
 
-                                                // One code point two cells wide (CJK, a fullwidth form) is font_cell with two cells on the paper it sits on,
-                                                // the plan the recorder takes: the same cell, so the processor and the GPU agree. Marks and emoji (several
-                                                // code points) are still font_draw on the ground (font_blend), not recorded (lost).
                                                 if (doc_decode(l->shown + l->shown_at[k], size, &wide) == size && l->x[k + 1] - l->x[k] == 2 * t->cell)
                                                 {
-                                                        unsigned int paper = ui_text_paper(t, l->offset[k], ground);
-                                                        b32 cell_x = origin + l->x[k] - t->left, cell_y = y + (t->line_height - grid.cell_height) / 2 - t->top;
-
                                                         if (ui->scene)
-                                                                ui_scene_wide(ui, faces, wide, &grid, ui_text_em(ui, t), &target, t->left, t->top, cell_x, cell_y,
-                                                                              ink & 0xffffffu, paper);
+                                                                ui_scene_wide(ui, faces, wide, &grid, ui_text_em(ui, t), &target, t->left, t->top, cell_x, cell_y, ink & 0xffffffu, paper);
                                                         else
-                                                                font_cell(ui->engine, faces, 2, wide, 2, &grid, ui_text_em(ui, t), 0, &target, cell_x, cell_y,
-                                                                          ink & 0xffffffu, paper);
+                                                                font_cell(ui->engine, faces, 2, wide, 2, &grid, ui_text_em(ui, t), 0, &target, cell_x, cell_y, ink & 0xffffffu, paper);
                                                 }
                                                 else if (l->x[k + 1] - l->x[k] == t->cell && ui_cluster_codes(l->shown + l->shown_at[k], size, cluster, &cluster_n))
                                                 {
-                                                        // A cluster of one cell (a base and its marks): its code points' boxes are one coverage (font_cluster_plan), drawn
-                                                        // as the recorder draws it (font_plan_paint, or the same plan in a frame).
-                                                        unsigned int paper = ui_text_paper(t, l->offset[k], ground);
-                                                        b32 cell_x = origin + l->x[k] - t->left, cell_y = y + (t->line_height - grid.cell_height) / 2 - t->top;
                                                         font_cell_plan_t plan;
 
                                                         if (grid.cell_width * grid.cell_height > (b32)sizeof(cluster_cover))
@@ -36289,29 +35447,24 @@ cluster_lost:
                                                         if (ui->scene)
                                                                 ui->scene->lost = UI_LOST_MARKS;
                                                         font_draw(ui->engine, faces, 2, l->shown + l->shown_at[k], size, ui_text_em(ui, t), 0, &target,
-                                                                  (b32)((b64)(origin + l->x[k] - t->left) * 65536), baseline - t->top, ink & 0xffffffu,
-                                                                  FONT_UNKNOWN);
+                                                                  (b32)((b64)cell_x * 65536), baseline - t->top, ink & 0xffffffu, FONT_UNKNOWN);
                                                 }
                                         }
-                                        k++;
-                                        run = 0;
-                                        goto next;
+                                        k++, run = 0;
+                                        break;
                                 }
-                                codes[run++] = code;
-                                k++;
+                                codes[run++] = code, k++;
                         }
                         if (run && origin + l->x[start] < t->right && origin + l->x[k] > t->left - t->cell)
                         {
                                 unsigned int paper = ui_text_paper(t, l->offset[start], ground);
-
-                                b32 cell_x = origin + l->x[start] - t->left, cell_y = y + (t->line_height - grid.cell_height) / 2 - t->top;
+                                b32 cell_x = origin + l->x[start] - t->left;
 
                                 if (ui->scene)
                                         ui_scene_cells(ui, faces, 2, 0, codes, run, &grid, ui_text_em(ui, t), &target, t->left, t->top, cell_x, cell_y, ink & 0xffffffu, paper);
                                 else
                                         font_cells(ui->engine, faces, 2, codes, run, &grid, ui_text_em(ui, t), 0, &target, cell_x, cell_y, ink & 0xffffffu, paper);
                         }
-                next:;
                 }
         }
         if (t->mode == UI_TEXT_CODE && t->doc.tab_size)
@@ -36494,50 +35647,29 @@ static fn ui_text_hex_draw(struct ui address_to ui, struct ui_text address_to t,
                         {
                                 unsigned int tone = ui_tone(sel_bg & 0xffffffu, sel_bg >> 24);
 
-                                if (bx < right)
-                                        ui_fill(ui, bx, row_y, bx + 2 * cell > right ? right - bx : 2 * cell, t->line_height, tone);
-                                if (ax < right)
-                                        ui_fill(ui, ax, row_y, ax + cell > right ? right - ax : cell, t->line_height, tone);
+                                ui_fill_clip_x(ui, bx, row_y, 2 * cell, t->line_height, right, tone);
+                                ui_fill_clip_x(ui, ax, row_y, cell, t->line_height, right, tone);
                         }
                         else if (is_caret && t->focused)
-                        {
-                                // Highlight the companion byte in the opposite pane so hex & ASCII stay visually linked.
-                                unsigned int peer = ui_tone(accent, 42);
-
-                                if (t->hex_ascii && bx < right)
-                                        ui_fill(ui, bx, row_y, bx + 2 * cell > right ? right - bx : 2 * cell, t->line_height, peer);
-                                else if (!t->hex_ascii && ax < right)
-                                        ui_fill(ui, ax, row_y, ax + cell > right ? right - ax : cell, t->line_height, peer);
-                        }
+                                ui_fill_clip_x(ui, t->hex_ascii ? bx : ax, row_y, t->hex_ascii ? 2 * cell : cell, t->line_height, right, ui_tone(accent, 42));
                         if (col < got)
                         {
                                 p8 b = row_bytes[col];
                                 char pair[3] = {hex[b >> 4], hex[b & 15], 0};
                                 char ch[2] = {b >= 0x20 && b <= 0x7e ? (char)b : '.', 0};
                                 unsigned int hcol = b == 0 ? dim : (b >= 0x20 && b <= 0x7e) ? ink : info;
-                                unsigned int halpha = b == 0 ? 120 : 255;
 
                                 if (bx < right)
-                                        ui_run_in(ui, faces, bx, baseline, (string_address)pair, t->size + t->zoom, hcol, halpha, t->left, right, 0);
+                                        ui_run_in(ui, faces, bx, baseline, (string_address)pair, t->size + t->zoom, hcol, b == 0 ? 120 : 255, t->left, right, 0);
                                 if (ax < right)
                                         ui_run_in(ui, faces, ax, baseline, (string_address)ch, t->size + t->zoom,
                                                   b >= 0x20 && b <= 0x7e ? ink : dim, b >= 0x20 && b <= 0x7e ? 255 : 110, t->left, right, 0);
                         }
                         if (is_caret && t->focused && t->caret_fade < UI_CARET_FULL)
-                        {
-                                if (!t->hex_ascii && bx < right)
-                                        ui_text_draw_caret(ui, t, bx + (t->hex_nibble ? cell : 0), row_y, right, !t->hex_insert, false);
-                                else if (t->hex_ascii && ax < right)
-                                        ui_text_draw_caret(ui, t, ax, row_y, right, !t->hex_insert, false);
-                        }
+                                ui_text_draw_caret(ui, t, t->hex_ascii ? ax : bx + (t->hex_nibble ? cell : 0), row_y, right, !t->hex_insert, false);
                 }
         }
-        {
-                struct ui_bar_rect r;
-
-                if (ui_text_bar_rect(ui, t, &r))
-                        ui_bar_draw(ui, &t->bar, &r);
-        }
+        ui_text_bar_draw(ui, t);
 }
 
 /*
@@ -36648,44 +35780,29 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                                 ui_chevron(ui, ui_mirror(x + t->cell / 2 - t->cell / 3, 2 * (t->cell / 3) + 1, x, width) + t->cell / 3, row_y + t->line_height / 2, t->cell / 3,
                                            ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 160));
                 }
-                if (!t->wrap || t->mode == UI_TEXT_FIELD || ui_text_lay.bidi)
                 {
-                        if (line_ground != ground && t->right > t->left)
-                                ui_fill(ui, t->left, row_y, t->right - t->left, t->line_height, 0xff000000u | line_ground);
-                        if (t->right > t->left)
-                                ui_text_draw_line(ui, t, &ui_text_lay, 0, ui_text_lay.count, 0, line, row_y, baseline, line_ground, true);
-                        row_y += t->line_height;
-                        continue;
-                }
-                // Wrapped: the line cut where it would pass the box's width, at a blank when one is near, each row
-                // after the first indented as the line is (ui_text_wrap_to, which the hand and the handles cut it by too).
-                {
+                        b32 wrap = t->wrap && t->mode != UI_TEXT_FIELD && !ui_text_lay.bidi;
                         p32 from = 0;
-                        int room = t->right - t->left, indent = room > 0 ? ui_text_wrap_indent(&ui_text_lay, room) : 0;
+                        int room = t->right - t->left, indent = wrap && room > 0 ? ui_text_wrap_indent(&ui_text_lay, room) : 0;
 
                         do
                         {
-                                p32 to = room > 0 ? ui_text_wrap_to(&ui_text_lay, from, room, indent) : ui_text_lay.count;
-                                int offset_x = ui_text_lay.x[from] - (from ? indent : 0);
+                                p32 to = wrap && room > 0 ? ui_text_wrap_to(&ui_text_lay, from, room, indent) : ui_text_lay.count;
+                                int offset_x = wrap ? ui_text_lay.x[from] - (from ? indent : 0) : 0;
 
                                 if (line_ground != ground && room > 0)
                                         ui_fill(ui, t->left, row_y, room, t->line_height, 0xff000000u | line_ground);
                                 if (room > 0)
                                         ui_text_draw_line(ui, t, &ui_text_lay, from, to, offset_x, line, row_y,
                                                           row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline, line_ground,
-                                                          to >= ui_text_lay.count);
+                                                          !wrap || to >= ui_text_lay.count);
                                 row_y += t->line_height;
                                 from = to;
-                        } while (from < ui_text_lay.count && row_y + t->line_height <= t->bottom);
+                        } while (wrap && from < ui_text_lay.count && row_y + t->line_height <= t->bottom);
                 }
         }
         if (t->mode != UI_TEXT_FIELD)
-        {
-                struct ui_bar_rect r;
-
-                if (ui_text_bar_rect(ui, t, &r))
-                        ui_bar_draw(ui, &t->bar, &r);
-        }
+                ui_text_bar_draw(ui, t);
 }
 
 /*
