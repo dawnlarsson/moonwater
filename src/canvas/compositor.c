@@ -1206,6 +1206,7 @@ static struct
         font_engine *engine;
 
         int focus, hover, grab, drag, resize, press; // rows, or COMPOSITOR_NONE
+        unsigned int edge_right; // row + 1 while right button is held on a resize edge waiting for left to move the window; 0 none
         struct ui_click press_click; // the presses on a window's top: a double press is the kit's click count
         struct taskbar_cells cells;  // the panel's cells: what a press on one does (taskbar_cell_press), and the tray's double press
         unsigned int settings_asked; // the times the script was asked for the settings (compositor_settings_open)

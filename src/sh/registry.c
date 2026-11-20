@@ -342,10 +342,10 @@ static const struct settings_row settings_rows[] = {
     //  The theme of Canvas's own windows (ui.c's kit): light or dark, or auto by the clock, and the accent its controls
     //  fill with; the compositor puts them in the window table and every window turns to them at once.
     SETTING_PLAIN_ROW(null, "Theme", SETTINGS_CHOICE, 0, ("canvas", "theme"), "theme ", "light dark auto",
-                      .path = SETTING_THEME_PATH, .standard = "dark", .reset = "dark",
+                      .path = SETTING_THEME_PATH, .standard = "light", .reset = "light",
                       .refusal = "theme is light, dark or auto, not %s\n",
                       .usage = "canvas theme [light|dark|auto]",
-                      .help = "the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [dark]"),
+                      .help = "the colours of the windows Canvas draws itself; auto is light from 7 to 19 by the clock [light]"),
     SETTING_PLAIN_ROW(null, "Accent", SETTINGS_CHOICE, SETTINGS_INK, ("canvas", "theme", "accent"), "accent ",
                       "white amber blue green violet rose graphite",
                       .type = SETTING_COLOUR, .path = SETTING_ACCENT_PATH, .standard = "#ffffff",

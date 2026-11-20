@@ -1478,14 +1478,37 @@ static fn launcher_label(const struct launcher_entry address_to entry, char addr
 }
 
 // A row, for the kit's list: its label and the quiet word of where it is from.
+static const unsigned int address_to launcher_list_picture(int id, int side)
+{
+        return id >= 0 && (positive)id < launcher.entries && launcher.entry[id].kind == LAUNCHER_WINDOW &&
+                       launcher.entry[id].index < ui_apps.count
+                   ? ui_apps_picture(launcher.entry[id].index, side)
+                   : null;
+}
+
 static fn launcher_describe(int id, struct ui_row address_to row)
 {
         static char label[LAUNCHER_TEXT + 8];
+        const struct launcher_entry address_to entry;
 
         if (id < 0 || id >= (int)launcher.entries)
                 return;
-        launcher_label(&launcher.entry[id], label, sizeof(label), &row->note);
+        entry = &launcher.entry[id];
+        launcher_label(entry, label, sizeof(label), &row->note);
         row->label = label;
+        if (entry->kind == LAUNCHER_WINDOW && entry->index < ui_apps.count)
+        {
+                const struct ui_app_entry address_to app = &ui_apps.app[entry->index];
+                int symbol = app->kit ? ui_icon_of(app->id) : -1;
+
+                if (symbol >= 0)
+                        row->icon = symbol + 1;
+                else
+                        row->tile_name = app->kit ? app->id : app->name;
+                row->tile_picture = launcher_list_picture;
+        }
+        else if (entry->kind == LAUNCHER_PROGRAM || entry->kind == LAUNCHER_COMMAND)
+                row->icon = UI_ICON_TERMINAL + 1;
 }
 
 static fn launcher_draw(unsigned int address_to pixels)

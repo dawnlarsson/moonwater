@@ -8174,6 +8174,7 @@ LANGUAGE_ID(menu_bin_empty, "Empty the bin") \
 LANGUAGE_ID(menu_bin_open, "Open the bin") \
 LANGUAGE_ID(menu_bin_restore, "Put back") \
 LANGUAGE_ID(menu_copy, "&Copy") \
+LANGUAGE_ID(menu_copy_row, "Copy row") \
 LANGUAGE_ID(menu_cut, "Cu&t") \
 LANGUAGE_ID(menu_delete, "&Delete") \
 LANGUAGE_ID(menu_find, "&Find") \
@@ -8185,6 +8186,7 @@ LANGUAGE_ID(menu_open_terminal, "Open a &Terminal Here") \
 LANGUAGE_ID(menu_paste, "&Paste") \
 LANGUAGE_ID(menu_properties, "P&roperties") \
 LANGUAGE_ID(menu_redo, "&Redo") \
+LANGUAGE_ID(menu_remove, "Remove") \
 LANGUAGE_ID(menu_rename, "Re&name") \
 LANGUAGE_ID(menu_reset_zoom, "&Reset Zoom") \
 LANGUAGE_ID(menu_select_all, "Select &All") \
@@ -8241,10 +8243,15 @@ LANGUAGE_ID(settings_cannot_join, "moonwater cannot join what that network asks 
 LANGUAGE_ID(settings_cannot_run, "the moonwater command could not be run") \
 LANGUAGE_ID(settings_card_back, "Escape or a press goes back") \
 LANGUAGE_ID(settings_card_stopped, "stopped: Escape or a press goes back") \
+LANGUAGE_ID(settings_column_access, "Access") \
+LANGUAGE_ID(settings_column_security, "Security") \
+LANGUAGE_ID(settings_column_signal, "Signal") \
+LANGUAGE_ID(settings_column_status, "Status") \
 LANGUAGE_ID(settings_copied, "copied to the clipboard") \
 LANGUAGE_ID(settings_copy_both, "Copy label and value") \
 LANGUAGE_ID(settings_copy_line, "%1$s: %2$s") \
 LANGUAGE_ID(settings_copy_value, "Copy value") \
+LANGUAGE_ID(settings_device_deny, "Deny") \
 LANGUAGE_ID(settings_device_drive, "drive, %s") \
 LANGUAGE_ID(settings_device_name, "Name of the device") \
 LANGUAGE_ID(settings_device_none, "No drives or USB devices found") \
@@ -8278,6 +8285,7 @@ LANGUAGE_ID(settings_item_cannot, "moonwater cannot join what this network asks 
 LANGUAGE_ID(settings_item_drive, "shown, not held: no verb changes a drive") \
 LANGUAGE_ID(settings_item_joined, "joined: Delete forgets it") \
 LANGUAGE_ID(settings_item_kept, "kept by its name: Delete forgets it") \
+LANGUAGE_ID(settings_item_link, "linked: Delete removes it") \
 LANGUAGE_ID(settings_item_open, "Enter joins it, and saves it") \
 LANGUAGE_ID(settings_item_saved, "saved: Enter types its passphrase again, Delete forgets it") \
 LANGUAGE_ID(settings_joined, "joined") \
@@ -19370,6 +19378,8 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
         ui_popmenu_pump reads its events and answers what was chosen, and ui_popmenu_close leaves the row. The app's runner
         waits on its wake too while it is open (ui_app.popup).
 */
+struct ui_list;
+
 struct ui_popup
 {
         struct window_row own;
@@ -19378,6 +19388,8 @@ struct ui_popup
         b32 open, pending;
         int shown, x, y;
         struct ui_text address_to field; // the text widget its menu was opened for (ui_text_menu_open), or none
+        struct ui_list address_to list;  // the list its row context menu was opened for (ui_list_menu_open), or none
+        int list_row;                    // the row id that list menu was opened for (-1 none)
 };
 
 /*
@@ -25443,6 +25455,9 @@ static p32 ui_strips_event(struct ui address_to ui, struct ui_strips address_to 
 #define UI_LIST_MOST 512 // the rows a list shows at once (the settings window's every row and list, 3 lists of 24 and All commands)
 #define UI_LIST_STARTS 1 // a row is its section's first
 #define UI_LIST_HEADED 2 // and its section has a header over it
+#define UI_LIST_COLUMNS 4 // and its section has a details column header (row.columns) over its rows
+#define UI_ROW_DENSE 28      // dense row height for details/file-explorer-style lists (logical px at 100% text)
+#define UI_ROW_DENSE_TABS 36 // dense row height when a details row carries segmented tabs (UI_TABS_H = 32)
 
 #define UI_ROW_PLAIN 0
 #define UI_ROW_CHOICE 1
@@ -25520,6 +25535,7 @@ static inline int ui_columns_end(const struct ui_columns address_to c, int k)
 
 struct ui_row
 {
+        struct ui_columns address_to columns; // a section's details header (ui_columns): drawn under the section header, rows rendered as dense striped cells
         const char address_to cells[UI_COLUMNS_MOST]; // under a list's columns: the words of each column after the first (the label's)
         int indent;                        // levels the label is set in by (a tree's rows), UI_INDENT logical pixels each
         int icon;                          // a tile's symbol, UI_ICON_* + 1 (0 none)
@@ -25567,6 +25583,41 @@ struct ui_row
         // null for none: an app's, ui_apps_picture), and where it has none the lettered tile of tile_name (ui_icon_tile) before the symbol.
         const unsigned int address_to (address_to tile_picture)(int id, int side);
         const char address_to tile_name;
+};
+
+/*
+        Base context menu actions for a list row: Copy (primary value or name), Copy row (full row / label and value),
+        and optionally Remove (for removable list items). IDs sit above UI_TEXT_MENU_* so a field row can append them
+        after its text menu without colliding.
+*/
+#define UI_LIST_MENU_COPY 0x100
+#define UI_LIST_MENU_COPY_ROW 0x101
+#define UI_LIST_MENU_REMOVE 0x102
+
+#define UI_LIST_MENU_HAS_COPY 1u      // row has copyable text (else Copy / Copy row are disabled)
+#define UI_LIST_MENU_HAS_COPY_ROW 2u  // include the second copy item (Copy row / Copy label and value)
+#define UI_LIST_MENU_CAN_REMOVE 4u    // include Remove (after a separator)
+#define UI_LIST_MENU_REMOVE_DIM 8u    // Remove shown disabled
+#define UI_LIST_MENU_VALUE_WORDS 16u  // use "Copy value" / "Copy label and value" wording
+
+#define UI_KEY_MENU 127 // keyboard menu key (compositor keycode)
+#define UI_KEY_F10 68   // F10 (Shift+F10 opens a context menu)
+
+static inline b32 ui_key_is_menu(const struct window_event address_to event)
+{
+        return event->a == UI_KEY_MENU || (event->a == UI_KEY_F10 && (event->flags & WINDOW_KEY_SHIFT));
+}
+
+// Declarative context menu hooks for a ui_list: the kit builds, opens, positions, and executes Copy / Copy row / Remove automatically.
+struct ui_list_menu
+{
+        p32 (*flags)(int id);                                           // UI_LIST_MENU_* flags for row id (0: no menu)
+        const char address_to (*copy)(int id);                          // primary text copied by Copy / Copy value
+        void (*copy_row)(int id, char address_to into, positive room);  // full row text for Copy row (null falls back to copy)
+        void (*extra)(struct ui_popmenu address_to m, int id);          // optional app-specific items prepended before base items
+        void (*act)(int id, int item);                                  // Remove (UI_LIST_MENU_REMOVE) or any extra item id
+        void (*copied)(int id);                                         // optional hook called after clipboard write
+        void (*before_open)(int before, int row);                       // optional hook before right-click opens on row (e.g. drop confirm)
 };
 
 struct ui_list
@@ -25634,6 +25685,8 @@ struct ui_list
         // the list like normal, holding both Left and Right box-drag-selects (band / band_began / band_moved), and a clean right click
         // asks for the context menu on release (menu_asked).
         b32 (*selected)(int id);
+        const struct ui_list_menu address_to menu;            // declarative row context menu (base Copy / Copy row / Remove + extra)
+        void (*sorted)(struct ui_columns address_to columns); // called when a sectioned details header changes sort order
         b32 drag_armed, drag_began;
         int drag_row, drag_x, drag_y;
         b32 band_began, band_moved;
@@ -25693,6 +25746,16 @@ static fn ui_list_describe(const struct ui_list address_to l, int id, struct ui_
 static inline int ui_list_pitch(const struct ui address_to ui, const struct ui_list address_to l)
 {
         return l->row_h > 0 ? ui_dev(ui, ui_text_percent > 100 ? l->row_h * ui_text_percent / 100 : l->row_h) : ui_dev(ui, UI_ROW);
+}
+
+// A dense row's height in a sectioned details list (UI_ROW_DENSE, or UI_ROW_DENSE_TABS when it carries a trailing control).
+static inline int ui_list_dense_pitch(const struct ui address_to ui, const struct ui_row address_to row)
+{
+        int base = row && (row->kind == UI_ROW_TABS || row->kind == UI_ROW_BUTTON || row->kind == UI_ROW_SLIDER || row->kind == UI_ROW_SWITCH)
+                       ? UI_ROW_DENSE_TABS
+                       : UI_ROW_DENSE;
+
+        return ui_dev(ui, ui_text_percent > 100 ? base * ui_text_percent / 100 : base);
 }
 
 static inline int ui_list_unit(const struct ui address_to ui, const struct ui_list address_to l)
@@ -25824,18 +25887,24 @@ static fn ui_list_layout(struct ui address_to ui, struct ui_list address_to l)
                 struct ui_row row;
 
                 ui_list_describe(l, l->id[at], &row);
-                l->starts[at] = !at || row.section != section ? UI_LIST_STARTS | (row.header ? UI_LIST_HEADED : 0) : 0;
+                l->starts[at] = !at || row.section != section
+                                    ? UI_LIST_STARTS | (row.header ? UI_LIST_HEADED : 0) | (row.columns ? UI_LIST_COLUMNS : 0)
+                                    : 0;
                 if (at && l->starts[at])
                         y += ui_dev(ui, UI_SECTION_GAP);
                 if (l->starts[at] & UI_LIST_HEADED)
                         y += ui_dev(ui, UI_SECTION);
+                if (l->starts[at] & UI_LIST_COLUMNS)
+                        y += ui_dev(ui, UI_COLUMNS_H);
                 section = row.section;
                 l->top[at] = y;
                 // A row is a row high, and in a list whose words wrap as tall as its lines (its own tree's height, ui_row_whole); a share row is
-                // UI_ROW_SHARE_HIGH of a row's UI_ROW_LEAST, its words cut and not wrapped. A tall row is as tall as a drive's line, its heading and
+                // UI_ROW_SHARE_HIGH of a row's UI_ROW_LEAST, its words cut and not wrapped. A section details row (row.columns) uses the dense
+                // details pitch unless it is editing a field or tall. A tall row is as tall as a drive's line, its heading and
                 // its strip are (ui_row_drive_height). A row that folds is its share of that: a line under an option that is opening or shutting
                 // (the app's spring).
                 l->whole[at] = row.kind == UI_ROW_SHARE ? ui_dev(ui, UI_ROW) * UI_ROW_SHARE_HIGH / UI_ROW_LEAST
+                               : row.columns && !row.tall && row.kind != UI_ROW_FIELD ? ui_list_dense_pitch(ui, &row)
                                : l->wrap && !row.tall && ui->regular ? ui_row_whole(ui, l, l->id[at], &row) : ui_list_pitch(ui, l);
                 l->tall[at] = (int)ui_qmul(row.reveal < 0 ? 0 : row.reveal > UI_ONE ? UI_ONE : row.reveal, row.tall ? ui_row_drive_height(ui, &row) : l->whole[at]);
                 y += l->tall[at];
@@ -26064,6 +26133,8 @@ static b32 ui_list_reveal(const struct ui address_to ui, struct ui_list address_
         else
         {
                 top = l->top[at], height = l->tall[at];
+                if (l->starts[at] & UI_LIST_COLUMNS)
+                        top -= ui_dev(ui, UI_COLUMNS_H), height += ui_dev(ui, UI_COLUMNS_H);
                 if (l->starts[at] & UI_LIST_HEADED)
                         top -= ui_dev(ui, UI_SECTION), height += ui_dev(ui, UI_SECTION);
         }
@@ -26344,7 +26415,7 @@ static int ui_row_drive_height(const struct ui address_to ui, const struct ui_ro
 static struct ui_row_parts
 {
         struct ui_tree tree;
-        struct ui_node address_to mark, address_to label, address_to note_room, address_to note, address_to value_box, address_to back, address_to value,
+        struct ui_node address_to mark, address_to icon, address_to label, address_to note_room, address_to note, address_to value_box, address_to back, address_to value,
                 address_to on, address_to more, address_to control, address_to expander, address_to badge, address_to toggle, address_to bars,
                 address_to share, address_to amount, address_to aside, address_to swatch, address_to segment[UI_STRIP_MOST];
         const char address_to label_shown, address_to value_shown; // the label and the value as they fit, null when they are not written
@@ -26554,6 +26625,8 @@ static fn ui_row_tree_at(struct ui address_to ui, struct ui_list address_to l, i
         // The label is 17 from where the mark starts, which at some scales is a pixel more than the mark and the gap.
         if (row->mark)
                 p->mark = n = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 7)), n->margin[1] = ui_dev(ui, 17) - n->size[0].value - gap;
+        if (row->icon || row->tile_picture || row->tile_name)
+                p->icon = ui_row_leaf(t, UI_FIXED, ui_dev(ui, 20));
         least = wraps ? ui_row_label_least(ui) : 0;
         if (row->kind == UI_ROW_SWITCH || held)
         {
@@ -26995,15 +27068,18 @@ static fn ui_row_label_about(struct ui address_to ui, struct ui_row_parts addres
         label set in by UI_INDENT a level, with its expander's chevron in the room before it (right while shut, down while open). Reading
         from the right every place is turned over the list's middle.
 */
-static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to l, const struct ui_row address_to row, int y, int height,
-                        unsigned int ink, unsigned int quiet)
+static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to l, const struct ui_columns address_to c,
+                        const struct ui_row address_to row, int y, int height, unsigned int ink, unsigned int quiet)
 {
-        const struct ui_columns address_to c = l->columns;
         int pad = ui_dev(ui, UI_INSET), gap = ui_dev(ui, 8), set_in = ui_dev(ui, UI_INDENT) * row->indent + (row->expander ? ui_dev(ui, UI_INDENT) : 0);
         int baseline = ui_kit_baseline(ui, y + (height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM), count = c ? c->count : 1;
         int left = c ? c->x : l->x, span = c ? c->w : l->w;
+        b32 span_all = c != null && row->kind == UI_ROW_PLAIN && row->bars <= 0;
         char cut[UI_CUT_TEXT];
 
+        for (int j = 1; span_all && j < count; j++)
+                if (row->cells[j])
+                        span_all = false;
         if (row->expander)
         {
                 int size = ui_dev(ui, 4), x = l->x + pad + ui_dev(ui, UI_INDENT) * row->indent + ui_dev(ui, 3);
@@ -27014,11 +27090,20 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
         for (int k = 0; k < count; k++)
         {
                 const char address_to words = k ? row->cells[k] : row->label;
-                int x = c ? c->at[k] : l->x, w = c ? ui_columns_end(c, k) : l->w, width;
+                int x = c ? c->at[k] : l->x, w = c ? (span_all && !k ? span : ui_columns_end(c, k)) : l->w, width;
                 string_address shown;
 
                 x += k ? gap : pad + set_in;
                 w -= (k ? gap : pad + set_in) + gap;
+                // A non-selectable list's mark (a joined network): an accent dot before its label in the first column.
+                if (!k && row->mark && !l->selected && w > 0)
+                {
+                        int dot = ui_dev(ui, 6), dx = ui_mirror(x, dot, left, span), dy = y + (height - dot) / 2;
+
+                        ui_kit_fill(ui, &(struct ui_box){dx * 256, dy * 256, (dx + dot) * 256, (dy + dot) * 256, dot * 128, dot * 128},
+                                    ui_role(UI_PRIMARY), null);
+                        x += dot + ui_dev(ui, 8), w -= dot + ui_dev(ui, 8);
+                }
                 // A folder's entry has its symbol before its label, 16 pixels a side, the label after it.
                 if (!k && row->file && w > 0)
                 {
@@ -27026,6 +27111,14 @@ static fn ui_list_cells(struct ui address_to ui, const struct ui_list address_to
 
                         ui_file_icon(ui, row->file - 1, null, ui_mirror(x, size, left, span), y + (height - size) / 2, size, quiet);
                         x += size + ui_dev(ui, 8), w -= size + ui_dev(ui, 8);
+                }
+                // Signal bars sit at the end of the last column in a details list (e.g. Wi-Fi signal strength).
+                if (row->bars > 0 && k == count - 1 && w > 0)
+                {
+                        int sig_w = ui_signal_width(ui), sx = ui_mirror(x + w - sig_w, sig_w, left, span);
+
+                        ui_signal(ui, sx + sig_w, y + height / 2, row->bars);
+                        w -= sig_w + ui_dev(ui, 6);
                 }
                 if (!words || !words[0] || w <= 0)
                         continue;
@@ -27220,6 +27313,53 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
         return UI_COLUMNS_SORTED | UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
 }
 
+// Routes pointer motion and clicks to any sectioned details headers (UI_LIST_COLUMNS) visible inside a list.
+static p32 ui_list_columns_event(struct ui address_to ui, struct ui_list address_to l, const struct window_event address_to event,
+                                 int x, int y, struct ui_columns address_to address_to hit)
+{
+        int col_h = ui_dev(ui, UI_COLUMNS_H);
+        p32 any = 0;
+
+        if (hit)
+                *hit = null;
+        if (l->virtual || (event->type != WINDOW_EVENT_MOTION && event->type != WINDOW_EVENT_BUTTON))
+                return 0;
+        for (int at = 0; at < l->count; at++)
+        {
+                struct ui_row row;
+                struct ui_columns address_to c;
+                int hy;
+                p32 took;
+
+                if (!(l->starts[at] & UI_LIST_COLUMNS))
+                        continue;
+                ui_list_describe(l, l->id[at], &row);
+                c = row.columns;
+                if (!c)
+                        continue;
+                hy = ui_list_row_y(l, at) - col_h;
+                ui_columns_layout(ui, c, l->x, hy, l->w);
+                if (c->held >= 0)
+                {
+                        took = ui_columns_event(ui, c, event, x, y);
+                        if (hit)
+                                *hit = c;
+                        return took;
+                }
+                if (event->type == WINDOW_EVENT_BUTTON && (y < l->y || y >= l->y + l->h))
+                        continue;
+                took = ui_columns_event(ui, c, event, x, y >= l->y && y < l->y + l->h ? y : -1);
+                any |= took;
+                if (took & UI_COLUMNS_TAKEN)
+                {
+                        if (hit)
+                                *hit = c;
+                        return any;
+                }
+        }
+        return any;
+}
+
 /*
         A tile of a list's icon or list view: lit where the keys are (the list's lit fill), a hint of the ink under the pointer, ringed in the
         accent when it is marked (one of many chosen); its symbol over its label, the label cut with dots to the tile and centred, or, for a
@@ -27342,30 +27482,57 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         if ((n = p->picture) && row.paint && seen)
                 row.paint(ui, id, n->x, n->y, n->w, n->h);
         baseline = ui_row_baseline(ui, p->label, UI_BODY_MEDIUM);
-        if ((n = p->mark) && !l->columns && !l->tree) // under columns a row chosen is its well (below), and no dot over its symbol
-                ui_kit_fill(ui, &(struct ui_box){n->x * 256, (n->y + (n->h - n->w) / 2) * 256, (n->x + n->w) * 256, (n->y + (n->h + n->w) / 2) * 256, n->w * 128, n->w * 128},
-                            ui_role(UI_PRIMARY), null);
-        // Under columns the row is its cells; with an indent (a tree's row) its label is set in by it, with the expander's chevron
-        // before it.
-        if (l->columns || l->tree)
         {
-                // A row lit for a moment (a drop landed on it): the selection's own fill, which reads on a light theme and a dark one alike
-                // (the accent may be white on the dark one), and a ring of the ink round it.
-                if (row.glow)
-                {
-                        struct ui_box glow = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
+                struct ui_columns address_to cols = row.columns && row.kind != UI_ROW_FIELD ? row.columns : l->columns;
 
-                        ui_kit_fill(ui, &glow, ui_kit_lit(ui), null);
-                        ui_kit_ring(ui, &glow, ui_q8(ui, 1), 0x90000000u | (strong & 0xffffffu));
+                if ((n = p->mark) && !cols && !l->tree) // under columns a row chosen is its well or column dot, and no layout dot over its symbol
+                        ui_kit_fill(ui, &(struct ui_box){n->x * 256, (n->y + (n->h - n->w) / 2) * 256, (n->x + n->w) * 256, (n->y + (n->h + n->w) / 2) * 256, n->w * 128, n->w * 128},
+                                    ui_role(UI_PRIMARY), null);
+                if ((n = p->icon) && !cols && !l->tree && seen)
+                {
+                        int icon_side = n->w < n->h ? n->w : n->h;
+                        int ix = n->x + (n->w - icon_side) / 2, iy = n->y + (n->h - icon_side) / 2;
+                        const unsigned int address_to pic = row.tile_picture ? row.tile_picture(id, icon_side) : null;
+
+                        if (pic)
+                                ui_icon_picture(ui, ix, iy, icon_side, pic);
+                        else if (row.tile_name)
+                                ui_icon_tile(ui, ix, iy, icon_side, row.tile_name);
+                        else if (row.icon)
+                                ui_icon(ui, row.icon - 1, ix, iy, icon_side, 0, strong);
                 }
-                // A row that is one of many chosen is a well of the accent across its span (the row the keys are on is lit over it too).
-                if (row.mark)
-                        ui_kit_fill(ui, &(struct ui_box){across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0},
-                                    0x38000000u | (ui_role(UI_PRIMARY) & 0xffffffu), null);
-                ui_list_cells(ui, l, &row, y, height, ink, quiet);
-                if (trailing)
-                        ui_control_draw(ui, trailing);
-                return;
+                // Under columns the row is its cells; with an indent (a tree's row) its label is set in by it, with the expander's chevron
+                // before it.
+                if (cols || l->tree)
+                {
+                        if (cols && (cols->x != l->x || cols->w != l->w))
+                                ui_columns_layout(ui, cols, l->x, cols->y, l->w);
+                        // A row lit for a moment (a drop landed on it): the selection's own fill, which reads on a light theme and a dark one alike
+                        // (the accent may be white on the dark one), and a ring of the ink round it.
+                        if (row.glow)
+                        {
+                                struct ui_box glow = {across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0};
+
+                                ui_kit_fill(ui, &glow, ui_kit_lit(ui), null);
+                                ui_kit_ring(ui, &glow, ui_q8(ui, 1), 0x90000000u | (strong & 0xffffffu));
+                        }
+                        // A row that is one of many chosen (multi-select list) is a well of the accent across its span (the row the keys are on is lit over it too).
+                        if (row.mark && l->selected)
+                                ui_kit_fill(ui, &(struct ui_box){across * 256, y * 256, (across + across_w) * 256, (y + height) * 256, 0, 0},
+                                            0x38000000u | (ui_role(UI_PRIMARY) & 0xffffffu), null);
+                        if (row.tall)
+                        {
+                                ui_list_cells(ui, l, cols, &row, y + ui_dev(ui, UI_DRIVE_TOP), ui_drive_part(ui, UI_DRIVE_LINE), ink, quiet);
+                                if (trailing)
+                                        ui_control_draw(ui, trailing);
+                                ui_list_drive(ui, &row, seen, strong, quiet);
+                                return;
+                        }
+                        ui_list_cells(ui, l, cols, &row, y, height, ink, quiet);
+                        if (trailing)
+                                ui_control_draw(ui, trailing);
+                        return;
+                }
         }
         // Where words wrap, the label, the note and the value are their lines (ui_row_text), one where they fit, drawn as below; a label
         // with what its row does under it is one block of both (ui_row_label_about).
@@ -27501,36 +27668,53 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                 ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, l->y + (row_height - ui_dev(ui, 20)) / 2, UI_BODY_MEDIUM),
                                     ui_fit(ui, (string_address)l->empty, UI_BODY_MEDIUM, room, cut, sizeof(cut)), UI_BODY_MEDIUM,
                                     ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
-        for (int at = 0; at < l->count; at++)
         {
-                int y = ui_list_row_y(l, at), height = l->tall[at];
+                int section_row = 0;
+                b32 section_table = false;
 
-                if ((l->starts[at] & UI_LIST_HEADED) && y > l->y && y - ui_dev(ui, UI_SECTION) < l->y + l->h)
+                for (int at = 0; at < l->count; at++)
                 {
-                        struct ui_row row;
+                        int y = ui_list_row_y(l, at), height = l->tall[at];
+                        int col_h = (l->starts[at] & UI_LIST_COLUMNS) ? ui_dev(ui, UI_COLUMNS_H) : 0;
 
-                        ui_list_describe(l, ui_list_id(l, at), &row);
-                        ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET), ui_kit_baseline(ui, y - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
-                                            ui_fit(ui, (string_address)row.header, UI_TITLE_SMALL, room, cut, sizeof(cut)), UI_TITLE_SMALL,
-                                            ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
-                }
-                // A row folding is cut to its share: its words stay in it while it shows less than its line (a row, or its lines).
-                if (height > 0 && y + height > l->y && y < l->y + l->h)
-                {
-                        int band_top = ui->top, band_bottom = ui->bottom;
-
-                        if (height < l->whole[at])
-                                ui->top = y > l->y ? y : l->y, ui->bottom = y + height < l->y + l->h ? y + height : l->y + l->h;
-                        if (l->tiles)
-                                ui_list_tile(ui, l, ui_list_id(l, at), y, height);
-                        else
+                        if (l->starts[at] & UI_LIST_STARTS)
+                                section_row = 0, section_table = (l->starts[at] & UI_LIST_COLUMNS) != 0;
+                        if (l->starts[at] & (UI_LIST_HEADED | UI_LIST_COLUMNS))
                         {
-                                // A virtual list's row is striped by its number in the whole list, any other's by its place.
-                                if (ui_list_striped(l, l->virtual ? ui_list_id(l, at) : at))
-                                        ui_list_stripe(ui, l, y, height);
-                                ui_list_row(ui, l, ui_list_id(l, at), y, height);
+                                struct ui_row row;
+                                int head_bottom = y - col_h;
+
+                                ui_list_describe(l, ui_list_id(l, at), &row);
+                                if ((l->starts[at] & UI_LIST_HEADED) && head_bottom > l->y && head_bottom - ui_dev(ui, UI_SECTION) < l->y + l->h)
+                                        ui_kit_text_flipped(ui, l->x + ui_dev(ui, UI_INSET),
+                                                            ui_kit_baseline(ui, head_bottom - ui_dev(ui, UI_SECTION) + ui_dev(ui, 8), UI_TITLE_SMALL),
+                                                            ui_fit(ui, (string_address)row.header, UI_TITLE_SMALL, room, cut, sizeof(cut)), UI_TITLE_SMALL,
+                                                            ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, l->x, l->w);
+                                if ((l->starts[at] & UI_LIST_COLUMNS) && row.columns && y > l->y && y - col_h < l->y + l->h)
+                                {
+                                        ui_columns_layout(ui, row.columns, l->x, y - col_h, l->w);
+                                        ui_columns_draw(ui, row.columns);
+                                }
                         }
-                        ui->top = band_top, ui->bottom = band_bottom;
+                        // A row folding is cut to its share: its words stay in it while it shows less than its line (a row, or its lines).
+                        if (height > 0 && y + height > l->y && y < l->y + l->h)
+                        {
+                                int band_top = ui->top, band_bottom = ui->bottom;
+
+                                if (height < l->whole[at])
+                                        ui->top = y > l->y ? y : l->y, ui->bottom = y + height < l->y + l->h ? y + height : l->y + l->h;
+                                if (l->tiles)
+                                        ui_list_tile(ui, l, ui_list_id(l, at), y, height);
+                                else
+                                {
+                                        // A virtual list's row is striped by its number in the whole list, a sectioned details table by its row in the section, any other by its place.
+                                        if (ui_list_striped(l, l->virtual ? ui_list_id(l, at) : at) || (section_table && (section_row & 1)))
+                                                ui_list_stripe(ui, l, y, height);
+                                        ui_list_row(ui, l, ui_list_id(l, at), y, height);
+                                }
+                                ui->top = band_top, ui->bottom = band_bottom;
+                        }
+                        section_row++;
                 }
         }
         l->scroll.scroll = drawn;
@@ -27863,7 +28047,7 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                         }
                         if (l->press.down || l->drag_armed || l->scroll.held)
                                 ui_list_press_cancel(ui, l);
-                        if (l->selected && on_list)
+                        if ((l->selected || l->menu) && on_list)
                                 l->right_down = true;
                         return -1;
                 }
@@ -28038,6 +28222,138 @@ static int ui_view_list_click(struct ui address_to ui, struct ui_view address_to
         return -1;
 }
 
+/* ---- declarative list context menus (Copy, Copy row, Remove + extra) ---- */
+
+static fn ui_list_menu_items(struct ui_popmenu address_to m, p32 flags)
+{
+        p32 copy_state = (flags & UI_LIST_MENU_HAS_COPY) ? 0 : UI_MENU_DISABLED;
+        b32 value_words = (flags & UI_LIST_MENU_VALUE_WORDS) != 0;
+
+        ui_popmenu_add(m, value_words ? WORDS(settings_copy_value) : WORDS(menu_copy), null, copy_state, UI_LIST_MENU_COPY);
+        if (flags & UI_LIST_MENU_HAS_COPY_ROW)
+                ui_popmenu_add(m, value_words ? WORDS(settings_copy_both) : WORDS(menu_copy_row), null, copy_state, UI_LIST_MENU_COPY_ROW);
+        if (flags & UI_LIST_MENU_CAN_REMOVE)
+        {
+                ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_add(m, WORDS(menu_remove), "Delete", (flags & UI_LIST_MENU_REMOVE_DIM) ? UI_MENU_DISABLED : 0, UI_LIST_MENU_REMOVE);
+        }
+}
+
+static fn ui_list_menu_populate(struct ui_popmenu address_to m, const struct ui_list address_to l, int id)
+{
+        if (!l || !l->menu || !l->menu->flags)
+                return;
+        if (l->menu->extra)
+                l->menu->extra(m, id);
+        ui_list_menu_items(m, l->menu->flags(id));
+}
+
+// Opens a list row's context menu at (x, y) in window device pixels; tracks popup->list and popup->list_row automatically.
+static b32 ui_list_menu_open(struct ui address_to ui, struct ui_list address_to l, struct ui_popup address_to popup,
+                             struct window_row address_to own, int id, int x, int y, b32 keys)
+{
+        struct ui_popmenu address_to m;
+
+        if (!ui || !l || !l->menu || !l->menu->flags || !l->menu->copy || !popup || !own || ui->scale <= 0)
+                return false;
+        if (!l->menu->copy(id) || !l->menu->flags(id))
+                return false;
+        m = &popup->menu;
+        m->count = 0, m->typed_length = 0;
+        memory_zero(&m->press, sizeof(m->press));
+        ui_list_menu_populate(m, l, id);
+        if (!m->count)
+                return false;
+        popup->field = null;
+        if (!ui_popmenu_open(popup, own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch))
+        {
+                popup->list = null, popup->list_row = -1;
+                return false;
+        }
+        popup->list = l, popup->list_row = id;
+        if (keys)
+        {
+                m->hot = 0;
+                ui_popmenu_present(popup);
+        }
+        return true;
+}
+
+// Opens the focused row's context menu under that row (Menu key or Shift+F10), revealing the row first and mirroring for RTL.
+static b32 ui_list_menu_open_keys(struct ui address_to ui, struct ui_list address_to l, struct ui_popup address_to popup,
+                                  struct window_row address_to own, int room_h)
+{
+        int id, at, x, y, tall;
+        struct ui measure;
+        struct ui_popmenu address_to m;
+
+        if (!ui || !l || !l->menu || !l->menu->flags || !l->menu->copy || !popup || !own)
+                return false;
+        id = l->focus;
+        at = ui_list_at(l, id);
+        if (at < 0 || !l->menu->copy(id) || !l->menu->flags(id))
+                return false;
+        ui_list_reveal(ui, l);
+        measure = *ui;
+        m = &popup->menu;
+        m->count = 0;
+        ui_list_menu_populate(m, l, id);
+        ui_popmenu_size(&measure, m, room_h);
+        tall = l->tall[at] > 0 ? l->tall[at] : ui_list_pitch(ui, l);
+        y = ui_list_row_y(l, at) + tall - ui_px(ui, UI_GAP1);
+        x = ui_rtl() ? l->x + l->w - ui_dev(ui, UI_INSET) - m->width : l->x + ui_dev(ui, UI_INSET);
+        return ui_list_menu_open(ui, l, popup, own, id, x < 0 ? 0 : x, y, true);
+}
+
+// Appends a row's base list menu items after an inline text field's menu, tagging popup->list / list_row for ui_list_menu_do.
+static fn ui_list_menu_attach(struct ui_popup address_to popup, struct ui_list address_to l, int id)
+{
+        if (!popup || !l || !l->menu || !l->menu->flags)
+                return;
+        ui_popmenu_add(&popup->menu, null, null, UI_MENU_SEPARATOR, 0);
+        ui_list_menu_populate(&popup->menu, l, id);
+        popup->list = l, popup->list_row = id;
+}
+
+// Executes a chosen item from a list context menu (Copy, Copy row, Remove, or extra). Returns true if handled.
+static b32 ui_list_menu_do(struct ui_popup address_to p, struct window_row address_to own, int id)
+{
+        struct ui_list address_to l;
+        int row;
+
+        if (!p || !p->list || !p->list->menu)
+                return false;
+        l = p->list, row = p->list_row;
+        p->list = null, p->list_row = -1;
+        if (id == UI_LIST_MENU_COPY || id == UI_LIST_MENU_COPY_ROW)
+        {
+                char line[1024];
+                const char address_to text = l->menu->copy ? l->menu->copy(row) : null;
+
+                if (text)
+                {
+                        if (id == UI_LIST_MENU_COPY_ROW && l->menu->copy_row)
+                                l->menu->copy_row(row, line, sizeof(line));
+                        else
+                                string_copy_bounded((string_address)line, (string_address)text, sizeof(line));
+                        if (line[0])
+                        {
+                                windows_clip_offer(own, WINDOWS_CLIP_CLIPBOARD, line, string_length((string_address)line));
+                                if (l->menu->copied)
+                                        l->menu->copied(row);
+                        }
+                }
+                return true;
+        }
+        if (id == UI_LIST_MENU_REMOVE || (!p->field && id > UI_LIST_MENU_REMOVE))
+        {
+                if (l->menu->act)
+                        l->menu->act(row, id);
+                return true;
+        }
+        return !p->field;
+}
+
 /* ---- a finger's press: what it drags, and what its lift throws ---- */
 /*
         A finger's press (ui_press): ui_press_down takes it where the finger lands, the region it drags is held where it is drawn;
@@ -28169,6 +28485,9 @@ struct ui_page
         char menu_mark[UI_MENU_ITEMS][2 * UI_PAGE_WORD]; // the same, its ampersands doubled for the menu
         // The app's: what scrolls in the body (its list's region, or a page of text's).
         struct ui_scroll address_to body;
+        // Optional popup + window handle: lets ui_page_pointer and ui_page_context_key open list context menus with zero app state.
+        struct ui_popup address_to popup;
+        struct window_row address_to own;
         // The picture: the page's buffers and the flag that it is due. The kit marks what changes in it (a press, a finger, a key,
         // a menu); the app marks what its own data changed (ui_page_redraw, ui_page_damage).
         struct ui_buffers buffers;
@@ -28179,6 +28498,7 @@ static fn ui_buffers_all(struct ui_buffers address_to b);
 static fn ui_buffers_rows(struct ui_buffers address_to b, int top, int bottom);
 static fn ui_page_damage(struct ui_page address_to p, int top, int bottom);
 static fn ui_page_changed(struct ui_page address_to p);
+static fn ui_page_redraw(struct ui_page address_to p);
 
 /*
         The page's frame, a view: the title's band (the title, and the search field at its end, clear of the window's buttons, when the
@@ -28627,6 +28947,7 @@ static b32 ui_page_menu_open(const struct ui address_to ui, struct ui_page addre
                 y = top + ui_px(ui, UI_ROW) - ui_px(ui, UI_GAP1);
         }
         menu->field = null;
+        menu->list = null, menu->list_row = -1;
         // A menu that did not open (its row could not be taken) is no menu of the page's: no row has one open.
         if (!ui_popmenu_open(menu, own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch))
         {
@@ -28745,6 +29066,19 @@ static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to 
                 return true;
         }
         return false;
+}
+
+// Opens the focused row's list context menu on Menu / Shift+F10 when the page's keys are in the rows.
+static b32 ui_page_context_key(struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l,
+                               const struct window_event address_to event)
+{
+        if (p->card || p->menu_row >= 0 || !p->pane || !p->popup || !p->own || !l->menu || !ui_key_is_menu(event))
+                return false;
+        if (l->menu->before_open)
+                l->menu->before_open(l->focus, l->focus);
+        if (ui_list_menu_open_keys(ui, l, p->popup, p->own, p->height))
+                ui_page_redraw(p);
+        return true;
 }
 
 // Lets go of a page's press where the rows under it have moved (a row came in, went out or changed place): the press targets a place of the
@@ -28993,6 +29327,43 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
                 if (side & UI_VIEW_DRAW)
                         ui_page_redraw(p);
                 if (side & UI_VIEW_TAKEN)
+                        return;
+        }
+        // Right-click on a list row opens its declarative context menu (ui_list.menu) automatically with zero app state.
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && !p->card && p->menu_row < 0 && p->popup && p->own && l->menu)
+        {
+                ui_page_let_go(ui, p, l);
+                if (event->flags & WINDOW_KEY_DOWN)
+                {
+                        int x = ui_kit.pointer_x, y = ui_kit.pointer_y, row = ui_page_target(ui, p, l, x, y);
+
+                        if (row >= 0 && row < UI_PAGE_GROUP)
+                        {
+                                int before = l->focus;
+
+                                if (row != before)
+                                        l->focus = row;
+                                p->pane = 1;
+                                if (l->menu->before_open)
+                                        l->menu->before_open(before, row);
+                                ui_list_menu_open(ui, l, p->popup, p->own, row, x, y, false);
+                                ui_page_redraw(p);
+                        }
+                }
+                return;
+        }
+        // Sectioned details column headers inside the page's list: click to sort, drag edge to resize.
+        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && !p->card && p->menu_row < 0)
+        {
+                struct ui_columns address_to hit = null;
+                p32 took = ui_list_columns_event(ui, l, event, event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x,
+                                                 event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y, &hit);
+
+                if ((took & UI_COLUMNS_SORTED) && l->sorted)
+                        l->sorted(hit);
+                if (took & UI_COLUMNS_DRAW)
+                        ui_page_redraw(p);
+                if (took & UI_COLUMNS_TAKEN)
                         return;
         }
         if (ui_list_slider(ui, p, l, event))
@@ -30001,7 +30372,7 @@ static int ui_app_run(struct ui_app address_to app)
         ui_kit.themed = __atomic_load_n(&table->themed, __ATOMIC_ACQUIRE);
         // A table the compositor has not themed yet is the standard: dark, white.
         ui_kit_sync_table(table);
-        ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_DARK, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
+        ui_kit_theme(ui_kit.themed ? table->theme : UI_THEME_LIGHT, ui_kit.themed ? table->accent : UI_ACCENT_STANDARD, table->motion);
         string_copy_bounded((string_address)table->title[row], (string_address)language_of((const char address_to)app->title), WINDOWS_TITLE);
         windows_name(app->own, (const char *)app->name);
         // Who the window is, for its tab and its group in the taskbar: the program's name is its app_id ("settings", "files").
@@ -30062,8 +30433,13 @@ static int ui_app_run(struct ui_app address_to app)
                         {
                                 int gone = ui_popmenu_scroll(app->popup, &event);
 
-                                if (gone != UI_MENU_NOTHING && app->chose)
-                                        app->chose(gone);
+                                if (gone != UI_MENU_NOTHING)
+                                {
+                                        if (app->chose)
+                                                app->chose(gone);
+                                        else if (ui_list_menu_do(app->popup, app->own, gone))
+                                                ui_app_changed(app);
+                                }
                         }
                         if (!app->event(&event))
                                 running = false;
@@ -30073,8 +30449,13 @@ static int ui_app_run(struct ui_app address_to app)
                 {
                         int chosen = ui_popmenu_pump(app->popup);
 
-                        if (chosen != UI_MENU_NOTHING && app->chose)
-                                app->chose(chosen);
+                        if (chosen != UI_MENU_NOTHING)
+                        {
+                                if (app->chose)
+                                        app->chose(chosen);
+                                else if (ui_list_menu_do(app->popup, app->own, chosen))
+                                        ui_app_changed(app);
+                        }
                         // A menu's ripple is moving: its next picture is due a display period on.
                         if (app->popup->open && app->popup->menu.moving)
                                 timeout = ui_kit_frame_ns();
@@ -32545,6 +32926,7 @@ static b32 ui_text_menu_open(struct ui_popup address_to p, struct ui_text addres
         p->menu.count = 0;
         ui_text_menu_items(&p->menu, t, false);
         p->field = t;
+        p->list = null, p->list_row = -1;
         return ui_popmenu_open(p, t->own, ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
 

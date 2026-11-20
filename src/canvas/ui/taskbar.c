@@ -2870,7 +2870,7 @@ static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_
         //      The kit's theme, which a kit program takes from the table and the compositor had never been given: a menu's ground
         //      (ui_role_surface) and its words (ui_text_colour) were the zero theme's, black on black, with only the separator's
         //      line (ui->ink) to be seen. At once, as reduced motion turns it: the menu is drawn whole each time it is drawn.
-        ui_kit_theme(themed ? table->theme : UI_THEME_DARK, themed ? table->accent : UI_ACCENT_STANDARD, 1);
+        ui_kit_theme(themed ? table->theme : UI_THEME_LIGHT, themed ? table->accent : UI_ACCENT_STANDARD, 1);
 
         unsigned int address_to scratch = ui->scratch;
         int scratch_width = ui->scratch_width, scratch_scale = ui->scratch_scale;

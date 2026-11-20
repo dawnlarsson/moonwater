@@ -334,7 +334,7 @@ static void sessionbus_settings(void)
                 dark = !day;
         }
         else
-                dark = !string_equals((string_address)word, (string_address) "light");
+                dark = string_equals((string_address)word, (string_address) "dark");
         sessionbus_word(SETTING_ACCENT_PATH, word, sizeof word);
         if (word[0] && !string_equals((string_address)word, (string_address) "reset") && !string_equals((string_address)word, (string_address) "default"))
                 accent = window_colour_parse((string_address)word);

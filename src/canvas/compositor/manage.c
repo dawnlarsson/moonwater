@@ -35,11 +35,30 @@ static signed char compositor_layer_clamp(int layer)
                                                : (signed char)layer;
 }
 
-// Effective stacking band of a row: its declared layer, or WINDOW_LAYER_ABOVE for small non-fullscreen override-redirect X11 menus/popups.
+static int compositor_popup_root(int row);
+
+// Effective stacking band of a row: its declared layer, inheriting at least its popup parent chain's layer
+// (so context menus opened from overlays like the launcher always stack above them), or WINDOW_LAYER_ABOVE
+// for small non-fullscreen override-redirect X11 menus/popups.
 static signed char compositor_layer_of(int row)
 {
         signed char layer = compositor.layer[row];
 
+        if (compositor_popup_parent[row] >= 0)
+        {
+                int parent = compositor_popup_parent[row], hops = 0;
+
+                while (parent >= 0 && parent < (int)compositor_rows_in_use && hops++ < (int)compositor_rows_in_use)
+                {
+                        signed char pl = compositor.layer[parent];
+
+                        if (pl == WINDOW_LAYER_NORMAL && (compositor.asks[parent] & (WINDOW_DISMISS | WINDOW_NO_CLOSE)) == (WINDOW_DISMISS | WINDOW_NO_CLOSE))
+                                pl = WINDOW_LAYER_OVERLAY;
+                        if (pl > layer)
+                                layer = pl;
+                        parent = compositor_popup_parent[parent];
+                }
+        }
         if (layer == WINDOW_LAYER_NORMAL && compositor_row_xoverride(row) && !compositor.fullscreen[row] &&
             !((int)compositor.w[row] >= compositor.width && (int)compositor.h[row] >= compositor.height))
                 return WINDOW_LAYER_ABOVE;
@@ -66,7 +85,7 @@ static void compositor_raise_one(int row)
         compositor_damage_row(row);
 }
 
-// On top of its own stacking layer band, keeping owned transient/modal dialogs above their owner.
+// On top of its own stacking layer band, keeping owned transient/modal dialogs and open popups above their owner.
 static void compositor_raise(int row)
 {
         compositor_raise_one(row);
@@ -74,6 +93,9 @@ static void compositor_raise(int row)
                 return;
         for (int child = 0; child < (int)compositor_rows_in_use; child++)
                 if (child != row && compositor_owner[child] == row + 1 && compositor_visible(child) && compositor_popup_parent[child] < 0)
+                        compositor_raise_one(child);
+        for (int child = 0; child < (int)compositor_rows_in_use; child++)
+                if (child != row && compositor_popup_parent[child] >= 0 && compositor_popup_root(child) == row && compositor_visible(child))
                         compositor_raise_one(child);
 }
 
@@ -957,6 +979,7 @@ static int compositor_hold_cancel(void)
                 return 0;
         compositor_preview(COMPOSITOR_NONE);
         compositor.drag = compositor.resize = compositor.shared_row = COMPOSITOR_NONE;
+        compositor.edge_right = 0;
         compositor.press = COMPOSITOR_NONE;
         compositor_mark_clear();
         compositor_lit(COMPOSITOR_NONE, 0, 0);
@@ -2652,6 +2675,8 @@ static void compositor_leave(int row)
         compositor.drag = compositor.drag == row ? COMPOSITOR_NONE : compositor.drag;
         compositor.press = compositor.press == row ? COMPOSITOR_NONE : compositor.press;
         compositor.resize = compositor.resize == row ? COMPOSITOR_NONE : compositor.resize;
+        if (compositor.edge_right == (unsigned int)row + 1)
+                compositor.edge_right = 0;
         // A window that comes into the row next has no edge of this one's lit, and a finger on its X closes nothing.
         if (compositor.lit_row == row)
                 compositor.lit_row = COMPOSITOR_NONE, compositor.lit_edges = compositor.lit_held = 0;

@@ -3434,6 +3434,36 @@ static void check_compositor_cancel(void)
           compositor.resize == COMPOSITOR_NONE && compositor.table->want_width[1] == 100 && compositor.x[1] == 60);
     screens_hand(60 + 100 + 2 + 40, 100, -1);
     compositor.press = COMPOSITOR_NONE;
+
+    /* Both left and right click on any resize edge moves the entire window (in either button order), without
+       leaking clicks to the window, and Escape still cancels the move. */
+    compositor_float(1);
+    head = compositor.table->event_head[1];
+    // 1. Left down on bottom resize edge, then Right down -> reverts any resize and drags the whole window.
+    screens_hand(110, 60 + 80 + 2, 1);
+    screens_hand(110, 60 + 80 + 2 + 10, 0);
+    compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+    screens_hand(130, 60 + 80 + 2 + 25, 0);
+    check("edge move: left+right on a resize edge reverts the resize and moves the entire window",
+          compositor.drag == 1 && compositor.resize == COMPOSITOR_NONE && compositor.w[1] == 100 && compositor.h[1] == 80 &&
+              compositor.x[1] == 80 && compositor.y[1] == 75);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+    check("edge move: releasing both buttons drops the window where moved with no stray events to the client",
+          compositor.drag == COMPOSITOR_NONE && compositor.x[1] == 80 && compositor.y[1] == 75 && compositor.table->event_head[1] == head);
+
+    // 2. Right down on left resize edge, then Left down -> moves the entire window too.
+    compositor.pointer_x = 80 - 2, compositor.pointer_y = 75 + 40;
+    compositor_motion();
+    compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+    compositor_button(COMPOSITOR_BTN_LEFT, 1);
+    screens_hand(80 - 2 - 20, 75 + 40 - 15, 0);
+    check("edge move: right+left on a resize edge moves the entire window in the reverse button order too",
+          compositor.drag == 1 && compositor.resize == COMPOSITOR_NONE && compositor.x[1] == 60 && compositor.y[1] == 60);
+    compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+    compositor_button(COMPOSITOR_BTN_LEFT, 0);
+    check("edge move: releasing right then left ends the move cleanly",
+          compositor.drag == COMPOSITOR_NONE && compositor.edge_right == 0 && compositor.x[1] == 60 && compositor.y[1] == 60);
 }
 
 /*

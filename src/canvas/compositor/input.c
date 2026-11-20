@@ -2078,7 +2078,10 @@ static void compositor_drag_stop(int row)
                 return;
         resized = compositor.resize == row;
         compositor_preview(COMPOSITOR_NONE);
-        compositor.drag = compositor.resize = compositor.shared_row = COMPOSITOR_NONE;
+        compositor.drag = COMPOSITOR_NONE;
+        compositor.resize = COMPOSITOR_NONE;
+        compositor.shared_row = COMPOSITOR_NONE;
+        compositor.edge_right = 0;
         compositor_mark_clear();
         compositor_lit(COMPOSITOR_NONE, 0, 0);
         rows_none(&compositor.hold_rows);
@@ -2109,6 +2112,11 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         // What the hand held is let go: its line is no longer lit.
         if (dragged >= 0 || resized >= 0)
                 compositor_lit(COMPOSITOR_NONE, 0, 0);
+        if (code == COMPOSITOR_BTN_RIGHT && compositor.edge_right)
+        {
+                compositor.edge_right = 0;
+                compositor_lit(COMPOSITOR_NONE, 0, 0);
+        }
         if (resized >= 0)
         {
                 compositor_mark_clear();
@@ -2308,8 +2316,24 @@ static void compositor_button(unsigned int code, int down)
                 return;
         }
 
-        // A right press while the hand moves or resizes a window takes the move back, as Escape does (compositor_hold_cancel);
-        // the press is nothing else. A resize the right button holds (Alt) has no second right press.
+        // Both left and right click while on a window resize edge moves the entire window: pressing right during an
+        // edge resize reverts the resize and begins dragging the window instead. A right press during a drag (or
+        // Alt+Right resize) still takes the move back, as Escape does (compositor_hold_cancel).
+        if (code == COMPOSITOR_BTN_RIGHT && compositor.resize >= 0 && !alt)
+        {
+                int row = compositor.resize;
+
+                compositor_hold_cancel();
+                if (row >= 0 && row < COMPOSITOR_ROWS && compositor.showing[row] && !compositor.fullscreen[row])
+                {
+                        compositor_raise(row);
+                        compositor_focus(row);
+                        compositor_drag_begin(row);
+                        compositor.cursor.shape = CP_ARROW;
+                        compositor_cursor_move();
+                }
+                return;
+        }
         if (code == COMPOSITOR_BTN_RIGHT && compositor_hold_cancel())
                 return;
 
@@ -2424,12 +2448,45 @@ static void compositor_button(unsigned int code, int down)
 
         // A right press is the window's as a left one is: it is raised and has the keys, so the menu it opens there has them too (its
         // arrows, Enter, Escape), where they stayed with the window that had them before and the menu could not be closed by a key.
+        // On a resize edge, holding right arms the left+right chord to move the entire window from any edge.
         if (code == COMPOSITOR_BTN_RIGHT && !alt && compositor.grab < 0 && !compositor_wl_held())
+        {
+                unsigned int edges = compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
+
                 compositor_raise(under), compositor_focus(under);
+                if (edges && !compositor.fullscreen[under])
+                {
+                        compositor.edge_right = (unsigned int)under + 1;
+                        compositor.press_x = compositor.pointer_x;
+                        compositor.press_y = compositor.pointer_y;
+                        compositor_lit(under, edges, 1);
+                        return;
+                }
+        }
 
         if ((code == COMPOSITOR_BTN_LEFT || (code == COMPOSITOR_BTN_RIGHT && alt)) && compositor.grab < 0 && !compositor_wl_held())
         {
                 unsigned int edges = compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
+
+                // Completing a right+left chord on a resize edge moves the entire window from any edge.
+                if (code == COMPOSITOR_BTN_LEFT && !alt && compositor.edge_right)
+                {
+                        int row = (int)compositor.edge_right - 1;
+
+                        compositor.edge_right = 0;
+                        if (row >= 0 && row < COMPOSITOR_ROWS && compositor.showing[row] && !compositor.fullscreen[row] &&
+                            (compositor_edge_zone(row, compositor.pointer_x, compositor.pointer_y) ||
+                             !ui_touch_past(compositor.press_x, compositor.press_y, compositor.pointer_x, compositor.pointer_y,
+                                            ui_touch_slop(compositor_row_scale(row)))))
+                        {
+                                compositor_raise(row);
+                                compositor_focus(row);
+                                compositor_drag_begin(row);
+                                compositor.cursor.shape = CP_ARROW;
+                                compositor_cursor_move();
+                                return;
+                        }
+                }
 
                 now = clock_monotonic_nanoseconds();
                 compositor_raise(under);

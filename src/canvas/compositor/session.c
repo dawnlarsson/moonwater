@@ -463,7 +463,7 @@ static const struct compositor_chrome *compositor_chrome_now(void)
         static struct compositor_chrome chrome;
         static unsigned int made, made_dark, made_accent;
         struct windows address_to table = compositor.table;
-        unsigned int themed = table && table->themed, dark = themed ? table->theme == UI_THEME_DARK : 1;
+        unsigned int themed = table && table->themed, dark = themed ? table->theme == UI_THEME_DARK : 0;
         unsigned int accent = themed ? table->accent & 0xffffffu : UI_ACCENT_STANDARD;
 
         if (!made || made_dark != dark || made_accent != accent)
@@ -687,9 +687,9 @@ static void compositor_theme_core_read(void)
         unsigned int motion;
 
         compositor_word(SETTING_THEME_PATH, word, sizeof(word));
-        // Dark is the theme when nothing is kept (and when what is kept is none of the words).
-        compositor.theme_word = string_equals((string_address)word, (string_address) "light") ? 0
-                                : string_equals((string_address)word, (string_address) "auto") ? 2 : 1;
+        // Light is the theme when nothing is kept (and when what is kept is none of the words).
+        compositor.theme_word = string_equals((string_address)word, (string_address) "dark") ? 1
+                                : string_equals((string_address)word, (string_address) "auto") ? 2 : 0;
         compositor_word(SETTING_ACCENT_PATH, word, sizeof(word));
         if (word[0] && !string_equals((string_address)word, (string_address) "reset") && !string_equals((string_address)word, (string_address) "default"))
                 accent = window_colour_parse((string_address)word);

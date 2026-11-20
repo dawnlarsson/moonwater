@@ -4024,8 +4024,8 @@ static fn check_kit_theme(void)
                 const struct settings_row address_to accent_row = setting_by_path((string_address)SETTING_ACCENT_PATH);
 
                 ui_theme_make(&theme, 1, UI_ACCENT_STANDARD);
-                check("kit theme: the standard is dark with a white accent, its fills white with the dark ink on them",
-                      theme_row && accent_row && string_equals((string_address)theme_row->standard, (string_address) "dark") &&
+                check("kit theme: the standard is light with a white accent, and dark with white fills white with the dark ink on them",
+                      theme_row && accent_row && string_equals((string_address)theme_row->standard, (string_address) "light") &&
                           string_equals((string_address)accent_row->standard, (string_address) "#ffffff") &&
                           theme.role[UI_PRIMARY] == 0xffffffffu && theme.role[UI_ON_PRIMARY] == UI_INK && theme.role[UI_SURFACE] == 0xff111113u &&
                           ui_contrast(theme.role[UI_ON_PRIMARY], theme.role[UI_PRIMARY]) >= 450);
@@ -4044,7 +4044,7 @@ static fn check_kit_theme(void)
                         b32 before, standard, light, white, tabs;
 
                         compositor.table->themed = 0;
-                        before = compositor_line_lit() == 0xa7a7a7u && compositor_line_unlit() == 0x52525bu && compositor_tab_target(0) == 0x111113u;
+                        before = compositor_line_lit() == 0x18181bu && compositor_line_unlit() == 0xa1a1aau && compositor_tab_target(0) == 0xf7f7f8u;
                         compositor.table->themed = 1, compositor.table->theme = 1, compositor.table->accent = 0xffffff;
                         standard = compositor_line_lit() == 0xa7a7a7u && compositor_line_unlit() == 0x52525bu;
                         tabs = compositor_tab_target(0) == 0x111113 && compositor_tab_target(1) == 0xffffff;

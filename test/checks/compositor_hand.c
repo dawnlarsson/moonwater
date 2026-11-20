@@ -767,6 +767,50 @@ static void check_compositor_popup(void)
     compositor_present();
     check("popup keys: a window that takes the row of a popup's window has the keys, not the popup",
           compositor.focus == 1 && compositor_popup_top(1) == 1);
+
+    // A popup (context menu) opened from an overlay window such as the launcher (WINDOW_DISMISS | WINDOW_NO_CLOSE)
+    // must inherit WINDOW_LAYER_OVERLAY and stack ABOVE its parent, never underneath it.
+    compositor_popup_leave(1);
+    compositor_stack_remove(1);
+    compositor_stack_remove(3);
+    compositor.showing[1] = compositor.showing[3] = 0;
+    table->glass[1] = WINDOW_DISMISS | WINDOW_NO_CLOSE;
+    table->x[1] = 40, table->y[1] = 40, table->width[1] = 120, table->height[1] = 80;
+    glass_paint(1, 0, 0, 120, 80, 0x202020, true);
+    compositor_present();
+    table->popup_parent[3] = 2; // row 1 + 1
+    table->popup_x[3] = 10, table->popup_y[3] = 10, table->popup_w[3] = 0, table->popup_h[3] = 0;
+    table->popup_flags[3] = WINDOW_POPUP_POINT;
+    table->width[3] = 60, table->height[3] = 40;
+    table->glass[3] = WINDOW_NO_CLOSE;
+    glass_paint(3, 0, 0, 60, 40, 0x303030, true);
+    compositor_present();
+    {
+        int launcher_pos = -1, popup_pos = -1;
+
+        for (unsigned int i = 0; i < compositor.stacked; i++)
+        {
+            if (compositor.stack[i] == 1)
+                launcher_pos = (int)i;
+            if (compositor.stack[i] == 3)
+                popup_pos = (int)i;
+        }
+        check("popup layer: a context menu opened from the launcher inherits WINDOW_LAYER_OVERLAY and stacks above it",
+              compositor_layer_of(1) == WINDOW_LAYER_OVERLAY && compositor_layer_of(3) == WINDOW_LAYER_OVERLAY &&
+                  launcher_pos >= 0 && popup_pos > launcher_pos);
+        compositor_raise(1);
+        launcher_pos = popup_pos = -1;
+        for (unsigned int i = 0; i < compositor.stacked; i++)
+        {
+            if (compositor.stack[i] == 1)
+                launcher_pos = (int)i;
+            if (compositor.stack[i] == 3)
+                popup_pos = (int)i;
+        }
+        check("popup layer: raising the launcher keeps its open context menu stacked above it",
+              launcher_pos >= 0 && popup_pos > launcher_pos);
+    }
+    compositor_popup_leave(1);
     for (int row = 0; row < COMPOSITOR_ROWS; row++)
         compositor_popup_parent[row] = -1;
 }
