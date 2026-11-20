@@ -428,15 +428,28 @@ static unsigned int ui_ink_on(unsigned int fill)
         return ui_contrast(0xff000000u, fill) >= white ? 0xff000000u : 0xffffffffu;
 }
 
-// An ink deepened: from a start, mixed toward black (or white on dark) a step at a time, keeping its hue, until it stands out least
-// (hundredths: 450 is 4.5:1) from both grounds (the same twice for one). Text on a container, a role's words, the focus ring's ink.
-static unsigned int ui_ink_deepened(unsigned int start, unsigned int one, unsigned int two, unsigned int least, unsigned int toward)
+// Mix `colour` toward `toward` by the least amount (0..100% binary search) that reaches `min_ratio` contrast against both grounds.
+static unsigned int ui_contrast_mix2(unsigned int colour, unsigned int one, unsigned int two, unsigned int toward, unsigned int min_ratio)
 {
-        unsigned int ink = start;
+        unsigned int c = colour | 0xff000000u, t = toward | 0xff000000u, low = 0, high = 100;
 
-        for (int step = 0; step < 24 && (ui_contrast(ink, one) < least || ui_contrast(ink, two) < least); step++)
-                ink = ui_mix(ink | 0xff000000u, 85, toward);
-        return ink;
+        if (ui_contrast(c, one) >= min_ratio && ui_contrast(c, two) >= min_ratio)
+                return c;
+        while (low < high)
+        {
+                unsigned int mid = (low + high + 1) / 2, mixed = ui_mix(c, mid, t);
+
+                if (ui_contrast(mixed, one) >= min_ratio && ui_contrast(mixed, two) >= min_ratio)
+                        low = mid;
+                else
+                        high = mid - 1;
+        }
+        return ui_mix(c, low, t);
+}
+
+static inline unsigned int ui_contrast_mix(unsigned int colour, unsigned int ground, unsigned int toward, unsigned int min_ratio)
+{
+        return ui_contrast_mix2(colour, ground, ground, toward, min_ratio);
 }
 
 // The roles for light or dark and an accent (0xrrggbb).
@@ -458,15 +471,13 @@ static fn ui_theme_make(struct ui_theme address_to theme, unsigned int dark, uns
         if (dark)
         {
                 theme->role[UI_PRIMARY_CONTAINER] = ui_mix(fill, 22, theme->role[UI_SURFACE_HIGH]);
-                theme->role[UI_ON_PRIMARY_CONTAINER] = ui_ink_deepened(ui_mix(fill, 40, 0xffffffffu), theme->role[UI_PRIMARY_CONTAINER],
-                                                                                 theme->role[UI_PRIMARY_CONTAINER], 450, 0xffffffffu);
+                theme->role[UI_ON_PRIMARY_CONTAINER] = ui_contrast_mix(ui_mix(fill, 40, 0xffffffffu), theme->role[UI_PRIMARY_CONTAINER], 0xffffffffu, 450);
                 theme->role[UI_CONTROL_OFF] = ui_mix(bright, 14, theme->role[UI_SURFACE_HIGHEST]);
         }
         else
         {
                 theme->role[UI_PRIMARY_CONTAINER] = ui_mix(fill, 20, 0xffffffffu);
-                theme->role[UI_ON_PRIMARY_CONTAINER] = ui_ink_deepened(ui_mix(fill, 29, 0xff000000u), theme->role[UI_PRIMARY_CONTAINER],
-                                                                                 theme->role[UI_PRIMARY_CONTAINER], 450, 0xff000000u);
+                theme->role[UI_ON_PRIMARY_CONTAINER] = ui_contrast_mix(ui_mix(fill, 29, 0xff000000u), theme->role[UI_PRIMARY_CONTAINER], 0xff000000u, 450);
                 theme->role[UI_CONTROL_OFF] = ui_mix(bright, 14, 0xffffffffu);
         }
 }
@@ -9150,20 +9161,6 @@ static inline unsigned int ui_over(unsigned int pixel, unsigned int under)
 }
 #endif
 
-// A premultiplied tone (ui_tone, or a pixel of a picture) at cover 255ths of itself: every channel, alpha included, times the cover. The
-// box layer's cover of a straight colour is ui_kit_cover (256ths, premultiplied after the alpha is taken): the two differ in input and in
-// rounding, so they are not one function.
-static unsigned int ui_tone_cover(unsigned int tone, unsigned int cover)
-{
-        unsigned int out = 0;
-
-        if (cover >= 255)
-                return tone;
-        for (unsigned int shift = 0; shift < 32; shift += 8)
-                out |= ui_div255((tone >> shift & 255) * cover + 127) << shift;
-        return out;
-}
-
 // A rectangle (pixels, already cut to what may be drawn) recorded for the GPU: the colour as it is when it is opaque or when it is to be written (a
 // fill), laid over what is there when it is not (a tone over; none at all when it has no alpha).
 static void ui_scene_record(struct ui_scene address_to scene, int x0, int y0, int x1, int y1, unsigned int tone, b32 write)
@@ -9273,117 +9270,6 @@ static fn ui_fill(struct ui address_to ui, int x, int y, int width, int height, 
         if (x2 > x)
                 for (int row = y; row < y2; row++)
                         memory_over_tone_u32(ui->pixels + (unsigned long)row * ui->pitch + (unsigned long)x, (positive)(x2 - x), tone);
-}
-
-/*
-        How much of a pixel a rounded rectangle covers, in 255ths: sixteen
-        sample points, those in a corner's square counted inside its quarter
-        circle. x and y are the pixel's place from the rectangle's top left.
-*/
-static unsigned int ui_round_cover(int x, int y, int width, int height, int radius)
-{
-        unsigned int inside = 0;
-
-        if (x < 0 || y < 0 || x >= width || y >= height)
-                return 0;
-        if ((x >= radius && x < width - radius) || (y >= radius && y < height - radius))
-                return 255;
-
-        for (int sy = 0; sy < 4; sy++)
-                for (int sx = 0; sx < 4; sx++)
-                {
-                        // In eighths of a pixel, from the nearest corner's circle's centre. In 64 bits: past a radius of
-                        // 5792 px the squares leave int (the corner's sides are two radii and more).
-                        b64 px = 8 * (b64)x + 2 * sx + 1, py = 8 * (b64)y + 2 * sy + 1;
-                        b64 cx = x < radius ? 8 * (b64)radius : 8 * (b64)(width - radius);
-                        b64 cy = y < radius ? 8 * (b64)radius : 8 * (b64)(height - radius);
-                        b64 dx = px - cx, dy = py - cy;
-
-                        inside += dx * dx + dy * dy <= 64 * (b64)radius * (b64)radius;
-                }
-        return (inside * 255 + 8) / 16;
-}
-
-/*
-        A corner's cover depends on its radius alone: the radius is already in device pixels, and ui_round_cover reads no
-        other input. Its sample points are symmetric about the middle of the corner's square, so a pixel of any corner
-        samples the same circle as the pixel mirrored across that middle into the top left quarter. That quarter is made
-        once for each radius, the first time the radius is drawn, and kept: radius r at the sum of the squares below it,
-        so the masks of every radius up to UI_CORNER_MOST take UI_CORNER_BYTES (22140), and a larger radius is not kept
-        (ui_round_cover answers it, as before). A radius is one slot, so no two radii share one.
-*/
-#define UI_CORNER_MOST 40
-#define UI_CORNER_BYTES (UI_CORNER_MOST * (UI_CORNER_MOST + 1) * (2 * UI_CORNER_MOST + 1) / 6)
-static unsigned char ui_corner_masks[UI_CORNER_BYTES];
-static unsigned char ui_corner_made[UI_CORNER_MOST + 1];
-
-static const unsigned char address_to ui_corner_mask(int radius)
-{
-        unsigned char address_to mask = ui_corner_masks + (unsigned long)(radius - 1) * radius * (2 * radius - 1) / 6;
-
-        if (!ui_corner_made[radius])
-        {
-                // The quarter of a corner of radius, read from ui_round_cover itself: its square is 2 radius across.
-                for (int y = 0; y < radius; y++)
-                        for (int x = 0; x < radius; x++)
-                                mask[y * radius + x] = (unsigned char)ui_round_cover(x, y, 2 * radius, 2 * radius, radius);
-                ui_corner_made[radius] = 1;
-        }
-        return mask;
-}
-
-// ui_round_cover, read from a corner's mask where the pixel is in a corner's square. A pixel left of the middle or above it
-// is its own place in the top left quarter; one to the right or below is mirrored across the middle.
-static unsigned int ui_round_cover_cached(int x, int y, int width, int height, int radius)
-{
-        int mx, my;
-
-        if (radius < 1 || radius > UI_CORNER_MOST)
-                return ui_round_cover(x, y, width, height, radius);
-        if (x < 0 || y < 0 || x >= width || y >= height)
-                return 0;
-        if ((x >= radius && x < width - radius) || (y >= radius && y < height - radius))
-                return 255;
-        mx = x < radius ? x : width - 1 - x;
-        my = y < radius ? y : height - 1 - y;
-        return ui_corner_mask(radius)[my * radius + mx];
-}
-
-// A rounded rectangle, filled.
-static fn ui_round(struct ui address_to ui, int x, int y, int width, int height, int radius, unsigned int tone)
-{
-        radius = radius * 2 > width ? width / 2 : radius;
-        radius = radius * 2 > height ? height / 2 : radius;
-        for (int row = 0; row < height; row++)
-        {
-                // The straight middle rows are one fill.
-                if (row >= radius && row < height - radius)
-                {
-                        int last = height - radius;
-
-                        ui_fill(ui, x, y + row, width, last - row, tone);
-                        row = last - 1;
-                        continue;
-                }
-                // A row outside the band is not walked; a corner row's straight middle is one fill, as its cover is all of it.
-                if (!ui_in_band(ui, y + row))
-                        continue;
-                for (int column = 0; column < width; column++)
-                {
-                        unsigned int cover;
-
-                        if (column == radius && width - radius > radius)
-                        {
-                                ui_fill(ui, x + radius, y + row, width - 2 * radius, 1, tone);
-                                column = width - radius - 1;
-                                continue;
-                        }
-                        cover = ui_round_cover_cached(column, row, width, height, radius);
-
-                        if (cover)
-                                ui_dot(ui, x + column, y + row, ui_tone_cover(tone, cover));
-                }
-        }
 }
 
 /*
@@ -11487,25 +11373,10 @@ static b64 ui_slide_land(struct ui_slide address_to s, b32 address_to live)
 #define UI_READABLE 470
 #define UI_GLASS_GROUND 0x101012u // a glass window's ground before the compositor has tinted one: a dark glass's
 
-/*
-        The quiet ink on a glass ground: the ground mixed toward the ink from 176 of 256, or further toward it, the least
-        that stands out UI_READABLE from the ground. The ink is the most the kit's rule gives (window_contrast), so it
-        always does; the quiet one does not on the glass's ends, a dark glass at its brightest or a light one at its dimmest.
-*/
+// The quiet ink on a glass ground: ground mixed toward ink from 176/256, or further until contrast reaches UI_READABLE.
 static unsigned int ui_glass_quiet(unsigned int ground, unsigned int ink)
 {
-        unsigned int low = 176, high = 256;
-
-        while (low < high)
-        {
-                unsigned int mid = (low + high) / 2;
-
-                if (ui_contrast(window_mix(ground, ink, mid), ground) >= UI_READABLE)
-                        high = mid;
-                else
-                        low = mid + 1;
-        }
-        return window_mix(ground, ink, low);
+        return ui_contrast_mix(window_mix(ground, ink, 176), ground, ink, UI_READABLE) & 0xffffffu;
 }
 
 // The inks for a ground: what the compositor says the glass came to.
@@ -11722,18 +11593,44 @@ static inline unsigned int ui_role(int role)
         return ui_kit.shown.role[role];
 }
 
+// Whether what the rows lie on is light: an opaque window's surface, or what a glass's tint came to, in the lighter half of the range.
+static inline b32 ui_kit_light(const struct ui address_to ui)
+{
+        return ui_luminance(ui && ui->glass ? ui->ground & 0xffffffu : ui_role(UI_SURFACE) & 0xffffffu) > 32768;
+}
+
+// Container fill and on-container ink for a semantic role (PRIMARY, ERROR, SUCCESS, WARNING, INFO, SECONDARY_CONTAINER, or surface default).
+static fn ui_role_pair(int role, unsigned int address_to fill, unsigned int address_to ink)
+{
+        int bg, fg;
+
+        switch (role)
+        {
+        case UI_PRIMARY:             bg = UI_PRIMARY_CONTAINER,   fg = UI_ON_PRIMARY_CONTAINER;   break;
+        case UI_ERROR:               bg = UI_ERROR_CONTAINER,     fg = UI_ON_ERROR_CONTAINER;     break;
+        case UI_SUCCESS:             bg = UI_SUCCESS_CONTAINER,   fg = UI_ON_SUCCESS_CONTAINER;   break;
+        case UI_WARNING:             bg = UI_WARNING_CONTAINER,   fg = UI_ON_WARNING_CONTAINER;   break;
+        case UI_INFO:                bg = UI_INFO_CONTAINER,      fg = UI_ON_INFO_CONTAINER;      break;
+        case UI_SECONDARY_CONTAINER: bg = UI_SECONDARY_CONTAINER, fg = UI_ON_SECONDARY_CONTAINER; break;
+        case UI_SURFACE_HIGHEST:     bg = UI_SURFACE_HIGHEST,     fg = UI_ON_SURFACE_VARIANT;     break;
+        default:                     bg = UI_SURFACE_LOW,         fg = UI_ON_SURFACE_VARIANT;     break;
+        }
+        if (fill)
+                *fill = ui_role(bg);
+        if (ink)
+                *ink = ui_role(fg);
+}
+
 /*
         A role's colour as the ink of words on the window's grounds: the colour itself where it stands out 4.5:1 from the surface and
-        from the highest well on it (the darkest light ground, the lightest dark one), else mixed toward black (light) or white (dark) a
-        step at a time until it does, so it keeps its hue. Dawn's orange as a text button's or a keyword's words was 2.4:1 on white, and
-        the amber of numbers and the preprocessor 4.3:1 on the light surface.
+        from the highest well on it (the darkest light ground, the lightest dark one), else mixed toward black (light) or white (dark)
+        until it does, so it keeps its hue.
 */
 static unsigned int ui_ink_readable(unsigned int ink)
 {
         unsigned int surface = ui_role(UI_SURFACE) & 0xffffffu, well = ui_role(UI_SURFACE_HIGHEST) & 0xffffffu;
-        unsigned int toward = ui_luminance(surface) > 32768 ? 0xff000000u : 0xffffffffu;
 
-        return ui_ink_deepened(ink, surface, well, 450, toward);
+        return ui_contrast_mix2(ink, surface, well, ui_kit_light(null) ? 0xff000000u : 0xffffffffu, 450);
 }
 
 /*
@@ -12570,6 +12467,37 @@ static fn ui_kit_fill(struct ui address_to ui, const struct ui_box address_to bo
                 ui_kit_fill_cols(ui, box, argb, clip, at, at + UI_KIT_LINE < last ? at + UI_KIT_LINE : last);
 }
 
+// Convert a premultiplied tone (ui_tone) to straight ARGB for ui_kit_fill.
+static unsigned int ui_unpremultiply(unsigned int tone)
+{
+        unsigned int a = tone >> 24, out = a << 24;
+
+        if (a == 0 || a == 255)
+                return tone;
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+        {
+                unsigned int c = ((tone >> shift & 255) * 255 + a / 2) / a;
+
+                out |= (c > 255 ? 255 : c) << shift;
+        }
+        return out;
+}
+
+// A rounded rectangle, filled (premultiplied tone, device pixels), forwarded to the box layer (single GPU box op).
+static fn ui_round(struct ui address_to ui, int x, int y, int width, int height, int radius, unsigned int tone)
+{
+        struct ui_box box;
+
+        if (width <= 0 || height <= 0 || !(tone >> 24))
+                return;
+        if (radius < 0)
+                radius = 0;
+        radius = radius * 2 > width ? width / 2 : radius;
+        radius = radius * 2 > height ? height / 2 : radius;
+        box = (struct ui_box){(b32)x << 8, (b32)y << 8, (b32)(x + width) << 8, (b32)(y + height) << 8, (b32)radius << 8, (b32)radius << 8};
+        ui_kit_fill(ui, &box, ui_unpremultiply(tone), null);
+}
+
 
 // A box laid down in the coordinates a control works in (as if the window read from the left), turned over the control's middle
 // (sum: its left and right edges added, device 256ths) when it reads from the right; the box that clips it turned with it.
@@ -13101,12 +13029,15 @@ static inline b32 ui_stroke(const struct ui address_to ui) { return ui_q8(ui, 1)
 static unsigned int ui_kit_focus_ink(const struct ui address_to ui)
 {
         unsigned int ink = ui_role(UI_PRIMARY) | 0xff000000u, ground = ui_role(UI_SURFACE) | 0xff000000u;
-        b32 light = ui_luminance(ground & 0xffffffu) > 32768;
-        unsigned int lit = light ? ui_role(UI_SURFACE_LOWEST) | 0xff000000u : ground, toward = light ? 0xff000000u : 0xffffffffu;
+        b32 light;
+        unsigned int lit, toward;
 
         if (ui->glass)
                 return 0xff000000u | (ui->ink & 0xffffffu);
-        return ui_ink_deepened(ink, ground, lit, 300, toward);
+        light = ui_kit_light(ui);
+        lit = light ? ui_role(UI_SURFACE_LOWEST) | 0xff000000u : ground;
+        toward = light ? 0xff000000u : 0xffffffffu;
+        return ui_contrast_mix2(ink, ground, lit, toward, 300);
 }
 
 static fn ui_kit_focus_ring(struct ui address_to ui, const struct ui_box address_to box)
@@ -13264,13 +13195,6 @@ static inline fn ui_kit_layer_fill(struct ui address_to ui, const struct ui_box 
 {
         if (layer)
                 ui_kit_fill(ui, box, ui_mix(ink, layer, 0), null);
-}
-
-// Whether what the rows lie on is light: an opaque window's surface, or what a glass's tint came to, in the lighter half of the range.
-// A lit row there is lighter than its ground, as it is on a dark one, and not the ink laid over it, which on a light ground is a darker grey.
-static inline b32 ui_kit_light(const struct ui address_to ui)
-{
-        return ui_luminance(ui->glass ? ui->ground & 0xffffffu : ui_role(UI_SURFACE) & 0xffffffu) > 32768;
 }
 
 /*
@@ -14608,18 +14532,16 @@ static fn ui_badge_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         UI_CALL();
         int role = c->role, dot = c->on ? 2 * UI_DOT : 0;
-        // A role's container is the next role, except the error's: its on-colour is laid before its container (role + 2).
-        unsigned int fill = role == UI_PRIMARY ? ui_role(UI_PRIMARY_CONTAINER)
-                            : role < 0         ? 0
-                                               : ui_role(role == UI_ERROR ? UI_ERROR_CONTAINER : role + 1);
-        unsigned int ink = role == UI_PRIMARY ? ui_role(UI_ON_PRIMARY_CONTAINER) : role < 0 ? ui_role(UI_ON_SURFACE_VARIANT) : ui_role(role);
+        unsigned int fill = 0, ink = ui_role(UI_ON_SURFACE_VARIANT);
         struct ui_box box;
 
-        if (role == UI_SURFACE_HIGHEST)
-                fill = ui_role(UI_SURFACE_HIGHEST), ink = ui_role(UI_ON_SURFACE_VARIANT);
-        // A status's words keep its colour, deepened on its container till they read 4.5:1 (Failed was 3.9:1, Degraded 4.0, Healthy 4.4 light).
-        else if (role > 0 && fill)
-                ink = ui_ink_deepened(ink, fill, fill, 450, ui_luminance(ui_role(UI_SURFACE) & 0xffffffu) > 32768 ? 0xff000000u : 0xffffffffu);
+        if (role >= 0)
+        {
+                ui_role_pair(role, &fill, &ink);
+                // A status's words keep its colour, deepened on its container till they read 4.5:1.
+                if (role > 0 && role != UI_SURFACE_HIGHEST && fill)
+                        ink = ui_contrast_mix(ui_role(role), fill, ui_kit_light(ui) ? 0xff000000u : 0xffffffffu, 450);
+        }
         ui_control_size(ui, c);
         box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(22), ui_q(6));
         if (fill)
@@ -14754,12 +14676,10 @@ static fn ui_callout_draw(struct ui address_to ui, struct ui_control address_to 
 {
         UI_CALL();
         int role = c->role;
-        unsigned int fill = role ? ui_role(role == UI_PRIMARY ? UI_PRIMARY_CONTAINER : role == UI_ERROR ? UI_ERROR_CONTAINER : role + 1)
-                                 : ui_role(UI_SURFACE_LOW);
-        unsigned int ink = role ? ui_role(role == UI_PRIMARY ? UI_ON_PRIMARY_CONTAINER : role == UI_ERROR ? UI_ON_ERROR_CONTAINER : role + 2)
-                                : ui_role(UI_ON_SURFACE_VARIANT);
+        unsigned int fill, ink;
         struct ui_box box = ui_box_of(ui, ui_q(c->x), ui_q(c->y), ui_q(c->w), ui_q(c->h), ui_q(14));
 
+        ui_role_pair(role ? role : -1, &fill, &ink);
         ui_kit_fill(ui, &box, fill, null);
         ui_control_label(ui, c, 16, 14, UI_LABEL_LARGE, role ? ink : ui_role(UI_ON_SURFACE));
         if (c->text[0])
@@ -16228,6 +16148,131 @@ static long ui_body_given(struct ui_body address_to b, b64 at)
         and the wheel turns it along the screen. Its bar is drawn and takes no pointer, and a pull of it stretches nothing: ui_scroll_pointer,
         ui_scroll_reach and ui_scroll_pull are a region's that runs down.
 */
+// Unified 64-bit scrollbar primitive (shared thumb math for ui_scroll and overlay interaction/draw for 64-bit views like ui_text).
+struct ui_bar
+{
+        b32 hover, held;
+        int grab_y;
+        p64 grab_pos;
+};
+
+struct ui_bar_rect
+{
+        int x, y, w, h;
+        int thumb_pos, thumb_len;
+        p64 max_pos;
+};
+
+static b32 ui_bar_geom(int track_start, int track_len, int min_thumb, b64 content, b64 view, b64 pos,
+                       int address_to thumb_pos, int address_to thumb_len, p64 address_to max_pos)
+{
+        b64 rest = content - view;
+        int least, len;
+
+        if (content <= view || view <= 0 || track_len <= 0)
+                return false;
+        least = min_thumb > track_len ? track_len : min_thumb;
+        len = (int)((b64)track_len * view / content);
+        len = len < least ? least : len > track_len ? track_len : len;
+        *thumb_len = len;
+        *thumb_pos = track_start + (int)((b64)(track_len - len) * pos / rest);
+        if (max_pos)
+                *max_pos = (p64)rest;
+        return true;
+}
+
+static b32 ui_bar_place(const struct ui address_to ui, int left, int top, int right, int bottom,
+                        p64 total, p64 view, p64 cur, struct ui_bar_rect address_to r)
+{
+        int pad = ui_px(ui, 3), bw = ui_px(ui, 10), bh = bottom - top - 2 * pad;
+        p64 pos = total > view && cur > total - view ? total - view : cur;
+
+        if (bh <= 16 || right - left < bw * 3)
+                return false;
+        r->w = bw;
+        r->x = ui_rtl() ? left + pad : right - bw - pad;
+        r->y = top + pad;
+        r->h = bh;
+        return ui_bar_geom(r->y, r->h, ui_px(ui, 24), (b64)total, (b64)view, (b64)pos, &r->thumb_pos, &r->thumb_len, &r->max_pos);
+}
+
+static b32 ui_bar_event(const struct ui address_to ui, struct ui_bar address_to b, const struct ui_bar_rect address_to r,
+                        b32 valid, const struct window_event address_to event, int x, int y, p64 address_to pos)
+{
+        int slop;
+
+        if (!valid)
+        {
+                b->hover = b->held = false;
+                return false;
+        }
+        slop = ui_px(ui, 2);
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                b32 on;
+
+                if (b->held)
+                {
+                        int span = r->h - r->thumb_len;
+                        b64 target = span > 0 ? (b64)b->grab_pos + (b64)(y - b->grab_y) * (b64)r->max_pos / span : 0;
+
+                        *pos = target < 0 ? 0 : (p64)target > r->max_pos ? r->max_pos : (p64)target;
+                        ui_kit_shape = WINDOW_POINTER_ARROW;
+                        return true;
+                }
+                on = x >= r->x - slop && x < r->x + r->w + slop && y >= r->y && y < r->y + r->h;
+                if (on)
+                        ui_kit_shape = WINDOW_POINTER_ARROW;
+                if (on != b->hover)
+                {
+                        b->hover = on;
+                        return true;
+                }
+                return false;
+        }
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
+        {
+                if (!(event->flags & WINDOW_KEY_DOWN))
+                {
+                        if (!b->held)
+                                return false;
+                        b->held = false;
+                        return true;
+                }
+                if (x >= r->x - slop && x < r->x + r->w + slop && y >= r->y && y < r->y + r->h)
+                {
+                        int span = r->h - r->thumb_len;
+
+                        b->held = true;
+                        if (y < r->thumb_pos || y >= r->thumb_pos + r->thumb_len)
+                        {
+                                int rel = y - r->y - r->thumb_len / 2;
+                                p64 jump = span > 0 && rel > 0 ? (p64)rel * r->max_pos / (p64)span : 0;
+
+                                *pos = jump > r->max_pos ? r->max_pos : jump;
+                        }
+                        b->grab_y = y;
+                        b->grab_pos = *pos;
+                        return true;
+                }
+        }
+        return false;
+}
+
+static fn ui_bar_draw(struct ui address_to ui, const struct ui_bar address_to b, const struct ui_bar_rect address_to r)
+{
+        int wide = b->hover || b->held ? r->w - ui_px(ui, 2) : r->w / 2;
+        int tx = r->x + (r->w - wide) / 2;
+        unsigned int alpha = b->held ? 140 : b->hover ? 100 : 56;
+        struct ui_box pill;
+
+        if (wide < 2)
+                wide = 2;
+        pill = (struct ui_box){(b32)tx << 8, (b32)r->thumb_pos << 8, (b32)(tx + wide) << 8, (b32)(r->thumb_pos + r->thumb_len) << 8,
+                               (b32)(wide / 2) << 8, (b32)(wide / 2) << 8};
+        ui_kit_fill(ui, &pill, (alpha << 24) | (ui_role(UI_ON_SURFACE) & 0xffffffu), null);
+}
+
 struct ui_scroll
 {
         int x, y, height;            // the track: its left, its top and its height (across: the region's own left, top and height)
@@ -16269,16 +16314,10 @@ static void ui_scroll_track(const struct ui address_to ui, const struct ui_scrol
 // track is shorter than UI_SCROLL_LEAST: a thumb is never longer than the track it is in.
 static b32 ui_scroll_thumb(const struct ui address_to ui, const struct ui_scroll address_to s, int address_to top, int address_to length)
 {
-        int track, at, least = UI_SCROLL_LEAST * ui->scale / 100, rest = s->content - s->view;
+        int track, at;
 
         ui_scroll_track(ui, s, &at, &track);
-        if (s->content <= s->view || s->view <= 0 || track <= 0)
-                return 0;
-        least = least > track ? track : least;
-        *length = (int)((b64)track * s->view / s->content);
-        *length = *length < least ? least : *length > track ? track : *length;
-        *top = at + (int)((b64)(track - *length) * s->scroll / rest);
-        return 1;
+        return ui_bar_geom(at, track, UI_SCROLL_LEAST * ui->scale / 100, (b64)s->content, (b64)s->view, (b64)s->scroll, top, length, null);
 }
 
 /*
@@ -16611,6 +16650,21 @@ static long ui_wheel_pixels(const struct ui address_to ui, const struct window_e
         pixels = (long)(total / 120);
         *rest = (int)(total - (b64)pixels * 120);
         return pixels;
+}
+
+// Convert a wheel event into whole units of `unit` device pixels (a stepped notch moves `units_per_notch` units),
+// accumulating sub-pixel 120ths in *rest and sub-unit pixels in *left; optionally outputs raw device pixels in *pixels_out.
+static long ui_wheel_step(const struct ui address_to ui, const struct window_event address_to event, int unit, int units_per_notch,
+                          int address_to rest, int address_to left, long address_to pixels_out)
+{
+        int u = unit > 0 ? unit : 1;
+        long pixels = ui_wheel_pixels(ui, event, (long)units_per_notch * u, rest);
+        long total = (long)*left + pixels, steps = unit > 0 ? total / unit : 0;
+
+        *left = unit > 0 ? (int)(total - steps * unit) : (int)total;
+        if (pixels_out)
+                *pixels_out = pixels;
+        return steps;
 }
 
 /*
@@ -19249,7 +19303,7 @@ static unsigned int ui_popmenu_hot_fill(const struct ui address_to ui)
 
 static unsigned int ui_popmenu_tone(const struct ui address_to ui, p32 flags, b32 hot, unsigned int least)
 {
-        unsigned int ground, toward, colour, low = 0, high = 100;
+        unsigned int ground, toward, colour;
 
         if (!(flags & (UI_MENU_ERROR | UI_MENU_WARNING)))
                 return 0;
@@ -19262,17 +19316,7 @@ static unsigned int ui_popmenu_tone(const struct ui address_to ui, p32 flags, b3
         }
         toward = window_light(ground) ? 0xff000000u : 0xffffffffu;
         colour = 0xff000000u | ui_role(flags & UI_MENU_ERROR ? UI_ERROR : UI_WARNING);
-        // The most percent of the colour that stands out least: none of it (the black or the white) is the start, which always does.
-        while (low < high)
-        {
-                unsigned int mid = (low + high + 1) / 2;
-
-                if (ui_contrast(ui_mix(colour, mid, toward), ground) >= least)
-                        low = mid;
-                else
-                        high = mid - 1;
-        }
-        return ui_mix(colour, low, toward);
+        return ui_contrast_mix(colour, ground, toward, least);
 }
 
 // The menu drawn: every item that shows, in its element as the tree placed it, and a row's marks (a check, a dot, a submenu's) in its pads.
@@ -19496,17 +19540,13 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
         // A stop (WINDOW_WHEEL_STOP) is a touchpad's fingers lifting and turns nothing: it is no scroll, and closes no menu.
         if (event->type == WINDOW_EVENT_WHEEL)
         {
-                int row = ui_dev(ui, m->touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW), items;
-                long pixels;
+                int row = ui_dev(ui, m->touch ? UI_MENU_TOUCH_ROW : UI_MENU_ROW);
 
                 if (event->flags & WINDOW_WHEEL_STOP)
                         return UI_MENU_NOTHING;
                 if (m->scroll.content <= m->scroll.view || event->b)
                         return UI_MENU_GONE;
-                pixels = ui_wheel_pixels(ui, event, 3L * row, &m->wheel_rest) + m->wheel_left;
-                items = row > 0 ? (int)(pixels / row) : 0;
-                m->wheel_left = (int)(pixels - (long)items * row);
-                ui_popmenu_to(m, ui_popmenu_top(m) + items);
+                ui_popmenu_to(m, ui_popmenu_top(m) + (int)ui_wheel_step(ui, event, row, 3, &m->wheel_rest, &m->wheel_left, null));
                 return UI_MENU_NOTHING;
         }
         if (event->type == WINDOW_EVENT_BUTTON && event->a >= 0x110 && event->a <= 0x112)
@@ -21555,6 +21595,80 @@ struct ui_watch
         int node;                         // the element that was open at the read
 };
 
+// Unified draggable vertical splitter state & event handler (shared by side-pane seam and column-header resize).
+#define UI_SPLITTER_DRAW 1u
+#define UI_SPLITTER_TAKEN 2u
+#define UI_SPLITTER_MOVED 4u
+#define UI_SPLITTER_RESET 8u
+#define UI_SPLITTER_STARTED 16u
+
+struct ui_splitter
+{
+        b32 hover, held;
+        int from, start_w;
+        b64 click_at;
+};
+
+static p32 ui_splitter_event(const struct ui address_to ui, struct ui_splitter address_to sp, const struct window_event address_to event,
+                             int x, b32 on, int min_w, int max_w, int default_w, int current_w, int address_to out_w)
+{
+        b32 motion = event->type == WINDOW_EVENT_MOTION, button = event->type == WINDOW_EVENT_BUTTON;
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+        int scale = ui->scale > 0 ? ui->scale : 100;
+
+        if (!motion && !button)
+                return 0;
+        if (sp->held)
+        {
+                if (button && (!down || event->a != UI_POINTER_LEFT))
+                {
+                        sp->held = false;
+                        return UI_SPLITTER_DRAW | UI_SPLITTER_TAKEN;
+                }
+                if (motion)
+                {
+                        int delta = (x - sp->from) * ui_dir();
+                        int width = sp->start_w + delta * 100 / scale;
+
+                        if (width < min_w)
+                                width = min_w;
+                        if (max_w > 0 && width > max_w)
+                                width = max_w;
+                        *out_w = width;
+                        ui_kit_shape = WINDOW_POINTER_RESIZE;
+                        return UI_SPLITTER_DRAW | UI_SPLITTER_TAKEN | UI_SPLITTER_MOVED;
+                }
+                return UI_SPLITTER_TAKEN;
+        }
+        if (motion)
+        {
+                b32 was = sp->hover;
+
+                sp->hover = on;
+                if (on)
+                        ui_kit_shape = WINDOW_POINTER_RESIZE;
+                return on != was ? UI_SPLITTER_DRAW : 0;
+        }
+        if (button && down && event->a == UI_POINTER_LEFT && on)
+        {
+                b64 now = (b64)ui_kit.now;
+
+                if (default_w > 0 && sp->click_at && now - sp->click_at <= ui_click_ns)
+                {
+                        *out_w = default_w;
+                        sp->click_at = 0;
+                        return UI_SPLITTER_DRAW | UI_SPLITTER_TAKEN | UI_SPLITTER_RESET;
+                }
+                if (default_w > 0)
+                        sp->click_at = now;
+                sp->held = true, sp->hover = true;
+                sp->from = x, sp->start_w = current_w;
+                ui_kit_shape = WINDOW_POINTER_RESIZE;
+                return UI_SPLITTER_DRAW | UI_SPLITTER_TAKEN | UI_SPLITTER_STARTED;
+        }
+        return 0;
+}
+
 struct ui_view
 {
         struct ui address_to ui;
@@ -21576,9 +21690,8 @@ struct ui_view
         int side_node;
         int side_w;
         struct ui_rect side_box;
-        b32 side_hover, side_held;
-        int side_from, side_start_w;
-        b64 side_click_at;
+        b32 side_held;                    // mirrors side_split.held for external readers/checks
+        struct ui_splitter side_split;
 };
 
 // A view never begun pointed at its own tree's elements and items, so a read before its first build reads zeros.
@@ -22172,7 +22285,7 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
         {
                 int line = ui_dev(ui, v->side_held ? 2 : 1);
                 int seam = ui_rtl() ? v->side_box.x : v->side_box.x + v->side_box.w - (line > 0 ? line : 1);
-                unsigned int ink = v->side_hover || v->side_held ? ui_role(UI_PRIMARY) | 0xff000000u : ui_well(ui, UI_OUTLINE_VARIANT, 60);
+                unsigned int ink = v->side_split.hover || v->side_held ? ui_role(UI_PRIMARY) | 0xff000000u : ui_well(ui, UI_OUTLINE_VARIANT, 60);
 
                 line = line > 0 ? line : 1;
                 ui_kit_fill(ui, &(struct ui_box){(b32)seam << 8, (b32)v->side_box.y << 8, (b32)(seam + line) << 8,
@@ -22235,7 +22348,7 @@ static int ui_view_unpull(const struct ui address_to ui, const struct ui_view ad
 static fn ui_view_cancel(const struct ui address_to ui, struct ui_view address_to v)
 {
         ui_view_ready(v);
-        v->side_held = false;
+        v->side_split.held = v->side_held = false;
         ui_press_cancel(&v->finger);
         for (int k = 0; k < v->scrolls; k++)
                 v->scroll[k].held = false, ui_scroll_let_go(&v->scroll[k], 0);
@@ -22250,70 +22363,39 @@ static fn ui_view_cancel(const struct ui address_to ui, struct ui_view address_t
 static p32 ui_view_side_event(const struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event)
 {
         b32 motion = event->type == WINDOW_EVENT_MOTION, button = event->type == WINDOW_EVENT_BUTTON;
-        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
         int x = motion ? event->a : ui_kit.pointer_x, y = motion ? event->b : ui_kit.pointer_y;
         int scale = ui->scale > 0 ? ui->scale : 100, reach = ui_dev(ui, UI_SIDE_EDGE), inner = ui_dev(ui, 3);
         int seam, left, right, max_w, win_logical;
         b32 on;
+        p32 r, out = 0;
 
         if (!v || v->side_box.w <= 0 || v->side_box.h <= 0 || (!motion && !button))
                 return 0;
-        // Keep the grab zone clear of the side pane's own scrollbar track (which sits UI_SCROLL_BORDER inside the seam) while extending
-        // generously into the body side so the seam is easy to grab without stealing scrollbar clicks.
+        // Keep the grab zone clear of the side pane's own scrollbar track while extending into the body side.
         seam = ui_rtl() ? v->side_box.x : v->side_box.x + v->side_box.w;
         left = ui_rtl() ? seam - reach : seam - inner;
         right = ui_rtl() ? seam + inner : seam + reach;
         on = x >= left && x < right && y >= v->side_box.y && y < v->side_box.y + v->side_box.h;
-        if (v->side_held)
+        win_logical = v->width > 0 ? v->width * 100 / scale : 720;
+        max_w = win_logical / 2;
+        if (win_logical - UI_SIDE_BODY_MIN < max_w)
+                max_w = win_logical - UI_SIDE_BODY_MIN;
+        if (max_w < UI_COLUMN_LEAST)
+                max_w = UI_COLUMN_LEAST;
+        r = ui_splitter_event(ui, &v->side_split, event, x, on, UI_COLUMN_LEAST, max_w, UI_SIDE_W, v->side_box.w * 100 / scale, &v->side_w);
+        if (r & (UI_SPLITTER_STARTED | UI_SPLITTER_RESET))
         {
-                if (button && (!down || event->a != UI_POINTER_LEFT))
-                {
-                        v->side_held = false;
-                        return UI_VIEW_DRAW | UI_VIEW_TAKEN;
-                }
-                if (motion)
-                {
-                        int delta = (x - v->side_from) * ui_dir();
-                        int width = v->side_start_w + delta * 100 / scale;
-
-                        win_logical = v->width > 0 ? v->width * 100 / scale : 720;
-                        max_w = win_logical / 2;
-                        if (win_logical - UI_SIDE_BODY_MIN < max_w)
-                                max_w = win_logical - UI_SIDE_BODY_MIN;
-                        if (max_w < UI_COLUMN_LEAST)
-                                max_w = UI_COLUMN_LEAST;
-                        v->side_w = width < UI_COLUMN_LEAST ? UI_COLUMN_LEAST : width > max_w ? max_w : width;
-                        ui_kit_shape = WINDOW_POINTER_RESIZE;
-                        return UI_VIEW_DRAW | UI_VIEW_TAKEN;
-                }
-                return UI_VIEW_TAKEN;
-        }
-        if (motion)
-        {
-                b32 was = v->side_hover;
-
-                v->side_hover = on;
-                if (on)
-                        ui_kit_shape = WINDOW_POINTER_RESIZE;
-                return on != was ? UI_VIEW_DRAW : 0;
-        }
-        if (button && down && event->a == UI_POINTER_LEFT && on)
-        {
-                b64 now = (b64)ui_kit.now;
+                b32 held = v->side_split.held;
 
                 ui_view_cancel(ui, v);
-                if (v->side_click_at && now - v->side_click_at <= ui_click_ns)
-                {
-                        v->side_w = UI_SIDE_W, v->side_click_at = 0;
-                        return UI_VIEW_DRAW | UI_VIEW_TAKEN;
-                }
-                v->side_click_at = now;
-                v->side_held = true, v->side_hover = true;
-                v->side_from = x, v->side_start_w = v->side_box.w * 100 / scale;
-                ui_kit_shape = WINDOW_POINTER_RESIZE;
-                return UI_VIEW_DRAW | UI_VIEW_TAKEN;
+                v->side_split.held = held;
         }
-        return 0;
+        v->side_held = v->side_split.held;
+        if (r & UI_SPLITTER_DRAW)
+                out |= UI_VIEW_DRAW;
+        if (r & UI_SPLITTER_TAKEN)
+                out |= UI_VIEW_TAKEN;
+        return out;
 }
 
 static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event)
@@ -25717,7 +25799,8 @@ struct ui_columns
         // pointer and the edge the hand holds (its column, -1 none) with where the press was and that column's width then.
         int x, y, w, h;
         int at[UI_COLUMNS_MOST], wide[UI_COLUMNS_MOST];
-        int hover, held, held_edge, held_from, held_width; // held -1 when no edge is (an app sets it so at the start)
+        int hover, held, held_edge; // held -1 when no edge is (an app sets it so at the start)
+        struct ui_splitter split;
 };
 
 // How much of column k is in the header's width (device pixels from its start, as read from the left): none past the end.
@@ -27462,28 +27545,22 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
         b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
         int was = c->hover, edge;
 
-        if (event->type == WINDOW_EVENT_MOTION && c->held >= 0)
+        if (c->held >= 0)
         {
-                int moved = ui_point(x, c->x, c->w) - ui_point(c->held_from, c->x, c->w);
-                int width = c->held_width + moved * 100 / (ui->scale > 0 ? ui->scale : 100);
+                p32 r = ui_splitter_event(ui, &c->split, event, x, false, UI_COLUMNS_LEAST, 0, 0, 0, &c->width[c->held]);
 
-                c->width[c->held] = width < UI_COLUMNS_LEAST ? UI_COLUMNS_LEAST : width;
-                ui_columns_layout(ui, c, c->x, c->y, c->w);
-                ui_kit_shape = WINDOW_POINTER_RESIZE;
-                return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
-        }
-        if (event->type == WINDOW_EVENT_BUTTON && c->held >= 0 && (!down || event->a != UI_POINTER_LEFT))
-        {
-                c->held = -1;
-                return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
+                if (r & UI_SPLITTER_MOVED)
+                        ui_columns_layout(ui, c, c->x, c->y, c->w);
+                if (!c->split.held)
+                        c->held = -1;
+                return r ? (UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN) : 0;
         }
         if (event->type == WINDOW_EVENT_MOTION)
         {
                 edge = ui_columns_edge(ui, c, x, y);
+                ui_splitter_event(ui, &c->split, event, x, edge >= 0, UI_COLUMNS_LEAST, 0, 0, 0, &was);
                 c->hover = edge >= 0 ? -1 : ui_columns_hit(c, x, y);
-                if (edge >= 0)
-                        ui_kit_shape = WINDOW_POINTER_RESIZE;
-                else if (c->hover >= 0)
+                if (edge < 0 && c->hover >= 0)
                         ui_kit_shape = WINDOW_POINTER_HAND;
                 return c->hover != was ? UI_COLUMNS_DRAW : 0;
         }
@@ -27492,12 +27569,10 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
                 return 0;
         if ((edge = ui_columns_edge(ui, c, x, y)) >= 0)
         {
-                // The column the edge ends follows the hand. The first is held at the width it is shown at, so a column after it
-                // made wider moves the ones after it along and takes nothing from the first.
                 if (c->width[0] <= 0)
                         c->width[0] = c->wide[0] * 100 / (ui->scale > 0 ? ui->scale : 100);
+                ui_splitter_event(ui, &c->split, event, x, true, UI_COLUMNS_LEAST, 0, 0, c->width[edge], &c->width[edge]);
                 c->held_edge = c->held = edge;
-                c->held_from = x, c->held_width = c->width[edge];
                 ui_columns_layout(ui, c, c->x, c->y, c->w);
                 return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
         }
@@ -29286,7 +29361,7 @@ static fn ui_page_let_go(const struct ui address_to ui, struct ui_page address_t
         if (p->body)
                 p->body->held = false, ui_scroll_let_go(p->body, 0);
         if (p->view)
-                p->view->side_held = false;
+                p->view->side_split.held = p->view->side_held = false;
         ui_list_let_go(ui, l);
         ui_page_changed(p);
 }
@@ -31281,9 +31356,9 @@ struct ui_text
         p64 hex_top;
         // IDE polish: cached matching bracket pair, vertical scrollbar interaction, gutter line-drag selection, and live find highlight.
         p64 bracket_a, bracket_b;
-        b32 bar_hover, bar_held, gutter_drag;
-        int bar_grab_y;
-        p64 bar_grab_top, gutter_anchor;
+        struct ui_bar bar;
+        b32 gutter_drag;
+        p64 gutter_anchor;
         struct doc_find address_to live_find;
 };
 
@@ -32843,7 +32918,7 @@ static fn ui_text_hex_toggle(struct ui address_to ui, struct ui_text address_to 
 
         t->hex = on;
         t->hex_nibble = false;
-        t->bar_held = false;
+        t->bar.held = false;
         if (on)
                 ui_text_hex_reveal(t);
         else
@@ -34344,106 +34419,16 @@ static p32 ui_text_pinch(struct ui address_to ui, struct ui_text address_to t, c
         return UI_TEXT_MOVED;
 }
 
-// Vertical scrollbar geometry for multi-line text / code / hex views (overlay pill inside the trailing edge).
-static b32 ui_text_bar_geom(const struct ui address_to ui, const struct ui_text address_to t, int address_to bx, int address_to by,
-                            int address_to bw, int address_to bh, int address_to thumb_y, int address_to thumb_h, p64 address_to max_top)
+// Vertical scrollbar placement for multi-line text / code / hex views via the unified ui_bar primitive.
+static b32 ui_text_bar_rect(const struct ui address_to ui, const struct ui_text address_to t, struct ui_bar_rect address_to r)
 {
         p64 total = t->hex ? ui_text_hex_rows_total(t) : doc_line_count(&t->doc);
-        int rows = ui_text_rows(t), pad = ui_px(ui, 3), track_w = ui_px(ui, 10), track_h = t->bottom - t->top - 2 * pad;
-        p64 cur = t->hex ? t->hex_top / 16 : t->top_line, most;
+        p64 cur = t->hex ? t->hex_top / 16 : t->top_line;
+        int rows = ui_text_rows(t);
 
-        if (t->mode == UI_TEXT_FIELD || rows <= 0 || total <= (p64)rows || track_h <= 16 || t->well_right - t->well_left < track_w * 3)
+        if (t->mode == UI_TEXT_FIELD || rows <= 0)
                 return false;
-        most = total - (p64)rows;
-        if (cur > most)
-                cur = most;
-        *bw = track_w;
-        *bx = ui_rtl() ? t->well_left + pad : t->well_right - track_w - pad;
-        *by = t->top + pad;
-        *bh = track_h;
-        *thumb_h = (int)((p64)track_h * (p64)rows / total);
-        if (*thumb_h < ui_px(ui, 24))
-                *thumb_h = ui_px(ui, 24);
-        if (*thumb_h > track_h)
-                *thumb_h = track_h;
-        *thumb_y = *by + (most > 0 ? (int)((p64)(track_h - *thumb_h) * cur / most) : 0);
-        *max_top = most;
-        return true;
-}
-
-static p32 ui_text_bar_event(const struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
-{
-        int bx, by, bw, bh, ty, th;
-        p64 max_top;
-
-        if (!ui_text_bar_geom(ui, t, &bx, &by, &bw, &bh, &ty, &th, &max_top))
-        {
-                t->bar_hover = t->bar_held = false;
-                return 0;
-        }
-        if (event->type == WINDOW_EVENT_MOTION)
-        {
-                if (t->bar_held)
-                {
-                        int span = bh - th;
-                        b64 target = span > 0 ? (b64)t->bar_grab_top + (b64)(y - t->bar_grab_y) * (b64)max_top / span : 0;
-                        p64 clamped = target < 0 ? 0 : (p64)target > max_top ? max_top : (p64)target;
-
-                        if (t->hex)
-                                t->hex_top = clamped * 16;
-                        else
-                                t->top_line = clamped;
-                        ui_kit_shape = WINDOW_POINTER_ARROW;
-                        return UI_TEXT_MOVED;
-                }
-                {
-                        b32 on = x >= bx - ui_px(ui, 2) && x < bx + bw + ui_px(ui, 2) && y >= by && y < by + bh;
-
-                        if (on)
-                                ui_kit_shape = WINDOW_POINTER_ARROW;
-                        if (on != t->bar_hover)
-                        {
-                                t->bar_hover = on;
-                                return UI_TEXT_MOVED;
-                        }
-                }
-                return 0;
-        }
-        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
-        {
-                if (!(event->flags & WINDOW_KEY_DOWN))
-                {
-                        if (t->bar_held)
-                        {
-                                t->bar_held = false;
-                                return UI_TEXT_MOVED;
-                        }
-                        return 0;
-                }
-                if (x >= bx - ui_px(ui, 2) && x < bx + bw + ui_px(ui, 2) && y >= by && y < by + bh)
-                {
-                        int span = bh - th;
-
-                        t->bar_held = true;
-                        if (y < ty || y >= ty + th)
-                        {
-                                int rel = y - by - th / 2;
-                                p64 jump = span > 0 && rel > 0 ? (p64)rel * max_top / (p64)span : 0;
-
-                                if (jump > max_top)
-                                        jump = max_top;
-                                if (t->hex)
-                                        t->hex_top = jump * 16;
-                                else
-                                        t->top_line = jump;
-                                ty = by + (max_top > 0 ? (int)((p64)span * jump / max_top) : 0);
-                        }
-                        t->bar_grab_y = y;
-                        t->bar_grab_top = t->hex ? t->hex_top / 16 : t->top_line;
-                        return UI_TEXT_MOVED;
-                }
-        }
-        return 0;
+        return ui_bar_place(ui, t->well_left, t->top, t->well_right, t->bottom, total, (p64)rows, cur, r);
 }
 
 // Column layout for hex editor mode: fixed 8-digit offset gutter, 16 hex byte columns (8+8 grouped), and 16 ASCII columns.
@@ -34498,15 +34483,10 @@ static p32 ui_text_hex_pointer(struct ui address_to ui, struct ui_text address_t
                 if (event->flags & WINDOW_KEY_CONTROL)
                         return ui_text_hex_command(ui, t, event->a > 0 ? DOC_CMD_ZOOM_IN : DOC_CMD_ZOOM_OUT);
                 {
-                        long pixels = ui_wheel_pixels(ui, event, 3 * (long)(t->line_height > 0 ? t->line_height : 1), &s->wheel_rest);
-                        long rows;
-                        b64 to;
+                        long rows = ui_wheel_step(ui, event, t->line_height, 3, &s->wheel_rest, &s->finger_left, null);
                         p64 total = ui_text_hex_rows_total(t);
+                        b64 to = (b64)(t->hex_top / 16) + rows;
 
-                        s->finger_left += (int)pixels;
-                        rows = t->line_height > 0 ? s->finger_left / t->line_height : 0;
-                        s->finger_left -= (int)rows * t->line_height;
-                        to = (b64)(t->hex_top / 16) + rows;
                         t->hex_top = (to < 0 ? 0 : (p64)to >= total ? total - 1 : (p64)to) * 16;
                         return UI_TEXT_MOVED;
                 }
@@ -34570,10 +34550,20 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         // Let touch selection (handles, floating Cut/Copy/Paste bar, finger scroll) run before mouse-only scrollbar/gutter hit-testing.
         if (!touch && !s->finger)
         {
-                p32 bar_did = ui_text_bar_event(ui, t, event, x, y);
+                struct ui_bar_rect r;
+                p64 pos = t->hex ? t->hex_top / 16 : t->top_line;
+                b32 ok = ui_text_bar_rect(ui, t, &r);
 
-                if (bar_did || t->bar_held)
-                        return bar_did;
+                if (ui_bar_event(ui, &t->bar, &r, ok, event, x, y, &pos))
+                {
+                        if (t->hex)
+                                t->hex_top = pos * 16;
+                        else
+                                t->top_line = pos;
+                        return UI_TEXT_MOVED;
+                }
+                if (t->bar.held)
+                        return 0;
         }
         if (t->hex && t->mode != UI_TEXT_FIELD)
                 return ui_text_hex_pointer(ui, t, event, x, y);
@@ -34660,7 +34650,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 }
                 else
                 {
-                        long lines, step = 3 * (long)(t->line_height > 0 ? t->line_height : 1);
+                        long lines;
                         b64 to;
 
                         // A new hand stops a throw in flight, and a precise turn is the hand: its reports are kept for the throw its lift makes.
@@ -34672,15 +34662,12 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         }
                         else if (!precise)
                                 ui_body_hold(&s->fling, ui_kit_time());
-                        pixels = ui_wheel_pixels(ui, event, step, &s->wheel_rest);
+                        lines = ui_wheel_step(ui, event, t->line_height, 3, &s->wheel_rest, &s->finger_left, &pixels);
                         if (precise)
                         {
                                 s->wheel_hand -= pixels;
                                 ui_press_track(&s->grab, (int)s->wheel_hand);
                         }
-                        s->finger_left += (int)pixels;
-                        lines = t->line_height > 0 ? s->finger_left / t->line_height : 0;
-                        s->finger_left -= (int)lines * t->line_height;
                         to = (b64)t->top_line + lines;
                         t->top_line = to < 0 ? 0 : (p64)to >= doc_line_count(&t->doc) ? doc_line_count(&t->doc) - 1 : (p64)to;
                 }
@@ -35645,25 +35632,6 @@ cluster_lost:
         }
 }
 
-// Draws the sleek overlay vertical scrollbar pill when a multi-line text/code/hex view overflows its height.
-static fn ui_text_bar_draw(struct ui address_to ui, const struct ui_text address_to t)
-{
-        int bx, by, bw, bh, ty, th;
-        p64 max_top;
-
-        if (!ui_text_bar_geom(ui, t, &bx, &by, &bw, &bh, &ty, &th, &max_top))
-                return;
-        {
-                int wide = t->bar_hover || t->bar_held ? bw - ui_px(ui, 2) : bw / 2;
-                int tx = bx + (bw - wide) / 2;
-                unsigned int alpha = t->bar_held ? 140 : t->bar_hover ? 100 : 56;
-
-                if (wide < 2)
-                        wide = 2;
-                ui_round(ui, tx, ty, wide, th, wide / 2, ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, alpha));
-        }
-}
-
 // Updates cached matching bracket pair around the primary caret (code view, single empty caret).
 static fn ui_text_bracket_sync(struct ui_text address_to t)
 {
@@ -35818,7 +35786,12 @@ static fn ui_text_hex_draw(struct ui address_to ui, struct ui_text address_to t,
                         }
                 }
         }
-        ui_text_bar_draw(ui, t);
+        {
+                struct ui_bar_rect r;
+
+                if (ui_text_bar_rect(ui, t, &r))
+                        ui_bar_draw(ui, &t->bar, &r);
+        }
 }
 
 /*
@@ -35968,7 +35941,12 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 }
         }
         if (t->mode != UI_TEXT_FIELD)
-                ui_text_bar_draw(ui, t);
+        {
+                struct ui_bar_rect r;
+
+                if (ui_text_bar_rect(ui, t, &r))
+                        ui_bar_draw(ui, &t->bar, &r);
+        }
 }
 
 /*

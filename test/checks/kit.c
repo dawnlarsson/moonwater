@@ -4811,69 +4811,51 @@ static fn check_kit_fills(void)
                 check("kit fill: a fill is cut to the picture's rows, above its top and below its height", held);
         }
 
-        // A corner's cover from its cached quarter (ui_round_cover_cached, which a rounded rectangle reads) is ui_round_cover's at
-        // every pixel of every size a corner of that radius is drawn at: the mirror into each corner must be exact.
+        // ui_round forwards to ui_kit_fill: all four corners are symmetric and its GPU scene emits a single box op.
         {
-                positive wrong = 0;
+                static unsigned int round_buf[120 * 80];
+                unsigned int ops[64];
+                struct ui_scene scene;
+                b32 sym = true;
 
-                for (int radius = 1; radius <= UI_CORNER_MOST; radius++)
-                {
-                        const int grow[4] = {0, 1, 7, 20};
+                memory_zero(&ui, sizeof(ui));
+                ui.scale = 100, ui.width = 120, ui.height = 80, ui.top = 0, ui.bottom = 80;
+                ui.pixels = round_buf, ui.pitch = 120;
+                memory_zero(round_buf, sizeof(round_buf));
+                ui_round(&ui, 10, 10, 100, 60, 16, ui_tone(0xffffffu, 255));
+                for (int y = 0; y < 16; y++)
+                        for (int x = 0; x < 16; x++)
+                        {
+                                unsigned int tl = round_buf[(10 + y) * 120 + (10 + x)];
+                                unsigned int tr = round_buf[(10 + y) * 120 + (10 + 99 - x)];
+                                unsigned int bl = round_buf[(10 + 59 - y) * 120 + (10 + x)];
+                                unsigned int br = round_buf[(10 + 59 - y) * 120 + (10 + 99 - x)];
 
-                        for (int a = 0; a < 4; a++)
-                                for (int b = 0; b < 4; b++)
-                                {
-                                        int width = 2 * radius + grow[a], height = 2 * radius + grow[b];
+                                int da = (int)(tl >> 24) - (int)(bl >> 24);
 
-                                        for (int y = 0; y < height; y++)
-                                                for (int x = 0; x < width; x++)
-                                                        wrong += ui_round_cover_cached(x, y, width, height, radius) != ui_round_cover(x, y, width, height, radius);
-                                }
-                }
-                check("kit corners: a corner's cached cover is ui_round_cover's at every pixel, every radius to UI_CORNER_MOST and size", !wrong);
+                                sym &= (tl == tr && bl == br && da >= -1 && da <= 1);
+                        }
+                check("kit corners: ui_round via ui_kit_fill draws four symmetric corners and solid centre",
+                      sym && round_buf[10 * 120 + 10] == 0 && round_buf[40 * 120 + 60] == 0xffffffffu);
+                memory_zero(&scene, sizeof(scene));
+                scene.ops = ops, scene.room = 8;
+                ui.scene = &scene;
+                ui_round(&ui, 10, 10, 100, 60, 16, ui_tone(0xffffffu, 180));
+                check("kit corners: ui_round emits a single GPU box op instead of 1x1 pixel ops", scene.count == 1 && !scene.lost);
         }
-}
-
-/*
-        A rounded corner's cover (ui_round_cover) at radii the window's clamp allows: its sixteen samples square 8 radius and
-        64 radius squared, and past 5792 px those leave int, so the kit takes them in 64 bits. The reference is the same
-        test written out in 64 bits, over the corner squares of rectangles whose sides are two radii and more.
-*/
-static unsigned int kit_corner_reference(int x, int y, int width, int height, int radius)
-{
-        b64 inside = 0;
-
-        if (x < 0 || y < 0 || x >= width || y >= height)
-                return 0;
-        if ((x >= radius && x < width - radius) || (y >= radius && y < height - radius))
-                return 255;
-        for (int sy = 0; sy < 4; sy++)
-                for (int sx = 0; sx < 4; sx++)
-                {
-                        b64 px = 8 * (b64)x + 2 * sx + 1, py = 8 * (b64)y + 2 * sy + 1;
-                        b64 cx = x < radius ? 8 * (b64)radius : 8 * (b64)(width - radius);
-                        b64 cy = y < radius ? 8 * (b64)radius : 8 * (b64)(height - radius);
-                        b64 dx = px - cx, dy = py - cy;
-
-                        inside += dx * dx + dy * dy <= 64 * (b64)radius * (b64)radius;
-                }
-        return (unsigned int)((inside * 255 + 8) / 16);
 }
 
 static fn check_kit_corners(void)
 {
-        static const int radii[] = {8, 40, 1000, 5792, 5793, 6000, 9000};
-        positive wrong = 0;
+        static unsigned int buf[64 * 64];
+        struct ui ui;
 
-        for (positive k = 0; k < sizeof(radii) / sizeof(radii[0]); k++)
-        {
-                int r = radii[k], side = 2 * r + 8;
-
-                for (int y = 0; y < side; y += (r > 1000 ? 311 : 1))
-                        for (int x = 0; x < side; x += (r > 1000 ? 297 : 1))
-                                wrong += ui_round_cover(x, y, side, side, r) != kit_corner_reference(x, y, side, side, r);
-        }
-        check("kit: a rounded corner's cover is the 64-bit cover at every radius, past the int square too", !wrong);
+        memory_zero(&ui, sizeof(ui));
+        memory_zero(buf, sizeof(buf));
+        ui.scale = 100, ui.width = 64, ui.height = 64, ui.top = 0, ui.bottom = 64, ui.pixels = buf, ui.pitch = 64;
+        ui_round(&ui, 4, 4, 56, 56, 40, ui_tone(0x336699u, 255));
+        check("kit: ui_round clamps oversized radius cleanly and fills centre",
+              buf[4 * 64 + 4] == 0 && buf[32 * 64 + 32] == 0xff336699u);
 }
 
 /*
