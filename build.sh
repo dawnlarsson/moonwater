@@ -1514,19 +1514,46 @@ if [ "$do_usb" -eq 1 ]; then
         [ -z "$confirmation" ] || die "nothing written"
 
         say "Erasing $target"
-        diskutil unmountDisk "$target" >/dev/null 2>&1
-        diskutil eraseDisk FAT32 MOONWATER GPT "$target" ||
-                die "could not format $target"
+        diskutil unmountDisk force "$target" >/dev/null 2>&1 || true
+        if ! diskutil eraseDisk FAT32 MOONWATER GPT "$target"; then
+                sleep 1
+                diskutil unmountDisk force "$target" >/dev/null 2>&1 || true
+                diskutil eraseDisk FAT32 MOONWATER GPT "$target" ||
+                        die "could not format $target"
+        fi
 
-        volume="/Volumes/MOONWATER"
-        [ -d "$volume" ] || die "formatted, but $volume did not appear"
+        volume=""
+        tries=0
+        while [ "$tries" -lt 10 ]; do
+                for slice in "${target}s2" "${target}s1"; do
+                        mp=$(diskutil info "$slice" 2>/dev/null |
+                                awk -F": *" '/Mount Point:/ { print $2; exit }')
+                        if [ -n "$mp" ] && [ -d "$mp" ]; then
+                                volume="$mp"
+                                break
+                        fi
+                done
+                [ -n "$volume" ] && break
+                diskutil mountDisk "$target" >/dev/null 2>&1 || true
+                sleep 1
+                tries=$((tries + 1))
+        done
+        if [ -z "$volume" ] && [ -d "/Volumes/MOONWATER" ]; then
+                volume="/Volumes/MOONWATER"
+        fi
+        [ -n "$volume" ] && [ -d "$volume" ] ||
+                die "formatted, but the new MOONWATER volume did not mount"
 
         say "Writing the image"
         mkdir -p "$volume/EFI/BOOT" || die "could not create $volume/EFI/BOOT"
         cp "$image" "$volume/EFI/BOOT/$efi_name" || die "could not copy the image"
         sync
 
-        diskutil eject "$target" >/dev/null 2>&1
+        if ! diskutil eject "$target" >/dev/null 2>&1; then
+                sleep 1
+                diskutil unmountDisk force "$target" >/dev/null 2>&1 || true
+                diskutil eject "$target" >/dev/null 2>&1 || true
+        fi
 
         say "Done -- $target is bootable and safe to unplug"
         echo
