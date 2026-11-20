@@ -1282,9 +1282,10 @@ static struct
                 int dyn;                // the dynamic cursor is what is drawn now: the style, or a touch was the last input (touch.hidden)
                 int squeeze;            // `moonwater canvas cursor squeeze`: the percent a pointer shrinks by while a button is held (compositor_pointer_press)
                 unsigned int held;      // the buttons held down, a bit each from BTN_LEFT
-                // In 256ths: what a held button adds to the pointer's size, how far the dynamic shape is the text's rectangle, and how far it is stretched.
-                struct compositor_sway press, morph, stretch;
+                // In 256ths: what a held button adds to the pointer's size, how far the dynamic shape is the text's rectangle or a resize edge's points, and how far it is stretched.
+                struct compositor_sway press, morph, lens, stretch;
                 int ux, uy;             // the unit direction of the motion that stretches it, times 64
+                int lens_ux, lens_uy;   // the last resize edge's direction, times 64, kept while the points ease back into the circle
                 int last_x, last_y;     // where the pointer was when its speed was last taken, and when
                 positive last_ns, idle_until; // and when the stretch lets go if nothing moves
         } cursor;
@@ -2492,6 +2493,44 @@ static int compositor_wl_dmabuf_missing(void)
 }
 
 /*
+        Whether a window is Steam's own UI (WM_CLASS "steam" or "steamwebhelper", or a popup/transient of one): Steam's X11/CEF
+        windows push classic Xcursor bitmaps via wl_pointer.set_cursor, which would otherwise replace the dynamic cursor while
+        games (including Proton's steam_app_*) keep their own custom cursors.
+*/
+static int compositor_app_is_steam(const char *app)
+{
+        static const char steam[] = "steam", helper[] = "steamwebhelper";
+        positive length;
+
+        if (!app || !app[0])
+                return 0;
+        length = string_length((string_address)app);
+        return (length == sizeof(steam) - 1 && !memory_compare_ascii_case((address_any)app, (address_any)steam, length)) ||
+               (length == sizeof(helper) - 1 && !memory_compare_ascii_case((address_any)app, (address_any)helper, length));
+}
+
+static int compositor_row_is_steam(int row)
+{
+        for (int hops = 0; hops < 8 && row >= 0 && row < COMPOSITOR_ROWS; hops++)
+        {
+                const char *app = compositor.app_id[row][0] ? compositor.app_id[row]
+                                  : compositor.table        ? compositor.table->app_id[row]
+                                                            : 0;
+                int next;
+
+                if (compositor_app_is_steam(app))
+                        return 1;
+                next = compositor_popup_parent && compositor_popup_parent[row] >= 0 ? compositor_popup_parent[row]
+                       : compositor_owner && compositor_owner[row] > 0              ? compositor_owner[row] - 1
+                                                                                    : COMPOSITOR_NONE;
+                if (next == row)
+                        break;
+                row = next;
+        }
+        return 0;
+}
+
+/*
         The picture the pointer wears over row (COMPOSITOR_NONE for none of a client's): the one row's client drew, copied when the shim's
         serial for it has moved since it was last asked (compositor_picture_take; the pixels are the client's pool, read in this pass and
         not after), and none when it drew none or one the pointer does not wear. True when what the pointer wears changed.
@@ -2501,7 +2540,8 @@ static int compositor_picture_poll(int row)
         struct wayland_cursor picture;
         unsigned long was = compositor_picture.worn;
 
-        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_wl.started || !wayland_cursor_picture(row, &picture))
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_wl.started ||
+            (compositor_pointer_dynamic() && compositor_row_is_steam(row)) || !wayland_cursor_picture(row, &picture))
         {
                 compositor_picture.worn = 0;
                 compositor_picture.asked = 0;

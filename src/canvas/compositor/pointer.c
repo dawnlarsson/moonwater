@@ -195,8 +195,8 @@ _Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEX
 /*
         The dynamic cursor (`moonwater canvas cursor style dynamic`, and every pointer a touch uses) is one filled shape with a line at its
         edge and nothing in it: a circle of CP_DYN_RADIUS cells, which over text is a rounded rectangle a touch taller than a terminal
-        cell (one wide, three tall), the one easing into the other; over a window's edge it is a lens along the way the edge moves (CP_DYN_LENS_W
-        and CP_DYN_LENS_H: its top and bottom are arcs that meet in a point at either end, an arrow both ways). A fast hand stretches it along its motion and squashes it across by as much,
+        cell (one wide, three tall), the one easing into the other; over a window's edge it keeps the circle's core and thickness
+        (CP_DYN_RADIUS) with points easing out to CP_DYN_LENS_W along the way the edge moves. A fast hand stretches it along its motion and squashes it across by as much,
         so its area stays: nothing under CP_DYN_SLOW logical pixels a second, all of CP_DYN_STRETCH from CP_DYN_FAST up, and it lets go
         CP_DYN_IDLE_NS after the last motion. Its cell is CP_DYN_CELL square with the pointer at its middle, so the plane holds it at twice
         its size with the longest stretch.
@@ -211,8 +211,8 @@ _Static_assert(WINDOW_POINTER_ARROW == CP_ARROW && WINDOW_POINTER_TEXT == CP_TEX
 #define CP_DYN_TEXT_W 4         // the rectangle over text: its half width, half height and corner radius, in cells
 #define CP_DYN_TEXT_H 12
 #define CP_DYN_TEXT_R 2
-#define CP_DYN_LENS_W 10 // the lens over a window's edge: its half length and half thickness, in cells
-#define CP_DYN_LENS_H 5
+#define CP_DYN_LENS_W 12 // the resize indicator over a window's edge: its half length to each point, and core radius (CP_DYN_RADIUS), in cells
+#define CP_DYN_LENS_H CP_DYN_RADIUS
 #define CP_DYN_SLOW 1500
 #define CP_DYN_FAST 6000
 #define CP_DYN_STRETCH 154      // 256ths the long axis grows by at most: six tenths
@@ -751,12 +751,28 @@ static void compositor_dyn_cover(const struct compositor_pointer *p, long long u
                 return;
         if (p->lens)
         {
-                // Turned to the lens's own axes, its length along x: two arcs of radius R through its ends and its top (or bottom), each
-                // centred R - hh beyond the other side, and the lens is where both are; its outline is the nearer arc's.
-                long long along_lens = (u * p->ux + v * p->uy) / 64, off = (v * p->ux - u * p->uy) / 64;
-                long long R = ((long long)p->hw * p->hw + (long long)p->hh * p->hh) / (2 * p->hh), y = (off < 0 ? -off : off) + R - p->hh;
+                // Core circle of radius r (p->hh) with pointy ends at +-tip (p->hw) along (ux, uy): the convex hull of the circle and
+                // its two tips, so the middle keeps the circle's aspect and curvature and the ends taper tangentially to points.
+                long long a = (u * p->ux + v * p->uy) / 64, b = (v * p->ux - u * p->uy) / 64;
+                long long r = p->hh, tip = p->hw > r ? p->hw : r;
 
-                away = (long long)compositor_isqrt((unsigned long long)(along_lens * along_lens + y * y)) - R;
+                a = a < 0 ? -a : a;
+                b = b < 0 ? -b : b;
+                if (tip == r)
+                {
+                        away = (long long)compositor_isqrt((unsigned long long)(a * a + b * b)) - r;
+                        goto lined;
+                }
+                {
+                        long long leg = (long long)compositor_isqrt((unsigned long long)(tip * tip - r * r));
+
+                        if (a * leg <= b * r)
+                                away = (long long)compositor_isqrt((unsigned long long)(a * a + b * b)) - r;
+                        else if ((a - tip) * leg >= b * r)
+                                away = (long long)compositor_isqrt((unsigned long long)((a - tip) * (a - tip) + b * b));
+                        else
+                                away = (a * r + b * leg) / tip - r;
+                }
                 goto lined;
         }
         if (p->grow)

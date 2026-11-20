@@ -30181,11 +30181,11 @@ static b32 ui_lift_row(const struct window_row address_to own, string_address na
         for (unsigned int row = 0; row < windows_rows(table); row++)
         {
                 unsigned int pid = __atomic_load_n(&table->pid[row], __ATOMIC_ACQUIRE);
+                unsigned int shown = __atomic_load_n(&table->frame[row], __ATOMIC_ACQUIRE);
                 char door_name[48];
                 bipolar door;
 
-                if (row == own->row || !pid || !__atomic_load_n(&table->frame[row], __ATOMIC_ACQUIRE) ||
-                    !ui_is_program(pid, name))
+                if (row == own->row || !pid || (!shown && row > own->row) || !ui_is_program(pid, name))
                         continue;
 
                 if (put_away)
@@ -30193,6 +30193,8 @@ static b32 ui_lift_row(const struct window_row address_to own, string_address na
                         system_call_2(syscall(kill), (positive)pid, SIGTERM);
                         return true;
                 }
+                if (!shown)
+                        return true;
                 if (ask)
                         __atomic_store_n(&table->page[row], ask, __ATOMIC_RELEASE);
                 __atomic_add_fetch(&table->lift[row], 1, __ATOMIC_RELEASE);

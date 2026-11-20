@@ -983,6 +983,8 @@ static void compositor_settings_open(void)
 */
 static void compositor_launcher_open(int x, int y)
 {
+        compositor_menu_close();
+        compositor_popups_close(-1, -1);
         compositor.launcher_asked++;
         compositor_popup_trigger(null, "launcher_button", x, y, TASKBAR_LAUNCHER);
 }
@@ -1021,6 +1023,8 @@ static void compositor_logo_act(void)
 {
         int up = compositor_launcher_row();
 
+        compositor_menu_close();
+        compositor_popups_close(-1, -1);
         if (up >= 0)
         {
                 compositor_close(up);
@@ -1366,8 +1370,12 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                         compositor_keys.modifiers[at])
                 {
                         if (value == 1)
-                                // A chord pressed: said to the runner, which does what it is bound to.
+                        {
+                                // A chord pressed: close any open context menu or popup, then tell the runner.
+                                compositor_menu_close();
+                                compositor_popups_close(-1, -1);
                                 compositor_script_say(compositor_keys.chord[((unsigned int)(at))]);
+                        }
                         return;
                 }
 

@@ -468,6 +468,15 @@ static fn launcher_search(void)
         if (!length)
         {
                 launcher.named_length = 0;
+                if (!launcher.asked_beside)
+                {
+                        for (int at = 0; at < launcher.recent_count && count < LAUNCHER_ROWS; at++)
+                        {
+                                launcher.entry[count].kind = LAUNCHER_WINDOW;
+                                launcher.entry[count++].index = launcher.recent[at];
+                        }
+                        launcher.entries = count;
+                }
                 return;
         }
 
@@ -1005,23 +1014,29 @@ static fn launcher_view(void)
                 search->edit = launcher_field();
         }
         search->focused = launcher.focused && !launcher.view.group.keys;
-        launcher_tiles_ready();
+        if (launcher.asked_beside)
+                launcher_tiles_ready();
         ui_control(search, .class = "head");
         ui_col(.class = "inset")
         {
                 long rows = ui_value(&launcher.entries);
                 b32 typed = launcher.text[0] != 0;
-                int per = launcher_per(), lines = (launcher.app_count + per - 1) / per;
 
-                lines = lines > LAUNCHER_GRID_LINES ? LAUNCHER_GRID_LINES : lines;
-                // Nothing typed: the grid of the apps, and under it Recent, a line of the ones started last.
-                ui_rows(&launcher.grid, .class = "list", .h = lines * UI_TILE_H, .hidden = typed || !lines);
-                if (!typed && launcher.recent_count)
-                        ui_row(.class = "middle")
-                                ui_text(WORDS(launcher_recent), .class = "caption");
-                ui_rows(&launcher.recents, .class = "list", .h = UI_TILE_H, .hidden = typed || !launcher.recent_count);
+                if (launcher.asked_beside)
+                {
+                        int per = launcher_per(), lines = (launcher.app_count + per - 1) / per;
+
+                        lines = lines > LAUNCHER_GRID_LINES ? LAUNCHER_GRID_LINES : lines;
+                        // Nothing typed: the grid of the apps, and under it Recent, a line of the ones started last.
+                        ui_rows(&launcher.grid, .class = "list", .h = lines * UI_TILE_H, .hidden = typed || !lines);
+                        if (!typed && launcher.recent_count)
+                                ui_row(.class = "middle")
+                                        ui_text(WORDS(launcher_recent), .class = "caption");
+                        ui_rows(&launcher.recents, .class = "list", .h = UI_TILE_H, .hidden = typed || !launcher.recent_count);
+                }
                 ui_rows(&launcher.list, .class = "list", .h = (int)rows * UI_ROW, .hidden = !rows);
-                launcher_power_row();
+                if (launcher.asked_beside)
+                        launcher_power_row();
         }
 }
 
@@ -1080,7 +1095,7 @@ static fn launcher_take(void)
 static b32 launcher_asked(p32 asks)
 {
         if (asks & UI_TEXT_SUBMIT)
-                return launcher.text[0] ? !launcher_run(launcher.list.focus) : !launcher_start_app(launcher_app_focused());
+                return (launcher.text[0] || !launcher.asked_beside) ? !launcher_run(launcher.list.focus) : !launcher_start_app(launcher_app_focused());
         if (asks & UI_TEXT_CANCEL)
                 return false;
         if (asks & UI_TEXT_CHANGED)
@@ -1131,7 +1146,7 @@ static b32 launcher_grid_key(const struct window_event address_to event)
         int key = (int)event->a, per = launcher_per(), focus;
         b32 moved = false;
 
-        if (launcher.text[0] || !launcher.app_count)
+        if (!launcher.asked_beside || launcher.text[0] || !launcher.app_count)
                 return false;
         if ((key == 68 && (event->flags & WINDOW_KEY_SHIFT)) || key == 127)
         {
@@ -1375,9 +1390,9 @@ static b32 launcher_event(const struct window_event address_to event)
             (asks = ui_field_send(&launcher.ui, launcher_field(), &launcher.menu, event)) &&
             !(event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL)))
                 return launcher_asked(asks);
-        // With nothing typed the pointer is the grid's and Recent's: the tile it moves onto is the one the keys are on, a click starts
-        // it, and a right press opens its menu.
-        if (event->type != WINDOW_EVENT_KEY && !launcher.text[0])
+        // With nothing typed beside the panel the pointer is the grid's and Recent's: the tile it moves onto is the one the keys are on,
+        // a click starts it, and a right press opens its menu.
+        if (event->type != WINDOW_EVENT_KEY && launcher.asked_beside && !launcher.text[0])
                 return launcher_tiles_event(event);
         if (event->type == WINDOW_EVENT_KEY)
                 return launcher_key(event);

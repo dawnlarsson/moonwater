@@ -251,13 +251,18 @@ static void check_compositor_cursor_style(void)
 
     compositor.cursor.shape = CP_RESIZE_H;
     compositor_pointer_now(&other);
+    check("cursor style: over a window's edge the shape eases into the resize indicator",
+          compositor.cursor.lens.to == 256 && compositor.cursor.lens.at != 0);
+    compositor.cursor.lens.at = 0;
+    compositor_pointer_now(&other);
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
-    check("cursor style: over a window's side edge the shape is a lens along it, filled, 10 out to either point and 5 thick, round above "
-          "and below and pointed at its ends",
-          other.lens && !other.grow && plane[32 * 64 + 32] == fill && plane[35 * 64 + 32] == fill && (plane[32 * 64 + 41] >> 24) &&
-              plane[32 * 64 + 43] == 0 && (plane[32 * 64 + 23] >> 24) && plane[32 * 64 + 21] == 0 && (plane[37 * 64 + 32] >> 24) &&
-              plane[38 * 64 + 32] == 0 && plane[35 * 64 + 40] == 0 && plane[29 * 64 + 24] == 0);
+    check("cursor style: over a window's side edge the shape keeps the circle's core (8) with points 12 out along it",
+          other.lens && !other.grow && other.hw == CP_DYN_LENS_W * 256 && other.hh == CP_DYN_RADIUS * 256 &&
+              plane[32 * 64 + 32] == fill && plane[37 * 64 + 32] == fill && (plane[40 * 64 + 32] >> 24) &&
+              plane[41 * 64 + 32] == 0 && (plane[32 * 64 + 44] >> 24) && plane[32 * 64 + 45] == 0 &&
+              (plane[32 * 64 + 20] >> 24) && plane[32 * 64 + 19] == 0 && plane[40 * 64 + 42] == 0 &&
+              plane[24 * 64 + 22] == 0);
     {
         int size = other.scale;
 
@@ -281,15 +286,19 @@ static void check_compositor_cursor_style(void)
     compositor_pointer_now(&other);
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
-    check("cursor style: over a top or bottom edge it is the lens stood up", (plane[41 * 64 + 32] >> 24) && plane[43 * 64 + 32] == 0 &&
-                                                                                   (plane[32 * 64 + 37] >> 24) && plane[32 * 64 + 38] == 0);
+    check("cursor style: over a top or bottom edge it is stood up", (plane[44 * 64 + 32] >> 24) && plane[45 * 64 + 32] == 0 &&
+                                                                             (plane[32 * 64 + 40] >> 24) && plane[32 * 64 + 41] == 0);
     compositor.cursor.shape = CP_RESIZE_NWSE;
     compositor_pointer_now(&other);
     memory_zero(plane, sizeof(plane));
     compositor_cursor_draw(&t, 32, 32, &other, fill, edge);
-    check("cursor style: and over a corner it lies along the diagonal", plane[36 * 64 + 36] == fill && plane[26 * 64 + 38] == 0);
+    check("cursor style: and over a corner it lies along the diagonal", plane[36 * 64 + 36] == fill && plane[25 * 64 + 39] == 0);
     compositor.cursor.shape = CP_ARROW;
+    compositor_pointer_now(&other);
+    check("cursor style: leaving the edge eases the points back into the circle",
+          compositor.cursor.lens.to == 0 && compositor.cursor.lens.at != 0);
     compositor.cursor.morph = (struct compositor_sway){0, 0, 0};
+    compositor.cursor.lens = (struct compositor_sway){0, 0, 0};
 
     other = circle;
     other.grow = CP_DYN_STRETCH, other.ux = 64, other.uy = 0;
@@ -3577,6 +3586,17 @@ static void check_compositor_picture(void)
     compositor_present();
     check("picture: worn no longer, the pointer is the compositor's arrow again",
           compositor.cursor.drawn && !compositor.cursor.drawn_as.picture && glass_at(100, 60) == compositor_cursor_ink(1, 0) && glass_at(99, 59) == ground);
+
+    memory_copy(compositor.app_id[0], "Steam", 6);
+    memory_copy(compositor.app_id[1], "steamwebhelper", 15);
+    memory_copy(compositor.app_id[2], "steam_app_440", 14);
+    compositor_popup_parent[3] = 0;
+    check("picture: Steam UI windows keep the dynamic cursor while games keep custom cursors",
+          compositor_row_is_steam(0) && compositor_row_is_steam(1) && !compositor_row_is_steam(2) && compositor_row_is_steam(3));
+    compositor_popup_parent[3] = -1;
+    memory_zero(compositor.app_id[0], WINDOWS_APP_ID);
+    memory_zero(compositor.app_id[1], WINDOWS_APP_ID);
+    memory_zero(compositor.app_id[2], WINDOWS_APP_ID);
     compositor.cursor.soft = 0;
 }
 

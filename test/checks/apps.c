@@ -6914,6 +6914,13 @@ static fn check_field_hands(string_address regular)
                                 read = read && made >= 0 && launcher.session == (which ? LAUNCHER_SLEEP : 0u);
                         }
                         check("launcher: Sleep is offered only where the kernel's list of sleeps has the whole word mem, and a list that cannot be read offers none", read);
+                        b32 was_beside = launcher.asked_beside;
+
+                        launcher.asked_beside = false;
+                        launcher.session = LAUNCHER_SLEEP;
+                        launcher.height = launcher_build(0);
+                        check("launcher: centred (Super+Space) drops the power and sleep buttons", launcher.view.group.count == 0);
+                        launcher.asked_beside = true;
                         launcher.session = 0;
                         launcher.height = launcher_build(0);
                         two = launcher.view.group.count == 2 && !launcher_power_offered(2) && !launcher_power_offered(3) && launcher_power_act(2) &&
@@ -6928,6 +6935,7 @@ static fn check_field_hands(string_address regular)
                         check("launcher: with no Sleep offered the foot has Power off and Restart alone, and a button that is not offered starts nothing", two);
                         check("launcher: with Sleep offered the foot has three buttons inside the bar, each said before it is done, Sleep starting moonwater sleep, and no Log out",
                               three && said);
+                        launcher.asked_beside = was_beside;
                         launcher.session = was;
                         launcher.height = launcher_build(0);
                 }

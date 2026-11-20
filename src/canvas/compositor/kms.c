@@ -2069,7 +2069,7 @@ static void compositor_pointer_now(struct compositor_pointer *p)
 {
         // The values are read at the frame the clock is in, so the picture changes once a frame however often a moving hand asks for it.
         positive period = compositor.period ? compositor.period : 16000000ull, now = clock_monotonic_nanoseconds() / period * period;
-        int morph, grow, scale, most, resize;
+        int morph, lens, grow, scale, most, resize;
 
         // A window's client's own picture is worn as it was copied: no size of the settings', and no squeeze of a held button.
         if (compositor_picture.worn)
@@ -2078,11 +2078,13 @@ static void compositor_pointer_now(struct compositor_pointer *p)
                                                  .hot_y = compositor_picture.hot_y, .picture = compositor_picture.worn};
                 return;
         }
+        resize = compositor.cursor.shape >= CP_RESIZE_H && compositor.cursor.shape <= CP_RESIZE_NESW;
         compositor_sway_to(&compositor.cursor.morph, compositor.cursor.dyn && compositor.cursor.shape == CP_TEXT ? 256 : 0, now);
+        compositor_sway_to(&compositor.cursor.lens, compositor.cursor.dyn && resize ? 256 : 0, now);
         morph = compositor_sway_at(&compositor.cursor.morph, now);
+        lens = compositor_sway_at(&compositor.cursor.lens, now);
         grow = compositor_sway_at(&compositor.cursor.stretch, now) * CP_DYN_STRETCH >> 8;
         // Over a window's edge (a resize) the pointer keeps its size whatever is held: a drag of the edge neither grows it nor eases it.
-        resize = compositor.cursor.shape >= CP_RESIZE_H && compositor.cursor.shape <= CP_RESIZE_NESW;
         scale = resize ? compositor_cursor_size() : (compositor_cursor_size() * (256 + compositor_sway_at(&compositor.cursor.press, now)) + 128) >> 8;
         most = (CP_SPAN_MOST << 8) / (compositor.cursor.dyn ? CP_DYN_CELL : CP_CELL);
         *p = (struct compositor_pointer){.dyn = compositor.cursor.dyn, .scale = scale < most ? scale : most};
@@ -2091,14 +2093,21 @@ static void compositor_pointer_now(struct compositor_pointer *p)
                 p->shape = compositor.cursor.shape < CP_SHAPES ? compositor.cursor.shape : CP_ARROW;
                 return;
         }
-        // Over a window's edge the shape is the lens along the way the edge moves (45 is 64 over the square root of two), never stretched.
+        // Over a window's edge the shape eases into the pointed circle along the way the edge moves (45 is 64 over the square root of two), never stretched.
         if (resize)
         {
                 static const signed char way[4][2] = {{64, 0}, {0, 64}, {45, 45}, {45, -45}};
 
+                compositor.cursor.lens_ux = way[compositor.cursor.shape - CP_RESIZE_H][0];
+                compositor.cursor.lens_uy = way[compositor.cursor.shape - CP_RESIZE_H][1];
+        }
+        if (lens)
+        {
                 p->lens = 1;
-                p->hw = 256 * CP_DYN_LENS_W, p->hh = 256 * CP_DYN_LENS_H, p->c = 0;
-                p->ux = way[compositor.cursor.shape - CP_RESIZE_H][0], p->uy = way[compositor.cursor.shape - CP_RESIZE_H][1];
+                p->hw = 256 * CP_DYN_RADIUS + (CP_DYN_LENS_W - CP_DYN_RADIUS) * lens;
+                p->hh = 256 * CP_DYN_RADIUS;
+                p->c = 0;
+                p->ux = compositor.cursor.lens_ux, p->uy = compositor.cursor.lens_uy;
                 return;
         }
         p->hw = 256 * CP_DYN_RADIUS + (CP_DYN_TEXT_W - CP_DYN_RADIUS) * morph;
@@ -2156,7 +2165,7 @@ static void compositor_cursor_moved(positive now)
 // go (0 for neither). The main loop sleeps until then.
 static positive compositor_cursor_due(void)
 {
-        if (compositor.cursor.press.at || compositor.cursor.morph.at || compositor.cursor.stretch.at)
+        if (compositor.cursor.press.at || compositor.cursor.morph.at || compositor.cursor.lens.at || compositor.cursor.stretch.at)
                 return clock_monotonic_nanoseconds() + (compositor.period ? compositor.period : 16000000ull);
         return compositor.cursor.stretch.to ? compositor.cursor.idle_until : 0;
 }
@@ -2166,7 +2175,7 @@ static void compositor_cursor_tick(positive now)
 {
         if (compositor.cursor.stretch.to && now >= compositor.cursor.idle_until)
                 compositor_sway_to(&compositor.cursor.stretch, 0, now);
-        if (compositor.cursor.press.at || compositor.cursor.morph.at || compositor.cursor.stretch.at)
+        if (compositor.cursor.press.at || compositor.cursor.morph.at || compositor.cursor.lens.at || compositor.cursor.stretch.at)
                 compositor_cursor_move();
 }
 
