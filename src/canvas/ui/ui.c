@@ -25788,6 +25788,7 @@ static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l,
         ui_list_place(ui, l, n->x, n->y, n->w, n->h);
         // A list beside another runs its rows across its own column (the container it is in, its pad with it), not the window.
         l->row_x = l->beside ? column->x : 0, l->row_w = l->beside ? column->w : width;
+        l->scroll.inset = n->y <= 0 && (ui_rtl() ? l->row_x <= 0 : l->row_x + l->row_w >= width) ? UI_CLOSE_BOTTOM : 0;
         ui_list_layout(ui, l);
 }
 
