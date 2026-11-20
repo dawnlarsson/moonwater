@@ -63,7 +63,7 @@ files_delete_for_good	ec0e	Eliminare per sempre %1$d: %2$s? Maiusc+Canc di nuovo
 files_delete_stopped	ef42	Fermato a %2$s: %1$d eliminati prima
 files_deleted	8591	%d eliminati
 files_deleting	a297	Eliminazione: %d finora, Escape ferma
-files_done	1791	Fatto
+files_drive_root	84bc	Sistema
 files_empty	751c	Questa cartella è vuota
 files_failed	c564	Impossibile leggere questa cartella
 files_find_hint	0ee1	Cerca in questa cartella
@@ -82,11 +82,13 @@ files_not_folder	2663	Questa non è una cartella
 files_nothing_to_paste	c9d4	Gli appunti non contengono file
 files_nothing_to_redo	b2a4	Niente da ripetere
 files_nothing_to_undo	1433	Niente da annullare
+files_place_downloads	07de	Scaricati
+files_place_home	0eae	Home
+files_place_pictures	feae	Immagini
 files_reading	64a4	Lettura della cartella
 files_redone	6fd0	%d ripetuti
 files_rename_hint	ad88	Nuovo nome
 files_restored	4c30	%d rimessi al loro posto
-files_selecting	2d5c	Modalità selezione, %d scelti: tocca gli elementi per aggiungerli o toglierli, Esc o Fatto per finire
 files_sheet_created	59ac	Creato %s
 files_sheet_file	3663	File
 files_sheet_folder	7afd	Cartella
@@ -100,9 +102,8 @@ files_sheet_other	3921	Dispositivo, pipe o socket
 files_sheet_owner	8b0c	Proprietario %1$d, gruppo %2$d
 files_sheet_size	eca5	Dimensione %1$s (%2$s byte)
 files_sheet_size_in	31a1	Dimensione %1$s in %2$d elementi
-files_type_ext	d2c5	File %s
 files_type_link	e589	Collegamento
-files_type_other	e8e6	File speciale
+files_type_other	80d0	Speciale
 files_undone	4da3	%d annullati
 files_unreadable	986c	Questa cartella non può essere letta
 files_up	5940	Su
@@ -235,19 +236,6 @@ settings_asks_first	e9bd	chiede prima
 settings_badge_error	9cf1	Errore
 settings_badge_warning	fc8f	Avviso
 settings_battery_charging	5116	, in carica
-settings_item_drive	269a	mostrato, non trattenuto: nessun comando cambia un'unità
-settings_not_shown	8efd	altri %d non mostrati
-settings_role_efi	d41a	Sistema EFI
-settings_role_linux	2c8f	Dati Linux
-settings_role_swap	d36e	Swap
-settings_role_other	ff95	Altro
-settings_role_free	ad01	Spazio libero
-settings_role_unpartitioned	3c10	Nessuna tabella delle partizioni
-settings_opened	5bd7	aperto nel browser
-settings_partitioned	70f5	%d%% partizionato
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Partizioni
-settings_share	9902	%1$d,%2$d%%
 settings_battery_discharging	7964	, in scarica
 settings_battery_full	ded8	, carica
 settings_battery_idle	1635	, non in carica
@@ -298,6 +286,7 @@ settings_issue_unknown	e812	Un problema che questa versione non nomina (codice %
 settings_item_add	fbef	Enter conserva il nome di un dispositivo; la radio si accende per ciò che si associa
 settings_item_ask	6aad	Enter chiede la password e si connette
 settings_item_cannot	e643	moonwater non può soddisfare ciò che questa rete richiede
+settings_item_drive	269a	mostrato, non trattenuto: nessun comando cambia un'unità
 settings_item_joined	0fb8	connesso: Delete lo dimentica
 settings_item_kept	33d9	conservato per nome: Delete lo dimentica
 settings_item_open	4429	Enter si connette e la salva
@@ -320,19 +309,28 @@ settings_name_chars	58a2	un nome è fatto di lettere, cifre e trattini
 settings_name_long	f2c0	un nome ha meno di 32 caratteri
 settings_no_rates	185b	Lo schermo non elenca frequenze
 settings_no_screen	55fd	Nessuno schermo è collegato
+settings_no_sizes	0f7e	Lo schermo non elenca dimensioni
 settings_not_here	4e20	non presente su questa macchina
+settings_not_shown	8efd	altri %d non mostrati
 settings_nothing_kept	85a2	niente digitato: il valore resta
 settings_nothing_matches	14e9	Nessuna corrispondenza con il testo
 settings_nothing_typed	edce	niente digitato
 settings_notices_count	8902	%1$d avvisi
 settings_notices_dismiss	c370	ignora tutto
 settings_notices_none	47c6	nessun avviso del kernel
+settings_opened	5bd7	aperto nel browser
+settings_partitioned	70f5	%d%% partizionato
+settings_partitions	9b2e	Partizioni
 settings_percent	e76a	%d%%
+settings_primary_no	a970	Non principale
+settings_primary_other	0b14	Rendi principale un altro schermo per spostarlo
+settings_primary_yes	7f79	Principale
 settings_rate_best	7450	%d Hz (consigliata)
 settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater ha rifiutato
 settings_refused_place	9632	%s (la sua posizione nel file non viene letta)
 settings_refused_rate	97bc	%1$s (%2$d Hz non è offerto)
+settings_refused_size	1332	%s (%d × %d non è offerta)
 settings_refused_turn	7b3a	%1$s (%2$s non è stato possibile)
 settings_req_context	a233	la scheda non fornisce buffer, mappa VM né contesto di calcolo: l'anello di calcolo amdgpu o il suo firmware non è attivo
 settings_req_driver	42ea	il driver della scheda, %1$s, non ha ancora un percorso GPU: il processore disegna tutto
@@ -342,6 +340,12 @@ settings_req_prime	a63c	un dma-buf non si importa nel nodo di rendering: la sche
 settings_req_ring	29f2	l'anello di calcolo non ha completato l'autotest: firmware, clock o un reset dell'anello (lo dicono le righe del kernel)
 settings_req_selftest	0061	la scheda ha disegnato male l'immagine di autotest: i suoi kernel non corrispondono all'ISA di questa famiglia; resta sul processore
 settings_req_udmabuf	420f	/dev/udmabuf non crea un dma-buf da una pagina memfd: serve CONFIG_UDMABUF=y e che /dev/udmabuf si apra (la scheda compone ancora)
+settings_role_efi	d41a	Sistema EFI
+settings_role_free	ad01	Spazio libero
+settings_role_linux	2c8f	Dati Linux
+settings_role_other	ff95	Altro
+settings_role_swap	d36e	Swap
+settings_role_unpartitioned	3c10	Nessuna tabella delle partizioni
 settings_run_any	3ffd	Esegui un comando moonwater qualsiasi
 settings_running	d0e2	esecuzione di %s (Escape la ferma)
 settings_saved	9f44	salvata
@@ -349,6 +353,15 @@ settings_scale_best	2ba0	%d%% (consigliata)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Schermo %1$d: %2$s
 settings_screen_named	d918	Schermo %1$d: %2$s [%3$s]
+settings_share	9902	%1$d,%2$d%%
+settings_size_ask	7773	%d × %d: scegli Mantieni sotto Risoluzione, o torna tra %d s
+settings_size_back	6c84	Non mantenuta: torna a %s
+settings_size_best	5165	%d × %d (consigliata)
+settings_size_keep	d1e7	Mantieni %d × %d (torna tra %d s)
+settings_size_kept	7101	Mantenuta %d × %d
+settings_size_own	810e	la sua dimensione
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Lo schermo non ha accettato %d × %d: torna a %s
 settings_state_allowed	e443	consentito
 settings_state_blocked	6eb3	bloccato
 settings_state_view_only	031a	solo visualizzazione
@@ -376,6 +389,7 @@ settings_type_command	75f8	scrivi un comando: il verbo e ciò che segue
 settings_type_device	63e0	scrivi il nome di un dispositivo: Enter lo conserva, Escape lascia
 settings_type_passphrase	ca95	scrivi la password: Enter si connette, Escape lascia
 settings_unknown	9fb9	sconosciuto
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERBO [ARGOMENTI]
 settings_virtual_refused	4202	un dispositivo virtuale non può attivarlo: usare una tastiera o un mouse collegati alla macchina, oppure moonwater ssh in un terminale root
 settings_wall_hint	ccf0	Scegli un PNG in File, poi Imposta come sfondo di questo schermo
@@ -420,19 +434,6 @@ tray_settings	8728	Impostazioni
 ui_confirm_again	b3ff	premi di nuovo per confermare: 
 ui_field_digits	f52b	un numero è fatto di cifre
 ui_field_full	fe02	non ce ne sta di più
-settings_no_sizes	0f7e	Lo schermo non elenca dimensioni
-settings_primary_no	a970	Non principale
-settings_primary_other	0b14	Rendi principale un altro schermo per spostarlo
-settings_primary_yes	7f79	Principale
-settings_refused_size	1332	%s (%d × %d non è offerta)
-settings_size_ask	7773	%d × %d: scegli Mantieni sotto Risoluzione, o torna tra %d s
-settings_size_back	6c84	Non mantenuta: torna a %s
-settings_size_best	5165	%d × %d (consigliata)
-settings_size_keep	d1e7	Mantieni %d × %d (torna tra %d s)
-settings_size_kept	7101	Mantenuta %d × %d
-settings_size_own	810e	la sua dimensione
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	Lo schermo non ha accettato %d × %d: torna a %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Un cerchio sotto ogni dito su uno schermo touch

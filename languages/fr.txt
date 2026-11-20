@@ -63,7 +63,7 @@ files_delete_for_good	ec0e	Supprimer définitivement %1$d : %2$s ? Maj+Suppr enc
 files_delete_stopped	ef42	Arrêté à %2$s : %1$d supprimés avant
 files_deleted	8591	%d supprimés
 files_deleting	a297	Suppression : %d pour l'instant, Escape arrête
-files_done	1791	Terminé
+files_drive_root	84bc	Système
 files_empty	751c	Ce dossier est vide
 files_failed	c564	Ce dossier n'a pas pu être lu
 files_find_hint	0ee1	Chercher dans ce dossier
@@ -82,11 +82,13 @@ files_not_folder	2663	Ce n'est pas un dossier
 files_nothing_to_paste	c9d4	Le presse-papiers ne contient aucun fichier
 files_nothing_to_redo	b2a4	Rien à rétablir
 files_nothing_to_undo	1433	Rien à annuler
+files_place_downloads	07de	Téléchargements
+files_place_home	0eae	Dossier personnel
+files_place_pictures	feae	Images
 files_reading	64a4	Lecture du dossier
 files_redone	6fd0	%d rétablis
 files_rename_hint	ad88	Nouveau nom
 files_restored	4c30	%d remis à leur place
-files_selecting	2d5c	Mode sélection, %d choisis : touchez des éléments pour les ajouter ou les retirer, Échap ou Terminé pour finir
 files_sheet_created	59ac	Créé %s
 files_sheet_file	3663	Fichier
 files_sheet_folder	7afd	Dossier
@@ -100,9 +102,8 @@ files_sheet_other	3921	Périphérique, tube ou socket
 files_sheet_owner	8b0c	Propriétaire %1$d, groupe %2$d
 files_sheet_size	eca5	Taille %1$s (%2$s octets)
 files_sheet_size_in	31a1	Taille %1$s en %2$d éléments
-files_type_ext	d2c5	Fichier %s
 files_type_link	e589	Lien
-files_type_other	e8e6	Fichier spécial
+files_type_other	80d0	Spécial
 files_undone	4da3	%d annulés
 files_unreadable	986c	Ce dossier ne peut pas être lu
 files_up	5940	Monter
@@ -235,19 +236,6 @@ settings_asks_first	e9bd	demande d'abord
 settings_badge_error	9cf1	Erreur
 settings_badge_warning	fc8f	Avertissement
 settings_battery_charging	5116	, en charge
-settings_item_drive	269a	affiché, non retenu : aucune commande ne modifie un disque
-settings_not_shown	8efd	%d autres non affichés
-settings_role_efi	d41a	Système EFI
-settings_role_linux	2c8f	Données Linux
-settings_role_swap	d36e	Échange
-settings_role_other	ff95	Autre
-settings_role_free	ad01	Espace libre
-settings_role_unpartitioned	3c10	Aucune table de partitions
-settings_opened	5bd7	ouvert dans le navigateur
-settings_partitioned	70f5	%d %% partitionné
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Partitions
-settings_share	9902	%1$d,%2$d %%
 settings_battery_discharging	7964	, en décharge
 settings_battery_full	ded8	, pleine
 settings_battery_idle	1635	, ne charge pas
@@ -298,6 +286,7 @@ settings_issue_unknown	e812	Un problème que cette version ne nomme pas (code %1
 settings_item_add	fbef	Enter garde le nom d'un appareil ; la radio s'active pour ce qui s'appaire
 settings_item_ask	6aad	Enter demande son mot de passe et rejoint
 settings_item_cannot	e643	moonwater ne peut pas rejoindre ce que ce réseau demande
+settings_item_drive	269a	affiché, non retenu : aucune commande ne modifie un disque
 settings_item_joined	0fb8	connecté : Delete l'oublie
 settings_item_kept	33d9	gardé par son nom : Delete l'oublie
 settings_item_open	4429	Enter rejoint et l'enregistre
@@ -320,19 +309,28 @@ settings_name_chars	58a2	un nom, ce sont des lettres, des chiffres et des tirets
 settings_name_long	f2c0	un nom compte moins de 32 caractères
 settings_no_rates	185b	L'écran n'indique aucune fréquence
 settings_no_screen	55fd	Aucun écran n'est connecté
+settings_no_sizes	0f7e	L'écran ne propose aucune taille
 settings_not_here	4e20	absent de cette machine
+settings_not_shown	8efd	%d autres non affichés
 settings_nothing_kept	85a2	rien de saisi : la valeur est gardée
 settings_nothing_matches	14e9	Rien ne correspond à la saisie
 settings_nothing_typed	edce	rien de saisi
 settings_notices_count	8902	%1$d avis
 settings_notices_dismiss	c370	tout ignorer
 settings_notices_none	47c6	aucun avis du noyau
+settings_opened	5bd7	ouvert dans le navigateur
+settings_partitioned	70f5	%d %% partitionné
+settings_partitions	9b2e	Partitions
 settings_percent	e76a	%d %%
+settings_primary_no	a970	Pas principal
+settings_primary_other	0b14	Rendez un autre écran principal pour le changer
+settings_primary_yes	7f79	Principal
 settings_rate_best	7450	%d Hz (recommandée)
 settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater a refusé
 settings_refused_place	9632	%s (sa place dans le fichier n'est pas lue)
 settings_refused_rate	97bc	%1$s (%2$d Hz n'est pas proposé)
+settings_refused_size	1332	%s (%d × %d n'est pas proposé)
 settings_refused_turn	7b3a	%1$s (%2$s n'a pas pu être fait)
 settings_req_context	a233	la carte ne fournit ni tampon, ni mappage VM, ni contexte de calcul : l'anneau de calcul amdgpu ou son micrologiciel n'est pas prêt
 settings_req_driver	42ea	le pilote de la carte, %1$s, n'a pas encore de voie GPU : le processeur dessine tout
@@ -342,6 +340,12 @@ settings_req_prime	a63c	un dma-buf ne s'importe pas dans le nœud de rendu : la 
 settings_req_ring	29f2	l'anneau de calcul n'a pas fini l'autotest : micrologiciel, horloges ou réinitialisation de l'anneau (lignes du noyau)
 settings_req_selftest	0061	la carte a mal dessiné l'image d'autotest : ses noyaux ne correspondent pas à l'ISA de cette famille ; elle reste sur le processeur
 settings_req_udmabuf	420f	/dev/udmabuf ne crée pas de dma-buf depuis une page memfd : il faut CONFIG_UDMABUF=y et que /dev/udmabuf s'ouvre (la carte compose encore)
+settings_role_efi	d41a	Système EFI
+settings_role_free	ad01	Espace libre
+settings_role_linux	2c8f	Données Linux
+settings_role_other	ff95	Autre
+settings_role_swap	d36e	Échange
+settings_role_unpartitioned	3c10	Aucune table de partitions
 settings_run_any	3ffd	Exécuter une commande moonwater
 settings_running	d0e2	exécution de %s (Escape l'arrête)
 settings_saved	9f44	enregistré
@@ -349,6 +353,15 @@ settings_scale_best	2ba0	%d %% (recommandée)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Écran %1$d : %2$s
 settings_screen_named	d918	Écran %1$d : %2$s [%3$s]
+settings_share	9902	%1$d,%2$d %%
+settings_size_ask	7773	%d × %d : choisissez Garder sous Résolution, sinon retour dans %d s
+settings_size_back	6c84	Non gardé : retour à %s
+settings_size_best	5165	%d × %d (recommandée)
+settings_size_keep	d1e7	Garder %d × %d (retour dans %d s)
+settings_size_kept	7101	%d × %d gardé
+settings_size_own	810e	sa propre taille
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	L'écran n'a pas pris %d × %d : retour à %s
 settings_state_allowed	e443	autorisé
 settings_state_blocked	6eb3	bloqué
 settings_state_view_only	031a	consultation seule
@@ -376,6 +389,7 @@ settings_type_command	75f8	saisissez une commande : son verbe, puis ce qui suit
 settings_type_device	63e0	saisissez le nom d'un appareil : Enter le garde, Escape laisse
 settings_type_passphrase	ca95	saisissez son mot de passe : Enter rejoint, Escape laisse
 settings_unknown	9fb9	inconnu
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERBE [ARGUMENTS]
 settings_virtual_refused	4202	un périphérique virtuel ne peut pas activer ceci : utilisez un clavier ou une souris branchés sur la machine, ou moonwater ssh dans un terminal root
 settings_wall_hint	ccf0	Choisissez un PNG dans Fichiers, puis Définir comme fond d'écran de cet écran
@@ -420,19 +434,6 @@ tray_settings	8728	Réglages
 ui_confirm_again	b3ff	appuyez de nouveau pour confirmer : 
 ui_field_digits	f52b	un nombre s'écrit en chiffres
 ui_field_full	fe02	c'est tout ce que ce champ peut contenir
-settings_no_sizes	0f7e	L'écran ne propose aucune taille
-settings_primary_no	a970	Pas principal
-settings_primary_other	0b14	Rendez un autre écran principal pour le changer
-settings_primary_yes	7f79	Principal
-settings_refused_size	1332	%s (%d × %d n'est pas proposé)
-settings_size_ask	7773	%d × %d : choisissez Garder sous Résolution, sinon retour dans %d s
-settings_size_back	6c84	Non gardé : retour à %s
-settings_size_best	5165	%d × %d (recommandée)
-settings_size_keep	d1e7	Garder %d × %d (retour dans %d s)
-settings_size_kept	7101	%d × %d gardé
-settings_size_own	810e	sa propre taille
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	L'écran n'a pas pris %d × %d : retour à %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Un cercle sous chaque doigt sur un écran tactile

@@ -1736,6 +1736,8 @@ enum
         UI_FILE_DOCUMENT,    // a document: pages, sheets, slides
         UI_FILE_DRIVE,       // a disk: the root, a mount
         UI_FILE_HOME,        // the home folder
+        UI_FILE_DOWNLOADS,   // the downloads folder
+        UI_FILE_PICTURES,    // the pictures folder
         UI_FILE_TRASH,       // the bin
         UI_FILE_SPECIAL,     // a device, a pipe, a socket
         UI_FILE_KINDS
@@ -1761,6 +1763,10 @@ static const struct ui_icon_part ui_file_parts[UI_FILE_KINDS][UI_FILE_PARTS] = {
         [UI_FILE_DRIVE] = {{UI_ICON_RING, 4, 15, 44, 35, 3}, {UI_ICON_BOX, 34, 23, 39, 28, 2}, {UI_ICON_LINE, 10, 25, 26, 25, 0}},
         [UI_FILE_HOME] = {{UI_ICON_LINE, 4, 24, 24, 6, 0}, {UI_ICON_LINE, 24, 6, 44, 24, 0}, {UI_ICON_LINE, 10, 20, 10, 42, 0}, {UI_ICON_LINE, 38, 20, 38, 42, 0},
                           {UI_ICON_LINE, 10, 42, 38, 42, 0}, {UI_ICON_RING, 20, 30, 28, 42, 0}},
+        [UI_FILE_DOWNLOADS] = {{UI_ICON_LINE, 24, 7, 24, 32, 0}, {UI_ICON_LINE, 14, 22, 24, 32, 0}, {UI_ICON_LINE, 34, 22, 24, 32, 0},
+                               {UI_ICON_LINE, 8, 33, 8, 41, 0}, {UI_ICON_LINE, 8, 41, 40, 41, 0}, {UI_ICON_LINE, 40, 33, 40, 41, 0}},
+        [UI_FILE_PICTURES] = {{UI_ICON_RING, 6, 9, 42, 39, 3}, {UI_ICON_BOX, 14, 15, 20, 21, 3}, {UI_ICON_LINE, 10, 35, 19, 25, 0},
+                              {UI_ICON_LINE, 19, 25, 27, 33, 0}, {UI_ICON_LINE, 24, 30, 31, 22, 0}, {UI_ICON_LINE, 31, 22, 38, 35, 0}},
         [UI_FILE_TRASH] = {{UI_ICON_LINE, 7, 12, 41, 12, 0}, {UI_ICON_RING, 18, 6, 30, 12, 1}, {UI_ICON_LINE, 12, 12, 15, 43, 0}, {UI_ICON_LINE, 36, 12, 33, 43, 0},
                            {UI_ICON_LINE, 15, 43, 33, 43, 0}, {UI_ICON_LINE, 20, 18, 20, 37, 0}, {UI_ICON_LINE, 28, 18, 28, 37, 0}},
         [UI_FILE_SPECIAL] = {{UI_ICON_RING, 8, 8, 40, 40, 16}, {UI_ICON_BOX, 20, 20, 28, 28, 4}},
@@ -8064,7 +8070,7 @@ LANGUAGE_ID(files_delete_for_good, "Delete %1$d for good: %2$s? Shift+Delete aga
 LANGUAGE_ID(files_delete_stopped, "Stopped at %2$s: %1$d deleted before it") \
 LANGUAGE_ID(files_deleted, "%d deleted") \
 LANGUAGE_ID(files_deleting, "Deleting: %d so far, Escape stops") \
-LANGUAGE_ID(files_done, "Done") \
+LANGUAGE_ID(files_drive_root, "System") \
 LANGUAGE_ID(files_empty, "This folder is empty") \
 LANGUAGE_ID(files_failed, "This folder could not be read") \
 LANGUAGE_ID(files_find_hint, "Find in this folder") \
@@ -8083,11 +8089,13 @@ LANGUAGE_ID(files_not_folder, "This is not a folder") \
 LANGUAGE_ID(files_nothing_to_paste, "The clipboard holds no files") \
 LANGUAGE_ID(files_nothing_to_redo, "Nothing to do again") \
 LANGUAGE_ID(files_nothing_to_undo, "Nothing to undo") \
+LANGUAGE_ID(files_place_downloads, "Downloads") \
+LANGUAGE_ID(files_place_home, "Home") \
+LANGUAGE_ID(files_place_pictures, "Pictures") \
 LANGUAGE_ID(files_reading, "Reading the folder") \
 LANGUAGE_ID(files_redone, "%d done again") \
 LANGUAGE_ID(files_rename_hint, "New name") \
 LANGUAGE_ID(files_restored, "%d put back where they were") \
-LANGUAGE_ID(files_selecting, "Selection mode, %d chosen: tap items to add or take them out, Escape or Done to finish") \
 LANGUAGE_ID(files_sheet_created, "Made %s") \
 LANGUAGE_ID(files_sheet_file, "File") \
 LANGUAGE_ID(files_sheet_folder, "Folder") \
@@ -8101,9 +8109,8 @@ LANGUAGE_ID(files_sheet_other, "Device, pipe or socket") \
 LANGUAGE_ID(files_sheet_owner, "Owner %1$d, group %2$d") \
 LANGUAGE_ID(files_sheet_size, "Size %1$s (%2$s bytes)") \
 LANGUAGE_ID(files_sheet_size_in, "Size %1$s in %2$d items") \
-LANGUAGE_ID(files_type_ext, "%s file") \
 LANGUAGE_ID(files_type_link, "Link") \
-LANGUAGE_ID(files_type_other, "Special file") \
+LANGUAGE_ID(files_type_other, "Special") \
 LANGUAGE_ID(files_undone, "%d undone") \
 LANGUAGE_ID(files_unreadable, "This folder may not be read") \
 LANGUAGE_ID(files_up, "Up") \
@@ -10823,68 +10830,6 @@ static b32 ui_pressed(const struct ui_press address_to press, int target)
         return press->down && !press->dragged && target >= 0 && press->target == target;
 }
 
-/*
-        A hold: a press kept still (within UI_SLOP of where it went down) for UI_CHOOSE_HOLD_NS turns from what a press does (scroll the list,
-        click its row) into choosing: a list that asks for it (ui_list.hold_on) answers the hold done (ui_list_hold_tick) with where it
-        went down, a row or its ground, and the app chooses there, a rubber band from the ground or the row taken up from a row. From
-        the moment the press is still a ring of the accent grows round the press (ui_hold_draw), whole at UI_CHOOSE_HOLD_NS, and a pop of it
-        says the press has turned; a press moved past the slop before then is what it was, and no ring.
-*/
-#define UI_CHOOSE_HOLD_NS 3000000000ll  // how long a press is held still before it turns into choosing
-#define UI_CHOOSE_POP_NS 260000000ll // the ring's pop once it has
-#define UI_CHOOSE_RADIUS 22        // logical pixels: the ring's
-#define UI_CHOOSE_WIDTH 3          // and its stroke
-
-struct ui_hold
-{
-        b32 down, done;          // a press is held; it was held long enough (till the next press)
-        int x, y, target;        // where it went down and on what (-1 the ground)
-        b64 at;                  // when, and when it turned (the pop)
-        b64 turned;
-};
-
-static fn ui_hold_begin(struct ui_hold address_to h, int x, int y, int target, b64 now)
-{
-        h->down = true, h->done = false, h->x = x, h->y = y, h->target = target, h->at = now, h->turned = 0;
-}
-
-// The pressed hand moved: past the slop before the hold is done, the press is what it was, and no hold.
-static fn ui_hold_move(const struct ui address_to ui, struct ui_hold address_to h, int x, int y)
-{
-        if (h->down && !h->done && ui_press_past(ui, h->x, h->y, x, y))
-                h->down = false;
-}
-
-static fn ui_hold_end(struct ui_hold address_to h)
-{
-        h->down = false;
-}
-
-// How far the hold has come at now, Q30: 0 for none, UI_ONE once it is done.
-static b64 ui_hold_share(const struct ui_hold address_to h, b64 now)
-{
-        if (h->done)
-                return UI_ONE;
-        if (!h->down || now <= h->at)
-                return 0;
-        return now - h->at >= UI_CHOOSE_HOLD_NS ? UI_ONE : ((now - h->at) << UI_Q) / UI_CHOOSE_HOLD_NS;
-}
-
-// The hold at now: true the once it comes to UI_CHOOSE_HOLD_NS, which turns it (done, the pop's time).
-static b32 ui_hold_turns(struct ui_hold address_to h, b64 now)
-{
-        if (!h->down || h->done || ui_hold_share(h, now) < UI_ONE)
-                return false;
-        h->done = true, h->turned = now;
-        return true;
-}
-
-// Whether a picture is due for the hold at now: its ring growing, or its pop.
-static b32 ui_hold_moving(const struct ui_hold address_to h, b64 now)
-{
-        return (h->down && !h->done) || (h->turned && now - h->turned < UI_CHOOSE_POP_NS);
-}
-
 
 /* ---- kit: motion ---- */
 /*
@@ -11626,6 +11571,7 @@ static struct ui_kit
         b32 reached;
         int reach_top, reach_bottom;
         int pointer_x, pointer_y;          // the window's pointer, device pixels: the last motion's place (ui_event_context)
+        unsigned int buttons;              // pointer buttons currently held (UI_BTN_*), tracked by ui_event_context and cleared on focus loss
         b32 keyed;                         // the hand is on the keys: the last thing that moved the focus was a key, and no press came since (ui_kit_keyed_note)
         b64 test_clock;                    // a check's clock, ns (0: the monotonic clock): the kit reads it for every time, so a row needs no real one
         b64 stamp;                         // the device's stamp of the event being handled (window_event.when), or 0: a hand reads its time from it (ui_press_now)
@@ -11875,10 +11821,9 @@ static fn ui_kit_inks(struct ui address_to ui)
         band way to it) and a press on the pane's ground still takes the window to move it. The body has no margin of its own at the
         top or the far edge: what it holds keeps to its own insets, and rows run to the window's edge.
 */
-#define UI_SIDE_W 200 // logical pixels: the pane's width in every window that has one
-#define ui_side_frame() ui_row(.grow = 1)
-#define ui_side_pane(box) ui_col(.host = (box), .w = UI_SIDE_W, .min_w = UI_COLUMN_LEAST, .shrink = 1)
-#define ui_side_body(...) ui_col(.grow = 1, __VA_ARGS__)
+#define UI_SIDE_W 200        // logical pixels: the pane's default width in every window that has one
+#define UI_SIDE_BODY_MIN 240 // logical pixels: the body kept beside a resized pane at least
+#define UI_SIDE_EDGE 5       // logical pixels either side of the pane's inner seam that take the hand to resize it
 
 static b32 ui_side_holds(const struct ui address_to ui, int x, int w)
 {
@@ -15242,6 +15187,14 @@ static fn ui_kit_keyed_note(const struct window_event address_to event)
                 ui_kit.keyed = 1;
 }
 
+// The pointer's buttons, the evdev codes a press carries in a (the left, the right and the middle), and their held-state bits (ui_kit.buttons).
+#define UI_POINTER_LEFT 0x110
+#define UI_POINTER_RIGHT 0x111
+#define UI_POINTER_MIDDLE 0x112
+#define UI_BTN_LEFT 1u
+#define UI_BTN_RIGHT 2u
+#define UI_BTN_MIDDLE 4u
+
 static fn ui_event_context(const struct window_event address_to event)
 {
         ui_kit_keyed_note(event);
@@ -15250,6 +15203,16 @@ static fn ui_event_context(const struct window_event address_to event)
         ui_kit_repeat = event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_REPEAT) != 0;
         ui_kit.now = (b64)ui_kit_clock();
         ui_kit.stamp = event->when;
+        if (event->type == WINDOW_EVENT_BUTTON)
+        {
+                unsigned int bit = event->a == UI_POINTER_LEFT ? UI_BTN_LEFT : event->a == UI_POINTER_RIGHT ? UI_BTN_RIGHT
+                                   : event->a == UI_POINTER_MIDDLE ? UI_BTN_MIDDLE : 0;
+
+                if ((event->flags & WINDOW_KEY_DOWN) && !(event->flags & WINDOW_KEY_CANCEL))
+                        ui_kit.buttons |= bit;
+                else
+                        ui_kit.buttons &= ~bit;
+        }
         // A finger's events are traced when the trace is on (window_trace_touch looks for the switch at a finger's press).
         if (event->flags & WINDOW_KEY_TOUCH)
         {
@@ -15260,11 +15223,6 @@ static fn ui_event_context(const struct window_event address_to event)
         }
         ui_kit_track(event);
 }
-
-// The pointer's buttons, the evdev codes a press carries in a (the left, the right and the middle).
-#define UI_POINTER_LEFT 0x110
-#define UI_POINTER_RIGHT 0x111
-#define UI_POINTER_MIDDLE 0x112
 
 /*
         A control lets go of the press it held: no value changes, and its ripple, squish and extent settle as a release would (a
@@ -19703,6 +19661,8 @@ static b32 ui_popmenu_shows(struct ui_popup address_to p, const struct window_ro
 static b32 ui_popmenu_open(struct ui_popup address_to p, const struct window_row address_to parent, const struct ui address_to parent_ui,
                          int x, int y, int width, int height, unsigned int flags, b32 touch)
 {
+        // A popup takes the pointer from its parent: no parent button stays seen as held once the menu is up.
+        ui_kit.buttons = 0;
         if (p->open)
                 windows_leave(&p->own);
         p->open = false;
@@ -21605,6 +21565,13 @@ struct ui_view
         struct ui_scroll scroll[UI_VIEW_SCROLLS]; // the scroll containers of the build, in order: the body, the bar and the region of each
         int scrolls;
         struct ui_press finger;           // a finger's press in a scroll container: the drag that moves it, and the lift that throws it
+        // A glass side pane declared with ui_side_pane: its width in logical pixels (0: UI_SIDE_W), held across layouts as the hand drags its seam.
+        int side_node;
+        int side_w;
+        struct ui_rect side_box;
+        b32 side_hover, side_held;
+        int side_from, side_start_w;
+        b64 side_click_at;
 };
 
 // A view never begun pointed at its own tree's elements and items, so a read before its first build reads zeros.
@@ -21623,11 +21590,15 @@ struct ui_list;
 static fn ui_view_list_lay(struct ui address_to ui, struct ui_list address_to l, const struct ui_node address_to n, const struct ui_node address_to column, int width);
 static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l);
 static b32 ui_view_list_wheel(struct ui address_to ui, struct ui_list address_to l, int x, int y, b32 anywhere, const struct window_event address_to event);
+static b32 ui_view_list_bar(const struct ui address_to ui, struct ui_list address_to l, int type, int x, int y, b32 down, b32 address_to lit);
+static b32 ui_view_list_bar_cancel(struct ui_list address_to l);
+static fn ui_list_press_cancel(const struct ui address_to ui, struct ui_list address_to l);
 
 // The finger's recogniser and a scroll region's keys are defined with the list and the lines, after the view.
 static fn ui_press_down(struct ui_press address_to press, int x, int y, int target, struct ui_scroll address_to region);
 static int ui_press_follow(const struct ui address_to ui, struct ui_press address_to press, int x, int y);
 static int ui_press_lift(struct ui_press address_to press, b32 cancelled);
+static fn ui_press_cancel(struct ui_press address_to press);
 static b32 ui_lines_key(const struct ui address_to ui, struct ui_scroll address_to s, int key, b32 address_to moved);
 
 
@@ -21880,6 +21851,17 @@ static fn ui_view_scope(int dir, const struct ui_props address_to p)
                 ui_view_open(p->kind, dir, p);
 }
 
+// The glass side pane of a view: a column of the view's side_w (UI_SIDE_W at the start, held across layouts as the hand drags its seam).
+static fn ui_view_side(struct ui_rect address_to box)
+{
+        struct ui_view address_to v = ui_view_now;
+
+        if (!v)
+                return;
+        v->side_node = v->tree.count;
+        ui_view_open(UI_ITEM_BOX, 1, &(struct ui_props){.kind = UI_ITEM_BOX, .host = box, .w = v->side_w > 0 ? v->side_w : UI_SIDE_W, .min_w = UI_COLUMN_LEAST, .shrink = 1});
+}
+
 static fn ui_view_close(void)
 {
         if (ui_view_now)
@@ -21908,6 +21890,9 @@ static fn ui_view_leaf(const struct ui_props address_to p)
 
 #define ui_row(...) UI_VIEW_SCOPE(ui_view_scope(0, &(struct ui_props){.kind = UI_ITEM_BOX, __VA_ARGS__}))
 #define ui_col(...) UI_VIEW_SCOPE(ui_view_scope(1, &(struct ui_props){.kind = UI_ITEM_BOX, __VA_ARGS__}))
+#define ui_side_frame() ui_row(.grow = 1)
+#define ui_side_pane(box) UI_VIEW_SCOPE(ui_view_side(box))
+#define ui_side_body(...) ui_col(.grow = 1, __VA_ARGS__)
 #define ui_text(words, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_TEXT, .text = (words), __VA_ARGS__})
 #define ui_button(words, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BUTTON, .text = (words), __VA_ARGS__})
 #define ui_host(rect, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_HOST, .host = (rect), __VA_ARGS__})
@@ -21937,7 +21922,7 @@ static fn ui_view_begin(struct ui_view address_to v, struct ui address_to ui, in
         struct ui_node address_to root;
 
         ui_view_poll(v);
-        v->ui = ui, v->width = width, v->limit = limit, v->unknown = 0;
+        v->ui = ui, v->width = width, v->limit = limit, v->unknown = 0, v->side_node = -1;
         v->generation++;
         v->group.count = v->scrolls = 0;
         ui_view_now = v;
@@ -22066,6 +22051,14 @@ static int ui_view_end(struct ui_view address_to v)
                 line->y = (int)((b64)(row->y + (row->h - ui_dev(ui, ui_types[line->variant].line)) / 2) * 100 / scale);
         }
         v->group.keys = v->group.keys > v->group.count ? 0 : v->group.keys;
+        if (v->side_node >= 0 && v->side_node < v->tree.count)
+        {
+                const struct ui_node address_to sn = &v->tree.node[v->side_node];
+
+                v->side_box = (struct ui_rect){sn->x, sn->y, sn->w, sn->h};
+        }
+        else
+                v->side_box = (struct ui_rect){0, 0, 0, 0};
         return v->tree.node[0].h;
 }
 
@@ -22167,6 +22160,18 @@ static fn ui_view_draw(struct ui address_to ui, struct ui_view address_to v, b32
         }
         ui->top = 0, ui->bottom = ui->height;
         ui_side_inks(ui, false);
+        // The glass side pane's inner seam: a subtle hairline at rest, lit in the accent while the pointer is over it or drags it.
+        if (ui->sided && v->side_box.w > 0 && v->side_box.h > 0)
+        {
+                int line = ui_dev(ui, v->side_held ? 2 : 1);
+                int seam = ui_rtl() ? v->side_box.x : v->side_box.x + v->side_box.w - (line > 0 ? line : 1);
+                unsigned int ink = v->side_hover || v->side_held ? ui_role(UI_PRIMARY) | 0xff000000u : ui_well(ui, UI_OUTLINE_VARIANT, 60);
+
+                line = line > 0 ? line : 1;
+                ui_kit_fill(ui, &(struct ui_box){(b32)seam << 8, (b32)v->side_box.y << 8, (b32)(seam + line) << 8,
+                                                 (b32)(v->side_box.y + v->side_box.h) << 8, 0, 0},
+                            ink, null);
+        }
         ui_buttons_draw(ui, &v->group, keys);
 }
 
@@ -22219,6 +22224,91 @@ static int ui_view_unpull(const struct ui address_to ui, const struct ui_view ad
         return y;
 }
 
+// Every active drag, stretch, scrollbar hold and press in the view let go at once (a popup opening, focus lost, a cancel, a resize starting).
+static fn ui_view_cancel(const struct ui address_to ui, struct ui_view address_to v)
+{
+        ui_view_ready(v);
+        v->side_held = false;
+        ui_press_cancel(&v->finger);
+        for (int k = 0; k < v->scrolls; k++)
+                v->scroll[k].held = false, ui_scroll_let_go(&v->scroll[k], 0);
+        for (int at = 0; at < v->tree.count; at++)
+                if (v->item[at].list)
+                        ui_list_press_cancel(ui, v->item[at].list);
+        if (ui_kit_held)
+                ui_kit_let_go_held(ui_kit_held);
+}
+
+// The glass side pane's inner edge held and dragged to resize the pane (double-click resets to UI_SIDE_W), in either direction (RTL-aware).
+static p32 ui_view_side_event(const struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event)
+{
+        b32 motion = event->type == WINDOW_EVENT_MOTION, button = event->type == WINDOW_EVENT_BUTTON;
+        b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+        int x = motion ? event->a : ui_kit.pointer_x, y = motion ? event->b : ui_kit.pointer_y;
+        int scale = ui->scale > 0 ? ui->scale : 100, reach = ui_dev(ui, UI_SIDE_EDGE), inner = ui_dev(ui, 3);
+        int seam, left, right, max_w, win_logical;
+        b32 on;
+
+        if (!v || v->side_box.w <= 0 || v->side_box.h <= 0 || (!motion && !button))
+                return 0;
+        // Keep the grab zone clear of the side pane's own scrollbar track (which sits UI_SCROLL_BORDER inside the seam) while extending
+        // generously into the body side so the seam is easy to grab without stealing scrollbar clicks.
+        seam = ui_rtl() ? v->side_box.x : v->side_box.x + v->side_box.w;
+        left = ui_rtl() ? seam - reach : seam - inner;
+        right = ui_rtl() ? seam + inner : seam + reach;
+        on = x >= left && x < right && y >= v->side_box.y && y < v->side_box.y + v->side_box.h;
+        if (v->side_held)
+        {
+                if (button && (!down || event->a != UI_POINTER_LEFT))
+                {
+                        v->side_held = false;
+                        return UI_VIEW_DRAW | UI_VIEW_TAKEN;
+                }
+                if (motion)
+                {
+                        int delta = (x - v->side_from) * ui_dir();
+                        int width = v->side_start_w + delta * 100 / scale;
+
+                        win_logical = v->width > 0 ? v->width * 100 / scale : 720;
+                        max_w = win_logical / 2;
+                        if (win_logical - UI_SIDE_BODY_MIN < max_w)
+                                max_w = win_logical - UI_SIDE_BODY_MIN;
+                        if (max_w < UI_COLUMN_LEAST)
+                                max_w = UI_COLUMN_LEAST;
+                        v->side_w = width < UI_COLUMN_LEAST ? UI_COLUMN_LEAST : width > max_w ? max_w : width;
+                        ui_kit_shape = WINDOW_POINTER_RESIZE;
+                        return UI_VIEW_DRAW | UI_VIEW_TAKEN;
+                }
+                return UI_VIEW_TAKEN;
+        }
+        if (motion)
+        {
+                b32 was = v->side_hover;
+
+                v->side_hover = on;
+                if (on)
+                        ui_kit_shape = WINDOW_POINTER_RESIZE;
+                return on != was ? UI_VIEW_DRAW : 0;
+        }
+        if (button && down && event->a == UI_POINTER_LEFT && on)
+        {
+                b64 now = (b64)ui_kit.now;
+
+                ui_view_cancel(ui, v);
+                if (v->side_click_at && now - v->side_click_at <= ui_click_ns)
+                {
+                        v->side_w = UI_SIDE_W, v->side_click_at = 0;
+                        return UI_VIEW_DRAW | UI_VIEW_TAKEN;
+                }
+                v->side_click_at = now;
+                v->side_held = true, v->side_hover = true;
+                v->side_from = x, v->side_start_w = v->side_box.w * 100 / scale;
+                ui_kit_shape = WINDOW_POINTER_RESIZE;
+                return UI_VIEW_DRAW | UI_VIEW_TAKEN;
+        }
+        return 0;
+}
+
 static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event)
 {
         ui_view_ready(v);
@@ -22228,6 +22318,20 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
         struct ui_scroll address_to under = ui_view_scroll_at(v, x, y);
         p32 asks = 0;
 
+        asks = ui_view_side_event(ui, v, event);
+        if (asks & UI_VIEW_TAKEN)
+                return asks;
+        if (event->type == WINDOW_EVENT_BUTTON && down && event->a != UI_POINTER_LEFT)
+        {
+                if (v->finger.down)
+                        ui_press_cancel(&v->finger), asks |= UI_VIEW_DRAW;
+                for (int k = 0; k < v->scrolls; k++)
+                        if (v->scroll[k].held)
+                                v->scroll[k].held = false, ui_scroll_let_go(&v->scroll[k], 0), asks |= UI_VIEW_DRAW;
+                for (int at = 0; at < v->tree.count; at++)
+                        if (v->item[at].list && ui_view_list_bar_cancel(v->item[at].list))
+                                asks |= UI_VIEW_DRAW;
+        }
         if (event->type == WINDOW_EVENT_WHEEL)
         {
                 // A list's rows under the pointer turn with the wheel, as a scroll container does: the list's own glide. Over no list and no
@@ -22252,6 +22356,13 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
 
                 asks |= ui_scroll_bar(ui, s, (int)event->type, x, y, down) ? UI_VIEW_DRAW | UI_VIEW_TAKEN : lit != s->hover ? UI_VIEW_DRAW : 0;
         }
+        for (int at = 0; at < v->tree.count && (motion || button); at++)
+                if (v->item[at].list)
+                {
+                        b32 lit = false, took = ui_view_list_bar(ui, v->item[at].list, (int)event->type, x, y, down, &lit);
+
+                        asks |= took ? UI_VIEW_DRAW | UI_VIEW_TAKEN : lit ? UI_VIEW_DRAW : 0;
+                }
         if (asks & UI_VIEW_TAKEN)
                 return asks;
         for (int at = 0; at < v->tree.count && ui_kit_held && (motion || (button && !down)); at++)
@@ -23147,6 +23258,113 @@ static int ui_file_kind(const char address_to name, unsigned int mode)
                                 return known[at].kind;
         }
         return UI_FILE_PLAIN;
+}
+
+/*
+        A byte count with a strict explicit unit (B, KB, MB, GB, TB, PB, EB): bare bytes below 1024 with " B", then binary multiples
+        of 1024 with one decimal place below 10 and whole units from 10 up, rounded half-up (1024 rolls to 1.0 of the next unit).
+*/
+static fn ui_size_text(char address_to into, positive room, p64 bytes)
+{
+        static const char prefix[7] = {0, 'K', 'M', 'G', 'T', 'P', 'E'};
+        char digits[24];
+        positive used = 0;
+        int unit = 0;
+
+        if (!room)
+                return;
+        into[0] = 0;
+        if (bytes < 1024)
+                digits[positive_into_string((p8 address_to)digits, (positive)bytes)] = 0;
+        else
+        {
+                p64 scale = 1, whole, rem, r, s;
+
+                while (unit < 6 && bytes / scale >= 1024)
+                        scale *= 1024, unit++;
+                whole = bytes / scale, rem = bytes % scale;
+                r = unit >= 5 ? rem >> 10 : rem, s = unit >= 5 ? scale >> 10 : scale;
+                if (whole < 10)
+                {
+                        p64 tenths = (r * 10 + s / 2) / s;
+
+                        if (tenths >= 10)
+                                whole++, tenths = 0;
+                        if (whole < 10)
+                        {
+                                used = positive_into_string((p8 address_to)digits, (positive)whole);
+                                digits[used++] = '.', digits[used++] = (char)('0' + tenths), digits[used] = 0;
+                        }
+                        else
+                                digits[positive_into_string((p8 address_to)digits, (positive)whole)] = 0;
+                }
+                else
+                {
+                        if (r * 2 >= s)
+                                whole++;
+                        if (whole >= 1024 && unit < 6)
+                                unit++, digits[0] = '1', digits[1] = '.', digits[2] = '0', digits[3] = 0;
+                        else
+                                digits[positive_into_string((p8 address_to)digits, (positive)whole)] = 0;
+                }
+        }
+        used = string_length((string_address)digits);
+        if (used + 4 > room)
+                used = room > 4 ? room - 4 : 0;
+        memory_copy(into, digits, used);
+        if (used + 1 < room)
+                into[used++] = ' ';
+        if (prefix[unit] && used + 1 < room)
+                into[used++] = prefix[unit];
+        if (used + 1 < room)
+                into[used++] = 'B';
+        into[used] = 0;
+}
+
+/*
+        What kind of thing a directory entry is, as a Type column writes it: Folder, Link, Special, or for a regular file its uppercase
+        extension alone (PNG, TXT, PDF) without appending "file"; plain File only when it has no alphanumeric extension.
+*/
+static fn ui_file_type(char address_to into, positive room, const p8 address_to name, positive length, b32 is_dir, b32 is_link, b32 is_file)
+{
+        positive dot = 0;
+        char extension[16];
+
+        if (!room)
+                return;
+        into[0] = 0;
+        if (!is_file)
+        {
+                string_copy_bounded((string_address)into,
+                                    (string_address)(is_dir ? WORDS(files_sheet_folder) : is_link ? WORDS(files_type_link) : WORDS(files_type_other)), room);
+                return;
+        }
+        for (positive at = 1; name && at < length; at++)
+                if (name[at] == '.')
+                        dot = at;
+        if (dot && length - dot - 1 > 0 && length - dot - 1 < 8)
+        {
+                positive k = 0;
+
+                for (positive at = dot + 1; at < length; at++)
+                {
+                        p8 c = name[at];
+
+                        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')))
+                        {
+                                k = 0;
+                                break;
+                        }
+                        extension[k++] = (char)(c >= 'a' && c <= 'z' ? c - 32 : c);
+                }
+                extension[k] = 0;
+                if (k)
+                {
+                        string_copy_bounded((string_address)into, (string_address)extension, room);
+                        return;
+                }
+        }
+        string_copy_bounded((string_address)into, (string_address)WORDS(files_sheet_file), room);
 }
 
 // The symbol of a kit program, by the app_id it says (its name: ui_app_run), or -1 for a program that is none of the kit's.
@@ -25366,6 +25584,7 @@ struct ui_row
         b32 on;                            // a switch's
         b32 dim;                           // the label and the value quiet: a note, a value that is not there
         b32 mark;                          // a dot before the label: the one in use
+        b32 separator;                     // a subtle hairline rule above this row (e.g. between sidebar sections)
         b32 head;                          // a field right after the label, to the row's end (the words after a verb)
         int badge;                         // UI_ROW_BADGE_* at the row's right (left of a switch): the worst issue its option has, 0 none
         const char address_to badge_words; // what that badge says
@@ -25443,9 +25662,21 @@ struct ui_list
         int stripe;
         unsigned int stripe_tint;
         b32 stripe_accent;
-        // A hold (ui_hold): where the list asks for it (hold_on), a press kept still on it turns into choosing, as ui_list_hold_tick says.
-        b32 hold_on;
-        struct ui_hold hold;
+        // Selection, drag, dual-button box selection (L+R), double-click, and right-click menu: standardized in ui_list_click.
+        // When selected is set: pressing a selected row drags it past slop (drag_began), pressing an unselected row or ground UI-scrolls
+        // the list like normal, holding both Left and Right box-drag-selects (band / band_began / band_moved), and a clean right click
+        // asks for the context menu on release (menu_asked).
+        b32 (*selected)(int id);
+        b32 drag_armed, drag_began;
+        int drag_row, drag_x, drag_y;
+        b32 band_began, band_moved;
+        b32 chord, right_down;
+        b32 menu_asked;
+        int menu_x, menu_y;
+        b32 ground_clicked;
+        int last_clicked;                  // id + 1 of the row last clicked (0 none), for double-click detection
+        b64 last_clicked_at;
+        b32 double_clicked;                // true when the row returned by ui_list_click was a double-click
 };
 
 #define UI_LIST_STRIPE_INK 0x0d    // the alpha of the ink a striped row is tinted with (about 5 percent)
@@ -25683,6 +25914,46 @@ static b32 ui_view_list_wheel(struct ui address_to ui, struct ui_list address_to
         int across = l->row_w > 0 ? l->row_x : l->x, wide = l->row_w > 0 ? l->row_w : l->w;
 
         return l->describe && (anywhere || (x >= across && x < across + wide && y >= l->y && y < l->y + l->h)) && ui_wheel_turn(ui, &l->scroll, event);
+}
+
+// Whether x lies in the list's trailing scrollbar gutter (from the content edge to the trailing edge of the list's column/window).
+static b32 ui_list_in_gutter(const struct ui_list address_to l, int x, int y)
+{
+        int across = l->row_w > 0 ? l->row_x : l->x, wide = l->row_w > 0 ? l->row_w : l->w;
+
+        if (l->scroll.content <= l->scroll.view || l->scroll.view <= 0 || y < l->y || y >= l->y + l->h)
+                return false;
+        return ui_rtl() ? x >= across && x < l->x : x >= l->x + l->w && x < across + wide;
+}
+
+static b32 ui_view_list_bar(const struct ui address_to ui, struct ui_list address_to l, int type, int x, int y, b32 down, b32 address_to lit)
+{
+        b32 was = l->scroll.hover, took;
+        int bar_x = x;
+
+        if (!l->describe)
+                return false;
+        // Mouse clicks or hovers anywhere in the list's trailing margin gutter (all the way to the window's edge) reach its scrollbar,
+        // so users can scrub the thumb or tap the track to jump without missing by a couple pixels at the edge.
+        if (!ui_kit_touch && ui_list_in_gutter(l, x, y))
+        {
+                int w = ui_scroll_width(ui);
+
+                bar_x = bar_x < l->scroll.x ? l->scroll.x : bar_x >= l->scroll.x + w ? l->scroll.x + w - 1 : bar_x;
+        }
+        took = ui_scroll_bar(ui, &l->scroll, type, bar_x, y, down);
+        if (lit)
+                *lit = was != l->scroll.hover;
+        return took;
+}
+
+static b32 ui_view_list_bar_cancel(struct ui_list address_to l)
+{
+        if (!l->scroll.held)
+                return false;
+        l->scroll.held = false;
+        ui_scroll_let_go(&l->scroll, 0);
+        return true;
 }
 
 // How far across the list's rows run (device pixels): what the page gave them, else the list's own box.
@@ -27053,6 +27324,14 @@ static fn ui_list_row(struct ui address_to ui, struct ui_list address_to l, int 
         ui_list_describe(l, id, &row);
         trailing = ui_list_row_place(ui, l, id, &row, y, height, seen);
         ui_list_across(l, &across, &across_w);
+        if (row.separator)
+        {
+                int pad = ui_dev(ui, UI_INSET), line = ui_dev(ui, 1);
+
+                line = line > 0 ? line : 1;
+                ui_kit_fill(ui, &(struct ui_box){(b32)(l->x + pad) << 8, (b32)y << 8, (b32)(l->x + l->w - pad) << 8, (b32)(y + line) << 8, 0, 0},
+                            ui_well(ui, UI_OUTLINE_VARIANT, 60), null);
+        }
         // A drive's line is in the ink whatever the row is; any other row that is dim, or a line under its option, is quiet.
         if (!row.tall && (row.dim || row.sub))
                 ink = quiet;
@@ -27174,49 +27453,6 @@ static b32 ui_list_expander_at(struct ui address_to ui, struct ui_list address_t
                 ui_row_tree(ui, l, id, &row, ui_list_pitch(ui, l), false), first = ui_row_parts.expander;
         last = first && ui_row_parts.badge ? ui_row_parts.badge : first;
         return first && x >= first->x - ui_dev(ui, UI_ROW_GAP) && x < last->x + last->w;
-}
-
-/*
-        The hold's ring round where the press is: a faint whole ring and the accent's arc over it from the top, round the way the window
-        reads, as far as the hold has come; once it has turned, a ring of the accent that grows and fades (the pop).
-*/
-static fn ui_hold_draw(struct ui address_to ui, const struct ui_hold address_to h, b64 now)
-{
-        int r = ui_dev(ui, UI_CHOOSE_RADIUS), cx = h->x, cy = h->y;
-        b32 thick = (b32)ui_dev(ui, UI_CHOOSE_WIDTH) << 8;
-        unsigned int accent = ui_role(UI_PRIMARY) & 0xffffffu;
-
-        if (h->turned && now - h->turned < UI_CHOOSE_POP_NS)
-        {
-                b64 t = ((now - h->turned) << UI_Q) / UI_CHOOSE_POP_NS;
-                int grow = r + (int)(ui_qmul(t, (b64)r) / 2);
-                unsigned int alpha = (unsigned int)(255 - ui_qmul(t, 255));
-
-                ui_kit_ring(ui, &(struct ui_box){(b32)(cx - grow) << 8, (b32)(cy - grow) << 8, (b32)(cx + grow) << 8, (b32)(cy + grow) << 8, (b32)grow << 8, (b32)grow << 8},
-                            thick, alpha << 24 | accent);
-                return;
-        }
-        if (!h->down || h->done)
-                return;
-        {
-                b64 share = ui_hold_share(h, now);
-                int steps = 64, lit = (int)ui_qmul(share, steps);
-                b64 sine, cosine;
-                b32 px = 0, py = 0;
-
-                ui_kit_ring(ui, &(struct ui_box){(b32)(cx - r) << 8, (b32)(cy - r) << 8, (b32)(cx + r) << 8, (b32)(cy + r) << 8, (b32)r << 8, (b32)r << 8},
-                            thick, 0x40000000u | (ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu));
-                for (int k = 0; k <= lit; k++)
-                {
-                        b32 x, y;
-
-                        ui_sincos((b64)k * 6746518852ll / steps, &sine, &cosine);
-                        x = (b32)(cx * 256 + ui_dir() * ui_qmul(sine, (b64)r * 256)), y = (b32)(cy * 256 - ui_qmul(cosine, (b64)r * 256));
-                        if (k)
-                                ui_chevron_stroke(ui, px, py, x, y, thick, 0xff000000u | accent);
-                        px = x, py = y;
-                }
-        }
 }
 
 // A striped row's tint (straight ARGB): the app's, else the accent's or the ink's at a low alpha, the ink being the glass's on glass.
@@ -27347,13 +27583,6 @@ static fn ui_list_draw(struct ui address_to ui, struct ui_list address_to l)
                         ui_kit_ring(ui, &box, ui_q8(ui, 1), 0xff000000u | accent);
                 }
         }
-        // A hold's ring round the press, or its pop.
-        if (l->hold_on)
-        {
-                ui->top = 0, ui->bottom = ui->height;
-                ui_hold_draw(ui, &l->hold, (b64)ui_kit_time());
-                ui->top = l->y, ui->bottom = l->y + l->h;
-        }
         // Where a drag over it would be dropped: the kit's focus ring round that row, or round the whole list.
         if (l->drop)
         {
@@ -27444,20 +27673,53 @@ static fn ui_list_band_end(struct ui_list address_to l)
         l->band = false;
 }
 
+// Whether row/tile id overlaps the active rubber band: vertical overlap in a row list, 2D rectangle overlap in a tile grid.
+static b32 ui_list_band_has(const struct ui address_to ui, const struct ui_list address_to l, int id)
+{
+        int unit = ui_list_unit(ui, l), per = ui_list_per(ui, l), from = l->band_at, to = l->band_y1 - l->y + l->scroll.scroll;
+        int top = (id / per) * unit, bottom = top + unit, swap;
+
+        if (!l->band || !l->virtual || id < 0 || id >= l->total)
+                return false;
+        if (from > to)
+                swap = from, from = to, to = swap;
+        if (bottom <= from || top > to)
+                return false;
+        if (!l->tiles)
+                return true;
+        {
+                int left = l->band_x0 < l->band_x1 ? l->band_x0 : l->band_x1, right = l->band_x0 < l->band_x1 ? l->band_x1 : l->band_x0;
+                int tx = ui_list_tile_x(ui, l, id), tw = ui_dev(ui, l->tiles);
+
+                return tx + tw > left && tx <= right;
+        }
+}
+
 /*
-        The press on a list taken back, as a drag of what it pressed begins (a file browser's rows dragged out): the row no longer shows
-        pressed, the press is over and clicks nothing at its release, and a mouse's or a finger's drag of the rows that it had begun is let
-        go where it is, with no throw (a pull past an end goes back).
+        The press on a list taken back (a drag starting, a right click cancelling a scroll, focus lost, a popup opening): the row no
+        longer shows pressed, any scroll hold or stretch springs home immediately, any scrollbar hold, rubber band or armed drag ends,
+        and nothing is clicked at release.
 */
+static fn ui_press_cancel(struct ui_press address_to press)
+{
+        if (!press->down)
+                return;
+        if (press->region)
+                ui_scroll_let_go(press->region, 0);
+        press->dragged = false;
+        ui_press_end(press, true);
+}
+
 static fn ui_list_press_cancel(const struct ui address_to ui, struct ui_list address_to l)
 {
-        if (l->press.down)
-        {
-                if (l->press.dragged && l->press.region)
-                        ui_scroll_let_go(l->press.region, 0);
-                l->press.dragged = false;
-                ui_press_end(&l->press, true);
-        }
+        ui_press_cancel(&l->press);
+        l->scroll.held = false;
+        ui_scroll_let_go(&l->scroll, 0);
+        l->band = false;
+        l->drag_armed = false;
+        l->right_down = false;
+        l->chord = false;
+        l->menu_asked = false;
         ui_list_let_go(ui, l);
 }
 
@@ -27486,6 +27748,8 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
         l->pointer_x = x, l->pointer_y = y, l->pointer_mouse = !ui_kit_touch;
         if (type == WINDOW_EVENT_MOTION)
         {
+                if (!ui_kit_touch && (ui_list_in_gutter(l, x, y) || (l->scroll.content > l->scroll.view && ui_scroll_reach(ui, &l->scroll, x, y))))
+                        id = -1;
                 l->hover_at = l->scroll.scroll;
                 if (id != l->hover)
                 {
@@ -27553,16 +27817,49 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
         press the compositor takes back (WINDOW_KEY_CANCEL) is none, and so is one that stopped the list running on. Answers the
         row clicked, on the release, or -1. x and y are the pointer's place, which a button's event does not carry.
 */
+// Records a completed click on row and sets l->double_clicked when it repeats within ui_click_ns.
+static int ui_list_note_click(struct ui_list address_to l, int row)
+{
+        b64 now = (b64)ui_kit.now;
+
+        if (row < 0)
+                return -1;
+        l->double_clicked = l->last_clicked == row + 1 && now - l->last_clicked_at <= ui_click_ns;
+        if (l->double_clicked)
+                l->last_clicked = 0;
+        else
+                l->last_clicked = row + 1, l->last_clicked_at = now;
+        return row;
+}
+
 static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, const struct window_event address_to event, int x, int y)
 {
         b32 touch = (event->flags & WINDOW_KEY_TOUCH) != 0, cancelled = (event->flags & WINDOW_KEY_CANCEL) != 0;
-        int row, clicked;
+        int across, wide, row, clicked;
+        b32 on_list;
 
+        ui_list_across(l, &across, &wide);
+        on_list = x >= across && x < across + wide && y >= l->y && y < l->y + l->h;
+        l->drag_began = l->band_began = l->band_moved = l->ground_clicked = l->double_clicked = false;
+        l->menu_asked = false;
         if (event->type == WINDOW_EVENT_MOTION)
         {
+                if (l->band)
+                {
+                        l->band_moved = ui_list_band_follow(l, x, y);
+                        return -1;
+                }
+                if (l->drag_armed)
+                {
+                        if (ui_press_past(ui, l->drag_x, l->drag_y, x, y))
+                        {
+                                l->drag_armed = false, l->drag_began = true;
+                                ui_list_let_go(ui, l);
+                                return -1;
+                        }
+                }
                 row = ui_list_hit(ui, l, x, y);
                 ui_list_pointer(ui, l, WINDOW_EVENT_MOTION, x, y, false);
-                ui_hold_move(ui, &l->hold, x, y);
                 if (l->press.down && l->press.drags)
                 {
                         b32 dragged = l->press.dragged;
@@ -27571,56 +27868,125 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                         if (!dragged && l->press.dragged)
                                 ui_list_let_go(ui, l);
                 }
-                else if (!touch)
+                else if (!touch && l->press.down)
                         ui_list_press_slide(ui, l, &l->press, row);
                 return -1;
         }
-        if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT)
+        if (event->type != WINDOW_EVENT_BUTTON)
                 return -1;
+        // Right button: with Left already held on a selectable list begins dual-button box selection; otherwise cancels any active
+        // scroll/stretch so no list ever gets stuck, and on a clean release asks for the context menu.
+        if (event->a == UI_POINTER_RIGHT)
+        {
+                if (event->flags & WINDOW_KEY_DOWN)
+                {
+                        if (l->selected && (l->press.down || l->drag_armed || ((ui_kit.buttons & UI_BTN_LEFT) && on_list)))
+                        {
+                                ui_list_press_cancel(ui, l);
+                                l->chord = true, l->right_down = true;
+                                ui_list_band_begin(l, x, y);
+                                l->band_began = true;
+                                return -1;
+                        }
+                        if (l->press.down || l->drag_armed || l->scroll.held)
+                                ui_list_press_cancel(ui, l);
+                        if (l->selected && on_list)
+                                l->right_down = true;
+                        return -1;
+                }
+                {
+                        b32 was_right = l->right_down;
+
+                        l->right_down = false;
+                        if (l->band)
+                                ui_list_band_end(l);
+                        if (l->chord)
+                        {
+                                if (!(ui_kit.buttons & UI_BTN_LEFT))
+                                        l->chord = false;
+                                return -1;
+                        }
+                        if (was_right && !cancelled)
+                                l->menu_asked = true, l->menu_x = x, l->menu_y = y;
+                }
+                return -1;
+        }
+        if (event->a != UI_POINTER_LEFT)
+        {
+                if ((event->flags & WINDOW_KEY_DOWN) && (l->press.down || l->drag_armed || l->scroll.held))
+                        ui_list_press_cancel(ui, l);
+                return -1;
+        }
         if (event->flags & WINDOW_KEY_DOWN)
         {
+                if (!on_list)
+                        return -1;
+                // Right already held + Left pressed: dual-button box drag select (cancels pending right-click menu).
+                if (l->selected && (l->right_down || (ui_kit.buttons & UI_BTN_RIGHT)))
+                {
+                        ui_list_press_cancel(ui, l);
+                        l->chord = true, l->right_down = true;
+                        ui_list_band_begin(l, x, y);
+                        l->band_began = true;
+                        return -1;
+                }
                 row = ui_list_hit(ui, l, x, y);
-                if (l->hold_on)
-                        ui_hold_begin(&l->hold, x, y, row, (b64)ui_kit_time());
-                // A list that asks for the hold scrolls with a mouse's press and move as with a finger's (its drags are the hold's and the
-                // modifiers', never a plain press's): the one rule of such a list.
-                if (!ui_press_drags(event->flags) && !l->hold_on)
+                // Selected item: left-hold drags the selection past slop rather than scrolling the list.
+                if (l->selected && !touch && !(event->flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT)) && row >= 0 && l->selected(row))
+                {
+                        l->drag_armed = true, l->drag_row = row, l->drag_x = x, l->drag_y = y;
+                        ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, true);
+                        return -1;
+                }
+                // Unselected item, empty ground, or non-selectable list: UI scroll like normal.
+                if (!ui_press_drags(event->flags) && !l->selected)
                         ui_press_begin(&l->press, x, y, row, touch);
-                else if (ui_press_down(&l->press, x, y, row, &l->scroll), l->press.target < 0)
+                else if (ui_press_down(&l->press, x, y, row, &l->scroll), l->press.target < 0 && row >= 0)
                         return -1; // a press on rows running on stops them, and shows and clicks nothing
                 ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, true);
                 return -1;
         }
-        ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, false);
-        ui_hold_end(&l->hold);
-        row = ui_list_hit(ui, l, x, y);
-        if (!l->press.drags)
-                return ui_press_release(&l->press, cancelled, row);
-        clicked = ui_press_lift(&l->press, cancelled);
-        return clicked >= 0 && clicked == row ? clicked : -1;
-}
-
-/*
-        A list's hold at now (ui_list.hold_on): UI_LIST_HELD the once its press, kept still, comes to UI_CHOOSE_HOLD_NS (where it went down is
-        l->hold.target, a row or -1 the ground, and x, y), and the press is taken back then (nothing scrolls on and its release clicks
-        nothing); UI_LIST_HOLDING while a picture is due for its ring or its pop; 0 else.
-*/
-#define UI_LIST_HELD 1u
-#define UI_LIST_HOLDING 2u
-static p32 ui_list_hold_tick(const struct ui address_to ui, struct ui_list address_to l, b64 now)
-{
-        p32 says = 0;
-
-        if (!l->hold_on)
-                return 0;
-        if (ui_hold_turns(&l->hold, now))
+        if (l->band)
         {
-                ui_list_press_cancel(ui, l);
-                says |= UI_LIST_HELD;
+                ui_list_band_end(l);
+                if (!(ui_kit.buttons & UI_BTN_RIGHT))
+                        l->chord = false;
+                return -1;
         }
-        if (ui_hold_moving(&l->hold, now))
-                says |= UI_LIST_HOLDING;
-        return says;
+        if (l->chord)
+        {
+                if (!(ui_kit.buttons & UI_BTN_RIGHT))
+                        l->chord = false;
+                return -1;
+        }
+        if (l->drag_armed)
+        {
+                int armed = l->drag_row;
+
+                l->drag_armed = false;
+                ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, false);
+                row = ui_list_hit(ui, l, x, y);
+                return !cancelled && row >= 0 && row == armed ? ui_list_note_click(l, row) : -1;
+        }
+        ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, false);
+        if (!l->press.down)
+                return -1;
+        {
+                b32 dragged = l->press.dragged;
+                int target = l->press.target;
+
+                row = ui_list_hit(ui, l, x, y);
+                if (!l->press.drags)
+                        clicked = ui_press_release(&l->press, cancelled, row);
+                else
+                {
+                        clicked = ui_press_lift(&l->press, cancelled);
+                        clicked = clicked >= 0 && clicked == row ? clicked : -1;
+                }
+                if (!dragged && !cancelled && target < 0 && row < 0 && on_list)
+                        l->ground_clicked = true;
+                return ui_list_note_click(l, clicked);
+        }
 }
 
 /* ---- a finger's press: what it drags, and what its lift throws ---- */
@@ -27679,12 +28045,14 @@ static int ui_press_follow(const struct ui address_to ui, struct ui_press addres
 // The finger lifted: a dragged region is thrown on the hand's speed, and the press is done: what it pressed, or -1.
 static int ui_press_lift(struct ui_press address_to press, b32 cancelled)
 {
+        long speed = 0;
+
         if (press->dragged)
         {
                 positive now = ui_press_now(); // the event's own time (ui_event_context)
                 // The throw's speed is the hand's velocity over its last reports (ui_press_velocity), down the screen positive; the
                 // region moves the other way (ui_press_follow), and the body floors and caps the throw (ui_body_let_go).
-                long speed = ui_press_velocity(press, now);
+                speed = ui_press_velocity(press, now);
                 positive first = press->samples > 0 ? press->when[0] : now;
 
                 WINDOW_TRACE_START();
@@ -27693,9 +28061,10 @@ static int ui_press_lift(struct ui_press address_to press, b32 cancelled)
                                   (positive)(UI_FLING_NS / 1000000));
                 WINDOW_TRACE_PART("cancelled %b, throws %b", (bipolar)cancelled, (bipolar)(press->region && ui_throws(speed, press->region->scale)));
                 WINDOW_TRACE_END();
-                if (press->region)
-                        ui_scroll_let_go(press->region, -speed);
         }
+        // Always release the scroll body held by ui_press_down (even when the press never crossed slop or was cancelled), so it never stays stuck in BODY_TRACK.
+        if (press->region)
+                ui_scroll_let_go(press->region, press->dragged && !cancelled ? -speed : 0);
         return press->down ? ui_press_end(press, cancelled) : -1;
 }
 
@@ -28346,12 +28715,13 @@ static b32 ui_page_key(const struct ui address_to ui, struct ui_page address_to 
 // list, which now holds another row, so it is let go unclicked (its release is no click), and the list's rows show nothing pressed.
 static fn ui_page_let_go(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l)
 {
-        if (!p->press.down)
-                return;
-        if (p->press.drags)
-                ui_press_lift(&p->press, true);
-        else
-                ui_press_end(&p->press, true);
+        ui_press_cancel(&p->press);
+        p->column_scroll.held = false;
+        ui_scroll_let_go(&p->column_scroll, 0);
+        if (p->body)
+                p->body->held = false, ui_scroll_let_go(p->body, 0);
+        if (p->view)
+                p->view->side_held = false;
         ui_list_let_go(ui, l);
         ui_page_changed(p);
 }
@@ -28577,8 +28947,25 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
 {
         // The event's own touch flag, as ui_event_context sets it for the loop's events (a menu the press opens is a finger's).
         ui_kit_touch = (event->flags & WINDOW_KEY_TOUCH) != 0;
+        if (ui->sided && p->column_on && p->view)
+        {
+                int was = p->view->side_w;
+                p32 side = ui_view_side_event(ui, p->view, event);
+
+                if (p->view->side_w != was)
+                        ui_page_fit(ui, p, l, p->width, p->height, p->body ? p->body : &l->scroll, p->body ? p->body->content : l->content);
+                if (side & UI_VIEW_DRAW)
+                        ui_page_redraw(p);
+                if (side & UI_VIEW_TAKEN)
+                        return;
+        }
         if (ui_list_slider(ui, p, l, event))
                 return;
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a != UI_POINTER_LEFT && p->press.down)
+        {
+                ui_page_let_go(ui, p, l);
+                return;
+        }
         if (event->type == WINDOW_EVENT_MOTION)
         {
                 if (event->flags & WINDOW_KEY_TOUCH)
@@ -29226,6 +29613,7 @@ struct ui_app
         void (*draw)(unsigned int address_to pixels);
         b32 beside;                     // -a: the window opens beside the band's cell that was pressed, where the compositor left one
         struct ui_anchor anchor;        // that cell, as ui_app_place took it
+        struct ui_view address_to view; // optional: the app's view, cancelled automatically when the window loses focus
 };
 
 // The keys came or went: whether the app goes on. A popup (dismiss) that has had the keys and loses them is done, as is an app whose focus hook says so.
@@ -29600,6 +29988,12 @@ static int ui_app_run(struct ui_app address_to app)
                 {
                         *app->focused = table->focus == row;
                         ui_kit.keyed = 0; // the keys came or went: no ring till a key moves the focus here
+                        if (!*app->focused)
+                        {
+                                ui_kit.buttons = 0;
+                                if (app->view)
+                                        ui_view_cancel(app->ui, app->view);
+                        }
                         ui_app_changed(app);
                         if (!ui_app_keys(app, *app->focused))
                                 running = false;

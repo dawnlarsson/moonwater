@@ -63,7 +63,7 @@ files_delete_for_good	ec0e	Удалить навсегда %1$d: %2$s? Ещё р
 files_delete_stopped	ef42	Остановлено на %2$s: до этого удалено %1$d
 files_deleted	8591	Удалено: %d
 files_deleting	a297	Удаление: пока %d, Escape останавливает
-files_done	1791	Готово
+files_drive_root	84bc	Система
 files_empty	751c	Эта папка пуста
 files_failed	c564	Не удалось прочитать эту папку
 files_find_hint	0ee1	Найти в этой папке
@@ -82,11 +82,13 @@ files_not_folder	2663	Это не папка
 files_nothing_to_paste	c9d4	В буфере обмена нет файлов
 files_nothing_to_redo	b2a4	Нечего повторять
 files_nothing_to_undo	1433	Нечего отменять
+files_place_downloads	07de	Загрузки
+files_place_home	0eae	Домашняя
+files_place_pictures	feae	Изображения
 files_reading	64a4	Чтение папки
 files_redone	6fd0	Повторено: %d
 files_rename_hint	ad88	Новое имя
 files_restored	4c30	Возвращено на место: %d
-files_selecting	2d5c	Режим выбора, выбрано %d: касайтесь элементов, чтобы добавить или убрать, Escape или Готово — закончить
 files_sheet_created	59ac	Создан %s
 files_sheet_file	3663	Файл
 files_sheet_folder	7afd	Папка
@@ -100,9 +102,8 @@ files_sheet_other	3921	Устройство, канал или сокет
 files_sheet_owner	8b0c	Владелец %1$d, группа %2$d
 files_sheet_size	eca5	Размер %1$s (%2$s байт)
 files_sheet_size_in	31a1	Размер %1$s в %2$d элементах
-files_type_ext	d2c5	Файл %s
 files_type_link	e589	Ссылка
-files_type_other	e8e6	Особый файл
+files_type_other	80d0	Особый
 files_undone	4da3	Отменено: %d
 files_unreadable	986c	Эту папку нельзя читать
 files_up	5940	Вверх
@@ -235,19 +236,6 @@ settings_asks_first	e9bd	сначала спросит
 settings_badge_error	9cf1	Ошибка
 settings_badge_warning	fc8f	Предупреждение
 settings_battery_charging	5116	, заряжается
-settings_item_drive	269a	показан, не удерживается: ни одна команда не меняет диск
-settings_not_shown	8efd	ещё %d не показано
-settings_role_efi	d41a	Системный EFI
-settings_role_linux	2c8f	Данные Linux
-settings_role_swap	d36e	Подкачка
-settings_role_other	ff95	Прочее
-settings_role_free	ad01	Свободно
-settings_role_unpartitioned	3c10	Нет таблицы разделов
-settings_opened	5bd7	открыто в браузере
-settings_partitioned	70f5	%d %% размечено
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Разделы
-settings_share	9902	%1$d,%2$d %%
 settings_battery_discharging	7964	, разряжается
 settings_battery_full	ded8	, заряжена
 settings_battery_idle	1635	, не заряжается
@@ -298,6 +286,7 @@ settings_issue_unknown	e812	Проблема, которую эта версия
 settings_item_add	fbef	Enter запоминает имя устройства; радио включается для того, что соединяется
 settings_item_ask	6aad	Enter спросит пароль и подключится
 settings_item_cannot	e643	moonwater не может подключиться к тому, что требует эта сеть
+settings_item_drive	269a	показан, не удерживается: ни одна команда не меняет диск
 settings_item_joined	0fb8	подключено: Delete забывает
 settings_item_kept	33d9	запомнено по имени: Delete забывает
 settings_item_open	4429	Enter подключит и сохранит
@@ -320,19 +309,28 @@ settings_name_chars	58a2	имя состоит из букв, цифр и деф
 settings_name_long	f2c0	имя короче 32 символов
 settings_no_rates	185b	Экран не сообщает частоты
 settings_no_screen	55fd	Экран не подключён
+settings_no_sizes	0f7e	Экран не сообщает размеров
 settings_not_here	4e20	нет на этом компьютере
+settings_not_shown	8efd	ещё %d не показано
 settings_nothing_kept	85a2	ничего не введено: значение сохраняется
 settings_nothing_matches	14e9	Ничего не найдено по запросу
 settings_nothing_typed	edce	ничего не введено
 settings_notices_count	8902	уведомлений: %1$d
 settings_notices_dismiss	c370	скрыть все
 settings_notices_none	47c6	нет уведомлений ядра
+settings_opened	5bd7	открыто в браузере
+settings_partitioned	70f5	%d %% размечено
+settings_partitions	9b2e	Разделы
 settings_percent	e76a	%d %%
+settings_primary_no	a970	Не основной
+settings_primary_other	0b14	Сделайте основным другой экран, чтобы сменить его
+settings_primary_yes	7f79	Основной
 settings_rate_best	7450	%d Гц (рекомендуется)
 settings_rate_plain	743a	%d Гц
 settings_refused	454b	moonwater отказал
 settings_refused_place	9632	%s (его положение в файле не прочитано)
 settings_refused_rate	97bc	%1$s (%2$d Гц не предлагается)
+settings_refused_size	1332	%s (%d × %d не предлагается)
 settings_refused_turn	7b3a	%1$s (не удалось: %2$s)
 settings_req_context	a233	видеокарта не выделяет буфер, VM-отображение или контекст: кольцо amdgpu или его прошивка не запущены
 settings_req_driver	42ea	у драйвера видеокарты, %1$s, пока нет пути GPU: всё рисует процессор
@@ -342,6 +340,12 @@ settings_req_prime	a63c	dma-buf не импортируется в узел ре
 settings_req_ring	29f2	кольцо вычислений не завершило самотест: прошивка, частоты или сброс кольца (строки ядра скажут какие)
 settings_req_selftest	0061	видеокарта неверно нарисовала самотест: её ядра не совпадают с ISA семейства; остаётся на процессоре
 settings_req_udmabuf	420f	/dev/udmabuf не создаёт dma-buf из страницы memfd: нужен CONFIG_UDMABUF=y и открывающийся /dev/udmabuf
+settings_role_efi	d41a	Системный EFI
+settings_role_free	ad01	Свободно
+settings_role_linux	2c8f	Данные Linux
+settings_role_other	ff95	Прочее
+settings_role_swap	d36e	Подкачка
+settings_role_unpartitioned	3c10	Нет таблицы разделов
 settings_run_any	3ffd	Выполнить любую команду moonwater
 settings_running	d0e2	выполняется %s (Escape останавливает)
 settings_saved	9f44	сохранено
@@ -349,6 +353,15 @@ settings_scale_best	2ba0	%d %% (рекомендуется)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Экран %1$d: %2$s
 settings_screen_named	d918	Экран %1$d: %2$s [%3$s]
+settings_share	9902	%1$d,%2$d %%
+settings_size_ask	7773	%d × %d: выберите «Оставить» в разделе «Разрешение», иначе возврат через %d с
+settings_size_back	6c84	Не оставлено: возврат к %s
+settings_size_best	5165	%d × %d (рекомендуется)
+settings_size_keep	d1e7	Оставить %d × %d (возврат через %d с)
+settings_size_kept	7101	Оставлено %d × %d
+settings_size_own	810e	его собственный размер
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Экран не принял %d × %d: возврат к %s
 settings_state_allowed	e443	разрешено
 settings_state_blocked	6eb3	заблокировано
 settings_state_view_only	031a	только просмотр
@@ -376,6 +389,7 @@ settings_type_command	75f8	введите команду: её глагол и �
 settings_type_device	63e0	введите имя устройства: Enter запомнит, Escape оставит
 settings_type_passphrase	ca95	введите пароль: Enter подключит, Escape оставит
 settings_unknown	9fb9	неизвестно
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	ГЛАГОЛ [АРГУМЕНТЫ]
 settings_virtual_refused	4202	виртуальное устройство не может это включить: клавиатура или мышь машины, или moonwater ssh в терминале root
 settings_wall_hint	ccf0	Выберите PNG в Файлах, затем «Сделать обоями этого экрана»
@@ -420,19 +434,6 @@ tray_settings	8728	Настройки
 ui_confirm_again	b3ff	нажмите ещё раз для подтверждения: 
 ui_field_digits	f52b	число состоит из цифр
 ui_field_full	fe02	больше не помещается
-settings_no_sizes	0f7e	Экран не сообщает размеров
-settings_primary_no	a970	Не основной
-settings_primary_other	0b14	Сделайте основным другой экран, чтобы сменить его
-settings_primary_yes	7f79	Основной
-settings_refused_size	1332	%s (%d × %d не предлагается)
-settings_size_ask	7773	%d × %d: выберите «Оставить» в разделе «Разрешение», иначе возврат через %d с
-settings_size_back	6c84	Не оставлено: возврат к %s
-settings_size_best	5165	%d × %d (рекомендуется)
-settings_size_keep	d1e7	Оставить %d × %d (возврат через %d с)
-settings_size_kept	7101	Оставлено %d × %d
-settings_size_own	810e	его собственный размер
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	Экран не принял %d × %d: возврат к %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Круг под каждым пальцем на сенсорном экране

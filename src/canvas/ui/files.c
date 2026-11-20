@@ -202,8 +202,7 @@ static struct
         unsigned int ground;
         b32 focused, dirty;
         p32 seen;                // the model's revision as last drawn
-        p32 clicked;             // the place a mouse last clicked, and when: a second click there in time opens it
-        b64 clicked_at, next_look, next_show;
+        b64 next_look, next_show;
         unsigned int said;       // LANGUAGE_files_* the foot says of the last thing asked, 0 none
         string_address start;    // the folder asked for as it started
         // The path's band: the crumbs at rest, the field while the path is typed.
@@ -243,15 +242,10 @@ static struct
         // A rubber band begun with Control held adds what it crosses to what was chosen (band_base, as it was at its press).
         b32 band_add;
         p32 band_base_count;
-        // A press held still for UI_CHOOSE_HOLD_NS (the kit's hold, its ring round the press): on a row it takes that row up and carries it
-        // while the press is held (hold_carry: its release drops it), on the ground it turns to selection mode (selecting: a tap on a
-        // row adds it or takes it out, a press on the ground begins a band that adds, the foot says so and has Done), till Escape or Done.
-        b32 hold_carry, selecting;
         // A press while carrying (Tab's): where it went down; its release there drops as a press did, and taken past the slop it hands
         // what is carried to the desktop's drag, which another window or a Wayland client takes as its drop.
         b32 carry_press;
         int carry_px, carry_py;
-        b32 drag_toggle; // a row was pressed with a modifier or in selection mode and armed to be dragged: its release is no list click
         // What was done that Ctrl+Z undoes and Ctrl+Y does again (files_deed): the last FILES_DEEDS, deed_done of them done, the ones after
         // them undone (a new one forgets those). move_into is the folder a copy or a move under way goes into, for its deed; undoing is a
         // move begun by an undo, which is no deed of its own.
@@ -308,10 +302,10 @@ static fn files_deed_keep(struct files_deed address_to d);
 
 /* ---- the rows ---- */
 
-// A count of bytes as a row says it: bare below 1024, then K to E with a decimal while below ten (the library's, as ls -h says it).
-static fn files_size_text(char address_to into, p64 size)
+// Whether the row at place is chosen in the model: handed to the kit's list (ui_list.selected) so selected rows drag and unselected scroll.
+static b32 files_row_selected(int id)
 {
-        into[positive_into_human_1024_string((p8 address_to)into, (positive)size)] = 0;
+        return id >= 0 && files_model_chosen(&files.big->model, (p32)id);
 }
 
 // A moment as a row says it: the day and the minute, in the machine's own zone, digits whatever the language (2026-11-13 09:41).
@@ -335,58 +329,13 @@ static fn files_time_text(char address_to into, b64 seconds)
         into[16] = 0;
 }
 
-// An entry's name as a row writes it (ui_label_foreign), a folder's with a slash after it and a link's with an at sign, as ls -F marks them.
+// An entry's name as a row writes it (ui_label_foreign).
 static positive files_name_text(char address_to into, positive room, const struct files_model address_to m, const struct files_entry address_to entry)
 {
         positive used = room > 2 ? ui_label_foreign(into, room - 1, files_model_name(m, entry), entry->length) : 0;
 
         (void)entry;
         return used;
-}
-
-// What kind of thing an entry is, as the Type column says it: a folder, a link, a file by its name's extension (a TXT file), a file.
-static fn files_type_text(char address_to into, positive room, const struct files_model address_to m, const struct files_entry address_to entry)
-{
-        const p8 address_to name = files_model_name(m, entry);
-        positive dot = 0;
-        char extension[16];
-
-        into[0] = 0;
-        if (entry->kind != FILES_KIND_FILE)
-        {
-                string_copy_bounded((string_address)into, (string_address)(entry->kind == FILES_KIND_DIRECTORY ? WORDS(files_sheet_folder)
-                                                                           : entry->kind == FILES_KIND_LINK    ? WORDS(files_type_link)
-                                                                                                               : WORDS(files_type_other)),
-                                    room);
-                return;
-        }
-        // The last dot's words, a dot first not counting (.profile has none), at most a few letters and digits, written in capitals.
-        for (positive at = 1; at < entry->length; at++)
-                if (name[at] == '.')
-                        dot = at;
-        if (dot && entry->length - dot - 1 > 0 && entry->length - dot - 1 < 8)
-        {
-                positive k = 0;
-
-                for (positive at = dot + 1; at < entry->length; at++)
-                {
-                        p8 c = name[at];
-
-                        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')))
-                        {
-                                k = 0;
-                                break;
-                        }
-                        extension[k++] = (char)(c >= 'a' && c <= 'z' ? c - 32 : c);
-                }
-                extension[k] = 0;
-                if (k)
-                {
-                        language_format(into, room, WORDS(files_type_ext), extension);
-                        return;
-                }
-        }
-        string_copy_bounded((string_address)into, (string_address)WORDS(files_sheet_file), room);
 }
 
 static b32 files_tree_trash(const p8 address_to name, positive length);
@@ -452,10 +401,11 @@ static fn files_describe(int id, struct ui_row address_to row)
         if (entry->looked)
         {
                 if (entry->kind == FILES_KIND_FILE)
-                        files_size_text(size, entry->size);
+                        ui_size_text(size, sizeof(size), entry->size);
                 files_time_text(when, entry->modified);
         }
-        files_type_text(type, sizeof(type), m, entry);
+        ui_file_type(type, sizeof(type), files_model_name(m, entry), entry->length, entry->kind == FILES_KIND_DIRECTORY,
+                     entry->kind == FILES_KIND_LINK, entry->kind == FILES_KIND_FILE);
         row->cells[1] = size, row->cells[2] = type, row->cells[3] = when;
         row->file = 1 + files_symbol(m, entry);
         row->extension = files_extension_label(m, entry);
@@ -478,33 +428,39 @@ static b32 files_tree_trash(const p8 address_to name, positive length)
         return (length == 6 && !memory_compare(name, ".Trash", 6)) || (length == 5 && !memory_compare(name, "Trash", 5));
 }
 
-// A node of the folder tree, for its list: its name set in by its depth, a chevron before it unless it was read to have no folders, and
-// the folder shown lit.
+// A node of the sidebar tree, for its list: common folders (Home, Downloads, Pictures) above the storage drives (System + mounted
+// drives), each expandable into its own folder tree; a subtle separator separates the drives from the common folders above them.
 static fn files_tree_describe(int id, struct ui_row address_to row)
 {
         static char label[FILES_NAME * 3 + 4];
         const struct files_tree address_to t = &files.big->tree;
         const struct files_node address_to n = id >= 0 && (p32)id < t->count ? &t->node[id] : null;
+        unsigned int icon;
 
         if (!n)
                 return;
-        ui_label_foreign(label, sizeof(label), files_tree_name(t, (p32)id), n->length);
-        row->label = label;
+        if (n->depth == 0 && n->place == FILES_PLACE_HOME)
+                row->label = WORDS(files_place_home), icon = UI_FILE_HOME;
+        else if (n->depth == 0 && n->place == FILES_PLACE_DOWNLOADS)
+                row->label = WORDS(files_place_downloads), icon = UI_FILE_DOWNLOADS;
+        else if (n->depth == 0 && n->place == FILES_PLACE_PICTURES)
+                row->label = WORDS(files_place_pictures), icon = UI_FILE_PICTURES;
+        else if (n->depth == 0 && n->place == FILES_PLACE_ROOT)
+                row->label = WORDS(files_drive_root), icon = UI_FILE_DRIVE;
+        else
+        {
+                ui_label_foreign(label, sizeof(label), files_tree_name(t, (p32)id), n->length);
+                row->label = label;
+                icon = n->kind == FILES_NODE_DRIVE ? UI_FILE_DRIVE
+                       : files_tree_trash(files_tree_name(t, (p32)id), n->length) ? UI_FILE_TRASH
+                       : n->open ? UI_FILE_FOLDER_OPEN : UI_FILE_FOLDER;
+        }
         row->indent = n->depth;
         row->expander = n->open ? UI_ROW_EXPANDER_OPEN : n->read && !n->has ? 0 : UI_ROW_EXPANDER_SHUT;
-        // Its symbol: the root a drive, the home folder its own, any other a folder, open where it is open.
-        {
-                static p8 path[FILES_PATH];
-                positive length = files_tree_path(t, (p32)id, path) ? string_length((string_address)path) : 0;
-                static string_address home;
-
-                if (!home && !(home = getenv((string_address) "HOME")))
-                        home = (string_address) "";
-                row->file = 1 + (length == 1 ? UI_FILE_DRIVE
-                                 : length && string_equals((string_address)path, home) ? UI_FILE_HOME
-                                 : files_tree_trash(files_tree_name(t, (p32)id), n->length) ? UI_FILE_TRASH
-                                 : n->open ? UI_FILE_FOLDER_OPEN : UI_FILE_FOLDER);
-        }
+        row->file = 1 + icon;
+        // Separate the first storage drive from the common folders above it.
+        if (id > 0 && n->kind == FILES_NODE_DRIVE && t->node[id - 1].kind != FILES_NODE_DRIVE)
+                row->separator = true;
 }
 
 static fn files_tree_damaged(int top, int bottom)
@@ -564,8 +520,8 @@ static fn files_status_text(void)
                 char done[16], whole[16];
                 p32 items_done = __atomic_load_n(&job->items_done, __ATOMIC_ACQUIRE), items_total = __atomic_load_n(&job->items_total, __ATOMIC_ACQUIRE);
 
-                files_size_text(done, __atomic_load_n(&job->bytes_done, __ATOMIC_ACQUIRE));
-                files_size_text(whole, __atomic_load_n(&job->bytes_total, __ATOMIC_ACQUIRE));
+                ui_size_text(done, sizeof(done), __atomic_load_n(&job->bytes_done, __ATOMIC_ACQUIRE));
+                ui_size_text(whole, sizeof(whole), __atomic_load_n(&job->bytes_total, __ATOMIC_ACQUIRE));
                 language_format(into, room, job->how == FILES_MOVE_MOVE ? WORDS(files_moving) : WORDS(files_copying), (int)items_done,
                                 (int)(items_total > items_done ? items_total : items_done), done, whole);
         }
@@ -573,8 +529,6 @@ static fn files_status_text(void)
                 language_format(into, room, WORDS(files_deleting), (int)files.big->job.removed);
         else if (files.carrying)
                 language_format(into, room, WORDS(files_carrying), (int)files.carry_count);
-        else if (files.selecting)
-                language_format(into, room, WORDS(files_selecting), (int)m->chosen_count);
         else if (files.big->note[0])
                 string_copy_bounded((string_address)into, (string_address)files.big->note, room);
         else if (files.said)
@@ -592,7 +546,7 @@ static fn files_status_text(void)
                         if (entry->kind == FILES_KIND_FILE && files_model_chosen(m, place))
                                 bytes += entry->size;
                 }
-                files_size_text(size, bytes);
+                ui_size_text(size, sizeof(size), bytes);
                 language_format(into, room, WORDS(files_chosen_size), (int)m->chosen_count, (int)m->shown.count, size);
         }
         else if (m->state == FILES_READY && m->filter_length)
@@ -682,10 +636,11 @@ static fn files_layout(void)
 
         if (!l->describe)
         {
-                l->virtual = true, l->beside = true, l->hold_on = true;
+                l->virtual = true, l->beside = true;
                 l->row_h = FILES_ROW;
                 l->describe = files_describe;
                 l->damaged = files_damaged;
+                l->selected = files_row_selected;
                 l->hover = l->down = -1;
         }
         if (!files.big->tree_list.describe)
@@ -719,6 +674,12 @@ static fn files_layout(void)
         l->total = (int)files_model_count(m);
         l->focus = m->cursor != FILES_NO ? (int)m->cursor : -1;
         l->empty = files_state_text(m);
+        // The view: details are rows under the columns (striped), icons and a list are tiles. Set before ui_view_end so ui_list_layout
+        // sizes the virtual list and its scrollbar accurately on the first frame after switching view modes.
+        l->columns = files.view == FILES_VIEW_DETAILS ? &files.columns : null;
+        l->stripe = files.view == FILES_VIEW_DETAILS ? 2 : 0;
+        l->tiles = files.view == FILES_VIEW_ICONS ? FILES_TILE_ICON : files.view == FILES_VIEW_LIST ? FILES_TILE_LIST : 0;
+        l->tile_h = files.view == FILES_VIEW_LIST ? FILES_ROW : 0;
         ui_view_begin(&files.big->view, ui, files.width, -files.height);
         // The folder tree is the window's glass pane, its whole height at the start; the band, the rows and the foot are beside it.
         ui_side_frame()
@@ -750,8 +711,6 @@ static fn files_layout(void)
                                 if (files.finding)
                                         ui_control(&files.finder_field, .grow = 1, .h = FILES_BAND);
                                 ui_text(files.big->status, .class = "status");
-                                if (files.selecting)
-                                        ui_button(WORDS(files_done), .class = "ghost", .on = files_act, .arg = 3);
                         }
                 }
         }
@@ -767,12 +726,6 @@ static fn files_layout(void)
         files.columns.title[2] = WORDS(files_column_type), files.columns.title[3] = WORDS(files_column_modified);
         files.columns.at_end[1] = true;
         ui_columns_layout(ui, &files.columns, l->x, files.head_box.y, l->w);
-        // The view: details are rows under the columns, icons and a list are tiles (a symbol over a name, or before it).
-        l->columns = files.view == FILES_VIEW_DETAILS ? &files.columns : null;
-        // The details' rows in stripes, every second row tinted, so a row's cells are read across to its name.
-        l->stripe = files.view == FILES_VIEW_DETAILS ? 2 : 0;
-        l->tiles = files.view == FILES_VIEW_ICONS ? FILES_TILE_ICON : files.view == FILES_VIEW_LIST ? FILES_TILE_LIST : 0;
-        l->tile_h = files.view == FILES_VIEW_LIST ? FILES_ROW : 0;
         // The tree's rows scrolled so the folder shown is in sight, once it is shown.
         if (files.tree_reseat && files.big->tree_list.h > 0)
         {
@@ -1608,7 +1561,7 @@ static b32 files_carry_offer(void)
         array_store_release(uris, uris_room, uris_used);
         array_store_release(text, text_room, text_used);
         if (offered)
-                files_carry_end(), files.hold_carry = files.carry_press = false;
+                files_carry_end(), files.carry_press = false;
         return offered;
 }
 
@@ -2150,7 +2103,7 @@ static fn files_moved(void)
         files_keep_trim(m, &files.trail);
         files.crumb_focus = files.trail.current;
         files_tree_follow();
-        files.clicked = FILES_NO, files.said = 0;
+        files.big->list.last_clicked = 0, files.said = 0;
         // The rows: where they were left for a listing shown as it was left, which is then looked at again at once; else from the top.
         files.reseat = true;
         files.next_look = (b64)ui_kit.now + (m->restored ? 0 : FILES_LOOK_NS);
@@ -2187,49 +2140,66 @@ static b32 files_act(int which)
 {
         struct files_model address_to m = &files.big->model;
 
-        if (which == 3)
-        {
-                // Done: selection mode ends, what is chosen stays chosen.
-                files.selecting = false, files.dirty = true;
-                return true;
-        }
         if (which == 2 ? files_model_up(m) : files_model_back(m, which == 1))
                 files_moved();
         return true;
 }
 
-/* ---- the rubber band ---- */
+/* ---- the rubber band and dragging ---- */
 
-/*
-        What a left press on the rows does, the one rule for a mouse and a finger alike (the kit's: ui_list.hold_on, ui_list_click):
-
-            a press and a move scrolls the rows, and its throw runs them on (FILES_PRESS_LIST: the list's, as every kit list);
-            a press held still for three seconds turns into choosing: on a row it carries it, on the ground it is selection mode (the hold);
-            with Control or Shift at the press, or in selection mode, or while carrying, a press on the ground begins a band that adds and a
-            press on a row taken past the slop drags the rows chosen, that row among them, out as files (FILES_PRESS_BAND, FILES_PRESS_DRAG);
-            while carrying, a press let go where it went down drops what is carried there, and taken past the slop drags it (FILES_PRESS_CARRY).
-
-        A plain press and a move never drags a file: that is the scroll's.
-*/
-#define FILES_PRESS_LIST 0
-#define FILES_PRESS_BAND 1
-#define FILES_PRESS_DRAG 2
-#define FILES_PRESS_CARRY 3
-static int files_press_kind(unsigned int flags, int row, b32 selecting, b32 carrying)
+// Updates the model's selection from the list's active rubber band (2D tile overlap in icon/list views, row overlap in details).
+static fn files_band_apply(void)
 {
-        if (carrying)
-                return FILES_PRESS_CARRY;
-        if ((flags & (WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT)) || selecting)
-                return row >= 0 ? FILES_PRESS_DRAG : FILES_PRESS_BAND;
-        return FILES_PRESS_LIST;
+        struct ui address_to ui = &files.ui;
+        struct files_model address_to m = &files.big->model;
+        struct ui_list address_to l = &files.big->list;
+        int first = -1, last = -1;
+        b32 any = false;
+
+        if (files.band_add)
+                memory_copy(m->chosen, files_band_base, FILES_MOST / 8), m->chosen_count = files.band_base_count;
+        else
+                files_model_choose_none(m);
+        if (ui_list_band_rows(ui, l, &first, &last))
+        {
+                b32 down_band = l->band_y1 >= l->y + l->band_at - l->scroll.scroll;
+                int lead = -1;
+
+                for (int k = first; k <= last; k++)
+                        if ((p32)k < m->shown.places && ui_list_band_has(ui, l, k))
+                        {
+                                files_chosen_put(m, m->shown.order[k], true);
+                                if (!any || down_band)
+                                        lead = k;
+                                any = true;
+                        }
+                if (any && lead >= 0)
+                        m->cursor = (p32)lead;
+        }
+        m->revision++;
 }
 
-// Whether (x, y) is on the rows' list.
-static b32 files_on_rows(int x, int y)
+// Hands the selected rows (or place alone) to the desktop's drag-and-drop (text/uri-list + paths).
+static fn files_drag_start(p32 place)
 {
-        const struct ui_list address_to l = &files.big->list;
+        struct files_model address_to m = &files.big->model;
+        struct windows_clip_part parts[2];
+        p8 address_to uris, address_to paths;
+        positive uris_room, paths_room;
 
-        return x >= l->x && x < l->x + l->w && y >= l->y && y < l->y + l->h;
+        files.drag_place = place;
+        files.drag_chosen = files_model_chosen(m, place);
+        if (files_uris(place, parts, &uris, &uris_room, &paths, &paths_room))
+        {
+                p32 items = files.drag_chosen && m->chosen_count ? m->chosen_count : 1;
+                const struct files_entry address_to first = files_model_entry(m, place);
+                p32 kind = first ? (files_symbol(m, first) & 0xffu) + 1 : 0;
+
+                ui_drag_offer(&files.own, &files.drag, parts, 2,
+                              WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE | kind << WINDOWS_DRAG_KIND_SHIFT |
+                                  (items > 0xffff ? 0xffffu : items) << WINDOWS_DRAG_ITEMS_SHIFT);
+                files_uris_free(uris, uris_room, paths, paths_room, parts);
+        }
 }
 
 /* ---- the menu and the properties sheet ---- */
@@ -2316,7 +2286,7 @@ static int files_sheet_fill(void)
         // The size: a file's own; a folder's and many entries' as measured.
         if (!many && (facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
         {
-                files_size_text(size, facts.size);
+                ui_size_text(size, sizeof(size), facts.size);
                 bytes[positive_into((p8 address_to)bytes, (positive)facts.size)] = 0;
                 language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_size), size, bytes);
         }
@@ -2324,7 +2294,7 @@ static int files_sheet_fill(void)
                 string_copy_bounded((string_address)files.big->sheet[lines++], (string_address)WORDS(files_sheet_measuring), sizeof(files.big->sheet[0]));
         else
         {
-                files_size_text(size, files.big->move.bytes_total);
+                ui_size_text(size, sizeof(size), files.big->move.bytes_total);
                 // What a folder holds: the count is of what is in it, not of the folder itself.
                 p32 items = files.big->move.items_total;
 
@@ -2696,25 +2666,33 @@ static fn files_menu_do(int id)
         }
 }
 
-// To the tree's node at: its folder shown (opened as a named path: the model says what is there now).
-static fn files_tree_go(p32 at)
+// To the tree's node at: its folder shown (opened as a named path: the model says what is there now). A common folder (Downloads,
+// Pictures) that does not yet exist is created on demand when clicked. Returns false when already in that folder.
+static b32 files_tree_go(p32 at)
 {
         static p8 path[FILES_PATH];
+        const struct files_tree address_to t = &files.big->tree;
         int came;
 
-        if (at >= files.big->tree.count || !files_tree_path(&files.big->tree, at, path))
-                return;
+        if (at >= t->count || !files_tree_path(t, at, path))
+                return false;
+        if (string_equals((string_address)path, (string_address)files.big->model.path))
+                return false;
         came = files_model_try(&files.big->model, (string_address)path);
+        if (came == FILES_GONE && t->node[at].depth == 0 && t->node[at].kind == FILES_NODE_PLACE &&
+            (bipolar)system_call_3(syscall(mkdirat), AT_FDCWD, (positive)path, 0755) >= 0)
+                came = files_model_try(&files.big->model, (string_address)path);
         if (came == FILES_READING)
         {
                 files_moved();
-                return;
+                return true;
         }
         files.said = files_state_said(came);
         files.dirty = true;
+        return true;
 }
 
-// A node opened or shut, the keys kept on it.
+// A node opened or shut, the keys kept on it. Uses files_tree_find (not reveal) so collapsing an ancestor keeps it collapsed.
 static fn files_tree_toggle(p32 at)
 {
         struct files_tree address_to t = &files.big->tree;
@@ -2725,7 +2703,7 @@ static fn files_tree_toggle(p32 at)
                 files_tree_shut(t, at);
         else
                 files_tree_open(t, at);
-        files.tree_shown = files_tree_reveal(t, files.big->model.path);
+        files.tree_shown = files_tree_find(t, files.big->model.path);
         files.dirty = true;
 }
 
@@ -2885,11 +2863,6 @@ static b32 files_key(const struct window_event address_to event)
         if (files.carrying && key == UI_KEY_ESCAPE)
         {
                 files_carry_end();
-                return true;
-        }
-        if (files.selecting && key == UI_KEY_ESCAPE)
-        {
-                files.selecting = false, files.dirty = true;
                 return true;
         }
         if (key == UI_KEY_TAB && !shift && !control && !alt && !files.crumb_keys && !files.tree_keys)
@@ -3147,77 +3120,19 @@ static b32 files_event(const struct window_event address_to event)
                 return !down || ui_key_modifier((int)event->a) ? true : files_key(event);
         case WINDOW_EVENT_MOTION:
                 files.dirty |= files.carrying; // the ghost follows the pointer
-                // What is carried taken out of the window with the button down (a hold's carry), or a press while carrying taken past the
-                // slop: the desktop's drag carries it on.
-                if ((files.hold_carry && ((int)event->a < 0 || (int)event->b < 0 || (int)event->a >= files.width || (int)event->b >= files.height)) ||
-                    (files.carry_press && ui_press_past(ui, files.carry_px, files.carry_py, (int)event->a, (int)event->b)))
+                // A press while carrying (Tab's) taken past the slop hands what is carried to the desktop's drag.
+                if (files.carry_press && ui_press_past(ui, files.carry_px, files.carry_py, (int)event->a, (int)event->b))
                 {
                         files_carry_offer();
                         files.dirty = true;
                         break;
                 }
-                // A rubber band held: the rows it crosses are the ones chosen, the cursor on the row the hand is at.
-                if (l->band)
-                {
-                        int first, last;
-
-                        ui_hold_move(ui, &l->hold, event->a, event->b);
-                        if (ui_list_band_follow(l, event->a, event->b) && ui_list_band_rows(ui, l, &first, &last))
-                        {
-                                b32 down_band = event->b >= l->y + l->band_at - l->scroll.scroll;
-
-                                if (files.band_add)
-                                {
-                                        // What was chosen at the press, and every row the band crosses as well.
-                                        memory_copy(m->chosen, files_band_base, FILES_MOST / 8), m->chosen_count = files.band_base_count;
-                                        for (int k = first; k <= last; k++)
-                                                if ((p32)k < m->shown.places)
-                                                        files_chosen_put(m, m->shown.order[k], true);
-                                        m->cursor = (p32)(down_band ? last : first), m->revision++;
-                                }
-                                else
-                                {
-                                        files_model_choose(m, (p32)(down_band ? first : last), FILES_CHOOSE_ONLY);
-                                        files_model_choose(m, (p32)(down_band ? last : first), FILES_CHOOSE_RANGE);
-                                }
-                        }
-                        else if (!ui_list_band_rows(ui, l, &first, &last))
-                        {
-                                if (files.band_add)
-                                        memory_copy(m->chosen, files_band_base, FILES_MOST / 8), m->chosen_count = files.band_base_count;
-                                else
-                                        files_model_choose_none(m);
-                                m->revision++;
-                        }
-                        files.dirty = true;
-                        break;
-                }
-                // A row pressed and taken past the slop: the rows dragged out, as files, copied or moved; the list's press is the drag's now.
-                if (ui_drag_past(ui, &files.drag, event->a, event->b))
-                {
-                        struct windows_clip_part parts[2];
-                        p8 address_to uris, address_to paths;
-                        positive uris_room, paths_room;
-
-                        ui_list_press_cancel(ui, l);
-                        files.drag_chosen = files_model_chosen(m, files.drag_place);
-                        if (files_uris(files.drag_place, parts, &uris, &uris_room, &paths, &paths_room))
-                        {
-                                // The offer says how many it drags (the chosen ones, or the row alone), which the drag's chip shows.
-                                p32 items = files.drag_chosen && m->chosen_count ? m->chosen_count : 1;
-
-                                const struct files_entry address_to first = files_model_entry(m, files.drag_place);
-                                p32 kind = first ? (files_symbol(m, first) & 0xffu) + 1 : 0;
-
-                                ui_drag_offer(&files.own, &files.drag, parts, 2,
-                                              WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE | kind << WINDOWS_DRAG_KIND_SHIFT |
-                                                  (items > 0xffff ? 0xffffu : items) << WINDOWS_DRAG_ITEMS_SHIFT);
-                                files_uris_free(uris, uris_room, paths, paths_room, parts);
-                        }
-                        files.drag.armed = false;
-                        break;
-                }
+                // Both lists take motion through the kit's standardized ui_list_click (box-select, selected-item drag, UI scroll, hover).
                 ui_list_click(ui, l, event, event->a, event->b);
+                if (l->band_moved)
+                        files_band_apply();
+                if (l->drag_began)
+                        files_drag_start((p32)l->drag_row);
                 ui_list_click(ui, &files.big->tree_list, event, event->a, event->b);
                 // A crumb under the pointer is the hand's, and is drawn in the ink.
                 files.crumb_hover = files_crumb_at(event->a, event->b);
@@ -3255,50 +3170,9 @@ static b32 files_event(const struct window_event address_to event)
                 }
                 if (down)
                         files.crumb_keys = false, files.crumb_clicked = -1;
-                // The tree: a press on a node's chevron opens or shuts it, anywhere else on it shows its folder; the keys go to the tree.
-                if (event->a == UI_POINTER_LEFT && ui_list_hit(ui, &files.big->tree_list, ui_kit.pointer_x, ui_kit.pointer_y) >= 0)
-                {
-                        struct ui_list address_to tl = &files.big->tree_list;
-                        int node = ui_list_click(ui, tl, event, ui_kit.pointer_x, ui_kit.pointer_y);
-
-                        if (down)
-                                files.tree_keys = true, files.crumb_keys = false;
-                        if (node >= 0 && (p32)node < files.big->tree.count)
-                        {
-                                files.tree_at = (p32)node;
-                                if (ui_list_tree_chevron_at(ui, tl, files.big->tree.node[node].depth, ui_kit.pointer_x))
-                                        files_tree_toggle((p32)node);
-                                else
-                                        files_tree_go((p32)node);
-                        }
-                        break;
-                }
-                // A rubber band: a press of the left button on the rows' ground (past the last row) or on a row away from its name (in the
-                // columns after the first) begins one, choosing that row as a click would; its release ends it. A press on a row's name chooses
-                // it and may drag it out (below).
-                // A row taken up by a hold is carried while the press is held: its release drops it in the folder's row it is over, or in
-                // the folder shown (where it came from, it stays).
-                if (event->a == UI_POINTER_LEFT && !down && files.hold_carry)
-                {
-                        int at = ui_list_hit(ui, l, ui_kit.pointer_x, ui_kit.pointer_y);
-                        const struct files_entry address_to entry = at >= 0 ? files_model_entry(m, (p32)at) : null;
-
-                        files.hold_carry = false;
-                        ui_hold_end(&l->hold);
-                        files_carry_drop(entry && entry->kind == FILES_KIND_DIRECTORY && !files_carried(files_model_name(m, entry), entry->length) ? at : -1);
-                        files.dirty = true;
-                        break;
-                }
-                if (event->a == UI_POINTER_LEFT && !down && l->band)
-                {
-                        ui_hold_end(&l->hold);
-                        ui_list_band_end(l);
-                        break;
-                }
-                // Carrying: a press on a folder's row drops what is carried in it, a press on the rows' ground in the folder shown.
-                // Its press is held: a release where it went down drops there, a press taken past the slop is the desktop's drag.
-                if (event->a == UI_POINTER_LEFT && down && files.carrying && !files.hold_carry &&
-                    files_press_kind(event->flags, -1, files.selecting, true) == FILES_PRESS_CARRY)
+                // Carrying (Tab): a press on a folder's row drops what is carried in it, a press on the rows' ground in the folder shown;
+                // taken past the slop it hands what is carried to the desktop's drag.
+                if (event->a == UI_POINTER_LEFT && down && files.carrying)
                 {
                         files.carry_press = true, files.carry_px = ui_kit.pointer_x, files.carry_py = ui_kit.pointer_y;
                         break;
@@ -3317,79 +3191,73 @@ static b32 files_event(const struct window_event address_to event)
                         files.dirty = true;
                         break;
                 }
-                // With Control or Shift at the press, or in selection mode: the ground begins a band that adds to what is chosen, and a row is
-                // chosen (added, or a range with Shift) and armed to be dragged out with the rows chosen; a release there with no drag is the
-                // click it was (below, through the list's press).
-                if (event->a == UI_POINTER_LEFT && down && !files.editing && files_on_rows(ui_kit.pointer_x, ui_kit.pointer_y))
+                // The sidebar tree: always delivers releases and non-left cancels while a press is held so stretch/drag never gets stuck.
                 {
-                        int at = ui_list_hit(ui, l, ui_kit.pointer_x, ui_kit.pointer_y);
-                        int kind = files_press_kind(event->flags, at, files.selecting, false);
+                        struct ui_list address_to tl = &files.big->tree_list;
+                        b32 in_side = ui_kit.pointer_x >= files.side_box.x && ui_kit.pointer_x < files.side_box.x + files.side_box.w &&
+                                      ui_kit.pointer_y >= files.side_box.y && ui_kit.pointer_y < files.side_box.y + files.side_box.h;
 
+                        if (tl->press.down || in_side)
+                        {
+                                int node = ui_list_click(ui, tl, event, ui_kit.pointer_x, ui_kit.pointer_y);
+
+                                if (down && event->a == UI_POINTER_LEFT && in_side)
+                                        files.tree_keys = true, files.crumb_keys = false;
+                                if (node >= 0 && (p32)node < files.big->tree.count)
+                                {
+                                        files.tree_at = (p32)node;
+                                        if (ui_list_tree_chevron_at(ui, tl, files.big->tree.node[node].depth, ui_kit.pointer_x))
+                                                files_tree_toggle((p32)node);
+                                        else if (tl->double_clicked)
+                                        {
+                                                // Double-click in the sidebar toggles expand/collapse (giving immediate feedback even when
+                                                // already in that folder); a leaf folder with no children reloads and moves focus to rows.
+                                                b32 moved = files_tree_go((p32)node);
+
+                                                files_tree_toggle((p32)node);
+                                                if (!moved && files.big->tree.node[node].read && !files.big->tree.node[node].has)
+                                                        files.tree_keys = false, files_model_reload(m);
+                                        }
+                                        else if (files_tree_go((p32)node))
+                                                files.dirty = true;
+                                }
+                                if (in_side || event->a == UI_POINTER_LEFT)
+                                        break;
+                        }
+                }
+                // The main rows: standardized kit interaction (selected rows drag, unselected scroll, L+R box-selects, clean right click
+                // asks for menu on release, double click opens).
+                if (down && event->a == UI_POINTER_LEFT)
                         files.crumb_keys = files.tree_keys = false;
-                        if (kind == FILES_PRESS_BAND)
-                        {
-                                files.band_add = true;
-                                memory_copy(files_band_base, m->chosen, FILES_MOST / 8), files.band_base_count = m->chosen_count;
-                                m->cursor = FILES_NO, files.clicked = FILES_NO, m->revision++;
-                                ui_list_band_begin(l, ui_kit.pointer_x, ui_kit.pointer_y);
-                                break;
-                        }
-                        if (kind == FILES_PRESS_DRAG)
-                        {
-                                if (!files_model_chosen(m, (p32)at))
-                                        files_model_choose(m, (p32)at, event->flags & WINDOW_KEY_SHIFT ? FILES_CHOOSE_RANGE : FILES_CHOOSE_TOGGLE);
-                                m->cursor = (p32)at, m->revision++;
-                                ui_drag_button(&files.drag, event, ui_kit.pointer_x, ui_kit.pointer_y, true);
-                                files.drag_place = (p32)at, files.drag_chosen = true, files.drag_toggle = true;
-                                files.dirty = true;
-                                break;
-                        }
-                }
-                // A release of a row armed to be dragged and not dragged: the click it was, a row taken out of what is chosen in selection mode or
-                // with Control (it was added at the press when it was not chosen).
-                if (event->a == UI_POINTER_LEFT && !down && files.drag_toggle)
-                {
-                        files.drag_toggle = false;
-                        break;
-                }
-                // The right button: the menu of the row under the pointer (chosen alone first, unless it is among those chosen), or of the
-                // folder shown where no row is.
-                if (event->a == UI_POINTER_RIGHT)
-                {
-                        if (down)
-                                files_menu_at(ui_kit.pointer_x, ui_kit.pointer_y);
-                        break;
-                }
-                // A plain press: the list's, which scrolls with a move (mouse or finger) and is held for the three seconds' hold; its release
-                // with no move is a click on its row.
                 row = ui_list_click(ui, l, event, ui_kit.pointer_x, ui_kit.pointer_y);
+                if (l->band_began)
+                {
+                        files.band_add = (event->flags & WINDOW_KEY_CONTROL) != 0;
+                        memory_copy(files_band_base, m->chosen, FILES_MOST / 8), files.band_base_count = m->chosen_count;
+                        files_band_apply();
+                        break;
+                }
+                if (l->menu_asked)
+                {
+                        ui_view_cancel(ui, &files.big->view);
+                        files_menu_at(l->menu_x, l->menu_y);
+                        break;
+                }
                 if (down && l->down >= 0 && (p32)l->down != m->cursor)
                         m->cursor = (p32)l->down, m->revision++;
-                if (row < 0 && down && event->a == UI_POINTER_LEFT && files_on_rows(ui_kit.pointer_x, ui_kit.pointer_y) && ui_list_hit(ui, l, ui_kit.pointer_x, ui_kit.pointer_y) < 0 &&
-                    !files.selecting)
+                if (l->ground_clicked)
                         files_model_choose_none(m), m->cursor = FILES_NO, m->revision++, files.dirty = true;
                 if (row >= 0)
                 {
                         p32 place = (p32)row;
-                        b32 again = place == files.clicked && (b64)ui_kit.now - files.clicked_at <= ui_click_ns;
 
                         files.said = 0;
-                        // In selection mode a tap or a click adds the row or takes it out, and opens nothing.
-                        if (files.selecting)
+                        if ((event->flags & WINDOW_KEY_TOUCH) || l->double_clicked)
                         {
-                                files_model_choose(m, place, FILES_CHOOSE_TOGGLE);
-                                files.dirty = true;
-                                break;
-                        }
-                        // A finger's tap opens; a mouse's click chooses, and a second one on the row in time opens.
-                        if ((event->flags & WINDOW_KEY_TOUCH) || again)
-                        {
-                                files.clicked = FILES_NO;
                                 files_open(place);
                                 break;
                         }
                         files_model_choose(m, place, event->flags & WINDOW_KEY_CONTROL ? FILES_CHOOSE_TOGGLE : event->flags & WINDOW_KEY_SHIFT ? FILES_CHOOSE_RANGE : FILES_CHOOSE_ONLY);
-                        files.clicked = place, files.clicked_at = (b64)ui_kit.now;
                 }
                 break;
         }
@@ -3477,36 +3345,19 @@ static long files_tick(long timeout, long address_to other)
                 }
                 timeout = timeout < 0 || timeout > 16000000 ? 16000000 : timeout;
         }
-        // A press held still on the rows: its ring a frame at a time, and once it has been held long enough, on a row that row taken up
-        // and carried (its release drops it), on the ground selection mode.
+        // A rubber band held near the list's top or foot scrolls the rows under it and keeps updating the selection.
+        if (files.big->list.band)
         {
                 struct ui_list address_to l = &files.big->list;
-                p32 hold = ui_list_hold_tick(&files.ui, l, (b64)ui_kit_time());
+                int edge = ui_dev(&files.ui, FILES_EDGE), top = l->band_y1 - l->y, foot = l->y + l->h - l->band_y1, by = 0;
 
-                if (hold & UI_LIST_HELD)
-                {
-                        if (l->hold.target >= 0 && (p32)l->hold.target < files_model_count(m))
-                        {
-                                if (!files_model_chosen(m, (p32)l->hold.target))
-                                        files_model_choose(m, (p32)l->hold.target, FILES_CHOOSE_ONLY);
-                                ui_list_band_end(l);
-                                files.drag.armed = false;
-                                files_carry_pick();
-                                files.hold_carry = files.carrying;
-                        }
-                        else
-                        {
-                                // On the ground: selection mode, and a band from where the press went down that adds to what is chosen.
-                                files.selecting = true, files.band_add = true;
-                                memory_copy(files_band_base, m->chosen, FILES_MOST / 8), files.band_base_count = m->chosen_count;
-                                ui_list_band_begin(l, l->hold.x, l->hold.y);
-                        }
-                }
-                if (hold)
-                {
-                        files.dirty = true;
-                        timeout = timeout < 0 || timeout > 16000000 ? 16000000 : timeout;
-                }
+                if (top < edge)
+                        by = -ui_dev(&files.ui, FILES_EDGE_STEP) * (edge - (top < 0 ? 0 : top)) / edge - 1;
+                else if (foot < edge)
+                        by = ui_dev(&files.ui, FILES_EDGE_STEP) * (edge - (foot < 0 ? 0 : foot)) / edge + 1;
+                if (by && ui_scroll_set(&l->scroll, l->scroll.scroll + by))
+                        files_band_apply(), files.dirty = true;
+                timeout = timeout < 0 || timeout > 16000000 ? 16000000 : timeout;
         }
         // The drop's pop: a picture as it begins and as it ends.
         if (files.flash_used)
@@ -3623,6 +3474,12 @@ static long files_tick(long timeout, long address_to other)
 
                 if (became == FILES_STALE)
                         files_model_reload(m);
+                if (files_tree_drives_changed(&files.big->tree))
+                {
+                        files_tree_populate_live(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"));
+                        files_tree_follow();
+                        files.dirty = true;
+                }
                 files.dirty |= became != FILES_FRESH;
                 files.next_look = now + FILES_LOOK_NS;
                 if (m->walking)
@@ -3643,12 +3500,14 @@ static int files_open_window(void)
                 compositor_kmsg((string_address) "files: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                 return 1;
         }
-        files.clicked = FILES_NO, files.crumb_hover = -1, files.crumb_clicked = -1, files.drop_row = -1, files.drop_node = -1, files.spring = -1;
+        files.crumb_hover = -1, files.crumb_clicked = -1, files.drop_row = -1, files.drop_node = -1, files.spring = -1;
         files.columns.width[1] = 90, files.columns.width[2] = 110, files.columns.width[3] = 140;
         files.columns.sorted = 0, files.columns.hover = files.columns.held = -1;
+        files_app.view = &files.big->view;
         files_move_end(&files.big->move);
         if (!files_tree_begin(&files.big->tree))
                 return 1;
+        files_tree_populate_live(&files.big->tree, (const p8 address_to)getenv((string_address) "HOME"));
         if (!files.start || !files_model_go(&files.big->model, files.start))
                 files_model_go(&files.big->model, (string_address) "/");
         files.next_look = (b64)ui_kit.now + FILES_LOOK_NS;

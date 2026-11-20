@@ -4365,6 +4365,45 @@ static fn browser_tree(void)
         shut = !tree.node[sub].open && files_tree_after(&tree, sub) == sub + 1 && (sub + 1 >= tree.count || tree.node[sub + 1].depth <= tree.node[sub].depth);
         check("browser: the tree opens each folder down a path from the root, a node's folders are its folders in name order (no file, no link, no hidden one), its path is the path, and shut it lets go of what is under it",
               revealed && children && shut);
+        // Multi-root sidebar: common folders (Home, Downloads, Pictures) above storage drives (/ + mounted drives), all collapsed by default,
+        // longest-prefix reveal never force-expands /, and files_tree_find finds visible nodes without expanding anything.
+        {
+                static const char mountinfo[] =
+                    "20 1 0:19 / /proc rw,nosuid - proc proc rw\n"
+                    "21 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
+                    "22 21 8:2 / /boot/efi rw - vfat /dev/sda2 rw\n"
+                    "23 21 0:25 / /run rw - tmpfs tmpfs rw\n"
+                    "24 21 8:17 / /mnt/usb rw - exfat /dev/sdb1 rw\n"
+                    "25 21 259:1 / /run/media/u/My\\040Drive rw - ext4 /dev/nvme1n1p1 rw\n"
+                    "26 21 8:17 / /mnt/usb rw - exfat /dev/sdb1 rw\n"
+                    "27 21 7:0 / /mnt/loop rw - squashfs /dev/loop0 ro\n";
+                p8 home[FILES_PATH], sub_path[FILES_PATH];
+                p32 hnode, dnode, snode;
+                b32 roots_ok, reveal_ok, find_ok;
+
+                browser_path(home, (string_address) "tr");
+                browser_path(sub_path, (string_address) "tr/a");
+                files_tree_populate(&tree, home, (const p8 address_to)mountinfo, sizeof(mountinfo) - 1);
+                // Expected depth-0 roots: Home, Downloads, Pictures, /, usb, My Drive (6 roots, all collapsed).
+                roots_ok = tree.count == 6 &&
+                           tree.node[0].kind == FILES_NODE_PLACE && tree.node[0].place == FILES_PLACE_HOME && !tree.node[0].open &&
+                           tree.node[1].kind == FILES_NODE_PLACE && tree.node[1].place == FILES_PLACE_DOWNLOADS &&
+                           tree.node[2].kind == FILES_NODE_PLACE && tree.node[2].place == FILES_PLACE_PICTURES &&
+                           tree.node[3].kind == FILES_NODE_DRIVE && tree.node[3].place == FILES_PLACE_ROOT && !tree.node[3].open &&
+                           tree.node[4].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 4), (string_address) "usb") &&
+                           tree.node[5].kind == FILES_NODE_DRIVE && string_equals((string_address)files_tree_name(&tree, 5), (string_address) "My Drive") &&
+                           files_tree_path(&tree, 5, made) && string_equals((string_address)made, (string_address) "/run/media/u/My Drive");
+                hnode = files_tree_reveal(&tree, home);
+                dnode = files_tree_find(&tree, (const p8 address_to) "/");
+                reveal_ok = hnode == 0 && !tree.node[0].open && dnode == 3 && !tree.node[3].open;
+                snode = files_tree_reveal(&tree, sub_path);
+                reveal_ok = reveal_ok && snode != FILES_NO && tree.node[0].open && !tree.node[3].open &&
+                            files_tree_path(&tree, snode, made) && string_equals((string_address)made, (string_address)sub_path);
+                files_tree_shut(&tree, 0);
+                find_ok = files_tree_find(&tree, sub_path) == FILES_NO && !tree.node[0].open && files_tree_find(&tree, home) == 0;
+                check("browser: multi-root tree puts common folders above root and mounted drives, keeps / collapsed, and find never re-opens shut nodes",
+                      roots_ok && reveal_ok && find_ok);
+        }
         files_tree_end(&tree);
         browser_remove_in((string_address) "tr");
 }
@@ -4533,13 +4572,6 @@ static fn browser_asks(void)
                 browser_go(m, (string_address) "asks");
                 check("browser: in a work tree a name the index holds is tracked (a folder by what is under it), one a .gitignore matches ignored (a folder by a pattern with its /), any other untracked, .git none",
                       marked && !files_git_marks(m, files_git_check_state));
-                // The press rule: plain is the list's (it scrolls; the hold chooses), with Control or Shift or in selection mode a row drags and
-                // the ground bands, while carrying a press is the carry's.
-                check("browser: a plain press is the list's, Control or Shift drags a row and bands the ground, selection mode the same, carrying the carry's",
-                      files_press_kind(0, 3, false, false) == FILES_PRESS_LIST && files_press_kind(0, -1, false, false) == FILES_PRESS_LIST &&
-                          files_press_kind(WINDOW_KEY_CONTROL, 3, false, false) == FILES_PRESS_DRAG && files_press_kind(WINDOW_KEY_SHIFT, -1, false, false) == FILES_PRESS_BAND &&
-                          files_press_kind(0, 3, true, false) == FILES_PRESS_DRAG && files_press_kind(0, -1, true, false) == FILES_PRESS_BAND &&
-                          files_press_kind(0, 3, false, true) == FILES_PRESS_CARRY && files_press_kind(WINDOW_KEY_CONTROL, -1, true, true) == FILES_PRESS_CARRY);
         }
         files_model_close(m);
 }

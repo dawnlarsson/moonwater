@@ -1591,6 +1591,7 @@ static struct ui_app launcher_app = {
         .height = &launcher.height,
         .shown = &launcher.buffers.shown,
         .draw = launcher_paint,
+        .view = &launcher.view,
 };
 
 static b32 launcher_main()

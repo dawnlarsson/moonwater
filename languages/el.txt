@@ -63,7 +63,7 @@ files_delete_for_good	ec0e	Οριστική διαγραφή %1$d: %2$s; Ξαν�
 files_delete_stopped	ef42	Σταμάτησε στο %2$s: %1$d διαγράφηκαν πριν
 files_deleted	8591	%d διαγράφηκαν
 files_deleting	a297	Διαγραφή: %d ως τώρα, Escape σταματά
-files_done	1791	Τέλος
+files_drive_root	84bc	Σύστημα
 files_empty	751c	Αυτός ο φάκελος είναι κενός
 files_failed	c564	Δεν ήταν δυνατή η ανάγνωση του φακέλου
 files_find_hint	0ee1	Εύρεση σε αυτόν τον φάκελο
@@ -82,11 +82,13 @@ files_not_folder	2663	Αυτό δεν είναι φάκελος
 files_nothing_to_paste	c9d4	Το πρόχειρο δεν έχει αρχεία
 files_nothing_to_redo	b2a4	Τίποτα για επανάληψη
 files_nothing_to_undo	1433	Τίποτα για αναίρεση
+files_place_downloads	07de	Λήψεις
+files_place_home	0eae	Αρχική
+files_place_pictures	feae	Εικόνες
 files_reading	64a4	Ανάγνωση του φακέλου
 files_redone	6fd0	%d επαναλήφθηκαν
 files_rename_hint	ad88	Νέο όνομα
 files_restored	4c30	%d επέστρεψαν στη θέση τους
-files_selecting	2d5c	Λειτουργία επιλογής, %d επιλεγμένα: αγγίξτε στοιχεία για προσθήκη ή αφαίρεση, Escape ή Τέλος για ολοκλήρωση
 files_sheet_created	59ac	Δημιουργήθηκε %s
 files_sheet_file	3663	Αρχείο
 files_sheet_folder	7afd	Φάκελος
@@ -100,9 +102,8 @@ files_sheet_other	3921	Συσκευή, σωλήνας ή υποδοχή
 files_sheet_owner	8b0c	Κάτοχος %1$d, ομάδα %2$d
 files_sheet_size	eca5	Μέγεθος %1$s (%2$s byte)
 files_sheet_size_in	31a1	Μέγεθος %1$s σε %2$d στοιχεία
-files_type_ext	d2c5	Αρχείο %s
 files_type_link	e589	Σύνδεσμος
-files_type_other	e8e6	Ειδικό αρχείο
+files_type_other	80d0	Ειδικό
 files_undone	4da3	%d αναιρέθηκαν
 files_unreadable	986c	Δεν επιτρέπεται η ανάγνωση του φακέλου
 files_up	5940	Πάνω
@@ -235,19 +236,6 @@ settings_asks_first	e9bd	ρωτά πρώτα
 settings_badge_error	9cf1	Σφάλμα
 settings_badge_warning	fc8f	Προειδοποίηση
 settings_battery_charging	5116	, φορτίζει
-settings_item_drive	269a	εμφανίζεται, δεν κρατείται: καμία εντολή δεν αλλάζει δίσκο
-settings_not_shown	8efd	%d ακόμα δεν εμφανίζονται
-settings_role_efi	d41a	Σύστημα EFI
-settings_role_linux	2c8f	Δεδομένα Linux
-settings_role_swap	d36e	Ανταλλαγή
-settings_role_other	ff95	Άλλο
-settings_role_free	ad01	Ελεύθερος χώρος
-settings_role_unpartitioned	3c10	Χωρίς πίνακα διαμερισμάτων
-settings_opened	5bd7	άνοιξε στο πρόγραμμα περιήγησης
-settings_partitioned	70f5	%d%% διαμερισμένο
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Διαμερίσματα
-settings_share	9902	%1$d,%2$d%%
 settings_battery_discharging	7964	, αποφορτίζεται
 settings_battery_full	ded8	, πλήρης
 settings_battery_idle	1635	, δεν φορτίζει
@@ -298,6 +286,7 @@ settings_issue_unknown	e812	Ένα πρόβλημα που αυτή η έκδο�
 settings_item_add	fbef	το Enter κρατά το όνομα μιας συσκευής· η ασύρματη λειτουργία ενεργοποιείται για ό,τι ζευγαρώνει
 settings_item_ask	6aad	το Enter ζητά τον κωδικό και συνδέεται
 settings_item_cannot	e643	το moonwater δεν μπορεί να συνδεθεί σε ό,τι ζητά αυτό το δίκτυο
+settings_item_drive	269a	εμφανίζεται, δεν κρατείται: καμία εντολή δεν αλλάζει δίσκο
 settings_item_joined	0fb8	συνδεδεμένο: το Delete το ξεχνά
 settings_item_kept	33d9	κρατημένο με το όνομά του: το Delete το ξεχνά
 settings_item_open	4429	το Enter συνδέεται και το αποθηκεύει
@@ -320,19 +309,28 @@ settings_name_chars	58a2	ένα όνομα αποτελείται από γρά�
 settings_name_long	f2c0	ένα όνομα έχει λιγότερους από 32 χαρακτήρες
 settings_no_rates	185b	Η οθόνη δεν αναφέρει ρυθμούς
 settings_no_screen	55fd	Δεν είναι συνδεδεμένη καμία οθόνη
+settings_no_sizes	0f7e	Η οθόνη δεν αναφέρει μεγέθη
 settings_not_here	4e20	δεν υπάρχει σε αυτό το μηχάνημα
+settings_not_shown	8efd	%d ακόμα δεν εμφανίζονται
 settings_nothing_kept	85a2	δεν πληκτρολογήθηκε τίποτα: η τιμή διατηρείται
 settings_nothing_matches	14e9	Τίποτα δεν ταιριάζει με το κείμενο
 settings_nothing_typed	edce	δεν πληκτρολογήθηκε τίποτα
 settings_notices_count	8902	%1$d ειδοποιήσεις
 settings_notices_dismiss	c370	απόρριψη όλων
 settings_notices_none	47c6	καμία ειδοποίηση πυρήνα
+settings_opened	5bd7	άνοιξε στο πρόγραμμα περιήγησης
+settings_partitioned	70f5	%d%% διαμερισμένο
+settings_partitions	9b2e	Διαμερίσματα
 settings_percent	e76a	%d%%
+settings_primary_no	a970	Όχι κύρια
+settings_primary_other	0b14	Κάντε κύρια μια άλλη οθόνη για να την αλλάξετε
+settings_primary_yes	7f79	Κύρια
 settings_rate_best	7450	%d Hz (προτεινόμενο)
 settings_rate_plain	743a	%d Hz
 settings_refused	454b	το moonwater αρνήθηκε
 settings_refused_place	9632	%s (η θέση του στο αρχείο δεν διαβάζεται)
 settings_refused_rate	97bc	%1$s (το %2$d Hz δεν προσφέρεται)
+settings_refused_size	1332	%s (το %d × %d δεν προσφέρεται)
 settings_refused_turn	7b3a	%1$s (δεν έγινε: %2$s)
 settings_req_context	a233	η κάρτα δεν δίνει μπάφερ, χάρτη VM ή πλαίσιο: ο δακτύλιος amdgpu ή το υλικολογισμικό του δεν είναι ενεργά
 settings_req_driver	42ea	το πρόγραμμα οδήγησης της κάρτας, %1$s, δεν έχει ακόμη διαδρομή GPU: ο επεξεργαστής σχεδιάζει τα πάντα
@@ -342,6 +340,12 @@ settings_req_prime	a63c	ένα dma-buf δεν εισάγεται στον κόμ
 settings_req_ring	29f2	ο δακτύλιος υπολογισμού δεν ολοκλήρωσε το αυτοτέστ: υλικολογισμικό, ρολόγια ή επαναφορά (δείτε τον πυρήνα)
 settings_req_selftest	0061	η κάρτα σχεδίασε λάθος το αυτοτέστ: οι πυρήνες της δεν ταιριάζουν στο ISA· μένει στον επεξεργαστή
 settings_req_udmabuf	420f	το /dev/udmabuf δεν φτιάχνει dma-buf από σελίδα memfd: χρειάζεται CONFIG_UDMABUF=y και ανοιχτό /dev/udmabuf
+settings_role_efi	d41a	Σύστημα EFI
+settings_role_free	ad01	Ελεύθερος χώρος
+settings_role_linux	2c8f	Δεδομένα Linux
+settings_role_other	ff95	Άλλο
+settings_role_swap	d36e	Ανταλλαγή
+settings_role_unpartitioned	3c10	Χωρίς πίνακα διαμερισμάτων
 settings_run_any	3ffd	Εκτέλεση οποιασδήποτε εντολής moonwater
 settings_running	d0e2	εκτελείται το %s (το Escape το σταματά)
 settings_saved	9f44	αποθηκευμένο
@@ -349,6 +353,15 @@ settings_scale_best	2ba0	%d%% (προτεινόμενο)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Οθόνη %1$d: %2$s
 settings_screen_named	d918	Οθόνη %1$d: %2$s [%3$s]
+settings_share	9902	%1$d,%2$d%%
+settings_size_ask	7773	%d × %d: επιλέξτε Διατήρηση στην Ανάλυση, αλλιώς επιστρέφει σε %d δ
+settings_size_back	6c84	Δεν διατηρήθηκε: πίσω στο %s
+settings_size_best	5165	%d × %d (προτεινόμενο)
+settings_size_keep	d1e7	Διατήρηση %d × %d (πίσω σε %d δ)
+settings_size_kept	7101	Διατηρήθηκε %d × %d
+settings_size_own	810e	το δικό της μέγεθος
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Η οθόνη δεν δέχτηκε το %d × %d: πίσω στο %s
 settings_state_allowed	e443	επιτρέπεται
 settings_state_blocked	6eb3	αποκλεισμένο
 settings_state_view_only	031a	μόνο προβολή
@@ -376,6 +389,7 @@ settings_type_command	75f8	πληκτρολογήστε μια εντολή: τ�
 settings_type_device	63e0	πληκτρολογήστε το όνομα μιας συσκευής: το Enter το κρατά, το Escape το αφήνει
 settings_type_passphrase	ca95	πληκτρολογήστε τον κωδικό: το Enter συνδέεται, το Escape το αφήνει
 settings_unknown	9fb9	άγνωστο
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	ΡΗΜΑ [ΟΡΙΣΜΑΤΑ]
 settings_virtual_refused	4202	εικονική συσκευή δεν μπορεί να το ανοίξει: πληκτρολόγιο ή ποντίκι του υπολογιστή, ή moonwater ssh σε τερματικό root
 settings_wall_hint	ccf0	Επιλέξτε ένα PNG στα Αρχεία και μετά Ορισμός ως ταπετσαρία αυτής της οθόνης
@@ -420,19 +434,6 @@ tray_settings	8728	Ρυθμίσεις
 ui_confirm_again	b3ff	πατήστε ξανά για επιβεβαίωση: 
 ui_field_digits	f52b	ένας αριθμός αποτελείται από ψηφία
 ui_field_full	fe02	δεν χωράει περισσότερο
-settings_no_sizes	0f7e	Η οθόνη δεν αναφέρει μεγέθη
-settings_primary_no	a970	Όχι κύρια
-settings_primary_other	0b14	Κάντε κύρια μια άλλη οθόνη για να την αλλάξετε
-settings_primary_yes	7f79	Κύρια
-settings_refused_size	1332	%s (το %d × %d δεν προσφέρεται)
-settings_size_ask	7773	%d × %d: επιλέξτε Διατήρηση στην Ανάλυση, αλλιώς επιστρέφει σε %d δ
-settings_size_back	6c84	Δεν διατηρήθηκε: πίσω στο %s
-settings_size_best	5165	%d × %d (προτεινόμενο)
-settings_size_keep	d1e7	Διατήρηση %d × %d (πίσω σε %d δ)
-settings_size_kept	7101	Διατηρήθηκε %d × %d
-settings_size_own	810e	το δικό της μέγεθος
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	Η οθόνη δεν δέχτηκε το %d × %d: πίσω στο %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Ένας κύκλος κάτω από κάθε δάχτυλο σε οθόνη αφής

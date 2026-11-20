@@ -63,7 +63,7 @@ files_delete_for_good	ec0e	%1$d endgültig löschen: %2$s? Nochmal Umschalt+Entf
 files_delete_stopped	ef42	Angehalten bei %2$s: %1$d davor gelöscht
 files_deleted	8591	%d gelöscht
 files_deleting	a297	Löschen: %d bisher, Escape hält an
-files_done	1791	Fertig
+files_drive_root	84bc	System
 files_empty	751c	Dieser Ordner ist leer
 files_failed	c564	Dieser Ordner konnte nicht gelesen werden
 files_find_hint	0ee1	In diesem Ordner suchen
@@ -82,11 +82,13 @@ files_not_folder	2663	Das ist kein Ordner
 files_nothing_to_paste	c9d4	Die Zwischenablage enthält keine Dateien
 files_nothing_to_redo	b2a4	Nichts zu wiederholen
 files_nothing_to_undo	1433	Nichts rückgängig zu machen
+files_place_downloads	07de	Downloads
+files_place_home	0eae	Persönlich
+files_place_pictures	feae	Bilder
 files_reading	64a4	Ordner wird gelesen
 files_redone	6fd0	%d wiederholt
 files_rename_hint	ad88	Neuer Name
 files_restored	4c30	%d zurückgelegt, wo sie waren
-files_selecting	2d5c	Auswahlmodus, %d gewählt: Elemente antippen zum Hinzufügen oder Entfernen, Escape oder Fertig zum Beenden
 files_sheet_created	59ac	Erstellt %s
 files_sheet_file	3663	Datei
 files_sheet_folder	7afd	Ordner
@@ -100,9 +102,8 @@ files_sheet_other	3921	Gerät, Pipe oder Socket
 files_sheet_owner	8b0c	Besitzer %1$d, Gruppe %2$d
 files_sheet_size	eca5	Größe %1$s (%2$s Bytes)
 files_sheet_size_in	31a1	Größe %1$s in %2$d Einträgen
-files_type_ext	d2c5	%s-Datei
 files_type_link	e589	Verweis
-files_type_other	e8e6	Sonderdatei
+files_type_other	80d0	Spezial
 files_undone	4da3	%d rückgängig gemacht
 files_unreadable	986c	Dieser Ordner darf nicht gelesen werden
 files_up	5940	Nach oben
@@ -235,19 +236,6 @@ settings_asks_first	e9bd	fragt zuerst
 settings_badge_error	9cf1	Fehler
 settings_badge_warning	fc8f	Warnung
 settings_battery_charging	5116	, lädt
-settings_item_drive	269a	angezeigt, nicht gehalten: kein Befehl ändert ein Laufwerk
-settings_not_shown	8efd	%d weitere nicht angezeigt
-settings_role_efi	d41a	EFI-System
-settings_role_linux	2c8f	Linux-Daten
-settings_role_swap	d36e	Swap
-settings_role_other	ff95	Andere
-settings_role_free	ad01	Freier Speicher
-settings_role_unpartitioned	3c10	Keine Partitionstabelle
-settings_opened	5bd7	im Browser geöffnet
-settings_partitioned	70f5	%d %% partitioniert
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Partitionen
-settings_share	9902	%1$d,%2$d %%
 settings_battery_discharging	7964	, entlädt
 settings_battery_full	ded8	, voll
 settings_battery_idle	1635	, lädt nicht
@@ -298,6 +286,7 @@ settings_issue_unknown	e812	Ein Problem, das diese Version nicht benennt (Code %
 settings_item_add	fbef	Enter merkt sich den Namen eines Geräts; das Funkmodul schaltet sich für Kopplungen ein
 settings_item_ask	6aad	Enter fragt nach dem Passwort und verbindet
 settings_item_cannot	e643	moonwater kann nicht erfüllen, was dieses Netzwerk verlangt
+settings_item_drive	269a	angezeigt, nicht gehalten: kein Befehl ändert ein Laufwerk
 settings_item_joined	0fb8	verbunden: Delete vergisst es
 settings_item_kept	33d9	nach Namen gemerkt: Delete vergisst es
 settings_item_open	4429	Enter verbindet und speichert es
@@ -320,19 +309,28 @@ settings_name_chars	58a2	ein Name besteht aus Buchstaben, Ziffern und Bindestric
 settings_name_long	f2c0	ein Name ist kürzer als 32 Zeichen
 settings_no_rates	185b	Der Bildschirm nennt keine Wiederholraten
 settings_no_screen	55fd	Es ist kein Bildschirm angeschlossen
+settings_no_sizes	0f7e	Der Bildschirm nennt keine Größen
 settings_not_here	4e20	nicht auf diesem Gerät
+settings_not_shown	8efd	%d weitere nicht angezeigt
 settings_nothing_kept	85a2	nichts eingegeben: der Wert bleibt
 settings_nothing_matches	14e9	Nichts passt zur Eingabe
 settings_nothing_typed	edce	nichts eingegeben
 settings_notices_count	8902	%1$d Meldungen
 settings_notices_dismiss	c370	alle verwerfen
 settings_notices_none	47c6	keine Kernelmeldungen
+settings_opened	5bd7	im Browser geöffnet
+settings_partitioned	70f5	%d %% partitioniert
+settings_partitions	9b2e	Partitionen
 settings_percent	e76a	%d %%
+settings_primary_no	a970	Nicht primär
+settings_primary_other	0b14	Mache einen anderen Bildschirm zum primären, um ihn zu verschieben
+settings_primary_yes	7f79	Primär
 settings_rate_best	7450	%d Hz (empfohlen)
 settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater hat abgelehnt
 settings_refused_place	9632	%s (seine Position in der Datei wird nicht gelesen)
 settings_refused_rate	97bc	%1$s (%2$d Hz wird nicht angeboten)
+settings_refused_size	1332	%s (%d × %d wird nicht angeboten)
 settings_refused_turn	7b3a	%1$s (%2$s ließ sich nicht ausführen)
 settings_req_context	a233	die Karte liefert keinen Puffer, keine VM-Abbildung und keinen Compute-Kontext: der amdgpu-Compute-Ring oder seine Firmware läuft nicht
 settings_req_driver	42ea	der Treiber der Grafikkarte, %1$s, hat noch keinen GPU-Pfad: der Prozessor zeichnet alles
@@ -342,6 +340,12 @@ settings_req_prime	a63c	ein dma-buf lässt sich nicht in den Render-Knoten impor
 settings_req_ring	29f2	der Compute-Ring hat den Selbsttest nicht beendet: Firmware, Takte oder ein Ring-Reset (die Kernelzeilen sagen, welches)
 settings_req_selftest	0061	die Karte hat das Selbsttestbild falsch gezeichnet: ihre Kernel passen nicht zur ISA dieser Familie; sie bleibt beim Prozessor
 settings_req_udmabuf	420f	/dev/udmabuf erzeugt aus einer memfd-Seite keinen dma-buf: CONFIG_UDMABUF=y nötig und /dev/udmabuf muss sich öffnen (die Karte rechnet weiter)
+settings_role_efi	d41a	EFI-System
+settings_role_free	ad01	Freier Speicher
+settings_role_linux	2c8f	Linux-Daten
+settings_role_other	ff95	Andere
+settings_role_swap	d36e	Swap
+settings_role_unpartitioned	3c10	Keine Partitionstabelle
 settings_run_any	3ffd	Beliebigen moonwater-Befehl ausführen
 settings_running	d0e2	%s läuft (Escape bricht ab)
 settings_saved	9f44	gespeichert
@@ -349,6 +353,15 @@ settings_scale_best	2ba0	%d %% (empfohlen)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Bildschirm %1$d: %2$s
 settings_screen_named	d918	Bildschirm %1$d: %2$s [%3$s]
+settings_share	9902	%1$d,%2$d %%
+settings_size_ask	7773	%d × %d: wähle Behalten unter Auflösung, sonst geht es in %d s zurück
+settings_size_back	6c84	Nicht behalten: zurück zu %s
+settings_size_best	5165	%d × %d (empfohlen)
+settings_size_keep	d1e7	%d × %d behalten (zurück in %d s)
+settings_size_kept	7101	%d × %d behalten
+settings_size_own	810e	seine eigene Größe
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Der Bildschirm hat %d × %d nicht angenommen: zurück zu %s
 settings_state_allowed	e443	erlaubt
 settings_state_blocked	6eb3	gesperrt
 settings_state_view_only	031a	nur ansehen
@@ -376,6 +389,7 @@ settings_type_command	75f8	einen Befehl eingeben: sein Verb, dann was folgt
 settings_type_device	63e0	den Namen eines Geräts eingeben: Enter merkt ihn sich, Escape lässt es
 settings_type_passphrase	ca95	das Passwort eingeben: Enter verbindet, Escape lässt es
 settings_unknown	9fb9	unbekannt
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERB [ARGUMENTE]
 settings_virtual_refused	4202	ein virtuelles Gerät kann dies nicht einschalten: eine am Gerät angeschlossene Tastatur oder Maus verwenden, oder moonwater ssh in einem Root-Terminal
 settings_wall_hint	ccf0	Wählen Sie eine PNG-Datei in Dateien und dann „Als Hintergrundbild dieses Bildschirms festlegen“
@@ -420,19 +434,6 @@ tray_settings	8728	Einstellungen
 ui_confirm_again	b3ff	zur Bestätigung erneut drücken: 
 ui_field_digits	f52b	eine Zahl besteht aus Ziffern
 ui_field_full	fe02	mehr passt nicht hinein
-settings_no_sizes	0f7e	Der Bildschirm nennt keine Größen
-settings_primary_no	a970	Nicht primär
-settings_primary_other	0b14	Mache einen anderen Bildschirm zum primären, um ihn zu verschieben
-settings_primary_yes	7f79	Primär
-settings_refused_size	1332	%s (%d × %d wird nicht angeboten)
-settings_size_ask	7773	%d × %d: wähle Behalten unter Auflösung, sonst geht es in %d s zurück
-settings_size_back	6c84	Nicht behalten: zurück zu %s
-settings_size_best	5165	%d × %d (empfohlen)
-settings_size_keep	d1e7	%d × %d behalten (zurück in %d s)
-settings_size_kept	7101	%d × %d behalten
-settings_size_own	810e	seine eigene Größe
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	Der Bildschirm hat %d × %d nicht angenommen: zurück zu %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Ein Kreis unter jedem Finger auf einem Touchscreen

@@ -64,7 +64,7 @@ files_delete_for_good	ec0e	%1$d ہمیشہ کے لیے حذف کریں: %2$s؟ �
 files_delete_stopped	ef42	%2$s پر رک گیا: اس سے پہلے %1$d حذف ہوئے
 files_deleted	8591	%d حذف ہوئے
 files_deleting	a297	حذف ہو رہا ہے: اب تک %d، Escape روکتا ہے
-files_done	1791	ہو گیا
+files_drive_root	84bc	سسٹم
 files_empty	751c	یہ فولڈر خالی ہے
 files_failed	c564	یہ فولڈر پڑھا نہیں جا سکا
 files_find_hint	0ee1	اس فولڈر میں تلاش کریں
@@ -83,11 +83,13 @@ files_not_folder	2663	یہ فولڈر نہیں ہے
 files_nothing_to_paste	c9d4	کلپ بورڈ میں کوئی فائل نہیں
 files_nothing_to_redo	b2a4	دوبارہ کرنے کو کچھ نہیں
 files_nothing_to_undo	1433	واپس لینے کو کچھ نہیں
+files_place_downloads	07de	ڈاؤن لوڈز
+files_place_home	0eae	ہوم
+files_place_pictures	feae	تصاویر
 files_reading	64a4	فولڈر پڑھا جا رہا ہے
 files_redone	6fd0	%d دوبارہ کیے گئے
 files_rename_hint	ad88	نیا نام
 files_restored	4c30	%d اپنی جگہ واپس رکھے گئے
-files_selecting	2d5c	انتخاب موڈ، %d منتخب: شامل کرنے یا ہٹانے کے لیے اشیاء کو چھوئیں، ختم کرنے کے لیے Escape یا ہو گیا
 files_sheet_created	59ac	بنایا %s
 files_sheet_file	3663	فائل
 files_sheet_folder	7afd	فولڈر
@@ -101,9 +103,8 @@ files_sheet_other	3921	آلہ، پائپ یا ساکٹ
 files_sheet_owner	8b0c	مالک %1$d، گروپ %2$d
 files_sheet_size	eca5	سائز %1$s (%2$s بائٹ)
 files_sheet_size_in	31a1	سائز %1$s، %2$d اشیاء میں
-files_type_ext	d2c5	%s فائل
 files_type_link	e589	لنک
-files_type_other	e8e6	خاص فائل
+files_type_other	80d0	خاص
 files_undone	4da3	%d واپس لیے گئے
 files_unreadable	986c	اس فولڈر کو پڑھنے کی اجازت نہیں
 files_up	5940	اوپر
@@ -236,19 +237,6 @@ settings_asks_first	e9bd	پہلے پوچھتا ہے
 settings_badge_error	9cf1	خرابی
 settings_badge_warning	fc8f	انتباہ
 settings_battery_charging	5116	، چارج ہو رہی ہے
-settings_item_drive	269a	دکھایا گیا، روکا نہیں گیا: کوئی حکم ڈرائیو نہیں بدلتا
-settings_not_shown	8efd	%d مزید نہیں دکھائے گئے
-settings_role_efi	d41a	EFI سسٹم
-settings_role_linux	2c8f	Linux ڈیٹا
-settings_role_swap	d36e	سویپ
-settings_role_other	ff95	دیگر
-settings_role_free	ad01	خالی جگہ
-settings_role_unpartitioned	3c10	پارٹیشن ٹیبل نہیں
-settings_opened	5bd7	براؤزر میں کھولا گیا
-settings_partitioned	70f5	%d%% تقسیم شدہ
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	پارٹیشنز
-settings_share	9902	%1$d.%2$d%%
 settings_battery_discharging	7964	، ڈسچارج ہو رہی ہے
 settings_battery_full	ded8	، مکمل چارج
 settings_battery_idle	1635	، چارج نہیں ہو رہی
@@ -299,6 +287,7 @@ settings_issue_unknown	e812	ایک مسئلہ جسے یہ ورژن نام نہی
 settings_item_add	fbef	Enter ڈیوائس کا نام محفوظ رکھتا ہے؛ جو جوڑا جائے اس کے لیے ریڈیو چل پڑتا ہے
 settings_item_ask	6aad	Enter پاس ورڈ مانگتا ہے اور منسلک ہو جاتا ہے
 settings_item_cannot	e643	moonwater اس نیٹ ورک کے مطالبے کے مطابق منسلک نہیں ہو سکتا
+settings_item_drive	269a	دکھایا گیا، روکا نہیں گیا: کوئی حکم ڈرائیو نہیں بدلتا
 settings_item_joined	0fb8	منسلک: Delete اسے بھلا دیتا ہے
 settings_item_kept	33d9	نام سے رکھا گیا: Delete اسے بھلا دیتا ہے
 settings_item_open	4429	Enter منسلک کرتا ہے اور محفوظ کرتا ہے
@@ -321,19 +310,28 @@ settings_name_chars	58a2	نام لاطینی حروف، ہندسوں اور ہا
 settings_name_long	f2c0	نام 32 حروف سے کم ہوتا ہے
 settings_no_rates	185b	اسکرین کوئی ریٹ فہرست نہیں کرتی
 settings_no_screen	55fd	کوئی اسکرین منسلک نہیں
+settings_no_sizes	0f7e	اسکرین کوئی سائز فہرست نہیں کرتی
 settings_not_here	4e20	اس کمپیوٹر پر نہیں ہے
+settings_not_shown	8efd	%d مزید نہیں دکھائے گئے
 settings_nothing_kept	85a2	کچھ نہیں لکھا: قدر برقرار رہتی ہے
 settings_nothing_matches	14e9	جو لکھا ہے اس سے کچھ مطابقت نہیں رکھتا
 settings_nothing_typed	edce	کچھ نہیں لکھا
 settings_notices_count	8902	%1$d اطلاعات
 settings_notices_dismiss	c370	سب رد کریں
 settings_notices_none	47c6	کرنل کی کوئی اطلاع نہیں
+settings_opened	5bd7	براؤزر میں کھولا گیا
+settings_partitioned	70f5	%d%% تقسیم شدہ
+settings_partitions	9b2e	پارٹیشنز
 settings_percent	e76a	%d%%
+settings_primary_no	a970	بنیادی نہیں
+settings_primary_other	0b14	بدلنے کے لیے کسی اور اسکرین کو بنیادی بنائیں
+settings_primary_yes	7f79	بنیادی
 settings_rate_best	7450	%d ہرٹز (تجویز کردہ)
 settings_rate_plain	743a	%d ہرٹز
 settings_refused	454b	moonwater نے انکار کیا
 settings_refused_place	9632	%s (فائل میں اس کی جگہ پڑھی نہیں جاتی)
 settings_refused_rate	97bc	%1$s (%2$d ہرٹز دستیاب نہیں)
+settings_refused_size	1332	%s (%d × %d پیش نہیں)
 settings_refused_turn	7b3a	%1$s (%2$s نہیں ہو سکا)
 settings_req_context	a233	کارڈ بفر، VM میپ یا کمپیوٹ کانٹیکسٹ نہیں دیتا: amdgpu کمپیوٹ رنگ یا اس کا فرم ویئر چالو نہیں
 settings_req_driver	42ea	کارڈ کا درائیور، %1$s، ابھی GPU راستہ نہیں رکھتا: سب کچھ پروسیسر بناتا ہے
@@ -343,6 +341,12 @@ settings_req_prime	a63c	dma-buf رینڈر نوڈ میں درآمد نہیں ہ�
 settings_req_ring	29f2	کمپیوٹ رنگ نے سیلف ٹیسٹ پورا نہیں کیا: فرم ویئر، کلاک یا رنگ ری سیٹ (کرنل کی لائنیں بتاتی ہیں کون سی)
 settings_req_selftest	0061	کارڈ نے سیلف ٹیسٹ کی تصویر غلط بنائی: اس کے کرنل اس فیملی کے ISA سے نہیں ملتے؛ پروسیسر پر رہتا ہے
 settings_req_udmabuf	420f	/dev/udmabuf memfd صفحے سے dma-buf نہیں بناتا: CONFIG_UDMABUF=y درکار ہے اور /dev/udmabuf کھلنا چاہیے (کارڈ پھر بھی ترکیب کرتا ہے)
+settings_role_efi	d41a	EFI سسٹم
+settings_role_free	ad01	خالی جگہ
+settings_role_linux	2c8f	Linux ڈیٹا
+settings_role_other	ff95	دیگر
+settings_role_swap	d36e	سویپ
+settings_role_unpartitioned	3c10	پارٹیشن ٹیبل نہیں
 settings_run_any	3ffd	کوئی بھی moonwater کمانڈ چلائیں
 settings_running	d0e2	%s چل رہا ہے (Escape اسے روکتا ہے)
 settings_saved	9f44	محفوظ شدہ
@@ -350,6 +354,15 @@ settings_scale_best	2ba0	%d%% (تجویز کردہ)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	اسکرین %1$d: %2$s
 settings_screen_named	d918	اسکرین %1$d: %2$s [%3$s]
+settings_share	9902	%1$d.%2$d%%
+settings_size_ask	7773	%d × %d: ریزولوشن میں رکھیں چنیں، ورنہ %d سیکنڈ میں واپس
+settings_size_back	6c84	نہیں رکھا: واپس %s
+settings_size_best	5165	%d × %d (تجویز کردہ)
+settings_size_keep	d1e7	%d × %d رکھیں (%d سیکنڈ میں واپس)
+settings_size_kept	7101	%d × %d رکھا
+settings_size_own	810e	اس کا اپنا سائز
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	اسکرین نے %d × %d نہیں لیا: واپس %s
 settings_state_allowed	e443	اجازت ہے
 settings_state_blocked	6eb3	مسدود
 settings_state_view_only	031a	صرف دیکھنے کے لیے
@@ -377,6 +390,7 @@ settings_type_command	75f8	کمانڈ لکھیں: پہلے اس کا فعل، پ
 settings_type_device	63e0	ڈیوائس کا نام لکھیں: Enter اسے رکھتا ہے، Escape چھوڑ دیتا ہے
 settings_type_passphrase	ca95	پاس ورڈ لکھیں: Enter منسلک کرتا ہے، Escape چھوڑ دیتا ہے
 settings_unknown	9fb9	نامعلوم
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	فعل [آرگیومنٹس]
 settings_virtual_refused	4202	ایک ورچوئل ڈیوائس اسے آن نہیں کر سکتی: مشین سے جڑا کی بورڈ یا ماؤس استعمال کریں، یا root ٹرمینل میں moonwater ssh
 settings_wall_hint	ccf0	فائلوں میں ایک PNG چنیں، پھر اسے اس اسکرین کا وال پیپر بنائیں
@@ -421,19 +435,6 @@ tray_settings	8728	ترتیبات
 ui_confirm_again	b3ff	دوبارہ دبائیں: 
 ui_field_digits	f52b	نمبر ہندسوں پر مشتمل ہوتا ہے
 ui_field_full	fe02	اس میں اس سے زیادہ نہیں سماتا
-settings_no_sizes	0f7e	اسکرین کوئی سائز فہرست نہیں کرتی
-settings_primary_no	a970	بنیادی نہیں
-settings_primary_other	0b14	بدلنے کے لیے کسی اور اسکرین کو بنیادی بنائیں
-settings_primary_yes	7f79	بنیادی
-settings_refused_size	1332	%s (%d × %d پیش نہیں)
-settings_size_ask	7773	%d × %d: ریزولوشن میں رکھیں چنیں، ورنہ %d سیکنڈ میں واپس
-settings_size_back	6c84	نہیں رکھا: واپس %s
-settings_size_best	5165	%d × %d (تجویز کردہ)
-settings_size_keep	d1e7	%d × %d رکھیں (%d سیکنڈ میں واپس)
-settings_size_kept	7101	%d × %d رکھا
-settings_size_own	810e	اس کا اپنا سائز
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	اسکرین نے %d × %d نہیں لیا: واپس %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	ٹچ اسکرین پر ہر انگلی کے نیچے ایک دائرہ

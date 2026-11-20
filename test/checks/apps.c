@@ -1024,7 +1024,7 @@ static fn popmenu_bar_check(struct ui address_to wui);
 static fn drop_check(struct ui address_to wui);
 static fn band_check(struct ui address_to wui);
 static fn columns_check(struct ui address_to wui);
-static fn hold_check(struct ui address_to wui);
+static fn list_interaction_check(struct ui address_to wui);
 static fn copy_cap_check(void);
 
 /*
@@ -1216,71 +1216,255 @@ static fn columns_check(struct ui address_to wui)
         ui_kit.rtl = 0;
 }
 
+static b32 list_check_selected_row(int id)
+{
+        return id == 1;
+}
+
 /*
-        A hold: a press kept still is half way at 1.5 s and has not turned at 2.9 s, turns at 3 s (once), and stays turned till the next
-        press; one moved past the slop at 1 s is no hold and never turns. On a list that asks for it, a press held on a row turns with that
-        row as where it went down, and the press is taken back (its release clicks nothing); one held on the ground past the last row turns
-        with none (-1), which is a band's.
+        Standardized list interaction, side-pane resize, strict size units, and file types (src/canvas/ui/ui.c):
+          - L+R chord (in either press order) starts box drag selection and suppresses click & right-click menu;
+          - clean right click asks for context menu on release;
+          - left drag on a selected row starts item drag without scrolling; left drag on an unselected row UI-scrolls;
+          - right-clicking or releasing outside a list cancels drag/stretch so no list ever stays stuck in BODY_TRACK;
+          - side-pane seam drags widen/narrow (RTL too) and double-click resets;
+          - ui_size_text always emits an explicit unit (B, KB, MB, GB, TB) and ui_file_type omits trailing "file".
 */
-static fn hold_check(struct ui address_to wui)
+static fn list_interaction_check(struct ui address_to wui)
 {
         static struct ui_list l;
-        struct ui_hold h;
-        struct window_event press = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
-        struct window_event release = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
-        b64 second = 1000000000ll, half;
-        b32 timing, cancelled, row_held, ground_held;
+        static struct ui_view v;
+        struct window_event ldown = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_LEFT, 0};
+        struct window_event lup = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_LEFT, 0};
+        struct window_event rdown = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, UI_POINTER_RIGHT, 0};
+        struct window_event rup = {WINDOW_EVENT_BUTTON, 0, UI_POINTER_RIGHT, 0};
+        struct window_event move = {WINDOW_EVENT_MOTION, 0, 0, 0};
         int row;
+        b32 lr_chord, rl_chord, right_menu, sel_drag, unsel_scroll, unstuck_right, unstuck_out, side_ok, size_ok, type_ok;
 
         wui->scale = 100;
-        memory_zero(&h, sizeof(h));
-        ui_hold_begin(&h, 100, 100, 3, 10 * second);
-        half = ui_hold_share(&h, 10 * second + 3 * second / 2);
-        timing = half > UI_ONE / 2 - 1024 && half < UI_ONE / 2 + 1024 && !ui_hold_turns(&h, 10 * second + 29 * second / 10) &&
-                 ui_hold_turns(&h, 13 * second) && h.done && h.target == 3 && !ui_hold_turns(&h, 14 * second) && ui_hold_share(&h, 20 * second) == UI_ONE;
-        check("hold: a still press is half way at 1.5 s, not turned at 2.9 s, turned once at 3 s and stays so", timing);
-        ui_hold_begin(&h, 100, 100, 3, 10 * second);
-        ui_hold_move(wui, &h, 100 + UI_SLOP + 2, 100);
-        cancelled = ui_hold_share(&h, 11 * second) == 0 && !ui_hold_turns(&h, 13 * second) && !h.done;
-        check("hold: a press moved past the slop before 3 s is no hold, and never turns", cancelled);
-
         row = ui_dev(wui, UI_ROW);
+        ui_kit.buttons = 0;
+
+        // 1. L then R chord starts box-select, suppresses menu and click, ends on release.
         memory_zero(&l, sizeof(l));
-        l.virtual = true, l.total = 4, l.x = 0, l.y = 100, l.w = 300, l.h = 10 * row, l.hold_on = true, l.hover = l.down = -1, l.describe = stripe_row, l.empty = "";
+        l.virtual = true, l.total = 40, l.x = 0, l.y = 100, l.w = 300, l.h = 6 * row, l.row_x = 0, l.row_w = 300;
+        l.hover = l.down = -1, l.describe = stripe_row, l.selected = list_check_selected_row, l.empty = "";
         l.scroll.view = l.h;
         ui_list_window(wui, &l);
-        ui_list_click(wui, &l, &press, 20, 100 + row + 2);
-        row_held = (ui_list_hold_tick(wui, &l, l.hold.at + UI_CHOOSE_HOLD_NS - 1) & UI_LIST_HELD) == 0 &&
-                   (ui_list_hold_tick(wui, &l, l.hold.at + UI_CHOOSE_HOLD_NS) & UI_LIST_HELD) && l.hold.target == 1 && !l.press.down &&
-                   ui_list_click(wui, &l, &release, 20, 100 + row + 2) == -1;
-        check("hold: on a list a press held on a row turns with that row, and its release clicks nothing", row_held);
-        ui_list_click(wui, &l, &press, 20, 100 + 8 * row);
-        ground_held = (ui_list_hold_tick(wui, &l, l.hold.at + UI_CHOOSE_HOLD_NS) & UI_LIST_HELD) && l.hold.target == -1;
-        ui_list_click(wui, &l, &release, 20, 100 + 8 * row);
-        check("hold: on a list a press held on the ground past its rows turns with none, a band's", ground_held);
-        // The rule of a list that asks for the hold: a mouse's plain press and move scrolls it as a finger's does (the press is a drag of the
-        // list, not of a row), and no row is clicked at its release.
-        {
-                struct window_event motion = {WINDOW_EVENT_MOTION, 0, 20, 0};
-                b32 scrolled;
-                int clicked;
+        ui_list_layout(wui, &l);
+        ui_event_context(&ldown);
+        ui_list_click(wui, &l, &ldown, 20, 100 + 2 * row + 5);
+        ui_event_context(&rdown);
+        ui_list_click(wui, &l, &rdown, 20, 100 + 2 * row + 5);
+        lr_chord = l.band && l.band_began && !l.press.down && l.scroll.body.state != BODY_TRACK;
+        move.a = 60, move.b = (p32)(100 + 4 * row + 5);
+        ui_list_click(wui, &l, &move, 60, (int)move.b);
+        lr_chord = lr_chord && l.band && l.band_moved;
+        ui_event_context(&rup);
+        ui_list_click(wui, &l, &rup, 60, (int)move.b);
+        lr_chord = lr_chord && !l.band && !l.menu_asked;
+        ui_event_context(&lup);
+        lr_chord = lr_chord && ui_list_click(wui, &l, &lup, 60, (int)move.b) == -1 && !l.chord;
+        check("list: holding Left then Right box-selects, cancels scroll, and suppresses click and context menu", lr_chord);
 
-                memory_zero(&l, sizeof(l));
-                l.virtual = true, l.total = 60, l.x = 0, l.y = 100, l.w = 300, l.h = 6 * row, l.hold_on = true, l.hover = l.down = -1, l.describe = stripe_row, l.empty = "";
-                l.scroll.view = l.h;
-                ui_list_window(wui, &l);
-                ui_list_layout(wui, &l);
-                ui_list_click(wui, &l, &press, 20, 100 + 4 * row);
-                for (int step = 1; step <= 6; step++)
-                {
-                        motion.b = (p32)(100 + 4 * row - step * row / 2);
-                        ui_list_click(wui, &l, &motion, 20, (int)motion.b);
-                }
-                scrolled = l.press.dragged && l.scroll.scroll > 0 && !l.hold.down;
-                clicked = ui_list_click(wui, &l, &release, 20, (int)motion.b);
-                check("hold: a list that asks for the hold scrolls with a mouse's plain press and move, its hold let go, and clicks no row at the release",
-                      scrolled && clicked == -1);
+        // 2. R then L chord starts box-select and suppresses context menu.
+        ui_kit.buttons = 0;
+        ui_event_context(&rdown);
+        ui_list_click(wui, &l, &rdown, 20, 100 + row + 5);
+        ui_event_context(&ldown);
+        ui_list_click(wui, &l, &ldown, 20, 100 + row + 5);
+        rl_chord = l.band && l.band_began && !l.menu_asked;
+        ui_event_context(&lup);
+        ui_list_click(wui, &l, &lup, 20, 100 + 3 * row);
+        ui_event_context(&rup);
+        ui_list_click(wui, &l, &rup, 20, 100 + 3 * row);
+        rl_chord = rl_chord && !l.band && !l.menu_asked && !l.chord;
+        check("list: holding Right then Left box-selects and never opens the context menu", rl_chord);
+
+        // 3. Clean Right click alone asks for the context menu on release.
+        ui_kit.buttons = 0;
+        ui_event_context(&rdown);
+        ui_list_click(wui, &l, &rdown, 40, 100 + row + 5);
+        right_menu = !l.menu_asked && !l.band;
+        ui_event_context(&rup);
+        ui_list_click(wui, &l, &rup, 40, 100 + row + 5);
+        right_menu = right_menu && l.menu_asked && l.menu_x == 40;
+        check("list: a clean right click asks for the context menu on release", right_menu);
+
+        // 4. Selected row drags past slop without scrolling; unselected row UI-scrolls like normal.
+        ui_kit.buttons = 0;
+        ui_event_context(&ldown);
+        ui_list_click(wui, &l, &ldown, 20, 100 + row + 5); // row 1 is selected
+        move.a = 20, move.b = (p32)(100 + row + 5 + UI_SLOP + 8);
+        ui_list_click(wui, &l, &move, 20, (int)move.b);
+        sel_drag = l.drag_began && l.drag_row == 1 && l.scroll.scroll == 0 && !l.press.down;
+        ui_event_context(&lup);
+        ui_list_click(wui, &l, &lup, 20, (int)move.b);
+        check("list: dragging a selected item begins item drag without UI-scrolling", sel_drag);
+
+        ui_kit.buttons = 0;
+        ui_event_context(&ldown);
+        ui_list_click(wui, &l, &ldown, 20, 100 + 4 * row); // row 4 is unselected
+        for (int step = 1; step <= 6; step++)
+        {
+                move.a = 20, move.b = (p32)(100 + 4 * row - step * row / 2);
+                ui_list_click(wui, &l, &move, 20, (int)move.b);
         }
+        unsel_scroll = l.press.dragged && l.scroll.scroll > 0 && !l.drag_began;
+        ui_event_context(&lup);
+        unsel_scroll = unsel_scroll && ui_list_click(wui, &l, &lup, 20, (int)move.b) == -1 && l.scroll.body.state != BODY_TRACK;
+        check("list: dragging an unselected item UI-scrolls like normal and clicks nothing on release", unsel_scroll);
+
+        // 5. Non-selectable sidebar list: right-click or release outside always unstucks drag/stretch (BODY_TRACK).
+        memory_zero(&l, sizeof(l));
+        l.virtual = true, l.total = 40, l.x = 0, l.y = 0, l.w = 200, l.h = 6 * row, l.row_x = 0, l.row_w = 200;
+        l.hover = l.down = -1, l.describe = stripe_row, l.empty = "";
+        l.scroll.view = l.h;
+        ui_list_window(wui, &l);
+        ui_list_layout(wui, &l);
+        ui_kit.scroll_off = WINDOW_SCROLL_DRAG;
+        ui_kit.buttons = 0;
+        ui_event_context(&ldown);
+        ui_list_click(wui, &l, &ldown, 50, 20);
+        move.a = 50, move.b = (p32)(20 + 2 * row); // pull past top into stretch
+        ui_list_click(wui, &l, &move, 50, (int)move.b);
+        unstuck_right = l.press.dragged && l.scroll.body.state == BODY_TRACK;
+        ui_event_context(&rdown);
+        ui_list_click(wui, &l, &rdown, 50, (int)move.b);
+        unstuck_right = unstuck_right && !l.press.down && l.scroll.body.state != BODY_TRACK;
+        ui_event_context(&rup);
+        ui_event_context(&lup);
+        ui_kit.buttons = 0;
+        ui_event_context(&ldown);
+        ui_list_click(wui, &l, &ldown, 50, 20);
+        move.a = 50, move.b = (p32)(20 + 2 * row);
+        ui_list_click(wui, &l, &move, 50, (int)move.b);
+        ui_event_context(&lup);
+        ui_list_click(wui, &l, &lup, 450, 250); // release outside the list
+        unstuck_out = !l.press.down && l.scroll.body.state != BODY_TRACK;
+        check("list: right-click or release outside a list cancels stretch/drag so it never gets stuck", unstuck_right && unstuck_out);
+
+        // 6. Side pane seam resize: widens, narrows to least, resets on double-click, and works in RTL.
+        {
+                struct ui_rect side_box;
+
+                memory_zero(&v, sizeof(v));
+                ui_kit.rtl = 0;
+                ui_view_begin(&v, wui, 800, -480);
+                ui_side_frame()
+                {
+                        ui_side_pane(&side_box) {}
+                        ui_side_body() {}
+                }
+                ui_view_end(&v);
+                ui_kit.pointer_x = side_box.x + side_box.w, ui_kit.pointer_y = 100;
+                ui_kit.now = 1000000000ll;
+                ui_view_event(wui, &v, &ldown);
+                move.a = (p32)(side_box.x + side_box.w + 60), move.b = 100;
+                ui_view_event(wui, &v, &move);
+                side_ok = v.side_held && v.side_w == UI_SIDE_W + 60;
+                move.a = 10, move.b = 100;
+                ui_view_event(wui, &v, &move);
+                side_ok = side_ok && v.side_w == UI_COLUMN_LEAST;
+                ui_view_event(wui, &v, &lup);
+                side_ok = side_ok && !v.side_held;
+                // Double-click seam resets to UI_SIDE_W.
+                ui_kit.pointer_x = side_box.x + side_box.w, ui_kit.pointer_y = 100;
+                ui_kit.now = 1050000000ll;
+                ui_view_event(wui, &v, &ldown);
+                side_ok = side_ok && v.side_w == UI_SIDE_W && !v.side_held;
+                check("side pane: dragging the seam widens and narrows within bounds and double-clicking resets to default", side_ok);
+                // 6b. Scrollbars on ui_rows lists in ui_view (both sidebar and main list): tap-to-jump (including window edge gutter),
+                // thumb scrubbing, and right-click unstuck.
+                {
+                        static struct ui_list side_l, main_l;
+                        int top = 0, len = 0, bar_x;
+                        b32 bar_ok;
+
+                        memory_zero(&side_l, sizeof(side_l));
+                        memory_zero(&main_l, sizeof(main_l));
+                        side_l.virtual = side_l.beside = true, side_l.total = 40, side_l.hover = side_l.down = -1, side_l.describe = stripe_row, side_l.empty = "";
+                        main_l.virtual = main_l.beside = true, main_l.total = 80, main_l.hover = main_l.down = -1, main_l.describe = stripe_row, main_l.empty = "";
+                        memory_zero(&v, sizeof(v));
+                        ui_view_begin(&v, wui, 800, -300);
+                        ui_side_frame()
+                        {
+                                ui_side_pane(&side_box)
+                                        ui_col(.class = "rows", .grow = 1)
+                                                ui_rows(&side_l, .class = "list", .grow = 1);
+                                ui_side_body()
+                                        ui_col(.class = "rows", .grow = 1)
+                                                ui_rows(&main_l, .class = "list", .grow = 1);
+                        }
+                        ui_view_end(&v);
+                        // Tap-to-jump on main list scrollbar right at the window's trailing edge (x = 799).
+                        ui_kit.pointer_x = 799, ui_kit.pointer_y = 220;
+                        bar_ok = (ui_view_event(wui, &v, &ldown) & UI_VIEW_TAKEN) != 0 && main_l.scroll.held && main_l.scroll.scroll > 0;
+                        // Scrubbing upward moves scroll back toward the top.
+                        {
+                                int jumped = main_l.scroll.scroll;
+
+                                move.a = 799, move.b = 80;
+                                bar_ok = bar_ok && (ui_view_event(wui, &v, &move) & UI_VIEW_TAKEN) != 0 && main_l.scroll.scroll < jumped;
+                        }
+                        // Right-click while scrubbing releases the scrollbar so it never gets stuck.
+                        bar_ok = bar_ok && (ui_view_event(wui, &v, &rdown) & UI_VIEW_DRAW) != 0 && !main_l.scroll.held;
+                        ui_view_event(wui, &v, &rup);
+                        ui_view_event(wui, &v, &lup);
+                        // Sidebar scrollbar is independently clickable without colliding with the side-pane resize seam.
+                        bar_ok = bar_ok && ui_scroll_thumb(wui, &side_l.scroll, &top, &len);
+                        bar_x = side_l.scroll.x + ui_scroll_width(wui) / 2;
+                        ui_kit.pointer_x = bar_x, ui_kit.pointer_y = 240;
+                        bar_ok = bar_ok && (ui_view_event(wui, &v, &ldown) & UI_VIEW_TAKEN) != 0 && !v.side_held && side_l.scroll.held && side_l.scroll.scroll > 0;
+                        ui_view_event(wui, &v, &lup);
+                        bar_ok = bar_ok && !side_l.scroll.held;
+                        check("view list scrollbar: tap-to-jump (to window edge), thumb scrub, sidebar bar, and right-click cancel all work", bar_ok);
+                }
+        }
+
+        // 7. Strict size units & clean file types.
+        {
+                char s0[16], s4[16], s1023[16], s1k[16], s15k[16], s10k[16], s1m[16], s1g[16], s1t[16], sroll[16];
+                char tpng[24], ttxt[24], tplain[24], tdir[24], tlink[24], tspec[24];
+
+                ui_size_text(s0, sizeof(s0), 0);
+                ui_size_text(s4, sizeof(s4), 4);
+                ui_size_text(s1023, sizeof(s1023), 1023);
+                ui_size_text(s1k, sizeof(s1k), 1024);
+                ui_size_text(s15k, sizeof(s15k), 1536);
+                ui_size_text(s10k, sizeof(s10k), 10240);
+                ui_size_text(s1m, sizeof(s1m), 1048576ull);
+                ui_size_text(s1g, sizeof(s1g), 1073741824ull);
+                ui_size_text(s1t, sizeof(s1t), 1099511627776ull);
+                ui_size_text(sroll, sizeof(sroll), 1048064ull);
+                size_ok = string_equals((string_address)s0, (string_address) "0 B") &&
+                          string_equals((string_address)s4, (string_address) "4 B") &&
+                          string_equals((string_address)s1023, (string_address) "1023 B") &&
+                          string_equals((string_address)s1k, (string_address) "1.0 KB") &&
+                          string_equals((string_address)s15k, (string_address) "1.5 KB") &&
+                          string_equals((string_address)s10k, (string_address) "10 KB") &&
+                          string_equals((string_address)s1m, (string_address) "1.0 MB") &&
+                          string_equals((string_address)s1g, (string_address) "1.0 GB") &&
+                          string_equals((string_address)s1t, (string_address) "1.0 TB") &&
+                          string_equals((string_address)sroll, (string_address) "1.0 MB");
+                check("size: ui_size_text always uses strict explicit units (B, KB, MB, GB, TB) with clean rollover", size_ok);
+
+                ui_file_type(tpng, sizeof(tpng), (const p8 address_to) "photo.png", 9, false, false, true);
+                ui_file_type(ttxt, sizeof(ttxt), (const p8 address_to) "notes.txt", 9, false, false, true);
+                ui_file_type(tplain, sizeof(tplain), (const p8 address_to) "README", 6, false, false, true);
+                ui_file_type(tdir, sizeof(tdir), (const p8 address_to) "docs", 4, true, false, false);
+                ui_file_type(tlink, sizeof(tlink), (const p8 address_to) "sym", 3, false, true, false);
+                ui_file_type(tspec, sizeof(tspec), (const p8 address_to) "null", 4, false, false, false);
+                type_ok = string_equals((string_address)tpng, (string_address) "PNG") &&
+                          string_equals((string_address)ttxt, (string_address) "TXT") &&
+                          string_equals((string_address)tplain, (string_address) "File") &&
+                          string_equals((string_address)tdir, (string_address) "Folder") &&
+                          string_equals((string_address)tlink, (string_address) "Link") &&
+                          string_equals((string_address)tspec, (string_address) "Special");
+                check("type: ui_file_type shows clean extensions without trailing 'file' and standard labels for folders/links/special", type_ok);
+        }
+        ui_kit.buttons = 0;
 }
 
 /*
@@ -1777,7 +1961,7 @@ static fn text_widget_check(string_address inter, string_address mono)
         drop_check(&wui);
         band_check(&wui);
         columns_check(&wui);
-        hold_check(&wui);
+        list_interaction_check(&wui);
         copy_cap_check();
         squiggle_check(&wui);
         ui_over_check();

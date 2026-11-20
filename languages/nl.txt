@@ -63,7 +63,7 @@ files_delete_for_good	ec0e	%1$d voorgoed verwijderen: %2$s? Nogmaals Shift+Delet
 files_delete_stopped	ef42	Gestopt bij %2$s: %1$d ervoor verwijderd
 files_deleted	8591	%d verwijderd
 files_deleting	a297	Verwijderen: %d tot nu toe, Escape stopt
-files_done	1791	Klaar
+files_drive_root	84bc	Systeem
 files_empty	751c	Deze map is leeg
 files_failed	c564	Deze map kon niet worden gelezen
 files_find_hint	0ee1	Zoeken in deze map
@@ -82,11 +82,13 @@ files_not_folder	2663	Dit is geen map
 files_nothing_to_paste	c9d4	Het klembord bevat geen bestanden
 files_nothing_to_redo	b2a4	Niets om opnieuw te doen
 files_nothing_to_undo	1433	Niets om ongedaan te maken
+files_place_downloads	07de	Downloads
+files_place_home	0eae	Persoonlijk
+files_place_pictures	feae	Afbeeldingen
 files_reading	64a4	De map wordt gelezen
 files_redone	6fd0	%d opnieuw gedaan
 files_rename_hint	ad88	Nieuwe naam
 files_restored	4c30	%d teruggezet waar ze waren
-files_selecting	2d5c	Selectiemodus, %d gekozen: tik op items om ze toe te voegen of weg te halen, Escape of Klaar om te stoppen
 files_sheet_created	59ac	Gemaakt %s
 files_sheet_file	3663	Bestand
 files_sheet_folder	7afd	Map
@@ -100,9 +102,8 @@ files_sheet_other	3921	Apparaat, pijp of socket
 files_sheet_owner	8b0c	Eigenaar %1$d, groep %2$d
 files_sheet_size	eca5	Grootte %1$s (%2$s bytes)
 files_sheet_size_in	31a1	Grootte %1$s in %2$d items
-files_type_ext	d2c5	%s-bestand
 files_type_link	e589	Koppeling
-files_type_other	e8e6	Speciaal bestand
+files_type_other	80d0	Speciaal
 files_undone	4da3	%d ongedaan gemaakt
 files_unreadable	986c	Deze map mag niet worden gelezen
 files_up	5940	Omhoog
@@ -235,19 +236,6 @@ settings_asks_first	e9bd	vraagt eerst
 settings_badge_error	9cf1	Fout
 settings_badge_warning	fc8f	Waarschuwing
 settings_battery_charging	5116	, laadt op
-settings_item_drive	269a	getoond, niet vastgehouden: geen commando wijzigt een schijf
-settings_not_shown	8efd	%d meer niet getoond
-settings_role_efi	d41a	EFI-systeem
-settings_role_linux	2c8f	Linux-gegevens
-settings_role_swap	d36e	Swap
-settings_role_other	ff95	Overig
-settings_role_free	ad01	Vrije ruimte
-settings_role_unpartitioned	3c10	Geen partitietabel
-settings_opened	5bd7	geopend in browser
-settings_partitioned	70f5	%d%% gepartitioneerd
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Partities
-settings_share	9902	%1$d,%2$d%%
 settings_battery_discharging	7964	, ontlaadt
 settings_battery_full	ded8	, vol
 settings_battery_idle	1635	, laadt niet op
@@ -298,6 +286,7 @@ settings_issue_unknown	e812	Een probleem dat deze versie niet benoemt (code %1$d
 settings_item_add	fbef	Enter bewaart de naam van een apparaat; de radio gaat aan voor wat koppelt
 settings_item_ask	6aad	Enter vraagt om het wachtwoord en verbindt
 settings_item_cannot	e643	moonwater kan niet voldoen aan wat dit netwerk vraagt
+settings_item_drive	269a	getoond, niet vastgehouden: geen commando wijzigt een schijf
 settings_item_joined	0fb8	verbonden: Delete vergeet het
 settings_item_kept	33d9	bewaard op naam: Delete vergeet het
 settings_item_open	4429	Enter verbindt en bewaart het
@@ -320,19 +309,28 @@ settings_name_chars	58a2	een naam bestaat uit letters, cijfers en streepjes
 settings_name_long	f2c0	een naam is korter dan 32 tekens
 settings_no_rates	185b	Het scherm geeft geen frequenties op
 settings_no_screen	55fd	Er is geen scherm aangesloten
+settings_no_sizes	0f7e	Het scherm noemt geen formaten
 settings_not_here	4e20	niet op deze machine
+settings_not_shown	8efd	%d meer niet getoond
 settings_nothing_kept	85a2	niets getypt: de waarde blijft
 settings_nothing_matches	14e9	Niets komt overeen met de invoer
 settings_nothing_typed	edce	niets getypt
 settings_notices_count	8902	%1$d meldingen
 settings_notices_dismiss	c370	alles wegklikken
 settings_notices_none	47c6	geen kernelmeldingen
+settings_opened	5bd7	geopend in browser
+settings_partitioned	70f5	%d%% gepartitioneerd
+settings_partitions	9b2e	Partities
 settings_percent	e76a	%d%%
+settings_primary_no	a970	Niet primair
+settings_primary_other	0b14	Maak een ander scherm primair om het te verplaatsen
+settings_primary_yes	7f79	Primair
 settings_rate_best	7450	%d Hz (aanbevolen)
 settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater weigerde
 settings_refused_place	9632	%s (de plaats in het bestand wordt niet gelezen)
 settings_refused_rate	97bc	%1$s (%2$d Hz wordt niet aangeboden)
+settings_refused_size	1332	%s (%d × %d wordt niet aangeboden)
 settings_refused_turn	7b3a	%1$s (%2$s kon niet worden gedaan)
 settings_req_context	a233	de kaart levert geen buffer, geen VM-koppeling en geen rekencontext: de amdgpu-rekenring of zijn firmware draait niet
 settings_req_driver	42ea	het stuurprogramma van de kaart, %1$s, heeft nog geen GPU-route: de processor tekent alles
@@ -342,6 +340,12 @@ settings_req_prime	a63c	een dma-buf importeert niet in de render-knoop: de kaart
 settings_req_ring	29f2	de rekenring heeft de zelftest niet afgerond: firmware, kloks of een ringreset (de kernelregels zeggen welke)
 settings_req_selftest	0061	de kaart tekende de zelftestafbeelding verkeerd: de kernels passen niet bij de ISA van deze familie; ze blijft op de processor
 settings_req_udmabuf	420f	/dev/udmabuf maakt geen dma-buf van een memfd-pagina: CONFIG_UDMABUF=y is nodig en /dev/udmabuf moet opengaan (de kaart composeert nog)
+settings_role_efi	d41a	EFI-systeem
+settings_role_free	ad01	Vrije ruimte
+settings_role_linux	2c8f	Linux-gegevens
+settings_role_other	ff95	Overig
+settings_role_swap	d36e	Swap
+settings_role_unpartitioned	3c10	Geen partitietabel
 settings_run_any	3ffd	Een willekeurige moonwater-opdracht uitvoeren
 settings_running	d0e2	%s wordt uitgevoerd (Escape stopt het)
 settings_saved	9f44	opgeslagen
@@ -349,6 +353,15 @@ settings_scale_best	2ba0	%d%% (aanbevolen)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Scherm %1$d: %2$s
 settings_screen_named	d918	Scherm %1$d: %2$s [%3$s]
+settings_share	9902	%1$d,%2$d%%
+settings_size_ask	7773	%d × %d: kies Behouden onder Resolutie, anders terug over %d s
+settings_size_back	6c84	Niet behouden: terug naar %s
+settings_size_best	5165	%d × %d (aanbevolen)
+settings_size_keep	d1e7	%d × %d behouden (terug over %d s)
+settings_size_kept	7101	%d × %d behouden
+settings_size_own	810e	zijn eigen formaat
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Het scherm nam %d × %d niet aan: terug naar %s
 settings_state_allowed	e443	toegestaan
 settings_state_blocked	6eb3	geblokkeerd
 settings_state_view_only	031a	alleen weergeven
@@ -376,6 +389,7 @@ settings_type_command	75f8	typ een opdracht: het werkwoord, dan wat volgt
 settings_type_device	63e0	typ de naam van een apparaat: Enter bewaart hem, Escape laat het
 settings_type_passphrase	ca95	typ het wachtwoord: Enter verbindt, Escape laat het
 settings_unknown	9fb9	onbekend
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	WERKWOORD [ARGUMENTEN]
 settings_virtual_refused	4202	een virtueel apparaat kan dit niet aanzetten: gebruik een toetsenbord of muis die op de machine is aangesloten, of moonwater ssh in een root-terminal
 settings_wall_hint	ccf0	Kies een PNG in Bestanden en daarna Instellen als achtergrond van dit scherm
@@ -420,19 +434,6 @@ tray_settings	8728	Instellingen
 ui_confirm_again	b3ff	druk nogmaals om te bevestigen: 
 ui_field_digits	f52b	een getal bestaat uit cijfers
 ui_field_full	fe02	meer past er niet in
-settings_no_sizes	0f7e	Het scherm noemt geen formaten
-settings_primary_no	a970	Niet primair
-settings_primary_other	0b14	Maak een ander scherm primair om het te verplaatsen
-settings_primary_yes	7f79	Primair
-settings_refused_size	1332	%s (%d × %d wordt niet aangeboden)
-settings_size_ask	7773	%d × %d: kies Behouden onder Resolutie, anders terug over %d s
-settings_size_back	6c84	Niet behouden: terug naar %s
-settings_size_best	5165	%d × %d (aanbevolen)
-settings_size_keep	d1e7	%d × %d behouden (terug over %d s)
-settings_size_kept	7101	%d × %d behouden
-settings_size_own	810e	zijn eigen formaat
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	Het scherm nam %d × %d niet aan: terug naar %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Een cirkel onder elke vinger op een aanraakscherm

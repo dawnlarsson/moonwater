@@ -63,7 +63,7 @@ files_delete_for_good	ec0e	Radera %1$d för gott: %2$s? Skift+Delete igen gör d
 files_delete_stopped	ef42	Stannade vid %2$s: %1$d borttagna före
 files_deleted	8591	%d borttagna
 files_deleting	a297	Tar bort: %d hittills, Escape stoppar
-files_done	1791	Klar
+files_drive_root	84bc	System
 files_empty	751c	Den här mappen är tom
 files_failed	c564	Den här mappen kunde inte läsas
 files_find_hint	0ee1	Sök i den här mappen
@@ -82,11 +82,13 @@ files_not_folder	2663	Det här är ingen mapp
 files_nothing_to_paste	c9d4	Urklippet har inga filer
 files_nothing_to_redo	b2a4	Inget att göra om
 files_nothing_to_undo	1433	Inget att ångra
+files_place_downloads	07de	Hämtningar
+files_place_home	0eae	Hem
+files_place_pictures	feae	Bilder
 files_reading	64a4	Läser mappen
 files_redone	6fd0	%d gjorda igen
 files_rename_hint	ad88	Nytt namn
 files_restored	4c30	%d tillbakalagda där de var
-files_selecting	2d5c	Markeringsläge, %d valda: tryck på objekt för att lägga till eller ta bort, Escape eller Klar för att avsluta
 files_sheet_created	59ac	Skapad %s
 files_sheet_file	3663	Fil
 files_sheet_folder	7afd	Mapp
@@ -100,9 +102,8 @@ files_sheet_other	3921	Enhet, rör eller uttag
 files_sheet_owner	8b0c	Ägare %1$d, grupp %2$d
 files_sheet_size	eca5	Storlek %1$s (%2$s byte)
 files_sheet_size_in	31a1	Storlek %1$s i %2$d objekt
-files_type_ext	d2c5	%s-fil
 files_type_link	e589	Länk
-files_type_other	e8e6	Specialfil
+files_type_other	80d0	Special
 files_undone	4da3	%d ångrade
 files_unreadable	986c	Den här mappen får inte läsas
 files_up	5940	Upp
@@ -235,19 +236,6 @@ settings_asks_first	e9bd	frågar först
 settings_badge_error	9cf1	Fel
 settings_badge_warning	fc8f	Varning
 settings_battery_charging	5116	, laddar
-settings_item_drive	269a	visas, hålls inte: inget kommando ändrar en disk
-settings_not_shown	8efd	%d till visas inte
-settings_role_efi	d41a	EFI-system
-settings_role_linux	2c8f	Linux-data
-settings_role_swap	d36e	Swap
-settings_role_other	ff95	Annat
-settings_role_free	ad01	Ledigt utrymme
-settings_role_unpartitioned	3c10	Ingen partitionstabell
-settings_opened	5bd7	öppnad i webbläsaren
-settings_partitioned	70f5	%d %% partitionerat
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Partitioner
-settings_share	9902	%1$d,%2$d %%
 settings_battery_discharging	7964	, laddar ur
 settings_battery_full	ded8	, full
 settings_battery_idle	1635	, laddar inte
@@ -298,6 +286,7 @@ settings_issue_unknown	e812	Ett problem som den här versionen inte namnger (kod
 settings_item_add	fbef	Enter sparar namnet på en enhet; radion slås på för det som paras
 settings_item_ask	6aad	Enter frågar efter lösenordet och ansluter
 settings_item_cannot	e643	moonwater kan inte ansluta till det som det här nätverket kräver
+settings_item_drive	269a	visas, hålls inte: inget kommando ändrar en disk
 settings_item_joined	0fb8	ansluten: Delete glömmer det
 settings_item_kept	33d9	sparad med namn: Delete glömmer den
 settings_item_open	4429	Enter ansluter och sparar
@@ -320,19 +309,28 @@ settings_name_chars	58a2	ett namn består av bokstäver, siffror och bindestreck
 settings_name_long	f2c0	ett namn är kortare än 32 tecken
 settings_no_rates	185b	Skärmen anger inga frekvenser
 settings_no_screen	55fd	Ingen skärm är ansluten
+settings_no_sizes	0f7e	Skärmen anger inga storlekar
 settings_not_here	4e20	finns inte på den här maskinen
+settings_not_shown	8efd	%d till visas inte
 settings_nothing_kept	85a2	inget skrivet: värdet behålls
 settings_nothing_matches	14e9	Inget matchar det som skrivits
 settings_nothing_typed	edce	inget skrivet
 settings_notices_count	8902	%1$d meddelanden
 settings_notices_dismiss	c370	avfärda alla
 settings_notices_none	47c6	inga kärnmeddelanden
+settings_opened	5bd7	öppnad i webbläsaren
+settings_partitioned	70f5	%d %% partitionerat
+settings_partitions	9b2e	Partitioner
 settings_percent	e76a	%d %%
+settings_primary_no	a970	Inte primär
+settings_primary_other	0b14	Gör en annan skärm primär för att flytta den
+settings_primary_yes	7f79	Primär
 settings_rate_best	7450	%d Hz (rekommenderad)
 settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater avvisade
 settings_refused_place	9632	%s (dess plats i filen läses inte)
 settings_refused_rate	97bc	%1$s (%2$d Hz erbjuds inte)
+settings_refused_size	1332	%s (%d × %d erbjuds inte)
 settings_refused_turn	7b3a	%1$s (%2$s gick inte att göra)
 settings_req_context	a233	grafikkortet ger ingen buffert, ingen VM-mappning och inget beräkningssammanhang: amdgpu-beräkningsringen eller firmware är inte igång
 settings_req_driver	42ea	grafikkortets drivrutin, %1$s, har ingen GPU-väg än: processorn ritar allt
@@ -342,6 +340,12 @@ settings_req_prime	a63c	en dma-buf importeras inte i renderingsnoden: grafikkort
 settings_req_ring	29f2	beräkningsringen slutförde inte självtestet: firmware, klockor eller en ringåterställning (kärnraderna säger vilken)
 settings_req_selftest	0061	grafikkortet ritade självtestbilden fel: dess kärnor passar inte familjens ISA; det stannar på processorn
 settings_req_udmabuf	420f	/dev/udmabuf skapar ingen dma-buf av en memfd-sida: CONFIG_UDMABUF=y krävs och /dev/udmabuf måste kunna öppnas (grafikkortet sammanställer ändå)
+settings_role_efi	d41a	EFI-system
+settings_role_free	ad01	Ledigt utrymme
+settings_role_linux	2c8f	Linux-data
+settings_role_other	ff95	Annat
+settings_role_swap	d36e	Swap
+settings_role_unpartitioned	3c10	Ingen partitionstabell
 settings_run_any	3ffd	Kör valfritt moonwater-kommando
 settings_running	d0e2	kör %s (Escape stoppar)
 settings_saved	9f44	sparad
@@ -349,6 +353,15 @@ settings_scale_best	2ba0	%d %% (rekommenderad)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Skärm %1$d: %2$s
 settings_screen_named	d918	Skärm %1$d: %2$s [%3$s]
+settings_share	9902	%1$d,%2$d %%
+settings_size_ask	7773	%d × %d: välj Behåll under Upplösning, annars tillbaka om %d s
+settings_size_back	6c84	Inte behållen: tillbaka till %s
+settings_size_best	5165	%d × %d (rekommenderad)
+settings_size_keep	d1e7	Behåll %d × %d (tillbaka om %d s)
+settings_size_kept	7101	Behöll %d × %d
+settings_size_own	810e	dess egen storlek
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Skärmen tog inte %d × %d: tillbaka till %s
 settings_state_allowed	e443	tillåten
 settings_state_blocked	6eb3	blockerad
 settings_state_view_only	031a	endast visning
@@ -376,6 +389,7 @@ settings_type_command	75f8	skriv ett kommando: verbet och det som följer
 settings_type_device	63e0	skriv namnet på en enhet: Enter sparar det, Escape lämnar
 settings_type_passphrase	ca95	skriv lösenordet: Enter ansluter, Escape lämnar
 settings_unknown	9fb9	okänt
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERB [ARGUMENT]
 settings_virtual_refused	4202	en virtuell enhet kan inte slå på detta: använd ett tangentbord eller en mus som är ansluten till datorn, eller moonwater ssh i en root-terminal
 settings_wall_hint	ccf0	Välj en PNG i Filer och sedan Använd som skrivbordsbild för den här skärmen
@@ -420,19 +434,6 @@ tray_settings	8728	Inställningar
 ui_confirm_again	b3ff	tryck igen för att bekräfta: 
 ui_field_digits	f52b	ett tal består av siffror
 ui_field_full	fe02	mer ryms inte
-settings_no_sizes	0f7e	Skärmen anger inga storlekar
-settings_primary_no	a970	Inte primär
-settings_primary_other	0b14	Gör en annan skärm primär för att flytta den
-settings_primary_yes	7f79	Primär
-settings_refused_size	1332	%s (%d × %d erbjuds inte)
-settings_size_ask	7773	%d × %d: välj Behåll under Upplösning, annars tillbaka om %d s
-settings_size_back	6c84	Inte behållen: tillbaka till %s
-settings_size_best	5165	%d × %d (rekommenderad)
-settings_size_keep	d1e7	Behåll %d × %d (tillbaka om %d s)
-settings_size_kept	7101	Behöll %d × %d
-settings_size_own	810e	dess egen storlek
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	Skärmen tog inte %d × %d: tillbaka till %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	En cirkel under varje finger på en pekskärm

@@ -63,7 +63,7 @@ files_delete_for_good	ec0e	%1$d kalıcı olarak silinsin mi: %2$s? Yeniden Shift
 files_delete_stopped	ef42	%2$s üzerinde durdu: öncesinde %1$d silindi
 files_deleted	8591	%d silindi
 files_deleting	a297	Siliniyor: şimdiye dek %d, Escape durdurur
-files_done	1791	Bitti
+files_drive_root	84bc	Sistem
 files_empty	751c	Bu klasör boş
 files_failed	c564	Bu klasör okunamadı
 files_find_hint	0ee1	Bu klasörde bul
@@ -82,11 +82,13 @@ files_not_folder	2663	Bu bir klasör değil
 files_nothing_to_paste	c9d4	Panoda dosya yok
 files_nothing_to_redo	b2a4	Yinelenecek bir şey yok
 files_nothing_to_undo	1433	Geri alınacak bir şey yok
+files_place_downloads	07de	İndirilenler
+files_place_home	0eae	Ev
+files_place_pictures	feae	Resimler
 files_reading	64a4	Klasör okunuyor
 files_redone	6fd0	%d yinelendi
 files_rename_hint	ad88	Yeni ad
 files_restored	4c30	%d eski yerine kondu
-files_selecting	2d5c	Seçim modu, %d seçili: eklemek veya çıkarmak için öğelere dokunun, bitirmek için Escape veya Bitti
 files_sheet_created	59ac	Oluşturuldu %s
 files_sheet_file	3663	Dosya
 files_sheet_folder	7afd	Klasör
@@ -100,9 +102,8 @@ files_sheet_other	3921	Aygıt, boru ya da soket
 files_sheet_owner	8b0c	Sahip %1$d, grup %2$d
 files_sheet_size	eca5	Boyut %1$s (%2$s bayt)
 files_sheet_size_in	31a1	Boyut %1$s, %2$d öğe
-files_type_ext	d2c5	%s dosyası
 files_type_link	e589	Bağlantı
-files_type_other	e8e6	Özel dosya
+files_type_other	80d0	Özel
 files_undone	4da3	%d geri alındı
 files_unreadable	986c	Bu klasörü okuma izni yok
 files_up	5940	Yukarı
@@ -235,19 +236,6 @@ settings_asks_first	e9bd	önce sorar
 settings_badge_error	9cf1	Hata
 settings_badge_warning	fc8f	Uyarı
 settings_battery_charging	5116	, şarj oluyor
-settings_item_drive	269a	gösterilir, tutulmaz: hiçbir komut bir sürücüyü değiştirmez
-settings_not_shown	8efd	%d tane daha gösterilmiyor
-settings_role_efi	d41a	EFI sistemi
-settings_role_linux	2c8f	Linux verisi
-settings_role_swap	d36e	Takas
-settings_role_other	ff95	Diğer
-settings_role_free	ad01	Boş alan
-settings_role_unpartitioned	3c10	Bölüm tablosu yok
-settings_opened	5bd7	tarayıcıda açıldı
-settings_partitioned	70f5	%%%d bölümlenmiş
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Bölümler
-settings_share	9902	%%%1$d,%2$d
 settings_battery_discharging	7964	, boşalıyor
 settings_battery_full	ded8	, dolu
 settings_battery_idle	1635	, şarj olmuyor
@@ -298,6 +286,7 @@ settings_issue_unknown	e812	Bu sürümün adlandırmadığı bir sorun (kod %1$d
 settings_item_add	fbef	Enter bir aygıtın adını saklar; radyo eşleşenler için açılır
 settings_item_ask	6aad	Enter parolasını sorar ve bağlanır
 settings_item_cannot	e643	moonwater bu ağın istediğine katılamıyor
+settings_item_drive	269a	gösterilir, tutulmaz: hiçbir komut bir sürücüyü değiştirmez
 settings_item_joined	0fb8	bağlı: Delete unutturur
 settings_item_kept	33d9	adıyla saklı: Delete unutturur
 settings_item_open	4429	Enter bağlanır ve kaydeder
@@ -320,19 +309,28 @@ settings_name_chars	58a2	bir ad harflerden, rakamlardan ve tirelerden oluşur
 settings_name_long	f2c0	bir ad 32 karakterden kısadır
 settings_no_rates	185b	Ekran hiçbir hız bildirmiyor
 settings_no_screen	55fd	Bağlı bir ekran yok
+settings_no_sizes	0f7e	Ekran hiç boyut listelemiyor
 settings_not_here	4e20	bu makinede yok
+settings_not_shown	8efd	%d tane daha gösterilmiyor
 settings_nothing_kept	85a2	bir şey yazılmadı: değer korunur
 settings_nothing_matches	14e9	Yazılana uyan bir şey yok
 settings_nothing_typed	edce	bir şey yazılmadı
 settings_notices_count	8902	%1$d bildirim
 settings_notices_dismiss	c370	tümünü kapat
 settings_notices_none	47c6	çekirdek bildirimi yok
+settings_opened	5bd7	tarayıcıda açıldı
+settings_partitioned	70f5	%%%d bölümlenmiş
+settings_partitions	9b2e	Bölümler
 settings_percent	e76a	%%%d
+settings_primary_no	a970	Birincil değil
+settings_primary_other	0b14	Taşımak için başka bir ekranı birincil yapın
+settings_primary_yes	7f79	Birincil
 settings_rate_best	7450	%d Hz (önerilen)
 settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater reddetti
 settings_refused_place	9632	%s (dosyadaki konumu okunmuyor)
 settings_refused_rate	97bc	%1$s (%2$d Hz sunulmuyor)
+settings_refused_size	1332	%s (%d × %d sunulmuyor)
 settings_refused_turn	7b3a	%1$s (%2$s yapılamadı)
 settings_req_context	a233	kart bir arabellek, VM eşlemesi ya da hesaplama bağlamı vermiyor: amdgpu hesaplama halkası ya da yazılımı çalışmıyor
 settings_req_driver	42ea	kartın sürücüsü %1$s için henüz bir GPU yolu yok: her şeyi işlemci çizer
@@ -342,6 +340,12 @@ settings_req_prime	a63c	dma-buf render düğümüne aktarılamıyor: kart bir pe
 settings_req_ring	29f2	hesaplama halkası öz testi bitirmedi: yazılım, saatler ya da halka sıfırlaması (çekirdek satırları hangisini söyler)
 settings_req_selftest	0061	kart öz test görüntüsünü yanlış çizdi: çekirdekleri bu ailenin ISA'sına uymuyor; işlemcide kalır
 settings_req_udmabuf	420f	/dev/udmabuf bir memfd sayfasından dma-buf yapmıyor: CONFIG_UDMABUF=y gerekli ve /dev/udmabuf açılmalı (kart yine birleştirir)
+settings_role_efi	d41a	EFI sistemi
+settings_role_free	ad01	Boş alan
+settings_role_linux	2c8f	Linux verisi
+settings_role_other	ff95	Diğer
+settings_role_swap	d36e	Takas
+settings_role_unpartitioned	3c10	Bölüm tablosu yok
 settings_run_any	3ffd	Herhangi bir moonwater komutunu çalıştır
 settings_running	d0e2	%s çalışıyor (Escape durdurur)
 settings_saved	9f44	kayıtlı
@@ -349,6 +353,15 @@ settings_scale_best	2ba0	%%%d (önerilen)
 settings_scale_plain	e76a	%%%d
 settings_screen_bare	c945	Ekran %1$d: %2$s
 settings_screen_named	d918	Ekran %1$d: %2$s [%3$s]
+settings_share	9902	%%%1$d,%2$d
+settings_size_ask	7773	%d × %d: Çözünürlük altında Koru'yu seçin, yoksa %d sn içinde geri döner
+settings_size_back	6c84	Korunmadı: %s boyutuna dönüldü
+settings_size_best	5165	%d × %d (önerilen)
+settings_size_keep	d1e7	%d × %d koru (%d sn içinde geri)
+settings_size_kept	7101	%d × %d korundu
+settings_size_own	810e	kendi boyutu
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Ekran %d × %d boyutunu almadı: %s boyutuna dönüldü
 settings_state_allowed	e443	izin verildi
 settings_state_blocked	6eb3	engellendi
 settings_state_view_only	031a	yalnızca görüntüleme
@@ -376,6 +389,7 @@ settings_type_command	75f8	bir komut yazın: fiili, sonra devamı
 settings_type_device	63e0	bir aygıtın adını yazın: Enter saklar, Escape bırakır
 settings_type_passphrase	ca95	parolayı yazın: Enter bağlanır, Escape bırakır
 settings_unknown	9fb9	bilinmiyor
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	FİİL [ARGÜMANLAR]
 settings_virtual_refused	4202	sanal bir aygıt bunu açamaz: makineye takılı bir klavye veya fare kullanın ya da bir root terminalinde moonwater ssh
 settings_wall_hint	ccf0	Dosyalar’da bir PNG seçin, sonra bu ekranın duvar kağıdı yapın
@@ -420,19 +434,6 @@ tray_settings	8728	Ayarlar
 ui_confirm_again	b3ff	onaylamak için tekrar basın: 
 ui_field_digits	f52b	bir sayı rakamlardan oluşur
 ui_field_full	fe02	daha fazlası sığmaz
-settings_no_sizes	0f7e	Ekran hiç boyut listelemiyor
-settings_primary_no	a970	Birincil değil
-settings_primary_other	0b14	Taşımak için başka bir ekranı birincil yapın
-settings_primary_yes	7f79	Birincil
-settings_refused_size	1332	%s (%d × %d sunulmuyor)
-settings_size_ask	7773	%d × %d: Çözünürlük altında Koru'yu seçin, yoksa %d sn içinde geri döner
-settings_size_back	6c84	Korunmadı: %s boyutuna dönüldü
-settings_size_best	5165	%d × %d (önerilen)
-settings_size_keep	d1e7	%d × %d koru (%d sn içinde geri)
-settings_size_kept	7101	%d × %d korundu
-settings_size_own	810e	kendi boyutu
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	Ekran %d × %d boyutunu almadı: %s boyutuna dönüldü
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Dokunmatik ekranda her parmağın altında bir daire

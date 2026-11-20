@@ -1259,13 +1259,13 @@ static b32 installer_event_take(const struct window_event address_to event)
                 return false;
         if (installer.step == INSTALLER_STEP_APPS && installer_cards_event(event))
                 return true;
-        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && installer_steps_event(event))
-                return true;
         asks = ui_view_event(ui, &big->view, event);
         if (asks & UI_VIEW_QUIT)
                 return false;
         installer.dirty |= (asks & UI_VIEW_DRAW) != 0;
         if (asks & UI_VIEW_TAKEN)
+                return true;
+        if ((event->type == WINDOW_EVENT_MOTION || event->type == WINDOW_EVENT_BUTTON) && installer_steps_event(event))
                 return true;
         if (!l->count)
                 return true;
@@ -1418,6 +1418,7 @@ static int installer_open(void)
                 return 0;
         if (!(installer.big = ui_app_map(&installer_app, sizeof(struct installer_big))))
                 return 1;
+        installer_app.view = &installer.big->view;
         installer_begin();
         installer_list();
         ui_app_place(&installer_app, ui_px(&installer.ui, INSTALLER_WIDTH), ui_px(&installer.ui, INSTALLER_HEIGHT));

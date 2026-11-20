@@ -63,7 +63,7 @@ files_delete_for_good	ec0e	Usunąć na zawsze %1$d: %2$s? Ponowne Shift+Delete t
 files_delete_stopped	ef42	Zatrzymano na %2$s: wcześniej usunięto %1$d
 files_deleted	8591	Usunięto: %d
 files_deleting	a297	Usuwanie: dotąd %d, Escape zatrzymuje
-files_done	1791	Gotowe
+files_drive_root	84bc	System
 files_empty	751c	Ten folder jest pusty
 files_failed	c564	Nie udało się odczytać tego folderu
 files_find_hint	0ee1	Szukaj w tym folderze
@@ -82,11 +82,13 @@ files_not_folder	2663	To nie jest folder
 files_nothing_to_paste	c9d4	Schowek nie zawiera plików
 files_nothing_to_redo	b2a4	Nie ma czego ponowić
 files_nothing_to_undo	1433	Nie ma czego cofnąć
+files_place_downloads	07de	Pobrane
+files_place_home	0eae	Katalog domowy
+files_place_pictures	feae	Obrazy
 files_reading	64a4	Czytanie folderu
 files_redone	6fd0	Ponowiono %d
 files_rename_hint	ad88	Nowa nazwa
 files_restored	4c30	Przywrócono %d na miejsce
-files_selecting	2d5c	Tryb zaznaczania, wybrano %d: stuknij elementy, aby je dodać lub usunąć, Escape lub Gotowe, aby zakończyć
 files_sheet_created	59ac	Utworzono %s
 files_sheet_file	3663	Plik
 files_sheet_folder	7afd	Folder
@@ -100,9 +102,8 @@ files_sheet_other	3921	Urządzenie, potok lub gniazdo
 files_sheet_owner	8b0c	Właściciel %1$d, grupa %2$d
 files_sheet_size	eca5	Rozmiar %1$s (%2$s bajtów)
 files_sheet_size_in	31a1	Rozmiar %1$s w %2$d elementach
-files_type_ext	d2c5	Plik %s
 files_type_link	e589	Dowiązanie
-files_type_other	e8e6	Plik specjalny
+files_type_other	80d0	Specjalny
 files_undone	4da3	Cofnięto %d
 files_unreadable	986c	Tego folderu nie wolno czytać
 files_up	5940	W górę
@@ -235,19 +236,6 @@ settings_asks_first	e9bd	pyta najpierw
 settings_badge_error	9cf1	Błąd
 settings_badge_warning	fc8f	Ostrzeżenie
 settings_battery_charging	5116	, ładowanie
-settings_item_drive	269a	pokazany, nie przytrzymany: żadne polecenie nie zmienia dysku
-settings_not_shown	8efd	%d więcej nie pokazano
-settings_role_efi	d41a	System EFI
-settings_role_linux	2c8f	Dane Linux
-settings_role_swap	d36e	Wymiana
-settings_role_other	ff95	Inne
-settings_role_free	ad01	Wolne miejsce
-settings_role_unpartitioned	3c10	Brak tablicy partycji
-settings_opened	5bd7	otwarto w przeglądarce
-settings_partitioned	70f5	%d%% w partycjach
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Partycje
-settings_share	9902	%1$d,%2$d%%
 settings_battery_discharging	7964	, rozładowanie
 settings_battery_full	ded8	, naładowana
 settings_battery_idle	1635	, nie ładuje się
@@ -298,6 +286,7 @@ settings_issue_unknown	e812	Problem, którego ta wersja nie nazywa (kod %1$d)
 settings_item_add	fbef	Enter zapamiętuje nazwę urządzenia; radio włącza się dla tego, co się sparuje
 settings_item_ask	6aad	Enter prosi o hasło i łączy
 settings_item_cannot	e643	moonwater nie może spełnić wymagań tej sieci
+settings_item_drive	269a	pokazany, nie przytrzymany: żadne polecenie nie zmienia dysku
 settings_item_joined	0fb8	połączono: Delete zapomina
 settings_item_kept	33d9	zapamiętane po nazwie: Delete zapomina
 settings_item_open	4429	Enter łączy i zapisuje
@@ -320,19 +309,28 @@ settings_name_chars	58a2	nazwa składa się z liter, cyfr i myślników
 settings_name_long	f2c0	nazwa ma mniej niż 32 znaki
 settings_no_rates	185b	Ekran nie podaje częstotliwości
 settings_no_screen	55fd	Nie podłączono żadnego ekranu
+settings_no_sizes	0f7e	Ekran nie podaje rozmiarów
 settings_not_here	4e20	nie ma tego na tej maszynie
+settings_not_shown	8efd	%d więcej nie pokazano
 settings_nothing_kept	85a2	nic nie wpisano: wartość pozostaje
 settings_nothing_matches	14e9	Nic nie pasuje do wpisanego tekstu
 settings_nothing_typed	edce	nic nie wpisano
 settings_notices_count	8902	%1$d powiadomień
 settings_notices_dismiss	c370	odrzuć wszystkie
 settings_notices_none	47c6	brak powiadomień jądra
+settings_opened	5bd7	otwarto w przeglądarce
+settings_partitioned	70f5	%d%% w partycjach
+settings_partitions	9b2e	Partycje
 settings_percent	e76a	%d%%
+settings_primary_no	a970	Nie główny
+settings_primary_other	0b14	Ustaw inny ekran jako główny, aby go zmienić
+settings_primary_yes	7f79	Główny
 settings_rate_best	7450	%d Hz (zalecana)
 settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater odmówił
 settings_refused_place	9632	%s (jego położenie w pliku nie jest odczytywane)
 settings_refused_rate	97bc	%1$s (%2$d Hz nie jest dostępne)
+settings_refused_size	1332	%s (%d × %d nie jest oferowana)
 settings_refused_turn	7b3a	%1$s (nie udało się: %2$s)
 settings_req_context	a233	karta nie daje bufora, mapy VM ani kontekstu obliczeń: pierścień obliczeń amdgpu lub jego firmware nie działa
 settings_req_driver	42ea	sterownik karty, %1$s, nie ma jeszcze ścieżki GPU: procesor rysuje wszystko
@@ -342,6 +340,12 @@ settings_req_prime	a63c	dma-buf nie importuje się do węzła renderowania: kart
 settings_req_ring	29f2	pierścień obliczeń nie dokończył autotestu: firmware, zegary lub reset pierścienia (linie jądra mówią, który)
 settings_req_selftest	0061	karta źle narysowała obraz autotestu: jej jądra nie pasują do ISA tej rodziny; zostaje przy procesorze
 settings_req_udmabuf	420f	/dev/udmabuf nie tworzy dma-buf ze strony memfd: potrzeba CONFIG_UDMABUF=y i otwierającego się /dev/udmabuf (karta nadal składa obraz)
+settings_role_efi	d41a	System EFI
+settings_role_free	ad01	Wolne miejsce
+settings_role_linux	2c8f	Dane Linux
+settings_role_other	ff95	Inne
+settings_role_swap	d36e	Wymiana
+settings_role_unpartitioned	3c10	Brak tablicy partycji
 settings_run_any	3ffd	Uruchom dowolne polecenie moonwater
 settings_running	d0e2	uruchomiono %s (Escape przerywa)
 settings_saved	9f44	zapisano
@@ -349,6 +353,15 @@ settings_scale_best	2ba0	%d%% (zalecana)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Ekran %1$d: %2$s
 settings_screen_named	d918	Ekran %1$d: %2$s [%3$s]
+settings_share	9902	%1$d,%2$d%%
+settings_size_ask	7773	%d × %d: wybierz Zachowaj w Rozdzielczości, inaczej powrót za %d s
+settings_size_back	6c84	Nie zachowano: powrót do %s
+settings_size_best	5165	%d × %d (zalecana)
+settings_size_keep	d1e7	Zachowaj %d × %d (powrót za %d s)
+settings_size_kept	7101	Zachowano %d × %d
+settings_size_own	810e	jego własny rozmiar
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Ekran nie przyjął %d × %d: powrót do %s
 settings_state_allowed	e443	dozwolone
 settings_state_blocked	6eb3	zablokowane
 settings_state_view_only	031a	tylko podgląd
@@ -376,6 +389,7 @@ settings_type_command	75f8	wpisz polecenie: czasownik, potem to, co następuje
 settings_type_device	63e0	wpisz nazwę urządzenia: Enter zapamiętuje, Escape zostawia
 settings_type_passphrase	ca95	wpisz hasło: Enter łączy, Escape zostawia
 settings_unknown	9fb9	nieznane
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	CZASOWNIK [ARGUMENTY]
 settings_virtual_refused	4202	urządzenie wirtualne nie może tego włączyć: użyj klawiatury lub myszy podłączonej do komputera albo moonwater ssh w terminalu roota
 settings_wall_hint	ccf0	Wybierz plik PNG w Plikach, a potem Ustaw jako tapetę tego ekranu
@@ -420,19 +434,6 @@ tray_settings	8728	Ustawienia
 ui_confirm_again	b3ff	naciśnij ponownie, aby potwierdzić: 
 ui_field_digits	f52b	liczba składa się z cyfr
 ui_field_full	fe02	więcej się nie zmieści
-settings_no_sizes	0f7e	Ekran nie podaje rozmiarów
-settings_primary_no	a970	Nie główny
-settings_primary_other	0b14	Ustaw inny ekran jako główny, aby go zmienić
-settings_primary_yes	7f79	Główny
-settings_refused_size	1332	%s (%d × %d nie jest oferowana)
-settings_size_ask	7773	%d × %d: wybierz Zachowaj w Rozdzielczości, inaczej powrót za %d s
-settings_size_back	6c84	Nie zachowano: powrót do %s
-settings_size_best	5165	%d × %d (zalecana)
-settings_size_keep	d1e7	Zachowaj %d × %d (powrót za %d s)
-settings_size_kept	7101	Zachowano %d × %d
-settings_size_own	810e	jego własny rozmiar
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	Ekran nie przyjął %d × %d: powrót do %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Okrąg pod każdym palcem na ekranie dotykowym

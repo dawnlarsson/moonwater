@@ -60,7 +60,7 @@ files_delete_for_good	ec0e	Delete %1$d for good: %2$s? Shift+Delete again does i
 files_delete_stopped	ef42	Stopped at %2$s: %1$d deleted before it
 files_deleted	8591	%d deleted
 files_deleting	a297	Deleting: %d so far, Escape stops
-files_done	1791	Done
+files_drive_root	84bc	System
 files_empty	751c	This folder is empty
 files_failed	c564	This folder could not be read
 files_find_hint	0ee1	Find in this folder
@@ -79,11 +79,13 @@ files_not_folder	2663	This is not a folder
 files_nothing_to_paste	c9d4	The clipboard holds no files
 files_nothing_to_redo	b2a4	Nothing to do again
 files_nothing_to_undo	1433	Nothing to undo
+files_place_downloads	07de	Downloads
+files_place_home	0eae	Home
+files_place_pictures	feae	Pictures
 files_reading	64a4	Reading the folder
 files_redone	6fd0	%d done again
 files_rename_hint	ad88	New name
 files_restored	4c30	%d put back where they were
-files_selecting	2d5c	Selection mode, %d chosen: tap items to add or take them out, Escape or Done to finish
 files_sheet_created	59ac	Made %s
 files_sheet_file	3663	File
 files_sheet_folder	7afd	Folder
@@ -97,9 +99,8 @@ files_sheet_other	3921	Device, pipe or socket
 files_sheet_owner	8b0c	Owner %1$d, group %2$d
 files_sheet_size	eca5	Size %1$s (%2$s bytes)
 files_sheet_size_in	31a1	Size %1$s in %2$d items
-files_type_ext	d2c5	%s file
 files_type_link	e589	Link
-files_type_other	e8e6	Special file
+files_type_other	80d0	Special
 files_undone	4da3	%d undone
 files_unreadable	986c	This folder may not be read
 files_up	5940	Up
@@ -232,17 +233,6 @@ settings_asks_first	e9bd	asks first
 settings_badge_error	9cf1	Error
 settings_badge_warning	fc8f	Warning
 settings_battery_charging	5116	, Charging
-settings_role_efi	d41a	EFI system
-settings_role_linux	2c8f	Linux data
-settings_role_swap	d36e	Swap
-settings_role_other	ff95	Other
-settings_role_free	ad01	Free space
-settings_role_unpartitioned	3c10	No partition table
-settings_opened	5bd7	opened in browser
-settings_partitioned	70f5	%d%% partitioned
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Partitions
-settings_share	9902	%1$d.%2$d%%
 settings_battery_discharging	7964	, Discharging
 settings_battery_full	ded8	, Full
 settings_battery_idle	1635	, Not charging
@@ -316,6 +306,7 @@ settings_name_chars	58a2	a name is letters, digits and hyphens
 settings_name_long	f2c0	a name is under 32 characters
 settings_no_rates	185b	The screen lists no rates
 settings_no_screen	55fd	No screen is connected
+settings_no_sizes	0f7e	The screen lists no sizes
 settings_not_here	4e20	not on this machine
 settings_not_shown	8efd	%d more not shown
 settings_nothing_kept	85a2	nothing typed: the value is kept
@@ -324,12 +315,19 @@ settings_nothing_typed	edce	nothing typed
 settings_notices_count	8902	%1$d notices
 settings_notices_dismiss	c370	dismiss all
 settings_notices_none	47c6	no kernel notices
+settings_opened	5bd7	opened in browser
+settings_partitioned	70f5	%d%% partitioned
+settings_partitions	9b2e	Partitions
 settings_percent	e76a	%d%%
+settings_primary_no	a970	Not primary
+settings_primary_other	0b14	Make another screen the primary to move it
+settings_primary_yes	7f79	Primary
 settings_rate_best	7450	%d Hz (recommended)
 settings_rate_plain	743a	%d Hz
 settings_refused	454b	moonwater refused
 settings_refused_place	9632	%s (its place in the file is not read)
 settings_refused_rate	97bc	%1$s (%2$d Hz is not offered)
+settings_refused_size	1332	%s (%d × %d is not offered)
 settings_refused_turn	7b3a	%1$s (%2$s could not be done)
 settings_req_context	a233	the card would not give a buffer, its VM map or a compute context: the amdgpu compute ring or its firmware is not up (the kernel lines say which)
 settings_req_driver	42ea	the card's driver, %1$s, has no GPU path yet: the processor draws everything
@@ -339,6 +337,12 @@ settings_req_prime	a63c	a dma-buf would not import into the render node: the car
 settings_req_ring	29f2	the compute ring did not finish the self-test job: firmware, clocks or a ring reset (the kernel lines say which)
 settings_req_selftest	0061	the card drew the self-test picture wrong: its kernels do not match this family's ISA; the card stays on the processor
 settings_req_udmabuf	420f	/dev/udmabuf would not make a dma-buf of a memfd page: CONFIG_UDMABUF=y, and /dev/udmabuf must open (the card still composes; a refused userptr then has no fallback)
+settings_role_efi	d41a	EFI system
+settings_role_free	ad01	Free space
+settings_role_linux	2c8f	Linux data
+settings_role_other	ff95	Other
+settings_role_swap	d36e	Swap
+settings_role_unpartitioned	3c10	No partition table
 settings_run_any	3ffd	Run any moonwater command
 settings_running	d0e2	running %s (Escape stops it)
 settings_saved	9f44	saved
@@ -346,6 +350,15 @@ settings_scale_best	2ba0	%d%% (recommended)
 settings_scale_plain	e76a	%d%%
 settings_screen_bare	c945	Screen %1$d: %2$s
 settings_screen_named	d918	Screen %1$d: %2$s [%3$s]
+settings_share	9902	%1$d.%2$d%%
+settings_size_ask	7773	%d × %d: choose Keep under Resolution, or it goes back in %d s
+settings_size_back	6c84	Not kept: back to %s
+settings_size_best	5165	%d × %d (recommended)
+settings_size_keep	d1e7	Keep %d × %d (back in %d s)
+settings_size_kept	7101	Kept %d × %d
+settings_size_own	810e	its own size
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	The screen did not take %d × %d: back to %s
 settings_state_allowed	e443	allowed
 settings_state_blocked	6eb3	blocked
 settings_state_view_only	031a	view only
@@ -373,6 +386,7 @@ settings_type_command	75f8	type a command: its verb, then what follows it
 settings_type_device	63e0	type the name of a device: Enter keeps it, Escape leaves it
 settings_type_passphrase	ca95	type its passphrase: Enter joins it, Escape leaves it
 settings_unknown	9fb9	unknown
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	VERB [ARGUMENTS]
 settings_virtual_refused	4202	a virtual device cannot turn this on: use a keyboard or mouse plugged into the machine, or moonwater ssh in a root terminal
 settings_wall_hint	ccf0	Choose a PNG in Files, then Set as Wallpaper of this screen
@@ -417,19 +431,6 @@ tray_settings	8728	Settings
 ui_confirm_again	b3ff	press again to confirm: 
 ui_field_digits	f52b	a number is digits
 ui_field_full	fe02	that is as much as it holds
-settings_no_sizes	0f7e	The screen lists no sizes
-settings_primary_no	a970	Not primary
-settings_primary_other	0b14	Make another screen the primary to move it
-settings_primary_yes	7f79	Primary
-settings_refused_size	1332	%s (%d × %d is not offered)
-settings_size_ask	7773	%d × %d: choose Keep under Resolution, or it goes back in %d s
-settings_size_back	6c84	Not kept: back to %s
-settings_size_best	5165	%d × %d (recommended)
-settings_size_keep	d1e7	Keep %d × %d (back in %d s)
-settings_size_kept	7101	Kept %d × %d
-settings_size_own	810e	its own size
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	The screen did not take %d × %d: back to %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	A circle under each finger on a touch screen

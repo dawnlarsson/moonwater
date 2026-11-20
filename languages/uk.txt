@@ -63,7 +63,7 @@ files_delete_for_good	ec0e	Видалити назавжди %1$d: %2$s? Ще р
 files_delete_stopped	ef42	Зупинено на %2$s: до цього видалено %1$d
 files_deleted	8591	Видалено: %d
 files_deleting	a297	Видалення: поки %d, Escape зупиняє
-files_done	1791	Готово
+files_drive_root	84bc	Система
 files_empty	751c	Ця тека порожня
 files_failed	c564	Не вдалося прочитати цю теку
 files_find_hint	0ee1	Шукати в цій теці
@@ -82,11 +82,13 @@ files_not_folder	2663	Це не тека
 files_nothing_to_paste	c9d4	У буфері обміну немає файлів
 files_nothing_to_redo	b2a4	Нічого повторювати
 files_nothing_to_undo	1433	Нічого скасовувати
+files_place_downloads	07de	Завантаження
+files_place_home	0eae	Домівка
+files_place_pictures	feae	Зображення
 files_reading	64a4	Читання теки
 files_redone	6fd0	Повторено: %d
 files_rename_hint	ad88	Нове ім'я
 files_restored	4c30	Повернуто на місце: %d
-files_selecting	2d5c	Режим вибору, вибрано %d: торкайтеся елементів, щоб додати або прибрати, Escape або Готово — завершити
 files_sheet_created	59ac	Створено %s
 files_sheet_file	3663	Файл
 files_sheet_folder	7afd	Тека
@@ -100,9 +102,8 @@ files_sheet_other	3921	Пристрій, канал або сокет
 files_sheet_owner	8b0c	Власник %1$d, група %2$d
 files_sheet_size	eca5	Розмір %1$s (%2$s байт)
 files_sheet_size_in	31a1	Розмір %1$s у %2$d елементах
-files_type_ext	d2c5	Файл %s
 files_type_link	e589	Посилання
-files_type_other	e8e6	Особливий файл
+files_type_other	80d0	Особливий
 files_undone	4da3	Скасовано: %d
 files_unreadable	986c	Цю теку не можна читати
 files_up	5940	Вгору
@@ -235,19 +236,6 @@ settings_asks_first	e9bd	спершу запитає
 settings_badge_error	9cf1	Помилка
 settings_badge_warning	fc8f	Попередження
 settings_battery_charging	5116	, заряджається
-settings_item_drive	269a	показано, не утримується: жодна команда не змінює диск
-settings_not_shown	8efd	ще %d не показано
-settings_role_efi	d41a	Системний EFI
-settings_role_linux	2c8f	Дані Linux
-settings_role_swap	d36e	Підкачка
-settings_role_other	ff95	Інше
-settings_role_free	ad01	Вільне місце
-settings_role_unpartitioned	3c10	Немає таблиці розділів
-settings_opened	5bd7	відкрито в браузері
-settings_partitioned	70f5	%d %% розмічено
-settings_used_of	58fb	%1$s / %2$s
-settings_partitions	9b2e	Розділи
-settings_share	9902	%1$d,%2$d %%
 settings_battery_discharging	7964	, розряджається
 settings_battery_full	ded8	, заряджена
 settings_battery_idle	1635	, не заряджається
@@ -298,6 +286,7 @@ settings_issue_unknown	e812	Проблема, яку ця версія не на
 settings_item_add	fbef	Enter запам'ятовує назву пристрою; радіо вмикається для того, що з'єднується
 settings_item_ask	6aad	Enter запитає пароль і підключиться
 settings_item_cannot	e643	moonwater не може підключитися до того, що вимагає ця мережа
+settings_item_drive	269a	показано, не утримується: жодна команда не змінює диск
 settings_item_joined	0fb8	підключено: Delete забуває
 settings_item_kept	33d9	запам'ятовано за назвою: Delete забуває
 settings_item_open	4429	Enter підключить і збереже
@@ -320,19 +309,28 @@ settings_name_chars	58a2	ім'я складається з літер, цифр 
 settings_name_long	f2c0	ім'я коротше за 32 символи
 settings_no_rates	185b	Екран не повідомляє частот
 settings_no_screen	55fd	Екран не підключено
+settings_no_sizes	0f7e	Екран не повідомляє розмірів
 settings_not_here	4e20	немає на цьому комп'ютері
+settings_not_shown	8efd	ще %d не показано
 settings_nothing_kept	85a2	нічого не введено: значення зберігається
 settings_nothing_matches	14e9	Нічого не знайдено за запитом
 settings_nothing_typed	edce	нічого не введено
 settings_notices_count	8902	сповіщень: %1$d
 settings_notices_dismiss	c370	сховати все
 settings_notices_none	47c6	немає сповіщень ядра
+settings_opened	5bd7	відкрито в браузері
+settings_partitioned	70f5	%d %% розмічено
+settings_partitions	9b2e	Розділи
 settings_percent	e76a	%d %%
+settings_primary_no	a970	Не основний
+settings_primary_other	0b14	Зробіть основним інший екран, щоб змінити його
+settings_primary_yes	7f79	Основний
 settings_rate_best	7450	%d Гц (рекомендовано)
 settings_rate_plain	743a	%d Гц
 settings_refused	454b	moonwater відмовив
 settings_refused_place	9632	%s (його розташування у файлі не прочитано)
 settings_refused_rate	97bc	%1$s (%2$d Гц не пропонується)
+settings_refused_size	1332	%s (%d × %d не пропонується)
 settings_refused_turn	7b3a	%1$s (не вдалося: %2$s)
 settings_req_context	a233	відеокарта не дає буфер, VM-відображення чи контекст: кільце amdgpu або його прошивка не запущені
 settings_req_driver	42ea	драйвер відеокарти, %1$s, ще не має шляху GPU: усе малює процесор
@@ -342,6 +340,12 @@ settings_req_prime	a63c	dma-buf не імпортується у вузол ре
 settings_req_ring	29f2	кільце обчислень не завершило самотест: прошивка, частоти або скидання кільця (рядки ядра скажуть які)
 settings_req_selftest	0061	відеокарта неправильно намалювала самотест: ядра не відповідають ISA сімейства; на процесорі
 settings_req_udmabuf	420f	/dev/udmabuf не створює dma-buf зі сторінки memfd: потрібен CONFIG_UDMABUF=y і відкривний /dev/udmabuf
+settings_role_efi	d41a	Системний EFI
+settings_role_free	ad01	Вільне місце
+settings_role_linux	2c8f	Дані Linux
+settings_role_other	ff95	Інше
+settings_role_swap	d36e	Підкачка
+settings_role_unpartitioned	3c10	Немає таблиці розділів
 settings_run_any	3ffd	Виконати будь-яку команду moonwater
 settings_running	d0e2	виконується %s (Escape зупиняє)
 settings_saved	9f44	збережено
@@ -349,6 +353,15 @@ settings_scale_best	2ba0	%d %% (рекомендовано)
 settings_scale_plain	e76a	%d %%
 settings_screen_bare	c945	Екран %1$d: %2$s
 settings_screen_named	d918	Екран %1$d: %2$s [%3$s]
+settings_share	9902	%1$d,%2$d %%
+settings_size_ask	7773	%d × %d: виберіть «Залишити» в розділі «Роздільність», інакше повернення за %d с
+settings_size_back	6c84	Не залишено: повернення до %s
+settings_size_best	5165	%d × %d (рекомендовано)
+settings_size_keep	d1e7	Залишити %d × %d (повернення за %d с)
+settings_size_kept	7101	Залишено %d × %d
+settings_size_own	810e	його власний розмір
+settings_size_plain	9453	%d × %d
+settings_size_refused	20a9	Екран не прийняв %d × %d: повернення до %s
 settings_state_allowed	e443	дозволено
 settings_state_blocked	6eb3	заблоковано
 settings_state_view_only	031a	лише перегляд
@@ -376,6 +389,7 @@ settings_type_command	75f8	введіть команду: її дієслово 
 settings_type_device	63e0	введіть назву пристрою: Enter запам'ятає, Escape залишить
 settings_type_passphrase	ca95	введіть пароль: Enter підключить, Escape залишить
 settings_unknown	9fb9	невідомо
+settings_used_of	58fb	%1$s / %2$s
 settings_verb_hint	05aa	ДІЄСЛОВО [АРГУМЕНТИ]
 settings_virtual_refused	4202	віртуальний пристрій не може це ввімкнути: клавіатура чи миша машини, або moonwater ssh у терміналі root
 settings_wall_hint	ccf0	Виберіть PNG у Файлах, потім «Зробити шпалерами цього екрана»
@@ -420,19 +434,6 @@ tray_settings	8728	Налаштування
 ui_confirm_again	b3ff	натисніть ще раз для підтвердження: 
 ui_field_digits	f52b	число складається з цифр
 ui_field_full	fe02	більше не вміщається
-settings_no_sizes	0f7e	Екран не повідомляє розмірів
-settings_primary_no	a970	Не основний
-settings_primary_other	0b14	Зробіть основним інший екран, щоб змінити його
-settings_primary_yes	7f79	Основний
-settings_refused_size	1332	%s (%d × %d не пропонується)
-settings_size_ask	7773	%d × %d: виберіть «Залишити» в розділі «Роздільність», інакше повернення за %d с
-settings_size_back	6c84	Не залишено: повернення до %s
-settings_size_best	5165	%d × %d (рекомендовано)
-settings_size_keep	d1e7	Залишити %d × %d (повернення за %d с)
-settings_size_kept	7101	Залишено %d × %d
-settings_size_own	810e	його власний розмір
-settings_size_plain	9453	%d × %d
-settings_size_refused	20a9	Екран не прийняв %d × %d: повернення до %s
 =12h	da26	12h
 =24h	f841	24h
 =A circle under each finger on a touch screen	1bd7	Коло під кожним пальцем на сенсорному екрані

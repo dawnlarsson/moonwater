@@ -1712,12 +1712,32 @@ static b32 files_job_step(struct files_model address_to m, struct files_job addr
 #define FILES_TREE_NAMES (FILES_TREE_MOST * 32u) // and the bytes of their names
 #define FILES_TREE_CHILDREN 1024   // the folders a node opened shows at most
 #define FILES_TREE_SCAN 65536      // and the entries looked through to find them
+#define FILES_DRIVES_MOST 32       // extra mounted storage drives listed beside the root drive
+
+enum
+{
+        FILES_NODE_FOLDER, // an ordinary subfolder in a tree
+        FILES_NODE_PLACE,  // a common folder root above the drives (Home, Downloads, Pictures)
+        FILES_NODE_DRIVE,  // a storage drive root (/ or another mounted drive)
+};
+
+enum
+{
+        FILES_PLACE_NONE,
+        FILES_PLACE_HOME,
+        FILES_PLACE_DOWNLOADS,
+        FILES_PLACE_PICTURES,
+        FILES_PLACE_ROOT,
+};
 
 struct files_node
 {
-        p32 name;          // where its name starts in the tree's names
+        p32 name;          // display label in the tree's names
+        p32 root_path;     // depth 0 only: full absolute path in the tree's names
         p16 length;
-        p16 depth;         // 0 the root
+        p16 depth;         // 0 a root (place or drive)
+        p8 kind;           // FILES_NODE_*
+        p8 place;          // FILES_PLACE_*
         b8 open, read;     // its folders are shown; they were read (and it has has of them)
         p16 has;           // the folders it was read to have
         p64 inode;
@@ -1729,8 +1749,17 @@ struct files_tree
         struct files_node address_to node;
         p8 address_to names;
         p32 count, names_used;
+        p64 drives_hash;
         address_any mapped;
         positive mapped_size;
+};
+
+struct files_drive
+{
+        p8 label[FILES_NAME];
+        p8 path[FILES_PATH];
+        p8 device[32];
+        p8 root[256];
 };
 
 static positive files_tree_bytes(void)
@@ -1738,11 +1767,40 @@ static positive files_tree_bytes(void)
         return (positive)FILES_TREE_MOST * sizeof(struct files_node) + FILES_TREE_NAMES;
 }
 
+static fn files_tree_reset(struct files_tree address_to t)
+{
+        t->count = 0, t->names_used = 0, t->drives_hash = 0;
+}
+
+// Appends a depth-0 root (a common folder or a storage drive) to the tree, keeping its label and full path in t->names.
+static b32 files_tree_add_root(struct files_tree address_to t, const p8 address_to label, const p8 address_to path, p8 kind, p8 place)
+{
+        positive label_len = string_length((string_address)label), path_len = string_length((string_address)path);
+        struct files_node address_to n;
+        file_facts facts;
+
+        if (!t->node || t->count >= FILES_TREE_MOST || !label_len || !path_len || path[0] != '/' ||
+            t->names_used + label_len + path_len + 2 > FILES_TREE_NAMES)
+                return false;
+        n = &t->node[t->count];
+        memory_fill(n, 0, sizeof(*n));
+        n->name = t->names_used, n->length = (p16)label_len;
+        memory_copy(t->names + t->names_used, label, label_len + 1);
+        t->names_used += (p32)label_len + 1;
+        n->root_path = t->names_used;
+        memory_copy(t->names + t->names_used, path, path_len + 1);
+        t->names_used += (p32)path_len + 1;
+        n->depth = 0, n->kind = kind, n->place = place;
+        if (file_look_code(AT_FDCWD, (string_address)path, 0, &facts) >= 0)
+                n->inode = facts.inode, n->device_major = facts.device_major, n->device_minor = facts.device_minor;
+        t->count++;
+        return true;
+}
+
 // The tree's memory, and its root, the folder /. False when there is no memory.
 static b32 files_tree_begin(struct files_tree address_to t)
 {
         bipolar mapped = (bipolar)system_call_6(syscall(mmap), 0, files_tree_bytes(), 3, 0x22, (positive)-1, 0);
-        file_facts facts;
 
         memory_fill(t, 0, sizeof(*t));
         if (mapped < 0 && mapped > -4096)
@@ -1750,12 +1808,7 @@ static b32 files_tree_begin(struct files_tree address_to t)
         t->mapped = (address_any)mapped, t->mapped_size = files_tree_bytes();
         t->node = (struct files_node address_to)mapped;
         t->names = (p8 address_to)mapped + (positive)FILES_TREE_MOST * sizeof(struct files_node);
-        t->names[0] = '/', t->names[1] = end, t->names_used = 2;
-        t->node[0] = (struct files_node){0, 1, 0, false, false, 0, 0, 0, 0};
-        if (file_look_code(AT_FDCWD, (string_address) "/", 0, &facts) >= 0)
-                t->node[0].inode = facts.inode, t->node[0].device_major = facts.device_major, t->node[0].device_minor = facts.device_minor;
-        t->count = 1;
-        return true;
+        return files_tree_add_root(t, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT);
 }
 
 static fn files_tree_end(struct files_tree address_to t)
@@ -1763,6 +1816,209 @@ static fn files_tree_end(struct files_tree address_to t)
         if (t->mapped)
                 system_call_2(syscall(munmap), (positive)t->mapped, t->mapped_size);
         memory_fill(t, 0, sizeof(*t));
+}
+
+static b32 files_path_under(const p8 address_to path, const char address_to prefix)
+{
+        positive n = string_length((string_address)prefix);
+
+        return !memory_compare(path, prefix, n) && (path[n] == 0 || path[n] == '/');
+}
+
+// Decodes mountinfo's \ooo octal escapes into into (at most room - 1 bytes).
+static positive files_mount_unescape(const p8 address_to from, positive length, p8 address_to into, positive room)
+{
+        positive used = 0;
+
+        for (positive at = 0; at < length && used + 1 < room; at++)
+        {
+                if (from[at] == '\\' && at + 3 < length && from[at + 1] >= '0' && from[at + 1] <= '3' &&
+                    from[at + 2] >= '0' && from[at + 2] <= '7' && from[at + 3] >= '0' && from[at + 3] <= '7')
+                {
+                        into[used++] = (p8)(((from[at + 1] - '0') << 6) | ((from[at + 2] - '0') << 3) | (from[at + 3] - '0'));
+                        at += 3;
+                }
+                else
+                        into[used++] = from[at];
+        }
+        into[used] = end;
+        return used;
+}
+
+static b32 files_drive_virtual_fs(const p8 address_to fs)
+{
+        static const char address_to const skip[] = {
+            "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2", "pstore", "bpf", "tracefs", "debugfs",
+            "securityfs", "configfs", "fusectl", "mqueue", "hugetlbfs", "autofs", "rpc_pipefs", "efivarfs", "ramfs",
+            "sockfs", "pipefs", "nsfs", "overlay", "squashfs", "binfmt_misc", "fuse.portal", "fuse.gvfsd-fuse",
+        };
+
+        for (positive k = 0; k < sizeof(skip) / sizeof(skip[0]); k++)
+                if (string_equals((string_address)fs, (string_address)skip[k]))
+                        return true;
+        return false;
+}
+
+static b32 files_drive_skip_target(const p8 address_to path)
+{
+        static const char address_to const skip[] = {
+            "/proc", "/sys", "/dev", "/boot", "/snap", "/run/lock", "/run/shm", "/run/user", "/var/lib/docker", "/var/lib/containers",
+        };
+
+        if (string_equals((string_address)path, (string_address) "/"))
+                return true;
+        for (positive k = 0; k < sizeof(skip) / sizeof(skip[0]); k++)
+                if (files_path_under(path, skip[k]))
+                        return true;
+        return false;
+}
+
+static b32 files_drive_user_mount(const p8 address_to path)
+{
+        return (files_path_under(path, "/mnt") && path[4] == '/') || (files_path_under(path, "/media") && path[6] == '/') ||
+               (files_path_under(path, "/run/media") && path[10] == '/');
+}
+
+static b32 files_drive_block_source(const p8 address_to src)
+{
+        return !memory_compare(src, "/dev/", 5) && memory_compare(src, "/dev/loop", 9) != 0 &&
+               memory_compare(src, "/dev/zram", 9) != 0 && memory_compare(src, "/dev/ram", 8) != 0;
+}
+
+/*
+        Parses /proc/self/mountinfo text for additional mounted storage drives (beyond the root drive /): real block devices
+        (/dev/*, skipping loop/zram/ram) and user/removable mounts under /mnt/*, /media/*, /run/media/*, skipping virtual
+        filesystems, internal system mounts, and duplicates. Answers how many drives were found and writes a stable hash.
+*/
+static int files_drives_parse(const p8 address_to text, positive length, struct files_drive address_to out, int most, p64 address_to out_hash)
+{
+        int count = 0;
+        p64 hash = 14695981039346656037ull;
+        positive at = 0;
+
+        while (at < length && count < most)
+        {
+                positive line_start = at, line_end;
+                const p8 address_to tok[16];
+                positive tok_len[16];
+                int ntok = 0, sep = -1;
+                p8 dev[32], root[256], target[FILES_PATH], fs[64], src[256];
+                b32 dup = false;
+
+                while (at < length && text[at] != '\n')
+                        at++;
+                line_end = at;
+                if (at < length)
+                        at++;
+                for (positive p = line_start; p < line_end && ntok < 16;)
+                {
+                        while (p < line_end && (text[p] == ' ' || text[p] == '\t'))
+                                p++;
+                        if (p >= line_end)
+                                break;
+                        tok[ntok] = text + p;
+                        while (p < line_end && text[p] != ' ' && text[p] != '\t')
+                                p++;
+                        tok_len[ntok] = (positive)(text + p - tok[ntok]);
+                        if (sep < 0 && ntok >= 6 && tok_len[ntok] == 1 && tok[ntok][0] == '-')
+                                sep = ntok;
+                        ntok++;
+                }
+                if (sep < 6 || sep + 2 >= ntok)
+                        continue;
+                files_mount_unescape(tok[2], tok_len[2], dev, sizeof(dev));
+                files_mount_unescape(tok[3], tok_len[3], root, sizeof(root));
+                files_mount_unescape(tok[4], tok_len[4], target, sizeof(target));
+                files_mount_unescape(tok[sep + 1], tok_len[sep + 1], fs, sizeof(fs));
+                files_mount_unescape(tok[sep + 2], tok_len[sep + 2], src, sizeof(src));
+                if (target[0] != '/' || files_drive_skip_target(target) || files_drive_virtual_fs(fs))
+                        continue;
+                if (!files_drive_block_source(src) && !files_drive_user_mount(target))
+                        continue;
+                for (int k = 0; k < count; k++)
+                        if (string_equals((string_address)out[k].path, (string_address)target) ||
+                            (string_equals((string_address)out[k].device, (string_address)dev) &&
+                             string_equals((string_address)out[k].root, (string_address)root)))
+                                dup = true;
+                if (dup)
+                        continue;
+                {
+                        positive tlen = string_length((string_address)target), base = tlen;
+
+                        while (base > 1 && target[base - 1] == '/')
+                                target[--base] = end, tlen--;
+                        while (base > 0 && target[base - 1] != '/')
+                                base--;
+                        string_copy_bounded((string_address)out[count].path, (string_address)target, sizeof(out[count].path));
+                        string_copy_bounded((string_address)out[count].label, (string_address)(target + base), sizeof(out[count].label));
+                        string_copy_bounded((string_address)out[count].device, (string_address)dev, sizeof(out[count].device));
+                        string_copy_bounded((string_address)out[count].root, (string_address)root, sizeof(out[count].root));
+                        for (positive i = 0; i < tlen; i++)
+                                hash = (hash ^ target[i]) * 1099511628211ull;
+                        hash = (hash ^ 0xffu) * 1099511628211ull;
+                        count++;
+                }
+        }
+        if (out_hash)
+                *out_hash = hash;
+        return count;
+}
+
+/*
+        Populates the sidebar tree with common folders above the storage drives: Home, Downloads and Pictures (when home is given),
+        followed by the root drive (/) and every other mounted storage drive parsed from mountinfo. All roots start collapsed.
+*/
+static fn files_tree_populate(struct files_tree address_to t, const p8 address_to home, const p8 address_to mountinfo, positive mountinfo_len)
+{
+        static struct files_drive drives[FILES_DRIVES_MOST];
+        p8 sub[FILES_PATH];
+        p64 hash = 0;
+        int n = mountinfo && mountinfo_len ? files_drives_parse(mountinfo, mountinfo_len, drives, FILES_DRIVES_MOST, &hash) : 0;
+
+        files_tree_reset(t);
+        if (home && home[0] == '/')
+        {
+                positive hlen = string_length((string_address)home);
+
+                files_tree_add_root(t, (const p8 address_to) "Home", home, FILES_NODE_PLACE, FILES_PLACE_HOME);
+                if (hlen + 16 < sizeof(sub))
+                {
+                        string_copy_bounded((string_address)sub, (string_address)home, sizeof(sub));
+                        if (hlen > 1)
+                                string_append_bounded((string_address)sub, (string_address) "/", sizeof(sub));
+                        string_append_bounded((string_address)sub, (string_address) "Downloads", sizeof(sub));
+                        files_tree_add_root(t, (const p8 address_to) "Downloads", sub, FILES_NODE_PLACE, FILES_PLACE_DOWNLOADS);
+                        string_copy_bounded((string_address)sub, (string_address)home, sizeof(sub));
+                        if (hlen > 1)
+                                string_append_bounded((string_address)sub, (string_address) "/", sizeof(sub));
+                        string_append_bounded((string_address)sub, (string_address) "Pictures", sizeof(sub));
+                        files_tree_add_root(t, (const p8 address_to) "Pictures", sub, FILES_NODE_PLACE, FILES_PLACE_PICTURES);
+                }
+        }
+        files_tree_add_root(t, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT);
+        for (int k = 0; k < n; k++)
+                files_tree_add_root(t, drives[k].label, drives[k].path, FILES_NODE_DRIVE, FILES_PLACE_NONE);
+        t->drives_hash = hash;
+}
+
+static fn files_tree_populate_live(struct files_tree address_to t, const p8 address_to home)
+{
+        static p8 buf[65536];
+        bipolar got = file_slurp_once_at(AT_FDCWD, (string_address) "/proc/self/mountinfo", buf, sizeof(buf) - 1);
+
+        files_tree_populate(t, home, got > 0 ? buf : null, got > 0 ? (positive)got : 0);
+}
+
+static b32 files_tree_drives_changed(const struct files_tree address_to t)
+{
+        static p8 buf[65536];
+        static struct files_drive drives[FILES_DRIVES_MOST];
+        bipolar got = file_slurp_once_at(AT_FDCWD, (string_address) "/proc/self/mountinfo", buf, sizeof(buf) - 1);
+        p64 hash = 0;
+
+        if (got > 0)
+                files_drives_parse(buf, (positive)got, drives, FILES_DRIVES_MOST, &hash);
+        return hash != t->drives_hash;
 }
 
 static inline const p8 address_to files_tree_name(const struct files_tree address_to t, p32 at)
@@ -1780,31 +2036,42 @@ static p32 files_tree_after(const struct files_tree address_to t, p32 at)
         return next;
 }
 
-// The node's parent's place, or FILES_NO for the root.
+// The node's parent's place, or FILES_NO for a root (depth 0).
 static p32 files_tree_parent(const struct files_tree address_to t, p32 at)
 {
-        while (at > 0 && at < t->count)
+        if (at >= t->count || t->node[at].depth == 0)
+                return FILES_NO;
         {
                 p32 depth = t->node[at].depth;
 
                 for (p32 up = at; up-- > 0;)
                         if (t->node[up].depth < depth)
                                 return up;
-                break;
         }
         return FILES_NO;
 }
 
-// A node's path, the root's names joined with strokes: into, FILES_PATH bytes. False when it would not fit.
+// A node's path: its depth-0 root's path followed by its descendants joined with strokes. False when it would not fit.
 static b32 files_tree_path(const struct files_tree address_to t, p32 at, p8 address_to into)
 {
         p32 chain[256];
         int links = 0;
         positive used = 0;
+        const p8 address_to rpath;
+        positive rlen;
 
+        if (at >= t->count)
+                return false;
         for (p32 here = at; here != FILES_NO && here < t->count && links < 256; here = files_tree_parent(t, here))
                 chain[links++] = here;
-        into[used++] = '/';
+        if (!links)
+                return false;
+        rpath = t->names + t->node[chain[links - 1]].root_path;
+        rlen = string_length((string_address)rpath);
+        if (!rlen || rlen >= FILES_PATH)
+                return false;
+        memory_copy(into, rpath, rlen);
+        used = rlen;
         for (int k = links - 2; k >= 0; k--)
         {
                 const struct files_node address_to n = &t->node[chain[k]];
@@ -1922,16 +2189,56 @@ static fn files_tree_shut(struct files_tree address_to t, p32 at)
 }
 
 /*
-        The nodes down a path opened, the root first, so the folder at its end shows: the node of the path's last folder (FILES_NO when a
-        folder of it is not in the tree: hidden, gone, or past what a node shows).
+        Finds an already-visible node in the tree matching path without expanding any collapsed node (so collapsing an ancestor
+        keeps it collapsed). Prefers a depth-0 root match over a deeper duplicate under another root.
+*/
+static p32 files_tree_find(const struct files_tree address_to t, const p8 address_to path)
+{
+        static p8 made[FILES_PATH];
+        p32 found = FILES_NO;
+
+        for (p32 at = 0; at < t->count; at++)
+                if (files_tree_path(t, at, made) && string_equals((string_address)made, (string_address)path))
+                {
+                        if (t->node[at].depth == 0)
+                                return at;
+                        if (found == FILES_NO)
+                                found = at;
+                }
+        return found;
+}
+
+/*
+        Reveals path under the most specific (longest-prefix) depth-0 root that contains it: an exact root match returns that root
+        without opening it (so Home, Downloads, Pictures and Drives stay collapsed by default), and a deeper path opens only along
+        the suffix under that root (never force-expanding / when the path lives under Home or a mounted drive).
 */
 static p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to path)
 {
-        p32 at = 0;
-        positive start = 1, length = string_length((string_address)path);
+        positive length = string_length((string_address)path), best_len = 0, start;
+        p32 at = FILES_NO;
 
         if (!t->count || path[0] != '/')
                 return FILES_NO;
+        for (p32 k = 0; k < t->count; k++)
+        {
+                const p8 address_to rpath;
+                positive rlen;
+
+                if (t->node[k].depth != 0)
+                        continue;
+                rpath = t->names + t->node[k].root_path;
+                rlen = string_length((string_address)rpath);
+                if (!rlen || rlen > length || memory_compare(path, rpath, rlen) != 0)
+                        continue;
+                if (rlen > 1 && path[rlen] != 0 && path[rlen] != '/')
+                        continue;
+                if (rlen > best_len)
+                        best_len = rlen, at = k;
+        }
+        if (at == FILES_NO)
+                return FILES_NO;
+        start = best_len == 1 ? 1 : path[best_len] == '/' ? best_len + 1 : length;
         while (start < length)
         {
                 positive stop = start;
