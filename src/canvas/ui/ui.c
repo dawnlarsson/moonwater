@@ -23331,33 +23331,63 @@ static fn ui_picture_scale(unsigned int address_to into, int size, const unsigne
         }
         if (size > side)
         {
+                unsigned int row0[UI_PICTURE_MOST], row1[UI_PICTURE_MOST];
+
                 for (int y = 0; y < size; y++)
                 {
                         int cy = ((2 * y + 1) * side * 256) / (2 * size) - 128;
-                        int y0, y1, wy0, wy1;
+                        int y0, y1, wy1;
 
                         cy = cy < 0 ? 0 : cy > (side - 1) * 256 ? (side - 1) * 256 : cy;
                         y0 = cy >> 8, y1 = y0 + 1 < side ? y0 + 1 : y0;
-                        wy1 = cy & 255, wy0 = 256 - wy1;
-                        for (int x = 0; x < size; x++)
+                        wy1 = cy & 255;
+                        if (size <= UI_PICTURE_MOST)
                         {
-                                int cx = ((2 * x + 1) * side * 256) / (2 * size) - 128;
-                                int x0, x1, wx0, wx1;
-                                unsigned int p00, p01, p10, p11, w00, w01, w10, w11;
-                                unsigned int a, r, g, b;
+                                for (int x = 0; x < size; x++)
+                                {
+                                        int cx = ((2 * x + 1) * side * 256) / (2 * size) - 128;
+                                        int x0, x1, wx0, wx1;
+                                        unsigned int a0, a1, b0, b1;
 
-                                cx = cx < 0 ? 0 : cx > (side - 1) * 256 ? (side - 1) * 256 : cx;
-                                x0 = cx >> 8, x1 = x0 + 1 < side ? x0 + 1 : x0;
-                                wx1 = cx & 255, wx0 = 256 - wx1;
-                                p00 = from[y0 * side + x0], p01 = from[y0 * side + x1];
-                                p10 = from[y1 * side + x0], p11 = from[y1 * side + x1];
-                                w00 = (unsigned int)(wy0 * wx0), w01 = (unsigned int)(wy0 * wx1);
-                                w10 = (unsigned int)(wy1 * wx0), w11 = (unsigned int)(wy1 * wx1);
-                                a = ((p00 >> 24) * w00 + (p01 >> 24) * w01 + (p10 >> 24) * w10 + (p11 >> 24) * w11 + 32768u) >> 16;
-                                r = ((p00 >> 16 & 255) * w00 + (p01 >> 16 & 255) * w01 + (p10 >> 16 & 255) * w10 + (p11 >> 16 & 255) * w11 + 32768u) >> 16;
-                                g = ((p00 >> 8 & 255) * w00 + (p01 >> 8 & 255) * w01 + (p10 >> 8 & 255) * w10 + (p11 >> 8 & 255) * w11 + 32768u) >> 16;
-                                b = ((p00 & 255) * w00 + (p01 & 255) * w01 + (p10 & 255) * w10 + (p11 & 255) * w11 + 32768u) >> 16;
-                                into[y * size + x] = a << 24 | r << 16 | g << 8 | b;
+                                        cx = cx < 0 ? 0 : cx > (side - 1) * 256 ? (side - 1) * 256 : cx;
+                                        x0 = cx >> 8, x1 = x0 + 1 < side ? x0 + 1 : x0;
+                                        wx1 = cx & 255, wx0 = 256 - wx1;
+                                        a0 = from[y0 * side + x0], a1 = from[y0 * side + x1];
+                                        b0 = from[y1 * side + x0], b1 = from[y1 * side + x1];
+                                        row0[x] = (((a0 >> 24) * (unsigned int)wx0 + (a1 >> 24) * (unsigned int)wx1 + 128u) >> 8) << 24 |
+                                                  (((a0 >> 16 & 255) * (unsigned int)wx0 + (a1 >> 16 & 255) * (unsigned int)wx1 + 128u) >> 8) << 16 |
+                                                  (((a0 >> 8 & 255) * (unsigned int)wx0 + (a1 >> 8 & 255) * (unsigned int)wx1 + 128u) >> 8) << 8 |
+                                                  (((a0 & 255) * (unsigned int)wx0 + (a1 & 255) * (unsigned int)wx1 + 128u) >> 8);
+                                        row1[x] = (((b0 >> 24) * (unsigned int)wx0 + (b1 >> 24) * (unsigned int)wx1 + 128u) >> 8) << 24 |
+                                                  (((b0 >> 16 & 255) * (unsigned int)wx0 + (b1 >> 16 & 255) * (unsigned int)wx1 + 128u) >> 8) << 16 |
+                                                  (((b0 >> 8 & 255) * (unsigned int)wx0 + (b1 >> 8 & 255) * (unsigned int)wx1 + 128u) >> 8) << 8 |
+                                                  (((b0 & 255) * (unsigned int)wx0 + (b1 & 255) * (unsigned int)wx1 + 128u) >> 8);
+                                }
+                                memory_lerp_u32_row(into + y * size, row0, row1, (positive)size, (positive)wy1);
+                        }
+                        else
+                        {
+                                int wy0 = 256 - wy1;
+
+                                for (int x = 0; x < size; x++)
+                                {
+                                        int cx = ((2 * x + 1) * side * 256) / (2 * size) - 128;
+                                        int x0, x1, wx0, wx1;
+                                        unsigned int p00, p01, p10, p11, w00, w01, w10, w11;
+
+                                        cx = cx < 0 ? 0 : cx > (side - 1) * 256 ? (side - 1) * 256 : cx;
+                                        x0 = cx >> 8, x1 = x0 + 1 < side ? x0 + 1 : x0;
+                                        wx1 = cx & 255, wx0 = 256 - wx1;
+                                        p00 = from[y0 * side + x0], p01 = from[y0 * side + x1];
+                                        p10 = from[y1 * side + x0], p11 = from[y1 * side + x1];
+                                        w00 = (unsigned int)(wy0 * wx0), w01 = (unsigned int)(wy0 * wx1);
+                                        w10 = (unsigned int)(wy1 * wx0), w11 = (unsigned int)(wy1 * wx1);
+                                        into[y * size + x] =
+                                            (((p00 >> 24) * w00 + (p01 >> 24) * w01 + (p10 >> 24) * w10 + (p11 >> 24) * w11 + 32768u) >> 16) << 24 |
+                                            (((p00 >> 16 & 255) * w00 + (p01 >> 16 & 255) * w01 + (p10 >> 16 & 255) * w10 + (p11 >> 16 & 255) * w11 + 32768u) >> 16) << 16 |
+                                            (((p00 >> 8 & 255) * w00 + (p01 >> 8 & 255) * w01 + (p10 >> 8 & 255) * w10 + (p11 >> 8 & 255) * w11 + 32768u) >> 16) << 8 |
+                                            (((p00 & 255) * w00 + (p01 & 255) * w01 + (p10 & 255) * w10 + (p11 & 255) * w11 + 32768u) >> 16);
+                                }
                         }
                 }
                 return;
