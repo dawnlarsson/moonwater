@@ -23317,36 +23317,92 @@ static fn ui_icon_picture(struct ui address_to ui, int left, int top, int size, 
 }
 
 /*
-        A square picture of any side made (premultiplied 0xaarrggbb both): smaller, each pixel the mean of the
-        pixels under it; the same, a copy; larger, the nearest (memory_resample_u32_rect). ui_icon_scale is this from a window's icon.
+        A square picture of any side made (premultiplied 0xaarrggbb both): smaller, area-weighted fractional box average;
+        the same, a copy; larger, bilinear interpolation. ui_icon_scale is this from a window's icon.
 */
 static fn ui_picture_scale(unsigned int address_to into, int size, const unsigned int address_to from, int side)
 {
         if (size <= 0 || side <= 0)
                 return;
-        if (size >= side)
+        if (size == side)
         {
-                memory_resample_u32_rect(into, (positive)size, (positive)size, (positive)size, from, (positive)side, (positive)side, (positive)side,
-                                         (positive)size, (positive)size, 0, 0);
+                memory_copy(into, from, (positive)size * (positive)size * 4);
+                return;
+        }
+        if (size > side)
+        {
+                for (int y = 0; y < size; y++)
+                {
+                        int cy = ((2 * y + 1) * side * 256) / (2 * size) - 128;
+                        int y0, y1, wy0, wy1;
+
+                        cy = cy < 0 ? 0 : cy > (side - 1) * 256 ? (side - 1) * 256 : cy;
+                        y0 = cy >> 8, y1 = y0 + 1 < side ? y0 + 1 : y0;
+                        wy1 = cy & 255, wy0 = 256 - wy1;
+                        for (int x = 0; x < size; x++)
+                        {
+                                int cx = ((2 * x + 1) * side * 256) / (2 * size) - 128;
+                                int x0, x1, wx0, wx1;
+                                unsigned int p00, p01, p10, p11, w00, w01, w10, w11;
+                                unsigned int a, r, g, b;
+
+                                cx = cx < 0 ? 0 : cx > (side - 1) * 256 ? (side - 1) * 256 : cx;
+                                x0 = cx >> 8, x1 = x0 + 1 < side ? x0 + 1 : x0;
+                                wx1 = cx & 255, wx0 = 256 - wx1;
+                                p00 = from[y0 * side + x0], p01 = from[y0 * side + x1];
+                                p10 = from[y1 * side + x0], p11 = from[y1 * side + x1];
+                                w00 = (unsigned int)(wy0 * wx0), w01 = (unsigned int)(wy0 * wx1);
+                                w10 = (unsigned int)(wy1 * wx0), w11 = (unsigned int)(wy1 * wx1);
+                                a = ((p00 >> 24) * w00 + (p01 >> 24) * w01 + (p10 >> 24) * w10 + (p11 >> 24) * w11 + 32768u) >> 16;
+                                r = ((p00 >> 16 & 255) * w00 + (p01 >> 16 & 255) * w01 + (p10 >> 16 & 255) * w10 + (p11 >> 16 & 255) * w11 + 32768u) >> 16;
+                                g = ((p00 >> 8 & 255) * w00 + (p01 >> 8 & 255) * w01 + (p10 >> 8 & 255) * w10 + (p11 >> 8 & 255) * w11 + 32768u) >> 16;
+                                b = ((p00 & 255) * w00 + (p01 & 255) * w01 + (p10 & 255) * w10 + (p11 & 255) * w11 + 32768u) >> 16;
+                                into[y * size + x] = a << 24 | r << 16 | g << 8 | b;
+                        }
+                }
                 return;
         }
         for (int y = 0; y < size; y++)
         {
-                int y0 = y * side / size, y1 = (y + 1) * side / size;
+                int sy0 = y * side * 256 / size, sy1 = (y + 1) * side * 256 / size;
+                int y0 = sy0 >> 8, y1 = (sy1 - 1) >> 8;
 
+                if (y1 >= side)
+                        y1 = side - 1;
                 for (int x = 0; x < size; x++)
                 {
-                        int x0 = x * side / size, x1 = (x + 1) * side / size;
-                        unsigned int sum[4] = {0, 0, 0, 0}, count = (unsigned int)((x1 - x0) * (y1 - y0));
+                        int sx0 = x * side * 256 / size, sx1 = (x + 1) * side * 256 / size;
+                        int x0 = sx0 >> 8, x1 = (sx1 - 1) >> 8;
+                        p64 sum[4] = {0, 0, 0, 0}, total = 0;
 
-                        for (int sy = y0; sy < y1; sy++)
-                                for (int sx = x0; sx < x1; sx++)
+                        if (x1 >= side)
+                                x1 = side - 1;
+                        for (int sy = y0; sy <= y1; sy++)
+                        {
+                                int ya = sy * 256 > sy0 ? sy * 256 : sy0;
+                                int yb = (sy + 1) * 256 < sy1 ? (sy + 1) * 256 : sy1;
+                                p64 wy = (p64)(yb - ya);
+
+                                for (int sx = x0; sx <= x1; sx++)
                                 {
+                                        int xa = sx * 256 > sx0 ? sx * 256 : sx0;
+                                        int xb = (sx + 1) * 256 < sx1 ? (sx + 1) * 256 : sx1;
+                                        p64 w = wy * (p64)(xb - xa);
                                         unsigned int pixel = from[sy * side + sx];
 
-                                        sum[0] += pixel >> 24, sum[1] += pixel >> 16 & 255, sum[2] += pixel >> 8 & 255, sum[3] += pixel & 255;
+                                        sum[0] += (pixel >> 24) * w;
+                                        sum[1] += (pixel >> 16 & 255) * w;
+                                        sum[2] += (pixel >> 8 & 255) * w;
+                                        sum[3] += (pixel & 255) * w;
+                                        total += w;
                                 }
-                        into[y * size + x] = (sum[0] + count / 2) / count << 24 | (sum[1] + count / 2) / count << 16 | (sum[2] + count / 2) / count << 8 | (sum[3] + count / 2) / count;
+                        }
+                        if (!total)
+                                total = 1;
+                        into[y * size + x] = (unsigned int)((sum[0] + total / 2) / total) << 24 |
+                                             (unsigned int)((sum[1] + total / 2) / total) << 16 |
+                                             (unsigned int)((sum[2] + total / 2) / total) << 8 |
+                                             (unsigned int)((sum[3] + total / 2) / total);
                 }
         }
 }

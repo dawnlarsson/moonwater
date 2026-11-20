@@ -5254,12 +5254,14 @@ static fn check_apps_registry(void)
                         memory_free(pixels, 4u * 5 * 4);
         }
         {
-                unsigned int from[4] = {0xff000000u, 0xffffffffu, 0xffffffffu, 0xff000000u}, into[4];
+                unsigned int from[4] = {0xff000000u, 0xffffffffu, 0xffffffffu, 0xff000000u}, into[9];
 
                 ui_picture_scale(into, 1, from, 2);
                 check("apps: a picture made smaller is the mean of what is under each pixel", into[0] == 0xff808080u);
                 ui_picture_scale(into, 2, from, 2);
                 check("apps: and made its own size is itself", into[0] == from[0] && into[1] == from[1] && into[3] == from[3]);
+                ui_picture_scale(into, 3, from, 2);
+                check("apps: a picture made larger uses bilinear interpolation at its center", into[4] == 0xff808080u);
         }
 }
 #endif
