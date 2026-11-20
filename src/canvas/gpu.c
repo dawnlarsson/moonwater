@@ -15,8 +15,10 @@ static struct { positive va, maps, top; } gpu_window = {GPU_AMD_VA, GPU_AMD_VA_M
 #define GPU_VA_MAPS (gpu_window.maps)
 #define GPU_VA_END (gpu_window.top) // never past GPU_VA_RECORD
 static positive gpu_map_next = GPU_AMD_VA_MAPS; // where the next map or import is placed (gpu_place_aligned): from GPU_VA_MAPS of the window
-#define GPU_BASES_AT 40960 // the table of bases a text op names (its word 6, bits 16 to 23: 255 addresses of 8 bytes, number 0 is the buffer's start and is not read)
-#define GPU_DATA 45056 // the pixels start here; before them: packets at 0, arguments after the packets, the kernels from 1024 (or after the arguments), the bases from GPU_BASES_AT
+#define GPU_BASES_AT 40960    // the table of bases a text op names (its word 6, bits 16 to 23: 255 addresses of 8 bytes, number 0 is the buffer's start and is not read)
+#define GPU_SRGB_S2L_AT 43008 // 256 x u32 IEC 61966-2-1 sRGB -> 12-bit linear (0..4095), 1024 bytes (43008..44032)
+#define GPU_SRGB_L2S_AT 44032 // 4096 x u8 IEC 61966-2-1 12-bit linear -> sRGB (0..255), 4096 bytes (44032..48128)
+#define GPU_DATA 49152        // the pixels start here; before them: packets at 0, arguments after the packets, the kernels from 1024, bases at 40960, sRGB LUTs at 43008
 // The two slots a job is built in, used in turn so that the next job is written while one runs: slot k's packets at GPU_PACKETS * k (the driver's room for a
 // job's command words: struct gpu_backend's packets), its arguments at GPU_SLOTS * GPU_PACKETS + 256 * k, the kernels from gpu_layout.code. With amdgpu's 256
 // that is packets at 0 and 256, arguments at 512 and 768, the kernels from 1024. A slot is not written while its job may run (gpu_slot_take).
@@ -283,7 +285,7 @@ typedef char gpu_kernels_fit[sizeof(gpu_k_copy) + sizeof(gpu_k_fill) + sizeof(gp
 // The card must draw what it should before anything is trusted to it: families of the ISA the kernels are in (RDNA2, gfx10.3: Van Gogh 144, Yellow Carp 146, Raphael 149,
 // Mendocino 151) are tried, and each is held to the hash of the picture one small scene of every kind of op made on the card they were written on.
 #define GPU_FAMILIES(f) ((f) == 144 || (f) == 146 || (f) == 149 || (f) == 151)
-#define GPU_TEST_HASH 2024535671u
+#define GPU_TEST_HASH 1092551981u
 // The rest of the chips the kernels are code for, which nobody has run them on: family 143 (Navi 10, 12 and 14, RDNA1; Navi 21 to 24, the RDNA2 cards). llvm-mc
 // makes of gpu.asm the same 3,749 words for gfx1010, gfx1012, gfx1030 and gfx1036 (the gate asks it: gpu-kernels-chips), so the code is theirs too as far as an assembler can say; what the dispatch's
 // registers and the ring do on them has been seen by no one. They are let in only where the machine's owner asks (the file /run/moonwater/gpu-gfx10, looked for at
@@ -1446,6 +1448,15 @@ static void gpu_req_record(const char *path, const char *driver, unsigned int fa
         gpu_req.family = family, gpu_req.device = device;
 }
 
+static void gpu_srgb_upload(void)
+{
+        unsigned int address_to s2l = (unsigned int address_to)((p8 address_to)gpu.at + GPU_SRGB_S2L_AT);
+
+        for (unsigned int i = 0; i < 256; i++)
+                s2l[i] = canvas_srgb_to_lin[i];
+        memory_copy((p8 address_to)gpu.at + GPU_SRGB_L2S_AT, canvas_lin_to_srgb, 4096);
+}
+
 static b32 gpu_start(positive bytes)
 {
         positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // last MiB is self-test
@@ -1609,6 +1620,7 @@ static b32 gpu_start(positive bytes)
                         memory_copy((p8 address_to)gpu.at + here, gpu_set->kernels[i].words + gpu_set->skip, gpu_set->kernels[i].size - 4 * gpu_set->skip);
                         here = (here + gpu_set->kernels[i].size - 4 * gpu_set->skip + 255) & ~255u;
                 }
+                gpu_srgb_upload();
                 // The self-test: the card must finish its job (RING) and draw the picture the kernels draw (SELFTEST).
                 hash = gpu_test_hash();
                 if (!gpu_req_step(GPU_REQ_RING, hash == 0, gpu_last_error))

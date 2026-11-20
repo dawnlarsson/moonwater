@@ -1662,26 +1662,32 @@ static fn ui_over_check(void)
         check("ui_over: the body gives the C's bytes for every alpha pair and for lanes at their edges", same && drawn > 0);
 
         /*
-                ui_kit_put, the premultiply and the over as one body on x86-64 and arm64, against the C it replaced: every
-                alpha at every cover from nothing past the whole, with colours that are not premultiplied too.
+                ui_kit_put: exact IEC 61966-2-1 linear-light AA on opaque destinations and premultiplied Porter-Duff on
+                transparent destinations, for every alpha and cover, touching its own pixel alone.
         */
         same = true;
         for (unsigned int a = 0; a < 256; a++)
                 for (unsigned int cover = 0; cover <= 4200; cover += 7)
                 {
                         unsigned int argb = (XORSHIFT32(state) & 0x00ffffffu) | a << 24, under = XORSHIFT32(state);
-                        unsigned int row[2] = {under, under}, want = under;
+                        unsigned int row[2] = {under, under}, want = under, c = cover > 4096 ? 4096 : cover;
 
                         ui_kit_put(row, 1, cover, argb);
-                        if (!cover)
+                        if (!cover || !a)
                                 want = under;
-                        else if (cover >= 4096 && argb >> 24 == 255)
+                        else if ((under >> 24) == 255)
+                        {
+                                unsigned int full = a == 255 ? (argb | 0xff000000u) : ui_over_reference(ui_premultiplied(argb, 4096), under);
+
+                                want = canvas_mix_linear12(under, full, c);
+                        }
+                        else if (c >= 4096 && a == 255)
                                 want = argb | 0xff000000u;
                         else
-                                want = ui_over_reference(ui_premultiplied(argb, cover > 4096 ? 4096 : cover), under);
+                                want = ui_over_reference(ui_premultiplied(argb, c), under);
                         same &= row[1] == want && row[0] == under;
                 }
-        check("ui_kit_put: the body gives the C's pixel for every alpha and cover, and touches its own pixel alone", same);
+        check("ui_kit_put: linear-light AA on opaque destinations and Porter-Duff on transparent ones, touching its own pixel alone", same);
 }
 
 /*

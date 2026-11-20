@@ -38,7 +38,7 @@ static long gpu_model_control(int fd, unsigned int request, void address_to a)
 
 #include "../../src/canvas/gpu.c"
 
-#define GPU_MODEL_CARD_WORDS 4096 // the words of each kernel the card counts the runs of
+#define GPU_MODEL_CARD_WORDS 8192 // the words of each kernel the card counts the runs of
 
 // The imports the model gives memory to: gpu.c's table grows to GPU_IMPORTS_MOST, and the model's rows import no more than these.
 #define GPU_MODEL_IMPORTS 64
@@ -171,6 +171,7 @@ static b32 gpu_model_card_start(positive bytes)
                 memory_copy((p8 address_to)gpu.at + here, gpu_kernels[i].words + 2, gpu_kernels[i].size - 8);
                 here = (here + gpu_kernels[i].size - 8 + 255) & ~255u;
         }
+        gpu_srgb_upload();
         gpu_model_card_reset();
         return true;
 }

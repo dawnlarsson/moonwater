@@ -567,16 +567,16 @@ static const unsigned char *compositor_corner_mask(int radius)
                         {
                                 int inside = 0;
 
-                                // In eighths of a pixel, sample centres odd, the circle's centre at 8 radius.
-                                for (int sy = 0; sy < 4; sy++)
-                                        for (int sx = 0; sx < 4; sx++)
+                                // 16x16 supersampling (in 32nds of a pixel, sample centres odd, circle centre at 32*radius) for smooth 256-level AA coverage.
+                                for (int sy = 0; sy < 16; sy++)
+                                        for (int sx = 0; sx < 16; sx++)
                                         {
-                                                int dx = 8 * radius - (8 * x + 2 * sx + 1);
-                                                int dy = 8 * radius - (8 * y + 2 * sy + 1);
+                                                int dx = 32 * radius - (32 * x + 2 * sx + 1);
+                                                int dy = 32 * radius - (32 * y + 2 * sy + 1);
 
-                                                inside += dx * dx + dy * dy <= 64 * radius * radius;
+                                                inside += dx * dx + dy * dy <= 1024 * radius * radius;
                                         }
-                                mask[y * radius + x] = (unsigned char)((inside * 255 + 8) / 16);
+                                mask[y * radius + x] = (unsigned char)((inside * 255 + 128) >> 8);
                         }
                 // The same quarter read backwards along each row, where the corner is on the right: made with it,
                 // so the parallel bands only ever read the masks.
@@ -1025,7 +1025,7 @@ static void compositor_lit_corner(const struct compositor_target *t, const struc
                                 ic = inner[(unsigned long)iy * ri + ix];
                         ring[k] = oc > ic ? (unsigned char)(oc - ic) : 0;
                 }
-                memory_mix_u32_row(at, ink_row, ring, (positive)(x2 - x1));
+                canvas_mix_linear_row(at, ink_row, ring, (positive)(x2 - x1));
         }
 }
 
@@ -1080,10 +1080,10 @@ static void compositor_corner_rows(const struct compositor_target *t, const stru
                                         ic = inner[(unsigned long)iy * ri + ix];
                                 ring[k] = oc > ic ? (unsigned char)(oc - ic) : 0;
                         }
-                        memory_mix_u32_row(at, edge_row, ring, (positive)(x2 - x1));
+                        canvas_mix_linear_row(at, edge_row, ring, (positive)(x2 - x1));
                 }
                 else if (b)
-                        memory_mix_u32_row(at, edge_row, outer + (unsigned long)my * r + (x1 - cx), (positive)(x2 - x1));
+                        canvas_mix_linear_row(at, edge_row, outer + (unsigned long)my * r + (x1 - cx), (positive)(x2 - x1));
                 if (py >= y && py < y + h && ri && sx2 > sx1 && (frame->builtin || frame->pixels))
                 {
                         int kx = sx1 - cx;
@@ -1098,8 +1098,8 @@ static void compositor_corner_rows(const struct compositor_target *t, const stru
                                 cover = inner + (unsigned long)(my - b) * ri + (kx - b);
                         row = frame->builtin ? tab_row
                                              : frame->pixels + (unsigned long)(py - y) * frame->pitch + (unsigned long)(sx1 - x);
-                        memory_mix_u32_row(t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(sx1 - t->ox),
-                                           row, cover, (positive)(sx2 - sx1));
+                        canvas_mix_linear_row(t->pixels + (unsigned long)(py - t->oy) * t->pitch + (unsigned long)(sx1 - t->ox),
+                                              row, cover, (positive)(sx2 - sx1));
                 }
         }
 }
@@ -1146,7 +1146,7 @@ static int canvas_cpu_round_corner(void *ctx, const struct compositor_frame *f, 
                                 unsigned int pixel = *at;
 
                                 if (cover)
-                                        pixel = b ? compositor_mix(pixel, edge, cover) : pixel;
+                                        pixel = b ? canvas_mix_linear(pixel, edge & 0xffffffu, cover) : pixel;
                                 if (px >= x && px < x + w && py >= y && py < y + h)
                                 {
                                         unsigned int in = inner ? inner[(my - b) * ri + (mx - b)] : 0;
@@ -1159,7 +1159,7 @@ static int canvas_cpu_round_corner(void *ctx, const struct compositor_frame *f, 
                                         if (f->blend)
                                                 pixel = compositor_over_weighted(pixel, ink, in);
                                         else
-                                                pixel = in == 255 ? ink : in ? compositor_mix(pixel, ink, in) : pixel;
+                                                pixel = in == 255 ? ink : in ? canvas_mix_linear(pixel, ink, in) : pixel;
                                 }
                                 *at = pixel;
                         }
@@ -1404,7 +1404,7 @@ static void compositor_gpu_rect(unsigned int kind, int x0, int y0, int x1, int y
                 if (frame->swap)
                         op[0] |= 0x80u;
         }
-        if (kind == 5 || kind == 12)
+        if (kind == 5 || kind == 12 || kind == 13)
                 op[0] |= (unsigned int)r << 8, op[5] = cover + (unsigned int)((cy0 - y0) * r + (cx0 - x0)), op[6] = frame ? op[6] : colour;
         g->count++;
 }
@@ -1474,9 +1474,9 @@ static int canvas_gpu_round_corner(void *ctx, const struct compositor_frame *f, 
         if ((b && !edge_table) || (picture && ri && !content_table))
                 return g->why = COMPOSITOR_GPU_WHY_POOL, 0;
         if (b)
-                compositor_gpu_rect(5, cx, cy, cx + r, cy + r, edge & 0xffffffu, 0, edge_table, r);
+                compositor_gpu_rect(13, cx, cy, cx + r, cy + r, edge & 0xffffffu, 0, edge_table, r);
         if (picture && ri && sx2 > sx1 && sy2 > sy1)
-                compositor_gpu_rect(f->blend ? 12 : 5, sx1, sy1, sx2, sy2, tab, f->builtin ? 0 : f,
+                compositor_gpu_rect(f->blend ? 12 : 13, sx1, sy1, sx2, sy2, tab, f->builtin ? 0 : f,
                                     content_table + (unsigned int)((sy1 - cy) * r + (sx1 - cx)), r);
         return 1;
 }
@@ -1490,7 +1490,7 @@ static int canvas_gpu_lit_corner(void *ctx, const struct compositor_frame *f, in
         (void)f;
         if (!ring)
                 return g->why = COMPOSITOR_GPU_WHY_POOL, 0;
-        compositor_gpu_rect(5, cx, cy, cx + r, cy + r, ink & 0xffffffu, 0, ring, r);
+        compositor_gpu_rect(13, cx, cy, cx + r, cy + r, ink & 0xffffffu, 0, ring, r);
         return 1;
 }
 

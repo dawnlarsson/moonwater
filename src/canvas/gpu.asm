@@ -276,12 +276,57 @@ glass:
 	v_add_nc_u32	\ck, \ck, v48
 .endm
 
-; the pixel \o of the lane with the box's cover \ck: the colour at that cover laid over it where it has any alpha
+; the pixel \o of the lane with the box's cover \ck: on an opaque destination (alpha 255), exact IEC 61966-2-1 linear-light AA
+; between \o and the full-cover over colour (s72/s73/s74); on a transparent destination, standard premultiplied over.
+; s[98:99] holds GPU_VA + GPU_SRGB_S2L_AT (43008), s[100:101] holds GPU_VA + GPU_SRGB_L2S_AT (44032).
 .macro boxpixel o, ck
 	premulv		v34, \ck
 	overv		v23, \o, v34
 	v_cmp_lt_u32_e64 s[88:89], 0x00ffffff, v34
+	over		v53, \o
+	v_min_u32	v39, 4096, \ck
+	v_sub_nc_u32	v40, 4096, v39
+	v_bfe_u32	v41, \o, 0, 8
+	v_bfe_u32	v42, \o, 8, 8
+	v_bfe_u32	v43, \o, 16, 8
+	v_bfe_u32	v44, v53, 0, 8
+	v_bfe_u32	v45, v53, 8, 8
+	v_bfe_u32	v46, v53, 16, 8
+	v_lshlrev_b32	v41, 2, v41
+	v_lshlrev_b32	v42, 2, v42
+	v_lshlrev_b32	v43, 2, v43
+	v_lshlrev_b32	v44, 2, v44
+	v_lshlrev_b32	v45, 2, v45
+	v_lshlrev_b32	v46, 2, v46
+	global_load_dword v47, v41, s[98:99]
+	global_load_dword v48, v42, s[98:99]
+	global_load_dword v49, v43, s[98:99]
+	global_load_dword v50, v44, s[98:99]
+	global_load_dword v51, v45, s[98:99]
+	global_load_dword v52, v46, s[98:99]
+	s_waitcnt	vmcnt(0)
+	v_mad_u32_u24	v47, v47, v40, 2048
+	v_mad_u32_u24	v47, v50, v39, v47
+	v_lshrrev_b32	v47, 12, v47
+	v_mad_u32_u24	v48, v48, v40, 2048
+	v_mad_u32_u24	v48, v51, v39, v48
+	v_lshrrev_b32	v48, 12, v48
+	v_mad_u32_u24	v49, v49, v40, 2048
+	v_mad_u32_u24	v49, v52, v39, v49
+	v_lshrrev_b32	v49, 12, v49
+	global_load_ubyte v41, v47, s[100:101]
+	global_load_ubyte v42, v48, s[100:101]
+	global_load_ubyte v43, v49, s[100:101]
+	s_waitcnt	vmcnt(0)
+	v_lshl_or_b32	v41, v42, 8, v41
+	v_lshl_or_b32	v41, v43, 16, v41
+	v_lshl_or_b32	v41, 255, 24, v41
+	v_cmp_lt_u32_e64 s[84:85], 0xfeffffff, \o
+	v_cmp_ne_u32_e64 s[86:87], 0, \ck
+	s_and_b64	s[86:87], s[84:85], s[86:87]
+	s_andn2_b64	s[88:89], s[88:89], s[84:85]
 	v_cndmask_b32_e64 \o, \o, v23, s[88:89]
+	v_cndmask_b32_e64 \o, \o, v41, s[86:87]
 .endm
 
 ; \out = ui_tone(the op's colour, \a): the colour premultiplied at the alpha \a (0 to 255) (the colour's blue, green, red in s94, s95, s96)
@@ -460,6 +505,8 @@ scene:
 	s_cbranch_scc1	.scene_mix
 	s_cmp_eq_u32	s47, 12
 	s_cbranch_scc1	.scene_mix
+	s_cmp_eq_u32	s47, 13
+	s_cbranch_scc1	.scene_mix
 	s_cmp_eq_u32	s47, 6
 	s_cbranch_scc1	.scene_close
 	s_cmp_eq_u32	s47, 7
@@ -548,6 +595,53 @@ scene:
 	v_cmp_ne_u32_e64 s[96:97], 0, \cv
 	v_cndmask_b32_e64 v42, \o, v42, s[96:97]
 	v_cndmask_b32_e64 \o, \o, v42, \mk
+.endm
+
+; one pixel of an exact IEC 61966-2-1 linear-light mix (canvas_mix_linear, op 13): s[98:99] holds GPU_VA + GPU_SRGB_S2L_AT,
+; s[100:101] holds GPU_VA + GPU_SRGB_L2S_AT; cv == 0 keeps \o, cv >= 255 takes \ink, else w = cv + (cv >> 7) in 0..256.
+.macro mixlinear o, cv, ink, mk
+	v_lshrrev_b32	v39, 7, \cv
+	v_add_nc_u32	v39, \cv, v39
+	v_sub_nc_u32	v40, 256, v39
+	v_bfe_u32	v41, \o, 0, 8
+	v_bfe_u32	v42, \o, 8, 8
+	v_bfe_u32	v43, \o, 16, 8
+	v_bfe_u32	v44, \ink, 0, 8
+	v_bfe_u32	v45, \ink, 8, 8
+	v_bfe_u32	v46, \ink, 16, 8
+	v_lshlrev_b32	v41, 2, v41
+	v_lshlrev_b32	v42, 2, v42
+	v_lshlrev_b32	v43, 2, v43
+	v_lshlrev_b32	v44, 2, v44
+	v_lshlrev_b32	v45, 2, v45
+	v_lshlrev_b32	v46, 2, v46
+	global_load_dword v47, v41, s[98:99]
+	global_load_dword v48, v42, s[98:99]
+	global_load_dword v49, v43, s[98:99]
+	global_load_dword v50, v44, s[98:99]
+	global_load_dword v51, v45, s[98:99]
+	global_load_dword v52, v46, s[98:99]
+	s_waitcnt	vmcnt(0)
+	v_mad_u32_u24	v47, v47, v40, 128
+	v_mad_u32_u24	v47, v50, v39, v47
+	v_lshrrev_b32	v47, 8, v47
+	v_mad_u32_u24	v48, v48, v40, 128
+	v_mad_u32_u24	v48, v51, v39, v48
+	v_lshrrev_b32	v48, 8, v48
+	v_mad_u32_u24	v49, v49, v40, 128
+	v_mad_u32_u24	v49, v52, v39, v49
+	v_lshrrev_b32	v49, 8, v49
+	global_load_ubyte v41, v47, s[100:101]
+	global_load_ubyte v42, v48, s[100:101]
+	global_load_ubyte v43, v49, s[100:101]
+	s_waitcnt	vmcnt(0)
+	v_lshl_or_b32	v41, v42, 8, v41
+	v_lshl_or_b32	v41, v43, 16, v41
+	v_cmp_lt_u32_e64 s[96:97], 254, \cv
+	v_cndmask_b32_e64 v41, v41, \ink, s[96:97]
+	v_cmp_ne_u32_e64 s[96:97], 0, \cv
+	v_cndmask_b32_e64 v41, \o, v41, s[96:97]
+	v_cndmask_b32_e64 \o, \o, v41, \mk
 .endm
 
 ; \o = compositor_over_weighted(\o, \ink, \cv) where \mk has it: the premultiplied ink's four channels each times the cover, (c * cv + 127 + 1 + that >> 8) >> 8,
@@ -854,10 +948,22 @@ scene:
 	v_bfe_u32	v63, v34, 24, 8
 	s_cmp_eq_u32	s47, 12
 	s_cbranch_scc1	.mix_over
+	s_cmp_eq_u32	s47, 13
+	s_cbranch_scc1	.mix_linear
 	mixpixel	v5, v60, v64, s[82:83]
 	mixpixel	v6, v61, v65, s[84:85]
 	mixpixel	v7, v62, v66, s[86:87]
 	mixpixel	v8, v63, v67, s[88:89]
+	s_branch	.scene_loop
+.mix_linear:
+	s_add_u32	s98, s102, 43008
+	s_addc_u32	s99, s103, 0
+	s_add_u32	s100, s102, 44032
+	s_addc_u32	s101, s103, 0
+	mixlinear	v5, v60, v64, s[82:83]
+	mixlinear	v6, v61, v65, s[84:85]
+	mixlinear	v7, v62, v66, s[86:87]
+	mixlinear	v8, v63, v67, s[88:89]
 	s_branch	.scene_loop
 .mix_over:
 	wover		v5, v60, v64, s[82:83]
@@ -1418,6 +1524,31 @@ scene:
 	v_lshrrev_b32	v72, 12, v72
 	s_branch	.box_next
 .box_blend:
+	s_add_u32	s98, s102, 43008
+	s_addc_u32	s99, s103, 0
+	s_add_u32	s100, s102, 44032
+	s_addc_u32	s101, s103, 0
+	s_lshr_b32	s67, s52, 7
+	s_add_u32	s67, s52, s67
+	s_mul_i32	s68, s64, s67
+	s_add_u32	s68, s68, 128
+	s_lshr_b32	s68, s68, 8
+	s_mul_i32	s69, s65, s67
+	s_add_u32	s69, s69, 128
+	s_lshr_b32	s69, s69, 8
+	s_mul_i32	s70, s66, s67
+	s_add_u32	s70, s70, 128
+	s_lshr_b32	s70, s70, 8
+	s_lshl_b32	s70, s70, 16
+	s_lshl_b32	s69, s69, 8
+	s_or_b32	s70, s70, s69
+	s_or_b32	s70, s70, s68
+	s_lshl_b32	s71, s52, 24
+	s_or_b32	s71, s71, s70
+	s_sub_u32	s72, 255, s52
+	s_and_b32	s73, s71, s75
+	s_lshr_b32	s74, s71, 8
+	s_and_b32	s74, s74, s75
 	boxpixel	v5, v69
 	boxpixel	v6, v70
 	boxpixel	v7, v71

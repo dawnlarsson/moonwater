@@ -8880,9 +8880,6 @@ static struct ui_ramp address_to ui_ramp_for(unsigned int colour, unsigned int a
 #if (X64 || ARM64) && !defined(UI_OVER_C)
 #define UI_OVER_ASM 1
 #endif
-#if (X64 || ARM64) && !defined(UI_OVER_C)
-#define UI_KIT_PUT_ASM 1
-#endif
 
 #ifdef UI_OVER_ASM
 extern unsigned int ui_over_body(unsigned int pixel, unsigned int under) __asm__("ui_over_body")
@@ -8918,34 +8915,6 @@ asm(".pushsection .text\n"
     "ui_over_257: .short 257, 257, 257, 257, 257, 257, 257, 257\n"
     ".size ui_over_body, .-ui_over_body\n"
     ".popsection\n");
-/*
-        ui_kit_put_body: rdi the pixel, esi the cover (UI_FULL is 4096), edx the colour. A cover of nothing is nothing;
-        a whole cover of an opaque colour is the colour; otherwise the alpha is alpha times cover over 4096, the colour
-        premultiplied by it (window_mix: each channel times alpha plus alpha >> 7 in 256ths, rounded) and laid over the
-        pixel by ui_over_body's arithmetic. A tone of nothing is the pixel, so a zero alpha writes nothing.
-*/
-asm(".pushsection .text\n"
-    ".balign 16\n"
-    ".local ui_kit_put_body\n"
-    ".type ui_kit_put_body, " ASM_TYPE "\n"
-    "ui_kit_put_body:\n" ASM_ENDBR
-    "test %esi, %esi\n   jz 9f\n"
-    "cmp $4096, %esi\n   jb 2f\n"
-    "mov %edx, %eax\n   shr $24, %eax\n   cmp $255, %eax\n   jne 1f\n"
-    "mov %edx, (%rdi)\n" ASM_RET
-    "1:  mov $4096, %esi\n"
-    "2:  mov %edx, %eax\n   shr $24, %eax\n   imul %esi, %eax\n   shr $12, %eax\n   jz 9f\n"
-    "mov %eax, %ecx\n   shr $7, %ecx\n   add %eax, %ecx\n"
-    "movd %ecx, %xmm1\n   pshuflw $0, %xmm1, %xmm1\n"
-    "pxor %xmm2, %xmm2\n   movd %edx, %xmm0\n   punpcklbw %xmm2, %xmm0\n"
-    "pmullw %xmm1, %xmm0\n   paddw ui_over_128(%rip), %xmm0\n   psrlw $8, %xmm0\n   pinsrw $3, %eax, %xmm0\n"
-    "movd (%rdi), %xmm1\n   punpcklbw %xmm2, %xmm1\n"
-    "mov $255, %ecx\n   sub %eax, %ecx\n   movd %ecx, %xmm3\n   pshuflw $0, %xmm3, %xmm3\n"
-    "pmullw %xmm3, %xmm1\n   paddw ui_over_128(%rip), %xmm1\n   pmulhuw ui_over_257(%rip), %xmm1\n"
-    "paddw %xmm0, %xmm1\n   packuswb %xmm1, %xmm1\n   movd %xmm1, (%rdi)\n"
-    "9:  " ASM_RET
-    ".size ui_kit_put_body, .-ui_kit_put_body\n"
-    ".popsection\n");
 #elif ARM64
 asm(".pushsection .text\n"
     ".balign 16\n"
@@ -8966,32 +8935,6 @@ asm(".pushsection .text\n"
     "fmov w0, s4\n   " ASM_RET
     "2:  mov w0, w1\n   " ASM_RET
     ".size ui_over_body, .-ui_over_body\n"
-    ".popsection\n");
-/*
-        ui_kit_put_body, as on x86-64: x0 the pixel, w1 the cover, w2 the colour. The tone is the colour times alpha
-        (cover over 4096) plus alpha >> 7, halved by 256, in the lanes; the under is laid over it with the same arithmetic.
-*/
-asm(".pushsection .text\n"
-    ".balign 16\n"
-    ".local ui_kit_put_body\n"
-    ".type ui_kit_put_body, " ASM_TYPE "\n"
-    "ui_kit_put_body:\n" ASM_ENDBR
-    "cbz w1, 9f\n"
-    "mov w3, #4096\n   cmp w1, w3\n   b.lo 2f\n"
-    "lsr w4, w2, #24\n   cmp w4, #255\n   b.ne 1f\n"
-    "str w2, [x0]\n" ASM_RET
-    "1:  mov w1, w3\n"
-    "2:  lsr w4, w2, #24\n   mul w4, w4, w1\n   lsr w4, w4, #12\n   cbz w4, 9f\n"
-    "add w5, w4, w4, lsr #7\n"
-    "dup v1.8h, w5\n   fmov s0, w2\n   uxtl v0.8h, v0.8b\n   mul v0.8h, v0.8h, v1.8h\n"
-    "movi v2.8h, #128\n   add v0.8h, v0.8h, v2.8h\n   ushr v0.8h, v0.8h, #8\n   mov v0.h[3], w4\n"
-    "ldr s1, [x0]\n   uxtl v1.8h, v1.8b\n"
-    "mov w6, #255\n   sub w6, w6, w4\n   dup v3.8h, w6\n   mul v1.8h, v1.8h, v3.8h\n"
-    "add v1.8h, v1.8h, v2.8h\n"
-    "movz w7, #257\n   dup v4.4h, w7\n   umull v5.4s, v1.4h, v4.4h\n   shrn v5.4h, v5.4s, #16\n"
-    "add v5.4h, v5.4h, v0.4h\n   sqxtun v5.8b, v5.8h\n   str s5, [x0]\n"
-    "9:  " ASM_RET
-    ".size ui_kit_put_body, .-ui_kit_put_body\n"
     ".popsection\n");
 #endif
 
@@ -12046,25 +11989,26 @@ static inline b32 ui_span_ends(b32 first, b32 width, b32 left, b32 right, b32 ad
         the tone over the pixel in the same registers. The C below it is riscv64's (its fused body counted more instructions
         than this C, see ui_over) and the reference the bodies are checked against.
 */
-#ifdef UI_KIT_PUT_ASM
-extern void ui_kit_put_body(unsigned int address_to at, unsigned int cover, unsigned int argb) __asm__("ui_kit_put_body")
-        __attribute__((visibility("hidden")));
+static inline fn ui_kit_put(unsigned int address_to row, b32 x, unsigned int cover, unsigned int argb)
+{
+        unsigned int c, under;
 
-static inline fn ui_kit_put(unsigned int address_to row, b32 x, unsigned int cover, unsigned int argb)
-{
-        ui_kit_put_body(row + x, cover, argb);
-}
-#else
-static inline fn ui_kit_put(unsigned int address_to row, b32 x, unsigned int cover, unsigned int argb)
-{
-        if (!cover)
+        if (!cover || !(argb >> 24))
                 return;
-        if (cover >= UI_FULL && argb >> 24 == 255)
+        c = cover > UI_FULL ? UI_FULL : cover;
+        under = row[x];
+        if ((under >> 24) == 255)
+        {
+                unsigned int full = argb >> 24 == 255 ? (argb | 0xff000000u) : ui_over(ui_premultiplied(argb, UI_FULL), under);
+
+                row[x] = canvas_mix_linear12(under, full, c);
+                return;
+        }
+        if (c >= UI_FULL && argb >> 24 == 255)
                 row[x] = argb | 0xff000000u;
         else
-                row[x] = ui_over(ui_premultiplied(argb, cover > UI_FULL ? UI_FULL : cover), row[x]);
+                row[x] = ui_over(ui_premultiplied(argb, c), under);
 }
-#endif
 
 /*
         A run of pixels laid over with one premultiplied tone, which is what ui_over gives each of them: an opaque tone
@@ -12313,7 +12257,13 @@ static fn ui_kit_fill_cols(struct ui address_to ui, const struct ui_box address_
                         for (b32 x = lo; x < a; x++)
                                 ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
                         if (b > a && inside)
-                                ui_kit_run(row + a, b - a, ui_kit_cover(argb, inside));
+                        {
+                                if (inside >= UI_FULL)
+                                        ui_kit_run(row + a, b - a, ui_kit_cover(argb, UI_FULL));
+                                else
+                                        for (b32 x = a; x < b; x++)
+                                                ui_kit_put(row, x, inside, argb);
+                        }
                         for (b32 x = b > a ? b : hi; x < hi; x++)
                                 ui_kit_put(row, x, clip ? ui_spans_cover(&spans, x) * ui_spans_cover(&cut, x) / UI_FULL : ui_spans_cover(&spans, x), argb);
                 }
@@ -12455,8 +12405,11 @@ static fn ui_kit_ring_cols(struct ui address_to ui, const struct ui_box address_
 
                                 if (x == a && b > a)
                                 {
-                                        if (inside > 0)
-                                                ui_kit_run(row + a, b - a, ui_premultiplied(argb, (unsigned int)inside > UI_FULL ? UI_FULL : (unsigned int)inside));
+                                        if (inside >= (int)UI_FULL)
+                                                ui_kit_run(row + a, b - a, ui_premultiplied(argb, UI_FULL));
+                                        else if (inside > 0)
+                                                for (b32 rx = a; rx < b; rx++)
+                                                        ui_kit_put(row, rx, (unsigned int)inside, argb);
                                         x = b - 1;
                                         continue;
                                 }

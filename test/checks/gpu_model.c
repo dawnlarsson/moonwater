@@ -415,7 +415,7 @@ b32 main()
                       model_hash() == GPU_TEST_HASH && !gpu_model.fault.code);
         }
 
-        // One bit of one word of the card's copy of the scene kernel flipped (premulv's v_lshrrev_b32 v35, 12, v35 made 13): the model runs it to its end and the hash is another.
+        // One bit of one word of the card's copy of the scene kernel flipped (boxpixel's linear-light v_lshrrev_b32 v47, 12, v47 made 13): the model runs it to its end and the hash is another.
         {
                 p32 address_to code = (p32 address_to)((p8 address_to)gpu.at + gpu_kernel_at[6]);
                 unsigned int words = (unsigned int)(gpu_kernels[6].size - 8) / 4, found = 0;
@@ -427,7 +427,7 @@ b32 main()
 
                         if (gpu_model_decode(code + at, words - at, 4ull * at, &in))
                                 break;
-                        if (in.id == gpu_model_find(GM_VOP2, 0x16) && !in.e64 && in.op[0] == 256 + 35 && in.op[1] == 128 + 12 && in.op[2] == 256 + 35)
+                        if (in.id == gpu_model_find(GM_VOP2, 0x16) && !in.e64 && in.op[0] == 256 + 47 && in.op[1] == 128 + 12 && in.op[2] == 256 + 47)
                                 found = at + 1;
                         at += in.words;
                 }
