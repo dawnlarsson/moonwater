@@ -7347,7 +7347,11 @@ static fn check_kit_place(void)
                 ui_control_draw(&ui, &column);
                 started = !ui_kit.busy && (ui_kit.now = (b64)(ui_kit.now), ui_tween_at(&column.pip_y, &live)) == ui_q(3 * 34);
                 ui_tabs_choose(&ui, &column, 6);
-                cascade = column.item_dom[3].at && column.item_dom[5].at && column.item_dom[6].at && !column.item_dom[2].at && !column.item_dom[7].at;
+                {
+                        struct ui_items_anim address_to a = ui_items_anim_for(&column);
+
+                        cascade = a->dom[3].at && a->dom[5].at && a->dom[6].at && !a->dom[2].at && !a->dom[7].at;
+                }
                 ui_kit.now += 16666667, ui_kit.busy = 0;
                 ui_control_draw(&ui, &column);
                 ui_kit.now += 150000000ll, ui_kit.busy = 0;

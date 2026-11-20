@@ -3717,7 +3717,7 @@ static fn check_settings_keys(void)
 
 static unsigned int settings_frames_whole[SETTINGS_FRAMES_W * SETTINGS_FRAMES_H];
 static p8 settings_frames_kept[sizeof(settings)], settings_frames_kit[sizeof(ui_kit)];
-static struct ui_control settings_frames_controls[2 * SETTINGS_LIST_IDS];
+static struct ui_list_slot settings_frames_controls[UI_LIST_POOL];
 
 static struct
 {
@@ -3735,11 +3735,13 @@ static b32 settings_frames_same(int slot, string_address when)
 
         memory_copy(settings_frames_kept, &settings, sizeof(settings));
         memory_copy(settings_frames_kit, &ui_kit, sizeof(ui_kit));
-        memory_copy(settings_frames_controls, settings.list.controls, sizeof(settings_frames_controls));
+        if (settings.list.pool)
+                memory_copy(settings_frames_controls, settings.list.pool, sizeof(settings_frames_controls));
         settings_draw_rows(settings_frames_whole, 0, 0);
         memory_copy(&settings, settings_frames_kept, sizeof(settings));
         memory_copy(&ui_kit, settings_frames_kit, sizeof(ui_kit));
-        memory_copy(settings.list.controls, settings_frames_controls, sizeof(settings_frames_controls));
+        if (settings.list.pool)
+                memory_copy(settings.list.pool, settings_frames_controls, sizeof(settings_frames_controls));
         // The picture is the window's size, which a resize makes less than the buffer's.
         for (int y = 0; y < settings.height; y++)
                 for (int x = 0; x < settings.width; x++)
@@ -6367,7 +6369,7 @@ static fn check_settings_drive_rows(string_address regular, string_address bold)
         settings.ui.regular = &faces[0];
         settings.ui.bold = bold_bytes && font_load(&faces[1], (const p8 address_to)bold_bytes, bold_size, 0) == 0 ? &faces[1] : null;
         settings.ui.scale = 100, settings.ui.opaque = 1;
-        settings.list.controls = null, settings.page.buffers.shown = -1, settings.page.pane = 0;
+        settings.list.pool = null, settings.page.buffers.shown = -1, settings.page.pane = 0;
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 1);
         ui_kit_theme(UI_THEME_DARK, UI_ACCENT_STANDARD, 0);
         ui_inks(&settings.ui, 0x101012u);
@@ -7790,8 +7792,8 @@ static fn check_settings_frames(string_address regular, string_address bold)
                 struct ui ui;
                 struct window_row own;
                 int width, height, shown, group;
-                struct ui_control address_to controls;
-        } saved = {settings.ui, settings.own, settings.width, settings.height, settings.page.buffers.shown, settings.page.chosen, settings.list.controls};
+                struct ui_list_slot address_to pool;
+        } saved = {settings.ui, settings.own, settings.width, settings.height, settings.page.buffers.shown, settings.page.chosen, settings.list.pool};
 
         if (!bytes || (engine < 0 && engine > -4096) || (table < 0 && table > -4096) || !settings_map() ||
             font_load(&faces[0], (const p8 address_to)bytes, size, 0) != 0)
@@ -7992,7 +7994,7 @@ static fn check_settings_frames(string_address regular, string_address bold)
         settings.ui = saved.ui;
         settings.own = saved.own;
         settings.width = saved.width, settings.height = saved.height, settings.page.buffers.shown = saved.shown, settings.page.chosen = saved.group;
-        settings.list.controls = saved.controls;
+        settings.list.pool = saved.pool;
         settings_layout();
         compositor_call(syscall(munmap), (positive)table, WINDOWS_HEADER + 2 * buffer, 0, 0, 0, 0);
         compositor_call(syscall(munmap), (positive)engine, sizeof(font_engine), 0, 0, 0, 0);

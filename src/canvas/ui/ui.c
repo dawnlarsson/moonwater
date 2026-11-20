@@ -713,6 +713,16 @@ static inline int ui_click_again(struct ui_click *k, b64 now, int x, int y, int 
         return k->count;
 }
 
+// Double-click by target id within ui_click_ns (used by list rows and splitter seams).
+static inline b32 ui_click_same(struct ui_click *k, b64 now, int id)
+{
+        b32 again = k->count && k->x == id && now - k->at <= ui_click_ns;
+
+        k->count = again ? 0 : 1;
+        k->x = id, k->at = now;
+        return again;
+}
+
 // The whole notches a turn of a wheel makes, its 120ths added to the rest kept from the turns before (the rest is what is left
 // under the last notch, for the next turn: a wheel that reports 120ths sends several turns to a notch). The compositor's
 // tray wheel and the kit's wheel share it; a turn back takes notches back.
@@ -12966,7 +12976,7 @@ struct ui_control
         struct ui_chase drawn;
         struct ui_ripple ripple[3];
         struct ui_tween layer, fill, ink, label_ink, stroke, scale, extent, pip_x, pip_w, pip_y;
-        struct ui_stretch dom, item_dom[UI_ITEMS];
+        struct ui_stretch dom;
         int dom_origin;                    // -1 the far edge, 1 the near (left, top), 0 the middle
         struct ui_spring held_squish;      // --sw-squish or --squish let go
         b64 bend, bend_target;             // --sw-squish / --squish held, Q30 over one; the slider's jello target
@@ -12989,6 +12999,7 @@ struct ui_control
         int close_item, close_hover;       // tabs: item closed on click (-1 none); hovered close slot (-1 none, -2 add button)
         b32 add_clicked;                   // tabs: '+' button clicked
         int tab_right_click;               // tabs: item right-clicked (-1 none)
+        unsigned char hit_kind;            // tabs: UI_TAB_HIT_* captured on press
 };
 
 // The row a control's ripple and hover cover, in logical pixels.
@@ -13058,7 +13069,7 @@ static struct ui_box ui_kit_focus_outset(const struct ui address_to ui, struct u
 // A determinate progress's fill as a whole: at most the track's end, UI_ONE (a value past its whole fills the track, no more).
 static inline b64 ui_progress_whole(b64 value) { return value > UI_ONE ? UI_ONE : value; }
 
-// Per-item ink & scale tweens live in a small ID-keyed pool instead of bloating every ui_control by ~5 KiB.
+// Per-item ink, scale, and domino-stretch animations live in a small ID-keyed pool instead of bloating every ui_control.
 // Keyed by a monotonic generation ID stored on ui_control (not its pointer) so value copies (`bare = *c`)
 // share the exact mid-tween state and `memory_zero` cleanly disassociates reused stack slots.
 #define UI_ITEMS_POOL 16
@@ -13066,6 +13077,7 @@ struct ui_items_anim
 {
         p64 id, used;
         struct ui_tween ink[UI_ITEMS], scale[UI_ITEMS];
+        struct ui_stretch dom[UI_ITEMS];
 };
 static struct ui_items_anim ui_items_pool[UI_ITEMS_POOL];
 static p64 ui_items_gen, ui_items_tick;
@@ -13263,34 +13275,40 @@ struct ui_place
         b32 ox, oy, tx, ty;
 };
 
+// Paint one active ripple at origin (ox, oy) in Q8 device px, through optional transform `place`, clipped to `clip`. Returns true if live.
+static b32 ui_ripple_paint(struct ui address_to ui, struct ui_ripple address_to r, b32 ox, b32 oy,
+                           const struct ui_place address_to place, const struct ui_box address_to clip, unsigned int argb)
+{
+        b64 cx, cy, radius, opacity;
+        struct ui_box dot;
+
+        if (!ui_ripple_at(r, &cx, &cy, &radius, &opacity))
+                return false;
+        dot.x0 = ox + (b32)(((cx - radius) * ui->scale / 100) >> 22);
+        dot.x1 = ox + (b32)(((cx + radius) * ui->scale / 100) >> 22);
+        dot.y0 = oy + (b32)(((cy - radius) * ui->scale / 100) >> 22);
+        dot.y1 = oy + (b32)(((cy + radius) * ui->scale / 100) >> 22);
+        dot.rx = dot.ry = (b32)((radius * ui->scale / 100) >> 22);
+        if (place)
+                dot = ui_box_transform(dot, place->sx, place->sy, place->ox, place->oy, place->tx, place->ty);
+        ui_kit_fill(ui, &dot, ui_mix(argb, (unsigned int)((opacity * 100 + UI_HALF) >> UI_Q), 0), clip);
+        return true;
+}
+
 static fn ui_kit_ripples_on(struct ui address_to ui, struct ui_control address_to c, b32 x0, b32 y0, const struct ui_place address_to place,
                             const struct ui_box address_to clip, unsigned int argb, const struct ui_box address_to pill)
 {
         for (int k = 0; k < 3; k++)
         {
-                b64 cx, cy, radius, opacity;
-                struct ui_box dot;
-                struct ui_place frame = *place;
+                const struct ui_place address_to frame = place;
                 const struct ui_box address_to cut = clip;
                 b32 ox = x0, oy = y0;
 
-                if (!ui_ripple_at(&c->ripple[k], &cx, &cy, &radius, &opacity))
-                        continue;
-                ui_kit.busy = 1;
                 // A tab's ripple that rides the indicator is measured from the indicator's own rectangle this frame, and cut to it.
                 if (pill && c->ripple[k].rides)
-                {
-                        struct ui_place still = {UI_ONE, UI_ONE, 0, 0, 0, 0};
-
-                        ox = pill->x0 - ui_q8(ui, 8), oy = pill->y0 - ui_q8(ui, 8), frame = still, cut = pill;
-                }
-                dot.x0 = ox + (b32)(((cx - radius) * ui->scale / 100) >> 22);
-                dot.x1 = ox + (b32)(((cx + radius) * ui->scale / 100) >> 22);
-                dot.y0 = oy + (b32)(((cy - radius) * ui->scale / 100) >> 22);
-                dot.y1 = oy + (b32)(((cy + radius) * ui->scale / 100) >> 22);
-                dot.rx = dot.ry = (b32)((radius * ui->scale / 100) >> 22);
-                dot = ui_box_transform(dot, frame.sx, frame.sy, frame.ox, frame.oy, frame.tx, frame.ty);
-                ui_kit_fill(ui, &dot, ui_mix(argb, (unsigned int)((opacity * 100 + UI_HALF) >> UI_Q), 0), cut);
+                        ox = pill->x0 - ui_q8(ui, 8), oy = pill->y0 - ui_q8(ui, 8), frame = null, cut = pill;
+                if (ui_ripple_paint(ui, &c->ripple[k], ox, oy, frame, cut, argb))
+                        ui_kit.busy = 1;
         }
 }
 
@@ -13591,6 +13609,36 @@ static fn ui_toggle_draw(struct ui address_to ui, struct ui_control address_to c
         at 0.55 of it. Pressing the chosen one again squishes it (0.84) and the
         pip (pip-press, .3s).
 */
+// Domino stretch cascade across items between c->at and `item` (pos[] in Q30; null = evenly spaced by index).
+static fn ui_domino_cascade(struct ui_control address_to c, int item, const b64 address_to pos, b64 tol, int flight_ms, b64 peak)
+{
+        int from = c->at;
+        b64 p0, p1, length;
+
+        if (item == from || item < 0 || item >= c->count)
+                return;
+        p0 = pos ? pos[from] : ui_q(from);
+        p1 = pos ? pos[item] : ui_q(item);
+        length = p1 > p0 ? p1 - p0 : p0 - p1;
+        c->dom_origin = p1 >= p0 ? 1 : -1;
+        if (!ui_kit.motion && length >= UI_ONE)
+        {
+                struct ui_items_anim address_to anim = ui_items_anim_for(c);
+
+                for (int k = 0; k < c->count; k++)
+                {
+                        b64 pk = pos ? pos[k] : ui_q(k);
+                        b64 along = p1 >= p0 ? pk - p0 : p0 - pk;
+
+                        if (along < -tol || along > length + tol)
+                                continue;
+                        along = along < 0 ? 0 : along > length ? length : along;
+                        ui_stretch_go(&anim->dom[k], ui_kit.now + ui_paced(ui_qmul(ui_qdiv(along, length), (b64)flight_ms * UI_MS)), peak);
+                }
+        }
+        c->at = item;
+}
+
 static b32 ui_radio_row_y(const struct ui_control address_to c, int item)
 {
         return c->y + item * UI_RADIO_PITCH;
@@ -13612,7 +13660,7 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
         for (int item = 0; item < c->count; item++)
         {
                 b32 ry = ui_q8(ui, ui_radio_row_y(c, item)), rh = ui_q8(ui, c->h), oy = ry + rh / 2, rx = ui_q8(ui, c->x), rw = ui_q8(ui, c->w);
-                b64 dom = ui_stretch_at(&c->item_dom[item], &live), hover, rest;
+                b64 dom = ui_stretch_at(&anim->dom[item], &live), hover, rest;
                 b32 origin = c->dom_origin > 0 ? oy - ui_q8(ui, 14) : c->dom_origin < 0 ? oy + ui_q8(ui, 14) : oy;
                 b32 lrow = c->item == item;
                 struct ui_box dot = {cx - ui_q8(ui, 14), oy - ui_q8(ui, 14), cx + ui_q8(ui, 14), oy + ui_q8(ui, 14), ui_q8(ui, 14), ui_q8(ui, 14)};
@@ -13704,22 +13752,11 @@ static fn ui_radios_draw(struct ui address_to ui, struct ui_control address_to c
 // The radio domino: the rows between the old and the new, stretched as the pip passes each (240 ms of flight).
 static fn ui_radios_choose(struct ui_control address_to c, int item)
 {
-        int from = c->at, distance = item > from ? item - from : from - item;
+        int before = c->at;
 
-        if (item == from)
-                return;
-        c->dom_origin = item > from ? 1 : -1;
-        if (!ui_kit.motion)
-                for (int k = 0; k < c->count; k++)
-                {
-                        int along = (item > from ? k - from : from - k);
-
-                        if (along < 0 || along > distance)
-                                continue;
-                        ui_stretch_go(&c->item_dom[k], ui_kit.now + ui_paced((b64)along * 240 * UI_MS / distance), UI_Q2(134));
-                }
-        c->at = item;
-        c->pip_squash = ui_kit.motion ? 0 : 1;
+        ui_domino_cascade(c, item, null, 0, 240, UI_Q2(134));
+        if (c->at != before)
+                c->pip_squash = ui_kit.motion ? 0 : 1;
 }
 
 /*
@@ -14098,296 +14135,324 @@ static int ui_tabs_add_left(struct ui address_to ui, const struct ui_control add
         return ui_mirror(x, UI_TAB_ADD_W, c->x, c->w);
 }
 
-static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c);
-static fn ui_tabs_marks(struct ui address_to ui, struct ui_control address_to c, int height);
+// Structured hit result for tabs (eliminates UI_ITEMS + k / 2 * UI_ITEMS magic offsets).
+#define UI_TAB_HIT_NONE 0
+#define UI_TAB_HIT_ITEM 1
+#define UI_TAB_HIT_CLOSE 2
+#define UI_TAB_HIT_ADD 3
 
-#define UI_TABS_H 32 // a segmented tab's height, the pill (a strip of tabs, the editor's file tabs too)
-static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
+struct ui_tab_hit
 {
-        UI_CALL();
-        b32 seg = c->variant == UI_TABS_SEGMENTED, live = 0;
+        int kind; // UI_TAB_HIT_*
+        int item; // tab index for ITEM/CLOSE, -1 otherwise
+};
 
-        if (c->variant == UI_TABS_VERTICAL)
-        {
-                ui_vtabs_draw(ui, c);
-                return;
-        }
-        // A strip with no items or no window room has nothing to draw.
-        if (c->count == 0 || ui->scale <= 0 || ui->width <= 0 || ui->height <= 0 || (c->closable && c->w <= 0))
-                return;
-        int height = seg ? UI_TABS_H : 40, chosen = c->at;
-        struct ui_items_anim address_to anim = ui_items_anim_for(c);
-        b64 pip_x, pip_w;
-
-        if (chosen < 0 || chosen >= c->count)
-                chosen = 0;
-        if (!seg)
-        {
-                struct ui_box hair = {ui_q8(ui, c->x), ui_q8(ui, c->y + height), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + height) + ui_stroke(ui), 0, 0};
-
-                ui_kit_fill(ui, &hair, ui_role(UI_OUTLINE_VARIANT), null);
-        }
-        // The pip's place is the strip's own (from its left), so a strip the layout moves takes its pip with it at once.
-        ui_kit_number_to(&c->pip_x, ui_q(ui_tab_left(ui, c, chosen) - c->x + (seg ? 0 : 8)), 350, &ui_ease);
-        ui_kit_number_to(&c->pip_w, ui_q(ui_tab_width(ui, c, chosen) - (seg ? 0 : 16)), 350, &ui_ease);
-        pip_x = ui_q(c->x) + ui_kit_tween(&c->pip_x);
-        pip_w = ui_kit_tween(&c->pip_w);
-        // The hovered tab's state layer is under the pip, so a pip sliding past it keeps its own accent and is not muddied by the layer's grey.
-        if (c->item >= 0 && c->item < c->count)
-        {
-                int x = ui_tab_left(ui, c, c->item), w = ui_tab_width(ui, c, c->item);
-                b32 bx = ui_q8(ui, x), bw = ui_q8(ui, w), anchor = c->dom_origin > 0 ? bx : bx + bw;
-                b64 dom = ui_stretch_at(&c->item_dom[c->item], &live);
-                struct ui_box face = ui_box_transform(ui_box_of(ui, ui_q(x), ui_q(c->y), ui_q(w), ui_q(height), ui_q(height) / 2), dom, UI_ONE, anchor, 0, 0, 0);
-
-                ui_kit_layer_to(c, 0);
-                ui_kit_layer_fill(ui, &face, ui_kit_colour(&anim->ink[c->item]), ui_kit_layer(c));
-        }
-        {
-                struct ui_box pip = seg ? ui_box_of(ui, pip_x, ui_q(c->y), pip_w, ui_q(height), ui_q(height) / 2)
-                                        : ui_box_of(ui, pip_x, ui_q(c->y + height - 1), pip_w, ui_q(2), ui_q(2));
-
-                ui_kit_fill(ui, &pip, ui_role(UI_PRIMARY), null);
-        }
-        for (int item = 0; item < c->count; item++)
-        {
-                int x = ui_tab_left(ui, c, item), w = ui_tab_width(ui, c, item), width, baseline;
-                b64 dom = ui_stretch_at(&c->item_dom[item], &live);
-                b32 bx = ui_q8(ui, x), bw = ui_q8(ui, w), anchor = c->dom_origin > 0 ? bx : bx + bw;
-                struct ui_box face = ui_box_of(ui, ui_q(x), ui_q(c->y), ui_q(w), ui_q(height), ui_q(height) / 2);
-                unsigned int ink;
-                char cut[128];
-                string_address shown = (string_address)c->items[item];
-
-                if (w <= 0)
-                        continue;
-                ui_kit_colour_to(&anim->ink[item], item == chosen ? ui_role(seg ? UI_ON_PRIMARY : UI_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT),
-                                 200, &ui_ease);
-                ink = ui_kit_colour(&anim->ink[item]);
-                face = ui_box_transform(face, dom, UI_ONE, anchor, 0, 0, 0);
-                // The ripple: a tab is a button (its state layer is under the pip, above).
-                if (c->item == item)
-                {
-                        struct ui_place place = {dom, UI_ONE, anchor, 0, 0, 0};
-                        struct ui_box pill = ui_box_of(ui, pip_x, ui_q(c->y), pip_w, ui_q(height), ui_q(height) / 2);
-
-                        ui_kit_ripples_on(ui, c, bx - ui_q8(ui, 8), ui_q8(ui, c->y - 8), &place, &face, ink, seg ? &pill : null);
-                }
-                baseline = ui_kit_baseline(ui, ui_dev(ui, c->y) + (ui_dev(ui, height) - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE);
-                if (c->closable)
-                {
-                        int close_w = w >= 40 ? UI_TAB_CLOSE_W + 4 : 0;
-                        int label_x = ui_rtl() ? x + close_w + 8 : x + 12;
-                        int label_room = ui_dev(ui, w - close_w - 16);
-
-                        if (label_room > 0)
-                        {
-                                shown = ui_fit(ui, shown, UI_LABEL_LARGE, label_room, cut, sizeof(cut));
-                                width = ui_kit_measure(ui, shown, UI_LABEL_LARGE);
-                                ui_kit_text(ui, ui_dev(ui, label_x) + (label_room > width ? (label_room - width) / 2 : 0), baseline, shown, UI_LABEL_LARGE, ink, 0);
-                        }
-                        if (close_w > 0)
-                        {
-                                int cx = ui_tab_close_left(ui, c, item), cy = c->y + (height - UI_TAB_CLOSE_W) / 2;
-                                b32 dirty = item < 32 && (c->marks & (1u << item)) != 0;
-                                b32 hot = c->close_hover == item;
-
-                                if (hot)
-                                {
-                                        struct ui_box pill = ui_box_of(ui, ui_q(cx), ui_q(cy), ui_q(UI_TAB_CLOSE_W), ui_q(UI_TAB_CLOSE_W), ui_q(UI_TAB_CLOSE_W / 2));
-
-                                        ui_kit_layer_fill(ui, &pill, ink, 36);
-                                }
-                                if (dirty && !hot)
-                                {
-                                        int dot = ui_px(ui, UI_DOT);
-
-                                        ui_kit_dot(ui, ui_dev(ui, cx) + (ui_dev(ui, UI_TAB_CLOSE_W) - dot) / 2,
-                                                   ui_dev(ui, c->y) + (ui_dev(ui, height) - dot) / 2, ink | 0xff000000u);
-                                }
-                                else if (hot || item == chosen || c->item == item)
-                                {
-                                        int xw = ui_kit_measure(ui, (string_address) "\xc3\x97", UI_LABEL_LARGE);
-                                        unsigned int xink = hot ? ink : (ink & 0xffffffu) | 0xb0000000u;
-
-                                        ui_kit_text(ui, ui_dev(ui, cx) + (ui_dev(ui, UI_TAB_CLOSE_W) - xw) / 2, baseline, (string_address) "\xc3\x97", UI_LABEL_LARGE, xink, 0);
-                                }
-                        }
-                }
-                else
-                {
-                        b32 middle = bx + bw / 2;
-
-                        width = ui_kit_measure(ui, shown, UI_LABEL_LARGE);
-                        middle = anchor + (b32)ui_qmul(middle - anchor, dom);
-                        ui_kit_text(ui, middle / 256 - width / 2, baseline, shown, UI_LABEL_LARGE, ink, 0);
-                }
-        }
-        if (c->addable)
-        {
-                int ax = ui_tabs_add_left(ui, c);
-
-                if (ax >= 0)
-                {
-                        struct ui_box add_box = ui_box_of(ui, ui_q(ax), ui_q(c->y), ui_q(UI_TAB_ADD_W), ui_q(height), ui_q(height) / 2);
-                        unsigned int ink = ui_role(c->close_hover == -2 ? UI_ON_SURFACE : UI_ON_SURFACE_VARIANT);
-                        int pw = ui_kit_measure(ui, (string_address) "+", UI_LABEL_LARGE);
-                        int baseline = ui_kit_baseline(ui, ui_dev(ui, c->y) + (ui_dev(ui, height) - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE);
-
-                        if (c->close_hover == -2)
-                                ui_kit_layer_fill(ui, &add_box, ink, 24);
-                        ui_kit_text(ui, ui_dev(ui, ax) + (ui_dev(ui, UI_TAB_ADD_W) - pw) / 2, baseline, (string_address) "+", UI_LABEL_LARGE, ink, 0);
-                }
-        }
-        if (!c->closable)
-                ui_tabs_marks(ui, c, height);
-        ui_kit.busy |= live;
-}
-
-/*
-        Tabs stood on end (UI_TABS_VERTICAL): a column of items h tall and w wide,
-        their text at the left 12 in, the accent pip behind the chosen one sliding
-        up and down to it over .35s --ease-emphasized, the items it rolls over
-        stretched 1.13 along y as it passes (130 ms of flight, anchored at their
-        trailing edge), colours .2s, the hovered one's state layer and a press's
-        ripple: the horizontal strip's every number, on the other axis.
-*/
-// Where a column's rows run across, logical pixels: the whole row the page gave it (row_x, row_w: flush with the window's
-// edge to the middle of the scroll bar's track), or the column's own box where it has none.
 static fn ui_vtabs_row(const struct ui_control address_to c, int address_to x, int address_to w)
 {
         *x = c->row_w > 0 ? c->row_x : c->x;
         *w = c->row_w > 0 ? c->row_w : c->w;
 }
 
-static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c)
+static struct ui_tab_hit ui_tab_hit_at(struct ui address_to ui, const struct ui_control address_to c, int x, int y)
+{
+        if (c->variant == UI_TABS_VERTICAL)
+        {
+                int rx, rw;
+
+                ui_vtabs_row(c, &rx, &rw);
+                for (int k = 0; k < c->count; k++)
+                        if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, rx), ui_dev(ui, c->y + k * c->h), ui_dev(ui, rw), ui_dev(ui, c->h)))
+                                return (struct ui_tab_hit){UI_TAB_HIT_ITEM, k};
+                return (struct ui_tab_hit){UI_TAB_HIT_NONE, -1};
+        }
+        {
+                int h = c->variant ? 32 : 40;
+
+                if (c->addable)
+                {
+                        int ax = ui_tabs_add_left(ui, c);
+
+                        if (ax >= 0 && ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, ax), ui_dev(ui, c->y), ui_dev(ui, UI_TAB_ADD_W), ui_dev(ui, h)))
+                                return (struct ui_tab_hit){UI_TAB_HIT_ADD, -1};
+                }
+                for (int k = 0; k < c->count; k++)
+                {
+                        int left = ui_tab_left(ui, c, k), wide = ui_tab_width(ui, c, k);
+
+                        if (wide <= 0)
+                                continue;
+                        if (c->closable && wide >= 40)
+                        {
+                                int cx = ui_tab_close_left(ui, c, k), cy = c->y + (h - UI_TAB_CLOSE_W) / 2;
+
+                                if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, cx), ui_dev(ui, cy), ui_dev(ui, UI_TAB_CLOSE_W), ui_dev(ui, UI_TAB_CLOSE_W)))
+                                        return (struct ui_tab_hit){UI_TAB_HIT_CLOSE, k};
+                        }
+                        if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, left), ui_dev(ui, c->y), ui_dev(ui, wide), ui_dev(ui, h)))
+                                return (struct ui_tab_hit){UI_TAB_HIT_ITEM, k};
+                }
+                return (struct ui_tab_hit){UI_TAB_HIT_NONE, -1};
+        }
+}
+
+static fn ui_tabs_marks(struct ui address_to ui, struct ui_control address_to c, int height);
+
+// Axis descriptor unifying horizontal (segmented/underline) and vertical tab strips.
+struct ui_tab_axis
+{
+        b32 vertical, seg;
+        int rx, rw, height;
+        b64 pip_pos, pip_len;
+        struct ui_box pill;
+};
+
+static inline struct ui_place ui_tab_axis_place(b32 vertical, b64 dom, b32 anchor)
+{
+        return vertical ? (struct ui_place){UI_ONE, dom, 0, anchor, 0, 0} : (struct ui_place){dom, UI_ONE, anchor, 0, 0, 0};
+}
+
+static inline struct ui_box ui_tab_axis_stretch(struct ui_box box, b32 vertical, b64 dom, b32 anchor)
+{
+        struct ui_place p = ui_tab_axis_place(vertical, dom, anchor);
+
+        return ui_box_transform(box, p.sx, p.sy, p.ox, p.oy, 0, 0);
+}
+
+#define UI_TABS_H 32 // a segmented tab's height, the pill (a strip of tabs, the editor's file tabs too)
+static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
 {
         UI_CALL();
-        b32 busy = ui_kit.busy;
-        b64 pip_y;
-        int rx, rw;
+        struct ui_tab_axis ax;
+        struct ui_items_anim address_to anim;
+        b32 was_busy = ui_kit.busy, live = 0;
+        int chosen = c->at;
 
-        struct ui_items_anim address_to anim = ui_items_anim_for(c);
-
-        ui_vtabs_row(c, &rx, &rw);
-
-        // What moves is said item by item: the column is count items, and its box (c->h) is one of them. The pip's
-        // way is from where it set out to where it goes, which holds where it was drawn the frame before.
-        ui_kit.reached = 1;
-        ui_kit.busy = 0;
-        ui_kit_number_to(&c->pip_y, ui_q(c->at * c->h), 350, &ui_ease);
-        pip_y = ui_q(c->y) + ui_kit_tween(&c->pip_y);
-        if (ui_kit.busy)
+        ax.vertical = c->variant == UI_TABS_VERTICAL;
+        ax.seg = c->variant == UI_TABS_SEGMENTED;
+        if (!ax.vertical && (c->count == 0 || ui->scale <= 0 || ui->width <= 0 || ui->height <= 0 || (c->closable && c->w <= 0)))
+                return;
+        anim = ui_items_anim_for(c);
+        if (ax.vertical)
         {
-                b64 from = c->pip_y.from < c->pip_y.to ? c->pip_y.from : c->pip_y.to, to = c->pip_y.from < c->pip_y.to ? c->pip_y.to : c->pip_y.from;
+                ui_vtabs_row(c, &ax.rx, &ax.rw);
+                ax.height = c->h;
+                ui_kit.reached = 1;
+                ui_kit.busy = 0;
+                ui_kit_number_to(&c->pip_y, ui_q(c->at * c->h), 350, &ui_ease);
+                ax.pip_pos = ui_q(c->y) + ui_kit_tween(&c->pip_y);
+                ax.pip_len = ui_q(c->h);
+                if (ui_kit.busy)
+                {
+                        b64 lo = c->pip_y.from < c->pip_y.to ? c->pip_y.from : c->pip_y.to;
+                        b64 hi = c->pip_y.from < c->pip_y.to ? c->pip_y.to : c->pip_y.from;
 
-                ui_kit_reach(c->y + (int)(from >> UI_Q), c->y + (int)((to + UI_ONE - 1) >> UI_Q) + c->h);
+                        ui_kit_reach(c->y + (int)(lo >> UI_Q), c->y + (int)((hi + UI_ONE - 1) >> UI_Q) + c->h);
+                }
+                was_busy |= ui_kit.busy;
+                ax.pill = ui_box_of(ui, ui_q(ax.rx), ax.pip_pos, ui_q(ax.rw), ax.pip_len, 0);
+                {
+                        struct ui_box pip = ax.pill;
+
+                        pip.y0 = (b32)((ax.pip_pos * ui->scale / 100) >> 22);
+                        pip.y1 = (b32)(((ax.pip_pos + ax.pip_len) * ui->scale / 100) >> 22);
+                        if (!c->disabled && c->count > 0)
+                                ui_kit_fill(ui, &pip, ui_kit_lit(ui), null);
+                }
         }
-        busy |= ui_kit.busy;
+        else
         {
-                // The chosen group is its whole row, square, in the fill every list's lit row has (ui_kit_lit).
-                struct ui_box pip = ui_box_of(ui, ui_q(rx), pip_y, ui_q(rw), ui_q(c->h), 0);
+                ax.height = ax.seg ? UI_TABS_H : 40;
+                if (chosen < 0 || chosen >= c->count)
+                        chosen = 0;
+                if (!ax.seg)
+                {
+                        struct ui_box hair = {ui_q8(ui, c->x), ui_q8(ui, c->y + ax.height), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + ax.height) + ui_stroke(ui), 0, 0};
 
-                pip.y0 = (b32)((pip_y * ui->scale / 100) >> 22), pip.y1 = (b32)(((pip_y + ui_q(c->h)) * ui->scale / 100) >> 22);
+                        ui_kit_fill(ui, &hair, ui_role(UI_OUTLINE_VARIANT), null);
+                }
+                ui_kit_number_to(&c->pip_x, ui_q(ui_tab_left(ui, c, chosen) - c->x + (ax.seg ? 0 : 8)), 350, &ui_ease);
+                ui_kit_number_to(&c->pip_w, ui_q(ui_tab_width(ui, c, chosen) - (ax.seg ? 0 : 16)), 350, &ui_ease);
+                ax.pip_pos = ui_q(c->x) + ui_kit_tween(&c->pip_x);
+                ax.pip_len = ui_kit_tween(&c->pip_w);
+                ax.pill = ui_box_of(ui, ax.pip_pos, ui_q(c->y), ax.pip_len, ui_q(ax.height), ui_q(ax.height) / 2);
+                // Hovered tab state layer goes under the pip so a sliding accent pip is not muddied by the layer.
+                if (c->item >= 0 && c->item < c->count)
+                {
+                        int x = ui_tab_left(ui, c, c->item), w = ui_tab_width(ui, c, c->item);
+                        b32 bx = ui_q8(ui, x), bw = ui_q8(ui, w), anchor = c->dom_origin > 0 ? bx : bx + bw;
+                        b64 dom = ui_stretch_at(&anim->dom[c->item], &live);
+                        struct ui_box face = ui_tab_axis_stretch(ui_box_of(ui, ui_q(x), ui_q(c->y), ui_q(w), ui_q(ax.height), ui_q(ax.height) / 2), false, dom, anchor);
 
-                if (!c->disabled && c->count > 0) // no items, no chosen one to show
-                        ui_kit_fill(ui, &pip, ui_kit_lit(ui), null);
-                // The keys in the column have no ring: the pip is the chosen group and the group the keys are on, and it says so.
+                        ui_kit_layer_to(c, 0);
+                        ui_kit_layer_fill(ui, &face, ui_kit_colour(&anim->ink[c->item]), ui_kit_layer(c));
+                }
+                {
+                        struct ui_box pip = ax.seg ? ax.pill : ui_box_of(ui, ax.pip_pos, ui_q(c->y + ax.height - 1), ax.pip_len, ui_q(2), ui_q(2));
+
+                        ui_kit_fill(ui, &pip, ui_role(UI_PRIMARY), null);
+                }
         }
         for (int item = 0; item < c->count; item++)
         {
-                int y = c->y + item * c->h;
-                b32 live = 0;
-                b64 dom = ui_stretch_at(&c->item_dom[item], &live);
-                b32 by = ui_q8(ui, y), bh = ui_q8(ui, y + c->h) - by, anchor = c->dom_origin > 0 ? by : by + bh;
-                struct ui_box face = ui_box_of(ui, ui_q(rx), ui_q(y), ui_q(rw), ui_q(c->h), 0);
+                b32 item_live = 0;
+                b64 dom = ui_stretch_at(&anim->dom[item], &item_live);
+                int ix = ax.vertical ? ax.rx : ui_tab_left(ui, c, item);
+                int iy = ax.vertical ? c->y + item * c->h : c->y;
+                int iw = ax.vertical ? ax.rw : ui_tab_width(ui, c, item);
+                int ih = ax.height;
+                b32 a0 = ax.vertical ? ui_q8(ui, iy) : ui_q8(ui, ix);
+                b32 alen = ax.vertical ? ui_q8(ui, iy + ih) - a0 : ui_q8(ui, iw);
+                b32 anchor = c->dom_origin > 0 ? a0 : a0 + alen;
+                struct ui_box face;
+                unsigned int ink, target_ink;
 
-                face.y0 = (b32)by, face.y1 = (b32)(by + bh);
-                unsigned int ink;
-                b32 middle;
-
-                busy |= live;
-                ui_kit.busy = live;
-                if (y + c->h + 8 < ui->top * 100 / ui->scale || y - 8 > ui->bottom * 100 / ui->scale)
-                        continue;
-                ui_kit_colour_to(&anim->ink[item], item == c->at && !c->disabled ? ui_role(UI_ON_SURFACE) : ui_role(UI_ON_SURFACE_VARIANT), 200, &ui_ease);
+                if (ax.vertical)
+                {
+                        was_busy |= item_live;
+                        ui_kit.busy = item_live;
+                        if (iy + ih + 8 < ui->top * 100 / ui->scale || iy - 8 > ui->bottom * 100 / ui->scale)
+                                continue;
+                        face = ui_box_of(ui, ui_q(ix), ui_q(iy), ui_q(iw), ui_q(ih), 0);
+                        face.y0 = a0, face.y1 = a0 + alen;
+                        target_ink = item == c->at && !c->disabled ? ui_role(UI_ON_SURFACE) : ui_role(UI_ON_SURFACE_VARIANT);
+                }
+                else
+                {
+                        live |= item_live;
+                        if (iw <= 0)
+                                continue;
+                        face = ui_box_of(ui, ui_q(ix), ui_q(iy), ui_q(iw), ui_q(ih), ui_q(ih) / 2);
+                        target_ink = item == chosen ? ui_role(ax.seg ? UI_ON_PRIMARY : UI_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT);
+                }
+                ui_kit_colour_to(&anim->ink[item], target_ink, 200, &ui_ease);
                 ink = ui_kit_colour(&anim->ink[item]);
-                face = ui_box_transform(face, UI_ONE, dom, 0, anchor, 0, 0);
+                face = ui_tab_axis_stretch(face, ax.vertical, dom, anchor);
                 if (c->item == item)
                 {
-                        struct ui_place place = {UI_ONE, dom, 0, anchor, 0, 0};
-                        unsigned int layer;
+                        struct ui_place place = ui_tab_axis_place(ax.vertical, dom, anchor);
+                        b32 rx0 = (ax.vertical ? ui_q8(ui, ix) : a0) - ui_q8(ui, 8);
+                        b32 ry0 = (ax.vertical ? a0 : ui_q8(ui, iy)) - ui_q8(ui, 8);
 
-                        ui_kit_layer_to(c, 0);
-                        layer = ui_kit_layer(c);
-                        ui_kit_lift_fill(ui, &face, ink, layer);
+                        if (ax.vertical)
                         {
-                                struct ui_box pill = ui_box_of(ui, ui_q(rx), pip_y, ui_q(rw), ui_q(c->h), 0);
+                                ui_kit_layer_to(c, 0);
+                                ui_kit_lift_fill(ui, &face, ink, ui_kit_layer(c));
+                        }
+                        ui_kit_ripples_on(ui, c, rx0, ry0, &place, &face, ink, (ax.vertical || ax.seg) ? &ax.pill : null);
+                }
+                if (ax.vertical)
+                {
+                        b32 middle = anchor + (b32)ui_qmul(a0 + alen / 2 - anchor, dom);
 
-                                ui_kit_ripples_on(ui, c, ui_q8(ui, rx - 8), by - ui_q8(ui, 8), &place, &face, ink, &pill);
+                        ui_kit_start(ui, ui_rtl() ? ui_dev(ui, c->x + c->w - 12) : ui_dev(ui, c->x + 12),
+                                     ui_kit_baseline(ui, middle / 256 - ui_dev(ui, 10), UI_LABEL_LARGE),
+                                     (string_address)c->items[item], item == c->at ? UI_LABEL_LARGE : UI_BODY_MEDIUM, ink, 0, 0, ui->width);
+                        if (ui_kit.busy)
+                                ui_kit_reach(iy, iy + ih);
+                        was_busy |= ui_kit.busy;
+                }
+                else
+                {
+                        int baseline = ui_kit_baseline(ui, ui_dev(ui, iy) + (ui_dev(ui, ih) - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE), width;
+                        char cut[128];
+                        string_address shown = (string_address)c->items[item];
+
+                        if (c->closable)
+                        {
+                                int close_w = iw >= 40 ? UI_TAB_CLOSE_W + 4 : 0;
+                                int label_x = ui_rtl() ? ix + close_w + 8 : ix + 12;
+                                int label_room = ui_dev(ui, iw - close_w - 16);
+
+                                if (label_room > 0)
+                                {
+                                        shown = ui_fit(ui, shown, UI_LABEL_LARGE, label_room, cut, sizeof(cut));
+                                        width = ui_kit_measure(ui, shown, UI_LABEL_LARGE);
+                                        ui_kit_text(ui, ui_dev(ui, label_x) + (label_room > width ? (label_room - width) / 2 : 0), baseline, shown, UI_LABEL_LARGE, ink, 0);
+                                }
+                                if (close_w > 0)
+                                {
+                                        int cx = ui_tab_close_left(ui, c, item), cy = iy + (ih - UI_TAB_CLOSE_W) / 2;
+                                        b32 dirty = item < 32 && (c->marks & (1u << item)) != 0;
+                                        b32 hot = c->close_hover == item;
+
+                                        if (hot)
+                                        {
+                                                struct ui_box pill = ui_box_of(ui, ui_q(cx), ui_q(cy), ui_q(UI_TAB_CLOSE_W), ui_q(UI_TAB_CLOSE_W), ui_q(UI_TAB_CLOSE_W / 2));
+
+                                                ui_kit_layer_fill(ui, &pill, ink, 36);
+                                        }
+                                        if (dirty && !hot)
+                                        {
+                                                int dot = ui_px(ui, UI_DOT);
+
+                                                ui_kit_dot(ui, ui_dev(ui, cx) + (ui_dev(ui, UI_TAB_CLOSE_W) - dot) / 2,
+                                                           ui_dev(ui, iy) + (ui_dev(ui, ih) - dot) / 2, ink | 0xff000000u);
+                                        }
+                                        else if (hot || item == chosen || c->item == item)
+                                        {
+                                                int xw = ui_kit_measure(ui, (string_address) "\xc3\x97", UI_LABEL_LARGE);
+                                                unsigned int xink = hot ? ink : (ink & 0xffffffu) | 0xb0000000u;
+
+                                                ui_kit_text(ui, ui_dev(ui, cx) + (ui_dev(ui, UI_TAB_CLOSE_W) - xw) / 2, baseline, (string_address) "\xc3\x97", UI_LABEL_LARGE, xink, 0);
+                                        }
+                                }
+                        }
+                        else
+                        {
+                                b32 middle = anchor + (b32)ui_qmul(a0 + alen / 2 - anchor, dom);
+
+                                width = ui_kit_measure(ui, shown, UI_LABEL_LARGE);
+                                ui_kit_text(ui, middle / 256 - width / 2, baseline, shown, UI_LABEL_LARGE, ink, 0);
                         }
                 }
-                // The text at whole pixels where the stretch takes the item's middle.
-                middle = anchor + (b32)ui_qmul(by + bh / 2 - anchor, dom);
-                ui_kit_start(ui, ui_rtl() ? ui_dev(ui, c->x + c->w - 12) : ui_dev(ui, c->x + 12), ui_kit_baseline(ui, middle / 256 - ui_dev(ui, 10), UI_LABEL_LARGE),
-                             (string_address)c->items[item], item == c->at ? UI_LABEL_LARGE : UI_BODY_MEDIUM, ink, 0, 0, ui->width);
-                // Its stretch, its colour, its state layer or its ripple moving: the item's rows.
-                if (ui_kit.busy)
-                        ui_kit_reach(y, y + c->h);
-                busy |= ui_kit.busy;
         }
-        ui_kit.busy = busy;
+        if (ax.vertical)
+        {
+                ui_kit.busy = was_busy;
+                return;
+        }
+        if (c->addable)
+        {
+                int add_x = ui_tabs_add_left(ui, c);
+
+                if (add_x >= 0)
+                {
+                        struct ui_box add_box = ui_box_of(ui, ui_q(add_x), ui_q(c->y), ui_q(UI_TAB_ADD_W), ui_q(ax.height), ui_q(ax.height) / 2);
+                        unsigned int ink = ui_role(c->close_hover == -2 ? UI_ON_SURFACE : UI_ON_SURFACE_VARIANT);
+                        int pw = ui_kit_measure(ui, (string_address) "+", UI_LABEL_LARGE);
+                        int baseline = ui_kit_baseline(ui, ui_dev(ui, c->y) + (ui_dev(ui, ax.height) - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE);
+
+                        if (c->close_hover == -2)
+                                ui_kit_layer_fill(ui, &add_box, ink, 24);
+                        ui_kit_text(ui, ui_dev(ui, add_x) + (ui_dev(ui, UI_TAB_ADD_W) - pw) / 2, baseline, (string_address) "+", UI_LABEL_LARGE, ink, 0);
+                }
+        }
+        if (!c->closable)
+                ui_tabs_marks(ui, c, ax.height);
+        ui_kit.busy |= live;
 }
 
-// The vertical cascade: each item whose middle the pip passes stretches as it does (130 ms of flight).
 static fn ui_vtabs_choose(struct ui_control address_to c, int item)
 {
-        int from = c->at, distance = item > from ? item - from : from - item;
-
-        if (item == from || item < 0 || item >= c->count)
-                return;
-        c->dom_origin = item > from ? 1 : -1;
-        if (!ui_kit.motion)
-                for (int k = 0; k < c->count; k++)
-                {
-                        int along = item > from ? k - from : from - k;
-
-                        if (along < 0 || along > distance)
-                                continue;
-                        ui_stretch_go(&c->item_dom[k], ui_kit.now + ui_paced((b64)along * 130 * UI_MS / distance), UI_Q2(113));
-                }
-        c->at = item;
+        ui_domino_cascade(c, item, null, 0, 130, UI_Q2(113));
 }
 
 // The tabs' cascade: each tab whose middle the pip rolls over stretches as it passes (130 ms of flight).
 static fn ui_tabs_choose(struct ui address_to ui, struct ui_control address_to c, int item)
 {
+        b64 pos[UI_ITEMS];
+
         if (c->variant == UI_TABS_VERTICAL)
         {
                 (void)ui;
                 ui_vtabs_choose(c, item);
                 return;
         }
-        b64 from, to, length;
-
-        if (item == c->at)
+        if (item == c->at || item < 0 || item >= c->count)
                 return;
-        from = ui_q(ui_tab_left(ui, c, c->at)) + ui_q(ui_tab_width(ui, c, c->at)) / 2;
-        to = ui_q(ui_tab_left(ui, c, item)) + ui_q(ui_tab_width(ui, c, item)) / 2;
-        length = to > from ? to - from : from - to;
-        c->dom_origin = to >= from ? 1 : -1;
-        if (!ui_kit.motion && length >= UI_ONE)
-                for (int k = 0; k < c->count; k++)
-                {
-                        b64 middle = ui_q(ui_tab_left(ui, c, k)) + ui_q(ui_tab_width(ui, c, k)) / 2;
-                        b64 along = to >= from ? middle - from : from - middle;
-
-                        if (along < -ui_q(6) || along > length + ui_q(6))
-                                continue;
-                        along = along < 0 ? 0 : along > length ? length : along;
-                        ui_stretch_go(&c->item_dom[k], ui_kit.now + ui_paced(ui_qmul(ui_qdiv(along, length), 130 * UI_MS)), UI_Q2(113));
-                }
-        c->at = item;
+        for (int k = 0; k < c->count && k < UI_ITEMS; k++)
+                pos[k] = ui_q(ui_tab_left(ui, c, k)) + ui_q(ui_tab_width(ui, c, k)) / 2;
+        ui_domino_cascade(c, item, pos, ui_q(6), 130, UI_Q2(113));
 }
 
 /*
@@ -14780,8 +14845,6 @@ static fn ui_control_place(struct ui_control address_to c)
         for (positive k = 0; k < sizeof(unplaced) / sizeof(unplaced[0]); k++)
                 unplaced[k]->placed = 0;
         ui_items_anim_reset(c);
-        for (int k = 0; k < UI_ITEMS; k++)
-                c->item_dom[k].at = 0;
         // A slider's extent is not drawn: it is unplaced, as it was when it was the thumb's halo radius.
         if (c->kind == UI_SLIDER)
                 c->extent.placed = 0;
@@ -14877,44 +14940,69 @@ static fn ui_swatches_draw(struct ui address_to ui, struct ui_control address_to
         }
 }
 
+static fn ui_heading_draw(struct ui address_to ui, struct ui_control address_to c)
+{
+        if (ui_rtl() && c->w > 0)
+                ui_kit_start(ui, ui_dev(ui, c->x + c->w), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
+                             ui_role(c->role), 0, ui_dev(ui, c->x), ui_dev(ui, c->x + c->w));
+        else
+                ui_kit_text_clip(ui, ui_dev(ui, c->x), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
+                                 ui_role(c->role), 0, c->w > 0 ? ui_dev(ui, c->x + c->w) : ui->width);
+}
+
+static fn ui_rule_draw(struct ui address_to ui, struct ui_control address_to c)
+{
+        ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y) + ui_stroke(ui), 0, 0},
+                    ui_role(UI_OUTLINE_VARIANT), null);
+}
+
+// Data-driven control descriptor table replacing parallel switch(c->kind) ladders across draw, hit, live, cursor, and touch axis checks.
+#define UI_CF_LIVE   1u // interactive control (takes pointer when !disabled)
+#define UI_CF_H_AXIS 2u // touch swipe prefers horizontal axis (vertical slider flips)
+#define UI_CF_TEXT   4u // I-beam pointer cursor instead of hand
+#define UI_CF_TOGGLE 8u // switch/checkbox/radio horizontal-drag toggle group
+
+struct ui_control_desc
+{
+        fn (*draw)(struct ui address_to ui, struct ui_control address_to c);
+        unsigned int flags;
+};
+
+static const struct ui_control_desc ui_control_table[24] = {
+    [UI_BUTTON]    = {ui_button_draw,   UI_CF_LIVE},
+    [UI_SWITCH]    = {ui_toggle_draw,   UI_CF_LIVE | UI_CF_H_AXIS | UI_CF_TOGGLE},
+    [UI_CHECKBOX]  = {ui_toggle_draw,   UI_CF_LIVE | UI_CF_H_AXIS | UI_CF_TOGGLE},
+    [UI_RADIOS]    = {ui_radios_draw,   UI_CF_LIVE | UI_CF_H_AXIS | UI_CF_TOGGLE},
+    [UI_SLIDER]    = {ui_slider_draw,   UI_CF_LIVE | UI_CF_H_AXIS},
+    [UI_TABS]      = {ui_tabs_draw,     UI_CF_LIVE},
+    [UI_INPUT]     = {ui_input_draw,    UI_CF_LIVE | UI_CF_TEXT},
+    [UI_PROGRESS]  = {ui_progress_draw, 0},
+    [UI_BADGE]     = {ui_badge_draw,    0},
+    [UI_TAG]       = {ui_tag_draw,      0},
+    [UI_AVATAR]    = {ui_avatar_draw,   0},
+    [UI_CALLOUT]   = {ui_callout_draw,  0},
+    [UI_CODE_WELL] = {ui_code_draw,     0},
+    [UI_KBD]       = {ui_kbd_draw,      0},
+    [UI_SPINNER]   = {ui_spinner_draw,  0},
+    [UI_CARD]      = {ui_surface_draw,  0},
+    [UI_WINDOW]    = {ui_surface_draw,  0},
+    [UI_HEADING]   = {ui_heading_draw,  0},
+    [UI_RULE]      = {ui_rule_draw,     0},
+    [UI_LIST_ROW]  = {ui_list_row_draw, 0},
+    [UI_SWATCHES]  = {ui_swatches_draw, 0},
+};
+
+static inline unsigned int ui_control_flags(const struct ui_control address_to c)
+{
+        return c->kind < 24 ? ui_control_table[c->kind].flags : 0;
+}
+
 static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address_to c)
 {
         if (c->placed != ui_kit.epoch)
                 ui_control_place(c);
-        switch (c->kind)
-        {
-        case UI_LIST_ROW: ui_list_row_draw(ui, c); break;
-        case UI_SWATCHES: ui_swatches_draw(ui, c); break;
-        case UI_BUTTON: ui_button_draw(ui, c); break;
-        case UI_SWITCH:
-        case UI_CHECKBOX: ui_toggle_draw(ui, c); break;
-        case UI_RADIOS: ui_radios_draw(ui, c); break;
-        case UI_SLIDER: ui_slider_draw(ui, c); break;
-        case UI_TABS: ui_tabs_draw(ui, c); break;
-        case UI_INPUT: ui_input_draw(ui, c); break;
-        case UI_PROGRESS: ui_progress_draw(ui, c); break;
-        case UI_BADGE: ui_badge_draw(ui, c); break;
-        case UI_TAG: ui_tag_draw(ui, c); break;
-        case UI_AVATAR: ui_avatar_draw(ui, c); break;
-        case UI_CALLOUT: ui_callout_draw(ui, c); break;
-        case UI_CODE_WELL: ui_code_draw(ui, c); break;
-        case UI_KBD: ui_kbd_draw(ui, c); break;
-        case UI_SPINNER: ui_spinner_draw(ui, c); break;
-        case UI_CARD:
-        case UI_WINDOW: ui_surface_draw(ui, c); break;
-        case UI_HEADING:
-                if (ui_rtl() && c->w > 0)
-                        ui_kit_start(ui, ui_dev(ui, c->x + c->w), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
-                                     ui_role(c->role), 0, ui_dev(ui, c->x), ui_dev(ui, c->x + c->w));
-                else
-                        ui_kit_text_clip(ui, ui_dev(ui, c->x), ui_kit_baseline(ui, ui_dev(ui, c->y), c->variant), (string_address)c->label, c->variant,
-                                         ui_role(c->role), 0, c->w > 0 ? ui_dev(ui, c->x + c->w) : ui->width);
-                break;
-        case UI_RULE:
-                ui_kit_fill(ui, &(struct ui_box){ui_q8(ui, c->x), ui_q8(ui, c->y), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y) + ui_stroke(ui), 0, 0},
-                            ui_role(UI_OUTLINE_VARIANT), null);
-                break;
-        }
+        if (c->kind < 24 && ui_control_table[c->kind].draw)
+                ui_control_table[c->kind].draw(ui, c);
 }
 
 /* ---- the pointer ---- */
@@ -14925,7 +15013,7 @@ static fn ui_control_draw_one(struct ui address_to ui, struct ui_control address
         rubber band, the wheel's notch and the hand are the body's (ui_body_*, s->body): an app forwards its input and keeps no stretch.
 */
 
-// Whether a device point is in a control's box (a radio group: which row; tabs: which tab), -1 when not.
+// Whether a device point is in a control's box (a radio group: which row; tabs: which tab, or 0 for add button), -1 when not.
 static int ui_control_hit(struct ui address_to ui, const struct ui_control address_to c, int x, int y)
 {
         int lx = x * 100 / ui->scale, ly = y * 100 / ui->scale;
@@ -14937,60 +15025,27 @@ static int ui_control_hit(struct ui address_to ui, const struct ui_control addre
                                 return k;
                 return -1;
         }
-        // A tab is a finger's UI_TARGET each way where it is smaller, as every control is (ui_hit).
-        if (c->kind == UI_TABS && c->variant == UI_TABS_VERTICAL)
-        {
-                int rx, rw;
-
-                ui_vtabs_row(c, &rx, &rw);
-                for (int k = 0; k < c->count; k++)
-                        if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, rx), ui_dev(ui, c->y + k * c->h), ui_dev(ui, rw), ui_dev(ui, c->h)))
-                                return k;
-                return -1;
-        }
         if (c->kind == UI_TABS)
         {
-                int h = c->variant ? 32 : 40;
+                struct ui_tab_hit th = ui_tab_hit_at(ui, c, x, y);
 
-                if (c->addable)
-                {
-                        int ax = ui_tabs_add_left(ui, c);
-
-                        if (ax >= 0 && ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, ax), ui_dev(ui, c->y), ui_dev(ui, UI_TAB_ADD_W), ui_dev(ui, h)))
-                                return 2 * UI_ITEMS;
-                }
-                for (int k = 0; k < c->count; k++)
-                {
-                        int left = ui_tab_left(ui, c, k), wide = ui_tab_width(ui, c, k);
-
-                        if (wide <= 0)
-                                continue;
-                        if (c->closable && wide >= 40)
-                        {
-                                int cx = ui_tab_close_left(ui, c, k), cy = c->y + (h - UI_TAB_CLOSE_W) / 2;
-
-                                if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, cx), ui_dev(ui, cy), ui_dev(ui, UI_TAB_CLOSE_W), ui_dev(ui, UI_TAB_CLOSE_W)))
-                                        return UI_ITEMS + k;
-                        }
-                        if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, left), ui_dev(ui, c->y), ui_dev(ui, wide), ui_dev(ui, h)))
-                                return k;
-                }
-                return -1;
+                return th.kind == UI_TAB_HIT_NONE ? -1 : th.kind == UI_TAB_HIT_ADD ? 0 : th.item;
         }
-        if (c->kind == UI_INPUT && c->variant == UI_FIELD_BARE)
-                return ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y), ui_dev(ui, c->w), ui_dev(ui, c->h ? c->h : UI_FIELD_H)) ? 0 : -1;
         if (c->kind == UI_INPUT)
-                return ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y + 30), ui_dev(ui, c->w), ui_dev(ui, UI_FIELD_H)) ? 0 : -1;
+        {
+                int dy = c->variant == UI_FIELD_BARE ? 0 : 30;
+                int dh = c->variant == UI_FIELD_BARE && c->h ? c->h : UI_FIELD_H;
+
+                return ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y + dy), ui_dev(ui, c->w), ui_dev(ui, dh)) ? 0 : -1;
+        }
         if (c->kind == UI_SWATCHES)
                 return ui_swatch_at(ui, c, x, y);
-        (void)lx, (void)ly;
         return ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y), ui_dev(ui, c->w), ui_dev(ui, c->h)) ? 0 : -1;
 }
 
 static b32 ui_control_live(const struct ui_control address_to c)
 {
-        return !c->disabled && (c->kind == UI_BUTTON || c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_RADIOS ||
-                                c->kind == UI_SLIDER || c->kind == UI_TABS || c->kind == UI_INPUT);
+        return !c->disabled && (ui_control_flags(c) & UI_CF_LIVE) != 0;
 }
 
 // The slider's value under a device point (the hand's, as the window reads it): the thumb's travel and its step are ui_slider_of's.
@@ -15045,7 +15100,7 @@ static fn ui_kit_track(const struct window_event address_to event)
 // A control under the pointer: an input's I-beam, and the hand over any other control (a button, a tab, a switch, a row).
 static void ui_kit_shape_note(const struct ui_control address_to c)
 {
-        ui_kit_shape = c->kind == UI_INPUT ? WINDOW_POINTER_TEXT : WINDOW_POINTER_HAND;
+        ui_kit_shape = (ui_control_flags(c) & UI_CF_TEXT) ? WINDOW_POINTER_TEXT : WINDOW_POINTER_HAND;
 }
 
 /*
@@ -15147,132 +15202,274 @@ static b32 ui_kit_axis_refused(const struct ui_control address_to c, int dx, int
 {
         int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
 
-        if (c->kind == UI_SLIDER && (c->variant & UI_SLIDER_VERTICAL))
-                return ax > ay;
-        if (c->kind == UI_SLIDER || c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_RADIOS)
-                return ay > ax;
-        return 0;
+        if (!(ui_control_flags(c) & UI_CF_H_AXIS))
+                return 0;
+        return c->kind == UI_SLIDER && (c->variant & UI_SLIDER_VERTICAL) ? ax > ay : ay > ax;
+}
+
+static struct ui_control address_to ui_kit_pointer_drag(struct ui address_to ui, struct ui_control address_to c, int x, int y)
+{
+        int dx = x - c->press_x, dy = y - c->press_y;
+        b64 ldx = ui_qdiv(ui_q(dx), ui_q(ui->scale) / 100), ldy = ui_qdiv(ui_q(dy), ui_q(ui->scale) / 100);
+
+        // A finger's first movement past the slop decides the axis: the other way, the control lets go so the page scrolls.
+        if (ui_kit_touch && !c->moved && ui_press_past(ui, c->press_x, c->press_y, x, y) && ui_kit_axis_refused(c, dx, dy))
+        {
+                ui_kit_let_go_held(c);
+                return null;
+        }
+        c->pointer_x = x, c->pointer_y = y;
+        if (ui_kit_touch && !c->moved && ui_press_past(ui, c->press_x, c->press_y, x, y))
+                c->moved = 1;
+        if (c->kind == UI_BUTTON)
+        {
+                ui_squish_move(&c->squish, ui_squash_of(ldx, ldy));
+                if (ui_control_hit(ui, c, x, y) < 0)
+                        ui_kit_ripples_exit(c);
+                return null;
+        }
+        if (ui_control_flags(c) & UI_CF_TOGGLE)
+        {
+                b32 right = dx > 0, toward = (right != ui_rtl()) != (c->kind == UI_RADIOS ? c->item == c->at : c->on);
+
+                if (!c->moved && !ui_press_past(ui, c->press_x, c->press_y, x, y))
+                        return null;
+                c->moved = 1;
+                if (c->kind != UI_RADIOS)
+                {
+                        b64 fill = (c->on ? UI_ONE : 0) + (ui_rtl() ? -ldx : ldx) / 100;
+
+                        fill = fill < 0 ? 0 : fill > UI_ONE ? UI_ONE : fill;
+                        ui_tween_put(&c->extent, fill, UI_TWEEN_NUMBER);
+                }
+                c->bend = ui_qmul(ui_squash_curve((ldx < 0 ? -ldx : ldx) / 52), toward ? UI_ONE : UI_Q2(30));
+                c->squish_origin = right ? 1 : -1;
+                ui_squish_move(&c->squish, ui_squash_of(ldx, ldy));
+                return null;
+        }
+        if (c->kind == UI_SLIDER)
+        {
+                b32 vertical = (c->variant & UI_SLIDER_VERTICAL) != 0;
+                int along = vertical ? dy : dx, lo = ui_dev(ui, vertical ? c->y : c->x), hi = lo + ui_slider_span(ui, c), pos = vertical ? y : x;
+                b64 over, f = vertical ? ldx : ldy, k = ui_squash_curve((f < 0 ? -f : f) / 400), nudge = f > 0 ? k * 8 : f < 0 ? -k * 8 : 0;
+                struct ui_squash s = {0, 0, 0, 0};
+
+                if (!c->moved && along < 4 * ui->scale / 100 && along > -4 * ui->scale / 100)
+                        return null;
+                c->moved = 1, c->sliding = 0;
+                c->value = ui_slider_at(ui, c, x, y);
+                over = pos < lo ? ui_q(lo - pos) : pos > hi ? ui_q(pos - hi) : 0;
+                c->bend_target = over > 0 ? ui_qmul(ui_squash_curve(ui_qdiv(over, ui_q(hi - lo)) * 2), UI_Q2(130)) : 0;
+                if (over > 0)
+                        c->squish_origin = vertical ? (pos < lo ? 1 : -1) : (pos < lo ? -1 : 1);
+                if (vertical)
+                        s.sx = k, s.tx = nudge;
+                else
+                        s.sy = k, s.ty = nudge;
+                ui_squish_move(&c->squish, s);
+                return c;
+        }
+        return null;
+}
+
+static struct ui_control address_to ui_kit_pointer_press(struct ui address_to ui, struct ui_control address_to c, int x, int y, int hit, int hit_kind)
+{
+        ui_kit_held = c;
+        c->down = 1, c->moved = 0, c->hover = 1;
+        c->item = hit, c->hit_kind = (unsigned char)hit_kind;
+        c->press_x = c->pointer_x = x, c->press_y = c->pointer_y = y;
+        c->pressed_at = ui_kit.now;
+        ui_squish_press(&c->squish);
+        if (c->kind == UI_BUTTON)
+                ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y), ui_dev(ui, c->w), ui_dev(ui, c->h), 8);
+        else if (c->kind == UI_TABS && hit_kind == UI_TAB_HIT_ITEM)
+        {
+                int rx, rw, h = c->variant ? 32 : 40;
+                struct ui_ripple address_to r;
+
+                ui_vtabs_row(c, &rx, &rw);
+                r = c->variant == UI_TABS_VERTICAL
+                        ? ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, rx), ui_dev(ui, c->y + hit * c->h), ui_dev(ui, rw), ui_dev(ui, c->h), 8)
+                        : ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, ui_tab_left(ui, c, hit)), ui_dev(ui, c->y), ui_dev(ui, ui_tab_width(ui, c, hit)), ui_dev(ui, h), 8);
+                if (r)
+                        r->rides = hit == c->at && c->variant != UI_TABS_UNDERLINE;
+        }
+        else if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_LIST_ROW)
+        {
+                ui_spring_stop(&c->held_squish);
+                ui_list_row_press(ui, c, x, y);
+        }
+        else if (c->kind == UI_RADIOS)
+                ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x), ui_dev(ui, ui_radio_row_y(c, hit)), ui_dev(ui, c->w), ui_dev(ui, c->h), 0);
+        else if (c->kind == UI_INPUT)
+                c->focused = 1;
+        else if (c->kind == UI_SLIDER)
+        {
+                b64 from = c->value, to = ui_slider_at(ui, c, x, y);
+
+                ui_spring_stop(&c->held_squish);
+                c->slide.landed = 0, c->bend = c->bend_target = 0, c->squish_origin = 0, c->last_frame = 0, c->bounce = 0;
+                if ((to > from ? to - from : from - to) > 1073741 && !ui_kit.motion)
+                {
+                        ui_slide_go(&c->slide, from, to, c->high - c->low, ui_kit.now);
+                        c->sliding = c->bounce = 1;
+                        c->squish_origin = to >= from ? 1 : -1;
+                }
+                else
+                        c->value = to;
+                c->hover_x = -1;
+                if (c->value != from || c->sliding)
+                        return c;
+        }
+        return null;
+}
+
+static struct ui_control address_to ui_kit_pointer_release(struct ui address_to ui, struct ui_control address_to c, int x, int y)
+{
+        struct ui_control address_to changed = null;
+
+        c->down = 0;
+        ui_kit_ripples_exit(c);
+        if (c->kind == UI_BUTTON)
+        {
+                ui_squish_release(&c->squish);
+                if (!c->moved && ui_control_hit(ui, c, x, y) >= 0)
+                        changed = c;
+        }
+        else if (c->kind == UI_TABS)
+        {
+                struct ui_tab_hit th = ui_tab_hit_at(ui, c, x, y);
+
+                ui_squish_release(&c->squish);
+                c->close_item = -1, c->add_clicked = false, c->tab_right_click = -1;
+                if (!c->moved && th.kind == (int)c->hit_kind && th.item == c->item)
+                {
+                        if (th.kind == UI_TAB_HIT_ADD)
+                                c->add_clicked = true, changed = c;
+                        else if (th.kind == UI_TAB_HIT_CLOSE)
+                                c->close_item = th.item, changed = c;
+                        else if (th.kind == UI_TAB_HIT_ITEM)
+                                ui_tabs_choose(ui, c, th.item), changed = c;
+                }
+                c->hover = th.kind != UI_TAB_HIT_NONE;
+                c->item = th.item;
+                c->close_hover = th.kind == UI_TAB_HIT_ADD ? -2 : th.kind == UI_TAB_HIT_CLOSE ? th.item : -1;
+                c->hit_kind = UI_TAB_HIT_NONE;
+                return changed;
+        }
+        else if (ui_control_flags(c) & UI_CF_TOGGLE)
+        {
+                int dx = x - c->press_x;
+                b64 ldx = ui_qdiv(ui_q(dx), ui_q(ui->scale) / 100);
+                b32 right = (dx > 0) != ui_rtl(), was = c->kind == UI_RADIOS ? c->item == c->at : c->on;
+                b32 pick = c->kind == UI_RADIOS ? ui_control_hit(ui, c, x, y) == c->item
+                                                : (c->moved && right != was && (ldx > ui_q(100) || ldx < -ui_q(100))) || !c->moved;
+
+                if (pick)
+                {
+                        if (c->kind == UI_RADIOS)
+                        {
+                                if (c->item != c->at)
+                                        ui_radios_choose(c, c->item), changed = c;
+                                else if (!c->moved && !ui_kit.motion)
+                                {
+                                        int lx = x * 100 / ui->scale;
+
+                                        if (lx >= c->x + c->w - 40 && lx < c->x + c->w - 12)
+                                        {
+                                                c->dom_origin = 0;
+                                                ui_stretch_go(&ui_items_anim_for(c)->dom[c->at], ui_kit.now, UI_Q2(84));
+                                                c->pip_press = 1;
+                                        }
+                                }
+                        }
+                        else
+                        {
+                                c->on = !c->on, changed = c;
+                                c->dom_origin = (c->on ? 1 : -1) * ui_dir();
+                                if (!ui_kit.motion)
+                                        ui_stretch_go(&c->dom, ui_kit.now, UI_Q2(111));
+                        }
+                }
+                c->moved = 0;
+                if (c->kind != UI_RADIOS)
+                        ui_kit_number_to(&c->extent, c->on ? UI_ONE : 0, 200, &ui_ease);
+                if (c->bend > UI_REST_SCALE && !ui_kit.motion)
+                        ui_spring_go(&c->held_squish, c->bend, 0);
+                c->bend = 0;
+                ui_squish_release(&c->squish);
+        }
+        else if (c->kind == UI_SLIDER)
+        {
+                b64 cur = c->bend > 3221225 ? c->bend : 0;
+
+                if (c->moved && cur > 0 && !ui_kit.motion)
+                        ui_spring_go(&c->held_squish, cur, 0);
+                else if (c->bounce && !c->moved && !ui_kit.motion)
+                        c->slide.landed = ui_kit.now;
+                else
+                        c->squish_origin = 0;
+                c->bend = c->bend_target = 0, c->moved = 0;
+                ui_squish_release(&c->squish);
+        }
+        {
+                int hit = ui_control_live(c) ? ui_control_hit(ui, c, x, y) : -1;
+
+                c->hover = hit >= 0, c->item = hit;
+        }
+        return changed;
 }
 
 static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, struct ui_control address_to controls, int count, int type, int x, int y,
                                                    b32 down, unsigned int flags)
 {
-        struct ui_control address_to changed = null;
-
         ui_kit_touch = (flags & WINDOW_KEY_TOUCH) != 0;
-        // A press the compositor takes back (a second finger, a finger held for the right button) clicks nothing:
-        // what it held springs home as a release would, and no value changes.
         if (type == WINDOW_EVENT_BUTTON && !down && (flags & WINDOW_KEY_CANCEL) && ui_kit_held)
         {
                 ui_kit_let_go_held(ui_kit_held);
                 return null;
         }
-
         if (type == WINDOW_EVENT_MOTION)
         {
                 struct ui_control address_to c = ui_kit_held;
 
-                // A control disabled while it is held lets go: it changes nothing more, and its hold must not outlive it.
                 if (c && !ui_control_live(c))
                 {
                         ui_kit_let_go_held(c);
                         return null;
                 }
                 if (c)
-                {
-                        int dx = x - c->press_x, dy = y - c->press_y;
-                        b64 ldx = ui_qdiv(ui_q(dx), ui_q(ui->scale) / 100), ldy = ui_qdiv(ui_q(dy), ui_q(ui->scale) / 100);
-
-                        // A finger's first movement past the slop decides the axis: the other way, the control lets the finger go, and
-                        // the page it is on takes the drag (its finger drags the region from where the press went down).
-                        if (ui_kit_touch && !c->moved && ui_press_past(ui, c->press_x, c->press_y, x, y) && ui_kit_axis_refused(c, dx, dy))
-                        {
-                                ui_kit_let_go_held(c);
-                                return null;
-                        }
-                        c->pointer_x = x, c->pointer_y = y;
-                        // A finger that moves past the slop is a drag: what it lifts on is no click (the kit's press rule).
-                        if (ui_kit_touch && !c->moved && ui_press_past(ui, c->press_x, c->press_y, x, y))
-                                c->moved = 1;
-                        if (c->kind == UI_BUTTON)
-                        {
-                                ui_squish_move(&c->squish, ui_squash_of(ldx, ldy));
-                                // pointerleave ends the ripple.
-                                if (ui_control_hit(ui, c, x, y) < 0)
-                                        ui_kit_ripples_exit(c);
-                        }
-                        else if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_RADIOS)
-                        {
-                                b32 right = dx > 0, toward = (right != ui_rtl()) != (c->kind == UI_RADIOS ? c->item == c->at : c->on);
-                                b64 fill;
-
-                                // The one slop of every press (UI_SLOP): a click that jitters less than that is still a click.
-                                if (!c->moved && !ui_press_past(ui, c->press_x, c->press_y, x, y))
-                                        return null;
-                                c->moved = 1;
-                                if (c->kind != UI_RADIOS)
-                                {
-                                        fill = (c->on ? UI_ONE : 0) + (ui_rtl() ? -ldx : ldx) / 100;
-                                        fill = fill < 0 ? 0 : fill > UI_ONE ? UI_ONE : fill;
-                                        ui_tween_put(&c->extent, fill, UI_TWEEN_NUMBER);
-                                }
-                                c->bend = ui_qmul(ui_squash_curve((ldx < 0 ? -ldx : ldx) / 52), toward ? UI_ONE : UI_Q2(30));
-                                c->squish_origin = right ? 1 : -1;
-                                ui_squish_move(&c->squish, ui_squash_of(ldx, ldy));
-                        }
-                        else if (c->kind == UI_SLIDER)
-                        {
-                                b32 vertical = (c->variant & UI_SLIDER_VERTICAL) != 0;
-                                int along = vertical ? dy : dx, lo = ui_dev(ui, vertical ? c->y : c->x), hi = lo + ui_slider_span(ui, c), pos = vertical ? y : x;
-                                b64 over = 0, f = vertical ? ldx : ldy;
-
-                                // A drag begins once it is past 4 logical pixels along the track (a stood one's along is the hand's y).
-                                if (!c->moved && along < 4 * ui->scale / 100 && along > -4 * ui->scale / 100)
-                                        return null;
-                                c->moved = 1;
-                                c->sliding = 0;
-                                c->value = ui_slider_at(ui, c, x, y);
-                                changed = c;
-                                // Past an end the bars are stretched like a band, by how far past; the release springs them home.
-                                over = pos < lo ? ui_q(lo - pos) : pos > hi ? ui_q(pos - hi) : 0;
-                                c->bend_target = over > 0 ? ui_qmul(ui_squash_curve(ui_qdiv(over, ui_q(hi - lo)) * 2), UI_Q2(130)) : 0;
-                                if (over > 0)
-                                        c->squish_origin = vertical ? (pos < lo ? 1 : -1) : (pos < lo ? -1 : 1);
-                                {
-                                        // The hand's movement across the track nudges the bars the same way (sideways for a flat one, aside for a stood one).
-                                        b64 k = ui_squash_curve((f < 0 ? -f : f) / 400), nudge = f > 0 ? k * 8 : f < 0 ? -k * 8 : 0;
-                                        struct ui_squash s = {0, 0, 0, 0};
-
-                                        if (vertical)
-                                                s.sx = k, s.tx = nudge;
-                                        else
-                                                s.sy = k, s.ty = nudge;
-                                        ui_squish_move(&c->squish, s);
-                                }
-                        }
-                        return changed;
-                }
+                        return ui_kit_pointer_drag(ui, c, x, y);
                 for (int k = 0; k < count; k++)
                 {
-                        struct ui_control address_to c = &controls[k];
-                        int hit = ui_control_live(c) ? ui_control_hit(ui, c, x, y) : -1;
-                        int item_hit = c->kind == UI_TABS && hit >= 2 * UI_ITEMS ? -1
-                                       : c->kind == UI_TABS && hit >= UI_ITEMS   ? hit - UI_ITEMS
-                                                                                  : hit;
+                        struct ui_control address_to ctl = &controls[k];
+                        b32 live = ui_control_live(ctl);
+                        b32 hovered;
+                        int item_hit;
 
-                        if (c->kind == UI_TABS)
-                                c->close_hover = hit >= 2 * UI_ITEMS ? -2 : hit >= UI_ITEMS ? hit - UI_ITEMS : -1;
-                        if ((hit >= 0) != c->hover || (hit >= 0 && item_hit != c->item))
+                        if (ctl->kind == UI_TABS)
                         {
-                                if (hit < 0 && c->hover)
-                                        ui_kit_ripples_exit(c);
-                                c->hover = hit >= 0;
-                                c->item = item_hit;
+                                struct ui_tab_hit th = live ? ui_tab_hit_at(ui, ctl, x, y) : (struct ui_tab_hit){UI_TAB_HIT_NONE, -1};
+
+                                hovered = th.kind != UI_TAB_HIT_NONE;
+                                item_hit = th.item;
+                                ctl->close_hover = th.kind == UI_TAB_HIT_ADD ? -2 : th.kind == UI_TAB_HIT_CLOSE ? th.item : -1;
                         }
-                        if (hit >= 0)
-                                ui_kit_shape_note(c);
-                        if (c->kind == UI_SLIDER)
-                                c->hover_x = hit >= 0 ? ui_slider_along(ui, c, x, y) : -1, c->pointer_x = x, c->pointer_y = y; // the thumb's ring follows the hand
+                        else
+                        {
+                                item_hit = live ? ui_control_hit(ui, ctl, x, y) : -1;
+                                hovered = item_hit >= 0;
+                        }
+                        if (hovered != ctl->hover || (hovered && item_hit != ctl->item))
+                        {
+                                if (!hovered && ctl->hover)
+                                        ui_kit_ripples_exit(ctl);
+                                ctl->hover = hovered, ctl->item = item_hit;
+                        }
+                        if (hovered)
+                                ui_kit_shape_note(ctl);
+                        if (ctl->kind == UI_SLIDER)
+                                ctl->hover_x = hovered ? ui_slider_along(ui, ctl, x, y) : -1, ctl->pointer_x = x, ctl->pointer_y = y;
                 }
                 return null;
         }
@@ -15280,214 +15477,46 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 return null;
         if (down)
         {
-                // A press whose release never came is let go first, as a cancel lets it go: it is up, and its ripple runs
-                // out. Left held, its ripple never exits and the frame never goes idle.
                 if (ui_kit_held)
-                {
-                        struct ui_control address_to lost = ui_kit_held;
-
-                        ui_kit_held = null;
-                        lost->down = lost->moved = 0;
-                        ui_kit_ripples_exit(lost);
-                        ui_squish_release(&lost->squish);
-                }
-                // A press takes the focus from wherever it was: a field's, and a button's (a click focuses a button in Chrome).
+                        ui_kit_let_go_held(ui_kit_held);
                 for (int k = 0; k < count; k++)
                         controls[k].focused = 0;
                 for (int k = 0; k < count; k++)
                 {
-                        struct ui_control address_to c = &controls[k];
-                        int hit = ui_control_live(c) ? ui_control_hit(ui, c, x, y) : -1;
+                        struct ui_control address_to ctl = &controls[k];
 
-                        if (hit < 0)
+                        if (!ui_control_live(ctl))
                                 continue;
-                        // A click does not focus a button: the focus ring is the keys' (:focus-visible), and a pointer sees where it pressed.
-                        ui_kit_held = c;
-                        c->down = 1;
-                        c->moved = 0;
-                        c->item = hit;
-                        c->hover = 1;
-                        c->press_x = c->pointer_x = x, c->press_y = c->pointer_y = y;
-                        c->pressed_at = ui_kit.now;
-                        ui_squish_press(&c->squish);
-                        if (c->kind == UI_BUTTON)
-                                ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x), ui_dev(ui, c->y), ui_dev(ui, c->w), ui_dev(ui, c->h), 8);
-                        else if (c->kind == UI_TABS)
+                        if (ctl->kind == UI_TABS)
                         {
-                                // The tab's own box (on end, its item's row); a press on the chosen tab rides its indicator.
-                                int rx, rw, h = c->variant ? 32 : 40;
-                                struct ui_ripple address_to r = null;
+                                struct ui_tab_hit th = ui_tab_hit_at(ui, ctl, x, y);
 
-                                ui_vtabs_row(c, &rx, &rw);
-                                if (c->variant == UI_TABS_VERTICAL)
-                                        r = ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, rx), ui_dev(ui, c->y + hit * c->h),
-                                                                ui_dev(ui, rw), ui_dev(ui, c->h), 8);
-                                else if (hit < UI_ITEMS)
-                                        r = ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, ui_tab_left(ui, c, hit)), ui_dev(ui, c->y),
-                                                                ui_dev(ui, ui_tab_width(ui, c, hit)), ui_dev(ui, h), 8);
-                                if (r)
-                                        r->rides = hit == c->at && c->variant != UI_TABS_UNDERLINE;
+                                if (th.kind != UI_TAB_HIT_NONE)
+                                        return ui_kit_pointer_press(ui, ctl, x, y, th.item, th.kind);
                         }
-                        else if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_LIST_ROW)
+                        else
                         {
-                                ui_spring_stop(&c->held_squish);
-                                ui_list_row_press(ui, c, x, y);
-                        }
-                        else if (c->kind == UI_RADIOS)
-                                ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, c->x), ui_dev(ui, ui_radio_row_y(c, hit)), ui_dev(ui, c->w), ui_dev(ui, c->h), 0);
-                        else if (c->kind == UI_INPUT)
-                                c->focused = 1;
-                        else if (c->kind == UI_SLIDER)
-                        {
-                                b64 from = c->value, to = ui_slider_at(ui, c, x, y);
+                                int hit = ui_control_hit(ui, ctl, x, y);
 
-                                ui_spring_stop(&c->held_squish);
-                                c->slide.landed = 0;
-                                c->bend = c->bend_target = 0;
-                                c->squish_origin = 0;
-                                c->last_frame = 0;
-                                c->bounce = 0;
-                                if ((to > from ? to - from : from - to) > 1073741 && !ui_kit.motion) // 0.001
-                                {
-                                        ui_slide_go(&c->slide, from, to, c->high - c->low, ui_kit.now);
-                                        c->sliding = c->bounce = 1;
-                                        c->squish_origin = to >= from ? 1 : -1;
-                                }
-                                else
-                                        c->value = to;
-                                if (c->value != from || c->sliding)
-                                        changed = c;
-                                c->hover_x = -1; // v(B): the hover preview is over till the pointer moves again
+                                if (hit >= 0)
+                                        return ui_kit_pointer_press(ui, ctl, x, y, hit, UI_TAB_HIT_ITEM);
                         }
-                        break;
                 }
-                return changed;
+                return null;
         }
-        // The release.
         {
                 struct ui_control address_to c = ui_kit_held;
 
                 ui_kit_held = null;
                 if (!c)
                         return null;
-                // Disabled while it was held (with no motion to let it go): its release clicks, toggles and picks nothing, and
-                // the hold lets go as a cancel's does.
                 if (!ui_control_live(c))
                 {
                         ui_kit_let_go_held(c);
                         c->hover = 0, c->item = -1;
                         return null;
                 }
-                c->down = 0;
-                ui_kit_ripples_exit(c);
-                if (c->kind == UI_BUTTON)
-                {
-                        ui_squish_release(&c->squish);
-                        // The hover is where the pointer is now: the held motion did not keep it, so a press dragged out and let go
-                        // outside leaves none. A button disabled while it was held is not clicked (a disabled one takes no press).
-                        c->hover = ui_control_live(c) && ui_control_hit(ui, c, x, y) >= 0;
-                        if (!c->moved && ui_control_live(c) && ui_control_hit(ui, c, x, y) >= 0)
-                                changed = c;
-                }
-                else if (c->kind == UI_TABS)
-                {
-                        ui_squish_release(&c->squish);
-                        c->close_item = -1, c->add_clicked = false, c->tab_right_click = -1;
-                        if (!c->moved && ui_control_hit(ui, c, x, y) == c->item)
-                        {
-                                if (c->item == 2 * UI_ITEMS)
-                                        c->add_clicked = true, changed = c;
-                                else if (c->item >= UI_ITEMS)
-                                        c->close_item = c->item - UI_ITEMS, changed = c;
-                                else
-                                {
-                                        ui_tabs_choose(ui, c, c->item);
-                                        changed = c;
-                                }
-                        }
-                        if (c->item >= UI_ITEMS)
-                                c->item = c->item >= 2 * UI_ITEMS ? -1 : c->item - UI_ITEMS;
-                }
-                else if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_RADIOS)
-                {
-                        int dx = x - c->press_x;
-                        b64 ldx = ui_qdiv(ui_q(dx), ui_q(ui->scale) / 100);
-                        // The drag's way toward the on side: a right-to-left layout's on is at the left, as the press's
-                        // motion reads it (toward), so the same drag that turns it on in one turns it on in the other.
-                        b32 right = (dx > 0) != ui_rtl();
-
-                        b32 was = c->kind == UI_RADIOS ? c->item == c->at : c->on;
-                        // A radio is picked by a press let go on the circle it went down on: a drag that ends elsewhere picks nothing.
-                        b32 pick = c->kind == UI_RADIOS ? ui_control_hit(ui, c, x, y) == c->item
-                                                        : (c->moved && right != was && (ldx > ui_q(100) || ldx < -ui_q(100))) || !c->moved;
-
-                        if (pick)
-                        {
-                                if (c->kind == UI_RADIOS)
-                                {
-                                        if (c->item != c->at)
-                                        {
-                                                ui_radios_choose(c, c->item);
-                                                changed = c;
-                                        }
-                                        else if (!c->moved && !ui_kit.motion)
-                                        {
-                                                // Pressed again on the chosen circle: a squish in place, and the pip's own.
-                                                int lx = x * 100 / ui->scale;
-
-                                                if (lx >= c->x + c->w - 40 && lx < c->x + c->w - 12)
-                                                {
-                                                        c->dom_origin = 0;
-                                                        ui_stretch_go(&c->item_dom[c->at], ui_kit.now, UI_Q2(84));
-                                                        c->pip_press = 1;
-                                                }
-                                        }
-                                }
-                                else
-                                {
-                                        c->on = !c->on;
-                                        changed = c;
-                                        // The change: the row stretches toward where the knob went.
-                                        c->dom_origin = (c->on ? 1 : -1) * ui_dir();
-                                        if (!ui_kit.motion)
-                                                ui_stretch_go(&c->dom, ui_kit.now, UI_Q2(111));
-                                }
-                        }
-                        if (c->kind != UI_RADIOS)
-                        {
-                                // The bars go back to the width their state gives, from where the hand left them.
-                                c->moved = 0;
-                                ui_kit_number_to(&c->extent, c->on ? UI_ONE : 0, 200, &ui_ease);
-                        }
-                        c->moved = 0;
-                        if (c->bend > UI_REST_SCALE && !ui_kit.motion)
-                                ui_spring_go(&c->held_squish, c->bend, 0);
-                        c->bend = 0;
-                        ui_squish_release(&c->squish);
-                }
-                else if (c->kind == UI_SLIDER)
-                {
-                        b64 cur = c->bend > 3221225 ? c->bend : 0;
-
-                        if (c->moved && cur > 0 && !ui_kit.motion)
-                                ui_spring_go(&c->held_squish, cur, 0);
-                        else if (c->bounce && !c->moved && !ui_kit.motion)
-                                c->slide.landed = ui_kit.now;
-                        else
-                                c->squish_origin = 0;
-                        c->bend = c->bend_target = 0;
-                        c->moved = 0;
-                        ui_squish_release(&c->squish); // pressSpring(B, 0, vy, 0, vyT): the drag's vertical press only
-                }
-                // The release is where the pointer is: a press dragged off the control and let go there is not hovered
-                // (the held motions above never moved hover, and no motion comes after a release to move it).
-                {
-                        int hit = ui_control_live(c) ? ui_control_hit(ui, c, x, y) : -1;
-
-                        c->hover = hit >= 0;
-                        c->item = hit;
-                }
-                return changed;
+                return ui_kit_pointer_release(ui, c, x, y);
         }
 }
 
@@ -19097,6 +19126,7 @@ static void ui_scratch_fit(struct ui address_to ui, unsigned int width)
 #define UI_MENU_SUBMENU 64u // id names the submenu the app opens for it
 #define UI_MENU_ERROR 128u  // a notice of an error: the taskbar's dot at the item's start, where a check would be, and its keys in the error's ink
 #define UI_MENU_WARNING 256u // a notice of a warning: the same in the warning's ink
+#define UI_MENU_LITERAL 512u // draw label literally (do not interpret '&' as a mnemonic prefix)
 #define UI_MENU_SEEN 300     // a notice's dot stands out 3 to 1 from its ground (WCAG's for a shape that is not text), its word UI_READABLE
 #define UI_MENU_ROW 28
 #define UI_MENU_TOUCH_ROW 44
@@ -19177,12 +19207,19 @@ static fn ui_popmenu_to(struct ui_popmenu address_to m, int at)
         ui_scroll_set(&m->scroll, m->tree.node[0].offset);
 }
 
-// A label as drawn: its & left out (and && one &).
-static positive ui_popmenu_shown(const char address_to label, p8 address_to into, positive room, p32 address_to mnemonic)
+// A label as drawn: when UI_MENU_LITERAL is set, copied verbatim; otherwise '&' marks mnemonic and '&&' is one '&'.
+static positive ui_popmenu_shown_flags(const char address_to label, p32 flags, p8 address_to into, positive room, p32 address_to mnemonic)
 {
         positive out = 0;
 
         *mnemonic = 0;
+        if (flags & UI_MENU_LITERAL)
+        {
+                for (positive at = 0; label && label[at] && out + 1 < room; at++)
+                        into[out++] = (p8)label[at];
+                into[out] = 0;
+                return out;
+        }
         for (positive at = 0; label && label[at] && out + 1 < room; at++)
         {
                 if (label[at] == '&' && label[at + 1] && label[at + 1] != '&')
@@ -19198,6 +19235,11 @@ static positive ui_popmenu_shown(const char address_to label, p8 address_to into
         }
         into[out] = 0;
         return out;
+}
+
+static positive ui_popmenu_shown(const char address_to label, p8 address_to into, positive room, p32 address_to mnemonic)
+{
+        return ui_popmenu_shown_flags(label, 0, into, room, mnemonic);
 }
 
 /*
@@ -19236,7 +19278,7 @@ static fn ui_popmenu_size(struct ui address_to ui, struct ui_popmenu address_to 
                 {
                         n->align = UI_CENTER, n->justify = UI_BETWEEN;
                         n->pad[0] = lead, n->pad[1] = item->keys ? far : inset, n->gap = inset + ui_dev(ui, 32) - far;
-                        ui_popmenu_shown(item->label, shown, sizeof(shown), &mnemonic);
+                        ui_popmenu_shown_flags(item->label, item->flags, shown, sizeof(shown), &mnemonic);
                         n = ui_tree_open(t), n->content[0] = ui_kit_measure(ui, shown, UI_BODY_MEDIUM), n->content[1] = cap, n->margin[1] = inset - lead, ui_tree_close(t);
                         if (item->keys)
                                 n = ui_tree_open(t), n->content[0] = ui_kit_measure(ui, (string_address)item->keys, UI_BODY_MEDIUM), n->content[1] = cap, ui_tree_close(t);
@@ -19273,19 +19315,11 @@ static int ui_popmenu_at(const struct ui_popmenu address_to m, int x, int y)
 */
 static fn ui_popmenu_ripple(struct ui address_to ui, struct ui_popmenu address_to m, const struct ui_node address_to n)
 {
-        struct ui_box rect = {n->x * 256, n->y * 256, (n->x + n->w) * 256, (n->y + n->h) * 256, 0, 0}, dot;
-        b64 cx, cy, radius, opacity;
+        struct ui_box rect = {n->x * 256, n->y * 256, (n->x + n->w) * 256, (n->y + n->h) * 256, 0, 0};
+        unsigned int argb = ui->glass ? 0xff000000u | (ui->ground & 0xffffffu) : ui_role(UI_SURFACE);
 
-        if (!ui_ripple_at(&m->ripple, &cx, &cy, &radius, &opacity))
-                return;
-        m->moving = 1;
-        dot.x0 = rect.x0 + (b32)(((cx - radius) * ui->scale / 100) >> 22), dot.x1 = rect.x0 + (b32)(((cx + radius) * ui->scale / 100) >> 22);
-        dot.y0 = rect.y0 + (b32)(((cy - radius) * ui->scale / 100) >> 22), dot.y1 = rect.y0 + (b32)(((cy + radius) * ui->scale / 100) >> 22);
-        dot.rx = dot.ry = (b32)((radius * ui->scale / 100) >> 22);
-        // The press sinks the item toward the ground it lies on (the glass's, or the surface's): the label is paired with the
-        // highlight's ink, so a press that brightened the highlight would take the label's contrast below UI_READABLE.
-        ui_kit_fill(ui, &dot, ui_mix(ui->glass ? 0xff000000u | (ui->ground & 0xffffffu) : ui_role(UI_SURFACE),
-                                     (unsigned int)((opacity * 100 + UI_HALF) >> UI_Q), 0), &rect);
+        if (ui_ripple_paint(ui, &m->ripple, rect.x0, rect.y0, null, &rect, argb))
+                m->moving = 1;
 }
 
 /*
@@ -19352,7 +19386,7 @@ static fn ui_popmenu_draw(struct ui address_to ui, struct ui_popmenu address_to 
                         ui_fill(ui, n->x, n->y, n->w, n->h, ui_premultiplied(ui_popmenu_hot_fill(ui), UI_FULL));
                 if (at == m->ripple_at)
                         ui_popmenu_ripple(ui, m, n);
-                ui_popmenu_shown(item->label, shown, sizeof(shown), &mnemonic);
+                ui_popmenu_shown_flags(item->label, item->flags, shown, sizeof(shown), &mnemonic);
                 if (item->flags & UI_MENU_HEADER)
                         ui_kit_text_flipped(ui, n[1].x, baseline, shown, UI_LABEL_MEDIUM, ui_text_colour(ui, UI_ON_SURFACE_VARIANT), 0, 0, m->width);
                 else
@@ -19501,7 +19535,7 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                         // A mnemonic chooses at once; else the first item the letters typed start.
                         for (int at = 0; at < m->count; at++)
                         {
-                                ui_popmenu_shown(m->items[at].label, shown, sizeof(shown), &mnemonic);
+                                ui_popmenu_shown_flags(m->items[at].label, m->items[at].flags, shown, sizeof(shown), &mnemonic);
                                 if (ui_popmenu_choosable(m, at) && mnemonic == byte_to_lower((b8)c) && m->typed_length == 1)
                                 {
                                         m->hot = at;
@@ -19512,7 +19546,7 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                         {
                                 positive k = 0;
 
-                                ui_popmenu_shown(m->items[at].label, shown, sizeof(shown), &mnemonic);
+                                ui_popmenu_shown_flags(m->items[at].label, m->items[at].flags, shown, sizeof(shown), &mnemonic);
                                 while (k < (positive)m->typed_length && shown[k] && byte_to_lower((b8)shown[k]) == m->typed[k])
                                         k++;
                                 if (ui_popmenu_choosable(m, at) && k == (positive)m->typed_length)
@@ -19549,7 +19583,7 @@ static int ui_popmenu_event(struct ui address_to ui, struct ui_popmenu address_t
                 ui_popmenu_to(m, ui_popmenu_top(m) + (int)ui_wheel_step(ui, event, row, 3, &m->wheel_rest, &m->wheel_left, null));
                 return UI_MENU_NOTHING;
         }
-        if (event->type == WINDOW_EVENT_BUTTON && event->a >= 0x110 && event->a <= 0x112)
+        if (event->type == WINDOW_EVENT_BUTTON && event->a >= UI_POINTER_LEFT && event->a <= UI_POINTER_MIDDLE)
         {
                 int at = ui_popmenu_at(m, x, y), clicked;
 
@@ -21606,7 +21640,7 @@ struct ui_splitter
 {
         b32 hover, held;
         int from, start_w;
-        b64 click_at;
+        struct ui_click click;
 };
 
 static p32 ui_splitter_event(const struct ui address_to ui, struct ui_splitter address_to sp, const struct window_event address_to event,
@@ -21651,16 +21685,11 @@ static p32 ui_splitter_event(const struct ui address_to ui, struct ui_splitter a
         }
         if (button && down && event->a == UI_POINTER_LEFT && on)
         {
-                b64 now = (b64)ui_kit.now;
-
-                if (default_w > 0 && sp->click_at && now - sp->click_at <= ui_click_ns)
+                if (default_w > 0 && ui_click_same(&sp->click, (b64)ui_kit.now, 1))
                 {
                         *out_w = default_w;
-                        sp->click_at = 0;
                         return UI_SPLITTER_DRAW | UI_SPLITTER_TAKEN | UI_SPLITTER_RESET;
                 }
-                if (default_w > 0)
-                        sp->click_at = now;
                 sp->held = true, sp->hover = true;
                 sp->from = x, sp->start_w = current_w;
                 ui_kit_shape = WINDOW_POINTER_RESIZE;
@@ -22428,14 +22457,12 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
 
                                 if (c && c->kind == UI_TABS && c->closable && ui_control_live(c))
                                 {
-                                        int hit = ui_control_hit(ui, c, x, y);
+                                        struct ui_tab_hit th = ui_tab_hit_at(ui, c, x, y);
 
-                                        if (hit >= UI_ITEMS && hit < 2 * UI_ITEMS)
-                                                hit -= UI_ITEMS;
-                                        if (hit >= 0 && hit < c->count)
+                                        if ((th.kind == UI_TAB_HIT_ITEM || th.kind == UI_TAB_HIT_CLOSE) && th.item >= 0 && th.item < c->count)
                                         {
-                                                c->close_item = event->a == UI_POINTER_MIDDLE ? hit : -1;
-                                                c->tab_right_click = event->a == UI_POINTER_RIGHT ? hit : -1;
+                                                c->close_item = event->a == UI_POINTER_MIDDLE ? th.item : -1;
+                                                c->tab_right_click = event->a == UI_POINTER_RIGHT ? th.item : -1;
                                                 c->add_clicked = false;
                                                 return asks | UI_VIEW_DRAW | UI_VIEW_TAKEN | ui_view_act(&v->item[at]);
                                         }
@@ -25898,6 +25925,15 @@ struct ui_list_menu
         void (*before_open)(int before, int row);                       // optional hook before right-click opens on row (e.g. drop confirm)
 };
 
+// Compact LRU row animation pool for ui_list: replaces 2 * ids * sizeof(ui_control) (~2.5 MiB/list) with ~65 KiB/list.
+#define UI_LIST_POOL 32
+struct ui_list_slot
+{
+        int id;                    // row id owning this pair, or -1 if free
+        p64 used;                  // monotonic LRU timestamp
+        struct ui_control c[2];    // [0] row's own (or switch), [1] trailing control
+};
+
 struct ui_list
 {
         // The app's: the row (its own number) each place shows, in order, how it is described, and where a change must
@@ -25937,7 +25973,8 @@ struct ui_list
         int pointer_x, pointer_y;
         b32 pointer_mouse;                 // that place is a mouse's, which stays over the list while it is still (a finger's hovers nothing)
         int hover_at;                      // where the rows were scrolled to when the hover was last hit: moved since, it is hit again (ui_list_draw)
-        struct ui_control address_to controls; // two to a row: the row's own (or its switch) and its trailing control
+        struct ui_list_slot address_to pool; // compact LRU pool of row control pairs (allocated lazily)
+        p64 pool_tick;
         struct ui_columns address_to columns;  // a details view's: its rows are drawn as cells under these (ui_columns), none else
         b32 tree;                          // a tree's: each row's label set in by its indent, its expander's chevron before it (ui_list_cells)
         b32 beside;                        // a view's list beside another (two panes): its rows run across its own column, not the window
@@ -25972,8 +26009,8 @@ struct ui_list
         b32 menu_asked;
         int menu_x, menu_y;
         b32 ground_clicked;
-        int last_clicked;                  // id + 1 of the row last clicked (0 none), for double-click detection
-        b64 last_clicked_at;
+        int last_clicked;                  // id + 1 of the row last clicked (0 none; apps clear to reset double-click)
+        struct ui_click click;             // double-click tracking (ui_click_same)
         b32 double_clicked;                // true when the row returned by ui_list_click was a double-click
 };
 
@@ -26097,29 +26134,66 @@ static inline int ui_list_id(const struct ui_list address_to l, int at)
         return l->virtual ? l->first + at : l->id[at];
 }
 
-// The rows' controls, mapped at the first draw: what is never drawn is never touched. A virtual list has a pair for each place, a row's
-// being those of its number over the places.
+// The rows' controls, served from a compact LRU pool (UI_LIST_POOL pairs, allocated lazily) so large lists never map megabytes.
 static struct ui_control address_to ui_list_control(struct ui_list address_to l, int id, int which)
 {
-        if (l->virtual && l->ids <= 0)
-                l->ids = UI_LIST_MOST;
-        if (!l->controls && l->ids > 0)
-        {
-                long mapped = ui_map((positive)l->ids * 2 * sizeof(struct ui_control));
+        int free_slot = -1, victim = -1;
 
-                l->controls = mapped < 0 && mapped > -4096 ? null : (struct ui_control address_to)mapped;
-        }
         if (l->virtual)
-                return l->controls && id >= 0 && id < l->total ? &l->controls[2 * (id % l->ids) + which] : null;
-        return l->controls && id >= 0 && id < l->ids ? &l->controls[2 * id + which] : null;
+        {
+                if (id < 0 || id >= l->total)
+                        return null;
+        }
+        else if (id < 0 || l->ids <= 0 || id >= l->ids)
+                return null;
+        if (!l->pool)
+        {
+                long mapped = ui_map((positive)UI_LIST_POOL * sizeof(struct ui_list_slot));
+
+                if (mapped < 0 && mapped > -4096)
+                        return null;
+                l->pool = (struct ui_list_slot address_to)mapped;
+                for (int i = 0; i < UI_LIST_POOL; i++)
+                        l->pool[i].id = -1;
+        }
+        for (int i = 0; i < UI_LIST_POOL; i++)
+        {
+                struct ui_list_slot address_to s = &l->pool[i];
+
+                if (s->id == id)
+                {
+                        s->used = ++l->pool_tick;
+                        return &s->c[which];
+                }
+                if (s->id < 0 && free_slot < 0)
+                        free_slot = i;
+                else if (s->id >= 0)
+                {
+                        b32 pinned = &s->c[0] == ui_kit_held || &s->c[1] == ui_kit_held || s->id == l->hover || s->id == l->down ||
+                                     s->id == l->focus || s->id == l->slide - 1;
+
+                        if (!pinned && (victim < 0 || s->used < l->pool[victim].used))
+                                victim = i;
+                }
+        }
+        {
+                int pick = free_slot >= 0 ? free_slot : victim >= 0 ? victim : 0;
+                struct ui_list_slot address_to s = &l->pool[pick];
+
+                ui_items_anim_reset(&s->c[0]);
+                ui_items_anim_reset(&s->c[1]);
+                memory_zero(s->c, sizeof(s->c));
+                s->id = id;
+                s->used = ++l->pool_tick;
+                return &s->c[which];
+        }
 }
 
 // A virtual list's places for where it is scrolled to now: the rows of the view at rest and UI_LIST_MARGIN either side, each at its
-// number's top. A row that comes to a place another had forgets that one's hover, press and ripple.
+// number's top.
 static fn ui_list_window(const struct ui address_to ui, struct ui_list address_to l)
 {
         int row = ui_list_unit(ui, l), per = ui_list_per(ui, l), margin = l->tiles ? 2 : UI_LIST_MARGIN, most, at_rest, first, count;
-        int was_first = l->first, was_count = l->count;
 
         l->total = l->total < 0 ? 0 : l->total;
         l->content = (l->total + per - 1) / per * row;
@@ -26134,14 +26208,7 @@ static fn ui_list_window(const struct ui address_to ui, struct ui_list address_t
         count = count < 0 ? 0 : count;
         l->first = first, l->count = count;
         for (int at = 0; at < count; at++)
-        {
                 l->top[at] = (first + at) / per * row, l->tall[at] = l->whole[at] = row, l->starts[at] = 0;
-                if (l->controls && l->ids > 0 && (first + at < was_first || first + at >= was_first + was_count))
-                {
-                        ui_control_forget(&l->controls[2 * ((first + at) % l->ids)]);
-                        ui_control_forget(&l->controls[2 * ((first + at) % l->ids) + 1]);
-                }
-        }
 }
 
 static int ui_row_drive_height(const struct ui address_to ui, const struct ui_row address_to row);
@@ -28247,15 +28314,12 @@ static int ui_list_pointer(struct ui address_to ui, struct ui_list address_to l,
 // Records a completed click on row and sets l->double_clicked when it repeats within ui_click_ns.
 static int ui_list_note_click(struct ui_list address_to l, int row)
 {
-        b64 now = (b64)ui_kit.now;
-
         if (row < 0)
                 return -1;
-        l->double_clicked = l->last_clicked == row + 1 && now - l->last_clicked_at <= ui_click_ns;
-        if (l->double_clicked)
-                l->last_clicked = 0;
-        else
-                l->last_clicked = row + 1, l->last_clicked_at = now;
+        if (!l->last_clicked)
+                l->click.count = 0;
+        l->double_clicked = ui_click_same(&l->click, (b64)ui_kit.now, row);
+        l->last_clicked = l->double_clicked ? 0 : row + 1;
         return row;
 }
 
@@ -28751,8 +28815,7 @@ struct ui_page
         int chosen;                        // the column's group chosen (the body's rows are its rows)
         b32 pane;                          // where the keys are: 0 the column of groups, 1 the body
         int menu_row, menu_x, menu_y;      // the list row whose choice menu is open (-1 none) and where it is placed
-        char menu_word[UI_MENU_ITEMS][UI_PAGE_WORD];   // the menu's words as the app gave them: a choice's value is one of these
-        char menu_mark[UI_MENU_ITEMS][2 * UI_PAGE_WORD]; // the same, its ampersands doubled for the menu
+        char menu_word[UI_MENU_ITEMS][UI_PAGE_WORD];   // the menu's words as the app gave them (drawn with UI_MENU_LITERAL)
         // The app's: what scrolls in the body (its list's region, or a page of text's).
         struct ui_scroll address_to body;
         // Optional popup + window handle: lets ui_page_pointer and ui_page_context_key open list context menus with zero app state.
@@ -29188,21 +29251,13 @@ static b32 ui_page_menu_open(const struct ui address_to ui, struct ui_page addre
         for (int k = 0; k < UI_MENU_ITEMS; k++)
         {
                 const char address_to shown = label(row, k);
-                positive out = 0;
 
                 if (!shown)
                         break;
                 string_copy_bounded((string_address)p->menu_word[k], (string_address)shown, UI_PAGE_WORD);
-                for (positive c = 0; p->menu_word[k][c] && out + 2 < sizeof(p->menu_mark[k]); c++)
-                {
-                        p->menu_mark[k][out++] = p->menu_word[k][c];
-                        if (p->menu_word[k][c] == '&')
-                                p->menu_mark[k][out++] = '&';
-                }
-                p->menu_mark[k][out] = 0;
                 if (string_equals((string_address)p->menu_word[k], (string_address)current))
                         current_at = k;
-                ui_popmenu_add(m, p->menu_mark[k], null, UI_MENU_RADIO | (current_at == k ? UI_MENU_ON : 0), k);
+                ui_popmenu_add(m, p->menu_word[k], null, UI_MENU_RADIO | UI_MENU_LITERAL | (current_at == k ? UI_MENU_ON : 0), k);
         }
         // The row is revealed before its place is read: the reveal scrolls the list, and the row's top is where it is then.
         if (!p->card)
@@ -29356,6 +29411,7 @@ static b32 ui_page_context_key(struct ui address_to ui, struct ui_page address_t
 static fn ui_page_let_go(const struct ui address_to ui, struct ui_page address_to p, struct ui_list address_to l)
 {
         ui_press_cancel(&p->press);
+        ui_press_cancel(&l->press);
         p->column_scroll.held = false;
         ui_scroll_let_go(&p->column_scroll, 0);
         if (p->body)
@@ -29638,9 +29694,29 @@ static fn ui_page_pointer(struct ui address_to ui, struct ui_page address_to p, 
         }
         if (ui_list_slider(ui, p, l, event))
                 return;
-        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a != UI_POINTER_LEFT && p->press.down)
+        if (event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a != UI_POINTER_LEFT && (p->press.down || l->press.down))
         {
                 ui_page_let_go(ui, p, l);
+                return;
+        }
+        // Route list-row pointer interactions (when the page body is the list's own scroll) through ui_list_click.
+        if (!p->card && (!p->body || p->body == &l->scroll) &&
+            (l->press.down ? (event->type == WINDOW_EVENT_MOTION || (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT))
+                           : (!p->press.down && event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_POINTER_LEFT &&
+                              ui_page_target(ui, p, l, ui_kit.pointer_x, ui_kit.pointer_y) >= 0 &&
+                              ui_page_target(ui, p, l, ui_kit.pointer_x, ui_kit.pointer_y) < UI_PAGE_GROUP)))
+        {
+                int px = event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x;
+                int py = event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y;
+                int press_x = l->press.x, press_y = l->press.y;
+                int clicked = ui_list_click(ui, l, event, px, py);
+
+                p->press = l->press;
+                if (l->press.down && l->press.dragged)
+                        ui_page_moved(ui, p, &l->scroll);
+                ui_page_changed(p);
+                if (clicked >= 0)
+                        ui_page_press_done(ui, p, l, done, press_x, press_y, px, py);
                 return;
         }
         if (event->type == WINDOW_EVENT_MOTION)
@@ -32978,6 +33054,38 @@ static fn ui_text_hex_move(struct ui_text address_to t, b64 target, b32 extend)
         ui_text_wake(t);
 }
 
+// Shared text/hex helpers: atomic single-edit replacement, zoom adjustment, and app-level command predicate.
+static fn ui_doc_replace_one(struct doc address_to doc, p64 at, p64 removed, const p8 address_to text, p64 length, p64 caret)
+{
+        doc_seal(doc);
+        doc_replace(doc, at, removed, text, length);
+        if (caret != DOC_NONE)
+                doc_select_set(doc, caret, caret);
+        doc_seal(doc);
+}
+
+static p32 ui_text_zoom(struct ui address_to ui, struct ui_text address_to t, p32 command)
+{
+        t->zoom = command == DOC_CMD_ZOOM_RESET ? 0 : t->zoom + (command == DOC_CMD_ZOOM_IN ? 1 : -1);
+        t->zoom = t->zoom < -6 ? -6 : t->zoom > 40 ? 40 : t->zoom;
+        ui_text_metrics(ui, t);
+        return UI_TEXT_MOVED;
+}
+
+static b32 ui_text_is_app_command(p32 command)
+{
+        switch (command)
+        {
+        case DOC_CMD_SAVE: case DOC_CMD_SAVE_AS: case DOC_CMD_OPEN: case DOC_CMD_NEW:
+        case DOC_CMD_NEW_WINDOW: case DOC_CMD_CLOSE: case DOC_CMD_NEXT_TAB: case DOC_CMD_PREVIOUS_TAB:
+        case DOC_CMD_FIND: case DOC_CMD_REPLACE: case DOC_CMD_FIND_NEXT: case DOC_CMD_FIND_PREVIOUS:
+        case DOC_CMD_GOTO_LINE:
+                return true;
+        default:
+                return false;
+        }
+}
+
 static p32 ui_text_hex_command(struct ui address_to ui, struct ui_text address_to t, p32 command)
 {
         p64 version = t->doc.version, len = doc_length(&t->doc);
@@ -33049,11 +33157,7 @@ static p32 ui_text_hex_command(struct ui address_to ui, struct ui_text address_t
                 if (doc_any_selected(&t->doc))
                         doc_erase_selections(&t->doc);
                 else if (active < len)
-                {
-                        doc_seal(&t->doc);
-                        doc_replace(&t->doc, active, 1, (const p8 address_to) "", 0);
-                        doc_seal(&t->doc);
-                }
+                        ui_doc_replace_one(&t->doc, active, 1, (const p8 address_to) "", 0, DOC_NONE);
                 t->hex_nibble = false;
                 ui_text_hex_reveal(t);
                 ui_text_wake(t);
@@ -33068,12 +33172,7 @@ static p32 ui_text_hex_command(struct ui address_to ui, struct ui_text address_t
                 if (doc_any_selected(&t->doc))
                         doc_erase_selections(&t->doc);
                 else if (active > 0)
-                {
-                        doc_seal(&t->doc);
-                        doc_replace(&t->doc, active - 1, 1, (const p8 address_to) "", 0);
-                        doc_select_set(&t->doc, active - 1, active - 1);
-                        doc_seal(&t->doc);
-                }
+                        ui_doc_replace_one(&t->doc, active - 1, 1, (const p8 address_to) "", 0, active - 1);
                 ui_text_hex_reveal(t);
                 ui_text_wake(t);
                 return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
@@ -33084,12 +33183,7 @@ static p32 ui_text_hex_command(struct ui address_to ui, struct ui_text address_t
                 if (doc_any_selected(&t->doc))
                         doc_erase_selections(&t->doc);
                 else if (active < len)
-                {
-                        doc_seal(&t->doc);
-                        doc_replace(&t->doc, active, 1, (const p8 address_to) "", 0);
-                        doc_select_set(&t->doc, active, active);
-                        doc_seal(&t->doc);
-                }
+                        ui_doc_replace_one(&t->doc, active, 1, (const p8 address_to) "", 0, active);
                 ui_text_hex_reveal(t);
                 ui_text_wake(t);
                 return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
@@ -33101,19 +33195,13 @@ static p32 ui_text_hex_command(struct ui address_to ui, struct ui_text address_t
                 ui_text_wake(t);
                 return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
         case DOC_CMD_ZOOM_IN: case DOC_CMD_ZOOM_OUT: case DOC_CMD_ZOOM_RESET:
-                t->zoom = command == DOC_CMD_ZOOM_RESET ? 0 : t->zoom + (command == DOC_CMD_ZOOM_IN ? 1 : -1);
-                t->zoom = t->zoom < -6 ? -6 : t->zoom > 40 ? 40 : t->zoom;
-                ui_text_metrics(ui, t);
-                return UI_TEXT_MOVED;
+                return ui_text_zoom(ui, t, command);
         case DOC_CMD_MENU:
                 t->menu_x = t->well_left + t->cell * 12;
                 t->menu_y = t->top + (int)(active / 16 >= t->hex_top / 16 ? active / 16 - t->hex_top / 16 + 1 : 1) * t->line_height;
                 return UI_TEXT_MENU;
         default:
-                if (command == DOC_CMD_SAVE || command == DOC_CMD_SAVE_AS || command == DOC_CMD_OPEN || command == DOC_CMD_NEW ||
-                    command == DOC_CMD_NEW_WINDOW || command == DOC_CMD_CLOSE || command == DOC_CMD_NEXT_TAB ||
-                    command == DOC_CMD_PREVIOUS_TAB || command == DOC_CMD_FIND || command == DOC_CMD_REPLACE ||
-                    command == DOC_CMD_FIND_NEXT || command == DOC_CMD_FIND_PREVIOUS || command == DOC_CMD_GOTO_LINE)
+                if (ui_text_is_app_command(command))
                 {
                         t->command = command;
                         return UI_TEXT_COMMAND;
@@ -33139,10 +33227,7 @@ static p32 ui_text_hex_char(struct ui_text address_to t, p32 character)
                 byte = (p8)character;
                 at = start;
                 remove = finish > start ? finish - start : (!t->hex_insert && at < len ? 1 : 0);
-                doc_seal(&t->doc);
-                doc_replace(&t->doc, at, remove, &byte, 1);
-                doc_select_set(&t->doc, at + 1, at + 1);
-                doc_seal(&t->doc);
+                ui_doc_replace_one(&t->doc, at, remove, &byte, 1, at + 1);
                 t->hex_nibble = false;
                 ui_text_hex_reveal(t);
                 ui_text_wake(t);
@@ -33156,10 +33241,7 @@ static p32 ui_text_hex_char(struct ui_text address_to t, p32 character)
                 if (finish > start)
                 {
                         byte = (p8)(nib << 4);
-                        doc_seal(&t->doc);
-                        doc_replace(&t->doc, at, finish - start, &byte, 1);
-                        doc_select_set(&t->doc, at, at);
-                        doc_seal(&t->doc);
+                        ui_doc_replace_one(&t->doc, at, finish - start, &byte, 1, at);
                         t->hex_nibble = true;
                 }
                 else if (!t->hex_nibble)
@@ -33168,10 +33250,7 @@ static p32 ui_text_hex_char(struct ui_text address_to t, p32 character)
                         p8 cur = inserting ? 0 : (p8)doc_byte(&t->doc, at);
 
                         byte = (p8)((nib << 4) | (cur & 0x0f));
-                        doc_seal(&t->doc);
-                        doc_replace(&t->doc, at, inserting ? 0 : 1, &byte, 1);
-                        doc_select_set(&t->doc, at, at);
-                        doc_seal(&t->doc);
+                        ui_doc_replace_one(&t->doc, at, inserting ? 0 : 1, &byte, 1, at);
                         t->hex_nibble = true;
                 }
                 else
@@ -33179,10 +33258,7 @@ static p32 ui_text_hex_char(struct ui_text address_to t, p32 character)
                         p8 cur = at < len ? (p8)doc_byte(&t->doc, at) : 0;
 
                         byte = (p8)((cur & 0xf0) | nib);
-                        doc_seal(&t->doc);
-                        doc_replace(&t->doc, at, at < len ? 1 : 0, &byte, 1);
-                        doc_select_set(&t->doc, at + 1, at + 1);
-                        doc_seal(&t->doc);
+                        ui_doc_replace_one(&t->doc, at, at < len ? 1 : 0, &byte, 1, at + 1);
                         t->hex_nibble = false;
                 }
                 ui_text_hex_reveal(t);
@@ -33271,10 +33347,7 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
         case DOC_CMD_ZOOM_IN: case DOC_CMD_ZOOM_OUT: case DOC_CMD_ZOOM_RESET:
                 if (t->mode != UI_TEXT_CODE)
                         return 0;
-                t->zoom = command == DOC_CMD_ZOOM_RESET ? 0 : t->zoom + (command == DOC_CMD_ZOOM_IN ? 1 : -1);
-                t->zoom = t->zoom < -6 ? -6 : t->zoom > 40 ? 40 : t->zoom;
-                ui_text_metrics(ui, t);
-                return UI_TEXT_MOVED;
+                return ui_text_zoom(ui, t, command);
         case DOC_CMD_WRAP:
                 if (t->mode == UI_TEXT_FIELD)
                         return 0;
@@ -34129,7 +34202,7 @@ static p32 ui_select_finger(struct ui address_to ui, struct ui_select address_to
 
         if (event->type == WINDOW_EVENT_MOTION)
                 return ui_select_finger_move(ui, s, x, y);
-        if (event->a == 0x111)
+        if (event->a == UI_POINTER_RIGHT)
         {
                 // The long press's right button: on the text it selects the word; a finger on a handle or the bar only says it was
                 // held, and that press's lift is what it was.
@@ -34503,7 +34576,7 @@ static p32 ui_text_hex_pointer(struct ui address_to ui, struct ui_text address_t
                 }
                 if (!well)
                         return 0;
-                if (event->a == 0x111)
+                if (event->a == UI_POINTER_RIGHT)
                 {
                         p64 at = ui_text_hex_hit(t, x, y, &in_ascii);
                         const struct doc_selection address_to sel = &t->doc.selections[t->doc.primary];
@@ -34514,7 +34587,7 @@ static p32 ui_text_hex_pointer(struct ui address_to ui, struct ui_text address_t
                         t->menu_x = x, t->menu_y = y;
                         return UI_TEXT_MENU | UI_TEXT_MOVED;
                 }
-                if (event->a != 0x110)
+                if (event->a != UI_POINTER_LEFT)
                         return 0;
                 {
                         p64 at = ui_text_hex_hit(t, x, y, &in_ascii);
@@ -34545,7 +34618,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         if (event->type == WINDOW_EVENT_PINCH)
                 return ui_text_pinch(ui, t, event);
         struct ui_select address_to s = ui_text_sel(t);
-        b32 touch = (event->flags & WINDOW_KEY_TOUCH) != 0 || (event->type == WINDOW_EVENT_BUTTON && event->a == 0x111 && (event->flags & WINDOW_KEY_HOLD));
+        b32 touch = (event->flags & WINDOW_KEY_TOUCH) != 0 || (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && (event->flags & WINDOW_KEY_HOLD));
 
         // Let touch selection (handles, floating Cut/Copy/Paste bar, finger scroll) run before mouse-only scrollbar/gutter hit-testing.
         if (!touch && !s->finger)
@@ -34593,7 +34666,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         return UI_TEXT_MOVED;
                 }
         }
-        if (in_gutter && event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == 0x110)
+        if (in_gutter && event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == UI_POINTER_LEFT)
         {
                 p64 at = ui_text_hit(ui, t, t->left, y), line = doc_line_of(&t->doc, at), lines = doc_line_count(&t->doc);
                 p64 lo = shift ? doc_line_of(&t->doc, t->doc.selections[t->doc.primary].anchor) : line;
@@ -34675,8 +34748,8 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         }
         // A finger's: its left button (the press, the lift, the compositor taking it back), the right button of its long press
         // (WINDOW_KEY_HOLD), and its moves while it holds something. A two fingers' right button is a mouse's, and asks the menu.
-        if (event->type == WINDOW_EVENT_BUTTON && ((event->a == 0x110 && (event->flags & WINDOW_KEY_TOUCH)) ||
-                                                   (event->a == 0x111 && (event->flags & WINDOW_KEY_HOLD))))
+        if (event->type == WINDOW_EVENT_BUTTON && ((event->a == UI_POINTER_LEFT && (event->flags & WINDOW_KEY_TOUCH)) ||
+                                                   (event->a == UI_POINTER_RIGHT && (event->flags & WINDOW_KEY_HOLD))))
                 return ui_text_finger(ui, t, event, x, y);
         if (event->type == WINDOW_EVENT_MOTION && s->finger)
                 return event->flags & WINDOW_KEY_TOUCH ? ui_text_finger(ui, t, event, x, y) : 0;
@@ -34689,7 +34762,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         b32 was = s->dragging;
 
                         // A press in the selection let go with no drag: a click there, the caret where it was.
-                        if (t->drag.armed && event->a == 0x110)
+                        if (t->drag.armed && event->a == UI_POINTER_LEFT)
                         {
                                 t->drag.armed = false;
                                 doc_select_set(&t->doc, ui_text_hit(ui, t, t->drag.x, t->drag.y), ui_text_hit(ui, t, t->drag.x, t->drag.y));
@@ -34704,7 +34777,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                 if (!well)
                         return 0;
                 s->handles = s->bar = false;
-                if (event->a == 0x111)
+                if (event->a == UI_POINTER_RIGHT)
                 {
                         p64 at = ui_text_hit(ui, t, x, y);
                         b32 in_selection = false;
@@ -34717,7 +34790,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         t->menu_x = x, t->menu_y = y;
                         return UI_TEXT_MENU | UI_TEXT_MOVED;
                 }
-                if (event->a == 0x112)
+                if (event->a == UI_POINTER_MIDDLE)
                 {
                         p64 at = ui_text_hit(ui, t, x, y);
 
@@ -34728,7 +34801,7 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
                         ui_text_wake(t);
                         return UI_TEXT_PASTE | UI_TEXT_MOVED;
                 }
-                if (event->a != 0x110)
+                if (event->a != UI_POINTER_LEFT)
                         return 0;
                 {
                         p64 at = ui_text_hit(ui, t, x, y);
@@ -35313,6 +35386,28 @@ static fn ui_text_fill(struct ui address_to ui, const struct ui_text address_to 
                 ui_fill(ui, x0, y, x1 - x0, height, tone);
 }
 
+// Shared text/hex gutter background tint and hairline divider, plus caret painter (vertical bar or block overwrite).
+static fn ui_text_draw_gutter_bg(struct ui address_to ui, int gx, int y, int gw, int h, int hair_x, int right,
+                                 unsigned int ground, unsigned int tint, unsigned int hair_alpha)
+{
+        if (gw > 0)
+                ui_fill(ui, gx, y, gw, h, 0xff000000u | window_mix(ground, ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, tint));
+        if (hair_x >= 0 && hair_x < right)
+                ui_fill(ui, hair_x, y, ui_px(ui, 1), h, ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, hair_alpha));
+}
+
+static fn ui_text_draw_caret(struct ui address_to ui, const struct ui_text address_to t, int cx, int y, int right_clip, b32 block, b32 text_clip)
+{
+        unsigned int cover = UI_CARET_FULL - t->caret_fade;
+        unsigned int tone = ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, block ? 110 * cover / UI_CARET_FULL : cover);
+        int cw = block ? t->cell : ui_caret_px(ui), cy = y + ui_px(ui, 1), ch = t->line_height - 2 * ui->scale / 100;
+
+        if (text_clip)
+                ui_text_fill(ui, t, cx, cy, cw, ch, tone);
+        else if (cx < right_clip)
+                ui_fill(ui, cx, cy, cx + cw > right_clip ? right_clip - cx : cw, ch, tone);
+}
+
 static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t, struct ui_text_layout address_to l,
                             p32 from, p32 to, int shift, p64 line, int y, int baseline, unsigned int ground, b32 is_last)
 {
@@ -35597,7 +35692,6 @@ cluster_lost:
                 for (positive s = 0; s < t->doc.selection_count; s++)
                 {
                         p64 caret = t->doc.selections[s].active;
-                        unsigned int cover = UI_CARET_FULL - t->caret_fade;
 
                         if (caret < l->offset[from] || (is_last ? caret > l->offset[to] : caret >= l->offset[to]))
                                 continue;
@@ -35607,10 +35701,7 @@ cluster_lost:
 
                                 if (!t->doc.overwrite && raw >= t->left && cx < t->left)
                                         cx = t->left;
-                                ui_text_fill(ui, t, cx, y + ui_px(ui, 1),
-                                             t->doc.overwrite ? t->cell : ui_caret_px(ui),
-                                             t->line_height - 2 * ui->scale / 100,
-                                             ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, t->doc.overwrite ? 110 * cover / UI_CARET_FULL : cover));
+                                ui_text_draw_caret(ui, t, cx, y, t->right, t->doc.overwrite, true);
                         }
                 }
         if (t->preedit_length && t->focused)
@@ -35673,7 +35764,6 @@ static fn ui_text_hex_draw(struct ui address_to ui, struct ui_text address_to t,
         unsigned int accent = ui_role(UI_PRIMARY) & 0xffffffu;
         unsigned int info = ui_ink_readable(ui_role(UI_INFO)) & 0xffffffu;
         unsigned int sel_bg = ui_well(ui, UI_SELECTION, 40);
-        unsigned int gutter_bg = window_mix(ground, ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 110);
         unsigned int hair = ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 90);
 
         ui_text_metrics(ui, t);
@@ -35691,10 +35781,7 @@ static fn ui_text_hex_draw(struct ui address_to ui, struct ui_text address_to t,
         at = t->hex_top;
 
         // Offset gutter background and column dividers (strictly clipped to [x, right)).
-        if (t->gutter > 0)
-                ui_fill(ui, x, y, t->gutter, height, 0xff000000u | gutter_bg);
-        if (x + addr_w < right)
-                ui_fill(ui, x + addr_w, y, ui_px(ui, 1), height, hair);
+        ui_text_draw_gutter_bg(ui, x, y, t->gutter, height, x + addr_w, right, ground, 110, 90);
         if (ascii_x - cell > x && ascii_x - cell < right)
                 ui_fill(ui, ascii_x - cell, y, ui_px(ui, 1), height, hair);
 
@@ -35765,24 +35852,10 @@ static fn ui_text_hex_draw(struct ui address_to ui, struct ui_text address_to t,
                         }
                         if (is_caret && t->focused && t->caret_fade < UI_CARET_FULL)
                         {
-                                unsigned int cover = UI_CARET_FULL - t->caret_fade;
-
                                 if (!t->hex_ascii && bx < right)
-                                {
-                                        int cx = bx + (t->hex_nibble ? cell : 0);
-                                        int cw = t->hex_insert ? ui_caret_px(ui) : cell;
-
-                                        if (cx < right)
-                                                ui_fill(ui, cx, row_y + ui_px(ui, 1), cx + cw > right ? right - cx : cw,
-                                                        t->line_height - 2 * ui->scale / 100, ui_tone(accent, t->hex_insert ? cover : 110 * cover / UI_CARET_FULL));
-                                }
+                                        ui_text_draw_caret(ui, t, bx + (t->hex_nibble ? cell : 0), row_y, right, !t->hex_insert, false);
                                 else if (t->hex_ascii && ax < right)
-                                {
-                                        int cw = t->hex_insert ? ui_caret_px(ui) : cell;
-
-                                        ui_fill(ui, ax, row_y + ui_px(ui, 1), ax + cw > right ? right - ax : cw,
-                                                t->line_height - 2 * ui->scale / 100, ui_tone(accent, t->hex_insert ? cover : 110 * cover / UI_CARET_FULL));
-                                }
+                                        ui_text_draw_caret(ui, t, ax, row_y, right, !t->hex_insert, false);
                         }
                 }
         }
@@ -35833,15 +35906,8 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 return;
         // Subtle gutter background tint and hairline separator in code views.
         if (t->numbers && t->gutter > 0)
-        {
-                int gx = ui_rtl() ? t->right : x;
-                unsigned int gutter_bg = window_mix(ground, ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 96);
-
-                ui_fill(ui, gx, y, t->gutter, height, 0xff000000u | gutter_bg);
-                if (t->right > t->left)
-                        ui_fill(ui, ui_rtl() ? t->right : t->left - ui_px(ui, 1), y, ui_px(ui, 1), height,
-                                ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 80));
-        }
+                ui_text_draw_gutter_bg(ui, ui_rtl() ? t->right : x, y, t->gutter, height,
+                                       t->right > t->left ? (ui_rtl() ? t->right : t->left - ui_px(ui, 1)) : -1, x + width, ground, 96, 80);
         // A field's caret is always in sight, in the box it is drawn in now (its text set by the app, or the box moved).
         if (t->mode == UI_TEXT_FIELD)
         {
