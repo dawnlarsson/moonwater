@@ -23,19 +23,6 @@ static void compositor_latency(unsigned int which, positive reported, positive n
                 compositor.latency[which].worst = took;
 }
 
-/*
-        How long the processor is allowed to take waking up. The largest cost
-        from a pointer moving to the program that draws it is the processor
-        coming back from an idle state, and the deeper the state the longer
-        that takes, so while a person is at the machine it is asked to stay
-        out of them: a zero in /dev/cpu_dma_latency, which holds for as long
-        as the file is open, taken after the first thing they do (the first
-        pays the wakeup either way: the processor was idle when the interrupt
-        came) and let go of half a second after the last. What counts is what
-        a hand or a key did and not a program's commit, so a clock ticking in
-        a window does not keep it. A request of zero is a processor polling,
-        which to cpufreq is busy, so it is not held a moment longer than that.
-*/
 static void compositor_hold_touch(positive now)
 {
         int zero = 0;
@@ -43,46 +30,44 @@ static void compositor_hold_touch(positive now)
         compositor.hold_until = now + UI_HOLD_NS;
         if (compositor.hold >= 0 || compositor.holds == ~0ul)
                 return;
-
         compositor.hold = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC);
         if (compositor.hold < 0)
         {
-                // Not there on this machine: it is not asked for again.
-                compositor.hold = -1;
-                compositor.holds = ~0ul;
+                compositor.hold = -1, compositor.holds = ~0ul;
                 return;
         }
-
         system_write_once(compositor.hold, &zero, sizeof(zero));
         compositor.holds++;
 }
 
 static void compositor_hold_drop(positive now)
 {
-        if (compositor.hold < 0 || now < compositor.hold_until)
-                return;
-
-        system_close(compositor.hold);
-        compositor.hold = -1;
+        if (compositor.hold >= 0 && now >= compositor.hold_until)
+                system_close(compositor.hold), compositor.hold = -1;
 }
 
-/*
-        A game's hold: while a fullscreen window is the top one on a screen (a game, as a person plays it: compositor_fullscreen_up), the
-        processor is held out of its idle states as the input hold holds it (a zero in /dev/cpu_dma_latency), and on a battery that is
-        discharging out of the deep ones only (a microsecond: the shallowest halt, C1). The input hold covers a game played with the keys
-        and the mouse only while they move; a pad's reports never reach the compositor, and a game waiting on the card has every core
-        asleep. Measured on the box (Ryzen 9950X) with tools/gameload, a thread sleeping to a 144 Hz deadline and then working 359 us of
-        a multiply chain at full clock: with the machine otherwise idle it woke 345 us late at the median and 550-680 us at worst (the
-        package's deep states: ACPI says 18 us for C2, it takes 335), and ran its work in 551 us; held at 1 us, 10 us late and 640 us;
-        at 0, 10 us late and 359 us. Beside eight busy threads (a game's workers) it woke in 10 us at every request and worked 550, 627
-        and 386 us (none, 1, 0), while the eight did 11022, 11003 and 10892 steps a microsecond: the poll costs the busy threads 1
-        percent. What it costs is power: 84 W for the package with the machine idle against 26 W at 1 and 14 W with no request, 103-108
-        W against 48-77 W under four to eight busy threads. The file held open is the request, so a compositor that ends lets go of it
-        with its descriptors. Off, for the machine's owner: /run/moonwater/game-hold-off at the start.
-*/
+static int compositor_write_sysfs(const char *path, const void *data, unsigned long len)
+{
+        long fd = system_open_at(AT_FDCWD, (string_address)path, O_WRONLY | O_CLOEXEC);
 
-// Hold amd_pstate/intel_pstate energy_performance_preference at "performance" while a fullscreen game runs on AC power,
-// restoring the saved preference on exit so desktop power is untouched.
+        if (fd < 0)
+                return 0;
+        system_write_once((int)fd, data, len);
+        system_close((int)fd);
+        return 1;
+}
+
+static int compositor_multi_ccd(void)
+{
+        long probe = system_open_at(AT_FDCWD, (string_address) "/sys/devices/system/cpu/cpu8/online", FILE_READ | O_CLOEXEC);
+
+        if (probe < 0)
+                return 0;
+        system_close((int)probe);
+        return 1;
+}
+
+// Hold amd_pstate/intel_pstate EPP at "performance" while a fullscreen game runs on AC power.
 static char compositor_game_epp_saved[32];
 static int compositor_game_epp_active;
 
@@ -101,53 +86,39 @@ static void compositor_game_epp(int on)
                         return;
                 want = "performance";
         }
+        else if (!compositor_game_epp_saved[0])
+                return;
         else
-        {
-                if (!compositor_game_epp_saved[0])
-                        return;
                 want = compositor_game_epp_saved;
-        }
         len = (unsigned long)string_length((string_address)want);
         for (unsigned int cpu = 0; cpu < 64; cpu++)
         {
                 char path[96];
-                long fd;
 
                 windows_num_path(path, sizeof(path), "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/energy_performance_preference");
-                fd = system_open_at(AT_FDCWD, (string_address)path, O_WRONLY | O_CLOEXEC);
-                if (fd < 0)
+                if (!compositor_write_sysfs(path, want, len))
                         break;
-                system_write_once((int)fd, want, len);
-                system_close((int)fd);
         }
         compositor_game_epp_active = on;
 }
 
-// On multi-CCD machines (>= 9 CPUs, e.g. Ryzen 16-core/32-thread), pin the current latency-critical thread (compositor loop
-// or input reader) to CCD0 (CPUs 0-7) so /dev/spark, compositor, and GPU/USB IRQs share a single L3 cache with zero cross-CCD bounces.
+// On multi-CCD machines (>= 9 CPUs), pin latency-critical threads & xhci_hcd/amdgpu IRQs to CCD0 (CPUs 0-7).
 static void compositor_pin_ccd0(void)
 {
-        long probe = system_open_at(AT_FDCWD, (string_address) "/sys/devices/system/cpu/cpu8/online", FILE_READ | O_CLOEXEC);
         unsigned long mask[2] = {0xfful, 0ul};
 
-        if (probe < 0)
-                return;
-        system_close((int)probe);
-        compositor_call(syscall(sched_setaffinity), 0, sizeof(mask), (positive)mask, 0, 0, 0);
+        if (compositor_multi_ccd())
+                compositor_call(syscall(sched_setaffinity), 0, sizeof(mask), (positive)mask, 0, 0, 0);
 }
 
-// Route xhci_hcd (USB mouse/keyboard) and amdgpu (vblank/fence) IRQs to CCD0 (CPUs 0-7) on multi-CCD machines.
 static void compositor_pin_irqs_ccd0(void)
 {
-        long probe = system_open_at(AT_FDCWD, (string_address) "/sys/devices/system/cpu/cpu8/online", FILE_READ | O_CLOEXEC);
         static char buf[32768];
         long fd, got;
 
-        if (probe < 0)
+        if (!compositor_multi_ccd())
                 return;
-        system_close((int)probe);
-        fd = system_open_at(AT_FDCWD, (string_address) "/proc/interrupts", FILE_READ | O_CLOEXEC);
-        if (fd < 0)
+        if ((fd = system_open_at(AT_FDCWD, (string_address) "/proc/interrupts", FILE_READ | O_CLOEXEC)) < 0)
                 return;
         got = (long)compositor_call(syscall(read), (positive)fd, (positive)buf, sizeof(buf) - 1, 0, 0, 0);
         system_close((int)fd);
@@ -160,28 +131,19 @@ static void compositor_pin_irqs_ccd0(void)
                 long line = at, stop = nl ? nl - buf : got;
                 char saved = buf[stop];
 
-                at = stop + 1;
-                buf[stop] = 0;
-                // Check if this line is an xhci_hcd or amdgpu IRQ.
+                at = stop + 1, buf[stop] = 0;
                 if (string_find((string_address)buf + line, (string_address) "xhci_hcd") ||
                     string_find((string_address)buf + line, (string_address) "amdgpu"))
                 {
                         long p = line + (long)string_span_of_set((string_address)buf + line, (string_address) " ");
-                        positive used = 0;
-                        positive irq = string_digits((string_address)buf + p, &used);
+                        positive used = 0, irq = string_digits((string_address)buf + p, &used);
 
                         if (used > 0 && buf[p + (long)used] == ':' && irq > 0 && irq < 4096)
                         {
                                 char path[64];
-                                long ifd;
 
                                 windows_num_path(path, sizeof(path), "/proc/irq/", (unsigned int)irq, "/smp_affinity");
-                                ifd = system_open_at(AT_FDCWD, (string_address)path, O_WRONLY | O_CLOEXEC);
-                                if (ifd >= 0)
-                                {
-                                        system_write_once((int)ifd, "000000ff", 8);
-                                        system_close((int)ifd);
-                                }
+                                compositor_write_sysfs(path, "000000ff", 8);
                         }
                 }
                 buf[stop] = saved;
@@ -190,10 +152,9 @@ static void compositor_pin_irqs_ccd0(void)
 
 static void compositor_game_watch(void)
 {
-        int game = compositor.games != ~0ul && compositor_fullscreen_up();
         static const char *const batteries[] = {"/sys/class/power_supply/BAT0/status", "/sys/class/power_supply/BAT1/status",
                                                  "/sys/class/power_supply/battery/status"};
-        int us = 0;
+        int game = compositor.games != ~0ul && compositor_fullscreen_up(), us = 0;
 
         if (game == (compositor.game >= 0))
                 return;
@@ -201,20 +162,16 @@ static void compositor_game_watch(void)
         {
                 compositor_gpu_game_clocks(0);
                 compositor_game_epp(0);
-                system_close(compositor.game);
-                compositor.game = -1;
+                system_close(compositor.game), compositor.game = -1;
                 return;
         }
         compositor.game = (int)system_open_at(AT_FDCWD, (string_address) "/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC);
         if (compositor.game < 0)
         {
-                compositor.game = -1;
-                compositor.games = ~0ul; // not there on this machine: not asked for again
+                compositor.game = -1, compositor.games = ~0ul;
                 return;
         }
-        // The battery as it is when the hold is taken (a laptop's names; a desktop has none): a cable put in or out during the game
-        // counts from the next take.
-        for (unsigned int at = 0; at < sizeof(batteries) / sizeof(batteries[0]); at++)
+        for (unsigned int at = 0; at < 3; at++)
         {
                 char status[16];
 
@@ -223,32 +180,15 @@ static void compositor_game_watch(void)
         }
         system_write_once(compositor.game, &us, sizeof(us));
         if (!us)
-        {
-                compositor_game_epp(1);
-                compositor_gpu_game_clocks(1);
-        }
+                compositor_game_epp(1), compositor_gpu_game_clocks(1);
         compositor.games++;
 }
 
-/*
-        A game's threads, while its window is the fullscreen top one (compositor_fullscreen_top), asked for a short slice of the fair
-        scheduler (EEVDF's custom slice: sched_attr.sched_runtime of a SCHED_OTHER or SCHED_BATCH thread, honoured since 6.12): a thread woken with a slice shorter than what
-        runs on its core has the earlier deadline and takes the core at once, where with the default slice (2.8 ms on the box's 32 cores) it
-        waits for the running one's to end. Its share of the processor is its weight's as before (the nice is kept); only when it runs
-        changes. Measured on the box (Ryzen 9950X) with tools/gameload, a thread sleeping to a 144 Hz deadline and working 37 us, beside 32
-        threads spinning at nice 0, three rounds: wake late p99 1719-1887 us and at most 2585-2821 us with the default slice; 10-13 us and at
-        most 11-14 us at a 100 us slice (500 us: 10-158 and 11-444; nice -5: 11-852 and 1687-2394; nice -10: 11-178 and 396-1601), with the
-        machine idle 16 and 14 us; HL2 in d1_canals_01 (GPU-bound, 144 fps) beside the 32 spinners: frame p99.9 10.59 ms and at most 11.23
-        with the default slice, 9.86 and 10.32 at 100 us, 9.44 and 9.67 alone (one run each). The window's process is the table's pid of its row (an X window's is X-Resource's word on its client, not
-        what it says of itself), every thread of it is asked, and a thread it makes later is made with its maker's slice; when the window is
-        no longer the fullscreen top one, or another one is, its threads go back to the default (a runtime of 0) where they still have ours. A
-        thread at a real-time, idle or deadline policy, or that the kernel refuses, is left as it is. Off, for the machine's owner, with the
-        game's hold: /run/moonwater/game-hold-off.
-*/
+// EEVDF custom 100 us runtime slice for fullscreen top games (restored on exit or restart via game-slice file).
 #define COMPOSITOR_GAME_SLICE_NS 100000ull
-#define COMPOSITOR_GAME_SLICES 8 // the games sliced at once: one a screen's fullscreen top
-#define COMPOSITOR_GAME_SLICE_FILE "/run/moonwater/game-slice" // the pids sliced now, for a compositor started after this one to give back
-static b32 compositor_game_off; // /run/moonwater/game-hold-off at the start: no game's hold, no slice
+#define COMPOSITOR_GAME_SLICES 8
+#define COMPOSITOR_GAME_SLICE_FILE "/run/moonwater/game-slice"
+static b32 compositor_game_off;
 struct compositor_sched_attr
 {
         unsigned int size, policy;
@@ -260,7 +200,6 @@ struct compositor_sched_attr
 };
 _Static_assert(sizeof(struct compositor_sched_attr) == 56, "sched_attr: SCHED_ATTR_SIZE_VER1");
 
-// Each thread of the process pid given the slice (0: the default again): the threads asked.
 static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long long slice)
 {
         char path[40];
@@ -269,8 +208,7 @@ static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long lon
         unsigned int asked = 0;
 
         windows_num_path(path, sizeof(path), "/proc/", pid, "/task");
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC);
-        if (handle < 0)
+        if ((handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
                 return 0;
         while ((got = system_call_3(syscall(getdents64), (positive)handle, (positive)buffer, sizeof(buffer))) > 0)
                 for (bipolar at = 0; at < got;)
@@ -283,22 +221,16 @@ static unsigned int compositor_game_slice_of(unsigned int pid, unsigned long lon
                         at += size;
                         for (; *name >= '0' && *name <= '9'; name++)
                                 tid = tid * 10 + (positive)(*name - '0');
-                        if (!tid || *name)
-                                continue;
-                        if (compositor_call(syscall(sched_getattr), tid, (positive)&attr, sizeof(attr), 0, 0, 0) != 0 || attr.policy > 3 ||
-                            attr.policy == 1 || attr.policy == 2) // SCHED_OTHER 0, SCHED_BATCH 3; FIFO, RR (and IDLE 5, DEADLINE 6) are left
-                                continue;
-                        if ((attr.runtime == COMPOSITOR_GAME_SLICE_NS) == !!slice) // sched_getattr says the slice it has, ours or the default
+                        if (!tid || *name || compositor_call(syscall(sched_getattr), tid, (positive)&attr, sizeof(attr), 0, 0, 0) != 0 ||
+                            (attr.policy != 0 && attr.policy != 3) || (attr.runtime == COMPOSITOR_GAME_SLICE_NS) == !!slice)
                                 continue;
                         attr.size = sizeof(attr), attr.flags = 0, attr.runtime = slice;
-                        if (compositor_call(syscall(sched_setattr), tid, (positive)&attr, 0, 0, 0, 0) == 0)
-                                asked++;
+                        asked += compositor_call(syscall(sched_setattr), tid, (positive)&attr, 0, 0, 0, 0) == 0;
                 }
         system_close(handle);
         return asked;
 }
 
-// The pids sliced now, written where a compositor started after this one finds them (COMPOSITOR_GAME_SLICE_FILE), a line each.
 static void compositor_game_slice_note(const unsigned int *pids, unsigned int count)
 {
         char text[COMPOSITOR_GAME_SLICES * 12];
@@ -314,12 +246,14 @@ static void compositor_game_slice_note(const unsigned int *pids, unsigned int co
         system_close(handle);
 }
 
-/*
-        Each loop turn: every screen's fullscreen top window's process given the slice (two games on two screens each have it, where the first
-        screen's alone did), and the ones that are no longer put back. The slice is the scheduler's and needs no /dev/cpu_dma_latency: a
-        machine without that node (the hold's) still slices; only the owner's game-hold-off file stops it. At the first turn the pids a
-        compositor before this one sliced (its file) are put back, so a game that outlived a compositor's restart is not left with the slice.
-*/
+static int compositor_pid_in(const unsigned int *list, unsigned int n, unsigned int pid)
+{
+        for (unsigned int i = 0; i < n; i++)
+                if (list[i] == pid)
+                        return 1;
+        return 0;
+}
+
 static void compositor_game_slice(void)
 {
         static unsigned int pids[COMPOSITOR_GAME_SLICES], count;
@@ -329,57 +263,43 @@ static void compositor_game_slice(void)
         unsigned int tops = compositor_game_off ? 0 : compositor_fullscreen_tops(rows, COMPOSITOR_GAME_SLICES);
         b32 changed = false;
 
-        // The file is the compositor's that has the card and gave the device its table (table_giver): a check's, or a headless one's, has no word in it.
-        if (!started && !compositor.table_giver)
-                started = 1;
         if (!started)
         {
-                char text[COMPOSITOR_GAME_SLICES * 12 + 1];
-                bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_GAME_SLICE_FILE, FILE_READ | O_NOFOLLOW | O_CLOEXEC), got = 0;
-                unsigned int value = 0;
-
                 started = 1;
-                if (handle >= 0)
-                        got = system_read_once(handle, text, sizeof text - 1), system_close(handle);
-                for (bipolar k = 0; k < got; k++)
-                        if (text[k] >= '0' && text[k] <= '9')
-                                value = value * 10 + (unsigned int)(text[k] - '0');
-                        else
-                        {
-                                if (value && value != me)
-                                        compositor_game_slice_of(value, 0);
-                                value = 0;
-                        }
-                if (got > 0)
-                        compositor_game_slice_note(pids, 0);
+                if (compositor.table_giver)
+                {
+                        char text[COMPOSITOR_GAME_SLICES * 12 + 1];
+                        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_GAME_SLICE_FILE, FILE_READ | O_NOFOLLOW | O_CLOEXEC), got = 0;
+                        unsigned int value = 0;
+
+                        if (handle >= 0)
+                                got = system_read_once(handle, text, sizeof text - 1), system_close(handle);
+                        for (bipolar k = 0; k < got; k++)
+                                if (text[k] >= '0' && text[k] <= '9')
+                                        value = value * 10 + (unsigned int)(text[k] - '0');
+                                else
+                                {
+                                        if (value && value != me)
+                                                compositor_game_slice_of(value, 0);
+                                        value = 0;
+                                }
+                        if (got > 0)
+                                compositor_game_slice_note(pids, 0);
+                }
         }
         for (unsigned int k = 0; k < tops && compositor.table; k++)
         {
-                unsigned int pid = __atomic_load_n(&compositor.table->pid[rows[k]], __ATOMIC_ACQUIRE), dup = 0;
+                unsigned int pid = __atomic_load_n(&compositor.table->pid[rows[k]], __ATOMIC_ACQUIRE);
 
-                for (unsigned int j = 0; j < nows; j++)
-                        dup |= now[j] == pid;
-                if (pid && pid != me && !dup)
+                if (pid && pid != me && !compositor_pid_in(now, nows, pid))
                         now[nows++] = pid;
         }
         for (unsigned int k = 0; k < count; k++)
-        {
-                b32 kept = false;
-
-                for (unsigned int j = 0; j < nows; j++)
-                        kept |= now[j] == pids[k];
-                if (!kept)
+                if (!compositor_pid_in(now, nows, pids[k]))
                         compositor_game_slice_of(pids[k], 0), changed = true;
-        }
         for (unsigned int j = 0; j < nows; j++)
-        {
-                b32 had = false;
-
-                for (unsigned int k = 0; k < count; k++)
-                        had |= pids[k] == now[j];
-                if (!had)
+                if (!compositor_pid_in(pids, count, now[j]))
                         compositor_game_slice_of(now[j], COMPOSITOR_GAME_SLICE_NS), changed = true;
-        }
         if (!changed)
                 return;
         memory_copy(pids, now, sizeof now[0] * nows), count = nows;
@@ -445,37 +365,30 @@ static unsigned int compositor_key_word(const char *word, unsigned int length, u
         return ~0u;
 }
 
-// The chords the rules bound, read once at the start: a line that is not one is left out, and said.
 static void compositor_keys_read(void)
 {
-        //      Read whole each time: the runner writes the file again at every load of the rules.
-        compositor_keys.count = 0;
         static char text[4096];
         bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_KEYS_FILE, COMPOSITOR_SETTING_OPEN);
         bipolar got = handle < 0 ? 0 : system_read_once(handle, text, sizeof(text) - 1);
         unsigned int at = 0;
 
+        compositor_keys.count = 0;
         if (handle >= 0)
                 system_close(handle);
         text[got > 0 ? got : 0] = 0;
-
         while (text[at] && compositor_keys.count < COMPOSITOR_KEYS)
         {
                 unsigned int start = at, close, modifiers = 0, code = 0, bad = 0;
 
                 while (text[at] && text[at] != '\n')
                         at++;
-                close = at;
-                if (text[at])
-                        at++;
+                close = at, at += text[at] != 0;
                 while (start < close && (text[start] == ' ' || text[start] == '\t'))
                         start++;
                 while (close > start && (text[close - 1] == ' ' || text[close - 1] == '\t' || text[close - 1] == '\r'))
                         close--;
                 if (close == start)
                         continue;
-
-                // key_, then the words.
                 bad = close - start < 5 || memory_compare(text + start, "key_", 4);
                 for (unsigned int word = start + 4; word < close && !bad;)
                 {
@@ -484,23 +397,17 @@ static void compositor_keys_read(void)
                         while (stop < close && text[stop] != '_')
                                 stop++;
                         flag = compositor_key_word(text + word, stop - word, &code);
-                        bad = flag == ~0u;
-                        modifiers |= bad ? 0 : flag;
-                        word = stop + 1;
+                        bad = flag == ~0u, modifiers |= bad ? 0 : flag, word = stop + 1;
                 }
-
-                // Named by the function, which is what the rule's author looks for: there is no chord in it.
                 if (bad || !code || close - start >= sizeof(compositor_keys.chord[0]))
                 {
                         p8 name[48];
                         positive length = close - start < sizeof(name) - 1 ? close - start : sizeof(name) - 1;
 
-                        memory_copy(name, text + start, length);
-                        name[length] = 0;
+                        memory_copy(name, text + start, length), name[length] = 0;
                         compositor_kmsg((string_address) "compositor: no chord in the rules' keys line ", 0, (string_address)name);
                         continue;
                 }
-
                 memory_copy(compositor_keys.chord[compositor_keys.count], text + start, close - start);
                 compositor_keys.chord[compositor_keys.count][close - start] = 0;
                 compositor_keys.code[compositor_keys.count] = (unsigned short)code;
@@ -508,8 +415,6 @@ static void compositor_keys_read(void)
         }
 }
 
-// A name said to the runner on the FIFO, a line: a chord pressed, or a thing done to the desktop that the runner
-// starts a program for (tray_double, launcher_button). A runner that does not listen hears nothing.
 static void compositor_script_say(const char *name)
 {
         bipolar handle;
@@ -519,33 +424,26 @@ static void compositor_script_say(const char *name)
 
         if (length > sizeof(line) - 2)
                 length = sizeof(line) - 2;
-        // Said by the doors' thread, which may wait on the FIFO's lock (compositor_doors); a ring that is full drops the line.
         if (compositor_doors.threads)
         {
-                //      Full is said, not dropped in silence: sixteen lines are waiting on a runner that does not read.
                 if (head - __atomic_load_n(&compositor_doors.line_tail, __ATOMIC_ACQUIRE) >= 16)
                 {
-                        compositor_kmsg((string_address) "compositor: a line for the rules is dropped, sixteen wait unread: ", 0,
-                                        (string_address)name);
+                        compositor_kmsg((string_address) "compositor: a line for the rules is dropped, sixteen wait unread: ", 0, (string_address)name);
                         return;
                 }
                 memory_copy(compositor_doors.lines[head % 16], name, length);
-                compositor_doors.lines[head % 16][length] = '\n';
-                compositor_doors.lines[head % 16][length + 1] = 0;
+                compositor_doors.lines[head % 16][length] = '\n', compositor_doors.lines[head % 16][length + 1] = 0;
                 __atomic_store_n(&compositor_doors.line_head, head + 1, __ATOMIC_RELEASE);
                 compositor_door_ask(COMPOSITOR_DOOR_MISC, COMPOSITOR_DOOR_LINES);
                 return;
         }
-        // Not through a link: the FIFO is the runner's, and a link in its place would have this write into what it names.
         handle = system_open_at(AT_FDCWD, (string_address)compositor_keys_fire, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (handle < 0)
         {
-                compositor_kmsg((string_address) "compositor: nothing reads /run/moonwater/keys.fire, error ", (positive)-handle,
-                                (string_address) "");
+                compositor_kmsg((string_address) "compositor: nothing reads /run/moonwater/keys.fire, error ", (positive)-handle, (string_address) "");
                 return;
         }
-        memory_copy(line, name, length);
-        line[length] = '\n';
+        memory_copy(line, name, length), line[length] = '\n';
         system_write_once(handle, line, length + 1);
         system_close(handle);
 }
@@ -1195,63 +1093,47 @@ static void compositor_input_override_unregister(compositor_input_override_fn fn
                 }
 }
 
-static int compositor_input_override_query(int row)
+static int compositor_input_override_run(int row, struct compositor_input_override_event *ev, int max_mode)
 {
-        struct compositor_input_override_event ev = {0};
         int best = 0;
 
         if (!compositor_input_overrides || !compositor.table || row < 0 || row >= COMPOSITOR_ROWS)
                 return 0;
-        ev.kind = COMPOSITOR_OVERRIDE_QUERY;
-        ev.row = row;
-        ev.pid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE);
+        ev->row = row;
+        ev->pid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE);
         for (unsigned int i = 0; i < compositor_input_overrides; i++)
         {
-                int state = compositor_input_override_list[i].fn(compositor_input_override_list[i].ctx, &ev);
+                int r = compositor_input_override_list[i].fn(compositor_input_override_list[i].ctx, ev);
 
-                if (state > best)
-                        best = state;
+                if (max_mode)
+                        best = r > best ? r : best;
+                else if (r)
+                        return 1;
         }
         return best;
 }
 
+static int compositor_input_override_query(int row)
+{
+        struct compositor_input_override_event ev = {.kind = COMPOSITOR_OVERRIDE_QUERY};
+
+        return compositor_input_override_run(row, &ev, 1);
+}
+
 static int compositor_input_override_key(int row, unsigned int code, int value, unsigned int modifiers)
 {
-        struct compositor_input_override_event ev = {0};
+        struct compositor_input_override_event ev = {.kind = COMPOSITOR_OVERRIDE_KEY, .flags = modifiers, .a = (int)code, .b = value};
 
-        if (!compositor_input_overrides || !compositor.table || row < 0 || row >= COMPOSITOR_ROWS)
-                return 0;
-        ev.kind = COMPOSITOR_OVERRIDE_KEY;
-        ev.row = row;
-        ev.pid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE);
-        ev.flags = modifiers;
-        ev.a = (int)code;
-        ev.b = value;
-        for (unsigned int i = 0; i < compositor_input_overrides; i++)
-                if (compositor_input_override_list[i].fn(compositor_input_override_list[i].ctx, &ev))
-                        return 1;
-        return 0;
+        return compositor_input_override_run(row, &ev, 0);
 }
 
 static int compositor_input_override_pointer(int row, unsigned int type, unsigned int flags, int a, int b)
 {
-        struct compositor_input_override_event ev = {0};
+        struct compositor_input_override_event ev = {.kind = COMPOSITOR_OVERRIDE_POINTER, .ev_type = type, .flags = flags, .a = a, .b = b};
 
-        if (!compositor_input_overrides || !compositor.table || row < 0 || row >= COMPOSITOR_ROWS)
-                return 0;
-        ev.kind = COMPOSITOR_OVERRIDE_POINTER;
-        ev.ev_type = type;
-        ev.flags = flags;
-        ev.row = row;
-        ev.pid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE);
-        ev.a = a;
-        ev.b = b;
-        ev.width = (int)compositor.w[row];
-        ev.height = (int)compositor.h[row];
-        for (unsigned int i = 0; i < compositor_input_overrides; i++)
-                if (compositor_input_override_list[i].fn(compositor_input_override_list[i].ctx, &ev))
-                        return 1;
-        return 0;
+        if (row >= 0 && row < COMPOSITOR_ROWS)
+                ev.width = (int)compositor.w[row], ev.height = (int)compositor.h[row];
+        return compositor_input_override_run(row, &ev, 0);
 }
 
 /*
@@ -1288,101 +1170,69 @@ static int compositor_steam_passes(unsigned int code, int value, unsigned int mo
 
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
-        unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord;
+        unsigned int bit = compositor_held_bit(code), characters[2] = {0, 0}, flags, modifiers, chord, mods4;
         int count, target;
 
         taskbar_moon_seen(clock_monotonic_nanoseconds());
         if (value == 1)
                 compositor_keytrace_read(code, reported, clock_monotonic_nanoseconds());
-
-        // Escape while the hand moves or resizes a window puts it back as it was at the press, and is no window's key.
         if (code == CK_KEY_ESC && value && (compositor.drag >= 0 || compositor.resize >= 0))
         {
                 if (value == 1)
                         compositor_hold_cancel();
                 return;
         }
-        // Escape while any Canvas-native or protocol-bridged drag is active cancels it.
         if (code == CK_KEY_ESC && value && compositor_dnd_escape(value))
                 return;
 #ifdef CONFIG_MOONWATER_WAYLAND
-        // Escape while a client's drag holds the pointer cancels the drag, whichever window has the keys (a kit window's, a client's that
-        // is not the drag's, none): the source is told it was cancelled and the window under it left, and the key is no window's.
         if (!compositor_dnd.bridge_count && code == CK_KEY_ESC && value && compositor_wl_drag_escape(value))
                 return;
 #endif
-
-        // The snap assist offered after a drop goes at any key that is not a modifier: Escape is only that, and any other key
-        // goes on to the window that has the keys, as it would have.
         if (compositor.assist_armed && value == 1 && !bit)
         {
                 compositor_assist_close();
                 if (code == CK_KEY_ESC)
                         return;
         }
-
         if (bit)
-        {
-                if (value)
-                        compositor.held[at] |= (unsigned char)bit;
-                else
-                        compositor.held[at] &= (unsigned char)~bit;
-        }
-        // The logo key pressed and let go alone is a press on the launcher's tab (compositor_logo_tap). The key itself goes on as it did.
+                compositor.held[at] = value ? (unsigned char)(compositor.held[at] | bit) : (unsigned char)(compositor.held[at] & ~bit);
         if (compositor_logo_tap(&compositor.logo_alone, bit, value,
                                 (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_ALTGR)) != 0))
                 compositor_logo_act();
         if (bit)
         {
-                // A modifier is part of what a drag snaps to (Control is no snap): its target is read again now, not at the
-                // next motion.
                 if (compositor.drag >= 0)
                         compositor_preview(compositor.drag);
-                // And of what a drop of files would do (a copy, a move): the program a drag is over is told the keys now.
                 compositor_dnd_keys();
 #ifdef CONFIG_MOONWATER_WAYLAND
                 if (!compositor_dnd.bridge_count)
                         compositor_drag_keys();
 #endif
         }
-
         modifiers = compositor_modifiers();
         chord = modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
-
-        // Protocol-neutral input override (e.g. Steam/Proton overlay): intercepts keys directly from Canvas.
-        if (compositor_input_overrides && !compositor_steam_passes(code, (int)value, modifiers, chord) &&
-            compositor_input_override_key(compositor.focus, code, (int)value, modifiers))
-        {
-                if ((bit & (CK_HELD_ALT | CK_HELD_ALTGR)) && !(modifiers & WINDOW_KEY_ALT) && compositor.cycle)
-                        compositor_focus_commit();
-                return;
-        }
+        mods4 = chord | (modifiers & WINDOW_KEY_SUPER);
+        if (!compositor_steam_passes(code, (int)value, modifiers, chord) &&
+            ((compositor_input_overrides && compositor_input_override_key(compositor.focus, code, (int)value, modifiers))
 #ifdef CONFIG_MOONWATER_WAYLAND
-        // Steam's overlay over a game on Wayland: Shift+Tab opens it, and while it is open every key is its own (wayland_host.c),
-        // but the chords the compositor keeps (compositor_steam_passes). An Alt let go there still ends an Alt+Tab.
-        if (!compositor_steam_passes(code, (int)value, modifiers, chord) && compositor_wl_steam_key(code, (int)value, modifiers))
+             || compositor_wl_steam_key(code, (int)value, modifiers)
+#endif
+                 ))
         {
                 if ((bit & (CK_HELD_ALT | CK_HELD_ALTGR)) && !(modifiers & WINDOW_KEY_ALT) && compositor.cycle)
                         compositor_focus_commit();
                 return;
         }
-#endif
         if (bit & (CK_HELD_ALT | CK_HELD_ALTGR))
         {
                 if (!(modifiers & WINDOW_KEY_ALT) && compositor.cycle)
                         compositor_focus_commit();
 #ifdef CONFIG_MOONWATER_WAYLAND
-                // A client's window reads Alt and AltGr itself: they are modifiers of its keymap.
                 compositor_wl_key(code, value);
 #endif
                 return;
         }
-
 #ifdef CONFIG_MOONWATER_WAYLAND
-        // A client's keyboard shortcuts inhibitor on the window with the keys suspends the compositor's chords: the keys are the
-        // window's, except Super with Escape, the one chord kept (it is the compositor's, held a second to give the keys back), and the
-        // media keys, which are not chords and stay the desktop's (compositor_wl_suspends: 0 the chords run, 1 the window has the key,
-        // 2 the kept chord).
         if (!bit)
         {
                 int suspended = compositor_wl_suspends(code, value, (modifiers & WINDOW_KEY_SUPER) != 0);
@@ -1396,29 +1246,18 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 }
         }
 #endif
-
         if (chord == WINDOW_KEY_ALT && code == CK_KEY_TAB)
         {
                 if (value)
                         compositor_focus_step();
                 return;
         }
-
-        if (chord == WINDOW_KEY_ALT && code == CK_KEY_F4 && !compositor.cycle)
+        if (chord == WINDOW_KEY_ALT && !compositor.cycle && (code == CK_KEY_F4 || code == CK_KEY_F9))
         {
                 if (value == 1)
-                        compositor_close(compositor.focus);
+                        code == CK_KEY_F4 ? compositor_close(compositor.focus) : compositor_minimize_row(compositor.focus);
                 return;
         }
-
-        if (chord == WINDOW_KEY_ALT && code == CK_KEY_F9 && !compositor.cycle)
-        {
-                if (value == 1)
-                        // Alt-F9: the window with the keys is put away, and the keys go to the one under it.
-                        compositor_minimize_row(compositor.focus);
-                return;
-        }
-
         // The volume keys are the desktop's, whichever window has the keys.
         if (!(modifiers & (WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) &&
             (code == CK_KEY_MUTE || code == CK_KEY_VOLUME_DOWN || code == CK_KEY_VOLUME_UP || code == CK_KEY_MICMUTE))
@@ -1427,76 +1266,44 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                         compositor_volume_key(code, value);
                 return;
         }
-
-        // A chord a rule bound is its own and no window's; a press says so, and not a repeat, so a key held
-        // down does not fill the desktop with what it starts.
-        for (unsigned int at = 0; at < compositor_keys.count; at++)
-                if (code == compositor_keys.code[at] &&
-                    (modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)) ==
-                        compositor_keys.modifiers[at])
+        for (unsigned int k = 0; k < compositor_keys.count; k++)
+                if (code == compositor_keys.code[k] && mods4 == compositor_keys.modifiers[k])
                 {
                         if (value == 1)
-                        {
-                                // A chord pressed: close any open context menu or popup, then tell the runner.
-                                compositor_menu_close();
-                                compositor_popups_close(-1, -1);
-                                compositor_script_say(compositor_keys.chord[((unsigned int)(at))]);
-                        }
+                                compositor_menu_close(), compositor_popups_close(-1, -1), compositor_script_say(compositor_keys.chord[k]);
                         return;
                 }
-
-        // Super alone with an arrow: the tiling chords, which the rules' bindings above have had first say; and Super and
-        // Shift with Left or Right, a window to the next screen.
-        if ((modifiers & (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) == WINDOW_KEY_SUPER &&
-            (code == CK_KEY_LEFT || code == CK_KEY_RIGHT || code == CK_KEY_UP || code == CK_KEY_DOWN))
+        if (mods4 == WINDOW_KEY_SUPER && (code == CK_KEY_LEFT || code == CK_KEY_RIGHT || code == CK_KEY_UP || code == CK_KEY_DOWN))
         {
                 if (value == 1)
                         compositor_tile_chord(code);
                 return;
         }
-        if ((modifiers & (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT)) == (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT) &&
-            (code == CK_KEY_LEFT || code == CK_KEY_RIGHT))
+        if (mods4 == (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT) && (code == CK_KEY_LEFT || code == CK_KEY_RIGHT))
         {
                 if (value == 1)
                         compositor_screen_chord(code);
                 return;
         }
-        // Fullscreen, on and off: Super with F11 for any window, and F11 alone for a window of Canvas's own. A client's window reads F11
-        // itself (a browser's own fullscreen is its set_fullscreen), so it is given the key.
-        if (code == CK_KEY_F11 && !compositor.cycle && compositor_fullscreen_key((modifiers & (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL |
-                                                                                                WINDOW_KEY_ALT)) == WINDOW_KEY_SUPER,
-                                                                                   (modifiers & (WINDOW_KEY_SUPER | WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL |
-                                                                                                WINDOW_KEY_ALT)) == 0))
+        if (code == CK_KEY_F11 && !compositor.cycle && compositor_fullscreen_key(mods4 == WINDOW_KEY_SUPER, mods4 == 0))
         {
                 if (value == 1)
                         compositor_fullscreen_toggle(compositor.focus);
                 return;
         }
-
         if (((chord & ~WINDOW_KEY_SHIFT) == (WINDOW_KEY_ALT | WINDOW_KEY_CONTROL) && code == CK_KEY_BACKSPACE) ||
             ((modifiers & WINDOW_KEY_ALT) && compositor.cycle))
                 return;
-
 #ifdef CONFIG_MOONWATER_WAYLAND
-        // A client's window is given the key as it is, with no characters made of it here.
         if (compositor_wl_key(code, value))
                 return;
 #endif
-        count = compositor_keymap_event(&compositor.keymap, code, value, modifiers, characters);
-        if (count < 0)
+        if ((count = compositor_keymap_event(&compositor.keymap, code, value, modifiers, characters)) < 0)
                 return;
-
         if (compositor.focus < 0)
                 compositor_refocus();
         if (compositor.focus < 0)
                 return;
-
-        // A press goes to the window that has the keys and is held there; a repeat or a
-        // release of a key whose press went elsewhere (or nowhere) is nobody's to hear.
-        // While the window has a popup open, the topmost popup is where its keys go.
-        // A repeat or a release goes where its press went (keys_to), not where the keys go now: a popup opened
-        // since the press would otherwise get a release it never had the press of, and the window the press went
-        // to would be left holding the key down.
         target = compositor_popup_top(compositor.focus);
         if (code < 256)
         {
@@ -1506,8 +1313,7 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 {
                         if (compositor.keys_to != target)
                                 compositor_keys_release();
-                        *down |= mask;
-                        compositor.keys_to = target;
+                        *down |= mask, compositor.keys_to = target;
                 }
                 else if (!(*down & mask))
                         return;
@@ -1518,7 +1324,6 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                                 *down &= (unsigned char)~mask;
                 }
         }
-
         flags = modifiers | (value ? WINDOW_KEY_DOWN : 0) | (value == 2 ? WINDOW_KEY_REPEAT : 0);
         for (int each = 0; each < (count ? count : 1); each++)
                 compositor_post(target, WINDOW_EVENT_KEY, flags, (int)code, (int)characters[each]);
@@ -1873,65 +1678,39 @@ static void compositor_drag_let_go(int to);
 
 static void compositor_motion(void)
 {
-        int under, tab;
+        int under, tab, rect[4];
 
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
-        // The moon turns while a hand is about, and grows while the pointer is over it.
         taskbar_moon_seen(clock_monotonic_nanoseconds());
         taskbar_moon_hover(tab == TASKBAR_LAUNCHER ? compositor_moon_band(compositor.pointer_x, compositor.pointer_y) : -1);
-        // The menu's hover: the item under the hand lit.
+        if (taskbar_menu_rect(rect))
         {
-                int rect[4];
-
-                if (taskbar_menu_rect(rect))
-                {
-                        taskbar_menu_hand(WINDOW_EVENT_MOTION, 0, 0, 0, compositor.pointer_x, compositor.pointer_y);
-                        compositor_damage(rect[0], rect[1], rect[2], rect[3]);
-                }
+                taskbar_menu_hand(WINDOW_EVENT_MOTION, 0, 0, 0, compositor.pointer_x, compositor.pointer_y);
+                compositor_damage(rect[0], rect[1], rect[2], rect[3]);
         }
-
-        // The shape of what the hand has hold of or is over: the edges it could take, and inside a window (away from its edges)
-        // the shape its client asked for with wp_cursor_shape, or the program's controls publish (the arrow when it has none).
         {
-                // A window a button is held in (compositor.grab) has the pointer for as long as it is held: its shape is worn wherever the
-                // hand has gone, off the window and over another included, so a selection dragged past its window's edge keeps its pointer.
                 int held = compositor.resize < 0 && compositor.drag < 0 ? compositor.grab : COMPOSITOR_NONE;
                 unsigned int zone = compositor.resize >= 0 || compositor.drag >= 0 || under < 0 || held >= 0 ? 0
                                     : compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
                 int of = held >= 0 ? held : compositor.resize < 0 && compositor.drag < 0 && under >= 0 && !zone ? under : COMPOSITOR_NONE;
-                int asked = of >= 0 ? compositor_asked_shape(of) : -1;
+                int asked = of >= 0 ? compositor_asked_shape(of) : -1, dnd_shape = -1;
 
                 compositor.cursor.shape = compositor.resize >= 0 ? compositor_cursor_by_edges[compositor.edges[compositor.resize] & 15]
                                           : compositor.drag >= 0 ? CP_ARROW
                                           : zone ? compositor_cursor_by_edges[zone & 15]
-                                          : asked >= 0 ? (unsigned int)asked
-                                          : CP_ARROW;
+                                          : asked >= 0 ? (unsigned int)asked : CP_ARROW;
                 if (compositor_dnd_active())
-                {
-                        int dnd_shape;
-
-                        compositor_dnd_motion(under);
-                        dnd_shape = compositor_dnd_shape();
-                        if (dnd_shape >= 0)
-                                compositor.cursor.shape = (unsigned int)dnd_shape, asked = -1;
-                }
+                        compositor_dnd_motion(under), dnd_shape = compositor_dnd_shape();
 #ifdef CONFIG_MOONWATER_WAYLAND
                 else if (!compositor_dnd.bridge_count)
-                {
-                        // A drag, whoever's: the hand where a target takes it, no drop elsewhere; its chip beside the pointer, and a program's
-                        // drag's motion the drag's (compositor_drag_follow).
-                        compositor_drag_follow(under);
-                        if (compositor_drag_shape() >= 0)
-                                compositor.cursor.shape = (unsigned int)compositor_drag_shape(), asked = -1;
-                }
+                        compositor_drag_follow(under), dnd_shape = compositor_drag_shape();
 #endif
-                // A client that asked for no pointer over its window has none there (-2 is that answer).
+                if (dnd_shape >= 0)
+                        compositor.cursor.shape = (unsigned int)dnd_shape, asked = -1;
                 compositor.cursor.client_hidden = asked == -2;
-                compositor.cursor.asked_row = of;
-                compositor.cursor.asked_seen = asked;
+                compositor.cursor.asked_row = of, compositor.cursor.asked_seen = asked;
 #ifdef CONFIG_MOONWATER_WAYLAND
-                // Over the window's own part, the picture its client drew for the pointer, where it drew one, in place of the arrow.
                 compositor_picture_poll(asked >= 0 ? of : COMPOSITOR_NONE);
 #endif
         }
@@ -1939,38 +1718,22 @@ static void compositor_motion(void)
         if (compositor.cursor.magnify)
                 compositor_magnify(clock_monotonic_nanoseconds());
         compositor_cursor_move();
-
-        // On the plane the pointer is on the screen when the call returns; drawn, when the frame has gone.
         if (compositor.motion_ts && !compositor_cursor_in_scene())
-        {
-                compositor_latency(0, compositor.motion_ts, clock_monotonic_nanoseconds());
-                compositor.motion_ts = 0;
-        }
-
-        // The edge the hand holds, all of a window it moves, or for a pointer with no button down the edge it is over.
-        compositor_lit(compositor.resize >= 0  ? compositor.resize
-                       : compositor.drag >= 0 ? compositor.drag
-                                              : under,
+                compositor_latency(0, compositor.motion_ts, clock_monotonic_nanoseconds()), compositor.motion_ts = 0;
+        compositor_lit(compositor.resize >= 0 ? compositor.resize : compositor.drag >= 0 ? compositor.drag : under,
                        compositor.resize >= 0 ? compositor.edges[compositor.resize]
                        : compositor.drag >= 0 ? COMPOSITOR_LIT_ALL
-                       : under < 0 || compositor.grab >= 0 || compositor.touching
-                           ? 0
-                           : compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y),
+                       : under < 0 || compositor.grab >= 0 || compositor.touching ? 0 : compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y),
                        compositor.resize >= 0 || compositor.drag >= 0);
-
         if (compositor.resize >= 0)
         {
                 compositor_resize_move();
                 return;
         }
-
         if (compositor.drag >= 0)
         {
                 int row = compositor.drag;
 
-                // Taken by the hand and moved: a window that fills a place is the window it was, under the hand, once the
-                // hand is UI_SLOP from where it pressed (in its own scale). Short of that it is still a press -- a click, or
-                // half a double click with a shaking hand -- and nothing moves.
                 if (compositor.arranged[row] != COMPOSITOR_FLOATING)
                 {
                         if (!ui_touch_past(compositor.press_x, compositor.press_y, compositor.pointer_x, compositor.pointer_y,
@@ -1978,8 +1741,6 @@ static void compositor_motion(void)
                                 return;
                         compositor_float_for_drag(row);
                 }
-
-                // Kept on the output as it is moved, as when it was placed.
                 compositor.drag_moved = 1;
                 compositor_damage_row(row);
                 compositor_place(row, compositor.pointer_x - compositor.drag_x, compositor.pointer_y - compositor.drag_y);
@@ -1987,15 +1748,10 @@ static void compositor_motion(void)
                 compositor_preview(row);
                 return;
         }
-
-        // A held button keeps the pointer with the window it went down on. Otherwise a window is told of the motion
-        // over it only when it wants the motion (the window hover_off flag): each report of it wakes the program.
         compositor_shared_hover(under);
         compositor.hover = under;
         if (compositor.grab >= 0)
                 compositor_pointer_to(compositor.grab);
-        // A finger that was held for a long press has no button down (its press was taken back), and what it selects follows it as
-        // a held button's drag does, to the window it landed on, whether or not that window asked for the pointer's motion.
         else if (compositor.touch.gesture.mode == UI_TOUCH_HELD && compositor.touch.hold_row >= 0)
                 compositor_pointer_to(compositor.touch.hold_row);
         else if (under >= 0 && !__atomic_load_n(&compositor.table->hover_off[under], __ATOMIC_ACQUIRE))
@@ -2058,12 +1814,6 @@ static void compositor_box_of(int row, int *box)
         box[2] = (int)compositor.w[row], box[3] = (int)compositor.h[row];
 }
 
-/*
-        The snap preview: the target the window being moved touches (compositor_target), from the frame it is touched in, and
-        damaged where it was and where it is. Its target is there while the contact is, and gone the moment it is lost or the
-        window is let go; what is drawn of it is there at once, moves to a new target and fades out when there is none
-        (compositor_preview_shown). Once the window has moved only.
-*/
 static void compositor_preview(int row)
 {
         unsigned int count, how = COMPOSITOR_FLOATING, touch = 0;
@@ -2079,20 +1829,14 @@ static void compositor_preview(int row)
                 compositor_overlays_drag(compositor.pointer_x, compositor.pointer_y);
         }
         else if (row < 0 && compositor.grid_on)
-        {
-                compositor_overlays_damage();
-                compositor.grid_on = 0;
-        }
+                compositor_overlays_damage(), compositor.grid_on = 0;
         if (row < 0)
                 compositor.grid_since = 0;
         compositor.snap_held = touch;
         if (how == COMPOSITOR_FLOATING)
         {
                 if (compositor.preview[2] > 0)
-                {
-                        compositor_damage(compositor.preview[0], compositor.preview[1], compositor.preview[2], compositor.preview[3]);
-                        compositor_preview_leave();
-                }
+                        compositor_damage(compositor.preview[0], compositor.preview[1], compositor.preview[2], compositor.preview[3]), compositor_preview_leave();
                 memory_zero(compositor.preview, sizeof(compositor.preview));
                 compositor.preview_row = COMPOSITOR_NONE;
                 return;
@@ -2107,17 +1851,8 @@ static void compositor_preview(int row)
         compositor_damage(rect[0], rect[1], rect[2], rect[3]);
 }
 
-// The button is let go. A window that was being moved is arranged by where the
-// hand let go, unless the release is not the hand's (the device went away).
 static void compositor_lit(int row, unsigned int edges, unsigned int held);
 
-/*
-        The window is taken hold of to be moved, wherever the pointer is on it now: its popups go, the hand's place on it
-        is kept, and what a drop on a target would restore. The press on its top does this, and so does a client's own
-        request to be moved while the person holds a button on it (the Wayland shim's xdg_toplevel.move). press_x and
-        press_y mark where the hold began: for a native press, where the pointer is now; for a client move, where the button
-        went down so its own drag threshold does not pay a second compositor slop.
-*/
 static void compositor_drag_begin_from(int under, int press_x, int press_y)
 {
         compositor_popups_close(under, -1);
@@ -2126,10 +1861,8 @@ static void compositor_drag_begin_from(int under, int press_x, int press_y)
         compositor.drag_moved = 0;
         compositor.drag_x = compositor.pointer_x - compositor.x[under];
         compositor.drag_y = compositor.pointer_y - compositor.y[under];
-        compositor.press_x = press_x;
-        compositor.press_y = press_y;
+        compositor.press_x = press_x, compositor.press_y = press_y;
         compositor_hold_take(0, under);
-        // What a drop on a target keeps for a restore: where it floats now, or where it floated before.
         if (compositor.arranged[under] == COMPOSITOR_FLOATING)
         {
                 int keep[4] = {compositor.x[under], compositor.y[under], (int)compositor.w[under], (int)compositor.h[under]};
@@ -2138,7 +1871,6 @@ static void compositor_drag_begin_from(int under, int press_x, int press_y)
         }
         else
                 compositor_row_saved_get(under, compositor.drag_keep);
-        // The window is in the hand: all of its line is lit until it is let go.
         compositor_lit(under, COMPOSITOR_LIT_ALL, 1);
 }
 
@@ -2161,7 +1893,6 @@ static void compositor_drag_start_client(int under)
         }
 }
 
-// Canonical client-initiated move/resize/cancel entry (Wayland xdg_toplevel.move/resize, XWM _NET_WM_MOVERESIZE).
 static int compositor_grab_begin_client(int row, unsigned int edges, int is_move, int cancel)
 {
         if (row < 0 || row >= COMPOSITOR_ROWS)
@@ -2172,49 +1903,29 @@ static int compositor_grab_begin_client(int row, unsigned int edges, int is_move
             compositor.drag >= 0 || compositor.resize >= 0)
                 return 0;
         if (is_move)
-        {
-                compositor_drag_start_client(row);
-                return 1;
-        }
+                return compositor_drag_start_client(row), 1;
         if (!edges)
                 return 0;
         compositor_resize_begin(row, edges);
         if (compositor.resize == row)
-        {
-                compositor_lit(row, compositor.edges[row], 1);
-                return 1;
-        }
+                return compositor_lit(row, compositor.edges[row], 1), 1;
         return 0;
 }
 
 #ifdef CONFIG_MOONWATER_WAYLAND
-static void compositor_drag_begin_client(int under)
-{
-        compositor_drag_start_client(under);
-}
-
-static void compositor_drag_stop(int row)
-{
-        (void)compositor_grab_end(COMPOSITOR_GRAB_STOP, row);
-}
+static void compositor_drag_begin_client(int under) { compositor_drag_start_client(under); }
+static void compositor_drag_stop(int row) { (void)compositor_grab_end(COMPOSITOR_GRAB_STOP, row); }
 #endif
 
-// A release with flags: WINDOW_KEY_CANCEL is one that is no click (a finger that became two, or was held).
 static void compositor_release_as(unsigned int code, int snap, unsigned int flags)
 {
-        int dragged = compositor.drag, to = COMPOSITOR_NONE, resized = compositor.resize;
-        unsigned int index = code - COMPOSITOR_BTN_LEFT, drop_how = COMPOSITOR_FLOATING;
-        int drop_screen = 0, drop_box[4];
-        unsigned int drop_touch = 0;
+        int dragged = compositor.drag, to = COMPOSITOR_NONE, resized = compositor.resize, drop_screen = 0, drop_box[4];
+        unsigned int index = code - COMPOSITOR_BTN_LEFT, drop_how = COMPOSITOR_FLOATING, drop_touch = 0;
 
         compositor_pointer_press(code, 0);
-        // Where the window lands is read before the preview and the grid are taken away: the grid's region, or the snap.
         if (dragged >= 0 && snap && compositor.drag_moved)
-        {
-                compositor_box_of(dragged, drop_box);
-                drop_how = compositor_target(dragged, compositor.pointer_x, compositor.pointer_y, drop_box, &drop_screen, &drop_touch);
-        }
-        // The preview goes with the drag; where the window lands is the target read above, from its rectangle.
+                compositor_box_of(dragged, drop_box),
+                    drop_how = compositor_target(dragged, compositor.pointer_x, compositor.pointer_y, drop_box, &drop_screen, &drop_touch);
         compositor_grab_end(COMPOSITOR_GRAB_COMMIT, COMPOSITOR_NONE);
         if (code == COMPOSITOR_BTN_RIGHT && compositor.edge_right)
         {
@@ -2223,11 +1934,6 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                         compositor_grab_clear();
                 compositor_lit(COMPOSITOR_NONE, 0, 0);
         }
-        // A button is let go in the window it was pressed in: a second button pressed over another window while the
-        // first is held is that window's, and the first's release is the one that window held the grab for. A button
-        // that was never recorded as pressed in a window (its press was taken by a popup, a minimise or a hold's cancel)
-        // goes to none: the window the grab holds is not its window, and it never had the press. The grab is kept while
-        // another button still down holds it.
         if (index < 8 && (compositor.button_down >> index & 1))
         {
                 to = compositor.button_row[index];
@@ -2236,41 +1942,26 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
         }
         compositor_dnd_release(to);
 #ifdef CONFIG_MOONWATER_WAYLAND
-        // A program's drag is let go with the button that holds it: its drop, or its cancel (the release still the program's).
         if (!compositor_dnd.bridge_count)
                 compositor_drag_let_go(to);
 #endif
-        compositor_post(to, WINDOW_EVENT_BUTTON, flags | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)), (int)code, 0);
-        // A press and a release with no motion between is a click on the window's top, which only raises it:
-        // a window at the top of the output, where the snap margin is, would otherwise fill it when clicked.
-        if (dragged >= 0 && snap && compositor.drag_moved)
+        compositor_post(to, WINDOW_EVENT_BUTTON,
+                        flags | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)),
+                        (int)code, 0);
+        if (dragged >= 0 && snap && compositor.drag_moved && drop_how != COMPOSITOR_FLOATING)
         {
-                unsigned int how = drop_how;
-                int screen = drop_screen;
-
-                if (how != COMPOSITOR_FLOATING)
-                {
-                        compositor_arrange_on(dragged, how, screen);
-                        // The rectangle a restore puts back is the one from before the drag (compositor.drag_keep).
-                        compositor_row_saved_set(dragged, compositor.drag_keep);
-                        // The others of the screen are offered the space the drop left, until a click or Escape.
-                        compositor.assist_on = compositor.assist_armed = 1;
-                        compositor.assist_row = dragged;
-                        compositor.assist_how = (unsigned int)compositor.arranged[dragged];
-                        compositor.assist_screen = screen;
-                        compositor_assist_refresh();
-                        if (!compositor.assist_count)
-                                compositor_assist_close();
-                        // They come up now, not during the drag: where they are is drawn for the next present.
-                        compositor_overlays_damage();
-                }
+                compositor_arrange_on(dragged, drop_how, drop_screen);
+                compositor_row_saved_set(dragged, compositor.drag_keep);
+                compositor.assist_on = compositor.assist_armed = 1;
+                compositor.assist_row = dragged, compositor.assist_how = (unsigned int)compositor.arranged[dragged];
+                compositor.assist_screen = drop_screen;
+                compositor_assist_refresh();
+                if (!compositor.assist_count)
+                        compositor_assist_close();
+                compositor_overlays_damage();
         }
         if (compositor.grid_on)
-        {
-                compositor_overlays_damage();
-                compositor.grid_on = 0;
-        }
-        // Where the hand put a window is where a window of its name opens next (compositor_remember).
+                compositor_overlays_damage(), compositor.grid_on = 0;
         if (snap && (resized >= 0 || (dragged >= 0 && compositor.drag_moved)))
                 compositor_remember(resized >= 0 ? resized : dragged);
 }
@@ -2393,6 +2084,34 @@ static void compositor_cancel_holds(const struct compositor_rows *roots)
                 compositor_release_as(COMPOSITOR_BTN_LEFT, 0, WINDOW_KEY_CANCEL);
 }
 
+static void compositor_edge_drag_start(int row)
+{
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row] || compositor.fullscreen[row])
+                return;
+        compositor_raise(row);
+        compositor_focus(row);
+        compositor_drag_begin(row);
+        compositor.cursor.shape = CP_ARROW;
+        compositor_cursor_move();
+}
+
+static void compositor_button_deliver(int row, unsigned int code, int save_left, int check_locked)
+{
+        compositor.grab = compositor.grab >= 0 ? compositor.grab : row;
+        if (!check_locked || !compositor_wl_locked())
+                compositor_pointer_to(row);
+        compositor_post(row, WINDOW_EVENT_BUTTON,
+                        WINDOW_KEY_DOWN | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)),
+                        (int)code, 0);
+        if (code - COMPOSITOR_BTN_LEFT < 8)
+        {
+                compositor.button_down |= (unsigned char)(1u << (code - COMPOSITOR_BTN_LEFT));
+                compositor.button_row[code - COMPOSITOR_BTN_LEFT] = row;
+                if (save_left && code == COMPOSITOR_BTN_LEFT)
+                        compositor.button_x = compositor.pointer_x, compositor.button_y = compositor.pointer_y;
+        }
+}
+
 static void compositor_button(unsigned int code, int down)
 {
         int under, tab, alt = (compositor_modifiers() & WINDOW_KEY_ALT) != 0, top, band, up;
@@ -2401,8 +2120,6 @@ static void compositor_button(unsigned int code, int down)
 
         compositor_pointer_clamp();
         under = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
-
-        // The moon's menu and the band's arrangement first: what is theirs goes no further.
         if (compositor_band_hand(code, down))
                 return;
         if (!down)
@@ -2410,67 +2127,36 @@ static void compositor_button(unsigned int code, int down)
                 compositor_release(code, 1);
                 return;
         }
-
-        // Both left and right click while on a window resize edge moves the entire window: pressing right during an
-        // edge resize reverts the resize and begins dragging the window instead. A right press during a drag (or
-        // Alt+Right resize) still takes the move back, as Escape does (compositor_hold_cancel).
+        // Left+right click on a window resize edge moves the entire window.
         if (code == COMPOSITOR_BTN_RIGHT && compositor.resize >= 0 && !alt)
         {
                 int row = compositor.resize;
 
                 compositor_hold_cancel();
-                if (row >= 0 && row < COMPOSITOR_ROWS && compositor.showing[row] && !compositor.fullscreen[row])
-                {
-                        compositor_raise(row);
-                        compositor_focus(row);
-                        compositor_drag_begin(row);
-                        compositor.cursor.shape = CP_ARROW;
-                        compositor_cursor_move();
-                }
+                compositor_edge_drag_start(row);
                 return;
         }
         if (code == COMPOSITOR_BTN_RIGHT && compositor_hold_cancel())
                 return;
-
         if (under >= 0 && compositor_popup_parent[under] >= 0)
         {
                 compositor_popups_close(-1, under);
-                compositor.grab = compositor.grab >= 0 ? compositor.grab : under;
-                compositor_pointer_to(under);
-                compositor_post(under, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)), (int)code, 0);
-                if (code - COMPOSITOR_BTN_LEFT < 8)
-                {
-                        compositor.button_down |= (unsigned char)(1u << (code - COMPOSITOR_BTN_LEFT));
-                        compositor.button_row[code - COMPOSITOR_BTN_LEFT] = under;
-                }
+                compositor_button_deliver(under, code, 0, 0);
                 return;
         }
-        // A press outside every popup that is open asks them to go, and is theirs: it goes no further, to the window
-        // below, the desktop or a tab, with a finger the same as a mouse (compositor_touch_button is this path too).
         compositor_menu_roots(&roots);
         if (compositor_popups_close(-1, -1))
         {
                 compositor_cancel_holds(&roots);
                 return;
         }
-
-        // The launcher that is up before this press, if there is one: the press below on the launcher's button puts it away
-        // (it is asked to go here, like any press outside it) and asks for no other.
         up = compositor_launcher_row();
-
-        // A window that asked to be put away by a press anywhere but on it (WINDOW_DISMISS) is asked to go by one on
-        // the desktop, a tab, another window or the tray alike; the press then goes on as it would have.
         if (compositor.focus >= 0 && (compositor.asks[compositor.focus] & WINDOW_DISMISS) && compositor.showing[compositor.focus] &&
             !(compositor.pointer_x >= compositor.x[compositor.focus] &&
               compositor.pointer_x < compositor.x[compositor.focus] + (int)compositor.w[compositor.focus] &&
               compositor.pointer_y >= compositor.y[compositor.focus] &&
               compositor.pointer_y < compositor.y[compositor.focus] + (int)compositor.h[compositor.focus]))
                 compositor_close(compositor.focus);
-
-        // The panel's cells (the launcher's button, the microphone, the volume and the tray) take a press by the taskbar's rule
-        // (taskbar_cell_press): what it does is the rule's action, and the compositor carries the action out. Each takes its
-        // press alone: none of them passes it on to a window.
-        // The moon's right press: its menu beside it.
         if (tab == TASKBAR_LAUNCHER && code == COMPOSITOR_BTN_RIGHT)
         {
                 compositor_menu_open(compositor.pointer_x, compositor.pointer_y);
@@ -2488,12 +2174,8 @@ static void compositor_button(unsigned int code, int down)
                                            compositor.pointer_x, compositor.pointer_y, compositor.scale))
                 {
                 case TASKBAR_ACT_LAUNCHER:
-                        // with the launcher up the press puts it away, and with none it asks the runner for one beside the button
                         if (up >= 0)
-                        {
-                                compositor_close(up);
-                                compositor_tabs_changed();
-                        }
+                                compositor_close(up), compositor_tabs_changed();
                         else if (taskbar_launcher_on())
                                 compositor_launcher_open(compositor.pointer_x, compositor.pointer_y);
                         break;
@@ -2507,43 +2189,29 @@ static void compositor_button(unsigned int code, int down)
                 }
                 return;
         }
-
-        // A press on a chevron of the tasks' strip (more windows than the band has icons for): the strip a page on or back.
         if (tab == TASKBAR_STRIP_BACK || tab == TASKBAR_STRIP_ON)
         {
                 if (code == COMPOSITOR_BTN_LEFT && taskbar_strip_page(tab == TASKBAR_STRIP_ON ? 1 : -1))
                         compositor_tabs_changed();
                 return;
         }
-
-        // A press on a window's tab brings the window up, a middle press asks it to go, and a right press (a finger's long press) opens its menu.
-        // The tray takes none.
         if (tab >= 0)
         {
-                // A pinned program with no window (taskbar_pins_tabs) has no row to bring up or ask to go: a left press starts it.
-                if (compositor.listed[tab] == TASKBAR_GHOST)
+                if (code == COMPOSITOR_BTN_RIGHT)
+                        compositor_menu_open(compositor.pointer_x, compositor.pointer_y);
+                else if (compositor.listed[tab] == TASKBAR_GHOST)
                 {
                         if (code == COMPOSITOR_BTN_LEFT)
                                 taskbar_pin_start(tab, clock_monotonic_nanoseconds());
-                        else if (code == COMPOSITOR_BTN_RIGHT)
-                                compositor_menu_open(compositor.pointer_x, compositor.pointer_y);
-                        return;
                 }
-                if (code == COMPOSITOR_BTN_MIDDLE)
+                else if (code == COMPOSITOR_BTN_MIDDLE)
                         compositor_close(compositor.listed[tab]);
                 else if (code == COMPOSITOR_BTN_LEFT)
                         compositor_reveal(compositor.listed[tab]);
-                else if (code == COMPOSITOR_BTN_RIGHT)
-                        compositor_menu_open(compositor.pointer_x, compositor.pointer_y);
                 return;
         }
-
         if (under < 0)
                 return;
-
-        // A right press is the window's as a left one is: it is raised and has the keys, so the menu it opens there has them too (its
-        // arrows, Enter, Escape), where they stayed with the window that had them before and the menu could not be closed by a key.
-        // On a resize edge, holding right arms the left+right chord to move the entire window from any edge.
         if (code == COMPOSITOR_BTN_RIGHT && !alt && compositor.grab < 0 && !compositor_wl_held())
         {
                 unsigned int edges = compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
@@ -2553,18 +2221,15 @@ static void compositor_button(unsigned int code, int down)
                 {
                         compositor.edge_right = (unsigned int)under + 1;
                         compositor_grab_set(COMPOSITOR_GRAB_EDGE_CHORD, under, COMPOSITOR_BTN_RIGHT, edges);
-                        compositor.press_x = compositor.pointer_x;
-                        compositor.press_y = compositor.pointer_y;
+                        compositor.press_x = compositor.pointer_x, compositor.press_y = compositor.pointer_y;
                         compositor_lit(under, edges, 1);
                         return;
                 }
         }
-
         if ((code == COMPOSITOR_BTN_LEFT || (code == COMPOSITOR_BTN_RIGHT && alt)) && compositor.grab < 0 && !compositor_wl_held())
         {
                 unsigned int edges = compositor_edge_zone(under, compositor.pointer_x, compositor.pointer_y);
 
-                // Completing a right+left chord on a resize edge moves the entire window from any edge.
                 if (code == COMPOSITOR_BTN_LEFT && !alt && compositor.edge_right)
                 {
                         int row = (int)compositor.edge_right - 1;
@@ -2577,38 +2242,20 @@ static void compositor_button(unsigned int code, int down)
                              !ui_touch_past(compositor.press_x, compositor.press_y, compositor.pointer_x, compositor.pointer_y,
                                             ui_touch_slop(compositor_row_scale(row)))))
                         {
-                                compositor_raise(row);
-                                compositor_focus(row);
-                                compositor_drag_begin(row);
-                                compositor.cursor.shape = CP_ARROW;
-                                compositor_cursor_move();
+                                compositor_edge_drag_start(row);
                                 return;
                         }
                 }
-
                 now = clock_monotonic_nanoseconds();
-                compositor_raise(under);
-                compositor_focus(under);
-
-                /*
-                        A finger on the close button: the window goes when the finger lifts from it without
-                        moving (compositor_touch_report), and one that moves past the slop was making the press the
-                        corner or the titlebar gives (compositor_touch_resume). The X is the finger's only within its
-                        disc and a little more; the rest of the corner is the corner's.
-                */
+                compositor_raise(under), compositor_focus(under);
                 if (compositor.touching && !alt && code == COMPOSITOR_BTN_LEFT &&
                     compositor_on_button(under, compositor.pointer_x, compositor.pointer_y, compositor_close_box))
                 {
-                        compositor.press = COMPOSITOR_NONE;
-                        compositor.touch.closing = under;
+                        compositor.press = COMPOSITOR_NONE, compositor.touch.closing = under;
                         compositor_grab_set(COMPOSITOR_GRAB_TOUCH_CLOSE, under, COMPOSITOR_BTN_LEFT, 0);
                         ui_touch_pend(&compositor.touch.gesture, 1);
                         return;
                 }
-
-                // Just outside a window's edges is the edge, to resize by. An edge resize makes
-                // this ordinary geometry: a double click after it fills the screen and does not
-                // restore what was. The edge the hand has is lit at once.
                 if (edges && code == COMPOSITOR_BTN_LEFT)
                 {
                         if (!compositor_shared_begin(under, edges))
@@ -2616,61 +2263,32 @@ static void compositor_button(unsigned int code, int down)
                         compositor_lit(under, edges, 1);
                         return;
                 }
-
-                // With Alt held, the right button resizes from the corner nearest the hand, which a window
-                // filling the output has no other way to be.
                 if (alt && code == COMPOSITOR_BTN_RIGHT)
                 {
-                        int centre_x = compositor.x[under] + (int)compositor.w[under] / 2;
-                        int centre_y = compositor.y[under] + (int)compositor.h[under] / 2;
+                        int cx = compositor.x[under] + (int)compositor.w[under] / 2;
+                        int cy = compositor.y[under] + (int)compositor.h[under] / 2;
 
-                        compositor_resize_begin(under, (compositor.pointer_x < centre_x ? COMPOSITOR_EDGE_LEFT
-                                                                                        : COMPOSITOR_EDGE_RIGHT) |
-                                                           (compositor.pointer_y < centre_y ? COMPOSITOR_EDGE_TOP
-                                                                                            : COMPOSITOR_EDGE_BOTTOM));
+                        compositor_resize_begin(under, (compositor.pointer_x < cx ? COMPOSITOR_EDGE_LEFT : COMPOSITOR_EDGE_RIGHT) |
+                                                           (compositor.pointer_y < cy ? COMPOSITOR_EDGE_TOP : COMPOSITOR_EDGE_BOTTOM));
                         if (compositor.resize == under)
                                 compositor_lit(under, compositor.edges[under], 1);
                         return;
                 }
-
-                /*
-                        The top of a window is its titlebar, drawn as nothing:
-                        a press there is the window's whatever is under it --
-                        on the close button it asks the window to go, twice
-                        quickly it fills the output or gives it back, and
-                        otherwise it takes hold of the window to move it.
-                        With Alt, anywhere on the window is the same. A control
-                        of the window under the pointer there (a button, a tab,
-                        a field: the pointer shows a hand or an I-beam over it)
-                        is the window's press, not the titlebar's: its pressing
-                        is what the window's controls are for.
-                */
                 band = !alt && code == COMPOSITOR_BTN_LEFT && !compositor.fullscreen[under] && !(compositor.asks[under] & WINDOW_NO_GRAB) &&
-                       compositor.pointer_x >= compositor.x[under] &&
-                       compositor.pointer_x < compositor.x[under] + (int)compositor.w[under] &&
-                       compositor.pointer_y >= compositor.y[under] &&
-                       compositor.pointer_y < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale / 100;
-
-                // The close button is the compositor's, drawn over the band, so it takes its press whatever pointer the window's
-                // kit shows under it (a control's hand or I-beam): only the rest of the band gives way to a control.
+                       compositor.pointer_x >= compositor.x[under] && compositor.pointer_x < compositor.x[under] + (int)compositor.w[under] &&
+                       compositor.pointer_y >= compositor.y[under] && compositor.pointer_y < compositor.y[under] + COMPOSITOR_GRAB * compositor.scale / 100;
                 if (band && compositor_on_button(under, compositor.pointer_x, compositor.pointer_y, compositor_close_box))
                 {
-                        // Not one of a pair, or a second click would fill the screen on its way out.
-                        compositor.press = COMPOSITOR_NONE;
-                        compositor_close(under);
+                        compositor.press = COMPOSITOR_NONE, compositor_close(under);
                         return;
                 }
-                // The arrow (0) or none asked (-1): a control's shape is positive, and a hidden pointer (-2, a game drawing its own cursor)
-                // must never have clicks in the top band stolen as a titlebar drag.
                 {
                         int asked = compositor_asked_shape(under);
 
                         top = band && asked >= -1 && asked <= (int)WINDOW_POINTER_ARROW;
                 }
-
                 if (alt || top)
                 {
-                        // The count is kept for every press on a top (the second of a run of two, on the same window, is the pair).
                         int run = ui_click_again(&compositor.press_click, now, compositor.pointer_x, compositor.pointer_y, compositor.scale);
                         int again = run == 2 && under == compositor.press;
 
@@ -2678,36 +2296,18 @@ static void compositor_button(unsigned int code, int down)
                         if (again)
                         {
                                 compositor.press = COMPOSITOR_NONE;
-                                // One placed filling its screen's room is given back as a maximized one is.
-                                if (compositor_filling(under))
-                                        compositor_float(under);
-                                else
-                                        compositor_arrange(under, COMPOSITOR_MAXIMIZED);
+                                compositor_filling(under) ? compositor_float(under) : compositor_arrange(under, COMPOSITOR_MAXIMIZED);
                                 return;
                         }
                         compositor_drag_begin(under);
                         return;
                 }
         }
-
-        // The window's own: a press inside its picture. The motion first, so it knows where.
         if (compositor.pointer_x < compositor.x[under] || compositor.pointer_y < compositor.y[under] ||
             compositor.pointer_x >= compositor.x[under] + (int)compositor.w[under] ||
             compositor.pointer_y >= compositor.y[under] + (int)compositor.h[under])
                 return;
-
-        // A button's press and its release carry the modifiers held (a Control click adds a row, a Shift click a range).
-        compositor.grab = compositor.grab >= 0 ? compositor.grab : under;
-        if (!compositor_wl_locked())
-                compositor_pointer_to(under);
-        compositor_post(under, WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)), (int)code, 0);
-        if (code - COMPOSITOR_BTN_LEFT < 8)
-        {
-                compositor.button_down |= (unsigned char)(1u << (code - COMPOSITOR_BTN_LEFT));
-                compositor.button_row[code - COMPOSITOR_BTN_LEFT] = under;
-                if (code == COMPOSITOR_BTN_LEFT)
-                        compositor.button_x = compositor.pointer_x, compositor.button_y = compositor.pointer_y;
-        }
+        compositor_button_deliver(under, code, 1, 1);
 }
 
 /*
@@ -3202,71 +2802,47 @@ static long long compositor_stream_turn(unsigned int at, long long value120, lon
         return compositor_scale_rem(value120, gain * (long long)compositor_speed(), COMPOSITOR_GAIN_TURN, &compositor.wheel_rest[at][axis]);
 }
 
-// The wheel goes to what holds the pointer, or to what is under it when the wheel turns. Not to what was under it when
-// the pointer last moved (compositor.hover): a menu or a terminal that a key opened, a window closed or moved or
-// raised by the keys, and the desktop before the first motion all lie under a pointer that has not moved, and a wheel
-// sent to the window it last moved over scrolled that one, or nothing.
-// Every turn of the wheel comes here, a mouse's, a stream's, a trackpad's or two fingers' on a touch screen: v120 in 120ths of a
-// notch (of UI_NOTCH with WINDOW_WHEEL_PRECISE), and the window's flags. The window converts it once (ui_wheel_turn).
 static void compositor_wheel(int v120, int horizontal, unsigned int flags)
 {
-        int row = compositor.grab;
+        int row = compositor.grab, wx = compositor.pointer_x, wy = compositor.pointer_y;
 
-        // The keys held are the wheel's too (Control zooms a view, Shift turns a wheel across): the window reads them from the event as it does a key's.
         flags |= compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
-
-        // A motion read with the wheel in one batch has moved the pointer and not yet kept it on a screen (that is
-        // done when the batch is over): kept first, as before a button, or a flick past the edge sends the wheel to
-        // no window, or to one in the room beside a shorter screen.
         compositor_pointer_clamp();
-        // The wheel over the tasks of a band with more of them than it has icons for scrolls its strip, a tab a notch.
         if (row < 0)
         {
                 int over = compositor_band_hit(compositor.pointer_x, compositor.pointer_y);
-                static int strip_notch;
+                static int strip_notch, vol_notch;
 
-                if ((over >= 0 || over == TASKBAR_STRIP_BACK || over == TASKBAR_STRIP_ON) && taskbar_strip_listed[0] + taskbar_strip_listed[1] >
-                                                                                                   taskbar_strip_shown[0] + taskbar_strip_shown[1])
+                if ((over >= 0 || over == TASKBAR_STRIP_BACK || over == TASKBAR_STRIP_ON) &&
+                    taskbar_strip_listed[0] + taskbar_strip_listed[1] > taskbar_strip_shown[0] + taskbar_strip_shown[1])
                 {
                         int turns = ui_notch_take(&strip_notch, v120);
 
-                        if (turns && taskbar_strip_step(-turns)) // the wheel down (a notch below 0) is on, toward the later tabs
+                        if (turns && taskbar_strip_step(-turns))
                                 compositor_tabs_changed();
                         return;
                 }
-        }
-        if (row < 0 && !horizontal && taskbar_cell_of(compositor_band_hit(compositor.pointer_x, compositor.pointer_y), TASKBAR_BUTTON_WHEEL) == TASKBAR_ACT_VOLUME_STEP)
-        {
-                // The wheel over the tray's volume cell turns the volume, five percent a notch (120ths of one add up).
-                static int notch;
-                int turns = ui_notch_take(&notch, v120);
+                if (!horizontal && taskbar_cell_of(over, TASKBAR_BUTTON_WHEEL) == TASKBAR_ACT_VOLUME_STEP)
+                {
+                        int turns = ui_notch_take(&vol_notch, v120);
 
-                if (turns)
-                        compositor_volume_step(COMPOSITOR_VOLUME_STEP * turns, 0);
-                return;
-        }
-        if (row < 0)
+                        if (turns)
+                                compositor_volume_step(COMPOSITOR_VOLUME_STEP * turns, 0);
+                        return;
+                }
                 row = compositor.hover = compositor_picture_under(compositor.pointer_x, compositor.pointer_y);
-        // Where the pointer is goes first, as it does before a button: a window that turns a wheel by where the pointer
-        // is (the settings window's two columns, a terminal's report to a program that asked for the mouse) has only
-        // the last motion it was told of, which is none when it opened under a pointer that has not moved. Told once:
-        // a wheel that reports in 120ths sends several events to a notch, and each would take two of the ring's places.
-        int wx = compositor.pointer_x, wy = compositor.pointer_y;
-
+        }
         if (row >= 0)
+        {
                 compositor_window_point(row, compositor.pointer_x, compositor.pointer_y, &wx, &wy);
-        if (row >= 0 && !compositor_wl_locked() && (row != compositor.told_row || wx != compositor.told_x || wy != compositor.told_y))
-                compositor_pointer_to(row);
-        // What became of it, for moonwater debug.
-        if (row < 0)
-                compositor.table->wheel_nowhere++;
-        else if (compositor_post(row, WINDOW_EVENT_WHEEL, flags, v120, horizontal))
-                compositor.table->wheel_sent++;
+                if (!compositor_wl_locked() && (row != compositor.told_row || wx != compositor.told_x || wy != compositor.told_y))
+                        compositor_pointer_to(row);
+                compositor_post(row, WINDOW_EVENT_WHEEL, flags, v120, horizontal)
+                    ? compositor.table->wheel_sent++ : compositor.table->wheel_full++;
+        }
         else
-                compositor.table->wheel_full++;
-        compositor.table->wheel_row = row;
-        compositor.table->wheel_x = wx;
-        compositor.table->wheel_y = wy;
+                compositor.table->wheel_nowhere++;
+        compositor.table->wheel_row = row, compositor.table->wheel_x = wx, compositor.table->wheel_y = wy;
 }
 
 // A touchpad's report over: its finger's move is a mouse's, and two fingers' are the wheel, counted for moonwater
@@ -3522,13 +3098,19 @@ static void compositor_chip_stroke_into(unsigned char *layer, int w, int h, long
                 }
 }
 
-// The control cell i of a chip of cells is: 0 close, 1 minimise, 2 maximise. A chip of two has no minimise.
+static void compositor_chip_rect_strokes(unsigned char *layer, int w, int h, long x0, long y0, long x1, long y1, long radius)
+{
+        compositor_chip_stroke_into(layer, w, h, x0, y0, x1, y0, radius);
+        compositor_chip_stroke_into(layer, w, h, x1, y0, x1, y1, radius);
+        compositor_chip_stroke_into(layer, w, h, x1, y1, x0, y1, radius);
+        compositor_chip_stroke_into(layer, w, h, x0, y1, x0, y0, radius);
+}
+
 static int compositor_chip_kind(int cells, int i)
 {
         return cells == 2 && i > 0 ? i + 1 : i;
 }
 
-// The glyphs of the cells: close (an X), minimise (a bar), maximise (a square), each a G-pixel half size about its cell's middle.
 static void compositor_chip_glyphs(unsigned char *layer, int w, int h, int scale, int cells)
 {
         int cell = w / cells;
@@ -3545,27 +3127,20 @@ static void compositor_chip_glyphs(unsigned char *layer, int w, int h, int scale
                 else if (i == 1)
                         compositor_chip_stroke_into(layer, w, h, cx - g, cy, cx + g, cy, radius);
                 else
-                        compositor_chip_stroke_into(layer, w, h, cx - g, cy - g, cx + g, cy - g, radius),
-                            compositor_chip_stroke_into(layer, w, h, cx + g, cy - g, cx + g, cy + g, radius),
-                            compositor_chip_stroke_into(layer, w, h, cx + g, cy + g, cx - g, cy + g, radius),
-                            compositor_chip_stroke_into(layer, w, h, cx - g, cy + g, cx - g, cy - g, radius);
+                        compositor_chip_rect_strokes(layer, w, h, cx - g, cy - g, cx + g, cy + g, radius);
         }
 }
 
-// The coverage of a chip of w x h: the body, and the glyphs of its cells after it when there are any (glyphs: how many).
 static void compositor_chip_paint(int w, int h, int scale, int glyphs)
 {
         unsigned char *cover = compositor.chip.cover;
 
         compositor_chip_body(cover, w, h);
         if (glyphs)
-        {
-                memory_zero(cover + (unsigned long)w * h, (positive)w * h);
-                compositor_chip_glyphs(cover + (unsigned long)w * h, w, h, scale, glyphs);
-        }
+                memory_zero(cover + (unsigned long)w * h, (positive)w * h),
+                    compositor_chip_glyphs(cover + (unsigned long)w * h, w, h, scale, glyphs);
 }
 
-// The chip's coverage memory, mapped once at its largest (body + glyphs).
 static int compositor_chip_map(void)
 {
         struct compositor_chip *c = &compositor.chip;
@@ -3575,33 +3150,23 @@ static int compositor_chip_map(void)
         return c->cover != null;
 }
 
-// Whether the table asks for reduced motion (the kit's motion setting), when a chip slides in at once.
-static int compositor_chip_reduced(void)
-{
-        return compositor.table && compositor.table->motion;
-}
+static int compositor_chip_reduced(void) { return compositor.table && compositor.table->motion; }
 
-// Where the chip is drawn now, in the desktop's pixels: a controls chip follows its window and slides down into its place.
 static void compositor_chip_place(int *box)
 {
         const struct compositor_chip *c = &compositor.chip;
 
         box[2] = c->w, box[3] = c->h;
-        if (c->kind == COMPOSITOR_CHIP_CONTROLS)
-                box[0] = compositor.x[c->row] + c->rel_x, box[1] = compositor.y[c->row] + c->rel_y - c->slide;
-        else
-                box[0] = c->rel_x, box[1] = c->rel_y;
+        box[0] = c->kind == COMPOSITOR_CHIP_CONTROLS ? compositor.x[c->row] + c->rel_x : c->rel_x;
+        box[1] = c->kind == COMPOSITOR_CHIP_CONTROLS ? compositor.y[c->row] + c->rel_y - c->slide : c->rel_y;
 }
 
-// A box is damaged as the chip is: over every window, so the scene under it is composed again.
 static void compositor_chip_damage(const int *box)
 {
-        if (box[2] <= 0 || box[3] <= 0)
-                return;
-        compositor_damage_over(box[0], box[1], box[2], box[3]);
+        if (box[2] > 0 && box[3] > 0)
+                compositor_damage_over(box[0], box[1], box[2], box[3]);
 }
 
-// The chip's box and alpha, when either changed since it was last drawn: the old place and the new are damaged.
 static void compositor_chip_redraw(void)
 {
         struct compositor_chip *c = &compositor.chip;
@@ -3618,84 +3183,69 @@ static void compositor_chip_redraw(void)
         compositor_chip_damage(c->drawn);
 }
 
-// The chip is taken off: its place is damaged and nothing is drawn.
 static void compositor_chip_hide(void)
 {
         struct compositor_chip *c = &compositor.chip;
 
         compositor_chip_damage(c->drawn);
         memory_zero(c->drawn, sizeof(c->drawn));
-        c->kind = COMPOSITOR_CHIP_NONE;
-        c->alpha = 0;
+        c->kind = COMPOSITOR_CHIP_NONE, c->alpha = 0;
 }
 
-// The window's controls over its top band, when they fit it (a cell each, and a cell's margin either side); false when they do not. A window
-// that asked for no tab has no minimise: nothing would bring it back (compositor_frame's minimise button is left out for it the same way).
-static int compositor_chip_controls(int row, positive now)
+static void compositor_chip_show(int kind, int row, int cells, int rx, int ry, int w, int h, int slide, positive now, positive hold, positive fade)
 {
         struct compositor_chip *c = &compositor.chip;
+
+        c->kind = kind, c->row = row, c->cells = cells;
+        c->rel_x = rx, c->rel_y = ry, c->w = w, c->h = h, c->slide = slide, c->alpha = 255;
+        c->shown = now, c->hold = hold, c->fade = fade;
+        compositor_chip_redraw();
+}
+
+static int compositor_chip_controls(int row, positive now)
+{
         int cells = row >= 0 && row < COMPOSITOR_ROWS && (compositor.asks[row] & WINDOW_NO_TAB) ? 2 : 3;
         int scale = compositor.scale, cell = UI_EDGE_CONTROL_CELL * scale / 100, w = cells * cell, h = COMPOSITOR_CHIP_HEIGHT_DP * scale / 100;
 
-        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_visible(row) || cell < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST)
-                return 0;
-        if ((int)compositor.w[row] < w + 2 * cell || !compositor_chip_map())
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor_visible(row) || cell < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST ||
+            (int)compositor.w[row] < w + 2 * cell || !compositor_chip_map())
                 return 0;
         compositor_chip_hide();
         compositor_chip_paint(w, h, scale, cells);
-        c->kind = COMPOSITOR_CHIP_CONTROLS, c->row = row, c->cells = cells;
-        c->rel_x = ((int)compositor.w[row] - w) / 2, c->rel_y = COMPOSITOR_CHIP_TOP_DP * scale / 100;
-        c->w = w, c->h = h, c->alpha = 255;
-        c->slide = compositor_chip_reduced() ? 0 : h;
-        c->shown = now, c->hold = COMPOSITOR_CHIP_HOLD_NS, c->fade = (positive)ui_paced(COMPOSITOR_CHIP_FADE_NS);
-        compositor_chip_redraw();
+        compositor_chip_show(COMPOSITOR_CHIP_CONTROLS, row, cells, ((int)compositor.w[row] - w) / 2, COMPOSITOR_CHIP_TOP_DP * scale / 100,
+                             w, h, compositor_chip_reduced() ? 0 : h, now, COMPOSITOR_CHIP_HOLD_NS, (positive)ui_paced(COMPOSITOR_CHIP_FADE_NS));
         return 1;
 }
 
-// The indicator of a first swipe into a window that covers its screen: a bar at the edge it came from, about the finger's place.
 static void compositor_chip_hint(const int *rect, int x, int y, int side, positive now)
 {
-        struct compositor_chip *c = &compositor.chip;
         int scale = compositor.scale, w = COMPOSITOR_CHIP_HINT_W_DP * scale / 100, h = COMPOSITOR_CHIP_HINT_H_DP * scale / 100;
-        int margin = COMPOSITOR_CHIP_HINT_MARGIN_DP * scale / 100, left = rect[0] + margin, right = rect[0] + rect[2] - w - margin;
-        int top = rect[1] + margin, bottom = rect[1] + rect[3] - h - margin;
+        int margin = COMPOSITOR_CHIP_HINT_MARGIN_DP * scale / 100, rx, ry;
+        int vertical = side == UI_EDGE_LEFT || side == UI_EDGE_RIGHT;
 
-        if (side == UI_EDGE_LEFT || side == UI_EDGE_RIGHT)
-                w = h, h = COMPOSITOR_CHIP_HINT_W_DP * scale / 100, top = rect[1] + margin, bottom = rect[1] + rect[3] - h - margin;
+        if (vertical)
+                w = h, h = COMPOSITOR_CHIP_HINT_W_DP * scale / 100;
         if (w < 1 || h < 1 || w > COMPOSITOR_CHIP_W_MOST || h > COMPOSITOR_CHIP_H_MOST || !compositor_chip_map())
                 return;
         compositor_chip_hide();
         compositor_chip_paint(w, h, scale, 0);
-        c->kind = COMPOSITOR_CHIP_HINT, c->row = COMPOSITOR_NONE;
-        if (side == UI_EDGE_LEFT || side == UI_EDGE_RIGHT)
+        if (vertical)
         {
-                // A bar along a side edge, about the finger's height.
-                c->rel_x = side == UI_EDGE_LEFT ? rect[0] + margin : rect[0] + rect[2] - w - margin;
-                c->rel_y = y - h / 2;
-                c->rel_y = c->rel_y < top ? top : c->rel_y > bottom ? bottom : c->rel_y;
+                int top = rect[1] + margin, bottom = rect[1] + rect[3] - h - margin;
+
+                rx = side == UI_EDGE_LEFT ? rect[0] + margin : rect[0] + rect[2] - w - margin;
+                ry = y - h / 2, ry = ry < top ? top : ry > bottom ? bottom : ry;
         }
         else
         {
-                c->rel_x = x - w / 2;
-                c->rel_x = c->rel_x < left ? left : c->rel_x > right ? right : c->rel_x;
-                c->rel_y = side == UI_EDGE_BOTTOM ? rect[1] + rect[3] - h - margin : rect[1] + margin;
+                int left = rect[0] + margin, right = rect[0] + rect[2] - w - margin;
+
+                rx = x - w / 2, rx = rx < left ? left : rx > right ? right : rx;
+                ry = side == UI_EDGE_BOTTOM ? rect[1] + rect[3] - h - margin : rect[1] + margin;
         }
-        c->w = w, c->h = h, c->slide = 0, c->alpha = 255;
-        c->shown = now, c->hold = COMPOSITOR_CHIP_HINT_NS, c->fade = 0;
-        compositor_chip_redraw();
+        compositor_chip_show(COMPOSITOR_CHIP_HINT, COMPOSITOR_NONE, 0, rx, ry, w, h, 0, now, COMPOSITOR_CHIP_HINT_NS, 0);
 }
 
-/*
-        A drag's chip, whoever's the drag is (a Wayland client's, an X client's, a program's): a capsule of the kit's glass beside the
-        pointer, following it, its glyph the action the drag would come to where it is (copy a plus, move an arrow, ask three dots, none a
-        slash), and where the program said how many things it drags and they are more than one (compositor_chip_drag_items, from its
-        offer), their count after the glyph, drawn as the chip's strokes are, seven to a figure. Shown while the drag is and taken off with it
-        (action -1).
-*/
-// compositor_chip_drag_items and compositor_chip_drag_kind are declared in compositor.c so manage.c and input.c share them.
-
-// One part of a symbol's table (the kit's, ui_file_parts) into a chip's glyph layer, size to a side from x, y: lines and outlines as the
-// chip's strokes, a box filled whole and a shade at a third.
 static void compositor_chip_part(unsigned char *glyph, int w, int h, long x, long y, long size, const struct ui_icon_part *part, long radius)
 {
         long x0 = x + part->x0 * size / 48, y0 = y + part->y0 * size / 48, x1 = x + part->x1 * size / 48, y1 = y + part->y1 * size / 48;
@@ -3703,17 +3253,15 @@ static void compositor_chip_part(unsigned char *glyph, int w, int h, long x, lon
         if (part->kind == UI_ICON_LINE)
                 compositor_chip_stroke_into(glyph, w, h, x0, y0, x1, y1, radius);
         else if (part->kind == UI_ICON_RING)
-        {
-                compositor_chip_stroke_into(glyph, w, h, x0, y0, x1, y0, radius), compositor_chip_stroke_into(glyph, w, h, x1, y0, x1, y1, radius);
-                compositor_chip_stroke_into(glyph, w, h, x1, y1, x0, y1, radius), compositor_chip_stroke_into(glyph, w, h, x0, y1, x0, y0, radius);
-        }
+                compositor_chip_rect_strokes(glyph, w, h, x0, y0, x1, y1, radius);
         else if (part->kind == UI_ICON_BOX || part->kind == UI_ICON_SHADE)
                 for (long py = y0 < 0 ? 0 : y0; py < y1 && py < h; py++)
                         for (long px = x0 < 0 ? 0 : x0; px < x1 && px < w; px++)
                         {
                                 unsigned char want = part->kind == UI_ICON_BOX ? 255 : 85;
 
-                                glyph[py * w + px] = glyph[py * w + px] > want ? glyph[py * w + px] : want;
+                                if (want > glyph[py * w + px])
+                                        glyph[py * w + px] = want;
                         }
 }
 
@@ -4276,6 +3824,13 @@ static void compositor_pinch(const struct ui_touch_event *e)
                 touch->pinch_row = COMPOSITOR_NONE;
 }
 
+static void compositor_touch_clear_close(void)
+{
+        compositor.touch.closing = COMPOSITOR_NONE;
+        if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_CLOSE)
+                compositor_grab_clear();
+}
+
 static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *out, positive now)
 {
         int wheel = 0;
@@ -4290,68 +3845,41 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         compositor.touch.device = (int)at;
                         compositor.touch.physical = at < COMPOSITOR_INPUTS && compositor_input_physical[at];
                         compositor.touch.hidden = 1;
-                        compositor.touch.closing = COMPOSITOR_NONE;
-                        compositor.touch.hold_row = COMPOSITOR_NONE;
+                        compositor.touch.closing = compositor.touch.hold_row = COMPOSITOR_NONE;
                         if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_CLOSE ||
                             compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_HOLD)
                                 compositor_grab_clear();
                         compositor_touch_motion(e->x, e->y, now);
                         break;
-                case UI_TOUCH_MOVE:
-                        compositor_touch_motion(e->x, e->y, now);
-                        break;
-                case UI_TOUCH_PRESS:
-                        compositor_touch_button(COMPOSITOR_BTN_LEFT, 1);
-                        break;
+                case UI_TOUCH_MOVE: compositor_touch_motion(e->x, e->y, now); break;
+                case UI_TOUCH_PRESS: compositor_touch_button(COMPOSITOR_BTN_LEFT, 1); break;
                 case UI_TOUCH_RELEASE:
-                        compositor.touch.closing = COMPOSITOR_NONE;
-                        if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_CLOSE)
-                                compositor_grab_clear();
+                        compositor_touch_clear_close();
                         compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
                         compositor_touch_button(COMPOSITOR_BTN_LEFT, 0);
                         break;
-                case UI_TOUCH_CANCEL:
-                        compositor_touch_cancel();
-                        break;
+                case UI_TOUCH_CANCEL: compositor_touch_cancel(); break;
                 case UI_TOUCH_CLOSE:
-                        // Lifted unmoved on the close button it went down on: the window goes.
                         compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
                         if (compositor.touch.closing >= 0)
-                        {
-                                compositor.press = COMPOSITOR_NONE;
-                                compositor_close(compositor.touch.closing);
-                        }
-                        compositor.touch.closing = COMPOSITOR_NONE;
-                        if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_CLOSE)
-                                compositor_grab_clear();
+                                compositor.press = COMPOSITOR_NONE, compositor_close(compositor.touch.closing);
+                        compositor_touch_clear_close();
                         break;
                 case UI_TOUCH_RESUME:
-                        // A press on the X that moves is no press of it: the press it was under the X is made.
-                        compositor.touch.closing = COMPOSITOR_NONE;
-                        if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_CLOSE)
-                                compositor_grab_clear();
+                        compositor_touch_clear_close();
                         compositor_touch_resume();
                         break;
-                case UI_TOUCH_RIGHT:
-                        compositor_touch_right();
-                        break;
+                case UI_TOUCH_RIGHT: compositor_touch_right(); break;
                 case UI_TOUCH_WHEEL:
                         compositor.touching = 1;
-                        // Fingers on glass are direct: the content goes with them whatever the Scrolling group's natural direction says of a wheel and
-                        // a pad, which the kit and the clients apply to every precise turn, so this one is turned the other way first.
                         compositor_wheel(compositor.table && (compositor.table->scroll_off & WINDOW_SCROLL_FLIP) ? -e->v120 : e->v120, e->horizontal, WINDOW_WHEEL_PRECISE);
                         wheel = 1;
                         break;
-                case UI_TOUCH_TURN_END:
-                        compositor_wheel(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP);
-                        break;
+                case UI_TOUCH_TURN_END: compositor_wheel(0, 0, WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STOP); break;
                 case UI_TOUCH_HOLD:
-                        // The left press taken back and the right button sent are both the long press's: the cancel carries WINDOW_KEY_HOLD too.
                         {
                                 int tab;
 
-                                // The hold is at the finger's own place (the last one it reported), not at the pointer, which a second
-                                // device may have left elsewhere.
                                 compositor_predict_place(COMPOSITOR_PREDICT_TOUCH, compositor.touch.x, compositor.touch.y, now);
                                 compositor.touch.holding = 1;
                                 compositor_touch_cancel();
@@ -4363,7 +3891,6 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         }
                         break;
                 case UI_TOUCH_HOLD_END:
-                        // Lifted after a long press: the release that ends it, in the window it landed on (a terminal copies its selection).
                         if (compositor.touch.hold_row >= 0)
                                 compositor_post(compositor.touch.hold_row, WINDOW_EVENT_BUTTON,
                                                 WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, COMPOSITOR_BTN_LEFT, 0);
@@ -4371,9 +3898,7 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_HOLD)
                                 compositor_grab_clear();
                         break;
-                case UI_TOUCH_IDLE:
-                        compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
-                        break;
+                case UI_TOUCH_IDLE: compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH); break;
                 case UI_TOUCH_PINCH_BEGIN:
                 case UI_TOUCH_PINCH_UPDATE:
                 case UI_TOUCH_PINCH_END:
@@ -4521,24 +4046,26 @@ static void compositor_swipe_hand(unsigned int at, positive now, const struct ui
         compositor_touch_feed(at, now, &compositor.swipe.landing, &report);
 }
 
-// The launcher, opened by a swipe up: its rectangle is a panel's thickness along the bottom of its screen, beside the finger, as the launcher
-// button's is (window.c's button_*), and the runner is told as it is told of the button.
-static void compositor_swipe_launcher(int x, const int *rect, int number)
+static void compositor_table_button_set(int x, int y, int w, int h, unsigned int edge, unsigned int screen)
 {
         struct windows *table = compositor.table;
+
+        if (!table)
+                return;
+        table->button_x = x, table->button_y = y;
+        table->button_w = (unsigned int)w, table->button_h = (unsigned int)h;
+        table->button_edge = edge, table->button_screen = screen;
+}
+
+static void compositor_swipe_launcher(int x, const int *rect, int number)
+{
         int w = COMPOSITOR_SWIPE_LAUNCHER_DP * compositor.scale / 100, h = taskbar_thick(compositor.scale);
 
-        if (table)
-        {
-                table->button_x = x - w / 2, table->button_y = rect[1] + rect[3] - h;
-                table->button_w = (unsigned int)w, table->button_h = (unsigned int)h;
-                table->button_edge = TASKBAR_BOTTOM, table->button_screen = (unsigned int)number;
-        }
+        compositor_table_button_set(x - w / 2, rect[1] + rect[3] - h, w, h, TASKBAR_BOTTOM, (unsigned int)number);
         compositor.launcher_asked++;
         compositor_script_say("launcher_button");
 }
 
-// A tap on a control of the chip: the window's close, its minimise, or its maximise (restored when it is maximised), and the chip is taken away.
 static void compositor_chip_press(int cell)
 {
         int row = compositor.chip.row;
@@ -4550,38 +4077,24 @@ static void compositor_chip_press(int cell)
                 compositor_close(row);
         else if (cell == 1)
                 compositor_minimize_row(row);
-        else if (compositor_filling(row))
-                compositor_float(row);
         else
-                compositor_arrange(row, COMPOSITOR_MAXIMIZED);
+                compositor_filling(row) ? compositor_float(row) : compositor_arrange(row, COMPOSITOR_MAXIMIZED);
 }
 
-// A swipe in from a side edge that its setting runs something for: the window switcher's step, or on the left the launcher and on the right
-// the volume popup, beside the finger. The launcher's rectangle is a panel's thickness along its edge, as the bottom one's is.
 static void compositor_swipe_side(int side, int y, const int *rect, int number)
 {
-        struct windows *table = compositor.table;
         int what = side == UI_EDGE_LEFT ? compositor.side_left : compositor.side_right;
         int w = taskbar_thick(compositor.scale), h = COMPOSITOR_SWIPE_LAUNCHER_DP * compositor.scale / 100;
 
         if (what == COMPOSITOR_SIDE_WINDOWS)
         {
-                compositor_focus_step();
-                compositor_focus_commit();
+                compositor_focus_step(), compositor_focus_commit();
                 return;
         }
-        if (table)
-        {
-                table->button_x = side == UI_EDGE_RIGHT ? rect[0] + rect[2] - w : rect[0];
-                table->button_y = y - h / 2;
-                table->button_w = (unsigned int)w, table->button_h = (unsigned int)h;
-                table->button_edge = side == UI_EDGE_RIGHT ? TASKBAR_RIGHT : TASKBAR_LEFT, table->button_screen = (unsigned int)number;
-        }
+        compositor_table_button_set(side == UI_EDGE_RIGHT ? rect[0] + rect[2] - w : rect[0], y - h / 2, w, h,
+                                    side == UI_EDGE_RIGHT ? TASKBAR_RIGHT : TASKBAR_LEFT, (unsigned int)number);
         if (side == UI_EDGE_LEFT)
-        {
-                compositor.launcher_asked++;
-                compositor_script_say("launcher_button");
-        }
+                compositor.launcher_asked++, compositor_script_say("launcher_button");
         else
                 compositor_script_say("volume_button");
 }
@@ -4675,7 +4188,6 @@ static void compositor_touch_report(unsigned int at, positive now)
         struct ui_touch_frame frame;
         struct ui_touch_out out;
 
-        // The trace (window.c): the gesture's mode and each finger's place in pixels, at the report.
         WINDOW_TRACE("compositor report: device %b, gesture mode %b, dropped %b\n", (bipolar)at, (bipolar)touch->gesture.mode, (bipolar)screen->dropped);
         for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                 if (screen->id[slot] >= 0)
@@ -4683,11 +4195,8 @@ static void compositor_touch_report(unsigned int at, positive now)
                         int x, y;
 
                         compositor_touch_point(at, slot, &x, &y);
-                        WINDOW_TRACE("compositor finger: slot %b tracking id %b px %b,%b\n", (bipolar)slot, (bipolar)screen->id[slot],
-                                     (bipolar)x, (bipolar)y);
+                        WINDOW_TRACE("compositor finger: slot %b tracking id %b px %b,%b\n", (bipolar)slot, (bipolar)screen->id[slot], (bipolar)x, (bipolar)y);
                 }
-
-        // Events were lost: no finger is trusted, and what they were doing ends as if they were lifted, no click made.
         if (screen->dropped)
         {
 #ifdef CONFIG_MOONWATER_WAYLAND
@@ -4703,12 +4212,7 @@ static void compositor_touch_report(unsigned int at, positive now)
                         screen->id[slot] = screen->was[slot] = -1;
                 }
                 if (touch->gesture.mode != UI_TOUCH_NONE && touch->device == (int)at)
-                {
-                        ui_touch_drop(&touch->gesture, &out);
-                        compositor_touch_apply(at, &out, now);
-                }
-                // The fingers still down are read again from the kernel (B-h3-3): each lands anew at the next report, where it was a finger
-                // with no id, moving nothing, until it was lifted.
+                        ui_touch_drop(&touch->gesture, &out), compositor_touch_apply(at, &out, now);
                 if (screen->slots)
                 {
                         int ids[UI_TOUCH_SLOTS], xs[UI_TOUCH_SLOTS], ys[UI_TOUCH_SLOTS];
@@ -4719,48 +4223,28 @@ static void compositor_touch_report(unsigned int at, positive now)
                 }
                 return;
         }
-        if (touch->gesture.mode != UI_TOUCH_NONE && touch->device != (int)at)
+        if ((touch->gesture.mode != UI_TOUCH_NONE && touch->device != (int)at) ||
+            (compositor.swipe.state != COMPOSITOR_SWIPE_NONE && compositor.swipe.device != (int)at))
         {
                 memory_copy(screen->was, screen->id, sizeof(screen->was));
                 return;
         }
-        if (compositor.swipe.state != COMPOSITOR_SWIPE_NONE && compositor.swipe.device != (int)at)
-        {
-                memory_copy(screen->was, screen->id, sizeof(screen->was));
-                return;
-        }
-
-        // The marks follow the fingers, and fade from those lifted.
-        for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
-                if (screen->id[slot] >= 0)
-                {
-                        int x, y;
-
-                        compositor_touch_point(at, slot, &x, &y);
-                        compositor_spot_set(slot, x, y);
-                }
-                else if (screen->was[slot] >= 0)
-                        compositor_spot_lift(slot, now);
-
         memory_zero(&frame, sizeof(frame));
         memory_copy(frame.id, screen->id, sizeof(frame.id));
         memory_copy(frame.was, screen->was, sizeof(frame.was));
         for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
                 if (screen->id[slot] >= 0)
+                {
                         compositor_touch_point(at, slot, &frame.x[slot], &frame.y[slot]);
-        frame.scale = compositor.scale;
-        frame.now = now;
+                        compositor_spot_set(slot, frame.x[slot], frame.y[slot]);
+                }
+                else if (screen->was[slot] >= 0)
+                        compositor_spot_lift(slot, now);
+        frame.scale = compositor.scale, frame.now = now;
         frame.pointer_x = compositor.pointer_x, frame.pointer_y = compositor.pointer_y;
         frame.busy = compositor.drag >= 0 || compositor.resize >= 0;
-
-        // A finger in a band the system may take is the system's, or held back from the kit, until it is decided.
-        if (compositor_swipe_report(at, now, &frame))
-        {
-                memory_copy(screen->was, screen->id, sizeof(screen->was));
-                return;
-        }
-
-        compositor_touch_feed(at, now, &frame, &frame);
+        if (!compositor_swipe_report(at, now, &frame))
+                compositor_touch_feed(at, now, &frame, &frame);
         memory_copy(screen->was, screen->id, sizeof(screen->was));
 }
 
@@ -5070,14 +4554,25 @@ static int compositor_reader_key(unsigned int at, unsigned int code, int value, 
 }
 #endif
 
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_reader_direct_stat(positive now_us, positive micro)
+{
+        positive late = now_us - micro;
+
+        __atomic_add_fetch(&compositor_reader.direct, 1, __ATOMIC_RELEASE);
+        if (late > compositor_reader.late_most && late < 1000000000ull)
+                compositor_reader.late_most = late;
+        compositor_reader.late += late >= 100;
+}
+#endif
+
 static int compositor_reader_direct(unsigned int at, const struct compositor_input_event *raw, unsigned int count)
 {
 #ifdef CONFIG_MOONWATER_WAYLAND
         long dx = 0, dy = 0;
         int key = -1, value = 0;
+        positive micro;
 
-        // While the screens are out (display off) every record goes to the loop, whose take lights them (compositor_dark_woken): a key or a
-        // locked pointer's motion sent from here reached the client with the screens left dark and the file there.
         if (compositor.touchpad[at] || compositor.touchscreen[at] || compositor.devices[at].wakeonly || __atomic_load_n(&compositor.dark, __ATOMIC_RELAXED) ||
             __atomic_load_n(&compositor_reader.taken, __ATOMIC_ACQUIRE) != compositor_reader.handed_out || compositor_reader.dropped)
                 return 0;
@@ -5088,20 +4583,14 @@ static int compositor_reader_direct(unsigned int at, const struct compositor_inp
                         dy += raw[k].value;
                 else if (raw[k].type == COMPOSITOR_EV_KEY && raw[k].code < 256 && key < 0)
                         key = raw[k].code, value = raw[k].value;
-                else if (raw[k].type != 4u && !(raw[k].type == COMPOSITOR_EV_SYN && raw[k].code == 0)) // EV_MSC; SYN_REPORT
+                else if (raw[k].type != 4u && !(raw[k].type == COMPOSITOR_EV_SYN && raw[k].code == 0))
                         return 0;
+        micro = (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds;
         if (key >= 0)
-                return !dx && !dy && compositor_reader_key(at, (unsigned int)key, value,
-                                                          (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds);
-        positive micro = (positive)raw[count - 1].seconds * 1000000ull + (positive)raw[count - 1].microseconds, late;
-
+                return !dx && !dy && compositor_reader_key(at, (unsigned int)key, value, micro);
         if ((!dx && !dy) || !compositor_wl_direct_send(dx, dy, micro))
                 return 0;
-        __atomic_add_fetch(&compositor_reader.direct, 1, __ATOMIC_RELEASE);
-        // The report's time from the device's stamp to its send, for the count of late ones (said when the compositor ends).
-        late = clock_monotonic_nanoseconds() / 1000 - micro;
-        compositor_reader.late_most = late > compositor_reader.late_most && late < 1000000000ull ? late : compositor_reader.late_most;
-        compositor_reader.late += late >= 100;
+        compositor_reader_direct_stat(clock_monotonic_nanoseconds() / 1000, micro);
         return 1;
 #else
         (void)at, (void)raw, (void)count;
@@ -5183,11 +4672,7 @@ static unsigned int compositor_reader_spark_drain(struct spark_input_ring *ring,
 #ifdef CONFIG_MOONWATER_WAYLAND
                         if (compositor_wl_direct_send(dx, dy, micro))
                         {
-                                positive late = now / 1000 - micro;
-
-                                __atomic_add_fetch(&compositor_reader.direct, 1, __ATOMIC_RELEASE);
-                                compositor_reader.late_most = late > compositor_reader.late_most && late < 1000000000ull ? late : compositor_reader.late_most;
-                                compositor_reader.late += late >= 100;
+                                compositor_reader_direct_stat(now / 1000, micro);
                                 count++;
                                 continue;
                         }
@@ -5589,58 +5074,37 @@ static void compositor_input_gone(unsigned int at)
         compositor_reader_changed(at);
 }
 
-// What one read of device at gave (got bytes of whole records), acted on; moved says a report moved the pointer, whose motion is made
-// once the device's reads are done (compositor_input_end).
 static int compositor_input_take(unsigned int at, const struct compositor_input_event *raw, bipolar got, int moved)
 {
         struct compositor_report_event events[64];
         positive count;
-
         int is_spark = at >= COMPOSITOR_INPUTS;
 
 #ifdef MOONWATER_GPU_C
-        // Input keeps the card awake for what answers it, asked once the turn's input is forwarded (compositor_gpu_input_turn)
         if (is_spark || !compositor.devices[at].wakeonly)
                 compositor_gpu_wake();
 #endif
-
-        // It woke the loop, and that was all it was for.
         if (!is_spark && compositor.devices[at].wakeonly)
-        {
-                compositor_sling_only = 0;
-                return moved;
-        }
-
-        // The whole records of what was read, each with its stamp worked out, in one pass (evdev_decode).
+                return compositor_sling_only = 0, moved;
         count = evdev_decode((const p8 *)raw, (positive)got, (p64 *)events, 64);
         for (positive i = 0; i < count; i++)
         {
                 const struct compositor_report_event *event = &events[i];
                 positive now = event->stamp;
 
-                // A key or a button pressed, a move or a touch: a person, who has the screens lit again (a release is not, so the
-                // chord that put them out does not light them; a switch, EV_SW, is none of these).
                 if (compositor.dark && ((event->type == 1 && event->value == 1) || event->type == 2 || event->type == 3))
                         compositor_dark_woken();
-
-                // The events this one posts carry its own stamp (the device's), not the time the loop reads them at.
                 compositor_stamp_now = now;
-                // A locked pointer's counts and the end of their report are all a slingshot turn may hold (EV_MSC, 4, a scan code, says
-                // nothing either); a touch screen's and a touchpad's are worked into gestures, a key, a button and a wheel are the
-                // compositor's to look at (its keys, a click's focus, a stream).
                 if ((!is_spark && (compositor.touchscreen[at] || compositor.touchpad[at])) || !compositor_wl_locked() ||
                     !((event->type == COMPOSITOR_EV_REL && event->code < 2) || (event->type == COMPOSITOR_EV_SYN && event->code == 0) ||
                       event->type == 4u))
                         compositor_sling_only = 0;
 #ifdef CONFIG_MOONWATER_WAYLAND
-                // The idle clock (ext-idle-notify) counts from the input a person gives: keys, buttons, motion, fingers.
                 if (event->type == COMPOSITOR_EV_KEY || event->type == COMPOSITOR_EV_REL || event->type == COMPOSITOR_EV_ABS)
                         compositor_wl_input();
 #endif
-                // The touch trace (window.c): a touch-down looks for its switch, and each raw event of a touch screen or a pad is a line.
                 if (!is_spark && (compositor.touchscreen[at] || compositor.touchpad[at]))
                 {
-                        // A finger down is BTN_TOUCH, or, on a screen that reports slots only (a virtio multitouch device sends no BTN_TOUCH), a tracking id.
                         if ((event->type == COMPOSITOR_EV_KEY && event->code == COMPOSITOR_BTN_TOUCH && event->value) ||
                             (event->type == COMPOSITOR_EV_ABS && event->code == COMPOSITOR_ABS_MT_TRACKING_ID && event->value >= 0))
                                 window_trace_touch();
@@ -5652,22 +5116,16 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                 }
                 if ((event->type == COMPOSITOR_EV_REL && event->code < 2) || event->type == COMPOSITOR_EV_ABS)
                         compositor.motion_ts = compositor.motion_ts ? compositor.motion_ts : now;
-
-                // A touch screen's events are its fingers', taken when its report is over.
                 if (!is_spark && compositor.touchscreen[at])
                 {
                         if (event->type == COMPOSITOR_EV_SYN && event->code == 0)
                                 compositor_touch_report(at, now);
                         else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
-                        {
-                                compositor.table->input_dropped[at]++;
-                                compositor.screen_touch[at].dropped = 1;
-                        }
+                                compositor.table->input_dropped[at]++, compositor.screen_touch[at].dropped = 1;
                         else
                                 compositor_touch_event(at, event);
                         continue;
                 }
-
                 if (event->type == COMPOSITOR_EV_REL && event->code == COMPOSITOR_REL_X)
                 {
                         compositor.raw_x = compositor_counts(compositor.raw_x, event->value);
@@ -5683,47 +5141,32 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                         int fine = event->code == COMPOSITOR_REL_WHEEL_HI || event->code == COMPOSITOR_REL_HWHEEL_HI;
                         int sideways = event->code == COMPOSITOR_REL_HWHEEL || event->code == COMPOSITOR_REL_HWHEEL_HI;
 
-                        compositor.table->input_wheel_read[at]++;
-                        compositor.table->input_wheel_last[at] = now;
-                        // A wheel that reports in 120ths is read from those, and its notches are not counted again.
+                        compositor.table->input_wheel_read[at]++, compositor.table->input_wheel_last[at] = now;
                         if (fine || !(compositor.hires[at] >> sideways & 1))
                         {
-                                // A stream's notches are the finger's motion, one for one; a mouse's are stepped (compositor_wheel_stream).
                                 int stream = compositor_wheel_streams(at, now);
-
-                                if (compositor.table)
-                                        window_wheel_note(compositor.table, at, now, stream);
-
-                                compositor.table->input_wheel_used[at]++;
                                 long long value120 = fine ? (long long)event->value : (long long)event->value * 120;
                                 unsigned int flags = 0;
 
+                                if (compositor.table)
+                                        window_wheel_note(compositor.table, at, now, stream);
+                                compositor.table->input_wheel_used[at]++;
                                 if (stream)
-                                {
-                                        long long gain = compositor_stream_gain_at(at, now);
-
-                                        value120 = compositor_stream_turn(at, value120, gain, sideways);
+                                        value120 = compositor_stream_turn(at, value120, compositor_stream_gain_at(at, now), sideways),
                                         flags = WINDOW_WHEEL_PRECISE | WINDOW_WHEEL_STREAM;
-                                }
                                 compositor_wheel(compositor_counts(0, value120), sideways, flags);
                         }
                 }
                 else if (event->type == COMPOSITOR_EV_SYN && event->code == COMPOSITOR_SYN_DROPPED)
                 {
                         compositor.table->input_dropped[at]++;
-                        // What the kernel dropped may be a lift and a touch somewhere else: the touchpad's
-                        // next report says where the finger is, and is no move from where it was before.
                         if (compositor.touchpad[at])
                         {
                                 struct compositor_pad *pad = compositor_pad_of(at);
                                 unsigned char bits[COMPOSITOR_KEY_BYTES];
                                 int ids[UI_TOUCH_SLOTS];
 
-                                pad->moving = 0;
-                                pad->left_x = pad->left_y = 0;
-                                // Its fingers as the kernel has them now (B-h3-4): a lift that was lost left a slot down and a count of two, and a
-                                // single finger's drag was read as a pinch with a stale second point. The slots by EVIOCGMTSLOTS, the touch and the
-                                // count of fingers by the tool keys (EVIOCGKEY); a pad that answers neither has nothing down.
+                                pad->moving = 0, pad->left_x = pad->left_y = 0;
                                 compositor_mt_slots(at, ids, pad->mt_x, pad->mt_y, &pad->slot);
                                 pad->slot = pad->slot < 0 ? 0 : pad->slot >= UI_TOUCH_SLOTS ? UI_TOUCH_SLOTS - 1 : pad->slot;
                                 for (int slot = 0; slot < UI_TOUCH_SLOTS; slot++)
@@ -5734,34 +5177,21 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                                                : compositor_input_down(bits, COMPOSITOR_BTN_TOOL_QUADTAP)  ? 4
                                                : compositor_input_down(bits, COMPOSITOR_BTN_TOOL_TRIPLETAP) ? 3
                                                : compositor_input_down(bits, COMPOSITOR_BTN_TOOL_DOUBLETAP) ? 2
-                                               : compositor_input_down(bits, COMPOSITOR_BTN_TOOL_FINGER)    ? 1
-                                                                                                             : 0;
+                                               : compositor_input_down(bits, COMPOSITOR_BTN_TOOL_FINGER)    ? 1 : 0;
                         }
-                        // And a key's or a button's release: what no device has down is let go.
                         compositor_input_dropped(at, now);
                 }
-                else if (event->type == COMPOSITOR_EV_ABS && compositor.touchpad[at] && event->code >= COMPOSITOR_ABS_MT_SLOT &&
-                         event->code <= COMPOSITOR_ABS_MT_TRACKING_ID)
+                else if (event->type == COMPOSITOR_EV_ABS && compositor.touchpad[at] &&
+                         event->code >= COMPOSITOR_ABS_MT_SLOT && event->code <= COMPOSITOR_ABS_MT_TRACKING_ID)
                         compositor_pad_slot(compositor_pad_of(at), event->code, event->value);
                 else if (event->type == COMPOSITOR_EV_ABS && event->code < 2 && compositor.touchpad[at])
-                {
-                        struct compositor_pad *pad = compositor_pad_of(at);
-
-                        if (event->code)
-                                pad->next_y = event->value;
-                        else
-                                pad->next_x = event->value;
-                }
+                        *(event->code ? &compositor_pad_of(at)->next_y : &compositor_pad_of(at)->next_x) = event->value;
                 else if (event->type == COMPOSITOR_EV_ABS && event->code < 2)
                 {
                         int *range = event->code ? compositor.absolute_y[at] : compositor.absolute_x[at];
-                        int place = compositor_tablet(event->value, range[0], range[1],
-                                                      event->code ? compositor.height : compositor.width);
+                        int place = compositor_tablet(event->value, range[0], range[1], event->code ? compositor.height : compositor.width);
 
-                        if (event->code)
-                                compositor.tablet_y = place;
-                        else
-                                compositor.tablet_x = place;
+                        *(event->code ? &compositor.tablet_y : &compositor.tablet_x) = place;
                         compositor.tablet_have |= event->code ? 2 : 1;
                 }
                 else if (event->type == COMPOSITOR_EV_SYN && event->code == 0)
@@ -5770,13 +5200,9 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                                 compositor_pad_apply(at, now);
                         moved |= compositor_report(now, now);
                 }
-                else if (event->type == COMPOSITOR_EV_KEY && compositor.touchpad[at] &&
-                         compositor_pad_finger_key(event->code))
+                else if (event->type == COMPOSITOR_EV_KEY && compositor.touchpad[at] && compositor_pad_finger_key(event->code))
                 {
                         struct compositor_pad *pad = compositor_pad_of(at);
-                        // The last finger lifting ends the precise gesture: the region in hand lets go at its lift (WINDOW_WHEEL_STOP).
-                        // Fingers that turned no wheel (a move of the pointer, a tap, a click) end none, and their lift sends nothing:
-                        // a stop is a wheel event to the window under the pointer, which an open menu there is not to be closed by.
                         b32 down = pad->touching || pad->fingers;
 
                         compositor_pad_key(pad, event->code, event->value);
@@ -5791,11 +5217,8 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                          !compositor.touchpad[at] && !compositor.touchscreen[at])
                         compositor_predict_clear(COMPOSITOR_PREDICT_PEN);
                 else if (event->type == COMPOSITOR_EV_KEY &&
-                         ((event->code >= COMPOSITOR_BTN_LEFT && event->code <= COMPOSITOR_BTN_TASK) ||
-                          event->code == COMPOSITOR_BTN_TOUCH))
+                         ((event->code >= COMPOSITOR_BTN_LEFT && event->code <= COMPOSITOR_BTN_TASK) || event->code == COMPOSITOR_BTN_TOUCH))
                 {
-                        // A touch is the left button (a touchpad's is no press, above); the others are where
-                        // they are, but a touchpad's left pressed with two fingers on it, which is its right.
                         unsigned int code = event->code == COMPOSITOR_BTN_TOUCH ? COMPOSITOR_BTN_LEFT : event->code;
 
                         if (compositor.touchpad[at] && code == COMPOSITOR_BTN_LEFT)
@@ -5813,13 +5236,12 @@ static int compositor_input_take(unsigned int at, const struct compositor_input_
                 }
                 else if (event->type == COMPOSITOR_EV_KEY && event->code < 256)
                 {
-                        // A key of a physical keyboard is the last input (the on-screen keyboard's auto rule).
                         if (event->value == 1 && (compositor.input_kinds[at] & WINDOWS_INPUT_KEYBOARD))
                                 compositor.osk_typed = 1;
                         compositor_key(at, event->code, event->value, now);
                 }
         }
-return moved;
+        return moved;
 }
 
 static void compositor_input_end(unsigned int at, int moved)

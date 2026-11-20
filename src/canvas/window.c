@@ -1779,15 +1779,14 @@ static unsigned int windows_issue_lines(const struct windows_issues *all, const 
         return lines;
 }
 
-// The worst severity of a key's issues on a copy (0 none, WINDOWS_ISSUE_WARNING or WINDOWS_ISSUE_ERROR), and how many there are.
-static unsigned int windows_issues_worst(const struct windows_issues *all, const char *key, unsigned int *count)
+static unsigned int windows_issues_scan(const struct windows_issues *all, const char *key, unsigned int *count)
 {
         unsigned int worst = 0;
 
         if (count)
                 *count = 0;
-        for (int i = 0; all && key && i < WINDOWS_ISSUES; i++)
-                if (all->issue[i].used && windows_issue_same(all->issue[i].key, key))
+        for (int i = 0; all && i < WINDOWS_ISSUES; i++)
+                if (all->issue[i].used && (key ? windows_issue_same(all->issue[i].key, key) : all->issue[i].key[0] != 0))
                 {
                         worst = all->issue[i].severity > worst ? all->issue[i].severity : worst;
                         if (count)
@@ -1796,22 +1795,14 @@ static unsigned int windows_issues_worst(const struct windows_issues *all, const
         return worst;
 }
 
-// The worst severity of every issue on a copy (0 none, WINDOWS_ISSUE_WARNING or WINDOWS_ISSUE_ERROR), and how many there are: what the tray's
-// notices dot says. Kernel notices and the options' issues alike; a dismissed kernel notice is none (windows_kernel_dismiss clears it).
+static unsigned int windows_issues_worst(const struct windows_issues *all, const char *key, unsigned int *count)
+{
+        return key ? windows_issues_scan(all, key, count) : (count ? (*count = 0) : 0u);
+}
+
 static unsigned int windows_issues_summary(const struct windows_issues *all, unsigned int *count)
 {
-        unsigned int worst = 0;
-
-        if (count)
-                *count = 0;
-        for (int i = 0; all && i < WINDOWS_ISSUES; i++)
-                if (all->issue[i].used && all->issue[i].key[0])
-                {
-                        worst = all->issue[i].severity > worst ? all->issue[i].severity : worst;
-                        if (count)
-                                (*count)++;
-                }
-        return worst;
+        return windows_issues_scan(all, 0, count);
 }
 
 // The metrics' rings: the last samples of a path's presents (nanoseconds), and the mean and the worst of them in microseconds. A rate is a count over
@@ -2317,105 +2308,80 @@ static int windows_arrange_word(const char *word, unsigned int length, unsigned 
         return 1;
 }
 
-// Whether count bytes at a and at b are the same.
+static int windows_word_next(const char *text, unsigned int *start, unsigned int *stop)
+{
+        unsigned int at = *start;
+
+        while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
+                at++;
+        if (!text[at])
+                return 0;
+        *start = at;
+        while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
+                at++;
+        *stop = at;
+        return 1;
+}
+
 static int windows_same(const char *a, const char *b, unsigned int count)
 {
         return !memory_compare(a, b, count);
 }
 
-// Whether a whole arrangement is one: default or nothing, or words each of which is one, a name once.
 static int windows_arrange_valid(const char *text)
 {
-        unsigned int at = 0, words = 0, starts[WINDOWS_OUTPUTS * 2], names[WINDOWS_OUTPUTS * 2];
+        unsigned int start = 0, stop, words = 0, starts[WINDOWS_OUTPUTS * 2], names[WINDOWS_OUTPUTS * 2];
 
-        while (text[at])
+        for (; windows_word_next(text, &start, &stop); start = stop)
         {
-                unsigned int start, name;
+                unsigned int name;
                 int how, x, y;
 
-                while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
-                        at++;
-                if (!text[at])
-                        break;
-                start = at;
-                while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
-                        at++;
-                // default is a word alone, never a screen's name among others.
-                if (at - start == 7 && windows_same(text + start, "default", 7))
+                if (stop - start == 7 && windows_same(text + start, "default", 7))
                 {
-                        while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
-                                at++;
-                        return !words && !text[at];
+                        unsigned int next_s = stop, next_e;
+
+                        return !words && !windows_word_next(text, &next_s, &next_e);
                 }
-                if (words == WINDOWS_OUTPUTS * 2 || !windows_arrange_word(text + start, at - start, &name, &how, &x, &y))
+                if (words == WINDOWS_OUTPUTS * 2 || !windows_arrange_word(text + start, stop - start, &name, &how, &x, &y))
                         return 0;
                 for (unsigned int other = 0; other < words; other++)
                         if (names[other] == name && windows_same(text + starts[other], text + start, name))
                                 return 0;
-                starts[words] = start;
-                names[words++] = name;
+                starts[words] = start, names[words++] = name;
         }
         return 1;
 }
 
-/*
-        The arrangement: count screens in the card's order, each its name and
-        its width and height, laid by the words of the setting (default or
-        none for the card's own order). Each screen's rectangle comes back in
-        rects, x, y, width, height, in the card's order, with a width of 0 for
-        one that is dark; order is the screens lit, the primary first and the
-        rest as they were laid. Answers how many are lit, at least one when
-        any is connected: a setting that would leave every screen dark lights
-        the first.
-*/
 static unsigned int windows_arrange_lay(const char *text, const char (*names)[WINDOWS_OUTPUT_NAME], const int (*sizes)[2],
-                                           unsigned int count, int (*rects)[4], unsigned char *order)
+                                        unsigned int count, int (*rects)[4], unsigned char *order)
 {
         unsigned char laid[WINDOWS_OUTPUTS] = {0}, placed[WINDOWS_OUTPUTS] = {0}, dark[WINDOWS_OUTPUTS] = {0};
-        int place[WINDOWS_OUTPUTS][2] = {{0}}, valid = windows_arrange_valid(text);
-        unsigned int lit = 0, at = 0, used = 0;
-        int right = 0, low_x = 0, low_y = 0;
+        int place[WINDOWS_OUTPUTS][2] = {{0}}, valid = windows_arrange_valid(text), right = 0, low_x = 0, low_y = 0;
+        unsigned int lit = 0, start = 0, stop, used = 0;
 
         count = count < WINDOWS_OUTPUTS ? count : WINDOWS_OUTPUTS;
-
-        // The named screens first, in the setting's order; a name no screen has is a screen not plugged in now.
-        while (valid && text[at])
+        for (; valid && windows_word_next(text, &start, &stop); start = stop)
         {
-                unsigned int start, name;
+                unsigned int name;
                 int how, x, y;
 
-                while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
-                        at++;
-                start = at;
-                while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
-                        at++;
-                if (at == start || !windows_arrange_word(text + start, at - start, &name, &how, &x, &y))
+                if (!windows_arrange_word(text + start, stop - start, &name, &how, &x, &y))
                         continue;
                 for (unsigned int screen = 0; screen < count; screen++)
-                {
-                        unsigned int same = 0;
-
-                        while (same < name && names[screen][same] == text[start + same])
-                                same++;
-                        if (same != name || names[screen][name] || laid[screen])
-                                continue;
-                        laid[screen] = 1;
-                        dark[screen] = how == WINDOWS_PLACE_OFF;
-                        placed[screen] = how == WINDOWS_PLACE_AT;
-                        place[screen][0] = x, place[screen][1] = y;
-                        order[used++] = (unsigned char)screen;
-                }
+                        if (!laid[screen] && !names[screen][name] && windows_same(names[screen], text + start, name))
+                        {
+                                laid[screen] = 1, dark[screen] = how == WINDOWS_PLACE_OFF, placed[screen] = how == WINDOWS_PLACE_AT;
+                                place[screen][0] = x, place[screen][1] = y, order[used++] = (unsigned char)screen;
+                        }
         }
         for (unsigned int screen = 0; screen < count; screen++)
                 if (!laid[screen])
                         order[used++] = (unsigned char)screen;
-
         for (unsigned int screen = 0; screen < count; screen++)
                 lit += !dark[screen];
         if (!lit && count)
                 dark[0] = 0;
-
-        // Those given a place have it; the rest go to the right of everything laid before them, tops level.
         lit = 0;
         for (unsigned int each = 0; each < used; each++)
         {
@@ -2425,8 +2391,7 @@ static unsigned int windows_arrange_lay(const char *text, const char (*names)[WI
                         continue;
                 rects[screen][0] = placed[screen] ? place[screen][0] : right;
                 rects[screen][1] = placed[screen] ? place[screen][1] : 0;
-                rects[screen][2] = sizes[screen][0];
-                rects[screen][3] = sizes[screen][1];
+                rects[screen][2] = sizes[screen][0], rects[screen][3] = sizes[screen][1];
                 right = rects[screen][0] + rects[screen][2] > right || !lit ? rects[screen][0] + rects[screen][2] : right;
                 low_x = !lit || rects[screen][0] < low_x ? rects[screen][0] : low_x;
                 low_y = !lit || rects[screen][1] < low_y ? rects[screen][1] : low_y;
@@ -2561,18 +2526,51 @@ static int windows_display_size(const char *word, unsigned int length, unsigned 
         return 1;
 }
 
-// Reads one line of length bytes at line into display, and says in bad which of its fields were not right.
+static int windows_display_value(unsigned int field, const char *word, unsigned int length, int *into)
+{
+        int value = 0;
+
+        if (field == WINDOWS_DISPLAY_REFRESH && length == 9 && windows_name_is("preferred", word, 9))
+        {
+                *into = 0;
+                return 1;
+        }
+        if (field == WINDOWS_DISPLAY_ROTATION)
+        {
+                if (!windows_display_number(word, length, 0, 3, &value) ||
+                    (value != 0 && value != 90 && value != 180 && value != 270))
+                        return 0;
+        }
+        else if (field == WINDOWS_DISPLAY_SCALE)
+        {
+                if (!windows_display_number(word, length, 0, 3, &value) || !windows_scale_ok(value))
+                        return 0;
+        }
+        else if (field == WINDOWS_DISPLAY_REFRESH)
+        {
+                if (!windows_display_number(word, length, 0, 4, &value) || value < 1 || value > (int)WINDOWS_DISPLAY_HZ)
+                        return 0;
+        }
+        else if (!windows_display_number(word, length, 1, 6, &value) || value > WINDOWS_PLACE_MOST ||
+                 value < -WINDOWS_PLACE_MOST)
+                return 0;
+        *into = value;
+        return 1;
+}
+
 static void windows_display_line(const char *line, unsigned int length, struct windows_display *display)
 {
+        static const struct { const char *name; unsigned char len; unsigned short bit; } fields[] = {
+            {"rotation", 8, WINDOWS_DISPLAY_ROTATION}, {"refresh", 7, WINDOWS_DISPLAY_REFRESH},
+            {"scale", 5, WINDOWS_DISPLAY_SCALE},       {"mode", 4, WINDOWS_DISPLAY_MODE},
+            {"primary", 7, WINDOWS_DISPLAY_PRIMARY},   {"x", 1, WINDOWS_DISPLAY_X},
+            {"y", 1, WINDOWS_DISPLAY_Y},
+        };
         unsigned int at = 0, start, seen = 0, have_x = 0, have_y = 0;
         int x = 0, y = 0;
 
-        for (unsigned int each = 0; each < WINDOWS_OUTPUT_NAME; each++)
-                display->name[each] = 0;
-        display->rotation = display->refresh = display->placed = display->bad = 0;
-        display->width = display->height = display->primary = 0;
+        memory_zero(display, sizeof(*display));
         display->scale = WINDOWS_SCALE_DEFAULT;
-        display->x = display->y = 0;
         while (at < length && (line[at] == ' ' || line[at] == '\t'))
                 at++;
         start = at;
@@ -2585,7 +2583,8 @@ static void windows_display_line(const char *line, unsigned int length, struct w
         }
         for (;;)
         {
-                unsigned int word, equals, key, keys;
+                unsigned int word, equals, key = 0, val_len;
+                const char *val;
                 int value;
 
                 while (at < length && (line[at] == ' ' || line[at] == '\t'))
@@ -2597,95 +2596,53 @@ static void windows_display_line(const char *line, unsigned int length, struct w
                         at++;
                 for (equals = word; equals < at && line[equals] != '='; equals++)
                         ;
-                keys = equals - word;
                 if (equals == at || equals == word)
                 {
                         display->bad |= WINDOWS_DISPLAY_OTHER;
                         continue;
                 }
-                // Each field is the key's name and the value after its '=': the rest is the value.
-                {
-                        static const struct
+                for (unsigned int f = 0; f < sizeof(fields) / sizeof(fields[0]); f++)
+                        if (equals - word == fields[f].len && windows_name_is(fields[f].name, line + word, fields[f].len))
                         {
-                                const char *name;
-                                unsigned char len;
-                                unsigned short bit;
-                        } fields[] = {
-                            {"rotation", 8, WINDOWS_DISPLAY_ROTATION}, {"refresh", 7, WINDOWS_DISPLAY_REFRESH},
-                            {"scale", 5, WINDOWS_DISPLAY_SCALE},       {"mode", 4, WINDOWS_DISPLAY_MODE},
-                            {"primary", 7, WINDOWS_DISPLAY_PRIMARY},   {"x", 1, WINDOWS_DISPLAY_X},
-                            {"y", 1, WINDOWS_DISPLAY_Y},
-                        };
-
-                        key = 0;
-                        for (unsigned int f = 0; f < sizeof(fields) / sizeof(fields[0]); f++)
-                                if (keys == fields[f].len && windows_name_is(fields[f].name, line + word, fields[f].len))
-                                {
-                                        key = fields[f].bit;
-                                        break;
-                                }
-                }
+                                key = fields[f].bit;
+                                break;
+                        }
                 if (!key || (seen & key))
                 {
                         display->bad |= WINDOWS_DISPLAY_OTHER;
                         continue;
                 }
                 seen |= key;
-                if (key == WINDOWS_DISPLAY_ROTATION)
+                val = line + equals + 1, val_len = at - equals - 1;
+                if (key == WINDOWS_DISPLAY_PRIMARY)
                 {
-                        if (windows_display_number(line + equals + 1, at - equals - 1, 0, 3, &value) &&
-                            (value == 0 || value == 90 || value == 180 || value == 270))
-                                display->rotation = (unsigned int)value;
-                        else
-                                display->bad |= key;
-                }
-                else if (key == WINDOWS_DISPLAY_SCALE)
-                {
-                        if (windows_display_number(line + equals + 1, at - equals - 1, 0, 3, &value) && windows_scale_ok(value))
-                                display->scale = (unsigned int)value;
-                        else
-                                display->bad |= key;
-                }
-                else if (key == WINDOWS_DISPLAY_PRIMARY)
-                {
-                        if (at - equals - 1 == 3 && windows_name_is("yes", line + equals + 1, 3))
+                        if (val_len == 3 && windows_name_is("yes", val, 3))
                                 display->primary = 1;
-                        else if (!(at - equals - 1 == 2 && windows_name_is("no", line + equals + 1, 2)))
+                        else if (!(val_len == 2 && windows_name_is("no", val, 2)))
                                 display->bad |= key;
                 }
                 else if (key == WINDOWS_DISPLAY_MODE)
                 {
-                        if (!windows_display_size(line + equals + 1, at - equals - 1, &display->width, &display->height))
+                        if (!windows_display_size(val, val_len, &display->width, &display->height))
                                 display->bad |= key;
                 }
-                else if (key == WINDOWS_DISPLAY_REFRESH)
-                {
-                        if (at - equals - 1 == 9 && windows_name_is("preferred", line + equals + 1, 9))
-                                display->refresh = 0;
-                        else if (windows_display_number(line + equals + 1, at - equals - 1, 0, 4, &value) &&
-                                 value >= 1 && value <= (int)WINDOWS_DISPLAY_HZ)
-                                display->refresh = (unsigned int)value;
-                        else
-                                display->bad |= key;
-                }
-                else if (windows_display_number(line + equals + 1, at - equals - 1, 1, 6, &value) &&
-                         value <= WINDOWS_PLACE_MOST && value >= -WINDOWS_PLACE_MOST)
-                {
-                        if (key == WINDOWS_DISPLAY_X)
-                                x = value, have_x = 1;
-                        else
-                                y = value, have_y = 1;
-                }
-                else
+                else if (!windows_display_value(key, val, val_len, &value))
                         display->bad |= key;
+                else if (key == WINDOWS_DISPLAY_ROTATION)
+                        display->rotation = (unsigned int)value;
+                else if (key == WINDOWS_DISPLAY_SCALE)
+                        display->scale = (unsigned int)value;
+                else if (key == WINDOWS_DISPLAY_REFRESH)
+                        display->refresh = (unsigned int)value;
+                else if (key == WINDOWS_DISPLAY_X)
+                        x = value, have_x = 1;
+                else
+                        y = value, have_y = 1;
         }
-        // x and y go together: one alone is malformed for the field it lacks.
         if (have_x && have_y)
                 display->placed = 1, display->x = x, display->y = y;
-        else if (have_x)
-                display->bad |= WINDOWS_DISPLAY_Y;
-        else if (have_y)
-                display->bad |= WINDOWS_DISPLAY_X;
+        else if (have_x || have_y)
+                display->bad |= have_x ? WINDOWS_DISPLAY_Y : WINDOWS_DISPLAY_X;
 }
 
 // Reads the lines of text into list, at most room of them, and answers how many were read; a blank line is none.
@@ -2793,57 +2750,35 @@ static void windows_rotate_u32(unsigned int *into, unsigned long into_pitch, con
 {
         if (degrees == 90 || degrees == 270)
         {
-                // The panel columns and rows the rectangle turns into.
-                unsigned int pa = degrees == 90 ? lh - y1 : y0, pb = degrees == 90 ? lh - y0 : y1;
-                unsigned int qa = degrees == 90 ? x0 : lw - x1, qb = degrees == 90 ? x1 : lw - x0;
+                int cw = degrees == 90;
+                unsigned int pa = cw ? lh - y1 : y0, pb = cw ? lh - y0 : y1;
+                unsigned int qa = cw ? x0 : lw - x1, qb = cw ? x1 : lw - x0;
+                long step = cw ? -(long)from_pitch : (long)from_pitch;
 
                 for (unsigned int p = pa, pe; p < pb; p = pe)
                 {
-                        // Tiles start at multiples of the tile, so a tile's panel row is a line of the card's memory.
                         pe = (p / WINDOWS_TURN_TILE + 1) * WINDOWS_TURN_TILE;
                         pe = pe < pb ? pe : pb;
                         for (unsigned int q = qa; q < qb; q += WINDOWS_TURN_TILE)
                         {
                                 unsigned int qe = q + WINDOWS_TURN_TILE < qb ? q + WINDOWS_TURN_TILE : qb;
 
-                                // A full-width tile (sixteen columns, at least four rows) is one call. The panel row r of the tile is the
-                                // picture's column q + r, and panel column c is the picture's row lh - 1 - p - c for a quarter turn one way,
-                                // or p + c for the other: memory_transpose_u32 with the picture's column step, and the row step that turns
-                                // the tile's rows the same way. Any other edge is the loop below: measured, the call wins only at sixteen
-                                // columns on both machines, and the edges of a picture stay with the loop.
                                 if (qe - q >= 4 && pe - p == WINDOWS_TURN_TILE)
                                 {
-                                        unsigned int *to = into + (unsigned long)q * into_pitch + p;
+                                        const unsigned int *src = cw ? from + (unsigned long)(lh - 1 - p) * from_pitch + q
+                                                                     : from + (unsigned long)p * from_pitch + (lw - 1 - q);
 
-                                        if (degrees == 90)
-                                                memory_transpose_u32(to, into_pitch, from + (unsigned long)(lh - 1 - p) * from_pitch + q,
-                                                                     -(long)from_pitch, 1, qe - q, pe - p);
-                                        else
-                                                memory_transpose_u32(to, into_pitch, from + (unsigned long)p * from_pitch + (lw - 1 - q),
-                                                                     (long)from_pitch, -1, qe - q, pe - p);
+                                        memory_transpose_u32(into + (unsigned long)q * into_pitch + p, into_pitch, src, step, cw ? 1 : -1, qe - q, pe - p);
                                         continue;
                                 }
-
                                 for (unsigned int row = q; row < qe; row++)
                                 {
                                         unsigned int *to = into + (unsigned long)row * into_pitch;
+                                        const unsigned int *src = cw ? from + (unsigned long)(lh - 1 - p) * from_pitch + row
+                                                                     : from + (unsigned long)p * from_pitch + (lw - 1 - row);
 
-                                        if (degrees == 90)
-                                        {
-                                                // Panel column px of this row is the picture's column row, from the row lh - 1 - px.
-                                                const unsigned int *source = from + (unsigned long)(lh - 1 - p) * from_pitch + row;
-
-                                                for (unsigned int px = p; px < pe; px++, source -= from_pitch)
-                                                        to[px] = *source;
-                                        }
-                                        else
-                                        {
-                                                // Panel column px of this row is the picture's row px, from the column lw - 1 - row.
-                                                const unsigned int *source = from + (unsigned long)p * from_pitch + (lw - 1 - row);
-
-                                                for (unsigned int px = p; px < pe; px++, source += from_pitch)
-                                                        to[px] = *source;
-                                        }
+                                        for (unsigned int px = p; px < pe; px++, src += step)
+                                                to[px] = *src;
                                 }
                         }
                 }
@@ -2856,13 +2791,7 @@ static void windows_rotate_u32(unsigned int *into, unsigned long into_pitch, con
                 return;
         }
         for (unsigned int ly = y0; ly < y1; ly++)
-        {
-                unsigned int *to = into + (unsigned long)ly * into_pitch + x0;
-                const unsigned int *row = from + (unsigned long)ly * from_pitch + x0;
-
-                for (unsigned int each = x1 - x0; each; each--)
-                        *to++ = *row++;
-        }
+                memory_copy(into + (unsigned long)ly * into_pitch + x0, from + (unsigned long)ly * from_pitch + x0, (positive)(x1 - x0) * 4);
 }
 
 // The panel rectangle (left, top, right, bottom) the picture rectangle x0, y0 to x1, y1 turns into; the corners are
@@ -2943,66 +2872,17 @@ static unsigned int windows_displays_write(char *into, unsigned int room, const 
         return at;
 }
 
-/*
-        A word a `canvas display` gives one field of a screen, judged as windows_displays_read judges that field of the
-        file: rotation is 0, 90, 180 or 270; refresh is preferred (into is 0) or a whole number of Hz from 1 to
-        WINDOWS_DISPLAY_HZ; a place's X or Y is a whole number within WINDOWS_PLACE_MOST. Answers whether it is one.
-*/
-static int windows_display_value(unsigned int field, const char *word, unsigned int length, int *into)
-{
-        int value = 0;
-
-        if (field == WINDOWS_DISPLAY_REFRESH && length == 9 && windows_name_is("preferred", word, 9))
-        {
-                *into = 0;
-                return 1;
-        }
-        if (field == WINDOWS_DISPLAY_ROTATION)
-        {
-                if (!windows_display_number(word, length, 0, 3, &value) ||
-                    (value != 0 && value != 90 && value != 180 && value != 270))
-                        return 0;
-        }
-        else if (field == WINDOWS_DISPLAY_SCALE)
-        {
-                if (!windows_display_number(word, length, 0, 3, &value) || !windows_scale_ok(value))
-                        return 0;
-        }
-        else if (field == WINDOWS_DISPLAY_REFRESH)
-        {
-                if (!windows_display_number(word, length, 0, 4, &value) || value < 1 || value > (int)WINDOWS_DISPLAY_HZ)
-                        return 0;
-        }
-        else if (!windows_display_number(word, length, 1, 6, &value) || value > WINDOWS_PLACE_MOST ||
-                 value < -WINDOWS_PLACE_MOST)
-                return 0;
-        *into = value;
-        return 1;
-}
-
-/*
-        The displays file (text, NUL-ended) with one screen's setting changed. field is the bit it changes:
-        WINDOWS_DISPLAY_ROTATION, WINDOWS_DISPLAY_REFRESH, or X and Y together for the place, and change holds the new
-        value in its rotation, refresh, or x and y. The screen keeps its other fields: its line is the one
-        windows_displays_read takes for it, changed and written by windows_displays_write, so a screen the file did not
-        have gets a line of that field alone. Every other line is copied as it is, with a newline where the file had
-        none, and a later line of the same screen is dropped, as the reader takes only the first. A screen left with
-        nothing set has no line. Answers the bytes written into (NUL-ended), or -1 when name is not a connector's, the
-        file names more screens than the reader holds without this one, or the bytes do not fit.
-*/
 static int windows_displays_set(char *into, unsigned int room, const char *text, const char *name, unsigned int field,
                                 const struct windows_display *change)
 {
-        struct windows_display list[WINDOWS_DISPLAYS], screen;
+        struct windows_display list[WINDOWS_DISPLAYS], screen = {0};
         const struct windows_display *found;
         unsigned int name_length = 0, count, made, at = 0, start = 0, done = 0;
         char line[192];
 
         if (!room)
                 return -1;
-        into[0] = 0;
-        screen = (struct windows_display){0};
-        screen.scale = WINDOWS_SCALE_DEFAULT;
+        into[0] = 0, screen.scale = WINDOWS_SCALE_DEFAULT;
         while (name_length < WINDOWS_OUTPUT_NAME && name[name_length])
                 name_length++;
         if (!windows_display_name(name, name_length, screen.name))
@@ -3027,7 +2907,6 @@ static int windows_displays_set(char *into, unsigned int room, const char *text,
         if (field & (WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y))
                 screen.placed = 1, screen.x = change->x, screen.y = change->y;
         made = windows_displays_write(line, sizeof(line), &screen, 1);
-
         while (text[start])
         {
                 unsigned int stop, word, word_end;
@@ -3039,8 +2918,7 @@ static int windows_displays_set(char *into, unsigned int room, const char *text,
                                 return -1;
                         done = 1;
                 }
-                else if (!windows_buf_put(into, room, &at, text + start, stop - start) ||
-                         !windows_buf_put(into, room, &at, "\n", 1))
+                else if (!windows_buf_put(into, room, &at, text + start, stop - start) || !windows_buf_put(into, room, &at, "\n", 1))
                         return -1;
                 start = stop + (text[stop] == '\n');
         }
@@ -3159,36 +3037,6 @@ static int windows_displays_lead(char *into, unsigned int room, const char *text
         return (int)at;
 }
 
-/*
-        The arrangement the compositor lays, with each display's place put in
-        it. The arrangement's words stay as they are, except that a placed
-        display's word (NAME@X,Y) takes the display's place where the
-        arrangement names it (a screen the arrangement holds dark stays dark).
-        Then the card screens the arrangement does not name follow in the
-        card's order, and last the displays it does not name but places, each
-        as NAME@X,Y: so a placed display that is not in the arrangement does not
-        become the primary. An arrangement that is not one is taken as none.
-        Answers the bytes written with the NUL, or 0 when they do not fit or
-        are not an arrangement after all; the compositor then lays the
-        arrangement it has.
-*/
-// The next word of text from *start, whose bounds come back in start and end; 0 when there is none.
-static int windows_word_next(const char *text, unsigned int *start, unsigned int *stop)
-{
-        unsigned int at = *start;
-
-        while (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')
-                at++;
-        if (!text[at])
-                return 0;
-        *start = at;
-        while (text[at] && text[at] != ' ' && text[at] != '\t' && text[at] != '\n' && text[at] != '\r')
-                at++;
-        *stop = at;
-        return 1;
-}
-
-// The length of a NUL-ended connector name.
 static unsigned int windows_name_length(const char *name)
 {
         unsigned int at = 0;
@@ -3198,7 +3046,6 @@ static unsigned int windows_name_length(const char *name)
         return at;
 }
 
-// Whether the card screen names are a screen the length bytes at word name: which one, plus one, or 0.
 static unsigned int windows_screen_of(const char (*names)[WINDOWS_OUTPUT_NAME], unsigned int count, const char *word,
                                       unsigned int length)
 {
@@ -3206,6 +3053,13 @@ static unsigned int windows_screen_of(const char (*names)[WINDOWS_OUTPUT_NAME], 
                 if (windows_name_is(names[screen], word, length))
                         return screen + 1;
         return 0;
+}
+
+static int windows_buf_at_xy(char *into, unsigned int room, unsigned int *at, const char *name, unsigned int len, int x, int y)
+{
+        return windows_buf_put(into, room, at, name, len) && windows_buf_put(into, room, at, "@", 1) &&
+               windows_buf_num(into, room, at, x) && windows_buf_put(into, room, at, ",", 1) &&
+               windows_buf_num(into, room, at, y) && windows_buf_put(into, room, at, " ", 1);
 }
 
 static unsigned int windows_arrange_pinned(const char *arrangement, const char (*names)[WINDOWS_OUTPUT_NAME],
@@ -3220,79 +3074,59 @@ static unsigned int windows_arrange_pinned(const char *arrangement, const char (
         if (!room || count > WINDOWS_OUTPUTS || listed > WINDOWS_DISPLAYS)
                 return 0;
         into[0] = 0;
-        // What the arrangement names: its screens, and the first display of each of its names.
         for (start = 0; windows_word_next(base, &start, &stop); start = stop)
         {
-                const struct windows_display *display;
+                const struct windows_display *d;
 
                 if (stop - start == 7 && windows_name_is("default", base + start, 7))
                         continue;
                 windows_arrange_word(base + start, stop - start, &name, &how, &x, &y);
-                screen = windows_screen_of(names, count, base + start, name);
-                if (screen)
+                if ((screen = windows_screen_of(names, count, base + start, name)))
                         named[screen - 1] = 1;
-                display = windows_display_of(list, listed, base + start, name);
-                if (display)
-                        used[display - list] = 1;
+                if ((d = windows_display_of(list, listed, base + start, name)))
+                        used[d - list] = 1;
         }
-        // The displays the arrangement does not name but places: the screens they are name the screens they are on.
         for (unsigned int each = 0; each < listed; each++)
         {
-                const struct windows_display *display = &list[each];
-                unsigned int length = windows_name_length(display->name);
-                unsigned int screen;
+                const struct windows_display *d = &list[each];
+                unsigned int length = windows_name_length(d->name);
 
-                if (!display->placed || used[each] || !length || windows_display_of(list, listed, display->name, length) != display)
-                        continue;
-                screen = windows_screen_of(names, count, display->name, length);
-                if (screen)
+                if (d->placed && !used[each] && length && windows_display_of(list, listed, d->name, length) == d &&
+                    (screen = windows_screen_of(names, count, d->name, length)))
                         named[screen - 1] = 1;
         }
-        // The arrangement's words, a placed display's own word in place of its word where it has one.
         for (start = 0; windows_word_next(base, &start, &stop); start = stop)
         {
-                const struct windows_display *display;
+                const struct windows_display *d;
 
                 if (stop - start == 7 && windows_name_is("default", base + start, 7))
                         continue;
                 windows_arrange_word(base + start, stop - start, &name, &how, &x, &y);
-                display = how == WINDOWS_PLACE_OFF ? 0 : windows_display_of(list, listed, base + start, name);
-                if (display && display->placed)
+                d = how == WINDOWS_PLACE_OFF ? 0 : windows_display_of(list, listed, base + start, name);
+                if (d && d->placed)
                 {
-                        if (!windows_buf_put(into, room, &at, display->name, name) || !windows_buf_put(into, room, &at, "@", 1) ||
-                            !windows_buf_num(into, room, &at, display->x) || !windows_buf_put(into, room, &at, ",", 1) ||
-                            !windows_buf_num(into, room, &at, display->y) || !windows_buf_put(into, room, &at, " ", 1))
+                        if (!windows_buf_at_xy(into, room, &at, d->name, name, d->x, d->y))
                                 return 0;
                 }
                 else if (!windows_buf_put(into, room, &at, base + start, stop - start) || !windows_buf_put(into, room, &at, " ", 1))
                         return 0;
         }
-        // The card screens the arrangement does not name, in the card's order.
-        for (unsigned int screen = 0; screen < count; screen++)
-        {
-                unsigned int length = windows_name_length(names[screen]);
-
-                if (named[screen])
-                        continue;
-                if (!windows_buf_put(into, room, &at, names[screen], length) || !windows_buf_put(into, room, &at, " ", 1))
-                        return 0;
-                named[screen] = 1;
-        }
-        // The displays it does not name but places, each on a screen that is there.
+        for (unsigned int s = 0; s < count; s++)
+                if (!named[s])
+                {
+                        if (!windows_buf_put(into, room, &at, names[s], windows_name_length(names[s])) || !windows_buf_put(into, room, &at, " ", 1))
+                                return 0;
+                        named[s] = 1;
+                }
         for (unsigned int each = 0; each < listed; each++)
         {
-                const struct windows_display *display = &list[each];
-                unsigned int length = windows_name_length(display->name);
+                const struct windows_display *d = &list[each];
+                unsigned int length = windows_name_length(d->name);
 
-                if (!display->placed || used[each] || !length || windows_display_of(list, listed, display->name, length) != display ||
-                    !windows_screen_of(names, count, display->name, length))
-                        continue;
-                if (!windows_buf_put(into, room, &at, display->name, length) || !windows_buf_put(into, room, &at, "@", 1) ||
-                    !windows_buf_num(into, room, &at, display->x) || !windows_buf_put(into, room, &at, ",", 1) ||
-                    !windows_buf_num(into, room, &at, display->y) || !windows_buf_put(into, room, &at, " ", 1))
+                if (d->placed && !used[each] && length && windows_display_of(list, listed, d->name, length) == d &&
+                    windows_screen_of(names, count, d->name, length) && !windows_buf_at_xy(into, room, &at, d->name, length, d->x, d->y))
                         return 0;
         }
-        // The space each word left at its end is dropped; an empty arrangement (no screens) is the card's order.
         while (at && into[at - 1] == ' ')
                 into[--at] = 0;
         return windows_arrange_valid(into) ? at + 1 : 0;
@@ -3869,61 +3703,13 @@ static int windows_lists_fit(const struct windows *table, unsigned long size, un
         return (size - lists) / WINDOW_LIST_BYTES >= room;
 }
 
-/*
-        A window's identity (the table's app_id, icon_seq and icon). The setters are the only writers of ours and refuse what is not
-        one: a row past the table, an app_id that is empty, has a byte under a space or a delete in it, or does not fit with its
-        null; a picture with no pixels, a side of 0 or over WINDOWS_ICON_MOST, or rows shorter than its width. Nothing is written by
-        a refusal. The readers trust none of it, since any program that maps the table can write a row: an app_id is copied to its
-        room and ended there with what is not printable made a question mark, and an icon is copied between two reads of an even,
-        equal icon_seq (tried a few times, then none) with each colour held to its alpha, so what a reader holds is always a whole
-        premultiplied picture or no picture.
-*/
-
-// No app_id and no icon: what a row never taken has.
-static void windows_identity_clear(struct windows *table, unsigned int row)
-{
-        if (!table || row >= WINDOWS)
-                return;
-        for (unsigned int at = 0; at < WINDOWS_APP_ID; at++)
-                ((volatile char *)table->app_id[row])[at] = 0;
-        __atomic_store_n(&table->icon_seq[row], 0u, __ATOMIC_RELEASE);
-}
-
-// Row row's app_id is text. 1 when it was taken; 0, with the row as it was, for a row past the table, no text, an empty one, one too
-// long for its room, or one with a control byte or a space in it (an app_id is one word).
-static int windows_app_id_set(struct windows *table, unsigned int row, const char *text)
+static unsigned int windows_copy_word_clean(char *into, const volatile char *src)
 {
         unsigned int length = 0;
 
-        if (!table || row >= WINDOWS || !text)
-                return 0;
-        while (length < WINDOWS_APP_ID && text[length])
-        {
-                if ((unsigned char)text[length] <= ' ' || text[length] == 127)
-                        return 0;
-                length++;
-        }
-        if (!length || length >= WINDOWS_APP_ID)
-                return 0;
-        // The null first and the rest from the end, so a reader that copies while this writes never finds a longer word than either.
-        for (unsigned int at = WINDOWS_APP_ID; at-- > length;)
-                ((volatile char *)table->app_id[row])[at] = 0;
-        for (unsigned int at = length; at-- > 0;)
-                ((volatile char *)table->app_id[row])[at] = text[at];
-        return 1;
-}
-
-// Row row's app_id copied into into (WINDOWS_APP_ID bytes), ended with a null, a byte that is not printable made '?'. Answers its length, 0 for none.
-static unsigned int windows_app_id_read(const struct windows *table, unsigned int row, char *into)
-{
-        unsigned int length = 0;
-
-        into[0] = 0;
-        if (!table || row >= WINDOWS)
-                return 0;
         for (; length < WINDOWS_APP_ID - 1; length++)
         {
-                char byte = ((const volatile char *)table->app_id[row])[length];
+                char byte = src[length];
 
                 if (!byte)
                         break;
@@ -3933,41 +3719,73 @@ static unsigned int windows_app_id_read(const struct windows *table, unsigned in
         return length;
 }
 
-// The app being started in slot, copied into into (WINDOWS_APP_ID bytes) whole and held to one word: its time, 0 for a free slot or a copy a
-// writer was in.
+static void windows_store_word(volatile char *dst, const char *src, unsigned int length)
+{
+        for (unsigned int at = WINDOWS_APP_ID; at-- > length;)
+                dst[at] = 0;
+        for (unsigned int at = length; at-- > 0;)
+                dst[at] = src[at];
+}
+
+static unsigned int windows_valid_word_len(const char *text)
+{
+        unsigned int length = 0;
+
+        if (!text)
+                return 0;
+        while (length < WINDOWS_APP_ID && text[length])
+        {
+                if ((unsigned char)text[length] <= ' ' || text[length] == 127)
+                        return 0;
+                length++;
+        }
+        return length < WINDOWS_APP_ID ? length : 0;
+}
+
+static void windows_identity_clear(struct windows *table, unsigned int row)
+{
+        if (!table || row >= WINDOWS)
+                return;
+        windows_store_word(table->app_id[row], "", 0);
+        __atomic_store_n(&table->icon_seq[row], 0u, __ATOMIC_RELEASE);
+}
+
+static int windows_app_id_set(struct windows *table, unsigned int row, const char *text)
+{
+        unsigned int length = table && row < WINDOWS ? windows_valid_word_len(text) : 0;
+
+        if (!length)
+                return 0;
+        windows_store_word(table->app_id[row], text, length);
+        return 1;
+}
+
+static unsigned int windows_app_id_read(const struct windows *table, unsigned int row, char *into)
+{
+        into[0] = 0;
+        return table && row < WINDOWS ? windows_copy_word_clean(into, table->app_id[row]) : 0;
+}
+
 static unsigned long long windows_starting_read(const struct windows *table, unsigned int slot, char *into)
 {
         unsigned long long stamp;
-        unsigned int length = 0;
+        unsigned int length;
 
         into[0] = 0;
         if (!table || slot >= WINDOWS_STARTING || !(stamp = __atomic_load_n(&table->starting_at[slot], __ATOMIC_ACQUIRE)))
                 return 0;
-        for (; length < WINDOWS_APP_ID - 1; length++)
-        {
-                char byte = ((const volatile char *)table->starting[slot])[length];
-
-                if (!byte)
-                        break;
-                into[length] = (unsigned char)byte <= ' ' || byte == 127 ? '?' : byte;
-        }
-        into[length] = 0;
+        length = windows_copy_word_clean(into, table->starting[slot]);
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
         return length && __atomic_load_n(&table->starting_at[slot], __ATOMIC_ACQUIRE) == stamp ? stamp : 0;
 }
 
-// The app id started at now (the monotonic clock): in the slot that has it already, else a free one, else the oldest's.
 static void windows_starting_set(struct windows *table, const char *id, unsigned long long now)
 {
-        unsigned int length = 0, slot = 0;
+        unsigned int length = table && now ? windows_valid_word_len(id) : 0, slot = 0;
         unsigned long long oldest = ~0ull;
         char held[WINDOWS_APP_ID];
 
-        if (!table || !id || !now)
-                return;
-        while (length < WINDOWS_APP_ID - 1 && id[length] && (unsigned char)id[length] > ' ' && id[length] != 127)
-                length++;
-        if (!length || id[length])
+        if (!length)
                 return;
         for (unsigned int at = 0; at < WINDOWS_STARTING; at++)
         {
@@ -3983,10 +3801,7 @@ static void windows_starting_set(struct windows *table, const char *id, unsigned
         }
         __atomic_store_n(&table->starting_at[slot], 0ull, __ATOMIC_RELEASE);
         __atomic_thread_fence(__ATOMIC_RELEASE);
-        for (unsigned int at = WINDOWS_APP_ID; at-- > length;)
-                ((volatile char *)table->starting[slot])[at] = 0;
-        for (unsigned int at = length; at-- > 0;)
-                ((volatile char *)table->starting[slot])[at] = id[at];
+        windows_store_word(table->starting[slot], id, length);
         __atomic_store_n(&table->starting_at[slot], now, __ATOMIC_RELEASE);
 }
 
@@ -4092,79 +3907,42 @@ static int windows_fits(unsigned long size, unsigned long pixels, unsigned long 
         return buffer / 4 / stride >= height;
 }
 
-/*
-        A row's program fields put back as a row never taken has them. It runs after the row is claimed and before
-        its pid is stored as the program's, so a peer that finds the pid finds a row with no picture, no hover and no
-        damage. pinned is not among them: it is the compositor's, and is 1 while the card may still read the row's
-        buffers after the row has left (compositor_window_fb_drop runs once the card is off them), so clearing it
-        here would let windows_discard give back pages the card reads.
-*/
 static void windows_reset_row(struct windows *table, unsigned int row)
 {
-        table->state[row] = 0;
-        // The asks to go were of the window that had the row.
-        __atomic_store_n(&table->close_asks[row], 0u, __ATOMIC_RELEASE);
-        table->x[row] = table->y[row] = 0;
-        table->width[row] = table->height[row] = 0;
-        table->want_width[row] = table->want_height[row] = 0;
-        table->buffer_index[row] = 0;
+        unsigned char *list = window_list_of(table, (int)row);
+
+        table->state[row] = table->buffer_index[row] = table->glass[row] = table->asked[row] = table->ground[row] = 0;
+        table->x[row] = table->y[row] = table->place_x[row] = table->place_y[row] = 0;
+        table->width[row] = table->height[row] = table->want_width[row] = table->want_height[row] = 0;
         table->damage_x[row] = table->damage_y[row] = table->damage_width[row] = table->damage_height[row] = 0;
-        // The whole title: compositor_take reads all of it, so what the row held past a shorter title must go too.
-        for (unsigned int at = 0; at < WINDOWS_TITLE; at++)
-                table->title[row][at] = 0;
-        table->glass[row] = 0;
-        // The scale the window is drawn at and its text fields with the keys are the compositor's and the program's for the window
-        // that had the row: the program reads the scale at its start, and the keyboard shows for any field count above 0.
+        table->place[row] = table->place_screen[row] = table->place_width[row] = table->place_height[row] = 0;
+        table->least_width[row] = table->least_height[row] = table->most_width[row] = table->most_height[row] = 0;
+        table->body_state[row] = table->body_raw[row] = table->body_drawn[row] = table->body_speed[row] = 0;
+        table->popup_parent[row] = table->popup_flags[row] = 0;
+        table->popup_x[row] = table->popup_y[row] = table->popup_w[row] = table->popup_h[row] = 0;
+        table->layer[row] = WINDOW_LAYER_NORMAL;
+        memory_zero(table->title[row], WINDOWS_TITLE);
+        memory_zero(table->name[row], WINDOWS_NAME);
+        windows_identity_clear(table, row);
+        table->event_tail[row] = __atomic_load_n(&table->event_head[row], __ATOMIC_ACQUIRE);
+        __atomic_store_n(&table->osk_tail[row], __atomic_load_n(&table->osk_head[row], __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
+        __atomic_store_n(&table->close_asks[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->window_scale[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->field[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->pointer_shape[row], WINDOW_POINTER_ARROW, __ATOMIC_RELEASE);
-        table->asked[row] = 0;
-        table->ground[row] = 0;
         __atomic_store_n(&table->lift[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->page[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->hover_off[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->pinch_wanted[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->spoiled_height[row][0], 0, __ATOMIC_RELEASE);
         __atomic_store_n(&table->spoiled_height[row][1], 0, __ATOMIC_RELEASE);
-        table->event_tail[row] = __atomic_load_n(&table->event_head[row], __ATOMIC_ACQUIRE);
-        // The key requests the last keyboard left unread are not the next one's to send on: its ring starts empty, as the events' does.
-        __atomic_store_n(&table->osk_tail[row], __atomic_load_n(&table->osk_head[row], __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
-        table->body_state[row] = 0;
-        table->body_raw[row] = table->body_drawn[row] = table->body_speed[row] = 0;
-        // A placement and a name are the program that asked's, and not the next one's to open in the row.
-        table->place[row] = table->place_screen[row] = 0;
-        table->place_x[row] = table->place_y[row] = 0;
-        table->place_width[row] = table->place_height[row] = 0;
-        // So are the size bounds and stacking layer it said: the next window in the row says its own, or has none.
-        table->least_width[row] = table->least_height[row] = 0;
-        table->most_width[row] = table->most_height[row] = 0;
-        table->layer[row] = WINDOW_LAYER_NORMAL;
-        for (unsigned int at = 0; at < WINDOWS_NAME; at++)
-                table->name[row][at] = 0;
-        // Who the window was is not who the next one in the row is: no app_id and no icon until it says its own.
-        windows_identity_clear(table, row);
         __atomic_store_n(&table->moved[row], 0u, __ATOMIC_RELEASE);
-        // A popup's parent and anchor were the menu's that last had the row: kept, the next window there was put at
-        // the menu's anchor as a popup of its window, with no tab and never the keys. A watch of the clipboard too
-        // is its program's; the serials only count up, and the compositor reads them against what it last saw.
-        table->popup_parent[row] = table->popup_flags[row] = 0;
-        table->popup_x[row] = table->popup_y[row] = table->popup_w[row] = table->popup_h[row] = 0;
         __atomic_store_n(&table->clip_watch[row], 0u, __ATOMIC_RELEASE);
-        // It takes no drops until its program says it does (the kit's windows do), and nothing of a drag of the last one's is its.
         __atomic_store_n(&table->drop_ok[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->shown[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->frame[row], 0, __ATOMIC_RELEASE);
-        // A row's list is its new program's from the first frame: the generation the compositor took last is the old program's, and so is
-        // the list it left in the row, which is no list now (its header zero, as ui_draw_list_init leaves it, and its generation 0 the one
-        // taken last). Its header left as it was, the new program's first pictures, of pixels or before its own list was made, were read as a
-        // list of its own: one of another size refused as not the window's (a 560 by 256 list on a window taken at 1920 by 1080) and one of
-        // the same size drawn into the new window as its picture. No publish of the new program's is under way here: its pid is not stored yet.
-        {
-                unsigned char *list = window_list_of(table, (int)row);
-
-                if (list)
-                        memory_zero(list, UI_DRAW_LIST_HEADER);
-        }
+        if (list)
+                memory_zero(list, UI_DRAW_LIST_HEADER);
         __atomic_store_n(&table->list_state[row], 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&table->list_seen[row], 0u, __ATOMIC_RELEASE);
 }
@@ -4220,34 +3998,26 @@ static int window_place_parse(struct window_place *place, const char *const *wor
 {
         unsigned int at = 0, seen = 0;
 
-        for (unsigned int byte = 0; byte < sizeof(*place); byte++)
-                ((char *)place)[byte] = 0;
+        memory_zero(place, sizeof(*place));
         while (at < count)
         {
                 const char *word = words[at], *value = at + 1 < count ? words[at + 1] : 0, *after;
-                unsigned int bit, how = 0;
+                unsigned int how = window_place_word(word, "center") ? WINDOW_PLACE_CENTER
+                                   : window_place_word(word, "maximized") ? WINDOW_PLACE_MAXIMIZED
+                                   : window_place_word(word, "fullscreen") ? WINDOW_PLACE_FULLSCREEN
+                                   : window_place_word(word, "at") ? WINDOW_PLACE_AT : 0;
+                unsigned int bit = how ? WINDOW_PLACE_HOW
+                                   : window_place_word(word, "screen") ? WINDOW_PLACE_SCREEN
+                                   : window_place_word(word, "size") ? WINDOW_PLACE_SIZE
+                                   : window_place_word(word, "name") ? 32u : 0;
                 int number;
 
-                if (window_place_word(word, "center"))
-                        how = WINDOW_PLACE_CENTER;
-                else if (window_place_word(word, "maximized"))
-                        how = WINDOW_PLACE_MAXIMIZED;
-                else if (window_place_word(word, "fullscreen"))
-                        how = WINDOW_PLACE_FULLSCREEN;
-                else if (window_place_word(word, "at"))
-                        how = WINDOW_PLACE_AT;
-                bit = how                                 ? WINDOW_PLACE_HOW
-                      : window_place_word(word, "screen") ? WINDOW_PLACE_SCREEN
-                      : window_place_word(word, "size")   ? WINDOW_PLACE_SIZE
-                      : window_place_word(word, "name")   ? 32u
-                                                          : 0;
                 if (!bit)
                         break;
                 if (seen & bit)
                         return -1;
-                seen |= bit;
-                at++;
-                if (how == WINDOW_PLACE_CENTER || how == WINDOW_PLACE_MAXIMIZED || how == WINDOW_PLACE_FULLSCREEN)
+                seen |= bit, at++;
+                if (how && how != WINDOW_PLACE_AT)
                 {
                         place->how |= how;
                         continue;
@@ -4266,8 +4036,7 @@ static int window_place_parse(struct window_place *place, const char *const *wor
                 {
                         if (!window_place_number(value, 0, 1, (int)WINDOW_PLACE_SCREENS, &number))
                                 return -1;
-                        place->screen = (unsigned int)number - 1;
-                        place->how |= WINDOW_PLACE_SCREEN;
+                        place->screen = (unsigned int)number - 1, place->how |= WINDOW_PLACE_SCREEN;
                 }
                 else if (bit == WINDOW_PLACE_SIZE)
                 {
@@ -4275,16 +4044,13 @@ static int window_place_parse(struct window_place *place, const char *const *wor
                         place->width = (unsigned int)number;
                         if (!after || !window_place_number(after + 1, 0, 1, WINDOW_PLACE_MOST, &number))
                                 return -1;
-                        place->height = (unsigned int)number;
-                        place->how |= WINDOW_PLACE_SIZE;
+                        place->height = (unsigned int)number, place->how |= WINDOW_PLACE_SIZE;
                 }
+                else if (!window_name_valid(value))
+                        return -1;
                 else
-                {
-                        if (!window_name_valid(value))
-                                return -1;
                         for (unsigned int letter = 0; value[letter]; letter++)
                                 place->name[letter] = value[letter];
-                }
         }
         if ((place->how & WINDOW_PLACE_SIZE) && ((place->how & WINDOW_PLACE_HOW) == WINDOW_PLACE_MAXIMIZED ||
                                                  (place->how & WINDOW_PLACE_HOW) == WINDOW_PLACE_FULLSCREEN))
@@ -4292,46 +4058,30 @@ static int window_place_parse(struct window_place *place, const char *const *wor
         return (int)at;
 }
 
-/*
-        A placement as its words, the way window_place_parse reads them back, into room bytes (WINDOW_PLACE_TEXT
-        holds the longest): one blank between two words and none at either end. Its length.
-*/
 static unsigned int window_place_say(const struct window_place *place, char *into, unsigned int room)
 {
         static const char *const modes[] = {"", "center", "at", "maximized", "fullscreen"};
-        char text[WINDOW_PLACE_TEXT];
+        char text[WINDOW_PLACE_TEXT] = {0};
         unsigned int at = 0, how = place->how & WINDOW_PLACE_HOW, length;
 
-        text[0] = 0;
-        if (how && how < sizeof(modes) / sizeof(modes[0]))
+        if (how && how < 5)
                 windows_buf_str(text, sizeof(text), &at, modes[how]);
         if (how == WINDOW_PLACE_AT)
-        {
-                windows_buf_str(text, sizeof(text), &at, " ");
-                windows_buf_num(text, sizeof(text), &at, place->x);
-                windows_buf_str(text, sizeof(text), &at, ",");
-                windows_buf_num(text, sizeof(text), &at, place->y);
-        }
+                windows_buf_str(text, sizeof(text), &at, " "), windows_buf_num(text, sizeof(text), &at, place->x),
+                    windows_buf_str(text, sizeof(text), &at, ","), windows_buf_num(text, sizeof(text), &at, place->y);
         if (place->how & WINDOW_PLACE_SCREEN)
-        {
-                windows_buf_str(text, sizeof(text), &at, at ? " screen " : "screen ");
-                windows_buf_num(text, sizeof(text), &at, (long)place->screen + 1);
-        }
+                windows_buf_str(text, sizeof(text), &at, at ? " screen " : "screen "),
+                    windows_buf_num(text, sizeof(text), &at, (long)place->screen + 1);
         if (place->how & WINDOW_PLACE_SIZE)
-        {
-                windows_buf_str(text, sizeof(text), &at, at ? " size " : "size ");
-                windows_buf_num(text, sizeof(text), &at, (long)place->width);
-                windows_buf_str(text, sizeof(text), &at, "x");
-                windows_buf_num(text, sizeof(text), &at, (long)place->height);
-        }
+                windows_buf_str(text, sizeof(text), &at, at ? " size " : "size "),
+                    windows_buf_num(text, sizeof(text), &at, (long)place->width),
+                    windows_buf_str(text, sizeof(text), &at, "x"), windows_buf_num(text, sizeof(text), &at, (long)place->height);
         if (place->name[0])
-        {
-                windows_buf_str(text, sizeof(text), &at, at ? " name " : "name ");
-                windows_buf_str(text, sizeof(text), &at, place->name);
-        }
+                windows_buf_str(text, sizeof(text), &at, at ? " name " : "name "),
+                    windows_buf_str(text, sizeof(text), &at, place->name);
         length = at < room ? at : room ? room - 1 : 0;
-        for (unsigned int byte = 0; byte < length; byte++)
-                into[byte] = text[byte];
+        if (length)
+                memory_copy(into, text, length);
         if (room)
                 into[length] = 0;
         return length;
@@ -4387,60 +4137,43 @@ static int window_place_from_text(struct window_place *place, const char *text)
         return window_place_parse(place, word, count) == (int)count;
 }
 
-/*
-        MOONWATER_PLACE, into the row just taken, and emptied in the environment the program was started with, so
-        a program that starts another with that environment hands on no placement. Emptied where it is, the
-        string cut after its '=', and not taken out of the vector: the vector ends in the null the auxiliary
-        vector is found after (the vDSO's clock is looked for there the first time the clock is read), and a
-        vector made shorter in place would put that null where the walk stops too soon. A placement whose words
-        are wrong is not used, and is emptied all the same.
-*/
+static char *windows_env_value(char *entry, const char *name, unsigned int len)
+{
+        for (unsigned int i = 0; i < len; i++)
+                if (entry[i] != name[i])
+                        return 0;
+        return entry[len] == '=' ? entry + len + 1 : 0;
+}
+
 static void windows_place_take(struct windows *table, unsigned int row)
 {
         string_address address_to environment = program_environment_list();
-        const unsigned int prefix = sizeof(WINDOW_PLACE_VARIABLE);
         int placed = 0;
         struct window_place place;
 
         for (unsigned int at = 0; environment && environment[at]; at++)
         {
-                char *entry = (char *)environment[at];
-                unsigned int same = 0;
+                char *val = windows_env_value((char *)environment[at], WINDOW_PLACE_VARIABLE, sizeof(WINDOW_PLACE_VARIABLE) - 1);
 
-                while (same + 1 < prefix && entry[same] == WINDOW_PLACE_VARIABLE[same])
-                        same++;
-                if (same + 1 != prefix || entry[same] != '=')
+                if (!val)
                         continue;
-                if (!placed && entry[prefix] && window_place_from_text(&place, entry + prefix))
-                {
-                        windows_place_set(table, row, &place);
-                        placed = 1;
-                }
-                entry[prefix] = 0;
+                if (!placed && *val && window_place_from_text(&place, val))
+                        windows_place_set(table, row, &place), placed = 1;
+                *val = 0;
         }
 }
 
-/*
-        MOONWATER_ASKED=1 in the environment the program was started with makes its row asked, which is what gives the
-        keys to its first window when it shows (compositor_take). The variable is emptied the same way a placement is,
-        so the programs this one starts after its first window are not asked. Any other value is not asked.
-*/
 static void windows_asked_take(struct windows *table, unsigned int row, string_address address_to environment)
 {
-        const unsigned int prefix = sizeof(WINDOW_ASKED_VARIABLE);
-
         for (unsigned int at = 0; environment && environment[at]; at++)
         {
-                char *entry = (char *)environment[at];
-                unsigned int same = 0;
+                char *val = windows_env_value((char *)environment[at], WINDOW_ASKED_VARIABLE, sizeof(WINDOW_ASKED_VARIABLE) - 1);
 
-                while (same + 1 < prefix && entry[same] == WINDOW_ASKED_VARIABLE[same])
-                        same++;
-                if (same + 1 != prefix || entry[same] != '=')
+                if (!val)
                         continue;
-                if (entry[prefix] == '1' && !entry[prefix + 1])
+                if (val[0] == '1' && !val[1])
                         __atomic_store_n(&table->asked[row], 1u, __ATOMIC_RELEASE);
-                entry[prefix] = 0;
+                *val = 0;
         }
 }
 
@@ -5317,30 +5050,6 @@ static int windows_event(const struct window_row *own, struct window_event *even
         return 1;
 }
 
-/*
-        Asleep until the compositor knocks, the other descriptor (a pty, for a terminal; -1 for none) is
-        readable, or nanoseconds (negative: never). Answers what ppoll does, and -1 once the compositor has
-        gone: its end of the wake is closed.
-*/
-static long windows_wait(const struct window_row *own, long other, long nanoseconds)
-{
-        struct window_poll wanted[2] = {{(int)own->wake, 1, 0}, {(int)other, 1, 0}};
-        long timeout[2] = {nanoseconds / 1000000000, nanoseconds % 1000000000};
-        long ready = window_call(WINDOW_SYS_PPOLL, (long)wanted, other >= 0 ? 2 : 1,
-                                 nanoseconds < 0 ? 0 : (long)timeout, 0, 0, 0);
-
-        if (ready > 0 && wanted[0].returned)
-        {
-                windows_drain(own->wake);
-                if (wanted[0].returned & 16) // POLLHUP
-                        return -1;
-        }
-        return ready;
-}
-
-/*
-        windows_wait with one more wake: a popup's row of the same program (-1 for none), which a menu's events knock on.
-*/
 static long windows_wait_also(const struct window_row *own, long also, long other, long nanoseconds)
 {
         struct window_poll wanted[3];
@@ -5362,6 +5071,11 @@ static long windows_wait_also(const struct window_row *own, long also, long othe
         if (ready > 0 && also_at < 3 && wanted[also_at].returned)
                 windows_drain(also);
         return ready;
+}
+
+static long windows_wait(const struct window_row *own, long other, long nanoseconds)
+{
+        return windows_wait_also(own, -1, other, nanoseconds);
 }
 
 /*
@@ -5724,23 +5438,23 @@ static long windows_clip_memfd(const void *bytes, unsigned long length)
         return windows_clip_build(&part, 1);
 }
 
-// The parts a program offers as a selection: made into a copy, named in the row, and knocked for.
+static void windows_fd_replace(long *slot, long fd)
+{
+        if (*slot >= 0)
+                window_call(WINDOW_SYS_CLOSE, *slot, 0, 0, 0, 0, 0);
+        *slot = fd;
+}
+
 static long windows_clip_offer_parts(const struct window_row *own, unsigned int which, const struct windows_clip_part *parts, unsigned long count)
 {
         struct windows *table = own->table;
-        long fd;
+        long fd = count ? windows_clip_build(parts, count) : -22;
 
         which &= 1u;
-        if (!count)
-                return -22;
-        fd = windows_clip_build(parts, count);
         if (fd < 0)
                 return fd;
-        if (windows_clip_held[which] >= 0)
-                window_call(WINDOW_SYS_CLOSE, windows_clip_held[which], 0, 0, 0, 0, 0);
-        windows_clip_held[which] = fd;
-        table->clip_offer_fd[own->row] = (int)fd;
-        table->clip_offer_which[own->row] = which;
+        windows_fd_replace(&windows_clip_held[which], fd);
+        table->clip_offer_fd[own->row] = (int)fd, table->clip_offer_which[own->row] = which;
         __atomic_add_fetch(&table->clip_offer_serial[own->row], 1, __ATOMIC_RELEASE);
         windows_knock(own);
         return 0;
@@ -5753,13 +5467,9 @@ static long windows_clip_offer(const struct window_row *own, unsigned int which,
         return length ? windows_clip_offer_parts(own, which, &part, 1) : -22;
 }
 
-// The copy of which the compositor answered for: the memfd it opened for itself is let go here.
 static void windows_clip_done(unsigned int which)
 {
-        which &= 1u;
-        if (windows_clip_held[which] >= 0)
-                window_call(WINDOW_SYS_CLOSE, windows_clip_held[which], 0, 0, 0, 0, 0);
-        windows_clip_held[which] = -1;
+        windows_fd_replace(&windows_clip_held[which & 1u], -1);
 }
 
 static void windows_clip_ask(const struct window_row *own, unsigned int which)
@@ -5769,16 +5479,11 @@ static void windows_clip_ask(const struct window_row *own, unsigned int which)
         windows_knock(own);
 }
 
-// "/proc/PID/fd/NUMBER" into path (48 bytes).
 static void windows_proc_fd(char *path, unsigned int pid, unsigned int number)
 {
         windows_num2_path(path, 48, "/proc/", pid, "/fd/", number);
 }
 
-/*
-        A selection's copy as the compositor holds it, mapped whole and read-only from its memfd through /proc (unmapped with munmap of
-        want): the size the compositor said, and a copy that holds together. Its address, or 0.
-*/
 static const unsigned char *windows_clip_map(unsigned int pid, unsigned int which, unsigned long want)
 {
         char path[48];
@@ -5787,25 +5492,17 @@ static const unsigned char *windows_clip_map(unsigned int pid, unsigned int whic
         if (!pid || !want)
                 return 0;
         windows_proc_fd(path, pid, WINDOWS_CLIP_FD + (which < 3 ? which : 0));
-        fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0); // O_RDONLY | O_CLOEXEC
-        if (fd < 0)
+        if ((fd = window_call(WINDOW_SYS_OPENAT, -100, (long)path, 0x80000, 0, 0, 0)) < 0)
                 return 0;
         mapped = window_call(WINDOW_SYS_LSEEK, fd, 0, 2, 0, 0, 0) == (long)want ? window_call(WINDOW_SYS_MMAP, 0, (long)want, 1, 1, fd, 0) : -22;
         window_call(WINDOW_SYS_CLOSE, fd, 0, 0, 0, 0, 0);
         if (mapped < 0 && mapped > -4096)
                 return 0;
         if (!windows_clip_valid((const unsigned char *)mapped, want))
-        {
-                window_call(WINDOW_SYS_MUNMAP, mapped, (long)want, 0, 0, 0, 0);
-                return 0;
-        }
+                return window_call(WINDOW_SYS_MUNMAP, mapped, (long)want, 0, 0, 0, 0), (const unsigned char *)0;
         return (const unsigned char *)mapped;
 }
 
-/*
-        A type of a selection read from the compositor's copy (text for name 0) into a mapping of its own (unmapped with munmap of
-        *length + 1, windows_clip_free): its length, or a negative errno. want is what the compositor said the copy's size is.
-*/
 static long windows_clip_fetch_type(unsigned int pid, unsigned int which, unsigned long want, const char *name, unsigned char **bytes,
                                     unsigned long *length)
 {
@@ -5813,24 +5510,19 @@ static long windows_clip_fetch_type(unsigned int pid, unsigned int which, unsign
         struct windows_clip_type type;
         long mapped;
 
-        *bytes = 0;
-        *length = 0;
+        *bytes = 0, *length = 0;
         if (!file)
                 return -2;
         name = name ? name : WINDOWS_CLIP_TEXT;
         if (!windows_clip_find(file, want, name, string_length((string_address)name), &type))
-        {
-                window_call(WINDOW_SYS_MUNMAP, (long)file, (long)want, 0, 0, 0, 0);
-                return -61; // ENODATA
-        }
+                return window_call(WINDOW_SYS_MUNMAP, (long)file, (long)want, 0, 0, 0, 0), -61;
         mapped = window_call(WINDOW_SYS_MMAP, 0, (long)type.length + 1, 3, 0x22, -1, 0);
         if (!(mapped < 0 && mapped > -4096))
                 memory_copy((address_any)mapped, (address_any)(file + type.offset), (positive)type.length);
         window_call(WINDOW_SYS_MUNMAP, (long)file, (long)want, 0, 0, 0, 0);
         if (mapped < 0 && mapped > -4096)
                 return mapped;
-        *bytes = (unsigned char *)mapped;
-        *length = type.length;
+        *bytes = (unsigned char *)mapped, *length = type.length;
         return (long)type.length;
 }
 
@@ -5839,7 +5531,6 @@ static long windows_clip_fetch(unsigned int pid, unsigned int which, unsigned lo
         return windows_clip_fetch_type(pid, which, want, 0, bytes, length);
 }
 
-// The paste the compositor said is READY for this window: its text, or the type name names.
 static long windows_clip_read_type(const struct window_row *own, unsigned int which, const char *name, unsigned char **bytes, unsigned long *length)
 {
         return windows_clip_fetch_type(__atomic_load_n(&own->table->clip_pid, __ATOMIC_ACQUIRE), which,
@@ -5851,13 +5542,6 @@ static long windows_clip_read(const struct window_row *own, unsigned int which, 
         return windows_clip_read_type(own, which, 0, bytes, length);
 }
 
-/*
-        Drag and drop from a program's side (WINDOW_EVENT_DRAG). windows_drag_offer: a drag of the parts begun, while the person's button
-        or finger is down on the window, of the actions it allows; the copy is held until the drag has ENDED (or was DECLINED).
-        windows_drag_types: the drag's copy mapped (unmapped with munmap of *size), to look at its names (windows_clip_offered) while it
-        is over the window. windows_drop_take: what the window takes of it (the nth name, -1 for none; the actions, the one preferred).
-        windows_drag_read: once READY, the type it took. windows_drop_done: the window is done with the drop (1 it took it).
-*/
 static long windows_drag_held = -1;
 
 static long windows_drag_offer(const struct window_row *own, const struct windows_clip_part *parts, unsigned long count, unsigned int actions)
@@ -5867,9 +5551,7 @@ static long windows_drag_offer(const struct window_row *own, const struct window
 
         if (fd < 0)
                 return fd;
-        if (windows_drag_held >= 0)
-                window_call(WINDOW_SYS_CLOSE, windows_drag_held, 0, 0, 0, 0, 0);
-        windows_drag_held = fd;
+        windows_fd_replace(&windows_drag_held, fd);
         table->drag_offer_fd[own->row] = (int)fd;
         table->drag_offer_actions[own->row] = actions & (7u | 0xffu << WINDOWS_DRAG_KIND_SHIFT | 0xffffu << WINDOWS_DRAG_ITEMS_SHIFT);
         __atomic_add_fetch(&table->drag_offer_serial[own->row], 1, __ATOMIC_RELEASE);
@@ -5877,12 +5559,9 @@ static long windows_drag_offer(const struct window_row *own, const struct window
         return 0;
 }
 
-// The program's drag is over (ENDED or DECLINED): its copy is let go here.
 static void windows_drag_over(void)
 {
-        if (windows_drag_held >= 0)
-                window_call(WINDOW_SYS_CLOSE, windows_drag_held, 0, 0, 0, 0, 0);
-        windows_drag_held = -1;
+        windows_fd_replace(&windows_drag_held, -1);
 }
 
 static const unsigned char *windows_drag_types(const struct window_row *own, unsigned long *size)
@@ -5904,8 +5583,7 @@ static void windows_drop_take(const struct window_row *own, long nth, unsigned i
 
 static long windows_drag_read(const struct window_row *own, const char *name, unsigned char **bytes, unsigned long *length)
 {
-        return windows_clip_fetch_type(__atomic_load_n(&own->table->clip_pid, __ATOMIC_ACQUIRE), WINDOWS_CLIP_DRAG,
-                                       __atomic_load_n(&own->table->clip_given_length[own->row], __ATOMIC_ACQUIRE), name, bytes, length);
+        return windows_clip_read_type(own, WINDOWS_CLIP_DRAG, name, bytes, length);
 }
 
 static void windows_drop_done(const struct window_row *own, int took)
