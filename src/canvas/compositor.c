@@ -1742,6 +1742,37 @@ static void compositor_tray_click(int index, int button)
                 compositor.tray[slot].click(compositor.tray[slot].owner, compositor.tray[slot].id, button);
 }
 
+// Protocol-neutral drag chip metadata (shared by Canvas DnD in manage.c, chip renderer in input.c, and protocol bridges).
+static unsigned int compositor_chip_drag_items;
+static unsigned int compositor_chip_drag_kind;
+static void compositor_chip_drag(int action);
+
+// Protocol-neutral input override hook (e.g. Steam/Proton overlay): intercepts keys/pointer directly in Canvas.
+#define COMPOSITOR_OVERRIDE_QUERY   0
+#define COMPOSITOR_OVERRIDE_KEY     1
+#define COMPOSITOR_OVERRIDE_POINTER 2
+
+struct compositor_input_override_event
+{
+        unsigned int kind, ev_type, flags;
+        int row;
+        unsigned int pid;
+        int a, b, width, height;
+};
+
+typedef int (*compositor_input_override_fn)(void *ctx, const struct compositor_input_override_event *ev);
+
+static unsigned int compositor_input_overrides;
+static int compositor_input_override_query(int row);
+static int compositor_input_override_pointer(int row, unsigned int type, unsigned int flags, int a, int b);
+
+// Forward declarations for row lifecycle / dynamic growth used by manage.c.
+static void compositor_row_notify_stack(int row);
+static unsigned int compositor_rows_grow(unsigned int want);
+#ifdef CONFIG_MOONWATER_WAYLAND
+static int compositor_wl_started(void);
+#endif
+
 // The nine parts that read the state, in the order their uses need (the comment before the first run says why).
 #include "compositor/damage.c" // what changed: rectangles and damage, landings and glides, the snap preview's state, a row's pixels and runs, the frames and the bands
 #include "compositor/glass.c" // the glass under the panel and the tabs: the grain, the frost, the blur and its scene
@@ -2657,6 +2688,11 @@ static int compositor_row_is_steam(int row)
 #include "wayland.c"
 #include "wayland_host.c"
 
+static int compositor_wl_started(void)
+{
+        return compositor_wl.started;
+}
+
 static int compositor_wl_dmabuf_missing(void)
 {
         return compositor_wl.started && !compositor_wl.render;
@@ -2872,6 +2908,9 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor_clip.offer_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_clip.ask_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_clip.gesture, COMPOSITOR_ROWS_ROW) \
+        X(compositor_dnd.offer_seen, COMPOSITOR_ROWS_ROW) \
+        X(compositor_dnd.take_seen, COMPOSITOR_ROWS_ROW) \
+        X(compositor_dnd.done_seen, COMPOSITOR_ROWS_ROW) \
         X(compositor_gpu_pins, COMPOSITOR_ROWS_ROW) \
         X(compositor_osk_held, COMPOSITOR_ROWS_ROW) \
         X(compositor_doors.asked, COMPOSITOR_ROWS_ROW1) \

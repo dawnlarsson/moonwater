@@ -1632,6 +1632,10 @@ static int compositor_post(int row, unsigned int type, unsigned int flags, int a
 
         if (row < 0)
                 return 0;
+        if (compositor_input_overrides &&
+            (type == WINDOW_EVENT_MOTION || type == WINDOW_EVENT_BUTTON || type == WINDOW_EVENT_WHEEL) &&
+            compositor_input_override_pointer(row, type, flags, a, b))
+                return 1;
         compositor_owed_flush(row);
         posted = compositor_post_now(row, type, flags, a, b, compositor_post_physical);
         if (!posted && !(flags & WINDOW_KEY_DOWN) &&

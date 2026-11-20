@@ -1159,12 +1159,106 @@ static int compositor_fullscreen_key(int super, int alone)
         return 1;
 }
 
-#ifdef CONFIG_MOONWATER_WAYLAND
 /*
-        Whether a key is one the compositor keeps from Steam's overlay while the overlay has the keys: Super with Escape (the chord a
-        shortcuts inhibitor keeps), Alt with Tab, and a chord a rule bound. They go on as they would with no overlay, so an overlay
-        that is open and draws nothing (the renderer enabled it and Steam never showed it) cannot hold the keyboard. A key kept at its
-        press is kept at its repeats and its release too, so neither the overlay nor the inhibitor's Escape is told half of it.
+        Protocol-neutral input override registry (e.g. Steam/Proton overlay): consumers register
+        a callback to query/intercept keys and pointer events directly from Canvas without
+        cross-protocol calls between Wayland and X11.
+*/
+#define COMPOSITOR_INPUT_OVERRIDES_MAX 4
+
+static struct
+{
+        compositor_input_override_fn fn;
+        void *ctx;
+} compositor_input_override_list[COMPOSITOR_INPUT_OVERRIDES_MAX];
+
+static int compositor_input_override_register(compositor_input_override_fn fn, void *ctx)
+{
+        if (!fn || compositor_input_overrides >= COMPOSITOR_INPUT_OVERRIDES_MAX)
+                return -1;
+        for (unsigned int i = 0; i < compositor_input_overrides; i++)
+                if (compositor_input_override_list[i].fn == fn && compositor_input_override_list[i].ctx == ctx)
+                        return 0;
+        compositor_input_override_list[compositor_input_overrides].fn = fn;
+        compositor_input_override_list[compositor_input_overrides].ctx = ctx;
+        compositor_input_overrides++;
+        return 0;
+}
+
+static void compositor_input_override_unregister(compositor_input_override_fn fn, void *ctx)
+{
+        for (unsigned int i = 0; i < compositor_input_overrides; i++)
+                if (compositor_input_override_list[i].fn == fn && compositor_input_override_list[i].ctx == ctx)
+                {
+                        compositor_input_override_list[i] = compositor_input_override_list[--compositor_input_overrides];
+                        return;
+                }
+}
+
+static int compositor_input_override_query(int row)
+{
+        struct compositor_input_override_event ev = {0};
+        int best = 0;
+
+        if (!compositor_input_overrides || !compositor.table || row < 0 || row >= COMPOSITOR_ROWS)
+                return 0;
+        ev.kind = COMPOSITOR_OVERRIDE_QUERY;
+        ev.row = row;
+        ev.pid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE);
+        for (unsigned int i = 0; i < compositor_input_overrides; i++)
+        {
+                int state = compositor_input_override_list[i].fn(compositor_input_override_list[i].ctx, &ev);
+
+                if (state > best)
+                        best = state;
+        }
+        return best;
+}
+
+static int compositor_input_override_key(int row, unsigned int code, int value, unsigned int modifiers)
+{
+        struct compositor_input_override_event ev = {0};
+
+        if (!compositor_input_overrides || !compositor.table || row < 0 || row >= COMPOSITOR_ROWS)
+                return 0;
+        ev.kind = COMPOSITOR_OVERRIDE_KEY;
+        ev.row = row;
+        ev.pid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE);
+        ev.flags = modifiers;
+        ev.a = (int)code;
+        ev.b = value;
+        for (unsigned int i = 0; i < compositor_input_overrides; i++)
+                if (compositor_input_override_list[i].fn(compositor_input_override_list[i].ctx, &ev))
+                        return 1;
+        return 0;
+}
+
+static int compositor_input_override_pointer(int row, unsigned int type, unsigned int flags, int a, int b)
+{
+        struct compositor_input_override_event ev = {0};
+
+        if (!compositor_input_overrides || !compositor.table || row < 0 || row >= COMPOSITOR_ROWS)
+                return 0;
+        ev.kind = COMPOSITOR_OVERRIDE_POINTER;
+        ev.ev_type = type;
+        ev.flags = flags;
+        ev.row = row;
+        ev.pid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE);
+        ev.a = a;
+        ev.b = b;
+        ev.width = (int)compositor.w[row];
+        ev.height = (int)compositor.h[row];
+        for (unsigned int i = 0; i < compositor_input_overrides; i++)
+                if (compositor_input_override_list[i].fn(compositor_input_override_list[i].ctx, &ev))
+                        return 1;
+        return 0;
+}
+
+/*
+        Whether a key is one the compositor keeps from an input override (such as Steam's overlay) while it has the keys:
+        Super with Escape (the chord a shortcuts inhibitor keeps), Alt with Tab, and a chord a rule bound. They go on as
+        they would with no override, so a stuck overlay cannot hold the keyboard. A key kept at its press is kept at its
+        repeats and its release too, so neither side is told half of it.
 */
 static int compositor_steam_passes(unsigned int code, int value, unsigned int modifiers, unsigned int chord)
 {
@@ -1191,7 +1285,6 @@ static int compositor_steam_passes(unsigned int code, int value, unsigned int mo
                 *bit &= (unsigned char)~mask;
         return pass;
 }
-#endif
 
 static void compositor_key(unsigned int at, unsigned int code, int value, positive reported)
 {
@@ -1209,10 +1302,13 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                         compositor_hold_cancel();
                 return;
         }
+        // Escape while any Canvas-native or protocol-bridged drag is active cancels it.
+        if (code == CK_KEY_ESC && value && compositor_dnd_escape(value))
+                return;
 #ifdef CONFIG_MOONWATER_WAYLAND
         // Escape while a client's drag holds the pointer cancels the drag, whichever window has the keys (a kit window's, a client's that
         // is not the drag's, none): the source is told it was cancelled and the window under it left, and the key is no window's.
-        if (code == CK_KEY_ESC && value && compositor_wl_drag_escape(value))
+        if (!compositor_dnd.bridge_count && code == CK_KEY_ESC && value && compositor_wl_drag_escape(value))
                 return;
 #endif
 
@@ -1242,15 +1338,25 @@ static void compositor_key(unsigned int at, unsigned int code, int value, positi
                 // next motion.
                 if (compositor.drag >= 0)
                         compositor_preview(compositor.drag);
-#ifdef CONFIG_MOONWATER_WAYLAND
                 // And of what a drop of files would do (a copy, a move): the program a drag is over is told the keys now.
-                compositor_drag_keys();
+                compositor_dnd_keys();
+#ifdef CONFIG_MOONWATER_WAYLAND
+                if (!compositor_dnd.bridge_count)
+                        compositor_drag_keys();
 #endif
         }
 
         modifiers = compositor_modifiers();
         chord = modifiers & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT);
 
+        // Protocol-neutral input override (e.g. Steam/Proton overlay): intercepts keys directly from Canvas.
+        if (compositor_input_overrides && !compositor_steam_passes(code, (int)value, modifiers, chord) &&
+            compositor_input_override_key(compositor.focus, code, (int)value, modifiers))
+        {
+                if ((bit & (CK_HELD_ALT | CK_HELD_ALTGR)) && !(modifiers & WINDOW_KEY_ALT) && compositor.cycle)
+                        compositor_focus_commit();
+                return;
+        }
 #ifdef CONFIG_MOONWATER_WAYLAND
         // Steam's overlay over a game on Wayland: Shift+Tab opens it, and while it is open every key is its own (wayland_host.c),
         // but the chords the compositor keeps (compositor_steam_passes). An Alt let go there still ends an Alt+Tab.
@@ -1801,12 +1907,24 @@ static void compositor_motion(void)
                                           : zone ? compositor_cursor_by_edges[zone & 15]
                                           : asked >= 0 ? (unsigned int)asked
                                           : CP_ARROW;
+                if (compositor_dnd_active())
+                {
+                        int dnd_shape;
+
+                        compositor_dnd_motion(under);
+                        dnd_shape = compositor_dnd_shape();
+                        if (dnd_shape >= 0)
+                                compositor.cursor.shape = (unsigned int)dnd_shape, asked = -1;
+                }
 #ifdef CONFIG_MOONWATER_WAYLAND
-                // A drag, whoever's: the hand where a target takes it, no drop elsewhere; its chip beside the pointer, and a program's
-                // drag's motion the drag's (compositor_drag_follow).
-                compositor_drag_follow(under);
-                if (compositor_drag_shape() >= 0)
-                        compositor.cursor.shape = (unsigned int)compositor_drag_shape(), asked = -1;
+                else if (!compositor_dnd.bridge_count)
+                {
+                        // A drag, whoever's: the hand where a target takes it, no drop elsewhere; its chip beside the pointer, and a program's
+                        // drag's motion the drag's (compositor_drag_follow).
+                        compositor_drag_follow(under);
+                        if (compositor_drag_shape() >= 0)
+                                compositor.cursor.shape = (unsigned int)compositor_drag_shape(), asked = -1;
+                }
 #endif
                 // A client that asked for no pointer over its window has none there (-2 is that answer).
                 compositor.cursor.client_hidden = asked == -2;
@@ -2116,9 +2234,11 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                 compositor.button_down &= (unsigned char)~(1u << index);
                 compositor_grab_settle();
         }
+        compositor_dnd_release(to);
 #ifdef CONFIG_MOONWATER_WAYLAND
         // A program's drag is let go with the button that holds it: its drop, or its cancel (the release still the program's).
-        compositor_drag_let_go(to);
+        if (!compositor_dnd.bridge_count)
+                compositor_drag_let_go(to);
 #endif
         compositor_post(to, WINDOW_EVENT_BUTTON, flags | (compositor_modifiers() & (WINDOW_KEY_SHIFT | WINDOW_KEY_CONTROL | WINDOW_KEY_ALT | WINDOW_KEY_SUPER)), (int)code, 0);
         // A press and a release with no motion between is a click on the window's top, which only raises it:
@@ -3572,8 +3692,7 @@ static void compositor_chip_hint(const int *rect, int x, int y, int side, positi
         offer), their count after the glyph, drawn as the chip's strokes are, seven to a figure. Shown while the drag is and taken off with it
         (action -1).
 */
-static unsigned int compositor_chip_drag_items; // the things the program's drag carries, 0 when it did not say (any other drag's)
-static unsigned int compositor_chip_drag_kind;  // and the first one's file symbol plus one (UI_FILE_*), 0 none
+// compositor_chip_drag_items and compositor_chip_drag_kind are declared in compositor.c so manage.c and input.c share them.
 
 // One part of a symbol's table (the kit's, ui_file_parts) into a chip's glyph layer, size to a side from x, y: lines and outlines as the
 // chip's strokes, a box filled whole and a shade at a third.
