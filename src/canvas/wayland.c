@@ -4757,266 +4757,204 @@ static int wayland_facts_freed(struct wayland_surface *s, const struct wayland_f
 
 static void wayland_configure_owed(struct wayland_client *c, struct wayland_surface *s)
 {
-        struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
-
-        if (s->role != WAYLAND_ROLE_TOPLEVEL || !s->u.top.told || s->row < 0 || s->serials >= WAYLAND_SERIALS)
+        struct wayland_facts f = {0};
+        if (s->role != WAYLAND_ROLE_TOPLEVEL || !s->u.top.told || s->row < 0 || s->serials >= WAYLAND_SERIALS ||
+            wayland.host->row_facts(wayland.host->context, s->row, &f) < 0)
                 return;
-        if (wayland.host->row_facts(wayland.host->context, s->row, &facts) < 0)
-                return;
-        if ((facts.width != s->u.top.told_width || facts.height != s->u.top.told_height || facts.states != s->u.top.told_states) &&
-            !wayland_facts_freed(s, &facts))
+        if ((f.width != s->u.top.told_width || f.height != s->u.top.told_height || f.states != s->u.top.told_states) &&
+            !wayland_facts_freed(s, &f))
                 wayland_configure(c, s, 0);
+}
+
+static inline long wayland_xs_clamp(long v, long lo, long hi) { return wayland_max(lo, wayland_min(v, hi)); }
+static inline void wayland_xs_do(long row, long what, long a, long b) { wayland.host->row_do(wayland.host->context, (int)row, what, a, b); }
+static inline unsigned int wayland_xs_now(void) { return (unsigned int)wayland.host->now(wayland.host->context); }
+
+static void wayland_xs_role_drop(struct wayland_client *c, struct wayland_surface *s)
+{
+        wayland_unhold(c, s);
+        wayland_row_release(c, s);
+        s->role_id = 0, s->serials = 0, s->width = s->height = 0;
+        s->flags &= ~(unsigned)(WAYLAND_SURFACE_CONFIGURED | WAYLAND_SURFACE_SENT | WAYLAND_SURFACE_MAPPED);
 }
 
 static int wayland_xdg_surface_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
-        struct wayland_surface *s = wayland_surface_of(c, self - c->objects);
-        struct wayland_surface *parent;
-        long made;
-
+        struct wayland_surface *s = wayland_surface_of(c, self - c->objects), *parent = 0;
         if (!s)
-                return WAYLAND_OK; // its wl_surface is gone: the xdg_surface is inert, and only a destroy is left
-        switch (op)
-        {
-        case WLQ_xdg_surface_destroy:
-                if (s->role_id)
-                        return wayland_fail(c, self->id, WLN_xdg_surface_error_defunct_role_object,
-                                            "the role object still exists");
-                s->flags &= ~(unsigned)(WAYLAND_SURFACE_XDG | WAYLAND_SURFACE_CONFIGURED | WAYLAND_SURFACE_SENT);
-                s->xdg_id = 0;
                 return WAYLAND_OK;
-        case WLQ_xdg_surface_get_toplevel:
-        case WLQ_xdg_surface_get_popup:
+        if (op == WLQ_xdg_surface_destroy)
+        {
+                if (s->role_id)
+                        return wayland_fail(c, self->id, WLN_xdg_surface_error_defunct_role_object, "the role object still exists");
+                s->flags &= ~(unsigned)(WAYLAND_SURFACE_XDG | WAYLAND_SURFACE_CONFIGURED | WAYLAND_SURFACE_SENT);
+                return s->xdg_id = 0, WAYLAND_OK;
+        }
+        if (op == WLQ_xdg_surface_get_toplevel || op == WLQ_xdg_surface_get_popup)
+        {
+                int popup = op == WLQ_xdg_surface_get_popup;
+                struct wayland_positioner *p = 0;
+                long made = a[0].slot;
                 if (s->role_id)
                         return wayland_fail(c, self->id, WLN_xdg_surface_error_already_constructed, "the xdg_surface has a role");
-                if (s->role != WAYLAND_ROLE_NONE && s->role != (op == WLQ_xdg_surface_get_toplevel ? WAYLAND_ROLE_TOPLEVEL : WAYLAND_ROLE_POPUP))
+                if (s->role != WAYLAND_ROLE_NONE && s->role != (popup ? WAYLAND_ROLE_POPUP : WAYLAND_ROLE_TOPLEVEL))
                         return wayland_fail(c, self->id, WLN_xdg_wm_base_error_role, "the surface has another role");
                 if (s->width || (s->pending.attach_made && s->pending.attached))
                         return wayland_fail(c, self->id, WLN_xdg_surface_error_unconfigured_buffer, "the surface has a buffer");
-                made = a[0].slot;
-                if (op == WLQ_xdg_surface_get_popup)
+                if (popup)
                 {
-                        struct wayland_positioner *p;
-
                         parent = a[1].slot >= 0 ? wayland_surface_of(c, a[1].slot) : 0;
-                        if (a[1].slot < 0 || !parent || !(parent->flags & WAYLAND_SURFACE_XDG) || !parent->role_id ||
+                        if (!parent || !(parent->flags & WAYLAND_SURFACE_XDG) || !parent->role_id ||
                             (parent->role != WAYLAND_ROLE_TOPLEVEL && parent->role != WAYLAND_ROLE_POPUP))
-                                return wayland_fail(c, self->id, WLN_xdg_wm_base_error_invalid_popup_parent,
-                                                    "the popup's parent is not a window");
+                                return wayland_fail(c, self->id, WLN_xdg_wm_base_error_invalid_popup_parent, "the popup's parent is not a window");
                         p = &c->positioners[c->objects[a[2].slot].link];
                         if (p->width < 1 || p->anchor_width < 1)
-                                return wayland_fail(c, self->id, WLN_xdg_wm_base_error_invalid_positioner,
-                                                    "the positioner is not complete");
-                        s->role = WAYLAND_ROLE_POPUP;
-                        s->parent = (unsigned int)(wayland_surface_index(c, parent) + 1);
-                        c->objects[made].link = (int)wayland_surface_index(c, s);
-                        c->objects[made].aux = s->gen;
-                        s->role_id = c->objects[made].id;
-                        wayland_popup_configure(c, s, p, parent);
-                        return WAYLAND_OK;
+                                return wayland_fail(c, self->id, WLN_xdg_wm_base_error_invalid_positioner, "the positioner is not complete");
                 }
-                s->role = WAYLAND_ROLE_TOPLEVEL;
+                s->role = popup ? WAYLAND_ROLE_POPUP : WAYLAND_ROLE_TOPLEVEL;
                 s->role_id = c->objects[made].id;
-                s->title[0] = s->app_id[0] = 0;
-                s->u.top.min_width = s->u.top.min_height = s->u.top.max_width = s->u.top.max_height = 0;
                 c->objects[made].link = (int)wayland_surface_index(c, s);
                 c->objects[made].aux = s->gen;
+                if (popup)
+                        s->parent = (unsigned int)(wayland_surface_index(c, parent) + 1), wayland_popup_configure(c, s, p, parent);
+                else
+                        s->title[0] = s->app_id[0] = 0, s->u.top.min_width = s->u.top.min_height = s->u.top.max_width = s->u.top.max_height = 0;
                 return WAYLAND_OK;
-        case WLQ_xdg_surface_set_window_geometry:
-                if (!s->role_id)
-                        return wayland_fail(c, self->id, WLN_xdg_surface_error_not_constructed, "the xdg_surface has no role");
+        }
+        if (!s->role_id)
+                return wayland_fail(c, self->id, WLN_xdg_surface_error_not_constructed, "the xdg_surface has no role");
+        if (op == WLQ_xdg_surface_set_window_geometry)
+        {
                 if (a[2].i < 1 || a[3].i < 1)
                         return wayland_fail(c, self->id, WLN_xdg_surface_error_invalid_size, "the geometry must be positive");
-                s->geometry_x = wayland_max(-(1L << 24), wayland_min(a[0].i, 1L << 24));
-                s->geometry_y = wayland_max(-(1L << 24), wayland_min(a[1].i, 1L << 24));
+                s->geometry_x = wayland_xs_clamp(a[0].i, -(1L << 24), 1L << 24);
+                s->geometry_y = wayland_xs_clamp(a[1].i, -(1L << 24), 1L << 24);
                 s->geometry_width = wayland_min(a[2].i, WAYLAND_DIMENSION);
                 s->geometry_height = wayland_min(a[3].i, WAYLAND_DIMENSION);
-                s->geometry_set = 1;
-                return WAYLAND_OK;
-        default: // ack_configure: one of the serials sent, and every one before it
-                if (!s->role_id)
-                        return wayland_fail(c, self->id, WLN_xdg_surface_error_not_constructed, "the xdg_surface has no role");
-                for (long at = 0; at < s->serials; at++)
-                        if (s->serial[at] == a[0].u)
-                        {
-                                for (long more = at + 1; more < s->serials; more++)
-                                        s->serial[more - at - 1] = s->serial[more];
-                                s->serials = (unsigned char)(s->serials - at - 1);
-                                s->flags |= WAYLAND_SURFACE_CONFIGURED;
-                                s->last_serial = (unsigned int)a[0].u;
-                                wayland_configure_owed(c, s);
-                                return WAYLAND_OK;
-                        }
-                return wayland_fail(c, self->id, WLN_xdg_surface_error_invalid_serial, "the serial was not sent");
+                return s->geometry_set = 1, WAYLAND_OK;
         }
+        for (long at = 0; at < s->serials; at++)
+                if (s->serial[at] == a[0].u)
+                {
+                        for (long more = at + 1; more < s->serials; more++)
+                                s->serial[more - at - 1] = s->serial[more];
+                        s->serials = (unsigned char)(s->serials - at - 1);
+                        s->flags |= WAYLAND_SURFACE_CONFIGURED;
+                        s->last_serial = (unsigned int)a[0].u;
+                        wayland_configure_owed(c, s);
+                        return WAYLAND_OK;
+                }
+        return wayland_fail(c, self->id, WLN_xdg_surface_error_invalid_serial, "the serial was not sent");
 }
 
-/* Whether a toplevel is an ancestor of another, by its parent chain, which a loop of requests may not make. */
 static int wayland_ancestor(struct wayland_client *c, long maybe, long of)
 {
-        for (long hops = 0; hops < c->tbl[WLT_SURFACE].count && of; hops++)
-        {
+        for (long hops = 0; hops < c->tbl[WLT_SURFACE].count && of; hops++, of = (long)c->surfaces[of - 1].parent)
                 if (of - 1 == maybe)
                         return 1;
-                of = (long)c->surfaces[of - 1].parent;
-        }
         return 0;
 }
 
 static int wayland_toplevel_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *s = wayland_surface_of(c, self - c->objects);
-        long row;
-
         if (!s)
                 return WAYLAND_OK;
-        row = s->row;
+        long row = s->row;
         switch (op)
         {
         case WLQ_xdg_toplevel_destroy:
-                wayland_unhold(c, s);
-                wayland_row_release(c, s);
-                s->role_id = 0;
-                s->flags &= ~(unsigned)(WAYLAND_SURFACE_CONFIGURED | WAYLAND_SURFACE_SENT | WAYLAND_SURFACE_MAPPED);
-                s->serials = 0;
-                s->width = s->height = 0;
-                s->u.top.want_maximized = s->u.top.want_fullscreen = 0; // a toplevel made after this one starts with no state asked
-                return WAYLAND_OK;
+                wayland_xs_role_drop(c, s);
+                s->u.top.want_maximized = s->u.top.want_fullscreen = 0;
+                break;
         case WLQ_xdg_toplevel_set_parent:
-                if (a[0].slot < 0)
-                {
-                        s->parent = 0;
-                        return WAYLAND_OK;
-                }
-                {
-                        struct wayland_surface *p = wayland_surface_of(c, a[0].slot);
-
-                        if (!p || p->role != WAYLAND_ROLE_TOPLEVEL || p == s ||
-                            wayland_ancestor(c, wayland_surface_index(c, s), (long)wayland_surface_index(c, p) + 1))
-                                return wayland_fail(c, self->id, WLN_xdg_toplevel_error_invalid_parent, "that parent makes a loop");
-                        s->parent = (unsigned int)(wayland_surface_index(c, p) + 1);
-                }
-                return WAYLAND_OK;
+        {
+                struct wayland_surface *p = a[0].slot >= 0 ? wayland_surface_of(c, a[0].slot) : 0;
+                if (a[0].slot >= 0 && (!p || p->role != WAYLAND_ROLE_TOPLEVEL || p == s ||
+                                       wayland_ancestor(c, wayland_surface_index(c, s), (long)wayland_surface_index(c, p) + 1)))
+                        return wayland_fail(c, self->id, WLN_xdg_toplevel_error_invalid_parent, "that parent makes a loop");
+                s->parent = p ? (unsigned int)(wayland_surface_index(c, p) + 1) : 0;
+                break;
+        }
         case WLQ_xdg_toplevel_set_title:
                 wayland_text(s->title, a[0].text, a[0].length);
-                if (row >= 0)
-                        wayland.host->row_title(wayland.host->context, row, s->title, 0);
-                return WAYLAND_OK;
+                if (row >= 0) wayland.host->row_title(wayland.host->context, row, s->title, 0);
+                break;
         case WLQ_xdg_toplevel_set_app_id:
                 wayland_text(s->app_id, a[0].text, a[0].length);
-                if (row >= 0 && !s->title[0])
-                        wayland.host->row_title(wayland.host->context, row, s->app_id, 0);
-                if (row >= 0 && wayland.host->row_app)
-                        wayland.host->row_app(wayland.host->context, (int)row, s->app_id);
-                return WAYLAND_OK;
-        case WLQ_xdg_toplevel_show_window_menu:
-                return WAYLAND_OK;
+                if (row >= 0 && !s->title[0]) wayland.host->row_title(wayland.host->context, row, s->app_id, 0);
+                if (row >= 0 && wayland.host->row_app) wayland.host->row_app(wayland.host->context, (int)row, s->app_id);
+                break;
         case WLQ_xdg_toplevel_move:
-                // Only for the press this client was last sent: a serial it was never given is no move (a compositor may ignore
-                // it, and does), so a client cannot take a window by naming a number.
                 if (row >= 0 && c->press_serial && a[1].u == c->press_serial)
-                        wayland.host->row_do(wayland.host->context, (int)row, WAYLAND_DO_MOVE, (long)a[1].u, 0);
-                return WAYLAND_OK;
+                        wayland_xs_do(row, WAYLAND_DO_MOVE, (long)a[1].u, 0);
+                break;
         case WLQ_xdg_toplevel_resize:
-                if (a[2].u > WLN_xdg_toplevel_resize_edge_bottom_right || a[2].u == 3 || a[2].u == 7 || a[2].u == 11 || a[2].u == 12 ||
-                    a[2].u == 13 || a[2].u == 14)
+                if (a[2].u > WLN_xdg_toplevel_resize_edge_bottom_right || (a[2].u & 3) == 3)
                         return wayland_fail(c, self->id, WLN_xdg_toplevel_error_invalid_resize_edge, "no such edge");
                 if (row >= 0 && a[2].u && c->press_serial && a[1].u == c->press_serial)
-                        wayland.host->row_do(wayland.host->context, (int)row, WAYLAND_DO_RESIZE, (long)a[2].u, 0);
-                return WAYLAND_OK;
+                        wayland_xs_do(row, WAYLAND_DO_RESIZE, (long)a[2].u, 0);
+                break;
         case WLQ_xdg_toplevel_set_max_size:
-                if (a[0].i < 0 || a[1].i < 0)
-                        return wayland_fail(c, self->id, WLN_xdg_toplevel_error_invalid_size, "a negative size");
-                s->u.top.max_width = a[0].i;
-                s->u.top.max_height = a[1].i;
-                if (row >= 0)
-                        wayland.host->row_do(wayland.host->context, (int)row, WAYLAND_DO_MAX_SIZE, s->u.top.max_width, s->u.top.max_height);
-                return WAYLAND_OK;
         case WLQ_xdg_toplevel_set_min_size:
                 if (a[0].i < 0 || a[1].i < 0)
                         return wayland_fail(c, self->id, WLN_xdg_toplevel_error_invalid_size, "a negative size");
-                s->u.top.min_width = a[0].i;
-                s->u.top.min_height = a[1].i;
+                if (op == WLQ_xdg_toplevel_set_max_size) s->u.top.max_width = a[0].i, s->u.top.max_height = a[1].i;
+                else s->u.top.min_width = a[0].i, s->u.top.min_height = a[1].i;
                 if (row >= 0)
-                        wayland.host->row_do(wayland.host->context, (int)row, WAYLAND_DO_MIN_SIZE, s->u.top.min_width, s->u.top.min_height);
-                return WAYLAND_OK;
+                        wayland_xs_do(row, op == WLQ_xdg_toplevel_set_max_size ? WAYLAND_DO_MAX_SIZE : WAYLAND_DO_MIN_SIZE, a[0].i, a[1].i);
+                break;
         case WLQ_xdg_toplevel_set_maximized:
         case WLQ_xdg_toplevel_unset_maximized:
         case WLQ_xdg_toplevel_set_fullscreen:
         case WLQ_xdg_toplevel_unset_fullscreen:
         case WLQ_xdg_toplevel_set_minimized:
         {
-                long what = op == WLQ_xdg_toplevel_set_maximized     ? WAYLAND_DO_MAXIMIZE
-                            : op == WLQ_xdg_toplevel_unset_maximized ? WAYLAND_DO_UNMAXIMIZE
-                            : op == WLQ_xdg_toplevel_set_fullscreen  ? WAYLAND_DO_FULLSCREEN
-                            : op == WLQ_xdg_toplevel_unset_fullscreen ? WAYLAND_DO_UNFULLSCREEN
-                                                                       : WAYLAND_DO_MINIMIZE;
-
-                // The client's last word on maximized and fullscreen is kept whatever window it was asked of: a window shown again (after a
-                // null buffer took it away) is in the state last asked (wayland_show does it at the first show). Asked of a shown window,
-                // it is done now.
-                if (what == WAYLAND_DO_MAXIMIZE)
-                        s->u.top.want_maximized = 1;
-                else if (what == WAYLAND_DO_UNMAXIMIZE)
-                        s->u.top.want_maximized = 0;
-                else if (what == WAYLAND_DO_FULLSCREEN)
-                        s->u.top.want_fullscreen = 1;
-                else if (what == WAYLAND_DO_UNFULLSCREEN)
-                        s->u.top.want_fullscreen = 0;
-                // set_fullscreen's output, when it names one: the screen it is (its wl_output's), or -1 for the one the window is mostly on.
-                if (what == WAYLAND_DO_FULLSCREEN)
-                        s->u.top.want_screen = op == WLQ_xdg_toplevel_set_fullscreen && a[0].slot >= 0 && c->objects[a[0].slot].iface == WLI_wl_output &&
-                                                         c->objects[a[0].slot].aux < WAYLAND_SCREENS
-                                                 ? (short)c->objects[a[0].slot].aux
-                                                 : -1;
+                static const unsigned char state_do[5] = {WAYLAND_DO_MAXIMIZE, WAYLAND_DO_UNMAXIMIZE, WAYLAND_DO_FULLSCREEN, WAYLAND_DO_UNFULLSCREEN, WAYLAND_DO_MINIMIZE};
+                long what = state_do[op - WLQ_xdg_toplevel_set_maximized];
+                if (op <= WLQ_xdg_toplevel_unset_maximized)
+                        s->u.top.want_maximized = op == WLQ_xdg_toplevel_set_maximized;
+                else if (op <= WLQ_xdg_toplevel_unset_fullscreen)
+                {
+                        s->u.top.want_fullscreen = op == WLQ_xdg_toplevel_set_fullscreen;
+                        if (s->u.top.want_fullscreen)
+                                s->u.top.want_screen = a[0].slot >= 0 && c->objects[a[0].slot].iface == WLI_wl_output &&
+                                                       c->objects[a[0].slot].aux < WAYLAND_SCREENS ? (short)c->objects[a[0].slot].aux : -1;
+                }
                 if (row >= 0)
-                        wayland.host->row_do(wayland.host->context, (int)row, what, what == WAYLAND_DO_FULLSCREEN ? s->u.top.want_screen : 0, 0);
-                return WAYLAND_OK;
+                        wayland_xs_do(row, what, what == WAYLAND_DO_FULLSCREEN ? s->u.top.want_screen : 0, 0);
+                break;
         }
-        default:
-                return WAYLAND_OK;
         }
+        return WAYLAND_OK;
 }
 
 static int wayland_popup_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *s = wayland_surface_of(c, self - c->objects);
-
         if (!s)
                 return WAYLAND_OK;
-        switch (op)
+        if (op == WLQ_xdg_popup_destroy)
         {
-        case WLQ_xdg_popup_destroy:
-                // Popups close from the top: one that has a popup of its own open cannot go first.
                 for (long at = 0; at < c->tbl[WLT_SURFACE].count; at++)
                         if (c->surfaces[at].live && c->surfaces[at].role == WAYLAND_ROLE_POPUP && c->surfaces[at].role_id &&
                             c->surfaces[at].parent == (unsigned int)(wayland_surface_index(c, s) + 1))
-                                return wayland_fail(c, self->id, WLN_xdg_wm_base_error_not_the_topmost_popup,
-                                                    "a popup is destroyed before the one over it");
-                wayland_unhold(c, s);
-                wayland_row_release(c, s);
-                s->role_id = 0;
-                s->flags &= ~(unsigned)(WAYLAND_SURFACE_CONFIGURED | WAYLAND_SURFACE_SENT | WAYLAND_SURFACE_MAPPED);
-                s->serials = 0;
-                s->width = s->height = 0;
-                return WAYLAND_OK;
-        case WLQ_xdg_popup_grab:
+                                return wayland_fail(c, self->id, WLN_xdg_wm_base_error_not_the_topmost_popup, "a popup is destroyed before the one over it");
+                wayland_xs_role_drop(c, s);
+        }
+        else if (op == WLQ_xdg_popup_grab)
+        {
                 if (s->flags & WAYLAND_SURFACE_MAPPED)
                         return wayland_fail(c, self->id, WLN_xdg_popup_error_invalid_grab, "the popup is already shown");
                 s->u.popup.grab = 1;
-                return WAYLAND_OK;
-        default: // reposition: a new place for the popup, and the token it was asked with
+        }
+        else
         {
-                struct wayland_positioner *p = &c->positioners[c->objects[a[0].slot].link];
-                struct wayland_surface *parent = s->parent ? &c->surfaces[s->parent - 1] : 0;
-
                 wayland_ev(c, self->id, WLE_xdg_popup_repositioned, (unsigned int)a[1].u);
-                wayland_popup_configure(c, s, p, parent);
-                if (s->row >= 0)
-                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_PLACE, s->u.popup.x, s->u.popup.y);
-                return WAYLAND_OK;
+                wayland_popup_configure(c, s, &c->positioners[c->objects[a[0].slot].link], s->parent ? &c->surfaces[s->parent - 1] : 0);
+                if (s->row >= 0) wayland_xs_do(s->row, WAYLAND_DO_PLACE, s->u.popup.x, s->u.popup.y);
         }
-        }
+        return WAYLAND_OK;
 }
 
 static int wayland_output_manager_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
@@ -5024,7 +4962,6 @@ static int wayland_output_manager_request(struct wayland_client *c, struct wayla
         if (op == WLQ_zxdg_output_manager_v1_get_xdg_output)
         {
                 long slot = a[0].slot;
-
                 c->objects[slot].aux = c->objects[a[1].slot].aux;
                 wayland_xdg_output_send(c, slot, c->objects[slot].aux);
                 if (c->objects[slot].version >= 3 && c->objects[a[1].slot].version >= 2)
@@ -5036,23 +4973,11 @@ static int wayland_output_manager_request(struct wayland_client *c, struct wayla
 
 /* ---- the seat: the pointer, the keyboard and what they are told ---- */
 
-/*
-        Where the pointer and the keyboard are, as the clients are told of them: a row each, or none. The compositor
-        decides both (the window under the pointer, the window with the keys) and says so; the shim sends the client
-        that owns the row its enter and, to the one it left, its leave, to every pointer and keyboard that client has.
-        A client's pointers, keyboards and touches are lists of ids kept as they are made and released, so an event
-        finds them without a walk of the whole object table.
-*/
-static unsigned long wayland_fixed(long pixels, long scale120)
-{
-        return wayland_units_fixed(pixels, scale120);
-}
+static unsigned long wayland_fixed(long pixels, long scale120) { return wayland_units_fixed(pixels, scale120); }
 
-/* The surface and client of a row, or 0. */
 static struct wayland_surface *wayland_row_surface(long row, struct wayland_client **client)
 {
         struct wayland_client *c;
-
         if (row < 0 || row >= wayland.row_made || wayland.row[row].client < 0)
                 return 0;
         c = wayland.client[wayland.row[row].client];
@@ -5062,68 +4987,52 @@ static struct wayland_surface *wayland_row_surface(long row, struct wayland_clie
         return &c->surfaces[wayland.row[row].surface];
 }
 
-/* Whether a popup's window asked to grab the keys (a menu does; a tooltip does not). */
 WAYLAND_API long wayland_row_grabs(long row)
 {
         struct wayland_client *c;
         struct wayland_surface *s = wayland_row_surface(row, &c);
-
         return s && s->role == WAYLAND_ROLE_POPUP && s->u.popup.grab;
 }
 
-/* A client's id list for one kind of seat object: pointer, keyboard or touch. */
-static struct wayland_ids *wayland_seat_ids(struct wayland_client *c, long iface)
-{
-        return &c->seat_ids[iface == WLI_wl_pointer ? 0 : iface == WLI_wl_touch ? 2 : 1];
-}
+static struct wayland_ids *wayland_seat_ids(struct wayland_client *c, long iface) { return &c->seat_ids[iface == WLI_wl_pointer ? 0 : iface == WLI_wl_touch ? 2 : 1]; }
 
-/* Zero-alloc iterator over live object slots of `iface` in `ids`. */
 static long wayland_ids_next(struct wayland_client *c, const struct wayland_ids *ids, long iface, long *cursor)
 {
         while (*cursor < ids->count)
         {
                 long slot = wayland_slot_of(c, ids->id[(*cursor)++]);
-
                 if (slot >= 0 && c->objects[slot].iface == iface)
                         return slot;
         }
         return -1;
 }
 
-static long wayland_seat_next(struct wayland_client *c, long iface, long *cursor)
-{
-        return wayland_ids_next(c, wayland_seat_ids(c, iface), iface, cursor);
-}
-
-static int wayland_seat_any(struct wayland_client *c, long iface)
-{
-        long at = 0;
-
-        return wayland_seat_next(c, iface, &at) >= 0;
-}
-
-/* A seat object made: its id is kept; false when the memory for it is not there. */
-static int wayland_seat_add(struct wayland_client *c, long iface, unsigned int id)
-{
-        return wayland_ids_add(wayland_seat_ids(c, iface), id);
-}
-
-static void wayland_seat_remove(struct wayland_client *c, long iface, unsigned int id)
-{
-        wayland_ids_remove(wayland_seat_ids(c, iface), id);
-}
-
-static void wayland_pointer_frame(struct wayland_client *c, long slot)
-{
-        if (c->objects[slot].version >= 5)
-                wayland_emit(c, c->objects[slot].id, WLE_wl_pointer_frame, 0, 0);
-}
+static long wayland_seat_next(struct wayland_client *c, long iface, long *cursor) { return wayland_ids_next(c, wayland_seat_ids(c, iface), iface, cursor); }
+static int wayland_xs_seat_any(struct wayland_client *c, long iface) { long at = 0; return wayland_seat_next(c, iface, &at) >= 0; }
+static void wayland_pointer_frame(struct wayland_client *c, long slot) { if (c->objects[slot].version >= 5) wayland_emit(c, c->objects[slot].id, WLE_wl_pointer_frame, 0, 0); }
 
 static void wayland_pointer_frames(struct wayland_client *c)
 {
         for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
                 wayland_pointer_frame(c, slot);
 }
+
+static void wayland_xs_seat_send(struct wayland_client *c, long iface, long op, const unsigned int *w, long n, int frame)
+{
+        for (long at = 0, slot; (slot = wayland_seat_next(c, iface, &at)) >= 0;)
+        {
+                wayland_emit(c, c->objects[slot].id, op, w, n);
+                if (frame && iface == WLI_wl_pointer)
+                        wayland_pointer_frame(c, slot);
+                else if (frame && iface == WLI_wl_touch)
+                        wayland_ev0(c, c->objects[slot].id, WLE_wl_touch_frame);
+        }
+}
+
+#define wayland_xs_seat_ev(c, iface, op, frame, ...) do { \
+        const unsigned int _ws_w[] = {__VA_ARGS__}; \
+        wayland_xs_seat_send((c), (iface), (op), _ws_w, (long)(sizeof _ws_w / sizeof _ws_w[0]), (frame)); \
+} while (0)
 
 static int wayland_surface_hits(const struct wayland_surface *s, int is_root, long px, long py)
 {
@@ -5133,17 +5042,13 @@ static int wayland_surface_hits(const struct wayland_surface *s, int is_root, lo
                 return 0;
         if (!s->input_bounded)
                 return 1;
+        long scale = s->scale120 > 0 ? s->scale120 : WAYLAND_UNIT;
+        long lx = wayland_units(px, scale), ly = wayland_units(py, scale);
+        for (long i = 0; i < s->input_count; i++)
         {
-                long scale = s->scale120 > 0 ? s->scale120 : WAYLAND_UNIT;
-                long lx = wayland_units(px, scale), ly = wayland_units(py, scale);
-
-                for (long i = 0; i < s->input_count; i++)
-                {
-                        const struct wayland_rect *r = &s->input_rects[i];
-
-                        if (lx >= r->x && lx < r->x + r->width && ly >= r->y && ly < r->y + r->height)
-                                return 1;
-                }
+                const struct wayland_rect *r = &s->input_rects[i];
+                if (lx >= r->x && lx < r->x + r->width && ly >= r->y && ly < r->y + r->height)
+                        return 1;
         }
         return 0;
 }
@@ -5152,116 +5057,59 @@ static struct wayland_surface *wayland_pick_node(struct wayland_client *c, struc
                                                  const struct wayland_surface *root, long ax, long ay, long root_scale,
                                                  long x, long y, long depth, long *sx, long *sy)
 {
-        long ox, oy;
-
         if (depth >= c->tbl[WLT_SURFACE].count)
                 return 0;
-        for (unsigned int ch = node->last_child[1]; ch; ch = c->surfaces[ch - 1].prev_sib)
+        for (int layer = 1; layer >= 0; layer--)
         {
-                struct wayland_surface *cs = &c->surfaces[ch - 1];
-                struct wayland_surface *hit = wayland_pick_node(c, cs, root, ax + cs->u.sub.x, ay + cs->u.sub.y, root_scale, x, y, depth + 1, sx, sy);
-
-                if (hit)
-                        return hit;
-        }
-        ox = wayland_pixels(ax, root_scale);
-        oy = wayland_pixels(ay, root_scale);
-        if (wayland_surface_hits(node, node == root, x - ox, y - oy))
-        {
-                *sx = x - ox;
-                *sy = y - oy;
-                return node;
-        }
-        for (unsigned int ch = node->last_child[0]; ch; ch = c->surfaces[ch - 1].prev_sib)
-        {
-                struct wayland_surface *cs = &c->surfaces[ch - 1];
-                struct wayland_surface *hit = wayland_pick_node(c, cs, root, ax + cs->u.sub.x, ay + cs->u.sub.y, root_scale, x, y, depth + 1, sx, sy);
-
-                if (hit)
-                        return hit;
+                for (unsigned int ch = node->last_child[layer]; ch; ch = c->surfaces[ch - 1].prev_sib)
+                {
+                        struct wayland_surface *cs = &c->surfaces[ch - 1];
+                        struct wayland_surface *hit = wayland_pick_node(c, cs, root, ax + cs->u.sub.x, ay + cs->u.sub.y,
+                                                                        root_scale, x, y, depth + 1, sx, sy);
+                        if (hit)
+                                return hit;
+                }
+                if (layer == 1)
+                {
+                        long lx = x - wayland_pixels(ax, root_scale), ly = y - wayland_pixels(ay, root_scale);
+                        if (wayland_surface_hits(node, node == root, lx, ly))
+                                return *sx = lx, *sy = ly, node;
+                }
         }
         return 0;
 }
 
-/*
-        The surface of a window that holds a point of its picture, with the point in that surface's own pixels: the topmost
-        subsurface that shows there and takes the pointer (an input region with nothing in it takes none), else the root. The
-        later sibling is above the earlier and children placed above lie over what they hang from while children placed below
-        lie behind it.
-*/
 static struct wayland_surface *wayland_pick(struct wayland_client *c, struct wayland_surface *root, long x, long y, long *sx, long *sy)
 {
         struct wayland_surface *hit = 0;
         long wx, wy, ww, wh;
-
         wayland_window_rect(c, root, root->width, root->height, root->scale120, &wx, &wy, &ww, &wh);
         x += wx;
         y += wy;
-
-        if (!wayland_has_children(root) && !root->input_bounded)
-        {
-                *sx = x;
-                *sy = y;
-                return root;
-        }
-        hit = wayland_pick_node(c, root, root, 0, 0, root->scale120 > 0 ? root->scale120 : WAYLAND_UNIT, x, y, 0, sx, sy);
-        if (!hit)
-        {
-                *sx = x;
-                *sy = y;
-                return root;
-        }
-        return hit;
+        if (wayland_has_children(root) || root->input_bounded)
+                hit = wayland_pick_node(c, root, root, 0, 0, root->scale120 > 0 ? root->scale120 : WAYLAND_UNIT, x, y, 0, sx, sy);
+        return hit ? hit : (*sx = x, *sy = y, root);
 }
 
-static void wayland_pointer_enter_one(struct wayland_client *c, long slot, struct wayland_surface *s, unsigned long serial, long sx, long sy)
-{
-        wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_enter, (unsigned int)serial, s->id,
-                   (unsigned int)wayland_fixed(sx, s->scale120), (unsigned int)wayland_fixed(sy, s->scale120));
-        wayland_pointer_frame(c, slot);
-}
-
-static void wayland_pointer_leave_all(struct wayland_client *c, struct wayland_surface *s)
-{
-        unsigned long serial = wayland_serial(c);
-
-        for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
-        {
-                wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_leave, (unsigned int)serial, s->id);
-                wayland_pointer_frame(c, slot);
-        }
-}
-
-/*
-        The pointer is over row (or none, -1), at (x, y) of its picture: the surface it leaves, a subsurface or a window's root,
-        is sent its leave and the surface it enters its enter, each to every pointer its client has. The same surface is no event.
-*/
 WAYLAND_API int wayland_dragging(void);
 WAYLAND_API void wayland_drag_motion(long row, long x, long y);
 WAYLAND_API void wayland_drag_cancel(void);
 static void wayland_drag_release(void);
-static void wayland_drag_end(int how);
 
 static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surface **picked, long *sx_out, long *sy_out)
 {
         struct wayland_client *old = 0, *now = 0;
-        struct wayland_surface *root, *was = 0, *is = 0;
+        struct wayland_surface *root, *is = 0;
         long sx = 0, sy = 0;
-
+        if (picked) *picked = 0;
         if (!wayland.host)
-        {
-                if (picked) *picked = 0;
                 return;
-        }
-        // A drag holds the pointer: where it is goes to the drag, and no client is told of the pointer.
         if (wayland_dragging())
         {
-                if (picked) *picked = 0;
                 wayland_drag_motion(row, x, y);
                 return;
         }
-        root = wayland_row_surface(row, &now);
-        if (root)
+        if ((root = wayland_row_surface(row, &now)))
                 is = wayland_pick(now, root, x, y, &sx, &sy);
         if (picked) *picked = is;
         if (sx_out) *sx_out = sx;
@@ -5270,82 +5118,55 @@ static void wayland_pointer_to_at(long row, long x, long y, struct wayland_surfa
         wayland.pointer_y = y;
         if (is && row == wayland.pointer_row && wayland_surface_index(now, is) == wayland.pointer_surface)
                 return;
-        // The hand's counts kept for the surface the pointer leaves are its, sent before the leave.
         wayland_counts_send(1);
         if (wayland.pointer_row >= 0 && wayland_row_surface(wayland.pointer_row, &old) && wayland.pointer_surface >= 0 &&
             old->surfaces[wayland.pointer_surface].live)
-                was = &old->surfaces[wayland.pointer_surface];
-        if (was)
-                wayland_pointer_leave_all(old, was);
-        // The cursor shape a window's client asked for is its own while the pointer is on it: none on leave, none on enter
-        // until the client asks again (the arrow is the compositor's).
+                wayland_xs_seat_ev(old, WLI_wl_pointer, WLE_wl_pointer_leave, 1,
+                                   (unsigned int)wayland_serial(old), old->surfaces[wayland.pointer_surface].id);
         if (wayland.pointer_row >= 0 && wayland.pointer_row != (is ? row : -1))
-                wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR, -1, 0);
+                wayland_xs_do(wayland.pointer_row, WAYLAND_DO_CURSOR, -1, 0);
         if (is)
-                wayland.host->row_do(wayland.host->context, row, WAYLAND_DO_CURSOR, -1, 0);
-        // And so is the picture a client drew for it (wayland_cursor_picture): the client names one again for the surface it enters.
+                wayland_xs_do(row, WAYLAND_DO_CURSOR, -1, 0);
         if (wayland.cursor_client >= 0)
-        {
-                wayland.cursor_client = wayland.cursor_surface = -1;
-                wayland.cursor_serial++;
-        }
+                wayland.cursor_client = wayland.cursor_surface = -1, wayland.cursor_serial++;
         wayland.pointer_row = is ? row : -1;
         wayland.pointer_surface = is ? wayland_surface_index(now, is) : -1;
         if (is)
         {
                 unsigned long serial = wayland_input_serial(now);
-
                 now->pointer_enter = (unsigned int)serial;
-                for (long at = 0, slot; (slot = wayland_seat_next(now, WLI_wl_pointer, &at)) >= 0;)
-                        wayland_pointer_enter_one(now, slot, is, serial, sx, sy);
+                wayland_xs_seat_ev(now, WLI_wl_pointer, WLE_wl_pointer_enter, 1, (unsigned int)serial, is->id,
+                                   (unsigned int)wayland_fixed(sx, is->scale120), (unsigned int)wayland_fixed(sy, is->scale120));
         }
         wayland_constraints_update();
 }
 
-WAYLAND_API void wayland_pointer_to(long row, long x, long y)
-{
-        wayland_pointer_to_at(row, x, y, 0, 0, 0);
-}
+WAYLAND_API void wayland_pointer_to(long row, long x, long y) { wayland_pointer_to_at(row, x, y, 0, 0, 0); }
 
 WAYLAND_API void wayland_pointer_motion(long row, long x, long y)
 {
         struct wayland_client *c;
-        struct wayland_surface *root, *s = 0;
-        long time, sx = 0, sy = 0;
-
-        if (wayland.host && wayland_dragging())
+        struct wayland_surface *s = 0;
+        long sx = 0, sy = 0;
+        if (!wayland.host)
+                return;
+        if (wayland_dragging())
         {
                 wayland_drag_motion(row, x, y);
                 return;
         }
-        if (!wayland.host || row != wayland.pointer_row || (wayland.hold_mode == 1 && row == wayland.hold_row) ||
-            !(root = wayland_row_surface(row, &c)))
+        if (row != wayland.pointer_row || (wayland.hold_mode == 1 && row == wayland.hold_row) || !wayland_row_surface(row, &c))
                 return;
-        // A motion that crosses from one surface of the window to another is a leave and an enter first.
         wayland_pointer_to_at(row, x, y, &s, &sx, &sy);
         if (wayland.pointer_row != row || wayland.pointer_surface < 0 || !s)
                 return;
-        time = wayland.host->now(wayland.host->context);
-        {
-                const unsigned int words[3] = {(unsigned int)time, (unsigned int)wayland_fixed(sx, s->scale120),
-                                               (unsigned int)wayland_fixed(sy, s->scale120)};
-
-                for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
-                        wayland_emit(c, c->objects[slot].id, WLE_wl_pointer_motion, words, 3);
-        }
-        // The hand's counts since the last motion, in this frame (wayland_pointer_relative): the reports' own, not the places' difference,
-        // which stops at the screen's edge and is a pixel the gain rounded.
+        wayland_xs_seat_ev(c, WLI_wl_pointer, WLE_wl_pointer_motion, 0, wayland_xs_now(),
+                           (unsigned int)wayland_fixed(sx, s->scale120), (unsigned int)wayland_fixed(sy, s->scale120));
         if (wayland.counts_row == row)
                 wayland_counts_send(0);
         wayland_pointer_frames(c);
 }
 
-/*
-        wl_touch. A finger that goes down on a window is sent to the surface under it, and its moves and its lift go to that
-        surface whatever is under it then (the protocol's implicit grab). Every event is followed by a frame, which ends it.
-        The window's coordinates come in as the window's picture (the row's), as the pointer's do, so the surface's own are
-        the picture's less the subsurface's place, at the surface's scale.
-*/
 static int wayland_touch_find(long id)
 {
         for (int at = 0; at < WAYLAND_TOUCHES; at++)
@@ -5354,84 +5175,43 @@ static int wayland_touch_find(long id)
         return -1;
 }
 
-/*
-        One wl_touch event to each touch seat of a client, with its words (count of them, as the wire has them), and a frame
-        after each: the frame is what ends a touch event for the client.
-*/
-static void wayland_touch_send(struct wayland_client *c, long event, const unsigned long *words, long count)
-{
-        unsigned int w[6];
-
-        for (long i = 0; i < count; i++)
-                w[i] = (unsigned int)words[i];
-        for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_touch, &at)) >= 0;)
-        {
-                wayland_send(c, c->objects[slot].id, event, w, count);
-                wayland_ev0(c, c->objects[slot].id, WLE_wl_touch_frame);
-        }
-}
-
-/*
-        Whether the window in row has a client that holds a wl_touch. A finger on such a window is the touch's: the compositor's
-        pointer events for it (the kit's gesture turns a finger into a press and a motion) are not sent to that client, so it is
-        told each finger once, as a touch, and not twice.
-*/
 WAYLAND_API long wayland_row_takes_touch(long row)
 {
         struct wayland_client *c = 0;
-
-        if (row < 0 || row >= wayland.row_made || !wayland_row_surface(row, &c))
-                return 0;
-        return wayland_seat_any(c, WLI_wl_touch);
+        return wayland_row_surface(row, &c) && wayland_xs_seat_any(c, WLI_wl_touch);
 }
 
-/* A finger went down on row at (x, y) of its picture; id is its tracking id, unique while it is down. */
 WAYLAND_API void wayland_touch_down(long row, long id, long x, long y)
 {
         struct wayland_client *c = 0;
         struct wayland_surface *root, *s;
-        long sx = 0, sy = 0, time, point = -1;
-        unsigned long serial, words[6];
-
+        long sx = 0, sy = 0, point = -1;
         if (!wayland.host || id < 0 || wayland_touch_find(id) >= 0 || !(root = wayland_row_surface(row, &c)))
                 return;
         for (int at = 0; at < WAYLAND_TOUCHES && point < 0; at++)
                 if (!wayland.touch[at].live)
                         point = at;
-        if (point < 0 || !wayland_seat_any(c, WLI_wl_touch) || !(s = wayland_pick(c, root, x, y, &sx, &sy)))
+        if (point < 0 || !wayland_xs_seat_any(c, WLI_wl_touch) || !(s = wayland_pick(c, root, x, y, &sx, &sy)))
                 return;
-        time = wayland.host->now(wayland.host->context);
-        serial = wayland_input_serial(c);
+        unsigned long serial = wayland_input_serial(c);
         c->press_serial = (unsigned int)serial;
-        wayland.touch[point].live = 1;
-        wayland.touch[point].client = c->slot;
-        wayland.touch[point].row = (int)row;
-        wayland.touch[point].surface = (int)wayland_surface_index(c, s);
-        wayland.touch[point].id = id;
-        wayland.touch[point].x = x;
-        wayland.touch[point].y = y;
-        words[0] = serial, words[1] = (unsigned long)time, words[2] = s->id, words[3] = (unsigned long)id;
-        words[4] = wayland_fixed(sx, s->scale120), words[5] = wayland_fixed(sy, s->scale120);
-        wayland_touch_send(c, WLE_wl_touch_down, words, 6);
+        wayland.touch[point] = (struct wayland_touch){1, c->slot, (int)row, (int)wayland_surface_index(c, s), id, x, y};
+        wayland_xs_seat_ev(c, WLI_wl_touch, WLE_wl_touch_down, 1, (unsigned int)serial, wayland_xs_now(), s->id, (unsigned int)id,
+                           (unsigned int)wayland_fixed(sx, s->scale120), (unsigned int)wayland_fixed(sy, s->scale120));
 }
 
-/* The row a finger is down on, or -1 when it is not down: the shell gives a finger's place in that row's picture. */
 WAYLAND_API long wayland_touch_row(long id)
 {
         int at = wayland_touch_find(id);
-
         return at < 0 ? -1 : wayland.touch[at].row;
 }
 
-/* A finger that is down moved to (x, y) of its row's picture: a motion to its surface, unless it did not move. */
 WAYLAND_API void wayland_touch_motion(long id, long x, long y)
 {
         struct wayland_client *c = 0;
         struct wayland_surface *s;
-        long ox = 0, oy = 0, time;
-        unsigned long words[4];
+        long ox = 0, oy = 0;
         int at = wayland_touch_find(id);
-
         if (!wayland.host || at < 0 || (wayland.touch[at].x == x && wayland.touch[at].y == y))
                 return;
         if (!wayland_row_surface(wayland.touch[at].row, &c) || c->slot != wayland.touch[at].client)
@@ -5443,54 +5223,21 @@ WAYLAND_API void wayland_touch_motion(long id, long x, long y)
         wayland.touch[at].y = y;
         if (s->role == WAYLAND_ROLE_SUBSURFACE)
                 wayland_sub_offset(c, s, &ox, &oy);
-        time = wayland.host->now(wayland.host->context);
-        words[0] = (unsigned long)time, words[1] = (unsigned long)id;
-        words[2] = wayland_fixed(x - ox, s->scale120), words[3] = wayland_fixed(y - oy, s->scale120);
-        wayland_touch_send(c, WLE_wl_touch_motion, words, 4);
+        wayland_xs_seat_ev(c, WLI_wl_touch, WLE_wl_touch_motion, 1, wayland_xs_now(), (unsigned int)id,
+                           (unsigned int)wayland_fixed(x - ox, s->scale120), (unsigned int)wayland_fixed(y - oy, s->scale120));
 }
 
-/* A finger that was down is lifted. */
 WAYLAND_API void wayland_touch_up(long id)
 {
-        struct wayland_client *c;
-        long time;
-        unsigned long serial, words[3];
         int at = wayland_touch_find(id);
-
         if (!wayland.host || at < 0)
                 return;
-        c = wayland.client[wayland.touch[at].client];
+        struct wayland_client *c = wayland.client[wayland.touch[at].client];
         wayland.touch[at].live = 0;
-        if (!c)
-                return;
-        time = wayland.host->now(wayland.host->context);
-        serial = wayland_input_serial(c);
-        words[0] = serial, words[1] = (unsigned long)time, words[2] = (unsigned long)id;
-        wayland_touch_send(c, WLE_wl_touch_up, words, 3);
+        if (c)
+                wayland_xs_seat_ev(c, WLI_wl_touch, WLE_wl_touch_up, 1, (unsigned int)wayland_input_serial(c), wayland_xs_now(), (unsigned int)id);
 }
 
-/*
-        The fingers' sequence is taken away (the compositor's gesture took them, or the device lost its events): each client
-        that had a finger down is sent a cancel, once, and none of its fingers is down any more.
-*/
-WAYLAND_API void wayland_touch_cancel(void)
-{
-        for (int at = 0; at < WAYLAND_TOUCHES; at++)
-        {
-                struct wayland_client *c;
-
-                if (!wayland.touch[at].live)
-                        continue;
-                c = wayland.client[wayland.touch[at].client];
-                for (int each = 0; each < WAYLAND_TOUCHES; each++)
-                        if (wayland.touch[each].live && wayland.touch[each].client == wayland.touch[at].client)
-                                wayland.touch[each].live = 0;
-                if (c)
-                        wayland_touch_send(c, WLE_wl_touch_cancel, 0, 0);
-        }
-}
-
-/* A client that goes has no finger down: its points are let go with it, and nothing is sent to it. */
 static void wayland_touch_forget(long slot)
 {
         for (int at = 0; at < WAYLAND_TOUCHES; at++)
@@ -5498,166 +5245,124 @@ static void wayland_touch_forget(long slot)
                         wayland.touch[at].live = 0;
 }
 
-/* A button of the pointer, by its Linux code, pressed or let go. A press is the serial a client may name to ask for a move. */
+WAYLAND_API void wayland_touch_cancel(void)
+{
+        for (int at = 0; at < WAYLAND_TOUCHES; at++)
+                if (wayland.touch[at].live)
+                {
+                        struct wayland_client *c = wayland.client[wayland.touch[at].client];
+                        wayland_touch_forget(wayland.touch[at].client);
+                        if (c)
+                                wayland_xs_seat_send(c, WLI_wl_touch, WLE_wl_touch_cancel, 0, 0, 1);
+                }
+}
+
 WAYLAND_API void wayland_pointer_button(long row, long code, long pressed)
 {
         struct wayland_client *c;
-        struct wayland_surface *s;
-        unsigned long serial;
-        long time;
-
         if (!wayland.host || code < 0 || code > 0x2ff)
                 return;
         wayland.buttons += pressed ? 1 : wayland.buttons > 0 ? -1 : 0;
-        // A drag holds the pointer: a button let go is its drop (or its cancel), and no client is told of it.
         if (wayland_dragging())
         {
                 if (!pressed)
                         wayland_drag_release();
                 return;
         }
-        if (row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)))
+        if (row != wayland.pointer_row || !wayland_row_surface(row, &c))
                 return;
-        time = wayland.host->now(wayland.host->context);
-        serial = wayland_input_serial(c);
+        unsigned long serial = wayland_input_serial(c);
         if (pressed)
                 c->press_serial = (unsigned int)serial;
-        {
-                const unsigned int words[4] = {(unsigned int)serial, (unsigned int)time, (unsigned int)code,
-                                               pressed ? WLN_wl_pointer_button_state_pressed : WLN_wl_pointer_button_state_released};
-
-                for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
-                {
-                        wayland_emit(c, c->objects[slot].id, WLE_wl_pointer_button, words, 4);
-                        wayland_pointer_frame(c, slot);
-                }
-        }
-        (void)s;
+        wayland_xs_seat_ev(c, WLI_wl_pointer, WLE_wl_pointer_button, 1, (unsigned int)serial, wayland_xs_now(), (unsigned int)code,
+                           pressed ? WLN_wl_pointer_button_state_pressed : WLN_wl_pointer_button_state_released);
 }
 
-/*
-        The wheel or two fingers: v120 is in hundred-and-twentieths of a notch, and horizontal says which axis. A wheel (notch_px
-        0) reports what version eight has for it (value120), what earlier ones had (discrete steps, the remainder kept for the
-        next), a notch being WAYLAND_NOTCH of the surface's units. A finger's turn (notch_px, the window's UI_NOTCH) is a smooth
-        value of the same size from a finger: a notch of it is notch_px pixels of the surface, so the client moves as the
-        fingers do.
-*/
 WAYLAND_API void wayland_pointer_axis(long row, long horizontal, long v120, long notch_px)
 {
         struct wayland_client *c;
-        long time, axis = horizontal ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll;
-        int precise = notch_px > 0;
-
         if (!wayland.host || row != wayland.pointer_row || !wayland_row_surface(row, &c) || !v120)
                 return;
+        int precise = notch_px > 0;
+        unsigned int time = wayland_xs_now(), axis = horizontal ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll;
         if (precise)
                 c->finger_scroll = 1;
-        time = wayland.host->now(wayland.host->context);
         for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
         {
                 struct wayland_object *o = &c->objects[slot];
-
                 if (o->version >= 5)
                         wayland_ev(c, o->id, WLE_wl_pointer_axis_source,
                                    precise ? WLN_wl_pointer_axis_source_finger : WLN_wl_pointer_axis_source_wheel);
                 if (o->version >= 9)
-                        wayland_ev(c, o->id, WLE_wl_pointer_axis_relative_direction,
-                                   (unsigned int)axis, WLN_wl_pointer_axis_relative_direction_identical);
+                        wayland_ev(c, o->id, WLE_wl_pointer_axis_relative_direction, axis, WLN_wl_pointer_axis_relative_direction_identical);
                 if (!precise && o->version >= 8)
-                        wayland_ev(c, o->id, WLE_wl_pointer_axis_value120, (unsigned int)axis, (unsigned int)v120);
+                        wayland_ev(c, o->id, WLE_wl_pointer_axis_value120, axis, (unsigned int)v120);
                 else if (!precise && o->version >= 5)
                 {
-                        long notches;
-
-                        c->axis_left[horizontal ? 1 : 0] += v120;
-                        notches = c->axis_left[horizontal ? 1 : 0] / 120;
-                        c->axis_left[horizontal ? 1 : 0] -= notches * 120;
+                        long *left = &c->axis_left[horizontal ? 1 : 0], notches = (*left += v120) / 120;
+                        *left -= notches * 120;
                         if (notches)
-                                wayland_ev(c, o->id, WLE_wl_pointer_axis_discrete, (unsigned int)axis, (unsigned int)notches);
+                                wayland_ev(c, o->id, WLE_wl_pointer_axis_discrete, axis, (unsigned int)notches);
                 }
-                wayland_ev(c, o->id, WLE_wl_pointer_axis, (unsigned int)time, (unsigned int)axis,
-                           (unsigned int)(v120 * (precise ? notch_px : WAYLAND_NOTCH) * 256 / 120));
+                wayland_ev(c, o->id, WLE_wl_pointer_axis, time, axis, (unsigned int)(v120 * (precise ? notch_px : WAYLAND_NOTCH) * 256 / 120));
                 wayland_pointer_frame(c, slot);
         }
 }
 
-/*
-        The fingers lifted off a pad that scrolled (the pad's last finger, WINDOW_WHEEL_STOP): each pointer of the client is sent
-        axis_stop on both axes (from version 5), which is what a toolkit ends kinetic scrolling on. Only a client that had a finger
-        scroll and no stop since is sent one; a wheel's scroll has none.
-*/
 WAYLAND_API void wayland_pointer_axis_stop(long row)
 {
         struct wayland_client *c;
-        long time;
-
         if (!wayland.host || row != wayland.pointer_row || !wayland_row_surface(row, &c) || !c->finger_scroll)
                 return;
         c->finger_scroll = 0;
-        time = wayland.host->now(wayland.host->context);
+        unsigned int time = wayland_xs_now();
         for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_pointer, &at)) >= 0;)
                 for (long axis = 0; axis < 2 && c->objects[slot].version >= 5; axis++)
                 {
-                        wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_axis_stop, (unsigned int)time,
+                        wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_axis_stop, time,
                                    axis ? WLN_wl_pointer_axis_horizontal_scroll : WLN_wl_pointer_axis_vertical_scroll);
                         wayland_pointer_frame(c, slot);
                 }
 }
 
-/*
-        zwp_text_input_v3: a text field of a client's window, which the desktop's on-screen keyboard shows by. Its enable, content type
-        and cursor rectangle are applied at the commit, as the protocol has them, and done carries the commit's serial. While it is
-        enabled and its window has the keyboard, the window's row holds one field count in the window table (WAYLAND_DO_TEXT, the same
-        count ui_field_focus keeps for a kit field), so the keyboard shows; the count goes when either stops being so, when the window
-        goes, and when the object is destroyed or its client dies. The cursor rectangle's bottom is passed with it (WAYLAND_DO_CARET),
-        so the window is moved up for the cursor and not for its own bottom edge. Nothing else of the protocol is done: no preedit, no
-        surrounding text, no change cause; a commit_string is never sent.
-*/
+// zwp_text_input_v3: keep row's WAYLAND_DO_TEXT refcount (`counted`) exact across enable/focus/close/destroy.
 static void wayland_text_sync(struct wayland_client *c, struct wayland_text *t)
 {
         int want = t->enabled && t->row >= 0 ? t->row : -1;
-        struct wayland_surface *s;
         struct wayland_client *owner = 0;
+        struct wayland_surface *s;
         long caret = -1;
-
         if (t->counted >= 0 && t->counted != want)
-        {
-                wayland.host->row_do(wayland.host->context, t->counted, WAYLAND_DO_TEXT, -1, 0);
-                t->counted = -1;
-        }
+                wayland_xs_do(t->counted, WAYLAND_DO_TEXT, -1, 0), t->counted = -1;
         if (want >= 0 && t->counted < 0)
-        {
-                wayland.host->row_do(wayland.host->context, want, WAYLAND_DO_TEXT, 1, (long)t->purpose);
-                t->counted = want;
-        }
+                wayland_xs_do(want, WAYLAND_DO_TEXT, 1, (long)t->purpose), t->counted = want;
         if (t->counted < 0)
                 return;
-        s = wayland_row_surface(t->counted, &owner);
-        if (s && owner == c && t->caret >= 0)
+        if ((s = wayland_row_surface(t->counted, &owner)) && owner == c && t->caret >= 0)
                 caret = wayland_pixels(t->caret, s->scale120);
-        wayland.host->row_do(wayland.host->context, t->counted, WAYLAND_DO_TEXT, 0, (long)t->purpose);
-        wayland.host->row_do(wayland.host->context, t->counted, WAYLAND_DO_CARET, caret, 0);
+        wayland_xs_do(t->counted, WAYLAND_DO_TEXT, 0, (long)t->purpose);
+        wayland_xs_do(t->counted, WAYLAND_DO_CARET, caret, 0);
 }
 
-// The window of a row goes: its text inputs lose the keys with it, and give back their counts (called before the row is closed).
+static void wayland_xs_text_close(struct wayland_client *c, struct wayland_text *t)
+{
+        t->enabled = 0, t->row = -1;
+        wayland_text_sync(c, t);
+        t->live = 0;
+}
+
 static void wayland_texts_row_gone(struct wayland_client *c, long row)
 {
         for (long at = 0; at < c->tbl[WLT_TEXT].count; at++)
                 if (c->texts[at].live && c->texts[at].row == row)
-                {
-                        c->texts[at].row = -1;
-                        wayland_text_sync(c, &c->texts[at]);
-                }
+                        c->texts[at].row = -1, wayland_text_sync(c, &c->texts[at]);
 }
 
-// The keyboard went to a window of the client (its row and surface id) or left it: each text input is told, and holds or gives back its
-// count with it. A leave is only for the window the keys were in.
 static void wayland_texts_focus(struct wayland_client *c, long row, unsigned int surface, int entered)
 {
         for (long at = 0; at < c->tbl[WLT_TEXT].count; at++)
         {
                 struct wayland_text *t = &c->texts[at];
-
                 if (!t->live || (!entered && t->row != row))
                         continue;
                 t->row = entered ? (int)row : -1;
@@ -5666,43 +5371,28 @@ static void wayland_texts_focus(struct wayland_client *c, long row, unsigned int
         }
 }
 
-// The client's text input objects are given up: each one's count goes back (the client died, or the window's keys went with it).
 static void wayland_texts_drop(struct wayland_client *c)
 {
         for (long at = 0; at < c->tbl[WLT_TEXT].count; at++)
                 if (c->texts[at].live)
-                {
-                        c->texts[at].enabled = 0;
-                        c->texts[at].row = -1;
-                        wayland_text_sync(c, &c->texts[at]);
-                        c->texts[at].live = 0;
-                }
+                        wayland_xs_text_close(c, &c->texts[at]);
 }
 
 static int wayland_text_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_text *t;
-
         if (self->iface == WLI_zwp_text_input_manager_v3)
         {
-                struct wayland_surface *focus;
-                struct wayland_client *owner = 0;
-                long index;
-
                 if (op != WLQ_zwp_text_input_manager_v3_get_text_input)
                         return WAYLAND_OK;
-                index = wayland_tbl_alloc(c, WLT_TEXT);
+                long index = wayland_tbl_alloc(c, WLT_TEXT);
                 if (index < 0)
                         return wayland_new_fail(c, self->id, a[0].u);
                 t = &c->texts[index];
-                t->live = 1;
-                t->id = (unsigned int)a[0].u;
-                t->caret = t->pending_caret = -1;
-                t->row = -1;
-                t->counted = -1;
+                t->live = 1, t->id = (unsigned int)a[0].u, t->caret = t->pending_caret = -1, t->row = t->counted = -1;
                 c->objects[a[0].slot].link = (int)index;
-                // A client that gets its text input once the keys are in its window is told so at once.
-                focus = wayland_row_surface(wayland.keyboard_row, &owner);
+                struct wayland_client *owner = 0;
+                struct wayland_surface *focus = wayland_row_surface(wayland.keyboard_row, &owner);
                 if (focus && owner == c)
                         wayland_texts_focus(c, wayland.keyboard_row, focus->id, 1);
                 return WAYLAND_OK;
@@ -5713,96 +5403,60 @@ static int wayland_text_request(struct wayland_client *c, struct wayland_object 
         switch (op)
         {
         case WLQ_zwp_text_input_v3_destroy:
-                t->enabled = 0;
-                t->row = -1;
-                wayland_text_sync(c, t);
-                t->live = 0;
+                wayland_xs_text_close(c, t);
                 wayland_tbl_free(c, WLT_TEXT, self->link);
                 self->link = -1;
                 break;
         case WLQ_zwp_text_input_v3_enable:
-                t->pending_enabled = 1;
-                break;
         case WLQ_zwp_text_input_v3_disable:
-                t->pending_enabled = 0;
+                t->pending_enabled = op == WLQ_zwp_text_input_v3_enable;
                 break;
         case WLQ_zwp_text_input_v3_set_content_type:
-                // A purpose the protocol does not have is a normal one, so no field is ever given a purpose it cannot show.
-                t->pending_purpose = a[1].u <= WLN_zwp_text_input_v3_content_purpose_terminal ? (unsigned char)a[1].u
-                                                                                             : (unsigned char)WLN_zwp_text_input_v3_content_purpose_normal;
+                t->pending_purpose = a[1].u <= WLN_zwp_text_input_v3_content_purpose_terminal
+                                     ? (unsigned char)a[1].u : (unsigned char)WLN_zwp_text_input_v3_content_purpose_normal;
                 break;
         case WLQ_zwp_text_input_v3_set_cursor_rectangle:
-                // The bottom edge is y + height, in surface units; a rectangle with a negative size, or one above the surface, is none.
                 t->pending_caret = a[2].i < 0 || a[3].i < 0 || (long)a[1].i + (long)a[3].i < 0 ? -1 : (long)a[1].i + (long)a[3].i;
                 break;
         case WLQ_zwp_text_input_v3_commit:
-                t->enabled = t->pending_enabled;
-                t->purpose = t->pending_purpose;
-                t->caret = t->pending_caret;
+                t->enabled = t->pending_enabled, t->purpose = t->pending_purpose, t->caret = t->pending_caret;
                 wayland_text_sync(c, t);
-                t->serial++;
-                wayland_ev(c, t->id, WLE_zwp_text_input_v3_done, (unsigned int)t->serial);
-                break;
-        default: // set_surrounding_text and set_text_change_cause are taken and not used
+                wayland_ev(c, t->id, WLE_zwp_text_input_v3_done, (unsigned int)++t->serial);
                 break;
         }
         return WAYLAND_OK;
 }
 
-/* How fast a held key repeats, to one keyboard (from version 4): the rate a second and the delay in milliseconds. */
 static void wayland_keyboard_repeat(struct wayland_client *c, long slot)
 {
         long rate = 25, delay = 600;
-
         if (c->objects[slot].version < 4)
                 return;
         wayland.host->repeat(wayland.host->context, &rate, &delay);
         wayland_ev(c, c->objects[slot].id, WLE_wl_keyboard_repeat_info, (unsigned int)rate, (unsigned int)delay);
 }
 
-/* The keymap to one keyboard: a descriptor beside the event, and how fast a held key repeats. */
 static void wayland_keyboard_keymap(struct wayland_client *c, long slot)
 {
-        struct wayland_event e;
         long size = 0, fd = wayland.host->keymap(wayland.host->context, &size);
-
-        e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_keymap);
-        if (fd >= 0 && size > 0 && size <= WAYLAND_KEYMAP_MAX && wayland_out_fd_room(c))
-        {
-                wayland_word(&e, WLN_wl_keyboard_keymap_format_xkb_v1);
-                wayland_word(&e, (unsigned long)size);
-                wayland_out_fd_put(c, fd, 0, e.start);
-        }
-        else
-        {
-                wayland_word(&e, WLN_wl_keyboard_keymap_format_no_keymap);
-                wayland_word(&e, 0);
-        }
+        struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_keymap);
+        int ok = fd >= 0 && size > 0 && size <= WAYLAND_KEYMAP_MAX && wayland_out_fd_room(c);
+        wayland_word(&e, ok ? WLN_wl_keyboard_keymap_format_xkb_v1 : WLN_wl_keyboard_keymap_format_no_keymap);
+        wayland_word(&e, ok ? (unsigned long)size : 0);
+        if (ok) wayland_out_fd_put(c, fd, 0, e.start);
         wayland_end(&e);
         wayland_keyboard_repeat(c, slot);
 }
 
-/*
-        The modifiers a keymap built by the compositor reads, from the keys held: Shift, Control, Alt on Mod1, the logo keys
-        on Mod4 and AltGr on Mod5, the keymap's own masks (Shift 1, Lock 2, Control 4, Mod1 8, Mod2 16, Mod4 64, Mod5 128).
-        The locked ones, Caps Lock and Num Lock, are the compositor's to say.
-*/
+static inline int wayland_xs_key_down(long code) { return (wayland.keys[code >> 3] >> (code & 7)) & 1; }
+
 static unsigned long wayland_depressed(void)
 {
+        static const unsigned char map[8][2] = {{42, 1}, {54, 1}, {29, 4}, {97, 4}, {56, 8}, {125, 64}, {126, 64}, {100, 128}};
         unsigned long mods = 0;
-
-#define WAYLAND_DOWN(code) ((wayland.keys[(code) >> 3] >> ((code) & 7)) & 1)
-        if (WAYLAND_DOWN(42) || WAYLAND_DOWN(54))
-                mods |= 1;
-        if (WAYLAND_DOWN(29) || WAYLAND_DOWN(97))
-                mods |= 4;
-        if (WAYLAND_DOWN(56))
-                mods |= 8;
-        if (WAYLAND_DOWN(125) || WAYLAND_DOWN(126))
-                mods |= 64;
-        if (WAYLAND_DOWN(100))
-                mods |= 128;
-#undef WAYLAND_DOWN
+        for (long i = 0; i < 8; i++)
+                if (wayland_xs_key_down(map[i][0]))
+                        mods |= map[i][1];
         return mods;
 }
 
@@ -5816,43 +5470,34 @@ static void wayland_keyboard_enter_one(struct wayland_client *c, long slot, stru
 {
         struct wayland_event e = wayland_begin(c, c->objects[slot].id, WLE_wl_keyboard_enter);
         long count = 0;
-
         wayland_word(&e, serial);
         wayland_word(&e, s->id);
         for (long key = 0; key < 128; key++)
-                count += (wayland.keys[key >> 3] >> (key & 7)) & 1;
+                count += wayland_xs_key_down(key);
         wayland_word(&e, (unsigned long)count * 4);
         for (long key = 0; key < 128; key++)
-                if ((wayland.keys[key >> 3] >> (key & 7)) & 1)
+                if (wayland_xs_key_down(key))
                         wayland_word(&e, (unsigned long)key);
         wayland_end(&e);
         wayland_modifiers_to(c, slot);
 }
 
 static void wayland_selections_to(struct wayland_client *c);
-
-/* The keys go to row (or to none, -1): the client it leaves is sent its leave, the one it enters its enter with the keys held. */
 static void wayland_shortcuts_send(struct wayland_client *c, struct wayland_surface *s, int active);
 
 WAYLAND_API void wayland_keyboard_to(long row)
 {
         struct wayland_client *old = 0, *now = 0;
-        struct wayland_surface *was, *is;
-
         if (!wayland.host || row == wayland.keyboard_row)
                 return;
-        was = wayland_row_surface(wayland.keyboard_row, &old);
-        is = wayland_row_surface(row, &now);
+        struct wayland_surface *was = wayland_row_surface(wayland.keyboard_row, &old);
+        struct wayland_surface *is = wayland_row_surface(row, &now);
         if (was)
         {
-                unsigned long serial = wayland_serial(old);
-
-                for (long at = 0, slot; (slot = wayland_seat_next(old, WLI_wl_keyboard, &at)) >= 0;)
-                        wayland_ev(old, old->objects[slot].id, WLE_wl_keyboard_leave, (unsigned int)serial, was->id);
+                wayland_xs_seat_ev(old, WLI_wl_keyboard, WLE_wl_keyboard_leave, 0, (unsigned int)wayland_serial(old), was->id);
                 wayland_texts_focus(old, wayland.keyboard_row, was->id, 0);
         }
         wayland.keyboard_row = is ? row : -1;
-        // A shortcuts inhibitor is active while its window has the keys: the one that lost them is sent inactive, the one that got them active.
         if (was && old && (was->shortcuts || was->xgrab) && was->shortcut_active)
                 wayland_shortcuts_send(old, was, 0);
         if (is && now && (is->shortcuts || is->xgrab) && !is->shortcut_active)
@@ -5861,9 +5506,6 @@ WAYLAND_API void wayland_keyboard_to(long row)
         if (is)
         {
                 unsigned long serial = wayland_input_serial(now);
-
-                // A window is entered with no key held and the locks the compositor says: whatever was held went with the window
-                // that had the keys, whose release the compositor sent there.
                 memory_zero(wayland.keys, sizeof wayland.keys);
                 wayland.mods[0] = wayland.mods[1] = wayland.mods[3] = 0;
                 wayland.mods[2] = (unsigned long)wayland.host->locks(wayland.host->context);
@@ -5874,271 +5516,156 @@ WAYLAND_API void wayland_keyboard_to(long row)
         }
 }
 
-/*
-        A key of the keyboard, by its Linux code, pressed or let go, to the window that has the keys. A repeat is not sent:
-        the client repeats the key itself at the rate it was told, so a held key costs this nothing.
-*/
 WAYLAND_API void wayland_key(long row, long code, long pressed)
 {
         struct wayland_client *c;
-        struct wayland_surface *s;
-        unsigned long serial;
-        long time;
-
         if (!wayland.host || code < 1 || code > 0x2ff)
                 return;
-        // Escape during a drag: the drag cancelled, and the key the drag's.
         if (code == 1 && wayland_dragging())
         {
-                if (pressed)
-                        wayland_drag_cancel();
+                if (pressed) wayland_drag_cancel();
                 return;
         }
         if (code < 128)
-        {
-                if (pressed)
-                        wayland.keys[code >> 3] |= (unsigned char)(1u << (code & 7));
-                else
-                        wayland.keys[code >> 3] &= (unsigned char)~(1u << (code & 7));
-        }
-        if (row != wayland.keyboard_row || !(s = wayland_row_surface(row, &c)))
+                wayland.keys[code >> 3] = pressed ? (unsigned char)(wayland.keys[code >> 3] | (1u << (code & 7)))
+                                                  : (unsigned char)(wayland.keys[code >> 3] & ~(1u << (code & 7)));
+        if (row != wayland.keyboard_row || !wayland_row_surface(row, &c))
                 return;
-        time = wayland.host->now(wayland.host->context);
-        serial = wayland_input_serial(c);
+        wayland_xs_seat_ev(c, WLI_wl_keyboard, WLE_wl_keyboard_key, 0, (unsigned int)wayland_input_serial(c), wayland_xs_now(),
+                           (unsigned int)code, pressed ? WLN_wl_keyboard_key_state_pressed : WLN_wl_keyboard_key_state_released);
+        unsigned long depressed = wayland_depressed(), locked = (unsigned long)wayland.host->locks(wayland.host->context);
+        if (depressed != wayland.mods[0] || locked != wayland.mods[2])
         {
-                const unsigned int words[4] = {(unsigned int)serial, (unsigned int)time, (unsigned int)code,
-                                               pressed ? WLN_wl_keyboard_key_state_pressed : WLN_wl_keyboard_key_state_released};
-
+                wayland.mods[0] = depressed, wayland.mods[2] = locked;
                 for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_keyboard, &at)) >= 0;)
-                        wayland_emit(c, c->objects[slot].id, WLE_wl_keyboard_key, words, 4);
+                        wayland_modifiers_to(c, slot);
         }
-        // The modifiers after the key that changed them, to each keyboard, when they did.
-        {
-                unsigned long depressed = wayland_depressed(), locked = (unsigned long)wayland.host->locks(wayland.host->context);
-
-                if (depressed != wayland.mods[0] || locked != wayland.mods[2])
-                {
-                        wayland.mods[0] = depressed;
-                        wayland.mods[2] = locked;
-                        for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_keyboard, &at)) >= 0;)
-                                wayland_modifiers_to(c, slot);
-                }
-        }
-        (void)s;
 }
 
-/*
-        A key the desktop's keyboard sends for a window: the same as wayland_key, with Shift held for it when the key makes a capital or
-        a shifted symbol (shift). The client's keymap makes the character from the code and the modifiers, so the shim holds Shift for
-        the press and lets it go with the key's release, as a person's Shift would be (wayland.synth_code remembers the key).
-*/
 WAYLAND_API void wayland_key_shift(long row, long code, long pressed, long shift)
 {
-        int inject = pressed && shift && code != 42 && code != 54 && code >= 1 && code < 128 && !wayland.synth_code &&
-                     !((wayland.keys[42 >> 3] >> (42 & 7)) & 1) && !((wayland.keys[54 >> 3] >> (54 & 7)) & 1);
-
         if (!wayland.host)
                 return;
-        if (inject)
-        {
-                wayland_key(row, 42, 1);
-                wayland.synth_code = (unsigned long)code;
-        }
+        if (pressed && shift && code != 42 && code != 54 && code >= 1 && code < 128 && !wayland.synth_code &&
+            !wayland_xs_key_down(42) && !wayland_xs_key_down(54))
+                wayland_key(row, 42, 1), wayland.synth_code = (unsigned long)code;
         wayland_key(row, code, pressed);
         if (!pressed && wayland.synth_code == (unsigned long)code)
-        {
-                wayland_key(row, 42, 0);
-                wayland.synth_code = 0;
-        }
+                wayland_key(row, 42, 0), wayland.synth_code = 0;
 }
 
-/* The repeat rate or delay changed (the settings): each keyboard is told, and nothing else of it. */
-WAYLAND_API void wayland_repeat_changed(void)
+static void wayland_xs_keyboards_update(int keymap)
 {
         if (!wayland.host)
                 return;
-        for (long client = 0; client < wayland.client_slots; client++)
+        for (long i = 0; i < wayland.client_slots; i++)
         {
-                struct wayland_client *c = wayland.client[client];
-
-                if (!c)
-                        continue;
-                for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_keyboard, &at)) >= 0;)
-                        wayland_keyboard_repeat(c, slot);
-        }
-}
-
-/* The keymap changed (a layout was set): each keyboard is sent the new one, and the modifiers. */
-WAYLAND_API void wayland_keymap_changed(void)
-{
-        if (!wayland.host)
-                return;
-        for (long client = 0; client < wayland.client_slots; client++)
-        {
-                struct wayland_client *c = wayland.client[client];
-
-                if (!c)
-                        continue;
-                for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_keyboard, &at)) >= 0;)
+                struct wayland_client *c = wayland.client[i];
+                for (long at = 0, slot; c && (slot = wayland_seat_next(c, WLI_wl_keyboard, &at)) >= 0;)
                 {
-                        wayland_keyboard_keymap(c, slot);
-                        wayland_modifiers_to(c, slot);
+                        if (keymap) wayland_keyboard_keymap(c, slot), wayland_modifiers_to(c, slot);
+                        else wayland_keyboard_repeat(c, slot);
                 }
         }
 }
 
-/*
-        wl_seat: a pointer or a keyboard is made, kept in the client's list, and told where things are now (the keyboard
-        its keymap, and its enter if the keys are this client's already). Touch is not offered until the seat has it.
-*/
+WAYLAND_API void wayland_repeat_changed(void) { wayland_xs_keyboards_update(0); }
+WAYLAND_API void wayland_keymap_changed(void) { wayland_xs_keyboards_update(1); }
+
 static int wayland_seat_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
-        long slot = a ? a[0].slot : -1;
-
-        switch (op)
+        static const short ifaces[3] = {WLI_wl_pointer, WLI_wl_keyboard, WLI_wl_touch};
+        if (op < 0 || op > 2)
+                return WAYLAND_OK;
+        long slot = a[0].slot;
+        if (op == WLQ_wl_seat_get_touch && !(wayland.host->seat(wayland.host->context) & WLN_wl_seat_capability_touch))
+                return wayland_fail(c, self->id, WLN_wl_seat_error_missing_capability, "the seat has no touch");
+        if (!wayland_ids_add(wayland_seat_ids(c, ifaces[op]), c->objects[slot].id))
+                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many seat objects");
+        struct wayland_client *owner;
+        struct wayland_surface *s;
+        if (op == WLQ_wl_seat_get_pointer && wayland.pointer_surface >= 0 &&
+            (s = wayland_row_surface(wayland.pointer_row, &owner)) && owner == c && c->surfaces[wayland.pointer_surface].live)
         {
-        case WLQ_wl_seat_get_pointer:
-                if (!wayland_seat_add(c, WLI_wl_pointer, c->objects[slot].id))
-                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many pointers");
-                if (wayland.pointer_row >= 0 && wayland.row[wayland.pointer_row].client == c->slot && wayland.pointer_surface >= 0)
-                {
-                        struct wayland_client *owner;
-                        struct wayland_surface *root = wayland_row_surface(wayland.pointer_row, &owner), *s = 0;
-                        long sx = 0, sy = 0;
-
-                        if (root && c->surfaces[wayland.pointer_surface].live)
-                        {
-                                unsigned long serial = wayland_input_serial(c);
-
-                                c->pointer_enter = (unsigned int)serial;
-                                s = wayland_pick(c, root, wayland.pointer_x, wayland.pointer_y, &sx, &sy);
-                                wayland_pointer_enter_one(c, slot, s, serial, sx, sy);
-                        }
-                }
-                return WAYLAND_OK;
-        case WLQ_wl_seat_get_keyboard:
-                if (!wayland_seat_add(c, WLI_wl_keyboard, c->objects[slot].id))
-                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many keyboards");
-                wayland_keyboard_keymap(c, slot);
-                if (wayland.keyboard_row >= 0 && wayland.row[wayland.keyboard_row].client == c->slot)
-                {
-                        struct wayland_client *owner;
-                        struct wayland_surface *s = wayland_row_surface(wayland.keyboard_row, &owner);
-
-                        if (s)
-                                wayland_keyboard_enter_one(c, slot, s, wayland_serial(c));
-                }
-                return WAYLAND_OK;
-        case WLQ_wl_seat_get_touch:
-                // A seat with no touch screen has no touch to give: the client is refused, as the protocol says.
-                if (!(wayland.host->seat(wayland.host->context) & WLN_wl_seat_capability_touch))
-                        return wayland_fail(c, self->id, WLN_wl_seat_error_missing_capability, "the seat has no touch");
-                if (!wayland_seat_add(c, WLI_wl_touch, c->objects[slot].id))
-                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "too many touches");
-                return WAYLAND_OK;
-        default:
-                return WAYLAND_OK;
+                long sx = 0, sy = 0;
+                unsigned long serial = wayland_input_serial(c);
+                c->pointer_enter = (unsigned int)serial;
+                s = wayland_pick(c, s, wayland.pointer_x, wayland.pointer_y, &sx, &sy);
+                wayland_ev(c, c->objects[slot].id, WLE_wl_pointer_enter, (unsigned int)serial, s->id,
+                           (unsigned int)wayland_fixed(sx, s->scale120), (unsigned int)wayland_fixed(sy, s->scale120));
+                wayland_pointer_frame(c, slot);
         }
+        else if (op == WLQ_wl_seat_get_keyboard)
+        {
+                wayland_keyboard_keymap(c, slot);
+                if ((s = wayland_row_surface(wayland.keyboard_row, &owner)) && owner == c)
+                        wayland_keyboard_enter_one(c, slot, s, wayland_serial(c));
+        }
+        return WAYLAND_OK;
 }
 
-/* A pointer or a keyboard let go: out of its client's list. A pointer's set_cursor is taken and its image not yet shown. */
 static int wayland_seat_object_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
-        // wl_pointer.set_cursor (serial, surface, hotspot): the surface takes the cursor role (one with another role is the role error,
-        // whatever the serial), the serial is the enter's (wayland_pointer_serial_ok), and only the client with the pointer may set its
-        // cursor. No surface hides the pointer over its window. A surface is the client's picture of the pointer, which the compositor
-        // reads with wayland_cursor_picture; it is told the arrow (WAYLAND_DO_CURSOR) for as long as it draws no such picture.
-        if (op == WLQ_wl_pointer_set_cursor && self->iface == WLI_wl_pointer && a[1].slot >= 0)
-        {
-                struct wayland_surface *named = wayland_surface_of(c, a[1].slot);
-
-                if (!named || (named->role != WAYLAND_ROLE_NONE && named->role != WAYLAND_ROLE_CURSOR) || (named->flags & WAYLAND_SURFACE_XDG) ||
-                    named->xsurface)
-                        return wayland_fail(c, self->id, WLN_wl_pointer_error_role, "the cursor's surface has another role");
-                named->role = WAYLAND_ROLE_CURSOR;
-        }
-        if (op == WLQ_wl_pointer_set_cursor && self->iface == WLI_wl_pointer && wayland.pointer_row >= 0 &&
-            wayland.row[wayland.pointer_row].client == c->slot && wayland_pointer_serial_ok(c, a[0].u))
+        if (self->iface == WLI_wl_pointer && op == WLQ_wl_pointer_set_cursor)
         {
                 struct wayland_surface *named = a[1].slot >= 0 ? wayland_surface_of(c, a[1].slot) : 0;
-
-                wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR,
-                                     a[1].slot < 0 ? WAYLAND_CURSOR_HIDDEN : WAYLAND_CURSOR_ARROW, 0);
-                wayland.cursor_client = named ? c->slot : -1;
-                wayland.cursor_surface = named ? wayland_surface_index(c, named) : -1;
-                wayland.cursor_gen = named ? named->gen : 0;
-                wayland.cursor_hot_x = wayland_max(-WAYLAND_DIMENSION, wayland_min((long)a[2].i, WAYLAND_DIMENSION));
-                wayland.cursor_hot_y = wayland_max(-WAYLAND_DIMENSION, wayland_min((long)a[3].i, WAYLAND_DIMENSION));
-                wayland.cursor_serial++;
+                if (a[1].slot >= 0)
+                {
+                        if (!named || (named->role != WAYLAND_ROLE_NONE && named->role != WAYLAND_ROLE_CURSOR) ||
+                            (named->flags & WAYLAND_SURFACE_XDG) || named->xsurface)
+                                return wayland_fail(c, self->id, WLN_wl_pointer_error_role, "the cursor's surface has another role");
+                        named->role = WAYLAND_ROLE_CURSOR;
+                }
+                if (wayland.pointer_row >= 0 && wayland.row[wayland.pointer_row].client == c->slot && wayland_pointer_serial_ok(c, a[0].u))
+                {
+                        wayland_xs_do(wayland.pointer_row, WAYLAND_DO_CURSOR,
+                                      a[1].slot < 0 ? WAYLAND_CURSOR_HIDDEN : WAYLAND_CURSOR_ARROW, 0);
+                        wayland.cursor_client = named ? c->slot : -1;
+                        wayland.cursor_surface = named ? wayland_surface_index(c, named) : -1;
+                        wayland.cursor_gen = named ? named->gen : 0;
+                        wayland.cursor_hot_x = wayland_xs_clamp((long)a[2].i, -WAYLAND_DIMENSION, WAYLAND_DIMENSION);
+                        wayland.cursor_hot_y = wayland_xs_clamp((long)a[3].i, -WAYLAND_DIMENSION, WAYLAND_DIMENSION);
+                        wayland.cursor_serial++;
+                }
         }
-        if (op == WLQ_wl_pointer_release && self->iface == WLI_wl_pointer)
-                wayland_seat_remove(c, WLI_wl_pointer, self->id);
-        else if (op == WLQ_wl_keyboard_release && self->iface == WLI_wl_keyboard)
-                wayland_seat_remove(c, WLI_wl_keyboard, self->id);
-        else if (op == WLQ_wl_touch_release && self->iface == WLI_wl_touch)
-                wayland_seat_remove(c, WLI_wl_touch, self->id);
+        else if (op == (self->iface == WLI_wl_pointer ? WLQ_wl_pointer_release
+                        : self->iface == WLI_wl_keyboard ? WLQ_wl_keyboard_release : WLQ_wl_touch_release))
+                wayland_ids_remove(wayland_seat_ids(c, self->iface), self->id);
         return WAYLAND_OK;
 }
 
 /* ---- the clipboard ---- */
 
-/*
-        A client's copy and paste are the compositor's: it holds one copy for each selection (the clipboard and the primary
-        selection), of every type its maker offered, whoever made it (a Wayland client, an X client, a program of the compositor's),
-        and what a client is shown of it is the types the host names (clip_type). A client's copy (set_selection with a source) is
-        read once, into the compositor's: the host asks for each type the source offers in turn (wayland_clip_type, then
-        wayland_clip_send with a descriptor of its own for the source's send event) and reads what comes, and the copy is the
-        selection when the source has given every one, so it outlives its source and its client. A paste is an offer of the copy's
-        types made to the client that has the keys, when it gets them and when the copy changes, and a receive on an offer that is
-        still the selection's is the host writing that type to the descriptor the client gave. A copy is taken only for a client the
-        person has just touched, and a paste is given only to the window that has the keys with the person's key or button just on
-        it (the host's rule, as for a program of the compositor's).
-*/
-
-/* The next live device slot of a client for a selection, or -1. */
-static long wayland_device_next(struct wayland_client *c, long which, long *cursor)
-{
-        return wayland_ids_next(c, &c->device_ids[which], which ? WLI_zwp_primary_selection_device_v1 : WLI_wl_data_device, cursor);
-}
-
-static void wayland_device_remove(struct wayland_client *c, long which, unsigned int id)
-{
-        wayland_ids_remove(&c->device_ids[which], id);
-}
+static long wayland_device_next(struct wayland_client *c, long which, long *cursor) { return wayland_ids_next(c, &c->device_ids[which], which ? WLI_zwp_primary_selection_device_v1 : WLI_wl_data_device, cursor); }
+static void wayland_device_remove(struct wayland_client *c, long which, unsigned int id) { wayland_ids_remove(&c->device_ids[which], id); }
 
 // An id of the server's own that no object of the client has now, taken in turn so a number just let go is not the next.
 static unsigned long wayland_server_id(struct wayland_client *c)
 {
-        // Half full or more, the index doubles (64 first), so the walk from the hint meets a free id in a step or two.
-        if (2 * (c->server_live + 1) > c->tbl[WLT_SERVER].count)
-        {
-                long want = c->tbl[WLT_SERVER].count ? 2 * c->tbl[WLT_SERVER].count : 64;
+        long n = c->tbl[WLT_SERVER].count;
 
-                if ((unsigned long)want > WAYLAND_SERVER_IDS || !wayland_tbl_reach(c, WLT_SERVER, want))
-                        want = 0;
-                if (!want && c->server_live >= c->tbl[WLT_SERVER].count)
+        if (2 * (c->server_live + 1) > n)
+        {
+                long want = n ? 2 * n : 64;
+
+                if ((unsigned long)want <= WAYLAND_SERVER_IDS && wayland_tbl_reach(c, WLT_SERVER, want))
+                        n = c->tbl[WLT_SERVER].count;
+                else if (c->server_live >= n)
                         return 0;
         }
-        for (long step = 0; step < c->tbl[WLT_SERVER].count; step++)
+        for (long step = 0; step < n; step++)
         {
-                long at = (c->server_hint + step) % c->tbl[WLT_SERVER].count;
+                long at = (c->server_hint + step) % n;
 
                 if (!c->server_index[at])
-                {
-                        c->server_hint = (at + 1) % c->tbl[WLT_SERVER].count;
-                        return WAYLAND_SERVER_BASE + (unsigned long)at;
-                }
+                        return c->server_hint = (at + 1) % n, WAYLAND_SERVER_BASE + (unsigned long)at;
         }
         return 0;
 }
 
-/* Packed NUL-terminated MIME buffer helpers shared by clipboard/primary sources and XDND/host drags. */
 static int wayland_mime_buf_append(struct wayland_table *tbl, long *bytes, const unsigned char *text, long len)
 {
-        if (!text || len < 1)
-                return 0;
-        tbl->unit = 1;
-        if (!wayland_table_reach(tbl, *bytes + len + 1))
+        if (!text || len < 1 || (tbl->unit = 1, !wayland_table_reach(tbl, *bytes + len + 1)))
                 return 0;
         for (long at = 0; at < len; at++)
                 tbl->at[*bytes + at] = text[at];
@@ -6152,42 +5679,35 @@ static const char *wayland_mime_buf_nth(const unsigned char *buf, long bytes, lo
         for (long at = 0; buf && at < bytes;)
         {
                 const char *type = (const char *)buf + at;
-                long length = 0;
+                long len = 0;
 
-                while (at + length < bytes && type[length])
-                        length++;
+                while (at + len < bytes && type[len])
+                        len++;
                 if (!nth--)
                         return type;
-                at += length + 1;
+                at += len + 1;
         }
         return 0;
 }
 
-/* Unified offer creation + data_offer/offer(/source_actions) emission for selection (is_drag=0) and DND (is_drag=1). */
 static unsigned long wayland_offer_create_and_send(struct wayland_client *c, long device_slot, long which, int is_drag,
                                                    const unsigned char *types, long type_bytes, unsigned int src_actions, long *out_index)
 {
-        long index = wayland_tbl_alloc(c, WLT_OFFER), offer = -1;
+        long index = wayland_tbl_alloc(c, WLT_OFFER);
         unsigned long id = index >= 0 ? wayland_server_id(c) : 0;
+        long offer = id ? wayland_object_new(c, id, which ? WLI_zwp_primary_selection_offer_v1 : WLI_wl_data_offer,
+                                             c->objects[device_slot].version) : -1;
+        struct wayland_offer *o;
 
         if (out_index)
                 *out_index = -1;
-        if (id)
-                offer = wayland_object_new(c, id, which ? WLI_zwp_primary_selection_offer_v1 : WLI_wl_data_offer,
-                                           c->objects[device_slot].version);
         if (offer < 0)
-        {
-                if (index >= 0)
-                        wayland_tbl_free(c, WLT_OFFER, index);
-                return 0;
-        }
-        c->offers[index].id = (unsigned int)id;
-        c->offers[index].live = 1;
-        c->offers[index].which = (unsigned char)which;
+                return index >= 0 ? (wayland_tbl_free(c, WLT_OFFER, index), 0UL) : 0UL;
+        o = &c->offers[index], o->id = (unsigned int)id, o->live = 1, o->which = (unsigned char)which;
         if (is_drag)
-                c->offers[index].drag = 1;
+                o->drag = 1;
         else
-                c->offers[index].serial = wayland.selection_serial[which];
+                o->serial = wayland.selection_serial[which];
         c->objects[offer].link = (int)index;
         if (out_index)
                 *out_index = index;
@@ -6206,7 +5726,6 @@ static unsigned long wayland_offer_create_and_send(struct wayland_client *c, lon
         return id;
 }
 
-/* Unified data_source/primary_selection_source send+fd emitter (from_host=1 increments wayland.fds). */
 static int wayland_source_send_fd(struct wayland_client *c, const struct wayland_source *source, const char *mime, long fd, int from_host)
 {
         if (!c || !source || !mime || fd < 0 || wayland_slot_of(c, source->id) < 0 || !wayland_out_fd_room(c))
@@ -6217,41 +5736,42 @@ static int wayland_source_send_fd(struct wayland_client *c, const struct wayland
         return 1;
 }
 
-/*
-        The copy the compositor holds for a selection, to one of a client's devices: a new offer of it with its types, then the
-        selection naming the offer; or the selection with none when there is nothing, or no room for an offer.
-*/
+static inline int wayland_has_keys(const struct wayland_client *c)
+{
+        return wayland.keyboard_row >= 0 && wayland.row[wayland.keyboard_row].client == c->slot;
+}
+
 static void wayland_selection_to(struct wayland_client *c, long slot, long which)
 {
-        unsigned long id = 0;
+        unsigned long id = wayland.host->clip_type(wayland.host->context, which, 0)
+                               ? wayland_offer_create_and_send(c, slot, which, 0, 0, 0, 0, 0) : 0;
 
-        if (wayland.host->clip_type(wayland.host->context, which, 0))
-                id = wayland_offer_create_and_send(c, slot, which, 0, 0, 0, 0, 0);
         wayland_ev(c, c->objects[slot].id, which ? WLE_zwp_primary_selection_device_v1_selection : WLE_wl_data_device_selection, (unsigned int)id);
 }
 
-// Both selections to a client's devices: what it is shown when it gets the keys.
-static void wayland_selections_to(struct wayland_client *c)
+static void wayland_selection_client(struct wayland_client *c, long which)
 {
-        for (long which = 0; which < 2; which++)
-                for (long at = 0, slot; (slot = wayland_device_next(c, which, &at)) >= 0;)
-                        wayland_selection_to(c, slot, which);
+        for (long at = 0, slot; (slot = wayland_device_next(c, which, &at)) >= 0;)
+                wayland_selection_to(c, slot, which);
 }
 
-// A source told it is not wanted: its copy is not taken, or the copy is another's now. It is let go but for its object.
+static void wayland_selections_to(struct wayland_client *c)
+{
+        wayland_selection_client(c, 0);
+        wayland_selection_client(c, 1);
+}
+
 static void wayland_source_cancel(struct wayland_client *c, long index)
 {
         struct wayland_source *source = &c->sources[index];
 
         source->state = 3;
-        if (wayland_slot_of(c, source->id) < 0)
-                return;
-        wayland_ev0(c, source->id, source->which ? WLE_zwp_primary_selection_source_v1_cancelled : WLE_wl_data_source_cancelled);
+        if (wayland_slot_of(c, source->id) >= 0)
+                wayland_ev0(c, source->id, source->which ? WLE_zwp_primary_selection_source_v1_cancelled : WLE_wl_data_source_cancelled);
 }
 
 static void wayland_drag_end(int how);
 
-// A source object destroyed: a copy of it still being read is ended, and the selection stays what it was but is nobody's.
 static void wayland_source_drop(struct wayland_client *c, long index)
 {
         struct wayland_source *source = &c->sources[index];
@@ -6260,25 +5780,16 @@ static void wayland_source_drop(struct wayland_client *c, long index)
         if (!source->live)
                 return;
         if (source->state == 1 && c->pending[which] == index + 1)
-        {
-                c->pending[which] = 0;
-                wayland.host->clip_abort(wayland.host->context, c->slot, which);
-        }
+                c->pending[which] = 0, wayland.host->clip_abort(wayland.host->context, c->slot, which);
         if (wayland.selection_owner[which] == c->slot + 1 && wayland.selection_source[which] == index)
                 wayland.selection_owner[which] = 0;
-        // The source of the drag gone: the drag is cancelled, its target told it left.
         if (wayland.drag.live && wayland.drag.client == c->slot && wayland.drag.source == index)
                 wayland_drag_end(0);
         wayland_table_drop(&source->mime_table);
-        source->mime_bytes = 0;
-        source->live = 0;
+        source->mime_bytes = 0, source->live = 0;
         wayland_tbl_free(c, WLT_SOURCE, index);
 }
 
-/*
-        The compositor's copy for a selection is new (or gone): the source of a client that was the selection is told it is not,
-        the count that tells an old offer from a current one moves, and the client that has the keys is offered the new copy.
-*/
 WAYLAND_API void wayland_selection_changed(long which)
 {
         struct wayland_client *c;
@@ -6290,16 +5801,11 @@ WAYLAND_API void wayland_selection_changed(long which)
             c->sources[wayland.selection_source[which]].live && c->sources[wayland.selection_source[which]].state == 2)
                 wayland_source_cancel(c, wayland.selection_source[which]);
         wayland.selection_owner[which] = 0;
-        if (wayland.keyboard_row < 0 || wayland.row[wayland.keyboard_row].client < 0)
-                return;
-        c = wayland.client[wayland.row[wayland.keyboard_row].client];
-        if (!c)
-                return;
-        for (long at = 0, slot; (slot = wayland_device_next(c, which, &at)) >= 0;)
-                wayland_selection_to(c, slot, which);
+        if (wayland.keyboard_row >= 0 && wayland.row[wayland.keyboard_row].client >= 0 &&
+            (c = wayland.client[wayland.row[wayland.keyboard_row].client]))
+                wayland_selection_client(c, which);
 }
 
-// The source being read for a selection of a client, or 0.
 static struct wayland_source *wayland_clip_pending(long client, long which, struct wayland_client **owner)
 {
         struct wayland_client *c = client >= 0 && client < wayland.client_slots && wayland.host ? wayland.client[client] : 0;
@@ -6307,15 +5813,9 @@ static struct wayland_source *wayland_clip_pending(long client, long which, stru
 
         if (index < 0 || index >= c->tbl[WLT_SOURCE].count || !c->sources[index].live || c->sources[index].state != 1)
                 return 0;
-        *owner = c;
-        return &c->sources[index];
+        return *owner = c, &c->sources[index];
 }
 
-/*
-        The host's reading of a client's copy: wayland_clip_type is the nth type the source being read offered (0 past the last, or
-        when no source is being read), each NUL ended; wayland_clip_send asks the source for it into the descriptor fd, which is the
-        shim's from then on (1 when the send is queued; 0, and fd closed, when the source is gone or the client's queue is full).
-*/
 WAYLAND_API const char *wayland_clip_type(long client, long which, long nth)
 {
         struct wayland_client *c = 0;
@@ -6330,19 +5830,13 @@ WAYLAND_API int wayland_clip_send(long client, long which, long nth, long fd)
         struct wayland_source *source = wayland_clip_pending(client, which, &c);
         const char *type = source ? wayland_mime_buf_nth(source->mime_table.at, source->mime_bytes, nth) : 0;
 
-        if (!wayland_source_send_fd(c, source, type, fd, 1))
-        {
-                if (fd >= 0 && wayland.host->close)
-                        wayland.host->close(wayland.host->context, fd);
-                return 0;
-        }
-        return 1;
+        if (wayland_source_send_fd(c, source, type, fd, 1))
+                return 1;
+        if (fd >= 0 && wayland.host && wayland.host->close)
+                wayland.host->close(wayland.host->context, fd);
+        return 0;
 }
 
-/*
-        The host has read a client's source to its end (ok), or could not: the source is the selection, or is cancelled. The
-        host says it after it has made the copy the selection, so the copy's change has been told by then.
-*/
 WAYLAND_API void wayland_clip_pulled(long client, long which, long ok)
 {
         struct wayland_client *c = 0;
@@ -6351,50 +5845,12 @@ WAYLAND_API void wayland_clip_pulled(long client, long which, long ok)
 
         if (!source)
                 return;
-        index = c->pending[which] - 1;
-        c->pending[which] = 0;
+        index = c->pending[which] - 1, c->pending[which] = 0;
         if (!ok)
-        {
-                wayland_source_cancel(c, index);
-                return;
-        }
-        source->state = 2;
-        wayland.selection_owner[which] = c->slot + 1;
-        wayland.selection_source[which] = index;
+                return wayland_source_cancel(c, index);
+        source->state = 2, wayland.selection_owner[which] = c->slot + 1, wayland.selection_source[which] = index;
 }
 
-// A source made: a record, and the object tied to it.
-static int wayland_source_new(struct wayland_client *c, struct wayland_object *self, long which, long slot)
-{
-        long index = wayland_tbl_alloc(c, WLT_SOURCE);
-
-        if (index < 0)
-                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a data source");
-        c->sources[index].id = c->objects[slot].id;
-        c->sources[index].live = 1;
-        c->sources[index].which = (unsigned char)which;
-        c->sources[index].state = 0;
-        c->objects[slot].link = (int)index;
-        return WAYLAND_OK;
-}
-
-// A device made: kept in the client's list, and shown the selection at once when the client has the keys already.
-static int wayland_device_new(struct wayland_client *c, struct wayland_object *self, long which, long slot)
-{
-        if (!wayland_ids_add(&c->device_ids[which], c->objects[slot].id))
-                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a data device");
-        if (wayland.keyboard_row >= 0 && wayland.row[wayland.keyboard_row].client == c->slot)
-                wayland_selection_to(c, slot, which);
-        return WAYLAND_OK;
-}
-
-/*
-        set_selection: a source (or none) and the serial of an input event of this client's. None clears the copy when this
-        client's source is the selection. A source is used once; one made from an event the client was not sent, one that offers
-        no type, one the host will not take (no gesture of the person's, the service off) is cancelled and nothing else happens.
-        Otherwise the host is given the source to read (clip_pull, which asks for its types with wayland_clip_send), and it is the
-        selection when it has been.
-*/
 static int wayland_set_selection(struct wayland_client *c, struct wayland_object *self, long which, const struct wayland_arg *a)
 {
         long index = a[0].slot >= 0 ? c->objects[a[0].slot].link : -1;
@@ -6407,101 +5863,78 @@ static int wayland_set_selection(struct wayland_client *c, struct wayland_object
                 return WAYLAND_OK;
         }
         source = &c->sources[index];
-        // The source that is being read, or is the selection, set again (a toolkit does after adding a type) is no change.
         if (source->state == 1 || source->state == 2)
                 return WAYLAND_OK;
         if (source->state != 0)
                 return wayland_fail(c, self->id, WLN_wl_data_device_error_used_source, "the source was used before");
         if (!wayland_input_serial_ok(c, a[1].u) || !source->mime_bytes)
-        {
-                wayland_source_cancel(c, index);
-                return WAYLAND_OK;
-        }
+                return wayland_source_cancel(c, index), WAYLAND_OK;
         if (c->pending[which])
-        {
-                wayland.host->clip_abort(wayland.host->context, c->slot, which);
-                wayland_source_cancel(c, c->pending[which] - 1);
-                c->pending[which] = 0;
-        }
-        source->state = 1;
-        c->pending[which] = index + 1;
+                wayland.host->clip_abort(wayland.host->context, c->slot, which),
+                    wayland_source_cancel(c, c->pending[which] - 1), c->pending[which] = 0;
+        source->state = 1, c->pending[which] = index + 1;
         if (!wayland.host->clip_pull(wayland.host->context, c->slot, which) && c->pending[which] == index + 1)
-        {
-                c->pending[which] = 0;
-                wayland_source_cancel(c, index);
-        }
+                c->pending[which] = 0, wayland_source_cancel(c, index);
         return WAYLAND_OK;
 }
 
-// receive: a type of an offer that is still the selection's, written to the descriptor by the host, for the client that has the keys.
 static int wayland_receive(struct wayland_client *c, struct wayland_object *self, struct wayland_arg *a)
 {
         struct wayland_offer *offer = &c->offers[self->link];
 
-        int current = offer->serial == wayland.selection_serial[offer->which] && wayland.keyboard_row >= 0 &&
-                      wayland.row[wayland.keyboard_row].client == c->slot;
-
-        if (current && a[0].text && a[0].length > 0)
+        if (offer->serial == wayland.selection_serial[offer->which] && wayland_has_keys(c) && a[0].text && a[0].length > 0)
         {
                 wayland.host->clip_push(wayland.host->context, wayland.keyboard_row, offer->which, (const char *)a[0].text, a[1].fd);
-                wayland.fds--;
-                a[1].fd = -1;
+                wayland.fds--, a[1].fd = -1;
         }
         return WAYLAND_OK;
 }
 
-
-/*
-        Drag and drop (wl_data_device.start_drag). A client starts a drag with the serial of the press its button holds; the pointer is
-        then the drag's until the button lets go: what is under it is entered (wl_data_device.enter with an offer of its own carrying
-        the source's types and actions), moved over (motion) and left (leave), and no pointer event goes to any client. The target
-        accepts a type (wl_data_offer.accept, told to the source as target) and says what it takes (set_actions); the action is
-        what both take, the target's preferred one first, told to both. Let go over a target that took a type (and an action, at
-        version 3): the target is told drop and the source dnd_drop_performed, and the target's receive hands its descriptor to the
-        source's send as it is (no byte passes through the compositor), and its finish is the source's dnd_finished. Let go
-        anywhere else, Escape, the source or either client gone: the source is told cancelled and the target left. A drag with no
-        source is the client's own: only its own surfaces are entered, and nothing is carried. XDND between X windows is the X server's
-        own (the stress bench's x-dnd). Xwayland has no data device (it binds no wl_data_device_manager), so between an X window and a
-        Wayland one the window manager of Xwayland is the bridge (xwm.c), as Mutter's and wlroots' are: a Wayland drag over an X window
-        is offered to it (host->xdrag), which is the XDND source to that window and says what it takes (wayland_drag_x_status) and when
-        it is done (wayland_drag_x_finished), the X window's conversion the source's send (wayland_drag_x_send); and an X drag over a
-        Wayland window is a drag of the X side's (wayland_drag_x_begin, xsource): its types and actions offered to the Wayland target,
-        its motion the X source's positions, its drop the X source's, and the target's receive handed to the X side (host->xreceive).
-        The pointer stays the X client's then (its button and motion are Xwayland's: the X source drives the drag), so Escape is the
-        X source's to take.
-*/
+/* Drag and drop (wl_data_device.start_drag) and XDND/host bridge. */
 #define WAYLAND_DRAG_ACTIONS 7u
 #define WAYLAND_DRAG_ANSWER_MS 1000
 static void wayland_drag_decide(void);
 
-// A type a source offered, kept for a drag's offer (its null with it). A type the memory has no room for is not offered.
-static void wayland_source_type(struct wayland_client *c, long index, const unsigned char *text, long length)
+static long wayland_obj_ver(struct wayland_client *c, unsigned long id)
 {
-        struct wayland_source *source = &c->sources[index];
+        long slot = c ? wayland_slot_of(c, id) : -1;
 
-        wayland_mime_buf_append(&source->mime_table, &source->mime_bytes, text, length);
+        return slot >= 0 ? (long)c->objects[slot].version : -1;
 }
 
-static struct wayland_client *wayland_drag_client(void)
+static struct wayland_client *wayland_drag_cli(long slot)
 {
-        return wayland.drag.live && wayland.drag.client >= 0 && wayland.drag.client < wayland.client_slots ? wayland.client[wayland.drag.client] : 0;
+        return wayland.drag.live && slot >= 0 && slot < wayland.client_slots ? wayland.client[slot] : 0;
+}
+
+static struct wayland_source *wayland_drag_src(struct wayland_client **cc)
+{
+        struct wayland_client *c = wayland_drag_cli(wayland.drag.client);
+
+        if (cc)
+                *cc = c;
+        return c && wayland.drag.source >= 0 && wayland.drag.source < c->tbl[WLT_SOURCE].count && c->sources[wayland.drag.source].live
+                   ? &c->sources[wayland.drag.source] : 0;
 }
 
 static struct wayland_source *wayland_drag_source(void)
 {
-        struct wayland_client *c = wayland_drag_client();
-
-        return c && wayland.drag.source >= 0 && wayland.drag.source < c->tbl[WLT_SOURCE].count && c->sources[wayland.drag.source].live
-                   ? &c->sources[wayland.drag.source]
-                   : 0;
+        return wayland_drag_src(0);
 }
 
-static struct wayland_client *wayland_drag_target(void)
+static struct wayland_offer *wayland_drag_offer(struct wayland_client **tc, long *ver)
 {
-        return wayland.drag.live && wayland.drag.target >= 0 && wayland.drag.target < wayland.client_slots ? wayland.client[wayland.drag.target] : 0;
+        struct wayland_client *t = wayland_drag_cli(wayland.drag.target);
+        struct wayland_offer *o = t && wayland.drag.offer >= 0 && wayland.drag.offer < t->tbl[WLT_OFFER].count
+                                      ? &t->offers[wayland.drag.offer] : 0;
+
+        if (tc)
+                *tc = t;
+        if (ver)
+                *ver = o ? wayland_obj_ver(t, o->id) : -1;
+        return o;
 }
 
-// The target's first data device, or -1.
 static long wayland_drag_device(struct wayland_client *c)
 {
         long at = 0;
@@ -6509,19 +5942,43 @@ static long wayland_drag_device(struct wayland_client *c)
         return wayland_device_next(c, 0, &at);
 }
 
-// An event of the drag's source with a word (or none), when the source is there and its version has it.
-static void wayland_drag_tell_source(long op, long version, long word, int has_word)
+static int wayland_drag_is_offer(struct wayland_client *c, long offer)
 {
-        struct wayland_client *c = wayland_drag_client();
-        struct wayland_source *source = wayland_drag_source();
-        long slot = source ? wayland_slot_of(c, source->id) : -1;
+        return wayland.drag.live && wayland.drag.target == c->slot && wayland.drag.offer == offer;
+}
 
-        if (slot < 0 || c->objects[slot].version < version)
+static unsigned int wayland_drag_pick(unsigned int mask, unsigned int pref)
+{
+        return (mask & pref) ? pref : (mask & 1u) ? 1u : (mask & 2u) ? 2u : (mask & 4u) ? 4u : 0;
+}
+
+static void wayland_drag_clear(void)
+{
+        wayland_zero(&wayland.drag, sizeof wayland.drag);
+        wayland.drag.client = wayland.drag.source = wayland.drag.origin = -1;
+        wayland.drag.target = wayland.drag.surface = wayland.drag.offer = wayland.drag.xtarget = -1;
+}
+
+static void wayland_drag_tell_source(long op, unsigned int word)
+{
+        struct wayland_client *c;
+        struct wayland_source *s = wayland_drag_src(&c);
+
+        if (!s || wayland_obj_ver(c, s->id) < (op == WLE_wl_data_source_cancelled ? 1 : 3))
                 return;
-        if (has_word)
-                wayland_ev(c, source->id, op, (unsigned int)word);
+        if (op == WLE_wl_data_source_action)
+                wayland_ev(c, s->id, op, word);
         else
-                wayland_ev0(c, source->id, op);
+                wayland_ev0(c, s->id, op);
+}
+
+static void wayland_drag_send_target(const char *type)
+{
+        struct wayland_client *c;
+        struct wayland_source *s = wayland_drag_src(&c);
+
+        if (s && wayland_obj_ver(c, s->id) >= 0)
+                wayland_ev_str(c, s->id, WLE_wl_data_source_target, type);
 }
 
 static long wayland_xdrag(long what, long row, long x, long y)
@@ -6529,7 +5986,6 @@ static long wayland_xdrag(long what, long row, long x, long y)
         return wayland.host && wayland.host->xdrag ? wayland.host->xdrag(wayland.host->context, what, row, x, y) : 0;
 }
 
-// The X window a Wayland drag was over left: the X side told, and the source that it takes no type there.
 static void wayland_drag_xleave(void)
 {
         if (wayland.drag.xtarget < 0)
@@ -6537,56 +5993,47 @@ static void wayland_drag_xleave(void)
         wayland_xdrag(WAYLAND_XDRAG_LEAVE, wayland.drag.xtarget, 0, 0);
         wayland.drag.xtarget = -1;
         if (wayland.drag.x_accepted)
-                wayland_drag_tell_source(WLE_wl_data_source_target, 1, 0, 1);
-        wayland.drag.x_accepted = 0;
-        wayland.drag.action = 0;
+                wayland_drag_send_target(0);
+        wayland.drag.x_accepted = 0, wayland.drag.action = 0;
 }
 
-// The action a drag comes to: what the source and the target both take, the target's preferred one if it is among them, else the
-// first of copy, move and ask; 0 for none. Told to both when it changes.
 static void wayland_drag_actions(void)
 {
-        struct wayland_client *t = wayland_drag_target();
-        struct wayland_source *source = wayland_drag_source();
-        struct wayland_offer *o = t && wayland.drag.offer >= 0 && wayland.drag.offer < t->tbl[WLT_OFFER].count ? &t->offers[wayland.drag.offer] : 0;
-        unsigned int both, action = 0;
-        long slot;
+        struct wayland_client *t;
+        long ver;
+        struct wayland_offer *o = wayland_drag_offer(&t, &ver);
+        struct wayland_source *s = wayland_drag_source();
+        unsigned int both, action;
 
         if (!o)
                 return;
-        both = (source ? source->actions : wayland.drag.xsource ? wayland.drag.x_actions : WAYLAND_DRAG_ACTIONS) & o->actions;
-        action = (both & o->preferred) ? o->preferred : (both & 1u) ? 1u : (both & 2u) ? 2u : (both & 4u) ? 4u : 0;
+        both = (s ? s->actions : wayland.drag.xsource ? wayland.drag.x_actions : WAYLAND_DRAG_ACTIONS) & o->actions;
+        action = wayland_drag_pick(both, o->preferred);
         if (action == wayland.drag.action)
                 return;
         wayland.drag.action = action;
-        wayland_drag_tell_source(WLE_wl_data_source_action, 3, action, 1);
-        slot = wayland_slot_of(t, o->id);
-        if (slot >= 0 && t->objects[slot].version >= 3)
+        wayland_drag_tell_source(WLE_wl_data_source_action, action);
+        if (ver >= 3)
                 wayland_ev(t, o->id, WLE_wl_data_offer_action, action);
         if (wayland.drag.released && o->accepted && action)
                 wayland_drag_decide();
 }
 
-// The target told the drag left it (its offer stays the client's until it destroys it).
 static void wayland_drag_leave(void)
 {
-        struct wayland_client *t = wayland_drag_target();
+        struct wayland_client *t;
+        struct wayland_offer *o = wayland_drag_offer(&t, 0);
         long device = t ? wayland_drag_device(t) : -1;
 
         if (device >= 0)
                 wayland_ev0(t, t->objects[device].id, WLE_wl_data_device_leave);
-        if (t && wayland.drag.offer >= 0 && wayland.drag.offer < t->tbl[WLT_OFFER].count)
-                t->offers[wayland.drag.offer].drag = 0;
+        if (o)
+                o->drag = 0;
         if (t && wayland.drag.target != wayland.drag.client)
-                wayland_drag_tell_source(WLE_wl_data_source_target, 1, 0, 1); // no type accepted any more (a null type)
-        wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
-        wayland.drag.action = 0;
+                wayland_drag_send_target(0);
+        wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1, wayland.drag.action = 0;
 }
 
-/*
-        The drag ended: 0 cancelled (the target left, the source told cancelled), 1 the source's own end (nothing told it),
-        2 finished (the source told dnd_finished). The drag is none after.
-*/
 static void wayland_drag_end(int how)
 {
         int x_end = wayland.drag.xsource || wayland.drag.xtarget >= 0 || wayland.drag.x_seen;
@@ -6594,55 +6041,44 @@ static void wayland_drag_end(int how)
 
         if (!wayland.drag.live)
                 return;
-        if (!wayland.drag.dropped && wayland_drag_target())
-                wayland_drag_leave();
         if (!wayland.drag.dropped)
+        {
+                if (wayland_drag_cli(wayland.drag.target))
+                        wayland_drag_leave();
                 wayland_drag_xleave();
-        if (how == 0)
-                wayland_drag_tell_source(WLE_wl_data_source_cancelled, 1, 0, 0);
-        else if (how == 2)
-                wayland_drag_tell_source(WLE_wl_data_source_dnd_finished, 3, 0, 0);
-        wayland.drag.live = wayland.drag.dropped = wayland.drag.released = 0;
-        wayland.drag.client = wayland.drag.source = wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
+        }
+        if (how == 0 || how == 2)
+                wayland_drag_tell_source(how ? WLE_wl_data_source_dnd_finished : WLE_wl_data_source_cancelled, 0);
         if (wayland.drag.xsource)
                 wayland_table_drop(&wayland.drag.x_types);
-        wayland.drag.xtarget = -1, wayland.drag.x_accepted = 0, wayland.drag.xsource = 0, wayland.drag.x_seen = 0, wayland.drag.x_bytes = 0;
-        wayland.drag.held = 0;
-        // The X side is told last, the drag none by then: it may start another from what it is told.
+        wayland_drag_clear();
         if (x_end)
                 wayland_xdrag(WAYLAND_XDRAG_END, -1, how == 2, (long)action);
 }
 
-// The drag over (x, y) of row (-1: no window of a client): the surface there entered with an offer of its own, or moved over.
 static void wayland_drag_over(long row, long x, long y)
 {
-        struct wayland_client *t = 0, *c = wayland_drag_client();
+        struct wayland_client *t = 0, *c = wayland_drag_cli(wayland.drag.client);
         struct wayland_surface *root = row >= 0 ? wayland_row_surface(row, &t) : 0, *is = 0;
         struct wayland_source *source = wayland_drag_source();
-        long sx = 0, sy = 0, device;
+        long sx = 0, sy = 0, device = -1, index = -1;
+        unsigned long id = 0;
 
         if ((!c && !wayland.drag.xsource) || wayland.drag.dropped)
                 return;
         if (root)
                 is = wayland_pick(t, root, x, y, &sx, &sy);
-        // A drag with no source is its own client's alone.
         if (is && wayland.drag.source < 0 && !wayland.drag.xsource && t != c)
                 is = 0;
-        /*
-                A window the host takes a drag over (xdrag): one whose client has no data device (an X window, whose drag the window manager
-                of Xwayland takes) or a row no client has (a program of the compositor's, which takes drops through the window table). It is
-                the target when the host says so, whoever the source is: a Wayland client's, an X client's or a program's.
-        */
-        if ((is && (device = wayland_drag_device(t)) < 0) || (row >= 0 && !root))
+        if (is)
+                device = wayland_drag_device(t);
+        if ((is && device < 0) || (row >= 0 && !root))
         {
                 if ((source || wayland.drag.xsource) && wayland.host->xdrag)
                 {
                         if (wayland.drag.xtarget == row)
-                        {
-                                wayland_xdrag(WAYLAND_XDRAG_OVER, row, x, y);
-                                return;
-                        }
-                        if (wayland_drag_target())
+                                return (void)wayland_xdrag(WAYLAND_XDRAG_OVER, row, x, y);
+                        if (wayland_drag_cli(wayland.drag.target))
                                 wayland_drag_leave();
                         wayland_drag_xleave();
                         if (wayland_xdrag(WAYLAND_XDRAG_OVER, row, x, y) == 1)
@@ -6655,37 +6091,30 @@ static void wayland_drag_over(long row, long x, long y)
                 wayland_drag_xleave();
         if (is && wayland.drag.target == t->slot && wayland.drag.surface == wayland_surface_index(t, is))
         {
-                wayland_ev(t, t->objects[wayland_drag_device(t)].id, WLE_wl_data_device_motion,
+                wayland_ev(t, t->objects[device].id, WLE_wl_data_device_motion,
                            (unsigned int)wayland.host->now(wayland.host->context),
                            (unsigned int)wayland_fixed(sx, is->scale120), (unsigned int)wayland_fixed(sy, is->scale120));
                 return;
         }
-        if (wayland_drag_target())
+        if (wayland_drag_cli(wayland.drag.target))
                 wayland_drag_leave();
         if (!is)
                 return;
-        device = wayland_drag_device(t);
+        if (source || wayland.drag.xsource)
         {
-                long index = -1;
-                unsigned long id = 0;
-
-                if (source || wayland.drag.xsource)
-                {
-                        id = wayland_offer_create_and_send(t, device, 0, 1,
-                                                           source ? source->mime_table.at : wayland.drag.x_types.at,
-                                                           source ? source->mime_bytes : wayland.drag.x_bytes,
-                                                           source ? source->actions : wayland.drag.x_actions, &index);
-                        if (!id)
-                                return;
-                }
-                wayland.drag.target = t->slot, wayland.drag.surface = wayland_surface_index(t, is), wayland.drag.offer = index;
-                wayland_ev(t, t->objects[device].id, WLE_wl_data_device_enter,
-                           (unsigned int)wayland_input_serial(t), is->id,
-                           (unsigned int)wayland_fixed(sx, is->scale120), (unsigned int)wayland_fixed(sy, is->scale120), (unsigned int)id);
+                id = wayland_offer_create_and_send(t, device, 0, 1,
+                                                   source ? source->mime_table.at : wayland.drag.x_types.at,
+                                                   source ? source->mime_bytes : wayland.drag.x_bytes,
+                                                   source ? source->actions : wayland.drag.x_actions, &index);
+                if (!id)
+                        return;
         }
+        wayland.drag.target = t->slot, wayland.drag.surface = wayland_surface_index(t, is), wayland.drag.offer = index;
+        wayland_ev(t, t->objects[device].id, WLE_wl_data_device_enter,
+                   (unsigned int)wayland_input_serial(t), is->id,
+                   (unsigned int)wayland_fixed(sx, is->scale120), (unsigned int)wayland_fixed(sy, is->scale120), (unsigned int)id);
 }
 
-// start_drag: the source (or none), the origin surface, an icon (not drawn) and the serial of the press that holds the button.
 static int wayland_drag_start(struct wayland_client *c, struct wayland_arg *a)
 {
         long source = -1;
@@ -6696,7 +6125,6 @@ static int wayland_drag_start(struct wayland_client *c, struct wayland_arg *a)
                 if (source < 0 || source >= c->tbl[WLT_SOURCE].count || c->sources[source].state != 0)
                         return wayland_fail(c, c->objects[a[0].slot].id, WLN_wl_data_device_error_used_source, "the source was used before");
         }
-        // Only with the button its press holds: the serial is that press's, and a button is down. Otherwise the source is cancelled.
         if (!wayland.buttons || (unsigned int)a[3].u != c->press_serial || !wayland_surface_of(c, a[1].slot) || wayland.drag.live)
         {
                 if (source >= 0)
@@ -6704,54 +6132,37 @@ static int wayland_drag_start(struct wayland_client *c, struct wayland_arg *a)
                 return WAYLAND_OK;
         }
         if (source >= 0)
-                c->sources[source].state = 4; // a drag's, never a selection's
-        wayland.drag.live = 1, wayland.drag.dropped = wayland.drag.released = 0;
-        wayland.drag.client = c->slot, wayland.drag.source = source, wayland.drag.origin = a[1].slot;
-        wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
-        wayland.drag.action = 0;
+                c->sources[source].state = 4;
+        wayland_drag_clear();
+        wayland.drag.live = 1, wayland.drag.client = c->slot, wayland.drag.source = source, wayland.drag.origin = a[1].slot;
         wayland_drag_over(wayland.pointer_row, wayland.pointer_x, wayland.pointer_y);
         return WAYLAND_OK;
 }
 
-// The target accepted a type (none: it takes nothing here), told to the source.
 static void wayland_drag_accept(struct wayland_client *c, long offer, const char *type)
 {
-        struct wayland_client *source_client = wayland_drag_client();
-        struct wayland_source *source = wayland_drag_source();
-        long slot;
-
-        if (!wayland.drag.live || wayland.drag.target != c->slot || wayland.drag.offer != offer || wayland.drag.dropped)
+        if (!wayland_drag_is_offer(c, offer) || wayland.drag.dropped)
                 return;
         c->offers[offer].accepted = type != 0;
-        slot = source ? wayland_slot_of(source_client, source->id) : -1;
-        if (slot >= 0)
-                wayland_ev_str(source_client, source->id, WLE_wl_data_source_target, type);
-        // Released before this answer: a type and an action taken (or a version with no actions) is the drop; no type is the cancel.
+        wayland_drag_send_target(type);
         if (wayland.drag.released)
         {
-                long offer_slot = wayland_slot_of(c, c->offers[offer].id);
+                long ver = wayland_obj_ver(c, c->offers[offer].id);
 
-                if (!type || wayland.drag.action || (offer_slot >= 0 && c->objects[offer_slot].version < 3))
+                if (!type || wayland.drag.action || (ver >= 0 && ver < 3))
                         wayland_drag_decide();
         }
 }
 
-/*
-        The button let go: a drop where the target took a type (and an action at version 3), else the drag is cancelled. A target that
-        was entered and has not yet said what it takes (a client answers an enter with its accept, which may still be in its socket as
-        the release is read) is waited for: the drag is released, and decided when the answer comes (wayland_drag_decide).
-*/
 static void wayland_drag_release(void)
 {
-        struct wayland_client *t = wayland_drag_target();
+        struct wayland_offer *o = wayland_drag_offer(0, 0);
 
-        if (((t && (wayland.drag.source >= 0 || wayland.drag.xsource) && wayland.drag.offer >= 0 && wayland.drag.offer < t->tbl[WLT_OFFER].count &&
-              !t->offers[wayland.drag.offer].accepted) ||
-             (wayland.drag.xtarget >= 0 && !wayland.drag.x_accepted)) &&
-            !wayland.drag.released)
+        if (!wayland.drag.released &&
+            (((wayland.drag.source >= 0 || wayland.drag.xsource) && o && !o->accepted) ||
+             (wayland.drag.xtarget >= 0 && !wayland.drag.x_accepted)))
         {
-                wayland.drag.released = 1;
-                wayland.drag.released_at = wayland.host->now(wayland.host->context);
+                wayland.drag.released = 1, wayland.drag.released_at = wayland.host->now(wayland.host->context);
                 return;
         }
         wayland_drag_decide();
@@ -6759,157 +6170,115 @@ static void wayland_drag_release(void)
 
 static void wayland_drag_decide(void)
 {
-        struct wayland_client *t = wayland_drag_target();
-        struct wayland_offer *o = t && wayland.drag.offer >= 0 && wayland.drag.offer < t->tbl[WLT_OFFER].count ? &t->offers[wayland.drag.offer] : 0;
-        long device = t ? wayland_drag_device(t) : -1, slot = o ? wayland_slot_of(t, o->id) : -1;
-        int v3 = slot >= 0 && t->objects[slot].version >= 3;
+        struct wayland_client *t, *sc;
+        long ver;
+        struct wayland_offer *o = wayland_drag_offer(&t, &ver);
 
-        // Over a window the host takes it over: dropped when it takes a type (and an action, for a source of version 3 or the host's), the
-        // host told to drop.
         if (wayland.drag.xtarget >= 0)
         {
-                struct wayland_client *sc = wayland_drag_client();
-                struct wayland_source *source = wayland_drag_source();
-                long source_slot = source ? wayland_slot_of(sc, source->id) : -1;
+                struct wayland_source *s = wayland_drag_src(&sc);
 
-                if (!wayland.drag.x_accepted || (source_slot >= 0 && sc->objects[source_slot].version >= 3 && !wayland.drag.action) ||
-                    (wayland.drag.xsource && !wayland.drag.action))
-                {
-                        wayland_drag_end(0);
-                        return;
-                }
+                if (!wayland.drag.x_accepted || (!wayland.drag.action && (wayland.drag.xsource || (s && wayland_obj_ver(sc, s->id) >= 3))))
+                        return wayland_drag_end(0);
                 wayland.drag.dropped = 1;
                 wayland_xdrag(WAYLAND_XDRAG_DROP, wayland.drag.xtarget, 0, 0);
-                wayland_drag_tell_source(WLE_wl_data_source_dnd_drop_performed, 3, 0, 0);
-                return;
         }
-        if (wayland.drag.source < 0 && !wayland.drag.xsource && t && device >= 0)
+        else
         {
-                // A drag of the client's own, with nothing carried: dropped, and over.
+                int carry = wayland.drag.source >= 0 || wayland.drag.xsource;
+                long device = t ? wayland_drag_device(t) : -1;
+
+                if (device < 0 || (carry && (!o || !o->accepted || (ver >= 3 && !wayland.drag.action))))
+                        return wayland_drag_end(0);
                 wayland_ev0(t, t->objects[device].id, WLE_wl_data_device_drop);
                 wayland.drag.dropped = 1;
-                wayland_drag_end(1);
-                return;
+                if (!carry)
+                        return wayland_drag_end(1);
         }
-        if (!o || device < 0 || !o->accepted || (v3 && !wayland.drag.action))
-        {
-                wayland_drag_end(0);
-                return;
-        }
-        wayland_ev0(t, t->objects[device].id, WLE_wl_data_device_drop);
-        wayland.drag.dropped = 1;
-        wayland_drag_tell_source(WLE_wl_data_source_dnd_drop_performed, 3, 0, 0);
+        wayland_drag_tell_source(WLE_wl_data_source_dnd_drop_performed, 0);
 }
 
-// receive on a drag's offer: the target's descriptor handed to the source's send, as it is (none of its bytes pass the compositor).
 static int wayland_drag_receive(struct wayland_client *c, struct wayland_object *self, struct wayland_arg *a)
 {
-        struct wayland_client *source_client = wayland_drag_client();
-        struct wayland_source *source = wayland_drag_source();
+        struct wayland_client *sc;
+        struct wayland_source *s = wayland_drag_src(&sc);
 
-        // An X drag's: the X side converts its selection into the descriptor.
-        if (wayland.drag.live && wayland.drag.xsource && wayland.drag.target == c->slot && wayland.drag.offer == self->link && a[0].text &&
-            a[0].length > 0 && wayland.host->xreceive)
+        if (!wayland_drag_is_offer(c, self->link) || !a[0].text)
+                return WAYLAND_OK;
+        if (wayland.drag.xsource && a[0].length > 0 && wayland.host->xreceive)
         {
                 wayland.host->xreceive(wayland.host->context, c->slot, 2, (const char *)a[0].text, a[1].fd);
-                wayland.fds--;
-                a[1].fd = -1;
-                return WAYLAND_OK;
+                wayland.fds--, a[1].fd = -1;
         }
-        if (wayland.drag.live && wayland.drag.target == c->slot && wayland.drag.offer == self->link && a[0].text && a[0].length > 1 &&
-            wayland_source_send_fd(source_client, source, (const char *)a[0].text, a[1].fd, 0))
-                a[1].fd = -1; // the source's now, already counted in wayland.fds until sent
+        else if (a[0].length > 1 && wayland_source_send_fd(sc, s, (const char *)a[0].text, a[1].fd, 0))
+                a[1].fd = -1;
         return WAYLAND_OK;
 }
 
-// A drag's offer destroyed by its target: a dropped drag ends (finished at version 2, where there is no finish; cancelled at 3).
 static void wayland_drag_offer_gone(struct wayland_client *c, long offer)
 {
-        if (!wayland.drag.live || wayland.drag.target != c->slot || wayland.drag.offer != offer)
-                return;
-        if (wayland.drag.dropped)
-        {
-                long slot = wayland_slot_of(c, c->offers[offer].id);
+        long ver;
 
-                wayland_drag_end(c->offers[offer].finished || (slot >= 0 && c->objects[slot].version < 3) ? 2 : 0);
+        if (!wayland_drag_is_offer(c, offer))
                 return;
-        }
-        wayland.drag.offer = -1;
+        if (!wayland.drag.dropped)
+                return (void)(wayland.drag.offer = -1);
+        ver = wayland_obj_ver(c, c->offers[offer].id);
+        wayland_drag_end(c->offers[offer].finished || (ver >= 0 && ver < 3) ? 2 : 0);
 }
 
-// Whether a drag holds the pointer (the host sends its motion and its release here, and Escape cancels it): a Wayland client's, or a
-// program's of the compositor's (an X client's pointer is Xwayland's).
+static void wayland_drag_move(long row, long x, long y)
+{
+        wayland.pointer_x = x, wayland.pointer_y = y;
+        wayland_drag_over(row, x, y);
+}
+
 WAYLAND_API int wayland_dragging(void)
 {
         return wayland.drag.live && !wayland.drag.dropped && !wayland.drag.released && (!wayland.drag.xsource || wayland.drag.held);
 }
 
-/*
-        The X side of drag and drop (the window manager of Xwayland's, DRAG AND DROP in xwm.c).
+WAYLAND_API int wayland_x_dragging(void)
+{
+        return wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.dropped;
+}
 
-        A Wayland drag over an X window: wayland_drag_x_types is the source's types (each with its null) and actions; wayland_drag_x_status
-        what the X window takes there (a type, and the action as the drag's bits), told to the source; wayland_drag_x_send the source's
-        send of a type into the descriptor (the shim's from then on: 1 when sent); wayland_drag_x_finished the X window done with the drop.
-
-        A drag an X window makes, over the Wayland windows: wayland_drag_x_begin its types and actions (none while another drag is), then
-        wayland_drag_x_motion, wayland_drag_x_leave and wayland_drag_x_drop as the X source says them, and wayland_drag_x_answer what
-        the Wayland target takes (1 with the action, for the X source's status).
-*/
 WAYLAND_API long wayland_drag_x_types(const char **types, unsigned int *actions)
 {
-        struct wayland_source *source = wayland_drag_source();
+        struct wayland_source *s = wayland_drag_source();
+        int xs = wayland.drag.live && wayland.drag.xsource && wayland.drag.x_bytes;
 
-        // A drag of the host's (a program's over an X window): its own types and actions.
-        if (wayland.drag.live && wayland.drag.xsource && wayland.drag.x_bytes)
-        {
-                *types = (const char *)wayland.drag.x_types.at;
-                if (actions)
-                        *actions = wayland.drag.x_actions;
-                return wayland.drag.x_bytes;
-        }
-        if (!wayland.drag.live || !source || !source->mime_bytes)
+        if (!xs && (!wayland.drag.live || !s || !s->mime_bytes))
                 return 0;
-        *types = (const char *)source->mime_table.at;
+        *types = (const char *)(xs ? wayland.drag.x_types.at : s->mime_table.at);
         if (actions)
-                *actions = source->actions ? source->actions : 1u;
-        return source->mime_bytes;
+                *actions = xs ? wayland.drag.x_actions : (s->actions ? s->actions : 1u);
+        return xs ? wayland.drag.x_bytes : s->mime_bytes;
 }
 
 WAYLAND_API void wayland_drag_x_status(long accepted, unsigned long action)
 {
-        struct wayland_client *sc = wayland_drag_client();
-        struct wayland_source *source = wayland_drag_source();
+        struct wayland_source *s = wayland_drag_source();
 
-        if (!wayland.drag.live || wayland.drag.xtarget < 0 || wayland.drag.dropped || (!source && !wayland.drag.xsource))
+        if (!wayland.drag.live || wayland.drag.xtarget < 0 || wayland.drag.dropped || (!s && !wayland.drag.xsource))
                 return;
-        action = accepted ? action & (source ? (source->actions ? source->actions : WAYLAND_DRAG_ACTIONS) : wayland.drag.x_actions) : 0;
-        action = action & 1u ? 1u : action & 2u ? 2u : action & 4u ? 4u : 0;
+        action = accepted ? wayland_drag_pick((unsigned int)action & (s ? (s->actions ? s->actions : WAYLAND_DRAG_ACTIONS) : wayland.drag.x_actions), 0) : 0;
         if (!!accepted != wayland.drag.x_accepted)
-        {
-                long slot = source ? wayland_slot_of(sc, source->id) : -1;
-
-                wayland.drag.x_accepted = !!accepted;
-                if (slot >= 0)
-                        wayland_ev_str(sc, source->id, WLE_wl_data_source_target,
-                                       accepted && source->mime_bytes ? (const char *)source->mime_table.at : 0);
-        }
+                wayland.drag.x_accepted = !!accepted, wayland_drag_send_target(accepted && s && s->mime_bytes ? (const char *)s->mime_table.at : 0);
         if (action != wayland.drag.action)
-        {
-                wayland.drag.action = (unsigned int)action;
-                wayland_drag_tell_source(WLE_wl_data_source_action, 3, (long)action, 1);
-        }
+                wayland.drag.action = (unsigned int)action, wayland_drag_tell_source(WLE_wl_data_source_action, (unsigned int)action);
         if (wayland.drag.released)
                 wayland_drag_decide();
 }
 
 WAYLAND_API int wayland_drag_x_send(const char *mime, long fd)
 {
-        if (!wayland.drag.live || (!wayland.drag.dropped && wayland.drag.xtarget < 0))
-                return 0;
-        return wayland_source_send_fd(wayland_drag_client(), wayland_drag_source(), mime, fd, 1);
+        struct wayland_client *sc;
+        struct wayland_source *s = wayland_drag_src(&sc);
+
+        return (wayland.drag.live && (wayland.drag.dropped || wayland.drag.xtarget >= 0)) ? wayland_source_send_fd(sc, s, mime, fd, 1) : 0;
 }
 
-// The host's target (an X window, a program's) is done with the drop: the drag ends, finished or not.
 WAYLAND_API void wayland_drag_x_finished(long ok)
 {
         if (wayland.drag.live && wayland.drag.dropped && wayland.drag.xtarget >= 0)
@@ -6920,93 +6289,70 @@ WAYLAND_API int wayland_drag_x_begin(const char *types, long bytes, unsigned lon
 {
         if (!wayland.host || wayland.drag.live || !types || bytes <= 0)
                 return 0;
-        wayland.drag.x_bytes = 0;
+        wayland_drag_clear();
         if (!wayland_mime_buf_append(&wayland.drag.x_types, &wayland.drag.x_bytes, (const unsigned char *)types, bytes))
                 return 0;
-        wayland.drag.x_bytes = bytes;
-        wayland.drag.live = 1, wayland.drag.dropped = wayland.drag.released = 0, wayland.drag.xsource = 1;
+        wayland.drag.x_bytes = bytes, wayland.drag.live = wayland.drag.xsource = 1;
         wayland.drag.x_actions = (unsigned int)(actions & WAYLAND_DRAG_ACTIONS ? actions & WAYLAND_DRAG_ACTIONS : 1u);
-        wayland.drag.client = wayland.drag.source = wayland.drag.origin = -1;
-        wayland.drag.target = wayland.drag.surface = wayland.drag.offer = wayland.drag.xtarget = -1;
-        wayland.drag.action = 0;
         return 1;
 }
 
-/* The actions an X drag offers changed under it (the person held a key, or asked): its offer is told them, and the action worked out again. */
 WAYLAND_API void wayland_drag_x_actions(unsigned long actions)
 {
-        struct wayland_client *t = wayland_drag_target();
-        struct wayland_offer *o = t && wayland.drag.offer >= 0 && wayland.drag.offer < t->tbl[WLT_OFFER].count ? &t->offers[wayland.drag.offer] : 0;
-        long slot = o ? wayland_slot_of(t, o->id) : -1;
+        struct wayland_client *t;
+        long ver;
+        struct wayland_offer *o = wayland_drag_offer(&t, &ver);
 
         actions &= WAYLAND_DRAG_ACTIONS;
         if (!wayland.drag.live || !wayland.drag.xsource || wayland.drag.dropped || !actions || actions == wayland.drag.x_actions)
                 return;
         wayland.drag.x_actions = (unsigned int)actions;
-        if (slot >= 0 && t->objects[slot].version >= 3)
+        if (ver >= 3)
                 wayland_ev(t, o->id, WLE_wl_data_offer_source_actions, (unsigned int)actions);
         wayland_drag_actions();
 }
 
-// Whether an X client's drag is over the Wayland side and not dropped (the host's Escape is its cancel too).
-WAYLAND_API int wayland_x_dragging(void)
-{
-        return wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.dropped;
-}
-
-/*
-        A drag a program of the compositor's makes (the host holds its types and bytes, its window table's copy): an X drag's but that the
-        compositor drives its pointer, as a Wayland client's (wayland_dragging: its motion and release come here, Escape cancels it), first
-        over the window row at (x, y). 0 while another drag is.
-*/
 WAYLAND_API int wayland_drag_host_begin(const char *types, long bytes, unsigned long actions, long row, long x, long y)
 {
         if (!wayland_drag_x_begin(types, bytes, actions))
                 return 0;
-        wayland.drag.held = 1;
-        wayland.pointer_x = x, wayland.pointer_y = y;
-        wayland_drag_over(row, x, y);
+        wayland.drag.held = 1, wayland_drag_move(row, x, y);
         return 1;
 }
 
-// The button of a drag the host makes let go (or its finger lifted): its drop, or its cancel.
 WAYLAND_API void wayland_drag_host_release(void)
 {
-        if (wayland.drag.live && wayland.drag.held && !wayland.drag.dropped && !wayland.drag.released)
+        if (wayland.drag.held && wayland_dragging())
                 wayland_drag_release();
 }
 
 WAYLAND_API void wayland_drag_x_motion(long row, long x, long y)
 {
-        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.dropped && !wayland.drag.released)
-        {
-                wayland.pointer_x = x, wayland.pointer_y = y;
-                wayland_drag_over(row, x, y);
-        }
+        if (wayland_x_dragging() && !wayland.drag.released)
+                wayland_drag_move(row, x, y);
 }
 
 WAYLAND_API void wayland_drag_x_leave(void)
 {
-        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.dropped)
+        if (wayland_x_dragging())
                 wayland_drag_end(0);
 }
 
 WAYLAND_API void wayland_drag_x_drop(void)
 {
-        if (wayland.drag.live && wayland.drag.xsource && !wayland.drag.held && !wayland.drag.dropped && !wayland.drag.released)
+        if (wayland_x_dragging() && !wayland.drag.released)
                 wayland_drag_release();
 }
 
 WAYLAND_API int wayland_drag_x_answer(unsigned long *action)
 {
-        struct wayland_client *t = wayland_drag_target();
-        struct wayland_offer *o = t && wayland.drag.offer >= 0 && wayland.drag.offer < t->tbl[WLT_OFFER].count ? &t->offers[wayland.drag.offer] : 0;
-        long slot = o ? wayland_slot_of(t, o->id) : -1;
+        long ver;
+        struct wayland_offer *o = wayland_drag_offer(0, &ver);
 
         *action = 0;
         if (!wayland.drag.live || !wayland.drag.xsource || !o || !o->accepted)
                 return 0;
-        *action = wayland.drag.action ? wayland.drag.action : (slot >= 0 && t->objects[slot].version < 3 ? 1u : 0);
+        *action = wayland.drag.action ? wayland.drag.action : (ver >= 0 && ver < 3 ? 1u : 0);
         return *action != 0;
 }
 
@@ -7016,120 +6362,110 @@ WAYLAND_API void wayland_drag_cancel(void)
                 wayland_drag_end(0);
 }
 
-// The drag over the row under the pointer (-1 for none), from the host that knows which window that is.
 WAYLAND_API void wayland_drag_motion(long row, long x, long y)
 {
         if (wayland_dragging())
-        {
-                wayland.pointer_x = x, wayland.pointer_y = y;
-                wayland_drag_over(row, x, y);
-        }
+                wayland_drag_move(row, x, y);
 }
 
 static int wayland_data_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
+        long which;
+
         switch (self->iface)
         {
         case WLI_wl_data_device_manager:
-                if (op == WLQ_wl_data_device_manager_create_data_source)
-                        return wayland_source_new(c, self, 0, a[0].slot);
-                return op == WLQ_wl_data_device_manager_get_data_device ? wayland_device_new(c, self, 0, a[0].slot) : WAYLAND_OK;
         case WLI_zwp_primary_selection_device_manager_v1:
-                if (op == WLQ_zwp_primary_selection_device_manager_v1_create_source)
-                        return wayland_source_new(c, self, 1, a[0].slot);
-                return op == WLQ_zwp_primary_selection_device_manager_v1_get_device ? wayland_device_new(c, self, 1, a[0].slot) : WAYLAND_OK;
+                which = self->iface == WLI_zwp_primary_selection_device_manager_v1;
+                if (op == WLQ_wl_data_device_manager_create_data_source)
+                {
+                        long idx = wayland_tbl_alloc(c, WLT_SOURCE);
+
+                        if (idx < 0)
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a data source");
+                        c->sources[idx].id = c->objects[a[0].slot].id, c->sources[idx].live = 1, c->sources[idx].which = (unsigned char)which;
+                        c->objects[a[0].slot].link = (int)idx;
+                }
+                else if (op == WLQ_wl_data_device_manager_get_data_device)
+                {
+                        if (!wayland_ids_add(&c->device_ids[which], c->objects[a[0].slot].id))
+                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a data device");
+                        if (wayland_has_keys(c))
+                                wayland_selection_to(c, a[0].slot, which);
+                }
+                return WAYLAND_OK;
         case WLI_wl_data_source:
         case WLI_zwp_primary_selection_source_v1:
-                if (op == WLQ_wl_data_source_offer && c->sources[self->link].state == 0)
-                        wayland_source_type(c, self->link, a[0].text, a[0].length);
-                else if (op == WLQ_wl_data_source_set_actions && !(a[0].u & ~7UL))
-                        c->sources[self->link].actions = (unsigned int)a[0].u;
+        {
+                struct wayland_source *s = &c->sources[self->link];
+
+                if (op == WLQ_wl_data_source_offer && s->state == 0)
+                        wayland_mime_buf_append(&s->mime_table, &s->mime_bytes, a[0].text, a[0].length);
+                else if (op == WLQ_wl_data_source_set_actions)
+                {
+                        if (a[0].u & ~7UL)
+                                return wayland_fail(c, self->id, WLN_wl_data_source_error_invalid_action_mask, "the actions are not a mask of three");
+                        s->actions = (unsigned int)a[0].u;
+                }
                 else if (op == WLQ_wl_data_source_destroy)
                         wayland_source_drop(c, self->link);
-                else if (op == WLQ_wl_data_source_set_actions && (a[0].u & ~7UL))
-                        return wayland_fail(c, self->id, WLN_wl_data_source_error_invalid_action_mask, "the actions are not a mask of three");
                 return WAYLAND_OK;
+        }
         case WLI_wl_data_device:
-                if (op == WLQ_wl_data_device_set_selection)
-                        return wayland_set_selection(c, self, 0, a);
-                if (op == WLQ_wl_data_device_start_drag)
-                        return wayland_drag_start(c, a);
-                wayland_device_remove(c, 0, self->id);
-                return WAYLAND_OK;
         case WLI_zwp_primary_selection_device_v1:
-                if (op == WLQ_zwp_primary_selection_device_v1_set_selection)
-                        return wayland_set_selection(c, self, 1, a);
-                wayland_device_remove(c, 1, self->id);
+                which = self->iface == WLI_zwp_primary_selection_device_v1;
+                if (op == (which ? WLQ_zwp_primary_selection_device_v1_set_selection : WLQ_wl_data_device_set_selection))
+                        return wayland_set_selection(c, self, which, a);
+                if (!which && op == WLQ_wl_data_device_start_drag)
+                        return wayland_drag_start(c, a);
+                wayland_device_remove(c, which, self->id);
                 return WAYLAND_OK;
         case WLI_wl_data_offer:
-                if (op == WLQ_wl_data_offer_receive)
-                        return c->offers[self->link].drag ? wayland_drag_receive(c, self, a) : wayland_receive(c, self, a);
-                if (op == WLQ_wl_data_offer_destroy)
+        case WLI_zwp_primary_selection_offer_v1:
+        {
+                struct wayland_offer *o = &c->offers[self->link];
+                long pri = self->iface == WLI_zwp_primary_selection_offer_v1;
+
+                if (op == (pri ? WLQ_zwp_primary_selection_offer_v1_receive : WLQ_wl_data_offer_receive))
+                        return o->drag ? wayland_drag_receive(c, self, a) : wayland_receive(c, self, a);
+                if (op == (pri ? WLQ_zwp_primary_selection_offer_v1_destroy : WLQ_wl_data_offer_destroy))
                 {
-                        if (c->offers[self->link].live)
+                        if (o->live)
                         {
-                                c->offers[self->link].live = 0;
-                                wayland_drag_offer_gone(c, self->link);
+                                o->live = 0;
+                                if (!pri)
+                                        wayland_drag_offer_gone(c, self->link);
                                 wayland_tbl_free(c, WLT_OFFER, self->link);
                                 self->link = -1;
                         }
                 }
                 else if (op == WLQ_wl_data_offer_finish)
                 {
-                        if (!c->offers[self->link].drag || !wayland.drag.live || !wayland.drag.dropped || wayland.drag.target != c->slot ||
-                            wayland.drag.offer != self->link)
+                        if (!o->drag || !wayland.drag.dropped || !wayland_drag_is_offer(c, self->link))
                                 return wayland_fail(c, self->id, WLN_wl_data_offer_error_invalid_finish, "finish is for a dropped drag's offer");
-                        c->offers[self->link].finished = 1;
-                        wayland_drag_end(2);
+                        o->finished = 1, wayland_drag_end(2);
                 }
-                else if (op == WLQ_wl_data_offer_accept && c->offers[self->link].drag)
+                else if (op == WLQ_wl_data_offer_accept && o->drag)
                         wayland_drag_accept(c, self->link, a[1].length > 0 ? (const char *)a[1].text : 0);
-                else if (op == WLQ_wl_data_offer_set_actions && c->offers[self->link].drag)
+                else if (op == WLQ_wl_data_offer_set_actions && o->drag)
                 {
                         if ((a[0].u & ~7UL) || (a[1].u & (a[1].u - 1)) || (a[1].u & ~7UL))
                                 return wayland_fail(c, self->id, WLN_wl_data_offer_error_invalid_action_mask, "the actions are not a mask of three");
-                        c->offers[self->link].actions = (unsigned int)a[0].u, c->offers[self->link].preferred = (unsigned int)a[1].u;
+                        o->actions = (unsigned int)a[0].u, o->preferred = (unsigned int)a[1].u;
                         wayland_drag_actions();
                 }
                 return WAYLAND_OK;
-        case WLI_zwp_primary_selection_offer_v1:
-                if (op == WLQ_zwp_primary_selection_offer_v1_receive)
-                        return wayland_receive(c, self, a);
-                if (c->offers[self->link].live)
-                {
-                        c->offers[self->link].live = 0;
-                        wayland_tbl_free(c, WLT_OFFER, self->link);
-                        self->link = -1;
-                }
-                return WAYLAND_OK;
+        }
         default:
                 return WAYLAND_OK;
         }
 }
 
-/*
-        wp_cursor_shape: a client names the shape it wants under the pointer (a cursor of the theme, by name) instead of drawing
-        one. The compositor draws its own pointer whatever a window's client says, so the shape is checked (a shape that does
-        not exist is the client's error) and no more; a toolkit that is told it is offered shapes does not load a theme and make
-        a surface for each, which is what offering them is for. Tablets are not offered, so there is no tool to name.
-*/
-/*
-        wp_viewporter: a viewport is a surface's destination size and source rectangle, pending state a commit applies. There is
-        no scaler, so a destination that is not the buffer's size in the surface's scale shows the buffer as it is drawn; what
-        the destination gives is the surface's size in its own units (the scale of a window that follows the fractional scale
-        is the buffer's pixels over the destination). Every number is a client's: it is checked as the protocol says, and a
-        size that is not a pixel count the shim could hold is a bad value.
-*/
-/*
-        An object made for a surface takes the surface's slot and generation, so wayland_surface_of finds it in O(1) and returns 0 once gone.
-        Declarative table for all 12 surface-extension manager bind requests (uniqueness check, dead-surface policy, role check).
-*/
+/* Surface-extension bind table, wp_viewporter, wp_fractional_scale, wp_cursor_shape. */
 static void wayland_surface_link(struct wayland_client *c, long slot, struct wayland_surface *s)
 {
-        if (slot < 0 || !s)
-                return;
-        c->objects[slot].link = (int)wayland_surface_index(c, s);
-        c->objects[slot].aux = s->gen;
+        if (slot >= 0 && s)
+                c->objects[slot].link = (int)wayland_surface_index(c, s), c->objects[slot].aux = s->gen;
 }
 
 #define WAYLAND_SOFF(field) ((long)(unsigned long)&((struct wayland_surface *)0)->field)
@@ -7142,25 +6478,22 @@ struct wayland_ext_spec
         const char *uniq_msg;
 };
 
+#define WL_EXT(i, o, fd, cr, ...) {WLI_##i, WLQ_##i##_##o, fd, cr, __VA_ARGS__}
 static const struct wayland_ext_spec wayland_ext_specs[] = {
-        {WLI_wp_viewporter, WLQ_wp_viewporter_get_viewport, 0, 0, 4, WAYLAND_SOFF(viewport_id),
-         WLN_wp_viewporter_error_viewport_exists, "the surface has a viewport"},
-        {WLI_wp_fractional_scale_manager_v1, WLQ_wp_fractional_scale_manager_v1_get_fractional_scale, 0, 0, 4, WAYLAND_SOFF(fractional_id),
-         WLN_wp_fractional_scale_manager_v1_error_fractional_scale_exists, "the surface has a fractional scale"},
-        {WLI_wp_linux_drm_syncobj_manager_v1, WLQ_wp_linux_drm_syncobj_manager_v1_get_surface, 0, 0, 4, WAYLAND_SOFF(syncobj_id),
-         WLN_wp_linux_drm_syncobj_manager_v1_error_surface_exists, "the surface already has a syncobj surface"},
-        {WLI_xdg_wm_dialog_v1, WLQ_xdg_wm_dialog_v1_get_xdg_dialog, 1, 1, 0, -1, 0, 0},
-        {WLI_wp_content_type_manager_v1, WLQ_wp_content_type_manager_v1_get_surface_content_type, 1, 0, 0, -1, 0, 0},
-        {WLI_wp_alpha_modifier_v1, WLQ_wp_alpha_modifier_v1_get_surface, 1, 0, 0, -1, 0, 0},
-        {WLI_wp_fifo_manager_v1, WLQ_wp_fifo_manager_v1_get_fifo, 1, 0, 0, -1, 0, 0},
-        {WLI_wp_commit_timing_manager_v1, WLQ_wp_commit_timing_manager_v1_get_timer, 1, 0, 0, -1, 0, 0},
-        {WLI_zwp_xwayland_keyboard_grab_manager_v1, WLQ_zwp_xwayland_keyboard_grab_manager_v1_grab_keyboard, 1, 0, 0, -1, 0, 0},
-        {WLI_zwp_keyboard_shortcuts_inhibit_manager_v1, WLQ_zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts, 1, 0, 1, WAYLAND_SOFF(shortcuts),
-         WLN_zwp_keyboard_shortcuts_inhibit_manager_v1_error_already_inhibited, "the surface has an inhibitor"},
-        {WLI_wp_tearing_control_manager_v1, WLQ_wp_tearing_control_manager_v1_get_tearing_control, 1, 0, 1, WAYLAND_SOFF(tearing),
-         WLN_wp_tearing_control_manager_v1_error_tearing_control_exists, "the surface has a tearing control"},
-        {WLI_zwp_idle_inhibit_manager_v1, WLQ_zwp_idle_inhibit_manager_v1_create_inhibitor, 1, 0, 0, -1, 0, 0},
+        WL_EXT(wp_viewporter, get_viewport, 0, 0, 4, WAYLAND_SOFF(viewport_id), WLN_wp_viewporter_error_viewport_exists, "the surface has a viewport"),
+        WL_EXT(wp_fractional_scale_manager_v1, get_fractional_scale, 0, 0, 4, WAYLAND_SOFF(fractional_id), WLN_wp_fractional_scale_manager_v1_error_fractional_scale_exists, "the surface has a fractional scale"),
+        WL_EXT(wp_linux_drm_syncobj_manager_v1, get_surface, 0, 0, 4, WAYLAND_SOFF(syncobj_id), WLN_wp_linux_drm_syncobj_manager_v1_error_surface_exists, "the surface already has a syncobj surface"),
+        WL_EXT(xdg_wm_dialog_v1, get_xdg_dialog, 1, 1, 0, -1, 0, 0),
+        WL_EXT(wp_content_type_manager_v1, get_surface_content_type, 1, 0, 0, -1, 0, 0),
+        WL_EXT(wp_alpha_modifier_v1, get_surface, 1, 0, 0, -1, 0, 0),
+        WL_EXT(wp_fifo_manager_v1, get_fifo, 1, 0, 0, -1, 0, 0),
+        WL_EXT(wp_commit_timing_manager_v1, get_timer, 1, 0, 0, -1, 0, 0),
+        WL_EXT(zwp_xwayland_keyboard_grab_manager_v1, grab_keyboard, 1, 0, 0, -1, 0, 0),
+        WL_EXT(zwp_keyboard_shortcuts_inhibit_manager_v1, inhibit_shortcuts, 1, 0, 1, WAYLAND_SOFF(shortcuts), WLN_zwp_keyboard_shortcuts_inhibit_manager_v1_error_already_inhibited, "the surface has an inhibitor"),
+        WL_EXT(wp_tearing_control_manager_v1, get_tearing_control, 1, 0, 1, WAYLAND_SOFF(tearing), WLN_wp_tearing_control_manager_v1_error_tearing_control_exists, "the surface has a tearing control"),
+        WL_EXT(zwp_idle_inhibit_manager_v1, create_inhibitor, 1, 0, 0, -1, 0, 0),
 };
+#undef WL_EXT
 
 static int wayland_ext_bind(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a, struct wayland_surface **out_s)
 {
@@ -7169,12 +6502,9 @@ static int wayland_ext_bind(struct wayland_client *c, struct wayland_object *sel
 
         if (out_s)
                 *out_s = 0;
-        for (unsigned long i = 0; i < sizeof wayland_ext_specs / sizeof wayland_ext_specs[0]; i++)
+        for (unsigned long i = 0; i < sizeof wayland_ext_specs / sizeof wayland_ext_specs[0] && !sp; i++)
                 if (wayland_ext_specs[i].iface == self->iface)
-                {
                         sp = &wayland_ext_specs[i];
-                        break;
-                }
         if (!sp || op != sp->bind_op)
                 return WAYLAND_OK;
         s = wayland_surface_of(c, a[1].slot);
@@ -7183,21 +6513,16 @@ static int wayland_ext_bind(struct wayland_client *c, struct wayland_object *sel
         if (!s)
                 return sp->fail_dead ? wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, sp->check_role ? "no such toplevel" : "a surface is gone")
                                      : WAYLAND_OK;
-        if (sp->uniq_size == 4)
+        if (sp->uniq_size)
         {
-                unsigned int *field = (unsigned int *)((unsigned char *)s + sp->uniq_off);
+                unsigned char *p = (unsigned char *)s + sp->uniq_off;
 
-                if (*field)
+                if (sp->uniq_size == 4 ? *(unsigned int *)p : *p)
                         return wayland_fail(c, self->id, sp->uniq_err, sp->uniq_msg);
-                *field = c->objects[a[0].slot].id;
-        }
-        else if (sp->uniq_size == 1)
-        {
-                unsigned char *field = (unsigned char *)s + sp->uniq_off;
-
-                if (*field)
-                        return wayland_fail(c, self->id, sp->uniq_err, sp->uniq_msg);
-                *field = 1;
+                if (sp->uniq_size == 4)
+                        *(unsigned int *)p = c->objects[a[0].slot].id;
+                else
+                        *p = 1;
         }
         wayland_surface_link(c, a[0].slot, s);
         if (out_s)
@@ -7215,10 +6540,7 @@ static int wayland_viewport_request(struct wayland_client *c, struct wayland_obj
         if (op == WLQ_wp_viewport_destroy)
         {
                 if (s)
-                {
-                        s->viewport_id = 0;
-                        s->pending.dst_w = s->pending.dst_h = s->pending.src_w = s->pending.src_h = 0;
-                }
+                        s->viewport_id = 0, s->pending.dst_w = s->pending.dst_h = s->pending.src_w = s->pending.src_h = 0;
                 return WAYLAND_OK;
         }
         if (!s)
@@ -7226,34 +6548,22 @@ static int wayland_viewport_request(struct wayland_client *c, struct wayland_obj
         if (op == WLQ_wp_viewport_set_source)
         {
                 if (a[0].i == -256 && a[1].i == -256 && a[2].i == -256 && a[3].i == -256)
-                {
-                        s->pending.src_w = s->pending.src_h = 0;
-                        return WAYLAND_OK;
-                }
+                        return s->pending.src_w = s->pending.src_h = 0, WAYLAND_OK;
                 if (a[0].i < 0 || a[1].i < 0 || a[2].i <= 0 || a[3].i <= 0)
                         return wayland_fail(c, self->id, WLN_wp_viewport_error_bad_value, "the source is negative or empty");
-                s->pending.src_x = a[0].i;
-                s->pending.src_y = a[1].i;
-                s->pending.src_w = a[2].i;
-                s->pending.src_h = a[3].i;
-                return WAYLAND_OK;
+                s->pending.src_x = a[0].i, s->pending.src_y = a[1].i, s->pending.src_w = a[2].i, s->pending.src_h = a[3].i;
         }
-        if (op == WLQ_wp_viewport_set_destination)
+        else if (op == WLQ_wp_viewport_set_destination)
         {
                 if (a[0].i == -1 && a[1].i == -1)
-                {
-                        s->pending.dst_w = s->pending.dst_h = 0;
-                        return WAYLAND_OK;
-                }
+                        return s->pending.dst_w = s->pending.dst_h = 0, WAYLAND_OK;
                 if (a[0].i <= 0 || a[1].i <= 0)
                         return wayland_fail(c, self->id, WLN_wp_viewport_error_bad_value, "the destination is empty");
-                s->pending.dst_w = wayland_min(a[0].i, WAYLAND_DIMENSION);
-                s->pending.dst_h = wayland_min(a[1].i, WAYLAND_DIMENSION);
+                s->pending.dst_w = wayland_min(a[0].i, WAYLAND_DIMENSION), s->pending.dst_h = wayland_min(a[1].i, WAYLAND_DIMENSION);
         }
         return WAYLAND_OK;
 }
 
-/* wp_fractional_scale: the scale of the screen the surface is on, in 120ths, said when it is made and whenever it changes. */
 static int wayland_fractional_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *s;
@@ -7261,8 +6571,7 @@ static int wayland_fractional_request(struct wayland_client *c, struct wayland_o
 
         if (self->iface == WLI_wp_fractional_scale_v1)
         {
-                s = wayland_surface_of(c, self - c->objects);
-                if (s && op == WLQ_wp_fractional_scale_v1_destroy)
+                if (op == WLQ_wp_fractional_scale_v1_destroy && (s = wayland_surface_of(c, self - c->objects)))
                         s->fractional_id = 0;
                 return WAYLAND_OK;
         }
@@ -7273,108 +6582,64 @@ static int wayland_fractional_request(struct wayland_client *c, struct wayland_o
         return status;
 }
 
-/* The compositor's shape for a protocol shape: the ones it draws, and the arrow (0) for the rest. */
 static long wayland_cursor_code(unsigned long shape)
 {
+#define CS(n, v) [WLN_wp_cursor_shape_device_v1_shape_##n] = WAYLAND_CURSOR_##v
         static const signed char map[WLN_wp_cursor_shape_device_v1_shape_all_resize + 1] = {
-                [WLN_wp_cursor_shape_device_v1_shape_text] = WAYLAND_CURSOR_TEXT,
-                [WLN_wp_cursor_shape_device_v1_shape_vertical_text] = WAYLAND_CURSOR_TEXT,
-                [WLN_wp_cursor_shape_device_v1_shape_crosshair] = WAYLAND_CURSOR_CROSS,
-                [WLN_wp_cursor_shape_device_v1_shape_move] = WAYLAND_CURSOR_MOVE,
-                [WLN_wp_cursor_shape_device_v1_shape_all_scroll] = WAYLAND_CURSOR_MOVE,
-                [WLN_wp_cursor_shape_device_v1_shape_e_resize] = WAYLAND_CURSOR_RESIZE_H,
-                [WLN_wp_cursor_shape_device_v1_shape_w_resize] = WAYLAND_CURSOR_RESIZE_H,
-                [WLN_wp_cursor_shape_device_v1_shape_ew_resize] = WAYLAND_CURSOR_RESIZE_H,
-                [WLN_wp_cursor_shape_device_v1_shape_col_resize] = WAYLAND_CURSOR_RESIZE_H,
-                [WLN_wp_cursor_shape_device_v1_shape_n_resize] = WAYLAND_CURSOR_RESIZE_V,
-                [WLN_wp_cursor_shape_device_v1_shape_s_resize] = WAYLAND_CURSOR_RESIZE_V,
-                [WLN_wp_cursor_shape_device_v1_shape_ns_resize] = WAYLAND_CURSOR_RESIZE_V,
-                [WLN_wp_cursor_shape_device_v1_shape_row_resize] = WAYLAND_CURSOR_RESIZE_V,
-                [WLN_wp_cursor_shape_device_v1_shape_nw_resize] = WAYLAND_CURSOR_RESIZE_NWSE,
-                [WLN_wp_cursor_shape_device_v1_shape_se_resize] = WAYLAND_CURSOR_RESIZE_NWSE,
-                [WLN_wp_cursor_shape_device_v1_shape_nwse_resize] = WAYLAND_CURSOR_RESIZE_NWSE,
-                [WLN_wp_cursor_shape_device_v1_shape_ne_resize] = WAYLAND_CURSOR_RESIZE_NESW,
-                [WLN_wp_cursor_shape_device_v1_shape_sw_resize] = WAYLAND_CURSOR_RESIZE_NESW,
-                [WLN_wp_cursor_shape_device_v1_shape_nesw_resize] = WAYLAND_CURSOR_RESIZE_NESW,
-                [WLN_wp_cursor_shape_device_v1_shape_pointer] = WAYLAND_CURSOR_HAND,
-                [WLN_wp_cursor_shape_device_v1_shape_grab] = WAYLAND_CURSOR_HAND,
-                [WLN_wp_cursor_shape_device_v1_shape_grabbing] = WAYLAND_CURSOR_HAND,
-                [WLN_wp_cursor_shape_device_v1_shape_progress] = WAYLAND_CURSOR_WAIT,
-                [WLN_wp_cursor_shape_device_v1_shape_wait] = WAYLAND_CURSOR_WAIT,
-                [WLN_wp_cursor_shape_device_v1_shape_not_allowed] = WAYLAND_CURSOR_NOTALLOWED,
-                [WLN_wp_cursor_shape_device_v1_shape_no_drop] = WAYLAND_CURSOR_NOTALLOWED,
+                CS(text, TEXT), CS(vertical_text, TEXT), CS(crosshair, CROSS), CS(move, MOVE), CS(all_scroll, MOVE),
+                CS(e_resize, RESIZE_H), CS(w_resize, RESIZE_H), CS(ew_resize, RESIZE_H), CS(col_resize, RESIZE_H),
+                CS(n_resize, RESIZE_V), CS(s_resize, RESIZE_V), CS(ns_resize, RESIZE_V), CS(row_resize, RESIZE_V),
+                CS(nw_resize, RESIZE_NWSE), CS(se_resize, RESIZE_NWSE), CS(nwse_resize, RESIZE_NWSE),
+                CS(ne_resize, RESIZE_NESW), CS(sw_resize, RESIZE_NESW), CS(nesw_resize, RESIZE_NESW),
+                CS(pointer, HAND), CS(grab, HAND), CS(grabbing, HAND),
+                CS(progress, WAIT), CS(wait, WAIT), CS(not_allowed, NOTALLOWED), CS(no_drop, NOTALLOWED),
         };
-
+#undef CS
         return shape < sizeof map ? map[shape] : WAYLAND_CURSOR_ARROW;
 }
 
-/*
-        wp_cursor_shape: a client names the shape it wants under the pointer, when its window has the pointer (the serial is one
-        of its recent inputs, as the protocol asks). The compositor draws the pointer, so the shape is handed to the host for that
-        window, which draws it inside the window and not on its edges; a shape the compositor lacks is its arrow. The shape is
-        reset when the pointer enters a window and when it leaves one (wayland_pointer_to).
-*/
 static int wayland_cursor_shape_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         if (self->iface == WLI_wp_cursor_shape_manager_v1)
+                return op == WLQ_wp_cursor_shape_manager_v1_get_tablet_tool_v2
+                           ? wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the seat has no tablet") : WAYLAND_OK;
+        if (op == WLQ_wp_cursor_shape_device_v1_set_shape)
         {
-                if (op == WLQ_wp_cursor_shape_manager_v1_get_tablet_tool_v2)
-                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the seat has no tablet");
-                return WAYLAND_OK;
-        }
-        if (op == WLQ_wp_cursor_shape_device_v1_set_shape &&
-            (a[1].u < WLN_wp_cursor_shape_device_v1_shape_default || a[1].u > WLN_wp_cursor_shape_device_v1_shape_all_resize))
-                return wayland_fail(c, self->id, WLN_wp_cursor_shape_device_v1_error_invalid_shape, "no such shape");
-        if (op == WLQ_wp_cursor_shape_device_v1_set_shape && wayland.pointer_row >= 0 &&
-            wayland.row[wayland.pointer_row].client == c->slot && wayland_pointer_serial_ok(c, a[0].u))
-        {
-                wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR, wayland_cursor_code(a[1].u), 0);
-                // A shape named takes the place of a picture the client drew (set_cursor's surface).
-                if (wayland.cursor_client >= 0)
+                if (a[1].u < WLN_wp_cursor_shape_device_v1_shape_default || a[1].u > WLN_wp_cursor_shape_device_v1_shape_all_resize)
+                        return wayland_fail(c, self->id, WLN_wp_cursor_shape_device_v1_error_invalid_shape, "no such shape");
+                if (wayland.pointer_row >= 0 && wayland.row[wayland.pointer_row].client == c->slot && wayland_pointer_serial_ok(c, a[0].u))
                 {
-                        wayland.cursor_client = wayland.cursor_surface = -1;
-                        wayland.cursor_serial++;
+                        wayland.host->row_do(wayland.host->context, wayland.pointer_row, WAYLAND_DO_CURSOR, wayland_cursor_code(a[1].u), 0);
+                        if (wayland.cursor_client >= 0)
+                                wayland.cursor_client = wayland.cursor_surface = -1, wayland.cursor_serial++;
                 }
         }
         return WAYLAND_OK;
 }
 
-/* ---- dma-bufs ---- */
+/* ---- dma-bufs, wl_drm, drm_syncobj ---- */
 
-/*
-        zwp_linux_dmabuf_v1: a client that draws with the GPU hands over its buffer as a dma-buf, and the compositor reads it
-        where it stands. What is taken is the host's to say (wayland_dmabuf_info): the device clients are to allocate on, and
-        the format and modifier pairs with the tranches a client is told them in (version 4's feedback, which is also sent
-        again when the host says they changed; a client of version 3 or less is sent each pair). Nothing is imported here: the
-        host maps the descriptor read-only (it is a dma-buf, and as large as the plane needs), and the buffer is then a buffer
-        of a pool that is that mapping, copied at commit and released as any is, except that the host brackets the read with
-        the dma-buf's own synchronisation and may answer that the buffer's writer is not done, in which case that frame is
-        skipped and the next one drawn whole. A client holds at most 48 such buffers, each with a descriptor, and all clients
-        at most 192. One plane of ARGB8888 or XRGB8888 is what a buffer is.
-*/
-
-// An array of bytes as the wire has it: the length, the bytes, padded to a word.
-static void wayland_array(struct wayland_event *e, const unsigned char *bytes, unsigned long length)
+static void wayland_ev_array(struct wayland_client *c, unsigned long id, long op, const unsigned char *bytes, unsigned long len)
 {
-        unsigned long padded = (length + 3) & ~3UL;
+        struct wayland_event e = wayland_begin(c, id, op);
+        unsigned long padded = (len + 3) & ~3UL;
 
-        wayland_word(e, length);
+        wayland_word(&e, len);
         for (unsigned long at = 0; at < padded; at++)
-                e->at[at] = at < length ? bytes[at] : 0;
-        e->at += padded;
+                e.at[at] = at < len ? bytes[at] : 0;
+        e.at += padded;
+        wayland_end(&e);
 }
 
-// A device number as a dev_t's eight bytes, the machine's order.
-static void wayland_device_array(struct wayland_event *e, unsigned long device)
+static void wayland_ev_dev(struct wayland_client *c, unsigned long id, long op, unsigned long dev)
 {
-        unsigned char bytes[8];
+        unsigned char b[8];
 
         for (long at = 0; at < 8; at++)
-                bytes[at] = (unsigned char)(device >> (8 * at));
-        wayland_array(e, bytes, 8);
+                b[at] = (unsigned char)(dev >> (8 * at));
+        wayland_ev_array(c, id, op, b, 8);
 }
 
-// The formats and, for version 3, the modifiers: what a client older than the feedback is told when it binds.
 static void wayland_dmabuf_formats(struct wayland_client *c, unsigned long id, long version)
 {
         const struct wayland_dmabuf_info *info = &wayland.dmabuf;
@@ -7393,85 +6658,47 @@ static void wayland_dmabuf_formats(struct wayland_client *c, unsigned long id, l
         }
 }
 
-// Supported DRM fourcc codes and opaque/shm format mapping.
 static int wayland_fourcc_supported(unsigned int fourcc)
 {
-        switch (fourcc)
-        {
-        case WAYLAND_FOURCC_ARGB8888:
-        case WAYLAND_FOURCC_XRGB8888:
-        case WAYLAND_FOURCC_ABGR8888:
-        case WAYLAND_FOURCC_XBGR8888:
-        case WAYLAND_FOURCC_ARGB2101010:
-        case WAYLAND_FOURCC_XRGB2101010:
-        case WAYLAND_FOURCC_ABGR2101010:
-        case WAYLAND_FOURCC_XBGR2101010:
-        case WAYLAND_FOURCC_NV12:
-                return 1;
-        default:
-                return 0;
-        }
+        static const unsigned int ok[] = {
+                WAYLAND_FOURCC_ARGB8888, WAYLAND_FOURCC_XRGB8888, WAYLAND_FOURCC_ABGR8888, WAYLAND_FOURCC_XBGR8888,
+                WAYLAND_FOURCC_ARGB2101010, WAYLAND_FOURCC_XRGB2101010, WAYLAND_FOURCC_ABGR2101010, WAYLAND_FOURCC_XBGR2101010,
+                WAYLAND_FOURCC_NV12,
+        };
+        for (unsigned long i = 0; i < sizeof ok / sizeof ok[0]; i++)
+                if (ok[i] == fourcc)
+                        return 1;
+        return 0;
 }
 
-static long wayland_shm_format_of(unsigned int fourcc)
-{
-        if (fourcc == WAYLAND_FOURCC_ARGB8888)
-                return WLN_wl_shm_format_argb8888;
-        if (fourcc == WAYLAND_FOURCC_XRGB8888)
-                return WLN_wl_shm_format_xrgb8888;
-        return (long)fourcc;
-}
-
-static void wayland_feedback_queue(struct wayland_client *c, unsigned long id)
-{
-        for (long at = 0; at < c->feedbacks; at++)
-                if (c->feedback[at].id == id)
-                {
-                        c->feedback[at].need = 1;
-                        c->feedback_pending = 1;
-                        wayland_out_mark(c->slot);
-                        return;
-                }
-}
-
-// The feedback to one feedback object: the table, the main device, each tranche in order, and done.
-static void wayland_feedback_send(struct wayland_client *c, long slot)
+static void wayland_feedback_send(struct wayland_client *c, unsigned long id)
 {
         const struct wayland_dmabuf_info *info = &wayland.dmabuf;
-        unsigned long id = c->objects[slot].id;
+        long slot = wayland_slot_of(c, id), size = 0, fd;
         struct wayland_event e;
-        long size = 0, fd = wayland.host->dmabuf_table(wayland.host->context, &size);
 
-        if (fd < 0 || size <= 0)
+        if (slot < 0 || c->objects[slot].iface != WLI_zwp_linux_dmabuf_feedback_v1 ||
+            (fd = wayland.host->dmabuf_table(wayland.host->context, &size)) < 0 || size <= 0)
                 return;
         if (!wayland_out_fd_room(c))
         {
-                wayland_feedback_queue(c, id);
+                for (long at = 0; at < c->feedbacks; at++)
+                        if (c->feedback[at].id == id)
+                                return c->feedback[at].need = 1, c->feedback_pending = 1, wayland_out_mark(c->slot);
                 return;
         }
         e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_format_table);
-        wayland_word(&e, (unsigned long)size);
-        wayland_out_fd_put(c, fd, 0, e.start);
-        wayland_end(&e);
-        e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_main_device);
-        wayland_device_array(&e, info->device);
-        wayland_end(&e);
+        wayland_word(&e, (unsigned long)size), wayland_out_fd_put(c, fd, 0, e.start), wayland_end(&e);
+        wayland_ev_dev(c, id, WLE_zwp_linux_dmabuf_feedback_v1_main_device, info->device);
         for (long at = 0; at < info->tranches; at++)
         {
                 unsigned char indices[WAYLAND_DMABUF_ENTRIES * 2];
 
-                e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_target_device);
-                wayland_device_array(&e, info->tranche[at].device);
-                wayland_end(&e);
+                wayland_ev_dev(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_target_device, info->tranche[at].device);
                 wayland_ev(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_flags, (unsigned int)info->tranche[at].flags);
                 for (long each = 0; each < info->tranche[at].count; each++)
-                {
-                        indices[each * 2] = info->tranche[at].index[each];
-                        indices[each * 2 + 1] = 0;
-                }
-                e = wayland_begin(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_formats);
-                wayland_array(&e, indices, (unsigned long)info->tranche[at].count * 2);
-                wayland_end(&e);
+                        indices[each * 2] = info->tranche[at].index[each], indices[each * 2 + 1] = 0;
+                wayland_ev_array(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_formats, indices, (unsigned long)info->tranche[at].count * 2);
                 wayland_ev0(c, id, WLE_zwp_linux_dmabuf_feedback_v1_tranche_done);
         }
         wayland_ev0(c, id, WLE_zwp_linux_dmabuf_feedback_v1_done);
@@ -7485,8 +6712,6 @@ static void wayland_feedback_flush(struct wayland_client *c)
                 return;
         for (long at = 0; at < c->feedbacks; at++)
         {
-                long object;
-
                 if (!c->feedback[at].need)
                         continue;
                 if (!wayland_out_fd_room(c))
@@ -7495,29 +6720,19 @@ static void wayland_feedback_flush(struct wayland_client *c)
                         break;
                 }
                 c->feedback[at].need = 0;
-                object = wayland_slot_of(c, c->feedback[at].id);
-                if (object >= 0 && c->objects[object].iface == WLI_zwp_linux_dmabuf_feedback_v1)
-                        wayland_feedback_send(c, object);
+                wayland_feedback_send(c, c->feedback[at].id);
         }
-        for (long at = 0; at < c->feedbacks && !more; at++)
-                if (c->feedback[at].need)
-                        more = 1;
         c->feedback_pending = (unsigned char)more;
-        if (c->feedback_pending)
+        if (more)
                 wayland_out_mark(c->slot);
 }
 
-/*
-        What the host takes, read and checked: at least one pair, supported formats, tranches that name pairs there are,
-        and a table to name them in. A host that fails any of it takes no dma-bufs, and the global is not offered.
-*/
 static void wayland_dmabuf_load(void)
 {
         struct wayland_dmabuf_info *info = &wayland.dmabuf;
         long size = 0;
 
-        for (unsigned long at = 0; at < sizeof *info; at++)
-                ((unsigned char *)info)[at] = 0;
+        wayland_zero(info, sizeof *info);
         if (!wayland.host->dmabuf_info(wayland.host->context, info) || info->count < 1 || info->count > WAYLAND_DMABUF_ENTRIES ||
             info->tranches < 1 || info->tranches > WAYLAND_DMABUF_TRANCHES || wayland.host->dmabuf_table(wayland.host->context, &size) < 0 ||
             size != info->count * 16)
@@ -7543,8 +6758,7 @@ static void wayland_dmabuf_load(void)
         }
         return;
 none:
-        info->count = 0;
-        wayland.drm_node[0] = 0;
+        info->count = 0, wayland.drm_node[0] = 0;
 }
 
 static void wayland_global_remove_send(struct wayland_client *c, unsigned long registry, long name)
@@ -7552,74 +6766,43 @@ static void wayland_global_remove_send(struct wayland_client *c, unsigned long r
         wayland_ev(c, registry, WLE_wl_registry_global_remove, (unsigned int)name);
 }
 
-static long wayland_global_name(long iface)
-{
-        for (long at = 0; at < WAYLAND_GLOBAL_COUNT; at++)
-                if (wayland_globals[at].iface == iface)
-                        return at + 1;
-        return 0;
-}
-
 static void wayland_global_flip_notify(long iface, int was_on, int now_on)
 {
-        long name = was_on != now_on ? wayland_global_name(iface) : 0;
+        long name = 0;
 
-        if (!name)
+        if (was_on == now_on)
                 return;
-        for (long slot = 0; slot < wayland.client_slots; slot++)
+        for (long at = 0; at < WAYLAND_GLOBAL_COUNT && !name; at++)
+                if (wayland_globals[at].iface == iface)
+                        name = at + 1;
+        for (long slot = 0; name && slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
-                if (!c)
-                        continue;
-                for (long at = 0; at < c->tbl[WLT_OBJECT].count; at++)
+                for (long at = 0; c && at < c->tbl[WLT_OBJECT].count; at++)
                         if (c->objects[at].iface == WLI_wl_registry)
-                        {
-                                if (now_on)
-                                        wayland_global_send(c, c->objects[at].id, name);
-                                else
-                                        wayland_global_remove_send(c, c->objects[at].id, name);
-                        }
+                                (now_on ? wayland_global_send : wayland_global_remove_send)(c, c->objects[at].id, name);
         }
 }
 
-/*
-        The host's dma-bufs changed (a device came or went, a plane to scan out was found): what is taken is read again,
-        zwp_linux_dmabuf_v1 / wl_drm / wp_linux_drm_syncobj_manager_v1 are advertised or withdrawn on open registries if their
-        availability flipped, and every feedback object of every client is sent it again.
-*/
 WAYLAND_API void wayland_dmabuf_changed(void)
 {
-        int was_dmabuf, was_drm, was_syncobj;
-        int now_dmabuf, now_drm, now_syncobj;
+        int was_db, was_drm, was_so, now_db, now_drm, now_so;
 
         if (!wayland.host)
                 return;
-        was_dmabuf = wayland.dmabuf.count > 0;
-        was_drm = was_dmabuf && wayland.drm_node[0] != 0;
-        was_syncobj = wayland.syncobj_ok != 0;
+        was_db = wayland.dmabuf.count > 0, was_drm = was_db && wayland.drm_node[0], was_so = wayland.syncobj_ok != 0;
         wayland_dmabuf_load();
-        now_dmabuf = wayland.dmabuf.count > 0;
-        now_drm = now_dmabuf && wayland.drm_node[0] != 0;
-        now_syncobj = wayland.syncobj_ok != 0;
-        wayland_global_flip_notify(WLI_zwp_linux_dmabuf_v1, was_dmabuf, now_dmabuf);
+        now_db = wayland.dmabuf.count > 0, now_drm = now_db && wayland.drm_node[0], now_so = wayland.syncobj_ok != 0;
+        wayland_global_flip_notify(WLI_zwp_linux_dmabuf_v1, was_db, now_db);
         wayland_global_flip_notify(WLI_wl_drm, was_drm, now_drm);
-        wayland_global_flip_notify(WLI_wp_linux_drm_syncobj_manager_v1, was_syncobj, now_syncobj);
-        if (!now_dmabuf)
-                return;
-        for (long slot = 0; slot < wayland.client_slots; slot++)
+        wayland_global_flip_notify(WLI_wp_linux_drm_syncobj_manager_v1, was_so, now_so);
+        for (long slot = 0; now_db && slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
-                if (!c)
-                        continue;
-                for (long at = 0; at < c->feedbacks; at++)
-                {
-                        long object = wayland_slot_of(c, c->feedback[at].id);
-
-                        if (object >= 0 && c->objects[object].iface == WLI_zwp_linux_dmabuf_feedback_v1)
-                                wayland_feedback_send(c, object);
-                }
+                for (long at = 0; c && at < c->feedbacks; at++)
+                        wayland_feedback_send(c, c->feedback[at].id);
         }
 }
 
@@ -7629,37 +6812,28 @@ static void wayland_params_free(struct wayland_client *c, struct wayland_params 
                 return;
         for (long plane = 0; plane < 4; plane++)
                 if (p->fd[plane] >= 0)
-                {
-                        wayland.host->close(wayland.host->context, p->fd[plane]);
-                        wayland.fds--;
-                        p->fd[plane] = -1;
-                }
-        p->live = 0;
-        wayland_tbl_free(c, WLT_PARAMS, p - c->params);
+                        wayland.host->close(wayland.host->context, p->fd[plane]), wayland.fds--, p->fd[plane] = -1;
+        p->live = 0, wayland_tbl_free(c, WLT_PARAMS, p - c->params);
 }
 
 static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long width, unsigned long height, unsigned long format,
                                         unsigned long flags, long plane_count, long fds[4], const unsigned long offsets[4],
                                         const unsigned long strides[4], unsigned long modifier, long id_slot)
 {
-        long offset = (long)offsets[0], stride = (long)strides[0], need, pool = -1, buffer = -1, found = 0;
+        long offset = (long)offsets[0], stride = (long)strides[0], pool, buffer, found = 0;
+        long need = (format != WAYLAND_FOURCC_NV12 && (modifier == 0 || modifier == WAYLAND_MODIFIER_INVALID))
+                        ? offset + stride * ((long)height - 1) + (long)width * 4 : offset + stride * (long)height;
+        struct wayland_pool *pl;
+        struct wayland_buffer *b;
         void *at;
 
-        if (format == WAYLAND_FOURCC_NV12)
-                need = offset + stride * (long)height;
-        else if (modifier == 0 || modifier == WAYLAND_MODIFIER_INVALID)
-                need = offset + stride * ((long)height - 1) + (long)width * 4;
-        else
-                need = offset + stride * (long)height;
-        for (long entry = 0; entry < wayland.dmabuf.count; entry++)
-                found |= wayland.dmabuf.entry[entry].format == format &&
-                         (modifier == WAYLAND_MODIFIER_INVALID || wayland.dmabuf.entry[entry].modifier == modifier);
+        for (long e = 0; e < wayland.dmabuf.count; e++)
+                found |= wayland.dmabuf.entry[e].format == format &&
+                         (modifier == WAYLAND_MODIFIER_INVALID || wayland.dmabuf.entry[e].modifier == modifier);
         if (!found || (flags & ~1UL) || need < 1)
                 return -2;
         pool = wayland_tbl_alloc(c, WLT_POOL);
         buffer = pool >= 0 ? wayland_tbl_alloc(c, WLT_BUFFER) : -1;
-        // A buffer of a modifier that is a layout of tiles (not linear, nor the implicit one) has nothing the processor can read: the host is
-        // asked to take it unmapped (a size below zero), and its pictures are the card's to read (no pixels).
         at = buffer >= 0 ? wayland.host->dmabuf_map(wayland.host->context, fds[0], modifier && modifier != WAYLAND_MODIFIER_INVALID ? -need : need) : 0;
         if (!at)
         {
@@ -7669,56 +6843,22 @@ static long wayland_dmabuf_alloc_buffer(struct wayland_client *c, unsigned long 
                         wayland_tbl_free(c, WLT_POOL, pool);
                 return -2;
         }
-        c->pools[pool].live = 1;
-        c->pools[pool].fd = fds[0];
-        fds[0] = -1; // the pool holds it now, and wayland.fds still counts it
+        pl = &c->pools[pool], b = &c->buffers[buffer];
+        pl->live = pl->dmabuf = pl->refs = pl->gone = 1, pl->fd = fds[0], fds[0] = -1;
         for (long k = 0; k < 3; k++)
-        {
-                c->pools[pool].extra_fd[k] = (k + 1 < plane_count) ? fds[k + 1] : -1;
-                if (k + 1 < plane_count)
-                        fds[k + 1] = -1;
-        }
-        c->pools[pool].dmabuf = 1;
-        c->pools[pool].unmapped = (at == WAYLAND_DMABUF_UNMAPPED);
-        c->pools[pool].size = need;
-        c->pools[pool].refs = 1;
-        c->pools[pool].gone = 1;
-        c->pools[pool].id = ++wayland.pool_id;
-        c->pools[pool].at = c->pools[pool].unmapped ? 0 : at;
-        c->buffers[buffer].live = 1;
-        c->buffers[buffer].pool = pool;
-        c->buffers[buffer].offset = offset;
-        c->buffers[buffer].width = (long)width;
-        c->buffers[buffer].height = (long)height;
-        c->buffers[buffer].stride = stride;
-        c->buffers[buffer].format = wayland_shm_format_of((unsigned int)format);
-        c->buffers[buffer].fourcc = (unsigned int)format;
-        c->buffers[buffer].modifier = modifier;
-        c->buffers[buffer].plane_count = plane_count;
-        for (long k = 0; k < 4; k++)
-        {
-                c->buffers[buffer].plane_offset[k] = k < plane_count ? offsets[k] : 0;
-                c->buffers[buffer].plane_stride[k] = k < plane_count ? strides[k] : 0;
-        }
-        c->buffers[buffer].y_invert = (flags & 1) ? 1 : 0;
-        c->buffers[buffer].rel_pending = 0;
-        c->buffers[buffer].explicit_sync = 0;
-        c->buffers[buffer].id = c->objects[id_slot].id;
-        c->buffers[buffer].held = c->buffers[buffer].zombie = 0;
-        c->objects[id_slot].link = (int)buffer;
-        c->dmabufs++;
-        wayland.dmabufs++;
-        wayland.pools++;
-        wayland.buffers++;
+                pl->extra_fd[k] = k + 1 < plane_count ? fds[k + 1] : -1, fds[k + 1] = k + 1 < plane_count ? -1 : fds[k + 1];
+        pl->unmapped = (at == WAYLAND_DMABUF_UNMAPPED), pl->size = need, pl->id = ++wayland.pool_id, pl->at = pl->unmapped ? 0 : at;
+        b->live = 1, b->pool = pool, b->offset = offset, b->width = (long)width, b->height = (long)height, b->stride = stride;
+        b->format = format == WAYLAND_FOURCC_ARGB8888 ? WLN_wl_shm_format_argb8888
+                    : format == WAYLAND_FOURCC_XRGB8888 ? WLN_wl_shm_format_xrgb8888 : (long)format;
+        b->fourcc = (unsigned int)format, b->modifier = modifier, b->plane_count = plane_count;
+        for (long k = 0; k < plane_count; k++)
+                b->plane_offset[k] = offsets[k], b->plane_stride[k] = strides[k];
+        b->y_invert = (unsigned char)(flags & 1), b->id = c->objects[id_slot].id, c->objects[id_slot].link = (int)buffer;
+        c->dmabufs++, wayland.dmabufs++, wayland.pools++, wayland.buffers++;
         return buffer;
 }
 
-/*
-        The buffer a params object describes, or why not: buffer index >= 0, -1 for the protocol error already queued,
-        -2 for a buffer that cannot be made (async: failed; immediate: invalid_wl_buffer). The descriptors go to a pool of
-        their own.
-*/
-/* Shared dma-buf/prime plane geometry validation: returns 0 OK, 1 incomplete, 2 dims, 3 format, 4 bounds. */
 static int wayland_dmabuf_validate(unsigned long width, unsigned long height, unsigned long format,
                                    long plane_count, int linear, const unsigned long *offsets, const unsigned long *strides)
 {
@@ -7728,22 +6868,12 @@ static int wayland_dmabuf_validate(unsigned long width, unsigned long height, un
                 return 2;
         if (!wayland_fourcc_supported((unsigned int)format))
                 return 3;
-        if (format == WAYLAND_FOURCC_NV12)
-        {
-                if (plane_count != 2 || (width & 1) || (height & 1))
-                        return 1;
-                if (offsets[0] > 0x7fffffffUL || offsets[1] > 0x7fffffffUL || strides[0] > (1UL << 20) || strides[1] > (1UL << 20) ||
-                    strides[0] < width || strides[1] < width)
-                        return 4;
-                return 0;
-        }
-        if (linear && plane_count != 1)
+        if (format == WAYLAND_FOURCC_NV12 ? (plane_count != 2 || (width & 1) || (height & 1)) : (linear && plane_count != 1))
                 return 1;
-        if (offsets[0] > 0x7fffffffUL || strides[0] == 0 || strides[0] > (1UL << 20) ||
-            (linear && (strides[0] < width * 4 || (strides[0] & 3))))
+        if (format != WAYLAND_FOURCC_NV12 && (!strides[0] || (linear && (strides[0] < width * 4 || (strides[0] & 3)))))
                 return 4;
-        for (long k = 1; k < plane_count; k++)
-                if (offsets[k] > 0x7fffffffUL || strides[k] > (1UL << 20))
+        for (long k = 0; k < plane_count; k++)
+                if (offsets[k] > 0x7fffffffUL || strides[k] > (1UL << 20) || (format == WAYLAND_FOURCC_NV12 && strides[k] < width))
                         return 4;
         return 0;
 }
@@ -7753,29 +6883,23 @@ static long wayland_dmabuf_make(struct wayland_client *c, struct wayland_object 
 {
         unsigned long width = a[0].u, height = a[1].u, format = a[2].u, flags = a[3].u;
         long plane_count = 0;
-        int linear, err;
+        int err;
 
-        p->used = 1; // a params object used (and checked unused before, by the request) makes one buffer, made or not
+        p->used = 1;
         for (long k = 0; k < 4; k++)
-        {
-                if (p->fd[k] < 0)
-                        continue;
-                if (k != plane_count)
+                if (p->fd[k] >= 0 && k != plane_count++)
                         return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_incomplete, "planes must be contiguous from 0"), -1;
-                plane_count++;
-        }
-        linear = p->modifier[0] == 0 || p->modifier[0] == WAYLAND_MODIFIER_INVALID;
-        err = wayland_dmabuf_validate(width, height, format, plane_count, linear, p->offset, p->stride);
+        err = wayland_dmabuf_validate(width, height, format, plane_count, p->modifier[0] == 0 || p->modifier[0] == WAYLAND_MODIFIER_INVALID,
+                                      p->offset, p->stride);
         if (err)
         {
-                static const unsigned int codes[5] = {0, WLN_zwp_linux_buffer_params_v1_error_incomplete,
-                                                      WLN_zwp_linux_buffer_params_v1_error_invalid_dimensions,
-                                                      WLN_zwp_linux_buffer_params_v1_error_invalid_format,
-                                                      WLN_zwp_linux_buffer_params_v1_error_out_of_bounds};
-                static const char *const msgs[5] = {0, "incomplete planes", "the size is out of range",
-                                                    "the format is not offered", "the plane does not fit its size"};
-
-                return wayland_fail(c, self->id, codes[err], msgs[err]), -1;
+                static const struct { unsigned int code; const char *msg; } errs[5] = {
+                        {0, 0}, {WLN_zwp_linux_buffer_params_v1_error_incomplete, "incomplete planes"},
+                        {WLN_zwp_linux_buffer_params_v1_error_invalid_dimensions, "the size is out of range"},
+                        {WLN_zwp_linux_buffer_params_v1_error_invalid_format, "the format is not offered"},
+                        {WLN_zwp_linux_buffer_params_v1_error_out_of_bounds, "the plane does not fit its size"},
+                };
+                return wayland_fail(c, self->id, errs[err].code, errs[err].msg), -1;
         }
         for (long k = 1; k < plane_count; k++)
                 if (p->modifier[k] != p->modifier[0])
@@ -7786,52 +6910,38 @@ static long wayland_dmabuf_make(struct wayland_client *c, struct wayland_object 
 static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_params *p;
-        long slot;
 
-        switch (self->iface)
+        if (self->iface == WLI_zwp_linux_dmabuf_v1)
         {
-        case WLI_zwp_linux_dmabuf_v1:
                 if (op == WLQ_zwp_linux_dmabuf_v1_create_params)
                 {
                         long index = wayland_tbl_alloc(c, WLT_PARAMS);
 
                         if (index < 0)
                                 return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for buffer params");
-                        c->params[index].id = c->objects[a[0].slot].id;
-                        c->params[index].live = 1;
+                        p = &c->params[index], p->id = c->objects[a[0].slot].id, p->live = 1, c->objects[a[0].slot].link = (int)index;
                         for (long plane = 0; plane < 4; plane++)
-                                c->params[index].fd[plane] = -1;
-                        c->objects[a[0].slot].link = (int)index;
+                                p->fd[plane] = -1;
                 }
                 else if (op == WLQ_zwp_linux_dmabuf_v1_get_default_feedback || op == WLQ_zwp_linux_dmabuf_v1_get_surface_feedback)
                 {
                         if (!wayland_tbl_reach(c, WLT_FEEDBACK, c->feedbacks + 1))
                                 return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for the feedback");
-                        c->feedback[c->feedbacks].need = 0;
-                        c->feedback[c->feedbacks++].id = c->objects[a[0].slot].id;
-                        wayland_feedback_send(c, a[0].slot);
+                        c->feedback[c->feedbacks].need = 0, c->feedback[c->feedbacks++].id = c->objects[a[0].slot].id;
+                        wayland_feedback_send(c, c->objects[a[0].slot].id);
                 }
                 return WAYLAND_OK;
-        case WLI_zwp_linux_dmabuf_feedback_v1:
+        }
+        if (self->iface == WLI_zwp_linux_dmabuf_feedback_v1)
+        {
                 for (long at = 0; at < c->feedbacks; at++)
                         if (c->feedback[at].id == self->id)
-                        {
-                                c->feedbacks--;
-                                c->feedback[at].id = c->feedback[c->feedbacks].id;
-                                c->feedback[at].need = c->feedback[c->feedbacks].need;
-                                c->feedback[c->feedbacks].need = 0;
-                                break;
-                        }
+                                return c->feedback[at] = c->feedback[--c->feedbacks], c->feedback[c->feedbacks].need = 0, WAYLAND_OK;
                 return WAYLAND_OK;
-        default:
-                break;
         }
         p = &c->params[self->link];
         if (op == WLQ_zwp_linux_buffer_params_v1_destroy)
-        {
-                wayland_params_free(c, p);
-                return WAYLAND_OK;
-        }
+                return wayland_params_free(c, p), WAYLAND_OK;
         if (p->used)
                 return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_already_used, "the params were used");
         if (op == WLQ_zwp_linux_buffer_params_v1_add)
@@ -7842,77 +6952,47 @@ static int wayland_dmabuf_request(struct wayland_client *c, struct wayland_objec
                         return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_plane_idx, "no such plane");
                 if (p->fd[plane] >= 0)
                         return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_plane_set, "the plane is set");
-                p->fd[plane] = a[0].fd; // held until the params are used or destroyed
-                a[0].fd = -1;
-                p->offset[plane] = a[2].u;
-                p->stride[plane] = a[3].u;
-                p->modifier[plane] = a[4].u << 32 | a[5].u;
+                p->fd[plane] = a[0].fd, a[0].fd = -1;
+                p->offset[plane] = a[2].u, p->stride[plane] = a[3].u, p->modifier[plane] = a[4].u << 32 | a[5].u;
                 return WAYLAND_OK;
         }
         if (op == WLQ_zwp_linux_buffer_params_v1_set_sampling_device)
                 return WAYLAND_OK;
-        if (op == WLQ_zwp_linux_buffer_params_v1_create)
         {
-                unsigned long id = wayland_server_id(c);
-                long object = id ? wayland_object_new(c, id, WLI_wl_buffer, 1) : -1, made;
-                struct wayland_arg wa[4] = {a[0], a[1], a[2], a[3]};
+                int immed = op != WLQ_zwp_linux_buffer_params_v1_create;
+                unsigned long id = immed ? 0 : wayland_server_id(c);
+                long obj = immed ? a[0].slot : (id ? wayland_object_new(c, id, WLI_wl_buffer, 1) : -1);
+                long made = obj >= 0 ? wayland_dmabuf_make(c, self, p, a + immed, obj) : (p->used = 1, -2);
 
-                made = object >= 0 ? wayland_dmabuf_make(c, self, p, wa, object) : (p->used = 1, -2);
+                if (made < 0 && !immed && obj >= 0)
+                        wayland_object_free(c, obj);
                 if (made == -1)
-                {
-                        if (object >= 0)
-                                wayland_object_free(c, object);
                         return WAYLAND_DEAD;
-                }
                 if (made < 0)
-                {
-                        if (object >= 0)
-                                wayland_object_free(c, object);
-                        wayland_ev0(c, self->id, WLE_zwp_linux_buffer_params_v1_failed);
-                        return WAYLAND_OK;
-                }
-                wayland_ev(c, self->id, WLE_zwp_linux_buffer_params_v1_created, (unsigned int)id);
+                        return immed ? wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_wl_buffer, "the buffer cannot be made")
+                                     : (wayland_ev0(c, self->id, WLE_zwp_linux_buffer_params_v1_failed), WAYLAND_OK);
+                if (!immed)
+                        wayland_ev(c, self->id, WLE_zwp_linux_buffer_params_v1_created, (unsigned int)id);
                 return WAYLAND_OK;
         }
-        // create_immed: the buffer is the id the client chose, and a buffer that cannot be made is the client's error.
-        slot = a[0].slot;
-        {
-                struct wayland_arg wa[4] = {a[1], a[2], a[3], a[4]};
-                long made = wayland_dmabuf_make(c, self, p, wa, slot);
-
-                if (made == -1)
-                        return WAYLAND_DEAD;
-                if (made < 0)
-                        return wayland_fail(c, self->id, WLN_zwp_linux_buffer_params_v1_error_invalid_wl_buffer, "the buffer cannot be made");
-        }
-        return WAYLAND_OK;
 }
 
 static int wayland_drm_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         if (op == WLQ_wl_drm_authenticate)
-        {
-                wayland_ev0(c, self->id, WLE_wl_drm_authenticated);
-                return WAYLAND_OK;
-        }
+                return wayland_ev0(c, self->id, WLE_wl_drm_authenticated), WAYLAND_OK;
         if (op == WLQ_wl_drm_create_prime_buffer)
         {
-                long width = a[2].i, height = a[3].i;
-                unsigned long format = a[4].u;
-                long fds[4] = {a[1].fd, -1, -1, -1};
-                unsigned long offsets[4] = {(unsigned long)a[5].i, (unsigned long)a[7].i, (unsigned long)a[9].i, 0};
-                unsigned long strides[4] = {(unsigned long)a[6].i, (unsigned long)a[8].i, (unsigned long)a[10].i, 0};
-                long plane_count = format == WAYLAND_FOURCC_NV12 ? 2 : 1;
-                long made;
+                unsigned long w = (unsigned long)a[2].i, h = (unsigned long)a[3].i, fmt = a[4].u;
+                long fds[4] = {a[1].fd, -1, -1, -1}, planes = fmt == WAYLAND_FOURCC_NV12 ? 2 : 1, made;
+                unsigned long off[4] = {(unsigned long)a[5].i, (unsigned long)a[7].i, (unsigned long)a[9].i, 0};
+                unsigned long str[4] = {(unsigned long)a[6].i, (unsigned long)a[8].i, (unsigned long)a[10].i, 0};
 
-                if (wayland_dmabuf_validate((unsigned long)width, (unsigned long)height, format, plane_count, 1, offsets, strides))
+                if (wayland_dmabuf_validate(w, h, fmt, planes, 1, off, str))
                         return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_format, "invalid prime buffer parameters");
-                made = wayland_dmabuf_alloc_buffer(c, (unsigned long)width, (unsigned long)height, format, 0, plane_count, fds, offsets,
-                                                   strides, WAYLAND_MODIFIER_INVALID, a[0].slot);
-                a[1].fd = fds[0]; // -1 if taken by pool
-                if (made < 0)
-                        return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_name, "cannot import prime buffer");
-                return WAYLAND_OK;
+                made = wayland_dmabuf_alloc_buffer(c, w, h, fmt, 0, planes, fds, off, str, WAYLAND_MODIFIER_INVALID, a[0].slot);
+                a[1].fd = fds[0];
+                return made < 0 ? wayland_fail(c, self->id, WLN_wl_drm_error_invalid_name, "cannot import prime buffer") : WAYLAND_OK;
         }
         return wayland_fail(c, self->id, WLN_wl_drm_error_invalid_name, "flink buffer names are not supported");
 }
@@ -7932,19 +7012,11 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
                         if (idx < 0)
                                 return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a syncobj timeline");
                         handle = wayland.syncobj.import ? wayland.syncobj.import(wayland.syncobj.context, a[1].fd) : -1;
-                        wayland.host->close(wayland.host->context, a[1].fd);
-                        wayland.fds--;
-                        a[1].fd = -1;
+                        wayland.host->close(wayland.host->context, a[1].fd), wayland.fds--, a[1].fd = -1;
                         if (handle < 0)
-                        {
-                                wayland_tbl_free(c, WLT_TIMELINE, idx);
-                                return wayland_fail(c, self->id, WLN_wp_linux_drm_syncobj_manager_v1_error_invalid_timeline,
-                                                    "invalid drm syncobj timeline fd");
-                        }
-                        c->timelines[idx].live = 1;
-                        c->timelines[idx].handle = handle;
-                        c->objects[a[0].slot].link = (int)idx;
-                        return WAYLAND_OK;
+                                return wayland_tbl_free(c, WLT_TIMELINE, idx),
+                                       wayland_fail(c, self->id, WLN_wp_linux_drm_syncobj_manager_v1_error_invalid_timeline, "invalid drm syncobj timeline fd");
+                        c->timelines[idx].live = 1, c->timelines[idx].handle = handle, c->objects[a[0].slot].link = (int)idx;
                 }
                 return WAYLAND_OK;
         }
@@ -7953,67 +7025,35 @@ static int wayland_syncobj_request(struct wayland_client *c, struct wayland_obje
                 long idx = self->link;
 
                 if (idx >= 0 && idx < c->tbl[WLT_TIMELINE].count && c->timelines[idx].live)
-                {
-                        c->timelines[idx].gone = 1;
-                        wayland_timeline_unref(c, idx);
-                }
+                        c->timelines[idx].gone = 1, wayland_timeline_unref(c, idx);
                 return WAYLAND_OK;
         }
         s = wayland_surface_of(c, self - c->objects);
         if (op == WLQ_wp_linux_drm_syncobj_surface_v1_destroy)
         {
                 if (s)
-                {
-                        s->syncobj_id = 0;
-                        s->pending.sync_acq_set = s->pending.sync_rel_set = 0;
-                }
+                        s->syncobj_id = 0, s->pending.sync_acq_set = s->pending.sync_rel_set = 0;
                 return WAYLAND_OK;
         }
         if (!s)
                 return wayland_fail(c, self->id, WLN_wp_linux_drm_syncobj_surface_v1_error_no_surface, "the surface is gone");
-        if (op == WLQ_wp_linux_drm_syncobj_surface_v1_set_acquire_point)
+        if (op == WLQ_wp_linux_drm_syncobj_surface_v1_set_acquire_point || op == WLQ_wp_linux_drm_syncobj_surface_v1_set_release_point)
         {
                 long tl = a[0].slot >= 0 ? c->objects[a[0].slot].link : -1;
+                unsigned long long pt = ((unsigned long long)a[1].u << 32) | a[2].u;
 
                 if (tl < 0 || tl >= c->tbl[WLT_TIMELINE].count || !c->timelines[tl].live)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "invalid syncobj timeline");
-                s->pending.sync_acq_set = 1;
-                s->pending.sync_acq_slot = (unsigned short)tl;
-                s->pending.sync_acq_point = ((unsigned long long)a[1].u << 32) | a[2].u;
-                return WAYLAND_OK;
-        }
-        if (op == WLQ_wp_linux_drm_syncobj_surface_v1_set_release_point)
-        {
-                long tl = a[0].slot >= 0 ? c->objects[a[0].slot].link : -1;
-
-                if (tl < 0 || tl >= c->tbl[WLT_TIMELINE].count || !c->timelines[tl].live)
-                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "invalid syncobj timeline");
-                s->pending.sync_rel_set = 1;
-                s->pending.sync_rel_slot = (unsigned short)tl;
-                s->pending.sync_rel_point = ((unsigned long long)a[1].u << 32) | a[2].u;
-                return WAYLAND_OK;
+                if (op == WLQ_wp_linux_drm_syncobj_surface_v1_set_acquire_point)
+                        s->pending.sync_acq_set = 1, s->pending.sync_acq_slot = (unsigned short)tl, s->pending.sync_acq_point = pt;
+                else
+                        s->pending.sync_rel_set = 1, s->pending.sync_rel_slot = (unsigned short)tl, s->pending.sync_rel_point = pt;
         }
         return WAYLAND_OK;
 }
 
-/* ---- games: the pointer held, motion without a place, and what a game asks of the desktop ---- */
+/* ---- relative pointer, direct input, pointer constraints ---- */
 
-/*
-        A game takes the pointer for its camera: zwp_pointer_constraints_v1 locks it (the pointer stays where it is, is not
-        drawn, and the hand's counts go to the game, through zwp_relative_pointer_v1, as they are, unaccelerated) or confines
-        it to the window. A lock or confinement holds only while its window is under the pointer and has the keys, so
-        Alt-Tab, a click elsewhere, the window going or its client going end it at once, and the compositor's own chords are
-        taken before any client sees them: no client can keep the pointer from the person. One holds at a time, the first of the
-        clients in order that qualifies. A one-shot constraint ends the first time it is let go, a persistent one holds again
-        when its window qualifies again. A confinement is to the whole window whatever region was named, which the protocol
-        allows. Relative motion is also sent for every move of the pointer over a client's window, as the places differ.
-        Idle inhibitors are taken and do nothing (the compositor has no idle to inhibit), a keyboard shortcuts inhibitor is
-        taken and never made active (the compositor's chords are not a client's to take), and tearing control is taken and does
-        nothing (frames are paced to the screen). Each of those is one a surface.
-*/
-
-// Relative motion to the relative pointers of a client, in the surface's units: the motion with the gain and the hand's counts.
-// How many it went to.
 static long wayland_relative_send(struct wayland_client *c, long scale120, long dx, long dy, long udx, long udy, long micro)
 {
         long sent = 0;
@@ -8021,20 +7061,11 @@ static long wayland_relative_send(struct wayland_client *c, long scale120, long 
                                        (unsigned int)wayland_fixed(dy, scale120), (unsigned int)wayland_fixed(udx, scale120),
                                        (unsigned int)wayland_fixed(udy, scale120)};
 
-        for (long at = 0; at < c->relative_ids.count; at++)
-        {
-                long slot = wayland_slot_of(c, c->relative_ids.id[at]);
-
-                if (slot < 0 || c->objects[slot].iface != WLI_zwp_relative_pointer_v1)
-                        continue;
-                wayland_emit(c, c->relative_ids.id[at], WLE_zwp_relative_pointer_v1_relative_motion, words, 6);
-                sent++;
-        }
+        for (long at = 0, slot; (slot = wayland_ids_next(c, &c->relative_ids, WLI_zwp_relative_pointer_v1, &at)) >= 0; sent++)
+                wayland_emit(c, c->objects[slot].id, WLE_zwp_relative_pointer_v1_relative_motion, words, 6);
         return sent;
 }
 
-// The counts kept for the frame of the pointer's next motion (wayland_pointer_relative), sent now: in that frame (frame 0, the
-// motion's own closes it) or in one of their own. A client with no relative pointer is sent nothing, no empty frame either.
 static void wayland_counts_send(int frame)
 {
         struct wayland_client *c;
@@ -8042,24 +7073,12 @@ static void wayland_counts_send(int frame)
         long row = wayland.counts_row;
 
         wayland.counts_row = -1;
-        if (row < 0 || !(s = wayland_row_surface(row, &c)) ||
-            !wayland_relative_send(c, s->scale120, wayland.counts[0], wayland.counts[1], wayland.counts[2], wayland.counts[3],
-                                   wayland.counts_micro) ||
-            !frame)
-                return;
-        wayland_pointer_frames(c);
+        if (row >= 0 && (s = wayland_row_surface(row, &c)) &&
+            wayland_relative_send(c, s->scale120, wayland.counts[0], wayland.counts[1], wayland.counts[2], wayland.counts[3],
+                                  wayland.counts_micro) && frame)
+                wayland_pointer_frames(c);
 }
 
-/*
-        One report of the hand (dx, dy with the gain, udx, udy as the hand gave them, micro the device's microsecond), to the client
-        whose window holds the pointer locked or confined, or with none held to the one the pointer is over. Locked, it is sent at
-        once in a wl_pointer frame of its own: no place moves. Free or confined the pointer moves too, and the reports' counts are
-        kept and go in the frame of the place's motion (wayland_pointer_motion), the reports read together summed as their places
-        are; what no motion took (the pointer stopped at an edge) is sent in a frame of its own by wayland_pointer_counts_flush, as
-        the host's pass ends. In one frame because Xwayland reads an X game's raw input from the relative motion of a frame and
-        makes a raw event of the place itself when a frame has a place and no relative motion: an X client was sent the pointer's
-        screen position as raw motion, once a report. A drag holds the pointer for itself.
-*/
 WAYLAND_API void wayland_pointer_relative(long row, long dx, long dy, long udx, long udy, long micro)
 {
         struct wayland_client *c;
@@ -8068,98 +7087,68 @@ WAYLAND_API void wayland_pointer_relative(long row, long dx, long dy, long udx, 
         if (!wayland.host || !s || row != (wayland.hold_mode ? wayland.hold_row : wayland.pointer_row) || wayland_dragging() ||
             !c->relative_ids.count)
                 return;
-        if (wayland.hold_mode != 1)
+        if (wayland.hold_mode == 1)
         {
-                if (wayland.counts_row != row)
-                {
-                        wayland_counts_send(1);
-                        wayland.counts[0] = wayland.counts[1] = wayland.counts[2] = wayland.counts[3] = 0;
-                        wayland.counts_row = row;
-                }
-                wayland.counts[0] += dx, wayland.counts[1] += dy, wayland.counts[2] += udx, wayland.counts[3] += udy;
-                wayland.counts_micro = micro;
+                if (wayland_relative_send(c, s->scale120, dx, dy, udx, udy, micro))
+                        wayland_pointer_frames(c);
                 return;
         }
-        if (wayland_relative_send(c, s->scale120, dx, dy, udx, udy, micro))
-                wayland_pointer_frames(c);
+        if (wayland.counts_row != row)
+                wayland_counts_send(1), wayland_zero(wayland.counts, sizeof wayland.counts), wayland.counts_row = row;
+        wayland.counts[0] += dx, wayland.counts[1] += dy, wayland.counts[2] += udx, wayland.counts[3] += udy;
+        wayland.counts_micro = micro;
 }
 
-// The counts no motion took, in a frame of their own (the host's pass ends with it).
 WAYLAND_API void wayland_pointer_counts_flush(void)
 {
         if (wayland.host)
                 wayland_counts_send(1);
 }
 
-/*
-        What the compositor's input thread needs to send a locked pointer's report itself, as wayland_pointer_relative would send it: the
-        ids of row's client's relative pointers (each a relative_motion) and of its pointers that take a frame (version 5 on, a frame each
-        after them), and its surface's scale; the client's slot and one, or 0 when the report would not be sent so (no host, no surface, the
-        pointer not held locked on row, a drag, no relative pointer, more ids than room). Asked by the loop, whose state this reads.
-*/
+static int wayland_ids_collect(struct wayland_client *c, const struct wayland_ids *ids, long iface, long min_ver,
+                               unsigned int *out, long *count, long room)
+{
+        long n = 0;
+
+        for (long at = 0, slot; (slot = wayland_ids_next(c, ids, iface, &at)) >= 0;)
+        {
+                if (c->objects[slot].version < min_ver)
+                        continue;
+                if (n >= room)
+                        return 0;
+                out[n++] = (unsigned int)c->objects[slot].id;
+        }
+        *count = n;
+        return 1;
+}
+
 WAYLAND_API long wayland_pointer_direct(long row, unsigned int *relative, long *relatives, unsigned int *frames, long *framed, long room,
                                         long *scale120)
 {
         struct wayland_client *c;
         struct wayland_surface *s = wayland_row_surface(row, &c);
-        const struct wayland_ids *ids;
 
         *relatives = *framed = 0;
-        if (!wayland.host || !s || wayland.hold_mode != 1 || row != wayland.hold_row || wayland_dragging() || !c->relative_ids.count)
+        if (!wayland.host || !s || wayland.hold_mode != 1 || row != wayland.hold_row || wayland_dragging() || !c->relative_ids.count ||
+            !wayland_ids_collect(c, &c->relative_ids, WLI_zwp_relative_pointer_v1, 1, relative, relatives, room) ||
+            !wayland_ids_collect(c, &c->seat_ids[0], WLI_wl_pointer, 5, frames, framed, room))
                 return 0;
-        for (long at = 0; at < c->relative_ids.count; at++)
-        {
-                long slot = wayland_slot_of(c, c->relative_ids.id[at]);
-
-                if (slot < 0 || c->objects[slot].iface != WLI_zwp_relative_pointer_v1)
-                        continue;
-                if (*relatives == room)
-                        return 0;
-                relative[(*relatives)++] = (unsigned int)c->relative_ids.id[at];
-        }
-        ids = &c->seat_ids[0];
-        for (long at = 0; at < ids->count; at++)
-        {
-                long slot = wayland_slot_of(c, ids->id[at]);
-
-                if (slot < 0 || c->objects[slot].iface != WLI_wl_pointer || c->objects[slot].version < 5)
-                        continue;
-                if (*framed == room)
-                        return 0;
-                frames[(*framed)++] = (unsigned int)ids->id[at];
-        }
         *scale120 = s->scale120;
         return *relatives ? c->slot + 1 : 0;
 }
 
-/*
-        What the input thread needs to send a key to the window that has the keys itself, as wayland_key would send it: the ids of row's
-        client's keyboards and where its serials are counted (taken there atomically, as wayland_serial takes them); the client's slot and
-        one, or 0 when a key would not be sent so (no host, row not the keyboard's, no surface, a drag, no keyboard, more than room).
-*/
 WAYLAND_API long wayland_keyboard_direct(long row, unsigned int *ids, long *count, long room, unsigned long **serial)
 {
         struct wayland_client *c;
-        long made = 0;
 
         *count = 0;
-        if (!wayland.host || row != wayland.keyboard_row || !wayland_row_surface(row, &c) || wayland_dragging())
+        if (!wayland.host || row != wayland.keyboard_row || !wayland_row_surface(row, &c) || wayland_dragging() ||
+            !wayland_ids_collect(c, wayland_seat_ids(c, WLI_wl_keyboard), WLI_wl_keyboard, 1, ids, count, room) || !*count)
                 return 0;
-        for (long at = 0, slot; (slot = wayland_seat_next(c, WLI_wl_keyboard, &at)) >= 0;)
-        {
-                if (made >= room)
-                        return 0;
-                ids[made++] = (unsigned int)c->objects[slot].id;
-        }
-        if (!made)
-                return 0;
-        *count = made;
         *serial = &c->serial;
         return c->slot + 1;
 }
 
-// A key the input thread sent itself (wayland_keyboard_direct), kept as wayland_key keeps one: the keys down, and its serial among the
-// client's input serials (a selection or a popup names one).
 WAYLAND_API void wayland_key_noted(long row, long code, long pressed, unsigned long serial)
 {
         struct wayland_client *c;
@@ -8168,17 +7157,14 @@ WAYLAND_API void wayland_key_noted(long row, long code, long pressed, unsigned l
                 return;
         if (code < 128)
         {
-                if (pressed)
-                        wayland.keys[code >> 3] |= (unsigned char)(1u << (code & 7));
-                else
-                        wayland.keys[code >> 3] &= (unsigned char)~(1u << (code & 7));
+                unsigned char bit = (unsigned char)(1u << (code & 7));
+
+                wayland.keys[code >> 3] = pressed ? (unsigned char)(wayland.keys[code >> 3] | bit) : (unsigned char)(wayland.keys[code >> 3] & ~bit);
         }
-        if (row != wayland.keyboard_row || !wayland_row_surface(row, &c))
-                return;
-        c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)serial;
+        if (row == wayland.keyboard_row && wayland_row_surface(row, &c))
+                c->input_serial[c->input_next++ % WAYLAND_INPUT_SERIALS] = (unsigned int)serial;
 }
 
-// A count of the hand's in the wire's fixed point at a surface's scale (wayland_fixed's), for a sender that is not the loop.
 WAYLAND_API unsigned long wayland_fixed_of(long pixels, long scale120)
 {
         return wayland_units_fixed(pixels, scale120);
@@ -8186,20 +7172,16 @@ WAYLAND_API unsigned long wayland_fixed_of(long pixels, long scale120)
 
 static void wayland_constraint_event(struct wayland_client *c, struct wayland_constraint *con, int on)
 {
-        if (wayland_slot_of(c, con->id) < 0)
-                return;
-        wayland_ev0(c, con->id, con->kind == 1
-                                    ? (on ? WLE_zwp_locked_pointer_v1_locked : WLE_zwp_locked_pointer_v1_unlocked)
-                                    : (on ? WLE_zwp_confined_pointer_v1_confined : WLE_zwp_confined_pointer_v1_unconfined));
+        if (wayland_slot_of(c, con->id) >= 0)
+                wayland_ev0(c, con->id, con->kind == 1
+                                            ? (on ? WLE_zwp_locked_pointer_v1_locked : WLE_zwp_locked_pointer_v1_unlocked)
+                                            : (on ? WLE_zwp_confined_pointer_v1_confined : WLE_zwp_confined_pointer_v1_unconfined));
 }
 
-// A constraint let go of: it says so (unless its object is going), and a one-shot one is over.
 static void wayland_constraint_release(struct wayland_client *c, struct wayland_constraint *con, int say)
 {
         struct wayland_surface *s = con->surface ? &c->surfaces[con->surface - 1] : 0;
 
-        // A lock that held, let go of with a hint on its window's own surface: where in the window's picture the client last drew
-        // the pointer, for the host to show it there (wayland_constraints_update tells it as the hold ends).
         if (con->active && con->kind == 1 && con->hinted && s && s->live && wayland_root_of(c, s) == s && s->row >= 0)
         {
                 long wx, wy, ww, wh;
@@ -8212,49 +7194,32 @@ static void wayland_constraint_release(struct wayland_client *c, struct wayland_
         if (con->active && say)
                 wayland_constraint_event(c, con, 0);
         con->active = 0;
-        if (con->oneshot || !say)
-        {
-                if (con->live)
-                {
-                        con->live = 0;
-                        wayland.constraints--;
-                        wayland_tbl_free(c, WLT_CONSTRAINT, con - c->constraints);
-                }
-        }
+        if ((con->oneshot || !say) && con->live)
+                con->live = 0, wayland.constraints--, wayland_tbl_free(c, WLT_CONSTRAINT, con - c->constraints);
 }
 
-/*
-        Which constraint holds the pointer: the first, of the clients in order, whose window is under the pointer and has the
-        keys, and is not the window the host holds constraints off (wayland_unhold_row). The others that held it are let go, the
-        one that qualifies is told it holds, and the host is told what is held.
-*/
 static void wayland_constraints_update(void)
 {
-        long client = -1, chosen = -1, row = -1, mode = 0;
+        struct wayland_client *owner = 0;
+        struct wayland_constraint *chosen = 0;
+        long row = -1, mode = 0;
 
         if (!wayland.host || (!wayland.constraints && !wayland.hold_mode))
                 return;
-        for (long slot = 0; slot < wayland.client_slots && chosen < 0; slot++)
+        for (long slot = 0; slot < wayland.client_slots && !chosen; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
-                for (long at = 0; c && at < c->tbl[WLT_CONSTRAINT].count && chosen < 0; at++)
+                for (long at = 0; c && at < c->tbl[WLT_CONSTRAINT].count && !chosen; at++)
                 {
                         struct wayland_constraint *con = &c->constraints[at];
-                        struct wayland_surface *surface = con->live && con->surface ? &c->surfaces[con->surface - 1] : 0;
-                        struct wayland_surface *root = surface && surface->live ? wayland_root_of(c, surface) : 0;
+                        struct wayland_surface *s = con->live && con->surface ? &c->surfaces[con->surface - 1] : 0;
+                        struct wayland_surface *root = s && s->live ? wayland_root_of(c, s) : 0;
 
-                        if (root && root->row >= 0 && root->row == wayland.pointer_row &&
+                        if (root && root->row >= 0 && root->row == wayland.pointer_row && root->row != wayland.unheld_row &&
                             (root->row == wayland.keyboard_row ||
-                             ((root->role == WAYLAND_ROLE_POPUP || (root->xsurface && root->u.xwin.popup)) &&
-                              wayland.keyboard_row >= 0 && wayland.row[wayland.keyboard_row].client == slot)) &&
-                            root->row != wayland.unheld_row)
-                        {
-                                client = slot;
-                                chosen = at;
-                                row = root->row;
-                                mode = con->kind;
-                        }
+                             ((root->role == WAYLAND_ROLE_POPUP || (root->xsurface && root->u.xwin.popup)) && wayland_has_keys(c))))
+                                owner = c, chosen = con, row = root->row, mode = con->kind;
                 }
         }
         for (long slot = 0; slot < wayland.client_slots; slot++)
@@ -8262,33 +7227,21 @@ static void wayland_constraints_update(void)
                 struct wayland_client *c = wayland.client[slot];
 
                 for (long at = 0; c && at < c->tbl[WLT_CONSTRAINT].count; at++)
-                        if (c->constraints[at].live && c->constraints[at].active && !(slot == client && at == chosen))
+                        if (c->constraints[at].live && c->constraints[at].active && &c->constraints[at] != chosen)
                                 wayland_constraint_release(c, &c->constraints[at], 1);
         }
-        if (chosen >= 0 && !wayland.client[client]->constraints[chosen].active)
-        {
-                wayland.client[client]->constraints[chosen].active = 1;
-                wayland_constraint_event(wayland.client[client], &wayland.client[client]->constraints[chosen], 1);
-        }
+        if (chosen && !chosen->active)
+                chosen->active = 1, wayland_constraint_event(owner, chosen, 1);
         if (row != wayland.hold_row || mode != wayland.hold_mode)
-        {
-                wayland.hold_row = row;
-                wayland.hold_mode = mode;
-                wayland.host->pointer_hold(wayland.host->context, row, mode);
-        }
+                wayland.hold_row = row, wayland.hold_mode = mode, wayland.host->pointer_hold(wayland.host->context, row, mode);
 }
 
-// The host holds the pointer's constraints off a window (row), or none (-1): a lock or a confinement there is let go of now and
-// taken again, as the protocol's persistent ones are, once the window is not held off.
 WAYLAND_API void wayland_unhold_row(long row)
 {
-        if (row == wayland.unheld_row)
-                return;
-        wayland.unheld_row = row;
-        wayland_constraints_update();
+        if (row != wayland.unheld_row)
+                wayland.unheld_row = row, wayland_constraints_update();
 }
 
-// A surface that is going: its constraints go, and what they held is let go.
 static void wayland_constraints_drop(struct wayland_client *c, long surface)
 {
         for (long at = 0; at < c->tbl[WLT_CONSTRAINT].count; at++)
@@ -8316,34 +7269,62 @@ static int wayland_presentation_request(struct wayland_client *c, struct wayland
         return WAYLAND_OK;
 }
 
-/*
-        xdg-toplevel-icon. An icon is made with pixels or a name (its flags say which: WAYLAND_ICON_CONTENT) and is immutable once it is set
-        on a toplevel (WAYLAND_ICON_SET). set_icon is double-buffered: the toplevel's icon is the one set when its surface next commits,
-        and an icon with neither pixels nor a name resets it to the default. The pixels are not kept: nothing draws an icon yet.
-*/
+static inline struct wayland_client *wayland_client_of(long slot)
+{
+        return slot >= 0 && slot < wayland.client_slots ? wayland.client[slot] : 0;
+}
+
+static inline struct wayland_client *wayland_live_client(long slot)
+{
+        return wayland.host ? wayland_client_of(slot) : 0;
+}
+
+static inline long wayland_now(void)
+{
+        return wayland.host->now(wayland.host->context);
+}
+
+static inline void wayland_fd_close(long fd)
+{
+        wayland.host->close(wayland.host->context, fd);
+        wayland.fds--;
+}
+
+static int wayland_row_suspended(long row)
+{
+        struct wayland_facts facts;
+
+        return wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED);
+}
+
+static inline void wayland_lent_drop(struct wayland_client *c, unsigned int *slot)
+{
+        if (*slot)
+                wayland_let_go(c, *slot - 1), *slot = 0;
+}
+
+static int wayland_tree_has_cb(struct wayland_client *c, struct wayland_surface *root, int which)
+{
+        for (struct wayland_surface *o = root; o; o = wayland_tree_next(c, root, o))
+                if (o->cbq[which].count)
+                        return 1;
+        return 0;
+}
+
+static void wayland_outputs_send(struct wayland_client *c)
+{
+        for (long at = 0; at < c->tbl[WLT_OBJECT].count; at++)
+                if (c->objects[at].iface == WLI_zxdg_output_v1)
+                        wayland_xdg_output_send(c, at, c->objects[at].aux);
+        for (long at = 0; at < c->tbl[WLT_OBJECT].count; at++)
+                if (c->objects[at].iface == WLI_wl_output)
+                        wayland_output_send(c, at);
+}
+
 #define WAYLAND_ICON_CONTENT 1
 #define WAYLAND_ICON_SET 2
 
-static void wayland_icon_set(struct wayland_client *c, long toplevel, long icon)
-{
-        struct wayland_surface *s = wayland_surface_of(c, toplevel);
-
-        if (icon >= 0)
-                c->objects[icon].flags |= WAYLAND_ICON_SET;
-        if (!s || s->role_id != c->objects[toplevel].id)
-                return;
-        s->pending.icon = icon >= 0 && (c->objects[icon].flags & WAYLAND_ICON_CONTENT) ? 1 : 0;
-        if (s->pending.icon)
-                wayland.icons++;
-}
-
-/*
-        The hints a client gives a window, none of which is drawn yet but all of which the compositor can read (wayland_row_*):
-        xdg_system_bell (a ring is taken and sounds nothing yet), xdg_dialog (modal or not, for the toplevel it was made for),
-        wp_content_type (the surface's kind of content, none by default and none on destroy), wp_alpha_modifier (the multiplier
-        a commit shows, opaque by default and again on destroy). A request that does not name a live surface is checked, not
-        taken: the protocol's refusals are the wire's, the rest is the hint.
-*/
+// Window hint protocols (dialog, content type, alpha modifier, fifo, commit timing, toplevel icon, system bell, tearing manager).
 static int wayland_hints_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *s;
@@ -8355,40 +7336,75 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
         case WLI_wp_alpha_modifier_v1:
         case WLI_wp_fifo_manager_v1:
         case WLI_wp_commit_timing_manager_v1:
+        case WLI_wp_tearing_control_manager_v1:
                 return wayland_ext_bind(c, self, op, a, 0);
-        case WLI_xdg_dialog_v1:
-                s = wayland_surface_of(c, self - c->objects);
-                if (op == WLQ_xdg_dialog_v1_set_modal && s)
-                        s->modal = 1;
-                else if ((op == WLQ_xdg_dialog_v1_unset_modal || op == WLQ_xdg_dialog_v1_destroy) && s)
-                        s->modal = 0;
+        case WLI_xdg_toplevel_icon_manager_v1:
+                if (op == WLQ_xdg_toplevel_icon_manager_v1_set_icon)
+                {
+                        long icon = a[1].u ? a[1].slot : -1;
+
+                        if (icon >= 0)
+                                c->objects[icon].flags |= WAYLAND_ICON_SET;
+                        s = wayland_surface_of(c, a[0].slot);
+                        if (s && s->role_id == c->objects[a[0].slot].id)
+                        {
+                                s->pending.icon = icon >= 0 && (c->objects[icon].flags & WAYLAND_ICON_CONTENT) ? 1 : 0;
+                                wayland.icons += s->pending.icon;
+                        }
+                }
                 return WAYLAND_OK;
-        case WLI_wp_content_type_v1:
-                s = wayland_surface_of(c, self - c->objects);
-                if (op == WLQ_wp_content_type_v1_set_content_type && s)
-                        s->content = a[0].u <= WLN_wp_content_type_v1_type_game ? (unsigned int)a[0].u : WLN_wp_content_type_v1_type_none;
-                else if (op == WLQ_wp_content_type_v1_destroy && s)
-                        s->content = WLN_wp_content_type_v1_type_none;
-                return WAYLAND_OK;
-        case WLI_wp_alpha_modifier_surface_v1:
-                s = wayland_surface_of(c, self - c->objects);
-                if (op == WLQ_wp_alpha_modifier_surface_v1_set_multiplier && s)
-                        s->pending.alpha = (unsigned int)a[0].u;
-                else if (op == WLQ_wp_alpha_modifier_surface_v1_destroy && s)
-                        s->pending.alpha = 0xffffffffu;
-                return WAYLAND_OK;
-        case WLI_wp_fifo_v1:
-                // The barrier is the next commit's (wait_barrier); set_barrier is the one the compositor's latch releases.
-                s = wayland_surface_of(c, self - c->objects);
-                if (op == WLQ_wp_fifo_v1_wait_barrier && s)
-                        s->pending.fifo_wait = 1;
-                else if (op == WLQ_wp_fifo_v1_set_barrier && s)
-                        s->pending.barrier = 1;
-                return WAYLAND_OK;
-        case WLI_wp_commit_timer_v1:
-                s = wayland_surface_of(c, self - c->objects);
-                if (op != WLQ_wp_commit_timer_v1_set_timestamp || !s)
+        case WLI_xdg_toplevel_icon_v1:
+                if (op != WLQ_xdg_toplevel_icon_v1_set_name && op != WLQ_xdg_toplevel_icon_v1_add_buffer)
                         return WAYLAND_OK;
+                if (self->flags & WAYLAND_ICON_SET)
+                        return wayland_fail(c, self->id, WLN_xdg_toplevel_icon_v1_error_immutable, "the icon is on a toplevel");
+                if (op == WLQ_xdg_toplevel_icon_v1_add_buffer)
+                {
+                        struct wayland_buffer *b = &c->buffers[c->objects[a[0].slot].link];
+
+                        if (c->pools[b->pool].dmabuf || b->width != b->height || b->width <= 0 || a[1].i < 1)
+                                return wayland_fail(c, self->id, WLN_xdg_toplevel_icon_v1_error_invalid_buffer,
+                                                    "the buffer is not a square of shared memory");
+                }
+                self->flags |= WAYLAND_ICON_CONTENT;
+                return WAYLAND_OK;
+        case WLI_xdg_system_bell_v1:
+                if (op == WLQ_xdg_system_bell_v1_ring)
+                        wayland.bells++;
+                return WAYLAND_OK;
+        default:
+                break;
+        }
+        if (!(s = wayland_surface_of(c, self - c->objects)))
+                return WAYLAND_OK;
+        switch (self->iface)
+        {
+        case WLI_xdg_dialog_v1:
+                if (op == WLQ_xdg_dialog_v1_set_modal)
+                        s->modal = 1;
+                else if (op == WLQ_xdg_dialog_v1_unset_modal || op == WLQ_xdg_dialog_v1_destroy)
+                        s->modal = 0;
+                break;
+        case WLI_wp_content_type_v1:
+                if (op == WLQ_wp_content_type_v1_set_content_type)
+                        s->content = a[0].u <= WLN_wp_content_type_v1_type_game ? (unsigned int)a[0].u : WLN_wp_content_type_v1_type_none;
+                else if (op == WLQ_wp_content_type_v1_destroy)
+                        s->content = WLN_wp_content_type_v1_type_none;
+                break;
+        case WLI_wp_alpha_modifier_surface_v1:
+                if (op == WLQ_wp_alpha_modifier_surface_v1_set_multiplier)
+                        s->pending.alpha = (unsigned int)a[0].u;
+                else if (op == WLQ_wp_alpha_modifier_surface_v1_destroy)
+                        s->pending.alpha = 0xffffffffu;
+                break;
+        case WLI_wp_fifo_v1:
+                if (op == WLQ_wp_fifo_v1_wait_barrier)
+                        s->pending.fifo_wait = 1;
+                else if (op == WLQ_wp_fifo_v1_set_barrier)
+                        s->pending.barrier = 1;
+                break;
+        case WLI_wp_commit_timer_v1:
+                if (op == WLQ_wp_commit_timer_v1_set_timestamp)
                 {
                         unsigned long seconds = ((unsigned long)a[0].u << 32) | (unsigned long)a[1].u;
 
@@ -8400,58 +7416,29 @@ static int wayland_hints_request(struct wayland_client *c, struct wayland_object
                         if (!s->pending.timestamp)
                                 s->pending.timestamp = 1;
                 }
-                return WAYLAND_OK;
-        case WLI_xdg_toplevel_icon_manager_v1:
-                if (op == WLQ_xdg_toplevel_icon_manager_v1_set_icon)
-                        wayland_icon_set(c, a[0].slot, a[1].u ? a[1].slot : -1);
-                return WAYLAND_OK;
-        case WLI_xdg_toplevel_icon_v1:
-                if (op == WLQ_xdg_toplevel_icon_v1_set_name || op == WLQ_xdg_toplevel_icon_v1_add_buffer)
-                {
-                        if (self->flags & WAYLAND_ICON_SET)
-                                return wayland_fail(c, self->id, WLN_xdg_toplevel_icon_v1_error_immutable, "the icon is on a toplevel");
-                }
-                if (op == WLQ_xdg_toplevel_icon_v1_set_name)
-                        self->flags |= WAYLAND_ICON_CONTENT;
-                else if (op == WLQ_xdg_toplevel_icon_v1_add_buffer)
-                {
-                        struct wayland_buffer *b = &c->buffers[c->objects[a[0].slot].link];
-
-                        // A square of shared memory, at a scale of one or more (a dma-buf is not one).
-                        if (c->pools[b->pool].dmabuf || b->width != b->height || b->width <= 0 || a[1].i < 1)
-                                return wayland_fail(c, self->id, WLN_xdg_toplevel_icon_v1_error_invalid_buffer,
-                                                    "the buffer is not a square of shared memory");
-                        self->flags |= WAYLAND_ICON_CONTENT;
-                }
-                return WAYLAND_OK;
-        default: // xdg_system_bell: a ring is counted, and nothing sounds or flashes yet
-                if (self->iface == WLI_xdg_system_bell_v1 && op == WLQ_xdg_system_bell_v1_ring)
-                        wayland.bells++;
-                return WAYLAND_OK;
+                break;
+        default:
+                break;
         }
+        return WAYLAND_OK;
 }
 
-/*
-        xdg-activation. A token is made by the client that asks for one, given a serial of its own input (the one the person's key
-        or button carried to it) and a surface, and given out by its commit: a random 32 digit text, sent in done. A client
-        activates a window with the text: when the token's serial is still one of its client's recent inputs and the token is
-        under ten seconds old, the window is raised and focused (WAYLAND_DO_FOCUS); otherwise the window only wants attention.
-        A token is used once; a token the shim does not know is nothing.
-*/
+// xdg-activation tokens: one-shot 32-hex tokens valid for WAYLAND_TOKEN_MS when backed by a recent input serial.
 static int wayland_token_free(void)
 {
-        long now = wayland.host->now(wayland.host->context);
+        long now = wayland_now(), free_at = -1;
 
         for (long at = 0; at < wayland.tokens; at++)
-                if (wayland.token[at].live && wayland.token[at].committed && now - wayland.token[at].when >= WAYLAND_TOKEN_MS)
-                        wayland.token[at].live = 0;
-        for (long at = 0; at < wayland.tokens; at++)
-                if (!wayland.token[at].live)
-                {
-                        wayland.token[at].gen++;
-                        return (int)at;
-                }
-        // None free: the table grown by one (-1 when the memory is not there).
+        {
+                struct wayland_token *t = &wayland.token[at];
+
+                if (t->live && t->committed && now - t->when >= WAYLAND_TOKEN_MS)
+                        t->live = 0;
+                if (!t->live && free_at < 0)
+                        free_at = at;
+        }
+        if (free_at >= 0)
+                return wayland.token[free_at].gen++, (int)free_at;
         wayland.token_table.unit = sizeof(struct wayland_token);
         if (wayland.tokens >= 0x7fffffffL || !wayland_table_reach(&wayland.token_table, wayland.tokens + 1))
                 return -1;
@@ -8459,17 +7446,6 @@ static int wayland_token_free(void)
         wayland.token[wayland.tokens].live = 0;
         wayland.token[wayland.tokens].gen = 0;
         return (int)wayland.tokens++;
-}
-
-static int wayland_token_make(struct wayland_token *t)
-{
-        unsigned char bytes[16];
-
-        if (!wayland.host->random(wayland.host->context, bytes, (long)sizeof bytes))
-                return 0;
-        memory_into_hex(t->text, bytes, 16);
-        t->text[32] = 0;
-        return 1;
 }
 
 static void wayland_token_forget(long slot)
@@ -8482,7 +7458,6 @@ static void wayland_token_forget(long slot)
                         wayland.token[at].live = 0;
                 live += wayland.token[at].live;
         }
-        // The last token gone with its client: the table let go too, as the rows' tables go with the last window.
         if (!live && wayland.tokens)
         {
                 wayland_table_drop(&wayland.token_table);
@@ -8493,7 +7468,6 @@ static void wayland_token_forget(long slot)
 static int wayland_activation_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         int at = self->link;
-        // The object's token is the one it was given: the slot's live token is another's once the first is used and the slot given again.
         struct wayland_token *t = at >= 0 && at < wayland.tokens && wayland.token[at].live && wayland.token[at].client == c->slot &&
                                           wayland.token[at].gen == self->aux
                                       ? &wayland.token[at] : 0;
@@ -8501,40 +7475,30 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
         if (self->iface == WLI_xdg_activation_v1)
         {
                 struct wayland_surface *s;
-                long now;
 
                 if (op == WLQ_xdg_activation_v1_get_activation_token)
                 {
-                        at = wayland_token_free();
-                        if (at < 0)
+                        if ((at = wayland_token_free()) < 0)
                                 return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for an activation token");
-                        wayland.token[at].live = 1;
-                        wayland.token[at].committed = 0;
-                        wayland.token[at].client = c->slot;
-                        wayland.token[at].serial = 0;
-                        wayland.token[at].text[0] = 0;
-                        c->objects[a[0].slot].link = (int)at;
+                        wayland.token[at] = (struct wayland_token){.live = 1, .client = (int)c->slot, .gen = wayland.token[at].gen};
+                        c->objects[a[0].slot].link = at;
                         c->objects[a[0].slot].aux = wayland.token[at].gen;
                         return WAYLAND_OK;
                 }
                 if (op != WLQ_xdg_activation_v1_activate)
                         return WAYLAND_OK;
-                s = wayland_surface_of(c, a[1].slot);
-                if (!s)
+                if (!(s = wayland_surface_of(c, a[1].slot)))
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
                 for (at = 0; at < wayland.tokens; at++)
                         if (wayland.token[at].live && wayland.token[at].committed &&
                             wayland_name_is(a[0].text, a[0].length, wayland.token[at].text))
                                 break;
-                if (at == wayland.tokens)
-                        return WAYLAND_OK;
+                if (at < wayland.tokens)
                 {
                         struct wayland_token *given = &wayland.token[at];
                         struct wayland_client *issuer = wayland.client[given->client];
-                        int recent;
+                        int recent = wayland_now() - given->when < WAYLAND_TOKEN_MS;
 
-                        now = wayland.host->now(wayland.host->context);
-                        recent = now - given->when < WAYLAND_TOKEN_MS;
                         given->live = 0;
                         if (recent && issuer && s->row >= 0 && wayland_input_serial_ok(issuer, given->serial))
                         {
@@ -8546,71 +7510,55 @@ static int wayland_activation_request(struct wayland_client *c, struct wayland_o
                 }
                 return WAYLAND_OK;
         }
-        // xdg_activation_token_v1: a serial (set_serial), the surface and app id are kept for nothing else, and a commit gives the token out.
+        if (!t || t->committed)
+                return WAYLAND_OK;
         if (op == WLQ_xdg_activation_token_v1_set_serial)
-        {
-                if (t && !t->committed)
-                        t->serial = (unsigned long)a[0].u;
-        }
+                t->serial = (unsigned long)a[0].u;
         else if (op == WLQ_xdg_activation_token_v1_commit)
         {
-                if (t && !t->committed)
+                unsigned char bytes[16];
+
+                if (!wayland.host->random(wayland.host->context, bytes, (long)sizeof bytes))
                 {
-                        if (!wayland_token_make(t))
-                        {
-                                t->live = 0;
-                                return WAYLAND_OK;
-                        }
-                        t->committed = 1;
-                        t->when = wayland.host->now(wayland.host->context);
-                        wayland_ev_str(c, self->id, WLE_xdg_activation_token_v1_done, t->text);
+                        t->live = 0;
+                        return WAYLAND_OK;
                 }
+                memory_into_hex(t->text, bytes, 16);
+                t->text[32] = 0;
+                t->committed = 1;
+                t->when = wayland_now();
+                wayland_ev_str(c, self->id, WLE_xdg_activation_token_v1_done, t->text);
         }
         else if (op == WLQ_xdg_activation_token_v1_destroy)
-        {
-                if (t && !t->committed)
-                        t->live = 0;
-        }
+                t->live = 0;
         return WAYLAND_OK;
 }
 
-/*
-        xwayland_shell_v1 and zwp_xwayland_keyboard_grab_manager_v1, the two protocols an X server (Xwayland) uses when its X
-        windows are wl_surfaces of this compositor. get_xwayland_surface gives a surface its xwayland_surface_v1 (a surface with a
-        role of its own is refused), and set_serial gives that surface the X11 serial of its window: the X window manager, which
-        is this compositor too, names the same serial when it associates the window (wayland_serial_row). A grab of the keyboard
-        holds the keys as a shortcuts inhibitor does, and is let go by its destroy; the chords that a shortcuts inhibitor
-        suspends are the compositor's to suspend, and read through wayland_row_shortcuts.
-*/
+// xwayland_shell_v1 and zwp_xwayland_keyboard_grab_manager_v1.
 static int wayland_xwayland_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
         struct wayland_surface *surface;
         int status;
 
-        if (self->iface == WLI_xwayland_shell_v1)
+        switch (self->iface)
         {
-                if (op == WLQ_xwayland_shell_v1_get_xwayland_surface)
-                {
-                        surface = wayland_surface_of(c, a[1].slot);
-                        if (!surface)
-                                return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the surface is gone");
-                        if (surface->xsurface || (surface->flags & WAYLAND_SURFACE_XDG) || surface->role != WAYLAND_ROLE_NONE)
-                                return wayland_fail(c, self->id, WLN_xwayland_shell_v1_error_role, "the surface has another role");
-                        surface->xsurface = 1;
-                        wayland_surface_link(c, a[0].slot, surface);
-                        // The client whose surfaces are X windows is the X server: its outputs are told again in X's space.
-                        wayland_xwayland_client(c->slot);
-                }
+        case WLI_xwayland_shell_v1:
+                if (op != WLQ_xwayland_shell_v1_get_xwayland_surface)
+                        return WAYLAND_OK;
+                if (!(surface = wayland_surface_of(c, a[1].slot)))
+                        return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the surface is gone");
+                if (surface->xsurface || (surface->flags & WAYLAND_SURFACE_XDG) || surface->role != WAYLAND_ROLE_NONE)
+                        return wayland_fail(c, self->id, WLN_xwayland_shell_v1_error_role, "the surface has another role");
+                surface->xsurface = 1;
+                wayland_surface_link(c, a[0].slot, surface);
+                wayland_xwayland_client(c->slot);
                 return WAYLAND_OK;
-        }
-        if (self->iface == WLI_xwayland_surface_v1)
-        {
+        case WLI_xwayland_surface_v1:
                 if (op == WLQ_xwayland_surface_v1_set_serial)
                 {
                         unsigned long long serial = ((unsigned long long)a[1].u << 32) | a[0].u;
 
-                        surface = wayland_surface_of(c, self - c->objects);
-                        if (!surface)
+                        if (!(surface = wayland_surface_of(c, self - c->objects)))
                                 return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "the surface is gone");
                         if (surface->u.xwin.serial_set)
                                 return wayland_fail(c, self->id, WLN_xwayland_surface_v1_error_already_associated,
@@ -8621,35 +7569,26 @@ static int wayland_xwayland_request(struct wayland_client *c, struct wayland_obj
                         surface->u.xwin.serial_set = 1;
                 }
                 return WAYLAND_OK;
-        }
-        if (self->iface == WLI_zwp_xwayland_keyboard_grab_manager_v1)
-        {
+        case WLI_zwp_xwayland_keyboard_grab_manager_v1:
                 status = wayland_ext_bind(c, self, op, a, &surface);
                 if (status == WAYLAND_OK && surface)
                 {
                         surface->xgrab = 1;
                         if (surface->row >= 0 && surface->row == wayland.keyboard_row && !surface->shortcut_active)
-                        {
-                                surface->shortcut_active = 1;
-                                surface->escape_down = 0;
-                        }
+                                surface->shortcut_active = 1, surface->escape_down = 0;
                 }
                 return status;
-        }
-        if (self->iface == WLI_zwp_xwayland_keyboard_grab_v1)
-        {
-                surface = wayland_surface_of(c, self - c->objects);
-                if (surface && op == WLQ_zwp_xwayland_keyboard_grab_v1_destroy)
+        case WLI_zwp_xwayland_keyboard_grab_v1:
+                if (op == WLQ_zwp_xwayland_keyboard_grab_v1_destroy && (surface = wayland_surface_of(c, self - c->objects)))
                 {
                         surface->xgrab = 0;
                         if (!surface->shortcuts)
-                        {
-                                surface->shortcut_active = 0;
-                                surface->escape_down = 0;
-                        }
+                                surface->shortcut_active = 0, surface->escape_down = 0;
                 }
+                return WAYLAND_OK;
+        default:
+                return WAYLAND_OK;
         }
-        return WAYLAND_OK;
 }
 
 static int wayland_games_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
@@ -8659,23 +7598,20 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
         switch (self->iface)
         {
         case WLI_zwp_relative_pointer_manager_v1:
-                if (op == WLQ_zwp_relative_pointer_manager_v1_get_relative_pointer)
-                {
-                        if (!wayland_ids_add(&c->relative_ids, c->objects[a[0].slot].id))
-                                return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a relative pointer");
-                }
+                if (op == WLQ_zwp_relative_pointer_manager_v1_get_relative_pointer &&
+                    !wayland_ids_add(&c->relative_ids, c->objects[a[0].slot].id))
+                        return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a relative pointer");
                 return WAYLAND_OK;
         case WLI_zwp_relative_pointer_v1:
                 wayland_ids_remove(&c->relative_ids, self->id);
                 return WAYLAND_OK;
         case WLI_zwp_pointer_constraints_v1:
         {
-                long index = -1;
+                long index;
 
                 if (op == WLQ_zwp_pointer_constraints_v1_destroy)
                         return WAYLAND_OK;
-                surface = wayland_surface_of(c, a[1].slot);
-                if (!surface)
+                if (!(surface = wayland_surface_of(c, a[1].slot)))
                         return wayland_fail(c, self->id, WAYLAND_INVALID_OBJECT, "a surface is gone");
                 if (a[4].u != WLN_zwp_pointer_constraints_v1_lifetime_oneshot && a[4].u != WLN_zwp_pointer_constraints_v1_lifetime_persistent)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the lifetime is oneshot or persistent");
@@ -8683,14 +7619,15 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                         if (c->constraints[at].live && c->constraints[at].surface == wayland_surface_index(c, surface) + 1)
                                 return wayland_fail(c, self->id, WLN_zwp_pointer_constraints_v1_error_already_constrained,
                                                     "the surface is constrained already");
-                index = wayland_tbl_alloc(c, WLT_CONSTRAINT);
-                if (index < 0)
+                if ((index = wayland_tbl_alloc(c, WLT_CONSTRAINT)) < 0)
                         return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for a pointer constraint");
-                c->constraints[index].id = c->objects[a[0].slot].id;
-                c->constraints[index].live = 1;
-                c->constraints[index].kind = op == WLQ_zwp_pointer_constraints_v1_lock_pointer ? 1 : 2;
-                c->constraints[index].oneshot = a[4].u == WLN_zwp_pointer_constraints_v1_lifetime_oneshot;
-                c->constraints[index].surface = (unsigned int)(wayland_surface_index(c, surface) + 1);
+                c->constraints[index] = (struct wayland_constraint){
+                        .id = c->objects[a[0].slot].id,
+                        .live = 1,
+                        .kind = op == WLQ_zwp_pointer_constraints_v1_lock_pointer ? 1 : 2,
+                        .oneshot = a[4].u == WLN_zwp_pointer_constraints_v1_lifetime_oneshot,
+                        .surface = (unsigned int)(wayland_surface_index(c, surface) + 1),
+                };
                 c->objects[a[0].slot].link = (int)index;
                 wayland.constraints++;
                 wayland_constraints_update();
@@ -8698,32 +7635,25 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
         }
         case WLI_zwp_locked_pointer_v1:
         case WLI_zwp_confined_pointer_v1:
-                // set_region is taken: the whole window is what a hold is. A lock's set_cursor_position_hint is kept (at once, not at
-                // the surface's next commit, which the protocol allows the hint to wait for): where the client has drawn the pointer
-                // it holds, and where the pointer is shown when the lock lets it go (wayland_constraint_release).
-                // The hint is quiet (wayland.quiet): it is read only when the lock lets go, which is not a quiet request.
-                if (self->iface == WLI_zwp_locked_pointer_v1 && op == WLQ_zwp_locked_pointer_v1_set_cursor_position_hint)
-                        wayland.quiet++;
-                if (self->iface == WLI_zwp_locked_pointer_v1 && op == WLQ_zwp_locked_pointer_v1_set_cursor_position_hint &&
-                    self->link >= 0 && self->link < c->tbl[WLT_CONSTRAINT].count && c->constraints[self->link].live &&
-                    c->constraints[self->link].id == self->id)
-                {
-                        c->constraints[self->link].hinted = 1;
-                        c->constraints[self->link].hint_x = (int)a[0].i;
-                        c->constraints[self->link].hint_y = (int)a[1].i;
-                }
-                if (op == WLQ_zwp_locked_pointer_v1_destroy)
-                {
-                        struct wayland_constraint *con = self->link >= 0 && self->link < c->tbl[WLT_CONSTRAINT].count ? &c->constraints[self->link] : 0;
+        {
+                struct wayland_constraint *con = self->link >= 0 && self->link < c->tbl[WLT_CONSTRAINT].count &&
+                                                         c->constraints[self->link].live && c->constraints[self->link].id == self->id
+                                                     ? &c->constraints[self->link] : 0;
 
-                        if (con && con->live && con->id == self->id)
-                        {
-                                wayland_constraint_release(c, con, 0);
-                                wayland_constraints_update();
-                        }
+                if (self->iface == WLI_zwp_locked_pointer_v1 && op == WLQ_zwp_locked_pointer_v1_set_cursor_position_hint)
+                {
+                        wayland.quiet++;
+                        if (con)
+                                con->hinted = 1, con->hint_x = (int)a[0].i, con->hint_y = (int)a[1].i;
+                }
+                else if (op == WLQ_zwp_locked_pointer_v1_destroy)
+                {
+                        if (con)
+                                wayland_constraint_release(c, con, 0), wayland_constraints_update();
                         self->link = -1;
                 }
                 return WAYLAND_OK;
+        }
         case WLI_zwp_keyboard_shortcuts_inhibit_manager_v1:
         {
                 int status = wayland_ext_bind(c, self, op, a, &surface);
@@ -8740,24 +7670,15 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                 return status;
         }
         case WLI_zwp_keyboard_shortcuts_inhibitor_v1:
-                surface = wayland_surface_of(c, self - c->objects);
-                if (surface)
-                {
-                        surface->shortcuts = 0;
-                        surface->shortcut_active = 0;
-                        surface->escape_down = 0;
-                }
+                if ((surface = wayland_surface_of(c, self - c->objects)))
+                        surface->shortcuts = surface->shortcut_active = surface->escape_down = 0;
                 return WAYLAND_OK;
-        case WLI_wp_tearing_control_manager_v1:
-                return wayland_ext_bind(c, self, op, a, 0);
         case WLI_wp_tearing_control_v1:
                 surface = wayland_surface_of(c, self - c->objects);
                 if (op == WLQ_wp_tearing_control_v1_destroy)
                 {
                         if (surface)
-                                surface->tearing = 0;
-                        if (surface)
-                                surface->pending.async_hint = 0;
+                                surface->tearing = surface->pending.async_hint = 0;
                 }
                 else if (a[0].u > WLN_wp_tearing_control_v1_presentation_hint_async)
                         return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "no such presentation hint");
@@ -8772,19 +7693,12 @@ static int wayland_games_request(struct wayland_client *c, struct wayland_object
                         c->inhibitors++;
                 return status;
         }
-        case WLI_zwp_idle_inhibitor_v1:
-                return WAYLAND_OK;
         default:
                 return WAYLAND_OK;
         }
 }
 
-/*
-        The idle clock (ext-idle-notify, and the screen's idle answer for the moonwater debug line). The clock is the last input the
-        compositor gave the shim (wayland_input_seen). An idle inhibitor holds while its surface is shown on a screen: a window the host
-        says is shown and is not minimized (the surface's root, for a subsurface). A surface with no window holds nothing, and neither does
-        one whose window is gone; whether the window is covered is not known cheaply, so a covered window still holds.
-*/
+// Idle inhibitors and ext-idle-notify v2.
 static int wayland_surface_shown(struct wayland_client *c, struct wayland_surface *s)
 {
         struct wayland_facts facts;
@@ -8792,12 +7706,10 @@ static int wayland_surface_shown(struct wayland_client *c, struct wayland_surfac
         if (!s)
                 return 0;
         s = wayland_root_of(c, s);
-        if (!s->live || s->row < 0 || wayland.host->row_facts(wayland.host->context, s->row, &facts) < 0)
-                return 0;
-        return !(facts.states & WAYLAND_STATE_SUSPENDED);
+        return s->live && s->row >= 0 && wayland.host->row_facts(wayland.host->context, s->row, &facts) >= 0 &&
+               !(facts.states & WAYLAND_STATE_SUSPENDED);
 }
 
-// The idle inhibitors that hold now: each zwp_idle_inhibitor_v1 of every client whose surface is shown.
 static long wayland_inhibitors_now(void)
 {
         long count = 0;
@@ -8809,48 +7721,30 @@ static long wayland_inhibitors_now(void)
 
                 if (!c || c->dead || !c->inhibitors)
                         continue;
-                // c->inhibitors counts the zwp_idle_inhibitor_v1 objects the client holds (wayland_object_free takes one back when it
-                // goes), so the scan ends at the last of them: a turn of the loop asks this on every pass while a video plays.
                 for (long at = 0; at < c->tbl[WLT_OBJECT].count && seen < c->inhibitors; at++)
                         if (c->objects[at].iface == WLI_zwp_idle_inhibitor_v1 && c->objects[at].id)
-                        {
-                                seen++;
-                                if (wayland_surface_shown(c, wayland_surface_of(c, at)))
-                                        count++;
-                        }
+                                seen++, count += wayland_surface_shown(c, wayland_surface_of(c, at));
         }
         return count;
 }
 
-static void wayland_notify_say(struct wayland_client *c, struct wayland_notify *n, long opcode)
-{
-        wayland_ev0(c, n->id, opcode);
-}
-
-/*
-        ext-idle-notify (ext_idle_notifier_v1, version 2). A notification counts from its creation, or from the input it was last resumed
-        by, and goes idle when the shim has been given no input for its timeout and, unless it was made by get_input_idle_notification,
-        no idle inhibitor holds. An idle notification sends resumed on the next input, and counts from that input again.
-*/
 static int wayland_idle_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
-        long at;
-
         if (self->iface == WLI_ext_idle_notifier_v1)
         {
-                struct wayland_notify *n;
+                long at;
 
                 if (op != WLQ_ext_idle_notifier_v1_get_idle_notification && op != WLQ_ext_idle_notifier_v1_get_input_idle_notification)
                         return WAYLAND_OK;
-                at = wayland_tbl_alloc(c, WLT_NOTIFY);
-                if (at < 0)
+                if ((at = wayland_tbl_alloc(c, WLT_NOTIFY)) < 0)
                         return wayland_fail(c, self->id, WAYLAND_NO_MEMORY, "no memory for an idle notification");
-                n = &c->notifies[at];
-                n->live = 1;
-                n->input_only = op == WLQ_ext_idle_notifier_v1_get_input_idle_notification;
-                n->id = c->objects[a[0].slot].id;
-                n->timeout = (long)a[1].u;
-                n->since = wayland.host->now(wayland.host->context);
+                c->notifies[at] = (struct wayland_notify){
+                        .live = 1,
+                        .input_only = op == WLQ_ext_idle_notifier_v1_get_input_idle_notification,
+                        .id = c->objects[a[0].slot].id,
+                        .timeout = (long)a[1].u,
+                        .since = wayland_now(),
+                };
                 c->objects[a[0].slot].link = (int)at;
                 wayland.idle_notifies++;
                 return WAYLAND_OK;
@@ -8860,47 +7754,45 @@ static int wayland_idle_request(struct wayland_client *c, struct wayland_object 
         return WAYLAND_OK;
 }
 
-/* ---- one request ---- */
-static int wayland_gestures_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a);
+// zwp_pointer_gestures_v1: track pinch listeners (swipe and hold are accepted no-ops).
+static int wayland_gestures_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        (void)a;
+        if (self->iface == WLI_zwp_pointer_gestures_v1 && op == WLQ_zwp_pointer_gestures_v1_get_pinch_gesture)
+        {
+                c->pinches++;
+                for (long at = 0; at < wayland.row_made; at++)
+                        if (wayland.row[at].client == c->slot)
+                                wayland.host->row_do(wayland.host->context, (int)at, WAYLAND_DO_PINCH_WANT, 1, 0);
+        }
+        return WAYLAND_OK;
+}
 
-/*
-        Reads a request's arguments by the table. A new id becomes an object here, of the interface the table names
-        and the version of the object it was sent to; an object argument must exist and be of its interface; a string
-        must end in its NUL; a descriptor is the next one the client sent. The whole message is read before any
-        handler runs, and nothing is left over.
-*/
-// How each kind of argument in the generated table is read off the wire (wire_arguments' classes): a descriptor takes no bytes, a number,
-// a fixed, an object and a new id are a word, and a string, a string that may be none, a global's name with its version and id, and an
-// array are a count and its bytes.
+/* ---- one request ---- */
+
 static const unsigned char wayland_kinds[256] = {
-    ['h'] = WIRE_NONE,
-    ['i'] = WIRE_WORD,
-    ['f'] = WIRE_WORD,
-    ['u'] = WIRE_WORD,
-    ['o'] = WIRE_WORD,
-    ['O'] = WIRE_WORD,
-    ['n'] = WIRE_WORD,
-    ['s'] = WIRE_TEXT | WIRE_ENDED,
-    ['S'] = WIRE_TEXT | WIRE_ENDED | WIRE_EMPTY,
-    ['N'] = WIRE_TEXT | WIRE_ENDED | WIRE_PAIR,
-    ['a'] = WIRE_TEXT | WIRE_EMPTY,
+        ['h'] = WIRE_NONE,
+        ['i'] = WIRE_WORD, ['f'] = WIRE_WORD, ['u'] = WIRE_WORD, ['o'] = WIRE_WORD, ['O'] = WIRE_WORD, ['n'] = WIRE_WORD,
+        ['s'] = WIRE_TEXT | WIRE_ENDED, ['S'] = WIRE_TEXT | WIRE_ENDED | WIRE_EMPTY,
+        ['N'] = WIRE_TEXT | WIRE_ENDED | WIRE_PAIR, ['a'] = WIRE_TEXT | WIRE_EMPTY,
 };
 
-/*
-        A request's arguments. The library walks the bytes by the table's list of kinds (wire_arguments): how many arguments are
-        there whole, a record of each, and why the walk stopped. What an argument means is then taken here in the order they came
-        (a descriptor from the ones sent, an object looked up and its interface asked, a new id made), each failing as it did when
-        the bytes were read here an argument at a time; and only when every argument before it has been taken is the request
-        refused for what the walk found wrong with its bytes, so the first thing wrong is still the thing said.
-*/
+// Decode request arguments via wire_arguments; semantic validation runs in argument order before reporting wire parse errors.
 static int wayland_args(struct wayland_client *c, const struct wayland_object *self, const struct wl_message *msg,
                         const unsigned char *at, long left, struct wayland_arg *a, long *begun, int *took_fd)
 {
+        static const char *const errs[] = {
+                [WIRE_END_SHORT] = "the arguments are short",
+                [WIRE_END_PAIR] = "the arguments are short",
+                [WIRE_END_NOTHING] = "a string has no length",
+                [WIRE_END_LONG] = "a string is longer than its message",
+                [WIRE_END_OPEN] = "a string is not ended",
+                [WIRE_END_ROOM] = "too many arguments",
+                [WIRE_END_OVER] = "the arguments are longer than the request",
+        };
         unsigned int records[WAYLAND_ARGS][4];
         unsigned long long walked = wire_arguments(msg->args, wayland_kinds, at, (unsigned long long)left, &records[0][0], WAYLAND_ARGS);
         long whole = (long)(walked & 255), why = (long)(walked >> 8);
-        // The argument the walk stopped in is begun as the ones before it are (initialized, and counted for the caller), unless it
-        // stopped before one: with no room for it, or past the last.
         long count = whole + (why != WIRE_END_DONE && why != WIRE_END_ROOM && why != WIRE_END_OVER);
 
         *begun = 0;
@@ -8908,16 +7800,10 @@ static int wayland_args(struct wayland_client *c, const struct wayland_object *s
         {
                 const unsigned char *kind = msg->args + 2 * n;
                 struct wayland_arg *arg = &a[n];
-                unsigned long word = records[n][0], length;
+                unsigned long word = records[n][0];
 
-                *begun = n + 1; // every argument begun is initialized below, so the caller reads no further than this
-                arg->u = 0;
-                arg->i = 0;
-                arg->text = 0;
-                arg->length = 0;
-                arg->slot = -1;
-                arg->fd = -1;
-                arg->version = 0;
+                *begun = n + 1;
+                *arg = (struct wayland_arg){.slot = -1, .fd = -1};
                 if (n == whole)
                         break;
                 switch (kind[0])
@@ -8949,8 +7835,7 @@ static int wayland_args(struct wayland_client *c, const struct wayland_object *s
                                         return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "an object is null");
                                 break;
                         }
-                        arg->slot = (int)wayland_slot_of(c, word);
-                        if (arg->slot < 0)
+                        if ((arg->slot = (int)wayland_slot_of(c, word)) < 0)
                                 return wayland_fail(c, word, WAYLAND_INVALID_OBJECT, "no such object");
                         if (kind[1] && c->objects[arg->slot].iface != kind[1])
                                 return wayland_fail(c, word, WAYLAND_INVALID_METHOD, "the object is another interface");
@@ -8961,47 +7846,29 @@ static int wayland_args(struct wayland_client *c, const struct wayland_object *s
                         if (arg->slot < 0)
                                 return wayland_new_fail(c, self->id, word);
                         break;
-                default: // a string, a string that may be none, a global's name, an array: the count, and where its bytes are
-                        length = word;
-                        if (!length && kind[0] == 'S')
+                default:
+                        if (!word && kind[0] == 'S')
                                 break;
                         arg->text = at + records[n][1];
-                        arg->length = kind[0] == 'a' ? (long)length : (long)length - 1;
+                        arg->length = kind[0] == 'a' ? (long)word : (long)word - 1;
                         if (kind[0] == 'N')
-                        {
-                                arg->version = (long)records[n][2];
-                                arg->u = records[n][3];
-                        }
+                                arg->version = (long)records[n][2], arg->u = records[n][3];
                         break;
                 }
         }
-        switch (why)
-        {
-        case WIRE_END_DONE:
+        if (why == WIRE_END_DONE)
                 return WAYLAND_OK;
-        case WIRE_END_ROOM:
-                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "too many arguments");
-        case WIRE_END_SHORT:
-        case WIRE_END_PAIR:
-                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the arguments are short");
-        case WIRE_END_NOTHING:
-                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a string has no length");
-        case WIRE_END_LONG:
-                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a string is longer than its message");
-        case WIRE_END_OPEN:
-                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "a string is not ended");
-        case WIRE_END_OVER:
-                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the arguments are longer than the request");
-        default:
-                return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD, "the table has an argument that cannot be read");
-        }
+        return wayland_fail(c, self->id, WAYLAND_INVALID_METHOD,
+                            (unsigned long)why < sizeof errs / sizeof *errs && errs[why]
+                                ? errs[why] : "the table has an argument that cannot be read");
 }
 
 static int wayland_layer_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
 {
+        struct wayland_surface *s;
+
         if (self->iface == WLI_zwlr_layer_shell_v1)
         {
-                struct wayland_surface *s;
                 long out = 0;
 
                 if (op == WLQ_zwlr_layer_shell_v1_destroy)
@@ -9023,139 +7890,87 @@ static int wayland_layer_request(struct wayland_client *c, struct wayland_object
                 c->objects[a[0].slot].link = c->objects[a[1].slot].link;
                 return WAYLAND_OK;
         }
+        s = &c->surfaces[self->link];
+        if (!s->live || s->role_id != self->id)
+                return WAYLAND_OK;
         if (op == WLQ_zwlr_layer_surface_v1_destroy)
         {
-                struct wayland_surface *s = &c->surfaces[self->link];
-
-                if (s->live && s->role_id == self->id)
-                {
-                        wayland_unhold(c, s);
-                        wayland_row_release(c, s);
-                        s->role = WAYLAND_ROLE_NONE;
-                        s->role_id = 0;
-                        s->u.top.layer_shell = 0;
-                        s->flags &= ~(unsigned)(WAYLAND_SURFACE_CONFIGURED | WAYLAND_SURFACE_SENT | WAYLAND_SURFACE_MAPPED);
-                }
-                return WAYLAND_OK;
+                wayland_unhold(c, s);
+                wayland_row_release(c, s);
+                s->role = WAYLAND_ROLE_NONE;
+                s->role_id = 0;
+                s->u.top.layer_shell = 0;
+                s->flags &= ~(unsigned)(WAYLAND_SURFACE_CONFIGURED | WAYLAND_SURFACE_SENT | WAYLAND_SURFACE_MAPPED);
         }
+        else if (op == WLQ_zwlr_layer_surface_v1_set_size)
+                s->u.top.layer_w = (long)a[0].u, s->u.top.layer_h = (long)a[1].u;
+        else if (op == WLQ_zwlr_layer_surface_v1_set_layer)
         {
-                struct wayland_surface *s = &c->surfaces[self->link];
-
-                if (!s->live || s->role_id != self->id)
-                        return WAYLAND_OK;
-                if (op == WLQ_zwlr_layer_surface_v1_set_size)
-                        s->u.top.layer_w = (long)a[0].u, s->u.top.layer_h = (long)a[1].u;
-                else if (op == WLQ_zwlr_layer_surface_v1_set_layer)
-                {
-                        if (a[0].u > 3)
-                                return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_invalid_layer, "unknown layer");
-                        s->u.top.layer_level = (long)a[0].u;
-                        if (s->row >= 0)
-                                wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_LAYER,
-                                                     s->u.top.layer_level <= 1 ? -1 : 2, s->u.top.layer_output);
-                }
-                else if (op == WLQ_zwlr_layer_surface_v1_ack_configure)
-                        s->flags |= WAYLAND_SURFACE_CONFIGURED;
+                if (a[0].u > 3)
+                        return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_invalid_layer, "unknown layer");
+                s->u.top.layer_level = (long)a[0].u;
+                if (s->row >= 0)
+                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_LAYER,
+                                             s->u.top.layer_level <= 1 ? -1 : 2, s->u.top.layer_output);
         }
+        else if (op == WLQ_zwlr_layer_surface_v1_ack_configure)
+                s->flags |= WAYLAND_SURFACE_CONFIGURED;
         return WAYLAND_OK;
 }
 
 typedef int (*wayland_request_fn)(struct wayland_client *, struct wayland_object *, long, struct wayland_arg *);
 
-// Unlisted interfaces (outputs, xdg outputs, etc.) have only release/destroy and return WAYLAND_OK.
+// Unlisted interfaces have only release/destroy no-ops and return WAYLAND_OK.
 static const wayland_request_fn wayland_handlers[WLI_COUNT] = {
-        [WLI_wl_display] = wayland_display_request,
-        [WLI_wl_registry] = wayland_registry_request,
-        [WLI_wl_compositor] = wayland_compositor_request,
-        [WLI_wl_surface] = wayland_surface_request,
-        [WLI_wl_region] = wayland_region_request,
-        [WLI_wl_shm] = wayland_shm_request,
-        [WLI_wl_shm_pool] = wayland_pool_request,
-        [WLI_wl_buffer] = wayland_buffer_request,
-        [WLI_wl_subcompositor] = wayland_subcompositor_request,
-        [WLI_wl_subsurface] = wayland_subsurface_request,
+        [WLI_wl_display] = wayland_display_request, [WLI_wl_registry] = wayland_registry_request,
+        [WLI_wl_compositor] = wayland_compositor_request, [WLI_wl_surface] = wayland_surface_request,
+        [WLI_wl_region] = wayland_region_request, [WLI_wl_shm] = wayland_shm_request,
+        [WLI_wl_shm_pool] = wayland_pool_request, [WLI_wl_buffer] = wayland_buffer_request,
+        [WLI_wl_subcompositor] = wayland_subcompositor_request, [WLI_wl_subsurface] = wayland_subsurface_request,
         [WLI_wl_seat] = wayland_seat_request,
-        [WLI_wl_pointer] = wayland_seat_object_request,
-        [WLI_wl_keyboard] = wayland_seat_object_request,
-        [WLI_wl_touch] = wayland_seat_object_request,
-        [WLI_xdg_wm_base] = wayland_wm_base_request,
-        [WLI_xdg_positioner] = wayland_positioner_request,
-        [WLI_xdg_surface] = wayland_xdg_surface_request,
-        [WLI_xdg_toplevel] = wayland_toplevel_request,
-        [WLI_xdg_popup] = wayland_popup_request,
+        [WLI_wl_pointer] = wayland_seat_object_request, [WLI_wl_keyboard] = wayland_seat_object_request, [WLI_wl_touch] = wayland_seat_object_request,
+        [WLI_xdg_wm_base] = wayland_wm_base_request, [WLI_xdg_positioner] = wayland_positioner_request,
+        [WLI_xdg_surface] = wayland_xdg_surface_request, [WLI_xdg_toplevel] = wayland_toplevel_request, [WLI_xdg_popup] = wayland_popup_request,
         [WLI_zxdg_output_manager_v1] = wayland_output_manager_request,
-        [WLI_zwp_relative_pointer_manager_v1] = wayland_games_request,
-        [WLI_zwp_relative_pointer_v1] = wayland_games_request,
-        [WLI_zwp_pointer_constraints_v1] = wayland_games_request,
-        [WLI_zwp_locked_pointer_v1] = wayland_games_request,
-        [WLI_zwp_confined_pointer_v1] = wayland_games_request,
+        [WLI_zwp_relative_pointer_manager_v1] = wayland_games_request, [WLI_zwp_relative_pointer_v1] = wayland_games_request,
+        [WLI_zwp_pointer_constraints_v1] = wayland_games_request, [WLI_zwp_locked_pointer_v1] = wayland_games_request, [WLI_zwp_confined_pointer_v1] = wayland_games_request,
         [WLI_zwp_idle_inhibit_manager_v1] = wayland_games_request,
-        [WLI_zwp_idle_inhibitor_v1] = wayland_games_request,
-        [WLI_zwp_keyboard_shortcuts_inhibit_manager_v1] = wayland_games_request,
-        [WLI_zwp_keyboard_shortcuts_inhibitor_v1] = wayland_games_request,
-        [WLI_wp_tearing_control_manager_v1] = wayland_games_request,
+        [WLI_zwp_keyboard_shortcuts_inhibit_manager_v1] = wayland_games_request, [WLI_zwp_keyboard_shortcuts_inhibitor_v1] = wayland_games_request,
         [WLI_wp_tearing_control_v1] = wayland_games_request,
-        [WLI_xwayland_shell_v1] = wayland_xwayland_request,
-        [WLI_xwayland_surface_v1] = wayland_xwayland_request,
-        [WLI_zwp_xwayland_keyboard_grab_manager_v1] = wayland_xwayland_request,
-        [WLI_zwp_xwayland_keyboard_grab_v1] = wayland_xwayland_request,
-        [WLI_xdg_activation_v1] = wayland_activation_request,
-        [WLI_xdg_activation_token_v1] = wayland_activation_request,
+        [WLI_xwayland_shell_v1] = wayland_xwayland_request, [WLI_xwayland_surface_v1] = wayland_xwayland_request,
+        [WLI_zwp_xwayland_keyboard_grab_manager_v1] = wayland_xwayland_request, [WLI_zwp_xwayland_keyboard_grab_v1] = wayland_xwayland_request,
+        [WLI_xdg_activation_v1] = wayland_activation_request, [WLI_xdg_activation_token_v1] = wayland_activation_request,
         [WLI_zwp_pointer_gestures_v1] = wayland_gestures_request,
-        [WLI_zwp_pointer_gesture_swipe_v1] = wayland_gestures_request,
-        [WLI_zwp_pointer_gesture_pinch_v1] = wayland_gestures_request,
-        [WLI_zwp_pointer_gesture_hold_v1] = wayland_gestures_request,
-        [WLI_ext_idle_notifier_v1] = wayland_idle_request,
-        [WLI_ext_idle_notification_v1] = wayland_idle_request,
-        [WLI_wp_fifo_manager_v1] = wayland_hints_request,
-        [WLI_wp_fifo_v1] = wayland_hints_request,
-        [WLI_wp_commit_timing_manager_v1] = wayland_hints_request,
-        [WLI_wp_commit_timer_v1] = wayland_hints_request,
-        [WLI_xdg_wm_dialog_v1] = wayland_hints_request,
-        [WLI_xdg_dialog_v1] = wayland_hints_request,
-        [WLI_xdg_system_bell_v1] = wayland_hints_request,
-        [WLI_xdg_toplevel_icon_manager_v1] = wayland_hints_request,
-        [WLI_xdg_toplevel_icon_v1] = wayland_hints_request,
-        [WLI_wp_content_type_manager_v1] = wayland_hints_request,
-        [WLI_wp_content_type_v1] = wayland_hints_request,
-        [WLI_wp_alpha_modifier_v1] = wayland_hints_request,
-        [WLI_wp_alpha_modifier_surface_v1] = wayland_hints_request,
-        [WLI_zwp_linux_dmabuf_v1] = wayland_dmabuf_request,
-        [WLI_zwp_linux_buffer_params_v1] = wayland_dmabuf_request,
-        [WLI_zwp_linux_dmabuf_feedback_v1] = wayland_dmabuf_request,
+        [WLI_ext_idle_notifier_v1] = wayland_idle_request, [WLI_ext_idle_notification_v1] = wayland_idle_request,
+        [WLI_wp_fifo_manager_v1] = wayland_hints_request, [WLI_wp_fifo_v1] = wayland_hints_request,
+        [WLI_wp_commit_timing_manager_v1] = wayland_hints_request, [WLI_wp_commit_timer_v1] = wayland_hints_request,
+        [WLI_xdg_wm_dialog_v1] = wayland_hints_request, [WLI_xdg_dialog_v1] = wayland_hints_request,
+        [WLI_xdg_system_bell_v1] = wayland_hints_request, [WLI_wp_tearing_control_manager_v1] = wayland_hints_request,
+        [WLI_xdg_toplevel_icon_manager_v1] = wayland_hints_request, [WLI_xdg_toplevel_icon_v1] = wayland_hints_request,
+        [WLI_wp_content_type_manager_v1] = wayland_hints_request, [WLI_wp_content_type_v1] = wayland_hints_request,
+        [WLI_wp_alpha_modifier_v1] = wayland_hints_request, [WLI_wp_alpha_modifier_surface_v1] = wayland_hints_request,
+        [WLI_zwp_linux_dmabuf_v1] = wayland_dmabuf_request, [WLI_zwp_linux_buffer_params_v1] = wayland_dmabuf_request, [WLI_zwp_linux_dmabuf_feedback_v1] = wayland_dmabuf_request,
         [WLI_wl_drm] = wayland_drm_request,
-        [WLI_wp_linux_drm_syncobj_manager_v1] = wayland_syncobj_request,
-        [WLI_wp_linux_drm_syncobj_timeline_v1] = wayland_syncobj_request,
-        [WLI_wp_linux_drm_syncobj_surface_v1] = wayland_syncobj_request,
-        [WLI_wp_cursor_shape_manager_v1] = wayland_cursor_shape_request,
-        [WLI_wp_cursor_shape_device_v1] = wayland_cursor_shape_request,
-        [WLI_zwp_text_input_manager_v3] = wayland_text_request,
-        [WLI_zwp_text_input_v3] = wayland_text_request,
+        [WLI_wp_linux_drm_syncobj_manager_v1] = wayland_syncobj_request, [WLI_wp_linux_drm_syncobj_timeline_v1] = wayland_syncobj_request, [WLI_wp_linux_drm_syncobj_surface_v1] = wayland_syncobj_request,
+        [WLI_wp_cursor_shape_manager_v1] = wayland_cursor_shape_request, [WLI_wp_cursor_shape_device_v1] = wayland_cursor_shape_request,
+        [WLI_zwp_text_input_manager_v3] = wayland_text_request, [WLI_zwp_text_input_v3] = wayland_text_request,
         [WLI_wp_presentation] = wayland_presentation_request,
-        [WLI_wp_viewporter] = wayland_viewport_request,
-        [WLI_wp_viewport] = wayland_viewport_request,
-        [WLI_wp_fractional_scale_manager_v1] = wayland_fractional_request,
-        [WLI_wp_fractional_scale_v1] = wayland_fractional_request,
-        [WLI_zwlr_layer_shell_v1] = wayland_layer_request,
-        [WLI_zwlr_layer_surface_v1] = wayland_layer_request,
-        [WLI_wl_data_device_manager] = wayland_data_request,
-        [WLI_wl_data_device] = wayland_data_request,
-        [WLI_wl_data_source] = wayland_data_request,
-        [WLI_wl_data_offer] = wayland_data_request,
-        [WLI_zwp_primary_selection_device_manager_v1] = wayland_data_request,
-        [WLI_zwp_primary_selection_device_v1] = wayland_data_request,
-        [WLI_zwp_primary_selection_source_v1] = wayland_data_request,
-        [WLI_zwp_primary_selection_offer_v1] = wayland_data_request,
+        [WLI_wp_viewporter] = wayland_viewport_request, [WLI_wp_viewport] = wayland_viewport_request,
+        [WLI_wp_fractional_scale_manager_v1] = wayland_fractional_request, [WLI_wp_fractional_scale_v1] = wayland_fractional_request,
+        [WLI_zwlr_layer_shell_v1] = wayland_layer_request, [WLI_zwlr_layer_surface_v1] = wayland_layer_request,
+        [WLI_wl_data_device_manager] = wayland_data_request, [WLI_wl_data_device] = wayland_data_request,
+        [WLI_wl_data_source] = wayland_data_request, [WLI_wl_data_offer] = wayland_data_request,
+        [WLI_zwp_primary_selection_device_manager_v1] = wayland_data_request, [WLI_zwp_primary_selection_device_v1] = wayland_data_request,
+        [WLI_zwp_primary_selection_source_v1] = wayland_data_request, [WLI_zwp_primary_selection_offer_v1] = wayland_data_request,
 };
 
 static int wayland_dispatch(struct wayland_client *c, const unsigned char *message, long size, unsigned long id, long op)
 {
-        long slot = wayland_slot_of(c, id), n;
+        long slot = wayland_slot_of(c, id), begun = 0;
         const struct wl_interface_info *info;
         const struct wl_message *msg;
         struct wayland_object *o;
         struct wayland_arg a[WAYLAND_ARGS];
-        long begun = 0;
         int status, took_fd = 0;
 
         wayland.heard++;
@@ -9173,14 +7988,10 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
 
                 status = handler ? handler(c, o, op, a) : WAYLAND_OK;
         }
-        // A descriptor a handler did not take is closed here, whatever became of the request (a request that took none has none to look
-        // for: every request walked its arguments for one).
-        for (n = 0; took_fd && n < begun; n++)
+        // Close any fd not consumed by the handler.
+        for (long n = 0; took_fd && n < begun; n++)
                 if (a[n].fd >= 0)
-                {
-                        wayland.host->close(wayland.host->context, a[n].fd);
-                        wayland.fds--;
-                }
+                        wayland_fd_close(a[n].fd);
         if (status >= 0 && msg->destructor && o->iface && c->objects[slot].id == id)
                 wayland_object_delete(c, slot);
         return status;
@@ -9195,13 +8006,7 @@ struct wayland_stats
 
 WAYLAND_API void wayland_stats_get(struct wayland_stats *into)
 {
-        into->clients = wayland.clients;
-        into->objects = wayland.objects;
-        into->surfaces = wayland.surfaces;
-        into->pools = wayland.pools;
-        into->buffers = wayland.buffers;
-        into->fds = wayland.fds;
-        into->rows = wayland.rows;
+        *into = (struct wayland_stats){wayland.clients, wayland.objects, wayland.surfaces, wayland.pools, wayland.buffers, wayland.fds, wayland.rows};
 }
 
 WAYLAND_API int wayland_start(const struct wayland_host *host)
@@ -9214,21 +8019,18 @@ WAYLAND_API int wayland_start(const struct wayland_host *host)
                 return -1;
         memory_zero(&wayland, sizeof wayland);
         wayland.pointer_row = wayland.pointer_surface = wayland.keyboard_row = -1;
-        wayland.drag.client = wayland.drag.source = wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
-        wayland.drag.xtarget = -1;
-        wayland.cursor_client = wayland.cursor_surface = -1;
-        wayland.xwayland_uid = -1;
+        wayland.drag.client = wayland.drag.source = wayland.drag.target = wayland.drag.surface = wayland.drag.offer = wayland.drag.xtarget = -1;
+        wayland.cursor_client = wayland.cursor_surface = wayland.xwayland_uid = -1;
+        wayland.hold_row = wayland.hint_row = wayland.counts_row = wayland.unheld_row = -1;
         wayland.host = host;
-        wayland.input_at = host->now(host->context);
+        wayland.input_at = wayland_now();
         wayland.screens = host->screens(host->context, wayland.screen, WAYLAND_SCREENS);
         if (wayland.screens < 0)
                 wayland.screens = 0;
         wayland_dmabuf_load();
-        wayland.hold_row = wayland.hint_row = wayland.counts_row = wayland.unheld_row = -1;
         return 0;
 }
 
-/* Register optional explicit syncobj / wl_drm host callbacks before or right after wayland_start. */
 WAYLAND_API void wayland_syncobj_host(const struct wayland_syncobj_host *syncobj)
 {
         if (syncobj)
@@ -9247,40 +8049,29 @@ WAYLAND_API void wayland_syncobj_host(const struct wayland_syncobj_host *syncobj
         }
 }
 
-/* The user whose clients are offered the X server's protocols: the one the X window manager's socket takes. None until the host says. */
 WAYLAND_API void wayland_xwayland_user(long uid)
 {
         wayland.xwayland_uid = uid;
 }
 
-/* The client that is the X server (its window manager found it by its pid): its outputs are told again, in X's space (wayland_x_screen). */
 WAYLAND_API void wayland_xwayland_client(long slot)
 {
-        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots ? wayland.client[slot] : 0;
+        struct wayland_client *c = wayland_live_client(slot);
 
-        // Each X server is a client of its own (one Xwayland per program run): its own space, marked on it, until it is dropped.
-        if (!wayland.host || !c || c->xspace)
+        if (!c || c->xspace)
                 return;
         c->xspace = 1;
-        for (long at = 0; c && at < c->tbl[WLT_OBJECT].count; at++)
-                if (c->objects[at].iface == WLI_zxdg_output_v1)
-                        wayland_xdg_output_send(c, at, c->objects[at].aux);
-        for (long at = 0; c && at < c->tbl[WLT_OBJECT].count; at++)
-                if (c->objects[at].iface == WLI_wl_output)
-                        wayland_output_send(c, at);
+        wayland_outputs_send(c);
 }
 
-// Whether a row is an override-redirect X window's (a menu, a tooltip, a drag's window, one that places itself): its client keeps its
-// own grabs, and the compositor neither puts it away for a press elsewhere nor lets a window it does not hang from over it.
 WAYLAND_API int wayland_row_xoverride(long row)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 ? wayland_row_surface(row, &c) : 0;
+        struct wayland_surface *s = wayland_row_surface(row, &c);
 
         return s && s->xsurface && s->u.xwin.popup;
 }
 
-/* A client's socket accepted: its record, with the display, or a refusal. */
 WAYLAND_API long wayland_connect(long pid, long uid)
 {
         struct wayland_client *c;
@@ -9291,7 +8082,6 @@ WAYLAND_API long wayland_connect(long pid, long uid)
         for (long at = 0; at < wayland.client_slots && slot < 0; at++)
                 if (!wayland.client[at])
                         slot = at;
-        // Every slot taken: one more is made (no count of clients is a cap; the memory for them is).
         if (slot < 0 && (slot = wayland_client_slot_grow()) < 0)
                 return -1;
         c = (struct wayland_client *)wayland.host->alloc(wayland.host->context, (long)sizeof *c);
@@ -9301,23 +8091,16 @@ WAYLAND_API long wayland_connect(long pid, long uid)
                         wayland_client_slots_drop();
                 return -1;
         }
-        c->live = 1;
-        c->slot = slot;
-        c->pid = pid;
-        c->uid = uid;
-        c->xspace = 0;
-        c->stalled_sync_handle = -1;
+        c->live = 1, c->slot = slot, c->pid = pid, c->uid = uid, c->xspace = 0, c->stalled_sync_handle = -1;
         wayland_tables_init(c);
         wayland.client[slot] = c;
         wayland.clients++;
-        // The queue's first WAYLAND_OUT, which most clients never pass.
         c->out_length = WAYLAND_OUT - WAYLAND_EVENT;
         if (!wayland_out_grow(c))
                 c->out = 0;
         c->out_length = 0;
         if (!c->out || wayland_object_new(c, 1, WLI_wl_display, 1) < 0)
         {
-                // No memory for the display's object: the connection is refused, and its tables given back.
                 wayland_tables_drop(c);
                 wayland.client[slot] = 0;
                 wayland.clients--;
@@ -9329,84 +8112,42 @@ WAYLAND_API long wayland_connect(long pid, long uid)
         return slot;
 }
 
-/*
-        The descriptors of the output queue let go: sent, or the client gone. The shim's own (a copy's pipe) are closed here and
-        nowhere else, so the number the queue holds is open until it has gone out; the host's (a keymap, a format table) stay.
-*/
-static void wayland_out_fds_let_go(struct wayland_client *c)
+// Close owned output fds in [0, drop) and shift remaining entries forward by shift bytes.
+static void wayland_out_fds_drop(struct wayland_client *c, long drop, long shift)
 {
         struct wayland_outfd *f = c->out_fds;
+        long kept = 0;
 
-        for (long at = 0; at < c->out_fd_count; at++)
+        for (long at = 0; at < drop; at++)
                 if (f[at].owned)
-                {
-                        wayland.host->close(wayland.host->context, f[at].fd);
-                        wayland.fds--;
-                }
-        c->out_fd_count = 0;
-}
-
-// The descriptors a send of count bytes carried (the batch wayland_out gave, when any byte went): the shim's own are closed, and the
-// rest move to the front, their offsets less the bytes gone.
-static void wayland_out_fds_sent(struct wayland_client *c, long count)
-{
-        struct wayland_outfd *f = c->out_fds;
-        long sent = wayland_out_fd_batch(c), kept = 0;
-
-        for (long at = 0; at < sent; at++)
-                if (f[at].owned)
-                {
-                        wayland.host->close(wayland.host->context, f[at].fd);
-                        wayland.fds--;
-                }
-        for (long at = sent; at < c->out_fd_count; at++, kept++)
-        {
-                f[kept] = f[at];
-                f[kept].at -= count;
-        }
+                        wayland_fd_close(f[at].fd);
+        for (long at = drop; at < c->out_fd_count; at++, kept++)
+                f[kept] = f[at], f[kept].at -= shift;
         c->out_fd_count = kept;
 }
 
-/*
-        A client gone, however it went: every window it had, every pool, every descriptor it sent and the shim did not
-        use, and its record. The one place that gives back what a client held.
-*/
 WAYLAND_API void wayland_drop(long slot)
 {
-        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots ? wayland.client[slot] : 0;
+        struct wayland_client *c = wayland_client_of(slot);
 
         if (!c)
                 return;
         wayland_touch_forget(slot);
         wayland_token_forget(slot);
-        // The drag's client gone: cancelled. The client a drag is over gone: left (a dropped drag is cancelled).
         if (wayland.drag.live && wayland.drag.client == slot)
-        {
-                wayland.drag.source = -1; // its source goes with it, and is told nothing
-                wayland_drag_end(1);
-        }
+                wayland.drag.source = -1, wayland_drag_end(1);
         else if (wayland.drag.live && wayland.drag.target == slot)
         {
                 if (wayland.drag.dropped)
-                {
-                        wayland.drag.target = -1;
-                        wayland_drag_end(0);
-                }
+                        wayland.drag.target = -1, wayland_drag_end(0);
                 else
                         wayland.drag.target = wayland.drag.surface = wayland.drag.offer = -1;
         }
-        // Its picture of the pointer is none: the pools it was in are let go of below.
         if (wayland.cursor_client == slot)
-        {
-                wayland.cursor_client = wayland.cursor_surface = -1;
-                wayland.cursor_serial++;
-        }
+                wayland.cursor_client = wayland.cursor_surface = -1, wayland.cursor_serial++;
         for (long at = 0; at < c->tbl[WLT_SURFACE].count; at++)
                 if (c->surfaces[at].live)
-                {
-                        wayland_row_release(c, &c->surfaces[at]);
-                        wayland.surfaces--;
-                }
+                        wayland_row_release(c, &c->surfaces[at]), wayland.surfaces--;
         wayland_texts_drop(c);
         for (long at = 0; at < c->tbl[WLT_POOL].count; at++)
                 if (c->pools[at].live)
@@ -9427,14 +8168,10 @@ WAYLAND_API void wayland_drop(long slot)
                 if (c->objects[at].iface)
                         wayland.objects--;
         for (long at = 0; at < c->in_fd_count; at++)
-        {
-                wayland.host->close(wayland.host->context, c->in_fds[at]);
-                wayland.fds--;
-        }
-        wayland_out_fds_let_go(c);
+                wayland_fd_close(c->in_fds[at]);
+        wayland_out_fds_drop(c, c->out_fd_count, 0);
         for (long which = 0; which < 2; which++)
         {
-                // A selection that was this client's stays, as text, and is nobody's; a copy it was in the middle of is ended.
                 if (wayland.selection_owner[which] == c->slot + 1)
                         wayland.selection_owner[which] = 0;
                 if (c->pending[which])
@@ -9447,7 +8184,6 @@ WAYLAND_API void wayland_drop(long slot)
         wayland.clients--;
         wayland_tables_drop(c);
         wayland.host->release(wayland.host->context, c, (long)sizeof *c);
-        // The last client gone: the slots are given back, made again by the next connection.
         if (!wayland.clients)
                 wayland_client_slots_drop();
 }
@@ -9459,32 +8195,20 @@ WAYLAND_API void wayland_stop(void)
         for (long slot = 0; slot < wayland.client_slots; slot++)
                 wayland_drop(slot);
         wayland_table_drop(&wayland.token_table);
-        wayland.token = 0, wayland.tokens = 0;
         wayland_table_drop(&wayland.drag.x_types);
-        wayland.drag.x_bytes = 0;
+        wayland.token = 0, wayland.tokens = 0, wayland.drag.x_bytes = 0;
         wayland_zero(&wayland.syncobj, sizeof wayland.syncobj);
-        wayland.syncobj_ok = 0;
-        wayland.drm_node[0] = 0;
-        wayland.host = 0;
+        wayland.syncobj_ok = 0, wayland.drm_node[0] = 0, wayland.host = 0;
 }
 
-/* What the client is: 0 alive, 1 sent a protocol error (flush, then drop), 2 cannot be sent more (drop). */
 WAYLAND_API long wayland_dead(long slot)
 {
-        return slot >= 0 && slot < wayland.client_slots && wayland.client[slot] ? wayland.client[slot]->dead : 2;
+        struct wayland_client *c = wayland_client_of(slot);
+
+        return c ? c->dead : 2;
 }
 
-/*
-        Bytes from a client, with the descriptors that came with them (which the shim owns from here, whatever
-        happens). Any part of a message may arrive: the bytes of an unfinished one wait for the rest. A size below
-        eight, above the largest or not a multiple of four leaves no boundary to find, so the client is dead; so is
-        one whose request fails. Answers 0, or a negative number once the client is dead.
-*/
-/*
-        A commit that answered WAYLAND_STALL and every byte from it on are kept in the client, from the start of the stash, and the
-        client waits. head is a message that was completed in the client's own buffer, the rest what follows it; the rest may be the
-        stash itself, being taken again (it is moved to the front, forward, so it does not run over what it still has to read).
-*/
+// Stash a WAYLAND_STALL commit and all trailing bytes in stream order (rest may overlap c->stash; forward copy preserves it).
 static void wayland_stall(struct wayland_client *c, const unsigned char *head, long head_size, const unsigned char *rest, long rest_length)
 {
         if (head_size + rest_length > WAYLAND_STASH)
@@ -9492,92 +8216,80 @@ static void wayland_stall(struct wayland_client *c, const unsigned char *head, l
                 wayland_fail(c, 1, WAYLAND_NO_MEMORY, "more sent than can wait for a buffer");
                 return;
         }
-        for (long at = 0; at < head_size; at++)
-                c->stash[at] = head[at];
+        wayland_copy(c->stash, head, head_size);
         for (long at = 0; at < rest_length; at++)
                 c->stash[head_size + at] = rest[at];
         c->stash_length = head_size + rest_length;
         c->stalled = 1;
-        c->stalled_at = wayland.host->now(wayland.host->context);
+        c->stalled_at = wayland_now();
 }
 
-/* The bytes of a client, a message at a time, until they are done or a commit has to wait. */
 static int wayland_pump(struct wayland_client *c, const unsigned char *bytes, long length)
 {
         int status = WAYLAND_OK;
 
         while (length > 0 && !c->dead && !c->stalled)
         {
-                long size, take;
+                const unsigned char *msg;
+                long size;
                 unsigned int head[2];
+                int partial = c->in_length != 0;
 
-                if (c->in_length)
+                if (partial)
                 {
-                        // Completing a message begun before: its header first, then the rest of what it says.
-                        take = c->in_length < 8 ? 8 - c->in_length : wayland_min(length, (long)(wayland_get(c->in + 4) >> 16) - c->in_length);
-                        take = wayland_min(take, length);
+                        long want = c->in_length < 8 ? 8 - c->in_length : (long)(wayland_get(c->in + 4) >> 16) - c->in_length;
+                        long take = wayland_min(want, length);
+
                         wayland_copy(c->in + c->in_length, bytes, take);
-                        c->in_length += take;
-                        bytes += take;
-                        length -= take;
+                        c->in_length += take, bytes += take, length -= take;
                         if (c->in_length < 8)
                                 continue;
+                        msg = c->in;
                         size = (long)wire_message(c->in, (unsigned long long)c->in_length, WAYLAND_MESSAGE, head);
-                        if (size < 0)
-                        {
-                                c->in_length = 0;
-                                status = wayland_fail(c, 1, WAYLAND_INVALID_METHOD, "a message of an impossible size");
-                                break;
-                        }
-                        if (!size)
-                                continue;
-                        c->in_length = 0;
-                        status = wayland_dispatch(c, c->in, size, head[0], (long)head[1]);
-                        if (status == WAYLAND_STALL)
-                        {
-                                wayland_stall(c, c->in, size, bytes, length);
-                                status = WAYLAND_OK;
-                        }
-                        continue;
                 }
-                // The head read and checked by the library (wire_message): a size no message has is the client's end, and no size yet
-                // (fewer than eight bytes, or a message that has not all come) is kept for the rest.
-                size = (long)wire_message(bytes, (unsigned long long)length, WAYLAND_MESSAGE, head);
+                else
+                {
+                        msg = bytes;
+                        size = (long)wire_message(bytes, (unsigned long long)length, WAYLAND_MESSAGE, head);
+                }
                 if (size < 0)
                 {
+                        c->in_length = 0;
                         status = wayland_fail(c, 1, WAYLAND_INVALID_METHOD, "a message of an impossible size");
                         break;
                 }
                 if (!size)
                 {
-                        wayland_copy(c->in, bytes, length);
-                        c->in_length = length;
-                        break;
+                        if (!partial)
+                        {
+                                wayland_copy(c->in, bytes, length);
+                                c->in_length = length;
+                                break;
+                        }
+                        continue;
                 }
-                status = wayland_dispatch(c, bytes, size, head[0], (long)head[1]);
+                c->in_length = 0;
+                status = wayland_dispatch(c, msg, size, head[0], (long)head[1]);
                 if (status == WAYLAND_STALL)
                 {
-                        wayland_stall(c, bytes, 0, bytes, length);
+                        wayland_stall(c, msg, partial ? size : 0, bytes, length);
                         status = WAYLAND_OK;
                         break;
                 }
-                bytes += size;
-                length -= size;
+                if (!partial)
+                        bytes += size, length -= size;
         }
         return c->dead ? WAYLAND_DEAD : status;
 }
 
 WAYLAND_API int wayland_feed(long slot, const unsigned char *bytes, long length, const long *fds, long count)
 {
-        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
+        struct wayland_client *c = wayland_live_client(slot);
 
         for (long at = 0; at < count; at++)
         {
                 if (c && !c->dead && c->in_fd_count < WAYLAND_FDS)
-                {
-                        c->in_fds[c->in_fd_count++] = fds[at];
-                        wayland.fds++;
-                }
+                        c->in_fds[c->in_fd_count++] = fds[at], wayland.fds++;
                 else
                 {
                         wayland.host->close(wayland.host->context, fds[at]);
@@ -9589,7 +8301,6 @@ WAYLAND_API int wayland_feed(long slot, const unsigned char *bytes, long length,
                 return WAYLAND_DEAD;
         if (c->stalled)
         {
-                // A host that reads a client that waits for a buffer: what comes is kept behind what waits.
                 if (c->stash_length + length > WAYLAND_STASH)
                         return wayland_fail(c, 1, WAYLAND_NO_MEMORY, "more sent than can wait for a buffer");
                 wayland_copy(c->stash + c->stash_length, bytes, length);
@@ -9599,58 +8310,45 @@ WAYLAND_API int wayland_feed(long slot, const unsigned char *bytes, long length,
         return wayland_pump(c, bytes, length);
 }
 
-/* Whether a client waits for a buffer to be ready, which the host does not read it for, and asks wayland_resume of. */
 WAYLAND_API long wayland_stalled(long slot)
 {
-        return slot >= 0 && slot < wayland.client_slots && wayland.client[slot] && !wayland.client[slot]->dead && wayland.client[slot]->stalled;
+        struct wayland_client *c = wayland_client_of(slot);
+
+        return c && !c->dead && c->stalled;
 }
 
-/*
-        When a stalled client is next worth asking of, on the host's clock (ms), and in fd the dma-buf it waits for, which the host
-        may poll to be told the moment it is ready (-1 for none): a client that waits for its budget at the end of its window of time,
-        one that waits for its GPU at the end of its time to finish. 0 for a client that does not wait.
-*/
 WAYLAND_API long wayland_stall_due(long slot, long *fd)
 {
-        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
+        struct wayland_client *c = wayland_live_client(slot);
+        long cap;
 
         *fd = -1;
         if (!c || c->dead || !c->stalled)
                 return 0;
         if (c->hold)
-                return c->hold_at; // a timed hold wakes the loop at its time; a barrier's is woken by the frames (wayland_frame_wanted)
+                return c->hold_at;
+        cap = c->stalled_at + WAYLAND_STALL_MS + 1;
         if (c->stalled_sync_handle >= 0)
         {
                 long efd = wayland.syncobj.eventfd ? wayland.syncobj.eventfd(wayland.syncobj.context, c->stalled_sync_handle, c->stalled_sync_point) : -1;
                 if (efd >= 0)
-                {
-                        *fd = efd;
-                        return c->stalled_at + WAYLAND_STALL_MS + 1;
-                }
-                long next = wayland.host->now(wayland.host->context) + 1;
-                long cap = c->stalled_at + WAYLAND_STALL_MS + 1;
+                        return *fd = efd, cap;
+                long next = wayland_now() + 1;
 
                 return next < cap ? next : cap;
         }
         if (c->stalled_fd < 0)
                 return c->budget_surface >= 0 ? c->surfaces[c->budget_surface].budget_at + WAYLAND_BUDGET_MS : 0;
-        *fd = c->stalled_fd;
-        return c->stalled_at + WAYLAND_STALL_MS + 1;
+        return *fd = c->stalled_fd, cap;
 }
 
-/*
-        The commit a client waits for is made again if its buffer is ready now, and what the client sent after it is taken, which
-        may be a commit that waits in its turn. Answers 1 while it is still waiting, else 0; a client whose buffer is not ready in
-        WAYLAND_STALL_MS is ended, since its GPU is not going to finish.
-*/
 WAYLAND_API int wayland_resume(long slot)
 {
-        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
+        struct wayland_client *c = wayland_live_client(slot);
         long length;
 
         if (!c || c->dead || !c->stalled)
                 return 0;
-        // A commit held for a barrier or a time is made again once wayland_hold_wanted says it is no longer held.
         if (c->hold)
         {
                 struct wayland_surface *held = &c->surfaces[c->hold_surface];
@@ -9659,19 +8357,15 @@ WAYLAND_API int wayland_resume(long slot)
                         return 1;
                 c->hold = 0;
         }
-        // A commit that waits for its budget is made in the client's next window of time; one that waits for its GPU, when it is done.
         if (c->stalled_sync_handle >= 0
                 ? (wayland.syncobj.ready && !wayland.syncobj.ready(wayland.syncobj.context, c->stalled_sync_handle, c->stalled_sync_point))
             : c->stalled_fd < 0
                 ? c->budget_surface >= 0 && c->surfaces[c->budget_surface].live && !wayland_budget_left(&c->surfaces[c->budget_surface])
                 : wayland.host->dmabuf_ready && !wayland.host->dmabuf_ready(wayland.host->context, c->stalled_fd))
         {
-                if ((c->stalled_fd >= 0 || c->stalled_sync_handle >= 0) &&
-                    wayland.host->now(wayland.host->context) - c->stalled_at > WAYLAND_STALL_MS)
+                if ((c->stalled_fd >= 0 || c->stalled_sync_handle >= 0) && wayland_now() - c->stalled_at > WAYLAND_STALL_MS)
                 {
-                        c->stalled = 0;
-                        c->stalled_sync_handle = -1;
-                        c->stash_length = 0;
+                        c->stalled = 0, c->stalled_sync_handle = -1, c->stash_length = 0;
                         wayland_fail(c, 1, WAYLAND_IMPLEMENTATION, "the buffer's writer never finished");
                         return 0;
                 }
@@ -9679,26 +8373,18 @@ WAYLAND_API int wayland_resume(long slot)
         }
         c->stalled_sync_handle = -1;
         length = c->stash_length;
-        c->stash_length = 0;
-        c->stalled = 0;
+        c->stash_length = 0, c->stalled = 0;
         wayland_pump(c, c->stash, length);
         return c->stalled ? 1 : 0;
 }
 
-/*
-        What waits to be sent to a client: its bytes, and the descriptors that go with them (the first byte's ancillary
-        data). wayland_sent takes what was written off, from the front; a send that wrote any bytes sent the descriptors.
-*/
-// What wayland_out hands the host: the batch's descriptors, copied in order.
 static long wayland_out_fd_view[WAYLAND_OUT_FDS];
 
 WAYLAND_API long wayland_out(long slot, const unsigned char **bytes, const long **fds, long *fd_count)
 {
-        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
+        struct wayland_client *c = wayland_live_client(slot);
 
-        *bytes = 0;
-        *fds = 0;
-        *fd_count = 0;
+        *bytes = 0, *fds = 0, *fd_count = 0;
         if (!c)
                 return 0;
         *bytes = c->out;
@@ -9706,22 +8392,31 @@ WAYLAND_API long wayland_out(long slot, const unsigned char **bytes, const long 
         for (long at = 0; at < *fd_count; at++)
                 wayland_out_fd_view[at] = c->out_fds[at].fd;
         *fds = wayland_out_fd_view;
-        // The descriptors past the batch wait for the next send: the bytes of this one end where the first of them begins.
         return *fd_count < c->out_fd_count ? c->out_fds[*fd_count].at : c->out_length;
 }
 
-// A send that took part of the queue, or carried descriptors, or left feedback waiting for room: out of the line of wayland_sent,
-// whose every send of all of a report's events is then a leaf that saves no registers (it saved six, and gave them back, each time).
-static __attribute__((noinline)) void wayland_sent_part(struct wayland_client *c, long slot, long count);
+// Keep partial/fd/feedback send slow path out-of-line so the common full flush in wayland_sent stays a leaf.
+static __attribute__((noinline)) void wayland_sent_part(struct wayland_client *c, long slot, long count)
+{
+        long at = count;
+
+        for (; at + 8 <= c->out_length; at += 8)
+                *(wayland_wire_long *)(c->out + at - count) = *(const wayland_wire_long *)(c->out + at);
+        for (; at < c->out_length; at++)
+                c->out[at - count] = c->out[at];
+        c->out_length -= count;
+        wayland_out_fds_drop(c, wayland_out_fd_batch(c), count);
+        wayland_feedback_flush(c);
+        if (!c->out_length && !c->dead && !c->feedback_pending)
+                wayland_out_clear(slot);
+}
 
 WAYLAND_API void wayland_sent(long slot, long count)
 {
-        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots && wayland.host ? wayland.client[slot] : 0;
+        struct wayland_client *c = wayland_live_client(slot);
 
         if (!c || count <= 0 || count > c->out_length)
                 return;
-        // All of it sent with no descriptor and no feedback waiting for room, as nearly every send is: the queue is empty, nothing
-        // to move up or close.
         if (count == c->out_length && !c->out_fd_count && !c->feedback_pending)
         {
                 c->out_length = 0;
@@ -9732,46 +8427,22 @@ WAYLAND_API void wayland_sent(long slot, long count)
         wayland_sent_part(c, slot, count);
 }
 
-static __attribute__((noinline)) void wayland_sent_part(struct wayland_client *c, long slot, long count)
-{
-        // What is left moved to the front, a word at a time forward (the place a word goes is below where it is read, and every word
-        // is read before one is written over it), then its last few bytes.
-        {
-                long at = count;
-
-                for (; at + 8 <= c->out_length; at += 8)
-                        *(wayland_wire_long *)(c->out + at - count) = *(const wayland_wire_long *)(c->out + at);
-                for (; at < c->out_length; at++)
-                        c->out[at - count] = c->out[at];
-        }
-        c->out_length -= count;
-        wayland_out_fds_sent(c, count);
-        wayland_feedback_flush(c);
-        if (!c->out_length && !c->dead && !c->feedback_pending)
-                wayland_out_clear(slot);
-}
-
-// The requests dispatched so far, over every client, and in quiet those of them that changed nothing the host shows (wayland.quiet).
 WAYLAND_API long wayland_heard(long *quiet)
 {
         *quiet = wayland.quiet;
         return wayland.heard;
 }
 
-// Whether a client has bytes queued or dead state waiting to flush; and how many slots there are to ask of.
 WAYLAND_API int wayland_out_dirty(long slot)
 {
         return slot >= 0 && slot < wayland.client_slots && (wayland.out_dirty[slot / 64] >> (slot % 64) & 1u);
 }
 
-/*
-        Whether a client's queue is past WAYLAND_OUT_HIGH: the host reads no more of it, and polls it for room and not for its
-        requests, until it has taken enough of its events (a reply to every request is queued, so reading on would only grow it).
-*/
 WAYLAND_API int wayland_out_backlog(long slot)
 {
-        return slot >= 0 && slot < wayland.client_slots && wayland.host && wayland.client[slot] &&
-               wayland.client[slot]->out_length > WAYLAND_OUT_HIGH;
+        struct wayland_client *c = wayland_live_client(slot);
+
+        return c && c->out_length > WAYLAND_OUT_HIGH;
 }
 
 WAYLAND_API long wayland_client_slots(void)
@@ -9779,12 +8450,6 @@ WAYLAND_API long wayland_client_slots(void)
         return wayland.client_slots;
 }
 
-/*
-        The compositor's screens, changed (a scale, a mode, a place, a turn): every client is told the whole of each screen it
-        bound, in the order a client waits for it. The xdg_output's logical position and size first, then the wl_output's
-        geometry, mode, scale, name, description and done, which from version 3 applies the xdg_output's too; so a client
-        sees the screen change once, all of it or none.
-*/
 WAYLAND_API void wayland_screens_changed(void)
 {
         long was;
@@ -9799,9 +8464,9 @@ WAYLAND_API void wayland_screens_changed(void)
         {
                 struct wayland_client *c = wayland.client[slot];
 
-                //      A screen went: the surfaces on it leave it, and what the client bound of it is told nothing more (its number is
-                //      nobody's: a screen that comes with it later is another global, and these are not it).
-                for (long screen = wayland.screens; c && screen < was && screen < WAYLAND_SCREENS; screen++)
+                if (!c)
+                        continue;
+                for (long screen = wayland.screens; screen < was && screen < WAYLAND_SCREENS; screen++)
                 {
                         for (long at = 0; at < c->tbl[WLT_SURFACE].count; at++)
                         {
@@ -9819,9 +8484,7 @@ WAYLAND_API void wayland_screens_changed(void)
                                     c->objects[object].aux == screen)
                                         c->objects[object].aux = 0xffff;
                 }
-                //      Each registry a client holds says so, as the protocol has it: a screen that came is a global to bind, one that went
-                //      is removed.
-                for (long at = 0; c && at < c->tbl[WLT_OBJECT].count && wayland.screens != was; at++)
+                for (long at = 0; at < c->tbl[WLT_OBJECT].count && wayland.screens != was; at++)
                         if (c->objects[at].iface == WLI_wl_registry)
                         {
                                 for (long screen = was; screen < wayland.screens; screen++)
@@ -9829,35 +8492,24 @@ WAYLAND_API void wayland_screens_changed(void)
                                 for (long screen = wayland.screens; screen < was; screen++)
                                         wayland_global_remove_send(c, c->objects[at].id, wayland_output_name(screen));
                         }
-                for (long at = 0; c && at < c->tbl[WLT_OBJECT].count; at++)
-                        if (c->objects[at].iface == WLI_zxdg_output_v1)
-                                wayland_xdg_output_send(c, at, c->objects[at].aux);
-                for (long at = 0; c && at < c->tbl[WLT_OBJECT].count; at++)
-                        if (c->objects[at].iface == WLI_wl_output)
-                                wayland_output_send(c, at);
+                wayland_outputs_send(c);
         }
         for (long screen = wayland.screens; screen < was && screen < WAYLAND_SCREENS; screen++)
                 wayland.output_age[screen]++;
 }
 
-/*
-        Every window is told the scale of the screen it is on, when that is another than it was told: the surfaces of the
-        window (its subsurfaces too) their fractional scale and whole scale, and a toplevel the size the compositor asks of
-        it in the new unit. A window that moved to another screen is told so (enter and leave). Once a pass, for each row a
-        client holds; a row whose percent is what it was told costs a look at its facts.
-*/
 WAYLAND_API void wayland_scales_sweep(void)
 {
         if (!wayland.host)
                 return;
         for (long row = 0; row < wayland.row_made; row++)
         {
-                struct wayland_client *c = wayland.row[row].client >= 0 ? wayland.client[wayland.row[row].client] : 0;
-                struct wayland_surface *root = c ? &c->surfaces[wayland.row[row].surface] : 0;
-                struct wayland_facts facts = {0, 0, 0, 0, 0, 0, 0};
+                struct wayland_client *c;
+                struct wayland_surface *root = wayland_row_surface(row, &c);
+                struct wayland_facts facts = {0};
                 long percent;
 
-                if (!root || !root->live || root->row != row || wayland.host->row_facts(wayland.host->context, (int)row, &facts) < 0)
+                if (!root || root->row != row || wayland.host->row_facts(wayland.host->context, (int)row, &facts) < 0)
                         continue;
                 wayland_surface_screens(c, root, wayland_screen_at(facts.x, facts.y));
                 percent = facts.scale > 0 ? facts.scale : 100;
@@ -9872,55 +8524,32 @@ WAYLAND_API void wayland_scales_sweep(void)
         }
 }
 
-/*
-        A window's row knocked: what the compositor says of it now, against what its client was told. The host counts the asks
-        to go of a window (facts.closing) and the surface keeps the count its client was told of: an ask it has not been told of
-        is said (xdg_toplevel.close) and is then told, so what the client does with it is the client's (it may ask the person
-        and keep the window), and the next press of the close button is one more in the host's count, said again. The count is
-        the host's alone to change: the shim took the ask off the row itself once (a call that cleared the host's closing), which
-        was a second way of saying an ask was over beside the count. A popup is asked to go once by the host, and is said so
-        once (popup_done: it is dismissed, and stays so until its window is gone). A size or a state that changed is a new
-        configure, which a client with too many unacknowledged waits for.
-*/
 WAYLAND_API void wayland_row_wake(long row)
 {
         struct wayland_client *c;
         struct wayland_surface *s;
         struct wayland_facts facts;
-        long slot;
 
-        if (!wayland.host || row < 0 || row >= wayland.row_made || wayland.row[row].client < 0)
-                return;
-        c = wayland.client[wayland.row[row].client];
-        s = c ? &c->surfaces[wayland.row[row].surface] : 0;
-        if (!s || !s->live || s->row != row || wayland.host->row_facts(wayland.host->context, (int)row, &facts) < 0)
+        if (!wayland.host || !(s = wayland_row_surface(row, &c)) || s->row != row ||
+            wayland.host->row_facts(wayland.host->context, (int)row, &facts) < 0)
                 return;
         if (facts.closing && facts.closing != s->closes)
         {
                 int popup = s->role == WAYLAND_ROLE_POPUP;
 
-                slot = wayland_find(c, s->role_id, popup ? WLI_xdg_popup : WLI_xdg_toplevel);
-                if (slot >= 0)
+                if (wayland_find(c, s->role_id, popup ? WLI_xdg_popup : WLI_xdg_toplevel) >= 0)
                         wayland_ev0(c, s->role_id, popup ? WLE_xdg_popup_popup_done : WLE_xdg_toplevel_close);
-                // This ask is told, or has nobody here to tell (an X window, which its window manager asks): it is not looked at again.
                 s->closes = facts.closing;
         }
-        // The compositor's own word on the state is the last word too: a window it took out of fullscreen (or out of maximized) is not
-        // put back in it when it is shown again, for a request the compositor has since let go of.
-        if (s->role == WAYLAND_ROLE_TOPLEVEL)
+        if (s->role != WAYLAND_ROLE_TOPLEVEL)
+                return;
+        if (!(facts.states & WAYLAND_STATE_FULLSCREEN))
+                s->u.top.want_fullscreen = 0;
+        if (!(facts.states & (WAYLAND_STATE_MAXIMIZED | WAYLAND_STATE_FULLSCREEN)))
+                s->u.top.want_maximized = 0;
+        if (s->u.top.told && (facts.width != s->u.top.told_width || facts.height != s->u.top.told_height || facts.states != s->u.top.told_states) &&
+            !wayland_facts_freed(s, &facts))
         {
-                if (!(facts.states & WAYLAND_STATE_FULLSCREEN))
-                        s->u.top.want_fullscreen = 0;
-                if (!(facts.states & (WAYLAND_STATE_MAXIMIZED | WAYLAND_STATE_FULLSCREEN)))
-                        s->u.top.want_maximized = 0;
-        }
-        if (s->role == WAYLAND_ROLE_TOPLEVEL && s->u.top.told &&
-            (facts.width != s->u.top.told_width || facts.height != s->u.top.told_height || facts.states != s->u.top.told_states) && !wayland_facts_freed(s, &facts))
-        {
-                // A window resized by hand is told a size a frame: the hand moves many times in one (a mouse reports a thousand times a
-                // second), and each size told is a buffer the client allocates and a picture it draws to be shown for none of them. A
-                // size that changed again in the frame the last one was told in is owed, and the frame's end says what the size is
-                // then (wayland_frame). A state that changed (the resize begun or ended, the keys taken) is said at once.
                 if (facts.states == s->u.top.told_states && (facts.states & WAYLAND_STATE_RESIZING) && s->u.top.configure_frame == wayland.frames + 1)
                         s->u.top.configure_late = 1;
                 else
@@ -9928,125 +8557,73 @@ WAYLAND_API void wayland_row_wake(long row)
         }
 }
 
-/*
-        A frame is on the screen: the callbacks that waited for one are answered, for every window that is shown and
-        not put away. A window put away is not told of frames, and is told of the next the moment it is shown.
-*/
-static void wayland_callbacks_due(long now);
-
-WAYLAND_API void wayland_frame(void)
-{
-        long now;
-
-        if (!wayland.host)
-                return;
-        wayland.frames++;
-        now = wayland.host->now(wayland.host->context);
-        for (long row = 0; row < wayland.row_made; row++)
-        {
-                struct wayland_client *c = wayland.row[row].client >= 0 ? wayland.client[wayland.row[row].client] : 0;
-                struct wayland_surface *s = c ? &c->surfaces[wayland.row[row].surface] : 0;
-
-                // The size a hand's resize came to in the frame that ended, said now (wayland_row_wake kept it back).
-                if (s && s->live && s->role == WAYLAND_ROLE_TOPLEVEL && s->u.top.configure_late)
-                {
-                        s->u.top.configure_late = 0;
-                        wayland_configure_owed(c, s);
-                }
-        }
-        // The callbacks were answered when the frame latched (wayland_latch), and those taken since are the next frame's. A frame's time
-        // with nothing latched (no present began) answers them all, and is a latch of its own for the fifo barriers.
-        if (!wayland.calling)
-        {
-                wayland.latches++;
-                wayland_callbacks_due(now);
-        }
-        wayland.calling = 0;
-}
-
-/* The callbacks every window shown has waiting, answered at the host's ms now: a window put away is told of no frame. */
 static void wayland_callbacks_due(long now)
 {
         for (long row = 0; row < wayland.row_made; row++)
         {
-                struct wayland_client *c = wayland.row[row].client >= 0 ? wayland.client[wayland.row[row].client] : 0;
-                struct wayland_surface *s = c && c->waiting ? &c->surfaces[wayland.row[row].surface] : 0;
-                struct wayland_facts facts;
-                int any = 0;
+                struct wayland_client *c;
+                struct wayland_surface *s = wayland_row_surface(row, &c);
 
-                if (s && s->live)
-                        for (struct wayland_surface *o = s; o && !any; o = wayland_tree_next(c, s, o))
-                                any = o->cbq[WLCB_READY].count != 0;
-                if (!any)
-                        continue;
-                if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
+                if (!s || !c->waiting || !wayland_tree_has_cb(c, s, WLCB_READY) || wayland_row_suspended(row))
                         continue;
                 for (struct wayland_surface *o = s; o; o = wayland_tree_next(c, s, o))
                         wayland_callbacks_done(c, o, now);
         }
 }
 
-/*
-        A present begins: what the clients have committed is what it latches. The frame callbacks waiting are answered now, as the
-        content they were asked with is taken: the client draws its next picture while this one is composed and flipped, which is the
-        most time it can be given (the present's whole time on the card, 3 ms of box's 6.9 ms refresh, more than it had). The feedbacks
-        taken so far are this frame's (presentings_framed), answered at its flip; what is committed from now until then is the next
-        frame's, its callbacks answered at the next latch, and a fifo barrier set before now is cleared (the content that set it is
-        latched). Before this, the frame's end (wayland_frame) and its flip (wayland_presented) answered whatever was there when they
-        came: a commit made while the card composed or the flip was on its way was told presented at that flip, a refresh before it was
-        shown, its frame callback came before any frame had it, and a barrier it set was cleared by a frame that never latched it, so
-        the next FIFO commit replaced it unshown.
-*/
+WAYLAND_API void wayland_frame(void)
+{
+        if (!wayland.host)
+                return;
+        wayland.frames++;
+        for (long row = 0; row < wayland.row_made; row++)
+        {
+                struct wayland_client *c;
+                struct wayland_surface *s = wayland_row_surface(row, &c);
+
+                if (s && s->role == WAYLAND_ROLE_TOPLEVEL && s->u.top.configure_late)
+                        s->u.top.configure_late = 0, wayland_configure_owed(c, s);
+        }
+        if (!wayland.calling)
+                wayland.latches++, wayland_callbacks_due(wayland_now());
+        wayland.calling = 0;
+}
+
+// Latch committed content for a present: pin lent buffers across the flip, snapshot presenting feedbacks, and answer ready callbacks.
 WAYLAND_API void wayland_latch(void)
 {
         if (!wayland.host)
                 return;
         wayland.latches++;
         wayland.framing = wayland.calling = 1;
-        // Pin the exact lent buffer handed to this present (flip or GPU compose) so commits arriving before the vblank
-        // cannot release the buffer that is currently being flipped onto or scanned out by the display.
         for (long row = 0; row < wayland.row_made; row++)
         {
-                struct wayland_client *c = wayland.row[row].client >= 0 ? wayland.client[wayland.row[row].client] : 0;
-                struct wayland_surface *s = c ? &c->surfaces[wayland.row[row].surface] : 0;
+                struct wayland_client *c;
+                struct wayland_surface *s = wayland_row_surface(row, &c);
 
-                if (!s || !s->live)
+                if (!s)
                         continue;
-                if (s->lent_latched)
-                {
-                        wayland_let_go(c, s->lent_latched - 1);
-                        s->lent_latched = 0;
-                }
+                wayland_lent_drop(c, &s->lent_latched);
                 if (s->lent)
-                {
-                        s->lent_latched = s->lent;
-                        c->buffers[s->lent - 1].held++;
-                }
+                        s->lent_latched = s->lent, c->buffers[s->lent - 1].held++;
         }
         for (long slot = 0; slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
 
-                // A client with no feedback taken has none framed either (each count is kept at or under its list's).
                 if (!c || !c->presenting_surfaces)
                         continue;
                 for (long at = 0; at < c->tbl[WLT_SURFACE].count; at++)
                         c->surfaces[at].presentings_framed = c->surfaces[at].cbq[WLCB_PRESENTING].count;
         }
-        wayland_callbacks_due(wayland.host->now(wayland.host->context));
+        wayland_callbacks_due(wayland_now());
 }
 
-/*
-        The feedbacks one surface's commits took, answered: presented at when (nanoseconds on the monotonic clock, split as the
-        protocol has it into seconds and nanoseconds), refreshing every refresh nanoseconds, the frame's count seq. Each object is
-        destroyed by its event, so it is let go with it.
-*/
 static void wayland_presentings_done(struct wayland_client *c, struct wayland_surface *s, unsigned long when, unsigned long refresh,
                                      unsigned long seq, unsigned long flags)
 {
         unsigned long seconds = when / 1000000000ul, nanoseconds = when % 1000000000ul;
         struct wayland_cbq *pq = &s->cbq[WLCB_PRESENTING];
-        // A frame flipped answers what it latched (wayland_latch); a frame's time that latched nothing answers all.
         long k = wayland.framing && s->presentings_framed < pq->count ? s->presentings_framed : pq->count;
 
         if (k && k == pq->count)
@@ -10059,7 +8636,6 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
                 if (slot < 0)
                         continue;
                 {
-                        // The last word is the presentation flags the compositor can vouch for (vsync, hw_clock, hw_completion).
                         unsigned int words[7] = {(unsigned int)(seconds >> 32), (unsigned int)seconds, (unsigned int)nanoseconds, (unsigned int)refresh,
                                                  (unsigned int)(seq >> 32), (unsigned int)seq, (unsigned int)flags};
 
@@ -10070,56 +8646,29 @@ static void wayland_presentings_done(struct wayland_client *c, struct wayland_su
         s->presentings_framed = 0;
 }
 
-/*
-        The buffers a window's lent pictures replaced, its own and its subsurfaces' as layers, let go of: those in pools, and those of dma-bufs
-        too when dmabufs (one may be the buffer the card shows until the flip lands).
-*/
 static void wayland_window_gone(struct wayland_client *c, struct wayland_surface *root, int dmabufs)
 {
         for (struct wayland_surface *s = root; s; s = wayland_tree_next(c, root, s))
                 if (s->lent_gone && (dmabufs || !c->pools[c->buffers[s->lent_gone - 1].pool].dmabuf))
-                {
-                        wayland_let_go(c, s->lent_gone - 1);
-                        s->lent_gone = 0;
-                }
+                        wayland_lent_drop(c, &s->lent_gone);
 }
 
-/*
-        The feedbacks of every window shown, answered with the frame at when. A drawn frame (drawn 1) also lets go of the buffer a
-        lent picture was replaced by, since the frame that shows the new picture is the one drawn; an idle frame does not. Either lets go of
-        the buffers of subsurfaces that went (wayland_gone_drawn): the host was told when they went, and a frame has gone by since.
-*/
 static void wayland_presented_rows(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags, int drawn, long zero_row)
 {
         for (long row = 0; row < wayland.row_made; row++)
         {
-                struct wayland_client *c = wayland.row[row].client >= 0 ? wayland.client[wayland.row[row].client] : 0;
-                struct wayland_surface *s = c ? &c->surfaces[wayland.row[row].surface] : 0;
-                struct wayland_facts facts;
+                struct wayland_client *c;
+                struct wayland_surface *s = wayland_row_surface(row, &c);
 
-                if (!s || !s->live)
+                if (!s)
                         continue;
-                if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
+                if (wayland_row_suspended(row))
                 {
-                        // A window put away is in no frame, so none will show the picture that replaced its lent buffer: the buffer is the
-                        // client's again at the first frame's time after the commit, drawn or not (what read it before the commit is done
-                        // by then). Kept for a frame that never comes, a client with two buffers that draws while it is put away had
-                        // neither: one is the picture, and the other was never released.
-                        if (s->lent_latched)
-                        {
-                                wayland_let_go(c, s->lent_latched - 1);
-                                s->lent_latched = 0;
-                        }
-                        if (s->lent_shown)
-                        {
-                                wayland_let_go(c, s->lent_shown - 1);
-                                s->lent_shown = 0;
-                        }
+                        wayland_lent_drop(c, &s->lent_latched);
+                        wayland_lent_drop(c, &s->lent_shown);
                         wayland_window_gone(c, s, 1);
                         continue;
                 }
-                // The frame that shows the picture a lent buffer was replaced by is drawn: update the pinned on-screen scanout
-                // buffer first so a buffer that just flipped onto the display (zero_row) stays held until the NEXT flip away from it.
                 if (drawn)
                 {
                         if (row == zero_row)
@@ -10128,25 +8677,12 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
 
                                 s->lent_shown = s->lent_latched;
                                 s->lent_latched = 0;
-                                if (old_shown)
-                                        wayland_let_go(c, old_shown - 1);
+                                wayland_lent_drop(c, &old_shown);
                         }
                         else
-                        {
-                                if (s->lent_latched)
-                                {
-                                        wayland_let_go(c, s->lent_latched - 1);
-                                        s->lent_latched = 0;
-                                }
-                                if (s->lent_shown)
-                                {
-                                        wayland_let_go(c, s->lent_shown - 1);
-                                        s->lent_shown = 0;
-                                }
-                        }
+                                wayland_lent_drop(c, &s->lent_latched), wayland_lent_drop(c, &s->lent_shown);
                         wayland_window_gone(c, s, 1);
                 }
-                // The window the card scanned out of its own buffer is presented with no copy (zero_copy), its subsurfaces were not shown so.
                 for (struct wayland_surface *o = s; o; o = wayland_tree_next(c, s, o))
                         wayland_presentings_done(c, o, when, refresh, seq,
                                                  o == s && row == zero_row ? flags | WLN_wp_presentation_feedback_kind_zero_copy : flags);
@@ -10157,27 +8693,15 @@ static void wayland_presented_rows(unsigned long when, unsigned long refresh, un
         wayland.framing = 0;
 }
 
-/*
-        A frame was drawn (composed; its flip may still be on its way): every window shown is in it with the picture it has now, so the
-        buffer a lent picture replaced is read by nothing any more and is the client's again, here, before the frame callbacks the same
-        frame answers (the host calls this, then wayland_frame). A buffer in a pool, that is: one of a dma-buf may be the very buffer the
-        card shows until the flip lands, and waits for wayland_presented. Released at the flip instead, a client with two buffers was
-        told the frame was done while both were still the compositor's, and one that draws only when a buffer is free drew no more.
-*/
 static void wayland_drawn_rows(int dmabuf_busy_row)
 {
         for (long row = 0; wayland.host && row < wayland.row_made; row++)
         {
-                struct wayland_client *c = wayland.row[row].client >= 0 ? wayland.client[wayland.row[row].client] : 0;
-                struct wayland_surface *s = c ? &c->surfaces[wayland.row[row].surface] : 0;
-                struct wayland_facts facts;
+                struct wayland_client *c;
+                struct wayland_surface *s = wayland_row_surface(row, &c);
 
-                if (!s || !s->live)
-                        continue;
-                // A window put away is in no frame: its buffer goes at a frame's time all the same (wayland_presented_rows).
-                if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
-                        continue;
-                wayland_window_gone(c, s, !(dmabuf_busy_row < -1 || (int)row == dmabuf_busy_row));
+                if (s && !wayland_row_suspended(row))
+                        wayland_window_gone(c, s, !(dmabuf_busy_row < -1 || (int)row == dmabuf_busy_row));
         }
         for (long slot = 0; wayland.host && slot < wayland.client_slots; slot++)
                 if (wayland.client[slot] && wayland.client[slot]->gone.count)
@@ -10194,24 +8718,12 @@ WAYLAND_API void wayland_drawn_composed(int busy_row)
         wayland_drawn_rows(busy_row);
 }
 
-/*
-        A frame was drawn and flipped to the screen (wayland_presented's when, refresh and seq, as above): the feedbacks its
-        commits took are answered, for every window that is shown and not put away. Called only for a frame that was drawn, so
-        a timer's frame with nothing new answers none. zero_row is the row the card showed straight from its client's buffer, -1 for none.
-*/
 WAYLAND_API void wayland_presented(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags, long zero_row)
 {
-        if (!wayland.host)
-                return;
-        wayland_presented_rows(when, refresh, seq, flags, 1, zero_row);
+        if (wayland.host)
+                wayland_presented_rows(when, refresh, seq, flags, 1, zero_row);
 }
 
-/*
-        A frame time went by and nothing was drawn: a commit whose content was the screen's (no damage, or damage of nothing) changes
-        nothing, so the picture is on the screen at this frame, and the feedbacks it took are answered. Without this a commit that
-        draws nothing waits for a frame that is never drawn, and a client that waits for its feedback (Chromium's video, which submits
-        its next frame when the last one is presented) stops.
-*/
 WAYLAND_API void wayland_presented_idle(unsigned long when, unsigned long refresh, unsigned long seq, unsigned long flags)
 {
         if (!wayland.host)
@@ -10220,71 +8732,31 @@ WAYLAND_API void wayland_presented_idle(unsigned long when, unsigned long refres
         wayland_presented_rows(when, refresh, seq, flags, 0, -1);
 }
 
-/* Whether a window that is shown has a feedback waiting for the next frame (wayland_presented_idle answers it). */
-static int wayland_presentings_wanted(struct wayland_client *c, long row)
-{
-        struct wayland_surface *root = &c->surfaces[wayland.row[row].surface];
-        struct wayland_facts facts;
-
-        if (wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
-                return 0;
-        for (struct wayland_surface *o = root; o; o = wayland_tree_next(c, root, o))
-                if (o->cbq[WLCB_PRESENTING].count)
-                        return 1;
-        return 0;
-}
-
-/*
-        Whether any callback waits for a frame, or a feedback for the next frame, so the compositor knows to come back for one.
-*/
 WAYLAND_API long wayland_frame_wanted(void)
 {
-        // A commit held for a barrier is waited for a frame at a time: each frame drawn is the one that clears it.
         for (long slot = 0; slot < wayland.client_slots; slot++)
                 if (wayland.client[slot] && wayland.client[slot]->stalled && wayland.client[slot]->hold && !wayland.client[slot]->hold_at)
                         return 1;
         for (long row = 0; wayland.host && row < wayland.row_made; row++)
         {
-                struct wayland_client *c = wayland.row[row].client >= 0 ? wayland.client[wayland.row[row].client] : 0;
+                struct wayland_client *c = wayland_client_of(wayland.row[row].client);
                 struct wayland_surface *s = c ? &c->surfaces[wayland.row[row].surface] : 0;
-                struct wayland_facts facts;
-                int waits = 0;
+                int live = s && s->live;
 
-                // A size owed to a window resized by hand is said at the frame's end: a frame is wanted for it.
-                if (s && s->live && s->role == WAYLAND_ROLE_TOPLEVEL && s->u.top.configure_late)
+                if ((c && c->gone.count) || (live && s->role == WAYLAND_ROLE_TOPLEVEL && s->u.top.configure_late))
                         return 1;
-                // A window put away that holds the buffer its picture replaced is given a frame's time to let it go in (wayland_presented_rows),
-                // and so is a client that holds those of subsurfaces that went.
-                if (c && c->gone.count)
-                        return 1;
-                if (s && s->live && s->lent_gone &&
-                    wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED))
-                        return 1;
-                if (!c || (!c->waiting && !c->presenting_surfaces))
+                if (!live)
                         continue;
-                if (c->waiting && s && s->live)
-                        for (struct wayland_surface *o = s; o && !waits; o = wayland_tree_next(c, s, o))
-                                waits = o->cbq[WLCB_READY].count != 0;
-                // A window put away is told of no frame (wayland_frame), so no frame is wanted for its callbacks: they are answered by the
-                // first frame drawn once it is shown, which the compositor draws for any window it shows.
-                if (waits && !(wayland.host->row_facts(wayland.host->context, (int)row, &facts) >= 0 && (facts.states & WAYLAND_STATE_SUSPENDED)))
+                if (s->lent_gone && wayland_row_suspended(row))
                         return 1;
-                // A feedback waits for the frame an idle tick answers (wayland_presented_idle): a client that holds none costs nothing here.
-                if (c->presenting_surfaces && wayland_presentings_wanted(c, row))
+                if (((c->waiting && wayland_tree_has_cb(c, s, WLCB_READY)) ||
+                     (c->presenting_surfaces && wayland_tree_has_cb(c, s, WLCB_PRESENTING))) &&
+                    !wayland_row_suspended(row))
                         return 1;
         }
         return 0;
 }
 
-/*
-        A window's hints as its commits set them, one WAYLAND_HINT_ name each, read from the surface of its row. A row with no window
-        has the fallback of each: opaque (0xffffffff) for ALPHA, the multiplier its surface shows; no content type for CONTENT; 0 for
-        the rest. CONTENT is the content type; FIFO whether its commit waits for the barrier (wp_fifo); TIMESTAMP the time its commit is
-        for (wp_commit_timing, nanoseconds on the monotonic clock, 0 for none); ATTENTION whether an xdg-activation it was not vouched for
-        wants attention until it is focused; ASYNC the tearing hint; ICON whether its toplevel has an icon (xdg-toplevel-icon); MODAL
-        whether its dialog is modal. The compositor shows a commit at its next frame whatever FIFO and TIMESTAMP say, so they are read
-        for what they are and not yet for a hold: a frame is already the barrier, and a commit cannot be held to a future time.
-*/
 #define WAYLAND_ROW_HINTS(X) \
         X(ALPHA, s->cur.alpha, 0xffffffffu) \
         X(CONTENT, s->content, WLN_wp_content_type_v1_type_none) \
@@ -10305,7 +8777,7 @@ enum wayland_row_hint
 WAYLAND_API unsigned long wayland_row_hint(long row, enum wayland_row_hint hint)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < wayland.row_made ? wayland_row_surface(row, &c) : 0;
+        struct wayland_surface *s = wayland_row_surface(row, &c);
 
         switch (hint)
         {
@@ -10316,30 +8788,6 @@ WAYLAND_API unsigned long wayland_row_hint(long row, enum wayland_row_hint hint)
         return 0;
 }
 
-/*
-        zwp_pointer_gestures_v1 (pointer-gestures, version 3). A pinch object is asked for per pointer: the client's windows take the
-        pinch from then on (the compositor sends a window that does not take it Ctrl and a wheel). Swipe and hold are accepted and
-        never sent: the compositor has no swipe or hold gesture to send.
-*/
-static int wayland_gestures_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
-{
-        (void)a;
-        if (self->iface == WLI_zwp_pointer_gestures_v1 && op == WLQ_zwp_pointer_gestures_v1_get_pinch_gesture)
-        {
-                c->pinches++;
-                for (long at = 0; at < wayland.row_made; at++)
-                        if (wayland.row[at].client == c->slot)
-                                wayland.host->row_do(wayland.host->context, (int)at, WAYLAND_DO_PINCH_WANT, 1, 0);
-        }
-        return WAYLAND_OK;
-}
-
-/*
-        A pinch of the pointer's window (the host's WINDOW_EVENT_PINCH): phase 1 begins it, 0 updates it, 2 ends it. scale is in
-        1024ths of the span it began at (1024 is 1.0), (fx, fy) the focal point in the row's pixels. Every pinch object of the
-        pointer's client is sent it: begin with the fingers (two), an update with the focal point's move and the scale (fixed, 1.0
-        is 256), no rotation, and an end that is not cancelled.
-*/
 WAYLAND_API void wayland_pointer_pinch(long row, long phase, long scale, long fx, long fy)
 {
         struct wayland_client *c = 0;
@@ -10349,45 +8797,33 @@ WAYLAND_API void wayland_pointer_pinch(long row, long phase, long scale, long fx
 
         if (!wayland.host || row != wayland.pointer_row || !(s = wayland_row_surface(row, &c)) || !c->pinches)
                 return;
-        time = wayland.host->now(wayland.host->context);
-        if (phase == 1)
-        {
-                wayland.pinch_x = fx;
-                wayland.pinch_y = fy;
+        time = wayland_now();
+        if (phase == 1 || phase == 2)
                 serial = wayland_input_serial(c);
-        }
-        else if (phase == 2)
-                serial = wayland_input_serial(c);
-        else
+        if (phase != 2)
         {
-                dx = fx - wayland.pinch_x;
-                dy = fy - wayland.pinch_y;
-                wayland.pinch_x = fx;
-                wayland.pinch_y = fy;
+                if (phase != 1)
+                        dx = fx - wayland.pinch_x, dy = fy - wayland.pinch_y;
+                wayland.pinch_x = fx, wayland.pinch_y = fy;
         }
         for (long at = 0, left = c->pinches; at < c->tbl[WLT_OBJECT].count && left > 0; at++)
         {
                 struct wayland_object *o = &c->objects[at];
 
-                if (o->iface != WLI_zwp_pointer_gesture_pinch_v1 || o->id == 0)
+                if (o->iface != WLI_zwp_pointer_gesture_pinch_v1 || !o->id)
                         continue;
                 left--;
                 if (phase == 1)
-                        wayland_ev(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_begin,
-                                   (unsigned int)serial, (unsigned int)time, s->id, 2u);
+                        wayland_ev(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_begin, (unsigned int)serial, (unsigned int)time, s->id, 2u);
                 else if (phase == 2)
-                        wayland_ev(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_end,
-                                   (unsigned int)serial, (unsigned int)time, 0u);
+                        wayland_ev(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_end, (unsigned int)serial, (unsigned int)time, 0u);
                 else
-                        wayland_ev(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_update,
-                                   (unsigned int)time, (unsigned int)wayland_fixed(dx, s->scale120),
-                                   (unsigned int)wayland_fixed(dy, s->scale120), (unsigned int)(scale > 0 ? scale / 4 : 0), 0u);
+                        wayland_ev(c, o->id, WLE_zwp_pointer_gesture_pinch_v1_update, (unsigned int)time,
+                                   (unsigned int)wayland_fixed(dx, s->scale120), (unsigned int)wayland_fixed(dy, s->scale120),
+                                   (unsigned int)(scale > 0 ? scale / 4 : 0), 0u);
         }
 }
 
-/* The window of the surface whose xwayland_surface_v1 gave this X11 serial: its row, -1 while it has none, -2 when no surface has the serial. */
-/* The serials of one X server are its own: each server numbers its windows from its own counter, so two servers name the same serial for
-   two windows. A serial is looked for in the client that is the server (client: its slot, the window manager's, -1 for none). */
 WAYLAND_API long wayland_client_count(void)
 {
         return wayland.client_slots;
@@ -10395,14 +8831,14 @@ WAYLAND_API long wayland_client_count(void)
 
 WAYLAND_API long wayland_client_pid(long slot)
 {
-        struct wayland_client *c = slot >= 0 && slot < wayland.client_slots ? wayland.client[slot] : 0;
+        struct wayland_client *c = wayland_client_of(slot);
 
         return c && c->live ? c->pid : -1;
 }
 
 static struct wayland_surface *wayland_xserial_surface(long client, unsigned long long serial, struct wayland_client **out_c)
 {
-        struct wayland_client *c = client >= 0 && client < wayland.client_slots ? wayland.client[client] : 0;
+        struct wayland_client *c = wayland_client_of(client);
 
         if (out_c)
                 *out_c = c;
@@ -10420,66 +8856,45 @@ WAYLAND_API long wayland_serial_row(long client, unsigned long long serial)
 {
         struct wayland_surface *s = wayland_xserial_surface(client, serial, 0);
 
-        if (!s)
-                return -2;
-        return s->row >= 0 && s->row < wayland.row_made ? s->row : -1;
+        return !s ? -2 : s->row >= 0 && s->row < wayland.row_made ? s->row : -1;
 }
 
-/*
-        The window manager's word on the X window whose surface set this serial: it is a window, or (popup, WAYLAND_XWINDOW_POPUP) an
-        override-redirect window at (x, y) of the output; a window at (x, y) it placed itself (WAYLAND_XWINDOW_PLACED); one transient for
-        the window of a row (WAYLAND_XWINDOW_OWNER: centred on it), with this title (plain text, cut to what a title takes). A surface that waited for the word
-        is shown at the commit that follows. Answers the surface's row (-1 while it has none), or -2 when no surface has the serial
-        yet, which the window manager asks of again. Said again, it sets the title anew.
-*/
 WAYLAND_API long wayland_xwindow_adopt(long client, unsigned long long serial, long popup, long x, long y, const char *title)
 {
-        long how = popup;
         struct wayland_client *c = 0;
         struct wayland_surface *s = wayland_xserial_surface(client, serial, &c);
-        char text[WAYLAND_TEXT];
         long at = 0;
+        int changed = 0;
 
         if (!s || !s->xsurface || s->u.xwin.dead)
                 return -2;
         s->u.xwin.adopted = 1;
-        popup = how & WAYLAND_XWINDOW_POPUP;
         if (s->row < 0)
         {
-                s->u.xwin.popup = popup ? 1 : 0;
-                s->u.xwin.placed = (how & WAYLAND_XWINDOW_PLACED) ? 1 : 0;
-                s->u.xwin.owner = how >> WAYLAND_XWINDOW_OWNER_SHIFT;
-                s->u.xwin.x = x;
-                s->u.xwin.y = y;
+                s->u.xwin.popup = (popup & WAYLAND_XWINDOW_POPUP) ? 1 : 0;
+                s->u.xwin.placed = (popup & WAYLAND_XWINDOW_PLACED) ? 1 : 0;
+                s->u.xwin.owner = popup >> WAYLAND_XWINDOW_OWNER_SHIFT;
+                s->u.xwin.x = x, s->u.xwin.y = y;
         }
         else if (s->u.xwin.popup && wayland.host && (s->u.xwin.x != x || s->u.xwin.y != y))
         {
-                // A popup its window manager moved while it is shown goes to its new place in the host, relative to its parent.
                 long px = 0, py = 0;
 
-                s->u.xwin.x = x;
-                s->u.xwin.y = y;
+                s->u.xwin.x = x, s->u.xwin.y = y;
                 if (c && !s->u.xwin.alone && wayland_xparent(c, s, &px, &py) >= 0)
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_PLACE, px, py);
                 else if (s->u.xwin.alone)
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_PLACE, x, y);
         }
         for (; title && title[at] && at < WAYLAND_TEXT - 1; at++)
-                text[at] = title[at];
-        text[at] = 0;
-        for (long i = 0; i <= at; i++)
-                if (text[i] != s->title[i])
-                {
-                        for (long j = 0; j <= at; j++)
-                                s->title[j] = text[j];
-                        if (s->row >= 0 && wayland.host)
-                                wayland.host->row_title(wayland.host->context, s->row, s->title[0] ? s->title : s->app_id, 0);
-                        break;
-                }
+                changed |= s->title[at] != title[at], s->title[at] = title[at];
+        changed |= s->title[at] != 0;
+        s->title[at] = 0;
+        if (changed && s->row >= 0 && wayland.host)
+                wayland.host->row_title(wayland.host->context, s->row, s->title[0] ? s->title : s->app_id, 0);
         return s->row >= 0 ? s->row : -1;
 }
 
-/* The window manager of an X window is gone: its window is taken away, and its surface is shown no more. */
 WAYLAND_API void wayland_xwindow_gone(long client, unsigned long long serial)
 {
         struct wayland_client *c = 0;
@@ -10487,72 +8902,49 @@ WAYLAND_API void wayland_xwindow_gone(long client, unsigned long long serial)
 
         if (!s || !s->xsurface)
                 return;
-        s->u.xwin.dead = 1;
-        s->u.xwin.adopted = 0;
+        s->u.xwin.dead = 1, s->u.xwin.adopted = 0;
         if (c)
                 wayland_row_release(c, s);
 }
 
-/* Whether a window has a keyboard shortcuts inhibitor, and whether its tearing hint is asynchronous (allowed to tear). */
 WAYLAND_API long wayland_row_shortcuts(long row)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < wayland.row_made ? wayland_row_surface(row, &c) : 0;
+        struct wayland_surface *s = wayland_row_surface(row, &c);
 
         return s && (s->shortcuts || s->xgrab) ? s->shortcut_active : 0;
 }
 
-/*
-        The keyboard shortcuts inhibitor's active state follows the keyboard: it becomes active when its surface gets the keys (and says
-        so, with active), and inactive when the keys go (and says so, with inactive). Nothing else sends them.
-*/
 static void wayland_shortcuts_send(struct wayland_client *c, struct wayland_surface *s, int active)
 {
-        long slot = wayland_find(c, s->shortcut_id, WLI_zwp_keyboard_shortcuts_inhibitor_v1);
-
         s->shortcut_active = (unsigned char)active;
         s->escape_down = 0;
-        if (slot >= 0)
+        if (wayland_find(c, s->shortcut_id, WLI_zwp_keyboard_shortcuts_inhibitor_v1) >= 0)
                 wayland_ev0(c, s->shortcut_id, active ? WLE_zwp_keyboard_shortcuts_inhibitor_v1_active
                                                       : WLE_zwp_keyboard_shortcuts_inhibitor_v1_inactive);
 }
 
-// Keys said to the compositor's chords, for the window that has them: whether a shortcuts inhibitor is active there. Where the
-// keys are taken from a chord, these are the answers (wayland_shortcuts_key).
-#define WAYLAND_KEY_ESC 1                 // the Linux code of Escape
-#define WAYLAND_ESCAPE_MS 1000            // how long Super and Escape are held to give the keys back
-#define WAYLAND_KEYS_CHORDS 0             // the compositor's chords run
-#define WAYLAND_KEYS_CLIENT 1             // the window has the keys (a shortcut inhibitor): the compositor's chords do not run
-#define WAYLAND_KEYS_ESCAPE 2             // Super and Escape, the one chord the inhibitor keeps: it is the compositor's, and nothing else gets it
+#define WAYLAND_KEY_ESC 1
+#define WAYLAND_ESCAPE_MS 1000
+#define WAYLAND_KEYS_CHORDS 0
+#define WAYLAND_KEYS_CLIENT 1
+#define WAYLAND_KEYS_ESCAPE 2
 
-/*
-        What a key does to the compositor's chords, for the window with the keys in row. An active shortcuts inhibitor suspends them, so the
-        key is the window's: WAYLAND_KEYS_CLIENT. The one chord kept is Super with Escape, held for WAYLAND_ESCAPE_MS: its press and its
-        release are the compositor's (WAYLAND_KEYS_ESCAPE, and no client sees them), and a hold as long as that gives the keys back, the
-        inhibitor is inactive until the keys next come to its window, and it is sent inactive. Escape with no Super is the window's.
-        super is 1 while the logo key is held.
-*/
 WAYLAND_API long wayland_shortcuts_key(long row, long code, long value, int super)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < wayland.row_made ? wayland_row_surface(row, &c) : 0;
-        long now;
+        struct wayland_surface *s = wayland_row_surface(row, &c);
 
         if (!s || !(s->shortcuts || s->xgrab) || !s->shortcut_active)
                 return WAYLAND_KEYS_CHORDS;
         if (code == WAYLAND_KEY_ESC && value == 1 && super && !s->escape_down)
-        {
-                s->escape_down = 1;
-                s->escape_at = wayland.host->now(wayland.host->context);
-                return WAYLAND_KEYS_ESCAPE;
-        }
+                return s->escape_down = 1, s->escape_at = wayland_now(), WAYLAND_KEYS_ESCAPE;
         if (code == WAYLAND_KEY_ESC && s->escape_down)
         {
                 if (value == 0)
                 {
-                        now = wayland.host->now(wayland.host->context);
                         s->escape_down = 0;
-                        if (now - s->escape_at >= WAYLAND_ESCAPE_MS)
+                        if (wayland_now() - s->escape_at >= WAYLAND_ESCAPE_MS)
                                 wayland_shortcuts_send(c, s, 0);
                 }
                 return WAYLAND_KEYS_ESCAPE;
@@ -10560,38 +8952,22 @@ WAYLAND_API long wayland_shortcuts_key(long row, long code, long value, int supe
         return WAYLAND_KEYS_CLIENT;
 }
 
-/*
-        Whether any client holds an idle inhibitor. The compositor has no idle timer to hold back yet: when one exists it must not
-        blank or suspend the screen while this is 1.
-*/
 WAYLAND_API long wayland_idle_inhibited(void)
 {
         return wayland_inhibitors_now();
 }
 
-/* The compositor gave the shim an input event (a key, a button, a motion, a finger): the idle clock starts again from now. */
 WAYLAND_API void wayland_input_seen(void)
 {
         if (wayland.host)
-                wayland.input_at = wayland.host->now(wayland.host->context);
+                wayland.input_at = wayland_now();
 }
 
-/*
-        Runs the idle notifications: each one that has been given no input for its timeout (and no inhibitor holds it) goes idle, and each
-        one that is idle and has input since sends resumed. Called on each pass of the compositor, so it is current when a frame is.
-*/
-WAYLAND_API void wayland_idle_tick(void)
+static long wayland_idle_scan(int tick, long now)
 {
-        long now;
+        long due = 0;
         int inhibited = -1;
 
-        // A released drag whose target did not answer in WAYLAND_DRAG_ANSWER_MS is decided as it stands (cancelled, as nothing was taken).
-        if (wayland.host && wayland.drag.live && wayland.drag.released &&
-            wayland.host->now(wayland.host->context) - wayland.drag.released_at >= WAYLAND_DRAG_ANSWER_MS)
-                wayland_drag_decide();
-        if (!wayland.host || !wayland.idle_notifies)
-                return;
-        now = wayland.host->now(wayland.host->context);
         for (long slot = 0; slot < wayland.client_slots; slot++)
         {
                 struct wayland_client *c = wayland.client[slot];
@@ -10607,64 +8983,42 @@ WAYLAND_API void wayland_idle_tick(void)
                                 continue;
                         if (n->idle)
                         {
-                                if (wayland.input_at > n->idled)
-                                {
-                                        n->idle = 0;
-                                        n->since = wayland.input_at;
-                                        wayland_notify_say(c, n, WLE_ext_idle_notification_v1_resumed);
-                                }
+                                if (tick && wayland.input_at > n->idled)
+                                        n->idle = 0, n->since = wayland.input_at, wayland_ev0(c, n->id, WLE_ext_idle_notification_v1_resumed);
                                 continue;
                         }
-                        if (!n->input_only && inhibited < 0)
-                                inhibited = wayland_inhibitors_now() > 0;
-                        base = wayland.input_at > n->since ? wayland.input_at : n->since;
-                        if ((!n->input_only && inhibited) || now - base < n->timeout)
-                                continue;
-                        n->idle = 1;
-                        n->idled = now;
-                        wayland_notify_say(c, n, WLE_ext_idle_notification_v1_idled);
-                }
-        }
-}
-
-/*
-        When the next idle notification may go idle, on the shim's clock (ms), or 0 for none: a notification that is not idle and is not
-        held by an inhibitor. The compositor's loop wakes for it, so an idle desktop still goes idle on time.
-*/
-WAYLAND_API long wayland_idle_due(void)
-{
-        long due = 0;
-        int inhibited = -1;
-
-        if (!wayland.host)
-                return 0;
-        for (long slot = 0; slot < wayland.client_slots; slot++)
-        {
-                struct wayland_client *c = wayland.client[slot];
-
-                if (!c || c->dead)
-                        continue;
-                for (long at = 0; at < c->tbl[WLT_NOTIFY].count; at++)
-                {
-                        struct wayland_notify *n = &c->notifies[at];
-                        long base, when;
-
-                        if (!n->live || n->idle)
-                                continue;
                         if (!n->input_only && inhibited < 0)
                                 inhibited = wayland_inhibitors_now() > 0;
                         if (!n->input_only && inhibited)
                                 continue;
                         base = wayland.input_at > n->since ? wayland.input_at : n->since;
-                        when = base + n->timeout;
-                        if (!due || when < due)
-                                due = when;
+                        if (tick)
+                        {
+                                if (now - base >= n->timeout)
+                                        n->idle = 1, n->idled = now, wayland_ev0(c, n->id, WLE_ext_idle_notification_v1_idled);
+                        }
+                        else if (!due || base + n->timeout < due)
+                                due = base + n->timeout;
                 }
         }
         return due;
 }
 
-/* What the idle clock says, for the moonwater debug line: the shim's ms of the last input, the inhibitors that hold, the notifications idle. */
+WAYLAND_API void wayland_idle_tick(void)
+{
+        if (!wayland.host)
+                return;
+        if (wayland.drag.live && wayland.drag.released && wayland_now() - wayland.drag.released_at >= WAYLAND_DRAG_ANSWER_MS)
+                wayland_drag_decide();
+        if (wayland.idle_notifies)
+                wayland_idle_scan(1, wayland_now());
+}
+
+WAYLAND_API long wayland_idle_due(void)
+{
+        return wayland.host ? wayland_idle_scan(0, 0) : 0;
+}
+
 WAYLAND_API void wayland_idle_state(long *input_ms, long *inhibitors, long *idled)
 {
         *input_ms = wayland.host ? wayland.input_at : 0;
@@ -10676,21 +9030,15 @@ WAYLAND_API void wayland_idle_state(long *input_ms, long *inhibitors, long *idle
                                 *idled += wayland.client[slot]->notifies[at].live && wayland.client[slot]->notifies[at].idle;
 }
 
-/* How many xdg_system_bell rings and xdg-toplevel-icon sets there have been, over every client (for the moonwater debug line). */
 WAYLAND_API void wayland_hint_counts(long *bells, long *icons)
 {
-        *bells = wayland.bells;
-        *icons = wayland.icons;
+        *bells = wayland.bells, *icons = wayland.icons;
 }
 
-/*
-        The four hints of a row in one lookup, as wayland_row_hint gives them one by one (CONTENT, ICON, MODAL and the shortcut hint):
-        compositor_wl_table asks every row of them each turn, so a row's surface is found once, not four times.
-*/
 WAYLAND_API void wayland_row_hints(long row, long *content, long *icon, long *modal, long *shortcuts)
 {
         struct wayland_client *c = 0;
-        struct wayland_surface *s = row >= 0 && row < wayland.row_made ? wayland_row_surface(row, &c) : 0;
+        struct wayland_surface *s = wayland_row_surface(row, &c);
 
         *content = s ? (long)s->content : WLN_wp_content_type_v1_type_none;
         *icon = s ? s->cur.icon : 0;
@@ -10698,24 +9046,11 @@ WAYLAND_API void wayland_row_hints(long row, long *content, long *icon, long *mo
         *shortcuts = s && (s->shortcuts || s->xgrab) ? s->shortcut_active : 0;
 }
 
-/* The client a row belongs to, or -1: the compositor asks before it treats a row as a program's. */
 WAYLAND_API long wayland_row_owner(long row)
 {
         return row >= 0 && row < wayland.row_made ? wayland.row[row].client : -1;
 }
 
-/*
-        The pointer's picture a client drew for its window under the pointer (wl_pointer.set_cursor with a surface), for the compositor
-        to draw in place of its own shape: the first pixel of the surface's buffer (format WLN_wl_shm_format_argb8888, premultiplied, or
-        _xrgb8888; stride bytes a row, width by height pixels), the hotspot in those pixels (the point of it that is the pointer's place,
-        which may lie outside it), the buffer's scale (its pixels a unit of the surface), and serial, which moves whenever any of that
-        does: a commit of the surface, another surface or hotspot named, a shape named in its place, the pointer on another surface, the
-        surface or its client gone. 1 for row the window under the pointer and a picture that is a buffer of one of those two formats the
-        compositor can read; 0 otherwise, with out's pixels 0 and its serial the one now, and the compositor draws the shape it was told
-        (WAYLAND_DO_CURSOR: the arrow while a surface is named, which has drawn nothing yet). The pixels are the client's pool, read-only
-        and held (the buffer is not released while it is the picture) until the shim is next fed or a client is dropped: the compositor
-        copies them then, as it copies any client picture. A pool its client cut is read as zeros (the SIGBUS handler's pages).
-*/
 struct wayland_cursor
 {
         const unsigned char *pixels;
@@ -10726,16 +9061,13 @@ struct wayland_cursor
 
 WAYLAND_API int wayland_cursor_picture(long row, struct wayland_cursor *out)
 {
-        struct wayland_client *c = wayland.cursor_client >= 0 && wayland.cursor_client < wayland.client_slots ? wayland.client[wayland.cursor_client] : 0;
+        struct wayland_client *c = wayland_client_of(wayland.cursor_client);
         struct wayland_surface *s = c && wayland.cursor_surface >= 0 && wayland.cursor_surface < c->tbl[WLT_SURFACE].count ? &c->surfaces[wayland.cursor_surface] : 0;
         const struct wayland_buffer *b;
         const struct wayland_pool *p;
         long scale;
 
-        out->pixels = 0;
-        out->stride = out->width = out->height = out->format = out->hot_x = out->hot_y = 0;
-        out->scale = 1;
-        out->serial = wayland.cursor_serial;
+        *out = (struct wayland_cursor){.scale = 1, .serial = wayland.cursor_serial};
         if (!s || !s->live || s->gen != wayland.cursor_gen || s->role != WAYLAND_ROLE_CURSOR || !s->held || row < 0 || row >= wayland.row_made ||
             row != wayland.pointer_row || wayland.row[row].client != wayland.cursor_client)
                 return 0;
@@ -10745,14 +9077,10 @@ WAYLAND_API int wayland_cursor_picture(long row, struct wayland_cursor *out)
             b->width <= 0 || b->height <= 0)
                 return 0;
         scale = s->cur.scale > 0 ? s->cur.scale : 1;
-        out->pixels = (const unsigned char *)p->at + b->offset;
-        out->stride = b->stride;
-        out->width = b->width;
-        out->height = b->height;
-        out->format = b->format;
-        out->hot_x = wayland.cursor_hot_x * scale;
-        out->hot_y = wayland.cursor_hot_y * scale;
-        out->scale = scale;
+        *out = (struct wayland_cursor){
+                (const unsigned char *)p->at + b->offset, b->stride, b->width, b->height, b->format,
+                wayland.cursor_hot_x * scale, wayland.cursor_hot_y * scale, scale, wayland.cursor_serial,
+        };
         return 1;
 }
 
