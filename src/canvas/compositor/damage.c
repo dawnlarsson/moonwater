@@ -66,48 +66,222 @@ static void *mem_buf_grow(void **ptr, unsigned long *cap, unsigned long need, un
 }
 
 /*
-        What changed, as a few rectangles that do not overlap. A rectangle
-        joins one it overlaps or lines up with, which costs nothing, and
-        stays apart from the rest, so two windows at opposite corners are
-        two small rectangles and not the screen between them. When the list
-        is full the rectangle joins whichever grows least.
+        Shared rectangle, damage-list, switch-file, and cubic-bezier tween primitives.
 */
+struct canvas_rect
+{
+        int x1, y1, x2, y2;
+};
+
+_Static_assert(sizeof(struct canvas_rect) == 4 * sizeof(int), "canvas_rect matches int[4]");
+
+struct canvas_damage
+{
+        struct canvas_rect r[COMPOSITOR_DAMAGE];
+        unsigned int count;
+};
+
+static inline int rect_empty(struct canvas_rect r)
+{
+        return r.x2 <= r.x1 || r.y2 <= r.y1;
+}
+
+static inline long rect_area(struct canvas_rect r)
+{
+        return (long)(r.x2 - r.x1) * (r.y2 - r.y1);
+}
+
+static inline struct canvas_rect rect_join(struct canvas_rect a, struct canvas_rect b)
+{
+        return (struct canvas_rect){a.x1 < b.x1 ? a.x1 : b.x1, a.y1 < b.y1 ? a.y1 : b.y1,
+                                    a.x2 > b.x2 ? a.x2 : b.x2, a.y2 > b.y2 ? a.y2 : b.y2};
+}
+
+static inline struct canvas_rect rect_meet(struct canvas_rect a, struct canvas_rect b)
+{
+        struct canvas_rect m = {a.x1 > b.x1 ? a.x1 : b.x1, a.y1 > b.y1 ? a.y1 : b.y1,
+                                a.x2 < b.x2 ? a.x2 : b.x2, a.y2 < b.y2 ? a.y2 : b.y2};
+
+        return rect_empty(m) ? (struct canvas_rect){0, 0, 0, 0} : m;
+}
+
+static inline struct canvas_rect rect_from_int4(const int p[4])
+{
+        return (struct canvas_rect){p[0], p[1], p[2], p[3]};
+}
+
+static inline void rect_to_int4(struct canvas_rect r, int p[4])
+{
+        p[0] = r.x1, p[1] = r.y1, p[2] = r.x2, p[3] = r.y2;
+}
+
+// Add rectangle r to damage list d, coalescing whenever union area <= sum + slack (0 for exact damage, >0 for GPU slack merge).
+static void damage_add(struct canvas_damage *d, struct canvas_rect r, long slack)
+{
+        unsigned int at = 0;
+
+        if (rect_empty(r))
+                return;
+        while (at < d->count)
+        {
+                struct canvas_rect joined = rect_join(r, d->r[at]);
+
+                if (rect_area(joined) <= rect_area(r) + rect_area(d->r[at]) + slack)
+                {
+                        r = joined;
+                        d->r[at] = d->r[--d->count];
+                        at = 0;
+                }
+                else
+                        at++;
+        }
+        if (d->count == COMPOSITOR_DAMAGE)
+        {
+                unsigned int best = 0;
+                long least = -1;
+
+                for (at = 0; at < COMPOSITOR_DAMAGE; at++)
+                {
+                        long grown = rect_area(rect_join(r, d->r[at])) - rect_area(d->r[at]);
+
+                        if (least < 0 || grown < least)
+                                least = grown, best = at;
+                }
+                d->r[best] = rect_join(r, d->r[best]);
+                return;
+        }
+        d->r[d->count++] = r;
+}
+
+// Subtract cut from every rectangle in d; returns 0 (leaving d untouched) if the pieces exceed COMPOSITOR_DAMAGE.
+static int damage_subtract(struct canvas_damage *d, struct canvas_rect cut)
+{
+        struct canvas_damage out;
+
+        out.count = 0;
+        for (unsigned int at = 0; at < d->count; at++)
+        {
+                struct canvas_rect r = d->r[at];
+
+                if (r.x2 <= cut.x1 || r.x1 >= cut.x2 || r.y2 <= cut.y1 || r.y1 >= cut.y2)
+                {
+                        if (out.count == COMPOSITOR_DAMAGE)
+                                return 0;
+                        out.r[out.count++] = r;
+                        continue;
+                }
+                {
+                        int mid_y1 = cut.y1 > r.y1 ? cut.y1 : r.y1, mid_y2 = cut.y2 < r.y2 ? cut.y2 : r.y2;
+                        struct canvas_rect parts[4] = {
+                            {r.x1, r.y1, r.x2, cut.y1},
+                            {r.x1, cut.y2, r.x2, r.y2},
+                            {r.x1, mid_y1, cut.x1, mid_y2},
+                            {cut.x2, mid_y1, r.x2, mid_y2},
+                        };
+
+                        for (unsigned int k = 0; k < 4; k++)
+                        {
+                                struct canvas_rect c = rect_meet(parts[k], r);
+
+                                if (rect_empty(c))
+                                        continue;
+                                if (out.count == COMPOSITOR_DAMAGE)
+                                        return 0;
+                                out.r[out.count++] = c;
+                        }
+                }
+        }
+        *d = out;
+        return 1;
+}
+
+static void damage_load_compositor(struct canvas_damage *d)
+{
+        d->count = compositor.damages < COMPOSITOR_DAMAGE ? compositor.damages : COMPOSITOR_DAMAGE;
+        if (d->count)
+                memory_copy(d->r, compositor.damage, d->count * sizeof(d->r[0]));
+}
+
+static void damage_store_compositor(const struct canvas_damage *d)
+{
+        compositor.damages = d->count;
+        if (d->count)
+                memory_copy(compositor.damage, d->r, d->count * sizeof(d->r[0]));
+}
+
+// Shared /run/moonwater/* switch-file probe (immediate or periodic-mask throttled).
+struct canvas_switch
+{
+        unsigned int probes;
+        int active;
+};
+
+static b32 canvas_switch_exists(const char *path, unsigned int extra_flags)
+{
+        bipolar handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_CLOEXEC | extra_flags);
+
+        if (handle < 0)
+                return 0;
+        system_close(handle);
+        return 1;
+}
+
+static int canvas_switch_poll(struct canvas_switch *sw, const char *path, unsigned int mask)
+{
+        if ((sw->probes++ & mask) == 0)
+                sw->active = (int)canvas_switch_exists(path, 0);
+        return sw->active;
+}
+
+// Shared cubic-bezier easing helpers (land, glide, preview, sway).
+static b64 canvas_tween_ease(positive at, positive now, b64 duration_ns)
+{
+        positive gone;
+
+        if (!at)
+                return 0;
+        gone = now > at ? now - at : 0;
+        return ui_bezier_at(&ui_ease, ui_progress((b64)gone, ui_paced(duration_ns)));
+}
+
+static inline int canvas_tween_lerp(int from, int to, b64 t)
+{
+        return from + (int)(((long long)(to - from) * (long long)t) / (long long)UI_ONE);
+}
+
+static void canvas_tween_rect(int out[4], const int from[4], const int to[4], b64 t)
+{
+        for (int k = 0; k < 4; k++)
+                out[k] = canvas_tween_lerp(from[k], to[k], t);
+}
+
 static long compositor_area(const int *rectangle)
 {
-        return (long)(rectangle[2] - rectangle[0]) * (rectangle[3] - rectangle[1]);
+        return rect_area(rect_from_int4(rectangle));
 }
 
 static long compositor_joined(const int *a, const int *b, int *into)
 {
-        into[0] = a[0] < b[0] ? a[0] : b[0];
-        into[1] = a[1] < b[1] ? a[1] : b[1];
-        into[2] = a[2] > b[2] ? a[2] : b[2];
-        into[3] = a[3] > b[3] ? a[3] : b[3];
-        return compositor_area(into);
+        struct canvas_rect j = rect_join(rect_from_int4(a), rect_from_int4(b));
+
+        rect_to_int4(j, into);
+        return rect_area(j);
 }
 
 // A rectangle, x1, y1, x2, y2, grown to take in another; one with x2 not past x1 is none.
 static void compositor_union(int *into, const int *other)
 {
-        if (other[2] <= other[0] || other[3] <= other[1])
+        struct canvas_rect o = rect_from_int4(other), i = rect_from_int4(into);
+
+        if (rect_empty(o))
                 return;
-        if (into[2] <= into[0] || into[3] <= into[1])
-        {
-                memory_copy(into, other, 4 * sizeof(int));
-                return;
-        }
-        compositor_joined(into, other, into);
+        rect_to_int4(rect_empty(i) ? o : rect_join(i, o), into);
 }
 
 // A rectangle cut to another; none when they do not meet.
 static void compositor_meet(int *into, const int *other)
 {
-        into[0] = into[0] > other[0] ? into[0] : other[0];
-        into[1] = into[1] > other[1] ? into[1] : other[1];
-        into[2] = into[2] < other[2] ? into[2] : other[2];
-        into[3] = into[3] < other[3] ? into[3] : other[3];
-        if (into[2] <= into[0] || into[3] <= into[1])
-                into[0] = into[1] = into[2] = into[3] = 0;
+        rect_to_int4(rect_meet(rect_from_int4(into), rect_from_int4(other)), into);
 }
 
 
@@ -143,13 +317,13 @@ static int compositor_stack_place(int row)
         changes nothing of the glass below it, and what lies over every
         window (the pointer drawn in software, the tabs) nothing of any.
 */
-static void compositor_glass_touch(const int *rectangle)
+static void compositor_glass_touch(const int *rectangle, int damage_by)
 {
         int reach = COMPOSITOR_GLASS_REACH;
-        int by = compositor.damage_by > 0 ? compositor.damage_by - 1 : COMPOSITOR_NONE;
+        int by = damage_by > 0 ? damage_by - 1 : COMPOSITOR_NONE;
         int lowest = by >= 0 ? compositor_stack_place(by) : -1;
 
-        if (compositor.damage_by == COMPOSITOR_OVER)
+        if (damage_by == COMPOSITOR_OVER)
                 return;
 
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
@@ -246,57 +420,27 @@ static void compositor_close_join(int *rectangle)
         }
 }
 
-static void compositor_damage(int x, int y, int width, int height)
+static void compositor_damage_from(int x, int y, int width, int height, int damage_by)
 {
         int rectangle[4] = {x < 0 ? 0 : x, y < 0 ? 0 : y,
                             x + width > compositor.width ? compositor.width : x + width,
                             y + height > compositor.height ? compositor.height : y + height};
-        int joined[4];
-        unsigned int at = 0;
+        struct canvas_damage d;
 
         if (rectangle[2] <= rectangle[0] || rectangle[3] <= rectangle[1])
                 return;
 
         compositor_close_join(rectangle);
-        compositor_glass_touch(rectangle);
+        compositor_glass_touch(rectangle, damage_by);
 
-        while (at < compositor.damages)
-        {
-                int *other = compositor.damage[at];
+        damage_load_compositor(&d);
+        damage_add(&d, rect_from_int4(rectangle), 0);
+        damage_store_compositor(&d);
+}
 
-                if (compositor_joined(rectangle, other, joined) <=
-                    compositor_area(rectangle) + compositor_area(other))
-                {
-                        memory_copy(rectangle, joined, sizeof(joined));
-                        memory_copy(other, compositor.damage[--compositor.damages], sizeof(joined));
-                        at = 0;
-                }
-                else
-                        at++;
-        }
-
-        if (compositor.damages == COMPOSITOR_DAMAGE)
-        {
-                unsigned int best = 0;
-                long least = -1;
-
-                for (at = 0; at < COMPOSITOR_DAMAGE; at++)
-                {
-                        long grown = compositor_joined(rectangle, compositor.damage[at], joined) -
-                                     compositor_area(compositor.damage[at]);
-
-                        if (least < 0 || grown < least)
-                        {
-                                least = grown;
-                                best = at;
-                        }
-                }
-
-                compositor_joined(rectangle, compositor.damage[best], compositor.damage[best]);
-                return;
-        }
-
-        memory_copy(compositor.damage[compositor.damages++], rectangle, sizeof(rectangle));
+static void compositor_damage(int x, int y, int width, int height)
+{
+        compositor_damage_from(x, y, width, height, compositor.damage_by);
 }
 
 // Whether a window is on the screen: it has shown a picture and is not put away.
@@ -353,9 +497,7 @@ static b64 compositor_land_short(int row)
 
         if (!compositor.landing[row])
                 return 0;
-        if (!compositor.land_at[row])
-                return UI_ONE - COMPOSITOR_LAND_SMALL;
-        done = ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - compositor.land_at[row]), ui_paced(COMPOSITOR_LAND_NS)));
+        done = canvas_tween_ease(compositor.land_at[row], clock_monotonic_nanoseconds(), COMPOSITOR_LAND_NS);
         return ui_qmul(UI_ONE - COMPOSITOR_LAND_SMALL, UI_ONE - done);
 }
 
@@ -463,7 +605,7 @@ static void compositor_glide_damage_now(int row)
 // How far a glide that began at `at` is, Q30 on the kit's ease: none before its first present (at 0).
 static b64 compositor_glide_done(positive at)
 {
-        return at ? ui_bezier_at(&ui_ease, ui_progress((b64)(clock_monotonic_nanoseconds() - at), ui_paced(COMPOSITOR_GLIDE_NS))) : 0;
+        return canvas_tween_ease(at, clock_monotonic_nanoseconds(), COMPOSITOR_GLIDE_NS);
 }
 
 // A glide from `from` to where the window is now, begun at its next present.
@@ -491,8 +633,7 @@ static void compositor_glide_start(int row, const int *from)
                 memory_copy(origin, compositor.glide_from[row], sizeof(origin));
                 origin[0] += from[0] - compositor.glide_base[row][0];
                 origin[1] += from[1] - compositor.glide_base[row][1];
-                for (int k = 0; k < 4; k++)
-                        drawn[k] = origin[k] + (int)(((long long)(from[k] - origin[k]) * (long long)done) / (long long)UI_ONE);
+                canvas_tween_rect(drawn, origin, from, done);
                 compositor_glide_damage(row, origin);
                 from = drawn;
         }
@@ -503,15 +644,11 @@ static void compositor_glide_start(int row, const int *from)
 // A window's rectangle as it is in the frame: where it glides from, to where it is, by the ease of the time since its first present.
 static void compositor_glide_frame(int row, struct compositor_frame *frame)
 {
-        int from[4];
-        long long to[4] = {compositor.x[row], compositor.y[row], (long long)compositor.w[row], (long long)compositor.h[row]};
-        long long at[4];
-        b64 done = compositor_glide_done(compositor.glide_at[row]);
+        int from[4], to[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]}, at[4];
 
         compositor_glide_origin(row, from);
-        for (int k = 0; k < 4; k++)
-                at[k] = from[k] + ((long long)(to[k] - from[k]) * (long long)done) / (long long)UI_ONE;
-        frame->x = (int)at[0], frame->y = (int)at[1], frame->width = (int)at[2], frame->height = (int)at[3];
+        canvas_tween_rect(at, from, to, compositor_glide_done(compositor.glide_at[row]));
+        frame->x = at[0], frame->y = at[1], frame->width = at[2], frame->height = at[3];
         frame->source_w = (int)compositor.w[row], frame->source_h = (int)compositor.h[row];
 }
 
@@ -558,20 +695,14 @@ static unsigned int compositor_preview_shown(int *rect)
 
         if (!compositor.preview_draw)
                 return 0;
-        done = compositor_glide_done(compositor.preview_at);
+        done = canvas_tween_ease(compositor.preview_at, clock_monotonic_nanoseconds(), UI_WINDOW_NS);
         if (compositor.preview_fading || compositor.preview[2] <= 0)
         {
                 memory_copy(rect, compositor.preview_from, sizeof(compositor.preview_from));
-                return compositor.preview_fading
-                           ? (unsigned int)(compositor.preview_from_alpha -
-                                            (long long)compositor.preview_from_alpha * (long long)done / (long long)UI_ONE)
-                           : 0;
+                return compositor.preview_fading ? (unsigned int)canvas_tween_lerp((int)compositor.preview_from_alpha, 0, done) : 0;
         }
-        for (int k = 0; k < 4; k++)
-                rect[k] = compositor.preview_from[k] +
-                          (int)((long long)(compositor.preview[k] - compositor.preview_from[k]) * (long long)done / (long long)UI_ONE);
-        return compositor.preview_from_alpha +
-               (unsigned int)((long long)(100 - compositor.preview_from_alpha) * (long long)done / (long long)UI_ONE);
+        canvas_tween_rect(rect, compositor.preview_from, compositor.preview, done);
+        return (unsigned int)canvas_tween_lerp((int)compositor.preview_from_alpha, 100, done);
 }
 
 // A new target (rect, filling how) for row's preview, before compositor.preview is set to it: from where it is drawn when it
@@ -1253,7 +1384,7 @@ static int compositor_launcher_row(void)
         return COMPOSITOR_NONE;
 }
 
-static unsigned int compositor_windows(void)
+static unsigned int compositor_windows_for(int band)
 {
         unsigned int count = 0;
         int bands = compositor_bands();
@@ -1266,7 +1397,7 @@ static unsigned int compositor_windows(void)
                 // is the band's launcher button, lit while it is up (compositor_launcher_row's test: a window that is dismissed and has no close).
                 if (!compositor.showing[row] || compositor_popup_parent[row] >= 0 || (compositor.asks[row] & WINDOW_NO_TAB) ||
                     (compositor.asks[row] & (WINDOW_DISMISS | WINDOW_NO_CLOSE)) == (WINDOW_DISMISS | WINDOW_NO_CLOSE) ||
-                    (bands > 1 && compositor_screen_of(row) != compositor.band_at))
+                    (bands > 1 && compositor_screen_of(row) != band))
                         continue;
                 while (place && compositor.made[compositor.listed[place - 1]] > compositor.made[row])
                         place--;
@@ -1288,6 +1419,11 @@ static unsigned int compositor_windows(void)
         return count;
 }
 
+static unsigned int compositor_windows(void)
+{
+        return compositor_windows_for(compositor.band_at);
+}
+
 // Each tab's title, app_id, icon and its sequence, in the order the tabs are listed: the rows' (compositor_rows_make), one a row.
 static const char **compositor_tab_titles, **compositor_tab_apps;
 static const unsigned int **compositor_tab_icons;
@@ -1295,17 +1431,17 @@ static unsigned int *compositor_tab_seqs;
 
 // What the taskbar is given of the compositor, filled for each call: the output, the band's buffers and the windows'
 // tabs as compositor_windows lists them (the caller lists them first when they may have changed).
-static struct taskbar_view compositor_taskbar_view(void)
+static struct taskbar_view compositor_taskbar_view_for(int band)
 {
         struct taskbar_view view;
 
         memory_zero(&view, sizeof(view));
         // The primary screen's (`taskbar display primary`), or with a band on every screen the one asked of.
-        compositor_output_rect(compositor.band_at, &view.x, &view.y, &view.width, &view.height);
+        compositor_output_rect(band, &view.x, &view.y, &view.width, &view.height);
         view.scale = compositor.scale;
         view.position = taskbar_position();
-        view.pixels = compositor.band_at > 0 ? compositor.band_more[compositor.band_at] : compositor.band;
-        view.band_bytes = compositor.band_at > 0 ? compositor.band_more_bytes[compositor.band_at] : compositor.band_bytes;
+        view.pixels = band > 0 ? compositor.band_more[band] : compositor.band;
+        view.band_bytes = band > 0 ? compositor.band_more_bytes[band] : compositor.band_bytes;
         view.glass = compositor.glass;
         view.face = &compositor.face;
         view.bold = compositor.bold_ok ? &compositor.bold : null;
@@ -1331,20 +1467,28 @@ static struct taskbar_view compositor_taskbar_view(void)
         return view;
 }
 
+static struct taskbar_view compositor_taskbar_view(void)
+{
+        return compositor_taskbar_view_for(compositor.band_at);
+}
+
+static struct taskbar_view compositor_band_view_for(int band)
+{
+        compositor_windows_for(band);
+        return compositor_taskbar_view_for(band);
+}
+
 static struct taskbar_view compositor_band_view(void)
 {
-        compositor_windows();
-        return compositor_taskbar_view();
+        return compositor_band_view_for(compositor.band_at);
 }
 
 // The panel's band as a frame: the band's own pixels when there is a font to write the titles with, and shapes the
 // scene draws when there is not.
-// The band compositor.band_at is (0, the primary's, when there is one), as a frame; its marks are kept apart, so
-// each band's frames keep their own however many bands are listed after it.
-static void compositor_band_frame(struct compositor_frame *frame)
+static void compositor_band_frame_for(int band, struct compositor_frame *frame)
 {
-        struct taskbar_view view = compositor_band_view();
-        unsigned char *marks = compositor.band_marks[compositor.band_at];
+        struct taskbar_view view = compositor_band_view_for(band);
+        unsigned char *marks = compositor.band_marks[band];
         int x, y, width, height;
 
         memory_copy(marks, compositor.marks, compositor.listing);
@@ -1357,27 +1501,29 @@ static void compositor_band_frame(struct compositor_frame *frame)
         frame->launcher_lit = view.launcher_lit;
 }
 
+static void compositor_band_frame(struct compositor_frame *frame)
+{
+        compositor_band_frame_for(compositor.band_at, frame);
+}
+
 // Damage a rectangle in the overlay plane (above every window: bands, touch spots, chip).
 static void compositor_damage_over(int x, int y, int width, int height)
 {
-        compositor.damage_by = COMPOSITOR_OVER;
-        compositor_damage(x, y, width, height);
-        compositor.damage_by = 0;
+        compositor_damage_from(x, y, width, height, COMPOSITOR_OVER);
 }
 
 // What the tabs show changed: the windows, which has the keys, which are put away, a title, the minute, the battery.
 static void compositor_tabs_changed(void)
 {
         taskbar_changed();
-        for (compositor.band_at = 0; compositor.band_at < compositor_bands(); compositor.band_at++)
+        for (int band = 0; band < compositor_bands(); band++)
         {
-                struct taskbar_view view = compositor_taskbar_view();
+                struct taskbar_view view = compositor_taskbar_view_for(band);
                 int x, y, width, height;
 
                 taskbar_band(&view, &x, &y, &width, &height);
                 compositor_damage_over(x, y, width, height);
         }
-        compositor.band_at = 0;
 }
 
 /*

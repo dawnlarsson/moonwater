@@ -350,8 +350,8 @@ static int compositor_front_stale[4], compositor_front_stale_any; // the stale o
 */
 struct compositor_parts
 {
-        int rect[COMPOSITOR_DAMAGE][4], of[4];
-        unsigned int count;
+        struct canvas_damage d;
+        struct canvas_rect of;
 };
 static struct compositor_parts compositor_front_parts, compositor_spare_parts;
 static unsigned int compositor_flip_refused; // presents the card refused a flip in a row (three: a modeset)
@@ -379,13 +379,14 @@ static void compositor_stale_all(int *box, int *any, struct compositor_parts *pa
 {
         box[0] = box[1] = 0, box[2] = compositor.width, box[3] = compositor.height;
         *any = 1;
-        parts->count = 0;
+        parts->d.count = 0;
 }
 
 // Whether a stale's parts are the box's: there are some, and the box is the one they were joined into.
 static int compositor_parts_hold(const struct compositor_parts *parts, const int *box, int any)
 {
-        return any && parts->count && !memory_compare(parts->of, box, sizeof(parts->of));
+        return any && parts->d.count && parts->of.x1 == box[0] && parts->of.y1 == box[1] &&
+               parts->of.x2 == box[2] && parts->of.y2 == box[3];
 }
 
 // A rectangle joined into a stale and into its parts (compositor_stale_join for the box): the parts go on being the stale when they
@@ -395,15 +396,15 @@ static void compositor_stale_part(int *box, int *any, struct compositor_parts *p
         int held = !*any || compositor_parts_hold(parts, box, *any);
 
         if (!*any)
-                parts->count = 0;
+                parts->d.count = 0;
         compositor_stale_join(box, any, add);
-        if (!held || parts->count == COMPOSITOR_DAMAGE)
+        if (!held || parts->d.count == COMPOSITOR_DAMAGE)
         {
-                parts->count = 0;
+                parts->d.count = 0;
                 return;
         }
-        memory_copy(parts->rect[parts->count++], add, sizeof(parts->of));
-        memory_copy(parts->of, box, sizeof(parts->of));
+        parts->d.r[parts->d.count++] = rect_from_int4(add);
+        parts->of = rect_from_int4(box);
 }
 
 // The screen's buffer and the spare trade places: the one composed into is the scanout (compositor.*), with its stale; the spare is the one
@@ -1969,18 +1970,9 @@ static void compositor_unscanned(unsigned int why)
 // overlay and every one is composed, for a comparison.
 static int compositor_planes_off(void)
 {
-        static unsigned int probes;
-        static int off;
+        static struct canvas_switch sw;
 
-        if ((probes++ & 511) == 0)
-        {
-                long handle = (long)system_open_at(AT_FDCWD, (string_address) "/run/moonwater/planes-off", FILE_READ | O_CLOEXEC);
-
-                off = handle >= 0;
-                if (handle >= 0)
-                        system_close(handle);
-        }
-        return off;
+        return canvas_switch_poll(&sw, "/run/moonwater/planes-off", 511);
 }
 
 static int compositor_plane_candidate(const struct compositor_frame *frames, const unsigned int *rows,
@@ -2070,39 +2062,12 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 // The damage less the rectangle the overlay shows; false when the pieces do not fit the list, which is then left whole.
 static int compositor_damage_cut(const int *rect)
 {
-        int pieces[COMPOSITOR_DAMAGE][4];
-        unsigned int count = 0;
+        struct canvas_damage d;
 
-        for (unsigned int at = 0; at < compositor.damages; at++)
-        {
-                const int *d = compositor.damage[at];
-                int cut[4][4] = {{d[0], d[1], d[2], rect[1]},
-                                 {d[0], rect[3], d[2], d[3]},
-                                 {d[0], rect[1] > d[1] ? rect[1] : d[1], rect[0], rect[3] < d[3] ? rect[3] : d[3]},
-                                 {rect[2], rect[1] > d[1] ? rect[1] : d[1], d[2], rect[3] < d[3] ? rect[3] : d[3]}};
-
-                if (d[2] <= rect[0] || d[0] >= rect[2] || d[3] <= rect[1] || d[1] >= rect[3])
-                {
-                        if (count == COMPOSITOR_DAMAGE)
-                                return 0;
-                        memory_copy(pieces[count++], d, sizeof(pieces[0]));
-                        continue;
-                }
-                for (unsigned int k = 0; k < 4; k++)
-                {
-                        int *c = cut[k];
-
-                        c[0] = c[0] > d[0] ? c[0] : d[0], c[2] = c[2] < d[2] ? c[2] : d[2];
-                        c[1] = c[1] > d[1] ? c[1] : d[1], c[3] = c[3] < d[3] ? c[3] : d[3];
-                        if (c[2] <= c[0] || c[3] <= c[1])
-                                continue;
-                        if (count == COMPOSITOR_DAMAGE)
-                                return 0;
-                        memory_copy(pieces[count++], c, sizeof(pieces[0]));
-                }
-        }
-        memory_copy(compositor.damage, pieces, sizeof(pieces[0]) * count);
-        compositor.damages = count;
+        damage_load_compositor(&d);
+        if (!damage_subtract(&d, rect_from_int4(rect)))
+                return 0;
+        damage_store_compositor(&d);
         return 1;
 }
 

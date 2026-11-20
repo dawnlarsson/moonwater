@@ -738,8 +738,7 @@ static positive compositor_card_awaited(void)
 static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame *frames, unsigned int count)
 {
         struct compositor_gscene *g = &compositor_gscene;
-        int rect[COMPOSITOR_DAMAGE][4];
-        unsigned int rects = 0;
+        struct canvas_damage rects = {.count = 0};
         b32 any_nonempty = false;
         positive out;
 
@@ -771,40 +770,22 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         g->width = (unsigned int)(compositor.width & ~3), g->height = (unsigned int)compositor.height; // the card's columns: a multiple of 4
         for (unsigned int at = 0; at < compositor.damages; at++)
         {
-                const int *d = compositor.damage[at];
-                int rx1 = d[0] < 0 ? 0 : d[0], ry1 = d[1] < 0 ? 0 : d[1];
-                int rx2 = d[2] > compositor.width ? compositor.width : d[2], ry2 = d[3] > compositor.height ? compositor.height : d[3];
+                struct canvas_rect r = rect_meet(rect_from_int4(compositor.damage[at]),
+                                                 (struct canvas_rect){0, 0, compositor.width, compositor.height});
 
-                if (rx2 <= rx1 || ry2 <= ry1)
+                if (rect_empty(r))
                         continue;
                 any_nonempty = true;
-                if (rx2 > (int)g->width)
-                        rx2 = (int)g->width;
-                if (rx2 <= rx1)
+                if (r.x2 > (int)g->width)
+                        r.x2 = (int)g->width;
+                if (rect_empty(r))
                         continue;
-                // Keep disjoint sparse damages separate instead of expanding two distant spots into a full-screen box, coalescing only adjacent/overlapping ones.
-                for (unsigned int j = 0; j < rects; j++)
-                {
-                        int ux1 = rect[j][0] < rx1 ? rect[j][0] : rx1, uy1 = rect[j][1] < ry1 ? rect[j][1] : ry1;
-                        int ux2 = rect[j][2] > rx2 ? rect[j][2] : rx2, uy2 = rect[j][3] > ry2 ? rect[j][3] : ry2;
-                        long a_j = (long)(rect[j][2] - rect[j][0]) * (rect[j][3] - rect[j][1]);
-                        long a_r = (long)(rx2 - rx1) * (ry2 - ry1);
-                        long a_u = (long)(ux2 - ux1) * (uy2 - uy1);
-
-                        if (a_u <= a_j + a_r + COMPOSITOR_GPU_MERGE_SLACK)
-                        {
-                                rect[j][0] = ux1, rect[j][1] = uy1, rect[j][2] = ux2, rect[j][3] = uy2;
-                                rx2 = rx1;
-                                break;
-                        }
-                }
-                if (rx2 > rx1 && rects < COMPOSITOR_DAMAGE)
-                        rect[rects][0] = rx1, rect[rects][1] = ry1, rect[rects][2] = rx2, rect[rects][3] = ry2, rects++;
+                damage_add(&rects, r, COMPOSITOR_GPU_MERGE_SLACK);
         }
         if (!any_nonempty)
                 return COMPOSITOR_GPU_WHY_OTHER;
         // The card draws the columns below g->width; a damage wholly past them is the processor's strip alone (compositor_present_frames), and drawn.
-        if (!rects)
+        if (!rects.count)
                 return COMPOSITOR_GPU_WHY_DRAWN;
         if (!(out = compositor_gpu_output()))
                 return COMPOSITOR_GPU_WHY_OUTPUT;
@@ -834,9 +815,10 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         if (compositor_card.nowait && compositor_card.looped)
         {
                 // The scenes after the scaled pictures, a rectangle each, submitted as the card has room for them; the present is the card's from the first.
-                for (unsigned int at = 0; at < rects; at++)
+                for (unsigned int at = 0; at < rects.count; at++)
                 {
-                        const struct compositor_card_step scene = {COMPOSITOR_CARD_SCENE, 0, 0, 0, 0, 0, 0, 0, {rect[at][0], rect[at][1], rect[at][2], rect[at][3]}};
+                        const struct compositor_card_step scene = {COMPOSITOR_CARD_SCENE, 0, 0, 0, 0, 0, 0, 0,
+                                                                   {rects.r[at].x1, rects.r[at].y1, rects.r[at].x2, rects.r[at].y2}};
 
                         if (!compositor_card_add(&scene))
                                 return COMPOSITOR_GPU_WHY_OTHER;
@@ -857,12 +839,12 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
         else
         {
                 gpu_handed_hold = 1;
-                for (unsigned int at = 0; at < rects; at++)
+                for (unsigned int at = 0; at < rects.count; at++)
                 {
                         b32 ok = gpu_scene(COMPOSITOR_GPU_OPS_AT, g->count, COMPOSITOR_GPU_BINS_AT, out,
                                            (unsigned int)(compositor.scanout_pitch / 4), g->width, (unsigned int)compositor.height,
-                                           (unsigned int)rect[at][0], (unsigned int)rect[at][1], (unsigned int)rect[at][2],
-                                           (unsigned int)rect[at][3]);
+                                           (unsigned int)rects.r[at].x1, (unsigned int)rects.r[at].y1, (unsigned int)rects.r[at].x2,
+                                           (unsigned int)rects.r[at].y2);
                         if (!ok)
                         {
                                 compositor_gpu_fail(GPU_FAIL_UNHOLD);
@@ -893,18 +875,9 @@ static void compositor_lists_set(int on);
 // card that composes, and moonwater debug says the lists drawn, refused and switched back to pixels.
 static int compositor_lists_switch(void)
 {
-        static unsigned int probes;
-        static int on = 1;
+        static struct canvas_switch sw;
 
-        if ((probes++ & 511) == 0)
-        {
-                long handle = (long)system_open_at(AT_FDCWD, (string_address) "/run/moonwater/lists-off", FILE_READ | O_CLOEXEC);
-
-                on = handle < 0;
-                if (handle >= 0)
-                        system_close(handle);
-        }
-        return on;
+        return !canvas_switch_poll(&sw, "/run/moonwater/lists-off", 511);
 }
 
 // Whether the card is composing in earnest: a card that is up but refuses nearly every present (its maps of the window pictures fail, its scanout is one it cannot draw

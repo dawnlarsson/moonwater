@@ -325,15 +325,15 @@ static int compositor_band_covers(const struct compositor_frame *windows, unsign
 // The glass over a rectangle of the output: the scene under it composed and blurred into compositor.glass, with the
 // blur's reach round it; a solid band's (compositor_band_solid) is the desktop's ground, nothing composed. Answers the row stride, or 0
 // when there is no memory for it.
-static int compositor_glass_make(const struct compositor_frame *windows, unsigned int count, int x, int y, int width,
-                                 int height)
+static int compositor_glass_make_for(int band, const struct compositor_frame *windows, unsigned int count, int x, int y,
+                                     int width, int height)
 {
         int across = compositor_glass_reach(COMPOSITOR_GLASS_ACROSS), down = compositor_glass_reach(COMPOSITOR_GLASS_DOWN);
         int gw = width + 2 * across, gh = height + 2 * down;
 
         if ((unsigned long)gw * (unsigned long)gh * 4 > compositor.glass_bytes)
                 return 0;
-        if (compositor_band_solid[(unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? compositor.band_at : 0])
+        if (compositor_band_solid[(unsigned int)band < WINDOWS_OUTPUTS ? band : 0])
         {
                 memory_fill_u32_rect(compositor.glass, (positive)gw, (positive)gw, (positive)gh, compositor_ground | 0xff000000u);
                 return gw;
@@ -348,13 +348,14 @@ struct compositor_glass_scene
 {
         const struct compositor_frame *windows;
         unsigned int count;
+        int band;
 };
 
 static int compositor_glass_scene_make(void *context, int x, int y, int width, int height)
 {
         const struct compositor_glass_scene *scene = (const struct compositor_glass_scene *)context;
 
-        return compositor_glass_make(scene->windows, scene->count, x, y, width, height);
+        return compositor_glass_make_for(scene->band, scene->windows, scene->count, x, y, width, height);
 }
 
 // A colour half as far again from its grey, kept in a byte. One pixel stays here: a call into the library costs more
@@ -382,15 +383,14 @@ static void compositor_band_damage(int x, int y, int width, int height)
 // The damage of the band's move: where it was (before) and where it is now, on every band. A slide damages nothing else.
 static void compositor_taskbar_damage(b64 before)
 {
-        for (compositor.band_at = 0; compositor.band_at < compositor_bands(); compositor.band_at++)
+        for (int band = 0; band < compositor_bands(); band++)
         {
-                struct taskbar_view view = compositor_taskbar_view();
+                struct taskbar_view view = compositor_taskbar_view_for(band);
                 int x, y, width, height;
 
                 taskbar_slide_rect(&view, before, &x, &y, &width, &height);
                 compositor_band_damage(x, y, width, height);
         }
-        compositor.band_at = 0;
 }
 
 /*
@@ -457,9 +457,9 @@ static void compositor_moon_keep(positive now)
 {
         if (!compositor.band || !compositor.table || !taskbar_moon_tick(now, compositor_launcher_row() >= 0))
                 return;
-        for (compositor.band_at = 0; compositor.band_at < compositor_bands(); compositor.band_at++)
+        for (int band = 0; band < compositor_bands(); band++)
         {
-                struct taskbar_view view = compositor_taskbar_view();
+                struct taskbar_view view = compositor_taskbar_view_for(band);
                 int x, y, w, h, most, rect[4];
 
                 if (!taskbar_slot(&view, TASKBAR_LAUNCHER, &x, &y, &w, &h) || w <= 0 || h <= 0)
@@ -469,16 +469,15 @@ static void compositor_moon_keep(positive now)
                         int square[4] = {x - most, y - most, w + 2 * most, h + 2 * most}, glow[4], shown = taskbar_moon_glow_level() > 0;
 
                         // While the glow is shown, or was in the last frame, its square is the moon's damage: past the band, and nothing else.
-                        if (taskbar_moon_glow_was(compositor.band_at, shown) | shown && taskbar_moon_glow_square(&view, glow))
+                        if (taskbar_moon_glow_was(band, shown) | shown && taskbar_moon_glow_square(&view, glow))
                                 memory_copy(square, glow, sizeof(square));
                         compositor_band_damage(square[0], square[1], square[2], square[3]);
                         rect[0] = square[0] < 0 ? 0 : square[0], rect[1] = square[1] < 0 ? 0 : square[1];
                         rect[2] = square[0] + square[2] > compositor.width ? compositor.width : square[0] + square[2];
                         rect[3] = square[1] + square[3] > compositor.height ? compositor.height : square[1] + square[3];
                 }
-                taskbar_moon_damaged(compositor.band_at, rect);
+                taskbar_moon_damaged(band, rect);
         }
-        compositor.band_at = 0;
 }
 
 /*
@@ -492,10 +491,10 @@ static struct
         unsigned long bytes;
 } compositor_glow[WINDOWS_OUTPUTS];
 
-static unsigned int compositor_moon_glow_frame(struct compositor_frame *frame)
+static unsigned int compositor_moon_glow_frame_for(int band, struct compositor_frame *frame)
 {
-        struct taskbar_view view = compositor_taskbar_view();
-        unsigned int at = (unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? (unsigned int)compositor.band_at : 0;
+        struct taskbar_view view = compositor_taskbar_view_for(band);
+        unsigned int at = (unsigned int)band < WINDOWS_OUTPUTS ? (unsigned int)band : 0;
         int square[4];
         unsigned long bytes;
         void *p;
@@ -530,7 +529,7 @@ static struct
 static unsigned int compositor_moon_menu_frame(struct compositor_frame *frame)
 {
         struct taskbar_view view;
-        int rect[4], was = compositor.band_at;
+        int rect[4];
         unsigned long bytes;
 
         if (!taskbar_menu_rect(rect))
@@ -546,10 +545,9 @@ static unsigned int compositor_moon_menu_frame(struct compositor_frame *frame)
         }
         if (taskbar_menu_redraw() || !compositor_menu.drawn)
         {
-                compositor.band_at = compositor_menu.band;
-                view = compositor_band_view();
+                view = compositor_band_view_for(compositor_menu.band);
                 taskbar_menu_draw(&view, compositor_menu.pixels);
-                compositor.band_at = was, compositor_menu.drawn = 1;
+                compositor_menu.drawn = 1;
                 if (taskbar_menu_redraw()) // a ripple still going: the next frame draws it on
                         compositor_damage(rect[0], rect[1], rect[2], rect[3]);
         }
@@ -573,14 +571,19 @@ static void compositor_taskbar_keep(positive now)
 
 // Redoes the slots redo names on the taskbar: the glass is made over their span and the blur's reach, and the band is
 // damaged over that span.
-static void compositor_band_draw(const struct compositor_frame *windows, unsigned int count, unsigned long redo)
+static void compositor_band_draw_for(int band, const struct compositor_frame *windows, unsigned int count, unsigned long redo)
 {
-        struct taskbar_view view = compositor_band_view();
-        struct compositor_glass_scene scene = {windows, count};
+        struct taskbar_view view = compositor_band_view_for(band);
+        struct compositor_glass_scene scene = {windows, count, band};
         int rect[4];
 
         if (taskbar_draw(&view, redo, compositor_glass_scene_make, &scene, rect))
                 compositor_band_damage(rect[0], rect[1], rect[2], rect[3]);
+}
+
+static void compositor_band_draw(const struct compositor_frame *windows, unsigned int count, unsigned long redo)
+{
+        compositor_band_draw_for(compositor.band_at, windows, count, redo);
 }
 
 /*
@@ -876,9 +879,7 @@ static void compositor_glass_pass(struct compositor_frame *frames, const unsigne
                                 continue;
                         }
                         // What changed of it is shown, and frosted again under any glass over it.
-                        compositor.damage_by = row + 1;
-                        compositor_damage(c[0], c[1], c[2] - c[0], c[3] - c[1]);
-                        compositor.damage_by = 0;
+                        compositor_damage_from(c[0], c[1], c[2] - c[0], c[3] - c[1], row + 1);
                 }
                 memory_zero(compositor.stale[row], sizeof(compositor.stale[row]));
                 memory_zero(compositor.dirty[row], sizeof(compositor.dirty[row]));

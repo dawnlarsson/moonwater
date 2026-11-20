@@ -1351,17 +1351,17 @@ static void compositor_present_frames(void)
                 int stale = taskbar_stale(), bands = compositor_bands();
                 const unsigned int *saved_direct_pixels = 0;
 
-                for (compositor.band_at = 0; compositor.band_at < bands; compositor.band_at++)
+                for (int band_idx = 0; band_idx < bands; band_idx++)
                 {
                         struct taskbar_view view;
                         unsigned long redo = stale ? COMPOSITOR_TABS_ALL : 0;
 
-                        compositor_band_frame(&band);
-                        view = compositor_taskbar_view();
+                        compositor_band_frame_for(band_idx, &band);
+                        view = compositor_taskbar_view_for(band_idx);
                         // Solid over a window, glass over the desktop (compositor_band_solid): a change of which is the whole band made again.
                         {
                                 unsigned char solid = (unsigned char)compositor_band_covers(frames, windows, &band);
-                                unsigned int at = (unsigned int)compositor.band_at < WINDOWS_OUTPUTS ? (unsigned int)compositor.band_at : 0;
+                                unsigned int at = (unsigned int)band_idx < WINDOWS_OUTPUTS ? (unsigned int)band_idx : 0;
 
                                 if (solid != compositor_band_solid[at])
                                         compositor_band_solid[at] = solid, redo = COMPOSITOR_TABS_ALL;
@@ -1397,23 +1397,25 @@ static void compositor_present_frames(void)
                                 compositor_wl_lent_sync(1);
 #endif
                                 compositor_wl_straight_pays(-1); // the glass is made from what is under the band
-                                compositor_band_draw(frames, windows, redo);
+                                compositor_band_draw_for(band_idx, frames, windows, redo);
                         }
                 }
                 if (saved_direct_pixels && windows)
                         frames[windows - 1].pixels = saved_direct_pixels;
-                for (compositor.band_at = 0; compositor.band_at < bands; compositor.band_at++)
+                for (int band_idx = 0; band_idx < bands; band_idx++)
                 {
-                        compositor_band_frame(&band);
+                        struct taskbar_view view;
+
+                        compositor_band_frame_for(band_idx, &band);
                         // A band slid all the way off shows nothing, its plates' outlines neither: their shadow's reach above the screen's
                         // edge (box: a 417 by 17 strip at the bottom, over a fullscreen game) put tabs over the window every frame, so the
                         // window was shown with the overlay composed over it from its picture, read whole for it when it was a straight one.
                         if (taskbar_shift() >= UI_ONE)
                                 continue;
-                        count += compositor_moon_glow_frame(&frames[count]); // under the plates
-                        count += compositor_panel_tabs(&band, &frames[count]);
+                        view = compositor_taskbar_view_for(band_idx);
+                        count += compositor_moon_glow_frame_for(band_idx, &frames[count]); // under the plates
+                        count += compositor_panel_tabs_with(&view, &band, &frames[count]);
                 }
-                compositor.band_at = 0;
         }
         if (tinted)
                 frames[count++] = preview;
@@ -1604,9 +1606,9 @@ static void compositor_present_frames(void)
                         {
                                 struct compositor_parts parts = compositor_front_parts;
 
-                                for (unsigned int at = 0; at < parts.count; at++)
-                                        compositor_damage(parts.rect[at][0], parts.rect[at][1], parts.rect[at][2] - parts.rect[at][0],
-                                                          parts.rect[at][3] - parts.rect[at][1]);
+                                for (unsigned int at = 0; at < parts.d.count; at++)
+                                        compositor_damage(parts.d.r[at].x1, parts.d.r[at].y1, parts.d.r[at].x2 - parts.d.r[at].x1,
+                                                          parts.d.r[at].y2 - parts.d.r[at].y1);
                         }
                         else if (compositor_front_stale_any)
                                 compositor_damage(compositor_front_stale[0], compositor_front_stale[1], compositor_front_stale[2] - compositor_front_stale[0],

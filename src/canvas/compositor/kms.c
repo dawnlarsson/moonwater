@@ -1807,11 +1807,7 @@ static void compositor_dark_set(void)
 // (compositor.c's /run/moonwater ones), which every build of this file has.
 static void compositor_dark_look(void)
 {
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_DARK_FILE, FILE_READ | O_CLOEXEC | O_NOFOLLOW);
-
-        if (handle >= 0)
-                system_close(handle);
-        compositor_dark(handle >= 0);
+        compositor_dark((int)canvas_switch_exists(COMPOSITOR_DARK_FILE, O_NOFOLLOW));
 }
 
 // A person at the machine: the screens lit again.
@@ -1917,11 +1913,9 @@ static void compositor_vrr_kick(void)
 // passed since it left (a time before it left is the time it left).
 static int compositor_sway_at(struct compositor_sway *s, positive now)
 {
-        positive gone = now > s->at ? now - s->at : 0, span = (positive)ui_paced((b64)CP_SWAY_NS);
-
-        if (s->at && gone >= span)
+        if (s->at && now > s->at && now - s->at >= (positive)ui_paced((b64)CP_SWAY_NS))
                 s->at = 0;
-        return s->at ? s->from + (int)((b64)(s->to - s->from) * ui_bezier_at(&ui_ease, ui_progress((b64)gone, (b64)span)) / UI_ONE) : s->to;
+        return s->at ? canvas_tween_lerp(s->from, s->to, canvas_tween_ease(s->at, now, (b64)CP_SWAY_NS)) : s->to;
 }
 
 // A value sent on its way from where it is now; with reduced motion it is there at once.
@@ -2064,9 +2058,7 @@ static void compositor_cursor_damage(void)
 {
         int hot_x, hot_y, span = compositor_pointer_span(&compositor.cursor.drawn_as, &hot_x, &hot_y);
 
-        compositor.damage_by = COMPOSITOR_OVER;
-        compositor_damage(compositor.cursor.x - hot_x, compositor.cursor.y - hot_y, span, span);
-        compositor.damage_by = 0;
+        compositor_damage_over(compositor.cursor.x - hot_x, compositor.cursor.y - hot_y, span, span);
 }
 
 /*
@@ -2095,12 +2087,7 @@ static struct
 // Whether the owner asks for the probe: the file is there.
 static int compositor_cursor_probe_asked(void)
 {
-        bipolar handle = system_open_at(AT_FDCWD, (string_address)COMPOSITOR_CURSOR_PROBE_FILE, FILE_READ | O_CLOEXEC);
-
-        if (handle < 0)
-                return 0;
-        system_close(handle);
-        return 1;
+        return (int)canvas_switch_exists(COMPOSITOR_CURSOR_PROBE_FILE, 0);
 }
 
 // Whether the card's driver is one refused the plane by name.
