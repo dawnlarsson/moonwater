@@ -19171,6 +19171,61 @@ static fn ui_popmenu_add(struct ui_popmenu address_to m, const char address_to l
                 m->items[m->count++] = (struct ui_menu_item){label, keys, flags, id};
 }
 
+// Declarative menu item specification for ui_popmenu_build (skips hidden items and collapses leading/consecutive/trailing separators).
+struct ui_menu_spec
+{
+        const char address_to label, address_to keys;
+        p32 flags;
+        int id;
+        b32 hide;
+};
+
+static fn ui_popmenu_build(struct ui_popmenu address_to m, const struct ui_menu_spec address_to specs, int count)
+{
+        b32 sep_pending = false;
+
+        for (int i = 0; i < count; i++)
+        {
+                const struct ui_menu_spec address_to s = &specs[i];
+
+                if (s->hide)
+                        continue;
+                if (s->flags & UI_MENU_SEPARATOR)
+                {
+                        if (m->count > 0)
+                                sep_pending = true;
+                        continue;
+                }
+                if (sep_pending)
+                {
+                        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+                        sep_pending = false;
+                }
+                ui_popmenu_add(m, s->label, s->keys, s->flags, s->id);
+        }
+}
+
+// Doubles '&' to '&&' so a literal string can be mixed into a formatted menu label without UI_MENU_LITERAL.
+static positive ui_menu_escape(char address_to dst, positive room, const char address_to src)
+{
+        positive out = 0;
+
+        if (!dst || !room)
+                return 0;
+        for (; src && *src && out + 1 < room; src++)
+        {
+                if (*src == '&')
+                {
+                        if (out + 2 >= room)
+                                break;
+                        dst[out++] = '&';
+                }
+                dst[out++] = *src;
+        }
+        dst[out] = 0;
+        return out;
+}
+
 static b32 ui_popmenu_choosable(const struct ui_popmenu address_to m, int at)
 {
         return at >= 0 && at < m->count && !(m->items[at].flags & (UI_MENU_SEPARATOR | UI_MENU_DISABLED | UI_MENU_HEADER));
@@ -22048,6 +22103,23 @@ static fn ui_view_leaf(const struct ui_props address_to p)
 #define ui_control(c, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_BOX, .control = (c), __VA_ARGS__})
 #define ui_rows(l, ...) ui_view_leaf(&(struct ui_props){.kind = UI_ITEM_HOST, .list = (l), __VA_ARGS__})
 
+// Checkable card helper for ui_view layouts: panel row with a 48dp icon host, title + optional quiet subtitle column, and a 24dp tick/check host.
+static fn ui_view_card_check(struct ui_rect address_to card_box, struct ui_rect address_to icon_box, struct ui_rect address_to tick_box,
+                             const char address_to title, const char address_to about, int h)
+{
+        ui_row(.host = card_box, .class = "panel.level.gap3", .h = h > 0 ? h : 76)
+        {
+                ui_host(icon_box, .w = 48, .h = 48);
+                ui_col(.grow = 1, .class = "gap2")
+                {
+                        ui_text(title, .class = "title", .size = 18);
+                        if (about && about[0])
+                                ui_text(about, .class = "quiet");
+                }
+                ui_host(tick_box, .w = 24, .h = 24);
+        }
+}
+
 // A text of the view that wraps, as the layout asks it (ui_tree_run): the height its lines come to at a width, one line where its words fit
 // it. With no face it is the one line it was declared with.
 static int ui_view_measure(address_any by, int node, int width)
@@ -24580,6 +24652,95 @@ static int ui_apps_find(const char address_to id)
                 if (string_equals((string_address)ui_apps.app[at].id, (string_address)id))
                         return at;
         return -1;
+}
+
+// Reads a newline-delimited list of app IDs from path (no symlink follow), returning deduplicated ui_apps indices that pass allow (when non-null).
+static int ui_app_list_read(const char address_to path, unsigned short address_to ids, int most, b32 (*allow)(positive which))
+{
+        char text[2048];
+        bipolar handle, got = 0;
+        int count = 0;
+
+        if (!path || !ids || most <= 0)
+                return 0;
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (handle >= 0)
+        {
+                got = system_read_once(handle, text, sizeof(text) - 1);
+                system_close(handle);
+        }
+        if (got <= 0)
+                return 0;
+        text[got] = 0;
+        for (positive at = 0; at < (positive)got && count < most;)
+        {
+                positive stop = at;
+                int which;
+
+                while (stop < (positive)got && text[stop] != '\n')
+                        stop++;
+                text[stop] = 0;
+                which = ui_apps_find(text + at);
+                if (which >= 0 && (!allow || allow((positive)which)))
+                {
+                        b32 seen = false;
+
+                        for (int k = 0; k < count; k++)
+                                seen |= ids[k] == (unsigned short)which;
+                        if (!seen)
+                                ids[count++] = (unsigned short)which;
+                }
+                at = stop + 1;
+        }
+        return count;
+}
+
+// Prepends ui_apps.app[which].id to a newline-delimited app-ID file, deduplicating and keeping at most `most` entries (mode 0600, O_NOFOLLOW).
+static b32 ui_app_list_push(const char address_to path, int which, int most)
+{
+        char text[2048], made[2048 + WINDOWS_APP_ID + 2];
+        const char address_to id;
+        positive id_len, length = 0, used = 0, lines = 1;
+        bipolar handle, got = 0;
+
+        if (!path || which < 0 || which >= ui_apps.count || !ui_apps.app || most <= 0)
+                return false;
+        id = ui_apps.app[which].id;
+        id_len = string_length((string_address)id);
+        if (!id_len || id_len >= WINDOWS_APP_ID)
+                return false;
+        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        if (handle >= 0)
+        {
+                got = system_read_once(handle, text, sizeof(text) - 1);
+                system_close(handle);
+        }
+        length = got > 0 ? (positive)got : 0;
+        text[length] = 0;
+        memory_copy(made, id, id_len);
+        made[id_len] = '\n';
+        used = id_len + 1;
+        for (positive at = 0; at < length && lines < (positive)most;)
+        {
+                positive stop = at;
+
+                while (stop < length && text[stop] != '\n')
+                        stop++;
+                if (stop > at && stop - at < WINDOWS_APP_ID &&
+                    !(stop - at == id_len && !memory_compare(text + at, id, id_len)) &&
+                    used + (stop - at) + 1 < sizeof(made))
+                {
+                        memory_copy(made + used, text + at, stop - at);
+                        used += stop - at, made[used++] = '\n', lines++;
+                }
+                at = stop + 1;
+        }
+        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (handle < 0)
+                return false;
+        system_write_all((b32)handle, made, used);
+        system_close(handle);
+        return true;
 }
 
 // Whether two words are the same but for the case of their ASCII letters.
@@ -28556,6 +28717,22 @@ static int ui_view_list_click(struct ui address_to ui, struct ui_view address_to
         return -1;
 }
 
+// Auto-scrolls a list when a drag or rubber band hovers within edge_dp of its top or bottom; when clamp_outside is false, requires (x, y) inside the list.
+static b32 ui_list_edge_scroll(const struct ui address_to ui, struct ui_list address_to l, int x, int y, int edge_dp, int max_step_dp, b32 clamp_outside)
+{
+        int edge = ui_dev(ui, edge_dp), top = y - l->y, foot = l->y + l->h - y, by = 0;
+
+        if (edge <= 0 || l->h <= 0)
+                return false;
+        if (!clamp_outside && (x < l->x || x >= l->x + l->w || top < 0 || foot < 0))
+                return false;
+        if (top < edge)
+                by = -ui_dev(ui, max_step_dp) * (edge - (top < 0 ? 0 : top)) / edge - 1;
+        else if (foot < edge)
+                by = ui_dev(ui, max_step_dp) * (edge - (foot < 0 ? 0 : foot)) / edge + 1;
+        return by != 0 && ui_scroll_set(&l->scroll, l->scroll.scroll + by);
+}
+
 /* ---- declarative list context menus (Copy, Copy row, Remove + extra) ---- */
 
 static fn ui_list_menu_items(struct ui_popmenu address_to m, p32 flags)
@@ -30299,6 +30476,227 @@ struct ui_anchor
         unsigned int edge, number; // the edge the panel is along, and the screen's number
 };
 
+/* ---- shared app utilities: input provenance, timeouts, verb output, sizes, wifi & async jobs ---- */
+
+// True when event is a physical keyboard or pointer-button action (never a virtual/injected device; pinch 0x8000 is excluded by event type).
+static inline b32 ui_event_hand(const struct window_event address_to event)
+{
+        return (event->type == WINDOW_EVENT_KEY || event->type == WINDOW_EVENT_BUTTON) && !(event->flags & WINDOW_EVENT_VIRTUAL);
+}
+
+// Minimum of two nanosecond wait timeouts, where < 0 means wait indefinitely.
+static inline long ui_timeout_min(long current, long want)
+{
+        if (want < 0)
+                return current;
+        return current < 0 || want < current ? want : current;
+}
+
+// Narrows current wait timeout so the loop wakes no later than deadline (in nanoseconds on the same clock as now).
+static inline long ui_deadline_wait(long current, b64 now, b64 deadline)
+{
+        long left = now >= deadline ? 0 : (long)(deadline - now);
+
+        return ui_timeout_min(current, left);
+}
+
+// Strips a leading "[Moonwater] " verb prefix from a line slice, updating *length when stripped.
+static const char address_to ui_strip_verb_prefix(const char address_to line, positive address_to length)
+{
+        if (line && length && *length >= 12 && !memory_compare(line, "[Moonwater] ", 12))
+        {
+                *length -= 12;
+                return line + 12;
+        }
+        return line;
+}
+
+// Formats a byte count in decimal SI units (B, KB, MB, GB, or TB with one decimal digit from 1000 GB up).
+static fn ui_size_decimal(unsigned long long bytes, char address_to into, positive room)
+{
+        char digits[24];
+        unsigned long long scaled;
+        const char address_to unit;
+
+        if (!into || !room)
+                return;
+        if (bytes >= 1000000000000ull)
+        {
+                unsigned long long gb = (bytes + 500000000ull) / 1000000000ull;
+
+                digits[positive_into_string((p8 address_to)digits, (positive)(gb / 1000))] = 0;
+                string_copy_bounded((string_address)into, (string_address)digits, room);
+                string_append_bounded((string_address)into, (string_address) ".", room);
+                digits[positive_into_string((p8 address_to)digits, (positive)(gb % 1000 / 100))] = 0;
+                string_append_bounded((string_address)into, (string_address)digits, room);
+                string_append_bounded((string_address)into, (string_address) " TB", room);
+                return;
+        }
+        if (bytes >= 1000000000ull)
+                scaled = bytes / 1000000000ull, unit = " GB";
+        else if (bytes >= 1000000ull)
+                scaled = bytes / 1000000ull, unit = " MB";
+        else if (bytes >= 1000ull)
+                scaled = bytes / 1000ull, unit = " KB";
+        else
+                scaled = bytes, unit = " B";
+        digits[positive_into_string((p8 address_to)digits, (positive)scaled)] = 0;
+        string_copy_bounded((string_address)into, (string_address)digits, room);
+        string_append_bounded((string_address)into, (string_address)unit, room);
+}
+
+#define UI_WIFI_HEARD 1u
+#define UI_WIFI_JOINED 2u
+#define UI_WIFI_SAVED 4u
+#define UI_WIFI_OPEN 8u
+
+struct ui_wifi_net
+{
+        char name[64];
+        char security[24];
+        signed short dbm;
+        unsigned char bars;
+        p8 flags;
+};
+
+// Parses `moonwater wifi` output into heard and saved networks, radio-on state (*on), and optional first status note line.
+static int ui_wifi_parse(const char address_to text, positive length, struct ui_wifi_net address_to nets, int most, b32 address_to on,
+                         char address_to note, positive note_room)
+{
+        int count = 0;
+
+        if (on)
+                *on = true;
+        if (note && note_room)
+                note[0] = 0;
+        if (!text || !length || !nets || most <= 0)
+                return 0;
+        for (int pass = 0; pass < 2; pass++)
+        {
+                const char address_to at = text, address_to limit = text + length;
+
+                while (at < limit)
+                {
+                        const char address_to stop = at, address_to line = at;
+                        positive size, dbm_at = 0;
+
+                        while (stop < limit && *stop != '\n')
+                                stop++;
+                        at = stop < limit ? stop + 1 : stop;
+                        while (stop > line && stop[-1] == '\r')
+                                stop--;
+                        size = (positive)(stop - line);
+                        line = ui_strip_verb_prefix(line, &size);
+                        if (!pass && on && size >= 8 && !memory_compare(line, "wifi off", 8))
+                                *on = false;
+                        for (positive k = 0; k + 5 <= size; k++)
+                                if (!memory_compare(line + k, " dBm ", 5))
+                                        dbm_at = k;
+                        if (!pass && dbm_at > 2 && size >= 4 && (line[0] == '*' || line[0] == '+' || line[0] == ' ') && line[1] == ' ')
+                        {
+                                positive number = dbm_at, name_end, word = dbm_at + 5;
+                                struct ui_wifi_net address_to n;
+                                int level = 0;
+                                b32 below = false;
+
+                                while (number > 2 && ((line[number - 1] >= '0' && line[number - 1] <= '9') || line[number - 1] == '-'))
+                                        number--;
+                                name_end = number;
+                                while (name_end > 2 && line[name_end - 1] == ' ')
+                                        name_end--;
+                                if (name_end <= 2 || count >= most)
+                                        continue;
+                                n = &nets[count++];
+                                memory_zero(n, sizeof(*n));
+                                {
+                                        positive nlen = name_end - 2 < sizeof(n->name) - 1 ? name_end - 2 : sizeof(n->name) - 1;
+
+                                        memory_copy(n->name, line + 2, nlen);
+                                        n->name[nlen] = 0;
+                                }
+                                n->flags = UI_WIFI_HEARD | (line[0] == '*' ? (UI_WIFI_JOINED | UI_WIFI_SAVED) : line[0] == '+' ? UI_WIFI_SAVED : 0);
+                                for (positive d = number; d < dbm_at; d++)
+                                        if (line[d] == '-')
+                                                below = true;
+                                        else
+                                                level = level * 10 + (line[d] - '0');
+                                n->dbm = (signed short)(below ? -level : level);
+                                for (positive bar = 0; bar < 4 && word < size; bar++, word++)
+                                        n->bars += line[word] == '#';
+                                while (word < size && line[word] == ' ')
+                                        word++;
+                                for (positive own = 0; word + own < size && line[word + own] != ' ' && own + 1 < sizeof(n->security); own++)
+                                        n->security[own] = line[word + own];
+                                if (string_equals((string_address)n->security, (string_address) "open"))
+                                        n->flags |= UI_WIFI_OPEN;
+                        }
+                        else if (pass && !dbm_at && size > 2 && line[0] == ' ' && line[1] == ' ' && line[2] != ' ')
+                        {
+                                positive nlen = size - 2;
+                                int found = -1;
+
+                                if (nlen > 9 && !memory_compare(line + 2, "and ", 4) && !memory_compare(line + size - 5, " more", 5))
+                                        continue;
+                                for (int k = 0; k < count; k++)
+                                        if (string_length((string_address)nets[k].name) == nlen && !memory_compare(nets[k].name, line + 2, nlen))
+                                        {
+                                                found = k;
+                                                break;
+                                        }
+                                if (found >= 0)
+                                        nets[found].flags |= UI_WIFI_SAVED;
+                                else if (count < most)
+                                {
+                                        struct ui_wifi_net address_to n = &nets[count++];
+                                        positive copy = nlen < sizeof(n->name) - 1 ? nlen : sizeof(n->name) - 1;
+
+                                        memory_zero(n, sizeof(*n));
+                                        memory_copy(n->name, line + 2, copy);
+                                        n->name[copy] = 0;
+                                        n->flags = UI_WIFI_SAVED;
+                                }
+                        }
+                        else if (pass && !dbm_at && size && line[0] != ' ' && note && note_room && !note[0] &&
+                                 !(size >= 5 && !memory_compare(line, "wifi ", 5)) && !(size >= 8 && !memory_compare(line, "* joined", 8)))
+                        {
+                                positive copy = size < note_room - 1 ? size : note_room - 1;
+
+                                memory_copy(note, line, copy);
+                                note[copy] = 0;
+                        }
+                }
+        }
+        return count;
+}
+
+/*
+        Async child-process job runner: non-blocking piped capture with a per-turn drain budget (64 KiB), waitid(WNOWAIT|WNOHANG)
+        orphan-pipe exit detection, optional timeout SIGKILL, non-blocking reap polling, and a state-D child reaper table so a stuck
+        kernel syscall never freezes the window or blocks shutdown.
+*/
+#define UI_JOB_DRAIN_BUDGET (64u << 10)
+#define UI_JOB_REAP_NS 20000000ull
+#define UI_JOB_LEFT 8
+#define UI_JOB_LEFT_NS 500000000ull
+
+struct ui_job
+{
+        bipolar child;
+        int output;
+        int ending;               // 0 running, 1 finished/reaping, 2 killed/reaping
+        b32 exited;               // waitid observed child exited while output pipe stayed open
+        positive began;           // start time (ns), or kill time once ending == 2
+        positive timeout_ns;      // 0 = no timeout
+        char address_to buf;
+        positive room, length;
+        b32 cut;                  // output exceeded room and was line-trimmed; tail counted & drained
+        positive cut_lines, cut_rows, cut_at, cut_blank;
+        int tag;
+        address_any context;
+        void (*done)(struct ui_job address_to j, b32 killed, positive status);
+        void (*data)(struct ui_job address_to j);
+};
+
 /*
         One app's window and loop. The runner claims the standard descriptors,
         takes the window, sets its title, name, glass, scale and ground, and calls
@@ -30367,6 +30765,7 @@ struct ui_app
         b32 beside;                     // -a: the window opens beside the band's cell that was pressed, where the compositor left one
         struct ui_anchor anchor;        // that cell, as ui_app_place took it
         struct ui_view address_to view; // optional: the app's view, cancelled automatically when the window loses focus
+        struct ui_job address_to job;   // optional: async piped child job, auto-wired into tick/ready/close by ui_app_run
 };
 
 // The keys came or went: whether the app goes on. A popup (dismiss) that has had the keys and loses them is done, as is an app whose focus hook says so.
@@ -30641,6 +31040,252 @@ static b32 ui_start_piped(string_address address_to words, positive count, const
         }
         *out_child = child, *out_fd = ends[0];
         return true;
+}
+
+static bipolar ui_job_left[UI_JOB_LEFT];
+
+static b32 ui_job_left_reap(void)
+{
+        b32 any = false;
+
+        for (positive at = 0; at < UI_JOB_LEFT; at++)
+        {
+                positive status = 0;
+
+                if (ui_job_left[at] <= 0)
+                        continue;
+                if (system_wait4_retry(ui_job_left[at], address_of status, 1, null) == 0)
+                        any = true;
+                else
+                        ui_job_left[at] = 0;
+        }
+        return any;
+}
+
+static b32 ui_job_exited(const struct ui_job address_to j)
+{
+        b32 info[32] = {0};
+        bipolar got;
+
+        if (!j || j->child <= 0)
+                return false;
+        got = system_call_5(syscall(waitid), 1, (positive)j->child, (positive)info, 4 | 0x01000000 | 1, 0);
+        return got == 0 && (bipolar)info[4] == j->child;
+}
+
+static b32 ui_job_reap(struct ui_job address_to j)
+{
+        positive status = 0;
+        b32 killed = j->ending == 2;
+        bipolar got;
+
+        if (!j || j->child <= 0 || !j->ending)
+                return false;
+        got = system_wait4_retry(j->child, address_of status, 1, null);
+        if (got == 0)
+                return false;
+        if (got < 0)
+                status = 0;
+        if (j->output >= 0)
+                system_close(j->output);
+        j->child = 0, j->output = -1, j->ending = 0, j->exited = false;
+        if (j->done)
+                j->done(j, killed, status);
+        return true;
+}
+
+static fn ui_job_leave(struct ui_job address_to j)
+{
+        for (positive at = 0; at < UI_JOB_LEFT; at++)
+                if (ui_job_left[at] <= 0)
+                {
+                        ui_job_left[at] = j->child;
+                        break;
+                }
+        if (j->output >= 0)
+                system_close(j->output);
+        j->child = 0, j->output = -1, j->ending = 0, j->exited = false;
+        if (j->done)
+                j->done(j, true, 0);
+}
+
+static fn ui_job_finish(struct ui_job address_to j, b32 killed)
+{
+        if (!j || j->child <= 0)
+                return;
+        if (killed)
+        {
+                system_call_2(syscall(kill), (positive)j->child, 9);
+                j->ending = 2;
+                j->began = (positive)ui_kit.now;
+        }
+        else if (!j->ending)
+                j->ending = 1;
+        ui_job_reap(j);
+}
+
+static fn ui_job_cut_count(struct ui_job address_to j, const char address_to bytes, positive count)
+{
+        for (positive at = 0; at < count; at++)
+        {
+                char c = bytes[at];
+
+                if (c == '\n')
+                {
+                        j->cut_lines++, j->cut_at = 0, j->cut_blank = 0;
+                        continue;
+                }
+                if (j->cut_at == 2 && c != ' ' && j->cut_blank == 2)
+                        j->cut_rows++;
+                if (j->cut_at < 2 && c == ' ')
+                        j->cut_blank++;
+                if (j->cut_at < 3)
+                        j->cut_at++;
+        }
+}
+
+static fn ui_job_buf_cut(struct ui_job address_to j)
+{
+        positive at = j->length;
+
+        while (at > 0 && j->buf[at - 1] != '\n')
+                at--;
+        if (at)
+        {
+                ui_job_cut_count(j, j->buf + at, j->length - at);
+                j->length = at;
+        }
+        if (j->buf && j->room)
+                j->buf[j->length < j->room ? j->length : j->room - 1] = 0;
+        j->cut = true;
+}
+
+static fn ui_job_attach(struct ui_job address_to j, bipolar child, int output, char address_to buf, positive room, positive timeout_ns)
+{
+        j->child = child, j->output = output, j->ending = 0, j->exited = false;
+        j->began = (positive)ui_kit.now, j->timeout_ns = timeout_ns;
+        j->buf = buf, j->room = room, j->length = 0;
+        j->cut = false, j->cut_lines = j->cut_rows = j->cut_at = j->cut_blank = 0;
+        if (buf && room)
+                buf[0] = 0;
+}
+
+static b32 ui_job_start(struct ui_job address_to j, string_address address_to words, positive count, const char address_to input,
+                        char address_to buf, positive room, positive timeout_ns)
+{
+        bipolar child = 0;
+        int output = -1;
+
+        if (!j || j->child > 0 || !ui_start_piped(words, count, input, &child, &output))
+                return false;
+        ui_job_attach(j, child, output, buf, room, timeout_ns);
+        return true;
+}
+
+static fn ui_job_kill(struct ui_job address_to j)
+{
+        ui_job_finish(j, true);
+}
+
+static fn ui_job_drain(struct ui_job address_to j)
+{
+        positive budget = UI_JOB_DRAIN_BUDGET;
+        positive keep_max;
+
+        if (!j || j->child <= 0 || j->output < 0)
+                return;
+        keep_max = j->buf && j->room > 1 ? j->room - 1 : 0;
+        for (;;)
+        {
+                bipolar got;
+                char spill[256];
+
+                if (!j->cut && keep_max && j->length >= keep_max)
+                        ui_job_buf_cut(j);
+                if (j->cut || !keep_max)
+                {
+                        got = system_read_once(j->output, spill, sizeof(spill));
+                        if (got > 0)
+                                ui_job_cut_count(j, spill, (positive)got);
+                }
+                else
+                {
+                        got = system_read_once(j->output, j->buf + j->length, keep_max - j->length);
+                        if (got > 0)
+                        {
+                                j->length += (positive)got;
+                                j->buf[j->length] = 0;
+                        }
+                }
+                if (got > 0)
+                {
+                        if (j->data)
+                                j->data(j);
+                        budget = budget > (positive)got ? budget - (positive)got : 0;
+                        if (!budget)
+                                return;
+                        continue;
+                }
+                if (got == 0 || (got != -11 && got != -4) || (got == -11 && j->exited))
+                        ui_job_finish(j, false);
+                return;
+        }
+}
+
+static long ui_job_tick(struct ui_job address_to j, long timeout, long address_to other)
+{
+        if (ui_job_left_reap())
+                timeout = ui_timeout_min(timeout, (long)UI_JOB_REAP_NS);
+        if (!j || j->child <= 0)
+                return timeout;
+        if (j->ending)
+        {
+                if (ui_job_reap(j))
+                        return 0;
+                if (j->ending == 2 && (positive)ui_kit.now >= j->began + UI_JOB_LEFT_NS)
+                {
+                        ui_job_leave(j);
+                        return 0;
+                }
+                return ui_timeout_min(timeout, (long)UI_JOB_REAP_NS);
+        }
+        if (j->timeout_ns && (positive)ui_kit.now >= j->began + j->timeout_ns)
+        {
+                ui_job_finish(j, true);
+                return j->child <= 0 ? 0 : ui_timeout_min(timeout, (long)UI_JOB_REAP_NS);
+        }
+        if (!j->exited && ui_job_exited(j))
+        {
+                j->exited = true;
+                ui_job_drain(j);
+                if (j->child <= 0)
+                        return 0;
+        }
+        if (j->output >= 0 && other && *other < 0)
+                *other = j->output;
+        if (j->timeout_ns)
+                timeout = ui_deadline_wait(timeout, (b64)ui_kit.now, (b64)(j->began + j->timeout_ns));
+        return ui_timeout_min(timeout, (long)UI_JOB_REAP_NS);
+}
+
+static fn ui_job_close(struct ui_job address_to j)
+{
+        if (!j || j->child <= 0)
+                return;
+        system_call_2(syscall(kill), (positive)j->child, 9);
+        j->ending = 2;
+        if (!ui_job_reap(j))
+        {
+                for (positive at = 0; at < UI_JOB_LEFT; at++)
+                        if (ui_job_left[at] <= 0)
+                        {
+                                ui_job_left[at] = j->child;
+                                break;
+                        }
+                if (j->output >= 0)
+                        system_close(j->output);
+                j->child = 0, j->output = -1, j->ending = 0, j->exited = false;
+        }
 }
 
 // The kit's frame: the app's picture at its size, into the buffer the compositor is not reading (ui_app_present). An app's own frame instead, when it names one.
@@ -30921,6 +31566,12 @@ static int ui_app_run(struct ui_app address_to app)
                                 }
                         }
                 }
+                if (app->job)
+                {
+                        timeout = ui_job_tick(app->job, timeout, &other);
+                        if (timeout == 0 && !app->tick)
+                                continue;
+                }
                 if (app->tick)
                 {
                         timeout = app->tick(timeout, &other);
@@ -30955,11 +31606,18 @@ static int ui_app_run(struct ui_app address_to app)
                 // The wait is over: its ready (the app's other source, a child's output) is answered at this time, not the time before the wait.
                 ui_kit_pass();
                 if (other >= 0)
-                        app->ready();
+                {
+                        if (app->job && app->job->output >= 0 && other == app->job->output)
+                                ui_job_drain(app->job);
+                        else if (app->ready)
+                                app->ready();
+                }
         }
 
         if (app->close)
                 app->close();
+        if (app->job)
+                ui_job_close(app->job);
         windows_leave(app->own);
         return 0;
 }
@@ -31500,6 +32158,18 @@ static b32 ui_text_open(struct ui_text address_to t, int mode, const p8 address_
         A field counts in the row of its owner (own) while it has the keys, and gives the count back when it loses them or its row
         changes; a field with no row writes nothing.
 */
+// Bare text-field helper for ui_view layouts: initializes UI_INPUT/UI_FIELD_BARE on first use, binds edit/placeholder/focus, and emits the control leaf.
+static fn ui_view_field(struct ui_control address_to c, struct ui_text address_to edit, const char address_to placeholder, int h, b32 grow,
+                        struct ui_rect address_to host)
+{
+        if (!c->kind)
+                c->kind = UI_INPUT, c->variant = UI_FIELD_BARE, ui_control_start(c);
+        c->edit = edit;
+        c->items[0] = placeholder;
+        c->focused = edit ? edit->focused : false;
+        ui_control(c, .h = h > 0 ? h : 48, .grow = grow ? 1 : 0, .host = host);
+}
+
 static void ui_field_focus(struct ui_text address_to t, b32 focused)
 {
         struct windows address_to table = t->own ? t->own->table : null;

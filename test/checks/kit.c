@@ -8763,6 +8763,122 @@ static fn check_kit_page_pointer(void)
                 check("kit page: the column's groups are hit where they are drawn, at rest, while the column is pulled past an end",
                       top_hit == 1 && far_hit == 5);
         }
+
+        // Core app primitives (menu spec/escape, timeouts, hand event, verb prefix, decimal sizes, wifi parse, edge scroll, job runner).
+        {
+                struct ui_popmenu m;
+                static const struct ui_menu_spec specs[] = {
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {"Open", "Enter", 0, 1, false},
+                    {"Hidden", null, 0, 2, true},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {"Delete", "Del", 0, 3, false},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                };
+                char esc[32], sz1[24], sz2[24], sz3[24], note[64];
+                struct ui_wifi_net nets[4];
+                b32 wifi_on = true;
+                const char address_to sample =
+                    "[Moonwater] * HomeNet      -52 dBm #### wpa2 5GHz\n"
+                    "[Moonwater] + Cafe         -70 dBm ##.. open 2.4GHz\n"
+                    "  OfficeNet\n"
+                    "  and 2 more\n"
+                    "wifi off\n"
+                    "No adapter ready\n";
+                const char address_to line = "[Moonwater] hello";
+                positive llen = 17;
+                struct window_event real_key = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, UI_KEY_ENTER, 0};
+                struct window_event virt_key = {WINDOW_EVENT_KEY, WINDOW_KEY_DOWN | WINDOW_EVENT_VIRTUAL, UI_KEY_ENTER, 0};
+                struct window_event wheel_ev = {WINDOW_EVENT_WHEEL, 0, 0, 120};
+                int ncount;
+
+                memory_zero(&m, sizeof(m));
+                ui_popmenu_build(&m, specs, (int)(sizeof(specs) / sizeof(specs[0])));
+                ui_menu_escape(esc, sizeof(esc), "A & B & C");
+                check("kit app primitives: ui_popmenu_build skips hidden/extra separators and ui_menu_escape doubles ampersands",
+                      m.count == 3 && m.items[0].id == 1 && (m.items[1].flags & UI_MENU_SEPARATOR) != 0 && m.items[2].id == 3 &&
+                          string_equals((string_address)esc, (string_address) "A && B && C"));
+                line = ui_strip_verb_prefix(line, &llen);
+                ui_size_decimal(512000000ull, sz1, sizeof(sz1));
+                ui_size_decimal(512000000000ull, sz2, sizeof(sz2));
+                ui_size_decimal(2400000000000ull, sz3, sizeof(sz3));
+                check("kit app primitives: timeouts, hand check, verb prefix strip, and decimal sizes",
+                      ui_timeout_min(-1, 50) == 50 && ui_timeout_min(20, 50) == 20 && ui_timeout_min(20, -1) == 20 &&
+                          ui_deadline_wait(-1, 100, 140) == 40 && ui_deadline_wait(10, 100, 140) == 10 &&
+                          ui_deadline_wait(50, 200, 140) == 0 && ui_event_hand(&real_key) && !ui_event_hand(&virt_key) &&
+                          !ui_event_hand(&wheel_ev) && llen == 5 && string_equals((string_address)line, (string_address) "hello") &&
+                          string_equals((string_address)sz1, (string_address) "512 MB") &&
+                          string_equals((string_address)sz2, (string_address) "512 GB") &&
+                          string_equals((string_address)sz3, (string_address) "2.4 TB"));
+                ncount = ui_wifi_parse(sample, string_length((string_address)sample), nets, 4, &wifi_on, note, sizeof(note));
+                check("kit app primitives: ui_wifi_parse decodes heard, saved-only, wifi off, and status note",
+                      ncount == 3 && !wifi_on && string_equals((string_address)nets[0].name, (string_address) "HomeNet") &&
+                          nets[0].dbm == -52 && nets[0].bars == 4 && (nets[0].flags & (UI_WIFI_HEARD | UI_WIFI_JOINED | UI_WIFI_SAVED)) == (UI_WIFI_HEARD | UI_WIFI_JOINED | UI_WIFI_SAVED) &&
+                          string_equals((string_address)nets[1].name, (string_address) "Cafe") && (nets[1].flags & UI_WIFI_OPEN) != 0 &&
+                          string_equals((string_address)nets[2].name, (string_address) "OfficeNet") && nets[2].flags == UI_WIFI_SAVED &&
+                          string_equals((string_address)note, (string_address) "No adapter ready"));
+                {
+                        static struct ui_list erows;
+
+                        bounds_list_make(&ui, &erows, 40, 200);
+                        ui_scroll_set(&erows.scroll, 100);
+                        {
+                                b32 down_s = ui_list_edge_scroll(&ui, &erows, erows.x + 10, erows.y + erows.h - 4, 28, 12, false);
+                                b32 mid_s = ui_list_edge_scroll(&ui, &erows, erows.x + 10, erows.y + erows.h / 2, 28, 12, false);
+                                b32 out_no = ui_list_edge_scroll(&ui, &erows, erows.x - 10, erows.y - 5, 28, 12, false);
+                                b32 out_yes = ui_list_edge_scroll(&ui, &erows, erows.x - 10, erows.y - 5, 28, 12, true);
+
+                                check("kit app primitives: ui_list_edge_scroll respects edges and clamp_outside", down_s && !mid_s && !out_no && out_yes);
+                        }
+                }
+                {
+                        struct ui_job job;
+                        char out[64];
+                        int fds[2] = {-1, -1};
+                        bipolar child;
+                        b32 drained = false;
+
+                        memory_zero(&job, sizeof(job));
+                        job.output = -1;
+                        ui_job_kill(&job); // safe no-op on pid 0
+                        if (system_call_2(syscall(pipe2), (positive)fds, O_CLOEXEC) == 0)
+                        {
+                                system_call_3(syscall(fcntl), (positive)fds[0], 4, O_NONBLOCK);
+                                child = system_fork();
+                                if (child == 0)
+                                {
+                                        system_close(fds[0]);
+                                        system_write_all((b32)fds[1], "ok\n", 3);
+                                        system_close(fds[1]);
+                                        system_call_1(syscall(exit), 0);
+                                }
+                                system_close(fds[1]);
+                                if (child > 0)
+                                {
+                                        long other = -1;
+
+                                        ui_job_attach(&job, child, fds[0], out, sizeof(out), 2000000000ull);
+                                        for (int tries = 0; tries < 200 && job.child > 0; tries++)
+                                        {
+                                                ui_job_drain(&job);
+                                                ui_job_tick(&job, 10000000, &other);
+                                                if (job.child > 0)
+                                                {
+                                                        struct { long sec, nsec; } ts = {0, 1000000};
+                                                        system_call_2(syscall(nanosleep), (positive)&ts, 0);
+                                                }
+                                        }
+                                        drained = job.child == 0 && string_equals((string_address)out, (string_address) "ok\n");
+                                        if (job.child > 0)
+                                                ui_job_close(&job);
+                                }
+                                else
+                                        system_close(fds[0]);
+                        }
+                        check("kit app primitives: ui_job drains piped child output and reaps cleanly", drained);
+                }
+        }
         ui_kit.test_clock = 0;
 }
 
