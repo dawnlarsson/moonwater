@@ -425,7 +425,7 @@ static unsigned int compositor_resizable_axes(int row)
 }
 
 // Clamp width/height to row's min/max and display bounds (exempting fullscreen/background rows from max bounds).
-static void compositor_clamp_size(int row, int *width, int *height)
+static void compositor_row_clamp(int row, int *width, int *height)
 {
         int least_w, most_w, least_h, most_h;
 
@@ -451,6 +451,96 @@ static void compositor_clamp_size(int row, int *width, int *height)
                 *height = compositor_most_height();
 }
 
+// Canonical protocol-neutral window state snapshot for Wayland/XWM/compositor callers.
+struct compositor_row_facts
+{
+        int x, y;
+        unsigned int width, height;
+        unsigned int want_width, want_height;
+        int scale;
+        unsigned int arranged;
+        unsigned char fullscreen;
+        signed char layer;
+        unsigned char focused, resizing, minimized, filling;
+        unsigned int closing;
+};
+
+static int compositor_row_facts(int row, struct compositor_row_facts *out)
+{
+        struct windows *table = compositor.table;
+
+        if (!out || row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
+                return -1;
+        out->x = compositor.x[row];
+        out->y = compositor.y[row];
+        out->width = compositor.w[row];
+        out->height = compositor.h[row];
+        out->want_width = table && (compositor.arranged[row] != COMPOSITOR_FLOATING || compositor.asking[row]) ? table->want_width[row] : 0;
+        out->want_height = table && (compositor.arranged[row] != COMPOSITOR_FLOATING || compositor.asking[row]) ? table->want_height[row] : 0;
+        out->scale = compositor_row_scale(row);
+        out->arranged = compositor.arranged[row];
+        out->fullscreen = compositor.fullscreen[row];
+        out->layer = compositor.layer[row];
+        out->focused = compositor.focus == row;
+        out->resizing = compositor.resize == row;
+        out->minimized = (compositor.state[row] & WINDOW_MINIMIZED) != 0;
+        out->filling = compositor_filling(row) != 0;
+        out->closing = (compositor.state[row] & WINDOW_CLOSING) ? (unsigned int)compositor.close_asks[row] : 0;
+        return 0;
+}
+
+// Write a UTF-8-safe truncated title into the row's table and compositor state, refreshing tabs on change.
+static void compositor_row_set_title(int row, const char *utf8, unsigned long len)
+{
+        char title[WINDOWS_TITLE];
+        unsigned long used = 0, at;
+
+        if (row < 0 || row >= COMPOSITOR_ROWS)
+                return;
+        if (utf8)
+                while (used < len && utf8[used])
+                        used++;
+        at = used < WINDOWS_TITLE - 1 ? used : WINDOWS_TITLE - 1;
+        while (at && at < used && ((unsigned char)utf8[at] & 0xc0u) == 0x80u)
+                at--;
+        for (unsigned int i = 0; i < WINDOWS_TITLE; i++)
+                title[i] = i < at ? utf8[i] : 0;
+        if (compositor.table)
+                memory_copy(compositor.table->title[row], title, WINDOWS_TITLE);
+        if (memory_compare(title, compositor.title[row], WINDOWS_TITLE))
+        {
+                memory_copy(compositor.title[row], title, WINDOWS_TITLE);
+                if (compositor.showing[row])
+                        compositor_tabs_changed();
+        }
+}
+
+static void compositor_row_saved_get(int row, int rect[4])
+{
+        rect[0] = compositor.saved_x[row];
+        rect[1] = compositor.saved_y[row];
+        rect[2] = (int)compositor.saved_w[row];
+        rect[3] = (int)compositor.saved_h[row];
+}
+
+static void compositor_row_saved_set(int row, const int rect[4])
+{
+        compositor.saved_x[row] = rect[0];
+        compositor.saved_y[row] = rect[1];
+        compositor.saved_w[row] = (unsigned int)rect[2];
+        compositor.saved_h[row] = (unsigned int)rect[3];
+}
+
+static void compositor_row_save_floating(int row)
+{
+        if (compositor.arranged[row] == COMPOSITOR_FLOATING)
+        {
+                int cur[4] = {compositor.x[row], compositor.y[row], (int)compositor.w[row], (int)compositor.h[row]};
+
+                compositor_row_saved_set(row, cur);
+        }
+}
+
 /*
         The size a window is asked to be, in the table, and a knock. It draws
         whatever size it will and says so with its next picture; the edges the
@@ -460,7 +550,7 @@ static void compositor_want(int row, int width, int height)
 {
         int x = compositor.x[row], y = compositor.y[row];
 
-        compositor_clamp_size(row, &width, &height);
+        compositor_row_clamp(row, &width, &height);
         compositor.table->want_width[row] = (unsigned int)width;
         compositor.table->want_height[row] = (unsigned int)height;
         rows_add(&compositor.woken, row);
@@ -554,6 +644,22 @@ static void compositor_scale_set(int scale)
 static void compositor_resize_begin(int row, unsigned int edges);
 static void compositor_hold_take(int at, int row);
 static unsigned int compositor_tile_cells(unsigned int how);
+
+static void compositor_grab_set(unsigned int kind, int row, unsigned int code, unsigned int edges)
+{
+        compositor.active_grab.kind = kind;
+        compositor.active_grab.row = row;
+        compositor.active_grab.code = code;
+        compositor.active_grab.edges = edges;
+}
+
+static void compositor_grab_clear(void)
+{
+        compositor.active_grab.kind = COMPOSITOR_GRAB_NONE;
+        compositor.active_grab.row = COMPOSITOR_NONE;
+        compositor.active_grab.code = 0;
+        compositor.active_grab.edges = 0;
+}
 
 // The window on the far side of row's edge (one edge: a corner is the window's own) that meets it edge to edge with the
 // same extent along it, or COMPOSITOR_NONE.
@@ -772,6 +878,7 @@ static int compositor_shared_begin(int row, unsigned int edge)
         compositor_resize_begin(row, edge);
         compositor.arranged[row] = was;
         compositor.shared_row = rows_has(&d.lo, row) ? d.hi_row : d.lo_row;
+        compositor_grab_set(COMPOSITOR_GRAB_DIVIDER, row, COMPOSITOR_BTN_LEFT, edge);
         compositor.shared_lo = d.lo_row, compositor.shared_hi = d.hi_row;
         compositor.shared_lo_set = d.lo, compositor.shared_hi_set = d.hi;
         compositor.shared_vertical = d.vertical;
@@ -855,6 +962,7 @@ static void compositor_resize_begin(int row, unsigned int edges)
         compositor_hold_take(0, row);
         compositor.resize = row;
         compositor.shared_row = COMPOSITOR_NONE;
+        compositor_grab_set(COMPOSITOR_GRAB_RESIZE, row, COMPOSITOR_BTN_LEFT, edges);
         compositor_mark_clear();
         compositor.resize_w = (int)compositor.w[row];
         compositor.resize_h = (int)compositor.h[row];
@@ -945,13 +1053,7 @@ static void compositor_arrange_rect(int row, unsigned int how, const int *rect)
                 return;
 
         compositor_osk_unpan(row);
-        if (compositor.arranged[row] == COMPOSITOR_FLOATING)
-        {
-                compositor.saved_x[row] = compositor.x[row];
-                compositor.saved_y[row] = compositor.y[row];
-                compositor.saved_w[row] = compositor.w[row];
-                compositor.saved_h[row] = compositor.h[row];
-        }
+        compositor_row_save_floating(row);
         compositor_set_rect(row, how, rect);
         compositor_osk_sync();
 }
@@ -973,21 +1075,118 @@ static void compositor_hold_take(int more, int row)
         compositor.hold_how[row] = compositor.arranged[row];
 }
 
+// Unified grab teardown: COMMIT (release), CANCEL (revert hold_rows), STOP (client stop), or DROP (row teardown).
+static int compositor_grab_end(int how, int drop_row)
+{
+        if (how == COMPOSITOR_GRAB_DROP)
+        {
+                if (drop_row < 0)
+                        return 0;
+                if (compositor.preview_row == drop_row)
+                        compositor_preview(COMPOSITOR_NONE);
+                if (compositor.preview_draw == drop_row + 1)
+                {
+                        int drawn[4];
+
+                        if (compositor_preview_shown(drawn))
+                                compositor_damage(drawn[0], drawn[1], drawn[2], drawn[3]);
+                        compositor.preview_draw = 0;
+                }
+                rows_del(&compositor.hold_rows, drop_row);
+                if (compositor.mark_row == drop_row || compositor.mark_with == drop_row || rows_has(&compositor.mark_rows, drop_row))
+                        compositor_mark_clear();
+                if (compositor.shared_row >= 0 &&
+                    (rows_has(&compositor.shared_lo_set, drop_row) || rows_has(&compositor.shared_hi_set, drop_row)))
+                        compositor.shared_row = COMPOSITOR_NONE, compositor.resize = COMPOSITOR_NONE;
+                if (compositor.drag == drop_row)
+                        compositor.drag = COMPOSITOR_NONE;
+                if (compositor.press == drop_row)
+                        compositor.press = COMPOSITOR_NONE;
+                if (compositor.resize == drop_row)
+                        compositor.resize = COMPOSITOR_NONE;
+                if (compositor.drag_glide == drop_row + 1)
+                        compositor.drag_glide = 0;
+                if (compositor.edge_right == (unsigned int)drop_row + 1)
+                        compositor.edge_right = 0;
+                if (compositor.lit_row == drop_row)
+                        compositor.lit_row = COMPOSITOR_NONE, compositor.lit_edges = compositor.lit_held = 0;
+                if (compositor.touch.closing == drop_row)
+                        compositor.touch.closing = COMPOSITOR_NONE;
+                if (compositor.touch.hold_row == drop_row)
+                        compositor.touch.hold_row = COMPOSITOR_NONE;
+                if (compositor.active_grab.row == drop_row ||
+                    (compositor.active_grab.kind == COMPOSITOR_GRAB_DIVIDER && compositor.shared_row < 0))
+                        compositor_grab_clear();
+                return 1;
+        }
+        if (how == COMPOSITOR_GRAB_STOP)
+        {
+                int resized;
+
+                if (drop_row < 0 || (compositor.drag != drop_row && compositor.resize != drop_row))
+                        return 0;
+                resized = compositor.resize == drop_row;
+                compositor_preview(COMPOSITOR_NONE);
+                compositor.drag = compositor.resize = compositor.shared_row = COMPOSITOR_NONE;
+                compositor.edge_right = 0;
+                if (compositor.drag_glide == drop_row + 1)
+                        compositor.drag_glide = 0;
+                compositor_mark_clear();
+                compositor_lit(COMPOSITOR_NONE, 0, 0);
+                rows_none(&compositor.hold_rows);
+                compositor_grab_clear();
+                if (resized)
+                        rows_add(&compositor.woken, drop_row);
+                return 1;
+        }
+        if (how == COMPOSITOR_GRAB_CANCEL)
+        {
+                if (compositor.drag < 0 && compositor.resize < 0)
+                        return 0;
+                compositor_preview(COMPOSITOR_NONE);
+                compositor.drag = compositor.resize = compositor.shared_row = COMPOSITOR_NONE;
+                compositor.edge_right = 0;
+                compositor.press = COMPOSITOR_NONE;
+                compositor.drag_glide = 0;
+                compositor_mark_clear();
+                compositor_lit(COMPOSITOR_NONE, 0, 0);
+                compositor_grab_clear();
+                for (int row = 0; row < (int)compositor_rows_in_use; row++)
+                        if (rows_has(&compositor.hold_rows, row) && compositor.showing[row])
+                                compositor_set_rect(row, compositor.hold_how[row], compositor.hold_rect[row]);
+                rows_none(&compositor.hold_rows);
+                return 1;
+        }
+        {
+                int dragged = compositor.drag, resized = compositor.resize;
+
+                compositor_preview(COMPOSITOR_NONE);
+                compositor.drag = compositor.resize = COMPOSITOR_NONE;
+                if (dragged >= 0 || resized >= 0)
+                        compositor_lit(COMPOSITOR_NONE, 0, 0);
+                if (resized >= 0)
+                {
+                        compositor_mark_clear();
+                        rows_add(&compositor.woken, resized);
+                        if (compositor.shared_row >= 0)
+                        {
+                                rows_or(&compositor.woken, &compositor.shared_lo_set);
+                                rows_or(&compositor.woken, &compositor.shared_hi_set);
+                                compositor.shared_row = COMPOSITOR_NONE;
+                        }
+                }
+                rows_none(&compositor.hold_rows);
+                if (compositor.active_grab.kind == COMPOSITOR_GRAB_MOVE ||
+                    compositor.active_grab.kind == COMPOSITOR_GRAB_RESIZE ||
+                    compositor.active_grab.kind == COMPOSITOR_GRAB_DIVIDER)
+                        compositor_grab_clear();
+                return dragged >= 0 || resized >= 0;
+        }
+}
+
 static int compositor_hold_cancel(void)
 {
-        if (compositor.drag < 0 && compositor.resize < 0)
-                return 0;
-        compositor_preview(COMPOSITOR_NONE);
-        compositor.drag = compositor.resize = compositor.shared_row = COMPOSITOR_NONE;
-        compositor.edge_right = 0;
-        compositor.press = COMPOSITOR_NONE;
-        compositor_mark_clear();
-        compositor_lit(COMPOSITOR_NONE, 0, 0);
-        for (int row = 0; row < (int)compositor_rows_in_use; row++)
-                if (rows_has(&compositor.hold_rows, row) && compositor.showing[row])
-                        compositor_set_rect(row, compositor.hold_how[row], compositor.hold_rect[row]);
-        rows_none(&compositor.hold_rows);
-        return 1;
+        return compositor_grab_end(COMPOSITOR_GRAB_CANCEL, COMPOSITOR_NONE);
 }
 
 static void compositor_float(int row);
@@ -1537,63 +1736,110 @@ static void compositor_assist_close(void)
                 compositor.assist_count = 0;
 }
 
+// Canonical window arrangement and fullscreen mode transition: saves/restores floating geometry,
+// updates fullscreen/tiles/OSK, and handles raise/focus on fullscreen entry.
+static void compositor_row_mode(int row, unsigned int arrange, int fullscreen, int screen)
+{
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
+                return;
+        if (fullscreen)
+        {
+                unsigned char was_fs = compositor.fullscreen[row];
+                unsigned int was = was_fs ? compositor.fullscreen_was[row] : compositor.arranged[row];
+                unsigned int count;
+                const int (*screens)[4] = compositor_screens(&count);
+                int part[4], on = screen >= 0 && (unsigned int)screen < count ? screen : compositor_screen_of(row);
+
+                // Set fullscreen before arrange so compositor_row_clamp/stretch do not clamp fixed-size fullscreen windows.
+                compositor.fullscreen[row] = 1;
+                compositor_screen_part(screens[on], COMPOSITOR_MAXIMIZED, part);
+                compositor_arrange_rect(row, COMPOSITOR_MAXIMIZED, part);
+                compositor_tile_others(row, COMPOSITOR_MAXIMIZED, on);
+                if (compositor.arranged[row] != COMPOSITOR_MAXIMIZED)
+                {
+                        compositor.fullscreen[row] = was_fs;
+                        return;
+                }
+                compositor.fullscreen_was[row] = (unsigned char)was;
+                compositor_raise(row);
+                compositor_focus(row);
+                return;
+        }
+        if (arrange == COMPOSITOR_FLOATING)
+        {
+                int was[4], saved[4];
+
+                if (compositor.arranged[row] == COMPOSITOR_FLOATING)
+                {
+                        compositor.fullscreen[row] = 0;
+                        return;
+                }
+                compositor_osk_unpan(row);
+                was[0] = compositor.x[row], was[1] = compositor.y[row], was[2] = (int)compositor.w[row], was[3] = (int)compositor.h[row];
+                compositor_row_saved_get(row, saved);
+                compositor_damage_row(row);
+                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
+                compositor.edges[row] = 0;
+                compositor_put(row, saved[0], saved[1]);
+                compositor_damage_row(row);
+                compositor_want(row, saved[2], saved[3]);
+                compositor_glide_start(row, was);
+                compositor_osk_sync();
+                return;
+        }
+        {
+                unsigned int count;
+                const int (*screens)[4] = compositor_screens(&count);
+                int part[4], on = screen >= 0 && (unsigned int)screen < count ? screen : compositor_screen_of(row);
+
+                compositor.fullscreen[row] = 0;
+                compositor_screen_part(screens[on], arrange, part);
+                compositor_arrange_rect(row, arrange, part);
+                // A maximized window covers every tile on its screen, so they float back as a half that a half covers does.
+                if (compositor_region_cells(arrange))
+                        compositor_tile_others(row, arrange, on);
+        }
+}
+
+// Promote a popup/override row to a managed toplevel (optionally fullscreen on fullscreen_output >= 0).
+static void compositor_row_promote_toplevel(int row, int fullscreen_output)
+{
+        if (row < 0 || row >= COMPOSITOR_ROWS)
+                return;
+        if (compositor.table)
+        {
+                compositor.table->glass[row] &= ~WINDOW_NO_TAB;
+                compositor.table->popup_parent[row] = 0;
+        }
+        compositor.asks[row] &= ~WINDOW_NO_TAB;
+        compositor_popup_parent[row] = -1;
+        if (fullscreen_output >= 0)
+                compositor_row_mode(row, COMPOSITOR_MAXIMIZED, 1, fullscreen_output);
+        compositor_raise(row);
+        compositor_focus(row);
+        compositor_tabs_changed();
+}
+
 // All of a screen or half of it (compositor_screen_part): the screen named, or with none (-1) the window's own
 // (compositor_screen_of). A tile leaves the others on the screen their share (compositor_tile_others).
 static void compositor_arrange_on(int row, unsigned int how, int on)
 {
-        unsigned int count;
-        const int (*screens)[4] = compositor_screens(&count);
-        int part[4], screen;
-
-        if (!compositor.showing[row])
-                return;
-
-        screen = on >= 0 && (unsigned int)on < count ? on : compositor_screen_of(row);
-        compositor_screen_part(screens[screen], how, part);
-        compositor_arrange_rect(row, how, part);
-        // A maximized window covers every tile on its screen, so they float back as a half that a half covers does.
-        if (compositor_region_cells(how))
-                compositor_tile_others(row, how, screen);
+        compositor_row_mode(row, how, 0, on);
 }
 
 static void compositor_arrange(int row, unsigned int how)
 {
-        compositor_arrange_on(row, how, -1);
+        compositor_row_mode(row, how, 0, -1);
 }
 
-/*
-        A window asked to fill its screen under the taskbar too (a client's set_fullscreen, an X window's _NET_WM_STATE_FULLSCREEN, F11 on a
-        window of Canvas's own): arranged maximised on the screen asked (-1: the one it is mostly on), and marked, so the taskbar slides away
-        while it is the top window (compositor_fullscreen_up), the card may show it straight from its buffer (compositor_direct_candidate), and
-        the second-swipe rule of the screen edges applies to it and to no other maximised window (compositor_swipe_act). It is put on top and
-        given the keys. What it filled before is kept (fullscreen_was), so leaving fullscreen puts it back as it was: floating where it floated,
-        or maximised, or a tile, where every exit floated it before.
-*/
 static void compositor_fullscreen_on(int row, int screen)
 {
-        unsigned int was;
-        unsigned char was_fs;
-
-        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
-                return;
-        was_fs = compositor.fullscreen[row];
-        was = was_fs ? compositor.fullscreen_was[row] : compositor.arranged[row];
-        // Set fullscreen before arrange so compositor_want/stretch do not clamp fixed-size fullscreen windows to most_w/h.
-        compositor.fullscreen[row] = 1;
-        compositor_arrange_on(row, COMPOSITOR_MAXIMIZED, screen);
-        if (compositor.arranged[row] != COMPOSITOR_MAXIMIZED)
-        {
-                compositor.fullscreen[row] = was_fs;
-                return;
-        }
-        compositor.fullscreen_was[row] = (unsigned char)was;
-        compositor_raise(row);
-        compositor_focus(row);
+        compositor_row_mode(row, COMPOSITOR_MAXIMIZED, 1, screen);
 }
 
 static void compositor_fullscreen_row(int row)
 {
-        compositor_fullscreen_on(row, -1);
+        compositor_row_mode(row, COMPOSITOR_MAXIMIZED, 1, -1);
 }
 
 // Set a window's stacking layer (BACKGROUND, NORMAL, ABOVE, OVERLAY). BACKGROUND windows fill their output behind all windows and tabs.
@@ -1621,16 +1867,9 @@ static void compositor_layer_set(int row, signed char layer, int screen)
 // fullscreen is left as it is.
 static void compositor_fullscreen_off(int row)
 {
-        unsigned int was;
-
         if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.fullscreen[row])
                 return;
-        was = compositor.fullscreen_was[row];
-        compositor.fullscreen[row] = 0;
-        if (was == COMPOSITOR_FLOATING)
-                compositor_float(row);
-        else
-                compositor_arrange(row, was);
+        compositor_row_mode(row, compositor.fullscreen_was[row], 0, -1);
         // The band comes back, and what it covers is drawn again.
         compositor_damage_row(row);
 }
@@ -1649,20 +1888,7 @@ static void compositor_fullscreen_toggle(int row)
 // Back to the rectangle it had, wherever it was put since.
 static void compositor_float(int row)
 {
-        int was[4];
-
-        if (compositor.arranged[row] == COMPOSITOR_FLOATING)
-                return;
-        compositor_osk_unpan(row);
-        was[0] = compositor.x[row], was[1] = compositor.y[row], was[2] = (int)compositor.w[row], was[3] = (int)compositor.h[row];
-        compositor_damage_row(row);
-        compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
-        compositor.edges[row] = 0;
-        compositor_put(row, compositor.saved_x[row], compositor.saved_y[row]);
-        compositor_damage_row(row);
-        compositor_want(row, (int)compositor.saved_w[row], (int)compositor.saved_h[row]);
-        compositor_glide_start(row, was);
-        compositor_osk_sync();
+        compositor_row_mode(row, COMPOSITOR_FLOATING, 0, -1);
 }
 
 /*
@@ -1677,7 +1903,7 @@ static void compositor_float_for_drag(int row)
         int width = (int)compositor.saved_w[row], height = (int)compositor.saved_h[row];
 
         compositor_osk_unpan(row);
-        compositor_clamp_size(row, &width, &height);
+        compositor_row_clamp(row, &width, &height);
         int in_x = compositor.press_x - compositor.x[row], in_y = compositor.press_y - compositor.y[row];
         int grab = (int)((long)in_x * width / (compositor.w[row] ? (int)compositor.w[row] : 1));
         int at = in_y < COMPOSITOR_GRAB * compositor.scale / 100
@@ -2655,35 +2881,7 @@ static void compositor_leave(int row)
         }
         compositor.hover = compositor.hover == row ? COMPOSITOR_NONE : compositor.hover;
         compositor.told_row = compositor.told_row == row ? COMPOSITOR_NONE : compositor.told_row;
-        if (compositor.preview_row == row)
-                compositor_preview(COMPOSITOR_NONE);
-        // What is drawn of its preview goes with it, and nothing of it is held to be put back.
-        if (compositor.preview_draw == row + 1)
-        {
-                int drawn[4];
-
-                if (compositor_preview_shown(drawn))
-                        compositor_damage(drawn[0], drawn[1], drawn[2], drawn[3]);
-                compositor.preview_draw = 0;
-        }
-        rows_del(&compositor.hold_rows, row);
-        if (compositor.mark_row == row || compositor.mark_with == row || rows_has(&compositor.mark_rows, row))
-                compositor_mark_clear();
-        // A window of the divider resized, going, ends the resize: the others are no longer taken with it.
-        if (compositor.shared_row >= 0 && (rows_has(&compositor.shared_lo_set, row) || rows_has(&compositor.shared_hi_set, row)))
-                compositor.shared_row = COMPOSITOR_NONE, compositor.resize = COMPOSITOR_NONE;
-        compositor.drag = compositor.drag == row ? COMPOSITOR_NONE : compositor.drag;
-        compositor.press = compositor.press == row ? COMPOSITOR_NONE : compositor.press;
-        compositor.resize = compositor.resize == row ? COMPOSITOR_NONE : compositor.resize;
-        if (compositor.edge_right == (unsigned int)row + 1)
-                compositor.edge_right = 0;
-        // A window that comes into the row next has no edge of this one's lit, and a finger on its X closes nothing.
-        if (compositor.lit_row == row)
-                compositor.lit_row = COMPOSITOR_NONE, compositor.lit_edges = compositor.lit_held = 0;
-        compositor.touch.closing = compositor.touch.closing == row ? COMPOSITOR_NONE : compositor.touch.closing;
-        // The window a long press landed on (compositor_touch_tick) gone: the lift that ends the press goes nowhere, not to the
-        // next program in the row, which never had the finger and would be given a press of the person's for the clipboard.
-        compositor.touch.hold_row = compositor.touch.hold_row == row ? COMPOSITOR_NONE : compositor.touch.hold_row;
+        compositor_grab_end(COMPOSITOR_GRAB_DROP, row);
         // A button held over the window that went is let go nowhere: the row is the next program's, which never had
         // the press (compositor_release).
         for (unsigned int index = 0; index < 8; index++)
@@ -2706,7 +2904,15 @@ static void compositor_leave(int row)
         compositor.w[row] = compositor.h[row] = compositor.edges[row] = 0;
         compositor.picture_w[row] = compositor.picture_h[row] = compositor.asking[row] = 0;
         compositor.asks[row] = 0;
-        compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
+        compositor.arranged[row] = COMPOSITOR_FLOATING;
+        compositor.fullscreen[row] = 0;
+        compositor.fullscreen_was[row] = COMPOSITOR_FLOATING;
+        compositor.layer[row] = WINDOW_LAYER_NORMAL;
+        if (table)
+                table->layer[row] = WINDOW_LAYER_NORMAL;
+        compositor.banded[row] = 0;
+        compositor.saved_x[row] = compositor.saved_y[row] = 0;
+        compositor.saved_w[row] = compositor.saved_h[row] = 0;
         compositor.title[row][0] = 0;
         memory_zero(compositor.app_id[row], WINDOWS_APP_ID), compositor.icon_seq[row] = 0;
         compositor.name[row][0] = 0;
@@ -2748,6 +2954,10 @@ static void compositor_leave(int row)
         // are that window's only if it began them (compositor_pinch sends updates to the row the begin named, and no other).
         if (compositor.touch.pinch_row == row)
                 compositor.touch.pinch_row = COMPOSITOR_NONE;
+        if (compositor.swipe.row == row)
+                compositor.swipe.row = COMPOSITOR_NONE;
+        if (compositor.swipe.armed_row == row)
+                compositor.swipe.armed_row = COMPOSITOR_NONE, compositor.swipe.armed_until = 0;
         table->state[row] = 0;
         table->want_width[row] = table->want_height[row] = 0;
         table->shown[row] = 0;
@@ -2767,6 +2977,9 @@ static void compositor_leave(int row)
 
         compositor.osk_pan[row] = 0;
         compositor.osk_height[row] = 0;
+        compositor.osk_edges[row] = 0;
+        if (compositor.osk_turn_focus == row)
+                compositor.osk_turn_focus = COMPOSITOR_NONE, compositor.osk_turned = 0, compositor.osk_turn_blur = 0;
         compositor.caret[row] = 0;
         compositor.text_purpose[row] = 0;
         if (compositor.focus == row)
@@ -3659,6 +3872,14 @@ static void compositor_popup_leave(int row)
 static long wayland_row_owner(long row);
 #endif
 
+// Full row teardown: clipboard ownership/drag, popups, and compositor row state.
+static void compositor_row_release(int row)
+{
+        compositor_clip_leave(row);
+        compositor_popup_leave(row);
+        compositor_leave(row);
+}
+
 // A row whose program has gone, its new door open: let go.
 static void compositor_door_gone(int row)
 {
@@ -3669,9 +3890,7 @@ static void compositor_door_gone(int row)
         if (wayland_row_owner(row) >= 0)
                 return;
 #endif
-        compositor_clip_leave(row);
-        compositor_popup_leave(row);
-        compositor_leave(row);
+        compositor_row_release(row);
 }
 
 /*

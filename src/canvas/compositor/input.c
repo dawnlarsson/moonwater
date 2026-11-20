@@ -1132,10 +1132,11 @@ static void compositor_screen_chord(unsigned int code)
                 return;
         how = compositor.arranged[row];
         {
-                int keep_x = compositor.saved_x[row], keep_y = compositor.saved_y[row];
+                int keep[4];
 
-                compositor_screen_carry(screens[from], screens[to], &keep_x, &keep_y, (int)compositor.saved_w[row], (int)compositor.saved_h[row]);
-                compositor.saved_x[row] = keep_x, compositor.saved_y[row] = keep_y;
+                compositor_row_saved_get(row, keep);
+                compositor_screen_carry(screens[from], screens[to], &keep[0], &keep[1], keep[2], keep[3]);
+                compositor_row_saved_set(row, keep);
         }
         if (how == COMPOSITOR_FLOATING)
         {
@@ -2026,6 +2027,7 @@ static void compositor_drag_begin_from(int under, int press_x, int press_y)
 {
         compositor_popups_close(under, -1);
         compositor.drag = under;
+        compositor_grab_set(COMPOSITOR_GRAB_MOVE, under, COMPOSITOR_BTN_LEFT, 0);
         compositor.drag_moved = 0;
         compositor.drag_x = compositor.pointer_x - compositor.x[under];
         compositor.drag_y = compositor.pointer_y - compositor.y[under];
@@ -2040,12 +2042,7 @@ static void compositor_drag_begin_from(int under, int press_x, int press_y)
                 memory_copy(compositor.drag_keep, keep, sizeof(keep));
         }
         else
-        {
-                int keep[4] = {compositor.saved_x[under], compositor.saved_y[under], (int)compositor.saved_w[under],
-                               (int)compositor.saved_h[under]};
-
-                memory_copy(compositor.drag_keep, keep, sizeof(keep));
-        }
+                compositor_row_saved_get(under, compositor.drag_keep);
         // The window is in the hand: all of its line is lit until it is let go.
         compositor_lit(under, COMPOSITOR_LIT_ALL, 1);
 }
@@ -2055,8 +2052,7 @@ static void compositor_drag_begin(int under)
         compositor_drag_begin_from(under, compositor.pointer_x, compositor.pointer_y);
 }
 
-#ifdef CONFIG_MOONWATER_WAYLAND
-static void compositor_drag_begin_client(int under)
+static void compositor_drag_start_client(int under)
 {
         compositor_drag_begin_from(under, compositor.button_x, compositor.button_y);
         if (compositor.arranged[under] != COMPOSITOR_FLOATING &&
@@ -2070,23 +2066,41 @@ static void compositor_drag_begin_client(int under)
         }
 }
 
+// Canonical client-initiated move/resize/cancel entry (Wayland xdg_toplevel.move/resize, XWM _NET_WM_MOVERESIZE).
+static int compositor_grab_begin_client(int row, unsigned int edges, int is_move, int cancel)
+{
+        if (row < 0 || row >= COMPOSITOR_ROWS)
+                return 0;
+        if (cancel)
+                return compositor_grab_end(COMPOSITOR_GRAB_STOP, row);
+        if (!compositor.showing[row] || !(compositor.button_down & 1u) || compositor.button_row[0] != row ||
+            compositor.drag >= 0 || compositor.resize >= 0)
+                return 0;
+        if (is_move)
+        {
+                compositor_drag_start_client(row);
+                return 1;
+        }
+        if (!edges)
+                return 0;
+        compositor_resize_begin(row, edges);
+        if (compositor.resize == row)
+        {
+                compositor_lit(row, compositor.edges[row], 1);
+                return 1;
+        }
+        return 0;
+}
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+static void compositor_drag_begin_client(int under)
+{
+        compositor_drag_start_client(under);
+}
+
 static void compositor_drag_stop(int row)
 {
-        int resized;
-
-        if (row < 0 || (compositor.drag != row && compositor.resize != row))
-                return;
-        resized = compositor.resize == row;
-        compositor_preview(COMPOSITOR_NONE);
-        compositor.drag = COMPOSITOR_NONE;
-        compositor.resize = COMPOSITOR_NONE;
-        compositor.shared_row = COMPOSITOR_NONE;
-        compositor.edge_right = 0;
-        compositor_mark_clear();
-        compositor_lit(COMPOSITOR_NONE, 0, 0);
-        rows_none(&compositor.hold_rows);
-        if (resized)
-                rows_add(&compositor.woken, row);
+        (void)compositor_grab_end(COMPOSITOR_GRAB_STOP, row);
 }
 #endif
 
@@ -2106,26 +2120,13 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                 drop_how = compositor_target(dragged, compositor.pointer_x, compositor.pointer_y, drop_box, &drop_screen, &drop_touch);
         }
         // The preview goes with the drag; where the window lands is the target read above, from its rectangle.
-        compositor_preview(COMPOSITOR_NONE);
-        compositor.drag = COMPOSITOR_NONE;
-        compositor.resize = COMPOSITOR_NONE;
-        // What the hand held is let go: its line is no longer lit.
-        if (dragged >= 0 || resized >= 0)
-                compositor_lit(COMPOSITOR_NONE, 0, 0);
+        compositor_grab_end(COMPOSITOR_GRAB_COMMIT, COMPOSITOR_NONE);
         if (code == COMPOSITOR_BTN_RIGHT && compositor.edge_right)
         {
                 compositor.edge_right = 0;
+                if (compositor.active_grab.kind == COMPOSITOR_GRAB_EDGE_CHORD)
+                        compositor_grab_clear();
                 compositor_lit(COMPOSITOR_NONE, 0, 0);
-        }
-        if (resized >= 0)
-        {
-                compositor_mark_clear();
-                rows_add(&compositor.woken, resized);
-                if (compositor.shared_row >= 0)
-                {
-                        rows_or(&compositor.woken, &compositor.shared_lo_set), rows_or(&compositor.woken, &compositor.shared_hi_set);
-                        compositor.shared_row = COMPOSITOR_NONE;
-                }
         }
         // A button is let go in the window it was pressed in: a second button pressed over another window while the
         // first is held is that window's, and the first's release is the one that window held the grab for. A button
@@ -2154,9 +2155,7 @@ static void compositor_release_as(unsigned int code, int snap, unsigned int flag
                 {
                         compositor_arrange_on(dragged, how, screen);
                         // The rectangle a restore puts back is the one from before the drag (compositor.drag_keep).
-                        compositor.saved_x[dragged] = compositor.drag_keep[0], compositor.saved_y[dragged] = compositor.drag_keep[1];
-                        compositor.saved_w[dragged] = (unsigned int)compositor.drag_keep[2];
-                        compositor.saved_h[dragged] = (unsigned int)compositor.drag_keep[3];
+                        compositor_row_saved_set(dragged, compositor.drag_keep);
                         // The others of the screen are offered the space the drop left, until a click or Escape.
                         compositor.assist_on = compositor.assist_armed = 1;
                         compositor.assist_row = dragged;
@@ -2246,20 +2245,19 @@ static int compositor_on_button(int row, int x, int y, int (*box)(const struct c
         what its release must be, and a press of any button first lets go of what an earlier one held, so a release a
         finger's cancel lost is not held over.
 */
-static unsigned int compositor_minimize_code;
-
 static int compositor_minimize_press(unsigned int code, int down)
 {
         int under, tab = COMPOSITOR_NONE;
 
         if (!down)
         {
-                if (!code || code != compositor_minimize_code)
+                if (compositor.active_grab.kind != COMPOSITOR_GRAB_MINIMIZE_BTN || !code || code != compositor.active_grab.code)
                         return 0;
-                compositor_minimize_code = 0;
+                compositor_grab_clear();
                 return 1;
         }
-        compositor_minimize_code = 0;
+        if (compositor.active_grab.kind == COMPOSITOR_GRAB_MINIMIZE_BTN)
+                compositor_grab_clear();
         if (code != COMPOSITOR_BTN_LEFT || compositor_wl_held())
                 return 0;
 
@@ -2270,7 +2268,7 @@ static int compositor_minimize_press(unsigned int code, int down)
                 return 0;
 
         compositor_popups_close(-1, -1);
-        compositor_minimize_code = code;
+        compositor_grab_set(COMPOSITOR_GRAB_MINIMIZE_BTN, under, code, 0);
         compositor_minimize_row(under);
         return 1;
 }
@@ -2457,6 +2455,7 @@ static void compositor_button(unsigned int code, int down)
                 if (edges && !compositor.fullscreen[under])
                 {
                         compositor.edge_right = (unsigned int)under + 1;
+                        compositor_grab_set(COMPOSITOR_GRAB_EDGE_CHORD, under, COMPOSITOR_BTN_RIGHT, edges);
                         compositor.press_x = compositor.pointer_x;
                         compositor.press_y = compositor.pointer_y;
                         compositor_lit(under, edges, 1);
@@ -2474,6 +2473,8 @@ static void compositor_button(unsigned int code, int down)
                         int row = (int)compositor.edge_right - 1;
 
                         compositor.edge_right = 0;
+                        if (compositor.active_grab.kind == COMPOSITOR_GRAB_EDGE_CHORD)
+                                compositor_grab_clear();
                         if (row >= 0 && row < COMPOSITOR_ROWS && compositor.showing[row] && !compositor.fullscreen[row] &&
                             (compositor_edge_zone(row, compositor.pointer_x, compositor.pointer_y) ||
                              !ui_touch_past(compositor.press_x, compositor.press_y, compositor.pointer_x, compositor.pointer_y,
@@ -2503,6 +2504,7 @@ static void compositor_button(unsigned int code, int down)
                 {
                         compositor.press = COMPOSITOR_NONE;
                         compositor.touch.closing = under;
+                        compositor_grab_set(COMPOSITOR_GRAB_TOUCH_CLOSE, under, COMPOSITOR_BTN_LEFT, 0);
                         ui_touch_pend(&compositor.touch.gesture, 1);
                         return;
                 }
@@ -4217,6 +4219,9 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         compositor.touch.hidden = 1;
                         compositor.touch.closing = COMPOSITOR_NONE;
                         compositor.touch.hold_row = COMPOSITOR_NONE;
+                        if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_CLOSE ||
+                            compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_HOLD)
+                                compositor_grab_clear();
                         compositor_touch_motion(e->x, e->y, now);
                         break;
                 case UI_TOUCH_MOVE:
@@ -4227,6 +4232,8 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                         break;
                 case UI_TOUCH_RELEASE:
                         compositor.touch.closing = COMPOSITOR_NONE;
+                        if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_CLOSE)
+                                compositor_grab_clear();
                         compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
                         compositor_touch_button(COMPOSITOR_BTN_LEFT, 0);
                         break;
@@ -4242,10 +4249,14 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                                 compositor_close(compositor.touch.closing);
                         }
                         compositor.touch.closing = COMPOSITOR_NONE;
+                        if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_CLOSE)
+                                compositor_grab_clear();
                         break;
                 case UI_TOUCH_RESUME:
                         // A press on the X that moves is no press of it: the press it was under the X is made.
                         compositor.touch.closing = COMPOSITOR_NONE;
+                        if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_CLOSE)
+                                compositor_grab_clear();
                         compositor_touch_resume();
                         break;
                 case UI_TOUCH_RIGHT:
@@ -4272,6 +4283,8 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                                 compositor.touch.holding = 1;
                                 compositor_touch_cancel();
                                 compositor.touch.hold_row = compositor_under(compositor.pointer_x, compositor.pointer_y, &tab);
+                                if (compositor.touch.hold_row >= 0)
+                                        compositor_grab_set(COMPOSITOR_GRAB_TOUCH_HOLD, compositor.touch.hold_row, COMPOSITOR_BTN_LEFT, 0);
                                 compositor_touch_right();
                                 compositor.touch.holding = 0;
                         }
@@ -4282,6 +4295,8 @@ static void compositor_touch_apply(unsigned int at, const struct ui_touch_out *o
                                 compositor_post(compositor.touch.hold_row, WINDOW_EVENT_BUTTON,
                                                 WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, COMPOSITOR_BTN_LEFT, 0);
                         compositor.touch.hold_row = COMPOSITOR_NONE;
+                        if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_HOLD)
+                                compositor_grab_clear();
                         break;
                 case UI_TOUCH_IDLE:
                         compositor_predict_clear(COMPOSITOR_PREDICT_TOUCH);
@@ -5489,6 +5504,9 @@ static void compositor_input_gone(unsigned int at)
                         compositor_post(compositor.touch.hold_row, WINDOW_EVENT_BUTTON,
                                         WINDOW_KEY_TOUCH | WINDOW_KEY_CANCEL | WINDOW_KEY_HOLD, COMPOSITOR_BTN_LEFT, 0);
                 compositor.touch.hold_row = COMPOSITOR_NONE;
+                if (compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_HOLD ||
+                    compositor.active_grab.kind == COMPOSITOR_GRAB_TOUCH_CLOSE)
+                        compositor_grab_clear();
                 ui_touch_reset(&compositor.touch.gesture);
         }
         if (compositor.touchscreen[at])

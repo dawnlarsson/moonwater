@@ -978,6 +978,41 @@ struct compositor_output
         unsigned long turn_value;
 };
 
+/*
+        Active pointer/touch grab state: unifies move, resize, shared divider resize,
+        right+left edge-chord arming, minimize button press, touch close button hold, and
+        touch long-press hold under one explicit state machine. Legacy mirror fields
+        (drag, resize, shared_row, edge_right, touch.closing, touch.hold_row) stay synced
+        for Wayland/XWM/render callers until Wave 2 migrates them.
+*/
+enum compositor_grab_kind
+{
+        COMPOSITOR_GRAB_NONE = 0,
+        COMPOSITOR_GRAB_MOVE,
+        COMPOSITOR_GRAB_RESIZE,
+        COMPOSITOR_GRAB_DIVIDER,
+        COMPOSITOR_GRAB_EDGE_CHORD,
+        COMPOSITOR_GRAB_MINIMIZE_BTN,
+        COMPOSITOR_GRAB_TOUCH_CLOSE,
+        COMPOSITOR_GRAB_TOUCH_HOLD,
+};
+
+enum compositor_grab_end_how
+{
+        COMPOSITOR_GRAB_COMMIT = 0,
+        COMPOSITOR_GRAB_CANCEL,
+        COMPOSITOR_GRAB_STOP,
+        COMPOSITOR_GRAB_DROP,
+};
+
+struct compositor_grab
+{
+        unsigned int kind;  // enum compositor_grab_kind
+        int row;            // target row, or COMPOSITOR_NONE
+        unsigned int code;  // button code (MINIMIZE_BTN / EDGE_CHORD)
+        unsigned int edges; // COMPOSITOR_EDGE_* for resize/divider/edge-chord
+};
+
 static struct
 {
         int card;
@@ -1206,6 +1241,7 @@ static struct
         font_engine *engine;
 
         int focus, hover, grab, drag, resize, press; // rows, or COMPOSITOR_NONE
+        struct compositor_grab active_grab;
         unsigned int edge_right; // row + 1 while right button is held on a resize edge waiting for left to move the window; 0 none
         struct ui_click press_click; // the presses on a window's top: a double press is the kit's click count
         struct taskbar_cells cells;  // the panel's cells: what a press on one does (taskbar_cell_press), and the tray's double press
@@ -2856,6 +2892,7 @@ static int compositor_rows_make(unsigned int rows)
 static void compositor_zero(void)
 {
         memory_zero(&compositor, sizeof(compositor));
+        compositor.active_grab.row = COMPOSITOR_NONE;
         compositor_rows_point();
         compositor_rows_make(compositor_rows_in_use);
         COMPOSITOR_ROWS_OWN(COMPOSITOR_ROWS_ZERO)
@@ -3363,7 +3400,11 @@ static b32 compositor_main()
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = compositor.told_row = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = compositor.preview_row = COMPOSITOR_NONE;
         compositor.mark_row = compositor.mark_with = compositor.shared_row = COMPOSITOR_NONE;
-        compositor.touch.closing = COMPOSITOR_NONE;
+        compositor.active_grab.kind = COMPOSITOR_GRAB_NONE;
+        compositor.active_grab.row = COMPOSITOR_NONE;
+        compositor.touch.closing = compositor.touch.hold_row = COMPOSITOR_NONE;
+        compositor.swipe.row = compositor.swipe.armed_row = COMPOSITOR_NONE;
+        compositor.osk_turn_focus = COMPOSITOR_NONE;
         compositor.cursor.asked_row = COMPOSITOR_NONE;
 
         for (positive at = 1; at < program_argument_count(); at++)
