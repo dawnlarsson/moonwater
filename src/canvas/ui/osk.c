@@ -37,16 +37,18 @@
 #ifndef MOONWATER_CANVAS_OSK
 #define MOONWATER_CANVAS_OSK
 
-#define OSK_WIDTH 640     // logical pixels: the keyboard's width, its keys and their gaps are the kit's (never wider than the output)
-#define OSK_TOUCH 48      // a key's touch target, logical: the rows are never shorter
-#define OSK_GAP UI_KEY_GAP // between keys, logical (the classes "keys" and "keyrow" say it for the view)
+#define OSK_WIDTH_PERCENT 88 // landscape share of the output's width; portrait fills the output
+#define OSK_WIDTH_MOST 1120  // logical pixels: widest the keyboard spans on large/ultrawide displays
+#define OSK_TOUCH 42         // a key's touch target, logical: the rows are never shorter
+#define OSK_GAP UI_KEY_GAP   // between keys, logical (the classes "keys" and "keyrow" say it for the view)
 #define OSK_ROWS 4
-#define OSK_COLS 12       // the most keys a row has (spacers count)
+#define OSK_COLS 12          // the most keys a row has (spacers count)
 #define OSK_PAGES 3
-// The keyboard's height is a share of the output's height, in device pixels: 40 percent when the output is wider than it is (landscape),
-// 50 percent when it is taller (portrait), and never more than half the output. The rows are at least the touch target, when that fits.
-#define OSK_HEIGHT_LANDSCAPE 40
-#define OSK_HEIGHT_PORTRAIT 50
+// The keyboard's height is a compact share of the output's height, in device pixels: 26 percent landscape (capped at OSK_HEIGHT_MOST
+// logical pixels so large displays stay sleek), 34 percent portrait, never over half, and rows at least the touch target when that fits.
+#define OSK_HEIGHT_LANDSCAPE 26
+#define OSK_HEIGHT_PORTRAIT 34
+#define OSK_HEIGHT_MOST 300 // logical pixels
 #define OSK_HEIGHT_LEAST (2 * UI_PAD + OSK_ROWS * OSK_TOUCH + (OSK_ROWS - 1) * OSK_GAP) // logical
 #define OSK_HOLD_NS 500000000ull   // a held key repeats after this
 #define OSK_REPEAT_NS 60000000ull  // and then every this
@@ -296,7 +298,8 @@ static void osk_layout(void)
                 c->w = box.w * 100 / ui->scale, c->h = box.h * 100 / ui->scale;
                 if (key->kind == OSK_CHAR)
                         osk.words[index][0] = (char)osk_character(key), osk.words[index][1] = 0;
-                c->label = key->kind == OSK_CHAR ? osk.words[index] : key->word;
+                // Backspace draws a vector icon (osk_draw) instead of a text label; trace still writes key->word ("Back").
+                c->label = key->kind == OSK_CHAR ? osk.words[index] : key->kind == OSK_BACK ? "" : key->word;
         }
 }
 
@@ -313,7 +316,25 @@ static void osk_draw(unsigned int address_to pixels)
         ui_begin(ui, pixels, osk.own.table->stride, osk.width, osk.height);
         for (int k = 0; k < OSK_ROWS * OSK_COLS; k++)
                 if (osk.keys[k].kind)
-                        ui_control_draw(ui, &osk.keys[k]);
+                {
+                        const struct osk_key address_to key = &osk_page_keys[osk.page][k / OSK_COLS][k % OSK_COLS];
+                        struct ui_control address_to c = &osk.keys[k];
+
+                        ui_control_draw(ui, c);
+                        if (key->kind == OSK_BACK)
+                        {
+                                b64 sx, sy;
+                                b32 tx, ty;
+                                int side = ui_px(ui, 24), cx, cy;
+
+                                if (side > ui_dev(ui, c->h) * 2 / 3)
+                                        side = ui_dev(ui, c->h) * 2 / 3;
+                                ui_kit_press_transform(ui, c, 1, &sx, &sy, &tx, &ty);
+                                cx = (ui_q8(ui, c->x) + ui_q8(ui, c->w) / 2 + tx) / 256;
+                                cy = (ui_q8(ui, c->y) + ui_q8(ui, c->h) / 2 + ty) / 256;
+                                ui_icon(ui, UI_ICON_BACKSPACE, cx - side / 2, cy - side / 2, side, 0, ui_kit_colour(&c->ink));
+                        }
+                }
         // The accents of a long press are drawn over the keys, after them.
         if (osk.alt_key >= 0)
                 for (int at = 0; at < osk.alt_count; at++)
@@ -485,9 +506,10 @@ static int osk_alt_hit(int x, int y)
 }
 
 // Trace helpers shared by osk_alts_trace and osk_trace: formats "<prefix vals...> x y w h label\n" and writes to path.
-static int osk_trace_line(char address_to into, int room, const int address_to prefix, int nprefix, const struct ui_control address_to c)
+static int osk_trace_line(char address_to into, int room, const int address_to prefix, int nprefix, const struct ui_control address_to c, const char address_to name)
 {
         int values[7], count = nprefix + 4, length = 0;
+        const char address_to label = name && name[0] ? name : c->label;
 
         if (room < OSK_TRACE_LINE)
                 return 0;
@@ -506,8 +528,8 @@ static int osk_trace_line(char address_to into, int room, const int address_to p
                 length += (int)positive_into_string((string_address)(into + length), (positive)n);
                 into[length++] = ' ';
         }
-        for (int w = 0; c->label[w] && w < OSK_TRACE_LINE - 40; w++)
-                into[length++] = c->label[w];
+        for (int w = 0; label[w] && w < OSK_TRACE_LINE - 40; w++)
+                into[length++] = label[w];
         into[length++] = '\n';
         return length;
 }
@@ -535,7 +557,7 @@ static void osk_alts_trace(void)
         string_copy_bounded((string_address)path, (string_address)osk.trace, sizeof(path) - 4);
         string_append_bounded((string_address)path, (string_address) ".alt", sizeof(path));
         for (int k = 0; k < osk.alt_count; k++)
-                length += osk_trace_line(text + length, (int)sizeof(text) - length, &k, 1, &osk.alts[k]);
+                length += osk_trace_line(text + length, (int)sizeof(text) - length, &k, 1, &osk.alts[k], null);
         osk_trace_save(path, text, length);
 }
 
@@ -713,12 +735,28 @@ static void osk_dock(b32 moved);
 // pixels), so a height too short for them is the least that gives them; a screen too short for that is still never over half.
 static int osk_height_of(const struct ui address_to ui, int screen_width, int screen_height)
 {
-        int percent = screen_width > screen_height ? OSK_HEIGHT_LANDSCAPE : OSK_HEIGHT_PORTRAIT;
+        b32 landscape = screen_width > screen_height;
+        int percent = landscape ? OSK_HEIGHT_LANDSCAPE : OSK_HEIGHT_PORTRAIT;
         int height = screen_height * percent / 100, most = screen_height / 2, least = ui_px(ui, OSK_HEIGHT_LEAST);
+        int cap = ui_px(ui, OSK_HEIGHT_MOST);
 
+        if (landscape && height > cap)
+                height = cap;
         if (height < least && least <= most)
                 height = least;
         return height > most ? most : height;
+}
+
+static int osk_width_of(const struct ui address_to ui, int screen_width, int screen_height)
+{
+        int width = screen_width > screen_height ? screen_width * OSK_WIDTH_PERCENT / 100 : screen_width;
+        int cap = ui_px(ui, OSK_WIDTH_MOST);
+
+        if (width > cap)
+                width = cap;
+        if (width > screen_width)
+                width = screen_width;
+        return width;
 }
 
 // The output the keyboard is on has another size than the one it was sized for (osk_metrics).
@@ -730,18 +768,16 @@ static b32 osk_screen_changed(void)
         return width != osk.screen_width || height != osk.screen_height;
 }
 
-// The keyboard's size and place for the scale it is drawn at and the output it is on: its pixels (the width never wider than the output),
-// its height (osk_height_of), the scratch rows its text is written through (ui_scratch_fit), its keys laid out again, and its place asked
-// of the compositor (osk_dock), which moves it when it is up.
+// The keyboard's size and place for the scale it is drawn at and the output it is on: its pixels (wide across the output in landscape,
+// full-width in portrait), its compact height (osk_height_of), the scratch rows its text is written through (ui_scratch_fit), its keys
+// laid out again, and its place asked of the compositor (osk_dock), which moves it when it is up.
 static void osk_metrics(void)
 {
         b32 up = osk.shown >= 0;
         int x, y;
 
         windows_output(osk.own.table, 0, &x, &y, &osk.screen_width, &osk.screen_height);
-        osk.width = ui_px(&osk.ui, OSK_WIDTH);
-        if (osk.width > osk.screen_width)
-                osk.width = osk.screen_width;
+        osk.width = osk_width_of(&osk.ui, osk.screen_width, osk.screen_height);
         osk.height = osk_height_of(&osk.ui, osk.screen_width, osk.screen_height);
         ui_scratch_fit(&osk.ui, (unsigned int)osk.width);
         osk_alts_close();
@@ -859,11 +895,13 @@ static void osk_trace(void)
                         for (int row = 0; row < OSK_ROWS; row++)
                                 for (int k = 0; k < OSK_COLS; k++)
                                 {
+                                        const struct osk_key address_to key = &osk_page_keys[page][row][k];
                                         const struct ui_control address_to c = &osk.keys[row * OSK_COLS + k];
                                         int prefix[3] = {number, row, k};
 
                                         if (c->kind)
-                                                length += osk_trace_line(osk.trace_text + length, OSK_TRACE_MOST - length, prefix, 3, c);
+                                                length += osk_trace_line(osk.trace_text + length, OSK_TRACE_MOST - length, prefix, 3, c,
+                                                                         key->kind == OSK_BACK ? key->word : null);
                                 }
                 }
         }

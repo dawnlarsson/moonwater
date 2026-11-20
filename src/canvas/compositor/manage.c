@@ -2480,8 +2480,8 @@ refused:
         return -2;
 }
 
-// The program the on-screen keyboard is, by its name (/proc/PID/comm, what ui_is_program reads).
-#define COMPOSITOR_OSK_NAME "osk\n"
+// The program the on-screen keyboard is, by its name (/proc/PID/comm, with trailing newline stripped by windows_read_line).
+#define COMPOSITOR_OSK_NAME "osk"
 
 // Whether a /proc path names the same file as the compositor's own executable's: the device and the inode, which the link of
 // /proc/PID/exe gives for the file it runs, whoever asks. The statx follows the link (no AT_SYMLINK_NOFOLLOW).
@@ -2519,7 +2519,7 @@ static b32 compositor_osk_is(unsigned int pid)
         memory_zero(comm, sizeof(comm));
         if (windows_read_line(path, comm, sizeof(comm), FILE_READ | O_CLOEXEC) < 0)
                 return 0;
-        return !memory_compare(comm, COMPOSITOR_OSK_NAME, sizeof(COMPOSITOR_OSK_NAME) - 1);
+        return string_equals((string_address)comm, (string_address)COMPOSITOR_OSK_NAME);
 }
 
 /*

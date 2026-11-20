@@ -23201,7 +23201,8 @@ enum
         UI_ICON_GLOBE,    // a globe, its meridian and parallels: the web, a browser (the installer's Chrome card)
         UI_ICON_GAMEPAD,  // a pad, its cross and two buttons: games (the installer's Steam card)
         UI_ICON_KEY,      // a key, its bow and its bit: a login from afar (the installer's SSH card)
-        UI_ICON_LINK,     // a page with an arrow out of it: a link to something elsewhere (a file browser's)
+        UI_ICON_LINK,      // a page with an arrow out of it: a link to something elsewhere (a file browser's)
+        UI_ICON_BACKSPACE, // a pointed keycap with an X inside: delete backward (the on-screen keyboard's Backspace key)
         UI_ICON_COUNT
 };
 
@@ -23230,6 +23231,8 @@ static const struct ui_icon_part ui_icon_parts[UI_ICON_COUNT][UI_ICON_PARTS] = {
         [UI_ICON_KEY] = {{UI_ICON_RING, 4, 14, 24, 34, 10}, {UI_ICON_BOX, 11, 21, 17, 27, 3}, {UI_ICON_LINE, 24, 24, 44, 24, 0}, {UI_ICON_LINE, 37, 24, 37, 32, 0},
                          {UI_ICON_LINE, 43, 24, 43, 30, 0}},
         [UI_ICON_LINK] = {{UI_ICON_RING, 10, 6, 38, 42, 4}, {UI_ICON_LINE, 17, 33, 31, 19, 0}, {UI_ICON_LINE, 22, 19, 31, 19, 0}, {UI_ICON_LINE, 31, 19, 31, 28, 0}},
+        [UI_ICON_BACKSPACE] = {{UI_ICON_LINE, 6, 24, 16, 12, 0}, {UI_ICON_LINE, 6, 24, 16, 36, 0}, {UI_ICON_LINE, 16, 12, 42, 12, 0}, {UI_ICON_LINE, 42, 12, 42, 36, 0},
+                               {UI_ICON_LINE, 16, 36, 42, 36, 0}, {UI_ICON_LINE, 23, 19, 33, 29, 0}, {UI_ICON_LINE, 33, 19, 23, 29, 0}},
 };
 
 // A place of a symbol's grid (halves of a 24th) on the picture, in 256ths of a device pixel: a whole pixel, the nearest.
