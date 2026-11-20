@@ -1056,6 +1056,48 @@ static unsigned int osc_number(unsigned int address_to at)
         return value;
 }
 
+// Emit prefix, optional marker byte, ';'-separated decimal numbers, and suffix.
+static fn emit_csi_nums(const char *prefix, p8 marker, const unsigned int *nums,
+                        positive count, const char *suffix)
+{
+        if (prefix)
+                emit_bytes((address_any)prefix, string_length((string_address)prefix));
+        if (marker)
+                emit(marker);
+        for (positive i = 0; i < count; i++)
+        {
+                if (i)
+                        emit(';');
+                positive_to_string(emit_bytes, nums[i]);
+        }
+        if (suffix)
+                emit_bytes((address_any)suffix, string_length((string_address)suffix));
+}
+
+// The SGR numbers that only set or clear style bits: single source of truth for
+// both sgr() and DECRQSS sgr_report() (in report order, canonical code first).
+static const struct
+{
+        unsigned char p;
+        unsigned short set, clear;
+} sgr_styles[] = {
+    {1, WINDOW_CELL_BOLD, 0},
+    {2, WINDOW_CELL_DIM, 0},
+    {3, WINDOW_CELL_ITALIC, 0},
+    {4, WINDOW_CELL_UNDERLINE, 0},
+    {5, WINDOW_CELL_BLINK, 0},
+    {6, WINDOW_CELL_BLINK, 0},
+    {8, WINDOW_CELL_HIDDEN, 0},
+    {9, WINDOW_CELL_STRIKE, 0},
+    {21, WINDOW_CELL_UNDERLINE, 0},
+    {22, 0, WINDOW_CELL_BOLD | WINDOW_CELL_DIM},
+    {23, 0, WINDOW_CELL_ITALIC},
+    {24, 0, WINDOW_CELL_UNDERLINE},
+    {25, 0, WINDOW_CELL_BLINK},
+    {28, 0, WINDOW_CELL_HIDDEN},
+    {29, 0, WINDOW_CELL_STRIKE},
+};
+
 /*
         The current rendition as SGR parameters: a 0, then what is on. It is
         the answer to DECRQSS for "m", so a program that asks how it is drawn
@@ -1063,33 +1105,33 @@ static unsigned int osc_number(unsigned int address_to at)
 */
 static fn sgr_colour_report(unsigned int colour, unsigned int base, unsigned int extended)
 {
-        emit(';');
-        if (colour < 8)
-                positive_to_string(emit_bytes, base + colour);
-        else if (colour < 16)
-                positive_to_string(emit_bytes, base + 60 + colour - 8);
+        if (colour < 16)
+        {
+                unsigned int code = colour < 8 ? base + colour : base + 60 + colour - 8;
+
+                emit_csi_nums(";", 0, address_of code, 1, null);
+        }
         else
         {
-                positive_to_string(emit_bytes, extended);
-                emit_literal(";5;");
-                positive_to_string(emit_bytes, colour);
+                unsigned int nums[3] = {extended, 5, colour};
+
+                emit_csi_nums(";", 0, nums, 3, null);
         }
 }
 
 static fn sgr_report(void)
 {
-        static const struct { unsigned short flag; unsigned char code; } marks[] = {
-            {WINDOW_CELL_BOLD, 1}, {WINDOW_CELL_DIM, 2}, {WINDOW_CELL_ITALIC, 3},
-            {WINDOW_CELL_UNDERLINE, 4}, {WINDOW_CELL_BLINK, 5}, {WINDOW_CELL_HIDDEN, 8},
-            {WINDOW_CELL_STRIKE, 9},
-        };
+        unsigned short reported = 0;
 
         emit('0');
-        for (positive i = 0; i < array_count(marks); i++)
-                if (style & marks[i].flag)
+        for (positive i = 0; i < array_count(sgr_styles); i++)
+                if (sgr_styles[i].set && (style & sgr_styles[i].set) &&
+                    !(reported & sgr_styles[i].set))
                 {
-                        emit(';');
-                        positive_to_string(emit_bytes, marks[i].code);
+                        unsigned int code = sgr_styles[i].p;
+
+                        reported |= sgr_styles[i].set;
+                        emit_csi_nums(";", 0, address_of code, 1, null);
                 }
         if (reverse)
                 emit_literal(";7");
@@ -1127,11 +1169,9 @@ static fn dcs_answer(void)
                 }
                 else if (osc_length == 3 && osc_bytes[2] == 'r')
                 {
-                        emit_literal("\x1bP1$r");
-                        positive_to_string(emit_bytes, region_top + 1);
-                        emit(';');
-                        positive_to_string(emit_bytes, region_bottom);
-                        emit_literal("r\x1b\\");
+                        unsigned int nums[2] = {region_top + 1, region_bottom};
+
+                        emit_csi_nums("\x1bP1$r", 0, nums, 2, "r\x1b\\");
                 }
                 else
                         emit_literal("\x1bP0$r\x1b\\");
@@ -1218,14 +1258,9 @@ static fn osc_finish(b32 bell)
                 if (i < osc_length && osc_bytes[i] == '?' && (command != 4 || index < 256) &&
                     answering())
                 {
-                        emit_literal("\x1b]");
-                        positive_to_string(emit_bytes, command);
-                        emit(';');
-                        if (command == 4)
-                        {
-                                positive_to_string(emit_bytes, index);
-                                emit(';');
-                        }
+                        unsigned int nums[2] = {command, index};
+
+                        emit_csi_nums("\x1b]", 0, nums, command == 4 ? 2 : 1, ";");
                         osc_colour(term_palette ? term_palette(index)
                                                 : window_cell_colour(index == TERM_INDEX_PAPER ? 0 : index == TERM_INDEX_INK ? 7 : index),
                                    bell);
@@ -1455,28 +1490,26 @@ static unsigned int sgr_extended(unsigned int at, unsigned int joined,
         return took;
 }
 
-// The SGR numbers that only set or clear style bits: what the number turns
-// on, and what it turns off.
-static const struct
+// Apply a foreground (base 30) or background (base 40) SGR colour parameter.
+static unsigned int sgr_colour_set(unsigned int p, unsigned int i, unsigned int took,
+                                   unsigned int base, unsigned char reset_colour,
+                                   unsigned short flag, unsigned char address_to target)
 {
-        unsigned char p;
-        unsigned short set, clear;
-} sgr_styles[] = {
-    {1, WINDOW_CELL_BOLD, 0},
-    {2, WINDOW_CELL_DIM, 0},
-    {3, WINDOW_CELL_ITALIC, 0},
-    {5, WINDOW_CELL_BLINK, 0},
-    {6, WINDOW_CELL_BLINK, 0},
-    {8, WINDOW_CELL_HIDDEN, 0},
-    {9, WINDOW_CELL_STRIKE, 0},
-    {21, WINDOW_CELL_UNDERLINE, 0},
-    {22, 0, WINDOW_CELL_BOLD | WINDOW_CELL_DIM},
-    {23, 0, WINDOW_CELL_ITALIC},
-    {24, 0, WINDOW_CELL_UNDERLINE},
-    {25, 0, WINDOW_CELL_BLINK},
-    {28, 0, WINDOW_CELL_HIDDEN},
-    {29, 0, WINDOW_CELL_STRIKE},
-};
+        if (p >= base && p <= base + 7)
+                address_to target = (unsigned char)(p - base);
+        else if (p == base + 8)
+                took = sgr_extended(i, took, target);
+        else if (p == base + 9)
+        {
+                address_to target = reset_colour;
+                style = (unsigned short)(style & ~flag);
+                return took;
+        }
+        else
+                address_to target = (unsigned char)(8 + (p - (base + 60)));
+        style = (unsigned short)(style | flag);
+        return took;
+}
 
 static fn sgr()
 {
@@ -1500,8 +1533,6 @@ static fn sgr()
                 // ECMA-48's double one: all of them the one line here.
                 else if (p == 4 && took && !terminal_csi.value[i + 1])
                         style &= (unsigned short)~WINDOW_CELL_UNDERLINE;
-                else if (p == 4)
-                        style |= WINDOW_CELL_UNDERLINE;
                 else if (p == 7 || p == 27)
                         reverse = p == 7;
                 else if (p < 30)
@@ -1513,50 +1544,14 @@ static fn sgr()
                                                                  ~sgr_styles[k].clear);
                         }
                 }
-                else if (p >= 30 && p <= 37)
-                {
-                        ink = (unsigned char)(p - 30);
-                        style = (unsigned short)(style | WINDOW_CELL_INK_SET);
-                }
-                else if (p == 38)
-                {
-                        took = sgr_extended(i, took, address_of ink);
-                        style = (unsigned short)(style | WINDOW_CELL_INK_SET);
-                }
-                else if (p == 39)
-                {
-                        ink = 7;
-                        style = (unsigned short)(style & ~WINDOW_CELL_INK_SET);
-                }
-                else if (p >= 40 && p <= 47)
-                {
-                        paper = (unsigned char)(p - 40);
-                        style = (unsigned short)(style | WINDOW_CELL_PAPER_SET);
-                }
-                else if (p == 48)
-                {
-                        took = sgr_extended(i, took, address_of paper);
-                        style = (unsigned short)(style | WINDOW_CELL_PAPER_SET);
-                }
-                else if (p == 49)
-                {
-                        paper = 0;
-                        style = (unsigned short)(style & ~WINDOW_CELL_PAPER_SET);
-                }
+                else if ((p >= 30 && p <= 39) || (p >= 90 && p <= 97))
+                        took = sgr_colour_set(p, i, took, 30, 7, WINDOW_CELL_INK_SET, address_of ink);
+                else if ((p >= 40 && p <= 49) || (p >= 100 && p <= 107))
+                        took = sgr_colour_set(p, i, took, 40, 0, WINDOW_CELL_PAPER_SET, address_of paper);
                 // The underline's own colour, spelled the way 38 is, and with
                 // nowhere to go.
                 else if (p == 58)
                         took = sgr_extended(i, took, address_of unused);
-                else if (p >= 90 && p <= 97)
-                {
-                        ink = (unsigned char)(8 + (p - 90));
-                        style = (unsigned short)(style | WINDOW_CELL_INK_SET);
-                }
-                else if (p >= 100 && p <= 107)
-                {
-                        paper = (unsigned char)(8 + (p - 100));
-                        style = (unsigned short)(style | WINDOW_CELL_PAPER_SET);
-                }
 
                 i += took;
         }
@@ -2112,19 +2107,11 @@ static fn csi_final(unsigned int final)
                         break;
                 if (terminal_csi.count && terminal_csi.value[0] == 6)
                 {
-                        emit_literal("\x1b[");
-                        if (terminal_csi.marker)
-                                emit('?');
-                        positive_to_string(emit_bytes, (origin_mode && row >= region_top ? row - region_top : row) + 1);
-                        emit(';');
-                        positive_to_string(emit_bytes,
-                                           column < COLUMNS ? column + 1 : COLUMNS);
-                        if (terminal_csi.marker)
-                        {
-                                emit(';');
-                                emit('1');
-                        }
-                        emit('R');
+                        unsigned int nums[3] = {(origin_mode && row >= region_top ? row - region_top : row) + 1,
+                                                column < COLUMNS ? column + 1 : COLUMNS, 1};
+
+                        emit_csi_nums("\x1b[", terminal_csi.marker ? '?' : 0, nums,
+                                      terminal_csi.marker ? 3 : 2, "R");
                 }
                 else if (terminal_csi.count && terminal_csi.value[0] == 5 &&
                          !terminal_csi.marker)
@@ -2165,35 +2152,23 @@ static fn csi_final(unsigned int final)
                 if (answering())
                 {
                         unsigned int p = terminal_csi.count ? terminal_csi.value[0] : 0;
+                        unsigned int nums[2] = {p, mode(p, false, false)};
 
-                        emit_literal("\x1b[");
-                        if (terminal_csi.marker)
-                                emit(terminal_csi.marker);
-                        positive_to_string(emit_bytes, p);
-                        emit(';');
-                        emit('0' + mode(p, false, false));
-                        emit_literal("$y");
+                        emit_csi_nums("\x1b[", terminal_csi.marker, nums, 2, "$y");
                 }
                 break;
         case CSI_WINOPS:
         {
                 unsigned int op = terminal_csi.value[0];
-                unsigned int high = op == 14 ? ROWS * term_cell_h
-                                  : op == 16 ? term_cell_h : ROWS;
-                unsigned int wide = op == 14 ? COLUMNS * term_cell_w
-                                  : op == 16 ? term_cell_w : COLUMNS;
+                unsigned int nums[3] = {op - 10,
+                                        op == 14 ? ROWS * term_cell_h : op == 16 ? term_cell_h : ROWS,
+                                        op == 14 ? COLUMNS * term_cell_w : op == 16 ? term_cell_w : COLUMNS};
 
                 if ((op != 14 && op != 16 && op != 18 && op != 19) ||
                     !answering())
                         break;
 
-                emit_literal("\x1b[");
-                emit('0' + op - 10);
-                emit(';');
-                positive_to_string(emit_bytes, high);
-                emit(';');
-                positive_to_string(emit_bytes, wide);
-                emit('t');
+                emit_csi_nums("\x1b[", 0, nums, 3, "t");
                 break;
         }
         case CSI_DECSTBM:
@@ -3985,20 +3960,16 @@ static fn SPARE term_key_modified(unsigned int character, unsigned int code,
                     sequence[length - 1] == '~')
                 {
                         emit_bytes((address_any)sequence, length - 1);
-                        emit(';');
-                        emit('0' + value);
-                        emit('~');
+                        emit_csi_nums(";", 0, address_of value, 1, "~");
                         return;
                 }
 
                 if (length == 3 && (sequence[1] == '[' || sequence[1] == 'O'))
                 {
-                        emit(27);
-                        emit('[');
-                        emit('1');
-                        emit(';');
-                        emit('0' + value);
-                        emit(sequence[2]);
+                        unsigned int nums[2] = {1, value};
+                        char tail[2] = {(char)sequence[2], 0};
+
+                        emit_csi_nums("\x1b[", 0, nums, 2, tail);
                         return;
                 }
         }
@@ -4149,13 +4120,9 @@ static fn term_pointer(unsigned int col, unsigned int row,
 
         if (mouse_sgr)
         {
-                emit_literal("\x1b[<");
-                positive_to_string(emit_bytes, code);
-                emit(';');
-                positive_to_string(emit_bytes, col);
-                emit(';');
-                positive_to_string(emit_bytes, row);
-                emit((down || move) ? 'M' : 'm');
+                unsigned int nums[3] = {code, col, row};
+
+                emit_csi_nums("\x1b[<", 0, nums, 3, (down || move) ? "M" : "m");
                 return;
         }
 

@@ -38,29 +38,6 @@
 
 // A record is at most what the kernel's buffer reads out for one message, escapes and all; a read of less is EINVAL.
 #define KLOG_RECORD 8192
-#define KLOG_KEY_HOME 102
-#define KLOG_KEY_UP 103
-#define KLOG_KEY_PAGE_UP 104
-#define KLOG_KEY_END 107
-#define KLOG_KEY_DOWN 108
-#define KLOG_KEY_PAGE_DOWN 109
-
-// A number in decimal, padded on the left with spaces or zeros to at least width digits.
-static positive klog_number(p8 address_to into, positive value, positive width, p8 pad)
-{
-        p8 digits[20];
-        positive count = 0, at = 0;
-
-        do
-                digits[count++] = (p8)('0' + value % 10);
-        while ((value /= 10) && count < sizeof(digits));
-
-        for (; width > count; width--)
-                into[at++] = pad;
-        while (count)
-                into[at++] = digits[--count];
-        return at;
-}
 
 /*
         One record, "priority,sequence,microseconds,flags;message\n", with any continuation lines after it, as the
@@ -87,9 +64,9 @@ static positive klog_line(const p8 address_to record, positive length, p8 addres
 
         seconds = stamp / 1000000;
         line[made++] = '[';
-        made += klog_number(line + made, seconds, 5, ' ');
+        made += positive_into_padded(line + made, seconds, 5, ' ');
         line[made++] = '.';
-        made += klog_number(line + made, stamp % 1000000, 6, '0');
+        made += positive_into_padded(line + made, stamp % 1000000, 6, '0');
         line[made++] = ']';
         line[made++] = ' ';
 
@@ -173,22 +150,22 @@ static b32 klog_receive(const struct window_event address_to event, b32 address_
 
         switch (event->a)
         {
-        case KLOG_KEY_UP:
+        case UI_KEY_UP:
                 lines = 1;
                 break;
-        case KLOG_KEY_DOWN:
+        case UI_KEY_DOWN:
                 lines = -1;
                 break;
-        case KLOG_KEY_PAGE_UP:
+        case UI_KEY_PAGE_UP:
                 lines = (int)ROWS - 1;
                 break;
-        case KLOG_KEY_PAGE_DOWN:
+        case UI_KEY_PAGE_DOWN:
                 lines = 1 - (int)ROWS;
                 break;
-        case KLOG_KEY_HOME:
+        case UI_KEY_HOME:
                 lines = 1 << 30;
                 break;
-        case KLOG_KEY_END:
+        case UI_KEY_END:
                 if (terminal_view_live())
                         address_to dirty = true;
                 return true;

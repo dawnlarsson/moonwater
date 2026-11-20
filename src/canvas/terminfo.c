@@ -299,37 +299,39 @@ static const unsigned char terminal_terminfo_blob[] = {
         rename replaces a link planted at the name rather than following
         it, so what the link points at is never written.
 */
+#ifdef STANDARD_MODERN_C
+static b32 file_write_atomic_at(b32 dir, string_address path, const void *bytes, positive length, positive mode);
+#endif
+
 static fn terminal_terminfo_write(bipolar directory, string_address name)
 {
         p8 held[sizeof(terminal_terminfo_blob) + 1];
-        p8 beside[64];
         bipolar got = file_slurp_once_at(directory, name, held, sizeof(held));
-        bipolar handle;
-        positive written;
 
         if (got == (bipolar)sizeof(terminal_terminfo_blob) &&
             !memory_compare(held, terminal_terminfo_blob, sizeof(terminal_terminfo_blob)))
                 return;
 
-        //      The longest name here, a dot word and twenty digits fit.
-        string_copy_bounded((string_address)beside, name, sizeof(beside) - 26);
-        string_append_bounded((string_address)beside, ".new.", sizeof(beside));
-        written = string_length((string_address)beside);
-        written += positive_into(beside + written,
-                                 (positive)system_call(syscall(getpid)));
-        beside[written] = 0;
+#ifdef STANDARD_MODERN_C
+        (void)file_write_atomic_at((b32)directory, name, terminal_terminfo_blob,
+                                   sizeof(terminal_terminfo_blob), 0644);
+#else
+        p8 beside[64];
+        bipolar handle;
+        positive written;
 
+        string_copy_bounded((string_address)beside, name, sizeof(beside) - 5);
+        string_append_bounded((string_address)beside, ".new", sizeof(beside));
         handle = system_open_output_at(directory, (string_address)beside, true, 0644);
         if (handle < 0)
                 return;
-
         written = system_write_all((positive)handle, terminal_terminfo_blob,
                                    sizeof(terminal_terminfo_blob));
         system_close(handle);
-
         if (written != sizeof(terminal_terminfo_blob) ||
             system_rename_at(directory, (string_address)beside, directory, name, 0) < 0)
                 system_remove_at(directory, (string_address)beside, 0);
+#endif
 }
 
 /* The directory below this one, made if it is not there and opened as
