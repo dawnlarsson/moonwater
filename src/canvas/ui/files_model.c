@@ -1,42 +1,10 @@
 /*
-        The file browser's model: what a window that shows a folder knows, and nothing of how it is drawn. A folder's
-        listing read in bounded steps, its entries (name, kind, size, time), their order, a selection, the path and the
-        way back and forward, and what went wrong as a state a view can say. No kit type is named here and nothing is
-        drawn: the view (files.c) reads this through the functions below, and a check runs it with no window at all.
-
-        The disk is not trusted, and neither is the time between two looks at it:
-
-            A name is bytes. It is kept as the kernel gave it and is never read as text here; a view that shows one
-            writes it through the kit's rule for words from outside (ui_label_foreign).
-
-            Nothing is followed. An entry is looked at with AT_SYMLINK_NOFOLLOW, so a link is a link (FILES_KIND_LINK)
-            with its own size and time and never what it points at, and a folder found in a listing is opened by
-            file_walk_open_found, the tree's own open for an entry a walk found: it looks without following, opens
-            with O_NOFOLLOW and holds the two to one inode, so a name swapped for a link between the listing and the
-            press is refused and not entered. Only a path a person named (files_model_go) is opened as named.
-
-            A listing is old the moment it is read. files_model_check looks at an entry again, through the folder's
-            own descriptor and without following, and says whether it is the file that was listed (the same inode, the
-            same device, the same kind), another one under its name, or gone; files_model_enter acts only on the first.
-            files_model_stale says whether the folder itself changed, or is gone, since its listing began.
-
-        Reading is in steps (files_model_step): a step takes at most the entries it is given and returns, so a folder of
-        any size is read between a window's events and never in one of them. A listing holds FILES_MOST entries and
-        FILES_NAMES bytes of their names; a folder with more is cut there and says so (cut), and is not an error. A
-        folder read again (files_model_reload) is read beside the listing shown and takes its place when it is whole,
-        so what is on the screen is never half of one.
-
-        Kept listings. A folder that was read whole and is left is not forgotten at once: its listing is kept (its entries, their
-        order, what was chosen, where the keys were and where a view had its rows), and going to that folder again shows it as it
-        was left with no reading at all; the view then asks files_model_stale, as it does of any folder shown, and only one that
-        changed is read again, beside what is shown. At most FILES_KEPT listings are kept and FILES_KEPT_BYTES bytes of them
-        together; when another would pass either the one left longest ago is let go, a listing larger than the bytes alone is
-        not kept, and files_keep_trim lets go of every one whose folder is not on a trail, so what is kept is the trail's. A kept
-        listing is the folder's only while the path opens to the same device and inode; anything else under its path is read.
-        m->reads counts the readings begun, which is how a check knows that moving along a trail began none.
-
-        The walk is the tree's (file_walk_open, file_walk_open_found, file_walk_next, file_walk_close: src/sh/file.c) and
-        the look is file_look_code; no call to the kernel is made here that the tree does not already make there.
+        The file browser's model (src/canvas/ui/files_model.c): bounded-step folder listing, sorting/filtering,
+        selection, history, kept-listing cache, trail, recursive delete/copy/move jobs, sidebar folder/drive tree,
+        trash bin, and git index/ignore marks. Pure model with no UI kit dependency.
+        Disk invariants: names are raw kernel bytes; entries are stat'd with AT_SYMLINK_NOFOLLOW and opened with
+        O_NOFOLLOW held to device+inode (file_walk_open_found, file_open_same, file_remove_same); only user-named
+        paths follow symlinks.
 */
 #ifndef MOONWATER_FILES_MODEL
 #define MOONWATER_FILES_MODEL
@@ -197,9 +165,41 @@ static address_any files_anon_map(positive bytes, bipolar address_to error)
         return (address_any)mapped;
 }
 
+static inline fn files_unmap(address_any ptr, positive bytes)
+{
+        if (ptr)
+                system_call_2(syscall(munmap), (positive)ptr, bytes);
+}
+
+static inline fn files_close(bipolar address_to fd)
+{
+        if (*fd >= 0)
+                system_close(*fd), *fd = -1;
+}
+
+static inline bipolar files_look_fd(bipolar fd, file_facts address_to facts)
+{
+        return file_look_code(fd, (string_address) "", AT_EMPTY_PATH, facts);
+}
+
+static inline bipolar files_look_at(bipolar dir, const p8 address_to name, file_facts address_to facts)
+{
+        return file_look_code(dir, (string_address)name, AT_SYMLINK_NOFOLLOW, facts);
+}
+
+static inline bipolar files_open_dir(bipolar dir, const p8 address_to path, p32 extra)
+{
+        return system_open_at(dir, (string_address)path, FILE_READ | O_DIRECTORY | O_CLOEXEC | extra);
+}
+
 static inline b32 files_same_file(p64 inode, p32 major, p32 minor, const file_facts address_to facts)
 {
         return inode == facts->inode && major == facts->device_major && minor == facts->device_minor;
+}
+
+static inline b32 files_same_facts(const file_facts address_to a, const file_facts address_to b)
+{
+        return files_same_file(a->inode, a->device_major, a->device_minor, b);
 }
 
 static b32 files_path_join(p8 address_to into, positive room, const p8 address_to folder, const p8 address_to name)
@@ -216,23 +216,20 @@ static b32 files_path_join(p8 address_to into, positive room, const p8 address_t
         return true;
 }
 
-static positive files_model_bytes(void)
-{
-        return 2 * ((positive)FILES_MOST * sizeof(struct files_entry) + FILES_NAMES + (positive)FILES_MOST * sizeof(p32)) + FILES_MOST / 8 +
-               2 * (positive)FILES_HISTORY * FILES_PATH;
-}
+#define FILES_MODEL_BYTES                                                                                                  \
+        (2 * ((positive)FILES_MOST * sizeof(struct files_entry) + FILES_NAMES + (positive)FILES_MOST * sizeof(p32)) +      \
+         FILES_MOST / 8 + 2 * (positive)FILES_HISTORY * FILES_PATH)
 
-// The model's memory: one anonymous mapping, which the kernel gives a page at a time as a listing grows. False when there is none.
+// The model's memory: one anonymous mapping, paged in lazily by the kernel.
 static b32 files_model_open(struct files_model address_to m)
 {
-        positive size = files_model_bytes();
         p8 address_to at;
 
         memory_fill(m, 0, sizeof(*m));
         m->handle = -1, m->reader.handle = -1, m->cursor = FILES_NO, m->anchor = FILES_NO;
-        if (!(at = (p8 address_to)files_anon_map(size, null)))
+        if (!(at = (p8 address_to)files_anon_map(FILES_MODEL_BYTES, null)))
                 return false;
-        m->mapped = at, m->mapped_size = size;
+        m->mapped = at, m->mapped_size = FILES_MODEL_BYTES;
         for (int which = 0; which < 2; which++)
         {
                 struct files_listing address_to l = which ? &m->next : &m->shown;
@@ -249,16 +246,20 @@ static b32 files_model_open(struct files_model address_to m)
 
 static fn files_keep_drop(struct files_model address_to m, int which);
 
+static fn files_walk_stop(struct files_model address_to m)
+{
+        if (m->walking)
+                file_walk_close(&m->reader);
+        m->walking = false;
+}
+
 static fn files_model_close(struct files_model address_to m)
 {
         for (int k = 0; k < FILES_KEPT; k++)
                 files_keep_drop(m, k);
-        if (m->walking)
-                file_walk_close(&m->reader);
-        if (m->handle >= 0)
-                system_close(m->handle);
-        if (m->mapped)
-                system_call_2(syscall(munmap), (positive)m->mapped, m->mapped_size);
+        files_walk_stop(m);
+        files_close(&m->handle);
+        files_unmap(m->mapped, m->mapped_size);
         memory_fill(m, 0, sizeof(*m));
         m->handle = -1, m->reader.handle = -1;
 }
@@ -284,16 +285,11 @@ static inline const p8 address_to files_model_name(const struct files_model addr
 
 static p8 files_kind_of(p32 mode)
 {
-        switch (mode & MODE_FORMAT)
-        {
-        case MODE_DIRECTORY: return FILES_KIND_DIRECTORY;
-        case MODE_LINK: return FILES_KIND_LINK;
-        case MODE_FILE: return FILES_KIND_FILE;
-        }
-        return FILES_KIND_OTHER;
+        p32 fmt = mode & MODE_FORMAT;
+
+        return fmt == MODE_DIRECTORY ? FILES_KIND_DIRECTORY : fmt == MODE_LINK ? FILES_KIND_LINK : fmt == MODE_FILE ? FILES_KIND_FILE : FILES_KIND_OTHER;
 }
 
-// The kind a directory record says, for an entry the look failed on.
 static p8 files_kind_of_record(p8 type)
 {
         return type == DT_DIR ? FILES_KIND_DIRECTORY : type == DT_LNK ? FILES_KIND_LINK : type == DT_REG ? FILES_KIND_FILE : FILES_KIND_OTHER;
@@ -301,9 +297,7 @@ static p8 files_kind_of_record(p8 type)
 
 /* ---- the order ---- */
 
-// Two names in order: by their bytes with ASCII's capitals as its small letters, then by their bytes as they are, so no two names are
-// equal. Both compares are the library's own (string_compare_folded, string_compare: the hardware floor's on every machine), since
-// this is what a sort of a long listing runs most; a name ends at its end in the listing's names, as they want.
+// Case-folded ASCII order, tie-broken by raw bytes so no two distinct names compare equal.
 static int files_name_order(const p8 address_to a, const p8 address_to b)
 {
         b32 folded = string_compare_folded((string_address)a, (string_address)b);
@@ -313,15 +307,13 @@ static int files_name_order(const p8 address_to a, const p8 address_to b)
         return folded < 0 ? -1 : folded > 0;
 }
 
-// Where a name's extension starts (after its last dot, a dot first not counting), or at its end when it has none.
-static const p8 address_to files_name_extension(const p8 address_to name, positive length)
+// Index of the last extension dot (ignoring a leading dot), or length when there is none.
+static positive files_name_dot(const p8 address_to name, positive length)
 {
-        positive dot = 0;
-
-        for (positive at = 1; at < length; at++)
-                if (name[at] == '.')
-                        dot = at + 1;
-        return name + (dot ? dot : length);
+        for (positive at = length; at > 1; at--)
+                if (name[at - 1] == '.')
+                        return at - 1;
+        return length;
 }
 
 struct files_order
@@ -331,12 +323,13 @@ struct files_order
         b32 descending;
 };
 
-// Folders first whatever the order is, then the key (turned over when descending), then the name, which settles every tie.
+// Folders first, then sort key (flipped when descending), then name tie-breaker.
 static b32 files_order_compare(address_any left, address_any right, address_any context)
 {
         const struct files_order address_to o = (const struct files_order address_to)context;
         const struct files_entry address_to a = &o->listing->entry[*(const p32 address_to)left];
         const struct files_entry address_to b = &o->listing->entry[*(const p32 address_to)right];
+        const p8 address_to na = o->listing->names + a->name, address_to nb = o->listing->names + b->name;
         int key = 0;
 
         if ((a->kind == FILES_KIND_DIRECTORY) != (b->kind == FILES_KIND_DIRECTORY))
@@ -348,9 +341,13 @@ static b32 files_order_compare(address_any left, address_any right, address_any 
         else if (o->sort == FILES_SORT_KIND && a->kind != b->kind)
                 key = a->kind < b->kind ? -1 : 1;
         else if (o->sort == FILES_SORT_KIND)
-                key = files_name_order(files_name_extension(o->listing->names + a->name, a->length), files_name_extension(o->listing->names + b->name, b->length));
+        {
+                positive da = files_name_dot(na, a->length), db = files_name_dot(nb, b->length);
+
+                key = files_name_order(na + (da < a->length ? da + 1 : da), nb + (db < b->length ? db + 1 : db));
+        }
         if (!key)
-                key = files_name_order(o->listing->names + a->name, o->listing->names + b->name);
+                key = files_name_order(na, nb);
         return o->descending ? -key : key;
 }
 
@@ -365,7 +362,6 @@ static fn files_listing_sort(struct files_listing address_to l, int sort, b32 de
         l->places = l->count;
 }
 
-// The order kept to the entries whose names hold the filter's bytes (letters of either case alike); a filter of none keeps them all.
 static fn files_listing_filter(struct files_listing address_to l, const p8 address_to filter, positive length)
 {
         p32 kept = 0;
@@ -382,7 +378,14 @@ static fn files_listing_filter(struct files_listing address_to l, const p8 addre
         l->places = kept;
 }
 
-// The place of the entry with this name in the listing shown, FILES_NO for none.
+static p32 files_order_place(const struct files_listing address_to l, p32 entry)
+{
+        for (p32 place = 0; entry != FILES_NO && place < l->places; place++)
+                if (l->order[place] == entry)
+                        return place;
+        return FILES_NO;
+}
+
 static p32 files_model_find(const struct files_model address_to m, const p8 address_to name)
 {
         positive length = string_length((string_address)name);
@@ -423,7 +426,6 @@ static fn files_chosen_put(struct files_model address_to m, p32 entry, b32 on)
         m->chosen_count += on ? 1 : (p32)-1;
 }
 
-// The cursor to a place, and what is chosen by going there (FILES_CHOOSE_*). A place past the listing is none.
 static fn files_model_choose(struct files_model address_to m, p32 place, int how)
 {
         p32 entry;
@@ -431,28 +433,24 @@ static fn files_model_choose(struct files_model address_to m, p32 place, int how
         if (place >= m->shown.places)
                 return;
         entry = m->shown.order[place];
-        if (how == FILES_CHOOSE_RANGE && m->anchor != FILES_NO)
-        {
-                p32 from = FILES_NO, low, high;
-
-                for (p32 at = 0; at < m->shown.places && from == FILES_NO; at++)
-                        from = m->shown.order[at] == m->anchor ? at : FILES_NO;
-                from = from == FILES_NO ? place : from;
-                low = from < place ? from : place, high = from < place ? place : from;
-                memory_fill(m->chosen, 0, FILES_MOST / 8), m->chosen_count = 0;
-                for (p32 at = low; at <= high; at++)
-                        files_chosen_put(m, m->shown.order[at], true);
-        }
-        else if (how == FILES_CHOOSE_TOGGLE)
+        if (how == FILES_CHOOSE_TOGGLE)
         {
                 files_chosen_put(m, entry, !(m->chosen[entry >> 3] >> (entry & 7) & 1));
                 m->anchor = entry;
         }
         else
         {
+                p32 from = how == FILES_CHOOSE_RANGE && m->anchor != FILES_NO ? files_order_place(&m->shown, m->anchor) : place;
+                p32 low, high;
+
+                if (how != FILES_CHOOSE_RANGE || m->anchor == FILES_NO)
+                        m->anchor = entry;
+                if (from == FILES_NO)
+                        from = place;
+                low = from < place ? from : place, high = from < place ? place : from;
                 memory_fill(m->chosen, 0, FILES_MOST / 8), m->chosen_count = 0;
-                files_chosen_put(m, entry, true);
-                m->anchor = entry;
+                for (p32 at = low; at <= high; at++)
+                        files_chosen_put(m, m->shown.order[at], true);
         }
         m->cursor = place;
         m->revision++;
@@ -488,7 +486,6 @@ static p32 files_selected_next(const struct files_model address_to m, p32 addres
         return FILES_NO;
 }
 
-// The cursor moved by so many places and held at the listing's ends; nothing chosen changes. True when it moved.
 static b32 files_model_move(struct files_model address_to m, bipolar by)
 {
         bipolar to;
@@ -503,39 +500,25 @@ static b32 files_model_move(struct files_model address_to m, bipolar by)
         return true;
 }
 
-/*
-        The listing shown put in the order asked for and kept to the filter, the cursor on the entry it was on (none when the filter leaves
-        that one out: then the first place). What is chosen is kept: it is of entries, not places.
-*/
+// Re-sort and re-filter the shown listing, keeping cursor on its entry (or 0 if filtered out).
 static fn files_model_order(struct files_model address_to m)
 {
-        p32 on = m->cursor < m->shown.places ? m->shown.order[m->cursor] : FILES_NO;
+        p32 on = m->cursor < m->shown.places ? m->shown.order[m->cursor] : FILES_NO, place;
 
         files_listing_sort(&m->shown, m->sort, m->descending);
         files_listing_filter(&m->shown, m->filter, m->filter_length);
-        m->cursor = m->shown.places ? 0 : FILES_NO;
-        for (p32 place = 0; place < m->shown.places && on != FILES_NO; place++)
-                if (m->shown.order[place] == on)
-                {
-                        m->cursor = place;
-                        break;
-                }
+        place = files_order_place(&m->shown, on);
+        m->cursor = place != FILES_NO ? place : m->shown.places ? 0 : FILES_NO;
         m->revision++;
 }
 
-// Another order: the entries are the same, so what is chosen stays chosen and the cursor stays on its entry.
 static fn files_model_sort(struct files_model address_to m, int sort, b32 descending)
 {
         m->sort = sort, m->descending = descending;
-        if (m->state != FILES_READY)
-                return; // a listing still being read is put in order when it is whole
-        files_model_order(m);
+        if (m->state == FILES_READY)
+                files_model_order(m);
 }
 
-/*
-        Only the entries whose names hold these bytes shown (letters of either case alike: a search within the folder), or every one
-        again for none; the folder is not read again. A filter is the folder's: another folder shown has none.
-*/
 static fn files_model_filter(struct files_model address_to m, const p8 address_to text, positive length)
 {
         length = length < FILES_NAME ? length : FILES_NAME - 1;
@@ -562,6 +545,17 @@ static fn files_listing_empty(struct files_listing address_to l)
         l->count = 0, l->names_used = 0, l->cut = false, l->places = 0;
 }
 
+static fn files_model_fail(struct files_model address_to m, bipolar error, b32 clear)
+{
+        if (clear)
+        {
+                files_listing_empty(&m->shown);
+                files_model_choose_none(m);
+                m->reloading = false, m->cursor = FILES_NO;
+        }
+        m->state = files_state_of(error), m->error = m->state == FILES_FAILED ? error : 0;
+}
+
 // One record of the walk into a listing: false when the listing is full (it is cut there).
 static b32 files_listing_take(struct files_model address_to m, struct files_listing address_to l, const struct linux_dirent64 address_to record)
 {
@@ -570,21 +564,13 @@ static b32 files_listing_take(struct files_model address_to m, struct files_list
         file_facts facts;
         bipolar looked;
 
-        if (file_is_dot((string_address)record->d_name)) // itself, and the folder it is in
+        if (file_is_dot((string_address)record->d_name) || (record->d_name[0] == '.' && !m->hidden) || !length || length >= FILES_NAME)
                 return true;
-        if (record->d_name[0] == '.' && !m->hidden)
-                return true;
-        if (!length || length >= FILES_NAME)
-                return true; // no name the kernel gives, and none a path could hold
-        // Looked at as it is, never as what it points at. One that is gone already was never listed.
-        looked = file_look_code(m->reader.handle, (string_address)record->d_name, AT_SYMLINK_NOFOLLOW, &facts);
+        looked = files_look_at(m->reader.handle, (const p8 address_to)record->d_name, &facts);
         if (looked == -ERROR_NO_ENTRY)
                 return true;
         if (l->count >= FILES_MOST || l->names_used + length + 1 > FILES_NAMES)
-        {
-                l->cut = true;
-                return false;
-        }
+                return l->cut = true, false;
         entry = &l->entry[l->count];
         memory_fill(entry, 0, sizeof(*entry));
         entry->name = l->names_used, entry->length = (p16)length;
@@ -594,7 +580,6 @@ static b32 files_listing_take(struct files_model address_to m, struct files_list
         {
                 entry->kind = files_kind_of(facts.mode), entry->looked = 1, entry->mode = (p16)facts.mode;
                 entry->size = facts.size, entry->modified = facts.modified.seconds, entry->inode = facts.inode;
-                // A link's symbol is what it names, looked at through it once; a link to nothing is a link to a plain file.
                 if (entry->kind == FILES_KIND_LINK)
                 {
                         file_facts named;
@@ -606,26 +591,19 @@ static b32 files_listing_take(struct files_model address_to m, struct files_list
         }
         else
                 entry->kind = files_kind_of_record(record->d_type), entry->inode = record->d_ino;
-        l->order[l->count] = l->count; // as the disk gave them, till the listing is whole
-        l->count++;
-        l->places = l->count;
+        l->order[l->count] = l->count;
+        l->places = ++l->count;
         return true;
 }
 
-// The reading is over: the listing put in order, a folder read again put in the place of the one shown, the cursor on the name kept for it.
 static fn files_model_finish(struct files_model address_to m, bipolar error)
 {
         struct files_listing address_to l = m->reloading ? &m->next : &m->shown;
 
-        file_walk_close(&m->reader);
-        m->walking = false;
+        files_walk_stop(m);
         if (error < 0 && !l->count)
         {
-                // Nothing of it could be read: the state says why, and a folder that was shown is shown no more.
-                files_listing_empty(&m->shown);
-                files_model_choose_none(m);
-                m->state = files_state_of(error), m->error = m->state == FILES_FAILED ? error : 0;
-                m->reloading = false, m->cursor = FILES_NO;
+                files_model_fail(m, error, true);
                 m->revision++;
                 return;
         }
@@ -638,7 +616,6 @@ static fn files_model_finish(struct files_model address_to m, bipolar error)
                 m->shown = m->next, m->next = was;
                 files_listing_empty(&m->next);
                 m->reloading = false;
-                // The entries are other entries now: what was chosen of the old ones is not carried to them.
                 files_model_choose_none(m);
         }
         m->state = FILES_READY, m->error = 0, m->listed++;
@@ -649,10 +626,6 @@ static fn files_model_finish(struct files_model address_to m, bipolar error)
         m->revision++;
 }
 
-/*
-        One step of the reading: at most `most` records of the folder are taken, each looked at once, and the step is over. True
-        while there is more to read, so a caller with a window steps between its events and one with none steps till this is false.
-*/
 static b32 files_model_step(struct files_model address_to m, positive most)
 {
         struct files_listing address_to l = m->reloading ? &m->next : &m->shown;
@@ -670,17 +643,14 @@ static b32 files_model_step(struct files_model address_to m, positive most)
                 }
         }
         if (!m->reloading)
-                m->revision++; // the entries so far are shown
+                m->revision++;
         return true;
 }
 
-// The reading of the folder at m->handle begun: a walk of its own beside the descriptor the looks go through, and the folder as it is now.
 static b32 files_model_begin(struct files_model address_to m)
 {
-        if (m->walking)
-                file_walk_close(&m->reader);
-        m->walking = false;
-        if (file_look_code(m->handle, (string_address) "", AT_EMPTY_PATH, &m->folder) < 0)
+        files_walk_stop(m);
+        if (files_look_fd(m->handle, &m->folder) < 0)
                 memory_fill(&m->folder, 0, sizeof(m->folder));
         if (!file_walk_open(&m->reader, m->handle, (string_address) "."))
                 return false;
@@ -694,12 +664,10 @@ static fn files_keep_drop(struct files_model address_to m, int which)
 {
         struct files_kept address_to k = &m->kept[which];
 
-        if (k->mapped)
-                system_call_2(syscall(munmap), (positive)k->mapped, k->bytes);
+        files_unmap(k->mapped, k->bytes);
         k->mapped = null, k->bytes = 0, k->path[0] = end, k->count = 0;
 }
 
-// The place that keeps this path's listing, -1 for none.
 static int files_keep_find(const struct files_model address_to m, const p8 address_to path)
 {
         for (int k = 0; path[0] && k < FILES_KEPT; k++)
@@ -713,7 +681,6 @@ static inline positive files_keep_bytes(p32 count, p32 names_used)
         return (positive)count * (sizeof(struct files_entry) + sizeof(p32)) + names_used + (count + 7) / 8;
 }
 
-// A kept listing as a listing: its entries, order and names where they lie in its mapping. Answers where its chosen bits are, after them.
 static p8 address_to files_keep_listing(const struct files_kept address_to k, struct files_listing address_to l)
 {
         p8 address_to at = (p8 address_to)k->mapped;
@@ -725,7 +692,18 @@ static p8 address_to files_keep_listing(const struct files_kept address_to k, st
         return at;
 }
 
-// The kept listing left longest ago, other than `but`: -1 for none.
+static fn files_keep_copy(const struct files_kept address_to k, struct files_model address_to m, b32 save)
+{
+        struct files_listing kl;
+        p8 address_to chosen = files_keep_listing(k, &kl);
+        positive eb = (positive)k->count * sizeof(struct files_entry), ob = (positive)k->count * sizeof(p32), cb = (k->count + 7) / 8;
+
+        memory_copy(save ? kl.entry : m->shown.entry, save ? m->shown.entry : kl.entry, eb);
+        memory_copy(save ? kl.order : m->shown.order, save ? m->shown.order : kl.order, ob);
+        memory_copy(save ? kl.names : m->shown.names, save ? m->shown.names : kl.names, k->names_used);
+        memory_copy(save ? chosen : m->chosen, save ? m->chosen : chosen, cb);
+}
+
 static int files_keep_oldest(const struct files_model address_to m, int but)
 {
         int oldest = -1;
@@ -736,21 +714,17 @@ static int files_keep_oldest(const struct files_model address_to m, int but)
         return oldest;
 }
 
-// The folder shown is being left: its listing, if it is whole, is kept as it is. One too large to keep, or with no memory for it, is not.
 static fn files_keep_put(struct files_model address_to m)
 {
         positive bytes = files_keep_bytes(m->shown.count, m->shown.names_used), held = 0;
         int which = files_keep_find(m, m->path);
         struct files_kept address_to k;
-        struct files_listing into;
-        bipolar mapped = 0;
-        p8 address_to chosen;
+        address_any mapped = null;
 
         if (which >= 0)
                 files_keep_drop(m, which);
         if (m->state != FILES_READY || m->handle < 0 || bytes > FILES_KEPT_BYTES)
                 return;
-        // A listing kept to a filter is kept whole: the filter is the folder's while it is shown, and is let go with it.
         if (m->shown.places != m->shown.count)
         {
                 m->filter_length = 0, m->filter[0] = end;
@@ -769,72 +743,48 @@ static fn files_keep_put(struct files_model address_to m)
                 held -= m->kept[oldest].bytes;
                 files_keep_drop(m, oldest);
         }
-        if (bytes && !(mapped = (bipolar)files_anon_map(bytes, null)))
+        if (bytes && !(mapped = files_anon_map(bytes, null)))
                 return;
         k = &m->kept[which];
         string_copy_bounded(k->path, m->path, FILES_PATH);
-        k->mapped = (address_any)mapped, k->bytes = bytes;
+        k->mapped = mapped, k->bytes = bytes;
         k->count = m->shown.count, k->names_used = m->shown.names_used, k->cut = m->shown.cut;
         k->folder = m->folder, k->sort = m->sort, k->descending = m->descending, k->hidden = m->hidden;
         k->cursor = m->cursor, k->anchor = m->anchor, k->chosen_count = m->chosen_count, k->seat = m->seat;
         k->left = ++m->kept_clock;
-        if (!bytes)
-                return;
-        chosen = files_keep_listing(k, &into);
-        memory_copy(into.entry, m->shown.entry, (positive)k->count * sizeof(struct files_entry));
-        memory_copy(into.order, m->shown.order, (positive)k->count * sizeof(p32));
-        memory_copy(into.names, m->shown.names, k->names_used);
-        memory_copy(chosen, m->chosen, (k->count + 7) / 8);
+        if (bytes)
+                files_keep_copy(k, m, true);
 }
 
-// A kept listing shown again, as it was left (in the order asked for now), and its place given up: nothing is read.
 static fn files_keep_take(struct files_model address_to m, int which)
 {
         struct files_kept address_to k = &m->kept[which];
-        struct files_listing from;
-        const p8 address_to chosen;
-        p32 on;
 
         m->shown.count = m->shown.places = k->count, m->shown.names_used = k->names_used, m->shown.cut = k->cut;
         if (k->bytes)
-        {
-                chosen = files_keep_listing(k, &from);
-                memory_copy(m->shown.entry, from.entry, (positive)k->count * sizeof(struct files_entry));
-                memory_copy(m->shown.order, from.order, (positive)k->count * sizeof(p32));
-                memory_copy(m->shown.names, from.names, k->names_used);
-                memory_copy(m->chosen, chosen, (k->count + 7) / 8);
-        }
+                files_keep_copy(k, m, false);
         m->chosen_count = k->chosen_count, m->anchor = k->anchor, m->cursor = k->cursor < k->count ? k->cursor : FILES_NO;
         m->folder = k->folder, m->seat = k->seat;
         if (k->sort != m->sort || k->descending != m->descending)
         {
-                on = m->cursor != FILES_NO ? m->shown.order[m->cursor] : FILES_NO;
+                p32 on = m->cursor != FILES_NO ? m->shown.order[m->cursor] : FILES_NO;
+
                 files_listing_sort(&m->shown, m->sort, m->descending);
-                for (p32 place = 0; place < m->shown.count && on != FILES_NO; place++)
-                        if (m->shown.order[place] == on)
-                        {
-                                m->cursor = place;
-                                break;
-                        }
+                m->cursor = files_order_place(&m->shown, on);
         }
         files_keep_drop(m, which);
 }
 
-// The folder shown is this one from now on: its descriptor (taken over; -1 with an error for one that did not open), and its reading
-// begun, unless its listing was kept and it is still that folder (the same device and inode on the descriptor): then it is shown as
-// it was left and nothing is read (m->restored). The folder left, if its listing was whole, is kept.
 static fn files_model_show(struct files_model address_to m, string_address path, bipolar handle, bipolar error)
 {
         file_facts now;
         int kept;
 
-        if (m->walking)
-                file_walk_close(&m->reader);
-        m->walking = false, m->reloading = false;
+        files_walk_stop(m);
+        m->reloading = false;
         files_keep_put(m);
         m->filter_length = 0, m->filter[0] = end;
-        if (m->handle >= 0)
-                system_close(m->handle);
+        files_close(&m->handle);
         m->handle = handle;
         if ((const p8 address_to)path != m->path)
                 string_copy_bounded(m->path, path, FILES_PATH);
@@ -845,8 +795,7 @@ static fn files_model_show(struct files_model address_to m, string_address path,
         {
                 const struct files_kept address_to k = &m->kept[kept];
 
-                if (handle >= 0 && k->hidden == m->hidden && file_look_code(handle, (string_address) "", AT_EMPTY_PATH, &now) >= 0 &&
-                    files_same_file(k->folder.inode, k->folder.device_major, k->folder.device_minor, &now))
+                if (handle >= 0 && k->hidden == m->hidden && files_look_fd(handle, &now) >= 0 && files_same_facts(&k->folder, &now))
                 {
                         files_keep_take(m, kept);
                         m->state = FILES_READY, m->error = 0, m->restored = true, m->came[0] = end, m->listed++;
@@ -857,32 +806,24 @@ static fn files_model_show(struct files_model address_to m, string_address path,
         }
         m->state = FILES_READING, m->error = 0;
         if (handle < 0 || !files_model_begin(m))
-        {
-                bipolar why = handle < 0 ? error : m->reader.error;
-
-                m->state = files_state_of(why), m->error = m->state == FILES_FAILED ? why : 0;
-        }
+                files_model_fail(m, handle < 0 ? error : m->reader.error, false);
         m->revision++;
 }
 
-// The folder shown read again, beside its listing: what is shown stays till the new one is whole (files_model_finish).
+static fn files_model_open_path(struct files_model address_to m, string_address path, b32 commit);
+
 static fn files_model_reload(struct files_model address_to m)
 {
         const struct files_entry address_to on = files_model_entry(m, m->cursor);
 
         if (m->handle < 0)
         {
-                // A folder that never opened is tried again as the path names it now.
-                file_walk opened;
-
-                file_walk_open(&opened, AT_FDCWD, m->path);
-                files_model_show(m, m->path, opened.handle, opened.error);
+                files_model_open_path(m, m->path, false);
                 return;
         }
         if (on && !m->came[0])
                 string_copy_bounded(m->came, (string_address)files_model_name(m, on), FILES_NAME);
         files_listing_empty(&m->next);
-        // One still being read for the first time starts again in place; one that is whole is read beside itself.
         m->reloading = m->state == FILES_READY;
         if (!m->reloading)
                 files_listing_empty(&m->shown), m->state = FILES_READING;
@@ -890,31 +831,23 @@ static fn files_model_reload(struct files_model address_to m)
         {
                 m->reloading = false;
                 files_listing_empty(&m->shown);
-                m->state = files_state_of(m->reader.error), m->error = m->state == FILES_FAILED ? m->reader.error : 0;
+                files_model_fail(m, m->reader.error, false);
         }
         m->revision++;
 }
 
-/*
-        Whether the folder shown is still what was listed. FILES_LOST: it has no name left (removed), or the path names another
-        folder or none now (renamed, replaced), and the state is FILES_GONE. FILES_STALE: it is the same folder and something in
-        it was added, removed or renamed since the reading began (its own times moved). FILES_FRESH otherwise.
-*/
+// FILES_LOST (state -> FILES_GONE), FILES_STALE (dir timestamps changed), or FILES_FRESH.
 static int files_model_stale(struct files_model address_to m)
 {
         file_facts now, named;
 
         if (m->handle < 0 || m->state == FILES_GONE)
                 return m->state == FILES_GONE ? FILES_LOST : FILES_FRESH;
-        if (file_look_code(m->handle, (string_address) "", AT_EMPTY_PATH, &now) < 0 || !now.hard_links ||
-            file_look_code(AT_FDCWD, m->path, 0, &named) < 0 || !files_same_file(now.inode, now.device_major, now.device_minor, &named))
+        if (files_look_fd(m->handle, &now) < 0 || !now.hard_links ||
+            file_look_code(AT_FDCWD, m->path, 0, &named) < 0 || !files_same_facts(&now, &named))
         {
-                if (m->walking)
-                        file_walk_close(&m->reader);
-                m->walking = false, m->reloading = false;
-                files_listing_empty(&m->shown);
-                files_model_choose_none(m);
-                m->cursor = FILES_NO, m->state = FILES_GONE, m->error = 0;
+                files_walk_stop(m);
+                files_model_fail(m, -ERROR_NO_ENTRY, true);
                 m->revision++;
                 return FILES_LOST;
         }
@@ -926,11 +859,7 @@ static int files_model_stale(struct files_model address_to m)
 
 /* ---- acting on what was listed ---- */
 
-/*
-        A listed entry looked at again, now, before anything is done with it: through the folder's descriptor, by its name, not
-        followed. FILES_SAME when it is the file that was listed (its kind, its inode, its device and, where the disk keeps one, its birth),
-        and its size and time are then the ones it has now; FILES_CHANGED when another file has its name; FILES_MISSING when none has. now, when given, is what was seen.
-*/
+// Re-stat a listed entry through m->handle without following: FILES_SAME / FILES_CHANGED / FILES_MISSING / FILES_REFUSED.
 static int files_model_check(struct files_model address_to m, p32 place, file_facts address_to now)
 {
         struct files_entry address_to entry = place < m->shown.places ? &m->shown.entry[m->shown.order[place]] : null;
@@ -939,7 +868,7 @@ static int files_model_check(struct files_model address_to m, p32 place, file_fa
 
         if (!entry || m->handle < 0)
                 return FILES_REFUSED;
-        looked = file_look_code(m->handle, (string_address)(m->shown.names + entry->name), AT_SYMLINK_NOFOLLOW, &facts);
+        looked = files_look_at(m->handle, m->shown.names + entry->name, &facts);
         if (now)
                 *now = facts;
         if (looked < 0)
@@ -968,7 +897,6 @@ static b32 files_path_take(p8 address_to into, string_address path)
         return true;
 }
 
-// The folder a path is in, by its bytes (the last name taken off: no link is read to say it), and that last name. False at the root.
 static b32 files_path_parent(const p8 address_to path, p8 address_to parent, p8 address_to name)
 {
         positive length = string_length((string_address)path), cut = length;
@@ -980,7 +908,8 @@ static b32 files_path_parent(const p8 address_to path, p8 address_to parent, p8 
         if (name)
                 string_copy_bounded(name, (string_address)(path + cut), FILES_NAME);
         cut = cut > 1 ? cut - 1 : 1;
-        memory_copy(parent, path, cut);
+        if (parent != path)
+                memory_copy(parent, path, cut);
         parent[cut] = end;
         return true;
 }
@@ -989,7 +918,7 @@ static fn files_history_push(p8 address_to stack, p32 address_to count, const p8
 {
         if (*count == FILES_HISTORY)
         {
-                for (p32 at = 0; at + 1 < FILES_HISTORY; at++) // the oldest is let go
+                for (p32 at = 0; at + 1 < FILES_HISTORY; at++)
                         memory_copy(stack + (positive)at * FILES_PATH, stack + (positive)(at + 1) * FILES_PATH, FILES_PATH);
                 (*count)--;
         }
@@ -1006,29 +935,28 @@ static fn files_model_commit(struct files_model address_to m, string_address pat
         files_model_show(m, path, handle, error);
 }
 
-// To a folder a person named: opened as named (a link in the path is followed, which is what naming one means). The folder shown
-// goes on the way back and the way forward is forgotten. False for a path that is not absolute or too long, and nothing changes.
+static fn files_model_open_path(struct files_model address_to m, string_address path, b32 commit)
+{
+        file_walk opened;
+
+        file_walk_open(&opened, AT_FDCWD, path);
+        if (commit)
+                files_model_commit(m, path, opened.handle, opened.error);
+        else
+                files_model_show(m, path, opened.handle, opened.error);
+}
+
 static b32 files_model_go(struct files_model address_to m, string_address path)
 {
         p8 taken[FILES_PATH];
-        file_walk opened;
 
         if (!files_path_take(taken, path))
                 return false;
-        file_walk_open(&opened, AT_FDCWD, taken);
-        files_model_commit(m, taken, opened.handle, opened.error);
+        files_model_open_path(m, taken, true);
         return true;
 }
 
-/*
-        To a folder a person typed, if it is one: the path is opened first, as typed (a link anywhere in it is followed, its last
-        part too: typing a name is asking for what it names, which is what files_model_go's rule is), and only one that opened is
-        shown, with the folder shown before it on the way back. FILES_READING when it is the folder shown from now on. Else the
-        state it would have had (FILES_GONE, FILES_UNREADABLE, FILES_NOT_DIRECTORY, FILES_FAILED; FILES_NOT_DIRECTORY too for text
-        that is no absolute path or does not fit one), and nothing has changed: the folder shown stays, whole, and so does the
-        way back. The text is bytes with an end and is not trusted: its length is held to FILES_PATH and nothing in it is read as
-        anything but a path for the kernel to resolve.
-*/
+// Open a user-typed path; only switches folder on success (returns FILES_READING), else returns failure state unchanged.
 static int files_model_try(struct files_model address_to m, string_address path)
 {
         p8 taken[FILES_PATH];
@@ -1042,12 +970,7 @@ static int files_model_try(struct files_model address_to m, string_address path)
         return FILES_READING;
 }
 
-/*
-        The start of a folder's name finished from the listing shown: of the folders listed whose names start with the bytes given,
-        what all of them go on to share is written to into (the whole name when there is one such folder), with its end. Answers
-        how many folders start so; into is the bytes given when none goes further. Files are not offered: a path being typed is a
-        folder's. The listing is the one in memory, so this reads no disk.
-*/
+// Complete a directory-name prefix against a listing in memory; returns match count and writes longest shared prefix.
 static p32 files_listing_complete(const struct files_listing address_to l, const p8 address_to start, positive length, p8 address_to into, positive room)
 {
         p32 found = 0;
@@ -1088,7 +1011,6 @@ static p32 files_model_complete(const struct files_model address_to m, const p8 
         return files_listing_complete(m->state == FILES_READY ? &m->shown : null, start, length, into, room);
 }
 
-// The same from the listing of any folder that is in memory, the one shown or one kept: none found for a folder that is neither.
 static p32 files_model_complete_in(const struct files_model address_to m, const p8 address_to folder, const p8 address_to start, positive length, p8 address_to into, positive room)
 {
         struct files_listing kept;
@@ -1101,14 +1023,12 @@ static p32 files_model_complete_in(const struct files_model address_to m, const 
         return files_listing_complete(which >= 0 && m->kept[which].bytes ? &kept : null, start, length, into, room);
 }
 
-// A folder that is open already, by a descriptor that is taken over, is the folder shown: the one before it goes on the way back.
 static fn files_model_take(struct files_model address_to m, string_address path, bipolar handle)
 {
         files_model_commit(m, path, handle, 0);
 }
 
-// Into the folder at a place of the listing: only one that is, now, the folder that was listed (files_model_check), opened without
-// following and held to that inode. FILES_SAME when it is the folder shown from now on; else why not, and the folder shown stays.
+// Enter a listed directory (re-checked and opened with O_NOFOLLOW held to its inode).
 static int files_model_enter(struct files_model address_to m, p32 place)
 {
         const struct files_entry address_to entry = files_model_entry(m, place);
@@ -1122,16 +1042,12 @@ static int files_model_enter(struct files_model address_to m, p32 place)
                 return seen;
         if (entry->kind != FILES_KIND_DIRECTORY || !files_path_join(into, FILES_PATH, m->path, files_model_name(m, entry)))
                 return FILES_REFUSED;
-        // Between the look above and this open the name may have been given to something else: the open looks again, does not
-        // follow, and is refused unless what it opened is what it looked at.
         if (!file_walk_open_found(&opened, m->handle, (string_address)files_model_name(m, entry)))
                 return opened.error == -ERROR_NO_ENTRY ? FILES_MISSING : FILES_CHANGED;
         files_model_commit(m, into, opened.handle, 0);
         return FILES_SAME;
 }
 
-// The cursor is to be on this name (the folder come up out of): when the listing is whole, or at once in one shown as it was left,
-// where everything else is as it was left.
 static fn files_model_came(struct files_model address_to m, const p8 address_to name)
 {
         p32 place = m->restored && name[0] ? files_model_find(m, name) : FILES_NO;
@@ -1142,59 +1058,38 @@ static fn files_model_came(struct files_model address_to m, const p8 address_to 
                 m->cursor = place, m->revision++;
 }
 
-// To the folder this one is in, with the cursor on the folder come out of. False at the root.
 static b32 files_model_up(struct files_model address_to m)
 {
         p8 parent[FILES_PATH], name[FILES_NAME];
-        file_walk opened;
 
         if (m->state == FILES_NONE || !files_path_parent(m->path, parent, name))
                 return false;
-        file_walk_open(&opened, AT_FDCWD, parent);
-        files_model_commit(m, parent, opened.handle, opened.error);
+        files_model_open_path(m, parent, true);
         files_model_came(m, name);
         return true;
 }
 
-// Back to the folder shown before this one (forward: to the one gone back from). False when there is none.
 static b32 files_model_back(struct files_model address_to m, b32 forward)
 {
         p8 address_to from = forward ? m->forward : m->back, address_to onto = forward ? m->back : m->forward;
         p32 address_to from_count = forward ? &m->forward_count : &m->back_count, address_to onto_count = forward ? &m->back_count : &m->forward_count;
         p8 to[FILES_PATH], name[FILES_NAME], parent[FILES_PATH];
-        file_walk opened;
 
         if (!*from_count)
                 return false;
         (*from_count)--;
         string_copy_bounded(to, (string_address)(from + (positive)*from_count * FILES_PATH), FILES_PATH);
         files_history_push(onto, onto_count, m->path);
-        // Back out of a folder into the one it is in puts the cursor on it, as going up does.
-        name[0] = end;
         if (!files_path_parent(m->path, parent, name) || !string_equals(parent, to))
                 name[0] = end;
-        file_walk_open(&opened, AT_FDCWD, to);
-        files_model_show(m, to, opened.handle, opened.error);
+        files_model_open_path(m, to, false);
         files_model_came(m, name);
         return true;
 }
 
 /* ---- the trail ---- */
-/*
-        The trail: the deepest path a person has gone to on the branch they are on, and where on it the folder shown is. Going to a
-        folder that is on the trail (one above the folder shown, or one of the deeper ones gone up out of) moves the place and leaves
-        the trail as it is, so up three folders and down again is two moves and nothing is typed. Going to a folder that is not on it
-        (another branch, opened from a listing or typed) makes the trail that folder's path: what was deeper than the fork is dropped
-        and the new folder is its end. files_trail_note is that rule, told the path shown after every move, however the move was made
-        (a crumb, Up, Back and Forward, a row opened, a path typed): the way back and forward keeps paths, as it did, and the trail is
-        worked out from the path gone to by the same rule, so the two cannot disagree.
-
-        A folder of the trail is remembered by what it was, its device and inode, from when it was shown. Before a deeper one is gone
-        back to, files_trail_check looks at its path again without following: FILES_SAME for the folder it was, FILES_MISSING for a
-        path that names nothing now, FILES_CHANGED for anything else there (another folder, a file, a link put in its place). Only
-        the first is gone to; the others are for a view to say, and files_trail_cut then drops the trail from that folder on.
-*/
-#define FILES_TRAIL 48 // the folders of a trail, the root with them: a deeper path keeps its last ones as crumbs
+// Deepest path visited on the current branch, remembering each crumb's device+inode for verified re-entry.
+#define FILES_TRAIL 48
 
 struct files_trail
 {
@@ -1207,7 +1102,6 @@ struct files_trail
         int count, current;
 };
 
-// The folders of a path: the root, then each name between strokes. A path with more than FILES_TRAIL keeps its last ones.
 static fn files_trail_split(struct files_trail address_to t)
 {
         positive length = string_length(t->path), at = 1;
@@ -1236,7 +1130,14 @@ static fn files_trail_split(struct files_trail address_to t)
         }
 }
 
-// The trail is this path, whole. What the folders it shares with the old one were is kept with them; no other is known, and none is lost.
+static int files_trail_index(const struct files_trail address_to t, const p8 address_to path, positive length)
+{
+        for (int k = 0; length && k < t->count; k++)
+                if (t->to[k] == length && !memory_compare((address_any)t->path, (address_any)path, length))
+                        return k;
+        return -1;
+}
+
 static fn files_trail_become(struct files_trail address_to t, const p8 address_to path)
 {
         struct files_trail was = *t;
@@ -1252,30 +1153,24 @@ static fn files_trail_become(struct files_trail address_to t, const p8 address_t
         }
 }
 
-// The path shown is this one now, and this is the folder it is (null: not known). True when the trail was kept and only the place moved.
 static b32 files_trail_note(struct files_trail address_to t, const p8 address_to shown, const file_facts address_to folder)
 {
         positive length = string_length((string_address)shown);
-        int place = -1;
+        int place = files_trail_index(t, shown, length);
 
-        for (int k = 0; k < t->count && place < 0; k++)
-                if (t->to[k] == length && !memory_compare((address_any)t->path, (address_any)shown, length))
-                        place = k;
         if (place < 0)
         {
-                // Another branch: the trail is this path.
                 files_trail_become(t, shown);
                 place = t->count - 1;
         }
         t->current = place < 0 ? 0 : place;
         for (int k = 0; k <= t->current && k < t->count; k++)
-                t->lost[k] = 0; // what was gone to is there
+                t->lost[k] = 0;
         if (folder && place >= 0 && folder->inode)
                 t->known[place] = 1, t->inode[place] = folder->inode, t->device_major[place] = folder->device_major, t->device_minor[place] = folder->device_minor;
         return t->to[t->count ? t->count - 1 : 0] != length;
 }
 
-// The path of the trail's folder number `which`, with its end.
 static fn files_trail_path(const struct files_trail address_to t, int which, p8 address_to into)
 {
         positive length = which >= 0 && which < t->count ? t->to[which] : 0;
@@ -1284,14 +1179,7 @@ static fn files_trail_path(const struct files_trail address_to t, int which, p8 
         into[length] = end;
 }
 
-/*
-        A folder of the trail opened as the folder it was. The open comes first and does not follow (O_NOFOLLOW: a link under its
-        name is refused by the kernel), and what it was is then compared on the descriptor that was opened, its device and inode,
-        so there is no moment between a look and an open in which the name can be given to something else: whatever the
-        descriptor is, it is what was compared. FILES_SAME with the descriptor in *handle (the caller's from then on);
-        FILES_MISSING for a path that names nothing now; FILES_CHANGED for anything else there (another folder, a file, a link);
-        FILES_REFUSED for no such folder of the trail, or one that may not be opened (*error has the kernel's code).
-*/
+// Open trail crumb `which` with O_NOFOLLOW and verify its device+inode on the opened fd.
 static int files_trail_open(const struct files_trail address_to t, int which, bipolar address_to handle, bipolar address_to error)
 {
         p8 path[FILES_PATH];
@@ -1302,19 +1190,17 @@ static int files_trail_open(const struct files_trail address_to t, int which, bi
         if (which < 0 || which >= t->count)
                 return FILES_REFUSED;
         files_trail_path(t, which, path);
-        opened = system_open_at(AT_FDCWD, path, FILE_READ | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        opened = files_open_dir(AT_FDCWD, path, O_NOFOLLOW);
         if (opened < 0)
         {
-                // Why not: nothing there, or something that is no folder (a look, for the word alone: nothing is done by it).
                 if (opened == -ERROR_NO_ENTRY)
                         return FILES_MISSING;
                 if (opened == -ERROR_NOT_DIRECTORY || opened == -40)
-                        return file_look_code(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, &facts) < 0 ? FILES_MISSING : FILES_CHANGED;
-                *error = opened;
-                return FILES_REFUSED;
+                        return files_look_at(AT_FDCWD, path, &facts) < 0 ? FILES_MISSING : FILES_CHANGED;
+                return *error = opened, FILES_REFUSED;
         }
-        if (file_look_code(opened, (string_address) "", AT_EMPTY_PATH, &facts) < 0 ||
-            (t->known[which] && (facts.inode != t->inode[which] || facts.device_major != t->device_major[which] || facts.device_minor != t->device_minor[which])))
+        if (files_look_fd(opened, &facts) < 0 ||
+            (t->known[which] && !files_same_file(t->inode[which], t->device_major[which], t->device_minor[which], &facts)))
         {
                 system_close(opened);
                 return FILES_CHANGED;
@@ -1323,18 +1209,15 @@ static int files_trail_open(const struct files_trail address_to t, int which, bi
         return FILES_SAME;
 }
 
-// Whether a folder of the trail is the folder it was, and nothing more: opened as files_trail_open opens it, and closed.
 static int files_trail_check(const struct files_trail address_to t, int which)
 {
         bipolar handle, error;
         int seen = files_trail_open(t, which, &handle, &error);
 
-        if (handle >= 0)
-                system_close(handle);
+        files_close(&handle);
         return seen == FILES_REFUSED && error ? FILES_CHANGED : seen;
 }
 
-// The trail ends before its folder number `which`: that one and all after it are dropped. The current one is never dropped.
 static fn files_trail_cut(struct files_trail address_to t, int which)
 {
         if (which <= t->current || which >= t->count)
@@ -1343,52 +1226,37 @@ static fn files_trail_cut(struct files_trail address_to t, int which)
         t->count = which;
 }
 
-// From its folder number `which` on, the trail's folders are lost: looked for and not there. They stay, struck through, to be put right.
 static fn files_trail_lose(struct files_trail address_to t, int which)
 {
         for (int k = which > t->current ? which : t->current + 1; k < t->count; k++)
                 t->lost[k] = 1;
 }
 
-// Every kept listing whose folder is not on the trail is let go: what is kept is the trail's.
 static fn files_keep_trim(struct files_model address_to m, const struct files_trail address_to t)
 {
         for (int k = 0; k < FILES_KEPT; k++)
         {
                 positive length = string_length((string_address)m->kept[k].path);
-                b32 on = false;
 
-                for (int at = 0; length && at < t->count && !on; at++)
-                        on = t->to[at] == length && !memory_compare((address_any)t->path, (address_any)m->kept[k].path, length);
-                if (length && !on)
+                if (length && files_trail_index(t, m->kept[k].path, length) < 0)
                         files_keep_drop(m, k);
         }
 }
 
-/*
-        One folder of the trail spelled again: the path the trail would be with its folder number `which` replaced by the text
-        and every folder after it kept, written to into. /path/to/something/else with "to" spelled "foo" is
-        /path/foo/something/else. A stroke in the text makes several folders of it; no text takes the folder out. The text is a
-        person's and is not trusted: a byte below a blank or the delete byte, and a folder spelled . or .., are refused, and so
-        is a path that would not fit. The root cannot be spelled again. False for what is refused, and into is not to be read.
-*/
+// Replace crumb `which` with `text`, collapsing repeated slashes and rejecting control chars or `.`/`..` segments.
 static b32 files_trail_spell(const struct files_trail address_to t, int which, const p8 address_to text, p8 address_to into)
 {
         positive length = string_length((string_address)text), used = 0, whole = string_length((string_address)t->path);
-        positive parts[3][2];
-        const p8 address_to from[3];
+        const p8 address_to from[3] = {t->path, text, t->path + (which >= 0 && which < t->count ? t->to[which] : 0)};
+        positive lens[3] = {which >= 0 && which < t->count ? t->from[which] : 0, length, which >= 0 && which < t->count ? whole - t->to[which] : 0};
 
         if (which < 0 || which >= t->count || t->to[which] <= 1 || (which == 0 && t->from[0] == 0))
                 return false;
         for (positive at = 0; at < length; at++)
                 if (text[at] < 0x20 || text[at] == 0x7f)
                         return false;
-        // What is before it (its stroke with it), the text, what is after it (its stroke with it): strokes run together are one.
-        from[0] = t->path, parts[0][0] = 0, parts[0][1] = t->from[which];
-        from[1] = text, parts[1][0] = 0, parts[1][1] = length;
-        from[2] = t->path, parts[2][0] = t->to[which], parts[2][1] = whole;
         for (int part = 0; part < 3; part++)
-                for (positive at = parts[part][0]; at < parts[part][1]; at++)
+                for (positive at = 0; at < lens[part]; at++)
                 {
                         p8 byte = from[part][at];
 
@@ -1414,14 +1282,7 @@ static b32 files_trail_spell(const struct files_trail address_to t, int which, c
         return used && into[0] == '/';
 }
 
-/*
-        The trail made a path a person spelled, and the folder shown its deepest folder that is one. The path's folders are tried
-        from the deepest up, each opened as named (a link is followed, which is what naming a folder means: files_model_go's rule),
-        and the first that opens is shown (not opened again when it is the folder shown already); the whole path is the trail,
-        with that folder the current one and every folder after it lost. Answers FILES_READY when the whole path was a folder,
-        else the state the first folder that was not would have had (FILES_GONE, FILES_NOT_DIRECTORY, FILES_UNREADABLE,
-        FILES_FAILED), for a view to say; FILES_NONE, and nothing changes, when not even its first folder opens.
-*/
+// Set trail to `path` and show its deepest existing ancestor, marking deeper crumbs lost.
 static int files_trail_resolve(struct files_model address_to m, struct files_trail address_to t, const p8 address_to path)
 {
         static struct files_trail next;
@@ -1453,28 +1314,8 @@ static int files_trail_resolve(struct files_model address_to m, struct files_tra
 }
 
 /* ---- changing what is in the folder ---- */
-/*
-        What changes the disk. Each works on the folder shown through its own descriptor (m->handle), by a name of the listing that
-        has just been looked at again (files_model_check) or by a new name that is held to be a name; nothing is resolved by a path,
-        so a folder renamed or swapped under the window cannot send an operation somewhere else. Nothing is followed.
-
-        A new folder and a new name are one call each (mkdirat, renameat2 with RENAME_NOREPLACE): a name that is taken is refused
-        (FILES_DID_EXISTS) and never written over. The kernel's refusal is kept (m->did_error) for a view to say.
-
-        Deleting is a job (struct files_job), run in steps as a listing is read: files_delete_begin takes the names (each looked at
-        again first: one that is no longer the entry listed stops the whole job before anything is removed), files_job_step removes
-        at most `most` things and returns, files_job_cancel stops it between two. It is a real delete, not a move to a trash: a trash
-        is a folder on the same filesystem with a record of where each thing came from, which this tree does not have, and a delete
-        that is asked twice (the view's) is honest about what it does. A file, a link and anything else that is no folder is removed
-        as the entry it is, by the tree's own remove for an entry that must still be the one looked at (file_remove_same: opened
-        without following, held to its inode, removed through the held folder), so a link is removed and never what it names. A
-        folder is emptied from the inside, each folder on the way opened without following and held to its inode
-        (file_walk_open_found), and removed when it is empty. What stops it (a folder that may not be written, a busy mount) stops the
-        job there: its state is FILES_JOB_FAILED with the kernel's code and the name it stopped at, and removed says how many things
-        went before it. Nothing is half-made by a delete; what a stopped or cancelled one leaves is whatever it had not reached, and
-        the count says how far it got.
-*/
-#define FILES_JOB_DEEP 64 // the folders inside one another a delete goes down: one deeper stops the job (FILES_JOB_FAILED, too deep)
+// Disk mutations through m->handle (O_NOFOLLOW / RENAME_NOREPLACE / file_remove_same); recursive delete runs in bounded steps.
+#define FILES_JOB_DEEP 64
 
 enum
 {
@@ -1508,7 +1349,6 @@ struct files_job
         int depth;
 };
 
-// Whether bytes are a name a folder can hold: not empty, not . or .., no stroke, and short enough.
 static b32 files_name_good(const p8 address_to name)
 {
         positive length = string_length((string_address)name);
@@ -1521,38 +1361,30 @@ static b32 files_name_good(const p8 address_to name)
         return true;
 }
 
-// A folder of this name made in the folder shown. A name that is taken is refused, whatever has it.
-static int files_model_make_folder(struct files_model address_to m, const p8 address_to name)
+static inline int files_did_code(bipolar res)
 {
-        bipolar made;
-
-        if (m->handle < 0 || !files_name_good(name))
-                return FILES_DID_BAD;
-        made = (bipolar)system_call_3(syscall(mkdirat), (positive)m->handle, (positive)name, 0755);
-        if (made >= 0)
-                return FILES_DID;
-        return made == -ERROR_EXISTS ? FILES_DID_EXISTS : FILES_DID_FAILED;
+        return res >= 0 ? FILES_DID : res == -ERROR_EXISTS ? FILES_DID_EXISTS : FILES_DID_FAILED;
 }
 
-// The entry at a place given another name in the folder shown: only the entry that was listed, and never over a name that is taken.
+static int files_model_make_folder(struct files_model address_to m, const p8 address_to name)
+{
+        if (m->handle < 0 || !files_name_good(name))
+                return FILES_DID_BAD;
+        return files_did_code((bipolar)system_call_3(syscall(mkdirat), (positive)m->handle, (positive)name, 0755));
+}
+
 static int files_model_rename(struct files_model address_to m, p32 place, const p8 address_to name)
 {
         const struct files_entry address_to entry = files_model_entry(m, place);
-        bipolar moved;
 
         if (!entry || !files_name_good(name) || files_model_check(m, place, null) != FILES_SAME)
                 return FILES_DID_BAD;
-        moved = (bipolar)system_call_5(syscall(renameat2), (positive)m->handle, (positive)files_model_name(m, entry), (positive)m->handle, (positive)name,
-                                       FILE_RENAME_NOREPLACE);
-        if (moved >= 0)
-                return FILES_DID;
-        return moved == -ERROR_EXISTS ? FILES_DID_EXISTS : FILES_DID_FAILED;
+        return files_did_code((bipolar)system_call_5(syscall(renameat2), (positive)m->handle, (positive)files_model_name(m, entry),
+                                                     (positive)m->handle, (positive)name, FILE_RENAME_NOREPLACE));
 }
 
-static positive files_job_bytes(void)
-{
-        return (positive)FILES_MOST * FILES_NAME / 8 + (positive)FILES_MOST / 8 * (sizeof(file_facts) + sizeof(p32));
-}
+#define FILES_JOB_NAMES ((positive)FILES_MOST * FILES_NAME / 8)
+#define FILES_JOB_BYTES (FILES_JOB_NAMES + (positive)FILES_MOST / 8 * (sizeof(file_facts) + sizeof(p32)))
 
 static fn files_job_close(struct files_job address_to job)
 {
@@ -1560,19 +1392,11 @@ static fn files_job_close(struct files_job address_to job)
                 system_close(job->stack[--job->depth]);
 }
 
-// The job let go of: its folders closed and its memory given back.
 static fn files_job_end(struct files_job address_to job)
 {
         files_job_close(job);
-        if (job->names)
-                system_call_2(syscall(munmap), (positive)job->names, files_job_bytes());
+        files_unmap(job->names, FILES_JOB_BYTES);
         memory_fill(job, 0, sizeof(*job));
-}
-
-static fn files_job_fail(struct files_job address_to job, bipolar error)
-{
-        files_job_close(job);
-        job->state = FILES_JOB_FAILED, job->error = error;
 }
 
 static fn files_job_cancel(struct files_job address_to job)
@@ -1583,11 +1407,7 @@ static fn files_job_cancel(struct files_job address_to job)
         job->state = FILES_JOB_CANCELLED;
 }
 
-/*
-        A delete of the entries chosen (or of the one at the cursor when none is chosen) begun. Every one is looked at again first and
-        must be the entry listed; one that is not stops the job before it starts (false, and the job is FILES_JOB_FAILED at that
-        name), so a listing that is stale deletes nothing. At most FILES_MOST / 8 entries are taken in one job.
-*/
+// Re-check and snapshot selected entries (up to FILES_MOST/8) before starting a stepped recursive delete.
 static b32 files_delete_begin(struct files_model address_to m, struct files_job address_to job)
 {
         bipolar err = 0;
@@ -1595,25 +1415,21 @@ static b32 files_delete_begin(struct files_model address_to m, struct files_job 
         p32 iter = 0, place;
 
         files_job_end(job);
-        if (!(job->names = (p8 address_to)files_anon_map(files_job_bytes(), &err)))
-        {
-                job->state = FILES_JOB_FAILED, job->error = err;
-                return false;
-        }
-        job->facts = (file_facts address_to)(job->names + (positive)FILES_MOST * FILES_NAME / 8);
+        if (!(job->names = (p8 address_to)files_anon_map(FILES_JOB_BYTES, &err)))
+                return job->state = FILES_JOB_FAILED, job->error = err, false;
+        job->facts = (file_facts address_to)(job->names + FILES_JOB_NAMES);
         job->offsets = (p32 address_to)(job->facts + FILES_MOST / 8);
         while ((place = files_selected_next(m, &iter)) != FILES_NO)
         {
                 const struct files_entry address_to entry = &m->shown.entry[m->shown.order[place]];
 
-                if (job->count >= FILES_MOST / 8 || used + entry->length + 1 > (positive)FILES_MOST * FILES_NAME / 8)
+                if (job->count >= FILES_MOST / 8 || used + entry->length + 1 > FILES_JOB_NAMES)
                         break;
                 if (files_model_check(m, place, &job->facts[job->count]) != FILES_SAME)
                 {
                         files_job_end(job);
                         string_copy_bounded(job->at, (string_address)files_model_name(m, entry), FILES_NAME);
-                        job->state = FILES_JOB_FAILED, job->error = -ERROR_NO_ENTRY;
-                        return false;
+                        return job->state = FILES_JOB_FAILED, job->error = -ERROR_NO_ENTRY, false;
                 }
                 job->offsets[job->count] = (p32)used;
                 memory_copy(job->names + used, files_model_name(m, entry), (positive)entry->length + 1);
@@ -1624,17 +1440,7 @@ static b32 files_delete_begin(struct files_model address_to m, struct files_job 
         return job->count != 0;
 }
 
-static inline const p8 address_to files_job_name(const struct files_job address_to job, p32 which)
-{
-        return job->names + job->offsets[which];
-}
-
-/*
-        One step of recursive DFS directory removal (shared by files_delete_one and files_move_remove):
-        - When *depth == 0: enters top_name (holding top_facts) if a directory, else removes it from root_fd.
-        - When *depth > 0: removes or enters the first entry in stack[*depth - 1], or closes and unlinks it once empty.
-        Returns: 1 = removed top-level entry completely, 0 = still descending/removing inside, < 0 = kernel error.
-*/
+// One step of recursive DFS directory removal (shared by delete and cross-device move): 1 = top removed, 0 = in progress, <0 = error.
 static int files_rmdir_step(bipolar root_fd, bipolar address_to stack, p8 (*inside)[FILES_NAME], int address_to depth, p8 address_to at,
                             const p8 address_to top_name, const file_facts address_to top_facts, p32 address_to removed, bipolar address_to error)
 {
@@ -1663,8 +1469,7 @@ static int files_rmdir_step(bipolar root_fd, bipolar address_to stack, p8 (*insi
                 {
                         if (gone < 0)
                                 return *error = gone, -1;
-                        system_close(stack[--(*depth)]);
-                        stack[*depth] = -1;
+                        files_close(&stack[--(*depth)]);
                         string_copy_bounded(at, inside[*depth], FILES_NAME);
                         gone = (bipolar)system_call_3(syscall(unlinkat), (positive)(*depth ? stack[*depth - 1] : root_fd), (positive)at, AT_REMOVEDIR);
                         if (gone < 0)
@@ -1673,8 +1478,7 @@ static int files_rmdir_step(bipolar root_fd, bipolar address_to stack, p8 (*insi
                                 (*removed)++;
                         return !*depth ? 1 : 0;
                 }
-                gone = file_look_code(in, (string_address)at, AT_SYMLINK_NOFOLLOW, &facts);
-                if (gone < 0)
+                if ((gone = files_look_at(in, at, &facts)) < 0)
                         return *error = gone, -1;
         }
         if ((facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
@@ -1687,39 +1491,32 @@ static int files_rmdir_step(bipolar root_fd, bipolar address_to stack, p8 (*insi
                 stack[(*depth)++] = walk.handle;
                 return 0;
         }
-        gone = file_remove_same(in, (string_address)at, 0, &facts);
-        if (gone < 0)
+        if ((gone = file_remove_same(in, (string_address)at, 0, &facts)) < 0)
                 return *error = gone, -1;
         if (removed)
                 (*removed)++;
         return top ? 1 : 0;
 }
 
-// One thing of a delete: the next entry inside the innermost folder it is in removed or gone into, or that folder, empty, removed
-// from the one it is in. False when the job is over (done or failed).
 static b32 files_delete_one(struct files_model address_to m, struct files_job address_to job)
 {
         bipolar err = 0;
         int step;
 
         if (!job->depth && job->next >= job->count)
-        {
-                job->state = FILES_JOB_DONE;
-                return false;
-        }
+                return job->state = FILES_JOB_DONE, false;
         step = files_rmdir_step(m->handle, job->stack, job->inside, &job->depth, job->at,
-                                job->depth ? null : files_job_name(job, job->next),
+                                job->depth ? null : job->names + job->offsets[job->next],
                                 job->depth ? null : &job->facts[job->next], &job->removed, &err);
         if (step < 0)
         {
-                files_job_fail(job, err);
-                return false;
+                files_job_close(job);
+                return job->state = FILES_JOB_FAILED, job->error = err, false;
         }
         job->next += step;
         return true;
 }
 
-// A step of the job: at most `most` things, and back. True while there is more to do.
 static b32 files_job_step(struct files_model address_to m, struct files_job address_to job, positive most)
 {
         for (positive done = 0; done < most && job->state == FILES_JOB_RUNNING; done++)
@@ -1728,21 +1525,13 @@ static b32 files_job_step(struct files_model address_to m, struct files_job addr
         return job->state == FILES_JOB_RUNNING;
 }
 
-/*
-        The folder tree (struct files_tree): the folders of the disk as a tree a view shows beside the listing, its nodes in the order they
-        are shown (each node's folders straight after it, one level in), opened and shut by the person. A node opened has its folders read
-        (files_tree_open): its entries looked at without following, the folders among them (a link to a folder is not one) kept in name
-        order, at most FILES_TREE_CHILDREN of them and FILES_TREE_SCAN entries looked through, so a folder of any size costs a bounded
-        read; a node shut lets go of everything under it. Each node is held to the device and inode it was read as, so a path made of
-        the tree (files_tree_path) names what was listed or, when it was swapped since, is found out by the model's own open (it is
-        opened as a named path, files_model_try, and the model says what it found). files_tree_reveal opens the nodes down a path, so the
-        folder shown is in the tree; a folder that is not there is not added.
-*/
+// Sidebar folder/drive tree: flat pre-order array of nodes with bounded lazy expansion and mountinfo drive sync.
 #define FILES_TREE_MOST 4096       // the nodes a tree holds
 #define FILES_TREE_NAMES (FILES_TREE_MOST * 32u) // and the bytes of their names
 #define FILES_TREE_CHILDREN 1024   // the folders a node opened shows at most
 #define FILES_TREE_SCAN 65536      // and the entries looked through to find them
 #define FILES_DRIVES_MOST 32       // extra mounted storage drives listed beside the root drive
+#define FILES_TREE_BYTES ((positive)FILES_TREE_MOST * sizeof(struct files_node) + FILES_TREE_NAMES)
 
 enum
 {
@@ -1792,17 +1581,20 @@ struct files_drive
         p8 root[256];
 };
 
-static positive files_tree_bytes(void)
-{
-        return (positive)FILES_TREE_MOST * sizeof(struct files_node) + FILES_TREE_NAMES;
-}
-
 static fn files_tree_reset(struct files_tree address_to t)
 {
         t->count = 0, t->names_used = 0, t->drives_hash = 0;
 }
 
-// Appends a depth-0 root (a common folder or a storage drive) to the tree, keeping its label and full path in t->names.
+static p32 files_tree_store(struct files_tree address_to t, const p8 address_to s, positive len)
+{
+        p32 at = t->names_used;
+
+        memory_copy(t->names + at, s, len + 1);
+        t->names_used += (p32)(len + 1);
+        return at;
+}
+
 static b32 files_tree_add_root(struct files_tree address_to t, const p8 address_to label, const p8 address_to path, p8 kind, p8 place)
 {
         positive label_len = string_length((string_address)label), path_len = string_length((string_address)path);
@@ -1812,30 +1604,24 @@ static b32 files_tree_add_root(struct files_tree address_to t, const p8 address_
         if (!t->node || t->count >= FILES_TREE_MOST || !label_len || !path_len || path[0] != '/' ||
             t->names_used + label_len + path_len + 2 > FILES_TREE_NAMES)
                 return false;
-        n = &t->node[t->count];
+        n = &t->node[t->count++];
         memory_fill(n, 0, sizeof(*n));
-        n->name = t->names_used, n->length = (p16)label_len;
-        memory_copy(t->names + t->names_used, label, label_len + 1);
-        t->names_used += (p32)label_len + 1;
-        n->root_path = t->names_used;
-        memory_copy(t->names + t->names_used, path, path_len + 1);
-        t->names_used += (p32)path_len + 1;
-        n->depth = 0, n->kind = kind, n->place = place;
+        n->name = files_tree_store(t, label, label_len), n->length = (p16)label_len;
+        n->root_path = files_tree_store(t, path, path_len);
+        n->kind = kind, n->place = place;
         if (file_look_code(AT_FDCWD, (string_address)path, 0, &facts) >= 0)
                 n->inode = facts.inode, n->device_major = facts.device_major, n->device_minor = facts.device_minor;
-        t->count++;
         return true;
 }
 
-// The tree's memory, and its root, the folder /. False when there is no memory.
 static b32 files_tree_begin(struct files_tree address_to t)
 {
-        address_any mapped = files_anon_map(files_tree_bytes(), null);
+        address_any mapped = files_anon_map(FILES_TREE_BYTES, null);
 
         memory_fill(t, 0, sizeof(*t));
         if (!mapped)
                 return false;
-        t->mapped = mapped, t->mapped_size = files_tree_bytes();
+        t->mapped = mapped, t->mapped_size = FILES_TREE_BYTES;
         t->node = (struct files_node address_to)mapped;
         t->names = (p8 address_to)mapped + (positive)FILES_TREE_MOST * sizeof(struct files_node);
         return files_tree_add_root(t, (const p8 address_to) "/", (const p8 address_to) "/", FILES_NODE_DRIVE, FILES_PLACE_ROOT);
@@ -1843,8 +1629,7 @@ static b32 files_tree_begin(struct files_tree address_to t)
 
 static fn files_tree_end(struct files_tree address_to t)
 {
-        if (t->mapped)
-                system_call_2(syscall(munmap), (positive)t->mapped, t->mapped_size);
+        files_unmap(t->mapped, t->mapped_size);
         memory_fill(t, 0, sizeof(*t));
 }
 
@@ -1855,7 +1640,6 @@ static b32 files_path_under(const p8 address_to path, const char address_to pref
         return !memory_compare(path, prefix, n) && (path[n] == 0 || path[n] == '/');
 }
 
-// Decodes mountinfo's \ooo octal escapes into into (at most room - 1 bytes).
 static positive files_mount_unescape(const p8 address_to from, positive length, p8 address_to into, positive room)
 {
         positive used = 0;
@@ -1903,23 +1687,7 @@ static b32 files_drive_skip_target(const p8 address_to path)
         return false;
 }
 
-static b32 files_drive_user_mount(const p8 address_to path)
-{
-        return (files_path_under(path, "/mnt") && path[4] == '/') || (files_path_under(path, "/media") && path[6] == '/') ||
-               (files_path_under(path, "/run/media") && path[10] == '/');
-}
-
-static b32 files_drive_block_source(const p8 address_to src)
-{
-        return string_has_prefix(src, "/dev/") && !string_has_prefix(src, "/dev/loop") &&
-               !string_has_prefix(src, "/dev/zram") && !string_has_prefix(src, "/dev/ram");
-}
-
-/*
-        Parses /proc/self/mountinfo text for additional mounted storage drives (beyond the root drive /): real block devices
-        (/dev/*, skipping loop/zram/ram) and user/removable mounts under /mnt/*, /media/*, /run/media/*, skipping virtual
-        filesystems, internal system mounts, and duplicates. Answers how many drives were found and writes a stable hash.
-*/
+// Parse /proc/self/mountinfo for extra mounted drives (real block devices or /mnt/*, /media/*, /run/media/*).
 static int files_drives_parse(const p8 address_to text, positive length, struct files_drive address_to out, int most, p64 address_to out_hash)
 {
         int count = 0;
@@ -1930,17 +1698,14 @@ static int files_drives_parse(const p8 address_to text, positive length, struct 
         {
                 positive line_start = at, line_end;
                 const p8 address_to tok[16];
-                positive tok_len[16];
+                positive tok_len[16], tlen;
                 int ntok = 0, sep = -1;
                 p8 dev[32], root[256], target[FILES_PATH], fs[64], src[256];
-                b32 dup = false;
+                b32 dup = false, block, user_mnt;
+                const p8 address_to nl = (const p8 address_to)memory_first_of(text + at, '\n', length - at);
 
-                {
-                        const p8 address_to nl = (const p8 address_to)memory_first_of(text + at, '\n', length - at);
-
-                        line_end = nl ? (positive)(nl - text) : length;
-                        at = nl ? line_end + 1 : length;
-                }
+                line_end = nl ? (positive)(nl - text) : length;
+                at = nl ? line_end + 1 : length;
                 for (positive p = line_start; p < line_end && ntok < 16;)
                 {
                         while (p < line_end && (text[p] == ' ' || text[p] == '\t'))
@@ -1962,44 +1727,39 @@ static int files_drives_parse(const p8 address_to text, positive length, struct 
                 files_mount_unescape(tok[4], tok_len[4], target, sizeof(target));
                 files_mount_unescape(tok[sep + 1], tok_len[sep + 1], fs, sizeof(fs));
                 files_mount_unescape(tok[sep + 2], tok_len[sep + 2], src, sizeof(src));
-                if (target[0] != '/' || files_drive_skip_target(target) || files_drive_virtual_fs(fs))
+                block = string_has_prefix(src, "/dev/") && !string_has_prefix(src, "/dev/loop") &&
+                        !string_has_prefix(src, "/dev/zram") && !string_has_prefix(src, "/dev/ram");
+                user_mnt = (files_path_under(target, "/mnt") && target[4] == '/') ||
+                           (files_path_under(target, "/media") && target[6] == '/') ||
+                           (files_path_under(target, "/run/media") && target[10] == '/');
+                if (target[0] != '/' || files_drive_skip_target(target) || files_drive_virtual_fs(fs) || (!block && !user_mnt))
                         continue;
-                if (!files_drive_block_source(src) && !files_drive_user_mount(target))
-                        continue;
-                for (int k = 0; k < count; k++)
-                        if (string_equals((string_address)out[k].path, (string_address)target) ||
-                            (string_equals((string_address)out[k].device, (string_address)dev) &&
-                             string_equals((string_address)out[k].root, (string_address)root)))
-                                dup = true;
+                for (int k = 0; k < count && !dup; k++)
+                        dup = string_equals((string_address)out[k].path, (string_address)target) ||
+                              (string_equals((string_address)out[k].device, (string_address)dev) &&
+                               string_equals((string_address)out[k].root, (string_address)root));
                 if (dup)
                         continue;
-                {
-                        positive tlen = string_length((string_address)target);
-
-                        while (tlen > 1 && target[tlen - 1] == '/')
-                                target[--tlen] = end;
-                        string_copy_bounded((string_address)out[count].path, (string_address)target, sizeof(out[count].path));
-                        if (tlen <= 1 && target[0] == '/')
-                                out[count].label[0] = 0;
-                        else
-                                path_tail_copy((p8 address_to)out[count].label, sizeof(out[count].label), target);
-                        string_copy_bounded((string_address)out[count].device, (string_address)dev, sizeof(out[count].device));
-                        string_copy_bounded((string_address)out[count].root, (string_address)root, sizeof(out[count].root));
-                        for (positive i = 0; i < tlen; i++)
-                                hash = (hash ^ target[i]) * 1099511628211ull;
-                        hash = (hash ^ 0xffu) * 1099511628211ull;
-                        count++;
-                }
+                tlen = string_length((string_address)target);
+                while (tlen > 1 && target[tlen - 1] == '/')
+                        target[--tlen] = end;
+                string_copy_bounded((string_address)out[count].path, (string_address)target, sizeof(out[count].path));
+                if (tlen <= 1 && target[0] == '/')
+                        out[count].label[0] = 0;
+                else
+                        path_tail_copy((p8 address_to)out[count].label, sizeof(out[count].label), target);
+                string_copy_bounded((string_address)out[count].device, (string_address)dev, sizeof(out[count].device));
+                string_copy_bounded((string_address)out[count].root, (string_address)root, sizeof(out[count].root));
+                for (positive i = 0; i < tlen; i++)
+                        hash = (hash ^ target[i]) * 1099511628211ull;
+                hash = (hash ^ 0xffu) * 1099511628211ull;
+                count++;
         }
         if (out_hash)
                 *out_hash = hash;
         return count;
 }
 
-/*
-        Populates the sidebar tree with common folders above the storage drives: Home, Downloads and Pictures (when home is given),
-        followed by the root drive (/) and every other mounted storage drive parsed from mountinfo. All roots start collapsed.
-*/
 static fn files_tree_apply(struct files_tree address_to t, const p8 address_to home, const struct files_drive address_to drives, int n, p64 hash)
 {
         static const struct
@@ -2036,8 +1796,7 @@ static fn files_tree_populate(struct files_tree address_to t, const p8 address_t
         int n = drives ? files_drives_parse(mountinfo, mountinfo_len, drives, FILES_DRIVES_MOST, &hash) : 0;
 
         files_tree_apply(t, home, drives, n, hash);
-        if (drives)
-                system_call_2(syscall(munmap), (positive)drives, sizeof(struct files_drive) * FILES_DRIVES_MOST);
+        files_unmap(drives, sizeof(struct files_drive) * FILES_DRIVES_MOST);
 }
 
 static b32 files_tree_sync_drives(struct files_tree address_to t, const p8 address_to home, b32 force)
@@ -2056,7 +1815,7 @@ static b32 files_tree_sync_drives(struct files_tree address_to t, const p8 addre
         changed = force || hash != t->drives_hash;
         if (changed)
                 files_tree_apply(t, home, s->drives, n, hash);
-        system_call_2(syscall(munmap), (positive)s, sizeof(*s));
+        files_unmap(s, sizeof(*s));
         return changed;
 }
 
@@ -2065,27 +1824,11 @@ static fn files_tree_populate_live(struct files_tree address_to t, const p8 addr
         files_tree_sync_drives(t, home, true);
 }
 
-static b32 files_tree_drives_changed(const struct files_tree address_to t)
-{
-        struct files_mount_scratch address_to s = (struct files_mount_scratch address_to)files_anon_map(sizeof(*s), null);
-        bipolar got;
-        p64 hash = 0;
-
-        if (!s)
-                return false;
-        got = file_slurp_once_at(AT_FDCWD, (string_address) "/proc/self/mountinfo", s->buf, sizeof(s->buf) - 1);
-        if (got > 0)
-                files_drives_parse(s->buf, (positive)got, s->drives, FILES_DRIVES_MOST, &hash);
-        system_call_2(syscall(munmap), (positive)s, sizeof(*s));
-        return hash != t->drives_hash;
-}
-
 static inline const p8 address_to files_tree_name(const struct files_tree address_to t, p32 at)
 {
         return t->names + t->node[at].name;
 }
 
-// The place after a node's last one under it: where its folders end.
 static p32 files_tree_after(const struct files_tree address_to t, p32 at)
 {
         p32 next = at + 1;
@@ -2095,29 +1838,22 @@ static p32 files_tree_after(const struct files_tree address_to t, p32 at)
         return next;
 }
 
-// The node's parent's place, or FILES_NO for a root (depth 0).
 static p32 files_tree_parent(const struct files_tree address_to t, p32 at)
 {
         if (at >= t->count || t->node[at].depth == 0)
                 return FILES_NO;
-        {
-                p32 depth = t->node[at].depth;
-
-                for (p32 up = at; up-- > 0;)
-                        if (t->node[up].depth < depth)
-                                return up;
-        }
+        for (p32 up = at, depth = t->node[at].depth; up-- > 0;)
+                if (t->node[up].depth < depth)
+                        return up;
         return FILES_NO;
 }
 
-// A node's path: its depth-0 root's path followed by its descendants joined with strokes. False when it would not fit.
 static b32 files_tree_path(const struct files_tree address_to t, p32 at, p8 address_to into)
 {
         p32 chain[256];
         int links = 0;
-        positive used = 0;
+        positive used = 0, rlen;
         const p8 address_to rpath;
-        positive rlen;
 
         if (at >= t->count)
                 return false;
@@ -2146,7 +1882,6 @@ static b32 files_tree_path(const struct files_tree address_to t, p32 at, p8 addr
         return true;
 }
 
-// The names of a node's folders read, in order: the collected names (each with its end) of names_used bytes, count of them.
 static int files_tree_name_order(address_any left, address_any right, address_any context)
 {
         const p8 address_to names = (const p8 address_to)context;
@@ -2154,10 +1889,6 @@ static int files_tree_name_order(address_any left, address_any right, address_an
         return files_name_order(names + *(const p32 address_to)left, names + *(const p32 address_to)right);
 }
 
-/*
-        A node opened: its folders read (once; a node read before shows what it read, and is read again by files_tree_shut then open) and
-        put after it, one level in. False when it cannot be read or there is no room; it is then shown with none.
-*/
 struct files_tree_open_scratch
 {
         p8 path[FILES_PATH];
@@ -2168,30 +1899,23 @@ struct files_tree_open_scratch
 static b32 files_tree_open(struct files_tree address_to t, p32 at)
 {
         struct files_tree_open_scratch address_to s;
-        file_walk walk;
+        file_walk walk = {.handle = -1};
         struct linux_dirent64 address_to record;
         file_facts folder;
         p32 count = 0, scanned = 0, after, depth;
-        positive used = 0, need = 0;
+        positive used = 0;
+        b32 ok = false;
 
         if (at >= t->count || t->node[at].open)
                 return at < t->count;
         if (!(s = (struct files_tree_open_scratch address_to)files_anon_map(sizeof(*s), null)))
                 return false;
-        if (!files_tree_path(t, at, s->path) || !file_walk_open(&walk, AT_FDCWD, (string_address)s->path))
-        {
-                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
-                t->node[at].read = true, t->node[at].has = 0;
-                return false;
-        }
-        // The folder held to what the node was read as: another one under its path is not this node's.
-        if (file_look_code(walk.handle, (string_address) "", AT_EMPTY_PATH, &folder) < 0 ||
+        if (!files_tree_path(t, at, s->path) || !file_walk_open(&walk, AT_FDCWD, (string_address)s->path) ||
+            files_look_fd(walk.handle, &folder) < 0 ||
             (t->node[at].inode && !files_same_file(t->node[at].inode, t->node[at].device_major, t->node[at].device_minor, &folder)))
         {
-                file_walk_close(&walk);
-                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
                 t->node[at].read = true, t->node[at].has = 0;
-                return false;
+                goto done;
         }
         while (count < FILES_TREE_CHILDREN && scanned < FILES_TREE_SCAN && (record = file_walk_next(&walk)))
         {
@@ -2201,8 +1925,7 @@ static b32 files_tree_open(struct files_tree address_to t, p32 at)
                 scanned++;
                 if (file_is_dot((string_address)record->d_name) || record->d_name[0] == '.' || length >= FILES_NAME || used + length + 1 > sizeof(s->found))
                         continue;
-                // A folder as it is, not followed: d_type when the disk says it, a look otherwise.
-                if (record->d_type != DT_DIR && (record->d_type != DT_UNKNOWN || file_look_code(walk.handle, (string_address)record->d_name, AT_SYMLINK_NOFOLLOW, &facts) < 0 ||
+                if (record->d_type != DT_DIR && (record->d_type != DT_UNKNOWN || files_look_at(walk.handle, (const p8 address_to)record->d_name, &facts) < 0 ||
                                                  (facts.mode & MODE_FORMAT) != MODE_DIRECTORY))
                         continue;
                 s->offsets[count++] = (p32)used;
@@ -2211,18 +1934,11 @@ static b32 files_tree_open(struct files_tree address_to t, p32 at)
         }
         if (count > 1)
                 qsort_r(s->offsets, count, sizeof(p32), files_tree_name_order, s->found);
-        for (p32 k = 0; k < count; k++)
-                need += string_length((string_address)(s->found + s->offsets[k]));
         after = at + 1, depth = t->node[at].depth + 1u;
-        t->node[at].read = true, t->node[at].has = (p16)count, t->node[at].open = true;
-        if (t->count + count > FILES_TREE_MOST || t->names_used + need + count > FILES_TREE_NAMES)
-        {
-                file_walk_close(&walk);
-                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
-                t->node[at].open = false;
-                return false;
-        }
-        // Room after the node, and each folder put there, its device and inode looked at without following.
+        t->node[at].read = true, t->node[at].has = (p16)count;
+        if (t->count + count > FILES_TREE_MOST || t->names_used + used > FILES_TREE_NAMES)
+                goto done;
+        t->node[at].open = true;
         memory_copy(&t->node[after + count], &t->node[after], (positive)(t->count - after) * sizeof(struct files_node));
         for (p32 k = 0; k < count; k++)
         {
@@ -2232,19 +1948,19 @@ static b32 files_tree_open(struct files_tree address_to t, p32 at)
                 file_facts facts;
 
                 memory_fill(n, 0, sizeof(*n));
-                n->name = t->names_used, n->length = (p16)length, n->depth = (p16)depth;
-                memory_copy(t->names + t->names_used, name, length + 1);
-                t->names_used += (p32)length + 1;
-                if (file_look_code(walk.handle, (string_address)name, AT_SYMLINK_NOFOLLOW, &facts) >= 0)
+                n->name = files_tree_store(t, name, length), n->length = (p16)length, n->depth = (p16)depth;
+                if (files_look_at(walk.handle, name, &facts) >= 0)
                         n->inode = facts.inode, n->device_major = facts.device_major, n->device_minor = facts.device_minor;
         }
         t->count += count;
-        file_walk_close(&walk);
-        system_call_2(syscall(munmap), (positive)s, sizeof(*s));
-        return true;
+        ok = true;
+done:
+        if (walk.handle >= 0)
+                file_walk_close(&walk);
+        files_unmap(s, sizeof(*s));
+        return ok;
 }
 
-// Reclaims name bytes left behind by shut nodes by compacting surviving node names in place.
 static fn files_tree_compact(struct files_tree address_to t)
 {
         p8 address_to fresh = (p8 address_to)files_anon_map(FILES_TREE_NAMES, null);
@@ -2269,10 +1985,9 @@ static fn files_tree_compact(struct files_tree address_to t)
         }
         memory_copy(t->names, fresh, used);
         t->names_used = used;
-        system_call_2(syscall(munmap), (positive)fresh, FILES_TREE_NAMES);
+        files_unmap(fresh, FILES_TREE_NAMES);
 }
 
-// A node shut: every node under it let go and its name bytes reclaimed, and read again when opened.
 static fn files_tree_shut(struct files_tree address_to t, p32 at)
 {
         p32 after;
@@ -2287,10 +2002,6 @@ static fn files_tree_shut(struct files_tree address_to t, p32 at)
                 files_tree_compact(t);
 }
 
-/*
-        Finds an already-visible node in the tree matching path without expanding any collapsed node (so collapsing an ancestor
-        keeps it collapsed). Prefers a depth-0 root match over a deeper duplicate under another root.
-*/
 static p32 files_tree_find(const struct files_tree address_to t, const p8 address_to path)
 {
         p8 made[FILES_PATH];
@@ -2307,11 +2018,7 @@ static p32 files_tree_find(const struct files_tree address_to t, const p8 addres
         return found;
 }
 
-/*
-        Reveals path under the most specific (longest-prefix) depth-0 root that contains it: an exact root match returns that root
-        without opening it (so Home, Downloads, Pictures and Drives stay collapsed by default), and a deeper path opens only along
-        the suffix under that root (never force-expanding / when the path lives under Home or a mounted drive).
-*/
+// Reveal `path` under the longest-prefix depth-0 root containing it (exact root matches stay collapsed).
 static p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to path)
 {
         positive length = string_length((string_address)path), best_len = 0, start;
@@ -2328,11 +2035,7 @@ static p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to
                         continue;
                 rpath = t->names + t->node[k].root_path;
                 rlen = string_length((string_address)rpath);
-                if (!rlen || rlen > length || memory_compare(path, rpath, rlen) != 0)
-                        continue;
-                if (rlen > 1 && path[rlen] != 0 && path[rlen] != '/')
-                        continue;
-                if (rlen > best_len)
+                if (rlen && rlen <= length && (rlen == 1 ? rpath[0] == '/' : files_path_under(path, (const char address_to)rpath)) && rlen > best_len)
                         best_len = rlen, at = k;
         }
         if (at == FILES_NO)
@@ -2360,28 +2063,7 @@ static p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to
         return at;
 }
 
-/*
-        Copying and moving (struct files_move): files named by their paths (a drop's, a paste's, the browser's own rows) put into a
-        folder held open (into), copied or moved, run in steps by a thread of its own (files_move_start) so that a folder of any size
-        and a disk of any speed never holds the window, which reads the counts as they go (bytes_done of bytes_total, items_done of
-        items_total) and may ask it to stop (files_move_cancel) between two pieces.
-
-        Nothing is written over and nothing is followed. A source is a path a person handed over: its folder is opened as the path
-        names it, and the source itself is looked at without following (a link is copied as the link it is, never what it names) and
-        opened held to the inode looked at (file_open_same, file_walk_open_found_same), so a name swapped between the look and the
-        open is refused. What is made in the folder is made only where the name is free (mkdirat, O_EXCL with O_NOFOLLOW, symlinkat,
-        renameat2 with RENAME_NOREPLACE); a name that is taken there is given a copy's, "name.copy.txt", "name.copy2.txt" and on (renamed counts them),
-        so two things never become one. A device, a pipe or a socket is not copied (skipped counts them).
-
-        A move is a rename where the source and the folder are on one filesystem, which is whole and instant; one into the folder it
-        is already in is nothing; across filesystems it is a copy and then, once the copy of that source is whole, its removal (as
-        the delete removes: held to what was looked at, a link removed and never what it names). A folder copied or moved into
-        itself or a folder inside it is refused (FILES_MOVE_INSIDE) before anything of it is made.
-
-        A copy that stops (cancelled, or the kernel refused) leaves what was whole and removes the file it was in the middle of; the
-        sources of a move are removed only when their copy is whole. The thread touches nothing of the model: the folder shown is read
-        again when the view sees the move end.
-*/
+// Stepped/threaded copy, move, and size-measurement job: never overwrites (O_EXCL / RENAME_NOREPLACE / .copy suffix) and never follows symlinks.
 #define FILES_MOVE_MOST 4096          // the sources one move takes
 #define FILES_MOVE_PIECE (8u << 20)   // a file's bytes copied in one piece: a cancel is seen between two
 #define FILES_MOVE_BUFFER (1u << 20)  // the bytes read and written at a time where the kernel will not copy a range
@@ -2389,6 +2071,8 @@ static p32 files_tree_reveal(struct files_tree address_to t, const p8 address_to
 #define FILES_MOVE_COPY 1             // what a move does: the values the drag's actions have (WINDOWS_DRAG_COPY, _MOVE)
 #define FILES_MOVE_MOVE 2
 #define FILES_MOVE_MEASURE 3          // or only counts what the sources hold (a properties sheet's size): nothing is made or moved
+#define FILES_MOVE_PATHS ((positive)FILES_MOVE_MOST * FILES_PATH / 4)
+#define FILES_MOVE_BYTES (FILES_MOVE_PATHS + (positive)FILES_MOVE_MOST * (sizeof(p32) + 1 + FILES_NAME))
 
 enum
 {
@@ -2415,63 +2099,60 @@ struct files_move
         p8 address_to copied;             // per source: 1 when it is copied (a copy, or a move across filesystems), 2 when it is done
         p8 address_to landed;             // per source, FILES_NAME bytes: the name it has in into once it is there ("" none), for an undo
         p32 count, next;
-        // The source being worked: its folder, its name, how it was looked at, the name it has in into.
         bipolar from;
         p8 name[FILES_NAME], named[FILES_NAME];
         file_facts facts;
-        // The folders inside it being copied (or counted, or removed), innermost last: each source folder's walk and the folder made
-        // for it, and the source folder's facts (its mode and times, given to the copy when it is whole).
         int depth;
         file_walk walk[FILES_JOB_DEEP];
         bipolar made[FILES_JOB_DEEP];
         file_facts made_facts[FILES_JOB_DEEP];
         p8 inside[FILES_JOB_DEEP][FILES_NAME];
-        // A file being copied, a piece at a time.
         bipolar in, out, out_folder;
         p8 out_name[FILES_NAME];
         p64 left;
-        file_facts piece_facts;           // and how its source was looked at: its mode and times, given to it when it is whole
-        b32 ranged;                       // the kernel copies a range here: no buffer
+        file_facts piece_facts;
+        b32 ranged;
         p8 address_to buffer;
         thread address_to worker;
-        b32 begun;                        // files_move_begin was called: files_move_end has what it holds to let go of
+        b32 begun;
 };
 
-// The name source which has in the folder it went into, "" while it has none there.
 static inline p8 address_to files_move_landed(const struct files_move address_to job, p32 which)
 {
         return job->landed + (positive)which * FILES_NAME;
 }
 
-static b32 files_move_cancelled(const struct files_move address_to job)
+static inline b32 files_move_cancelled(const struct files_move address_to job)
 {
         return __atomic_load_n(&job->cancel, __ATOMIC_ACQUIRE) != 0;
 }
 
-static fn files_move_fail(struct files_move address_to job, bipolar error)
+static inline b32 files_move_running(const struct files_move address_to job)
+{
+        return __atomic_load_n(&job->state, __ATOMIC_ACQUIRE) == FILES_JOB_RUNNING;
+}
+
+static b32 files_move_fail(struct files_move address_to job, bipolar error)
 {
         job->error = error;
         __atomic_store_n(&job->state, FILES_JOB_FAILED, __ATOMIC_RELEASE);
+        return false;
 }
 
-// The file half copied let go of: its descriptors closed and, when it was not whole, what was made of it removed (it is the move's own:
-// made with O_EXCL, and removed held to the inode it has).
 static fn files_move_file_drop(struct files_move address_to job, b32 whole)
 {
         file_facts made;
 
-        if (job->in >= 0)
-                system_close(job->in);
+        files_close(&job->in);
         if (job->out >= 0)
         {
-                if (!whole && file_look_code(job->out, (string_address) "", AT_EMPTY_PATH, &made) >= 0)
+                if (!whole && files_look_fd(job->out, &made) >= 0)
                         file_remove_same(job->out_folder, (string_address)job->out_name, 0, &made);
-                system_close(job->out);
+                files_close(&job->out);
         }
-        job->in = job->out = -1, job->left = 0;
+        job->left = 0;
 }
 
-// Everything the move holds let go of (its thread joined first by files_move_end): its folders, its file, its memory.
 static fn files_move_close(struct files_move address_to job)
 {
         files_move_file_drop(job, false);
@@ -2479,56 +2160,34 @@ static fn files_move_close(struct files_move address_to job)
         {
                 job->depth--;
                 file_walk_close(&job->walk[job->depth]);
-                if (job->made[job->depth] >= 0)
-                        system_close(job->made[job->depth]);
+                files_close(&job->made[job->depth]);
         }
-        if (job->from >= 0)
-                system_close(job->from);
-        if (job->into >= 0)
-                system_close(job->into);
-        job->from = job->into = -1;
+        files_close(&job->from);
+        files_close(&job->into);
 }
 
-// The bytes of a move's own memory: the sources' paths, offsets, marks and landed names.
-static positive files_move_bytes(void)
-{
-        return (positive)FILES_MOVE_MOST * FILES_PATH / 4 + (positive)FILES_MOVE_MOST * (sizeof(p32) + 1 + FILES_NAME);
-}
-
-/*
-        A move set up, not started: the sources (paths, count of them, each with its end) into the folder at into (a descriptor that is
-        the move's from now on, closed when it ends, whatever comes of this). A source that is no absolute path, the folder itself, or
-        more than FILES_MOVE_MOST of them are left out. The job's memory is a mapping of its own (files_move_end gives it back).
-*/
 static b32 files_move_begin(struct files_move address_to job, int how, bipolar into, const p8 address_to paths, p32 count)
 {
         bipolar err = 0;
-        positive used = 0, room = (positive)FILES_MOVE_MOST * FILES_PATH / 4;
+        positive used = 0;
 
         memory_fill(job, 0, sizeof(*job));
         job->into = into, job->from = job->in = job->out = job->out_folder = -1, job->begun = true;
         job->how = how == FILES_MOVE_MOVE || how == FILES_MOVE_MEASURE ? how : FILES_MOVE_COPY;
         for (int k = 0; k < FILES_JOB_DEEP; k++)
                 job->made[k] = -1, job->walk[k].handle = -1;
-        if (into < 0 || file_look_code(into, (string_address) "", AT_EMPTY_PATH, &job->into_facts) < 0 ||
-            (job->into_facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
-        {
-                files_move_fail(job, into < 0 ? into : -ERROR_NOT_DIRECTORY);
-                return false;
-        }
-        if (!(job->paths = (p8 address_to)files_anon_map(files_move_bytes(), &err)))
-        {
-                files_move_fail(job, err);
-                return false;
-        }
-        job->offsets = (p32 address_to)(job->paths + room);
+        if (into < 0 || files_look_fd(into, &job->into_facts) < 0 || (job->into_facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
+                return files_move_fail(job, into < 0 ? into : -ERROR_NOT_DIRECTORY);
+        if (!(job->paths = (p8 address_to)files_anon_map(FILES_MOVE_BYTES, &err)))
+                return files_move_fail(job, err);
+        job->offsets = (p32 address_to)(job->paths + FILES_MOVE_PATHS);
         job->copied = (p8 address_to)(job->offsets + FILES_MOVE_MOST);
         job->landed = job->copied + FILES_MOVE_MOST;
         for (p32 k = 0; k < count && job->count < FILES_MOVE_MOST; k++)
         {
                 positive length = string_length((string_address)paths);
 
-                if (length > 1 && paths[0] == '/' && length < FILES_PATH && used + length + 1 <= room)
+                if (length > 1 && paths[0] == '/' && length < FILES_PATH && used + length + 1 <= FILES_MOVE_PATHS)
                 {
                         job->offsets[job->count] = (p32)used;
                         memory_copy(job->paths + used, paths, length + 1);
@@ -2545,10 +2204,6 @@ static inline const p8 address_to files_move_path(const struct files_move addres
         return job->paths + job->offsets[which];
 }
 
-/*
-        The source number which made the one worked: its folder opened as its path names it and the source looked at in it without
-        following. False (the move failed) when either is not there.
-*/
 static b32 files_move_take(struct files_move address_to job, p32 which)
 {
         const p8 address_to path = files_move_path(job, which);
@@ -2558,32 +2213,22 @@ static b32 files_move_take(struct files_move address_to job, p32 which)
 
         while (cut > 0 && path[cut - 1] != '/')
                 cut--;
-        if (job->from >= 0)
-                system_close(job->from);
-        job->from = -1;
+        files_close(&job->from);
         if (!cut || cut == length || length - cut >= FILES_NAME)
-        {
-                files_move_fail(job, -ERROR_INVALID);
-                return false;
-        }
+                return files_move_fail(job, -ERROR_INVALID);
         memory_copy(job->name, path + cut, length - cut + 1);
         string_copy_bounded(job->at, (string_address)job->name, FILES_NAME);
         memory_copy(folder, path, cut > 1 ? cut - 1 : 1);
         folder[cut > 1 ? cut - 1 : 1] = end;
-        job->from = system_open_at(AT_FDCWD, folder, FILE_READ | O_DIRECTORY | O_CLOEXEC);
-        looked = job->from < 0 ? job->from : file_look_code(job->from, (string_address)job->name, AT_SYMLINK_NOFOLLOW, &job->facts);
-        if (looked < 0)
-        {
-                files_move_fail(job, looked);
-                return false;
-        }
-        return true;
+        job->from = files_open_dir(AT_FDCWD, folder, 0);
+        looked = job->from < 0 ? job->from : files_look_at(job->from, job->name, &job->facts);
+        return looked < 0 ? files_move_fail(job, looked) : true;
 }
 
-// Whether the folder (a descriptor) is the folder shown by facts or inside it: its folders looked at up to the root.
+// Whether directory fd `folder` is `facts` or a descendant of it.
 static b32 files_move_within(bipolar folder, const file_facts address_to facts)
 {
-        bipolar at = system_open_at(folder, (string_address) ".", FILE_READ | O_DIRECTORY | O_CLOEXEC);
+        bipolar at = files_open_dir(folder, (const p8 address_to) ".", 0);
         b32 inside = false;
 
         for (int up = 0; at >= 0 && up < 4096 && !inside; up++)
@@ -2591,47 +2236,32 @@ static b32 files_move_within(bipolar folder, const file_facts address_to facts)
                 file_facts here, above;
                 bipolar next;
 
-                if (file_look_code(at, (string_address) "", AT_EMPTY_PATH, &here) < 0)
+                if (files_look_fd(at, &here) < 0)
                         break;
-                inside = files_same_file(facts->inode, facts->device_major, facts->device_minor, &here);
-                next = system_open_at(at, (string_address) "..", FILE_READ | O_DIRECTORY | O_CLOEXEC);
-                if (next < 0 || file_look_code(next, (string_address) "", AT_EMPTY_PATH, &above) < 0 ||
-                    files_same_file(here.inode, here.device_major, here.device_minor, &above))
+                inside = files_same_facts(facts, &here);
+                next = files_open_dir(at, (const p8 address_to) "..", 0);
+                if (next < 0 || files_look_fd(next, &above) < 0 || files_same_facts(&here, &above))
                 {
-                        if (next >= 0)
-                                system_close(next);
+                        files_close(&next);
                         break;
                 }
                 system_close(at);
                 at = next;
         }
-        if (at >= 0)
-                system_close(at);
+        files_close(&at);
         return inside;
 }
 
-/*
-        A name for the source in the folder at into that is free there now: its own, else "stem.copy.ext", then "stem.copy2.ext" and on (a
-        name with its dot first has no extension: ".profile.copy"), so the copy sorts beside what it is a copy of and keeps its kind.
-        Answers false when none of the first thousand is free, or the name would not fit.
-*/
+// Find a free name in `into`: `name`, else `stem.copy.ext`, `stem.copy2.ext`, ... up to 999.
 static b32 files_move_free_name(bipolar into, const p8 address_to name, p8 address_to free, b32 address_to numbered)
 {
-        positive length = string_length((string_address)name), dot = length;
+        positive length = string_length((string_address)name), dot;
         file_facts there;
 
         *numbered = false;
-        if (file_look_code(into, (string_address)name, AT_SYMLINK_NOFOLLOW, &there) == -ERROR_NO_ENTRY)
-        {
-                memory_copy(free, name, length + 1);
-                return true;
-        }
-        for (positive at = length; at > 1; at--)
-                if (name[at - 1] == '.')
-                {
-                        dot = at - 1;
-                        break;
-                }
+        if (files_look_at(into, name, &there) == -ERROR_NO_ENTRY)
+                return memory_copy(free, name, length + 1), true;
+        dot = files_name_dot(name, length);
         for (positive number = 1; number < 1000; number++)
         {
                 p8 digits[8];
@@ -2643,28 +2273,17 @@ static b32 files_move_free_name(bipolar into, const p8 address_to name, p8 addre
                 memory_copy(free + dot, ".copy", 5);
                 memory_copy(free + dot + 5, digits, count);
                 memory_copy(free + dot + 5 + count, name + dot, length - dot + 1);
-                if (file_look_code(into, (string_address)free, AT_SYMLINK_NOFOLLOW, &there) == -ERROR_NO_ENTRY)
-                {
-                        *numbered = true;
-                        return true;
-                }
+                if (files_look_at(into, free, &there) == -ERROR_NO_ENTRY)
+                        return *numbered = true, true;
         }
         return false;
 }
 
-// The innermost folder being copied into, or into itself when none.
 static bipolar files_move_target(const struct files_move address_to job)
 {
         return job->depth ? job->made[job->depth - 1] : job->into;
 }
 
-// The innermost source folder, or the source's own folder.
-static bipolar files_move_source(const struct files_move address_to job)
-{
-        return job->depth ? job->walk[job->depth - 1].handle : job->from;
-}
-
-// A folder's mode and its times given to its copy, now that what is in it is whole.
 static fn files_move_settle(bipolar made, const file_facts address_to facts)
 {
         b64 times[4] = {facts->accessed.seconds, facts->accessed.nanoseconds, facts->modified.seconds, facts->modified.nanoseconds};
@@ -2673,11 +2292,6 @@ static fn files_move_settle(bipolar made, const file_facts address_to facts)
         system_call_4(syscall(utimensat), (positive)made, 0, (positive)times, 0);
 }
 
-/*
-        One thing of a copy (or of its count, when counting): the source as it was looked at (in the folder source, by name), made in
-        target under made_name. A folder is made and gone into (its walk and the folder made pushed), a file opened for its pieces, a link
-        made again, anything else skipped. False when the move stopped (failed).
-*/
 static b32 files_move_one(struct files_move address_to job, bipolar source, const p8 address_to name, file_facts address_to facts, const p8 address_to made_name,
                           b32 counting)
 {
@@ -2687,26 +2301,19 @@ static b32 files_move_one(struct files_move address_to job, bipolar source, cons
         if (format == MODE_DIRECTORY)
         {
                 if (job->depth >= FILES_JOB_DEEP)
-                {
-                        files_move_fail(job, -ERROR_LOOP);
-                        return false;
-                }
+                        return files_move_fail(job, -ERROR_LOOP);
                 if (!file_walk_open_found_same(&job->walk[job->depth], source, (string_address)name, facts))
-                {
-                        files_move_fail(job, job->walk[job->depth].error);
-                        return false;
-                }
+                        return files_move_fail(job, job->walk[job->depth].error);
                 job->made[job->depth] = -1, job->made_facts[job->depth] = *facts;
                 string_copy_bounded(job->inside[job->depth], (string_address)name, FILES_NAME);
                 if (!counting)
                 {
                         made = (bipolar)system_call_3(syscall(mkdirat), (positive)target, (positive)made_name, 0700);
-                        made = made < 0 ? made : system_open_at(target, (string_address)made_name, FILE_READ | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                        made = made < 0 ? made : files_open_dir(target, made_name, O_NOFOLLOW);
                         if (made < 0)
                         {
                                 file_walk_close(&job->walk[job->depth]);
-                                files_move_fail(job, made);
-                                return false;
+                                return files_move_fail(job, made);
                         }
                         job->made[job->depth] = made;
                 }
@@ -2731,10 +2338,7 @@ static b32 files_move_one(struct files_move address_to job, bipolar source, cons
                         length = (bipolar)system_call_3(syscall(symlinkat), (positive)points, (positive)target, (positive)made_name);
                 }
                 if (length < 0)
-                {
-                        files_move_fail(job, length);
-                        return false;
-                }
+                        return files_move_fail(job, length);
                 __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE);
                 return true;
         }
@@ -2750,19 +2354,16 @@ static b32 files_move_one(struct files_move address_to job, bipolar source, cons
         {
                 bipolar why = job->in < 0 ? job->in : job->out;
 
-                job->out = -1; // nothing was made
+                job->out = -1;
                 files_move_file_drop(job, true);
-                files_move_fail(job, why);
-                return false;
+                return files_move_fail(job, why);
         }
         job->out_folder = target, job->left = facts->size, job->ranged = true;
         string_copy_bounded(job->out_name, (string_address)made_name, FILES_NAME);
-        job->piece_facts = *facts; // the file's own mode and times, for when it is whole
+        job->piece_facts = *facts;
         return true;
 }
 
-// A piece of the file under way: FILES_MOVE_PIECE bytes, by the kernel's range copy or, where it will not, read and written. When it is
-// whole its mode and times are given to the copy. False when the move stopped.
 static b32 files_move_piece(struct files_move address_to job)
 {
         positive want = job->left < FILES_MOVE_PIECE ? (positive)job->left : FILES_MOVE_PIECE, moved = 0;
@@ -2775,7 +2376,7 @@ static b32 files_move_piece(struct files_move address_to job)
                         got = (bipolar)system_call_6(syscall(copy_file_range), (positive)job->in, 0, (positive)job->out, 0, want - moved, 0);
                         if (got == -ERROR_CROSS_DEVICE || got == -38 || got == -ERROR_INVALID || got == -95 || (got == 0 && !moved))
                         {
-                                job->ranged = false; // EXDEV, ENOSYS, EINVAL, EOPNOTSUPP, or nothing: the bytes go by hand
+                                job->ranged = false;
                                 continue;
                         }
                 }
@@ -2797,14 +2398,12 @@ static b32 files_move_piece(struct files_move address_to job)
         job->left -= moved;
         if (got < 0 || (!moved && job->left))
         {
-                // A file that shrank under the copy ends where it ended; anything else the kernel said stops the move.
                 if (got == 0)
                         job->left = 0;
                 else
                 {
                         files_move_file_drop(job, false);
-                        files_move_fail(job, got);
-                        return false;
+                        return files_move_fail(job, got);
                 }
         }
         if (!job->left)
@@ -2816,11 +2415,6 @@ static b32 files_move_piece(struct files_move address_to job)
         return true;
 }
 
-/*
-        A step of a copy (or a count) of the source worked: the file under way's next piece; else the next thing in the innermost
-        folder, or that folder ended (its copy given its mode and times). True while the source has more; false at its end or when
-        the move stopped (state says which).
-*/
 static b32 files_move_walk(struct files_move address_to job, b32 counting)
 {
         struct linux_dirent64 address_to record;
@@ -2838,58 +2432,38 @@ static b32 files_move_walk(struct files_move address_to job, b32 counting)
         if (!record)
         {
                 if (walk->error < 0)
-                {
-                        files_move_fail(job, walk->error);
-                        return false;
-                }
+                        return files_move_fail(job, walk->error);
                 job->depth--;
                 file_walk_close(walk);
                 if (job->made[job->depth] >= 0)
                 {
                         files_move_settle(job->made[job->depth], &job->made_facts[job->depth]);
-                        system_close(job->made[job->depth]);
-                        job->made[job->depth] = -1;
+                        files_close(&job->made[job->depth]);
                 }
                 __atomic_add_fetch(counting ? &job->items_total : &job->items_done, 1, __ATOMIC_RELEASE);
                 return job->depth > 0;
         }
-        looked = file_look_code(walk->handle, (string_address)record->d_name, AT_SYMLINK_NOFOLLOW, &facts);
-        if (looked < 0)
+        if ((looked = files_look_at(walk->handle, (const p8 address_to)record->d_name, &facts)) < 0)
         {
                 string_copy_bounded(job->at, (string_address)record->d_name, FILES_NAME);
-                files_move_fail(job, looked);
-                return false;
+                return files_move_fail(job, looked);
         }
         return files_move_one(job, walk->handle, (const p8 address_to)record->d_name, &facts, (const p8 address_to)record->d_name, counting) &&
                (job->depth > 0 || job->out >= 0);
 }
 
-/*
-        A step of a moved source's removal (its copy is whole): delegates to the shared DFS files_rmdir_step
-        using job->made[] as the directory fd stack (unused during FILES_MOVE_REMOVE, closed by files_move_close).
-*/
 static b32 files_move_remove(struct files_move address_to job)
 {
         bipolar err = 0;
         int step = files_rmdir_step(job->from, job->made, job->inside, &job->depth, job->at,
                                     job->depth ? null : job->name, job->depth ? null : &job->facts, null, &err);
 
-        if (step < 0)
-        {
-                files_move_fail(job, err);
-                return false;
-        }
-        return step == 0;
+        return step < 0 ? files_move_fail(job, err) : step == 0;
 }
 
-/*
-        A step of the move: a few things of the phase it is in, and back (a cancel is seen at each). True while there is more. The phases:
-        the sources moved by rename where they can be (a move), and marked to be copied where they cannot; what is to be copied counted;
-        each copied, and a moved one removed once its copy is whole; over.
-*/
 static b32 files_move_step(struct files_move address_to job)
 {
-        if (__atomic_load_n(&job->state, __ATOMIC_ACQUIRE) != FILES_JOB_RUNNING)
+        if (!files_move_running(job))
                 return false;
         if (files_move_cancelled(job))
         {
@@ -2904,35 +2478,20 @@ static b32 files_move_step(struct files_move address_to job)
                 file_facts folder;
 
                 if (job->next >= job->count)
-                {
-                        job->phase = FILES_MOVE_COUNT, job->next = 0;
-                        return true;
-                }
+                        return job->phase = FILES_MOVE_COUNT, job->next = 0, true;
                 if (!files_move_take(job, job->next))
                         return false;
                 if (job->how == FILES_MOVE_MEASURE)
-                {
-                        job->copied[job->next++] = 1;
-                        return true;
-                }
-                // A folder into itself, or into a folder inside it, is no copy and no move: nothing of it is made.
+                        return job->copied[job->next++] = 1, true;
                 if ((job->facts.mode & MODE_FORMAT) == MODE_DIRECTORY && files_move_within(job->into, &job->facts))
-                {
-                        files_move_fail(job, -FILES_MOVE_INSIDE);
-                        return false;
-                }
+                        return files_move_fail(job, -FILES_MOVE_INSIDE);
                 job->copied[job->next] = 1;
                 if (job->how == FILES_MOVE_MOVE)
                 {
-                        // Already in the folder: nothing to do. Else a rename where the name is free, and a copy where it crosses filesystems.
-                        if (file_look_code(job->from, (string_address) "", AT_EMPTY_PATH, &folder) >= 0 &&
-                            files_same_file(job->into_facts.inode, job->into_facts.device_major, job->into_facts.device_minor, &folder))
+                        if (files_look_fd(job->from, &folder) >= 0 && files_same_facts(&job->into_facts, &folder))
                                 job->copied[job->next] = 2;
                         else if (!files_move_free_name(job->into, job->name, job->named, &numbered))
-                        {
-                                files_move_fail(job, -ERROR_EXISTS);
-                                return false;
-                        }
+                                return files_move_fail(job, -ERROR_EXISTS);
                         else if ((moved = (bipolar)system_call_5(syscall(renameat2), (positive)job->from, (positive)job->name, (positive)job->into,
                                                                  (positive)job->named, FILE_RENAME_NOREPLACE)) >= 0)
                         {
@@ -2942,15 +2501,11 @@ static b32 files_move_step(struct files_move address_to job)
                                 __atomic_add_fetch(&job->items_done, 1, __ATOMIC_RELEASE);
                         }
                         else if (moved != -ERROR_CROSS_DEVICE)
-                        {
-                                files_move_fail(job, moved);
-                                return false;
-                        }
+                                return files_move_fail(job, moved);
                 }
                 job->next++;
                 return true;
         }
-        // Counting and copying go source by source: each taken, then walked.
         if (job->phase == FILES_MOVE_COUNT || job->phase == FILES_MOVE_COPYING)
         {
                 b32 counting = job->phase == FILES_MOVE_COUNT, numbered;
@@ -2959,9 +2514,8 @@ static b32 files_move_step(struct files_move address_to job)
                 {
                         if (files_move_walk(job, counting))
                                 return true;
-                        if (__atomic_load_n(&job->state, __ATOMIC_ACQUIRE) != FILES_JOB_RUNNING)
+                        if (!files_move_running(job))
                                 return false;
-                        // That source is counted, or whole: a moved one is removed now, else on to the next.
                         if (counting)
                                 job->next++;
                         else if (job->how == FILES_MOVE_MOVE)
@@ -2991,17 +2545,13 @@ static b32 files_move_step(struct files_move address_to job)
                         return true;
                 }
                 if (!files_move_free_name(job->into, job->name, job->named, &numbered))
-                {
-                        files_move_fail(job, -ERROR_EXISTS);
-                        return false;
-                }
+                        return files_move_fail(job, -ERROR_EXISTS);
                 job->renamed += numbered;
                 string_copy_bounded((string_address)files_move_landed(job, job->next), (string_address)job->named, FILES_NAME);
                 if (!files_move_one(job, job->from, job->name, &job->facts, job->named, false))
                         return false;
                 if (!job->depth && job->out < 0)
                 {
-                        // A link is whole at once (a moved one removed now), and something skipped stays where it is.
                         if (job->how == FILES_MOVE_MOVE && (job->facts.mode & MODE_FORMAT) == MODE_LINK)
                                 job->phase = FILES_MOVE_REMOVE;
                         else
@@ -3013,7 +2563,7 @@ static b32 files_move_step(struct files_move address_to job)
         {
                 if (files_move_remove(job))
                         return true;
-                if (__atomic_load_n(&job->state, __ATOMIC_ACQUIRE) != FILES_JOB_RUNNING)
+                if (!files_move_running(job))
                         return false;
                 job->copied[job->next++] = 2;
                 job->phase = FILES_MOVE_COPYING;
@@ -3022,19 +2572,12 @@ static b32 files_move_step(struct files_move address_to job)
         return false;
 }
 
-// The thread: steps to the end, or till it is stopped.
 static fn files_move_run(address_any argument)
 {
-        struct files_move address_to job = (struct files_move address_to)argument;
-
-        while (files_move_step(job))
+        while (files_move_step((struct files_move address_to)argument))
                 ;
 }
 
-/*
-        The move begun on a thread of its own; where no thread can be made, the view steps it between its events (files_move_step, as
-        the delete is stepped). True when a thread has it.
-*/
 static b32 files_move_start(struct files_move address_to job)
 {
         if (job->state != FILES_JOB_RUNNING)
@@ -3048,14 +2591,6 @@ static fn files_move_cancel(struct files_move address_to job)
         __atomic_store_n(&job->cancel, 1, __ATOMIC_RELEASE);
 }
 
-// Whether the move is under way (on its thread, or waiting for the view's steps).
-static b32 files_move_running(const struct files_move address_to job)
-{
-        return __atomic_load_n(&job->state, __ATOMIC_ACQUIRE) == FILES_JOB_RUNNING;
-}
-
-// The move let go of, once it is over (or stopped first): its thread joined, everything it holds closed, its memory given back. A move
-// never begun (a view's at its start) is only made empty.
 static fn files_move_end(struct files_move address_to job)
 {
         if (job->begun)
@@ -3066,31 +2601,17 @@ static fn files_move_end(struct files_move address_to job)
                         thread_join(job->worker);
                 }
                 files_move_close(job);
-                if (job->paths)
-                        system_call_2(syscall(munmap), (positive)job->paths, files_move_bytes());
-                if (job->buffer)
-                        system_call_2(syscall(munmap), (positive)job->buffer, FILES_MOVE_BUFFER);
+                files_unmap(job->paths, FILES_MOVE_BYTES);
+                files_unmap(job->buffer, FILES_MOVE_BUFFER);
         }
         memory_fill(job, 0, sizeof(*job));
         job->into = job->from = job->in = job->out = job->out_folder = -1;
 }
 
 /* ---- the bin ---- */
-/*
-        The bin is the desktop's common one under the home folder (on the data partition): BIN/files holds what was put there, each
-        under a name free there (files_move_free_name), and BIN/info/NAME.trashinfo says where it was and when:
+// Desktop trash bin (BIN/files + BIN/info/NAME.trashinfo); same-fs rename only (cross-fs returns FILES_DID_CROSS).
+#define FILES_DID_CROSS 9
 
-            [Trash Info]
-            Path=/root/a/one.txt
-            DeletionDate=2026-11-18T17:45:00
-
-        the path with every byte but letters, digits and / . - _ ~ as %XX. Putting is a rename on one filesystem (nothing is copied, so
-        nothing is lost if it stops); one on another filesystem is refused (FILES_DID_CROSS), which a real delete (Shift+Delete) does.
-        Restoring renames it back where it was, under a free name there if that is taken, and removes its info.
-*/
-#define FILES_DID_CROSS 9 // the bin is on another filesystem: nothing was moved
-
-// A path's folders made where they are missing (mode 0700), as mkdir -p does.
 static b32 files_bin_folders(const p8 address_to path)
 {
         p8 at[FILES_PATH];
@@ -3114,7 +2635,6 @@ static b32 files_bin_folders(const p8 address_to path)
         return true;
 }
 
-// The bin's own folder kind into into: BIN/files or BIN/info, with a name after it when one is given.
 static b32 files_bin_join(p8 address_to into, const p8 address_to bin, const char address_to part, const p8 address_to name, const char address_to suffix)
 {
         string_copy_bounded((string_address)into, (string_address)bin, FILES_PATH);
@@ -3129,7 +2649,6 @@ static b32 files_bin_join(p8 address_to into, const p8 address_to bin, const cha
         return string_length((string_address)into) + 1 < FILES_PATH;
 }
 
-// The last name of a path.
 static const p8 address_to files_base_name(const p8 address_to path)
 {
         const p8 address_to base = path;
@@ -3145,48 +2664,36 @@ static inline positive files_uri_byte(p8 address_to into, p8 c)
         static const char hex[] = "0123456789ABCDEF";
 
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' || c == '.' || c == '~')
-        {
-                into[0] = c;
-                return 1;
-        }
+                return into[0] = c, 1;
         into[0] = '%', into[1] = (p8)hex[c >> 4], into[2] = (p8)hex[c & 15];
         return 3;
 }
 
-/*
-        The entry at path (absolute) put in the bin, its info saying it was deleted at when ("YYYY-MM-DDThh:mm:ss"): FILES_DID with the
-        name it has in BIN/files in named (FILES_NAME), FILES_DID_CROSS where the bin is on another filesystem, FILES_DID_FAILED else.
-*/
+static inline int files_hex_nibble(p8 c)
+{
+        return c <= '9' ? c - '0' : (c | 32) - 'a' + 10;
+}
+
 static int files_bin_put(const p8 address_to bin, const p8 address_to path, const char address_to when, p8 address_to named)
 {
         p8 files_dir[FILES_PATH], into[FILES_PATH], info[FILES_PATH], text[FILES_PATH * 3 + 96];
-        positive used = 0;
+        positive used = 18;
         b32 numbered;
-        bipolar folder, moved, out;
+        bipolar folder, moved, out = -1;
+        int res = FILES_DID_FAILED;
 
         if (!files_bin_join(files_dir, bin, "/files", null, null) || !files_bin_folders(files_dir) || !files_bin_join(info, bin, "/info", null, null) ||
-            !files_bin_folders(info))
+            !files_bin_folders(info) || (folder = files_open_dir(AT_FDCWD, files_dir, 0)) < 0)
                 return FILES_DID_FAILED;
-        if ((folder = system_open_at(AT_FDCWD, (string_address)files_dir, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
-                return FILES_DID_FAILED;
-        // The info first, under the name the entry will have: a name whose info could not be made is never taken.
-        for (int tries = 0; tries < 8; tries++)
+        for (int tries = 0; tries < 8 && out < 0; tries++)
         {
                 if (!files_move_free_name(folder, files_base_name(path), named, &numbered) || !files_bin_join(info, bin, "/info", named, ".trashinfo"))
-                {
-                        system_close(folder);
-                        return FILES_DID_FAILED;
-                }
+                        goto done;
                 out = system_open_at_mode(AT_FDCWD, (string_address)info, FILE_WRITE | FILE_EXCLUSIVE | O_NOFOLLOW | O_CLOEXEC, 0600);
-                if (out >= 0)
-                        break;
         }
         if (out < 0)
-        {
-                system_close(folder);
-                return FILES_DID_FAILED;
-        }
-        memory_copy(text, "[Trash Info]\nPath=", 18), used = 18;
+                goto done;
+        memory_copy(text, "[Trash Info]\nPath=", 18);
         for (const p8 address_to c = path; *c && used + 4 < sizeof(text) - 64; c++)
                 used += files_uri_byte(text + used, *c);
         memory_copy(text + used, "\nDeletionDate=", 14), used += 14;
@@ -3197,16 +2704,18 @@ static int files_bin_put(const p8 address_to bin, const p8 address_to path, cons
         system_close(out);
         files_bin_join(into, bin, "/files", named, null);
         moved = (bipolar)system_call_5(syscall(renameat2), AT_FDCWD, (positive)path, AT_FDCWD, (positive)into, FILE_RENAME_NOREPLACE);
-        system_close(folder);
         if (moved < 0)
         {
                 system_remove_at(AT_FDCWD, (string_address)info, 0);
-                return moved == -ERROR_CROSS_DEVICE ? FILES_DID_CROSS : FILES_DID_FAILED;
+                res = moved == -ERROR_CROSS_DEVICE ? FILES_DID_CROSS : FILES_DID_FAILED;
         }
-        return FILES_DID;
+        else
+                res = FILES_DID;
+done:
+        system_close(folder);
+        return res;
 }
 
-// Where an entry of the bin (its name in BIN/files) was, from its info, %XX made bytes again: false when it has no info or none says.
 static b32 files_bin_was(const p8 address_to bin, const p8 address_to name, p8 address_to path)
 {
         p8 info[FILES_PATH], text[FILES_PATH * 3 + 128];
@@ -3215,8 +2724,7 @@ static b32 files_bin_was(const p8 address_to bin, const p8 address_to name, p8 a
 
         if (!files_bin_join(info, bin, "/info", name, ".trashinfo"))
                 return false;
-        got = file_slurp_once_at(AT_FDCWD, (string_address)info, text, sizeof(text) - 1);
-        if (got <= 0)
+        if ((got = file_slurp_once_at(AT_FDCWD, (string_address)info, text, sizeof(text) - 1)) <= 0)
                 return false;
         text[got] = 0;
         for (; at + 5 < (positive)got; at++)
@@ -3229,69 +2737,46 @@ static b32 files_bin_was(const p8 address_to bin, const p8 address_to name, p8 a
                 p8 c = text[at];
 
                 if (c == '%' && text[at + 1] && text[at + 2])
-                {
-                        int high = text[at + 1] <= '9' ? text[at + 1] - '0' : (text[at + 1] | 32) - 'a' + 10;
-                        int low = text[at + 2] <= '9' ? text[at + 2] - '0' : (text[at + 2] | 32) - 'a' + 10;
-
-                        c = (p8)(high << 4 | low), at += 2;
-                }
+                        c = (p8)(files_hex_nibble(text[at + 1]) << 4 | files_hex_nibble(text[at + 2])), at += 2;
                 path[out++] = c;
         }
         path[out] = 0;
         return out > 1 && path[0] == '/';
 }
 
-/*
-        The entry of the bin named name put back where it was: FILES_DID with the path it has now in back (FILES_PATH; a free name in its
-        folder if its own is taken, the folder made if it is gone), FILES_DID_FAILED else.
-*/
 static int files_bin_restore(const p8 address_to bin, const p8 address_to name, p8 address_to back)
 {
         p8 from[FILES_PATH], info[FILES_PATH], folder_path[FILES_PATH], free[FILES_NAME];
-        positive cut;
         b32 numbered;
         bipolar folder, moved;
 
-        if (!files_bin_was(bin, name, back) || !files_bin_join(from, bin, "/files", name, null) || !files_bin_join(info, bin, "/info", name, ".trashinfo"))
+        if (!files_bin_was(bin, name, back) || !files_bin_join(from, bin, "/files", name, null) || !files_bin_join(info, bin, "/info", name, ".trashinfo") ||
+            !files_path_parent(back, folder_path, null) || !files_bin_folders(folder_path) || (folder = files_open_dir(AT_FDCWD, folder_path, 0)) < 0)
                 return FILES_DID_FAILED;
-        string_copy_bounded((string_address)folder_path, (string_address)back, FILES_PATH);
-        cut = (positive)(files_base_name(folder_path) - folder_path);
-        folder_path[cut > 1 ? cut - 1 : 1] = 0;
-        if (!files_bin_folders(folder_path) || (folder = system_open_at(AT_FDCWD, (string_address)folder_path, FILE_READ | O_DIRECTORY | O_CLOEXEC)) < 0)
-                return FILES_DID_FAILED;
-        if (!files_move_free_name(folder, files_base_name(back), free, &numbered))
-        {
-                system_close(folder);
-                return FILES_DID_FAILED;
-        }
-        moved = (bipolar)system_call_5(syscall(renameat2), AT_FDCWD, (positive)from, (positive)folder, (positive)free, FILE_RENAME_NOREPLACE);
+        moved = files_move_free_name(folder, files_base_name(back), free, &numbered)
+                    ? (bipolar)system_call_5(syscall(renameat2), AT_FDCWD, (positive)from, (positive)folder, (positive)free, FILE_RENAME_NOREPLACE)
+                    : -1;
         system_close(folder);
         if (moved < 0)
                 return FILES_DID_FAILED;
         system_remove_at(AT_FDCWD, (string_address)info, 0);
-        back[cut] = 0;
-        string_append_bounded((string_address)back, (string_address)free, FILES_PATH);
+        files_path_join(back, FILES_PATH, folder_path, free);
         return FILES_DID;
 }
 
 /* ---- git: what a work tree tracks ---- */
-/*
-        Where the folder shown is in a git work tree (a .git folder in it or a folder above it), each entry of its listing is marked as
-        git sees it, from the index and the ignore files alone (no git is run): FILES_GIT_TRACKED where the index holds it (a folder,
-        where it holds anything under it), FILES_GIT_IGNORED where a .gitignore of the work tree's root or of the folder shown matches
-        its name (a name, * and ? in it, a / at its end for folders only, a / at its start for that folder's own names; negations and
-        patterns with a / inside are not read), FILES_GIT_UNTRACKED else. The index is read in versions 2 and 3 (version 4 compresses its
-        paths and is not read: nothing is marked). .git itself is left unmarked.
-*/
+// Marks listing entries as tracked/untracked/ignored directly from .git/index (v2/v3) and .gitignore files without invoking git.
 #define FILES_GIT_NONE 0
 #define FILES_GIT_TRACKED 1
 #define FILES_GIT_UNTRACKED 2
 #define FILES_GIT_IGNORED 3
-#define FILES_GIT_INDEX_MOST (64u << 20) // an index larger than this is not read
-#define FILES_GIT_NAMES 131072u          // the names' table: twice the listing's most
+#define FILES_GIT_INDEX_MOST (64u << 20)
+#define FILES_GIT_NAMES 131072u
+#define FILES_GIT_LITERALS 4096u
+#define FILES_GIT_GLOBS 256
+#define FILES_GIT_BUDGET 4000000ul
+#define FILES_GIT_IGNORE_MOST 16384
 
-// Whether text matches a glob of * and ? (no classes), both length-bounded; each step of it counted off budget, and none matches once that
-// is spent (a hostile ignore file's patterns cost what the budget allows and no more).
 static b32 files_git_glob(const p8 address_to glob, positive glob_length, const p8 address_to text, positive length, positive address_to budget)
 {
         positive g = 0, t = 0, star = (positive)-1, mark = 0;
@@ -3315,26 +2800,16 @@ static b32 files_git_glob(const p8 address_to glob, positive glob_length, const 
         return g == glob_length;
 }
 
-/*
-        The ignore files' patterns, read once for a listing: a line that is a name alone goes into a table of names (the most lines are
-        those, and a name is then one lookup whatever the file's length); one with * or ? is kept for the glob, at most FILES_GIT_GLOBS of
-        them, and every glob of the listing's names against them shares one budget of steps (FILES_GIT_BUDGET).
-*/
-#define FILES_GIT_LITERALS 4096u      // the table of a name pattern: a power of two
-#define FILES_GIT_GLOBS 256           // the wildcard patterns kept
-#define FILES_GIT_BUDGET 4000000ul    // the glob steps a listing's marks may take
-#define FILES_GIT_IGNORE_MOST 16384   // the bytes of an ignore file read
-
 struct files_git_pattern
 {
         const p8 address_to text;
         p16 length;
-        p8 only_folders, rooted; // a / at its end; it is of the folder the file is in (the file is the folder shown's, or a / began it)
+        p8 only_folders, rooted;
 };
 
 struct files_git_rules
 {
-        struct files_git_pattern literal[FILES_GIT_LITERALS]; // by the name's hash, open addressed (length 0: none)
+        struct files_git_pattern literal[FILES_GIT_LITERALS];
         struct files_git_pattern glob[FILES_GIT_GLOBS];
         int globs;
 };
@@ -3347,12 +2822,11 @@ struct files_git_scratch
         p8 ignore[2][FILES_GIT_IGNORE_MOST];
 };
 
-static p32 files_git_hash(const p8 address_to text, positive length)
+static inline p32 files_git_hash(const p8 address_to text, positive length)
 {
         return hash_fnv1a(2166136261u, text, length);
 }
 
-// An ignore file's lines read into the rules: rooted says the folder shown is the folder the file is in.
 static fn files_git_rules_add(struct files_git_rules address_to rules, const p8 address_to text, positive size, b32 rooted)
 {
         for (positive at = 0; at < size;)
@@ -3392,7 +2866,6 @@ static fn files_git_rules_add(struct files_git_rules address_to rules, const p8 
                                         *slot = pattern;
                                         break;
                                 }
-                                // The same name again: a folder-only one and one of every kind are one of every kind.
                                 if (slot->length == pattern.length && !memory_compare(slot->text, pattern.text, pattern.length))
                                 {
                                         slot->only_folders &= pattern.only_folders;
@@ -3403,7 +2876,6 @@ static fn files_git_rules_add(struct files_git_rules address_to rules, const p8 
         }
 }
 
-// Whether the rules ignore name (a folder's when folder).
 static b32 files_git_ignored(const struct files_git_rules address_to rules, const p8 address_to name, positive length, b32 folder, positive address_to budget)
 {
         p32 hash = files_git_hash(name, length);
@@ -3418,70 +2890,45 @@ static b32 files_git_ignored(const struct files_git_rules address_to rules, cons
                         return true;
         }
         for (int k = 0; k < rules->globs; k++)
-        {
-                const struct files_git_pattern address_to g = &rules->glob[k];
-
-                if ((folder || !g->only_folders) && files_git_glob(g->text, g->length, name, length, budget))
+                if ((folder || !rules->glob[k].only_folders) && files_git_glob(rules->glob[k].text, rules->glob[k].length, name, length, budget))
                         return true;
-        }
         return false;
 }
 
-/*
-        The marks of the listing shown, by entry (state[k] for m->shown.entry[k], FILES_MOST of them): true where the folder is in a
-        work tree and its index was read, false (every mark FILES_GIT_NONE) else. The index is read, not mapped (a file cut short while it
-        is read is a short read, not a fault), and one larger than FILES_GIT_INDEX_MOST is not read.
-*/
 static b32 files_git_marks(const struct files_model address_to m, p8 address_to state)
 {
         struct files_git_scratch address_to s;
         p8 at_path[FILES_PATH];
-        positive length = string_length((string_address)m->path), rel, ignore_size[2] = {0, 0}, size = 0, got = 0, budget = FILES_GIT_BUDGET;
+        positive length = string_length((string_address)m->path), rel, size = 0, mapped_size = 0, got = 0, budget = FILES_GIT_BUDGET;
         file_facts facts;
         bipolar handle;
-        p8 address_to mapped;
-        const p8 address_to index;
+        p8 address_to mapped = null;
         p32 count, version;
-        b32 at_root;
+        b32 at_root, ok = false;
 
         memory_fill(state, FILES_GIT_NONE, FILES_MOST);
-        if (!length || length >= FILES_PATH - 16)
+        if (!length || length >= FILES_PATH - 16 || !(s = (struct files_git_scratch address_to)files_anon_map(sizeof(*s), null)))
                 return false;
-        if (!(s = (struct files_git_scratch address_to)files_anon_map(sizeof(*s), null)))
-                return false;
-        // The work tree: the folder shown or the nearest above it with a .git folder.
         string_copy_bounded((string_address)s->root, (string_address)m->path, FILES_PATH);
         for (;;)
         {
-                positive here = string_length((string_address)s->root);
-
                 files_path_join(at_path, FILES_PATH, s->root, (const p8 address_to) ".git");
                 if (file_look_code(AT_FDCWD, (string_address)at_path, 0, &facts) == 0 && (facts.mode & MODE_FORMAT) == MODE_DIRECTORY)
                         break;
-                if (here <= 1)
-                {
-                        system_call_2(syscall(munmap), (positive)s, sizeof(*s));
-                        return false;
-                }
-                while (here > 1 && s->root[here - 1] != '/')
-                        here--;
-                s->root[here > 1 ? here - 1 : 1] = 0;
+                if (!files_path_parent(s->root, s->root, null))
+                        goto done;
         }
         rel = string_length((string_address)s->root);
-        rel = rel > 1 ? rel + 1 : 1; // the folder shown's path inside the work tree starts here ("" at the root)
+        rel = rel > 1 ? rel + 1 : 1;
         at_root = rel <= 1 || length + 1 == rel;
         string_append_bounded((string_address)at_path, (string_address) "/index", FILES_PATH);
         if ((handle = system_open_at(AT_FDCWD, (string_address)at_path, FILE_READ | O_CLOEXEC)) < 0)
+                goto done;
+        mapped_size = files_look_fd(handle, &facts) == 0 ? (positive)facts.size : 0;
+        mapped = mapped_size >= 12 && mapped_size <= FILES_GIT_INDEX_MOST ? (p8 address_to)files_anon_map(mapped_size, null) : null;
+        while (mapped && got < mapped_size)
         {
-                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
-                return false;
-        }
-        size = file_look_code(handle, (string_address) "", AT_EMPTY_PATH, &facts) == 0 ? (positive)facts.size : 0;
-        mapped = size >= 12 && size <= FILES_GIT_INDEX_MOST ? (p8 address_to)files_anon_map(size, null) : null;
-        // Read whole into memory of its own; what it holds past a short read is the zeros the mapping began with, and is not read.
-        while (mapped && got < size)
-        {
-                bipolar part = (bipolar)system_read_once(handle, mapped + got, size - got);
+                bipolar part = (bipolar)system_read_once(handle, mapped + got, mapped_size - got);
 
                 if (part <= 0)
                         break;
@@ -3489,21 +2936,12 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
         }
         system_close(handle);
         if (!mapped)
-        {
-                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
-                return false;
-        }
+                goto done;
         size = got;
-        index = mapped;
-        version = size >= 12 ? (p32)index[4] << 24 | (p32)index[5] << 16 | (p32)index[6] << 8 | index[7] : 0;
-        count = size >= 12 ? (p32)index[8] << 24 | (p32)index[9] << 16 | (p32)index[10] << 8 | index[11] : 0;
-        if (size < 12 || memory_compare(index, "DIRC", 4) || (version != 2 && version != 3))
-        {
-                system_call_2(syscall(munmap), (positive)mapped, facts.size);
-                system_call_2(syscall(munmap), (positive)s, sizeof(*s));
-                return false;
-        }
-        // The listing's names in a table, each to its entry, so a path of the index finds its entry at once.
+        version = size >= 12 ? (p32)mapped[4] << 24 | (p32)mapped[5] << 16 | (p32)mapped[6] << 8 | mapped[7] : 0;
+        count = size >= 12 ? (p32)mapped[8] << 24 | (p32)mapped[9] << 16 | (p32)mapped[10] << 8 | mapped[11] : 0;
+        if (size < 12 || memory_compare(mapped, "DIRC", 4) || (version != 2 && version != 3))
+                goto done;
         memory_fill(s->table, 0xff, sizeof(s->table));
         for (p32 k = 0; k < m->shown.count; k++)
         {
@@ -3515,33 +2953,32 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
                 s->table[hash & (FILES_GIT_NAMES - 1)] = k;
                 state[k] = FILES_GIT_UNTRACKED;
         }
-        // Every path of the index under the folder shown marks the name it starts with there tracked.
         for (positive at = 12, k = 0; k < count && at + 62 < size; k++)
         {
-                p16 flags = (p16)(index[at + 60] << 8 | index[at + 61]);
+                p16 flags = (p16)(mapped[at + 60] << 8 | mapped[at + 61]);
                 positive fixed = 62 + (version >= 3 && (flags & 0x4000) ? 2 : 0), name_at = at + fixed, end_at = name_at, first, stop;
                 p32 hash, found;
 
-                while (end_at < size && index[end_at])
+                while (end_at < size && mapped[end_at])
                         end_at++;
                 at = at + ((fixed + (end_at - name_at) + 8) & ~(positive)7);
                 first = name_at;
                 if (!at_root)
                 {
-                        positive inside = length - (rel - 1); // the folder shown's path from its slash in the work tree: "/sub/dir"
+                        positive inside = length - (rel - 1);
 
-                        if (end_at - name_at < inside || memory_compare(index + name_at, m->path + rel, inside - 1) || index[name_at + inside - 1] != '/')
+                        if (end_at - name_at < inside || memory_compare(mapped + name_at, m->path + rel, inside - 1) || mapped[name_at + inside - 1] != '/')
                                 continue;
                         first = name_at + inside;
                 }
-                for (stop = first; stop < end_at && index[stop] != '/'; stop++)
+                for (stop = first; stop < end_at && mapped[stop] != '/'; stop++)
                         ;
-                hash = files_git_hash(index + first, stop - first);
+                hash = files_git_hash(mapped + first, stop - first);
                 while ((found = s->table[hash & (FILES_GIT_NAMES - 1)]) != 0xffffffffu)
                 {
                         const struct files_entry address_to entry = &m->shown.entry[found];
 
-                        if (entry->length == stop - first && !memory_compare(m->shown.names + entry->name, index + first, stop - first))
+                        if (entry->length == stop - first && !memory_compare(m->shown.names + entry->name, mapped + first, stop - first))
                         {
                                 state[found] = FILES_GIT_TRACKED;
                                 break;
@@ -3549,18 +2986,15 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
                         hash++;
                 }
         }
-        system_call_2(syscall(munmap), (positive)mapped, facts.size);
-        // The ignore files: the work tree's root's and the folder shown's, read once into the rules.
         for (int which = 0; which < 2; which++)
         {
                 bipolar read;
 
                 files_path_join(at_path, FILES_PATH, which ? m->path : s->root, (const p8 address_to) ".gitignore");
                 read = file_slurp_once_at(AT_FDCWD, (string_address)at_path, s->ignore[which], sizeof(s->ignore[which]));
-                ignore_size[which] = read > 0 ? (positive)read : 0;
-                files_git_rules_add(&s->rules, s->ignore[which], ignore_size[which], which ? true : at_root);
+                files_git_rules_add(&s->rules, s->ignore[which], read > 0 ? (positive)read : 0, which ? true : at_root);
                 if (at_root)
-                        break; // the folder shown is the root: one file
+                        break;
         }
         for (p32 k = 0; k < m->shown.count; k++)
         {
@@ -3568,15 +3002,15 @@ static b32 files_git_marks(const struct files_model address_to m, p8 address_to 
                 const p8 address_to name = m->shown.names + entry->name;
 
                 if (entry->length == 4 && !memory_compare(name, ".git", 4))
-                {
                         state[k] = FILES_GIT_NONE;
-                        continue;
-                }
-                if (state[k] == FILES_GIT_UNTRACKED && files_git_ignored(&s->rules, name, entry->length, entry->kind == FILES_KIND_DIRECTORY, &budget))
+                else if (state[k] == FILES_GIT_UNTRACKED && files_git_ignored(&s->rules, name, entry->length, entry->kind == FILES_KIND_DIRECTORY, &budget))
                         state[k] = FILES_GIT_IGNORED;
         }
-        system_call_2(syscall(munmap), (positive)s, sizeof(*s));
-        return true;
+        ok = true;
+done:
+        files_unmap(mapped, mapped_size);
+        files_unmap(s, sizeof(*s));
+        return ok;
 }
 
 #endif // MOONWATER_FILES_MODEL

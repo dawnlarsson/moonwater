@@ -257,12 +257,10 @@ static struct
         b32 carry_press;
         int carry_px, carry_py;
         // What was done that Ctrl+Z undoes and Ctrl+Y does again (files_deed): the last FILES_DEEDS, deed_done of them done, the ones after
-        // them undone (a new one forgets those). move_into is the folder a copy or a move under way goes into, for its deed; undoing is a
-        // move begun by an undo, which is no deed of its own.
+        // them undone (a new one forgets those). move_into is the folder a copy or a move under way goes into, for its deed.
         struct files_deed deed[FILES_DEEDS];
         int deed_count, deed_done;
         p8 move_into[FILES_PATH];
-        b32 undoing;
         // The listing's marks as git sees them where the folder is in a work tree (files_git_marks), worked out again when the listing changes.
         b32 git;
         p64 git_key;
@@ -306,6 +304,18 @@ static b32 files_in_bin(void);
 static struct files_deed address_to files_deed_new(int kind);
 static fn files_deed_add(struct files_deed address_to d, const p8 address_to from, const p8 address_to to);
 static fn files_deed_keep(struct files_deed address_to d);
+static b32 files_tree_trash(const p8 address_to name, positive length);
+static b32 files_act(int which);
+static fn files_moved(void);
+static fn files_part_go(void);
+static fn files_open_with(b32 editor);
+
+#define FILES_COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
+static inline b32 files_in_rect(int x, int y, int rx, int ry, int rw, int rh)
+{
+        return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+}
 
 /* ---- the rows ---- */
 
@@ -315,37 +325,37 @@ static b32 files_row_selected(int id)
         return id >= 0 && files_model_chosen(&files.big->model, (p32)id);
 }
 
-// A moment as a row says it: the day and the minute, in the machine's own zone, digits whatever the language (2026-11-13 09:41).
-static fn files_time_text(char address_to into, b64 seconds)
+// A moment in the machine's own zone, digits whatever the language: YYYY-MM-DD<sep>HH:MM[:SS].
+static fn files_format_time(char address_to into, b64 seconds, char sep, b32 with_seconds)
 {
         tm broken;
         time_t at = (time_t)seconds;
         int year;
 
         into[0] = 0;
-        if (!localtime_r(&at, &broken))
+        if (!localtime_r(&at, &broken) || (year = broken.tm_year + 1900) < 0 || year > 9999)
                 return;
-        year = broken.tm_year + 1900;
-        if (year < 0 || year > 9999)
-                return;
-        into[0] = (char)('0' + year / 1000), into[1] = (char)('0' + year / 100 % 10), into[2] = (char)('0' + year / 10 % 10), into[3] = (char)('0' + year % 10);
-        into[4] = '-', into[5] = (char)('0' + (broken.tm_mon + 1) / 10), into[6] = (char)('0' + (broken.tm_mon + 1) % 10);
-        into[7] = '-', into[8] = (char)('0' + broken.tm_mday / 10), into[9] = (char)('0' + broken.tm_mday % 10);
-        into[10] = ' ', into[11] = (char)('0' + broken.tm_hour / 10), into[12] = (char)('0' + broken.tm_hour % 10);
-        into[13] = ':', into[14] = (char)('0' + broken.tm_min / 10), into[15] = (char)('0' + broken.tm_min % 10);
-        into[16] = 0;
+        {
+                static const char punct[5] = {'-', '-', ' ', ':', ':'};
+                int parts[5] = {broken.tm_mon + 1, broken.tm_mday, broken.tm_hour, broken.tm_min, broken.tm_sec};
+                int count = with_seconds ? 5 : 4;
+
+                into[0] = (char)('0' + year / 1000), into[1] = (char)('0' + year / 100 % 10);
+                into[2] = (char)('0' + year / 10 % 10), into[3] = (char)('0' + year % 10);
+                for (int k = 0; k < count; k++)
+                {
+                        into[4 + 3 * k] = k == 2 ? sep : punct[k];
+                        into[5 + 3 * k] = (char)('0' + parts[k] / 10);
+                        into[6 + 3 * k] = (char)('0' + parts[k] % 10);
+                }
+                into[4 + 3 * count] = 0;
+        }
 }
 
-// An entry's name as a row writes it (ui_label_foreign).
 static positive files_name_text(char address_to into, positive room, const struct files_model address_to m, const struct files_entry address_to entry)
 {
-        positive used = room > 2 ? ui_label_foreign(into, room - 1, files_model_name(m, entry), entry->length) : 0;
-
-        (void)entry;
-        return used;
+        return room > 2 ? ui_label_foreign(into, room - 1, files_model_name(m, entry), entry->length) : 0;
 }
-
-static b32 files_tree_trash(const p8 address_to name, positive length);
 
 // Whether the folder name in the folder at path is the home folder ($HOME).
 static b32 files_is_home(const p8 address_to path, const p8 address_to name, positive length)
@@ -409,7 +419,7 @@ static fn files_describe(int id, struct ui_row address_to row)
         {
                 if (entry->kind == FILES_KIND_FILE)
                         ui_size_text(size, sizeof(size), entry->size);
-                files_time_text(when, entry->modified);
+                files_format_time(when, entry->modified, ' ', false);
         }
         ui_file_type(type, sizeof(type), files_model_name(m, entry), entry->length, entry->kind == FILES_KIND_DIRECTORY,
                      entry->kind == FILES_KIND_LINK, entry->kind == FILES_KIND_FILE);
@@ -473,12 +483,6 @@ static fn files_tree_describe(int id, struct ui_row address_to row)
                 row->separator = true;
 }
 
-static fn files_tree_damaged(int top, int bottom)
-{
-        (void)top, (void)bottom;
-        files.dirty = true;
-}
-
 // The tree after the folder shown changed: the nodes down to it opened, and it is the lit one (none when it is not in the tree).
 static fn files_tree_follow(void)
 {
@@ -488,10 +492,7 @@ static fn files_tree_follow(void)
 }
 
 // The model's order for a column of the header: Name, Size, Type, Modified.
-static int files_column_sort(int column)
-{
-        return column == 1 ? FILES_SORT_SIZE : column == 2 ? FILES_SORT_KIND : column == 3 ? FILES_SORT_TIME : FILES_SORT_NAME;
-}
+static const int files_sort_cols[4] = {FILES_SORT_NAME, FILES_SORT_SIZE, FILES_SORT_KIND, FILES_SORT_TIME};
 
 static fn files_damaged(int top, int bottom)
 {
@@ -501,19 +502,18 @@ static fn files_damaged(int top, int bottom)
 
 /* ---- the window's words ---- */
 
-// What the rows' place says when there are none: the folder's state, in the language's words.
-static const char address_to files_state_text(const struct files_model address_to m)
+// A folder's state as its language id (used for both the empty-folder notice and foot errors).
+static unsigned int files_state_said(int state)
 {
-        switch (m->state)
+        switch (state)
         {
-        case FILES_READING: return WORDS(files_reading);
-        case FILES_UNREADABLE: return WORDS(files_unreadable);
-        case FILES_GONE: return WORDS(files_gone);
-        case FILES_NOT_DIRECTORY: return WORDS(files_not_folder);
-        case FILES_FAILED: return WORDS(files_failed);
-        case FILES_READY: return WORDS(files_empty);
+        case FILES_READING: return LANGUAGE_files_reading;
+        case FILES_UNREADABLE: return LANGUAGE_files_unreadable;
+        case FILES_GONE: return LANGUAGE_files_gone;
+        case FILES_NOT_DIRECTORY: return LANGUAGE_files_not_folder;
+        case FILES_READY: return LANGUAGE_files_empty;
+        default: return LANGUAGE_files_failed;
         }
-        return "";
 }
 
 // The foot: what the last thing asked came to, else how many entries there are (the first of more, for a listing that was cut).
@@ -635,8 +635,6 @@ static fn files_crumbs_draw(void)
 
 /* ---- the layout ---- */
 
-static b32 files_act(int which);
-
 // The window as a tree: the path's band (the three buttons, then the path), the rows, and the foot.
 static fn files_layout(void)
 {
@@ -644,46 +642,17 @@ static fn files_layout(void)
         struct files_model address_to m = &files.big->model;
         struct ui_list address_to l = &files.big->list;
 
-        if (!l->describe)
-        {
-                l->virtual = true, l->beside = true;
-                l->row_h = FILES_ROW;
-                l->describe = files_describe;
-                l->damaged = files_damaged;
-                l->selected = files_row_selected;
-                l->hover = l->down = -1;
-        }
-        if (!files.big->tree_list.describe)
-        {
-                struct ui_list address_to t = &files.big->tree_list;
-
-                t->virtual = true, t->tree = true, t->beside = true;
-                t->row_h = FILES_ROW;
-                t->describe = files_tree_describe;
-                t->damaged = files_tree_damaged;
-                t->hover = t->down = -1;
-        }
         files.big->tree_list.total = (int)files.big->tree.count;
         files.big->tree_list.focus = files.focus == FILES_FOCUS_TREE ? (int)files.tree_at : files.tree_shown != FILES_NO ? (int)files.tree_shown : -1;
         files_status_text();
-        if (!files.path.kind)
-        {
-                files.path.kind = UI_INPUT, files.path.variant = UI_FIELD_BARE;
-                files.path.edit = files_field();
-        }
         files.path.focused = files.editing && files.focused;
-        if (!files.finder_field.kind)
-        {
-                files.finder_field.kind = UI_INPUT, files.finder_field.variant = UI_FIELD_BARE;
-                files.finder_field.edit = &files.finder;
-        }
         files.finder_field.focused = files.finding && files.focus == FILES_FOCUS_FIND && files.focused;
         files.finder_field.items[0] = WORDS(files_find_hint);
         files.path.items[0] = files.editing == FILES_EDIT_NAME ? WORDS(files_rename_hint) : null;
         // Every entry is a row of the list, the row the keys are on is the model's cursor, and an empty folder says what it is.
         l->total = (int)files_model_count(m);
         l->focus = m->cursor != FILES_NO ? (int)m->cursor : -1;
-        l->empty = files_state_text(m);
+        l->empty = m->state == FILES_NONE ? "" : language_text(files_state_said(m->state));
         // The view: details are rows under the columns (striped), icons and a list are tiles. Set before ui_view_end so ui_list_layout
         // sizes the virtual list and its scrollbar accurately on the first frame after switching view modes.
         l->columns = files.view == FILES_VIEW_DETAILS ? &files.columns : null;
@@ -731,10 +700,8 @@ static fn files_layout(void)
                 ui_scroll_set(&l->scroll, (int)m->seat), files.reseat = false;
         m->seat = l->scroll.scroll;
         // The columns across the rows' words, in the language's titles; the one the rows are ordered by is the model's order.
-        files.columns.count = 4;
         files.columns.title[0] = WORDS(files_column_name), files.columns.title[1] = WORDS(files_column_size);
         files.columns.title[2] = WORDS(files_column_type), files.columns.title[3] = WORDS(files_column_modified);
-        files.columns.at_end[1] = true;
         ui_columns_layout(ui, &files.columns, l->x, files.head_box.y, l->w);
         // The tree's rows scrolled so the folder shown is in sight, once it is shown.
         if (files.tree_reseat && files.big->tree_list.h > 0)
@@ -759,8 +726,18 @@ static fn files_show_cursor(void)
 
 /* ---- what a person asks ---- */
 
-static fn files_moved(void);
-static fn files_part_go(void);
+static positive files_field_read(struct ui_text address_to t, p8 address_to into, positive room)
+{
+        positive length = ui_text_string(t, into, room);
+
+        into[length < room ? length : room - 1] = end;
+        return length;
+}
+
+static unsigned int files_did_said(int did)
+{
+        return did == FILES_DID ? 0 : did == FILES_DID_EXISTS ? LANGUAGE_files_name_taken : did == FILES_DID_BAD ? LANGUAGE_files_name_bad : LANGUAGE_files_unreadable;
+}
 
 // The band becomes the field: holding the whole path (FILES_EDIT_PATH), or the name of the entry the keys are on for a new one
 // (FILES_EDIT_NAME); or the crumbs again (0).
@@ -882,7 +859,7 @@ static fn files_new_folder(void)
                 did = files_model_make_folder(m, name);
         }
         files.big->note[0] = 0;
-        files.said = did == FILES_DID ? 0 : did == FILES_DID_EXISTS ? LANGUAGE_files_name_taken : did == FILES_DID_BAD ? LANGUAGE_files_name_bad : LANGUAGE_files_unreadable;
+        files.said = files_did_said(did);
         if (did == FILES_DID)
         {
                 files_model_reload(m);
@@ -896,46 +873,34 @@ static fn files_new_folder(void)
 static fn files_name_go(void)
 {
         struct files_model address_to m = &files.big->model;
-        static p8 typed[FILES_NAME];
-        positive length = ui_text_string(files_field(), typed, sizeof(typed));
+        static p8 typed[FILES_NAME], was[FILES_PATH], now[FILES_PATH];
+        const struct files_entry address_to entry = files_model_entry(m, files.naming);
         int did;
 
-        typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
+        (void)files_field_read(files_field(), typed, sizeof(typed));
+        was[0] = 0;
+        if (entry)
         {
-                // The deed: the old path and the new, made before the rename while the entry is still the one listed.
-                const struct files_entry address_to entry = files_model_entry(m, files.naming);
-                static p8 was[FILES_PATH], now[FILES_PATH];
-
-                was[0] = 0;
-                if (entry)
-                {
-                        files_path_join(was, FILES_PATH, m->path, files_model_name(m, entry));
-                        files_path_join(now, FILES_PATH, m->path, typed);
-                }
-                did = files_model_rename(m, files.naming, typed);
-                if (did == FILES_DID && was[0])
-                {
-                        struct files_deed address_to d = files_deed_new(FILES_DEED_RENAME);
-
-                        files_deed_add(d, was, now);
-                        files_deed_keep(d);
-                }
+                files_path_join(was, FILES_PATH, m->path, files_model_name(m, entry));
+                files_path_join(now, FILES_PATH, m->path, typed);
         }
+        did = files_model_rename(m, files.naming, typed);
         if (did != FILES_DID)
         {
-                files.said = did == FILES_DID_EXISTS ? LANGUAGE_files_name_taken : did == FILES_DID_BAD ? LANGUAGE_files_name_bad : LANGUAGE_files_unreadable;
+                files.said = files_did_said(did);
                 files.dirty = true;
                 return;
+        }
+        if (was[0])
+        {
+                struct files_deed address_to d = files_deed_new(FILES_DEED_RENAME);
+
+                files_deed_add(d, was, now);
+                files_deed_keep(d);
         }
         files_edit(0);
         files_model_reload(m);
         string_copy_bounded(m->came, typed, FILES_NAME);
-}
-
-static unsigned int files_state_said(int state)
-{
-        return state == FILES_GONE ? LANGUAGE_files_gone : state == FILES_UNREADABLE ? LANGUAGE_files_unreadable : state == FILES_NOT_DIRECTORY ? LANGUAGE_files_not_folder
-               : LANGUAGE_files_failed;
 }
 
 // The foot says why a folder of the trail is lost, with its name before the words, since it is not the folder shown: "else: This folder is gone".
@@ -959,10 +924,9 @@ static fn files_part_go(void)
 {
         static p8 typed[FILES_PATH], path[FILES_PATH], before[FILES_PATH];
         struct files_model address_to m = &files.big->model;
-        positive length = ui_text_string(files_field(), typed, sizeof(typed));
+        positive length = files_field_read(files_field(), typed, sizeof(typed));
         int why;
 
-        typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
         string_copy_bounded(before, m->path, FILES_PATH);
         if (string_length(typed) != length || !files_trail_spell(&files.trail, files.part, typed, path) ||
             (why = files_trail_resolve(m, &files.trail, path)) == FILES_NONE)
@@ -984,9 +948,9 @@ static fn files_part_go(void)
 static fn files_part_complete(void)
 {
         static p8 typed[FILES_PATH], parent[FILES_PATH], name[FILES_NAME];
-        positive length = ui_text_string(files_field(), typed, sizeof(typed));
+        positive length;
 
-        typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
+        (void)files_field_read(files_field(), typed, sizeof(typed));
         length = string_length(typed);
         for (positive at = 0; at < length; at++)
                 if (typed[at] == '/')
@@ -1000,52 +964,63 @@ static fn files_part_complete(void)
         files.dirty = true;
 }
 
-/*
-        The rows chosen (or the one pressed, place, when it is not chosen), as what a drag or a copy of files is to every program: a list of
-        file URIs (text/uri-list: file:// and each path, its bytes past the unreserved ones and the slash as %XX, a line each, CRLF), and
-        the same paths as text, a line each, for a program that takes text alone. The two parts, their bytes the caller releases
-        (files_uris_free); false when there is no row.
-*/
-static b32 files_uris(p32 place, struct windows_clip_part address_to parts, p8 address_to address_to uris, positive address_to uris_room,
-                      p8 address_to address_to paths, positive address_to paths_room)
+// Collect the chosen rows (or single alone when !use_chosen) as NUL-separated full paths; answers how many.
+static p32 files_paths_collect(p32 single, b32 use_chosen, p8 address_to address_to out, positive address_to room, positive address_to used,
+                               unsigned int address_to first_kind)
 {
-        struct files_model address_to m = &files.big->model;
-        positive uri_length = 0, path_length = 0;
-        b32 any_chosen = files_model_chosen(m, place);
+        const struct files_model address_to m = &files.big->model;
+        positive folder = string_length((string_address)m->path);
+        p32 count = 0;
 
-        *uris = *paths = null, *uris_room = *paths_room = 0;
         for (p32 at = 0; at < files_model_count(m); at++)
         {
                 const struct files_entry address_to entry = files_model_entry(m, at);
                 const p8 address_to name = entry ? files_model_name(m, entry) : null;
-                positive folder = string_length(m->path), length = name ? string_length(name) : 0;
+                positive length = name ? string_length((string_address)name) : 0;
 
-                if (!name || (any_chosen ? !files_model_chosen(m, at) : at != place))
+                if (!name || (use_chosen ? !files_model_chosen(m, at) : at != single))
                         continue;
-                if (!array_store_reserve(*uris, *uris_room, uri_length, uri_length + 3 * (folder + length) + 12, 4096) ||
-                    !array_store_reserve(*paths, *paths_room, path_length, path_length + folder + length + 3, 4096))
+                if (!array_store_reserve(*out, *room, *used, *used + folder + length + 2, 4096))
                         break;
-                memory_copy(*uris + uri_length, "file://", 7), uri_length += 7;
-                for (positive k = 0; k < folder + 1 + length; k++)
-                {
-                        p8 c = k < folder ? m->path[k] : k == folder ? (p8)'/' : name[k - folder - 1];
-
-                        if (k == folder && folder == 1)
-                                continue; // the root's own slash is the path's first
-                        uri_length += files_uri_byte(*uris + uri_length, c);
-                        (*paths)[path_length++] = c;
-                }
-                (*uris)[uri_length++] = '\r', (*uris)[uri_length++] = '\n';
-                (*paths)[path_length++] = '\n';
+                files_path_join(*out + *used, *room - *used, m->path, name);
+                *used += string_length((string_address)(*out + *used)) + 1;
+                if (!count && first_kind)
+                        *first_kind = files_symbol(m, entry);
+                count++;
         }
-        if (!uri_length)
+        return count;
+}
+
+// Pack NUL-separated paths into clipboard/drag parts: text/uri-list (CRLF, %XX-escaped) and text/plain (LF).
+static b32 files_uri_pack(const p8 address_to list, positive list_used, struct windows_clip_part address_to parts, p8 address_to address_to uris,
+                          positive address_to uris_room, p8 address_to address_to text, positive address_to text_room)
+{
+        positive uris_used = 0, text_used = 0;
+
+        *uris = *text = null, *uris_room = *text_room = 0;
+        for (positive at = 0; at < list_used;)
         {
-                array_store_release(*uris, *uris_room, uri_length);
-                array_store_release(*paths, *paths_room, path_length);
+                const p8 address_to path = list + at;
+                positive length = string_length((string_address)path);
+
+                at += length + 1;
+                if (!array_store_reserve(*uris, *uris_room, uris_used, uris_used + 3 * length + 12, 4096) ||
+                    !array_store_reserve(*text, *text_room, text_used, text_used + length + 2, 4096))
+                        break;
+                memory_copy(*uris + uris_used, "file://", 7), uris_used += 7;
+                for (positive k = 0; k < length; k++)
+                        uris_used += files_uri_byte(*uris + uris_used, path[k]);
+                (*uris)[uris_used++] = '\r', (*uris)[uris_used++] = '\n';
+                memory_copy(*text + text_used, path, length), text_used += length, (*text)[text_used++] = '\n';
+        }
+        if (!uris_used || !text_used)
+        {
+                array_store_release(*uris, *uris_room, uris_used);
+                array_store_release(*text, *text_room, text_used);
                 return false;
         }
-        parts[0] = (struct windows_clip_part){WINDOWS_CLIP_URIS, *uris, uri_length};
-        parts[1] = (struct windows_clip_part){WINDOWS_CLIP_TEXT, *paths, path_length - 1};
+        parts[0] = (struct windows_clip_part){WINDOWS_CLIP_URIS, *uris, uris_used};
+        parts[1] = (struct windows_clip_part){WINDOWS_CLIP_TEXT, *text, text_used - 1};
         return true;
 }
 
@@ -1057,10 +1032,26 @@ static fn files_uris_free(p8 address_to uris, positive uris_room, p8 address_to 
         array_store_release(paths, paths_room, path_length);
 }
 
+static b32 files_drag_offer_list(const p8 address_to list, positive list_used, p32 items, p32 kind)
+{
+        struct windows_clip_part parts[2];
+        p8 address_to uris, address_to text;
+        positive uris_room, text_room;
+        b32 offered;
+
+        if (!files_uri_pack(list, list_used, parts, &uris, &uris_room, &text, &text_room))
+                return false;
+        offered = ui_drag_offer(&files.own, &files.drag, parts, 2,
+                                WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE | kind << WINDOWS_DRAG_KIND_SHIFT |
+                                    (items > 0xffff ? 0xffffu : items) << WINDOWS_DRAG_ITEMS_SHIFT);
+        files_uris_free(uris, uris_room, text, text_room, parts);
+        return offered;
+}
+
 /* ---- the bin and the deeds ---- */
 
-// The bin's folder: the desktop's common one under the home folder ($HOME/.local/share/Trash), or none without a home.
-static b32 files_bin_root(p8 address_to into)
+// The bin's folder ($HOME/.local/share/Trash, plus optional sub-path), or false without a home.
+static b32 files_bin_root(p8 address_to into, const char address_to sub)
 {
         string_address home = getenv((string_address) "HOME");
 
@@ -1068,7 +1059,11 @@ static b32 files_bin_root(p8 address_to into)
                 return false;
         string_copy_bounded((string_address)into, home, FILES_PATH);
         string_append_bounded((string_address)into, (string_address) "/.local/share/Trash", FILES_PATH);
-        return string_length((string_address)into) + 16 < FILES_PATH;
+        if (string_length((string_address)into) + 16 >= FILES_PATH)
+                return false;
+        if (sub)
+                string_append_bounded((string_address)into, (string_address)sub, FILES_PATH);
+        return true;
 }
 
 // Whether the folder shown is the bin's files.
@@ -1076,32 +1071,18 @@ static b32 files_in_bin(void)
 {
         p8 bin[FILES_PATH];
 
-        if (!files_bin_root(bin))
-                return false;
-        string_append_bounded((string_address)bin, (string_address) "/files", FILES_PATH);
-        return string_equals((string_address)bin, (string_address)files.big->model.path);
+        return files_bin_root(bin, "/files") && string_equals((string_address)bin, (string_address)files.big->model.path);
 }
 
 // Now, as a bin's info says when: 2026-11-18T17:45:00 in the machine's zone.
 static fn files_now_text(char address_to into)
 {
-        tm broken;
         timespec real = {0, 0};
-        time_t at;
 
         clock_gettime(CLOCK_REALTIME, address_of real);
-        at = (time_t)real.tv_sec;
-
-        string_copy_bounded((string_address)into, (string_address) "1970-01-01T00:00:00", 20);
-        if (!localtime_r(&at, &broken) || broken.tm_year + 1900 < 0 || broken.tm_year + 1900 > 9999)
-                return;
-        {
-                int year = broken.tm_year + 1900, parts[5] = {broken.tm_mon + 1, broken.tm_mday, broken.tm_hour, broken.tm_min, broken.tm_sec};
-
-                into[0] = (char)('0' + year / 1000), into[1] = (char)('0' + year / 100 % 10), into[2] = (char)('0' + year / 10 % 10), into[3] = (char)('0' + year % 10);
-                for (int k = 0; k < 5; k++)
-                        into[5 + 3 * k] = (char)('0' + parts[k] / 10), into[6 + 3 * k] = (char)('0' + parts[k] % 10);
-        }
+        files_format_time(into, (b64)real.tv_sec, 'T', true);
+        if (!into[0])
+                string_copy_bounded((string_address)into, (string_address) "1970-01-01T00:00:00", 20);
 }
 
 static fn files_deed_free(struct files_deed address_to d)
@@ -1122,7 +1103,6 @@ static struct files_deed address_to files_deed_new(int kind)
                 files_deed_free(&files.deed[0]);
                 for (int k = 0; k + 1 < FILES_DEEDS; k++)
                         files.deed[k] = files.deed[k + 1];
-                memory_zero(&files.deed[FILES_DEEDS - 1], sizeof(files.deed[0]));
                 files.deed_count--, files.deed_done--;
         }
         d = &files.deed[files.deed_count++];
@@ -1180,20 +1160,27 @@ static fn files_flash_set(const struct files_move address_to job)
         files.flash_at = (b64)ui_kit_time();
 }
 
+// Whether name appears in a NUL-separated list (comparing each entry's basename when base_only).
+static b32 files_name_in_list(const p8 address_to list, positive used, const p8 address_to name, positive length, b32 base_only)
+{
+        for (positive at = 0; at < used;)
+        {
+                const p8 address_to item = list + at;
+                positive whole = string_length((string_address)item);
+                const p8 address_to cmp = base_only ? files_base_name(item) : item;
+
+                if (string_length((string_address)cmp) == length && !memory_compare(cmp, name, length))
+                        return true;
+                at += whole + 1;
+        }
+        return false;
+}
+
 // Whether a name of the folder shown is lit by the drop's pop now.
 static b32 files_flashed(const p8 address_to name, positive length)
 {
-        if (!files.flash_used || (b64)ui_kit_time() - files.flash_at >= FILES_FLASH_NS)
-                return false;
-        for (positive at = 0; at < files.flash_used;)
-        {
-                positive n = string_length((string_address)files.flash + at);
-
-                if (n == length && !memory_compare(files.flash + at, name, length))
-                        return true;
-                at += n + 1;
-        }
-        return false;
+        return files.flash_used && (b64)ui_kit_time() - files.flash_at < FILES_FLASH_NS &&
+               files_name_in_list(files.flash, files.flash_used, name, length, false);
 }
 
 // The deed of a copy or a move that is over: each thing that landed, from its source to its name in the folder it went into.
@@ -1203,11 +1190,8 @@ static fn files_move_deed(const struct files_move address_to job)
         p8 to[FILES_PATH];
 
         files_flash_set(job);
-        if (files.undoing || job->how == FILES_MOVE_MEASURE || !files.move_into[0])
-        {
-                files.undoing = false;
+        if (job->how == FILES_MOVE_MEASURE || !files.move_into[0])
                 return;
-        }
         d = files_deed_new(job->how == FILES_MOVE_MOVE ? FILES_DEED_MOVE : FILES_DEED_COPY);
         for (p32 k = 0; k < job->count; k++)
         {
@@ -1221,6 +1205,18 @@ static fn files_move_deed(const struct files_move address_to job)
         files_deed_keep(d);
 }
 
+static p32 files_deed_unpack(const struct files_deed address_to d, const p8 address_to (*pair)[2])
+{
+        p32 count = 0;
+
+        for (positive at = 0; at < d->used && count < FILES_MOVE_MOST; count++)
+        {
+                pair[count][0] = d->pairs + at, at += string_length((string_address)d->pairs + at) + 1;
+                pair[count][1] = d->pairs + at, at += string_length((string_address)d->pairs + at) + 1;
+        }
+        return count;
+}
+
 /*
         A deed undone (back) or done again: each pair the other way, the last first. A rename back that fails (the name is taken now, or a
         move went across filesystems) leaves that one where it is. Answers how many were turned.
@@ -1230,78 +1226,41 @@ static int files_deed_turn(struct files_deed address_to d, b32 back)
         p8 bin[FILES_PATH], named[FILES_NAME], where[FILES_PATH];
         char when[24];
         const p8 address_to (*pair)[2] = (const p8 address_to (*)[2])files_anon_map(sizeof(*pair) * FILES_MOVE_MOST, null);
-        struct files_deed turned, again;
+        struct files_deed turned = {.kind = d->kind}, again = {.kind = d->kind, .restored = d->restored};
+        b32 has_bin = files_bin_root(bin, null);
         int done = 0;
-        p32 count = 0, n = 0;
+        p32 count, n;
 
         if (!pair)
                 return 0;
         files_now_text(when);
-        for (positive at = 0; at < d->used && count < FILES_MOVE_MOST; count++)
-        {
-                pair[count][0] = d->pairs + at, at += string_length((string_address)d->pairs + at) + 1;
-                pair[count][1] = d->pairs + at, at += string_length((string_address)d->pairs + at) + 1;
-        }
-        memory_zero(&turned, sizeof(turned));
-        turned.kind = d->kind;
+        count = files_deed_unpack(d, pair);
         for (p32 k = count; k-- > 0;)
         {
-                const p8 address_to from = pair[k][0], address_to to = pair[k][1];
+                const p8 address_to from = pair[k][0], address_to to = pair[k][1], address_to nf = from, address_to nt = to;
                 b32 ok = false;
 
                 if (d->kind == FILES_DEED_MOVE || d->kind == FILES_DEED_RENAME)
-                {
-                        // Renamed from where it is to where it was, or back again; the pair stays.
                         ok = (bipolar)system_call_5(syscall(renameat2), AT_FDCWD, (positive)(back ? to : from), AT_FDCWD, (positive)(back ? from : to),
                                                     FILE_RENAME_NOREPLACE) >= 0;
-                        files_deed_add(&turned, from, to);
-                }
-                else if (d->kind == FILES_DEED_COPY && !d->binned && files_bin_root(bin))
+                else if (has_bin)
                 {
-                        // A copy undone: the copy put in the bin (the pair is the copy and where it is there).
-                        ok = files_bin_put(bin, to, when, named) == FILES_DID;
-                        if (ok)
-                                files_bin_join(where, bin, "/files", named, null), files_deed_add(&turned, to, where);
-                        else
-                                files_deed_add(&turned, from, to);
-                }
-                else if (d->kind == FILES_DEED_COPY && files_bin_root(bin))
-                {
-                        // A copy done again: the copy back from the bin where it was made.
-                        ok = files_bin_restore(bin, files_base_name(to), where) == FILES_DID;
-                        if (ok)
-                                files_deed_add(&turned, where, where);
-                        else
-                                files_deed_add(&turned, from, to);
-                }
-                else if (d->kind == FILES_DEED_BIN && files_bin_root(bin))
-                {
-                        // A putting in the bin undone puts back, done again puts in; one that put back the other way round.
-                        b32 into_bin = d->restored ? back : !back;
+                        b32 into_bin = d->kind == FILES_DEED_COPY ? !d->binned : (d->restored ? back : !back);
+                        const p8 address_to src = d->kind == FILES_DEED_COPY ? to : from;
 
-                        if (into_bin && (ok = files_bin_put(bin, from, when, named) == FILES_DID))
-                                files_bin_join(where, bin, "/files", named, null), files_deed_add(&turned, from, where);
+                        if (into_bin && (ok = files_bin_put(bin, src, when, named) == FILES_DID))
+                                files_bin_join(where, bin, "/files", named, null), nf = src, nt = where;
                         else if (!into_bin && (ok = files_bin_restore(bin, files_base_name(to), where) == FILES_DID))
-                                files_deed_add(&turned, where, to);
-                        else
-                                files_deed_add(&turned, from, to);
+                                nf = where, nt = d->kind == FILES_DEED_COPY ? where : to;
                 }
-                else
-                        files_deed_add(&turned, from, to);
+                files_deed_add(&turned, nf, nt);
                 done += ok;
         }
         // The pairs as they are now, in their first order again (they were turned the last first), reusing the transient pair table.
-        memory_zero(&again, sizeof(again));
-        again.kind = d->kind;
-        for (positive k = 0; k < turned.used && n < FILES_MOVE_MOST; n++)
-        {
-                pair[n][0] = turned.pairs + k, k += string_length((string_address)turned.pairs + k) + 1;
-                pair[n][1] = turned.pairs + k, k += string_length((string_address)turned.pairs + k) + 1;
-        }
+        n = files_deed_unpack(&turned, pair);
         for (p32 k = n; k-- > 0;)
                 files_deed_add(&again, pair[k][0], pair[k][1]);
         again.binned = d->kind == FILES_DEED_COPY ? (d->binned ? !done && d->binned : done > 0) : false;
-        again.restored = d->restored;
         system_call_2(syscall(munmap), (positive)pair, sizeof(*pair) * FILES_MOVE_MOST);
         files_deed_free(&turned);
         files_deed_free(d);
@@ -1329,54 +1288,29 @@ static fn files_undo(b32 again)
         files.dirty = true;
 }
 
-// Delete: what is chosen put in the bin (a deed, undone by Ctrl+Z); in the bin itself, or with Shift, a real delete, asked first.
-static fn files_bin_delete(void)
+// Put what is chosen in the bin (!restore), or put what is chosen in the bin back where it was (restore): both record a deed.
+static fn files_bin_act(b32 restore)
 {
         struct files_model address_to m = &files.big->model;
         p8 bin[FILES_PATH], named[FILES_NAME], path[FILES_PATH], where[FILES_PATH];
         char when[24];
         struct files_deed address_to d;
         b32 cross = false;
-        p32 iter = 0, at;
-
-        files.said = 0, files.big->note[0] = 0, files.armed = false;
-        if (m->state != FILES_READY || !files_bin_root(bin))
-                return;
-        files_now_text(when);
-        files_after_delete(m);
-        d = files_deed_new(FILES_DEED_BIN);
-        while ((at = files_selected_next(m, &iter)) != FILES_NO)
-        {
-                const struct files_entry address_to entry = files_model_entry(m, at);
-                int did;
-
-                if (!entry || !files_path_join(path, FILES_PATH, m->path, files_model_name(m, entry)))
-                        continue;
-                did = files_bin_put(bin, path, when, named);
-                cross |= did == FILES_DID_CROSS;
-                if (did == FILES_DID)
-                        files_bin_join(where, bin, "/files", named, null), files_deed_add(d, path, where);
-        }
-        if (d->count)
-                language_format(files.big->note, sizeof(files.big->note), WORDS(files_binned), (int)d->count);
-        else if (cross)
-                files.said = LANGUAGE_files_bin_cross;
-        files_deed_keep(d);
-        files_model_reload(m);
-        files.dirty = true;
-}
-
-// Put back: what is chosen in the bin put back where it was (a deed of the bin's, undone by putting it in again).
-static fn files_bin_put_back(void)
-{
-        struct files_model address_to m = &files.big->model;
-        p8 bin[FILES_PATH], back[FILES_PATH], where[FILES_PATH];
-        struct files_deed address_to d;
         int done = 0;
         p32 iter = 0, at;
 
-        if (!files_bin_root(bin) || !files_in_bin())
+        if (!restore)
+        {
+                files.said = 0, files.big->note[0] = 0, files.armed = false;
+                if (m->state != FILES_READY)
+                        return;
+        }
+        else if (!files_in_bin())
                 return;
+        if (!files_bin_root(bin, null))
+                return;
+        if (!restore)
+                files_now_text(when), files_after_delete(m);
         d = files_deed_new(FILES_DEED_BIN);
         while ((at = files_selected_next(m, &iter)) != FILES_NO)
         {
@@ -1384,14 +1318,28 @@ static fn files_bin_put_back(void)
 
                 if (!entry)
                         continue;
-                files_bin_join(where, bin, "/files", files_model_name(m, entry), null);
-                if (files_bin_restore(bin, files_model_name(m, entry), back) == FILES_DID)
-                        done++, files_deed_add(d, back, where);
+                if (restore)
+                {
+                        files_bin_join(where, bin, "/files", files_model_name(m, entry), null);
+                        if (files_bin_restore(bin, files_model_name(m, entry), path) == FILES_DID)
+                                done++, files_deed_add(d, path, where);
+                }
+                else if (files_path_join(path, FILES_PATH, m->path, files_model_name(m, entry)))
+                {
+                        int did = files_bin_put(bin, path, when, named);
+
+                        cross |= did == FILES_DID_CROSS;
+                        if (did == FILES_DID)
+                                files_bin_join(where, bin, "/files", named, null), files_deed_add(d, path, where);
+                }
         }
-        // Undone, the deed puts them in the bin again: a putting back is a bin's deed the other way round.
-        d->restored = true;
+        if (restore)
+                d->restored = true, language_format(files.big->note, sizeof(files.big->note), WORDS(files_restored), done);
+        else if (d->count)
+                language_format(files.big->note, sizeof(files.big->note), WORDS(files_binned), (int)d->count);
+        else if (cross)
+                files.said = LANGUAGE_files_bin_cross;
         files_deed_keep(d);
-        language_format(files.big->note, sizeof(files.big->note), WORDS(files_restored), done);
         files_model_reload(m);
         files.dirty = true;
 }
@@ -1401,9 +1349,8 @@ static fn files_bin_show(void)
 {
         p8 bin[FILES_PATH];
 
-        if (!files_bin_root(bin))
+        if (!files_bin_root(bin, "/files"))
                 return;
-        string_append_bounded((string_address)bin, (string_address) "/files", FILES_PATH);
         files_bin_folders(bin);
         if (files_model_go(&files.big->model, (string_address)bin))
                 files_moved();
@@ -1415,7 +1362,7 @@ static fn files_bin_empty(void)
         struct files_model address_to m = &files.big->model;
         p8 bin[FILES_PATH], info[FILES_PATH];
 
-        if (!files_in_bin() || !files_model_count(m) || !files_bin_root(bin))
+        if (!files_in_bin() || !files_model_count(m) || !files_bin_root(bin, null))
                 return;
         files_select_all(m);
         if (files.armed && files.armed_at == m->revision)
@@ -1443,26 +1390,9 @@ static fn files_carry_end(void)
 static b32 files_carry_take(void)
 {
         const struct files_model address_to m = &files.big->model;
-        positive folder = string_length((string_address)m->path);
-        p32 iter = 0, at;
 
         files_carry_end();
-        while ((at = files_selected_next(m, &iter)) != FILES_NO)
-        {
-                const struct files_entry address_to entry = files_model_entry(m, at);
-                const p8 address_to name = entry ? files_model_name(m, entry) : null;
-                positive length = name ? string_length((string_address)name) : 0, used = files.carry_used;
-
-                if (!name)
-                        continue;
-                if (!array_store_reserve(files.carry_paths, files.carry_room, used, used + folder + length + 2, 4096))
-                        break;
-                files_path_join(files.carry_paths + used, files.carry_room - used, m->path, name);
-                used += string_length((string_address)(files.carry_paths + used)) + 1;
-                if (!files.carry_count)
-                        files.carry_kind = files_symbol(m, entry);
-                files.carry_used = used, files.carry_count++;
-        }
+        files.carry_count = files_paths_collect(m->cursor, m->chosen_count > 0, &files.carry_paths, &files.carry_room, &files.carry_used, &files.carry_kind);
         string_copy_bounded((string_address)files.carry_from, (string_address)m->path, FILES_PATH);
         return files.carry_count > 0;
 }
@@ -1470,29 +1400,9 @@ static b32 files_carry_take(void)
 // Whether the entry name of the folder shown is one carried or cut from it: drawn dim where it lies.
 static b32 files_carried(const p8 address_to name, positive length)
 {
-        const struct files_model address_to m = &files.big->model;
-
-        if ((!files.carrying && !files.cut_dim) || !string_equals((string_address)files.carry_from, (string_address)m->path))
-                return false;
-        for (positive at = 0; at < files.carry_used;)
-        {
-                positive whole = string_length((string_address)files.carry_paths + at), base = whole;
-
-                while (base && files.carry_paths[at + base - 1] != '/')
-                        base--;
-                if (whole - base == length && !memory_compare(files.carry_paths + at + base, name, length))
-                        return true;
-                at += whole + 1;
-        }
-        return false;
-}
-
-// Tab on the rows: what is chosen picked up (carried), and Tab again, with any folder shown meanwhile, drops it there.
-static fn files_carry_pick(void)
-{
-        if (!files_carry_take())
-                return;
-        files.carrying = true, files.carry_at = (b64)ui_kit.now, files.said = 0, files.big->note[0] = 0;
+        return (files.carrying || files.cut_dim) &&
+               string_equals((string_address)files.carry_from, (string_address)files.big->model.path) &&
+               files_name_in_list(files.carry_paths, files.carry_used, name, length, true);
 }
 
 // What is carried dropped into the folder of a row (-1 the folder shown): moved there, unless it is the folder it came from.
@@ -1508,52 +1418,16 @@ static fn files_carry_drop(int row)
                 files.said = LANGUAGE_files_carry_here;
                 return;
         }
-        files_transfer(files.carry_paths, files.carry_count, row, FILES_MOVE_MOVE);
+        (void)files_transfer(files.carry_paths, files.carry_count, row, FILES_MOVE_MOVE);
         files_carry_end();
 }
 
-/*
-        What is carried handed to the desktop's drag (the button down on the window, as a drag of rows is): offered as a list of files,
-        a copy or a move, with their count and the first one's symbol for the drag's chip, so another browser or any Wayland client takes
-        it as a drop; the carry here is over, and a move the target made is shown when the drag ends (files_drag_event).
-*/
-static b32 files_carry_offer(void)
+// What is carried handed to the desktop's drag so another browser or Wayland client takes it as a drop.
+static fn files_carry_offer(void)
 {
-        struct windows_clip_part parts[2];
-        p8 address_to uris = null, address_to text = null;
-        positive uris_room = 0, text_room = 0, uris_used = 0, text_used = 0;
-        p32 items = files.carry_count, kind = (files.carry_kind & 0xffu) + 1;
-        b32 offered = false;
-
-        if (!files.carrying || !files.carry_count)
-                return false;
-        for (positive at = 0; at < files.carry_used;)
-        {
-                const p8 address_to path = files.carry_paths + at;
-                positive length = string_length((string_address)path);
-
-                at += length + 1;
-                if (!array_store_reserve(uris, uris_room, uris_used, uris_used + 3 * length + 12, 4096) ||
-                    !array_store_reserve(text, text_room, text_used, text_used + length + 2, 4096))
-                        break;
-                memory_copy(uris + uris_used, "file://", 7), uris_used += 7;
-                for (positive k = 0; k < length; k++)
-                        uris_used += files_uri_byte(uris + uris_used, path[k]);
-                uris[uris_used++] = '\r', uris[uris_used++] = '\n';
-                memory_copy(text + text_used, path, length), text_used += length, text[text_used++] = '\n';
-        }
-        if (uris_used && text_used)
-        {
-                parts[0] = (struct windows_clip_part){WINDOWS_CLIP_URIS, uris, uris_used};
-                parts[1] = (struct windows_clip_part){WINDOWS_CLIP_TEXT, text, text_used - 1};
-                offered = ui_drag_offer(&files.own, &files.drag, parts, 2,
-                                        WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE | kind << WINDOWS_DRAG_KIND_SHIFT | (items > 0xffff ? 0xffffu : items) << WINDOWS_DRAG_ITEMS_SHIFT);
-        }
-        array_store_release(uris, uris_room, uris_used);
-        array_store_release(text, text_room, text_used);
-        if (offered)
+        if (files.carrying && files.carry_count &&
+            files_drag_offer_list(files.carry_paths, files.carry_used, files.carry_count, (files.carry_kind & 0xffu) + 1))
                 files_carry_end(), files.carry_press = false;
-        return offered;
 }
 
 /*
@@ -1568,7 +1442,7 @@ static fn files_carry_draw(void)
         char count[12];
         int width, d = ui_dev(ui, 20), cx, cy;
 
-        if (!files.carrying || ui_kit.pointer_x < 0 || ui_kit.pointer_y < 0 || ui_kit.pointer_x >= files.width || ui_kit.pointer_y >= files.height)
+        if (!files.carrying || !files_in_rect(ui_kit.pointer_x, ui_kit.pointer_y, 0, 0, files.width, files.height))
                 return;
         if (since >= 0 && since < FILES_CARRY_POP_NS)
                 y -= (int)((FILES_CARRY_POP_NS - since) * ui_dev(ui, 6) / FILES_CARRY_POP_NS);
@@ -1584,17 +1458,23 @@ static fn files_carry_draw(void)
 }
 
 /*
-        The rows chosen (the cursor's when none is) copied, as files (files_uris), or cut: a cut offers them with a word beside
+        The rows chosen (the cursor's when none is) copied, as files, or cut: a cut offers them with a word beside
         (FILES_CLIP_CUT) that makes a browser's paste of them a move, here or in another window; any other program pastes them as it
         pastes files.
 */
 static fn files_rows_copy(b32 cut)
 {
+        const struct files_model address_to m = &files.big->model;
         struct windows_clip_part parts[3];
-        p8 address_to uris, address_to paths;
-        positive uris_room, paths_room;
+        p8 address_to list = null, address_to uris, address_to paths;
+        positive list_room = 0, list_used = 0, uris_room, paths_room;
+        b32 ok;
 
-        if (!files_uris(files.big->model.cursor, parts, &uris, &uris_room, &paths, &paths_room))
+        if (!files_paths_collect(m->cursor, files_model_chosen(m, m->cursor), &list, &list_room, &list_used, null))
+                return;
+        ok = files_uri_pack(list, list_used, parts, &uris, &uris_room, &paths, &paths_room);
+        array_store_release(list, list_room, list_used);
+        if (!ok)
                 return;
         parts[2] = (struct windows_clip_part){FILES_CLIP_CUT, (const p8 address_to) "cut", 3};
         windows_clip_offer_parts(&files.own, WINDOWS_CLIP_CLIPBOARD, parts, cut ? 3 : 2);
@@ -1606,14 +1486,31 @@ static fn files_rows_copy(b32 cut)
                 files_carry_end();
 }
 
-// Paste: the clipboard is asked for its files (the answer comes as a WINDOW_EVENT_CLIP, files_clip_event).
-static fn files_paste(void)
-{
-        files.pasting = true;
-        windows_clip_ask(&files.own, WINDOWS_CLIP_CLIPBOARD);
-}
+#define FILES_DROP_MOST (FILES_MOVE_MOST * FILES_PATH / 4) // the bytes of a drop's paths, each with its end
 
-static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how);
+// Decode a clipboard/drop text/uri-list buffer, free it, and start a copy/move into row (-1 folder shown).
+static b32 files_uri_transfer(p8 address_to bytes, unsigned long length, int row, int how, p32 address_to out_count)
+{
+        p8 address_to paths = null;
+        positive at = 0, used = 0, room = 0, got;
+        p32 count = 0;
+        static p8 path[FILES_PATH];
+        b32 ok;
+
+        while ((got = ui_uri_next(bytes, (positive)length, &at, path, sizeof(path))) && used + got + 1 <= FILES_DROP_MOST)
+        {
+                if (!array_store_reserve(paths, room, used, used + got + 1, 4096))
+                        break;
+                memory_copy(paths + used, path, got + 1);
+                used += got + 1, count++;
+        }
+        windows_clip_free(bytes, length);
+        ok = count && files_transfer(paths, count, row, how);
+        array_store_release(paths, room, used);
+        if (out_count)
+                *out_count = count;
+        return ok;
+}
 
 /*
         The clipboard's news. A copy this window offered that was taken or declined is let go of (windows_clip_done). The answer to a paste
@@ -1622,11 +1519,9 @@ static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how
 */
 static b32 files_clip_event(const struct window_event address_to event)
 {
-        p8 address_to bytes, address_to cut, address_to paths = null;
+        p8 address_to bytes, address_to cut;
         unsigned long length, cut_length;
-        positive at = 0, used = 0, room = 0, got;
         p32 count = 0;
-        static p8 path[FILES_PATH];
         b32 asked = files.pasting && (event->b == WINDOWS_CLIP_READY || event->b == WINDOWS_CLIP_REFUSED), moves;
 
         if (event->b == WINDOWS_CLIP_TAKEN || event->b == WINDOWS_CLIP_DECLINED)
@@ -1642,19 +1537,8 @@ static b32 files_clip_event(const struct window_event address_to event)
         moves = windows_clip_read_type(&files.own, (unsigned int)event->a, FILES_CLIP_CUT, &cut, &cut_length) > 0;
         if (moves)
                 windows_clip_free(cut, cut_length);
-        while ((got = ui_uri_next(bytes, (positive)length, &at, path, sizeof(path))) && used + got + 1 <= (positive)FILES_MOVE_MOST * FILES_PATH / 4)
-        {
-                if (!array_store_reserve(paths, room, used, used + got + 1, 4096))
-                        break;
-                memory_copy(paths + used, path, got + 1);
-                used += got + 1, count++;
-        }
-        windows_clip_free(bytes, length);
-        if (count)
-                files_transfer(paths, count, -1, moves ? FILES_MOVE_MOVE : FILES_MOVE_COPY);
-        else
+        if (!files_uri_transfer(bytes, length, -1, moves ? FILES_MOVE_MOVE : FILES_MOVE_COPY, &count) && !count)
                 files.said = LANGUAGE_files_nothing_to_paste;
-        array_store_release(paths, room, used);
         return true;
 }
 
@@ -1672,22 +1556,15 @@ static b32 files_clip_event(const struct window_event address_to event)
         otherwise. A drag of this window's rows over the folder they are in, or over one of the rows dragged, is taken nowhere. The drop
         is the model's move (files_move_*), on a thread of its own, the foot counting and Escape stopping it.
 */
-#define FILES_DROP_MOST (FILES_MOVE_MOST * FILES_PATH / 4) // the bytes of a drop's paths, each with its end
-
-// Whether the row at place is one of those this window's drag holds.
-static b32 files_dragged(p32 place)
-{
-        return files.drag.live && (files.drag_chosen ? files_model_chosen(&files.big->model, place) : place == files.drag_place);
-}
-
 // The folder row a drag at (x, y) over the window would go into, -1 for the folder shown.
 static int files_drop_row(int x, int y)
 {
         struct files_model address_to m = &files.big->model;
         int row = ui_list_hit(&files.ui, &files.big->list, x, y);
         const struct files_entry address_to entry = row >= 0 ? files_model_entry(m, (p32)row) : null;
+        b32 dragged = files.drag.live && row >= 0 && (files.drag_chosen ? files_model_chosen(m, (p32)row) : (p32)row == files.drag_place);
 
-        return entry && entry->kind == FILES_KIND_DIRECTORY && !files_dragged((p32)row) ? row : -1;
+        return entry && entry->kind == FILES_KIND_DIRECTORY && !dragged ? row : -1;
 }
 
 // Whether the first file of the drag over the window is on the filesystem of the folder shown: a move is then a rename.
@@ -1762,13 +1639,6 @@ static b32 files_transfer_start(const p8 address_to paths, p32 count, bipolar in
         return true;
 }
 
-static b32 files_transfer_into(const p8 address_to paths, p32 count, const p8 address_to folder, int how)
-{
-        bipolar into = system_open_at(AT_FDCWD, (string_address)folder, FILE_READ | O_DIRECTORY | O_CLOEXEC);
-
-        return files_transfer_start(paths, count, into, folder, how, false);
-}
-
 static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how)
 {
         const struct files_model address_to m = &files.big->model;
@@ -1777,7 +1647,11 @@ static b32 files_transfer(const p8 address_to paths, p32 count, int row, int how
 
         // A drop on a node of the folder tree: into that node's folder, by its path.
         if (row <= -2 && files.drop_node >= 0)
-                return files_tree_path(&files.big->tree, (p32)files.drop_node, dest) && files_transfer_into(paths, count, dest, how);
+        {
+                if (!files_tree_path(&files.big->tree, (p32)files.drop_node, dest))
+                        return false;
+                return files_transfer_start(paths, count, system_open_at(AT_FDCWD, (string_address)dest, FILE_READ | O_DIRECTORY | O_CLOEXEC), dest, how, false);
+        }
         if (entry)
                 files_path_join(dest, FILES_PATH, m->path, files_model_name(m, entry));
         else
@@ -1824,29 +1698,22 @@ static b32 files_drag_event(const struct window_event address_to event)
                 struct ui_list address_to tl = &files.big->tree_list;
                 int node = ui_list_hit(&files.ui, tl, files.drop.x, files.drop.y);
                 int row = node >= 0 ? -2 : files_drop_row(files.drop.x, files.drop.y);
+                int spring = node >= 0 ? FILES_SPRING_NODE + node : row;
                 b32 none = (files.drag.live && row == -1) || (node < 0 && files.big->model.state != FILES_READY);
-
-                // Over a node of the tree the drop goes into its folder, the node ringed; a drag held over a folder opens it (the spring).
-                files.drop_over = true;
-                if (node != files.drop_node)
-                        files.drop.nth = -2;
-                files.drop_node = node;
-                tl->drop = node >= 0 ? node + 1 : 0;
-                {
-                        int spring = node >= 0 ? FILES_SPRING_NODE + node : row;
-
-                        if (spring != files.spring)
-                                files.spring = spring, files.spring_at = (b64)ui_kit_time();
-                }
                 p32 preferred = files.drop.keys & WINDOW_KEY_CONTROL ? WINDOWS_DRAG_COPY
                                 : files.drop.keys & WINDOW_KEY_SHIFT ? WINDOWS_DRAG_MOVE
                                 : files_drop_near()                  ? WINDOWS_DRAG_MOVE
                                                                      : WINDOWS_DRAG_COPY;
 
+                // Over a node of the tree the drop goes into its folder, the node ringed; a drag held over a folder opens it (the spring).
+                files.drop_over = true;
+                tl->drop = node >= 0 ? node + 1 : 0;
+                if (spring != files.spring)
+                        files.spring = spring, files.spring_at = (b64)ui_kit_time();
                 // Another folder or another preference is a new answer: the pick is said again (ui_drop_pick says only a change).
-                if (files.drop_row != row || files.drop.action != preferred)
+                if (node != files.drop_node || files.drop_row != row || files.drop.action != preferred)
                         files.drop.nth = -2;
-                files.drop_row = row, files.drop.action = preferred;
+                files.drop_node = node, files.drop_row = row, files.drop.action = preferred;
                 ui_drop_pick(&files.own, &files.drop, names, none ? 0 : 1, WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE, preferred);
                 l->drop = files.drop.nth < 0 || node >= 0 ? 0 : row >= 0 ? row + 1 : UI_LIST_DROP_ALL;
         }
@@ -1854,31 +1721,28 @@ static b32 files_drag_event(const struct window_event address_to event)
                 l->drop = 0, files.big->tree_list.drop = 0, files.drop_over = false, files.spring = -1, files.drop_node = what == UI_DROP_DROPPED ? files.drop_node : -1;
         else if (what == UI_DROP_READY)
         {
-                p8 address_to bytes, address_to paths = null;
+                p8 address_to bytes;
                 unsigned long length;
-                positive at = 0, used = 0, room = 0, got;
-                p32 count = 0;
-                b32 took = false;
-                static p8 path[FILES_PATH];
+                b32 took = ui_drop_read(&files.own, &files.drop, &bytes, &length) &&
+                           files_uri_transfer(bytes, length, files.drop_row, files.drop.action == WINDOWS_DRAG_MOVE ? FILES_MOVE_MOVE : FILES_MOVE_COPY, null);
 
-                if (ui_drop_read(&files.own, &files.drop, &bytes, &length))
-                {
-                        while ((got = ui_uri_next(bytes, (positive)length, &at, path, sizeof(path))) && used + got + 1 <= FILES_DROP_MOST)
-                        {
-                                if (!array_store_reserve(paths, room, used, used + got + 1, 4096))
-                                        break;
-                                memory_copy(paths + used, path, got + 1);
-                                used += got + 1, count++;
-                        }
-                        windows_clip_free(bytes, length);
-                        took = count && files_transfer(paths, count, files.drop_row, files.drop.action == WINDOWS_DRAG_MOVE ? FILES_MOVE_MOVE : FILES_MOVE_COPY);
-                        array_store_release(paths, room, used);
-                }
                 ui_drop_done(&files.own, &files.drop, took);
                 files.drop_node = -1;
         }
         files.dirty = true;
         return true;
+}
+
+// Try to open path as a folder; on failure record the reason in files.said and mark dirty.
+static b32 files_try_go(const p8 address_to path)
+{
+        int came = files_model_try(&files.big->model, (string_address)path);
+
+        if (came == FILES_READING)
+                return true;
+        files.said = files_state_said(came);
+        files.dirty = true;
+        return false;
 }
 
 // The whole trail's path, the dimmed part with it, offered to the clipboard as text.
@@ -1898,30 +1762,17 @@ static fn files_trail_copy(void)
 static fn files_edit_go(void)
 {
         static p8 typed[FILES_PATH];
-        positive length = ui_text_string(files_field(), typed, sizeof(typed));
-        int came;
 
         if (files.editing == FILES_EDIT_NAME)
-        {
                 files_name_go();
-                return;
-        }
-        if (files.editing == FILES_EDIT_PART)
-        {
+        else if (files.editing == FILES_EDIT_PART)
                 files_part_go();
-                return;
-        }
-
-        typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
-        came = files_model_try(&files.big->model, typed);
-        if (came == FILES_READING)
+        else
         {
-                files_edit(0);
-                files_moved();
-                return;
+                (void)files_field_read(files_field(), typed, sizeof(typed));
+                if (files_try_go(typed))
+                        files_edit(0), files_moved();
         }
-        files.said = files_state_said(came);
-        files.dirty = true;
 }
 
 // Tab in the field: the folder name being typed finished from the listing shown, when the text's folder is the folder shown.
@@ -1929,10 +1780,10 @@ static fn files_edit_complete(void)
 {
         static p8 typed[FILES_PATH], whole[FILES_PATH], name[FILES_NAME];
         const struct files_model address_to m = &files.big->model;
-        positive length = ui_text_string(files_field(), typed, sizeof(typed)), cut, folder;
+        positive length, cut, folder;
         p32 found;
 
-        typed[length < sizeof(typed) ? length : sizeof(typed) - 1] = end;
+        (void)files_field_read(files_field(), typed, sizeof(typed));
         length = string_length(typed);
         for (cut = length; cut > 0 && typed[cut - 1] != '/'; cut--)
                 ;
@@ -1961,7 +1812,7 @@ static fn files_crumb_go(int which)
         struct files_model address_to m = &files.big->model;
         struct files_trail address_to trail = &files.trail;
         bipolar handle, error;
-        int seen, came;
+        int seen;
 
         if (which < 0 || which >= trail->count || which == trail->current)
                 return;
@@ -1979,8 +1830,7 @@ static fn files_crumb_go(int which)
                 files_moved();
                 return;
         }
-        came = files_model_try(m, to);
-        if (came == FILES_READING)
+        if (files_try_go(to))
         {
                 // Up the trail: the keys are on the folder of it come up through, as Up puts them on the folder come out of.
                 static p8 through[FILES_NAME];
@@ -1990,16 +1840,7 @@ static fn files_crumb_go(int which)
                 through[length < FILES_NAME ? length : 0] = end;
                 files_model_came(m, through);
                 files_moved();
-                return;
         }
-        files.said = files_state_said(came);
-        files.dirty = true;
-}
-
-// Along the trail by one folder: up it (-1) or down it (1), as far as it goes.
-static fn files_crumb_step(int by)
-{
-        files_crumb_go(files.trail.current + by);
 }
 
 // One folder of the trail becomes the field. When the press before this one went to that folder, that move is taken back first, so
@@ -2042,13 +1883,6 @@ static b32 files_crumb_key(const struct window_event address_to event)
         case FILES_KEY_F2:
                 files_part_edit(files.crumb_focus, false);
                 break;
-        case UI_KEY_TAB:
-                // Tab goes on to the folder tree (Shift+Tab is the band's buttons', the kit's).
-                if (event->flags & WINDOW_KEY_SHIFT)
-                        return false;
-                files.focus = FILES_FOCUS_TREE;
-                files.tree_at = files.tree_shown != FILES_NO ? files.tree_shown : 0;
-                break;
         case UI_KEY_ESCAPE:
         case UI_KEY_DOWN:
                 files.focus = FILES_FOCUS_ROWS;
@@ -2078,8 +1912,6 @@ static fn files_moved(void)
         files.dirty = true;
 }
 
-static fn files_open_with(b32 editor);
-
 // Into the entry at a place if it is a folder, or open regular files in the editor by default.
 static fn files_open(p32 place)
 {
@@ -2097,18 +1929,11 @@ static fn files_open(p32 place)
         }
         came = files_model_enter(m, place);
         if (came == FILES_SAME)
-        {
                 files_moved();
-                return;
-        }
-        if (came == FILES_REFUSED)
-                files.said = entry->kind == FILES_KIND_LINK ? LANGUAGE_files_link : 0;
+        else if (came == FILES_REFUSED)
+                files.said = entry->kind == FILES_KIND_LINK ? LANGUAGE_files_link : 0, files.dirty = true;
         else
-        {
-                files.said = LANGUAGE_files_changed;
-                files_model_reload(m);
-        }
-        files.dirty = true;
+                files.said = LANGUAGE_files_changed, files_model_reload(m), files.dirty = true;
 }
 
 // The band's buttons: Back, Forward, Up.
@@ -2159,39 +1984,46 @@ static fn files_band_apply(void)
 static fn files_drag_start(p32 place)
 {
         struct files_model address_to m = &files.big->model;
-        struct windows_clip_part parts[2];
-        p8 address_to uris, address_to paths;
-        positive uris_room, paths_room;
+        p8 address_to list = null;
+        positive list_room = 0, list_used = 0;
 
         files.drag_place = place;
         files.drag_chosen = files_model_chosen(m, place);
-        if (files_uris(place, parts, &uris, &uris_room, &paths, &paths_room))
+        if (files_paths_collect(place, files.drag_chosen, &list, &list_room, &list_used, null))
         {
                 p32 items = files.drag_chosen && m->chosen_count ? m->chosen_count : 1;
                 const struct files_entry address_to first = files_model_entry(m, place);
                 p32 kind = first ? (files_symbol(m, first) & 0xffu) + 1 : 0;
 
-                ui_drag_offer(&files.own, &files.drag, parts, 2,
-                              WINDOWS_DRAG_COPY | WINDOWS_DRAG_MOVE | kind << WINDOWS_DRAG_KIND_SHIFT |
-                                  (items > 0xffff ? 0xffffu : items) << WINDOWS_DRAG_ITEMS_SHIFT);
-                files_uris_free(uris, uris_room, paths, paths_room, parts);
+                (void)files_drag_offer_list(list, list_used, items, kind);
         }
+        array_store_release(list, list_room, list_used);
 }
 
 /* ---- the menu and the properties sheet ---- */
 
-// A moment as a sheet says it: the day, the minute and the second, in the machine's own zone.
-static fn files_sheet_time(char address_to into, b64 seconds)
+static fn files_sheet_escape(char address_to into, positive room, const p8 address_to raw, positive length)
 {
-        files_time_text(into, seconds);
-        if (into[0])
-        {
-                tm broken;
-                time_t at = (time_t)seconds;
+        char words[FILES_NAME * 3 + 4];
 
-                if (localtime_r(&at, &broken))
-                        into[16] = ':', into[17] = (char)('0' + broken.tm_sec / 10), into[18] = (char)('0' + broken.tm_sec % 10), into[19] = 0;
-        }
+        ui_label_foreign(words, sizeof(words), raw, length);
+        ui_menu_escape(into, room, words);
+}
+
+static fn files_popup_open(int x, int y)
+{
+        files.menu.field = null;
+        ui_popmenu_open(&files.menu, &files.own, &files.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
+}
+
+static fn files_cursor_pos(int address_to x, int address_to y, b32 mid)
+{
+        const struct files_model address_to m = &files.big->model;
+        const struct ui_list address_to l = &files.big->list;
+        int pitch = ui_list_pitch(&files.ui, l);
+
+        *x = l->x + ui_dev(&files.ui, 40);
+        *y = l->y + (mid ? pitch / 2 : 0) + (m->cursor != FILES_NO ? (int)m->cursor * pitch - l->scroll.scroll : 0);
 }
 
 /*
@@ -2204,8 +2036,10 @@ static int files_sheet_fill(void)
 {
         struct files_model address_to m = &files.big->model;
         const struct files_entry address_to entry = files_model_entry(m, m->cursor);
+        char (*sheet)[FILES_NAME * 3 + 64] = files.big->sheet;
+        positive room = sizeof(files.big->sheet[0]);
         b32 many = !files.sheet_folder && m->chosen_count > 1;
-        char words[FILES_NAME * 3 + 4], size[16], bytes[24], when[24], mode[12], octal[8];
+        char escaped[FILES_NAME * 3 + 4], size[16], bytes[24], when[24], mode[12], octal[8];
         file_facts facts;
         int lines = 0;
 
@@ -2214,13 +2048,12 @@ static int files_sheet_fill(void)
                 return 0;
         // The name, or how many.
         if (many)
-                language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_items), (int)m->chosen_count);
+                language_format(sheet[lines++], room, WORDS(files_sheet_items), (int)m->chosen_count);
         else
         {
                 const p8 address_to name = files.sheet_folder ? m->path : files_model_name(m, entry);
 
-                ui_label_foreign(words, sizeof(words), name, string_length((string_address)name));
-                ui_menu_escape(files.big->sheet[lines++], sizeof(files.big->sheet[0]), words);
+                files_sheet_escape(sheet[lines++], room, name, string_length((string_address)name));
         }
         // What it is.
         if (!many)
@@ -2232,70 +2065,63 @@ static int files_sheet_fill(void)
                         p8 points[FILES_PATH];
                         bipolar length = (bipolar)system_call_4(syscall(readlinkat), (positive)m->handle, (positive)files_model_name(m, entry), (positive)points,
                                                                 sizeof(points) - 1);
-                        char named[FILES_NAME * 3 + 4];
 
-                        named[0] = 0;
+                        escaped[0] = 0;
                         if (length >= 0)
-                                ui_label_foreign(words, sizeof(words), points, (positive)length), ui_menu_escape(named, sizeof(named), words);
-                        language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_link), named);
+                                files_sheet_escape(escaped, sizeof(escaped), points, (positive)length);
+                        language_format(sheet[lines++], room, WORDS(files_sheet_link), escaped);
                 }
                 else
-                        string_copy_bounded((string_address)files.big->sheet[lines++], (string_address)(format == MODE_DIRECTORY ? WORDS(files_sheet_folder)
-                                                                                                      : format == MODE_FILE      ? WORDS(files_sheet_file)
-                                                                                                                                 : WORDS(files_sheet_other)),
-                                            sizeof(files.big->sheet[0]));
+                        string_copy_bounded((string_address)sheet[lines++], (string_address)(format == MODE_DIRECTORY ? WORDS(files_sheet_folder)
+                                                                                           : format == MODE_FILE      ? WORDS(files_sheet_file)
+                                                                                                                      : WORDS(files_sheet_other)),
+                                            room);
         }
         // The size: a file's own; a folder's and many entries' as measured.
         if (!many && (facts.mode & MODE_FORMAT) != MODE_DIRECTORY)
         {
                 ui_size_text(size, sizeof(size), facts.size);
                 bytes[positive_into((p8 address_to)bytes, (positive)facts.size)] = 0;
-                language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_size), size, bytes);
+                language_format(sheet[lines++], room, WORDS(files_sheet_size), size, bytes);
         }
         else if (files.measuring)
-                string_copy_bounded((string_address)files.big->sheet[lines++], (string_address)WORDS(files_sheet_measuring), sizeof(files.big->sheet[0]));
+                string_copy_bounded((string_address)sheet[lines++], (string_address)WORDS(files_sheet_measuring), room);
         else
         {
-                ui_size_text(size, sizeof(size), files.big->move.bytes_total);
-                // What a folder holds: the count is of what is in it, not of the folder itself.
                 p32 items = files.big->move.items_total;
 
+                ui_size_text(size, sizeof(size), files.big->move.bytes_total);
+                // What a folder holds: the count is of what is in it, not of the folder itself.
                 items -= !many && items ? 1 : 0;
-                language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_size_in), size, (int)items);
+                language_format(sheet[lines++], room, WORDS(files_sheet_size_in), size, (int)items);
         }
         // Where it is.
         if (!files.sheet_folder)
         {
-                char escaped[FILES_NAME * 3 + 4];
-
-                ui_label_foreign(words, sizeof(words), m->path, string_length((string_address)m->path));
-                ui_menu_escape(escaped, sizeof(escaped), words);
-                language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_in), escaped);
+                files_sheet_escape(escaped, sizeof(escaped), m->path, string_length((string_address)m->path));
+                language_format(sheet[lines++], room, WORDS(files_sheet_in), escaped);
         }
         if (many)
                 return lines;
-        files_sheet_time(when, facts.modified.seconds);
-        language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_modified), when);
+        files_format_time(when, facts.modified.seconds, ' ', true);
+        language_format(sheet[lines++], room, WORDS(files_sheet_modified), when);
         if (facts.created.seconds)
         {
-                files_sheet_time(when, facts.created.seconds);
-                language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_created), when);
+                files_format_time(when, facts.created.seconds, ' ', true);
+                language_format(sheet[lines++], room, WORDS(files_sheet_created), when);
         }
         // The permissions, as ls writes them (the set-id and sticky bits in the execute places) and in octal.
         for (int bit = 0; bit < 9; bit++)
                 mode[bit] = facts.mode & (0400 >> bit) ? "rwxrwxrwx"[bit] : '-';
-        if (facts.mode & 04000)
-                mode[2] = mode[2] == 'x' ? 's' : 'S';
-        if (facts.mode & 02000)
-                mode[5] = mode[5] == 'x' ? 's' : 'S';
-        if (facts.mode & 01000)
-                mode[8] = mode[8] == 'x' ? 't' : 'T';
+        for (int k = 0; k < 3; k++)
+                if (facts.mode & (04000 >> k))
+                        mode[2 + 3 * k] = (char)((k == 2 ? 't' : 's') - (mode[2 + 3 * k] != 'x' ? 32 : 0));
         mode[9] = 0;
         for (int digit = 0; digit < 4; digit++)
                 octal[digit] = (char)('0' + (facts.mode >> (9 - 3 * digit) & 7));
         octal[4] = 0;
-        language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_mode), mode, octal);
-        language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_owner), (int)facts.owner, (int)facts.group);
+        language_format(sheet[lines++], room, WORDS(files_sheet_mode), mode, octal);
+        language_format(sheet[lines++], room, WORDS(files_sheet_owner), (int)facts.owner, (int)facts.group);
         return lines;
 }
 
@@ -2310,8 +2136,7 @@ static fn files_sheet_show(void)
         menu->count = 0;
         for (int at = 0; at < lines; at++)
                 ui_popmenu_add(menu, files.big->sheet[at], null, at ? 0 : UI_MENU_HEADER, FILES_MENU_SHEET);
-        files.menu.field = null;
-        ui_popmenu_open(&files.menu, &files.own, &files.ui, files.sheet_x, files.sheet_y, 0, 0, WINDOW_POPUP_POINT, false);
+        files_popup_open(files.sheet_x, files.sheet_y);
 }
 
 /*
@@ -2328,42 +2153,17 @@ static fn files_sheet_open(b32 folder, int x, int y)
         if (!folder && !entry)
                 folder = true, measure = true;
         if (x < 0)
-        {
-                struct ui_list address_to l = &files.big->list;
-
-                x = l->x + ui_dev(&files.ui, 40), y = l->y + (m->cursor != FILES_NO ? (int)m->cursor * ui_list_pitch(&files.ui, l) - l->scroll.scroll : 0);
-        }
+                files_cursor_pos(&x, &y, false);
         files.sheet = true, files.sheet_folder = folder, files.sheet_x = x, files.sheet_y = y, files.measuring = false;
         if (measure && !files.moving)
         {
                 p8 address_to list = null;
                 positive used = 0, room = 0;
-                p32 count = 0;
+                p32 count = folder ? 1 : files_paths_collect(m->cursor, m->chosen_count > 1, &list, &room, &used, null);
                 bipolar into = m->handle >= 0 ? system_open_at(m->handle, (string_address) ".", FILE_READ | O_DIRECTORY | O_CLOEXEC) : -1;
 
-                // The sources: the folder shown's own path, else each entry's, chosen or the cursor's.
-                for (p32 place = 0; place < (folder ? 1 : files_model_count(m)); place++)
-                {
-                        const struct files_entry address_to e = folder ? null : files_model_entry(m, place);
-                        positive length = string_length((string_address)m->path), name = e ? e->length : 0;
-
-                        if (!folder && (m->chosen_count > 1 ? !files_model_chosen(m, place) : place != m->cursor))
-                                continue;
-                        if (!array_store_reserve(list, room, used, used + length + name + 2, 4096))
-                                break;
-                        memory_copy(list + used, m->path, length);
-                        if (e)
-                        {
-                                if (length > 1)
-                                        list[used + length++] = '/';
-                                memory_copy(list + used + length, files_model_name(m, e), name);
-                                length += name;
-                        }
-                        list[used + length] = 0;
-                        used += length + 1, count++;
-                }
                 files_move_end(&files.big->move);
-                if (into >= 0 && count && files_move_begin(&files.big->move, FILES_MOVE_MEASURE, into, list, count))
+                if (into >= 0 && count && files_move_begin(&files.big->move, FILES_MOVE_MEASURE, into, folder ? m->path : list, count))
                 {
                         files_move_start(&files.big->move);
                         files.moving = files.measuring = true;
@@ -2468,7 +2268,7 @@ static fn files_menu_open(b32 on, int x, int y)
                     {WORDS(menu_properties), "Alt+Enter", 0, FILES_MENU_PROPERTIES, false},
                 };
 
-                ui_popmenu_build(menu, head, (int)(sizeof(head) / sizeof(head[0])));
+                ui_popmenu_build(menu, head, FILES_COUNT(head));
                 if (png)
                 {
                         unsigned int screens = ui_kit_table ? __atomic_load_n(&ui_kit_table->outputs, __ATOMIC_ACQUIRE) : 0;
@@ -2481,7 +2281,7 @@ static fn files_menu_open(b32 on, int x, int y)
                                 ui_popmenu_add(menu, files_wall_labels[at], null, 0, FILES_MENU_WALLPAPER_OF + (int)at);
                         }
                 }
-                ui_popmenu_build(menu, tail, (int)(sizeof(tail) / sizeof(tail[0])));
+                ui_popmenu_build(menu, tail, FILES_COUNT(tail));
         }
         else
         {
@@ -2498,6 +2298,7 @@ static fn files_menu_open(b32 on, int x, int y)
                     {WORDS(menu_view_details), "Ctrl+1", UI_MENU_RADIO | (files.view == FILES_VIEW_DETAILS ? UI_MENU_ON : 0), FILES_MENU_DETAILS, false},
                     {WORDS(menu_view_icons), "Ctrl+2", UI_MENU_RADIO | (files.view == FILES_VIEW_ICONS ? UI_MENU_ON : 0), FILES_MENU_ICONS, false},
                     {WORDS(menu_view_list), "Ctrl+3", UI_MENU_RADIO | (files.view == FILES_VIEW_LIST ? UI_MENU_ON : 0), FILES_MENU_LIST, false},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
                 };
                 const struct ui_menu_spec foot[] = {
                     {null, null, UI_MENU_SEPARATOR, 0, false},
@@ -2507,20 +2308,18 @@ static fn files_menu_open(b32 on, int x, int y)
                     {WORDS(menu_properties), null, 0, FILES_MENU_PROPERTIES, false},
                 };
 
-                ui_popmenu_build(menu, top, (int)(sizeof(top) / sizeof(top[0])));
-                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
+                ui_popmenu_build(menu, top, FILES_COUNT(top));
                 // The order, as the columns' header gives it (the one chosen again turns it round): the menu's way to it from the keys.
                 for (int column = 0; column < 4; column++)
                         ui_popmenu_add(menu, files.columns.title[column], column == files.columns.sorted ? (files.columns.descending ? "\xe2\x86\x93" : "\xe2\x86\x91") : null,
                                        UI_MENU_RADIO | (column == files.columns.sorted ? UI_MENU_ON : 0), FILES_MENU_SORT + column);
-                ui_popmenu_build(menu, foot, (int)(sizeof(foot) / sizeof(foot[0])));
+                ui_popmenu_build(menu, foot, FILES_COUNT(foot));
                 // The folder's own: nothing chosen, the cursor off the rows, so what the items do is the folder's.
                 files_model_choose_none(m);
                 m->cursor = FILES_NO, m->revision++;
         }
         files.sheet_folder = !on, files.sheet_x = x, files.sheet_y = y;
-        files.menu.field = null;
-        ui_popmenu_open(&files.menu, &files.own, &files.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
+        files_popup_open(x, y);
         files.dirty = true;
 }
 
@@ -2541,31 +2340,6 @@ static fn files_menu_at(int x, int y)
         files_menu_open(row >= 0, x, y);
 }
 
-// Shift+F10 and the menu key: the menu of the row the keys are on, at it; of the folder where there is none.
-static fn files_menu_keys(void)
-{
-        struct files_model address_to m = &files.big->model;
-        struct ui_list address_to l = &files.big->list;
-        int x = l->x + ui_dev(&files.ui, 40), y = l->y + ui_list_pitch(&files.ui, l) / 2;
-
-        if (m->cursor != FILES_NO)
-                y += (int)m->cursor * ui_list_pitch(&files.ui, l) - l->scroll.scroll;
-        files_menu_open(m->cursor != FILES_NO, x, y);
-}
-
-static fn files_delete(void);
-static fn files_new_folder(void);
-static fn files_open(p32 place);
-
-// The rows shown another way (FILES_VIEW_*): the cursor kept in sight.
-static fn files_view(int view)
-{
-        files.view = view;
-        files.big->list.scroll.scroll = 0;
-        files.dirty = true;
-        files_show_cursor();
-}
-
 // An item of the browser's menu, done.
 static fn files_menu_do(int id)
 {
@@ -2584,29 +2358,29 @@ static fn files_menu_do(int id)
         case FILES_MENU_TERMINAL: files_open_with(false); break;
         case FILES_MENU_CUT: files_rows_copy(true); break;
         case FILES_MENU_COPY: files_rows_copy(false); break;
-        case FILES_MENU_PASTE: files_paste(); break;
+        case FILES_MENU_PASTE: files.pasting = true, windows_clip_ask(&files.own, WINDOWS_CLIP_CLIPBOARD); break;
         case FILES_MENU_RENAME: files_edit(FILES_EDIT_NAME); break;
         case FILES_MENU_DELETE:
                 if (files_in_bin())
                         files_delete();
                 else
-                        files_bin_delete();
+                        files_bin_act(false);
                 break;
         case FILES_MENU_UNDO: files_undo(false); break;
         case FILES_MENU_REDO: files_undo(true); break;
-        case FILES_MENU_RESTORE: files_bin_put_back(); break;
+        case FILES_MENU_RESTORE: files_bin_act(true); break;
         case FILES_MENU_BIN: files_bin_show(); break;
         case FILES_MENU_BIN_EMPTY: files_bin_empty(); break;
         case FILES_MENU_NEW_FOLDER: files_new_folder(); break;
         case FILES_MENU_PROPERTIES: files_sheet_open(files.sheet_folder, files.sheet_x, files.sheet_y); break;
-        case FILES_MENU_HIDDEN:
-                m->hidden = !m->hidden;
-                files_model_reload(m);
-                break;
+        case FILES_MENU_HIDDEN: m->hidden = !m->hidden, files_model_reload(m); break;
         case FILES_MENU_DETAILS:
         case FILES_MENU_ICONS:
         case FILES_MENU_LIST:
-                files_view(id - FILES_MENU_DETAILS);
+                files.view = id - FILES_MENU_DETAILS;
+                files.big->list.scroll.scroll = 0;
+                files.dirty = true;
+                files_show_cursor();
                 break;
         case FILES_MENU_SORT:
         case FILES_MENU_SORT + 1:
@@ -2614,12 +2388,10 @@ static fn files_menu_do(int id)
         case FILES_MENU_SORT + 3:
                 files.columns.descending = id - FILES_MENU_SORT == files.columns.sorted ? !files.columns.descending : false;
                 files.columns.sorted = id - FILES_MENU_SORT;
-                files_model_sort(m, files_column_sort(files.columns.sorted), files.columns.descending);
+                files_model_sort(m, files_sort_cols[files.columns.sorted], files.columns.descending);
                 files_show_cursor();
                 break;
-        case FILES_MENU_ALL:
-                files_select_all(m);
-                break;
+        case FILES_MENU_ALL: files_select_all(m); break;
         }
 }
 
@@ -2629,23 +2401,13 @@ static b32 files_tree_go(p32 at)
 {
         static p8 path[FILES_PATH];
         const struct files_tree address_to t = &files.big->tree;
-        int came;
 
-        if (at >= t->count || !files_tree_path(t, at, path))
+        if (at >= t->count || !files_tree_path(t, at, path) || string_equals((string_address)path, (string_address)files.big->model.path))
                 return false;
-        if (string_equals((string_address)path, (string_address)files.big->model.path))
-                return false;
-        came = files_model_try(&files.big->model, (string_address)path);
-        if (came == FILES_GONE && t->node[at].depth == 0 && t->node[at].kind == FILES_NODE_PLACE &&
-            (bipolar)system_call_3(syscall(mkdirat), AT_FDCWD, (positive)path, 0755) >= 0)
-                came = files_model_try(&files.big->model, (string_address)path);
-        if (came == FILES_READING)
-        {
+        if (files_try_go(path) ||
+            (files.said == LANGUAGE_files_gone && t->node[at].depth == 0 && t->node[at].kind == FILES_NODE_PLACE &&
+             (bipolar)system_call_3(syscall(mkdirat), AT_FDCWD, (positive)path, 0755) >= 0 && files_try_go(path)))
                 files_moved();
-                return true;
-        }
-        files.said = files_state_said(came);
-        files.dirty = true;
         return true;
 }
 
@@ -2686,12 +2448,10 @@ static b32 files_tree_key(const struct window_event address_to event)
         case UI_KEY_LEFT:
         case UI_KEY_RIGHT:
                 step = ui_arrow(key);
-                if (step > 0 && !t->node[at].open)
+                if ((step > 0) != (t->node[at].open != 0))
                         files_tree_toggle(at);
                 else if (step > 0 && at + 1 < t->count && t->node[at + 1].depth > t->node[at].depth)
                         at++;
-                else if (step < 0 && t->node[at].open)
-                        files_tree_toggle(at);
                 else if (step < 0 && files_tree_parent(t, at) != FILES_NO)
                         at = files_tree_parent(t, at);
                 break;
@@ -2712,17 +2472,6 @@ static b32 files_tree_key(const struct window_event address_to event)
         ui_list_reveal(&files.ui, &files.big->tree_list);
         files.dirty = true;
         return true;
-}
-
-// The find field's text made the model's filter: the rows are those whose names hold it, the cursor on the first of them.
-static fn files_find_take(void)
-{
-        static p8 text[FILES_NAME];
-        positive length = ui_text_string(&files.finder, text, sizeof(text));
-
-        files_model_filter(&files.big->model, text, length < sizeof(text) ? length : sizeof(text) - 1);
-        files.reseat = true, files.big->model.seat = 0;
-        files.dirty = true;
 }
 
 // Finding begun (the field at the foot, with the keys and what it held chosen) or ended (the field gone, every entry shown again).
@@ -2786,56 +2535,41 @@ static b32 files_key(const struct window_event address_to event)
         bipolar by = 0;
 
         page = page < 1 ? 1 : page;
-        // Delete asks and Delete again does; Escape stops a delete under way; any other key leaves what was asked about.
         // Delete puts what is chosen in the bin (Ctrl+Z puts it back); Shift+Delete, or Delete in the bin, deletes it for good, asked first.
         if (key == UI_KEY_DELETE)
         {
-                if (event->flags & WINDOW_KEY_REPEAT)
-                        return true;
-                if ((event->flags & WINDOW_KEY_SHIFT) || files_in_bin())
-                        files_delete();
-                else
-                        files_bin_delete();
+                if (!(event->flags & WINDOW_KEY_REPEAT))
+                {
+                        if (shift || files_in_bin())
+                                files_delete();
+                        else
+                                files_bin_act(false);
+                }
                 return true;
         }
-        if ((event->flags & WINDOW_KEY_CONTROL) && (key == FILES_KEY_Z || key == FILES_KEY_Y))
-        {
-                files_undo(key == FILES_KEY_Y || (event->flags & WINDOW_KEY_SHIFT));
-                return true;
-        }
+        if (control && (key == FILES_KEY_Z || key == FILES_KEY_Y))
+                return files_undo(key == FILES_KEY_Y || shift), true;
         if (key == UI_KEY_ESCAPE && files.big->job.state == FILES_JOB_RUNNING)
-        {
-                files_job_cancel(&files.big->job);
-                return true;
-        }
+                return files_job_cancel(&files.big->job), true;
         if (key == UI_KEY_ESCAPE && files.moving && files_move_running(&files.big->move))
-        {
-                files_move_cancel(&files.big->move);
-                return true;
-        }
+                return files_move_cancel(&files.big->move), true;
         if (files.armed || files.big->note[0])
                 files.armed = false, files.big->note[0] = 0, files.dirty = true;
         // Carrying: Tab on the rows drops what is carried in the folder shown, Escape puts it back; anything else goes on as it would.
         if (files.carrying && key == UI_KEY_ESCAPE)
-        {
-                files_carry_end();
-                return true;
-        }
+                return files_carry_end(), true;
         if (key == UI_KEY_TAB && !shift && !control && !alt && files.focus == FILES_FOCUS_ROWS)
         {
                 if (files.carrying)
                         files_carry_drop(-1);
-                else
-                        files_carry_pick();
+                else if (files_carry_take())
+                        files.carrying = true, files.carry_at = (b64)ui_kit.now, files.said = 0, files.big->note[0] = 0;
                 files.dirty = true;
                 return true;
         }
         // Along the trail, wherever the keys are; then the trail's own keys while they are in it.
         if (alt && (key == UI_KEY_UP || key == UI_KEY_DOWN))
-        {
-                files_crumb_step(key == UI_KEY_UP ? -1 : 1);
-                return true;
-        }
+                return files_crumb_go(files.trail.current + (key == UI_KEY_UP ? -1 : 1)), true;
         if (files.focus == FILES_FOCUS_CRUMBS && files_crumb_key(event))
                 return true;
         if (files.focus == FILES_FOCUS_TREE && files_tree_key(event))
@@ -2853,66 +2587,48 @@ static b32 files_key(const struct window_event address_to event)
         {
                 static const struct
                 {
-                        p32 req, forbid;
+                        p32 req;
                         int key, menu_id;
                 } shortcuts[] = {
-                    {0, 0, FILES_KEY_F2, FILES_MENU_RENAME},
-                    {WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT, 0, FILES_KEY_N, FILES_MENU_NEW_FOLDER},
-                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_H, FILES_MENU_HIDDEN},
-                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_C, FILES_MENU_COPY},
-                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_X, FILES_MENU_CUT},
-                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_V, FILES_MENU_PASTE},
-                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_1, FILES_MENU_DETAILS},
-                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_1 + 1, FILES_MENU_ICONS},
-                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_1 + 2, FILES_MENU_LIST},
-                    {WINDOW_KEY_CONTROL, 0, FILES_KEY_A, FILES_MENU_ALL},
+                    {0, FILES_KEY_F2, FILES_MENU_RENAME},
+                    {WINDOW_KEY_CONTROL | WINDOW_KEY_SHIFT, FILES_KEY_N, FILES_MENU_NEW_FOLDER},
+                    {WINDOW_KEY_CONTROL, FILES_KEY_H, FILES_MENU_HIDDEN},
+                    {WINDOW_KEY_CONTROL, FILES_KEY_C, FILES_MENU_COPY},
+                    {WINDOW_KEY_CONTROL, FILES_KEY_X, FILES_MENU_CUT},
+                    {WINDOW_KEY_CONTROL, FILES_KEY_V, FILES_MENU_PASTE},
+                    {WINDOW_KEY_CONTROL, FILES_KEY_1, FILES_MENU_DETAILS},
+                    {WINDOW_KEY_CONTROL, FILES_KEY_1 + 1, FILES_MENU_ICONS},
+                    {WINDOW_KEY_CONTROL, FILES_KEY_1 + 2, FILES_MENU_LIST},
+                    {WINDOW_KEY_CONTROL, FILES_KEY_A, FILES_MENU_ALL},
                 };
 
-                for (positive k = 0; k < sizeof(shortcuts) / sizeof(shortcuts[0]); k++)
-                        if (key == shortcuts[k].key && (event->flags & shortcuts[k].req) == shortcuts[k].req && !(event->flags & shortcuts[k].forbid))
-                        {
-                                files_menu_do(shortcuts[k].menu_id);
-                                files.dirty = true;
-                                return true;
-                        }
+                for (int k = 0; k < FILES_COUNT(shortcuts); k++)
+                        if (key == shortcuts[k].key && (event->flags & shortcuts[k].req) == shortcuts[k].req)
+                                return files_menu_do(shortcuts[k].menu_id), files.dirty = true, true;
         }
         if (alt && (key == UI_KEY_LEFT || key == UI_KEY_RIGHT))
                 return files_act(key == UI_KEY_RIGHT);
         if (key == UI_KEY_BACKSPACE)
                 return files_act(2);
         if (key == FILES_KEY_F5 || (control && key == FILES_KEY_R))
-        {
-                files.said = 0;
-                files_model_reload(m);
-                files.dirty = true;
-                return true;
-        }
+                return files.said = 0, files_model_reload(m), files.dirty = true, true;
         if (control && key == FILES_KEY_F)
-        {
-                files_find(true);
-                return true;
-        }
+                return files_find(true), true;
         if (key == UI_KEY_ESCAPE && files.finding)
-        {
-                files_find(false);
-                return true;
-        }
+                return files_find(false), true;
         // A letter on the rows: the keys go to the first name that starts with what was typed in the last second.
         if (!control && !alt && event->b > ' ' && event->b != 0x7f && key != UI_KEY_SPACE)
-        {
-                files_type_ahead((p32)event->b);
-                return true;
-        }
+                return files_type_ahead((p32)event->b), true;
         if ((shift && key == FILES_KEY_F10) || key == FILES_KEY_MENU)
         {
-                files_menu_keys();
+                int x, y;
+
+                files_cursor_pos(&x, &y, true);
+                files_menu_open(m->cursor != FILES_NO, x, y);
                 return true;
         }
         if (alt && (key == UI_KEY_ENTER || key == UI_KEY_ENTER_PAD))
-        {
-                files_sheet_open(false, -1, -1);
-                return true;
-        }
+                return files_sheet_open(false, -1, -1), true;
         switch (key)
         {
         case UI_KEY_ENTER:
@@ -2972,10 +2688,7 @@ static b32 files_event(const struct window_event address_to event)
         {
                 asks = ui_field_send(ui, files_field(), &files.menu, event);
                 if (asks & UI_TEXT_SUBMIT)
-                {
-                        files_edit_go();
-                        return true;
-                }
+                        return files_edit_go(), true;
                 if (asks & (UI_TEXT_CANCEL | UI_TEXT_COMMIT))
                 {
                         files_edit(0);
@@ -2984,44 +2697,44 @@ static b32 files_event(const struct window_event address_to event)
                         files_layout();
                 }
                 else if (asks)
-                {
-                        files.said = 0, files.dirty = true;
-                        return true;
-                }
+                        return files.said = 0, files.dirty = true, true;
                 else if (event->type == WINDOW_EVENT_KEY)
                 {
-                        if (down && event->a == UI_KEY_TAB && !(event->flags & WINDOW_KEY_SHIFT) && files.editing == FILES_EDIT_PATH)
-                                files_edit_complete();
-                        else if (down && event->a == UI_KEY_TAB && !(event->flags & WINDOW_KEY_SHIFT) && files.editing == FILES_EDIT_PART)
-                                files_part_complete();
+                        if (down && event->a == UI_KEY_TAB && !(event->flags & WINDOW_KEY_SHIFT))
+                        {
+                                if (files.editing == FILES_EDIT_PATH)
+                                        files_edit_complete();
+                                else if (files.editing == FILES_EDIT_PART)
+                                        files_part_complete();
+                        }
                         return true;
                 }
         }
         else if (event->type == WINDOW_EVENT_KEY && down && (event->flags & WINDOW_KEY_CONTROL) && event->a == FILES_KEY_L)
-        {
-                files_edit(FILES_EDIT_PATH);
-                return true;
-        }
+                return files_edit(FILES_EDIT_PATH), true;
         // The find field: its keys while it has them, a press on it gives them to it; Enter gives them to the rows (what it found stays),
         // Escape ends the finding (every entry shown again), and its text is the filter as it is typed.
         else if (files.finding && (files.focus == FILES_FOCUS_FIND || event->type == WINDOW_EVENT_BUTTON))
         {
-                b32 on = ui_kit.pointer_x >= files.finder.well_left && ui_kit.pointer_x < files.finder.well_right && ui_kit.pointer_y >= files.finder.well_top &&
-                         ui_kit.pointer_y < files.finder.well_bottom;
-
-                if (event->type == WINDOW_EVENT_BUTTON && down && on)
+                if (event->type == WINDOW_EVENT_BUTTON && down &&
+                    files_in_rect(ui_kit.pointer_x, ui_kit.pointer_y, files.finder.well_left, files.finder.well_top,
+                                  files.finder.well_right - files.finder.well_left, files.finder.well_bottom - files.finder.well_top))
                         files.focus = FILES_FOCUS_FIND;
                 if (files.focus == FILES_FOCUS_FIND)
                 {
                         asks = ui_field_send(ui, &files.finder, &files.menu, event);
-                        if (asks & UI_TEXT_SUBMIT)
+                        if (asks & (UI_TEXT_SUBMIT | UI_TEXT_COMMIT))
                                 files.focus = FILES_FOCUS_ROWS;
                         else if (asks & UI_TEXT_CANCEL)
                                 files_find(false);
-                        else if (asks & UI_TEXT_COMMIT)
-                                files.focus = FILES_FOCUS_ROWS;
                         if (asks & ~(p32)(UI_TEXT_SUBMIT | UI_TEXT_CANCEL | UI_TEXT_COMMIT))
-                                files_find_take();
+                        {
+                                static p8 text[FILES_NAME];
+                                positive length = files_field_read(&files.finder, text, sizeof(text));
+
+                                files_model_filter(m, text, length < sizeof(text) ? length : sizeof(text) - 1);
+                                files.reseat = true, m->seat = 0, files.dirty = true;
+                        }
                         files.dirty |= asks != 0;
                         if (asks || event->type == WINDOW_EVENT_KEY)
                                 return true;
@@ -3042,7 +2755,7 @@ static b32 files_event(const struct window_event address_to event)
 
                 if (took & UI_COLUMNS_SORTED)
                 {
-                        files_model_sort(m, files_column_sort(files.columns.sorted), files.columns.descending);
+                        files_model_sort(m, files_sort_cols[files.columns.sorted], files.columns.descending);
                         files_show_cursor();
                 }
                 files.dirty |= (took & UI_COLUMNS_DRAW) != 0;
@@ -3083,9 +2796,8 @@ static b32 files_event(const struct window_event address_to event)
                 if (down)
                         files.armed = false, files.big->note[0] = 0; // a press leaves what Delete asked about
                 // The band: a press on a crumb goes to its folder, and one on the band's own ground opens the field.
-                if (down && event->a == UI_POINTER_LEFT && !files.editing && ui_kit.pointer_x >= files.crumbs_box.x &&
-                    ui_kit.pointer_x < files.crumbs_box.x + files.crumbs_box.w && ui_kit.pointer_y >= files.crumbs_box.y &&
-                    ui_kit.pointer_y < files.crumbs_box.y + files.crumbs_box.h)
+                if (down && event->a == UI_POINTER_LEFT && !files.editing &&
+                    files_in_rect(ui_kit.pointer_x, ui_kit.pointer_y, files.crumbs_box.x, files.crumbs_box.y, files.crumbs_box.w, files.crumbs_box.h))
                 {
                         int crumb = files_crumb_at(ui_kit.pointer_x, ui_kit.pointer_y);
 
@@ -3186,15 +2898,11 @@ static b32 files_event(const struct window_event address_to event)
                         files_model_choose_none(m), m->cursor = FILES_NO, m->revision++, files.dirty = true;
                 if (row >= 0)
                 {
-                        p32 place = (p32)row;
-
                         files.said = 0;
                         if ((event->flags & WINDOW_KEY_TOUCH) || l->double_clicked)
-                        {
-                                files_open(place);
-                                break;
-                        }
-                        files_model_choose(m, place, event->flags & WINDOW_KEY_CONTROL ? FILES_CHOOSE_TOGGLE : event->flags & WINDOW_KEY_SHIFT ? FILES_CHOOSE_RANGE : FILES_CHOOSE_ONLY);
+                                files_open((p32)row);
+                        else
+                                files_model_choose(m, (p32)row, event->flags & WINDOW_KEY_CONTROL ? FILES_CHOOSE_TOGGLE : event->flags & WINDOW_KEY_SHIFT ? FILES_CHOOSE_RANGE : FILES_CHOOSE_ONLY);
                 }
                 break;
         }
@@ -3259,9 +2967,11 @@ static long files_tick(long timeout, long address_to other)
                         files.spring = -1, files.drop.nth = -2;
                         if (spring >= FILES_SPRING_NODE && (p32)(spring - FILES_SPRING_NODE) < files.big->tree.count)
                         {
-                                if (!files.big->tree.node[spring - FILES_SPRING_NODE].open)
-                                        files_tree_toggle((p32)(spring - FILES_SPRING_NODE));
-                                files_tree_go((p32)(spring - FILES_SPRING_NODE));
+                                p32 node = (p32)(spring - FILES_SPRING_NODE);
+
+                                if (!files.big->tree.node[node].open)
+                                        files_tree_toggle(node);
+                                (void)files_tree_go(node);
                         }
                         else if (spring < FILES_SPRING_NODE)
                                 files_open((p32)spring);
@@ -3297,20 +3007,17 @@ static long files_tick(long timeout, long address_to other)
                 files.dirty = true;
                 timeout = ui_timeout_min(timeout, 16000000);
         }
-        // The field's caret blinks while the path is typed, and the find field's while it has the keys.
-        if (files.editing)
+        // The active field's caret blinks while the path or find field has the keys.
         {
-                b32 redraw = false;
+                struct ui_text address_to active = files.editing ? files_field() : files.finding && files.focus == FILES_FOCUS_FIND ? &files.finder : null;
 
-                timeout = ui_text_timeout(&files.ui, files_field(), timeout, &redraw);
-                files.dirty |= redraw;
-        }
-        if (files.finding && files.focus == FILES_FOCUS_FIND)
-        {
-                b32 redraw = false;
+                if (active)
+                {
+                        b32 redraw = false;
 
-                timeout = ui_text_timeout(&files.ui, &files.finder, timeout, &redraw);
-                files.dirty |= redraw;
+                        timeout = ui_text_timeout(&files.ui, active, timeout, &redraw);
+                        files.dirty |= redraw;
+                }
         }
         // A copy or a move under way: stepped here when it has no thread of its own, the foot counting while it runs, and when it ends
         // the foot says what it came to and the folder is read again.
@@ -3321,23 +3028,17 @@ static long files_tick(long timeout, long address_to other)
 
                 while (!job->worker && files_move_running(job) && (b64)ui_kit_clock() - began < FILES_TURN_NS)
                         files_move_step(job);
-                if (!files_move_running(job) && files.measuring)
+                if (!files_move_running(job))
                 {
-                        // A sheet's size, measured: the sheet again with it, if it is still open.
-                        files.measuring = false;
-                        if (files.sheet && files.menu.open)
-                                files_sheet_show();
-                        files_move_end(job);
-                        files.moving = false;
-                }
-                else if (!files_move_running(job))
-                {
-                        files_move_said();
-                        files_move_deed(job);
-                        files_move_end(job);
-                        files.moving = false;
-                        files_model_reload(m);
-                        files.dirty = true;
+                        if (files.measuring)
+                        {
+                                files.measuring = false;
+                                if (files.sheet && files.menu.open)
+                                        files_sheet_show();
+                        }
+                        else
+                                files_move_said(), files_move_deed(job), files_model_reload(m), files.dirty = true;
+                        files_move_end(job), files.moving = false;
                 }
                 else if (now >= files.next_progress)
                         files.next_progress = now + FILES_SHOW_NS, files.dirty = true;
@@ -3409,8 +3110,6 @@ static long files_tick(long timeout, long address_to other)
         return timeout == 0 ? 1 : timeout;
 }
 
-static struct ui_app files_app;
-
 static int files_open_window(void)
 {
         if (!(files.big = ui_app_map(&files_app, sizeof(struct files_big))))
@@ -3420,7 +3119,23 @@ static int files_open_window(void)
                 compositor_kmsg((string_address) "files: no memory, pid ", (positive)compositor_call(syscall(getpid), 0, 0, 0, 0, 0, 0), (string_address) "");
                 return 1;
         }
+        {
+                struct ui_list address_to lists[2] = {&files.big->list, &files.big->tree_list};
+
+                for (int k = 0; k < 2; k++)
+                {
+                        lists[k]->virtual = true, lists[k]->beside = true;
+                        lists[k]->row_h = FILES_ROW;
+                        lists[k]->damaged = files_damaged;
+                        lists[k]->hover = lists[k]->down = -1;
+                }
+                files.big->list.describe = files_describe, files.big->list.selected = files_row_selected;
+                files.big->tree_list.tree = true, files.big->tree_list.describe = files_tree_describe;
+        }
+        files.path.kind = UI_INPUT, files.path.variant = UI_FIELD_BARE, files.path.edit = files_field();
+        files.finder_field.kind = UI_INPUT, files.finder_field.variant = UI_FIELD_BARE, files.finder_field.edit = &files.finder;
         files.crumb_hover = -1, files.crumb_clicked = -1, files.drop_row = -1, files.drop_node = -1, files.spring = -1;
+        files.columns.count = 4, files.columns.at_end[1] = true;
         files.columns.width[1] = 90, files.columns.width[2] = 110, files.columns.width[3] = 140;
         files.columns.sorted = 0, files.columns.hover = files.columns.held = -1;
         files_app.view = &files.big->view;
@@ -3441,12 +3156,8 @@ static int files_open_window(void)
 static fn files_chose(int id)
 {
         if (id >= FILES_MENU_OPEN)
-        {
-                files_menu_do(id);
-                files.dirty = true;
-                return;
-        }
-        if (files.menu.field && ui_text_menu_do(&files.ui, files.menu.field, id))
+                files_menu_do(id), files.dirty = true;
+        else if (files.menu.field && ui_text_menu_do(&files.ui, files.menu.field, id))
                 files.dirty = true;
 }
 
