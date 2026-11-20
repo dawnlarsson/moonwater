@@ -7487,6 +7487,7 @@ static fn check_kit_tab_ripple(void)
 
         check("kit tab ripple: on a sliding segmented tab the ripple is cut to the indicator it moves with, nothing outside it", slid);
         check("kit tab ripple: on a strip on end the ripple starts at the press, on the item pressed", placed);
+        ui_kit_pointer(&ui, &column, 1, WINDOW_EVENT_BUTTON, 60, press_y, false, 0);
 }
 
 /*

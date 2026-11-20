@@ -1,9 +1,9 @@
-@language nl
-@name Nederlands
-@translated machine
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
+@language nl
+@name Nederlands
+@translated machine
 action_copy	3664	Kopiëren
 action_cut	5863	Knippen
 action_paste	0288	Plakken
@@ -13,21 +13,24 @@ editor_closes_unsaved	fcb8	sluit en gooit de niet-opgeslagen wijzigingen weg
 editor_encoding_bom	c0d7	UTF-8 met BOM
 editor_find_hint	d17a	Zoeken
 editor_find_replace_hint	3693	Zoeken/Vervangen door
+editor_hex_status	35a5	Offset %1$s / %2$s
 editor_indent_spaces	9db9	Spaties: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Regel
 editor_lock_stale	f9d8	%s is overgebleven van een eerder opslaan: verwijder het, sla dan op
+editor_mode_hex	55d5	Hex
+editor_mode_text	134a	Tekst
 editor_no_file_name	c863	geen bestandsnaam: start de editor met een naam
 editor_no_match	7de7	geen overeenkomst
 editor_not_regular	5955	geen gewoon bestand: geweigerd
-editor_open_none	63aa	openen is hier niet: start de editor met de bestandsnaam
+editor_open_hint	235f	Bestandspad openen
 editor_pattern_bad	5d57	het patroon is ongeldig
 editor_position	3696	Rg %1$d, Kol %2$d
 editor_read_failed	5f78	het bestand kon niet worden gelezen: het wordt niet geopend
 editor_reload_unsaved	85da	leest het bestand opnieuw en verwerpt de niet-opgeslagen wijzigingen
 editor_replace_usage	c677	vervangen is ZOEK/VERVANGING
 editor_replaced	1128	%d vervangen
-editor_save_as_none	0745	opslaan als is hier niet: Ctrl+S slaat het bestand op
+editor_save_as_hint	c955	Opslaan als pad
 editor_save_failed	069d	opslaan mislukt: het bestand is ongewijzigd
 editor_saved	9f44	opgeslagen
 editor_selected	a686	(%d geselecteerd)
@@ -35,6 +38,7 @@ editor_selected_carets	7e02	(%d geselecteerd, cursors)
 editor_tabs_full	8ed9	alle %d tabbladen zijn open: sluit eerst er een
 editor_unsaved	c014	niet-opgeslagen wijzigingen: sla ze op, of sluit elk met tweemaal Ctrl+W
 editor_untitled	8b58	naamloos
+editor_wrap_on	40cd	Omslag
 editor_write_beside	ec75	kon niet naast het bestand schrijven
 editor_writes_over_changed	df15	overschrijft de wijziging op schijf (Ctrl+R leest opnieuw)
 editor_writes_over_readonly	e22f	overschrijft een alleen-lezen bestand
@@ -184,15 +188,21 @@ launcher_sleep_armed	bb08	in slaapstand zetten
 menu_bin_empty	1538	Prullenbak legen
 menu_bin_open	8797	Prullenbak openen
 menu_bin_restore	4799	Terugzetten
+menu_close_others	ec3e	Andere tabbladen sluiten
+menu_close_tab	9753	Tabblad sluiten
 menu_copy	43e0	Ko&piëren
 menu_copy_row	f3c8	Rij kopiëren
 menu_cut	5c17	&Knippen
 menu_delete	1e3e	&Verwijderen
 menu_find	1fa6	&Zoeken
 menu_go_to_line	bc96	&Ga naar regel
+menu_hex_mode	fd1b	Hex-editor
 menu_new_folder	41cb	&Nieuwe map
+menu_new_tab	dad5	Nieuw tabblad
+menu_new_window	2c79	Nieuw venster
 menu_open	61a5	&Openen
 menu_open_editor	8ca0	Openen in de &editor
+menu_open_file	098c	Bestand openen...
 menu_open_terminal	6d2a	Hier een &terminal openen
 menu_paste	6854	P&lakken
 menu_properties	c780	&Eigenschappen
@@ -200,6 +210,7 @@ menu_redo	ac45	Op&nieuw
 menu_remove	901d	Verwijderen
 menu_rename	9529	Naam &wijzigen
 menu_reset_zoom	1b0f	Zoom &herstellen
+menu_save_as	e18c	Opslaan als...
 menu_select_all	f6f6	&Alles selecteren
 menu_set_wallpaper	1a27	Instellen als &achtergrond
 menu_set_wallpaper_of	aa60	Instellen als achtergrond van %s
@@ -209,6 +220,7 @@ menu_undo	b9d3	&Ongedaan maken
 menu_view_details	d3a1	&Details
 menu_view_icons	57e8	Grote &pictogrammen
 menu_view_list	4cc5	&Lijst
+menu_word_wrap	9ab3	Regelomslaan
 menu_zoom_in	5bcf	&Inzoomen
 menu_zoom_out	9234	&Uitzoomen
 mixer_allow	19d2	Toestaan
@@ -449,6 +461,8 @@ ui_field_full	fe02	meer past er niet in
 =A quick shake makes the pointer large for a moment	4d81	Even schudden maakt de aanwijzer kort groot
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Accentkleur (rrggbb of reset)
+=Add a key (label, then the public key)	e2e3	Sleutel toevoegen (label, dan de publieke sleutel)
+=Add a program to start (its path)	5e20	Programma aan de start toevoegen (zijn pad)
 =Airplane mode	3b8a	Vliegtuigmodus
 =All commands	4a42	Alle opdrachten
 =Allow recording	f7e5	Opnemen toestaan
@@ -468,6 +482,7 @@ ui_field_full	fe02	meer past er niet in
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Opstarten
+=Bowl tier	7b7f	Bowl-niveau
 =Brightness	324a	Helderheid
 =Build	7543	Build
 =Canvas	5091	Canvas
@@ -487,17 +502,18 @@ ui_field_full	fe02	meer past er niet in
 =Devices	f320	Apparaten
 =Discover now	398a	Nu detecteren
 =Discovery	2db5	Detectie
-=Files	1b30	Bestanden
-=Install Moonwater	06fc	Moonwater installeren
-=Internal storage	e961	Interne opslag
-=External devices	5769	Externe apparaten
 =Display	d9b5	Scherm
 =Double-click time (ms, or default)	9af1	Dubbelkliktijd (ms of default)
 =Drag lists with the mouse	4ee2	Lijsten met de muis slepen
 =Edge swipes	7aaf	Vegen vanaf de rand
 =Editor	bf98	Editor
+=End every session	12e1	Alle sessies beëindigen
+=External devices	5769	Externe apparaten
+=Files	1b30	Bestanden
 =GPU rendering (alpha)	e5e6	GPU-rendering (alpha)
 =Gallery	4cdd	Galerij
+=Graphics	9fa8	Graphics
+=Host key fingerprint	2398	Vingerafdruk van de hostsleutel
 =How fast the pointer follows the mouse	0a45	Hoe snel de aanwijzer de muis volgt
 =How long it stays large after a shake	82a0	Hoe lang hij groot blijft na het schudden
 =How long to hold a finger to right-click	b301	Hoe lang een vinger blijft voor een rechtsklik
@@ -511,6 +527,8 @@ ui_field_full	fe02	meer past er niet in
 =Input device (name, or default)	af7b	Invoerapparaat (naam of default)
 =Input mute	ad50	Invoer dempen
 =Input volume (percent, or default)	263f	Invoervolume (procent of default)
+=Install Moonwater	06fc	Moonwater installeren
+=Internal storage	e961	Interne opslag
 =Internet sharing over Bluetooth	afe8	Internetdeling via Bluetooth
 =Keep a device by its name	9c51	Een apparaat op naam bewaren
 =Keep the lowest-delay sample	d8b9	Monster met laagste vertraging bewaren
@@ -527,7 +545,9 @@ ui_field_full	fe02	meer past er niet in
 =Launcher	44b1	Starter
 =Learned	0c7c	Geleerd
 =Left edge	9ce5	Linkerrand
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Laat de sleutels van de lijst via het netwerk aanmelden; uit stopt hem en beëindigt alle sessies
 =Linked machines	0cc2	Gekoppelde machines
+=Listen address (any for every address)	d513	Luisteradres (any voor elk adres)
 =Local addresses	9f2c	Lokale adressen
 =Long press time (ms, or default)	aff4	Duur van lang indrukken (ms of default)
 =Machine	be0e	Machine
@@ -535,10 +555,6 @@ ui_field_full	fe02	meer past er niet in
 =Momentum	cfef	Momentum
 =Motion	7647	Beweging
 =Mount kept disks	f0c8	Bewaarde schijven aankoppelen
-=Programs started with the desktop	5b74	Programma's die met het bureaublad starten
-=Add a program to start (its path)	5e20	Programma aan de start toevoegen (zijn pad)
-=Remove a program from the start (its path)	1013	Programma uit de start verwijderen (zijn pad)
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Geopend in deze volgorde als het bureaublad start; none start het zonder vensters
 =Mouse	9b64	Muis
 =Mouse acceleration	c400	Muisversnelling
 =Mouse sensitivity (percent, or default)	8a23	Muisgevoeligheid (procent of default)
@@ -557,6 +573,7 @@ ui_field_full	fe02	meer past er niet in
 =Notices	8f06	Meldingen
 =On-screen keyboard	97f8	Toetsenbord op het scherm
 =Open windows where they were last put	8711	Vensters openen waar ze het laatst stonden
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Geopend in deze volgorde als het bureaublad start; none start het zonder vensters
 =Output device (name, or default)	d73c	Uitvoerapparaat (naam of default)
 =Pair a machine	b39b	Een machine koppelen
 =Paths	263f	Paden
@@ -564,9 +581,12 @@ ui_field_full	fe02	meer past er niet in
 =Pointer	4dca	Aanwijzer
 =Pointer squeeze (percent, or default)	bbee	Indrukken van de aanwijzer (procent, of standaard)
 =Pointer squeezes on click	ad88	Aanwijzer krimpt bij klikken
+=Port	3cc6	Poort
 =Power	a5e6	Energie
 =Power profile	8def	Energieprofiel
 =Predict touch and pen	e2b7	Aanraking en pen voorspellen
+=Primary display	924b	Primair scherm
+=Programs started with the desktop	5b74	Programma's die met het bureaublad starten
 =Proxy	1bfb	Proxy
 =Proxy from the environment	7fa7	Proxy uit de omgeving
 =Public IPv4	0813	Publiek IPv4
@@ -575,16 +595,25 @@ ui_field_full	fe02	meer past er niet in
 =Public address discovery (STUN)	7691	Detectie van het publieke adres (STUN)
 =Refresh rate	bf6e	Vernieuwingsfrequentie
 =Remembered devices	abbc	Onthouden apparaten
+=Remove a program from the start (its path)	1013	Programma uit de start verwijderen (zijn pad)
 =Resize border width (pixels, or default)	7fdf	Breedte van de rand voor formaatwijziging (pixels of default)
 =Resize grip (pixels, or default)	dddd	Greep voor formaatwijziging (pixels of default)
+=Resolution	18af	Resolutie
 =Right edge	279a	Rechterrand
+=Root login	6cd4	Root-aanmelding
+=Root may log in by a key of the list, and by nothing else	a430	Root mag zich aanmelden met een sleutel van de lijst, en met niets anders
 =Rotation	777f	Rotatie
 =Rubber band	9c42	Rubberbandeffect
+=SSH	7b31	SSH
+=SSH server	9b60	SSH-server
+=STUN servers (or reset)	4062	STUN-servers (of reset)
+=STUN time limit (ms, or default)	be40	STUN-tijdslimiet (ms of default)
 =Scale of this screen	e4ca	Schaal van dit scherm
 =Screen	c631	Scherm
 =Screen modes	85ad	Schermmodi
 =Scroll speed	e7af	Scrollsnelheid
 =Scrolling	74ec	Scrollen
+=Server files	5af9	Bestanden van de server
 =Servers in order	0a76	Servers op volgorde
 =Set the clock from the network	b2a3	Klok instellen via het netwerk
 =Settings	8728	Instellingen
@@ -597,19 +626,33 @@ ui_field_full	fe02	meer past er niet in
 =Sound	9a34	Geluid
 =Sound server	84bf	Geluidsserver
 =Start the desktop	be4c	Bureaublad starten
-=STUN servers (or reset)	4062	STUN-servers (of reset)
-=STUN time limit (ms, or default)	be40	STUN-tijdslimiet (ms of default)
 =System	84bc	Systeem
 =System notices	fa89	Systeemmeldingen
 =Taskbar	d759	Taakbalk
+=Taskbar battery place	3413	Plaats van de accu op de taakbalk
+=Taskbar clock bulge (percent)	fa6c	Bolling van de klok op de taakbalk (procent)
+=Taskbar clock place	c144	Plaats van de klok op de taakbalk
 =Taskbar display	042b	Scherm van de taakbalk
+=Taskbar distance from the edge (pixels)	845c	Afstand van de taakbalk tot de rand (pixels)
 =Taskbar hides for fullscreen	f2f8	Taakbalk verbergt zich bij volledig scherm
 =Taskbar launcher button	dd4d	Starterknop op de taakbalk
+=Taskbar microphone place	76d8	Plaats van de microfoon op de taakbalk
+=Taskbar moon look	a24d	Uiterlijk van de maan op de taakbalk
+=Taskbar moon place	6f19	Plaats van de maan op de taakbalk
+=Taskbar moon spin (seconds a turn, off or default)	a763	Draaiing van de maan op de taakbalk (seconden per omwenteling, uit of standaard)
+=Taskbar newest task side	b5a9	Kant van de nieuwste taak op de taakbalk
+=Taskbar notices place	a793	Plaats van de meldingen op de taakbalk
+=Taskbar order	ccfd	Volgorde van de taakbalk
 =Taskbar padding (pixels)	a3a0	Tussenruimte van de taakbalk (pixels)
 =Taskbar pinned programs (or none)	3732	Aan de taakbalk vastgemaakte programma's (of geen)
 =Taskbar position	81b8	Positie van de taakbalk
 =Taskbar scale (percent)	810b	Schaal van de taakbalk (procent)
+=Taskbar sound place	e2a1	Plaats van het geluid op de taakbalk
+=Taskbar tasks	445b	Taken op de taakbalk
+=Taskbar tasks place	bfd0	Plaats van de taken op de taakbalk
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Systeemvak van de taakbalk (tekst met {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Taskbar tray clock place	c2e6	Plaats van de systeemvakklok op de taakbalk
+=Taskbar tray text place	c235	Plaats van de systeemvaktekst op de taakbalk
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Terminalregels per wielstap
 =Text size (percent, or default)	51d7	Tekstgrootte (procent of default)
@@ -625,11 +668,12 @@ ui_field_full	fe02	meer past er niet in
 =Theme	7c92	Thema
 =This machine	3790	Deze machine
 =Time	e404	Tijd
+=Time limit (minutes, or off)	d2cf	Tijdslimiet (minuten, of off)
 =Time server (auto for the pool)	67e5	Tijdserver (auto voor de pool)
 =Time zone	741a	Tijdzone
 =Touch	fb78	Aanraking
-=Trace time limit (seconds, or default)	28d4	Trace-tijdslimiet (seconden of default)
 =Trace URL (or default)	be36	Trace-URL (of default)
+=Trace time limit (seconds, or default)	28d4	Trace-tijdslimiet (seconden of default)
 =Turned by the screen	ea45	Gedraaid door het scherm
 =Turned left	507c	Naar links gedraaid
 =Turned right	7a49	Naar rechts gedraaid
@@ -637,18 +681,27 @@ ui_field_full	fe02	meer past er niet in
 =Upside down	9dc1	Ondersteboven
 =Variable refresh rate	06a4	Variabele vernieuwingsfrequentie
 =Volume (percent, or default)	f6e3	Volume (procent of default)
+=Wallpaper	0da9	Bureaubladachtergrond
+=Wallpaper glow	57c6	Gloed van de bureaubladachtergrond
+=Wallpaper in the dark theme	a6dc	Bureaubladachtergrond in het donkere thema
+=Wallpaper of this screen	2c92	Achtergrond van dit scherm
+=Wallpaper picture (a PNG file, or none)	8e9d	Achtergrondafbeelding (een PNG-bestand, of geen)
+=Wallpaper seas (percent grey)	6836	Zeeën van de bureaubladachtergrond (procent grijs)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Wat vegen vanaf deze rand doet
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Waar Canvas tekent: op de GPU of de processor. Wat de kaart nu doet staat eronder
 =White edged in black, or the reverse	cd63	Wit met een zwarte rand, of andersom
 =Wi-Fi	0ec1	Wi-Fi
 =Wi-Fi IP address	9026	Wi-Fi IP-adres
 =Wired	9a54	Bekabeld
 =Wired IP address	0e25	Bekabeld IP-adres
+=after	7dc9	erna
 =all	4bc4	alle
 =allow	a832	toestaan
 =amber	bec0	amber
 =auto	a396	automatisch
 =balanced	b71d	gebalanceerd
+=before	ff3e	ervoor
 =black	4ba4	zwart
 =blue	f5cd	blauw
 =bottom	6b2a	onderaan
@@ -660,16 +713,23 @@ ui_field_full	fe02	meer past er niet in
 =default	5bde	standaard
 =deny	6367	weigeren
 =desktop	87b3	bureaublad
+=dimmed	bded	gedimd
 =dmy	2a79	dmy
 =dynamic	96ae	dynamisch
 =edge	d83c	rand
+=end	75aa	eind
 =fast	02af	snel
 =forest	2a60	woud
 =full	b33c	volledig
 =games	2b9c	games
+=glow	27bc	gloed
+=glow-and-edges	540f	gloed-en-randen
 =graphite	dc8d	grafiet
 =green	ecbc	groen
+=grouped	8b7d	gegroepeerd
 =high	b9fd	hoog
+=ink	8faf	inkt
+=inverted	8038	omgekeerd
 =kernel log	415a	kernellogboek
 =kernel log klog dmesg messages	1a8d	kernel logboek klog dmesg berichten
 =launcher	8391	starter
@@ -681,6 +741,9 @@ ui_field_full	fe02	meer past er niet in
 =mdy	3697	mdy
 =midnight-blue	4008	middernachtblauw
 =modem	67ed	modem
+=moon	ae40	maan
+=moon-tasks-tray	6c42	maan-taken-systeemvak
+=moon-tray-tasks	c2c4	maan-systeemvak-taken
 =network	86c5	netwerk
 =none	afdb	Geen
 =normal	9c52	normaal
@@ -690,20 +753,32 @@ ui_field_full	fe02	meer past er niet in
 =per second	4f98	per seconde
 =percent	fa5a	procent
 =performance	8ca5	prestaties
+=picture	d389	afbeelding
+=plain	3f67	effen
 =plum	b06b	pruim
 =powersave	2283	energiebesparing
 =primary	5fd9	primair
+=realistic	b65f	realistisch
 =reduced	5839	beperkt
 =right	2de5	rechts
 =rose	1806	roze
+=separate	bb18	apart
 =settings preferences options	8c78	instellingen voorkeuren opties
 =slate	deee	leisteen
 =slow	42b8	langzaam
+=split	2de3	gesplitst
+=start	04df	begin
+=tab	2e4c	pil
+=tasks-moon-tray	c6a4	taken-maan-systeemvak
+=tasks-tray-moon	4f46	taken-systeemvak-maan
 =tcp	ba90	tcp
 =terminal shell console	eaba	terminal console shell
 =thick	964e	dik
 =thin	b172	dun
 =top	dc3c	bovenaan
+=tray	a12d	systeemvak
+=tray-moon-tasks	7246	systeemvak-maan-taken
+=tray-tasks-moon	fda8	systeemvak-taken-maan
 =unlock	1f55	ontgrendelen
 =violet	57f2	violet
 =volume	698f	volume
@@ -712,66 +787,3 @@ ui_field_full	fe02	meer past er niet in
 =windows	26ea	vensters
 =wired	bfb4	bekabeld
 =ymd	faad	ymd
-=SSH	7b31	SSH
-=SSH server	9b60	SSH-server
-=Root login	6cd4	Root-aanmelding
-=Port	3cc6	Poort
-=Listen address (any for every address)	d513	Luisteradres (any voor elk adres)
-=Time limit (minutes, or off)	d2cf	Tijdslimiet (minuten, of off)
-=Host key fingerprint	2398	Vingerafdruk van de hostsleutel
-=Server files	5af9	Bestanden van de server
-=Bowl tier	7b7f	Bowl-niveau
-=Add a key (label, then the public key)	e2e3	Sleutel toevoegen (label, dan de publieke sleutel)
-=End every session	12e1	Alle sessies beëindigen
-=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Laat de sleutels van de lijst via het netwerk aanmelden; uit stopt hem en beëindigt alle sessies
-=Root may log in by a key of the list, and by nothing else	a430	Root mag zich aanmelden met een sleutel van de lijst, en met niets anders
-=Wallpaper	0da9	Bureaubladachtergrond
-=Wallpaper picture (a PNG file, or none)	8e9d	Achtergrondafbeelding (een PNG-bestand, of geen)
-=Wallpaper in the dark theme	a6dc	Bureaubladachtergrond in het donkere thema
-=Wallpaper seas (percent grey)	6836	Zeeën van de bureaubladachtergrond (procent grijs)
-=Wallpaper glow	57c6	Gloed van de bureaubladachtergrond
-=Taskbar moon place	6f19	Plaats van de maan op de taakbalk
-=Taskbar moon look	a24d	Uiterlijk van de maan op de taakbalk
-=Taskbar tasks place	bfd0	Plaats van de taken op de taakbalk
-=Taskbar newest task side	b5a9	Kant van de nieuwste taak op de taakbalk
-=Taskbar notices place	a793	Plaats van de meldingen op de taakbalk
-=Taskbar microphone place	76d8	Plaats van de microfoon op de taakbalk
-=Taskbar sound place	e2a1	Plaats van het geluid op de taakbalk
-=Taskbar battery place	3413	Plaats van de accu op de taakbalk
-=Taskbar tray text place	c235	Plaats van de systeemvaktekst op de taakbalk
-=Taskbar tray clock place	c2e6	Plaats van de systeemvakklok op de taakbalk
-=Taskbar order	ccfd	Volgorde van de taakbalk
-=Taskbar clock place	c144	Plaats van de klok op de taakbalk
-=Taskbar clock bulge (percent)	fa6c	Bolling van de klok op de taakbalk (procent)
-=moon	ae40	maan
-=plain	3f67	effen
-=picture	d389	afbeelding
-=dimmed	bded	gedimd
-=inverted	8038	omgekeerd
-=glow	27bc	gloed
-=glow-and-edges	540f	gloed-en-randen
-=start	04df	begin
-=end	75aa	eind
-=realistic	b65f	realistisch
-=ink	8faf	inkt
-=split	2de3	gesplitst
-=before	ff3e	ervoor
-=after	7dc9	erna
-=moon-tasks-tray	6c42	maan-taken-systeemvak
-=moon-tray-tasks	c2c4	maan-systeemvak-taken
-=tasks-moon-tray	c6a4	taken-maan-systeemvak
-=tasks-tray-moon	4f46	taken-systeemvak-maan
-=tray-moon-tasks	7246	systeemvak-maan-taken
-=tray-tasks-moon	fda8	systeemvak-taken-maan
-=tray	a12d	systeemvak
-=tab	2e4c	pil
-=Taskbar moon spin (seconds a turn, off or default)	a763	Draaiing van de maan op de taakbalk (seconden per omwenteling, uit of standaard)
-=Taskbar tasks	445b	Taken op de taakbalk
-=Taskbar distance from the edge (pixels)	845c	Afstand van de taakbalk tot de rand (pixels)
-=grouped	8b7d	gegroepeerd
-=separate	bb18	apart
-=Resolution	18af	Resolutie
-=Primary display	924b	Primair scherm
-=Wallpaper of this screen	2c92	Achtergrond van dit scherm
-=Graphics	9fa8	Graphics
-=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Waar Canvas tekent: op de GPU of de processor. Wat de kaart nu doet staat eronder

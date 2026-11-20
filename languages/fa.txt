@@ -1,10 +1,10 @@
-@language fa
-@name فارسی
-@translated machine
-@direction rtl
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
+@direction rtl
+@language fa
+@name فارسی
+@translated machine
 action_copy	3664	کپی
 action_cut	5863	برش
 action_paste	0288	چسباندن
@@ -14,21 +14,24 @@ editor_closes_unsaved	fcb8	بدون ذخیره می‌بندد
 editor_encoding_bom	c0d7	UTF-8 با BOM
 editor_find_hint	d17a	جستجو
 editor_find_replace_hint	3693	جستجو/جایگزین
+editor_hex_status	35a5	آفست %1$s / %2$s
 editor_indent_spaces	9db9	فاصله‌ها: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	سطر
 editor_lock_stale	f9d8	%s از یک ذخیره‌سازی قبلی مانده است: آن را حذف کنید، سپس ذخیره کنید
+editor_mode_hex	55d5	هگز
+editor_mode_text	134a	متن
 editor_no_file_name	c863	نام پرونده وجود ندارد: ویرایشگر را با نام پرونده اجرا کنید
 editor_no_match	7de7	موردی یافت نشد
 editor_not_regular	5955	پرونده عادی نیست: رد شد
-editor_open_none	63aa	باز کردن اینجا نیست: ویرایشگر را با نام پرونده اجرا کنید
+editor_open_hint	235f	مسیر فایل برای باز کردن
 editor_pattern_bad	5d57	الگو معتبر نیست
 editor_position	3696	سطر %1$d، ستون %2$d
 editor_read_failed	5f78	پرونده خوانده نشد: باز نمی‌شود
 editor_reload_unsaved	85da	پرونده را دوباره می‌خواند و تغییرات ذخیره‌نشده را کنار می‌گذارد
 editor_replace_usage	c677	قالب جایگزینی: جستجو/جایگزین
 editor_replaced	1128	%d مورد جایگزین شد
-editor_save_as_none	0745	ذخیره با نام اینجا نیست: Ctrl+S پرونده را ذخیره می‌کند
+editor_save_as_hint	c955	ذخیره به نام
 editor_save_failed	069d	ذخیره نشد: پرونده همان‌طور که بود مانده است
 editor_saved	9f44	ذخیره شد
 editor_selected	a686	(%d انتخاب‌شده)
@@ -36,6 +39,7 @@ editor_selected_carets	7e02	(%d انتخاب‌شده، مکان‌نما)
 editor_tabs_full	8ed9	هر %d زبانه باز است: ابتدا یکی را ببندید
 editor_unsaved	c014	تغییرات ذخیره‌نشده: آن‌ها را ذخیره کنید، یا هر پرونده را با دو بار فشردن Ctrl+W ببندید
 editor_untitled	8b58	بدون عنوان
+editor_wrap_on	40cd	شکست خط
 editor_write_beside	ec75	نوشتن در کنار پرونده ممکن نشد
 editor_writes_over_changed	df15	تغییر دیسک را بازنویسی می‌کند
 editor_writes_over_readonly	e22f	فقط‌خواندنی را بازنویسی می‌کند
@@ -185,15 +189,21 @@ launcher_sleep_armed	bb08	خواب
 menu_bin_empty	1538	خالی کردن سطل بازیافت
 menu_bin_open	8797	باز کردن سطل بازیافت
 menu_bin_restore	4799	بازگرداندن
+menu_close_others	ec3e	بستن زبانه‌های دیگر
+menu_close_tab	9753	بستن زبانه
 menu_copy	43e0	کپی
 menu_copy_row	f3c8	رونوشت ردیف
 menu_cut	5c17	برش
 menu_delete	1e3e	حذف
 menu_find	1fa6	جستجو
 menu_go_to_line	bc96	رفتن به سطر
+menu_hex_mode	fd1b	ویرایشگر هگز
 menu_new_folder	41cb	پوشه &جدید
+menu_new_tab	dad5	زبانه جدید
+menu_new_window	2c79	پنجره جدید
 menu_open	61a5	&باز کردن
 menu_open_editor	8ca0	باز کردن در &ویرایشگر
+menu_open_file	098c	باز کردن فایل...
 menu_open_terminal	6d2a	باز کردن &پایانه در اینجا
 menu_paste	6854	چسباندن
 menu_properties	c780	&ویژگی‌ها
@@ -201,6 +211,7 @@ menu_redo	ac45	انجام دوباره
 menu_remove	901d	حذف
 menu_rename	9529	&تغییر نام
 menu_reset_zoom	1b0f	بازنشانی بزرگ‌نمایی
+menu_save_as	e18c	ذخیره به نام...
 menu_select_all	f6f6	انتخاب همه
 menu_set_wallpaper	1a27	تنظیم به عنوان &پس‌زمینه
 menu_set_wallpaper_of	aa60	تنظیم به عنوان پس‌زمینهٔ %s
@@ -210,6 +221,7 @@ menu_undo	b9d3	واگرد
 menu_view_details	d3a1	&جزئیات
 menu_view_icons	57e8	&نمادهای بزرگ
 menu_view_list	4cc5	&فهرست
+menu_word_wrap	9ab3	شکست خودکار خط
 menu_zoom_in	5bcf	بزرگ‌نمایی
 menu_zoom_out	9234	کوچک‌نمایی
 mixer_allow	19d2	اجازه
@@ -450,6 +462,8 @@ ui_field_full	fe02	بیش از این جا ندارد
 =A quick shake makes the pointer large for a moment	4d81	یک تکان سریع نشانگر را لحظه‌ای بزرگ می‌کند
 =Accent	ccd7	رنگ تأکید
 =Accent colour (rrggbb or reset)	53aa	رنگ تأکید (rrggbb یا reset)
+=Add a key (label, then the public key)	e2e3	افزودن کلید (برچسب، سپس کلید عمومی)
+=Add a program to start (its path)	5e20	افزودن برنامه به شروع (مسیر آن)
 =Airplane mode	3b8a	حالت هواپیما
 =All commands	4a42	همه فرمان‌ها
 =Allow recording	f7e5	اجازهٔ ضبط
@@ -469,6 +483,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	بوت
+=Bowl tier	7b7f	سطح bowl
 =Brightness	324a	روشنایی
 =Build	7543	ساخت
 =Canvas	5091	Canvas
@@ -488,17 +503,18 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Devices	f320	دستگاه‌ها
 =Discover now	398a	اکنون کشف کن
 =Discovery	2db5	کشف
-=Files	1b30	پرونده‌ها
-=Install Moonwater	06fc	نصب Moonwater
-=Internal storage	e961	حافظهٔ داخلی
-=External devices	5769	دستگاه‌های خارجی
 =Display	d9b5	نمایشگر
 =Double-click time (ms, or default)	9af1	زمان دوبار کلیک (ms یا default)
 =Drag lists with the mouse	4ee2	کشیدن فهرست‌ها با ماوس
 =Edge swipes	7aaf	کشیدن از لبه‌ها
 =Editor	bf98	ویرایشگر
+=End every session	12e1	پایان همه نشست‌ها
+=External devices	5769	دستگاه‌های خارجی
+=Files	1b30	پرونده‌ها
 =GPU rendering (alpha)	e5e6	رندر با GPU (آلفا)
 =Gallery	4cdd	گالری
+=Graphics	9fa8	گرافیک
+=Host key fingerprint	2398	اثر انگشت کلید میزبان
 =How fast the pointer follows the mouse	0a45	سرعت دنبال کردن ماوس توسط نشانگر
 =How long it stays large after a shake	82a0	پس از تکان چه مدت بزرگ بماند
 =How long to hold a finger to right-click	b301	انگشت را چه مدت نگه دارید تا کلیک راست شود
@@ -512,6 +528,8 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Input device (name, or default)	af7b	دستگاه ورودی (نام یا default)
 =Input mute	ad50	بی‌صدا کردن ورودی
 =Input volume (percent, or default)	263f	بلندی ورودی (درصد یا default)
+=Install Moonwater	06fc	نصب Moonwater
+=Internal storage	e961	حافظهٔ داخلی
 =Internet sharing over Bluetooth	afe8	اشتراک‌گذاری اینترنت از طریق Bluetooth
 =Keep a device by its name	9c51	نگه‌داشتن دستگاه با نامش
 =Keep the lowest-delay sample	d8b9	نگه‌داشتن نمونه با کمترین تأخیر
@@ -528,7 +546,9 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Launcher	44b1	راه‌انداز
 =Learned	0c7c	به‌دست‌آمده
 =Left edge	9ce5	لبه چپ
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	به کلیدهای فهرست اجازهٔ ورود از راه شبکه می‌دهد؛ خاموش، می‌ایستد و همهٔ نشست‌ها را پایان می‌دهد
 =Linked machines	0cc2	رایانه‌های متصل
+=Listen address (any for every address)	d513	نشانی شنود (any برای همه)
 =Local addresses	9f2c	نشانی‌های محلی
 =Long press time (ms, or default)	aff4	زمان فشار طولانی (ms یا default)
 =Machine	be0e	رایانه
@@ -536,10 +556,6 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Momentum	cfef	تکانه
 =Motion	7647	حرکت
 =Mount kept disks	f0c8	سوار کردن دیسک‌های نگه‌داشته‌شده
-=Programs started with the desktop	5b74	برنامه‌هایی که با میز کار شروع می‌شوند
-=Add a program to start (its path)	5e20	افزودن برنامه به شروع (مسیر آن)
-=Remove a program from the start (its path)	1013	حذف برنامه از شروع (مسیر آن)
-=Opened in this order when the desktop starts; none starts it with no windows	5790	به همین ترتیب هنگام شروع میز کار باز می‌شوند؛ none آن را بدون پنجره شروع می‌کند
 =Mouse	9b64	ماوس
 =Mouse acceleration	c400	شتاب ماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسیت ماوس (درصد یا default)
@@ -558,6 +574,7 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Notices	8f06	اعلان‌ها
 =On-screen keyboard	97f8	صفحه‌کلید روی صفحه
 =Open windows where they were last put	8711	باز کردن پنجره‌ها در جایی که آخرین بار گذاشته شدند
+=Opened in this order when the desktop starts; none starts it with no windows	5790	به همین ترتیب هنگام شروع میز کار باز می‌شوند؛ none آن را بدون پنجره شروع می‌کند
 =Output device (name, or default)	d73c	دستگاه خروجی (نام یا default)
 =Pair a machine	b39b	جفت کردن یک رایانه
 =Paths	263f	مسیرها
@@ -565,9 +582,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Pointer	4dca	نشانگر
 =Pointer squeeze (percent, or default)	bbee	فشرده‌سازی نشانگر (درصد، یا پیش‌فرض)
 =Pointer squeezes on click	ad88	نشانگر با کلیک کوچک می‌شود
+=Port	3cc6	درگاه
 =Power	a5e6	انرژی
 =Power profile	8def	نمایه انرژی
 =Predict touch and pen	e2b7	پیش‌بینی لمس و قلم
+=Primary display	924b	صفحه اصلی
+=Programs started with the desktop	5b74	برنامه‌هایی که با میز کار شروع می‌شوند
 =Proxy	1bfb	پراکسی
 =Proxy from the environment	7fa7	پراکسی از محیط
 =Public IPv4	0813	IPv4 عمومی
@@ -576,16 +596,25 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Public address discovery (STUN)	7691	کشف نشانی عمومی (STUN)
 =Refresh rate	bf6e	نرخ تازه‌سازی
 =Remembered devices	abbc	دستگاه‌های ذخیره‌شده
+=Remove a program from the start (its path)	1013	حذف برنامه از شروع (مسیر آن)
 =Resize border width (pixels, or default)	7fdf	پهنای لبهٔ تغییر اندازه (پیکسل یا default)
 =Resize grip (pixels, or default)	dddd	دستگیرهٔ تغییر اندازه (پیکسل یا default)
+=Resolution	18af	وضوح
 =Right edge	279a	لبه راست
+=Root login	6cd4	ورود root
+=Root may log in by a key of the list, and by nothing else	a430	root می‌تواند با کلیدی از فهرست وارد شود، و با هیچ چیز دیگر
 =Rotation	777f	چرخش
 =Rubber band	9c42	اثر کشسانی
+=SSH	7b31	SSH
+=SSH server	9b60	سرور SSH
+=STUN servers (or reset)	4062	سرورهای STUN (یا reset)
+=STUN time limit (ms, or default)	be40	مهلت STUN (ms یا default)
 =Scale of this screen	e4ca	مقیاس این نمایشگر
 =Screen	c631	نمایشگر
 =Screen modes	85ad	حالت‌های نمایشگر
 =Scroll speed	e7af	سرعت پیمایش
 =Scrolling	74ec	پیمایش
+=Server files	5af9	پرونده‌های سرور
 =Servers in order	0a76	سرورها به ترتیب
 =Set the clock from the network	b2a3	تنظیم ساعت از روی شبکه
 =Settings	8728	تنظیمات
@@ -598,19 +627,33 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Sound	9a34	صدا
 =Sound server	84bf	کارساز صدا
 =Start the desktop	be4c	اجرای رومیزی
-=STUN servers (or reset)	4062	سرورهای STUN (یا reset)
-=STUN time limit (ms, or default)	be40	مهلت STUN (ms یا default)
 =System	84bc	سیستم
 =System notices	fa89	اعلان‌های سیستم
 =Taskbar	d759	نوار وظیفه
+=Taskbar battery place	3413	جای باتری در نوار وظیفه
+=Taskbar clock bulge (percent)	fa6c	برآمدگی ساعت در نوار وظیفه (درصد)
+=Taskbar clock place	c144	جای ساعت در نوار وظیفه
 =Taskbar display	042b	نمایشگر نوار وظیفه
+=Taskbar distance from the edge (pixels)	845c	فاصلهٔ نوار وظیفه از لبه (پیکسل)
 =Taskbar hides for fullscreen	f2f8	نوار وظیفه در حالت تمام‌صفحه پنهان می‌شود
 =Taskbar launcher button	dd4d	دکمه راه‌انداز در نوار وظیفه
+=Taskbar microphone place	76d8	جای میکروفون در نوار وظیفه
+=Taskbar moon look	a24d	نمای ماه در نوار وظیفه
+=Taskbar moon place	6f19	جای ماه در نوار وظیفه
+=Taskbar moon spin (seconds a turn, off or default)	a763	چرخش ماه در نوار وظیفه (ثانیه برای هر دور، خاموش یا پیش‌فرض)
+=Taskbar newest task side	b5a9	سوی جدیدترین وظیفه در نوار وظیفه
+=Taskbar notices place	a793	جای اعلان‌ها در نوار وظیفه
+=Taskbar order	ccfd	ترتیب نوار وظیفه
 =Taskbar padding (pixels)	a3a0	فاصله‌گذاری نوار وظیفه (پیکسل)
 =Taskbar pinned programs (or none)	3732	برنامه‌های سنجاق‌شده به نوار وظیفه (یا هیچ)
 =Taskbar position	81b8	موقعیت نوار وظیفه
 =Taskbar scale (percent)	810b	مقیاس نوار وظیفه (درصد)
+=Taskbar sound place	e2a1	جای صدا در نوار وظیفه
+=Taskbar tasks	445b	وظیفه‌ها در نوار وظیفه
+=Taskbar tasks place	bfd0	جای وظیفه‌ها در نوار وظیفه
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	ناحیه اعلان نوار وظیفه (متن با {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Taskbar tray clock place	c2e6	جای ساعت سینی در نوار وظیفه
+=Taskbar tray text place	c235	جای متن سینی در نوار وظیفه
 =Terminal	62d1	پایانه
 =Terminal lines per wheel notch	3800	خطوط پایانه در هر گام چرخ
 =Text size (percent, or default)	51d7	اندازهٔ متن (درصد یا default)
@@ -626,11 +669,12 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Theme	7c92	تم
 =This machine	3790	این رایانه
 =Time	e404	زمان
+=Time limit (minutes, or off)	d2cf	محدودیت زمان (دقیقه، یا off)
 =Time server (auto for the pool)	67e5	سرور زمان (auto برای مجموعه)
 =Time zone	741a	منطقه زمانی
 =Touch	fb78	لمس
-=Trace time limit (seconds, or default)	28d4	مهلت ردیابی (ثانیه یا default)
 =Trace URL (or default)	be36	نشانی URL ردیابی (یا default)
+=Trace time limit (seconds, or default)	28d4	مهلت ردیابی (ثانیه یا default)
 =Turned by the screen	ea45	چرخش توسط نمایشگر
 =Turned left	507c	چرخیده به چپ
 =Turned right	7a49	چرخیده به راست
@@ -638,18 +682,27 @@ ui_field_full	fe02	بیش از این جا ندارد
 =Upside down	9dc1	وارونه
 =Variable refresh rate	06a4	نرخ تازه‌سازی متغیر
 =Volume (percent, or default)	f6e3	بلندی صدا (درصد یا default)
+=Wallpaper	0da9	کاغذ دیواری
+=Wallpaper glow	57c6	درخشش کاغذ دیواری
+=Wallpaper in the dark theme	a6dc	کاغذ دیواری در تم تیره
+=Wallpaper of this screen	2c92	پس‌زمینهٔ این صفحه
+=Wallpaper picture (a PNG file, or none)	8e9d	تصویر پس‌زمینه (یک فایل PNG، یا هیچ)
+=Wallpaper seas (percent grey)	6836	دریاهای کاغذ دیواری (درصد خاکستری)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	کشیدن از این لبه چه می‌کند
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Canvas کجا می‌کشد: روی GPU یا پردازنده. کاری که کارت اکنون می‌کند زیر آن است
 =White edged in black, or the reverse	cd63	سفید با لبه سیاه، یا برعکس
 =Wi-Fi	0ec1	Wi-Fi
 =Wi-Fi IP address	9026	نشانی IP شبکه Wi-Fi
 =Wired	9a54	شبکه سیمی
 =Wired IP address	0e25	نشانی IP شبکه سیمی
+=after	7dc9	پس
 =all	4bc4	همه
 =allow	a832	اجازه
 =amber	bec0	کهربایی
 =auto	a396	خودکار
 =balanced	b71d	متعادل
+=before	ff3e	پیش
 =black	4ba4	مشکی
 =blue	f5cd	آبی
 =bottom	6b2a	پایین
@@ -661,16 +714,23 @@ ui_field_full	fe02	بیش از این جا ندارد
 =default	5bde	پیش‌فرض
 =deny	6367	رد
 =desktop	87b3	رومیزی
+=dimmed	bded	کم‌نور
 =dmy	2a79	dmy
 =dynamic	96ae	پویا
 =edge	d83c	لبه
+=end	75aa	پایان
 =fast	02af	سریع
 =forest	2a60	سبز جنگلی
 =full	b33c	کامل
 =games	2b9c	بازی‌ها
+=glow	27bc	درخشش
+=glow-and-edges	540f	درخشش-و-لبه‌ها
 =graphite	dc8d	گرافیتی
 =green	ecbc	سبز
+=grouped	8b7d	گروه‌شده
 =high	b9fd	زیاد
+=ink	8faf	جوهر
+=inverted	8038	وارونه
 =kernel log	415a	گزارش هسته
 =kernel log klog dmesg messages	1a8d	گزارش هسته klog dmesg پیام‌ها
 =launcher	8391	راه‌انداز
@@ -682,6 +742,9 @@ ui_field_full	fe02	بیش از این جا ندارد
 =mdy	3697	mdy
 =midnight-blue	4008	آبی نیمه‌شب
 =modem	67ed	مودم
+=moon	ae40	ماه
+=moon-tasks-tray	6c42	ماه-وظیفه‌ها-سینی
+=moon-tray-tasks	c2c4	ماه-سینی-وظیفه‌ها
 =network	86c5	شبکه
 =none	afdb	هیچ‌کدام
 =normal	9c52	عادی
@@ -691,20 +754,32 @@ ui_field_full	fe02	بیش از این جا ندارد
 =per second	4f98	در ثانیه
 =percent	fa5a	درصد
 =performance	8ca5	عملکرد
+=picture	d389	تصویر
+=plain	3f67	ساده
 =plum	b06b	آلویی
 =powersave	2283	صرفه‌جویی در انرژی
 =primary	5fd9	اصلی
+=realistic	b65f	واقعی
 =reduced	5839	کاهش‌یافته
 =right	2de5	راست
 =rose	1806	گلی
+=separate	bb18	جدا
 =settings preferences options	8c78	تنظیمات ترجیحات گزینه‌ها
 =slate	deee	سربی
 =slow	42b8	کند
+=split	2de3	تقسیم‌شده
+=start	04df	آغاز
+=tab	2e4c	کپسول
+=tasks-moon-tray	c6a4	وظیفه‌ها-ماه-سینی
+=tasks-tray-moon	4f46	وظیفه‌ها-سینی-ماه
 =tcp	ba90	tcp
 =terminal shell console	eaba	پایانه پوسته کنسول
 =thick	964e	ضخیم
 =thin	b172	نازک
 =top	dc3c	بالا
+=tray	a12d	سینی
+=tray-moon-tasks	7246	سینی-ماه-وظیفه‌ها
+=tray-tasks-moon	fda8	سینی-وظیفه‌ها-ماه
 =unlock	1f55	بازکردن قفل
 =violet	57f2	بنفش
 =volume	698f	صدا
@@ -713,66 +788,3 @@ ui_field_full	fe02	بیش از این جا ندارد
 =windows	26ea	پنجره‌ها
 =wired	bfb4	سیمی
 =ymd	faad	ymd
-=SSH	7b31	SSH
-=SSH server	9b60	سرور SSH
-=Root login	6cd4	ورود root
-=Port	3cc6	درگاه
-=Listen address (any for every address)	d513	نشانی شنود (any برای همه)
-=Time limit (minutes, or off)	d2cf	محدودیت زمان (دقیقه، یا off)
-=Host key fingerprint	2398	اثر انگشت کلید میزبان
-=Server files	5af9	پرونده‌های سرور
-=Bowl tier	7b7f	سطح bowl
-=Add a key (label, then the public key)	e2e3	افزودن کلید (برچسب، سپس کلید عمومی)
-=End every session	12e1	پایان همه نشست‌ها
-=Lets the keys of the list log in over the network; off stops it and ends every session	c746	به کلیدهای فهرست اجازهٔ ورود از راه شبکه می‌دهد؛ خاموش، می‌ایستد و همهٔ نشست‌ها را پایان می‌دهد
-=Root may log in by a key of the list, and by nothing else	a430	root می‌تواند با کلیدی از فهرست وارد شود، و با هیچ چیز دیگر
-=Wallpaper	0da9	کاغذ دیواری
-=Wallpaper picture (a PNG file, or none)	8e9d	تصویر پس‌زمینه (یک فایل PNG، یا هیچ)
-=Wallpaper in the dark theme	a6dc	کاغذ دیواری در تم تیره
-=Wallpaper seas (percent grey)	6836	دریاهای کاغذ دیواری (درصد خاکستری)
-=Wallpaper glow	57c6	درخشش کاغذ دیواری
-=Taskbar moon place	6f19	جای ماه در نوار وظیفه
-=Taskbar moon look	a24d	نمای ماه در نوار وظیفه
-=Taskbar tasks place	bfd0	جای وظیفه‌ها در نوار وظیفه
-=Taskbar newest task side	b5a9	سوی جدیدترین وظیفه در نوار وظیفه
-=Taskbar notices place	a793	جای اعلان‌ها در نوار وظیفه
-=Taskbar microphone place	76d8	جای میکروفون در نوار وظیفه
-=Taskbar sound place	e2a1	جای صدا در نوار وظیفه
-=Taskbar battery place	3413	جای باتری در نوار وظیفه
-=Taskbar tray text place	c235	جای متن سینی در نوار وظیفه
-=Taskbar tray clock place	c2e6	جای ساعت سینی در نوار وظیفه
-=Taskbar order	ccfd	ترتیب نوار وظیفه
-=Taskbar clock place	c144	جای ساعت در نوار وظیفه
-=Taskbar clock bulge (percent)	fa6c	برآمدگی ساعت در نوار وظیفه (درصد)
-=moon	ae40	ماه
-=plain	3f67	ساده
-=picture	d389	تصویر
-=dimmed	bded	کم‌نور
-=inverted	8038	وارونه
-=glow	27bc	درخشش
-=glow-and-edges	540f	درخشش-و-لبه‌ها
-=start	04df	آغاز
-=end	75aa	پایان
-=realistic	b65f	واقعی
-=ink	8faf	جوهر
-=split	2de3	تقسیم‌شده
-=before	ff3e	پیش
-=after	7dc9	پس
-=moon-tasks-tray	6c42	ماه-وظیفه‌ها-سینی
-=moon-tray-tasks	c2c4	ماه-سینی-وظیفه‌ها
-=tasks-moon-tray	c6a4	وظیفه‌ها-ماه-سینی
-=tasks-tray-moon	4f46	وظیفه‌ها-سینی-ماه
-=tray-moon-tasks	7246	سینی-ماه-وظیفه‌ها
-=tray-tasks-moon	fda8	سینی-وظیفه‌ها-ماه
-=tray	a12d	سینی
-=tab	2e4c	کپسول
-=Taskbar moon spin (seconds a turn, off or default)	a763	چرخش ماه در نوار وظیفه (ثانیه برای هر دور، خاموش یا پیش‌فرض)
-=Taskbar tasks	445b	وظیفه‌ها در نوار وظیفه
-=Taskbar distance from the edge (pixels)	845c	فاصلهٔ نوار وظیفه از لبه (پیکسل)
-=grouped	8b7d	گروه‌شده
-=separate	bb18	جدا
-=Resolution	18af	وضوح
-=Primary display	924b	صفحه اصلی
-=Wallpaper of this screen	2c92	پس‌زمینهٔ این صفحه
-=Graphics	9fa8	گرافیک
-=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Canvas کجا می‌کشد: روی GPU یا پردازنده. کاری که کارت اکنون می‌کند زیر آن است

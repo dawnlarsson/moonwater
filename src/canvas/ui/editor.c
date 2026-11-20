@@ -26,7 +26,7 @@
 #ifndef MOONWATER_CANVAS_EDITOR
 #define MOONWATER_CANVAS_EDITOR
 
-#define EDITOR_TABS 8
+#define EDITOR_TABS 16
 #define EDITOR_MAP_FROM (8u << 20)
 #define EDITOR_READ_MOST (64u << 20)
 #define EDITOR_PATH 512
@@ -54,15 +54,20 @@ static struct
         b32 dirty, focused;
         unsigned int ground;
         int width, height, shown;
-        struct ui_findbar find; // the kit's find bar: its field, its mode (find, replace, go to a line) and its flags
-        struct ui_control strip; // the file tabs, the kit's segmented tabs: an element of the view
-        struct ui_view view;     // the window as a view (editor_layout): the tabs, the bands, the code view's box and the status bar
+        struct ui_findbar find;  // the kit's find/open/save-as/line bar
+        struct ui_control strip; // the file tabs (closable, with '+' new-tab button)
+        struct ui_control wrap_btn, hex_btn; // status bar toggles for Word Wrap and Hex Editor mode
+        struct ui_view view;     // the window as a view (editor_layout)
         struct ui_rect find_box, text_box; // the device pixels the view gave them
         char bar_text[256];      // the status bar's line at the left, which the view measures
         char status[160];
         struct ui_popup menu;
-        struct ui_confirm confirm; // the kit's press again to confirm: Ctrl+W of a file with changes, Ctrl+S of one changed on disk
+        int tab_menu_at;         // tab index for tab context menu (-1 when body menu)
+        struct ui_confirm confirm; // press again to confirm: closing unsaved tab, overwriting changed/read-only file
+        struct ui_drop drop;     // drag-and-drop file URIs from Files onto the editor window
         b32 leaving; // the window may go: asked to, and nothing in it unsaved
+        string_address start_files[EDITOR_TABS]; // non-option file arguments parsed in editor_main
+        int start_count;
 } editor;
 
 static struct editor_tab address_to editor_now(void)
@@ -297,6 +302,62 @@ static b32 editor_load(struct editor_tab address_to tab, string_address path)
         return true;
 }
 
+static struct ui_app editor_app;
+
+// Updates the compositor window title so multiple editor windows identify their active file cleanly.
+static fn editor_title_sync(void)
+{
+        struct windows address_to table = editor.own.table;
+        char title[WINDOWS_TITLE];
+        const char address_to name;
+
+        if (!table || !editor.count)
+                return;
+        name = editor.tabs[editor.tab].path;
+        for (const char address_to s = name; *s; s++)
+                if (*s == '/')
+                        name = s + 1;
+        if (!name[0] && !doc_dirty(&editor.tabs[editor.tab].view.doc))
+                string_copy_bounded((string_address)title, (string_address)language_of("Editor"), sizeof(title));
+        else
+        {
+                positive at = 0;
+
+                if (doc_dirty(&editor.tabs[editor.tab].view.doc))
+                        at += string_copy_bounded((string_address)title, (string_address) "\xe2\x97\x8f ", sizeof(title));
+                at += string_copy_bounded((string_address)title + at, (string_address)(name[0] ? name : WORDS(editor_untitled)), sizeof(title) - at);
+                at += string_copy_bounded((string_address)title + at, (string_address) " \xe2\x80\x94 ", sizeof(title) - at);
+                string_copy_bounded((string_address)title + at, (string_address)language_of("Editor"), sizeof(title) - at);
+        }
+        string_copy_bounded((string_address)table->title[editor.own.row], (string_address)title, WINDOWS_TITLE);
+}
+
+// Spawns a new independent Editor window (optionally opening path).
+static fn editor_new_window(const char address_to path)
+{
+        string_address words[6];
+        positive count = 0;
+
+        words[count++] = (string_address) "/editor";
+        if (editor_app.font)
+        {
+                words[count++] = (string_address) "-f";
+                words[count++] = editor_app.font;
+        }
+        if (path && path[0])
+                words[count++] = (string_address)path;
+        words[count] = null;
+        (void)ui_start_apart(words, count);
+}
+
+// Whether bytes appear binary (contain a NUL byte in the leading 4 KiB): auto-opens in Hex Editor mode.
+static b32 editor_looks_binary(const p8 address_to bytes, positive length)
+{
+        positive probe = length < 4096 ? length : 4096;
+
+        return bytes && probe > 0 && memory_first_of((address_any)bytes, 0, probe) != null;
+}
+
 static b32 editor_open(string_address path)
 {
         struct editor_tab address_to tab;
@@ -325,8 +386,44 @@ static b32 editor_open(string_address path)
                         name = at + 1;
         tab->view.doc.language = doc_language_of((const char address_to)name, tab->bytes, tab->length < 256 ? tab->length : 256);
         tab->view.comment = doc_languages[tab->view.doc.language].comment;
+        if (editor_looks_binary(tab->bytes, tab->length))
+                tab->view.hex = true;
         editor.tab = editor.count++;
+        editor_title_sync();
         return true;
+}
+
+// Opens path in a tab, or switches to it if already open; replaces an untouched single untitled tab cleanly.
+static b32 editor_open_or_switch(string_address path)
+{
+        if (!path || !path[0])
+                return false;
+        for (int at = 0; at < editor.count; at++)
+                if (editor.tabs[at].path[0] && string_equals((string_address)editor.tabs[at].path, path))
+                {
+                        editor.tab = at;
+                        editor_keys();
+                        editor_title_sync();
+                        return true;
+                }
+        {
+                b32 replace_blank = editor.count == 1 && !editor.tabs[0].path[0] && !doc_length(&editor.tabs[0].view.doc) && !doc_dirty(&editor.tabs[0].view.doc);
+
+                if (!editor_open(path))
+                        return false;
+                if (replace_blank && editor.count == 2)
+                {
+                        ui_text_close(&editor.tabs[0].view);
+                        editor_bytes_release(&editor.tabs[0]);
+                        if (editor.tabs[0].folder >= 0)
+                                system_close(editor.tabs[0].folder);
+                        editor.tabs[0] = editor.tabs[1];
+                        editor.count = 1, editor.tab = 0;
+                        editor_keys();
+                        editor_title_sync();
+                }
+                return true;
+        }
 }
 
 // The file written whole beside itself and renamed over itself, its mode kept: false with a status.
@@ -464,16 +561,56 @@ static fn editor_reload(void)
         }
 }
 
-static fn editor_close_tab(void)
+// Saves tab to a new path, pinning its folder and updating syntax highlighting from the new filename.
+static b32 editor_save_as(struct editor_tab address_to tab, const char address_to path)
 {
-        struct editor_tab address_to tab = editor_now();
+        int folder;
+        const char address_to name = path;
 
+        if (!path || !path[0] || string_length((string_address)path) >= EDITOR_PATH)
+        {
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_save_failed), sizeof(editor.status));
+                return false;
+        }
+        folder = editor_folder(path, null);
+        if (folder < 0)
+        {
+                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_write_beside), sizeof(editor.status));
+                return false;
+        }
+        if (tab->folder >= 0)
+                system_close(tab->folder);
+        tab->folder = folder;
+        string_copy_bounded((string_address)tab->path, (string_address)path, EDITOR_PATH);
+        if (!tab->mode)
+                tab->mode = 0644;
+        tab->owner = tab->group = (p32)-1;
+        for (const char address_to s = path; *s; s++)
+                if (*s == '/')
+                        name = s + 1;
+        tab->view.doc.language = doc_language_of(name, null, 0);
+        tab->view.comment = doc_languages[tab->view.doc.language].comment;
+        if (!editor_save(tab))
+                return false;
+        editor_title_sync();
+        return true;
+}
+
+static fn editor_close_tab_at(int at)
+{
+        struct editor_tab address_to tab;
+
+        if (at < 0 || at >= editor.count)
+                return;
+        tab = &editor.tabs[at];
         ui_text_close(&tab->view);
         editor_bytes_release(tab);
         if (tab->folder >= 0)
                 system_close(tab->folder);
         editor.count--;
-        memory_copy(&editor.tabs[editor.tab], &editor.tabs[editor.tab + 1], (positive)(editor.count - editor.tab) * sizeof(editor.tabs[0]));
+        memory_copy(&editor.tabs[at], &editor.tabs[at + 1], (positive)(editor.count - at) * sizeof(editor.tabs[0]));
+        if (editor.tab > at)
+                editor.tab--;
         editor.tab = editor.tab >= editor.count ? editor.count - 1 : editor.tab;
         if (editor.count <= 0)
         {
@@ -482,38 +619,120 @@ static fn editor_close_tab(void)
         }
         // The tab shown now has the caret when the editor has the keys: a close is not a key, so no event gives it one.
         editor_keys();
+        editor_title_sync();
+}
+
+static fn editor_close_tab(void)
+{
+        editor_close_tab_at(editor.tab);
 }
 
 /*
-        Ctrl+W: a file with changes is not closed by the first, which says why; the second, with no other key or press
-        between them (editor_event disarms it), closes it and the changes go with it.
+        Closing a tab (Ctrl+W, tab close button, or middle-click): a file with changes is not closed by the first ask,
+        which says why; the second, with no other key or press between them, closes it and the changes go with it.
 */
-static fn editor_close_tab_asked(void)
+static fn editor_close_tab_asked_at(int at)
 {
         char line[UI_CONFIRM_TEXT];
 
-        if (ui_confirm_gate(&editor.confirm, DOC_CMD_CLOSE, doc_dirty(&editor_now()->view.doc), WORDS(editor_closes_unsaved), line, sizeof(line)))
-                editor_close_tab();
+        if (at < 0 || at >= editor.count)
+                return;
+        if (at != editor.tab)
+        {
+                editor.tab = at;
+                editor_keys();
+                editor_title_sync();
+        }
+        if (ui_confirm_gate(&editor.confirm, DOC_CMD_CLOSE, doc_dirty(&editor.tabs[at].view.doc), WORDS(editor_closes_unsaved), line, sizeof(line)))
+                editor_close_tab_at(at);
         else
                 string_copy_bounded((string_address)editor.status, (string_address)line, sizeof(editor.status));
+}
+
+static fn editor_close_tab_asked(void)
+{
+        editor_close_tab_asked_at(editor.tab);
+}
+
+// Closes every clean tab other than keep (leaves any dirty tabs untouched so unsaved work is never silently lost).
+static fn editor_close_others(int keep)
+{
+        if (keep < 0 || keep >= editor.count)
+                return;
+        editor.tab = keep;
+        for (int at = editor.count - 1; at >= 0; at--)
+                if (at != editor.tab && !doc_dirty(&editor.tabs[at].view.doc))
+                        editor_close_tab_at(at);
+        editor_title_sync();
+}
+
+// Seeds the Open / Save As bar with the active file's directory (or path for Save As).
+static fn editor_path_seed(char address_to into, positive room, b32 include_file)
+{
+        const char address_to path = editor_now()->path;
+
+        into[0] = 0;
+        if (path[0])
+        {
+                if (include_file)
+                {
+                        string_copy_bounded((string_address)into, (string_address)path, room);
+                        return;
+                }
+                {
+                        positive slash = string_length((string_address)path);
+
+                        while (slash && path[slash - 1] != '/')
+                                slash--;
+                        if (slash && slash < room)
+                        {
+                                memory_copy(into, path, slash);
+                                into[slash] = 0;
+                                return;
+                        }
+                }
+        }
+        {
+                const char address_to home = (const char address_to)getenv((string_address) "HOME");
+
+                if (home && home[0])
+                {
+                        positive n = string_copy_bounded((string_address)into, (string_address)home, room - 1);
+
+                        if (n > 0 && into[n - 1] != '/' && n + 1 < room)
+                                into[n++] = '/', into[n] = 0;
+                }
+        }
 }
 
 /*
         Ctrl+S of a file changed on disk since it was read or saved, or of a read-only one: the first says so and writes
         nothing, so the other change is not written over; the second, with no other key or press between, writes it.
+        An untitled file opens the Save As path prompt.
 */
 static fn editor_save_asked(void)
 {
         struct editor_tab address_to tab = editor_now();
         char line[UI_CONFIRM_TEXT];
 
+        if (!tab->path[0])
+        {
+                char seed[EDITOR_PATH];
+
+                editor_path_seed(seed, sizeof(seed), false);
+                ui_findbar_open_path(&editor.own, &editor.find, &tab->view, UI_FINDBAR_SAVE_AS, seed, editor.focused);
+                return;
+        }
         // The disk is looked at now, not only when the window last took focus: a program that wrote the file while the
         // window kept it would otherwise be written over without the question.
         editor_check_disk(tab);
         // A file with no write bit is asked for the same way: the rename that saves would replace it without a word.
         if (ui_confirm_gate(&editor.confirm, DOC_CMD_SAVE, tab->changed_on_disk || !(tab->mode & 0222),
                             tab->changed_on_disk ? WORDS(editor_writes_over_changed) : WORDS(editor_writes_over_readonly), line, sizeof(line)))
+        {
                 editor_save(tab);
+                editor_title_sync();
+        }
         else
                 string_copy_bounded((string_address)editor.status, (string_address)line, sizeof(editor.status));
 }
@@ -537,7 +756,7 @@ static b32 editor_done(void)
         return editor.leaving;
 }
 
-// What the find bar said, in the editor's words for it: the status line (the kit says what happened, the app says it).
+// What the find/path bar said, in the editor's words for it: the status line, or opening/saving the submitted path.
 static fn editor_said(int said, positive count)
 {
         if (said == UI_FINDBAR_SAID_CLEAR)
@@ -552,6 +771,19 @@ static fn editor_said(int said, positive count)
                 string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_replace_usage), sizeof(editor.status));
         else if (said == UI_FINDBAR_SAID_REFUSED)
                 string_copy_bounded((string_address)editor.status, (string_address)editor.find.field.refused, sizeof(editor.status));
+        else if (said == UI_FINDBAR_SAID_OPEN || said == UI_FINDBAR_SAID_SAVE_AS)
+        {
+                p8 path[EDITOR_PATH];
+                positive len = ui_text_string(&editor.find.field, path, sizeof(path));
+
+                if (len > 0)
+                {
+                        if (said == UI_FINDBAR_SAID_OPEN)
+                                editor_open_or_switch((string_address)path);
+                        else
+                                editor_save_as(editor_now(), (const char address_to)path);
+                }
+        }
 }
 
 // The find bar's command (find, replace, go to a line, the next match, the one before), and what it said of it.
@@ -565,24 +797,64 @@ static fn editor_bar(p32 command)
 
 /* ---- the context menu ---- */
 
-// The kit's items are 1 to 7 (ui_text_menu_items); the code view's own come after them.
-#define EDITOR_MENU_FIND 8
-#define EDITOR_MENU_LINE 9
-#define EDITOR_MENU_COMMENT 10
+// The kit's items are 1 to 7 (ui_text_menu_items); the code view's and tab bar's own come after them.
+enum
+{
+        EDITOR_MENU_FIND = 8,
+        EDITOR_MENU_LINE,
+        EDITOR_MENU_COMMENT,
+        EDITOR_MENU_WRAP,
+        EDITOR_MENU_HEX,
+        EDITOR_MENU_OPEN,
+        EDITOR_MENU_SAVE_AS,
+        EDITOR_MENU_NEW_TAB,
+        EDITOR_MENU_NEW_WINDOW,
+        EDITOR_MENU_TAB_CLOSE,
+        EDITOR_MENU_TAB_OTHERS,
+        EDITOR_MENU_TAB_WINDOW,
+};
 
-// The code view's menu: the kit's text menu, then find, go to a line and the comment. The find bar's is the kit's alone.
+static fn editor_command(p32 command);
+
+// The code view's menu: the kit's text menu, then find, go to a line, comment, wrap/hex toggles, and file/window actions.
 static fn editor_menu_open(int x, int y)
 {
         struct ui_popmenu address_to m = &editor.menu.menu;
         struct ui_text address_to view = &editor_now()->view;
 
         m->count = 0;
+        editor.tab_menu_at = -1;
         ui_text_menu_items(m, view, false);
         ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
         ui_popmenu_add(m, WORDS(menu_find), "Ctrl+F", 0, EDITOR_MENU_FIND);
         ui_popmenu_add(m, WORDS(menu_go_to_line), "Ctrl+G", 0, EDITOR_MENU_LINE);
-        ui_popmenu_add(m, WORDS(menu_toggle_comment), "Ctrl+/", 0, EDITOR_MENU_COMMENT);
+        if (!view->hex)
+                ui_popmenu_add(m, WORDS(menu_toggle_comment), "Ctrl+/", 0, EDITOR_MENU_COMMENT);
+        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+        if (!view->hex)
+                ui_popmenu_add(m, WORDS(menu_word_wrap), "Alt+Z", UI_MENU_CHECK | (view->wrap ? UI_MENU_ON : 0), EDITOR_MENU_WRAP);
+        ui_popmenu_add(m, WORDS(menu_hex_mode), "Ctrl+Shift+H", UI_MENU_CHECK | (view->hex ? UI_MENU_ON : 0), EDITOR_MENU_HEX);
+        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+        ui_popmenu_add(m, WORDS(menu_open_file), "Ctrl+O", 0, EDITOR_MENU_OPEN);
+        ui_popmenu_add(m, WORDS(menu_save_as), "Ctrl+Shift+S", 0, EDITOR_MENU_SAVE_AS);
+        ui_popmenu_add(m, WORDS(menu_new_tab), "Ctrl+N", 0, EDITOR_MENU_NEW_TAB);
+        ui_popmenu_add(m, WORDS(menu_new_window), "Ctrl+Shift+N", 0, EDITOR_MENU_NEW_WINDOW);
         editor.menu.field = view;
+        ui_popmenu_open(&editor.menu, &editor.own, &editor.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
+}
+
+// Right-click menu on a file tab: close tab, close other tabs, open in a new window.
+static fn editor_tab_menu_open(int at, int x, int y)
+{
+        struct ui_popmenu address_to m = &editor.menu.menu;
+
+        m->count = 0;
+        editor.tab_menu_at = at;
+        ui_popmenu_add(m, WORDS(menu_close_tab), "Ctrl+W", 0, EDITOR_MENU_TAB_CLOSE);
+        ui_popmenu_add(m, WORDS(menu_close_others), null, editor.count <= 1 ? UI_MENU_DISABLED : 0, EDITOR_MENU_TAB_OTHERS);
+        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+        ui_popmenu_add(m, WORDS(menu_new_window), "Ctrl+Shift+N", 0, EDITOR_MENU_TAB_WINDOW);
+        editor.menu.field = null;
         ui_popmenu_open(&editor.menu, &editor.own, &editor.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
 }
 
@@ -594,8 +866,27 @@ static fn editor_chose(int id)
                 editor_bar(id == EDITOR_MENU_FIND ? DOC_CMD_FIND : DOC_CMD_GOTO_LINE);
         else if (id == EDITOR_MENU_COMMENT)
                 ui_text_command(&editor.ui, view, DOC_CMD_COMMENT);
+        else if (id == EDITOR_MENU_WRAP)
+                ui_text_command(&editor.ui, view, DOC_CMD_WRAP);
+        else if (id == EDITOR_MENU_HEX)
+                ui_text_command(&editor.ui, view, DOC_CMD_HEX);
+        else if (id == EDITOR_MENU_OPEN)
+                editor_command(DOC_CMD_OPEN);
+        else if (id == EDITOR_MENU_SAVE_AS)
+                editor_command(DOC_CMD_SAVE_AS);
+        else if (id == EDITOR_MENU_NEW_TAB)
+                editor_command(DOC_CMD_NEW);
+        else if (id == EDITOR_MENU_NEW_WINDOW)
+                editor_command(DOC_CMD_NEW_WINDOW);
+        else if (id == EDITOR_MENU_TAB_CLOSE && editor.tab_menu_at >= 0)
+                editor_close_tab_asked_at(editor.tab_menu_at);
+        else if (id == EDITOR_MENU_TAB_OTHERS && editor.tab_menu_at >= 0)
+                editor_close_others(editor.tab_menu_at);
+        else if (id == EDITOR_MENU_TAB_WINDOW && editor.tab_menu_at >= 0 && editor.tab_menu_at < editor.count)
+                editor_new_window(editor.tabs[editor.tab_menu_at].path);
         else if (field == &editor.find.field || field == view)
                 ui_text_menu_do(&editor.ui, field, id);
+        editor_title_sync();
         editor.dirty = true;
 }
 
@@ -627,16 +918,92 @@ static fn editor_show_tab(int at)
 {
         editor.tab = at;
         editor_keys();
+        editor_title_sync();
         editor.dirty = true;
 }
 
-// A tab was chosen in the strip (a press on it and its release on the same tab, as the kit's tabs take them): its file is shown.
+// Tab strip interaction: '+' opens a new tab, 'x' or middle-click closes a tab, right-click opens tab menu, click switches tab.
 static b32 editor_tabbed(int which)
 {
         (void)which;
+        if (editor.strip.add_clicked)
+        {
+                editor.strip.add_clicked = false;
+                editor_open(null);
+                editor_keys();
+                editor.dirty = true;
+                return true;
+        }
+        if (editor.strip.close_item >= 0)
+        {
+                int victim = editor.strip.close_item;
+
+                editor.strip.close_item = -1;
+                editor_close_tab_asked_at(victim);
+                editor.dirty = true;
+                return true;
+        }
+        if (editor.strip.tab_right_click >= 0)
+        {
+                int target = editor.strip.tab_right_click;
+
+                editor.strip.tab_right_click = -1;
+                editor_tab_menu_open(target, ui_kit.pointer_x, ui_kit.pointer_y);
+                return true;
+        }
         if (editor.strip.at != editor.tab)
                 editor_show_tab(editor.strip.at);
         return true;
+}
+
+static b32 editor_toggle_wrap(int which)
+{
+        (void)which;
+        ui_text_command(&editor.ui, &editor_now()->view, DOC_CMD_WRAP);
+        editor.dirty = true;
+        return true;
+}
+
+static b32 editor_toggle_hex(int which)
+{
+        (void)which;
+        ui_text_command(&editor.ui, &editor_now()->view, DOC_CMD_HEX);
+        editor.dirty = true;
+        return true;
+}
+
+// Formats a hex offset as "0xXXXXXXXX" into out[12].
+static fn editor_hex_word(char address_to out, p64 value)
+{
+        static const char hex[] = "0123456789ABCDEF";
+
+        out[0] = '0', out[1] = 'x';
+        for (int d = 7; d >= 0; d--)
+                out[2 + (7 - d)] = hex[(value >> (d * 4)) & 15];
+        out[10] = 0;
+}
+
+static positive editor_status_put(char address_to text, positive room, positive at, const char address_to words);
+
+// Hex editor status bar line: current byte offset, total size, selected byte count, and active pane (Hex / ASCII).
+static fn editor_hex_status_text(char address_to text, positive room, struct ui_text address_to view)
+{
+        p64 caret = view->doc.selections[view->doc.primary].active, len = doc_length(&view->doc);
+        const struct doc_selection address_to sel = &view->doc.selections[view->doc.primary];
+        positive selected = (positive)(doc_sel_end(sel) - doc_sel_start(sel)), at = 0;
+        char off_s[16], len_s[16];
+
+        editor_hex_word(off_s, caret);
+        editor_hex_word(len_s, len);
+        at += language_format(text, room, WORDS(editor_hex_status), off_s, len_s);
+        if (selected)
+        {
+                at = editor_status_put(text, room, at, "  ");
+                at += language_format(text + at, room - at, WORDS(editor_selected), (long)selected);
+        }
+        at = editor_status_put(text, room, at, "    ");
+        at = editor_status_put(text, room, at, view->hex_ascii ? "ASCII" : WORDS(editor_mode_hex));
+        text[at] = 0;
 }
 
 // Words put into the status text at at, cut to the room left and a NUL after them: the place they end at, at most room - 1.
@@ -687,12 +1054,24 @@ static fn editor_layout(void)
         struct editor_tab address_to tab = editor_now();
         struct ui_control address_to strip = &editor.strip;
 
-        editor_status_text(editor.bar_text, sizeof(editor.bar_text), &tab->view.doc);
+        if (tab->view.hex)
+                editor_hex_status_text(editor.bar_text, sizeof(editor.bar_text), &tab->view);
+        else
+                editor_status_text(editor.bar_text, sizeof(editor.bar_text), &tab->view.doc);
         if (strip->kind != UI_TABS)
-                strip->kind = UI_TABS, strip->variant = UI_TABS_SEGMENTED, ui_control_start(strip);
+                strip->kind = UI_TABS, strip->variant = UI_TABS_SEGMENTED, strip->closable = true, strip->addable = true,
+                strip->close_item = strip->close_hover = strip->tab_right_click = -1, ui_control_start(strip);
         ui_tabs_fill(strip, editor.count, editor.tab, editor_tab_name, editor_tab_dirty);
+        if (editor.wrap_btn.kind != UI_BUTTON)
+                editor.wrap_btn.kind = UI_BUTTON, ui_control_start(&editor.wrap_btn);
+        editor.wrap_btn.variant = tab->view.wrap ? UI_BUTTON_PRIMARY : UI_BUTTON_TEXT;
+        editor.wrap_btn.label = WORDS(editor_wrap_on);
+        if (editor.hex_btn.kind != UI_BUTTON)
+                editor.hex_btn.kind = UI_BUTTON, ui_control_start(&editor.hex_btn);
+        editor.hex_btn.variant = tab->view.hex ? UI_BUTTON_PRIMARY : UI_BUTTON_TEXT;
+        editor.hex_btn.label = tab->view.hex ? WORDS(editor_mode_text) : WORDS(editor_mode_hex);
         ui_view_begin(&editor.view, &editor.ui, editor.width, -editor.height);
-        ui_control(strip, .class = "filetabs", .hidden = editor.count <= 1, .on = editor_tabbed);
+        ui_control(strip, .class = "filetabs", .on = editor_tabbed);
         ui_host(&editor.find_box, .h = UI_FINDBAR_H, .hidden = editor.find.mode == UI_FINDBAR_CLOSED);
         ui_host(&editor.text_box, .grow = 1);
         ui_row(.class = "bar")
@@ -703,6 +1082,8 @@ static fn editor_layout(void)
                         ui_text(WORDS(editor_changed_on_disk), .class = "warning");
                 if (editor.status[0])
                         ui_text(editor.status, .class = "status");
+                ui_control(&editor.wrap_btn, .h = 26, .hidden = tab->view.hex, .on = editor_toggle_wrap);
+                ui_control(&editor.hex_btn, .h = 26, .on = editor_toggle_hex);
         }
         ui_view_end(&editor.view);
 }
@@ -718,9 +1099,11 @@ static fn editor_draw(unsigned int address_to pixels)
         editor_layout();
         if (editor.find.mode != UI_FINDBAR_CLOSED)
         {
-                const char address_to hints[4] = {"", WORDS(editor_find_hint), WORDS(editor_find_replace_hint), WORDS(editor_line_hint)};
+                const char address_to hints[6] = {"", WORDS(editor_find_hint), WORDS(editor_find_replace_hint),
+                                                  WORDS(editor_line_hint), WORDS(editor_open_hint), WORDS(editor_save_as_hint)};
 
-                ui_findbar_draw(ui, &editor.find, editor.find_box.y, editor.width, hints[editor.find.mode]);
+                ui_findbar_draw(ui, &editor.find, editor.find_box.y, editor.width,
+                                editor.find.mode >= 0 && editor.find.mode < 6 ? hints[editor.find.mode] : "");
         }
         ui_text_draw(ui, &tab->view, editor.text_box.x, editor.text_box.y, editor.text_box.w, editor.text_box.h, paper);
         ui_view_draw(ui, &editor.view, false);
@@ -729,25 +1112,36 @@ static fn editor_draw(unsigned int address_to pixels)
         ui_text_overlay(ui, &tab->view);
 }
 
-// A command the view answered the app's: the files, the find bar, the tabs.
+// A command the view answered the app's: the files, the find bar, the tabs, new windows.
 static fn editor_command(p32 command)
 {
-        // Save As has no name to ask for yet: it would write the file in place, so it says so and writes nothing.
+        char seed[EDITOR_PATH];
+
         if (command == DOC_CMD_SAVE)
                 editor_save_asked();
         else if (command == DOC_CMD_SAVE_AS)
-                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_save_as_none), sizeof(editor.status));
+        {
+                editor_path_seed(seed, sizeof(seed), true);
+                ui_findbar_open_path(&editor.own, &editor.find, &editor_now()->view, UI_FINDBAR_SAVE_AS, seed, editor.focused);
+        }
         else if (ui_findbar_is_command(command))
                 editor_bar(command);
         else if (command == DOC_CMD_NEW)
+        {
                 editor_open(null);
-        // Opening a file is by the command line only (editor FILE): there is no chooser yet, so the key says so.
+                editor_keys();
+        }
+        else if (command == DOC_CMD_NEW_WINDOW)
+                editor_new_window(null);
         else if (command == DOC_CMD_OPEN)
-                string_copy_bounded((string_address)editor.status, (string_address)WORDS(editor_open_none), sizeof(editor.status));
+        {
+                editor_path_seed(seed, sizeof(seed), false);
+                ui_findbar_open_path(&editor.own, &editor.find, &editor_now()->view, UI_FINDBAR_OPEN, seed, editor.focused);
+        }
         else if (command == DOC_CMD_CLOSE)
                 editor_close_tab_asked();
         else if (command == DOC_CMD_NEXT_TAB || command == DOC_CMD_PREVIOUS_TAB)
-                editor.tab = (editor.tab + (command == DOC_CMD_NEXT_TAB ? 1 : editor.count - 1)) % editor.count;
+                editor_show_tab((editor.tab + (command == DOC_CMD_NEXT_TAB ? 1 : editor.count - 1)) % editor.count);
 }
 
 /*
@@ -774,7 +1168,16 @@ static b32 editor_event(const struct window_event address_to event)
                 ui_confirm_drop(&editor.confirm);
         editor_layout();
         // The file tabs are the view's: a press on one and its release are not the find bar's or the text's.
-        asks = ui_view_event(&editor.ui, &editor.view, event);
+        // When the pointer is already inside the document well and nothing is held, let the text widget take it directly.
+        {
+                int px = event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x;
+                int py = event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y;
+
+                asks = (!ui_kit_held && (event->type == WINDOW_EVENT_BUTTON || event->type == WINDOW_EVENT_MOTION) &&
+                        ui_text_inside(&tab->view, px, py))
+                           ? 0
+                           : ui_view_event(&editor.ui, &editor.view, event);
+        }
         if (asks & UI_VIEW_DRAW)
                 editor.dirty = true;
         if (asks & UI_VIEW_TAKEN)
@@ -807,6 +1210,35 @@ static b32 editor_event(const struct window_event address_to event)
                 if (said.took)
                         return true;
         }
+        // Dropping files from Files onto the editor opens them as tabs.
+        if (event->type == WINDOW_EVENT_DRAG && !tab->view.drag.live)
+        {
+                static const char address_to const uri_name[1] = {WINDOWS_CLIP_URIS};
+                int what = ui_drop_event(&editor.drop, event);
+
+                if (what == UI_DROP_OVER && ui_drop_pick(&editor.own, &editor.drop, uri_name, 1, WINDOWS_DRAG_COPY, WINDOWS_DRAG_COPY))
+                        return true;
+                if (what == UI_DROP_READY && editor.drop.nth == 0)
+                {
+                        p8 address_to bytes;
+                        unsigned long length;
+
+                        if (ui_drop_read(&editor.own, &editor.drop, &bytes, &length))
+                        {
+                                p8 uri_path[EDITOR_PATH];
+                                positive pos = 0, opened = 0;
+
+                                while (ui_uri_next(bytes, length, &pos, uri_path, sizeof(uri_path)))
+                                        opened += editor_open_or_switch((string_address)uri_path);
+                                windows_clip_free(bytes, length);
+                                ui_drop_done(&editor.own, &editor.drop, opened > 0);
+                                editor.dirty = true;
+                                return true;
+                        }
+                        ui_drop_done(&editor.own, &editor.drop, false);
+                        return true;
+                }
+        }
         tab = editor_now();
         editor_keys();
         asks = ui_text_event(&editor.ui, &tab->view, event, ui_kit.pointer_x, ui_kit.pointer_y);
@@ -817,6 +1249,8 @@ static b32 editor_event(const struct window_event address_to event)
         // A copy refused (a selection too large to copy): the status says why.
         if ((asks & UI_TEXT_REFUSED) && tab->view.refused)
                 string_copy_bounded((string_address)editor.status, (string_address)tab->view.refused, sizeof(editor.status));
+        if (asks & UI_TEXT_CHANGED)
+                editor_title_sync();
         if (asks)
                 editor.dirty = true;
         return true;
@@ -851,6 +1285,7 @@ static long editor_tick(long timeout, long address_to other)
 static fn editor_language(void)
 {
         editor.status[0] = 0;
+        editor_title_sync();
         editor.dirty = true;
 }
 
@@ -865,12 +1300,13 @@ static int editor_start(void)
         editor.width = screen_w * 3 / 5, editor.height = screen_h * 3 / 4;
         ui_free(table, editor.own.row, editor.width, editor.height, 0);
         ui_scratch_fit(&editor.ui, (unsigned int)screen_w);
-        for (positive at = 1; at < (positive)program_argument_count(); at++)
-                if (!editor_open(program_argument(at)) && !editor.count)
+        for (int at = 0; at < editor.start_count; at++)
+                if (!editor_open(editor.start_files[at]) && !editor.count)
                         break;
         if (!editor.count)
                 editor_open(null);
         editor.tab = 0;
+        editor_title_sync();
         editor.dirty = true;
         return -1;
 }
@@ -896,6 +1332,7 @@ static struct ui_app editor_app = {
     .closing = editor_closing,
     .done = editor_done,
     .mono = true,
+    .own_title = true,
     .width = &editor.width,
     .height = &editor.height,
     .shown = &editor.shown,
@@ -904,6 +1341,10 @@ static struct ui_app editor_app = {
 
 static b32 editor_main()
 {
+        editor.start_count = 0;
+        for (positive at = 1, took; at < (positive)program_argument_count(); at += took ? took : 1)
+                if (!(took = ui_app_option(&editor_app, at)) && editor.start_count < EDITOR_TABS)
+                        editor.start_files[editor.start_count++] = program_argument(at);
         return ui_app_run(&editor_app);
 }
 

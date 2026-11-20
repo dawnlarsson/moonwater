@@ -1,9 +1,9 @@
-@language pl
-@name Polski
-@translated machine
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
+@language pl
+@name Polski
+@translated machine
 action_copy	3664	Kopiuj
 action_cut	5863	Wytnij
 action_paste	0288	Wklej
@@ -13,21 +13,24 @@ editor_closes_unsaved	fcb8	zamyka i odrzuca niezapisane zmiany
 editor_encoding_bom	c0d7	UTF-8 z BOM
 editor_find_hint	d17a	Znajdź
 editor_find_replace_hint	3693	Znajdź/Zamień na
+editor_hex_status	35a5	Przesunięcie %1$s / %2$s
 editor_indent_spaces	9db9	Spacje: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Wiersz
 editor_lock_stale	f9d8	%s został po poprzednim zapisie: usuń go, potem zapisz
+editor_mode_hex	55d5	Hex
+editor_mode_text	134a	Tekst
 editor_no_file_name	c863	brak nazwy pliku: uruchom edytor z nazwą
 editor_no_match	7de7	brak dopasowania
 editor_not_regular	5955	to nie jest zwykły plik: odrzucono
-editor_open_none	63aa	otwieranie nie jest tutaj: uruchom edytor z nazwą pliku
+editor_open_hint	235f	Ścieżka pliku do otwarcia
 editor_pattern_bad	5d57	wzorzec nie kompiluje się
 editor_position	3696	Wrs %1$d, Kol %2$d
 editor_read_failed	5f78	nie udało się odczytać pliku: nie zostaje otwarty
 editor_reload_unsaved	85da	wczytuje plik ponownie i odrzuca niezapisane zmiany
 editor_replace_usage	c677	zamiana to SZUKANE/ZAMIENNIK
 editor_replaced	1128	zamieniono: %d
-editor_save_as_none	0745	zapisz jako nie jest tutaj: Ctrl+S zapisuje plik
+editor_save_as_hint	c955	Zapisz jako ścieżka
 editor_save_failed	069d	zapis się nie udał: plik jest bez zmian
 editor_saved	9f44	zapisano
 editor_selected	a686	(zaznaczono: %d)
@@ -35,6 +38,7 @@ editor_selected_carets	7e02	(zaznaczono: %d, kursory)
 editor_tabs_full	8ed9	wszystkie %d karty są otwarte: najpierw zamknij jedną
 editor_unsaved	c014	niezapisane zmiany: zapisz je lub zamknij każdą dwukrotnie Ctrl+W
 editor_untitled	8b58	bez nazwy
+editor_wrap_on	40cd	Zawijaj
 editor_write_beside	ec75	nie można zapisać obok pliku
 editor_writes_over_changed	df15	nadpisuje zmianę na dysku (Ctrl+R wczytuje ponownie)
 editor_writes_over_readonly	e22f	nadpisuje plik tylko do odczytu
@@ -184,15 +188,21 @@ launcher_sleep_armed	bb08	uśpić
 menu_bin_empty	1538	Opróżnij kosz
 menu_bin_open	8797	Otwórz kosz
 menu_bin_restore	4799	Przywróć
+menu_close_others	ec3e	Zamknij inne karty
+menu_close_tab	9753	Zamknij kartę
 menu_copy	43e0	&Kopiuj
 menu_copy_row	f3c8	Kopiuj wiersz
 menu_cut	5c17	&Wytnij
 menu_delete	1e3e	&Usuń
 menu_find	1fa6	Zna&jdź
 menu_go_to_line	bc96	Prz&ejdź do wiersza
+menu_hex_mode	fd1b	Edytor szesnastkowy
 menu_new_folder	41cb	&Nowy folder
+menu_new_tab	dad5	Nowa karta
+menu_new_window	2c79	Nowe okno
 menu_open	61a5	&Otwórz
 menu_open_editor	8ca0	Otwórz w &edytorze
+menu_open_file	098c	Otwórz plik...
 menu_open_terminal	6d2a	Otwórz &terminal tutaj
 menu_paste	6854	Wk&lej
 menu_properties	c780	Właś&ciwości
@@ -200,6 +210,7 @@ menu_redo	ac45	&Ponów
 menu_remove	901d	Usuń
 menu_rename	9529	Zmień &nazwę
 menu_reset_zoom	1b0f	&Resetuj powiększenie
+menu_save_as	e18c	Zapisz jako...
 menu_select_all	f6f6	&Zaznacz wszystko
 menu_set_wallpaper	1a27	Ustaw jako &tapetę
 menu_set_wallpaper_of	aa60	Ustaw jako tapetę %s
@@ -209,6 +220,7 @@ menu_undo	b9d3	&Cofnij
 menu_view_details	d3a1	&Szczegóły
 menu_view_icons	57e8	Duże &ikony
 menu_view_list	4cc5	&Lista
+menu_word_wrap	9ab3	Zawijanie wierszy
 menu_zoom_in	5bcf	&Powiększ
 menu_zoom_out	9234	Pom&niejsz
 mixer_allow	19d2	Zezwól
@@ -449,6 +461,8 @@ ui_field_full	fe02	więcej się nie zmieści
 =A quick shake makes the pointer large for a moment	4d81	Szybkie potrząśnięcie na chwilę powiększa wskaźnik
 =Accent	ccd7	Akcent
 =Accent colour (rrggbb or reset)	53aa	Kolor akcentu (rrggbb lub reset)
+=Add a key (label, then the public key)	e2e3	Dodaj klucz (etykieta, potem klucz publiczny)
+=Add a program to start (its path)	5e20	Dodaj program do startu (jego ścieżka)
 =Airplane mode	3b8a	Tryb samolotowy
 =All commands	4a42	Wszystkie polecenia
 =Allow recording	f7e5	Zezwalaj na nagrywanie
@@ -468,6 +482,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Uruchamianie
+=Bowl tier	7b7f	Poziom bowli
 =Brightness	324a	Jasność
 =Build	7543	Kompilacja
 =Canvas	5091	Canvas
@@ -487,17 +502,18 @@ ui_field_full	fe02	więcej się nie zmieści
 =Devices	f320	Urządzenia
 =Discover now	398a	Wykryj teraz
 =Discovery	2db5	Wykrywanie
-=Files	1b30	Pliki
-=Install Moonwater	06fc	Zainstaluj Moonwater
-=Internal storage	e961	Pamięć wewnętrzna
-=External devices	5769	Urządzenia zewnętrzne
 =Display	d9b5	Ekran
 =Double-click time (ms, or default)	9af1	Czas dwukrotnego kliknięcia (ms lub default)
 =Drag lists with the mouse	4ee2	Przeciąganie list myszą
 =Edge swipes	7aaf	Przesunięcia od krawędzi
 =Editor	bf98	Edytor
+=End every session	12e1	Zakończ wszystkie sesje
+=External devices	5769	Urządzenia zewnętrzne
+=Files	1b30	Pliki
 =GPU rendering (alpha)	e5e6	Renderowanie przez GPU (alfa)
 =Gallery	4cdd	Galeria
+=Graphics	9fa8	Grafika
+=Host key fingerprint	2398	Odcisk klucza hosta
 =How fast the pointer follows the mouse	0a45	Jak szybko wskaźnik podąża za myszą
 =How long it stays large after a shake	82a0	Jak długo pozostaje duży po potrząśnięciu
 =How long to hold a finger to right-click	b301	Jak długo trzymać palec, by kliknąć prawym
@@ -511,6 +527,8 @@ ui_field_full	fe02	więcej się nie zmieści
 =Input device (name, or default)	af7b	Urządzenie wejściowe (nazwa lub default)
 =Input mute	ad50	Wycisz wejście
 =Input volume (percent, or default)	263f	Głośność wejścia (procent lub default)
+=Install Moonwater	06fc	Zainstaluj Moonwater
+=Internal storage	e961	Pamięć wewnętrzna
 =Internet sharing over Bluetooth	afe8	Udostępnianie internetu przez Bluetooth
 =Keep a device by its name	9c51	Zapamiętaj urządzenie po nazwie
 =Keep the lowest-delay sample	d8b9	Zachowuj próbkę o najmniejszym opóźnieniu
@@ -527,7 +545,9 @@ ui_field_full	fe02	więcej się nie zmieści
 =Launcher	44b1	Uruchamianie
 =Learned	0c7c	Ustalono
 =Left edge	9ce5	Lewa krawędź
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Wpuszcza przez sieć klucze z listy; wyłączony zatrzymuje się i kończy wszystkie sesje
 =Linked machines	0cc2	Połączone maszyny
+=Listen address (any for every address)	d513	Adres nasłuchu (any dla każdego)
 =Local addresses	9f2c	Adresy lokalne
 =Long press time (ms, or default)	aff4	Czas długiego naciśnięcia (ms lub default)
 =Machine	be0e	Maszyna
@@ -535,10 +555,6 @@ ui_field_full	fe02	więcej się nie zmieści
 =Momentum	cfef	Pęd
 =Motion	7647	Ruch
 =Mount kept disks	f0c8	Montuj zachowane dyski
-=Programs started with the desktop	5b74	Programy uruchamiane z pulpitem
-=Add a program to start (its path)	5e20	Dodaj program do startu (jego ścieżka)
-=Remove a program from the start (its path)	1013	Usuń program ze startu (jego ścieżka)
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Otwierane w tej kolejności przy starcie pulpitu; none uruchamia go bez okien
 =Mouse	9b64	Mysz
 =Mouse acceleration	c400	Przyspieszenie myszy
 =Mouse sensitivity (percent, or default)	8a23	Czułość myszy (procent lub default)
@@ -557,6 +573,7 @@ ui_field_full	fe02	więcej się nie zmieści
 =Notices	8f06	Powiadomienia
 =On-screen keyboard	97f8	Klawiatura ekranowa
 =Open windows where they were last put	8711	Otwieraj okna tam, gdzie je ostatnio zostawiono
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Otwierane w tej kolejności przy starcie pulpitu; none uruchamia go bez okien
 =Output device (name, or default)	d73c	Urządzenie wyjściowe (nazwa lub default)
 =Pair a machine	b39b	Sparuj maszynę
 =Paths	263f	Ścieżki
@@ -564,9 +581,12 @@ ui_field_full	fe02	więcej się nie zmieści
 =Pointer	4dca	Wskaźnik
 =Pointer squeeze (percent, or default)	bbee	Ściśnięcie wskaźnika (procent lub domyślnie)
 =Pointer squeezes on click	ad88	Wskaźnik kurczy się przy kliknięciu
+=Port	3cc6	Port
 =Power	a5e6	Zasilanie
 =Power profile	8def	Profil zasilania
 =Predict touch and pen	e2b7	Przewiduj dotyk i rysik
+=Primary display	924b	Ekran główny
+=Programs started with the desktop	5b74	Programy uruchamiane z pulpitem
 =Proxy	1bfb	Proxy
 =Proxy from the environment	7fa7	Proxy ze środowiska
 =Public IPv4	0813	Publiczny IPv4
@@ -575,16 +595,25 @@ ui_field_full	fe02	więcej się nie zmieści
 =Public address discovery (STUN)	7691	Wykrywanie adresu publicznego (STUN)
 =Refresh rate	bf6e	Częstotliwość odświeżania
 =Remembered devices	abbc	Zapamiętane urządzenia
+=Remove a program from the start (its path)	1013	Usuń program ze startu (jego ścieżka)
 =Resize border width (pixels, or default)	7fdf	Szerokość ramki zmiany rozmiaru (piksele lub default)
 =Resize grip (pixels, or default)	dddd	Uchwyt zmiany rozmiaru (piksele lub default)
+=Resolution	18af	Rozdzielczość
 =Right edge	279a	Prawa krawędź
+=Root login	6cd4	Logowanie roota
+=Root may log in by a key of the list, and by nothing else	a430	Root może się zalogować kluczem z listy i niczym innym
 =Rotation	777f	Obrót
 =Rubber band	9c42	Efekt gumki
+=SSH	7b31	SSH
+=SSH server	9b60	Serwer SSH
+=STUN servers (or reset)	4062	Serwery STUN (lub reset)
+=STUN time limit (ms, or default)	be40	Limit czasu STUN (ms lub default)
 =Scale of this screen	e4ca	Skala tego ekranu
 =Screen	c631	Ekran
 =Screen modes	85ad	Tryby ekranu
 =Scroll speed	e7af	Prędkość przewijania
 =Scrolling	74ec	Przewijanie
+=Server files	5af9	Pliki serwera
 =Servers in order	0a76	Serwery w kolejności
 =Set the clock from the network	b2a3	Ustawiaj zegar z sieci
 =Settings	8728	Ustawienia
@@ -597,19 +626,33 @@ ui_field_full	fe02	więcej się nie zmieści
 =Sound	9a34	Dźwięk
 =Sound server	84bf	Serwer dźwięku
 =Start the desktop	be4c	Uruchom pulpit
-=STUN servers (or reset)	4062	Serwery STUN (lub reset)
-=STUN time limit (ms, or default)	be40	Limit czasu STUN (ms lub default)
 =System	84bc	System
 =System notices	fa89	Powiadomienia systemu
 =Taskbar	d759	Pasek zadań
+=Taskbar battery place	3413	Miejsce baterii na pasku zadań
+=Taskbar clock bulge (percent)	fa6c	Wypukłość zegara na pasku zadań (procent)
+=Taskbar clock place	c144	Miejsce zegara na pasku zadań
 =Taskbar display	042b	Ekran paska zadań
+=Taskbar distance from the edge (pixels)	845c	Odległość paska zadań od krawędzi (piksele)
 =Taskbar hides for fullscreen	f2f8	Pasek zadań chowa się przy pełnym ekranie
 =Taskbar launcher button	dd4d	Przycisk uruchamiania na pasku zadań
+=Taskbar microphone place	76d8	Miejsce mikrofonu na pasku zadań
+=Taskbar moon look	a24d	Wygląd księżyca na pasku zadań
+=Taskbar moon place	6f19	Miejsce księżyca na pasku zadań
+=Taskbar moon spin (seconds a turn, off or default)	a763	Obrót księżyca na pasku zadań (sekundy na obrót, wyłączony lub domyślny)
+=Taskbar newest task side	b5a9	Strona najnowszego zadania na pasku zadań
+=Taskbar notices place	a793	Miejsce powiadomień na pasku zadań
+=Taskbar order	ccfd	Kolejność na pasku zadań
 =Taskbar padding (pixels)	a3a0	Odstępy na pasku zadań (piksele)
 =Taskbar pinned programs (or none)	3732	Programy przypięte do paska zadań (lub brak)
 =Taskbar position	81b8	Położenie paska zadań
 =Taskbar scale (percent)	810b	Skala paska zadań (procent)
+=Taskbar sound place	e2a1	Miejsce dźwięku na pasku zadań
+=Taskbar tasks	445b	Zadania na pasku zadań
+=Taskbar tasks place	bfd0	Miejsce zadań na pasku zadań
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Obszar powiadomień paska zadań (tekst z {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Taskbar tray clock place	c2e6	Miejsce zegara zasobnika na pasku zadań
+=Taskbar tray text place	c235	Miejsce tekstu zasobnika na pasku zadań
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Wiersze terminala na skok kółka
 =Text size (percent, or default)	51d7	Rozmiar tekstu (procent lub default)
@@ -625,11 +668,12 @@ ui_field_full	fe02	więcej się nie zmieści
 =Theme	7c92	Motyw
 =This machine	3790	Ta maszyna
 =Time	e404	Czas
+=Time limit (minutes, or off)	d2cf	Limit czasu (minuty lub off)
 =Time server (auto for the pool)	67e5	Serwer czasu (auto dla puli)
 =Time zone	741a	Strefa czasowa
 =Touch	fb78	Dotyk
-=Trace time limit (seconds, or default)	28d4	Limit czasu śladu (sekundy lub default)
 =Trace URL (or default)	be36	URL śladu (lub default)
+=Trace time limit (seconds, or default)	28d4	Limit czasu śladu (sekundy lub default)
 =Turned by the screen	ea45	Obraca ekran
 =Turned left	507c	Obrócony w lewo
 =Turned right	7a49	Obrócony w prawo
@@ -637,18 +681,27 @@ ui_field_full	fe02	więcej się nie zmieści
 =Upside down	9dc1	Do góry nogami
 =Variable refresh rate	06a4	Zmienna częstotliwość odświeżania
 =Volume (percent, or default)	f6e3	Głośność (procent lub default)
+=Wallpaper	0da9	Tapeta
+=Wallpaper glow	57c6	Poświata tapety
+=Wallpaper in the dark theme	a6dc	Tapeta w ciemnym motywie
+=Wallpaper of this screen	2c92	Tapeta tego ekranu
+=Wallpaper picture (a PNG file, or none)	8e9d	Obraz tapety (plik PNG lub brak)
+=Wallpaper seas (percent grey)	6836	Morza tapety (procent szarości)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Co robi przesunięcie od tej krawędzi
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Gdzie Canvas rysuje: na GPU czy na procesorze. Co karta robi teraz, jest poniżej
 =White edged in black, or the reverse	cd63	Biały z czarną krawędzią albo odwrotnie
 =Wi-Fi	0ec1	Wi-Fi
 =Wi-Fi IP address	9026	Adres IP Wi-Fi
 =Wired	9a54	Przewodowa
 =Wired IP address	0e25	Adres IP przewodowy
+=after	7dc9	po
 =all	4bc4	wszystkie
 =allow	a832	zezwól
 =amber	bec0	bursztynowy
 =auto	a396	automatycznie
 =balanced	b71d	zrównoważony
+=before	ff3e	przed
 =black	4ba4	czarny
 =blue	f5cd	niebieski
 =bottom	6b2a	na dole
@@ -660,16 +713,23 @@ ui_field_full	fe02	więcej się nie zmieści
 =default	5bde	domyślny
 =deny	6367	odmów
 =desktop	87b3	pulpit
+=dimmed	bded	przyciemniona
 =dmy	2a79	dmy
 =dynamic	96ae	dynamiczny
 =edge	d83c	krawędź
+=end	75aa	koniec
 =fast	02af	szybko
 =forest	2a60	leśny
 =full	b33c	pełny
 =games	2b9c	gry
+=glow	27bc	poświata
+=glow-and-edges	540f	poświata-i-krawędzie
 =graphite	dc8d	grafitowy
 =green	ecbc	zielony
+=grouped	8b7d	zgrupowane
 =high	b9fd	wysoko
+=ink	8faf	tusz
+=inverted	8038	odwrócona
 =kernel log	415a	dziennik jądra
 =kernel log klog dmesg messages	1a8d	dziennik jądro klog dmesg komunikaty
 =launcher	8391	uruchamiacz
@@ -681,6 +741,9 @@ ui_field_full	fe02	więcej się nie zmieści
 =mdy	3697	mdy
 =midnight-blue	4008	granatowy
 =modem	67ed	modem
+=moon	ae40	księżyc
+=moon-tasks-tray	6c42	księżyc-zadania-zasobnik
+=moon-tray-tasks	c2c4	księżyc-zasobnik-zadania
 =network	86c5	sieć
 =none	afdb	Brak
 =normal	9c52	normalnie
@@ -690,20 +753,32 @@ ui_field_full	fe02	więcej się nie zmieści
 =per second	4f98	na sekundę
 =percent	fa5a	procent
 =performance	8ca5	wydajność
+=picture	d389	obraz
+=plain	3f67	zwykła
 =plum	b06b	śliwkowy
 =powersave	2283	oszczędzanie energii
 =primary	5fd9	główny
+=realistic	b65f	realistyczny
 =reduced	5839	ograniczony
 =right	2de5	po prawej
 =rose	1806	różowy
+=separate	bb18	osobno
 =settings preferences options	8c78	ustawienia preferencje opcje
 =slate	deee	łupkowy
 =slow	42b8	wolno
+=split	2de3	podzielone
+=start	04df	początek
+=tab	2e4c	pigułka
+=tasks-moon-tray	c6a4	zadania-księżyc-zasobnik
+=tasks-tray-moon	4f46	zadania-zasobnik-księżyc
 =tcp	ba90	tcp
 =terminal shell console	eaba	terminal konsola powłoka
 =thick	964e	gruby
 =thin	b172	cienki
 =top	dc3c	na górze
+=tray	a12d	zasobnik
+=tray-moon-tasks	7246	zasobnik-księżyc-zadania
+=tray-tasks-moon	fda8	zasobnik-zadania-księżyc
 =unlock	1f55	odblokuj
 =violet	57f2	fioletowy
 =volume	698f	głośność
@@ -712,66 +787,3 @@ ui_field_full	fe02	więcej się nie zmieści
 =windows	26ea	okna
 =wired	bfb4	przewodowa
 =ymd	faad	ymd
-=SSH	7b31	SSH
-=SSH server	9b60	Serwer SSH
-=Root login	6cd4	Logowanie roota
-=Port	3cc6	Port
-=Listen address (any for every address)	d513	Adres nasłuchu (any dla każdego)
-=Time limit (minutes, or off)	d2cf	Limit czasu (minuty lub off)
-=Host key fingerprint	2398	Odcisk klucza hosta
-=Server files	5af9	Pliki serwera
-=Bowl tier	7b7f	Poziom bowli
-=Add a key (label, then the public key)	e2e3	Dodaj klucz (etykieta, potem klucz publiczny)
-=End every session	12e1	Zakończ wszystkie sesje
-=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Wpuszcza przez sieć klucze z listy; wyłączony zatrzymuje się i kończy wszystkie sesje
-=Root may log in by a key of the list, and by nothing else	a430	Root może się zalogować kluczem z listy i niczym innym
-=Wallpaper	0da9	Tapeta
-=Wallpaper picture (a PNG file, or none)	8e9d	Obraz tapety (plik PNG lub brak)
-=Wallpaper in the dark theme	a6dc	Tapeta w ciemnym motywie
-=Wallpaper seas (percent grey)	6836	Morza tapety (procent szarości)
-=Wallpaper glow	57c6	Poświata tapety
-=Taskbar moon place	6f19	Miejsce księżyca na pasku zadań
-=Taskbar moon look	a24d	Wygląd księżyca na pasku zadań
-=Taskbar tasks place	bfd0	Miejsce zadań na pasku zadań
-=Taskbar newest task side	b5a9	Strona najnowszego zadania na pasku zadań
-=Taskbar notices place	a793	Miejsce powiadomień na pasku zadań
-=Taskbar microphone place	76d8	Miejsce mikrofonu na pasku zadań
-=Taskbar sound place	e2a1	Miejsce dźwięku na pasku zadań
-=Taskbar battery place	3413	Miejsce baterii na pasku zadań
-=Taskbar tray text place	c235	Miejsce tekstu zasobnika na pasku zadań
-=Taskbar tray clock place	c2e6	Miejsce zegara zasobnika na pasku zadań
-=Taskbar order	ccfd	Kolejność na pasku zadań
-=Taskbar clock place	c144	Miejsce zegara na pasku zadań
-=Taskbar clock bulge (percent)	fa6c	Wypukłość zegara na pasku zadań (procent)
-=moon	ae40	księżyc
-=plain	3f67	zwykła
-=picture	d389	obraz
-=dimmed	bded	przyciemniona
-=inverted	8038	odwrócona
-=glow	27bc	poświata
-=glow-and-edges	540f	poświata-i-krawędzie
-=start	04df	początek
-=end	75aa	koniec
-=realistic	b65f	realistyczny
-=ink	8faf	tusz
-=split	2de3	podzielone
-=before	ff3e	przed
-=after	7dc9	po
-=moon-tasks-tray	6c42	księżyc-zadania-zasobnik
-=moon-tray-tasks	c2c4	księżyc-zasobnik-zadania
-=tasks-moon-tray	c6a4	zadania-księżyc-zasobnik
-=tasks-tray-moon	4f46	zadania-zasobnik-księżyc
-=tray-moon-tasks	7246	zasobnik-księżyc-zadania
-=tray-tasks-moon	fda8	zasobnik-zadania-księżyc
-=tray	a12d	zasobnik
-=tab	2e4c	pigułka
-=Taskbar moon spin (seconds a turn, off or default)	a763	Obrót księżyca na pasku zadań (sekundy na obrót, wyłączony lub domyślny)
-=Taskbar tasks	445b	Zadania na pasku zadań
-=Taskbar distance from the edge (pixels)	845c	Odległość paska zadań od krawędzi (piksele)
-=grouped	8b7d	zgrupowane
-=separate	bb18	osobno
-=Resolution	18af	Rozdzielczość
-=Primary display	924b	Ekran główny
-=Wallpaper of this screen	2c92	Tapeta tego ekranu
-=Graphics	9fa8	Grafika
-=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Gdzie Canvas rysuje: na GPU czy na procesorze. Co karta robi teraz, jest poniżej

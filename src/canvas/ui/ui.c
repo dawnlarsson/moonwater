@@ -6766,7 +6766,7 @@ enum
         DOC_CMD_SINGLE, DOC_CMD_BRACKET, DOC_CMD_FIND, DOC_CMD_REPLACE, DOC_CMD_FIND_NEXT, DOC_CMD_FIND_PREVIOUS,
         DOC_CMD_GOTO_LINE, DOC_CMD_ZOOM_IN, DOC_CMD_ZOOM_OUT, DOC_CMD_ZOOM_RESET, DOC_CMD_WRAP, DOC_CMD_OVERWRITE,
         DOC_CMD_SAVE, DOC_CMD_OPEN, DOC_CMD_NEW, DOC_CMD_CLOSE, DOC_CMD_NEXT_TAB, DOC_CMD_PREVIOUS_TAB, DOC_CMD_MENU,
-        DOC_CMD_FOLD, DOC_CMD_UNFOLD, DOC_CMD_SAVE_AS,
+        DOC_CMD_FOLD, DOC_CMD_UNFOLD, DOC_CMD_SAVE_AS, DOC_CMD_HEX, DOC_CMD_NEW_WINDOW,
         DOC_CMDS
 };
 
@@ -6780,7 +6780,7 @@ static const char address_to const doc_command_names[DOC_CMDS] = {
     "copy", "paste", "select_all", "select_line", "expand", "shrink", "cursor_above", "cursor_below", "next_match",
     "all_matches", "single", "bracket", "find", "replace", "find_next", "find_previous", "goto_line", "zoom_in",
     "zoom_out", "zoom_reset", "wrap", "overwrite", "save", "open", "new", "close", "next_tab", "previous_tab", "menu",
-    "fold", "unfold", "save_as",
+    "fold", "unfold", "save_as", "hex", "new_window",
 };
 
 /*
@@ -6807,7 +6807,7 @@ static const char address_to const doc_default_keys[] = {
     "escape single", "ctrl+shift+\\ bracket", "ctrl+f find", "ctrl+h replace", "f3 find_next",
     "shift+f3 find_previous", "ctrl+g goto_line", "ctrl+= zoom_in", "ctrl++ zoom_in", "ctrl+- zoom_out",
     "ctrl+0 zoom_reset", "alt+z wrap", "insert overwrite", "ctrl+s save", "ctrl+shift+s save_as", "ctrl+o open",
-    "ctrl+n new", "ctrl+w close", "ctrl+tab next_tab", "ctrl+pagedown next_tab", "ctrl+shift+tab previous_tab",
+    "ctrl+n new", "ctrl+shift+n new_window", "ctrl+shift+h hex", "ctrl+w close", "ctrl+tab next_tab", "ctrl+pagedown next_tab", "ctrl+shift+tab previous_tab",
     "ctrl+pageup previous_tab", "shift+f10 menu", "menu menu", "ctrl+{ fold", "ctrl+} unfold",
 };
 
@@ -8002,21 +8002,24 @@ LANGUAGE_ID(editor_closes_unsaved, "closes the unsaved changes") \
 LANGUAGE_ID(editor_encoding_bom, "UTF-8 with BOM") \
 LANGUAGE_ID(editor_find_hint, "Find") \
 LANGUAGE_ID(editor_find_replace_hint, "Find/Replace with") \
+LANGUAGE_ID(editor_hex_status, "Offset %1$s / %2$s") \
 LANGUAGE_ID(editor_indent_spaces, "Spaces: %d") \
 LANGUAGE_ID(editor_indent_tab, "Tab: %d") \
 LANGUAGE_ID(editor_line_hint, "Line") \
 LANGUAGE_ID(editor_lock_stale, "%s is left by an earlier save: remove it, then save") \
+LANGUAGE_ID(editor_mode_hex, "Hex") \
+LANGUAGE_ID(editor_mode_text, "Text") \
 LANGUAGE_ID(editor_no_file_name, "no file name: start the editor with one") \
 LANGUAGE_ID(editor_no_match, "no match") \
 LANGUAGE_ID(editor_not_regular, "not a regular file: refused") \
-LANGUAGE_ID(editor_open_none, "open is not here: start the editor with the file's name") \
+LANGUAGE_ID(editor_open_hint, "Open file path") \
 LANGUAGE_ID(editor_pattern_bad, "the pattern does not compile") \
 LANGUAGE_ID(editor_position, "Ln %1$d, Col %2$d") \
 LANGUAGE_ID(editor_read_failed, "the file could not be read: it is not opened") \
 LANGUAGE_ID(editor_reload_unsaved, "reads the file again and drops the unsaved changes") \
 LANGUAGE_ID(editor_replace_usage, "replace is FIND/REPLACEMENT") \
 LANGUAGE_ID(editor_replaced, "%d replaced") \
-LANGUAGE_ID(editor_save_as_none, "save as is not here: Ctrl+S saves the file") \
+LANGUAGE_ID(editor_save_as_hint, "Save as path") \
 LANGUAGE_ID(editor_save_failed, "the save failed: the file is as it was") \
 LANGUAGE_ID(editor_saved, "saved") \
 LANGUAGE_ID(editor_selected, "(%d selected)") \
@@ -8024,6 +8027,7 @@ LANGUAGE_ID(editor_selected_carets, "(%d selected, carets)") \
 LANGUAGE_ID(editor_tabs_full, "all %d tabs are open: close one first") \
 LANGUAGE_ID(editor_unsaved, "unsaved changes: save them, or close each with Ctrl+W twice") \
 LANGUAGE_ID(editor_untitled, "untitled") \
+LANGUAGE_ID(editor_wrap_on, "Wrap") \
 LANGUAGE_ID(editor_write_beside, "could not write beside the file") \
 LANGUAGE_ID(editor_writes_over_changed, "writes over the change on disk (Ctrl+R reads it again)") \
 LANGUAGE_ID(editor_writes_over_readonly, "writes over a read-only file") \
@@ -8173,15 +8177,21 @@ LANGUAGE_ID(launcher_sleep_armed, "sleep") \
 LANGUAGE_ID(menu_bin_empty, "Empty the bin") \
 LANGUAGE_ID(menu_bin_open, "Open the bin") \
 LANGUAGE_ID(menu_bin_restore, "Put back") \
+LANGUAGE_ID(menu_close_others, "Close Other Tabs") \
+LANGUAGE_ID(menu_close_tab, "Close Tab") \
 LANGUAGE_ID(menu_copy, "&Copy") \
 LANGUAGE_ID(menu_copy_row, "Copy row") \
 LANGUAGE_ID(menu_cut, "Cu&t") \
 LANGUAGE_ID(menu_delete, "&Delete") \
 LANGUAGE_ID(menu_find, "&Find") \
 LANGUAGE_ID(menu_go_to_line, "&Go to Line") \
+LANGUAGE_ID(menu_hex_mode, "Hex Editor") \
 LANGUAGE_ID(menu_new_folder, "&New Folder") \
+LANGUAGE_ID(menu_new_tab, "New Tab") \
+LANGUAGE_ID(menu_new_window, "New Window") \
 LANGUAGE_ID(menu_open, "&Open") \
 LANGUAGE_ID(menu_open_editor, "Open in the &Editor") \
+LANGUAGE_ID(menu_open_file, "Open File...") \
 LANGUAGE_ID(menu_open_terminal, "Open a &Terminal Here") \
 LANGUAGE_ID(menu_paste, "&Paste") \
 LANGUAGE_ID(menu_properties, "P&roperties") \
@@ -8189,6 +8199,7 @@ LANGUAGE_ID(menu_redo, "&Redo") \
 LANGUAGE_ID(menu_remove, "Remove") \
 LANGUAGE_ID(menu_rename, "Re&name") \
 LANGUAGE_ID(menu_reset_zoom, "&Reset Zoom") \
+LANGUAGE_ID(menu_save_as, "Save As...") \
 LANGUAGE_ID(menu_select_all, "Select &All") \
 LANGUAGE_ID(menu_set_wallpaper, "Set as &Wallpaper") \
 LANGUAGE_ID(menu_set_wallpaper_of, "Set as Wallpaper of %s") \
@@ -8198,6 +8209,7 @@ LANGUAGE_ID(menu_undo, "&Undo") \
 LANGUAGE_ID(menu_view_details, "&Details") \
 LANGUAGE_ID(menu_view_icons, "Large &Icons") \
 LANGUAGE_ID(menu_view_list, "&List") \
+LANGUAGE_ID(menu_word_wrap, "Word Wrap") \
 LANGUAGE_ID(menu_zoom_in, "Zoom &In") \
 LANGUAGE_ID(menu_zoom_out, "Zoom &Out") \
 LANGUAGE_ID(mixer_allow, "Allow") \
@@ -13045,6 +13057,10 @@ struct ui_control
         int row_x, row_y, row_w, row_h;
         p64 items_id;                      // key into ui_items_pool (0 none); value-copied with struct ui_control
         unsigned int marks;                // tabs: bit k is a dot at the far end of item k (a file that has changes); last, for the layout's sake
+        b32 closable, addable;             // tabs: per-tab close button (x) + middle-click close, and trailing '+' new-tab button
+        int close_item, close_hover;       // tabs: item closed on click (-1 none); hovered close slot (-1 none, -2 add button)
+        b32 add_clicked;                   // tabs: '+' button clicked
+        int tab_right_click;               // tabs: item right-clicked (-1 none)
 };
 
 // The row a control's ripple and hover cover, in logical pixels.
@@ -14073,9 +14089,51 @@ static fn ui_slider_draw(struct ui address_to ui, struct ui_control address_to c
         sides. The pip slides over .35s --ease-emphasized, and the tabs it rolls
         over stretch 1.13 along the travel (130 ms of flight); colours go in .2s.
 */
+#define UI_DOT 6     // a status dot's width: a badge's, and a tab's in the editor (which takes it from here)
+#define UI_DOT_IN 12 // a tab's dot in from the tab's right edge
+#define UI_TAB_CLOSE_W 20 // logical px: trailing close/dirty-dot slot inside a closable tab
+#define UI_TAB_ADD_W 32   // logical px: trailing '+' new-tab button width
+#define UI_TAB_MAX_W 180  // logical px: maximum width of a single closable tab
+
+static string_address ui_fit(struct ui address_to ui, string_address text, int type, int room, char address_to fitted, positive capacity);
+static fn ui_kit_dot(struct ui address_to ui, int x, int y, unsigned int argb);
+
+static int ui_tab_natural_width(struct ui address_to ui, const struct ui_control address_to c, int item)
+{
+        int text = ui->scale > 0 && c->items[item] ? ui_kit_measure(ui, (string_address)c->items[item], UI_LABEL_LARGE) * 100 / ui->scale : 0;
+
+        if (!c->closable)
+                return text + 28;
+        text += 20 + UI_TAB_CLOSE_W;
+        if (text < 64)
+                text = 64;
+        return text > UI_TAB_MAX_W ? UI_TAB_MAX_W : text;
+}
+
 static int ui_tab_width(struct ui address_to ui, const struct ui_control address_to c, int item)
 {
-        return ui_kit_measure(ui, (string_address)c->items[item], UI_LABEL_LARGE) * 100 / ui->scale + 28;
+        int natural = ui_tab_natural_width(ui, c, item);
+
+        if (!c->closable || c->w <= 0 || c->count <= 0)
+                return natural;
+        {
+                int gap = c->variant == UI_TABS_SEGMENTED ? 4 : 2;
+                int add_room = c->addable ? UI_TAB_ADD_W + gap : 0;
+                int avail = c->w - add_room - (c->count > 1 ? (c->count - 1) * gap : 0);
+                int total = 0;
+
+                if (avail <= 0)
+                        return 0;
+                for (int k = 0; k < c->count; k++)
+                        total += ui_tab_natural_width(ui, c, k);
+                if (total <= avail)
+                        return natural;
+                {
+                        int shrunk = avail / c->count;
+
+                        return shrunk < 1 ? 1 : shrunk;
+                }
+        }
 }
 
 static int ui_tab_left(struct ui address_to ui, const struct ui_control address_to c, int item)
@@ -14098,6 +14156,24 @@ static int ui_tabs_length(struct ui address_to ui, const struct ui_control addre
         return length;
 }
 
+// Logical x of the trailing close slot inside a closable tab, and logical x of the trailing '+' button (-1 if hidden/no room).
+static int ui_tab_close_left(struct ui address_to ui, const struct ui_control address_to c, int item)
+{
+        int left = ui_tab_left(ui, c, item), wide = ui_tab_width(ui, c, item);
+
+        return ui_mirror(left + wide - UI_TAB_CLOSE_W - 4, UI_TAB_CLOSE_W, left, wide);
+}
+
+static int ui_tabs_add_left(struct ui address_to ui, const struct ui_control address_to c)
+{
+        int gap = c->variant == UI_TABS_SEGMENTED ? 4 : 2;
+        int x = c->x + ui_tabs_length(ui, c) + (c->count ? gap : 0);
+
+        if (!c->addable || (c->w > 0 && x + UI_TAB_ADD_W > c->x + c->w))
+                return -1;
+        return ui_mirror(x, UI_TAB_ADD_W, c->x, c->w);
+}
+
 static fn ui_vtabs_draw(struct ui address_to ui, struct ui_control address_to c);
 static fn ui_tabs_marks(struct ui address_to ui, struct ui_control address_to c, int height);
 
@@ -14112,13 +14188,15 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 ui_vtabs_draw(ui, c);
                 return;
         }
-        // A strip with no items has no pip to put on one, and no word to measure for its place.
-        if (c->count == 0)
+        // A strip with no items or no window room has nothing to draw.
+        if (c->count == 0 || ui->scale <= 0 || ui->width <= 0 || ui->height <= 0 || (c->closable && c->w <= 0))
                 return;
         int height = seg ? UI_TABS_H : 40, chosen = c->at;
         struct ui_items_anim address_to anim = ui_items_anim_for(c);
         b64 pip_x, pip_w;
 
+        if (chosen < 0 || chosen >= c->count)
+                chosen = 0;
         if (!seg)
         {
                 struct ui_box hair = {ui_q8(ui, c->x), ui_q8(ui, c->y + height), ui_q8(ui, c->x + c->w), ui_q8(ui, c->y + height) + ui_stroke(ui), 0, 0};
@@ -14154,7 +14232,11 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 b32 bx = ui_q8(ui, x), bw = ui_q8(ui, w), anchor = c->dom_origin > 0 ? bx : bx + bw;
                 struct ui_box face = ui_box_of(ui, ui_q(x), ui_q(c->y), ui_q(w), ui_q(height), ui_q(height) / 2);
                 unsigned int ink;
+                char cut[128];
+                string_address shown = (string_address)c->items[item];
 
+                if (w <= 0)
+                        continue;
                 ui_kit_colour_to(&anim->ink[item], item == chosen ? ui_role(seg ? UI_ON_PRIMARY : UI_PRIMARY) : ui_role(UI_ON_SURFACE_VARIANT),
                                  200, &ui_ease);
                 ink = ui_kit_colour(&anim->ink[item]);
@@ -14162,23 +14244,79 @@ static fn ui_tabs_draw(struct ui address_to ui, struct ui_control address_to c)
                 // The ripple: a tab is a button (its state layer is under the pip, above).
                 if (c->item == item)
                 {
-                        {
-                                struct ui_place place = {dom, UI_ONE, anchor, 0, 0, 0};
-                                struct ui_box pill = ui_box_of(ui, pip_x, ui_q(c->y), pip_w, ui_q(height), ui_q(height) / 2);
+                        struct ui_place place = {dom, UI_ONE, anchor, 0, 0, 0};
+                        struct ui_box pill = ui_box_of(ui, pip_x, ui_q(c->y), pip_w, ui_q(height), ui_q(height) / 2);
 
-                                ui_kit_ripples_on(ui, c, bx - ui_q8(ui, 8), ui_q8(ui, c->y - 8), &place, &face, ink, seg ? &pill : null);
+                        ui_kit_ripples_on(ui, c, bx - ui_q8(ui, 8), ui_q8(ui, c->y - 8), &place, &face, ink, seg ? &pill : null);
+                }
+                baseline = ui_kit_baseline(ui, ui_dev(ui, c->y) + (ui_dev(ui, height) - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE);
+                if (c->closable)
+                {
+                        int close_w = w >= 40 ? UI_TAB_CLOSE_W + 4 : 0;
+                        int label_x = ui_rtl() ? x + close_w + 8 : x + 12;
+                        int label_room = ui_dev(ui, w - close_w - 16);
+
+                        if (label_room > 0)
+                        {
+                                shown = ui_fit(ui, shown, UI_LABEL_LARGE, label_room, cut, sizeof(cut));
+                                width = ui_kit_measure(ui, shown, UI_LABEL_LARGE);
+                                ui_kit_text(ui, ui_dev(ui, label_x) + (label_room > width ? (label_room - width) / 2 : 0), baseline, shown, UI_LABEL_LARGE, ink, 0);
+                        }
+                        if (close_w > 0)
+                        {
+                                int cx = ui_tab_close_left(ui, c, item), cy = c->y + (height - UI_TAB_CLOSE_W) / 2;
+                                b32 dirty = item < 32 && (c->marks & (1u << item)) != 0;
+                                b32 hot = c->close_hover == item;
+
+                                if (hot)
+                                {
+                                        struct ui_box pill = ui_box_of(ui, ui_q(cx), ui_q(cy), ui_q(UI_TAB_CLOSE_W), ui_q(UI_TAB_CLOSE_W), ui_q(UI_TAB_CLOSE_W / 2));
+
+                                        ui_kit_layer_fill(ui, &pill, ink, 36);
+                                }
+                                if (dirty && !hot)
+                                {
+                                        int dot = ui_px(ui, UI_DOT);
+
+                                        ui_kit_dot(ui, ui_dev(ui, cx) + (ui_dev(ui, UI_TAB_CLOSE_W) - dot) / 2,
+                                                   ui_dev(ui, c->y) + (ui_dev(ui, height) - dot) / 2, ink | 0xff000000u);
+                                }
+                                else if (hot || item == chosen || c->item == item)
+                                {
+                                        int xw = ui_kit_measure(ui, (string_address) "\xc3\x97", UI_LABEL_LARGE);
+                                        unsigned int xink = hot ? ink : (ink & 0xffffffu) | 0xb0000000u;
+
+                                        ui_kit_text(ui, ui_dev(ui, cx) + (ui_dev(ui, UI_TAB_CLOSE_W) - xw) / 2, baseline, (string_address) "\xc3\x97", UI_LABEL_LARGE, xink, 0);
+                                }
                         }
                 }
-                width = ui_kit_measure(ui, (string_address)c->items[item], UI_LABEL_LARGE);
+                else
                 {
                         b32 middle = bx + bw / 2;
 
+                        width = ui_kit_measure(ui, shown, UI_LABEL_LARGE);
                         middle = anchor + (b32)ui_qmul(middle - anchor, dom);
-                        baseline = ui_kit_baseline(ui, ui_dev(ui, c->y) + (ui_dev(ui, height) - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE);
-                        ui_kit_text(ui, middle / 256 - width / 2, baseline, (string_address)c->items[item], UI_LABEL_LARGE, ink, 0);
+                        ui_kit_text(ui, middle / 256 - width / 2, baseline, shown, UI_LABEL_LARGE, ink, 0);
                 }
         }
-        ui_tabs_marks(ui, c, height);
+        if (c->addable)
+        {
+                int ax = ui_tabs_add_left(ui, c);
+
+                if (ax >= 0)
+                {
+                        struct ui_box add_box = ui_box_of(ui, ui_q(ax), ui_q(c->y), ui_q(UI_TAB_ADD_W), ui_q(height), ui_q(height) / 2);
+                        unsigned int ink = ui_role(c->close_hover == -2 ? UI_ON_SURFACE : UI_ON_SURFACE_VARIANT);
+                        int pw = ui_kit_measure(ui, (string_address) "+", UI_LABEL_LARGE);
+                        int baseline = ui_kit_baseline(ui, ui_dev(ui, c->y) + (ui_dev(ui, height) - ui_dev(ui, 20)) / 2, UI_LABEL_LARGE);
+
+                        if (c->close_hover == -2)
+                                ui_kit_layer_fill(ui, &add_box, ink, 24);
+                        ui_kit_text(ui, ui_dev(ui, ax) + (ui_dev(ui, UI_TAB_ADD_W) - pw) / 2, baseline, (string_address) "+", UI_LABEL_LARGE, ink, 0);
+                }
+        }
+        if (!c->closable)
+                ui_tabs_marks(ui, c, height);
         ui_kit.busy |= live;
 }
 
@@ -14408,9 +14546,6 @@ static fn ui_progress_draw(struct ui address_to ui, struct ui_control address_to
         foot), a spinner (a ring and a quarter of it in the accent, a turn in
         .7 s), a card and a window (hairline, 14 and 20 round).
 */
-#define UI_DOT 6     // a status dot's width: a badge's, and a tab's in the editor (which takes it from here)
-#define UI_DOT_IN 12 // a tab's dot in from the tab's right edge
-
 // A status dot, UI_DOT across, its top left at a device point, in one colour: a badge's, and an editor tab's.
 static fn ui_kit_dot(struct ui address_to ui, int x, int y, unsigned int argb)
 {
@@ -14895,10 +15030,31 @@ static int ui_control_hit(struct ui address_to ui, const struct ui_control addre
         }
         if (c->kind == UI_TABS)
         {
+                int h = c->variant ? 32 : 40;
+
+                if (c->addable)
+                {
+                        int ax = ui_tabs_add_left(ui, c);
+
+                        if (ax >= 0 && ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, ax), ui_dev(ui, c->y), ui_dev(ui, UI_TAB_ADD_W), ui_dev(ui, h)))
+                                return 2 * UI_ITEMS;
+                }
                 for (int k = 0; k < c->count; k++)
-                        if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, ui_tab_left(ui, c, k)), ui_dev(ui, c->y), ui_dev(ui, ui_tab_width(ui, c, k)),
-                                   ui_dev(ui, c->variant ? 32 : 40)))
+                {
+                        int left = ui_tab_left(ui, c, k), wide = ui_tab_width(ui, c, k);
+
+                        if (wide <= 0)
+                                continue;
+                        if (c->closable && wide >= 40)
+                        {
+                                int cx = ui_tab_close_left(ui, c, k), cy = c->y + (h - UI_TAB_CLOSE_W) / 2;
+
+                                if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, cx), ui_dev(ui, cy), ui_dev(ui, UI_TAB_CLOSE_W), ui_dev(ui, UI_TAB_CLOSE_W)))
+                                        return UI_ITEMS + k;
+                        }
+                        if (ui_hit(ui, ui_kit_touch, x, y, ui_dev(ui, left), ui_dev(ui, c->y), ui_dev(ui, wide), ui_dev(ui, h)))
                                 return k;
+                }
                 return -1;
         }
         if (c->kind == UI_INPUT && c->variant == UI_FIELD_BARE)
@@ -15180,13 +15336,18 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 {
                         struct ui_control address_to c = &controls[k];
                         int hit = ui_control_live(c) ? ui_control_hit(ui, c, x, y) : -1;
+                        int item_hit = c->kind == UI_TABS && hit >= 2 * UI_ITEMS ? -1
+                                       : c->kind == UI_TABS && hit >= UI_ITEMS   ? hit - UI_ITEMS
+                                                                                  : hit;
 
-                        if ((hit >= 0) != c->hover || (hit >= 0 && hit != c->item))
+                        if (c->kind == UI_TABS)
+                                c->close_hover = hit >= 2 * UI_ITEMS ? -2 : hit >= UI_ITEMS ? hit - UI_ITEMS : -1;
+                        if ((hit >= 0) != c->hover || (hit >= 0 && item_hit != c->item))
                         {
                                 if (hit < 0 && c->hover)
                                         ui_kit_ripples_exit(c);
                                 c->hover = hit >= 0;
-                                c->item = hit;
+                                c->item = item_hit;
                         }
                         if (hit >= 0)
                                 ui_kit_shape_note(c);
@@ -15234,16 +15395,16 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                         else if (c->kind == UI_TABS)
                         {
                                 // The tab's own box (on end, its item's row); a press on the chosen tab rides its indicator.
-                                int rx, rw;
-                                struct ui_ripple address_to r;
+                                int rx, rw, h = c->variant ? 32 : 40;
+                                struct ui_ripple address_to r = null;
 
                                 ui_vtabs_row(c, &rx, &rw);
-                                r = c->variant == UI_TABS_VERTICAL
-                                                                    ? ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, rx), ui_dev(ui, c->y + hit * c->h),
-                                                                                          ui_dev(ui, rw), ui_dev(ui, c->h), 8)
-                                                                    : ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, ui_tab_left(ui, c, hit)), ui_dev(ui, c->y),
-                                                                                          ui_dev(ui, ui_tab_width(ui, c, hit)), ui_dev(ui, c->variant ? 32 : 40), 8);
-
+                                if (c->variant == UI_TABS_VERTICAL)
+                                        r = ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, rx), ui_dev(ui, c->y + hit * c->h),
+                                                                ui_dev(ui, rw), ui_dev(ui, c->h), 8);
+                                else if (hit < UI_ITEMS)
+                                        r = ui_kit_ripple_start(ui, c, x, y, ui_dev(ui, ui_tab_left(ui, c, hit)), ui_dev(ui, c->y),
+                                                                ui_dev(ui, ui_tab_width(ui, c, hit)), ui_dev(ui, h), 8);
                                 if (r)
                                         r->rides = hit == c->at && c->variant != UI_TABS_UNDERLINE;
                         }
@@ -15311,11 +15472,21 @@ static struct ui_control address_to ui_kit_pointer(struct ui address_to ui, stru
                 else if (c->kind == UI_TABS)
                 {
                         ui_squish_release(&c->squish);
+                        c->close_item = -1, c->add_clicked = false, c->tab_right_click = -1;
                         if (!c->moved && ui_control_hit(ui, c, x, y) == c->item)
                         {
-                                ui_tabs_choose(ui, c, c->item);
-                                changed = c;
+                                if (c->item == 2 * UI_ITEMS)
+                                        c->add_clicked = true, changed = c;
+                                else if (c->item >= UI_ITEMS)
+                                        c->close_item = c->item - UI_ITEMS, changed = c;
+                                else
+                                {
+                                        ui_tabs_choose(ui, c, c->item);
+                                        changed = c;
+                                }
                         }
+                        if (c->item >= UI_ITEMS)
+                                c->item = c->item >= 2 * UI_ITEMS ? -1 : c->item - UI_ITEMS;
                 }
                 else if (c->kind == UI_SWITCH || c->kind == UI_CHECKBOX || c->kind == UI_RADIOS)
                 {
@@ -22167,6 +22338,27 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
                 for (int at = 0; at < v->tree.count; at++)
                         if (v->item[at].list && ui_view_list_bar_cancel(v->item[at].list))
                                 asks |= UI_VIEW_DRAW;
+                // Middle-click closes a closable tab; right-click reports tab_right_click for a tab context menu.
+                if (event->a == UI_POINTER_MIDDLE || event->a == UI_POINTER_RIGHT)
+                        for (int at = 0; at < v->tree.count; at++)
+                        {
+                                struct ui_control address_to c = v->item[at].control;
+
+                                if (c && c->kind == UI_TABS && c->closable && ui_control_live(c))
+                                {
+                                        int hit = ui_control_hit(ui, c, x, y);
+
+                                        if (hit >= UI_ITEMS && hit < 2 * UI_ITEMS)
+                                                hit -= UI_ITEMS;
+                                        if (hit >= 0 && hit < c->count)
+                                        {
+                                                c->close_item = event->a == UI_POINTER_MIDDLE ? hit : -1;
+                                                c->tab_right_click = event->a == UI_POINTER_RIGHT ? hit : -1;
+                                                c->add_clicked = false;
+                                                return asks | UI_VIEW_DRAW | UI_VIEW_TAKEN | ui_view_act(&v->item[at]);
+                                        }
+                                }
+                        }
         }
         if (event->type == WINDOW_EVENT_WHEEL)
         {
@@ -22232,7 +22424,7 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
                 on = y >= top && y < bottom && !(c->kind == UI_INPUT && c->edit);
                 // The control is where its picture drew it: a pull past an end of its container stretched that picture.
                 seen = on ? ui_view_unpull(ui, v, v->tree.node[at].parent, y) : y;
-                look = c->hover << 9 | c->focused << 8 | (c->item & 255), ghost = c->hover_x;
+                look = c->hover << 16 | c->focused << 15 | ((c->close_hover + 4) & 63) << 8 | (c->item & 255), ghost = c->hover_x;
                 if (motion)
                         ui_kit_pointer(ui, c, 1, WINDOW_EVENT_MOTION, x, on ? seen : -UI_TREE_MOST, false, event->flags);
                 else
@@ -22243,7 +22435,7 @@ static p32 ui_view_event(struct ui address_to ui, struct ui_view address_to v, c
                         if (ui_kit_pointer(ui, c, 1, WINDOW_EVENT_BUTTON, x, seen, true, event->flags))
                                 asks |= ui_view_act(&v->item[at]);
                 }
-                if (look != (c->hover << 9 | c->focused << 8 | (c->item & 255)))
+                if (look != (c->hover << 16 | c->focused << 15 | ((c->close_hover + 4) & 63) << 8 | (c->item & 255)))
                         asks |= UI_VIEW_DRAW;
                 else if (ghost != c->hover_x)
                         ui_view_due(v, ui_dev(ui, c->y - 8) < 0 ? 0 : ui_dev(ui, c->y - 8), ui_dev(ui, c->y + c->h + 8));
@@ -23507,6 +23699,9 @@ static const struct ui_kit_program
 #endif
 #if MOONWATER_UI_FILES
         {"Files", "files folders browser directory", "/files", 0},
+#endif
+#if MOONWATER_UI_EDITOR
+        {"Editor", "editor code text hex", "/editor", 0},
 #endif
 #if MOONWATER_UI_INSTALLER // last, and listed only where the launcher offers it
         {"Install Moonwater", "install installer disk drive", "/installer", 0},
@@ -31081,6 +31276,15 @@ struct ui_text
         struct ui_drag drag;
         struct ui_drop drop;
         p64 drag_from, drag_to, drop_at;
+        // Hex editor mode over the same piece table (t->doc): fixed 8-digit offset, 16 bytes/row, dual Hex + ASCII panes.
+        b32 hex, hex_ascii, hex_nibble, hex_insert;
+        p64 hex_top;
+        // IDE polish: cached matching bracket pair, vertical scrollbar interaction, gutter line-drag selection, and live find highlight.
+        p64 bracket_a, bracket_b;
+        b32 bar_hover, bar_held, gutter_drag;
+        int bar_grab_y;
+        p64 bar_grab_top, gutter_anchor;
+        struct doc_find address_to live_find;
 };
 
 /*
@@ -31128,6 +31332,7 @@ static b32 ui_text_open(struct ui_text address_to t, int mode, const p8 address_
         t->numbers = mode == UI_TEXT_CODE;
         t->wrap = mode == UI_TEXT_AREA;
         t->comment = "//";
+        t->bracket_a = t->bracket_b = DOC_NONE;
         ui_caret_wake(&t->caret);
         return true;
 }
@@ -32510,11 +32715,414 @@ static b32 ui_text_visual(struct ui address_to ui, struct ui_text address_to t, 
         return true;
 }
 
+// Visual Up/Down stepping across soft-wrapped rows of a logical line (returns true if handled).
+static b32 ui_text_wrap_step(struct ui address_to ui, struct ui_text address_to t, int dir, b32 extend)
+{
+        struct doc_selection address_to sel = &t->doc.selections[t->doc.primary];
+        p64 line = doc_line_of(&t->doc, sel->active), lines = doc_line_count(&t->doc);
+        int room = t->right - t->left, indent, rows = 0, cur = 0, want_x = 0;
+        p32 starts[128], ends[128];
+        p64 target;
+
+        if (!t->wrap || t->hex || t->mode == UI_TEXT_FIELD || t->doc.selection_count != 1 || room <= 0)
+                return false;
+        ui_text_layout_line(ui, t, line, &ui_text_lay);
+        if (ui_text_lay.bidi)
+                return false;
+        indent = ui_text_wrap_indent(&ui_text_lay, room);
+        for (p32 from = 0; rows < 128;)
+        {
+                p32 to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
+
+                starts[rows] = from, ends[rows] = to;
+                if (sel->active >= ui_text_lay.offset[from] && (sel->active < ui_text_lay.offset[to] || to >= ui_text_lay.count))
+                        cur = rows;
+                rows++;
+                if (to >= ui_text_lay.count)
+                        break;
+                from = to;
+        }
+        want_x = ui_text_slice_x(&ui_text_lay, starts[cur], ends[cur], sel->active) - (ui_text_lay.x[starts[cur]] - (starts[cur] ? indent : 0));
+        if (dir < 0 && cur > 0)
+        {
+                int r = cur - 1, px = want_x + ui_text_lay.x[starts[r]] - (starts[r] ? indent : 0);
+
+                target = ui_text_lay.offset[ends[r]];
+                for (p32 k = starts[r]; k < ends[r]; k++)
+                        if (px < (ui_text_lay.x[k] + ui_text_lay.x[k + 1]) / 2)
+                        {
+                                target = ui_text_lay.offset[k];
+                                break;
+                        }
+                if (target == ui_text_lay.offset[ends[r]] && ends[r] > starts[r] && ui_text_lay.shown[ui_text_lay.shown_at[ends[r] - 1]] == ' ')
+                        target = ui_text_lay.offset[ends[r] - 1];
+                doc_select_set(&t->doc, extend ? sel->anchor : target, target);
+                return true;
+        }
+        if (dir > 0 && cur + 1 < rows)
+        {
+                int r = cur + 1, px = want_x + ui_text_lay.x[starts[r]] - (starts[r] ? indent : 0);
+
+                target = ui_text_lay.offset[ends[r]];
+                for (p32 k = starts[r]; k < ends[r]; k++)
+                        if (px < (ui_text_lay.x[k] + ui_text_lay.x[k + 1]) / 2)
+                        {
+                                target = ui_text_lay.offset[k];
+                                break;
+                        }
+                if (target == ui_text_lay.offset[ends[r]] && ends[r] < ui_text_lay.count && ends[r] > starts[r] &&
+                    ui_text_lay.shown[ui_text_lay.shown_at[ends[r] - 1]] == ' ')
+                        target = ui_text_lay.offset[ends[r] - 1];
+                doc_select_set(&t->doc, extend ? sel->anchor : target, target);
+                return true;
+        }
+        // Moving onto the previous/next logical line's last/first visual row preserves visual x cleanly.
+        if ((dir < 0 && line == 0) || (dir > 0 && line + 1 >= lines))
+                return false;
+        {
+                p64 next_line = dir < 0 ? line - 1 : line + 1;
+                int nr = 0;
+
+                ui_text_layout_line(ui, t, next_line, &ui_text_lay);
+                if (ui_text_lay.bidi)
+                        return false;
+                indent = ui_text_wrap_indent(&ui_text_lay, room);
+                for (p32 from = 0; nr < 128;)
+                {
+                        p32 to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
+
+                        starts[nr] = from, ends[nr] = to, nr++;
+                        if (to >= ui_text_lay.count)
+                                break;
+                        from = to;
+                }
+                {
+                        int r = dir < 0 ? nr - 1 : 0;
+                        int px = want_x + ui_text_lay.x[starts[r]] - (starts[r] ? indent : 0);
+
+                        target = ui_text_lay.offset[ends[r]];
+                        for (p32 k = starts[r]; k < ends[r]; k++)
+                                if (px < (ui_text_lay.x[k] + ui_text_lay.x[k + 1]) / 2)
+                                {
+                                        target = ui_text_lay.offset[k];
+                                        break;
+                                }
+                        if (target == ui_text_lay.offset[ends[r]] && r + 1 < nr && ends[r] > starts[r] &&
+                            ui_text_lay.shown[ui_text_lay.shown_at[ends[r] - 1]] == ' ')
+                                target = ui_text_lay.offset[ends[r] - 1];
+                        doc_select_set(&t->doc, extend ? sel->anchor : target, target);
+                        return true;
+                }
+        }
+}
+
+/* ---- hex editor mode over struct doc ---- */
+
+static p64 ui_text_hex_rows_total(const struct ui_text address_to t)
+{
+        return doc_length(&t->doc) / 16 + 1;
+}
+
+static fn ui_text_hex_reveal(struct ui_text address_to t)
+{
+        p64 caret = t->doc.selections[t->doc.primary].active, row = caret / 16, top = t->hex_top / 16;
+        int rows = ui_text_rows(t);
+
+        if (rows < 1)
+                rows = 1;
+        if (row < top)
+                top = row;
+        else if (row >= top + (p64)rows)
+                top = row - (p64)rows + 1;
+        t->hex_top = top * 16;
+}
+
+static fn ui_text_hex_toggle(struct ui address_to ui, struct ui_text address_to t, b32 on)
+{
+        p64 caret = t->doc.selections[t->doc.primary].active;
+
+        t->hex = on;
+        t->hex_nibble = false;
+        t->bar_held = false;
+        if (on)
+                ui_text_hex_reveal(t);
+        else
+        {
+                t->top_line = doc_line_of(&t->doc, caret);
+                ui_text_reveal(ui, t);
+        }
+        ui_text_wake(t);
+}
+
+static b32 ui_text_hex_copy(struct ui_text address_to t, unsigned int which)
+{
+        static const char hex[] = "0123456789ABCDEF";
+        const struct doc_selection address_to sel = &t->doc.selections[t->doc.primary];
+        p64 start = doc_sel_start(sel), finish = doc_sel_end(sel), count;
+        p8 address_to out = null;
+        positive room = 0, used = 0;
+
+        if (t->hex_ascii)
+                return ui_text_copy(t, which);
+        if (start == finish)
+        {
+                if (start >= doc_length(&t->doc))
+                        return true;
+                finish = start + 1;
+        }
+        count = finish - start;
+        if (count > KIT_COPY_MOST / 3)
+        {
+                t->refused = WORDS(text_copy_too_large);
+                return false;
+        }
+        if (!array_store_reserve(out, room, used, (positive)(count * 3), 4096))
+                return false;
+        for (p64 at = start; at < finish; at++)
+        {
+                p32 b = doc_byte(&t->doc, at);
+
+                if (used)
+                        out[used++] = ' ';
+                out[used++] = (p8)hex[(b >> 4) & 15];
+                out[used++] = (p8)hex[b & 15];
+        }
+        ui_clip_offer(t->own, which, out, room, used);
+        return true;
+}
+
+static fn ui_text_hex_move(struct ui_text address_to t, b64 target, b32 extend)
+{
+        p64 len = doc_length(&t->doc);
+        p64 clamped = target < 0 ? 0 : (p64)target > len ? len : (p64)target;
+        p64 anchor = extend ? t->doc.selections[t->doc.primary].anchor : clamped;
+
+        t->hex_nibble = false;
+        doc_select_set(&t->doc, anchor, clamped);
+        ui_text_hex_reveal(t);
+        ui_text_wake(t);
+}
+
+static p32 ui_text_hex_command(struct ui address_to ui, struct ui_text address_to t, p32 command)
+{
+        p64 version = t->doc.version, len = doc_length(&t->doc);
+        p64 active = t->doc.selections[t->doc.primary].active;
+        int page = ui_text_rows(t) > 1 ? ui_text_rows(t) - 1 : 1;
+
+        switch (command)
+        {
+        case DOC_CMD_HEX:
+                ui_text_hex_toggle(ui, t, false);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_TAB:
+        case DOC_CMD_OUTDENT:
+                t->hex_ascii = !t->hex_ascii;
+                t->hex_nibble = false;
+                ui_text_wake(t);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_OVERWRITE:
+                t->hex_insert = !t->hex_insert;
+                ui_text_wake(t);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_LEFT: case DOC_CMD_SELECT_LEFT:
+                ui_text_hex_move(t, (b64)active - 1, command == DOC_CMD_SELECT_LEFT);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_RIGHT: case DOC_CMD_SELECT_RIGHT:
+                ui_text_hex_move(t, (b64)active + 1, command == DOC_CMD_SELECT_RIGHT);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_UP: case DOC_CMD_SELECT_UP:
+                ui_text_hex_move(t, (b64)active - 16, command == DOC_CMD_SELECT_UP);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_DOWN: case DOC_CMD_SELECT_DOWN:
+                ui_text_hex_move(t, (b64)active + 16, command == DOC_CMD_SELECT_DOWN);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_HOME: case DOC_CMD_SELECT_HOME:
+                ui_text_hex_move(t, (b64)(active & ~(p64)15), command == DOC_CMD_SELECT_HOME);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_END: case DOC_CMD_SELECT_END:
+                ui_text_hex_move(t, (b64)((active | 15) < len ? (active | 15) : len), command == DOC_CMD_SELECT_END);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_TOP: case DOC_CMD_SELECT_TOP:
+                ui_text_hex_move(t, 0, command == DOC_CMD_SELECT_TOP);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_BOTTOM: case DOC_CMD_SELECT_BOTTOM:
+                ui_text_hex_move(t, (b64)len, command == DOC_CMD_SELECT_BOTTOM);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_PAGE_UP: case DOC_CMD_SELECT_PAGE_UP:
+                ui_text_hex_move(t, (b64)active - (b64)page * 16, command == DOC_CMD_SELECT_PAGE_UP);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_PAGE_DOWN: case DOC_CMD_SELECT_PAGE_DOWN:
+                ui_text_hex_move(t, (b64)active + (b64)page * 16, command == DOC_CMD_SELECT_PAGE_DOWN);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_SELECT_ALL:
+                t->hex_nibble = false;
+                doc_select_set(&t->doc, 0, len);
+                ui_text_wake(t);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_SINGLE:
+                t->hex_nibble = false;
+                doc_select_set(&t->doc, active, active);
+                ui_text_wake(t);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_COPY:
+                return ui_text_hex_copy(t, WINDOWS_CLIP_CLIPBOARD) ? UI_TEXT_MOVED : UI_TEXT_MOVED | UI_TEXT_REFUSED;
+        case DOC_CMD_CUT:
+                if (t->read_only)
+                        return UI_TEXT_MOVED;
+                if (!ui_text_hex_copy(t, WINDOWS_CLIP_CLIPBOARD))
+                        return UI_TEXT_MOVED | UI_TEXT_REFUSED;
+                if (doc_any_selected(&t->doc))
+                        doc_erase_selections(&t->doc);
+                else if (active < len)
+                {
+                        doc_seal(&t->doc);
+                        doc_replace(&t->doc, active, 1, (const p8 address_to) "", 0);
+                        doc_seal(&t->doc);
+                }
+                t->hex_nibble = false;
+                ui_text_hex_reveal(t);
+                ui_text_wake(t);
+                return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
+        case DOC_CMD_PASTE:
+                ui_text_ask(t, WINDOWS_CLIP_CLIPBOARD);
+                return UI_TEXT_PASTE;
+        case DOC_CMD_BACKSPACE:
+                if (t->read_only)
+                        return 0;
+                t->hex_nibble = false;
+                if (doc_any_selected(&t->doc))
+                        doc_erase_selections(&t->doc);
+                else if (active > 0)
+                {
+                        doc_seal(&t->doc);
+                        doc_replace(&t->doc, active - 1, 1, (const p8 address_to) "", 0);
+                        doc_select_set(&t->doc, active - 1, active - 1);
+                        doc_seal(&t->doc);
+                }
+                ui_text_hex_reveal(t);
+                ui_text_wake(t);
+                return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
+        case DOC_CMD_DELETE:
+                if (t->read_only)
+                        return 0;
+                t->hex_nibble = false;
+                if (doc_any_selected(&t->doc))
+                        doc_erase_selections(&t->doc);
+                else if (active < len)
+                {
+                        doc_seal(&t->doc);
+                        doc_replace(&t->doc, active, 1, (const p8 address_to) "", 0);
+                        doc_select_set(&t->doc, active, active);
+                        doc_seal(&t->doc);
+                }
+                ui_text_hex_reveal(t);
+                ui_text_wake(t);
+                return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
+        case DOC_CMD_UNDO:
+        case DOC_CMD_REDO:
+                t->hex_nibble = false;
+                doc_command(&t->doc, command, t->comment);
+                ui_text_hex_reveal(t);
+                ui_text_wake(t);
+                return t->doc.version != version ? UI_TEXT_CHANGED : UI_TEXT_MOVED;
+        case DOC_CMD_ZOOM_IN: case DOC_CMD_ZOOM_OUT: case DOC_CMD_ZOOM_RESET:
+                t->zoom = command == DOC_CMD_ZOOM_RESET ? 0 : t->zoom + (command == DOC_CMD_ZOOM_IN ? 1 : -1);
+                t->zoom = t->zoom < -6 ? -6 : t->zoom > 40 ? 40 : t->zoom;
+                ui_text_metrics(ui, t);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_MENU:
+                t->menu_x = t->well_left + t->cell * 12;
+                t->menu_y = t->top + (int)(active / 16 >= t->hex_top / 16 ? active / 16 - t->hex_top / 16 + 1 : 1) * t->line_height;
+                return UI_TEXT_MENU;
+        default:
+                if (command == DOC_CMD_SAVE || command == DOC_CMD_SAVE_AS || command == DOC_CMD_OPEN || command == DOC_CMD_NEW ||
+                    command == DOC_CMD_NEW_WINDOW || command == DOC_CMD_CLOSE || command == DOC_CMD_NEXT_TAB ||
+                    command == DOC_CMD_PREVIOUS_TAB || command == DOC_CMD_FIND || command == DOC_CMD_REPLACE ||
+                    command == DOC_CMD_FIND_NEXT || command == DOC_CMD_FIND_PREVIOUS || command == DOC_CMD_GOTO_LINE)
+                {
+                        t->command = command;
+                        return UI_TEXT_COMMAND;
+                }
+                return 0;
+        }
+}
+
+static p32 ui_text_hex_char(struct ui_text address_to t, p32 character)
+{
+        p64 len = doc_length(&t->doc), at, remove;
+        const struct doc_selection address_to sel = &t->doc.selections[t->doc.primary];
+        p64 start = doc_sel_start(sel), finish = doc_sel_end(sel);
+        p8 byte;
+
+        if (t->read_only)
+                return 0;
+        t->doc.now = ui_kit_clock();
+        if (t->hex_ascii)
+        {
+                if (character < 0x20 || character > 0x7e)
+                        return 0;
+                byte = (p8)character;
+                at = start;
+                remove = finish > start ? finish - start : (!t->hex_insert && at < len ? 1 : 0);
+                doc_seal(&t->doc);
+                doc_replace(&t->doc, at, remove, &byte, 1);
+                doc_select_set(&t->doc, at + 1, at + 1);
+                doc_seal(&t->doc);
+                t->hex_nibble = false;
+                ui_text_hex_reveal(t);
+                ui_text_wake(t);
+                return UI_TEXT_CHANGED;
+        }
+        {
+                int nib = character < 128 ? ui_hex_digit((p8)character) : -1;
+                if (nib < 0)
+                        return 0;
+                at = start;
+                if (finish > start)
+                {
+                        byte = (p8)(nib << 4);
+                        doc_seal(&t->doc);
+                        doc_replace(&t->doc, at, finish - start, &byte, 1);
+                        doc_select_set(&t->doc, at, at);
+                        doc_seal(&t->doc);
+                        t->hex_nibble = true;
+                }
+                else if (!t->hex_nibble)
+                {
+                        b32 inserting = t->hex_insert || at >= len;
+                        p8 cur = inserting ? 0 : (p8)doc_byte(&t->doc, at);
+
+                        byte = (p8)((nib << 4) | (cur & 0x0f));
+                        doc_seal(&t->doc);
+                        doc_replace(&t->doc, at, inserting ? 0 : 1, &byte, 1);
+                        doc_select_set(&t->doc, at, at);
+                        doc_seal(&t->doc);
+                        t->hex_nibble = true;
+                }
+                else
+                {
+                        p8 cur = at < len ? (p8)doc_byte(&t->doc, at) : 0;
+
+                        byte = (p8)((cur & 0xf0) | nib);
+                        doc_seal(&t->doc);
+                        doc_replace(&t->doc, at, at < len ? 1 : 0, &byte, 1);
+                        doc_select_set(&t->doc, at + 1, at + 1);
+                        doc_seal(&t->doc);
+                        t->hex_nibble = false;
+                }
+                ui_text_hex_reveal(t);
+                ui_text_wake(t);
+                return UI_TEXT_CHANGED;
+        }
+}
+
 static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t, p32 command)
 {
         p64 version = t->doc.version;
         int page = ui_text_rows(t) > 1 ? ui_text_rows(t) - 1 : 1;
 
+        if (t->hex && t->mode != UI_TEXT_FIELD)
+                return ui_text_hex_command(ui, t, command);
         if (t->mode == UI_TEXT_FIELD && !ui_text_field_command(command))
                 return 0;
         if (t->masked && (command = ui_text_masked_command(command)) == DOC_CMD_NONE)
@@ -32527,12 +33135,49 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
         }
         switch (command)
         {
+        case DOC_CMD_UP: case DOC_CMD_DOWN: case DOC_CMD_SELECT_UP: case DOC_CMD_SELECT_DOWN:
+                if (ui_text_wrap_step(ui, t, (command == DOC_CMD_UP || command == DOC_CMD_SELECT_UP) ? -1 : 1,
+                                      command == DOC_CMD_SELECT_UP || command == DOC_CMD_SELECT_DOWN))
+                        break;
+                doc_command(&t->doc, command, t->comment);
+                break;
         case DOC_CMD_COPY:
+                if (t->mode == UI_TEXT_CODE && !doc_any_selected(&t->doc) && t->doc.selection_count == 1)
+                {
+                        p64 caret = t->doc.selections[0].active, line = doc_line_of(&t->doc, caret);
+                        p64 start = doc_line_start(&t->doc, line), finish = line + 1 < doc_line_count(&t->doc) ? doc_line_start(&t->doc, line + 1) : doc_length(&t->doc);
+                        p8 address_to text = null;
+                        positive room = 0, len = (positive)(finish - start);
+
+                        if (finish > start && finish - start <= KIT_COPY_MOST && array_store_reserve(text, room, 0, len, 4096))
+                        {
+                                len = doc_read(&t->doc, start, text, len);
+                                ui_clip_offer(t->own, WINDOWS_CLIP_CLIPBOARD, text, room, len);
+                        }
+                        return UI_TEXT_MOVED;
+                }
                 return ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD) ? UI_TEXT_MOVED : UI_TEXT_MOVED | UI_TEXT_REFUSED;
         case DOC_CMD_CUT:
                 // A masked field's text is never copied out, and so never cut out; nor is one too large to copy, which is left as it is.
                 if (t->read_only || t->masked)
                         return UI_TEXT_MOVED;
+                if (t->mode == UI_TEXT_CODE && !doc_any_selected(&t->doc) && t->doc.selection_count == 1)
+                {
+                        p64 caret = t->doc.selections[0].active, line = doc_line_of(&t->doc, caret);
+                        p64 start = doc_line_start(&t->doc, line), finish = line + 1 < doc_line_count(&t->doc) ? doc_line_start(&t->doc, line + 1) : doc_length(&t->doc);
+
+                        if (finish > start)
+                        {
+                                doc_select_set(&t->doc, start, finish);
+                                if (!ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD))
+                                {
+                                        doc_select_set(&t->doc, caret, caret);
+                                        return UI_TEXT_MOVED | UI_TEXT_REFUSED;
+                                }
+                                doc_erase_selections(&t->doc);
+                        }
+                        break;
+                }
                 if (!ui_text_copy(t, WINDOWS_CLIP_CLIPBOARD))
                         return UI_TEXT_MOVED | UI_TEXT_REFUSED;
                 doc_erase_selections(&t->doc);
@@ -32559,6 +33204,13 @@ static p32 ui_text_command(struct ui address_to ui, struct ui_text address_to t,
                 if (t->mode == UI_TEXT_FIELD)
                         return 0;
                 t->wrap = !t->wrap;
+                t->scroll_x = 0;
+                ui_text_reveal(ui, t);
+                return UI_TEXT_MOVED;
+        case DOC_CMD_HEX:
+                if (t->mode == UI_TEXT_FIELD)
+                        return 0;
+                ui_text_hex_toggle(ui, t, !t->hex);
                 return UI_TEXT_MOVED;
         case DOC_CMD_MENU:
         {
@@ -32629,6 +33281,8 @@ static p32 ui_text_key(struct ui address_to ui, struct ui_text address_to t, con
         // A character: any but a control (a blank is one like any other); a C1 control is no character typed either.
         if (t->read_only || character < 0x20 || character == 0x7f || (character >= 0x80 && character < 0xa0) || character > 0x10ffff)
                 return 0;
+        if (t->hex && t->mode != UI_TEXT_FIELD)
+                return ui_text_hex_char(t, character);
         {
                 p8 bytes[4];
                 positive size = memory_utf8_encode(bytes, sizeof(bytes), character);
@@ -33690,6 +34344,220 @@ static p32 ui_text_pinch(struct ui address_to ui, struct ui_text address_to t, c
         return UI_TEXT_MOVED;
 }
 
+// Vertical scrollbar geometry for multi-line text / code / hex views (overlay pill inside the trailing edge).
+static b32 ui_text_bar_geom(const struct ui address_to ui, const struct ui_text address_to t, int address_to bx, int address_to by,
+                            int address_to bw, int address_to bh, int address_to thumb_y, int address_to thumb_h, p64 address_to max_top)
+{
+        p64 total = t->hex ? ui_text_hex_rows_total(t) : doc_line_count(&t->doc);
+        int rows = ui_text_rows(t), pad = ui_px(ui, 3), track_w = ui_px(ui, 10), track_h = t->bottom - t->top - 2 * pad;
+        p64 cur = t->hex ? t->hex_top / 16 : t->top_line, most;
+
+        if (t->mode == UI_TEXT_FIELD || rows <= 0 || total <= (p64)rows || track_h <= 16 || t->well_right - t->well_left < track_w * 3)
+                return false;
+        most = total - (p64)rows;
+        if (cur > most)
+                cur = most;
+        *bw = track_w;
+        *bx = ui_rtl() ? t->well_left + pad : t->well_right - track_w - pad;
+        *by = t->top + pad;
+        *bh = track_h;
+        *thumb_h = (int)((p64)track_h * (p64)rows / total);
+        if (*thumb_h < ui_px(ui, 24))
+                *thumb_h = ui_px(ui, 24);
+        if (*thumb_h > track_h)
+                *thumb_h = track_h;
+        *thumb_y = *by + (most > 0 ? (int)((p64)(track_h - *thumb_h) * cur / most) : 0);
+        *max_top = most;
+        return true;
+}
+
+static p32 ui_text_bar_event(const struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
+{
+        int bx, by, bw, bh, ty, th;
+        p64 max_top;
+
+        if (!ui_text_bar_geom(ui, t, &bx, &by, &bw, &bh, &ty, &th, &max_top))
+        {
+                t->bar_hover = t->bar_held = false;
+                return 0;
+        }
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                if (t->bar_held)
+                {
+                        int span = bh - th;
+                        b64 target = span > 0 ? (b64)t->bar_grab_top + (b64)(y - t->bar_grab_y) * (b64)max_top / span : 0;
+                        p64 clamped = target < 0 ? 0 : (p64)target > max_top ? max_top : (p64)target;
+
+                        if (t->hex)
+                                t->hex_top = clamped * 16;
+                        else
+                                t->top_line = clamped;
+                        ui_kit_shape = WINDOW_POINTER_ARROW;
+                        return UI_TEXT_MOVED;
+                }
+                {
+                        b32 on = x >= bx - ui_px(ui, 2) && x < bx + bw + ui_px(ui, 2) && y >= by && y < by + bh;
+
+                        if (on)
+                                ui_kit_shape = WINDOW_POINTER_ARROW;
+                        if (on != t->bar_hover)
+                        {
+                                t->bar_hover = on;
+                                return UI_TEXT_MOVED;
+                        }
+                }
+                return 0;
+        }
+        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_LEFT)
+        {
+                if (!(event->flags & WINDOW_KEY_DOWN))
+                {
+                        if (t->bar_held)
+                        {
+                                t->bar_held = false;
+                                return UI_TEXT_MOVED;
+                        }
+                        return 0;
+                }
+                if (x >= bx - ui_px(ui, 2) && x < bx + bw + ui_px(ui, 2) && y >= by && y < by + bh)
+                {
+                        int span = bh - th;
+
+                        t->bar_held = true;
+                        if (y < ty || y >= ty + th)
+                        {
+                                int rel = y - by - th / 2;
+                                p64 jump = span > 0 && rel > 0 ? (p64)rel * max_top / (p64)span : 0;
+
+                                if (jump > max_top)
+                                        jump = max_top;
+                                if (t->hex)
+                                        t->hex_top = jump * 16;
+                                else
+                                        t->top_line = jump;
+                                ty = by + (max_top > 0 ? (int)((p64)span * jump / max_top) : 0);
+                        }
+                        t->bar_grab_y = y;
+                        t->bar_grab_top = t->hex ? t->hex_top / 16 : t->top_line;
+                        return UI_TEXT_MOVED;
+                }
+        }
+        return 0;
+}
+
+// Column layout for hex editor mode: fixed 8-digit offset gutter, 16 hex byte columns (8+8 grouped), and 16 ASCII columns.
+static fn ui_text_hex_layout(const struct ui_text address_to t, int x, int address_to addr_w, int address_to hex_x, int address_to ascii_x)
+{
+        int cell = t->cell > 0 ? t->cell : 8;
+
+        *addr_w = 10 * cell;
+        *hex_x = x + *addr_w + cell;
+        *ascii_x = *hex_x + 50 * cell;
+}
+
+static p64 ui_text_hex_hit(const struct ui_text address_to t, int x, int y, b32 address_to in_ascii)
+{
+        int addr_w, hex_x, ascii_x, cell = t->cell > 0 ? t->cell : 8;
+        int row = y > t->top && t->line_height > 0 ? (y - t->top) / t->line_height : 0;
+        p64 base = t->hex_top + (p64)row * 16, len = doc_length(&t->doc), col = 0;
+
+        ui_text_hex_layout(t, t->well_left, &addr_w, &hex_x, &ascii_x);
+        if (x >= ascii_x - cell)
+        {
+                int rel = x - ascii_x;
+
+                *in_ascii = true;
+                col = rel > 0 ? (p64)(rel / cell) : 0;
+                if (col > 15)
+                        col = 15;
+        }
+        else
+        {
+                int rel = x - hex_x, step;
+
+                *in_ascii = false;
+                if (rel > 24 * cell)
+                        rel -= cell; // skip the mid-row 8+8 gap
+                step = rel > 0 ? rel / (3 * cell) : 0;
+                col = step < 0 ? 0 : step > 15 ? 15 : (p64)step;
+        }
+        return base + col > len ? len : base + col;
+}
+
+static p32 ui_text_hex_pointer(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
+{
+        struct ui_select address_to s = ui_text_sel(t);
+        b32 well = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
+        b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0;
+
+        if (event->type == WINDOW_EVENT_WHEEL)
+        {
+                if (!well || (event->flags & WINDOW_WHEEL_STOP))
+                        return 0;
+                if (event->flags & WINDOW_KEY_CONTROL)
+                        return ui_text_hex_command(ui, t, event->a > 0 ? DOC_CMD_ZOOM_IN : DOC_CMD_ZOOM_OUT);
+                {
+                        long pixels = ui_wheel_pixels(ui, event, 3 * (long)(t->line_height > 0 ? t->line_height : 1), &s->wheel_rest);
+                        long rows;
+                        b64 to;
+                        p64 total = ui_text_hex_rows_total(t);
+
+                        s->finger_left += (int)pixels;
+                        rows = t->line_height > 0 ? s->finger_left / t->line_height : 0;
+                        s->finger_left -= (int)rows * t->line_height;
+                        to = (b64)(t->hex_top / 16) + rows;
+                        t->hex_top = (to < 0 ? 0 : (p64)to >= total ? total - 1 : (p64)to) * 16;
+                        return UI_TEXT_MOVED;
+                }
+        }
+        if (event->type == WINDOW_EVENT_BUTTON)
+        {
+                b32 down = (event->flags & WINDOW_KEY_DOWN) != 0;
+                b32 in_ascii = false;
+
+                if (!down)
+                {
+                        s->dragging = false;
+                        return 0;
+                }
+                if (!well)
+                        return 0;
+                if (event->a == 0x111)
+                {
+                        p64 at = ui_text_hex_hit(t, x, y, &in_ascii);
+                        const struct doc_selection address_to sel = &t->doc.selections[t->doc.primary];
+
+                        t->hex_ascii = in_ascii;
+                        if (!(doc_any_selected(&t->doc) && at >= doc_sel_start(sel) && at < doc_sel_end(sel)))
+                                doc_select_set(&t->doc, at, at);
+                        t->menu_x = x, t->menu_y = y;
+                        return UI_TEXT_MENU | UI_TEXT_MOVED;
+                }
+                if (event->a != 0x110)
+                        return 0;
+                {
+                        p64 at = ui_text_hex_hit(t, x, y, &in_ascii);
+
+                        t->hex_ascii = in_ascii;
+                        t->hex_nibble = false;
+                        doc_select_set(&t->doc, shift ? t->doc.selections[t->doc.primary].anchor : at, at);
+                        s->dragging = true;
+                        ui_text_wake(t);
+                        return UI_TEXT_MOVED;
+                }
+        }
+        if (event->type == WINDOW_EVENT_MOTION && s->dragging)
+        {
+                b32 in_ascii = t->hex_ascii;
+                p64 at = ui_text_hex_hit(t, x, y, &in_ascii);
+
+                doc_select_set(&t->doc, t->doc.selections[t->doc.primary].anchor, at);
+                return UI_TEXT_MOVED;
+        }
+        return 0;
+}
+
 // The pointer's presses and drags on a text widget: a finger's are the controller's, and the mouse's clicks, drag, Shift, Alt and the
 // middle and right buttons are here. Answers what changed (UI_TEXT_*), and UI_TEXT_MENU for the right button.
 static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t, const struct window_event address_to event, int x, int y)
@@ -33697,12 +34565,57 @@ static p32 ui_text_pointer(struct ui address_to ui, struct ui_text address_to t,
         if (event->type == WINDOW_EVENT_PINCH)
                 return ui_text_pinch(ui, t, event);
         struct ui_select address_to s = ui_text_sel(t);
+        b32 touch = (event->flags & WINDOW_KEY_TOUCH) != 0 || (event->type == WINDOW_EVENT_BUTTON && event->a == 0x111 && (event->flags & WINDOW_KEY_HOLD));
+
+        // Let touch selection (handles, floating Cut/Copy/Paste bar, finger scroll) run before mouse-only scrollbar/gutter hit-testing.
+        if (!touch && !s->finger)
+        {
+                p32 bar_did = ui_text_bar_event(ui, t, event, x, y);
+
+                if (bar_did || t->bar_held)
+                        return bar_did;
+        }
+        if (t->hex && t->mode != UI_TEXT_FIELD)
+                return ui_text_hex_pointer(ui, t, event, x, y);
         b32 well = x >= t->well_left && x < t->well_right && y >= t->well_top && y < t->well_bottom;
+        b32 in_gutter = !touch && !s->finger && well && t->numbers && t->gutter > 0 && (ui_rtl() ? x >= t->right : x < t->left);
         b32 shift = (event->flags & WINDOW_KEY_SHIFT) != 0, alt = (event->flags & WINDOW_KEY_ALT) != 0 && t->mode != UI_TEXT_FIELD;
 
-        // A text well is the I-beam's, as an input field is (ui_kit_shape_note).
-        if (event->type == WINDOW_EVENT_MOTION && well)
-                ui_kit_shape = WINDOW_POINTER_TEXT;
+        // A text well is the I-beam's, while the line-number gutter uses the arrow cursor for whole-line selection.
+        if (!touch && event->type == WINDOW_EVENT_MOTION && well)
+                ui_kit_shape = in_gutter ? WINDOW_POINTER_ARROW : WINDOW_POINTER_TEXT;
+        if (t->gutter_drag)
+        {
+                if (event->type == WINDOW_EVENT_BUTTON && !(event->flags & WINDOW_KEY_DOWN))
+                {
+                        t->gutter_drag = false;
+                        if (doc_any_selected(&t->doc))
+                                ui_text_copy(t, WINDOWS_CLIP_PRIMARY);
+                        return 0;
+                }
+                if (event->type == WINDOW_EVENT_MOTION)
+                {
+                        p64 at = ui_text_hit(ui, t, t->left, y), line = doc_line_of(&t->doc, at), lines = doc_line_count(&t->doc);
+                        p64 lo = line < t->gutter_anchor ? line : t->gutter_anchor, hi = line > t->gutter_anchor ? line : t->gutter_anchor;
+                        p64 s0 = doc_line_start(&t->doc, lo), s1 = hi + 1 < lines ? doc_line_start(&t->doc, hi + 1) : doc_length(&t->doc);
+
+                        doc_select_set(&t->doc, line < t->gutter_anchor ? s1 : s0, line < t->gutter_anchor ? s0 : s1);
+                        return UI_TEXT_MOVED;
+                }
+        }
+        if (in_gutter && event->type == WINDOW_EVENT_BUTTON && (event->flags & WINDOW_KEY_DOWN) && event->a == 0x110)
+        {
+                p64 at = ui_text_hit(ui, t, t->left, y), line = doc_line_of(&t->doc, at), lines = doc_line_count(&t->doc);
+                p64 lo = shift ? doc_line_of(&t->doc, t->doc.selections[t->doc.primary].anchor) : line;
+                p64 hi = line > lo ? line : lo;
+
+                if (line < lo)
+                        hi = lo, lo = line;
+                doc_select_set(&t->doc, doc_line_start(&t->doc, lo), hi + 1 < lines ? doc_line_start(&t->doc, hi + 1) : doc_length(&t->doc));
+                t->gutter_drag = true, t->gutter_anchor = shift ? doc_line_of(&t->doc, t->doc.selections[t->doc.primary].anchor) : line;
+                ui_text_wake(t);
+                return UI_TEXT_MOVED;
+        }
         positive now = ui_kit_clock();
 
         if (event->type == WINDOW_EVENT_WHEEL)
@@ -33992,6 +34905,8 @@ static p32 ui_key_command(const struct window_event address_to event)
 #define UI_FINDBAR_FIND 1
 #define UI_FINDBAR_REPLACE 2
 #define UI_FINDBAR_LINE 3
+#define UI_FINDBAR_OPEN 4
+#define UI_FINDBAR_SAVE_AS 5
 
 #define UI_FINDBAR_SAID_NONE 0
 #define UI_FINDBAR_SAID_CLEAR 1      // a match was found: the status says nothing
@@ -34000,12 +34915,14 @@ static p32 ui_key_command(const struct window_event address_to event)
 #define UI_FINDBAR_SAID_REPLACED 4   // the count of matches replaced
 #define UI_FINDBAR_SAID_USAGE 5      // a replace without a / after the query
 #define UI_FINDBAR_SAID_REFUSED 6    // the field refused a key: its refusal is the text (field.refused)
+#define UI_FINDBAR_SAID_OPEN 7       // Open path submitted (read path from bar->field)
+#define UI_FINDBAR_SAID_SAVE_AS 8    // Save As path submitted (read path from bar->field)
 
 struct ui_findbar
 {
-        struct ui_text field;        // the query, or the line's number
+        struct ui_text field;        // the query, line number, or file path
         struct ui_control control;   // its drawing
-        int mode;                    // UI_FINDBAR_CLOSED, _FIND, _REPLACE or _LINE
+        int mode;                    // UI_FINDBAR_CLOSED, _FIND, _REPLACE, _LINE, _OPEN or _SAVE_AS
         p32 flags;                   // DOC_FIND_CASE, DOC_FIND_WORD, DOC_FIND_REGEX
         struct doc_find search;      // the query as it was last set for its flags
 };
@@ -34024,6 +34941,49 @@ static fn ui_findbar_keys(struct ui_findbar address_to bar, struct ui_text addre
         ui_field_focus(view, ((b32)(window)) && !(((const struct ui_text *)(&bar->field)) && ((const struct ui_text *)(&bar->field))->focused));
 }
 
+// Updates live search highlights on view when the find bar is open in Find/Replace mode.
+static fn ui_findbar_sync(struct ui_findbar address_to bar, struct ui_text address_to view)
+{
+        if (bar->mode != UI_FINDBAR_FIND && bar->mode != UI_FINDBAR_REPLACE)
+        {
+                view->live_find = null;
+                return;
+        }
+        {
+                p8 query[UI_FINDBAR_QUERY];
+                positive length = ui_text_string(&bar->field, query, sizeof(query)), qlen = length;
+
+                if (bar->mode == UI_FINDBAR_REPLACE)
+                {
+                        qlen = 0;
+                        while (qlen < length && query[qlen] != '/')
+                                qlen++;
+                }
+                if (qlen > 0 && doc_find_set(&bar->search, query, qlen, bar->flags))
+                        view->live_find = &bar->search;
+                else
+                        view->live_find = null;
+        }
+}
+
+// Opened for a file path prompt (UI_FINDBAR_OPEN or UI_FINDBAR_SAVE_AS), pre-filled with seed (directory or path).
+static fn ui_findbar_open_path(const struct window_row address_to own, struct ui_findbar address_to bar, struct ui_text address_to view,
+                               int mode, const char address_to seed, b32 window)
+{
+        positive length = seed ? string_length((string_address)seed) : 0;
+
+        if (!bar->field.doc.selections)
+                ui_field_open(&bar->field, own, "");
+        bar->field.accept = null;
+        bar->field.most = UI_FINDBAR_QUERY - 1;
+        ui_text_set(&bar->field, (const p8 address_to)(seed ? seed : ""), length);
+        doc_select_set(&bar->field.doc, length, length);
+        bar->mode = mode;
+        view->live_find = null;
+        ui_field_focus(&bar->field, true);
+        ui_findbar_keys(bar, view, window);
+}
+
 // Opened for mode: its field emptied for a line, holding the view's selection for a find; the bar has the keys.
 static fn ui_findbar_open(const struct window_row address_to own, struct ui_findbar address_to bar, struct ui_text address_to view, int mode,
                           b32 window)
@@ -34033,8 +34993,8 @@ static fn ui_findbar_open(const struct window_row address_to own, struct ui_find
 
         if (!bar->field.doc.selections)
                 ui_field_open(&bar->field, own, "");
-        // A line is asked for by its number: the field takes digits only, and says so of anything else.
-        bar->field.accept = mode == UI_FINDBAR_LINE ? ui_field_digits : null;
+        // A line is asked for by its number (digits only in text mode; hex/decimal offset in hex mode).
+        bar->field.accept = mode == UI_FINDBAR_LINE && !view->hex ? ui_field_digits : null;
         bar->field.most = mode == UI_FINDBAR_LINE ? 19 : UI_FINDBAR_QUERY - 1;
         if (mode != UI_FINDBAR_LINE && doc_any_selected(&view->doc))
         {
@@ -34046,6 +35006,7 @@ static fn ui_findbar_open(const struct window_row address_to own, struct ui_find
                 ui_text_set(&bar->field, selected, length);
         doc_select_set(&bar->field.doc, 0, doc_length(((struct doc *)(&bar->field.doc))));
         bar->mode = mode;
+        ui_findbar_sync(bar, view);
         ui_field_focus(&bar->field, true);
         ui_findbar_keys(bar, view, window);
 }
@@ -34059,17 +35020,21 @@ static int ui_findbar_step(struct ui address_to ui, struct ui_findbar address_to
 
         if (!doc_find_set(&bar->search, query, length, bar->flags))
                 return UI_FINDBAR_SAID_BAD_PATTERN;
+        view->live_find = &bar->search;
         if (doc_find_next(&view->doc, &bar->search, from, back, true, &start, &finish))
         {
                 doc_select_set(&view->doc, start, finish);
-                ui_text_reveal(ui, view);
+                if (view->hex)
+                        ui_text_hex_reveal(view);
+                else
+                        ui_text_reveal(ui, view);
                 return UI_FINDBAR_SAID_CLEAR;
         }
         return UI_FINDBAR_SAID_NO_MATCH;
 }
 
 // What the bar's Enter does: find (back: the match before), replace every match with what follows a / in the query (count the
-// number), or go to its line; the bar closes for a line, and the view has the keys again.
+// number), go to its line (or hex byte offset), or submit an Open / Save As path.
 static int ui_findbar_enter(struct ui address_to ui, struct ui_findbar address_to bar, struct ui_text address_to view, b32 back, b32 window,
                             positive address_to count)
 {
@@ -34077,12 +35042,45 @@ static int ui_findbar_enter(struct ui address_to ui, struct ui_findbar address_t
         positive length = ui_text_string(&bar->field, text, sizeof(text));
 
         *count = 0;
+        if (bar->mode == UI_FINDBAR_OPEN || bar->mode == UI_FINDBAR_SAVE_AS)
+        {
+                int mode = bar->mode;
+
+                bar->mode = UI_FINDBAR_CLOSED;
+                ui_field_focus(&bar->field, false);
+                ui_findbar_keys(bar, view, window);
+                return mode == UI_FINDBAR_OPEN ? UI_FINDBAR_SAID_OPEN : UI_FINDBAR_SAID_SAVE_AS;
+        }
         if (bar->mode == UI_FINDBAR_LINE)
         {
-                p64 line = (p64)string_digits_max((string_address)text, length, null);
+                p64 number = (p64)string_digits_max((string_address)text, length, null);
 
-                doc_goto_line(&view->doc, line ? line - 1 : 0);
-                ui_text_reveal(ui, view);
+                if (view->hex)
+                {
+                        p64 offset = number, len = doc_length(&view->doc);
+
+                        if (length > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+                        {
+                                offset = 0;
+                                for (positive k = 2; k < length; k++)
+                                {
+                                        int d = ui_hex_digit(text[k]);
+
+                                        if (d < 0)
+                                                break;
+                                        offset = (offset << 4) | (p64)d;
+                                }
+                        }
+                        if (offset > len)
+                                offset = len;
+                        doc_select_set(&view->doc, offset, offset);
+                        ui_text_hex_reveal(view);
+                }
+                else
+                {
+                        doc_goto_line(&view->doc, number ? number - 1 : 0);
+                        ui_text_reveal(ui, view);
+                }
                 bar->mode = UI_FINDBAR_CLOSED;
                 ui_field_focus(&bar->field, false);
                 ui_findbar_keys(bar, view, window);
@@ -34141,6 +35139,8 @@ static struct ui_findbar_said ui_findbar_event(struct ui address_to ui, struct u
         // A press outside the bar is the view's: the bar's answer to it (commit or cancel) changes nothing.
         if (event->type == WINDOW_EVENT_BUTTON && (asks == UI_TEXT_COMMIT || asks == UI_TEXT_CANCEL))
                 asks = 0;
+        if (asks & UI_TEXT_CHANGED)
+                ui_findbar_sync(bar, view);
         if (asks & UI_TEXT_REFUSED)
                 said.said = UI_FINDBAR_SAID_REFUSED;
         if (asks & UI_TEXT_SUBMIT)
@@ -34148,19 +35148,24 @@ static struct ui_findbar_said ui_findbar_event(struct ui address_to ui, struct u
         else if (asks & UI_TEXT_CANCEL)
         {
                 bar->mode = UI_FINDBAR_CLOSED;
+                view->live_find = null;
                 ui_field_focus(&bar->field, false);
         }
         else if (!asks && event->type == WINDOW_EVENT_KEY && (event->flags & WINDOW_KEY_DOWN))
         {
                 p32 c = (p32)event->b | 0x20, command = ui_key_command(event);
 
-                if ((event->flags & WINDOW_KEY_ALT) && memory_first_of((address_any) "cwr", (b8)c, 3))
+                if ((event->flags & WINDOW_KEY_ALT) && (bar->mode == UI_FINDBAR_FIND || bar->mode == UI_FINDBAR_REPLACE) &&
+                    memory_first_of((address_any) "cwr", (b8)c, 3))
+                {
                         bar->flags ^= c == 'c' ? DOC_FIND_CASE : c == 'w' ? DOC_FIND_WORD : DOC_FIND_REGEX;
+                        ui_findbar_sync(bar, view);
+                }
                 else if (ui_findbar_is_command(command))
                         said.said = ui_findbar_command(ui, own, bar, view, command, window, &said.count);
-                else if (command >= DOC_CMD_FIND && command <= DOC_CMD_PREVIOUS_TAB && command != DOC_CMD_ZOOM_IN &&
+                else if (command >= DOC_CMD_FIND && command < DOC_CMDS && command != DOC_CMD_ZOOM_IN &&
                          command != DOC_CMD_ZOOM_OUT && command != DOC_CMD_ZOOM_RESET && command != DOC_CMD_WRAP &&
-                         command != DOC_CMD_OVERWRITE)
+                         command != DOC_CMD_OVERWRITE && command != DOC_CMD_FOLD && command != DOC_CMD_UNFOLD && command != DOC_CMD_MENU)
                         said.command = command;
         }
         ui_findbar_keys(bar, view, window);
@@ -34322,13 +35327,49 @@ static fn ui_text_fill(struct ui address_to ui, const struct ui_text address_to 
 }
 
 static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t, struct ui_text_layout address_to l,
-                            p32 from, p32 to, int shift, p64 line, int y, int baseline, unsigned int ground)
+                            p32 from, p32 to, int shift, p64 line, int y, int baseline, unsigned int ground, b32 is_last)
 {
         int base_origin = ui_text_origin(t, l), origin = base_origin - shift;
         unsigned int selection = ui_well(ui, UI_SELECTION, 40), text = ui_text_colour(ui, UI_ON_SURFACE);
         static struct doc_token tokens[512];
         positive token_count = t->mode == UI_TEXT_CODE ? doc_tokens(&t->doc, line, tokens, 512) : 0;
 
+        // Live find highlights on this visible slice when the find bar has an active query.
+        if (t->live_find && t->live_find->length > 0 && l->offset[to] > l->offset[from] && !l->bidi)
+        {
+                p64 probe = l->offset[from], ms, mf;
+                unsigned int match_tone = 0xff000000u | window_mix(ground, ui_role(UI_WARNING) & 0xffffffu, 60);
+
+                for (int hits = 0; hits < 64 && probe < l->offset[to]; hits++)
+                {
+                        if (!doc_find_next(&t->doc, t->live_find, probe, false, false, &ms, &mf) || ms >= l->offset[to])
+                                break;
+                        if (mf > l->offset[from])
+                        {
+                                int x0 = ui_text_slice_x(l, from, to, ms < l->offset[from] ? l->offset[from] : ms);
+                                int x1 = ui_text_slice_x(l, from, to, mf > l->offset[to] ? l->offset[to] : mf);
+
+                                ui_text_fill(ui, t, origin + x0, y, x1 - x0, t->line_height, match_tone);
+                        }
+                        probe = mf > probe ? mf : probe + 1;
+                }
+        }
+        // Matching bracket pair highlights in code views.
+        if (t->mode == UI_TEXT_CODE && t->bracket_a != DOC_NONE && !l->bidi)
+        {
+                p64 brackets[2] = {t->bracket_a, t->bracket_b};
+                unsigned int br_fill = 0xff000000u | window_mix(ground, ui_role(UI_PRIMARY) & 0xffffffu, 52);
+                unsigned int br_edge = ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, 150);
+
+                for (int bi = 0; bi < 2; bi++)
+                        if (brackets[bi] >= l->offset[from] && brackets[bi] < l->offset[to])
+                        {
+                                int bx = origin + ui_text_slice_x(l, from, to, brackets[bi]);
+
+                                ui_text_fill(ui, t, bx, y, t->cell, t->line_height, br_fill);
+                                ui_text_fill(ui, t, bx, y + t->line_height - ui_px(ui, 1), t->cell, ui_px(ui, 1), br_edge);
+                        }
+        }
         // A highlight (a match found, a word's other places) under the text, as the code view's cells are told their
         // paper is (ui_text_paper).
         for (positive r = 0; r < t->doc.range_count; r++)
@@ -34373,7 +35414,7 @@ static fn ui_text_draw_line(struct ui address_to ui, struct ui_text address_to t
                 }
                 ui_text_fill(ui, t, origin + x0, y, x1 - x0, t->line_height, ui_tone(selection & 0xffffffu, selection >> 24));
         }
-        if (ui_text_selected(t, l->offset[to]) && t->mode != UI_TEXT_FIELD)
+        if (is_last && ui_text_selected(t, l->offset[to]) && t->mode != UI_TEXT_FIELD)
                 ui_text_fill(ui, t, origin + l->x[to] - (l->base ? t->cell / 2 + ui_px(ui, 1) : 0), y, t->cell / 2 + ui_px(ui, 1), t->line_height,
                              ui_tone(selection & 0xffffffu, selection >> 24));
 
@@ -34520,16 +35561,20 @@ cluster_lost:
         }
         if (t->mode == UI_TEXT_CODE && t->doc.tab_size)
         {
-                // The indent's guides: a line a pixel wide at each tab stop inside the indent, at the left of its cell.
-                p64 indent = ui_text_indent(t, line);
+                // The indent's guides: a line a pixel wide at each tab stop inside the indent (first visual row only so wrapped rows stay clean).
                 unsigned int guide = ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 36), blank = ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, 140);
 
-                for (p64 column = t->doc.tab_size; column < indent; column += t->doc.tab_size)
+                if (from == 0)
                 {
-                        int at = base_origin + (int)column * t->cell;
+                        p64 indent = ui_text_indent(t, line);
 
-                        if (at >= t->left && at < t->right)
-                                ui_fill(ui, at, y, ui_px(ui, 1), t->line_height, guide);
+                        for (p64 column = t->doc.tab_size; column < indent; column += t->doc.tab_size)
+                        {
+                                int at = base_origin + (int)column * t->cell;
+
+                                if (at >= t->left && at < t->right)
+                                        ui_fill(ui, at, y, ui_px(ui, 1), t->line_height, guide);
+                        }
                 }
                 // A selection's blanks, seen: a dot in a space's cell, a line along a tab's.
                 for (p32 k = from; k < to; k++)
@@ -34560,20 +35605,26 @@ cluster_lost:
                         ui_text_fill(ui, t, x, baseline + 2 * ui->scale / 100 + ((x / (2 * ui->scale / 100)) & 1) * ui->scale / 100, 1, ui_px(ui, 1), ui_tone(colour & 0xffffffu, 255));
         }
         // The carets on this line, in the accent, at the blink's cover (solid, faded or gone: ui_text_wake); a composition's
-        // text after the primary, underlined. A bar caret stands on the edge between two characters, half in each one's
-        // bearing: drawn from the edge rightwards it covered the next letter's stem (a caret before "beta" read "peta").
+        // text after the primary, underlined. At a soft-wrap boundary, only the continuation row (not the end of the prior row) draws the caret.
         if (t->focused && t->caret_fade < UI_CARET_FULL)
                 for (positive s = 0; s < t->doc.selection_count; s++)
                 {
                         p64 caret = t->doc.selections[s].active;
                         unsigned int cover = UI_CARET_FULL - t->caret_fade;
 
-                        if (caret < l->offset[from] || caret > l->offset[to])
+                        if (caret < l->offset[from] || (is_last ? caret > l->offset[to] : caret >= l->offset[to]))
                                 continue;
-                        ui_fill(ui, origin + ui_text_slice_x(l, from, to, caret) - (t->doc.overwrite ? 0 : ui_px(ui, 1)), y + ui_px(ui, 1),
-                                t->doc.overwrite ? t->cell : ui_caret_px(ui),
-                                t->line_height - 2 * ui->scale / 100,
-                                ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, t->doc.overwrite ? 110 * cover / UI_CARET_FULL : cover));
+                        {
+                                int raw = origin + ui_text_slice_x(l, from, to, caret);
+                                int cx = raw - (t->doc.overwrite ? 0 : ui_px(ui, 1));
+
+                                if (!t->doc.overwrite && raw >= t->left && cx < t->left)
+                                        cx = t->left;
+                                ui_text_fill(ui, t, cx, y + ui_px(ui, 1),
+                                             t->doc.overwrite ? t->cell : ui_caret_px(ui),
+                                             t->line_height - 2 * ui->scale / 100,
+                                             ui_tone(ui_role(UI_PRIMARY) & 0xffffffu, t->doc.overwrite ? 110 * cover / UI_CARET_FULL : cover));
+                        }
                 }
         if (t->preedit_length && t->focused)
         {
@@ -34594,10 +35645,186 @@ cluster_lost:
         }
 }
 
+// Draws the sleek overlay vertical scrollbar pill when a multi-line text/code/hex view overflows its height.
+static fn ui_text_bar_draw(struct ui address_to ui, const struct ui_text address_to t)
+{
+        int bx, by, bw, bh, ty, th;
+        p64 max_top;
+
+        if (!ui_text_bar_geom(ui, t, &bx, &by, &bw, &bh, &ty, &th, &max_top))
+                return;
+        {
+                int wide = t->bar_hover || t->bar_held ? bw - ui_px(ui, 2) : bw / 2;
+                int tx = bx + (bw - wide) / 2;
+                unsigned int alpha = t->bar_held ? 140 : t->bar_hover ? 100 : 56;
+
+                if (wide < 2)
+                        wide = 2;
+                ui_round(ui, tx, ty, wide, th, wide / 2, ui_tone(ui_role(UI_ON_SURFACE) & 0xffffffu, alpha));
+        }
+}
+
+// Updates cached matching bracket pair around the primary caret (code view, single empty caret).
+static fn ui_text_bracket_sync(struct ui_text address_to t)
+{
+        static const char brackets[] = "()[]{}";
+        p64 caret;
+
+        t->bracket_a = t->bracket_b = DOC_NONE;
+        if (t->mode != UI_TEXT_CODE || t->hex || !t->focused || t->doc.selection_count != 1 || doc_any_selected(&t->doc))
+                return;
+        caret = t->doc.selections[0].active;
+        for (int side = 0; side < 2; side++)
+        {
+                p64 here = side ? caret - 1 : caret;
+                p32 b = side && !caret ? 0x100 : doc_byte(&t->doc, here);
+
+                if (b < 0x100 && memory_first_of((address_any)brackets, (b8)b, 6))
+                {
+                        p64 match = doc_match_bracket(&t->doc, caret);
+
+                        if (match != DOC_NONE)
+                                t->bracket_a = here, t->bracket_b = match;
+                        return;
+                }
+        }
+}
+
+// Hex editor view over t->doc: fixed 8-digit offset gutter, 16 bytes/row (8+8 grouped), and 16-column ASCII pane.
+static fn ui_text_hex_draw(struct ui address_to ui, struct ui_text address_to t, int x, int y, int width, int height, unsigned int ground)
+{
+        static const char hex[] = "0123456789ABCDEF";
+        const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};
+        font_metrics m;
+        int addr_w, hex_x, ascii_x, cell, row_y, right = x + width;
+        p64 len = doc_length(&t->doc), at = t->hex_top, caret = t->doc.selections[t->doc.primary].active;
+        const struct doc_selection address_to sel = &t->doc.selections[t->doc.primary];
+        p64 sel_start = doc_sel_start(sel), sel_end = doc_sel_end(sel);
+        unsigned int ink = ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu;
+        unsigned int dim = ui_text_colour(ui, UI_ON_SURFACE_VARIANT) & 0xffffffu;
+        unsigned int accent = ui_role(UI_PRIMARY) & 0xffffffu;
+        unsigned int info = ui_ink_readable(ui_role(UI_INFO)) & 0xffffffu;
+        unsigned int sel_bg = ui_well(ui, UI_SELECTION, 40);
+        unsigned int gutter_bg = window_mix(ground, ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 110);
+        unsigned int hair = ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 90);
+
+        ui_text_metrics(ui, t);
+        if (!faces[0] || width <= 0 || height <= 0 || t->line_height <= 0)
+                return;
+        m = font_metrics_at(faces[0], ui_text_em(ui, t));
+        cell = t->cell > 0 ? t->cell : 8;
+        ui_text_hex_layout(t, x, &addr_w, &hex_x, &ascii_x);
+        t->gutter = addr_w < width ? addr_w : width;
+        t->left = x + t->gutter, t->top = y, t->right = right, t->bottom = y + height;
+        t->well_left = x, t->well_top = y, t->well_right = right, t->well_bottom = y + height;
+        if (t->laid_width > 0 && (width != t->laid_width || height != t->laid_height || t->line_height != t->laid_line))
+                ui_text_hex_reveal(t);
+        t->laid_width = width, t->laid_height = height, t->laid_line = t->line_height;
+        at = t->hex_top;
+
+        // Offset gutter background and column dividers (strictly clipped to [x, right)).
+        if (t->gutter > 0)
+                ui_fill(ui, x, y, t->gutter, height, 0xff000000u | gutter_bg);
+        if (x + addr_w < right)
+                ui_fill(ui, x + addr_w, y, ui_px(ui, 1), height, hair);
+        if (ascii_x - cell > x && ascii_x - cell < right)
+                ui_fill(ui, ascii_x - cell, y, ui_px(ui, 1), height, hair);
+
+        for (row_y = y; row_y + t->line_height <= y + height && at <= len; row_y += t->line_height, at += 16)
+        {
+                int baseline = row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline;
+                b32 cur_row = caret >= at && caret < at + 16;
+                p8 row_bytes[16];
+                positive got = at < len ? doc_read(&t->doc, at, row_bytes, len - at < 16 ? (positive)(len - at) : 16) : 0;
+                char addr[12];
+
+                if (cur_row && t->focused)
+                {
+                        unsigned int row_bg = window_mix(ground, ui_role(UI_ON_SURFACE) & 0xffffffu, 10);
+
+                        if (t->left < right)
+                                ui_fill(ui, t->left, row_y, right - t->left, t->line_height, 0xff000000u | row_bg);
+                }
+                for (int d = 7; d >= 0; d--)
+                        addr[7 - d] = hex[(at >> (d * 4)) & 15];
+                addr[8] = 0;
+                if (x + cell < right)
+                        ui_run_in(ui, faces, x + cell, baseline, (string_address)addr, t->size + t->zoom, cur_row ? ink : dim, cur_row ? 220 : 140,
+                                  x, x + t->gutter, 0);
+
+                for (positive col = 0; col < 16; col++)
+                {
+                        p64 off = at + col;
+                        int bx = hex_x + (int)col * 3 * cell + (col >= 8 ? cell : 0);
+                        int ax = ascii_x + (int)col * cell;
+                        b32 selected = sel_end > sel_start && off >= sel_start && off < sel_end;
+                        b32 is_caret = off == caret;
+
+                        if (off > len)
+                                break;
+                        if (selected)
+                        {
+                                unsigned int tone = ui_tone(sel_bg & 0xffffffu, sel_bg >> 24);
+
+                                if (bx < right)
+                                        ui_fill(ui, bx, row_y, bx + 2 * cell > right ? right - bx : 2 * cell, t->line_height, tone);
+                                if (ax < right)
+                                        ui_fill(ui, ax, row_y, ax + cell > right ? right - ax : cell, t->line_height, tone);
+                        }
+                        else if (is_caret && t->focused)
+                        {
+                                // Highlight the companion byte in the opposite pane so hex & ASCII stay visually linked.
+                                unsigned int peer = ui_tone(accent, 42);
+
+                                if (t->hex_ascii && bx < right)
+                                        ui_fill(ui, bx, row_y, bx + 2 * cell > right ? right - bx : 2 * cell, t->line_height, peer);
+                                else if (!t->hex_ascii && ax < right)
+                                        ui_fill(ui, ax, row_y, ax + cell > right ? right - ax : cell, t->line_height, peer);
+                        }
+                        if (col < got)
+                        {
+                                p8 b = row_bytes[col];
+                                char pair[3] = {hex[b >> 4], hex[b & 15], 0};
+                                char ch[2] = {b >= 0x20 && b <= 0x7e ? (char)b : '.', 0};
+                                unsigned int hcol = b == 0 ? dim : (b >= 0x20 && b <= 0x7e) ? ink : info;
+                                unsigned int halpha = b == 0 ? 120 : 255;
+
+                                if (bx < right)
+                                        ui_run_in(ui, faces, bx, baseline, (string_address)pair, t->size + t->zoom, hcol, halpha, t->left, right, 0);
+                                if (ax < right)
+                                        ui_run_in(ui, faces, ax, baseline, (string_address)ch, t->size + t->zoom,
+                                                  b >= 0x20 && b <= 0x7e ? ink : dim, b >= 0x20 && b <= 0x7e ? 255 : 110, t->left, right, 0);
+                        }
+                        if (is_caret && t->focused && t->caret_fade < UI_CARET_FULL)
+                        {
+                                unsigned int cover = UI_CARET_FULL - t->caret_fade;
+
+                                if (!t->hex_ascii && bx < right)
+                                {
+                                        int cx = bx + (t->hex_nibble ? cell : 0);
+                                        int cw = t->hex_insert ? ui_caret_px(ui) : cell;
+
+                                        if (cx < right)
+                                                ui_fill(ui, cx, row_y + ui_px(ui, 1), cx + cw > right ? right - cx : cw,
+                                                        t->line_height - 2 * ui->scale / 100, ui_tone(accent, t->hex_insert ? cover : 110 * cover / UI_CARET_FULL));
+                                }
+                                else if (t->hex_ascii && ax < right)
+                                {
+                                        int cw = t->hex_insert ? ui_caret_px(ui) : cell;
+
+                                        ui_fill(ui, ax, row_y + ui_px(ui, 1), ax + cw > right ? right - ax : cw,
+                                                t->line_height - 2 * ui->scale / 100, ui_tone(accent, t->hex_insert ? cover : 110 * cover / UI_CARET_FULL));
+                                }
+                        }
+                }
+        }
+        ui_text_bar_draw(ui, t);
+}
+
 /*
         The widget drawn into the box x, y, width by height (device pixels), its ground already there (a field's well,
         a window's paper): ground is that colour, for the code view's cells. The rows from the top line down, wrapped
-        when wrap is on, with the gutter's line numbers on the left of a code view.
+        when wrap is on, with a fixed minimum 4-digit line-number gutter so typing never shifts the content.
 */
 static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int x, int y, int width, int height, unsigned int ground)
 {
@@ -34607,20 +35834,41 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
         int row_y;
         unsigned int line_ground;
 
+        if (t->hex && t->mode != UI_TEXT_FIELD)
+        {
+                ui_text_hex_draw(ui, t, x, y, width, height, ground);
+                return;
+        }
         ui_text_metrics(ui, t);
         m = font_metrics_at(ui_text_face(ui, t), ui_text_em(ui, t));
         t->gutter = 0;
         if (t->numbers)
         {
-                int digits = 1;
+                // Minimum 4 digits keeps line numbers rock-steady through 9,999 lines so adding lines never shifts the text.
+                int digits = 4;
 
-                for (p64 n = lines; n >= 10; n /= 10)
+                for (p64 n = lines; n >= 10000; n /= 10)
                         digits++;
-                t->gutter = (digits + 2) * t->cell;
+                t->gutter = (digits + 1) * t->cell;
+                if (t->gutter > width)
+                        t->gutter = width > 0 ? width : 0;
         }
         // The gutter is at the start of the lines: the left, or the right where the window reads from the right.
         t->left = x + (ui_rtl() ? 0 : t->gutter), t->top = y, t->right = x + width - (ui_rtl() ? t->gutter : 0), t->bottom = y + height;
         t->well_left = x, t->well_top = y, t->well_right = x + width, t->well_bottom = y + height;
+        if (width <= 0 || height <= 0)
+                return;
+        // Subtle gutter background tint and hairline separator in code views.
+        if (t->numbers && t->gutter > 0)
+        {
+                int gx = ui_rtl() ? t->right : x;
+                unsigned int gutter_bg = window_mix(ground, ui_role(UI_SURFACE_CONTAINER) & 0xffffffu, 96);
+
+                ui_fill(ui, gx, y, t->gutter, height, 0xff000000u | gutter_bg);
+                if (t->right > t->left)
+                        ui_fill(ui, ui_rtl() ? t->right : t->left - ui_px(ui, 1), y, ui_px(ui, 1), height,
+                                ui_tone(ui_role(UI_OUTLINE_VARIANT) & 0xffffffu, 80));
+        }
         // A field's caret is always in sight, in the box it is drawn in now (its text set by the app, or the box moved).
         if (t->mode == UI_TEXT_FIELD)
         {
@@ -34636,11 +35884,9 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
         if (t->mode == UI_TEXT_CODE && t->laid_width > 0 && (width != t->laid_width || height != t->laid_height || t->line_height != t->laid_line))
                 ui_text_reveal(ui, t);
         t->laid_width = width, t->laid_height = height, t->laid_line = t->line_height;
+        ui_text_bracket_sync(t);
         if (!doc_length(&t->doc) && t->placeholder && !t->preedit_length)
         {
-                // The placeholder is the quiet ink at full strength, on glass and on the kit's surfaces alike: the ink at 36% was 2.2:1
-                // on a light surface and 2.0 to 2.7:1 from the glass, and it is often the one thing that says what a field is for. The
-                // quiet ink is 7:1 on a surface and held at the readable threshold on glass (ui_glass_quiet), and still reads apart from the ink.
                 unsigned int text = ui_text_colour(ui, UI_ON_SURFACE_VARIANT), alpha = 255;
                 const font_face address_to faces[2] = {ui_text_face(ui, t), ui->regular};
                 int wide = ui_rtl() || t->centred ? ui_run_in(ui, faces, 0, 0, (string_address)t->placeholder, t->size + t->zoom, 0, 0, 0, ui->width, 0) : 0;
@@ -34674,9 +35920,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 if (t->mode == UI_TEXT_CODE && t->focused && t->doc.selection_count == 1 &&
                     doc_line_of(&t->doc, t->doc.selections[0].active) == line && !doc_any_selected(&t->doc))
                         line_ground = window_mix(line_ground, ui_role(UI_ON_SURFACE) & 0xffffffu, 10);
-                if (line_ground != ground)
-                        ui_fill(ui, t->left, row_y, t->right - t->left, t->line_height, 0xff000000u | line_ground);
-                if (t->numbers)
+                if (t->numbers && t->gutter > 0)
                 {
                         char number[24];
                         positive digits = positive_into_string((string_address)number, (positive)(line + 1));
@@ -34685,7 +35929,7 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
 
                         number[digits] = 0;
                         // The numbers are right-aligned in the gutter, which is at the left of the lines, or left-aligned at their right.
-                        ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, ui_rtl() ? t->right + t->cell : t->left - t->cell - wide,
+                        ui_run_in(ui, (const font_face address_to const[]){ui_text_face(ui, t), ui->regular}, ui_rtl() ? t->right + t->cell / 2 : t->left - t->cell / 2 - wide,
                                   baseline, (string_address)number, t->size + t->zoom, ui_role(UI_ON_SURFACE) & 0xffffffu, current ? 220 : 110,
                                   ui_rtl() ? t->right : x, ui_rtl() ? x + width : t->left, 0);
                         if (doc_folded_at(&t->doc, line, &hidden_to))
@@ -34694,7 +35938,10 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 }
                 if (!t->wrap || t->mode == UI_TEXT_FIELD || ui_text_lay.bidi)
                 {
-                        ui_text_draw_line(ui, t, &ui_text_lay, 0, ui_text_lay.count, 0, line, row_y, baseline, line_ground);
+                        if (line_ground != ground && t->right > t->left)
+                                ui_fill(ui, t->left, row_y, t->right - t->left, t->line_height, 0xff000000u | line_ground);
+                        if (t->right > t->left)
+                                ui_text_draw_line(ui, t, &ui_text_lay, 0, ui_text_lay.count, 0, line, row_y, baseline, line_ground, true);
                         row_y += t->line_height;
                         continue;
                 }
@@ -34702,20 +35949,26 @@ static fn ui_text_draw(struct ui address_to ui, struct ui_text address_to t, int
                 // after the first indented as the line is (ui_text_wrap_to, which the hand and the handles cut it by too).
                 {
                         p32 from = 0;
-                        int room = t->right - t->left, indent = ui_text_wrap_indent(&ui_text_lay, room);
+                        int room = t->right - t->left, indent = room > 0 ? ui_text_wrap_indent(&ui_text_lay, room) : 0;
 
                         do
                         {
-                                p32 to = ui_text_wrap_to(&ui_text_lay, from, room, indent);
+                                p32 to = room > 0 ? ui_text_wrap_to(&ui_text_lay, from, room, indent) : ui_text_lay.count;
                                 int offset_x = ui_text_lay.x[from] - (from ? indent : 0);
 
-                                ui_text_draw_line(ui, t, &ui_text_lay, from, to, offset_x, line, row_y,
-                                                  row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline, line_ground);
+                                if (line_ground != ground && room > 0)
+                                        ui_fill(ui, t->left, row_y, room, t->line_height, 0xff000000u | line_ground);
+                                if (room > 0)
+                                        ui_text_draw_line(ui, t, &ui_text_lay, from, to, offset_x, line, row_y,
+                                                          row_y + (t->line_height - (int)m.cell_height) / 2 + (int)m.baseline, line_ground,
+                                                          to >= ui_text_lay.count);
                                 row_y += t->line_height;
                                 from = to;
                         } while (from < ui_text_lay.count && row_y + t->line_height <= t->bottom);
                 }
         }
+        if (t->mode != UI_TEXT_FIELD)
+                ui_text_bar_draw(ui, t);
 }
 
 /*

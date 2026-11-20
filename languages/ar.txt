@@ -1,10 +1,10 @@
-@language ar
-@name العربية
-@translated machine
-@direction rtl
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
+@direction rtl
+@language ar
+@name العربية
+@translated machine
 action_copy	3664	نسخ
 action_cut	5863	قص
 action_paste	0288	لصق
@@ -14,21 +14,24 @@ editor_closes_unsaved	fcb8	يغلق ويتجاهل التغييرات
 editor_encoding_bom	c0d7	UTF-8 مع BOM
 editor_find_hint	d17a	بحث
 editor_find_replace_hint	3693	بحث/البديل
+editor_hex_status	35a5	الإزاحة %1$s / %2$s
 editor_indent_spaces	9db9	المسافات: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	السطر
 editor_lock_stale	f9d8	%s بقي من حفظ سابق: احذفه ثم احفظ
+editor_mode_hex	55d5	سداسي عشري
+editor_mode_text	134a	نص
 editor_no_file_name	c863	لا يوجد اسم ملف: ابدأ المحرر باسم ملف
 editor_no_match	7de7	لا يوجد تطابق
 editor_not_regular	5955	ليس ملفا عاديا: تم الرفض
-editor_open_none	63aa	الفتح غير متاح هنا: ابدأ المحرر باسم الملف
+editor_open_hint	235f	مسار الملف للفتح
 editor_pattern_bad	5d57	النمط غير صالح
 editor_position	3696	سطر %1$d، عمود %2$d
 editor_read_failed	5f78	تعذرت قراءة الملف: لم يُفتح
 editor_reload_unsaved	85da	يعيد قراءة الملف ويتجاهل التغييرات غير المحفوظة
 editor_replace_usage	c677	صيغة الاستبدال: البحث/البديل
 editor_replaced	1128	تم استبدال %d
-editor_save_as_none	0745	حفظ باسم غير متاح هنا: Ctrl+S يحفظ الملف
+editor_save_as_hint	c955	حفظ باسم
 editor_save_failed	069d	فشل الحفظ: الملف كما كان
 editor_saved	9f44	تم الحفظ
 editor_selected	a686	(%d محدد)
@@ -36,6 +39,7 @@ editor_selected_carets	7e02	(%d محدد، مؤشرات)
 editor_tabs_full	8ed9	كل التبويبات الـ%d مفتوحة: أغلق واحدا أولا
 editor_unsaved	c014	تغييرات غير محفوظة: احفظها، أو أغلق كل ملف بالضغط على Ctrl+W مرتين
 editor_untitled	8b58	بدون عنوان
+editor_wrap_on	40cd	التفاف
 editor_write_beside	ec75	تعذرت الكتابة بجوار الملف
 editor_writes_over_changed	df15	يكتب فوق تغيير القرص (Ctrl+R)
 editor_writes_over_readonly	e22f	يكتب فوق ملف للقراءة فقط
@@ -185,15 +189,21 @@ launcher_sleep_armed	bb08	السكون
 menu_bin_empty	1538	إفراغ سلة المهملات
 menu_bin_open	8797	فتح سلة المهملات
 menu_bin_restore	4799	استعادة
+menu_close_others	ec3e	إغلاق الألسنة الأخرى
+menu_close_tab	9753	إغلاق اللسان
 menu_copy	43e0	نسخ
 menu_copy_row	f3c8	نسخ الصف
 menu_cut	5c17	قص
 menu_delete	1e3e	حذف
 menu_find	1fa6	بحث
 menu_go_to_line	bc96	الانتقال إلى سطر
+menu_hex_mode	fd1b	محرر سداسي عشري
 menu_new_folder	41cb	مجلد &جديد
+menu_new_tab	dad5	لسان جديد
+menu_new_window	2c79	نافذة جديدة
 menu_open	61a5	&فتح
 menu_open_editor	8ca0	فتح في &المحرر
+menu_open_file	098c	فتح ملف...
 menu_open_terminal	6d2a	فتح &طرفية هنا
 menu_paste	6854	لصق
 menu_properties	c780	&خصائص
@@ -201,6 +211,7 @@ menu_redo	ac45	إعادة
 menu_remove	901d	إزالة
 menu_rename	9529	إعادة &تسمية
 menu_reset_zoom	1b0f	إعادة تعيين التكبير
+menu_save_as	e18c	حفظ باسم...
 menu_select_all	f6f6	تحديد الكل
 menu_set_wallpaper	1a27	تعيين &خلفية لسطح المكتب
 menu_set_wallpaper_of	aa60	تعيين خلفية لـ %s
@@ -210,6 +221,7 @@ menu_undo	b9d3	تراجع
 menu_view_details	d3a1	&تفاصيل
 menu_view_icons	57e8	&أيقونات كبيرة
 menu_view_list	4cc5	&قائمة
+menu_word_wrap	9ab3	التفاف الأسطر
 menu_zoom_in	5bcf	تكبير
 menu_zoom_out	9234	تصغير
 mixer_allow	19d2	السماح
@@ -450,6 +462,8 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =A quick shake makes the pointer large for a moment	4d81	هزة سريعة تكبّر المؤشر لحظة
 =Accent	ccd7	لون التمييز
 =Accent colour (rrggbb or reset)	53aa	لون التمييز (rrggbb أو reset)
+=Add a key (label, then the public key)	e2e3	إضافة مفتاح (تسمية، ثم المفتاح العام)
+=Add a program to start (its path)	5e20	إضافة برنامج إلى البدء (مساره)
 =Airplane mode	3b8a	وضع الطيران
 =All commands	4a42	كل الأوامر
 =Allow recording	f7e5	السماح بالتسجيل
@@ -469,6 +483,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	الإقلاع
+=Bowl tier	7b7f	مستوى bowl
 =Brightness	324a	السطوع
 =Build	7543	البناء
 =Canvas	5091	Canvas
@@ -488,17 +503,18 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Devices	f320	الأجهزة
 =Discover now	398a	اكتشف الآن
 =Discovery	2db5	الاكتشاف
-=Files	1b30	الملفات
-=Install Moonwater	06fc	تثبيت Moonwater
-=Internal storage	e961	التخزين الداخلي
-=External devices	5769	الأجهزة الخارجية
 =Display	d9b5	الشاشة
 =Double-click time (ms, or default)	9af1	مدة النقر المزدوج (ms أو default)
 =Drag lists with the mouse	4ee2	سحب القوائم بالماوس
 =Edge swipes	7aaf	السحب من الحواف
 =Editor	bf98	المحرر
+=End every session	12e1	إنهاء كل الجلسات
+=External devices	5769	الأجهزة الخارجية
+=Files	1b30	الملفات
 =GPU rendering (alpha)	e5e6	التصيير على GPU (ألفا)
 =Gallery	4cdd	المعرض
+=Graphics	9fa8	الرسوميات
+=Host key fingerprint	2398	بصمة مفتاح المضيف
 =How fast the pointer follows the mouse	0a45	سرعة تتبع المؤشر للماوس
 =How long it stays large after a shake	82a0	مدة بقائه كبيرًا بعد الهز
 =How long to hold a finger to right-click	b301	مدة إبقاء الإصبع لنقرة يمنى
@@ -512,6 +528,8 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Input device (name, or default)	af7b	جهاز الإدخال (الاسم أو default)
 =Input mute	ad50	كتم الإدخال
 =Input volume (percent, or default)	263f	مستوى صوت الإدخال (نسبة مئوية أو default)
+=Install Moonwater	06fc	تثبيت Moonwater
+=Internal storage	e961	التخزين الداخلي
 =Internet sharing over Bluetooth	afe8	مشاركة الإنترنت عبر Bluetooth
 =Keep a device by its name	9c51	حفظ جهاز باسمه
 =Keep the lowest-delay sample	d8b9	الاحتفاظ بالعينة ذات أقل تأخير
@@ -528,7 +546,9 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Launcher	44b1	المشغل
 =Learned	0c7c	تم التعرف
 =Left edge	9ce5	الحافة اليسرى
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	يسمح لمفاتيح القائمة بالدخول عبر الشبكة؛ إيقافه يوقفه وينهي كل الجلسات
 =Linked machines	0cc2	الحواسيب المرتبطة
+=Listen address (any for every address)	d513	عنوان الاستماع (any لكل العناوين)
 =Local addresses	9f2c	العناوين المحلية
 =Long press time (ms, or default)	aff4	مدة الضغط المطول (ms أو default)
 =Machine	be0e	الحاسوب
@@ -536,10 +556,6 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Momentum	cfef	الزخم
 =Motion	7647	الحركة
 =Mount kept disks	f0c8	تركيب الأقراص المحفوظة
-=Programs started with the desktop	5b74	البرامج التي تبدأ مع سطح المكتب
-=Add a program to start (its path)	5e20	إضافة برنامج إلى البدء (مساره)
-=Remove a program from the start (its path)	1013	إزالة برنامج من البدء (مساره)
-=Opened in this order when the desktop starts; none starts it with no windows	5790	تُفتح بهذا الترتيب عند بدء سطح المكتب؛ none يبدؤه بلا نوافذ
 =Mouse	9b64	الماوس
 =Mouse acceleration	c400	تسارع الماوس
 =Mouse sensitivity (percent, or default)	8a23	حساسية الماوس (نسبة مئوية أو default)
@@ -558,6 +574,7 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Notices	8f06	الإشعارات
 =On-screen keyboard	97f8	لوحة المفاتيح على الشاشة
 =Open windows where they were last put	8711	فتح النوافذ في مكانها الأخير
+=Opened in this order when the desktop starts; none starts it with no windows	5790	تُفتح بهذا الترتيب عند بدء سطح المكتب؛ none يبدؤه بلا نوافذ
 =Output device (name, or default)	d73c	جهاز الإخراج (الاسم أو default)
 =Pair a machine	b39b	إقران حاسوب
 =Paths	263f	المسارات
@@ -565,9 +582,12 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Pointer	4dca	المؤشر
 =Pointer squeeze (percent, or default)	bbee	ضغط المؤشر (بالمئة، أو الافتراضي)
 =Pointer squeezes on click	ad88	ينكمش المؤشر عند النقر
+=Port	3cc6	المنفذ
 =Power	a5e6	الطاقة
 =Power profile	8def	نمط الطاقة
 =Predict touch and pen	e2b7	توقع اللمس والقلم
+=Primary display	924b	الشاشة الرئيسية
+=Programs started with the desktop	5b74	البرامج التي تبدأ مع سطح المكتب
 =Proxy	1bfb	الوكيل
 =Proxy from the environment	7fa7	الوكيل من البيئة
 =Public IPv4	0813	IPv4 العام
@@ -576,16 +596,25 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Public address discovery (STUN)	7691	اكتشاف العنوان العام (STUN)
 =Refresh rate	bf6e	معدل التحديث
 =Remembered devices	abbc	الأجهزة المحفوظة
+=Remove a program from the start (its path)	1013	إزالة برنامج من البدء (مساره)
 =Resize border width (pixels, or default)	7fdf	عرض حد تغيير الحجم (بكسل أو default)
 =Resize grip (pixels, or default)	dddd	مقبض تغيير الحجم (بكسل أو default)
+=Resolution	18af	الدقة
 =Right edge	279a	الحافة اليمنى
+=Root login	6cd4	دخول root
+=Root may log in by a key of the list, and by nothing else	a430	يمكن لـ root الدخول بمفتاح من القائمة، ولا بشيء غيره
 =Rotation	777f	الدوران
 =Rubber band	9c42	تأثير المطاط
+=SSH	7b31	SSH
+=SSH server	9b60	خادم SSH
+=STUN servers (or reset)	4062	خوادم STUN (أو reset)
+=STUN time limit (ms, or default)	be40	مهلة STUN (ms أو default)
 =Scale of this screen	e4ca	مقياس هذه الشاشة
 =Screen	c631	الشاشة
 =Screen modes	85ad	أوضاع الشاشة
 =Scroll speed	e7af	سرعة التمرير
 =Scrolling	74ec	التمرير
+=Server files	5af9	ملفات الخادم
 =Servers in order	0a76	الخوادم بالترتيب
 =Set the clock from the network	b2a3	ضبط الساعة من الشبكة
 =Settings	8728	الإعدادات
@@ -598,19 +627,33 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Sound	9a34	الصوت
 =Sound server	84bf	خادم الصوت
 =Start the desktop	be4c	تشغيل سطح المكتب
-=STUN servers (or reset)	4062	خوادم STUN (أو reset)
-=STUN time limit (ms, or default)	be40	مهلة STUN (ms أو default)
 =System	84bc	النظام
 =System notices	fa89	إشعارات النظام
 =Taskbar	d759	شريط المهام
+=Taskbar battery place	3413	موضع البطارية في شريط المهام
+=Taskbar clock bulge (percent)	fa6c	انتفاخ الساعة في شريط المهام (نسبة مئوية)
+=Taskbar clock place	c144	موضع الساعة في شريط المهام
 =Taskbar display	042b	شاشة شريط المهام
+=Taskbar distance from the edge (pixels)	845c	بعد شريط المهام عن الحافة (بكسل)
 =Taskbar hides for fullscreen	f2f8	يختفي شريط المهام في ملء الشاشة
 =Taskbar launcher button	dd4d	زر المشغل في شريط المهام
+=Taskbar microphone place	76d8	موضع الميكروفون في شريط المهام
+=Taskbar moon look	a24d	مظهر القمر في شريط المهام
+=Taskbar moon place	6f19	موضع القمر في شريط المهام
+=Taskbar moon spin (seconds a turn, off or default)	a763	دوران القمر في شريط المهام (ثوانٍ لكل دورة، أو إيقاف، أو الافتراضي)
+=Taskbar newest task side	b5a9	جانب أحدث مهمة في شريط المهام
+=Taskbar notices place	a793	موضع الإشعارات في شريط المهام
+=Taskbar order	ccfd	ترتيب شريط المهام
 =Taskbar padding (pixels)	a3a0	المسافات في شريط المهام (بكسل)
 =Taskbar pinned programs (or none)	3732	البرامج المثبتة في شريط المهام (أو لا شيء)
 =Taskbar position	81b8	موضع شريط المهام
 =Taskbar scale (percent)	810b	مقياس شريط المهام (نسبة مئوية)
+=Taskbar sound place	e2a1	موضع الصوت في شريط المهام
+=Taskbar tasks	445b	المهام في شريط المهام
+=Taskbar tasks place	bfd0	موضع المهام في شريط المهام
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	منطقة الإعلام في شريط المهام (نص مع {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Taskbar tray clock place	c2e6	موضع ساعة منطقة الإعلام في شريط المهام
+=Taskbar tray text place	c235	موضع نص منطقة الإعلام في شريط المهام
 =Terminal	62d1	الطرفية
 =Terminal lines per wheel notch	3800	أسطر الطرفية لكل خطوة من العجلة
 =Text size (percent, or default)	51d7	حجم النص (نسبة مئوية أو default)
@@ -626,11 +669,12 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Theme	7c92	السمة
 =This machine	3790	هذا الحاسوب
 =Time	e404	الوقت
+=Time limit (minutes, or off)	d2cf	المهلة (دقائق، أو off)
 =Time server (auto for the pool)	67e5	خادم الوقت (auto للمجموعة)
 =Time zone	741a	المنطقة الزمنية
 =Touch	fb78	اللمس
-=Trace time limit (seconds, or default)	28d4	مهلة التتبع (ثوان أو default)
 =Trace URL (or default)	be36	عنوان URL للتتبع (أو default)
+=Trace time limit (seconds, or default)	28d4	مهلة التتبع (ثوان أو default)
 =Turned by the screen	ea45	التدوير بواسطة الشاشة
 =Turned left	507c	مدار لليسار
 =Turned right	7a49	مدار لليمين
@@ -638,18 +682,27 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =Upside down	9dc1	مقلوب
 =Variable refresh rate	06a4	معدل التحديث المتغير
 =Volume (percent, or default)	f6e3	مستوى الصوت (نسبة مئوية أو default)
+=Wallpaper	0da9	خلفية سطح المكتب
+=Wallpaper glow	57c6	توهج خلفية سطح المكتب
+=Wallpaper in the dark theme	a6dc	خلفية سطح المكتب في السمة الداكنة
+=Wallpaper of this screen	2c92	خلفية هذه الشاشة
+=Wallpaper picture (a PNG file, or none)	8e9d	صورة الخلفية (ملف PNG أو لا شيء)
+=Wallpaper seas (percent grey)	6836	بحار خلفية سطح المكتب (نسبة الرمادي)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	ما يفعله السحب من هذه الحافة
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	أين يرسم Canvas: على GPU أو المعالج. ما تفعله البطاقة الآن تحته
 =White edged in black, or the reverse	cd63	أبيض بحافة سوداء، أو العكس
 =Wi-Fi	0ec1	Wi-Fi
 =Wi-Fi IP address	9026	عنوان IP لشبكة Wi-Fi
 =Wired	9a54	الشبكة السلكية
 =Wired IP address	0e25	عنوان IP للشبكة السلكية
+=after	7dc9	بعد
 =all	4bc4	الكل
 =allow	a832	سماح
 =amber	bec0	كهرماني
 =auto	a396	تلقائي
 =balanced	b71d	متوازن
+=before	ff3e	قبل
 =black	4ba4	أسود
 =blue	f5cd	أزرق
 =bottom	6b2a	أسفل
@@ -661,16 +714,23 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =default	5bde	افتراضي
 =deny	6367	منع
 =desktop	87b3	سطح المكتب
+=dimmed	bded	خافتة
 =dmy	2a79	dmy
 =dynamic	96ae	ديناميكي
 =edge	d83c	الحافة
+=end	75aa	النهاية
 =fast	02af	سريع
 =forest	2a60	أخضر الغابة
 =full	b33c	كامل
 =games	2b9c	الألعاب
+=glow	27bc	توهج
+=glow-and-edges	540f	توهج-وحواف
 =graphite	dc8d	جرافيت
 =green	ecbc	أخضر
+=grouped	8b7d	مجمّعة
 =high	b9fd	مرتفع
+=ink	8faf	حبر
+=inverted	8038	معكوسة
 =kernel log	415a	سجل النواة
 =kernel log klog dmesg messages	1a8d	سجل النواة klog dmesg رسائل
 =launcher	8391	المُشغِّل
@@ -682,6 +742,9 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =mdy	3697	mdy
 =midnight-blue	4008	أزرق منتصف الليل
 =modem	67ed	مودم
+=moon	ae40	القمر
+=moon-tasks-tray	6c42	القمر-المهام-الإعلام
+=moon-tray-tasks	c2c4	القمر-الإعلام-المهام
 =network	86c5	الشبكة
 =none	afdb	لا شيء
 =normal	9c52	عادي
@@ -691,20 +754,32 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =per second	4f98	في الثانية
 =percent	fa5a	نسبة مئوية
 =performance	8ca5	الأداء
+=picture	d389	صورة
+=plain	3f67	بسيطة
 =plum	b06b	برقوقي
 =powersave	2283	توفير الطاقة
 =primary	5fd9	الرئيسية
+=realistic	b65f	واقعي
 =reduced	5839	مخفض
 =right	2de5	يمين
 =rose	1806	وردي
+=separate	bb18	منفصلة
 =settings preferences options	8c78	إعدادات تفضيلات خيارات
 =slate	deee	أردوازي
 =slow	42b8	بطيء
+=split	2de3	مقسمة
+=start	04df	البداية
+=tab	2e4c	كبسولة
+=tasks-moon-tray	c6a4	المهام-القمر-الإعلام
+=tasks-tray-moon	4f46	المهام-الإعلام-القمر
 =tcp	ba90	tcp
 =terminal shell console	eaba	الطرفية الصدفة وحدة التحكم
 =thick	964e	ضخيم
 =thin	b172	رفيع
 =top	dc3c	أعلى
+=tray	a12d	منطقة الإعلام
+=tray-moon-tasks	7246	الإعلام-القمر-المهام
+=tray-tasks-moon	fda8	الإعلام-المهام-القمر
 =unlock	1f55	إلغاء القفل
 =violet	57f2	بنفسجي
 =volume	698f	الصوت
@@ -713,66 +788,3 @@ ui_field_full	fe02	هذا أقصى ما يتسع له
 =windows	26ea	النوافذ
 =wired	bfb4	سلكي
 =ymd	faad	ymd
-=SSH	7b31	SSH
-=SSH server	9b60	خادم SSH
-=Root login	6cd4	دخول root
-=Port	3cc6	المنفذ
-=Listen address (any for every address)	d513	عنوان الاستماع (any لكل العناوين)
-=Time limit (minutes, or off)	d2cf	المهلة (دقائق، أو off)
-=Host key fingerprint	2398	بصمة مفتاح المضيف
-=Server files	5af9	ملفات الخادم
-=Bowl tier	7b7f	مستوى bowl
-=Add a key (label, then the public key)	e2e3	إضافة مفتاح (تسمية، ثم المفتاح العام)
-=End every session	12e1	إنهاء كل الجلسات
-=Lets the keys of the list log in over the network; off stops it and ends every session	c746	يسمح لمفاتيح القائمة بالدخول عبر الشبكة؛ إيقافه يوقفه وينهي كل الجلسات
-=Root may log in by a key of the list, and by nothing else	a430	يمكن لـ root الدخول بمفتاح من القائمة، ولا بشيء غيره
-=Wallpaper	0da9	خلفية سطح المكتب
-=Wallpaper picture (a PNG file, or none)	8e9d	صورة الخلفية (ملف PNG أو لا شيء)
-=Wallpaper in the dark theme	a6dc	خلفية سطح المكتب في السمة الداكنة
-=Wallpaper seas (percent grey)	6836	بحار خلفية سطح المكتب (نسبة الرمادي)
-=Wallpaper glow	57c6	توهج خلفية سطح المكتب
-=Taskbar moon place	6f19	موضع القمر في شريط المهام
-=Taskbar moon look	a24d	مظهر القمر في شريط المهام
-=Taskbar tasks place	bfd0	موضع المهام في شريط المهام
-=Taskbar newest task side	b5a9	جانب أحدث مهمة في شريط المهام
-=Taskbar notices place	a793	موضع الإشعارات في شريط المهام
-=Taskbar microphone place	76d8	موضع الميكروفون في شريط المهام
-=Taskbar sound place	e2a1	موضع الصوت في شريط المهام
-=Taskbar battery place	3413	موضع البطارية في شريط المهام
-=Taskbar tray text place	c235	موضع نص منطقة الإعلام في شريط المهام
-=Taskbar tray clock place	c2e6	موضع ساعة منطقة الإعلام في شريط المهام
-=Taskbar order	ccfd	ترتيب شريط المهام
-=Taskbar clock place	c144	موضع الساعة في شريط المهام
-=Taskbar clock bulge (percent)	fa6c	انتفاخ الساعة في شريط المهام (نسبة مئوية)
-=moon	ae40	القمر
-=plain	3f67	بسيطة
-=picture	d389	صورة
-=dimmed	bded	خافتة
-=inverted	8038	معكوسة
-=glow	27bc	توهج
-=glow-and-edges	540f	توهج-وحواف
-=start	04df	البداية
-=end	75aa	النهاية
-=realistic	b65f	واقعي
-=ink	8faf	حبر
-=split	2de3	مقسمة
-=before	ff3e	قبل
-=after	7dc9	بعد
-=moon-tasks-tray	6c42	القمر-المهام-الإعلام
-=moon-tray-tasks	c2c4	القمر-الإعلام-المهام
-=tasks-moon-tray	c6a4	المهام-القمر-الإعلام
-=tasks-tray-moon	4f46	المهام-الإعلام-القمر
-=tray-moon-tasks	7246	الإعلام-القمر-المهام
-=tray-tasks-moon	fda8	الإعلام-المهام-القمر
-=tray	a12d	منطقة الإعلام
-=tab	2e4c	كبسولة
-=Taskbar moon spin (seconds a turn, off or default)	a763	دوران القمر في شريط المهام (ثوانٍ لكل دورة، أو إيقاف، أو الافتراضي)
-=Taskbar tasks	445b	المهام في شريط المهام
-=Taskbar distance from the edge (pixels)	845c	بعد شريط المهام عن الحافة (بكسل)
-=grouped	8b7d	مجمّعة
-=separate	bb18	منفصلة
-=Resolution	18af	الدقة
-=Primary display	924b	الشاشة الرئيسية
-=Wallpaper of this screen	2c92	خلفية هذه الشاشة
-=Graphics	9fa8	الرسوميات
-=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	أين يرسم Canvas: على GPU أو المعالج. ما تفعله البطاقة الآن تحته

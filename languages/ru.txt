@@ -1,9 +1,9 @@
-@language ru
-@name Русский
-@translated machine
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
+@language ru
+@name Русский
+@translated machine
 action_copy	3664	Копировать
 action_cut	5863	Вырезать
 action_paste	0288	Вставить
@@ -13,21 +13,24 @@ editor_closes_unsaved	fcb8	закрывает, отбрасывая несохр
 editor_encoding_bom	c0d7	UTF-8 с BOM
 editor_find_hint	d17a	Найти
 editor_find_replace_hint	3693	Найти/Заменить на
+editor_hex_status	35a5	Смещение %1$s / %2$s
 editor_indent_spaces	9db9	Пробелы: %d
 editor_indent_tab	d9a7	Таб: %d
 editor_line_hint	f547	Строка
 editor_lock_stale	f9d8	%s остался от прошлого сохранения: удалите его, затем сохраните
+editor_mode_hex	55d5	Hex
+editor_mode_text	134a	Текст
 editor_no_file_name	c863	нет имени файла: запустите редактор с именем
 editor_no_match	7de7	нет совпадений
 editor_not_regular	5955	не обычный файл: отказано
-editor_open_none	63aa	открытия здесь нет: запустите редактор с именем файла
+editor_open_hint	235f	Путь к файлу
 editor_pattern_bad	5d57	шаблон не компилируется
 editor_position	3696	Стр %1$d, Стлб %2$d
 editor_read_failed	5f78	не удалось прочитать файл: он не открыт
 editor_reload_unsaved	85da	перечитывает файл и отбрасывает несохранённые изменения
 editor_replace_usage	c677	замена — НАЙТИ/ЗАМЕНА
 editor_replaced	1128	заменено: %d
-editor_save_as_none	0745	сохранить как здесь нет: Ctrl+S сохраняет файл
+editor_save_as_hint	c955	Сохранить как путь
 editor_save_failed	069d	не удалось сохранить: файл не изменился
 editor_saved	9f44	сохранено
 editor_selected	a686	(выделено: %d)
@@ -35,6 +38,7 @@ editor_selected_carets	7e02	(выделено: %d, курсоры)
 editor_tabs_full	8ed9	все %d вкладок открыты: сначала закройте одну
 editor_unsaved	c014	несохранённые изменения: сохраните их или закройте каждую, дважды нажав Ctrl+W
 editor_untitled	8b58	без имени
+editor_wrap_on	40cd	Перенос
 editor_write_beside	ec75	не удалось записать рядом с файлом
 editor_writes_over_changed	df15	перезапишет изменение на диске (Ctrl+R читает заново)
 editor_writes_over_readonly	e22f	перезапишет файл только для чтения
@@ -184,15 +188,21 @@ launcher_sleep_armed	bb08	перейти в сон
 menu_bin_empty	1538	Очистить корзину
 menu_bin_open	8797	Открыть корзину
 menu_bin_restore	4799	Восстановить
+menu_close_others	ec3e	Закрыть другие вкладки
+menu_close_tab	9753	Закрыть вкладку
 menu_copy	43e0	Копировать
 menu_copy_row	f3c8	Копировать строку
 menu_cut	5c17	Вырезать
 menu_delete	1e3e	Удалить
 menu_find	1fa6	Найти
 menu_go_to_line	bc96	Перейти к строке
+menu_hex_mode	fd1b	Hex-редактор
 menu_new_folder	41cb	&Новая папка
+menu_new_tab	dad5	Новая вкладка
+menu_new_window	2c79	Новое окно
 menu_open	61a5	&Открыть
 menu_open_editor	8ca0	Открыть в &редакторе
+menu_open_file	098c	Открыть файл...
 menu_open_terminal	6d2a	Открыть &терминал здесь
 menu_paste	6854	Вставить
 menu_properties	c780	&Свойства
@@ -200,6 +210,7 @@ menu_redo	ac45	Повторить
 menu_remove	901d	Удалить
 menu_rename	9529	&Переименовать
 menu_reset_zoom	1b0f	Сбросить масштаб
+menu_save_as	e18c	Сохранить как...
 menu_select_all	f6f6	Выделить всё
 menu_set_wallpaper	1a27	Сделать &обоями
 menu_set_wallpaper_of	aa60	Сделать обоями %s
@@ -209,6 +220,7 @@ menu_undo	b9d3	Отменить
 menu_view_details	d3a1	&Таблица
 menu_view_icons	57e8	Крупные &значки
 menu_view_list	4cc5	&Список
+menu_word_wrap	9ab3	Перенос строк
 menu_zoom_in	5bcf	Увеличить
 menu_zoom_out	9234	Уменьшить
 mixer_allow	19d2	Разрешить
@@ -449,6 +461,8 @@ ui_field_full	fe02	больше не помещается
 =A quick shake makes the pointer large for a moment	4d81	Быстрое встряхивание ненадолго увеличивает указатель
 =Accent	ccd7	Акцент
 =Accent colour (rrggbb or reset)	53aa	Цвет акцента (rrggbb или reset)
+=Add a key (label, then the public key)	e2e3	Добавить ключ (метка, затем открытый ключ)
+=Add a program to start (its path)	5e20	Добавить программу в автозапуск (её путь)
 =Airplane mode	3b8a	Режим полёта
 =All commands	4a42	Все команды
 =Allow recording	f7e5	Разрешить запись
@@ -468,6 +482,7 @@ ui_field_full	fe02	больше не помещается
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Загрузка
+=Bowl tier	7b7f	Уровень bowl
 =Brightness	324a	Яркость
 =Build	7543	Сборка
 =Canvas	5091	Canvas
@@ -487,17 +502,18 @@ ui_field_full	fe02	больше не помещается
 =Devices	f320	Устройства
 =Discover now	398a	Обнаружить сейчас
 =Discovery	2db5	Обнаружение
-=Files	1b30	Файлы
-=Install Moonwater	06fc	Установить Moonwater
-=Internal storage	e961	Внутреннее хранилище
-=External devices	5769	Внешние устройства
 =Display	d9b5	Экран
 =Double-click time (ms, or default)	9af1	Время двойного щелчка (мс или default)
 =Drag lists with the mouse	4ee2	Перетаскивать списки мышью
 =Edge swipes	7aaf	Жесты от края
 =Editor	bf98	Редактор
+=End every session	12e1	Завершить все сеансы
+=External devices	5769	Внешние устройства
+=Files	1b30	Файлы
 =GPU rendering (alpha)	e5e6	Отрисовка на GPU (альфа)
 =Gallery	4cdd	Галерея
+=Graphics	9fa8	Графика
+=Host key fingerprint	2398	Отпечаток ключа хоста
 =How fast the pointer follows the mouse	0a45	Как быстро указатель следует за мышью
 =How long it stays large after a shake	82a0	Сколько он остаётся крупным после встряхивания
 =How long to hold a finger to right-click	b301	Сколько держать палец для правого щелчка
@@ -511,6 +527,8 @@ ui_field_full	fe02	больше не помещается
 =Input device (name, or default)	af7b	Устройство ввода (имя или default)
 =Input mute	ad50	Отключить микрофон
 =Input volume (percent, or default)	263f	Громкость микрофона (проценты или default)
+=Install Moonwater	06fc	Установить Moonwater
+=Internal storage	e961	Внутреннее хранилище
 =Internet sharing over Bluetooth	afe8	Общий интернет через Bluetooth
 =Keep a device by its name	9c51	Запомнить устройство по имени
 =Keep the lowest-delay sample	d8b9	Оставлять замер с наименьшей задержкой
@@ -527,7 +545,9 @@ ui_field_full	fe02	больше не помещается
 =Launcher	44b1	Запуск
 =Learned	0c7c	Получено
 =Left edge	9ce5	Левый край
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Пускает ключи из списка по сети; выключенный останавливается и завершает все сеансы
 =Linked machines	0cc2	Связанные компьютеры
+=Listen address (any for every address)	d513	Адрес прослушивания (any для всех)
 =Local addresses	9f2c	Локальные адреса
 =Long press time (ms, or default)	aff4	Время долгого нажатия (мс или default)
 =Machine	be0e	Компьютер
@@ -535,10 +555,6 @@ ui_field_full	fe02	больше не помещается
 =Momentum	cfef	Инерция
 =Motion	7647	Движение
 =Mount kept disks	f0c8	Монтировать сохранённые диски
-=Programs started with the desktop	5b74	Программы, запускаемые с рабочим столом
-=Add a program to start (its path)	5e20	Добавить программу в автозапуск (её путь)
-=Remove a program from the start (its path)	1013	Убрать программу из автозапуска (её путь)
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Открываются в этом порядке при запуске рабочего стола; none запускает его без окон
 =Mouse	9b64	Мышь
 =Mouse acceleration	c400	Ускорение мыши
 =Mouse sensitivity (percent, or default)	8a23	Чувствительность мыши (проценты или default)
@@ -557,6 +573,7 @@ ui_field_full	fe02	больше не помещается
 =Notices	8f06	Уведомления
 =On-screen keyboard	97f8	Экранная клавиатура
 =Open windows where they were last put	8711	Открывать окна там, где их оставили
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Открываются в этом порядке при запуске рабочего стола; none запускает его без окон
 =Output device (name, or default)	d73c	Устройство вывода (имя или default)
 =Pair a machine	b39b	Связать компьютер
 =Paths	263f	Пути
@@ -564,9 +581,12 @@ ui_field_full	fe02	больше не помещается
 =Pointer	4dca	Указатель
 =Pointer squeeze (percent, or default)	bbee	Сжатие указателя (процент или по умолчанию)
 =Pointer squeezes on click	ad88	Указатель сжимается при щелчке
+=Port	3cc6	Порт
 =Power	a5e6	Питание
 =Power profile	8def	Профиль питания
 =Predict touch and pen	e2b7	Предсказывать касание и перо
+=Primary display	924b	Основной экран
+=Programs started with the desktop	5b74	Программы, запускаемые с рабочим столом
 =Proxy	1bfb	Прокси
 =Proxy from the environment	7fa7	Прокси из окружения
 =Public IPv4	0813	Публичный IPv4
@@ -575,16 +595,25 @@ ui_field_full	fe02	больше не помещается
 =Public address discovery (STUN)	7691	Обнаружение публичного адреса (STUN)
 =Refresh rate	bf6e	Частота обновления
 =Remembered devices	abbc	Запомненные устройства
+=Remove a program from the start (its path)	1013	Убрать программу из автозапуска (её путь)
 =Resize border width (pixels, or default)	7fdf	Ширина рамки изменения размера (пикселей или default)
 =Resize grip (pixels, or default)	dddd	Захват для изменения размера (пикселей или default)
+=Resolution	18af	Разрешение
 =Right edge	279a	Правый край
+=Root login	6cd4	Вход для root
+=Root may log in by a key of the list, and by nothing else	a430	Root может войти по ключу из списка и больше никак
 =Rotation	777f	Поворот
 =Rubber band	9c42	Эффект резинки
+=SSH	7b31	SSH
+=SSH server	9b60	SSH-сервер
+=STUN servers (or reset)	4062	Серверы STUN (или reset)
+=STUN time limit (ms, or default)	be40	Тайм-аут STUN (мс или default)
 =Scale of this screen	e4ca	Масштаб этого экрана
 =Screen	c631	Экран
 =Screen modes	85ad	Режимы экрана
 =Scroll speed	e7af	Скорость прокрутки
 =Scrolling	74ec	Прокрутка
+=Server files	5af9	Файлы сервера
 =Servers in order	0a76	Серверы по порядку
 =Set the clock from the network	b2a3	Устанавливать часы по сети
 =Settings	8728	Настройки
@@ -597,19 +626,33 @@ ui_field_full	fe02	больше не помещается
 =Sound	9a34	Звук
 =Sound server	84bf	Звуковой сервер
 =Start the desktop	be4c	Запускать рабочий стол
-=STUN servers (or reset)	4062	Серверы STUN (или reset)
-=STUN time limit (ms, or default)	be40	Тайм-аут STUN (мс или default)
 =System	84bc	Система
 =System notices	fa89	Уведомления системы
 =Taskbar	d759	Панель задач
+=Taskbar battery place	3413	Место батареи на панели задач
+=Taskbar clock bulge (percent)	fa6c	Выпуклость часов на панели задач (проценты)
+=Taskbar clock place	c144	Место часов на панели задач
 =Taskbar display	042b	Экран панели задач
+=Taskbar distance from the edge (pixels)	845c	Отступ панели задач от края (пиксели)
 =Taskbar hides for fullscreen	f2f8	Панель задач скрывается в полноэкранном режиме
 =Taskbar launcher button	dd4d	Кнопка запуска на панели задач
+=Taskbar microphone place	76d8	Место микрофона на панели задач
+=Taskbar moon look	a24d	Вид луны на панели задач
+=Taskbar moon place	6f19	Место луны на панели задач
+=Taskbar moon spin (seconds a turn, off or default)	a763	Вращение луны на панели задач (секунд на оборот, выкл. или по умолчанию)
+=Taskbar newest task side	b5a9	Сторона новейшей задачи на панели задач
+=Taskbar notices place	a793	Место уведомлений на панели задач
+=Taskbar order	ccfd	Порядок на панели задач
 =Taskbar padding (pixels)	a3a0	Отступы панели задач (пиксели)
 =Taskbar pinned programs (or none)	3732	Программы, закреплённые на панели задач (или нет)
 =Taskbar position	81b8	Положение панели задач
 =Taskbar scale (percent)	810b	Масштаб панели задач (проценты)
+=Taskbar sound place	e2a1	Место звука на панели задач
+=Taskbar tasks	445b	Задачи на панели задач
+=Taskbar tasks place	bfd0	Место задач на панели задач
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область уведомлений панели задач (текст с {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Taskbar tray clock place	c2e6	Место часов трея на панели задач
+=Taskbar tray text place	c235	Место текста трея на панели задач
 =Terminal	62d1	Терминал
 =Terminal lines per wheel notch	3800	Строк терминала на щелчок колеса
 =Text size (percent, or default)	51d7	Размер текста (проценты или default)
@@ -625,11 +668,12 @@ ui_field_full	fe02	больше не помещается
 =Theme	7c92	Тема
 =This machine	3790	Этот компьютер
 =Time	e404	Время
+=Time limit (minutes, or off)	d2cf	Ограничение времени (минуты или off)
 =Time server (auto for the pool)	67e5	Сервер времени (auto для пула)
 =Time zone	741a	Часовой пояс
 =Touch	fb78	Касание
-=Trace time limit (seconds, or default)	28d4	Тайм-аут трассировки (секунды или default)
 =Trace URL (or default)	be36	URL трассировки (или default)
+=Trace time limit (seconds, or default)	28d4	Тайм-аут трассировки (секунды или default)
 =Turned by the screen	ea45	Поворачивает экран
 =Turned left	507c	Повёрнут влево
 =Turned right	7a49	Повёрнут вправо
@@ -637,18 +681,27 @@ ui_field_full	fe02	больше не помещается
 =Upside down	9dc1	Перевёрнут
 =Variable refresh rate	06a4	Переменная частота обновления
 =Volume (percent, or default)	f6e3	Громкость (проценты или default)
+=Wallpaper	0da9	Обои
+=Wallpaper glow	57c6	Свечение обоев
+=Wallpaper in the dark theme	a6dc	Обои в тёмной теме
+=Wallpaper of this screen	2c92	Обои этого экрана
+=Wallpaper picture (a PNG file, or none)	8e9d	Картинка обоев (файл PNG или нет)
+=Wallpaper seas (percent grey)	6836	Моря на обоях (процент серого)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Что делает жест от этого края
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Где рисует Canvas: на GPU или на процессоре. Что делает карта сейчас — ниже
 =White edged in black, or the reverse	cd63	Белый с чёрной каймой или наоборот
 =Wi-Fi	0ec1	Wi-Fi
 =Wi-Fi IP address	9026	IP-адрес Wi-Fi
 =Wired	9a54	Проводная сеть
 =Wired IP address	0e25	IP-адрес проводной сети
+=after	7dc9	после
 =all	4bc4	все
 =allow	a832	разрешить
 =amber	bec0	янтарный
 =auto	a396	авто
 =balanced	b71d	сбалансированный
+=before	ff3e	перед
 =black	4ba4	чёрный
 =blue	f5cd	синий
 =bottom	6b2a	внизу
@@ -660,16 +713,23 @@ ui_field_full	fe02	больше не помещается
 =default	5bde	по умолчанию
 =deny	6367	запретить
 =desktop	87b3	рабочий стол
+=dimmed	bded	приглушённые
 =dmy	2a79	dmy
 =dynamic	96ae	динамический
 =edge	d83c	край
+=end	75aa	конец
 =fast	02af	быстро
 =forest	2a60	лесной
 =full	b33c	полное
 =games	2b9c	игры
+=glow	27bc	свечение
+=glow-and-edges	540f	свечение-и-края
 =graphite	dc8d	графитовый
 =green	ecbc	зелёный
+=grouped	8b7d	вместе
 =high	b9fd	высоко
+=ink	8faf	тушь
+=inverted	8038	инвертированные
 =kernel log	415a	журнал ядра
 =kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg сообщения
 =launcher	8391	запуск
@@ -681,6 +741,9 @@ ui_field_full	fe02	больше не помещается
 =mdy	3697	mdy
 =midnight-blue	4008	полуночно-синий
 =modem	67ed	модем
+=moon	ae40	луна
+=moon-tasks-tray	6c42	луна-задачи-трей
+=moon-tray-tasks	c2c4	луна-трей-задачи
 =network	86c5	сеть
 =none	afdb	Нет
 =normal	9c52	нормально
@@ -690,20 +753,32 @@ ui_field_full	fe02	больше не помещается
 =per second	4f98	в секунду
 =percent	fa5a	проценты
 =performance	8ca5	производительность
+=picture	d389	картинка
+=plain	3f67	простые
 =plum	b06b	сливовый
 =powersave	2283	экономия энергии
 =primary	5fd9	основной
+=realistic	b65f	реалистичная
 =reduced	5839	уменьшенное
 =right	2de5	справа
 =rose	1806	розовый
+=separate	bb18	раздельно
 =settings preferences options	8c78	настройки параметры опции
 =slate	deee	сланцевый
 =slow	42b8	медленно
+=split	2de3	разделены
+=start	04df	начало
+=tab	2e4c	плашка
+=tasks-moon-tray	c6a4	задачи-луна-трей
+=tasks-tray-moon	4f46	задачи-трей-луна
 =tcp	ba90	tcp
 =terminal shell console	eaba	терминал консоль оболочка
 =thick	964e	толстый
 =thin	b172	тонкий
 =top	dc3c	вверху
+=tray	a12d	трей
+=tray-moon-tasks	7246	трей-луна-задачи
+=tray-tasks-moon	fda8	трей-задачи-луна
 =unlock	1f55	разблокировать
 =violet	57f2	фиолетовый
 =volume	698f	громкость
@@ -712,66 +787,3 @@ ui_field_full	fe02	больше не помещается
 =windows	26ea	окна
 =wired	bfb4	проводная
 =ymd	faad	ymd
-=SSH	7b31	SSH
-=SSH server	9b60	SSH-сервер
-=Root login	6cd4	Вход для root
-=Port	3cc6	Порт
-=Listen address (any for every address)	d513	Адрес прослушивания (any для всех)
-=Time limit (minutes, or off)	d2cf	Ограничение времени (минуты или off)
-=Host key fingerprint	2398	Отпечаток ключа хоста
-=Server files	5af9	Файлы сервера
-=Bowl tier	7b7f	Уровень bowl
-=Add a key (label, then the public key)	e2e3	Добавить ключ (метка, затем открытый ключ)
-=End every session	12e1	Завершить все сеансы
-=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Пускает ключи из списка по сети; выключенный останавливается и завершает все сеансы
-=Root may log in by a key of the list, and by nothing else	a430	Root может войти по ключу из списка и больше никак
-=Wallpaper	0da9	Обои
-=Wallpaper picture (a PNG file, or none)	8e9d	Картинка обоев (файл PNG или нет)
-=Wallpaper in the dark theme	a6dc	Обои в тёмной теме
-=Wallpaper seas (percent grey)	6836	Моря на обоях (процент серого)
-=Wallpaper glow	57c6	Свечение обоев
-=Taskbar moon place	6f19	Место луны на панели задач
-=Taskbar moon look	a24d	Вид луны на панели задач
-=Taskbar tasks place	bfd0	Место задач на панели задач
-=Taskbar newest task side	b5a9	Сторона новейшей задачи на панели задач
-=Taskbar notices place	a793	Место уведомлений на панели задач
-=Taskbar microphone place	76d8	Место микрофона на панели задач
-=Taskbar sound place	e2a1	Место звука на панели задач
-=Taskbar battery place	3413	Место батареи на панели задач
-=Taskbar tray text place	c235	Место текста трея на панели задач
-=Taskbar tray clock place	c2e6	Место часов трея на панели задач
-=Taskbar order	ccfd	Порядок на панели задач
-=Taskbar clock place	c144	Место часов на панели задач
-=Taskbar clock bulge (percent)	fa6c	Выпуклость часов на панели задач (проценты)
-=moon	ae40	луна
-=plain	3f67	простые
-=picture	d389	картинка
-=dimmed	bded	приглушённые
-=inverted	8038	инвертированные
-=glow	27bc	свечение
-=glow-and-edges	540f	свечение-и-края
-=start	04df	начало
-=end	75aa	конец
-=realistic	b65f	реалистичная
-=ink	8faf	тушь
-=split	2de3	разделены
-=before	ff3e	перед
-=after	7dc9	после
-=moon-tasks-tray	6c42	луна-задачи-трей
-=moon-tray-tasks	c2c4	луна-трей-задачи
-=tasks-moon-tray	c6a4	задачи-луна-трей
-=tasks-tray-moon	4f46	задачи-трей-луна
-=tray-moon-tasks	7246	трей-луна-задачи
-=tray-tasks-moon	fda8	трей-задачи-луна
-=tray	a12d	трей
-=tab	2e4c	плашка
-=Taskbar moon spin (seconds a turn, off or default)	a763	Вращение луны на панели задач (секунд на оборот, выкл. или по умолчанию)
-=Taskbar tasks	445b	Задачи на панели задач
-=Taskbar distance from the edge (pixels)	845c	Отступ панели задач от края (пиксели)
-=grouped	8b7d	вместе
-=separate	bb18	раздельно
-=Resolution	18af	Разрешение
-=Primary display	924b	Основной экран
-=Wallpaper of this screen	2c92	Обои этого экрана
-=Graphics	9fa8	Графика
-=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Где рисует Canvas: на GPU или на процессоре. Что делает карта сейчас — ниже

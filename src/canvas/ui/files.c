@@ -2078,7 +2078,9 @@ static fn files_moved(void)
         files.dirty = true;
 }
 
-// Into the entry at a place, if it is a folder and is still the one listed. One that is not what was listed has the folder read again.
+static fn files_open_with(b32 editor);
+
+// Into the entry at a place if it is a folder, or open regular files in the editor by default.
 static fn files_open(p32 place)
 {
         struct files_model address_to m = &files.big->model;
@@ -2087,6 +2089,12 @@ static fn files_open(p32 place)
 
         if (!entry)
                 return;
+        if (entry->kind == FILES_KIND_FILE)
+        {
+                m->cursor = place;
+                files_open_with(true);
+                return;
+        }
         came = files_model_enter(m, place);
         if (came == FILES_SAME)
         {

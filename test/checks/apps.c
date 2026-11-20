@@ -8880,6 +8880,105 @@ static fn editor_tabs_check(struct ui address_to wui)
         editor.tab = 2;
         editor_close_tab();
         check("editor tabs: the tab a close shows has the caret", editor.count == 2 && editor.tab == 1 && editor_now()->view.focused);
+
+        // Stable 4-digit line-number gutter: growing from 1 line to 120 lines never shifts the content left edge.
+        {
+                unsigned int pixels[600 * 300];
+                int left1, left10, left120;
+                static struct ui_text tv;
+
+                ui_text_open(&tv, UI_TEXT_CODE, (const p8 address_to) "line 1\n", 7, ui_text_keymap());
+                ui_begin(wui, pixels, 600, 600, 300);
+                ui_text_draw(wui, &tv, 0, 0, 600, 300, 0x111113);
+                left1 = tv.left;
+                for (int k = 0; k < 12; k++)
+                        doc_type(&tv.doc, (const p8 address_to) "a\n", 2);
+                ui_text_draw(wui, &tv, 0, 0, 600, 300, 0x111113);
+                left10 = tv.left;
+                for (int k = 0; k < 110; k++)
+                        doc_type(&tv.doc, (const p8 address_to) "b\n", 2);
+                ui_text_draw(wui, &tv, 0, 0, 600, 300, 0x111113);
+                left120 = tv.left;
+                check("editor gutter: line numbers reserve at least 4 digits so adding lines 1..120 never shifts content",
+                      left1 > 0 && left1 == left10 && left1 == left120);
+
+                // Word wrap: visual Down moves across wrapped rows of a single long line, and matching bracket highlights pair.
+                ui_text_close(&tv);
+                ui_text_open(&tv, UI_TEXT_CODE, (const p8 address_to) "(alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau)\n", 100, ui_text_keymap());
+                tv.focused = true;
+                ui_text_command(wui, &tv, DOC_CMD_WRAP);
+                ui_text_draw(wui, &tv, 0, 0, 260, 200, 0x111113);
+                {
+                        p64 before_at, after_down, after_up;
+                        b32 bracket_ok = tv.bracket_a == 0 && tv.bracket_b == 98;
+
+                        doc_select_set(&tv.doc, 2, 2);
+                        before_at = tv.doc.selections[0].active;
+                        ui_text_command(wui, &tv, DOC_CMD_DOWN);
+                        after_down = tv.doc.selections[0].active;
+                        ui_text_command(wui, &tv, DOC_CMD_UP);
+                        after_up = tv.doc.selections[0].active;
+                        check("editor polish: word wrap steps visually across wrapped rows and highlights matching brackets",
+                              tv.wrap && bracket_ok && after_down > before_at && after_down < 98 && after_up == before_at);
+                }
+
+                // Hex editor mode: toggle, hex nibble overwrite, ASCII edit, Tab pane switch, undo/redo, and tiny-box clipping.
+                ui_text_command(wui, &tv, DOC_CMD_HEX);
+                doc_select_set(&tv.doc, 0, 0);
+                ui_text_key(wui, &tv, &(struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, '4'});
+                ui_text_key(wui, &tv, &(struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, '1'}); // 0x41 = 'A'
+                ui_text_key(wui, &tv, &(struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 15, '\t'}); // Tab -> ASCII pane
+                ui_text_key(wui, &tv, &(struct window_event){WINDOW_EVENT_KEY, WINDOW_KEY_DOWN, 0, 'Z'});  // byte 1 = 'Z'
+                {
+                        p8 head[2] = {0, 0}, undone[2] = {0, 0};
+                        b32 hex_ok;
+
+                        doc_read(&tv.doc, 0, head, 2);
+                        ui_text_command(wui, &tv, DOC_CMD_UNDO);
+                        ui_text_command(wui, &tv, DOC_CMD_UNDO);
+                        ui_text_command(wui, &tv, DOC_CMD_UNDO);
+                        doc_read(&tv.doc, 0, undone, 2);
+                        ui_text_draw(wui, &tv, 0, 0, 600, 300, 0x111113);
+                        ui_text_draw(wui, &tv, 0, 0, 1, 300, 0x111113);
+                        hex_ok = tv.hex && tv.hex_ascii && head[0] == 'A' && head[1] == 'Z' && undone[0] == '(' && undone[1] == 'a';
+                        check("editor hex: nibble editing, ASCII pane Tab switching, undo/redo, and drawing work over struct doc", hex_ok);
+                }
+                ui_text_close(&tv);
+
+                // Closable + addable file tabs: '+' opens a new tab, 'x' closes a tab, middle-click closes a tab, binary auto-opens hex.
+                {
+                        char bin_path[96];
+                        int ax, ay, cx, cy, count_after_add, count_after_close;
+
+                        editor.width = 600, editor.height = 300, editor.own.stride = 600;
+                        editor.count = 0;
+                        ui_kit_held = null;
+                        editor_open(null);
+                        editor_draw(pixels);
+                        ax = ui_dev(&editor.ui, ui_tabs_add_left(&editor.ui, &editor.strip) + UI_TAB_ADD_W / 2);
+                        ay = ui_dev(&editor.ui, editor.strip.y + UI_TABS_H / 2);
+                        ui_event_context(&(struct window_event){WINDOW_EVENT_MOTION, 0, ax, ay});
+                        editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0});
+                        editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, 0, 0x110, 0});
+                        count_after_add = editor.count;
+                        editor_draw(pixels);
+                        cx = ui_dev(&editor.ui, ui_tab_close_left(&editor.ui, &editor.strip, 1) + UI_TAB_CLOSE_W / 2);
+                        ui_event_context(&(struct window_event){WINDOW_EVENT_MOTION, 0, cx, ay});
+                        editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN, 0x110, 0});
+                        editor_event(&(struct window_event){WINDOW_EVENT_BUTTON, 0, 0x110, 0});
+                        count_after_close = editor.count;
+                        check("editor tabs: tab bar is always visible with '+' to open and 'x' to close tabs",
+                              count_after_add == 2 && count_after_close == 1);
+
+                        string_copy(string_copy((string_address)bin_path, (string_address)dir) + string_length((string_address)dir), (string_address) "/blob.bin");
+                        handle = system_open_at_mode(AT_FDCWD, (string_address)bin_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0640);
+                        system_write_all((b32)handle, "\x7f""ELF\x00\x01\x02\x03", 8);
+                        system_close(handle);
+                        check("editor hex: opening a binary file with NUL bytes automatically enables hex editor mode",
+                              editor_open((string_address)bin_path) && editor_now()->view.hex);
+                        system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)bin_path, 0);
+                }
+        }
         editor.count = 0;
         editor_open(null);
         system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)one, 0);

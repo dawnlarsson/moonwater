@@ -10,21 +10,24 @@ editor_closes_unsaved	fcb8	closes the unsaved changes
 editor_encoding_bom	c0d7	UTF-8 with BOM
 editor_find_hint	d17a	Find
 editor_find_replace_hint	3693	Find/Replace with
+editor_hex_status	35a5	Offset %1$s / %2$s
 editor_indent_spaces	9db9	Spaces: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Line
 editor_lock_stale	f9d8	%s is left by an earlier save: remove it, then save
+editor_mode_hex	55d5	Hex
+editor_mode_text	134a	Text
 editor_no_file_name	c863	no file name: start the editor with one
 editor_no_match	7de7	no match
 editor_not_regular	5955	not a regular file: refused
-editor_open_none	63aa	open is not here: start the editor with the file's name
+editor_open_hint	235f	Open file path
 editor_pattern_bad	5d57	the pattern does not compile
 editor_position	3696	Ln %1$d, Col %2$d
 editor_read_failed	5f78	the file could not be read: it is not opened
 editor_reload_unsaved	85da	reads the file again and drops the unsaved changes
 editor_replace_usage	c677	replace is FIND/REPLACEMENT
 editor_replaced	1128	%d replaced
-editor_save_as_none	0745	save as is not here: Ctrl+S saves the file
+editor_save_as_hint	c955	Save as path
 editor_save_failed	069d	the save failed: the file is as it was
 editor_saved	9f44	saved
 editor_selected	a686	(%d selected)
@@ -32,6 +35,7 @@ editor_selected_carets	7e02	(%d selected, carets)
 editor_tabs_full	8ed9	all %d tabs are open: close one first
 editor_unsaved	c014	unsaved changes: save them, or close each with Ctrl+W twice
 editor_untitled	8b58	untitled
+editor_wrap_on	40cd	Wrap
 editor_write_beside	ec75	could not write beside the file
 editor_writes_over_changed	df15	writes over the change on disk (Ctrl+R reads it again)
 editor_writes_over_readonly	e22f	writes over a read-only file
@@ -181,15 +185,21 @@ launcher_sleep_armed	bb08	sleep
 menu_bin_empty	1538	Empty the bin
 menu_bin_open	8797	Open the bin
 menu_bin_restore	4799	Put back
+menu_close_others	ec3e	Close Other Tabs
+menu_close_tab	9753	Close Tab
 menu_copy	43e0	&Copy
 menu_copy_row	f3c8	Copy row
 menu_cut	5c17	Cu&t
 menu_delete	1e3e	&Delete
 menu_find	1fa6	&Find
 menu_go_to_line	bc96	&Go to Line
+menu_hex_mode	fd1b	Hex Editor
 menu_new_folder	41cb	&New Folder
+menu_new_tab	dad5	New Tab
+menu_new_window	2c79	New Window
 menu_open	61a5	&Open
 menu_open_editor	8ca0	Open in the &Editor
+menu_open_file	098c	Open File...
 menu_open_terminal	6d2a	Open a &Terminal Here
 menu_paste	6854	&Paste
 menu_properties	c780	P&roperties
@@ -197,6 +207,7 @@ menu_redo	ac45	&Redo
 menu_remove	901d	Remove
 menu_rename	9529	Re&name
 menu_reset_zoom	1b0f	&Reset Zoom
+menu_save_as	e18c	Save As...
 menu_select_all	f6f6	Select &All
 menu_set_wallpaper	1a27	Set as &Wallpaper
 menu_set_wallpaper_of	aa60	Set as Wallpaper of %s
@@ -206,6 +217,7 @@ menu_undo	b9d3	&Undo
 menu_view_details	d3a1	&Details
 menu_view_icons	57e8	Large &Icons
 menu_view_list	4cc5	&List
+menu_word_wrap	9ab3	Word Wrap
 menu_zoom_in	5bcf	Zoom &In
 menu_zoom_out	9234	Zoom &Out
 mixer_allow	19d2	Allow
@@ -446,6 +458,8 @@ ui_field_full	fe02	that is as much as it holds
 =A quick shake makes the pointer large for a moment	4d81	A quick shake makes the pointer large for a moment
 =Accent	ccd7	Accent
 =Accent colour (rrggbb or reset)	53aa	Accent colour (rrggbb or reset)
+=Add a key (label, then the public key)	e2e3	Add a key (label, then the public key)
+=Add a program to start (its path)	5e20	Add a program to start (its path)
 =Airplane mode	3b8a	Airplane mode
 =All commands	4a42	All commands
 =Allow recording	f7e5	Allow recording
@@ -465,6 +479,7 @@ ui_field_full	fe02	that is as much as it holds
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Boot
+=Bowl tier	7b7f	Bowl tier
 =Brightness	324a	Brightness
 =Build	7543	Build
 =Canvas	5091	Canvas
@@ -484,17 +499,18 @@ ui_field_full	fe02	that is as much as it holds
 =Devices	f320	Devices
 =Discover now	398a	Discover now
 =Discovery	2db5	Discovery
-=Files	1b30	Files
-=Install Moonwater	06fc	Install Moonwater
-=Internal storage	e961	Internal storage
-=External devices	5769	External devices
 =Display	d9b5	Display
 =Double-click time (ms, or default)	9af1	Double-click time (ms, or default)
 =Drag lists with the mouse	4ee2	Drag lists with the mouse
 =Edge swipes	7aaf	Edge swipes
 =Editor	bf98	Editor
+=End every session	12e1	End every session
+=External devices	5769	External devices
+=Files	1b30	Files
 =GPU rendering (alpha)	e5e6	GPU rendering (alpha)
 =Gallery	4cdd	Gallery
+=Graphics	9fa8	Graphics
+=Host key fingerprint	2398	Host key fingerprint
 =How fast the pointer follows the mouse	0a45	How fast the pointer follows the mouse
 =How long it stays large after a shake	82a0	How long it stays large after a shake
 =How long to hold a finger to right-click	b301	How long to hold a finger to right-click
@@ -508,6 +524,8 @@ ui_field_full	fe02	that is as much as it holds
 =Input device (name, or default)	af7b	Input device (name, or default)
 =Input mute	ad50	Input mute
 =Input volume (percent, or default)	263f	Input volume (percent, or default)
+=Install Moonwater	06fc	Install Moonwater
+=Internal storage	e961	Internal storage
 =Internet sharing over Bluetooth	afe8	Internet sharing over Bluetooth
 =Keep a device by its name	9c51	Keep a device by its name
 =Keep the lowest-delay sample	d8b9	Keep the lowest-delay sample
@@ -524,7 +542,9 @@ ui_field_full	fe02	that is as much as it holds
 =Launcher	44b1	Launcher
 =Learned	0c7c	Learned
 =Left edge	9ce5	Left edge
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Lets the keys of the list log in over the network; off stops it and ends every session
 =Linked machines	0cc2	Linked machines
+=Listen address (any for every address)	d513	Listen address (any for every address)
 =Local addresses	9f2c	Local addresses
 =Long press time (ms, or default)	aff4	Long press time (ms, or default)
 =Machine	be0e	Machine
@@ -532,10 +552,6 @@ ui_field_full	fe02	that is as much as it holds
 =Momentum	cfef	Momentum
 =Motion	7647	Motion
 =Mount kept disks	f0c8	Mount kept disks
-=Programs started with the desktop	5b74	Programs started with the desktop
-=Add a program to start (its path)	5e20	Add a program to start (its path)
-=Remove a program from the start (its path)	1013	Remove a program from the start (its path)
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Opened in this order when the desktop starts; none starts it with no windows
 =Mouse	9b64	Mouse
 =Mouse acceleration	c400	Mouse acceleration
 =Mouse sensitivity (percent, or default)	8a23	Mouse sensitivity (percent, or default)
@@ -554,6 +570,7 @@ ui_field_full	fe02	that is as much as it holds
 =Notices	8f06	Notices
 =On-screen keyboard	97f8	On-screen keyboard
 =Open windows where they were last put	8711	Open windows where they were last put
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Opened in this order when the desktop starts; none starts it with no windows
 =Output device (name, or default)	d73c	Output device (name, or default)
 =Pair a machine	b39b	Pair a machine
 =Paths	263f	Paths
@@ -561,9 +578,12 @@ ui_field_full	fe02	that is as much as it holds
 =Pointer	4dca	Pointer
 =Pointer squeeze (percent, or default)	bbee	Pointer squeeze (percent, or default)
 =Pointer squeezes on click	ad88	Pointer squeezes on click
+=Port	3cc6	Port
 =Power	a5e6	Power
 =Power profile	8def	Power profile
 =Predict touch and pen	e2b7	Predict touch and pen
+=Primary display	924b	Primary display
+=Programs started with the desktop	5b74	Programs started with the desktop
 =Proxy	1bfb	Proxy
 =Proxy from the environment	7fa7	Proxy from the environment
 =Public IPv4	0813	Public IPv4
@@ -572,16 +592,25 @@ ui_field_full	fe02	that is as much as it holds
 =Public address discovery (STUN)	7691	Public address discovery (STUN)
 =Refresh rate	bf6e	Refresh rate
 =Remembered devices	abbc	Remembered devices
+=Remove a program from the start (its path)	1013	Remove a program from the start (its path)
 =Resize border width (pixels, or default)	7fdf	Resize border width (pixels, or default)
 =Resize grip (pixels, or default)	dddd	Resize grip (pixels, or default)
+=Resolution	18af	Resolution
 =Right edge	279a	Right edge
+=Root login	6cd4	Root login
+=Root may log in by a key of the list, and by nothing else	a430	Root may log in by a key of the list, and by nothing else
 =Rotation	777f	Rotation
 =Rubber band	9c42	Rubber band
+=SSH	7b31	SSH
+=SSH server	9b60	SSH server
+=STUN servers (or reset)	4062	STUN servers (or reset)
+=STUN time limit (ms, or default)	be40	STUN time limit (ms, or default)
 =Scale of this screen	e4ca	Scale of this screen
 =Screen	c631	Screen
 =Screen modes	85ad	Screen modes
 =Scroll speed	e7af	Scroll speed
 =Scrolling	74ec	Scrolling
+=Server files	5af9	Server files
 =Servers in order	0a76	Servers in order
 =Set the clock from the network	b2a3	Set the clock from the network
 =Settings	8728	Settings
@@ -594,19 +623,33 @@ ui_field_full	fe02	that is as much as it holds
 =Sound	9a34	Sound
 =Sound server	84bf	Sound server
 =Start the desktop	be4c	Start the desktop
-=STUN servers (or reset)	4062	STUN servers (or reset)
-=STUN time limit (ms, or default)	be40	STUN time limit (ms, or default)
 =System	84bc	System
 =System notices	fa89	System notices
 =Taskbar	d759	Taskbar
+=Taskbar battery place	3413	Taskbar battery place
+=Taskbar clock bulge (percent)	fa6c	Taskbar clock bulge (percent)
+=Taskbar clock place	c144	Taskbar clock place
 =Taskbar display	042b	Taskbar display
+=Taskbar distance from the edge (pixels)	845c	Taskbar distance from the edge (pixels)
 =Taskbar hides for fullscreen	f2f8	Taskbar hides for fullscreen
 =Taskbar launcher button	dd4d	Taskbar launcher button
+=Taskbar microphone place	76d8	Taskbar microphone place
+=Taskbar moon look	a24d	Taskbar moon look
+=Taskbar moon place	6f19	Taskbar moon place
+=Taskbar moon spin (seconds a turn, off or default)	a763	Taskbar moon spin (seconds a turn, off or default)
+=Taskbar newest task side	b5a9	Taskbar newest task side
+=Taskbar notices place	a793	Taskbar notices place
+=Taskbar order	ccfd	Taskbar order
 =Taskbar padding (pixels)	a3a0	Taskbar padding (pixels)
 =Taskbar pinned programs (or none)	3732	Taskbar pinned programs (or none)
 =Taskbar position	81b8	Taskbar position
 =Taskbar scale (percent)	810b	Taskbar scale (percent)
+=Taskbar sound place	e2a1	Taskbar sound place
+=Taskbar tasks	445b	Taskbar tasks
+=Taskbar tasks place	bfd0	Taskbar tasks place
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Taskbar tray clock place	c2e6	Taskbar tray clock place
+=Taskbar tray text place	c235	Taskbar tray text place
 =Terminal	62d1	Terminal
 =Terminal lines per wheel notch	3800	Terminal lines per wheel notch
 =Text size (percent, or default)	51d7	Text size (percent, or default)
@@ -622,11 +665,12 @@ ui_field_full	fe02	that is as much as it holds
 =Theme	7c92	Theme
 =This machine	3790	This machine
 =Time	e404	Time
+=Time limit (minutes, or off)	d2cf	Time limit (minutes, or off)
 =Time server (auto for the pool)	67e5	Time server (auto for the pool)
 =Time zone	741a	Time zone
 =Touch	fb78	Touch
-=Trace time limit (seconds, or default)	28d4	Trace time limit (seconds, or default)
 =Trace URL (or default)	be36	Trace URL (or default)
+=Trace time limit (seconds, or default)	28d4	Trace time limit (seconds, or default)
 =Turned by the screen	ea45	Turned by the screen
 =Turned left	507c	Turned left
 =Turned right	7a49	Turned right
@@ -634,18 +678,27 @@ ui_field_full	fe02	that is as much as it holds
 =Upside down	9dc1	Upside down
 =Variable refresh rate	06a4	Variable refresh rate
 =Volume (percent, or default)	f6e3	Volume (percent, or default)
+=Wallpaper	0da9	Wallpaper
+=Wallpaper glow	57c6	Wallpaper glow
+=Wallpaper in the dark theme	a6dc	Wallpaper in the dark theme
+=Wallpaper of this screen	2c92	Wallpaper of this screen
+=Wallpaper picture (a PNG file, or none)	8e9d	Wallpaper picture (a PNG file, or none)
+=Wallpaper seas (percent grey)	6836	Wallpaper seas (percent grey)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	What a swipe in from this edge does
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Where Canvas draws: on the GPU, or the processor. What the card does now is under it
 =White edged in black, or the reverse	cd63	White edged in black, or the reverse
 =Wi-Fi	0ec1	Wi-Fi
 =Wi-Fi IP address	9026	Wi-Fi IP address
 =Wired	9a54	Wired
 =Wired IP address	0e25	Wired IP address
+=after	7dc9	after
 =all	4bc4	all
 =allow	a832	allow
 =amber	bec0	amber
 =auto	a396	auto
 =balanced	b71d	balanced
+=before	ff3e	before
 =black	4ba4	black
 =blue	f5cd	blue
 =bottom	6b2a	bottom
@@ -657,16 +710,23 @@ ui_field_full	fe02	that is as much as it holds
 =default	5bde	default
 =deny	6367	deny
 =desktop	87b3	desktop
+=dimmed	bded	dimmed
 =dmy	2a79	dmy
 =dynamic	96ae	dynamic
 =edge	d83c	edge
+=end	75aa	end
 =fast	02af	fast
 =forest	2a60	forest
 =full	b33c	full
 =games	2b9c	games
+=glow	27bc	glow
+=glow-and-edges	540f	glow-and-edges
 =graphite	dc8d	graphite
 =green	ecbc	green
+=grouped	8b7d	grouped
 =high	b9fd	high
+=ink	8faf	ink
+=inverted	8038	inverted
 =kernel log	415a	kernel log
 =kernel log klog dmesg messages	1a8d	kernel log klog dmesg messages
 =launcher	8391	launcher
@@ -678,6 +738,9 @@ ui_field_full	fe02	that is as much as it holds
 =mdy	3697	mdy
 =midnight-blue	4008	midnight-blue
 =modem	67ed	modem
+=moon	ae40	moon
+=moon-tasks-tray	6c42	moon-tasks-tray
+=moon-tray-tasks	c2c4	moon-tray-tasks
 =network	86c5	network
 =none	afdb	none
 =normal	9c52	normal
@@ -687,20 +750,32 @@ ui_field_full	fe02	that is as much as it holds
 =per second	4f98	per second
 =percent	fa5a	percent
 =performance	8ca5	performance
+=picture	d389	picture
+=plain	3f67	plain
 =plum	b06b	plum
 =powersave	2283	powersave
 =primary	5fd9	primary
+=realistic	b65f	realistic
 =reduced	5839	reduced
 =right	2de5	right
 =rose	1806	rose
+=separate	bb18	separate
 =settings preferences options	8c78	settings preferences options
 =slate	deee	slate
 =slow	42b8	slow
+=split	2de3	split
+=start	04df	start
+=tab	2e4c	tab
+=tasks-moon-tray	c6a4	tasks-moon-tray
+=tasks-tray-moon	4f46	tasks-tray-moon
 =tcp	ba90	tcp
 =terminal shell console	eaba	terminal shell console
 =thick	964e	thick
 =thin	b172	thin
 =top	dc3c	top
+=tray	a12d	tray
+=tray-moon-tasks	7246	tray-moon-tasks
+=tray-tasks-moon	fda8	tray-tasks-moon
 =unlock	1f55	unlock
 =violet	57f2	violet
 =volume	698f	volume
@@ -709,66 +784,3 @@ ui_field_full	fe02	that is as much as it holds
 =windows	26ea	windows
 =wired	bfb4	wired
 =ymd	faad	ymd
-=SSH	7b31	SSH
-=SSH server	9b60	SSH server
-=Root login	6cd4	Root login
-=Port	3cc6	Port
-=Listen address (any for every address)	d513	Listen address (any for every address)
-=Time limit (minutes, or off)	d2cf	Time limit (minutes, or off)
-=Host key fingerprint	2398	Host key fingerprint
-=Server files	5af9	Server files
-=Bowl tier	7b7f	Bowl tier
-=Add a key (label, then the public key)	e2e3	Add a key (label, then the public key)
-=End every session	12e1	End every session
-=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Lets the keys of the list log in over the network; off stops it and ends every session
-=Root may log in by a key of the list, and by nothing else	a430	Root may log in by a key of the list, and by nothing else
-=Wallpaper	0da9	Wallpaper
-=Wallpaper picture (a PNG file, or none)	8e9d	Wallpaper picture (a PNG file, or none)
-=Wallpaper in the dark theme	a6dc	Wallpaper in the dark theme
-=Wallpaper seas (percent grey)	6836	Wallpaper seas (percent grey)
-=Wallpaper glow	57c6	Wallpaper glow
-=Taskbar moon place	6f19	Taskbar moon place
-=Taskbar moon look	a24d	Taskbar moon look
-=Taskbar tasks place	bfd0	Taskbar tasks place
-=Taskbar newest task side	b5a9	Taskbar newest task side
-=Taskbar notices place	a793	Taskbar notices place
-=Taskbar microphone place	76d8	Taskbar microphone place
-=Taskbar sound place	e2a1	Taskbar sound place
-=Taskbar battery place	3413	Taskbar battery place
-=Taskbar tray text place	c235	Taskbar tray text place
-=Taskbar tray clock place	c2e6	Taskbar tray clock place
-=Taskbar order	ccfd	Taskbar order
-=Taskbar clock place	c144	Taskbar clock place
-=Taskbar clock bulge (percent)	fa6c	Taskbar clock bulge (percent)
-=moon	ae40	moon
-=plain	3f67	plain
-=picture	d389	picture
-=dimmed	bded	dimmed
-=inverted	8038	inverted
-=glow	27bc	glow
-=glow-and-edges	540f	glow-and-edges
-=start	04df	start
-=end	75aa	end
-=realistic	b65f	realistic
-=ink	8faf	ink
-=split	2de3	split
-=before	ff3e	before
-=after	7dc9	after
-=moon-tasks-tray	6c42	moon-tasks-tray
-=moon-tray-tasks	c2c4	moon-tray-tasks
-=tasks-moon-tray	c6a4	tasks-moon-tray
-=tasks-tray-moon	4f46	tasks-tray-moon
-=tray-moon-tasks	7246	tray-moon-tasks
-=tray-tasks-moon	fda8	tray-tasks-moon
-=tray	a12d	tray
-=tab	2e4c	tab
-=Taskbar moon spin (seconds a turn, off or default)	a763	Taskbar moon spin (seconds a turn, off or default)
-=Taskbar tasks	445b	Taskbar tasks
-=Taskbar distance from the edge (pixels)	845c	Taskbar distance from the edge (pixels)
-=grouped	8b7d	grouped
-=separate	bb18	separate
-=Resolution	18af	Resolution
-=Primary display	924b	Primary display
-=Wallpaper of this screen	2c92	Wallpaper of this screen
-=Graphics	9fa8	Graphics
-=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Where Canvas draws: on the GPU, or the processor. What the card does now is under it

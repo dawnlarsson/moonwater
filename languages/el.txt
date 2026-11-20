@@ -1,9 +1,9 @@
-@language el
-@name Ελληνικά
-@translated machine
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
+@language el
+@name Ελληνικά
+@translated machine
 action_copy	3664	Αντιγραφή
 action_cut	5863	Αποκοπή
 action_paste	0288	Επικόλληση
@@ -13,21 +13,24 @@ editor_closes_unsaved	fcb8	κλείνει και απορρίπτει τις μ�
 editor_encoding_bom	c0d7	UTF-8 με BOM
 editor_find_hint	d17a	Εύρεση
 editor_find_replace_hint	3693	Εύρεση/Αντικατάσταση με
+editor_hex_status	35a5	Θέση %1$s / %2$s
 editor_indent_spaces	9db9	Κενά: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	Γραμμή
 editor_lock_stale	f9d8	το %s έμεινε από μια προηγούμενη αποθήκευση: διαγράψτε το και αποθηκεύστε
+editor_mode_hex	55d5	Hex
+editor_mode_text	134a	Κείμενο
 editor_no_file_name	c863	χωρίς όνομα αρχείου: ξεκινήστε τον επεξεργαστή με ένα
 editor_no_match	7de7	καμία αντιστοιχία
 editor_not_regular	5955	όχι κανονικό αρχείο: απορρίφθηκε
-editor_open_none	63aa	το άνοιγμα δεν υπάρχει εδώ: ξεκινήστε τον επεξεργαστή με το όνομα του αρχείου
+editor_open_hint	235f	Διαδρομή αρχείου
 editor_pattern_bad	5d57	το μοτίβο δεν μεταγλωττίζεται
 editor_position	3696	Γρ %1$d, Στ %2$d
 editor_read_failed	5f78	το αρχείο δεν μπόρεσε να διαβαστεί: δεν ανοίγεται
 editor_reload_unsaved	85da	διαβάζει ξανά το αρχείο και πετά τις μη αποθηκευμένες αλλαγές
 editor_replace_usage	c677	η αντικατάσταση είναι ΑΝΑΖΗΤΗΣΗ/ΑΝΤΙΚΑΤΑΣΤΑΣΗ
 editor_replaced	1128	αντικαταστάθηκαν: %d
-editor_save_as_none	0745	η αποθήκευση ως δεν υπάρχει εδώ: το Ctrl+S αποθηκεύει το αρχείο
+editor_save_as_hint	c955	Αποθήκευση ως
 editor_save_failed	069d	η αποθήκευση απέτυχε: το αρχείο είναι όπως ήταν
 editor_saved	9f44	αποθηκεύτηκε
 editor_selected	a686	(επιλέχθηκαν %d)
@@ -35,6 +38,7 @@ editor_selected_carets	7e02	(επιλέχθηκαν %d, δρομείς)
 editor_tabs_full	8ed9	και οι %d καρτέλες είναι ανοιχτές: κλείστε πρώτα μία
 editor_unsaved	c014	μη αποθηκευμένες αλλαγές: αποθηκεύστε τις ή κλείστε κάθε αρχείο με Ctrl+W δύο φορές
 editor_untitled	8b58	χωρίς τίτλο
+editor_wrap_on	40cd	Αναδίπλωση
 editor_write_beside	ec75	δεν ήταν δυνατή η εγγραφή δίπλα στο αρχείο
 editor_writes_over_changed	df15	αντικαθιστά την αλλαγή στον δίσκο (το Ctrl+R το διαβάζει ξανά)
 editor_writes_over_readonly	e22f	αντικαθιστά αρχείο μόνο για ανάγνωση
@@ -184,15 +188,21 @@ launcher_sleep_armed	bb08	αναστολή
 menu_bin_empty	1538	Άδειασμα κάδου
 menu_bin_open	8797	Άνοιγμα κάδου
 menu_bin_restore	4799	Επαναφορά
+menu_close_others	ec3e	Κλείσιμο άλλων καρτελών
+menu_close_tab	9753	Κλείσιμο καρτέλας
 menu_copy	43e0	Αντιγραφή
 menu_copy_row	f3c8	Αντιγραφή γραμμής
 menu_cut	5c17	Αποκοπή
 menu_delete	1e3e	Διαγραφή
 menu_find	1fa6	Εύρεση
 menu_go_to_line	bc96	Μετάβαση στη γραμμή
+menu_hex_mode	fd1b	Επεξεργαστής Hex
 menu_new_folder	41cb	&Νέος φάκελος
+menu_new_tab	dad5	Νέα καρτέλα
+menu_new_window	2c79	Νέο παράθυρο
 menu_open	61a5	Ά&νοιγμα
 menu_open_editor	8ca0	Άνοιγμα στον &επεξεργαστή
+menu_open_file	098c	Άνοιγμα αρχείου...
 menu_open_terminal	6d2a	Άνοιγμα &τερματικού εδώ
 menu_paste	6854	Επικόλληση
 menu_properties	c780	&Ιδιότητες
@@ -200,6 +210,7 @@ menu_redo	ac45	Επανάληψη
 menu_remove	901d	Αφαίρεση
 menu_rename	9529	&Μετονομασία
 menu_reset_zoom	1b0f	Επαναφορά ζουμ
+menu_save_as	e18c	Αποθήκευση ως...
 menu_select_all	f6f6	Επιλογή όλων
 menu_set_wallpaper	1a27	Ορισμός ως &ταπετσαρία
 menu_set_wallpaper_of	aa60	Ορισμός ως ταπετσαρία της %s
@@ -209,6 +220,7 @@ menu_undo	b9d3	Αναίρεση
 menu_view_details	d3a1	&Λεπτομέρειες
 menu_view_icons	57e8	Μεγάλα &εικονίδια
 menu_view_list	4cc5	&Λίστα
+menu_word_wrap	9ab3	Αναδίπλωση γραμμών
 menu_zoom_in	5bcf	Μεγέθυνση
 menu_zoom_out	9234	Σμίκρυνση
 mixer_allow	19d2	Επιτρέπω
@@ -449,6 +461,8 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =A quick shake makes the pointer large for a moment	4d81	Ένα γρήγορο κούνημα μεγαλώνει τον δείκτη για λίγο
 =Accent	ccd7	Έμφαση
 =Accent colour (rrggbb or reset)	53aa	Χρώμα έμφασης (rrggbb ή reset)
+=Add a key (label, then the public key)	e2e3	Προσθήκη κλειδιού (ετικέτα, μετά το δημόσιο κλειδί)
+=Add a program to start (its path)	5e20	Προσθήκη προγράμματος στην εκκίνηση (η διαδρομή του)
 =Airplane mode	3b8a	Λειτουργία πτήσης
 =All commands	4a42	Όλες οι εντολές
 =Allow recording	f7e5	Να επιτρέπεται η εγγραφή
@@ -468,6 +482,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Εκκίνηση
+=Bowl tier	7b7f	Επίπεδο bowl
 =Brightness	324a	Φωτεινότητα
 =Build	7543	Κατασκευή
 =Canvas	5091	Canvas
@@ -487,17 +502,18 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Devices	f320	Συσκευές
 =Discover now	398a	Ανακάλυψη τώρα
 =Discovery	2db5	Ανακάλυψη
-=Files	1b30	Αρχεία
-=Install Moonwater	06fc	Εγκατάσταση Moonwater
-=Internal storage	e961	Εσωτερικός χώρος αποθήκευσης
-=External devices	5769	Εξωτερικές συσκευές
 =Display	d9b5	Οθόνη
 =Double-click time (ms, or default)	9af1	Χρόνος διπλού κλικ (ms ή default)
 =Drag lists with the mouse	4ee2	Σύρσιμο λιστών με το ποντίκι
 =Edge swipes	7aaf	Σαρώσεις από τις άκρες
 =Editor	bf98	Επεξεργαστής
+=End every session	12e1	Τερματισμός όλων των συνεδριών
+=External devices	5769	Εξωτερικές συσκευές
+=Files	1b30	Αρχεία
 =GPU rendering (alpha)	e5e6	Απόδοση με GPU (άλφα)
 =Gallery	4cdd	Συλλογή
+=Graphics	9fa8	Γραφικά
+=Host key fingerprint	2398	Αποτύπωμα κλειδιού διακομιστή
 =How fast the pointer follows the mouse	0a45	Πόσο γρήγορα ακολουθεί ο δείκτης το ποντίκι
 =How long it stays large after a shake	82a0	Πόση ώρα μένει μεγάλος μετά από κούνημα
 =How long to hold a finger to right-click	b301	Πόση ώρα κρατιέται ένα δάχτυλο για δεξί κλικ
@@ -511,6 +527,8 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Input device (name, or default)	af7b	Συσκευή εισόδου (όνομα ή default)
 =Input mute	ad50	Σίγαση εισόδου
 =Input volume (percent, or default)	263f	Ένταση εισόδου (ποσοστό ή default)
+=Install Moonwater	06fc	Εγκατάσταση Moonwater
+=Internal storage	e961	Εσωτερικός χώρος αποθήκευσης
 =Internet sharing over Bluetooth	afe8	Κοινή χρήση internet μέσω Bluetooth
 =Keep a device by its name	9c51	Κράτηση συσκευής με το όνομά της
 =Keep the lowest-delay sample	d8b9	Διατήρηση του δείγματος με τη μικρότερη καθυστέρηση
@@ -527,7 +545,9 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Launcher	44b1	Εκκινητής
 =Learned	0c7c	Εντοπίστηκε
 =Left edge	9ce5	Αριστερό άκρο
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Αφήνει τα κλειδιά της λίστας να συνδέονται μέσω δικτύου· κλειστός σταματά και τερματίζει κάθε συνεδρία
 =Linked machines	0cc2	Συνδεδεμένα μηχανήματα
+=Listen address (any for every address)	d513	Διεύθυνση ακρόασης (any για όλες)
 =Local addresses	9f2c	Τοπικές διευθύνσεις
 =Long press time (ms, or default)	aff4	Χρόνος παρατεταμένου πατήματος (ms ή default)
 =Machine	be0e	Μηχάνημα
@@ -535,10 +555,6 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Momentum	cfef	Αδράνεια
 =Motion	7647	Κίνηση
 =Mount kept disks	f0c8	Προσάρτηση των κρατημένων δίσκων
-=Programs started with the desktop	5b74	Προγράμματα που ξεκινούν με την επιφάνεια εργασίας
-=Add a program to start (its path)	5e20	Προσθήκη προγράμματος στην εκκίνηση (η διαδρομή του)
-=Remove a program from the start (its path)	1013	Αφαίρεση προγράμματος από την εκκίνηση (η διαδρομή του)
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Ανοίγουν με αυτή τη σειρά όταν ξεκινά η επιφάνεια εργασίας, ενώ το none την ξεκινά χωρίς παράθυρα
 =Mouse	9b64	Ποντίκι
 =Mouse acceleration	c400	Επιτάχυνση ποντικιού
 =Mouse sensitivity (percent, or default)	8a23	Ευαισθησία ποντικιού (ποσοστό ή default)
@@ -557,6 +573,7 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Notices	8f06	Ειδοποιήσεις
 =On-screen keyboard	97f8	Πληκτρολόγιο οθόνης
 =Open windows where they were last put	8711	Άνοιγμα παραθύρων εκεί που αφέθηκαν τελευταία
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Ανοίγουν με αυτή τη σειρά όταν ξεκινά η επιφάνεια εργασίας, ενώ το none την ξεκινά χωρίς παράθυρα
 =Output device (name, or default)	d73c	Συσκευή εξόδου (όνομα ή default)
 =Pair a machine	b39b	Σύνδεση μηχανήματος
 =Paths	263f	Διαδρομές
@@ -564,9 +581,12 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Pointer	4dca	Δείκτης
 =Pointer squeeze (percent, or default)	bbee	Συμπίεση δείκτη (ποσοστό, ή προεπιλογή)
 =Pointer squeezes on click	ad88	Ο δείκτης συρρικνώνεται στο κλικ
+=Port	3cc6	Θύρα
 =Power	a5e6	Ενέργεια
 =Power profile	8def	Προφίλ ενέργειας
 =Predict touch and pen	e2b7	Πρόβλεψη αφής και πένας
+=Primary display	924b	Κύρια οθόνη
+=Programs started with the desktop	5b74	Προγράμματα που ξεκινούν με την επιφάνεια εργασίας
 =Proxy	1bfb	Μεσολαβητής
 =Proxy from the environment	7fa7	Μεσολαβητής από το περιβάλλον
 =Public IPv4	0813	Δημόσια IPv4
@@ -575,16 +595,25 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Public address discovery (STUN)	7691	Ανακάλυψη δημόσιας διεύθυνσης (STUN)
 =Refresh rate	bf6e	Ρυθμός ανανέωσης
 =Remembered devices	abbc	Συσκευές που θυμάται
+=Remove a program from the start (its path)	1013	Αφαίρεση προγράμματος από την εκκίνηση (η διαδρομή του)
 =Resize border width (pixels, or default)	7fdf	Πλάτος περιγράμματος αλλαγής μεγέθους (pixel ή default)
 =Resize grip (pixels, or default)	dddd	Λαβή αλλαγής μεγέθους (pixel ή default)
+=Resolution	18af	Ανάλυση
 =Right edge	279a	Δεξιό άκρο
+=Root login	6cd4	Σύνδεση root
+=Root may log in by a key of the list, and by nothing else	a430	Ο root μπορεί να συνδεθεί με κλειδί της λίστας, και με τίποτε άλλο
 =Rotation	777f	Περιστροφή
 =Rubber band	9c42	Ελαστικό εφέ
+=SSH	7b31	SSH
+=SSH server	9b60	Διακομιστής SSH
+=STUN servers (or reset)	4062	Διακομιστές STUN (ή reset)
+=STUN time limit (ms, or default)	be40	Χρονικό όριο STUN (ms ή default)
 =Scale of this screen	e4ca	Κλίμακα αυτής της οθόνης
 =Screen	c631	Οθόνη
 =Screen modes	85ad	Λειτουργίες οθόνης
 =Scroll speed	e7af	Ταχύτητα κύλισης
 =Scrolling	74ec	Κύλιση
+=Server files	5af9	Αρχεία διακομιστή
 =Servers in order	0a76	Διακομιστές με τη σειρά
 =Set the clock from the network	b2a3	Ρύθμιση ρολογιού από το δίκτυο
 =Settings	8728	Ρυθμίσεις
@@ -597,19 +626,33 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Sound	9a34	Ήχος
 =Sound server	84bf	Διακομιστής ήχου
 =Start the desktop	be4c	Έναρξη της επιφάνειας εργασίας
-=STUN servers (or reset)	4062	Διακομιστές STUN (ή reset)
-=STUN time limit (ms, or default)	be40	Χρονικό όριο STUN (ms ή default)
 =System	84bc	Σύστημα
 =System notices	fa89	Ειδοποιήσεις συστήματος
 =Taskbar	d759	Γραμμή εργασιών
+=Taskbar battery place	3413	Θέση της μπαταρίας στη γραμμή εργασιών
+=Taskbar clock bulge (percent)	fa6c	Καμπύλωση του ρολογιού στη γραμμή εργασιών (ποσοστό)
+=Taskbar clock place	c144	Θέση του ρολογιού στη γραμμή εργασιών
 =Taskbar display	042b	Οθόνη της γραμμής εργασιών
+=Taskbar distance from the edge (pixels)	845c	Απόσταση της γραμμής εργασιών από την άκρη (εικονοστοιχεία)
 =Taskbar hides for fullscreen	f2f8	Η γραμμή εργασιών κρύβεται σε πλήρη οθόνη
 =Taskbar launcher button	dd4d	Κουμπί εκκινητή στη γραμμή εργασιών
+=Taskbar microphone place	76d8	Θέση του μικροφώνου στη γραμμή εργασιών
+=Taskbar moon look	a24d	Όψη της σελήνης στη γραμμή εργασιών
+=Taskbar moon place	6f19	Θέση της σελήνης στη γραμμή εργασιών
+=Taskbar moon spin (seconds a turn, off or default)	a763	Περιστροφή της σελήνης στη γραμμή εργασιών (δευτερόλεπτα ανά στροφή, ανενεργή ή προεπιλογή)
+=Taskbar newest task side	b5a9	Πλευρά της νεότερης εργασίας στη γραμμή εργασιών
+=Taskbar notices place	a793	Θέση των ειδοποιήσεων στη γραμμή εργασιών
+=Taskbar order	ccfd	Σειρά της γραμμής εργασιών
 =Taskbar padding (pixels)	a3a0	Διαστήματα της γραμμής εργασιών (εικονοστοιχεία)
 =Taskbar pinned programs (or none)	3732	Προγράμματα καρφιτσωμένα στη γραμμή εργασιών (ή κανένα)
 =Taskbar position	81b8	Θέση της γραμμής εργασιών
 =Taskbar scale (percent)	810b	Κλίμακα της γραμμής εργασιών (ποσοστό)
+=Taskbar sound place	e2a1	Θέση του ήχου στη γραμμή εργασιών
+=Taskbar tasks	445b	Εργασίες στη γραμμή εργασιών
+=Taskbar tasks place	bfd0	Θέση των εργασιών στη γραμμή εργασιών
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Περιοχή ειδοποιήσεων της γραμμής εργασιών (κείμενο με {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Taskbar tray clock place	c2e6	Θέση ρολογιού ειδοποιήσεων στη γραμμή εργασιών
+=Taskbar tray text place	c235	Θέση κειμένου ειδοποιήσεων στη γραμμή εργασιών
 =Terminal	62d1	Τερματικό
 =Terminal lines per wheel notch	3800	Γραμμές τερματικού ανά βήμα τροχού
 =Text size (percent, or default)	51d7	Μέγεθος κειμένου (ποσοστό ή default)
@@ -625,11 +668,12 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Theme	7c92	Θέμα
 =This machine	3790	Αυτό το μηχάνημα
 =Time	e404	Ώρα
+=Time limit (minutes, or off)	d2cf	Χρονικό όριο (λεπτά, ή off)
 =Time server (auto for the pool)	67e5	Διακομιστής ώρας (auto για το pool)
 =Time zone	741a	Ζώνη ώρας
 =Touch	fb78	Αφή
-=Trace time limit (seconds, or default)	28d4	Χρονικό όριο ίχνους (δευτερόλεπτα ή default)
 =Trace URL (or default)	be36	URL ίχνους (ή default)
+=Trace time limit (seconds, or default)	28d4	Χρονικό όριο ίχνους (δευτερόλεπτα ή default)
 =Turned by the screen	ea45	Περιστρέφεται από την οθόνη
 =Turned left	507c	Στραμμένη αριστερά
 =Turned right	7a49	Στραμμένη δεξιά
@@ -637,18 +681,27 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =Upside down	9dc1	Ανάποδα
 =Variable refresh rate	06a4	Μεταβλητός ρυθμός ανανέωσης
 =Volume (percent, or default)	f6e3	Ένταση (ποσοστό ή default)
+=Wallpaper	0da9	Ταπετσαρία
+=Wallpaper glow	57c6	Λάμψη της ταπετσαρίας
+=Wallpaper in the dark theme	a6dc	Ταπετσαρία στο σκούρο θέμα
+=Wallpaper of this screen	2c92	Ταπετσαρία αυτής της οθόνης
+=Wallpaper picture (a PNG file, or none)	8e9d	Εικόνα ταπετσαρίας (αρχείο PNG ή καμία)
+=Wallpaper seas (percent grey)	6836	Θάλασσες της ταπετσαρίας (ποσοστό γκρι)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Τι κάνει μια σάρωση από αυτό το άκρο
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Πού σχεδιάζει το Canvas: στη GPU ή στον επεξεργαστή. Τι κάνει τώρα η κάρτα είναι από κάτω
 =White edged in black, or the reverse	cd63	Λευκός με μαύρο περίγραμμα, ή το αντίστροφο
 =Wi-Fi	0ec1	Wi-Fi
 =Wi-Fi IP address	9026	Διεύθυνση IP Wi-Fi
 =Wired	9a54	Ενσύρματο
 =Wired IP address	0e25	Ενσύρματη διεύθυνση IP
+=after	7dc9	μετά
 =all	4bc4	όλα
 =allow	a832	επιτρέπεται
 =amber	bec0	κεχριμπαρί
 =auto	a396	αυτόματο
 =balanced	b71d	ισορροπημένο
+=before	ff3e	πριν
 =black	4ba4	μαύρο
 =blue	f5cd	μπλε
 =bottom	6b2a	κάτω
@@ -660,16 +713,23 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =default	5bde	προεπιλογή
 =deny	6367	άρνηση
 =desktop	87b3	επιφάνεια εργασίας
+=dimmed	bded	μειωμένη
 =dmy	2a79	dmy
 =dynamic	96ae	δυναμικό
 =edge	d83c	άκρη
+=end	75aa	τέλος
 =fast	02af	γρήγορα
 =forest	2a60	δάσος
 =full	b33c	πλήρες
 =games	2b9c	παιχνίδια
+=glow	27bc	λάμψη
+=glow-and-edges	540f	λάμψη-και-άκρες
 =graphite	dc8d	γραφίτης
 =green	ecbc	πράσινο
+=grouped	8b7d	ομαδοποιημένες
 =high	b9fd	υψηλά
+=ink	8faf	μελάνι
+=inverted	8038	αντεστραμμένη
 =kernel log	415a	αρχείο καταγραφής πυρήνα
 =kernel log klog dmesg messages	1a8d	πυρήνας καταγραφή klog dmesg μηνύματα
 =launcher	8391	εκκινητής
@@ -681,6 +741,9 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =mdy	3697	mdy
 =midnight-blue	4008	μεσονύχτιο μπλε
 =modem	67ed	μόντεμ
+=moon	ae40	σελήνη
+=moon-tasks-tray	6c42	σελήνη-εργασίες-περιοχή
+=moon-tray-tasks	c2c4	σελήνη-περιοχή-εργασίες
 =network	86c5	δίκτυο
 =none	afdb	Καμία
 =normal	9c52	κανονικά
@@ -690,20 +753,32 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =per second	4f98	ανά δευτερόλεπτο
 =percent	fa5a	ποσοστό
 =performance	8ca5	απόδοση
+=picture	d389	εικόνα
+=plain	3f67	απλή
 =plum	b06b	δαμάσκηνο
 =powersave	2283	εξοικονόμηση ενέργειας
 =primary	5fd9	κύριο
+=realistic	b65f	ρεαλιστική
 =reduced	5839	μειωμένο
 =right	2de5	δεξιά
 =rose	1806	ροζ
+=separate	bb18	χωριστές
 =settings preferences options	8c78	ρυθμίσεις προτιμήσεις επιλογές
 =slate	deee	σχιστόλιθος
 =slow	42b8	αργά
+=split	2de3	διαιρεμένες
+=start	04df	αρχή
+=tab	2e4c	κάψουλα
+=tasks-moon-tray	c6a4	εργασίες-σελήνη-περιοχή
+=tasks-tray-moon	4f46	εργασίες-περιοχή-σελήνη
 =tcp	ba90	tcp
 =terminal shell console	eaba	τερματικό κονσόλα κέλυφος
 =thick	964e	χοντρό
 =thin	b172	λεπτό
 =top	dc3c	πάνω
+=tray	a12d	περιοχή ειδοποιήσεων
+=tray-moon-tasks	7246	περιοχή-σελήνη-εργασίες
+=tray-tasks-moon	fda8	περιοχή-εργασίες-σελήνη
 =unlock	1f55	ξεκλείδωμα
 =violet	57f2	βιολετί
 =volume	698f	ένταση
@@ -712,66 +787,3 @@ ui_field_full	fe02	δεν χωράει περισσότερο
 =windows	26ea	παράθυρα
 =wired	bfb4	ενσύρματη
 =ymd	faad	ymd
-=SSH	7b31	SSH
-=SSH server	9b60	Διακομιστής SSH
-=Root login	6cd4	Σύνδεση root
-=Port	3cc6	Θύρα
-=Listen address (any for every address)	d513	Διεύθυνση ακρόασης (any για όλες)
-=Time limit (minutes, or off)	d2cf	Χρονικό όριο (λεπτά, ή off)
-=Host key fingerprint	2398	Αποτύπωμα κλειδιού διακομιστή
-=Server files	5af9	Αρχεία διακομιστή
-=Bowl tier	7b7f	Επίπεδο bowl
-=Add a key (label, then the public key)	e2e3	Προσθήκη κλειδιού (ετικέτα, μετά το δημόσιο κλειδί)
-=End every session	12e1	Τερματισμός όλων των συνεδριών
-=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Αφήνει τα κλειδιά της λίστας να συνδέονται μέσω δικτύου· κλειστός σταματά και τερματίζει κάθε συνεδρία
-=Root may log in by a key of the list, and by nothing else	a430	Ο root μπορεί να συνδεθεί με κλειδί της λίστας, και με τίποτε άλλο
-=Wallpaper	0da9	Ταπετσαρία
-=Wallpaper picture (a PNG file, or none)	8e9d	Εικόνα ταπετσαρίας (αρχείο PNG ή καμία)
-=Wallpaper in the dark theme	a6dc	Ταπετσαρία στο σκούρο θέμα
-=Wallpaper seas (percent grey)	6836	Θάλασσες της ταπετσαρίας (ποσοστό γκρι)
-=Wallpaper glow	57c6	Λάμψη της ταπετσαρίας
-=Taskbar moon place	6f19	Θέση της σελήνης στη γραμμή εργασιών
-=Taskbar moon look	a24d	Όψη της σελήνης στη γραμμή εργασιών
-=Taskbar tasks place	bfd0	Θέση των εργασιών στη γραμμή εργασιών
-=Taskbar newest task side	b5a9	Πλευρά της νεότερης εργασίας στη γραμμή εργασιών
-=Taskbar notices place	a793	Θέση των ειδοποιήσεων στη γραμμή εργασιών
-=Taskbar microphone place	76d8	Θέση του μικροφώνου στη γραμμή εργασιών
-=Taskbar sound place	e2a1	Θέση του ήχου στη γραμμή εργασιών
-=Taskbar battery place	3413	Θέση της μπαταρίας στη γραμμή εργασιών
-=Taskbar tray text place	c235	Θέση κειμένου ειδοποιήσεων στη γραμμή εργασιών
-=Taskbar tray clock place	c2e6	Θέση ρολογιού ειδοποιήσεων στη γραμμή εργασιών
-=Taskbar order	ccfd	Σειρά της γραμμής εργασιών
-=Taskbar clock place	c144	Θέση του ρολογιού στη γραμμή εργασιών
-=Taskbar clock bulge (percent)	fa6c	Καμπύλωση του ρολογιού στη γραμμή εργασιών (ποσοστό)
-=moon	ae40	σελήνη
-=plain	3f67	απλή
-=picture	d389	εικόνα
-=dimmed	bded	μειωμένη
-=inverted	8038	αντεστραμμένη
-=glow	27bc	λάμψη
-=glow-and-edges	540f	λάμψη-και-άκρες
-=start	04df	αρχή
-=end	75aa	τέλος
-=realistic	b65f	ρεαλιστική
-=ink	8faf	μελάνι
-=split	2de3	διαιρεμένες
-=before	ff3e	πριν
-=after	7dc9	μετά
-=moon-tasks-tray	6c42	σελήνη-εργασίες-περιοχή
-=moon-tray-tasks	c2c4	σελήνη-περιοχή-εργασίες
-=tasks-moon-tray	c6a4	εργασίες-σελήνη-περιοχή
-=tasks-tray-moon	4f46	εργασίες-περιοχή-σελήνη
-=tray-moon-tasks	7246	περιοχή-σελήνη-εργασίες
-=tray-tasks-moon	fda8	περιοχή-εργασίες-σελήνη
-=tray	a12d	περιοχή ειδοποιήσεων
-=tab	2e4c	κάψουλα
-=Taskbar moon spin (seconds a turn, off or default)	a763	Περιστροφή της σελήνης στη γραμμή εργασιών (δευτερόλεπτα ανά στροφή, ανενεργή ή προεπιλογή)
-=Taskbar tasks	445b	Εργασίες στη γραμμή εργασιών
-=Taskbar distance from the edge (pixels)	845c	Απόσταση της γραμμής εργασιών από την άκρη (εικονοστοιχεία)
-=grouped	8b7d	ομαδοποιημένες
-=separate	bb18	χωριστές
-=Resolution	18af	Ανάλυση
-=Primary display	924b	Κύρια οθόνη
-=Wallpaper of this screen	2c92	Ταπετσαρία αυτής της οθόνης
-=Graphics	9fa8	Γραφικά
-=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Πού σχεδιάζει το Canvas: στη GPU ή στον επεξεργαστή. Τι κάνει τώρα η κάρτα είναι από κάτω

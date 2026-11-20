@@ -1,9 +1,9 @@
-@language uk
-@name Українська
-@translated machine
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
+@language uk
+@name Українська
+@translated machine
 action_copy	3664	Копіювати
 action_cut	5863	Вирізати
 action_paste	0288	Вставити
@@ -13,21 +13,24 @@ editor_closes_unsaved	fcb8	закриває, відкидаючи незбере
 editor_encoding_bom	c0d7	UTF-8 з BOM
 editor_find_hint	d17a	Знайти
 editor_find_replace_hint	3693	Знайти/Замінити на
+editor_hex_status	35a5	Зсув %1$s / %2$s
 editor_indent_spaces	9db9	Пробіли: %d
 editor_indent_tab	d9a7	Таб: %d
 editor_line_hint	f547	Рядок
 editor_lock_stale	f9d8	%s залишився від попереднього збереження: видаліть його, потім збережіть
+editor_mode_hex	55d5	Hex
+editor_mode_text	134a	Текст
 editor_no_file_name	c863	немає імені файлу: запустіть редактор з іменем
 editor_no_match	7de7	немає збігів
 editor_not_regular	5955	не звичайний файл: відхилено
-editor_open_none	63aa	відкриття тут немає: запустіть редактор з іменем файлу
+editor_open_hint	235f	Шлях до файлу
 editor_pattern_bad	5d57	шаблон не компілюється
 editor_position	3696	Рд %1$d, Стп %2$d
 editor_read_failed	5f78	не вдалося прочитати файл: його не відкрито
 editor_reload_unsaved	85da	перечитує файл і відкидає незбережені зміни
 editor_replace_usage	c677	заміна — ЗНАЙТИ/ЗАМІНА
 editor_replaced	1128	замінено: %d
-editor_save_as_none	0745	зберегти як тут немає: Ctrl+S зберігає файл
+editor_save_as_hint	c955	Зберегти як шлях
 editor_save_failed	069d	не вдалося зберегти: файл не змінився
 editor_saved	9f44	збережено
 editor_selected	a686	(виділено: %d)
@@ -35,6 +38,7 @@ editor_selected_carets	7e02	(виділено: %d, курсори)
 editor_tabs_full	8ed9	усі %d вкладок відкрито: спочатку закрийте одну
 editor_unsaved	c014	незбережені зміни: збережіть їх або закрийте кожну, двічі натиснувши Ctrl+W
 editor_untitled	8b58	без назви
+editor_wrap_on	40cd	Перенос
 editor_write_beside	ec75	не вдалося записати поруч із файлом
 editor_writes_over_changed	df15	перезапише зміну на диску (Ctrl+R читає знову)
 editor_writes_over_readonly	e22f	перезапише файл лише для читання
@@ -184,15 +188,21 @@ launcher_sleep_armed	bb08	перейти в сон
 menu_bin_empty	1538	Очистити кошик
 menu_bin_open	8797	Відкрити кошик
 menu_bin_restore	4799	Відновити
+menu_close_others	ec3e	Закрити інші вкладки
+menu_close_tab	9753	Закрити вкладку
 menu_copy	43e0	Копіювати
 menu_copy_row	f3c8	Копіювати рядок
 menu_cut	5c17	Вирізати
 menu_delete	1e3e	Видалити
 menu_find	1fa6	Знайти
 menu_go_to_line	bc96	Перейти до рядка
+menu_hex_mode	fd1b	Hex-редактор
 menu_new_folder	41cb	&Нова тека
+menu_new_tab	dad5	Нова вкладка
+menu_new_window	2c79	Нове вікно
 menu_open	61a5	&Відкрити
 menu_open_editor	8ca0	Відкрити в &редакторі
+menu_open_file	098c	Відкрити файл...
 menu_open_terminal	6d2a	Відкрити &термінал тут
 menu_paste	6854	Вставити
 menu_properties	c780	&Властивості
@@ -200,6 +210,7 @@ menu_redo	ac45	Повторити
 menu_remove	901d	Вилучити
 menu_rename	9529	&Перейменувати
 menu_reset_zoom	1b0f	Скинути масштаб
+menu_save_as	e18c	Зберегти як...
 menu_select_all	f6f6	Вибрати все
 menu_set_wallpaper	1a27	Зробити &шпалерами
 menu_set_wallpaper_of	aa60	Зробити шпалерами %s
@@ -209,6 +220,7 @@ menu_undo	b9d3	Скасувати
 menu_view_details	d3a1	&Таблиця
 menu_view_icons	57e8	Великі &значки
 menu_view_list	4cc5	&Список
+menu_word_wrap	9ab3	Перенесення рядків
 menu_zoom_in	5bcf	Збільшити
 menu_zoom_out	9234	Зменшити
 mixer_allow	19d2	Дозволити
@@ -449,6 +461,8 @@ ui_field_full	fe02	більше не вміщається
 =A quick shake makes the pointer large for a moment	4d81	Швидке струшування ненадовго збільшує вказівник
 =Accent	ccd7	Акцент
 =Accent colour (rrggbb or reset)	53aa	Колір акценту (rrggbb або reset)
+=Add a key (label, then the public key)	e2e3	Додати ключ (мітка, потім відкритий ключ)
+=Add a program to start (its path)	5e20	Додати програму до автозапуску (її шлях)
 =Airplane mode	3b8a	Режим польоту
 =All commands	4a42	Усі команди
 =Allow recording	f7e5	Дозволити запис
@@ -468,6 +482,7 @@ ui_field_full	fe02	більше не вміщається
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	Завантаження
+=Bowl tier	7b7f	Рівень bowl
 =Brightness	324a	Яскравість
 =Build	7543	Збірка
 =Canvas	5091	Canvas
@@ -487,17 +502,18 @@ ui_field_full	fe02	більше не вміщається
 =Devices	f320	Пристрої
 =Discover now	398a	Виявити зараз
 =Discovery	2db5	Виявлення
-=Files	1b30	Файли
-=Install Moonwater	06fc	Встановити Moonwater
-=Internal storage	e961	Внутрішнє сховище
-=External devices	5769	Зовнішні пристрої
 =Display	d9b5	Екран
 =Double-click time (ms, or default)	9af1	Час подвійного клацання (мс або default)
 =Drag lists with the mouse	4ee2	Перетягувати списки мишею
 =Edge swipes	7aaf	Жести від краю
 =Editor	bf98	Редактор
+=End every session	12e1	Завершити всі сеанси
+=External devices	5769	Зовнішні пристрої
+=Files	1b30	Файли
 =GPU rendering (alpha)	e5e6	Рендеринг на GPU (альфа)
 =Gallery	4cdd	Галерея
+=Graphics	9fa8	Графіка
+=Host key fingerprint	2398	Відбиток ключа хоста
 =How fast the pointer follows the mouse	0a45	Як швидко вказівник рухається за мишею
 =How long it stays large after a shake	82a0	Скільки він лишається великим після струшування
 =How long to hold a finger to right-click	b301	Скільки тримати палець для правого клацання
@@ -511,6 +527,8 @@ ui_field_full	fe02	більше не вміщається
 =Input device (name, or default)	af7b	Пристрій введення (назва або default)
 =Input mute	ad50	Вимкнути мікрофон
 =Input volume (percent, or default)	263f	Гучність мікрофона (відсотки або default)
+=Install Moonwater	06fc	Встановити Moonwater
+=Internal storage	e961	Внутрішнє сховище
 =Internet sharing over Bluetooth	afe8	Спільний інтернет через Bluetooth
 =Keep a device by its name	9c51	Запам'ятати пристрій за назвою
 =Keep the lowest-delay sample	d8b9	Залишати вимір із найменшою затримкою
@@ -527,7 +545,9 @@ ui_field_full	fe02	більше не вміщається
 =Launcher	44b1	Запуск
 =Learned	0c7c	Отримано
 =Left edge	9ce5	Лівий край
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Пускає ключі зі списку через мережу; вимкнений зупиняється й завершує всі сеанси
 =Linked machines	0cc2	Пов'язані комп'ютери
+=Listen address (any for every address)	d513	Адреса прослуховування (any для всіх)
 =Local addresses	9f2c	Локальні адреси
 =Long press time (ms, or default)	aff4	Час довгого натискання (мс або default)
 =Machine	be0e	Комп'ютер
@@ -535,10 +555,6 @@ ui_field_full	fe02	більше не вміщається
 =Momentum	cfef	Інерція
 =Motion	7647	Рух
 =Mount kept disks	f0c8	Монтувати збережені диски
-=Programs started with the desktop	5b74	Програми, що запускаються з робочим столом
-=Add a program to start (its path)	5e20	Додати програму до автозапуску (її шлях)
-=Remove a program from the start (its path)	1013	Прибрати програму з автозапуску (її шлях)
-=Opened in this order when the desktop starts; none starts it with no windows	5790	Відкриваються в цьому порядку під час запуску робочого столу; none запускає його без вікон
 =Mouse	9b64	Миша
 =Mouse acceleration	c400	Прискорення миші
 =Mouse sensitivity (percent, or default)	8a23	Чутливість миші (відсотки або default)
@@ -557,6 +573,7 @@ ui_field_full	fe02	більше не вміщається
 =Notices	8f06	Сповіщення
 =On-screen keyboard	97f8	Екранна клавіатура
 =Open windows where they were last put	8711	Відкривати вікна там, де їх залишили
+=Opened in this order when the desktop starts; none starts it with no windows	5790	Відкриваються в цьому порядку під час запуску робочого столу; none запускає його без вікон
 =Output device (name, or default)	d73c	Пристрій виводу (назва або default)
 =Pair a machine	b39b	Зв'язати комп'ютер
 =Paths	263f	Шляхи
@@ -564,9 +581,12 @@ ui_field_full	fe02	більше не вміщається
 =Pointer	4dca	Вказівник
 =Pointer squeeze (percent, or default)	bbee	Стискання вказівника (відсоток або типове)
 =Pointer squeezes on click	ad88	Вказівник стискається під час клацання
+=Port	3cc6	Порт
 =Power	a5e6	Живлення
 =Power profile	8def	Профіль живлення
 =Predict touch and pen	e2b7	Передбачати дотик і перо
+=Primary display	924b	Основний екран
+=Programs started with the desktop	5b74	Програми, що запускаються з робочим столом
 =Proxy	1bfb	Проксі
 =Proxy from the environment	7fa7	Проксі з оточення
 =Public IPv4	0813	Публічний IPv4
@@ -575,16 +595,25 @@ ui_field_full	fe02	більше не вміщається
 =Public address discovery (STUN)	7691	Виявлення публічної адреси (STUN)
 =Refresh rate	bf6e	Частота оновлення
 =Remembered devices	abbc	Запам'ятовані пристрої
+=Remove a program from the start (its path)	1013	Прибрати програму з автозапуску (її шлях)
 =Resize border width (pixels, or default)	7fdf	Ширина рамки зміни розміру (пікселів або default)
 =Resize grip (pixels, or default)	dddd	Захоплення для зміни розміру (пікселів або default)
+=Resolution	18af	Роздільність
 =Right edge	279a	Правий край
+=Root login	6cd4	Вхід для root
+=Root may log in by a key of the list, and by nothing else	a430	Root може увійти за ключем зі списку й більше ніяк
 =Rotation	777f	Поворот
 =Rubber band	9c42	Ефект гумки
+=SSH	7b31	SSH
+=SSH server	9b60	SSH-сервер
+=STUN servers (or reset)	4062	Сервери STUN (або reset)
+=STUN time limit (ms, or default)	be40	Тайм-аут STUN (мс або default)
 =Scale of this screen	e4ca	Масштаб цього екрана
 =Screen	c631	Екран
 =Screen modes	85ad	Режими екрана
 =Scroll speed	e7af	Швидкість прокрутки
 =Scrolling	74ec	Прокрутка
+=Server files	5af9	Файли сервера
 =Servers in order	0a76	Сервери за порядком
 =Set the clock from the network	b2a3	Встановлювати годинник за мережею
 =Settings	8728	Налаштування
@@ -597,19 +626,33 @@ ui_field_full	fe02	більше не вміщається
 =Sound	9a34	Звук
 =Sound server	84bf	Звуковий сервер
 =Start the desktop	be4c	Запускати робочий стіл
-=STUN servers (or reset)	4062	Сервери STUN (або reset)
-=STUN time limit (ms, or default)	be40	Тайм-аут STUN (мс або default)
 =System	84bc	Система
 =System notices	fa89	Сповіщення системи
 =Taskbar	d759	Панель завдань
+=Taskbar battery place	3413	Місце батареї на панелі завдань
+=Taskbar clock bulge (percent)	fa6c	Опуклість годинника на панелі завдань (відсотки)
+=Taskbar clock place	c144	Місце годинника на панелі завдань
 =Taskbar display	042b	Екран панелі завдань
+=Taskbar distance from the edge (pixels)	845c	Відступ панелі завдань від краю (пікселі)
 =Taskbar hides for fullscreen	f2f8	Панель завдань приховується в повноекранному режимі
 =Taskbar launcher button	dd4d	Кнопка запуску на панелі завдань
+=Taskbar microphone place	76d8	Місце мікрофона на панелі завдань
+=Taskbar moon look	a24d	Вигляд місяця на панелі завдань
+=Taskbar moon place	6f19	Місце місяця на панелі завдань
+=Taskbar moon spin (seconds a turn, off or default)	a763	Обертання місяця на панелі завдань (секунд на оберт, вимк. або типово)
+=Taskbar newest task side	b5a9	Бік найновішого завдання на панелі завдань
+=Taskbar notices place	a793	Місце сповіщень на панелі завдань
+=Taskbar order	ccfd	Порядок на панелі завдань
 =Taskbar padding (pixels)	a3a0	Відступи панелі завдань (пікселі)
 =Taskbar pinned programs (or none)	3732	Програми, закріплені на панелі завдань (або немає)
 =Taskbar position	81b8	Розташування панелі завдань
 =Taskbar scale (percent)	810b	Масштаб панелі завдань (відсотки)
+=Taskbar sound place	e2a1	Місце звуку на панелі завдань
+=Taskbar tasks	445b	Завдання на панелі завдань
+=Taskbar tasks place	bfd0	Місце завдань на панелі завдань
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	Область сповіщень панелі завдань (текст із {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Taskbar tray clock place	c2e6	Місце годинника трею на панелі завдань
+=Taskbar tray text place	c235	Місце тексту трею на панелі завдань
 =Terminal	62d1	Термінал
 =Terminal lines per wheel notch	3800	Рядків термінала на крок коліщатка
 =Text size (percent, or default)	51d7	Розмір тексту (відсотки або default)
@@ -625,11 +668,12 @@ ui_field_full	fe02	більше не вміщається
 =Theme	7c92	Тема
 =This machine	3790	Цей комп'ютер
 =Time	e404	Час
+=Time limit (minutes, or off)	d2cf	Обмеження часу (хвилини або off)
 =Time server (auto for the pool)	67e5	Сервер часу (auto для пулу)
 =Time zone	741a	Часовий пояс
 =Touch	fb78	Дотик
-=Trace time limit (seconds, or default)	28d4	Тайм-аут трасування (секунди або default)
 =Trace URL (or default)	be36	URL трасування (або default)
+=Trace time limit (seconds, or default)	28d4	Тайм-аут трасування (секунди або default)
 =Turned by the screen	ea45	Повертає екран
 =Turned left	507c	Повернуто ліворуч
 =Turned right	7a49	Повернуто праворуч
@@ -637,18 +681,27 @@ ui_field_full	fe02	більше не вміщається
 =Upside down	9dc1	Догори дриґом
 =Variable refresh rate	06a4	Змінна частота оновлення
 =Volume (percent, or default)	f6e3	Гучність (відсотки або default)
+=Wallpaper	0da9	Шпалери
+=Wallpaper glow	57c6	Сяйво шпалер
+=Wallpaper in the dark theme	a6dc	Шпалери в темній темі
+=Wallpaper of this screen	2c92	Шпалери цього екрана
+=Wallpaper picture (a PNG file, or none)	8e9d	Зображення шпалер (файл PNG або нічого)
+=Wallpaper seas (percent grey)	6836	Моря на шпалерах (відсоток сірого)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	Що робить жест від цього краю
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Де малює Canvas: на GPU чи на процесорі. Що робить карта зараз — нижче
 =White edged in black, or the reverse	cd63	Білий із чорною облямівкою або навпаки
 =Wi-Fi	0ec1	Wi-Fi
 =Wi-Fi IP address	9026	IP-адреса Wi-Fi
 =Wired	9a54	Дротова мережа
 =Wired IP address	0e25	IP-адреса дротової мережі
+=after	7dc9	після
 =all	4bc4	усі
 =allow	a832	дозволити
 =amber	bec0	бурштиновий
 =auto	a396	авто
 =balanced	b71d	збалансований
+=before	ff3e	перед
 =black	4ba4	чорний
 =blue	f5cd	синій
 =bottom	6b2a	внизу
@@ -660,16 +713,23 @@ ui_field_full	fe02	більше не вміщається
 =default	5bde	типовий
 =deny	6367	заборонити
 =desktop	87b3	робочий стіл
+=dimmed	bded	приглушені
 =dmy	2a79	dmy
 =dynamic	96ae	динамічний
 =edge	d83c	край
+=end	75aa	кінець
 =fast	02af	швидко
 =forest	2a60	лісовий
 =full	b33c	повний
 =games	2b9c	ігри
+=glow	27bc	сяйво
+=glow-and-edges	540f	сяйво-і-краї
 =graphite	dc8d	графітовий
 =green	ecbc	зелений
+=grouped	8b7d	разом
 =high	b9fd	високо
+=ink	8faf	туш
+=inverted	8038	інвертовані
 =kernel log	415a	журнал ядра
 =kernel log klog dmesg messages	1a8d	журнал ядра klog dmesg повідомлення
 =launcher	8391	запуск
@@ -681,6 +741,9 @@ ui_field_full	fe02	більше не вміщається
 =mdy	3697	mdy
 =midnight-blue	4008	опівнічно-синій
 =modem	67ed	модем
+=moon	ae40	місяць
+=moon-tasks-tray	6c42	місяць-завдання-трей
+=moon-tray-tasks	c2c4	місяць-трей-завдання
 =network	86c5	мережа
 =none	afdb	Немає
 =normal	9c52	нормально
@@ -690,20 +753,32 @@ ui_field_full	fe02	більше не вміщається
 =per second	4f98	за секунду
 =percent	fa5a	відсотки
 =performance	8ca5	продуктивність
+=picture	d389	зображення
+=plain	3f67	прості
 =plum	b06b	сливовий
 =powersave	2283	енергозбереження
 =primary	5fd9	основний
+=realistic	b65f	реалістичний
 =reduced	5839	зменшений
 =right	2de5	праворуч
 =rose	1806	рожевий
+=separate	bb18	окремо
 =settings preferences options	8c78	налаштування параметри опції
 =slate	deee	сланцевий
 =slow	42b8	повільно
+=split	2de3	розділені
+=start	04df	початок
+=tab	2e4c	плашка
+=tasks-moon-tray	c6a4	завдання-місяць-трей
+=tasks-tray-moon	4f46	завдання-трей-місяць
 =tcp	ba90	tcp
 =terminal shell console	eaba	термінал консоль оболонка
 =thick	964e	товстий
 =thin	b172	тонкий
 =top	dc3c	угорі
+=tray	a12d	трей
+=tray-moon-tasks	7246	трей-місяць-завдання
+=tray-tasks-moon	fda8	трей-завдання-місяць
 =unlock	1f55	розблокувати
 =violet	57f2	фіолетовий
 =volume	698f	гучність
@@ -712,66 +787,3 @@ ui_field_full	fe02	більше не вміщається
 =windows	26ea	вікна
 =wired	bfb4	дротова
 =ymd	faad	ymd
-=SSH	7b31	SSH
-=SSH server	9b60	SSH-сервер
-=Root login	6cd4	Вхід для root
-=Port	3cc6	Порт
-=Listen address (any for every address)	d513	Адреса прослуховування (any для всіх)
-=Time limit (minutes, or off)	d2cf	Обмеження часу (хвилини або off)
-=Host key fingerprint	2398	Відбиток ключа хоста
-=Server files	5af9	Файли сервера
-=Bowl tier	7b7f	Рівень bowl
-=Add a key (label, then the public key)	e2e3	Додати ключ (мітка, потім відкритий ключ)
-=End every session	12e1	Завершити всі сеанси
-=Lets the keys of the list log in over the network; off stops it and ends every session	c746	Пускає ключі зі списку через мережу; вимкнений зупиняється й завершує всі сеанси
-=Root may log in by a key of the list, and by nothing else	a430	Root може увійти за ключем зі списку й більше ніяк
-=Wallpaper	0da9	Шпалери
-=Wallpaper picture (a PNG file, or none)	8e9d	Зображення шпалер (файл PNG або нічого)
-=Wallpaper in the dark theme	a6dc	Шпалери в темній темі
-=Wallpaper seas (percent grey)	6836	Моря на шпалерах (відсоток сірого)
-=Wallpaper glow	57c6	Сяйво шпалер
-=Taskbar moon place	6f19	Місце місяця на панелі завдань
-=Taskbar moon look	a24d	Вигляд місяця на панелі завдань
-=Taskbar tasks place	bfd0	Місце завдань на панелі завдань
-=Taskbar newest task side	b5a9	Бік найновішого завдання на панелі завдань
-=Taskbar notices place	a793	Місце сповіщень на панелі завдань
-=Taskbar microphone place	76d8	Місце мікрофона на панелі завдань
-=Taskbar sound place	e2a1	Місце звуку на панелі завдань
-=Taskbar battery place	3413	Місце батареї на панелі завдань
-=Taskbar tray text place	c235	Місце тексту трею на панелі завдань
-=Taskbar tray clock place	c2e6	Місце годинника трею на панелі завдань
-=Taskbar order	ccfd	Порядок на панелі завдань
-=Taskbar clock place	c144	Місце годинника на панелі завдань
-=Taskbar clock bulge (percent)	fa6c	Опуклість годинника на панелі завдань (відсотки)
-=moon	ae40	місяць
-=plain	3f67	прості
-=picture	d389	зображення
-=dimmed	bded	приглушені
-=inverted	8038	інвертовані
-=glow	27bc	сяйво
-=glow-and-edges	540f	сяйво-і-краї
-=start	04df	початок
-=end	75aa	кінець
-=realistic	b65f	реалістичний
-=ink	8faf	туш
-=split	2de3	розділені
-=before	ff3e	перед
-=after	7dc9	після
-=moon-tasks-tray	6c42	місяць-завдання-трей
-=moon-tray-tasks	c2c4	місяць-трей-завдання
-=tasks-moon-tray	c6a4	завдання-місяць-трей
-=tasks-tray-moon	4f46	завдання-трей-місяць
-=tray-moon-tasks	7246	трей-місяць-завдання
-=tray-tasks-moon	fda8	трей-завдання-місяць
-=tray	a12d	трей
-=tab	2e4c	плашка
-=Taskbar moon spin (seconds a turn, off or default)	a763	Обертання місяця на панелі завдань (секунд на оберт, вимк. або типово)
-=Taskbar tasks	445b	Завдання на панелі завдань
-=Taskbar distance from the edge (pixels)	845c	Відступ панелі завдань від краю (пікселі)
-=grouped	8b7d	разом
-=separate	bb18	окремо
-=Resolution	18af	Роздільність
-=Primary display	924b	Основний екран
-=Wallpaper of this screen	2c92	Шпалери цього екрана
-=Graphics	9fa8	Графіка
-=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	Де малює Canvas: на GPU чи на процесорі. Що робить карта зараз — нижче

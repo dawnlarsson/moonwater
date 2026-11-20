@@ -1,10 +1,10 @@
-@language he
-@name עברית
-@translated machine
-@direction rtl
 # machine-made 2026-11-18 (the files pass), not yet read by a person: files_bin_cross files_bin_emptied files_binned files_carry_here files_carrying files_delete_for_good files_done files_nothing_to_redo files_nothing_to_undo files_redone files_restored files_selecting files_undone menu_bin_empty menu_bin_open menu_bin_restore text_copy_too_large
 # machine-made 2026-11-19 (the displays pass), not yet read by a person: settings_no_sizes settings_primary_no settings_primary_other settings_primary_yes settings_refused_size settings_size_ask settings_size_back settings_size_best settings_size_keep settings_size_kept settings_size_own settings_size_plain settings_size_refused =Resolution =Primary display =Graphics
 # machine-made 2026-11-19 (the apps pass), not yet read by a person: launcher_recent
+@direction rtl
+@language he
+@name עברית
+@translated machine
 action_copy	3664	העתק
 action_cut	5863	גזור
 action_paste	0288	הדבק
@@ -14,21 +14,24 @@ editor_closes_unsaved	fcb8	סוגר ומשליך את השינויים שלא נ
 editor_encoding_bom	c0d7	UTF-8 עם BOM
 editor_find_hint	d17a	חיפוש
 editor_find_replace_hint	3693	חיפוש/תחליף
+editor_hex_status	35a5	היסט %1$s / %2$s
 editor_indent_spaces	9db9	רווחים: %d
 editor_indent_tab	d9a7	Tab: %d
 editor_line_hint	f547	שורה
 editor_lock_stale	f9d8	%s נשאר משמירה קודמת: מחקו אותו, ואז שמרו
+editor_mode_hex	55d5	הקס
+editor_mode_text	134a	טקסט
 editor_no_file_name	c863	אין שם קובץ: הפעל את העורך עם שם קובץ
 editor_no_match	7de7	אין התאמה
 editor_not_regular	5955	לא קובץ רגיל: נדחה
-editor_open_none	63aa	פתיחה אינה זמינה כאן: הפעילו את העורך עם שם הקובץ
+editor_open_hint	235f	נתיב קובץ לפתיחה
 editor_pattern_bad	5d57	התבנית אינה תקינה
 editor_position	3696	שורה %1$d, עמודה %2$d
 editor_read_failed	5f78	לא ניתן לקרוא את הקובץ: הוא אינו נפתח
 editor_reload_unsaved	85da	קורא את הקובץ מחדש ומשליך את השינויים שלא נשמרו
 editor_replace_usage	c677	תבנית ההחלפה: חיפוש/תחליף
 editor_replaced	1128	הוחלפו %d
-editor_save_as_none	0745	שמירה בשם אינה זמינה כאן: Ctrl+S שומר את הקובץ
+editor_save_as_hint	c955	שמירה בשם
 editor_save_failed	069d	השמירה נכשלה: הקובץ נשאר כפי שהיה
 editor_saved	9f44	נשמר
 editor_selected	a686	(%d נבחרו)
@@ -36,6 +39,7 @@ editor_selected_carets	7e02	(%d נבחרו, סמנים)
 editor_tabs_full	8ed9	כל %d הכרטיסיות פתוחות: סגרו קודם אחת
 editor_unsaved	c014	שינויים שלא נשמרו: שמור אותם, או סגור כל קובץ באמצעות Ctrl+W פעמיים
 editor_untitled	8b58	ללא שם
+editor_wrap_on	40cd	גלישה
 editor_write_beside	ec75	לא ניתן לכתוב לצד הקובץ
 editor_writes_over_changed	df15	יכתוב מעל שינוי הדיסק (Ctrl+R קורא שוב)
 editor_writes_over_readonly	e22f	יכתוב מעל קובץ לקריאה בלבד
@@ -185,15 +189,21 @@ launcher_sleep_armed	bb08	מעבר לשינה
 menu_bin_empty	1538	ריקון סל המחזור
 menu_bin_open	8797	פתיחת סל המחזור
 menu_bin_restore	4799	שחזור
+menu_close_others	ec3e	סגור לשוניות אחרות
+menu_close_tab	9753	סגור לשונית
 menu_copy	43e0	העתק
 menu_copy_row	f3c8	העתק שורה
 menu_cut	5c17	גזור
 menu_delete	1e3e	מחק
 menu_find	1fa6	חפש
 menu_go_to_line	bc96	עבור לשורה
+menu_hex_mode	fd1b	עורך הקס
 menu_new_folder	41cb	תיקייה &חדשה
+menu_new_tab	dad5	לשונית חדשה
+menu_new_window	2c79	חלון חדש
 menu_open	61a5	&פתח
 menu_open_editor	8ca0	פתח ב&עורך
+menu_open_file	098c	פתח קובץ...
 menu_open_terminal	6d2a	פתח &מסוף כאן
 menu_paste	6854	הדבק
 menu_properties	c780	&מאפיינים
@@ -201,6 +211,7 @@ menu_redo	ac45	בצע שוב
 menu_remove	901d	הסר
 menu_rename	9529	&שנה שם
 menu_reset_zoom	1b0f	אפס זום
+menu_save_as	e18c	שמירה בשם...
 menu_select_all	f6f6	בחר הכול
 menu_set_wallpaper	1a27	הגדר כ&רקע
 menu_set_wallpaper_of	aa60	הגדר כרקע של %s
@@ -210,6 +221,7 @@ menu_undo	b9d3	בטל
 menu_view_details	d3a1	&פרטים
 menu_view_icons	57e8	&סמלים גדולים
 menu_view_list	4cc5	&רשימה
+menu_word_wrap	9ab3	גלישת שורות
 menu_zoom_in	5bcf	הגדל זום
 menu_zoom_out	9234	הקטן זום
 mixer_allow	19d2	אפשר
@@ -450,6 +462,8 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =A quick shake makes the pointer large for a moment	4d81	ניעור מהיר מגדיל את המצביע לרגע
 =Accent	ccd7	צבע הדגשה
 =Accent colour (rrggbb or reset)	53aa	צבע הדגשה (rrggbb או reset)
+=Add a key (label, then the public key)	e2e3	הוספת מפתח (תווית, ואז המפתח הציבורי)
+=Add a program to start (its path)	5e20	הוספת תוכנית להפעלה (הנתיב שלה)
 =Airplane mode	3b8a	מצב טיסה
 =All commands	4a42	כל הפקודות
 =Allow recording	f7e5	אפשר הקלטה
@@ -469,6 +483,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Bluetooth	14bd	Bluetooth
 =Boost	a6cc	Boost
 =Boot	38f5	אתחול
+=Bowl tier	7b7f	רמת bowl
 =Brightness	324a	בהירות
 =Build	7543	בנייה
 =Canvas	5091	Canvas
@@ -488,17 +503,18 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Devices	f320	התקנים
 =Discover now	398a	גלה עכשיו
 =Discovery	2db5	גילוי
-=Files	1b30	קבצים
-=Install Moonwater	06fc	התקנת Moonwater
-=Internal storage	e961	אחסון פנימי
-=External devices	5769	התקנים חיצוניים
 =Display	d9b5	מסך
 =Double-click time (ms, or default)	9af1	זמן לחיצה כפולה (ms או default)
 =Drag lists with the mouse	4ee2	גרירת רשימות בעכבר
 =Edge swipes	7aaf	החלקה מהקצוות
 =Editor	bf98	עורך
+=End every session	12e1	סיום כל ההפעלות
+=External devices	5769	התקנים חיצוניים
+=Files	1b30	קבצים
 =GPU rendering (alpha)	e5e6	רינדור ב-GPU (אלפא)
 =Gallery	4cdd	גלריה
+=Graphics	9fa8	גרפיקה
+=Host key fingerprint	2398	טביעת אצבע של מפתח המארח
 =How fast the pointer follows the mouse	0a45	כמה מהר המצביע עוקב אחרי העכבר
 =How long it stays large after a shake	82a0	כמה זמן הוא נשאר גדול אחרי ניעור
 =How long to hold a finger to right-click	b301	כמה זמן להחזיק אצבע ללחיצה ימנית
@@ -512,6 +528,8 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Input device (name, or default)	af7b	התקן קלט (שם או default)
 =Input mute	ad50	השתקת קלט
 =Input volume (percent, or default)	263f	עוצמת קלט (אחוזים או default)
+=Install Moonwater	06fc	התקנת Moonwater
+=Internal storage	e961	אחסון פנימי
 =Internet sharing over Bluetooth	afe8	שיתוף אינטרנט דרך Bluetooth
 =Keep a device by its name	9c51	שמור התקן לפי שמו
 =Keep the lowest-delay sample	d8b9	שמור את הדגימה עם ההשהיה הנמוכה ביותר
@@ -528,7 +546,9 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Launcher	44b1	משגר
 =Learned	0c7c	נלמד
 =Left edge	9ce5	קצה שמאלי
+=Lets the keys of the list log in over the network; off stops it and ends every session	c746	מאפשר למפתחות שברשימה להתחבר דרך הרשת; כבוי, הוא נעצר ומסיים כל הפעלה
 =Linked machines	0cc2	מחשבים מקושרים
+=Listen address (any for every address)	d513	כתובת האזנה (any לכל הכתובות)
 =Local addresses	9f2c	כתובות מקומיות
 =Long press time (ms, or default)	aff4	זמן לחיצה ארוכה (ms או default)
 =Machine	be0e	מחשב
@@ -536,10 +556,6 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Momentum	cfef	תנע
 =Motion	7647	תנועה
 =Mount kept disks	f0c8	הרכבת הדיסקים השמורים
-=Programs started with the desktop	5b74	תוכניות שמופעלות עם שולחן העבודה
-=Add a program to start (its path)	5e20	הוספת תוכנית להפעלה (הנתיב שלה)
-=Remove a program from the start (its path)	1013	הסרת תוכנית מההפעלה (הנתיב שלה)
-=Opened in this order when the desktop starts; none starts it with no windows	5790	נפתחות בסדר הזה כששולחן העבודה מופעל; none מפעיל אותו בלי חלונות
 =Mouse	9b64	עכבר
 =Mouse acceleration	c400	האצת העכבר
 =Mouse sensitivity (percent, or default)	8a23	רגישות העכבר (אחוזים או default)
@@ -558,6 +574,7 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Notices	8f06	הודעות
 =On-screen keyboard	97f8	מקלדת על המסך
 =Open windows where they were last put	8711	פתח חלונות במקום שבו הונחו לאחרונה
+=Opened in this order when the desktop starts; none starts it with no windows	5790	נפתחות בסדר הזה כששולחן העבודה מופעל; none מפעיל אותו בלי חלונות
 =Output device (name, or default)	d73c	התקן פלט (שם או default)
 =Pair a machine	b39b	צימוד מחשב
 =Paths	263f	נתיבים
@@ -565,9 +582,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Pointer	4dca	מצביע
 =Pointer squeeze (percent, or default)	bbee	לחיצת המצביע (אחוזים, או ברירת מחדל)
 =Pointer squeezes on click	ad88	המצביע מתכווץ בלחיצה
+=Port	3cc6	פורט
 =Power	a5e6	צריכת חשמל
 =Power profile	8def	פרופיל צריכת חשמל
 =Predict touch and pen	e2b7	חיזוי מגע ועט
+=Primary display	924b	מסך ראשי
+=Programs started with the desktop	5b74	תוכניות שמופעלות עם שולחן העבודה
 =Proxy	1bfb	פרוקסי
 =Proxy from the environment	7fa7	פרוקסי מהסביבה
 =Public IPv4	0813	IPv4 ציבורי
@@ -576,16 +596,25 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Public address discovery (STUN)	7691	גילוי הכתובת הציבורית (STUN)
 =Refresh rate	bf6e	קצב רענון
 =Remembered devices	abbc	התקנים שמורים
+=Remove a program from the start (its path)	1013	הסרת תוכנית מההפעלה (הנתיב שלה)
 =Resize border width (pixels, or default)	7fdf	רוחב מסגרת שינוי הגודל (פיקסלים או default)
 =Resize grip (pixels, or default)	dddd	אחיזת שינוי הגודל (פיקסלים או default)
+=Resolution	18af	רזולוציה
 =Right edge	279a	קצה ימני
+=Root login	6cd4	כניסת root
+=Root may log in by a key of the list, and by nothing else	a430	root יכול להתחבר במפתח מהרשימה, ובשום דבר אחר
 =Rotation	777f	סיבוב
 =Rubber band	9c42	אפקט גומייה
+=SSH	7b31	SSH
+=SSH server	9b60	שרת SSH
+=STUN servers (or reset)	4062	שרתי STUN (או reset)
+=STUN time limit (ms, or default)	be40	מגבלת זמן ל-STUN (ms או default)
 =Scale of this screen	e4ca	קנה המידה של המסך הזה
 =Screen	c631	מסך
 =Screen modes	85ad	מצבי מסך
 =Scroll speed	e7af	מהירות גלילה
 =Scrolling	74ec	גלילה
+=Server files	5af9	קובצי השרת
 =Servers in order	0a76	שרתים לפי הסדר
 =Set the clock from the network	b2a3	קבע את השעון מהרשת
 =Settings	8728	הגדרות
@@ -598,19 +627,33 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Sound	9a34	צליל
 =Sound server	84bf	שרת השמע
 =Start the desktop	be4c	הפעל את שולחן העבודה
-=STUN servers (or reset)	4062	שרתי STUN (או reset)
-=STUN time limit (ms, or default)	be40	מגבלת זמן ל-STUN (ms או default)
 =System	84bc	מערכת
 =System notices	fa89	הודעות המערכת
 =Taskbar	d759	שורת המשימות
+=Taskbar battery place	3413	מיקום הסוללה בשורת המשימות
+=Taskbar clock bulge (percent)	fa6c	קמירות השעון בשורת המשימות (אחוזים)
+=Taskbar clock place	c144	מיקום השעון בשורת המשימות
 =Taskbar display	042b	מסך שורת המשימות
+=Taskbar distance from the edge (pixels)	845c	מרחק שורת המשימות מהקצה (פיקסלים)
 =Taskbar hides for fullscreen	f2f8	שורת המשימות מוסתרת במסך מלא
 =Taskbar launcher button	dd4d	כפתור המשגר בשורת המשימות
+=Taskbar microphone place	76d8	מיקום המיקרופון בשורת המשימות
+=Taskbar moon look	a24d	מראה הירח בשורת המשימות
+=Taskbar moon place	6f19	מיקום הירח בשורת המשימות
+=Taskbar moon spin (seconds a turn, off or default)	a763	סיבוב הירח בשורת המשימות (שניות לסיבוב, כבוי או ברירת מחדל)
+=Taskbar newest task side	b5a9	הצד של המשימה החדשה ביותר בשורת המשימות
+=Taskbar notices place	a793	מיקום ההתראות בשורת המשימות
+=Taskbar order	ccfd	סדר שורת המשימות
 =Taskbar padding (pixels)	a3a0	ריווח בשורת המשימות (פיקסלים)
 =Taskbar pinned programs (or none)	3732	תוכנות מוצמדות לשורת המשימות (או אין)
 =Taskbar position	81b8	מיקום שורת המשימות
 =Taskbar scale (percent)	810b	קנה המידה של שורת המשימות (אחוזים)
+=Taskbar sound place	e2a1	מיקום הצליל בשורת המשימות
+=Taskbar tasks	445b	משימות בשורת המשימות
+=Taskbar tasks place	bfd0	מיקום המשימות בשורת המשימות
 =Taskbar tray (text with {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)	92d2	אזור ההודעות בשורת המשימות (טקסט עם {names}: {battery} {time.24h.hour}:{time.24h.min} {date.day} {cpu.load} ...)
+=Taskbar tray clock place	c2e6	מיקום שעון המגש בשורת המשימות
+=Taskbar tray text place	c235	מיקום טקסט המגש בשורת המשימות
 =Terminal	62d1	מסוף
 =Terminal lines per wheel notch	3800	שורות במסוף לכל צעד של הגלגלת
 =Text size (percent, or default)	51d7	גודל הטקסט (אחוזים או default)
@@ -626,11 +669,12 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Theme	7c92	ערכת נושא
 =This machine	3790	המחשב הזה
 =Time	e404	זמן
+=Time limit (minutes, or off)	d2cf	מגבלת זמן (דקות, או off)
 =Time server (auto for the pool)	67e5	שרת זמן (auto עבור המאגר)
 =Time zone	741a	אזור זמן
 =Touch	fb78	מגע
-=Trace time limit (seconds, or default)	28d4	מגבלת זמן למעקב (שניות או default)
 =Trace URL (or default)	be36	כתובת URL למעקב (או default)
+=Trace time limit (seconds, or default)	28d4	מגבלת זמן למעקב (שניות או default)
 =Turned by the screen	ea45	מסובב על ידי המסך
 =Turned left	507c	מסובב שמאלה
 =Turned right	7a49	מסובב ימינה
@@ -638,18 +682,27 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =Upside down	9dc1	הפוך
 =Variable refresh rate	06a4	קצב רענון משתנה
 =Volume (percent, or default)	f6e3	עוצמת שמע (אחוזים או default)
+=Wallpaper	0da9	טפט
+=Wallpaper glow	57c6	זוהר הטפט
+=Wallpaper in the dark theme	a6dc	טפט בערכת הנושא הכהה
+=Wallpaper of this screen	2c92	הרקע של מסך זה
+=Wallpaper picture (a PNG file, or none)	8e9d	תמונת רקע (קובץ PNG, או ללא)
+=Wallpaper seas (percent grey)	6836	ימות הטפט (אחוז אפור)
 =Waterlink	6560	Waterlink
 =What a swipe in from this edge does	faab	מה עושה החלקה פנימה מהקצה הזה
+=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	היכן Canvas מצייר: על ה-GPU או על המעבד. מה הכרטיס עושה עכשיו מופיע מתחת
 =White edged in black, or the reverse	cd63	לבן עם שוליים שחורים, או להפך
 =Wi-Fi	0ec1	Wi-Fi
 =Wi-Fi IP address	9026	כתובת IP של Wi-Fi
 =Wired	9a54	רשת קווית
 =Wired IP address	0e25	כתובת IP של הרשת הקווית
+=after	7dc9	אחרי
 =all	4bc4	הכול
 =allow	a832	אפשר
 =amber	bec0	ענבר
 =auto	a396	אוטומטי
 =balanced	b71d	מאוזן
+=before	ff3e	לפני
 =black	4ba4	שחור
 =blue	f5cd	כחול
 =bottom	6b2a	למטה
@@ -661,16 +714,23 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =default	5bde	ברירת מחדל
 =deny	6367	חסום
 =desktop	87b3	שולחן עבודה
+=dimmed	bded	מעומעם
 =dmy	2a79	dmy
 =dynamic	96ae	דינמי
 =edge	d83c	קצה
+=end	75aa	סוף
 =fast	02af	מהיר
 =forest	2a60	ירוק יער
 =full	b33c	מלא
 =games	2b9c	משחקים
+=glow	27bc	זוהר
+=glow-and-edges	540f	זוהר-ושוליים
 =graphite	dc8d	גרפיט
 =green	ecbc	ירוק
+=grouped	8b7d	מקובצות
 =high	b9fd	גבוה
+=ink	8faf	דיו
+=inverted	8038	הפוך
 =kernel log	415a	יומן הליבה
 =kernel log klog dmesg messages	1a8d	יומן ליבה klog dmesg הודעות
 =launcher	8391	מפעיל
@@ -682,6 +742,9 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =mdy	3697	mdy
 =midnight-blue	4008	כחול חצות
 =modem	67ed	מודם
+=moon	ae40	ירח
+=moon-tasks-tray	6c42	ירח-משימות-מגש
+=moon-tray-tasks	c2c4	ירח-מגש-משימות
 =network	86c5	רשת
 =none	afdb	אין
 =normal	9c52	רגיל
@@ -691,20 +754,32 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =per second	4f98	בשנייה
 =percent	fa5a	אחוזים
 =performance	8ca5	ביצועים
+=picture	d389	תמונה
+=plain	3f67	פשוט
 =plum	b06b	שזיף
 =powersave	2283	חיסכון באנרגיה
 =primary	5fd9	ראשי
+=realistic	b65f	מציאותי
 =reduced	5839	מופחת
 =right	2de5	ימין
 =rose	1806	ורד
+=separate	bb18	נפרדות
 =settings preferences options	8c78	הגדרות העדפות אפשרויות
 =slate	deee	צפחה
 =slow	42b8	איטי
+=split	2de3	מפוצל
+=start	04df	התחלה
+=tab	2e4c	גלולה
+=tasks-moon-tray	c6a4	משימות-ירח-מגש
+=tasks-tray-moon	4f46	משימות-מגש-ירח
 =tcp	ba90	tcp
 =terminal shell console	eaba	מסוף מעטפת קונסולה
 =thick	964e	עבה
 =thin	b172	דק
 =top	dc3c	למעלה
+=tray	a12d	מגש
+=tray-moon-tasks	7246	מגש-ירח-משימות
+=tray-tasks-moon	fda8	מגש-משימות-ירח
 =unlock	1f55	בטל נעילה
 =violet	57f2	סגול
 =volume	698f	עוצמת קול
@@ -713,66 +788,3 @@ ui_field_full	fe02	זה המקסימום שהוא מכיל
 =windows	26ea	חלונות
 =wired	bfb4	קווי
 =ymd	faad	ymd
-=SSH	7b31	SSH
-=SSH server	9b60	שרת SSH
-=Root login	6cd4	כניסת root
-=Port	3cc6	פורט
-=Listen address (any for every address)	d513	כתובת האזנה (any לכל הכתובות)
-=Time limit (minutes, or off)	d2cf	מגבלת זמן (דקות, או off)
-=Host key fingerprint	2398	טביעת אצבע של מפתח המארח
-=Server files	5af9	קובצי השרת
-=Bowl tier	7b7f	רמת bowl
-=Add a key (label, then the public key)	e2e3	הוספת מפתח (תווית, ואז המפתח הציבורי)
-=End every session	12e1	סיום כל ההפעלות
-=Lets the keys of the list log in over the network; off stops it and ends every session	c746	מאפשר למפתחות שברשימה להתחבר דרך הרשת; כבוי, הוא נעצר ומסיים כל הפעלה
-=Root may log in by a key of the list, and by nothing else	a430	root יכול להתחבר במפתח מהרשימה, ובשום דבר אחר
-=Wallpaper	0da9	טפט
-=Wallpaper picture (a PNG file, or none)	8e9d	תמונת רקע (קובץ PNG, או ללא)
-=Wallpaper in the dark theme	a6dc	טפט בערכת הנושא הכהה
-=Wallpaper seas (percent grey)	6836	ימות הטפט (אחוז אפור)
-=Wallpaper glow	57c6	זוהר הטפט
-=Taskbar moon place	6f19	מיקום הירח בשורת המשימות
-=Taskbar moon look	a24d	מראה הירח בשורת המשימות
-=Taskbar tasks place	bfd0	מיקום המשימות בשורת המשימות
-=Taskbar newest task side	b5a9	הצד של המשימה החדשה ביותר בשורת המשימות
-=Taskbar notices place	a793	מיקום ההתראות בשורת המשימות
-=Taskbar microphone place	76d8	מיקום המיקרופון בשורת המשימות
-=Taskbar sound place	e2a1	מיקום הצליל בשורת המשימות
-=Taskbar battery place	3413	מיקום הסוללה בשורת המשימות
-=Taskbar tray text place	c235	מיקום טקסט המגש בשורת המשימות
-=Taskbar tray clock place	c2e6	מיקום שעון המגש בשורת המשימות
-=Taskbar order	ccfd	סדר שורת המשימות
-=Taskbar clock place	c144	מיקום השעון בשורת המשימות
-=Taskbar clock bulge (percent)	fa6c	קמירות השעון בשורת המשימות (אחוזים)
-=moon	ae40	ירח
-=plain	3f67	פשוט
-=picture	d389	תמונה
-=dimmed	bded	מעומעם
-=inverted	8038	הפוך
-=glow	27bc	זוהר
-=glow-and-edges	540f	זוהר-ושוליים
-=start	04df	התחלה
-=end	75aa	סוף
-=realistic	b65f	מציאותי
-=ink	8faf	דיו
-=split	2de3	מפוצל
-=before	ff3e	לפני
-=after	7dc9	אחרי
-=moon-tasks-tray	6c42	ירח-משימות-מגש
-=moon-tray-tasks	c2c4	ירח-מגש-משימות
-=tasks-moon-tray	c6a4	משימות-ירח-מגש
-=tasks-tray-moon	4f46	משימות-מגש-ירח
-=tray-moon-tasks	7246	מגש-ירח-משימות
-=tray-tasks-moon	fda8	מגש-משימות-ירח
-=tray	a12d	מגש
-=tab	2e4c	גלולה
-=Taskbar moon spin (seconds a turn, off or default)	a763	סיבוב הירח בשורת המשימות (שניות לסיבוב, כבוי או ברירת מחדל)
-=Taskbar tasks	445b	משימות בשורת המשימות
-=Taskbar distance from the edge (pixels)	845c	מרחק שורת המשימות מהקצה (פיקסלים)
-=grouped	8b7d	מקובצות
-=separate	bb18	נפרדות
-=Resolution	18af	רזולוציה
-=Primary display	924b	מסך ראשי
-=Wallpaper of this screen	2c92	הרקע של מסך זה
-=Graphics	9fa8	גרפיקה
-=Where Canvas draws: on the GPU, or the processor. What the card does now is under it	7544	היכן Canvas מצייר: על ה-GPU או על המעבד. מה הכרטיס עושה עכשיו מופיע מתחת
