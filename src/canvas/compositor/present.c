@@ -1060,8 +1060,12 @@ static void compositor_wall_take(void)
         if (job->worker)
                 thread_join(job->worker);
         job->worker = null;
-        if (compositor_wall)
-                gpu_forget(compositor_wall, compositor_wall_bytes), compositor_call(syscall(munmap), (positive)compositor_wall, compositor_wall_bytes, 0, 0, 0, 0);
+        {
+                void *old_wall = compositor_wall;
+                unsigned long old_bytes = (unsigned long)compositor_wall_bytes;
+
+                mem_buf_free(&old_wall, &old_bytes, MEM_BUF_GPU_FORGET);
+        }
         compositor_wall = job->pixels, compositor_wall_bytes = job->bytes, compositor_wall_w = job->width, compositor_wall_h = job->height;
         memory_copy(compositor_wall_key, job->key, sizeof(compositor_wall_key));
         job->pixels = null, job->done = 0, compositor_wall_turn = job->turn;
@@ -1135,16 +1139,17 @@ static void compositor_wall_start(b64 turn, int step)
 
         job->bytes = (positive)compositor.width * (positive)compositor.height * 4;
         {
-                long got = (long)compositor_call(syscall(mmap), 0, job->bytes, 3, 0x22, (positive)-1, 0);
+                void *p = 0;
+                unsigned long cap = 0;
 
-                if (got < 0 && got > -4096)
+                if (!mem_buf_grow(&p, &cap, (unsigned long)job->bytes, 0))
                 {
                         // Said once for this space and look; looked for again only when something changes.
                         if (!step)
                                 compositor_wall_say("there was no memory for it", 0, 0, 0), memory_copy(compositor_wall_key, job->key, sizeof(compositor_wall_key));
                         return;
                 }
-                job->pixels = (unsigned int *)got;
+                job->pixels = (unsigned int *)p, job->bytes = (positive)cap;
         }
         // A step's copy of the wallpaper shown is the thread's to make: the one shown is let go only once the step is taken.
         job->from = step ? compositor_wall : null;

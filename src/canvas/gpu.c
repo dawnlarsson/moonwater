@@ -38,7 +38,6 @@ static struct { int fd, broken; unsigned int family, device, ctx, handle, *impor
 static unsigned char *gpu_import_at_room; // the reservation the import table's arrays are in, and the imports committed in it
 static unsigned int gpu_import_room;
 static p64 *gpu_submit_bos;               // a submit's buffers (the ring, the imports and maps a job may read), as many as the imports have room for
-static positive gpu_last_job; // when the last job finished (monotonic ns): the idle clock's measure (gpu_wake)
 // The memory the dma-buf route may reach: the window table's memfd (fd), mapped at at (its byte 0), the picture part of it (bytes), and pin(offset, on) when a
 // map of its pages is made or let go, so that the program that owns them does not give them back while the card may read them.
 static struct { int fd; unsigned char *at; positive bytes; void (*pin)(positive offset, b32 on); } gpu_shared = {-1, 0, 0, 0};
@@ -46,6 +45,41 @@ static struct { int fd; unsigned char *at; positive bytes; void (*pin)(positive 
 struct gpu_memfd { int fd; void *at; positive bytes; void (*pin)(positive offset, b32 on); };
 static struct gpu_memfd *gpu_memfds;
 static unsigned int gpu_memfd_count;
+
+// Growable/reserved anonymous mmap arena helpers shared across gpu.c (imports, memfds, i915 tables, bin staging).
+static void *gpu_mmap_reserve(positive bytes, int prot)
+{
+        long got = (long)system_call_6(syscall(mmap), 0, bytes, (positive)prot, 0x4022, (positive)-1, 0);
+
+        return got < 0 && got > -4096 ? 0 : (void *)got;
+}
+
+static void gpu_buf_free(void **ptr, positive *cap)
+{
+        if (*ptr)
+                system_call_2(syscall(munmap), (positive)*ptr, *cap);
+        *ptr = 0, *cap = 0;
+}
+
+static void *gpu_buf_grow(void **ptr, positive *cap, positive need, positive preserve)
+{
+        positive want = (need + 4095) & ~(positive)4095;
+        long p;
+
+        if (*ptr && *cap >= want)
+                return *ptr;
+        p = (long)system_call_6(syscall(mmap), 0, want, 3, 0x22, (positive)-1, 0);
+        if (p < 0 && p > -4096)
+                return 0;
+        if (*ptr)
+        {
+                if (preserve)
+                        memory_copy_apart((void *)p, *ptr, preserve);
+                system_call_2(syscall(munmap), (positive)*ptr, *cap);
+        }
+        *ptr = (void *)p, *cap = want;
+        return *ptr;
+}
 
 // The import table's arrays pointed at their reservation (made at the first need), with room for `want`: 1, or 0 when the memory is not there.
 #define GPU_IMPORT_ARRAYS(X) X(imported, unsigned int) X(imported_va, positive) X(imported_bytes, positive) X(imported_dead, unsigned char) \
@@ -58,16 +92,13 @@ static b32 gpu_imports_room(unsigned int want)
         if (!gpu_import_at_room)
         {
                 positive bytes = 0;
-                long got;
 
 #define GPU_IMPORT_SIZE(name, type) bytes += ((positive)GPU_IMPORTS_MOST * sizeof(type) + 4095) & ~4095ull;
                 GPU_IMPORT_ARRAYS(GPU_IMPORT_SIZE)
 #undef GPU_IMPORT_SIZE
                 bytes += ((positive)(GPU_IMPORTS_MOST + 64 + 1024) * sizeof(p64) + 4095) & ~4095ull; // the submit's buffers, with the maps
-                got = (long)system_call_6(syscall(mmap), 0, bytes, 0, 0x4022, (positive)-1, 0);
-                if (got < 0 && got > -4096)
+                if (!(gpu_import_at_room = (unsigned char address_to)gpu_mmap_reserve(bytes, 0)))
                         return false;
-                gpu_import_at_room = (unsigned char address_to)got;
         }
 #define GPU_IMPORT_POINT(name, type) gpu.name = (type address_to)(gpu_import_at_room + at), at += ((positive)GPU_IMPORTS_MOST * sizeof(type) + 4095) & ~4095ull;
         GPU_IMPORT_ARRAYS(GPU_IMPORT_POINT)
@@ -100,14 +131,8 @@ static b32 gpu_memfds_room(unsigned int want)
         static unsigned int room;
         positive grown;
 
-        if (!gpu_memfds)
-        {
-                long got = (long)system_call_6(syscall(mmap), 0, (positive)GPU_IMPORTS_MOST * sizeof(struct gpu_memfd), 0, 0x4022, (positive)-1, 0);
-
-                if (got < 0 && got > -4096)
-                        return false;
-                gpu_memfds = (struct gpu_memfd address_to)got;
-        }
+        if (!gpu_memfds && !(gpu_memfds = (struct gpu_memfd address_to)gpu_mmap_reserve((positive)GPU_IMPORTS_MOST * sizeof(struct gpu_memfd), 0)))
+                return false;
         if (want <= room)
                 return true;
         if (want > GPU_IMPORTS_MOST)
@@ -309,31 +334,57 @@ enum gpu_req
 static struct { unsigned int first, error, mask, mode, owner, family, device, route, route_error, pick, settled; positive nodes; char driver[8], node[20], bus[32], name[32]; } gpu_req;
 static char gpu_display[32]; // the display card's bus (set by the compositor before the start: "" for a headless one, or one the kernel does not name)
 #define GPU_NODES 8
-static unsigned int gpu_last_error; // the last job's refusal: the submit's errno, 62 (ETIME) for one that hung (two seconds old, not done), 5 for a wait that failed
-/*
-        A pending job (gpu.pending, submitted at gpu_job_began; the one before it, in the other slot, is gpu_before while it is not seen done) has a deadline:
-        GPU_HANG_NS after its submit it is hung. A call that waits for its job (gpu_run) waits a tick, GPU_LATE_NS, and then leaves it pending: the frame is
-        drawn some other way, with no cool-down. A pending job's end is said once (gpu_end_said), by the call that waited it out or by gpu_late_end, and only
-        when it is a bad one: its deadline passed, the kernel's log has a page fault since its submit (looked at from GPU_FAULT_FIRST past a tick, then every
-        GPU_FAULT_EVERY: gpu_fault_poll), or its fence answered an error (gpu_idle comes on that: gpu_found). gpu_end says how the last call's job was
-        given up on, gpu_last_error its errno: LATE, the tick passed with the job running (or a slot is still a running job's); HUNG, past its deadline or
-        faulted; WAIT, the wait itself failed; OVERFLOW, the bins did not fit. A refused submit has none.
-*/
-enum gpu_end
+typedef enum gpu_end
 {
         GPU_END_NONE,
         GPU_END_LATE,
         GPU_END_HUNG,
         GPU_END_WAIT,
         GPU_END_OVERFLOW
+} gpu_end_t;
+
+// Consolidated 2-slot compute ring & job lifecycle state (replaces 11 scattered job-slot globals).
+struct gpu_ring_slot
+{
+        positive sequence, began;
 };
-static enum gpu_end gpu_end;    // the last call's
-static enum gpu_end gpu_found;  // the bad end gpu_idle came on of a job whose end was not said, until gpu_late_end has said it
-static b32 gpu_end_said;        // the end of the pending jobs has been said: it is not said again
-static positive gpu_fault_poll; // when the kernel's log is next looked at for a page fault of the pending job (monotonic ns)
-static b32 gpu_patient;         // the self-test waits the hang's two seconds for its job, not a tick: a card just opened is slow to its first (2: GPU_RECOVER_NS, gpu_patience)
-static struct { positive sequence, began; } gpu_before; // the job before the pending one, in the other slot, while it is not seen done (0: none)
-static unsigned int gpu_slot, gpu_pending_slot; // the slot the last job was built in (GPU_ARGS is its arguments), and the pending job's
+
+static struct gpu_ring_state
+{
+        struct gpu_ring_slot slot[GPU_SLOTS]; // per-slot fence sequence and submission timestamp
+        struct gpu_ring_slot before;          // job before the pending one, in the other slot, while not seen done (0: none)
+        unsigned int build_slot;              // slot the last job was built in (GPU_ARGS is its arguments)
+        unsigned int pending_slot;            // slot of the newest pending job
+        gpu_end_t end_kind;                   // last call's end reason
+        gpu_end_t found;                      // bad end gpu_idle came on before gpu_late_end reports it
+        b32 end_said;                         // end of pending jobs has been reported
+        b32 patient;                          // self-test wait patience (0: tick, 1: hang, 2: recover)
+        unsigned int last_error;              // last job's refusal errno / ETIME / EIO
+        positive last_job;                    // when the last job finished (monotonic ns)
+        positive job_began;                   // when the job being run was submitted (monotonic ns)
+        positive fault_poll;                  // next time to poll kmsg for a page fault (monotonic ns)
+} gpu_ring;
+
+#define gpu_end          (gpu_ring.end_kind)
+#define gpu_found        (gpu_ring.found)
+#define gpu_end_said     (gpu_ring.end_said)
+#define gpu_fault_poll   (gpu_ring.fault_poll)
+#define gpu_patient      (gpu_ring.patient)
+#define gpu_before       (gpu_ring.before)
+#define gpu_slot         (gpu_ring.build_slot)
+#define gpu_pending_slot (gpu_ring.pending_slot)
+#define gpu_last_error   (gpu_ring.last_error)
+#define gpu_last_job     (gpu_ring.last_job)
+#define gpu_job_began    (gpu_ring.job_began)
+
+static void gpu_ring_reset(void)
+{
+        memory_zero(gpu_ring.slot, sizeof(gpu_ring.slot));
+        gpu_ring.before.sequence = gpu_ring.before.began = 0;
+        gpu_ring.build_slot = gpu_ring.pending_slot = 0;
+        gpu_ring.end_said = 0;
+        gpu_ring.found = GPU_END_NONE;
+}
 #define GPU_LATE_NS 16000000ull      // a job not done this long after it was submitted is late: a tick (the heaviest whole-screen job measured, 8K, is 5.5 ms)
 #define GPU_HANG_NS 2000000000ull    // and one not done this long after is hung. The kernel's own timeout for a job is amdgpu.lockup_timeout, which at v6.12 is sixty
                                      // seconds for the compute ring this uses: until it ends the job nothing here ends it, the buffer stays the job's (gpu_idle), and the
@@ -863,22 +914,10 @@ static enum gpu_err gpu_i915_classify(unsigned int error)
 // The reservations, taken once: the table of bound ranges and room for the object list of a submit of as many objects. False when the memory is not there.
 static b32 gpu_i915_room(void)
 {
-        if (!gpu_i915.bound)
-        {
-                long got = (long)system_call_6(syscall(mmap), 0, (positive)GPU_I915_HANDLES * sizeof(struct gpu_i915_bound), 3, 0x4022, (positive)-1, 0);
-
-                if (got < 0 && got > -4096)
-                        return false;
-                gpu_i915.bound = (struct gpu_i915_bound address_to)got;
-        }
-        if (!gpu_i915.objects)
-        {
-                long got = (long)system_call_6(syscall(mmap), 0, (positive)GPU_I915_HANDLES * sizeof(struct gpu_i915_object), 3, 0x4022, (positive)-1, 0);
-
-                if (got < 0 && got > -4096)
-                        return false;
-                gpu_i915.objects = (struct gpu_i915_object address_to)got;
-        }
+        if (!gpu_i915.bound && !(gpu_i915.bound = (struct gpu_i915_bound address_to)gpu_mmap_reserve((positive)GPU_I915_HANDLES * sizeof(struct gpu_i915_bound), 3)))
+                return false;
+        if (!gpu_i915.objects && !(gpu_i915.objects = (struct gpu_i915_object address_to)gpu_mmap_reserve((positive)GPU_I915_HANDLES * sizeof(struct gpu_i915_object), 3)))
+                return false;
         return true;
 }
 
@@ -1257,11 +1296,12 @@ static void gpu_bins_forget(void);
 
 static void gpu_stop(void)
 {
+        void *stage = gpu_bin_stage;
+
         gpu_maps_reset();
         gpu_shared.fd = -1, gpu_shared.at = 0, gpu_shared.bytes = 0, gpu_shared.pin = 0;
-        if (gpu_bin_stage)
-                system_call_2(syscall(munmap), (positive)gpu_bin_stage, gpu_bin_room);
-        gpu_bin_stage = 0, gpu_bin_room = 0;
+        gpu_buf_free(&stage, &gpu_bin_room);
+        gpu_bin_stage = 0;
         if (gpu.at)
                 system_call_2(syscall(munmap), (positive)gpu.at, gpu.size);
         if (gpu.fd >= 0)
@@ -1274,7 +1314,8 @@ static void gpu_stop(void)
         gpu_image_ok = gpu_nv12_ok = 0;
         if (gpu_import_at_room)
                 gpu_imports_room(0); // the import table's arrays pointed at their reservation again (its room kept, empty)
-        gpu.fd = -1, gpu_end_said = 0, gpu_found = GPU_END_NONE, gpu_before.sequence = 0, gpu_slot = gpu_pending_slot = 0;
+        gpu.fd = -1;
+        gpu_ring_reset();
         gpu_bins_forget();
         gpu_epoch++;
 }
@@ -1675,7 +1716,7 @@ static void gpu_gone_put(positive va, positive bytes, positive from, positive to
 #define GPU_FAULT_BYTES 320
 static char gpu_fault[GPU_FAULT_BYTES];
 static unsigned int gpu_faults, gpu_job_error;
-static positive gpu_job_began, gpu_fault_next; // when the job being run was submitted, and when a refused submit may read the log again (monotonic ns)
+static positive gpu_fault_next; // when a refused submit may read the log again (monotonic ns)
 static positive gpu_fault_import; // the import the last fault said was in (gpu_fault_say): its address as gpu_import_fd answered it, held or let go of; 0 for none
 
 // Text into a buffer at `at`, with its null kept within room: the end of it.
@@ -1730,20 +1771,57 @@ static void gpu_maps_reset(void)
 // session's maps made and let go of), the first gap from the start; 0 for none. guard is the space kept clear on either side of what is placed, and every
 // held import has GPU_IMPORT_GUARD clear on either side of it too: a client's picture the card reads by its layout may be read a little past its
 // buffer (gpu_amd_image_fits), and that read is to find no page there (a fault the hang's blame names), never another buffer's or the compositor's.
+// Unified BO/VA descriptor and lifecycle helpers across gpu_maps and gpu.imported*.
+struct gpu_bo
+{
+        positive va, bytes, from, to;
+        unsigned int handle, listed;
+        b32 written, dma, import;
+};
+
+static inline b32 gpu_bo_contains(positive va, positive bytes, positive at)
+{
+        return at >= va && at - va < bytes;
+}
+
+static void gpu_bo_unbind_close(const struct gpu_bo *bo, enum gpu_gone_why why)
+{
+        gpu_gone_put(bo->va, bo->bytes, bo->from, bo->to, bo->handle, why, bo->written, bo->dma, bo->import, bo->listed);
+        gpu_backend->unbind(bo->handle, bo->va, bo->bytes);
+        gpu_close(bo->handle);
+}
+
+static unsigned int gpu_bo_count(void)
+{
+        return gpu_map_count + gpu.imports;
+}
+
+static void gpu_bo_va_range(unsigned int idx, positive *va, positive *bytes, positive *guard)
+{
+        if (idx < gpu_map_count)
+                *va = gpu_maps[idx].va, *bytes = gpu_maps[idx].bytes, *guard = 0;
+        else
+        {
+                unsigned int j = idx - gpu_map_count;
+
+                *va = gpu.imported_va[j], *bytes = gpu.imported_bytes[j], *guard = GPU_IMPORT_GUARD;
+        }
+}
+
 static positive gpu_place_aligned(positive bytes, positive align, positive guard)
 {
         positive at = gpu_map_next + guard + bytes <= GPU_VA_END ? gpu_map_next + guard : GPU_VA_MAPS + guard;
+        unsigned int total = gpu_bo_count();
 
         at = (at + align - 1) & ~(align - 1);
-        for (unsigned int i = 0; i < gpu_map_count + gpu.imports; i++)
+        for (unsigned int i = 0; i < total; i++)
         {
-                b32 map = i < gpu_map_count;
-                positive from = map ? gpu_maps[i].va : gpu.imported_va[i - gpu_map_count];
-                positive to = from + (map ? gpu_maps[i].bytes : gpu.imported_bytes[i - gpu_map_count]); // a forgotten map keeps its span
-                positive gap = guard + (map ? 0 : GPU_IMPORT_GUARD);
+                positive from, span, extra, gap;
 
-                if (at < to + gap && from < at + bytes + gap)
-                        at = (to + gap + align - 1) & ~(align - 1), i = ~0u; // past it, and each held one looked at again
+                gpu_bo_va_range(i, &from, &span, &extra);
+                gap = guard + extra;
+                if (at < from + span + gap && from < at + bytes + gap)
+                        at = (from + span + gap + align - 1) & ~(align - 1), i = ~0u; // past it, and each held one looked at again
         }
         return at + bytes + guard <= GPU_VA_END ? at : 0;
 }
@@ -1780,9 +1858,10 @@ static b32 gpu_recover(void)
 // The map at i let go of, for the reason why: unmapped (its whole span), its buffer closed, the last map in its place.
 static void gpu_drop(unsigned int i, enum gpu_gone_why why)
 {
-        gpu_gone_put(gpu_maps[i].va, gpu_maps[i].bytes, gpu_maps[i].from, gpu_maps[i].to, gpu_maps[i].handle, why, gpu_maps[i].written, gpu_maps[i].dma, 0, gpu_maps[i].listed);
-        gpu_backend->unbind(gpu_maps[i].handle, gpu_maps[i].va, gpu_maps[i].bytes);
-        gpu_close(gpu_maps[i].handle);
+        const struct gpu_bo bo = {gpu_maps[i].va, gpu_maps[i].bytes, gpu_maps[i].from, gpu_maps[i].to,
+                                  gpu_maps[i].handle, gpu_maps[i].listed, gpu_maps[i].written, gpu_maps[i].dma, 0};
+
+        gpu_bo_unbind_close(&bo, why);
         if (gpu_maps[i].dma && gpu_maps[i].pin)
                 gpu_maps[i].pin(gpu_maps[i].offset, 0);
         gpu_maps[i] = gpu_maps[--gpu_map_count];
@@ -2225,6 +2304,12 @@ static void gpu_forget(const void *addr, positive bytes)
                 }
 }
 
+static void gpu_import_mark_dead(unsigned int i)
+{
+        gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0;
+        gpu.imported_dead_at[i] = gpu_tick, gpu.imported_dead_after[i] = gpu_submit_serial;
+}
+
 // A buffer gpu_import made, let go of by one holder for the reason why (its mode changed, it was made again, the card is idle). While another holder has it,
 // it only has one holder fewer. The last one's leaves it unmapped and its handle closed, unless a job the wait gave up on may still read it (gpu_run_job's
 // pending): then it is only released, and gpu_trim unmaps it once the card is idle.
@@ -2233,6 +2318,9 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
         for (unsigned int i = 0; at && i < gpu.imports; i++)
                 if (gpu.imported_va[i] == at)
                 {
+                        const struct gpu_bo bo = {at, gpu.imported_bytes[i], 0, 0, gpu.imported[i], 0, 1, 1, 1};
+                        unsigned int last;
+
                         if (!gpu.imported_dead[i] && gpu.imported_holds[i] > 1)
                         {
                                 gpu.imported_holds[i]--;
@@ -2240,17 +2328,14 @@ static void gpu_unimport(positive at, enum gpu_gone_why why)
                         }
                         if (gpu.pending && !gpu_idle())
                         {
-                                gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0, gpu.imported_dead_at[i] = gpu_tick, gpu.imported_dead_after[i] = gpu_submit_serial;
+                                gpu_import_mark_dead(i);
                                 return;
                         }
-                        gpu_gone_put(at, gpu.imported_bytes[i], 0, 0, gpu.imported[i], why, 1, 1, 1, 0);
-                        gpu_backend->unbind(gpu.imported[i], at, gpu.imported_bytes[i]);
-                        gpu_close(gpu.imported[i]);
-                        gpu.imported[i] = gpu.imported[gpu.imports - 1], gpu.imported_va[i] = gpu.imported_va[gpu.imports - 1];
-                        gpu.imported_bytes[i] = gpu.imported_bytes[gpu.imports - 1], gpu.imported_dead[i] = gpu.imported_dead[gpu.imports - 1];
-                        gpu.imported_dead_at[i] = gpu.imported_dead_at[gpu.imports - 1], gpu.imported_dead_after[i] = gpu.imported_dead_after[gpu.imports - 1];
-                        gpu.imported_holds[i] = gpu.imported_holds[gpu.imports - 1], gpu.imported_own[i] = gpu.imported_own[gpu.imports - 1];
-                        gpu.imported_handed[i] = gpu.imported_handed[gpu.imports - 1], gpu.imported_used[i] = gpu.imported_used[gpu.imports - 1], gpu.imports--;
+                        gpu_bo_unbind_close(&bo, why);
+                        last = --gpu.imports;
+#define GPU_IMPORT_SWAP(name, type) gpu.name[i] = gpu.name[last];
+                        GPU_IMPORT_ARRAYS(GPU_IMPORT_SWAP)
+#undef GPU_IMPORT_SWAP
                         return;
                 }
 }
@@ -2264,7 +2349,7 @@ static void gpu_release_import(positive at)
                         if (!gpu.imported_dead[i] && gpu.imported_holds[i] > 1)
                                 gpu.imported_holds[i]--;
                         else
-                                gpu.imported_dead[i] = 1, gpu.imported_holds[i] = 0, gpu.imported_dead_at[i] = gpu_tick, gpu.imported_dead_after[i] = gpu_submit_serial;
+                                gpu_import_mark_dead(i);
                         return;
                 }
 }
@@ -2698,7 +2783,7 @@ static void gpu_fault_say(positive at)
         n = gpu_text_num(gpu_fault, n, room, at, 16), n = gpu_text_put(gpu_fault, n, room, ": ");
         gpu_fault_import = 0;
         for (unsigned int i = 0; i < gpu_map_count; i++)
-                if (at >= gpu_maps[i].va && at - gpu_maps[i].va < gpu_maps[i].bytes)
+                if (gpu_bo_contains(gpu_maps[i].va, gpu_maps[i].bytes, at))
                 {
                         n = gpu_text_put(gpu_fault, n, room, "held map, handle ");
                         n = gpu_text_num(gpu_fault, n, room, gpu_maps[i].handle, 10);
@@ -2713,7 +2798,7 @@ static void gpu_fault_say(positive at)
                         return;
                 }
         for (unsigned int i = 0; i < gpu.imports; i++)
-                if (at >= gpu.imported_va[i] && at - gpu.imported_va[i] < gpu.imported_bytes[i])
+                if (gpu_bo_contains(gpu.imported_va[i], gpu.imported_bytes[i], at))
                 {
                         gpu_fault_import = gpu.imported_va[i];
                         n = gpu_text_put(gpu_fault, n, room, "held import, handle ");
@@ -3034,9 +3119,9 @@ static b32 gpu_wait_job(positive cap)
         submitted (HUNG; the log is read from GPU_FAULT_FIRST after a tick, then every GPU_FAULT_EVERY, so a frame does not pay for it). Each is read in the
         kernel's log and said in gpu_fault; gpu_end and gpu_last_error say it as a job that failed in the call would.
 */
-static enum gpu_end gpu_late_end(void)
+static gpu_end_t gpu_late_end(void)
 {
-        enum gpu_end over = GPU_END_NONE;
+        gpu_end_t over = GPU_END_NONE;
         positive now, began;
 
         if (gpu.pending && !gpu_end_said && !gpu_idle())
@@ -3237,6 +3322,7 @@ static positive gpu_submit(void)
         gpu_suspects = 0;
         if (gpu.pending)
                 gpu_before.sequence = gpu.pending, gpu_before.began = kept;
+        gpu_ring.slot[gpu_slot] = (struct gpu_ring_slot){sequence, began};
         gpu.pending = sequence, gpu_pending_slot = gpu_slot, gpu_end_said = 0, gpu_fault_poll = began + GPU_LATE_NS + GPU_FAULT_FIRST;
         gpu_submit_took = clock_monotonic_nanoseconds() - began;
         return sequence;
@@ -3380,20 +3466,11 @@ static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at, po
                 return gpu_end = GPU_END_OVERFLOW, -1;
         {
                 positive tab_bytes = (positive)cw * ch * 8, need;
+                void *stage = gpu_bin_stage;
                 int staged = 0;
 
-                if (tab_bytes > gpu_bin_room)
-                {
-                        positive want = tab_bytes < 262144 ? 262144 : ((tab_bytes + 4095) & ~(positive)4095);
-                        long p = system_call_6(syscall(mmap), 0, want, 3, 0x22, (positive)-1, 0);
-
-                        if (!(p < 0 && p > -4096))
-                        {
-                                if (gpu_bin_stage)
-                                        system_call_2(syscall(munmap), (positive)gpu_bin_stage, gpu_bin_room);
-                                gpu_bin_stage = (unsigned int *)p, gpu_bin_room = want;
-                        }
-                }
+                if (tab_bytes > gpu_bin_room && gpu_buf_grow(&stage, &gpu_bin_room, tab_bytes < 262144 ? 262144 : tab_bytes, 0))
+                        gpu_bin_stage = (unsigned int *)stage;
                 if (gpu_bin_stage && tab_bytes <= gpu_bin_room)
                         tab = gpu_bin_stage, list = tab + 2 * cw * ch, staged = 1;
                 memory_zero(tab, tab_bytes);
@@ -3406,16 +3483,9 @@ static int gpu_scene_build(positive ops_at, unsigned int n, positive bins_at, po
                         return gpu_end = GPU_END_OVERFLOW, -1;
                 if (staged && need > gpu_bin_room)
                 {
-                        positive want = (need + 4095) & ~(positive)4095;
-                        long p = system_call_6(syscall(mmap), 0, want, 3, 0x22, (positive)-1, 0);
-
-                        if (!(p < 0 && p > -4096))
-                        {
-                                memory_copy_apart((void *)p, gpu_bin_stage, tab_bytes);
-                                system_call_2(syscall(munmap), (positive)gpu_bin_stage, gpu_bin_room);
-                                gpu_bin_stage = (unsigned int *)p, gpu_bin_room = want;
-                                tab = gpu_bin_stage, list = tab + 2 * cw * ch;
-                        }
+                        stage = gpu_bin_stage;
+                        if (gpu_buf_grow(&stage, &gpu_bin_room, need, tab_bytes))
+                                gpu_bin_stage = (unsigned int *)stage, tab = gpu_bin_stage, list = tab + 2 * cw * ch;
                         else
                         {
                                 tab = (unsigned int address_to)((p8 address_to)gpu.at + bins_at), list = tab + 2 * cw * ch, staged = 0;

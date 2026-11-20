@@ -206,45 +206,33 @@ static unsigned int compositor_display_degrees(const char *name)
         screen at all.
 */
 static unsigned int *compositor_connector_ids;
-static long compositor_connector_room;
+static unsigned long compositor_connector_bytes;
 
 // Room for want connector ids: the list, or 0 when the memory is not there.
 static unsigned int *compositor_connectors_room(long want)
 {
-        long room = compositor_connector_room ? compositor_connector_room : 64, got;
+        void *p = compositor_connector_ids;
+        unsigned long need = (unsigned long)(want < 64 ? 64 : want) * sizeof(unsigned int);
 
-        if (want <= compositor_connector_room)
-                return compositor_connector_ids;
-        while (room < want)
-                room *= 2;
-        got = compositor_call(syscall(mmap), 0, (positive)(room * (long)sizeof(unsigned int)), 3, 0x22, (positive)-1, 0);
-        if (got < 0 && got > -4096)
+        if (!mem_buf_grow(&p, &compositor_connector_bytes, need, MEM_BUF_GROW_2X))
                 return 0;
-        if (compositor_connector_ids)
-                compositor_call(syscall(munmap), (positive)compositor_connector_ids, (positive)(compositor_connector_room * (long)sizeof(unsigned int)), 0, 0, 0, 0);
-        compositor_connector_ids = (unsigned int *)got, compositor_connector_room = room;
+        compositor_connector_ids = (unsigned int *)p;
         return compositor_connector_ids;
 }
 
 // The modes of a connector, read into a list that grows as the connectors' list does (compositor_modes_room): a screen may list more than 128.
 static struct compositor_mode *compositor_modes_list;
-static long compositor_modes_count;
+static unsigned long compositor_modes_bytes;
 
 // Room for want modes: the list, or 0 when the memory is not there.
 static struct compositor_mode *compositor_modes_room(long want)
 {
-        long room = compositor_modes_count ? compositor_modes_count : 128, got;
+        void *p = compositor_modes_list;
+        unsigned long need = (unsigned long)(want < 128 ? 128 : want) * sizeof(struct compositor_mode);
 
-        if (want <= compositor_modes_count)
-                return compositor_modes_list;
-        while (room < want)
-                room *= 2;
-        got = compositor_call(syscall(mmap), 0, (positive)(room * (long)sizeof(struct compositor_mode)), 3, 0x22, (positive)-1, 0);
-        if (got < 0 && got > -4096)
+        if (!mem_buf_grow(&p, &compositor_modes_bytes, need, MEM_BUF_GROW_2X))
                 return 0;
-        if (compositor_modes_list)
-                compositor_call(syscall(munmap), (positive)compositor_modes_list, (positive)(compositor_modes_count * (long)sizeof(struct compositor_mode)), 0, 0, 0, 0);
-        compositor_modes_list = (struct compositor_mode *)got, compositor_modes_count = room;
+        compositor_modes_list = (struct compositor_mode *)p;
         return compositor_modes_list;
 }
 

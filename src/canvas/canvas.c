@@ -1299,11 +1299,43 @@ static void output_attach(struct output *output)
         kept until the commit that points the pipe at the new one has
         landed, because freeing it sooner blanks the scanout.
 */
+// Walk each unique card on desktop.outputs (a card's outputs are consecutive); caller initializes seen = null.
+#define desktop_for_each_card(output, seen)                        \
+        list_for_each_entry((output), &desktop.outputs, link)      \
+                if ((output)->canvas == (seen))                    \
+                        continue;                                  \
+                else if (((seen) = (output)->canvas), 0)           \
+                        ;                                          \
+                else
+
+// Pick a 32-bit format on mode_set's primary plane and create a dumb scanout buffer; writes alpha mask into *opaque.
+static struct drm_client_buffer *output_buffer_make(struct canvas *canvas,
+                                                    struct drm_mode_set *mode_set,
+                                                    unsigned int width,
+                                                    unsigned int height,
+                                                    u32 *opaque)
+{
+        u32 format = canvas_plane_pick_format(mode_set->crtc->primary,
+                                              DRM_FORMAT_XRGB8888,
+                                              DRM_FORMAT_ARGB8888);
+        struct drm_client_buffer *buffer;
+
+        if (format == DRM_FORMAT_INVALID)
+                return ERR_PTR(-ENODEV);
+
+        buffer = drm_client_buffer_create_dumb(&canvas->client, width, height, format);
+        if (IS_ERR(buffer))
+                return buffer;
+
+        *opaque = format == DRM_FORMAT_ARGB8888 ? 0xff000000 : 0;
+        return buffer;
+}
+
 static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set,
                          _Bool either)
 {
         unsigned int width, height;
-        u32 format;
+        u32 opaque;
         struct drm_client_buffer *fresh;
 
         if (!mode_set || !mode_set->mode || !mode_set->crtc ||
@@ -1319,14 +1351,7 @@ static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set,
                          (unsigned long)output->width * output->height)
                 return false;
 
-        format = canvas_plane_pick_format(mode_set->crtc->primary,
-                                          DRM_FORMAT_XRGB8888,
-                                          DRM_FORMAT_ARGB8888);
-        if (format == DRM_FORMAT_INVALID)
-                return false;
-
-        fresh = drm_client_buffer_create_dumb(&output->canvas->client, width,
-                                              height, format);
+        fresh = output_buffer_make(output->canvas, mode_set, width, height, &opaque);
         if (IS_ERR(fresh))
                 return false;
 
@@ -1338,7 +1363,7 @@ static _Bool output_grow(struct output *output, struct drm_mode_set *mode_set,
         output->buffer = fresh;
         output->width = width;
         output->height = height;
-        output->opaque = format == DRM_FORMAT_ARGB8888 ? 0xff000000 : 0;
+        output->opaque = opaque;
         mode_set->fb = fresh->fb;
         return true;
 }
@@ -1503,34 +1528,33 @@ static struct output *output_add(struct canvas *canvas, struct drm_mode_set *mod
 {
         unsigned int width = mode_set->mode->hdisplay;
         unsigned int height = mode_set->mode->vdisplay;
-        u32 format = canvas_plane_pick_format(mode_set->crtc->primary,
-                                              DRM_FORMAT_XRGB8888,
-                                              DRM_FORMAT_ARGB8888);
+        struct drm_client_buffer *buffer;
         struct output *output;
+        u32 opaque;
 
-        if (format == DRM_FORMAT_INVALID)
+        buffer = output_buffer_make(canvas, mode_set, width, height, &opaque);
+        if (IS_ERR(buffer))
         {
-                pr_err("[moonwater canvas] " "no 32 bit format on this plane, skipping output\n");
+                if (PTR_ERR(buffer) == -ENODEV)
+                        pr_err("[moonwater canvas] " "no 32 bit format on this plane, skipping output\n");
+                else
+                        pr_err("[moonwater canvas] " "could not create a %ux%u scanout buffer\n", width, height);
                 return null;
         }
 
         output = kzalloc(sizeof(*output), GFP_KERNEL);
         if (!output)
-                return null;
-
-        output->buffer = drm_client_buffer_create_dumb(&canvas->client, width, height, format);
-        if (IS_ERR(output->buffer))
         {
-                pr_err("[moonwater canvas] " "could not create a %ux%u scanout buffer\n", width, height);
-                kfree(output);
+                drm_client_buffer_delete(buffer);
                 return null;
         }
 
+        output->buffer = buffer;
         output->canvas = canvas;
         output->mode_set = mode_set;
         output->width = width;
         output->height = height;
-        output->opaque = format == DRM_FORMAT_ARGB8888 ? 0xff000000 : 0;
+        output->opaque = opaque;
         mode_set->fb = output->buffer->fb;
 
         if (!output_describe(output))
@@ -1643,17 +1667,11 @@ static _Bool desktop_commit_known(struct canvas *known, int known_set)
 
         desktop_attach_buffers();
 
-        list_for_each_entry(output, &desktop.outputs, link)
+        desktop_for_each_card(output, committed)
         {
-                int set;
-
-                if (output->canvas == committed)
-                        continue;
-
-                committed = output->canvas;
-                set = committed == known
-                          ? known_set
-                          : drm_client_modeset_commit(&committed->client);
+                int set = committed == known
+                              ? known_set
+                              : drm_client_modeset_commit(&committed->client);
                 if (!set)
                 {
                         struct output *grown;
@@ -1793,7 +1811,7 @@ static _Bool canvas_scale_refresh(void)
 */
 static _Bool desktop_taken(void)
 {
-        struct drm_device *checked = null;
+        struct canvas *checked = null;
         struct output *output;
         _Bool taken = false;
 
@@ -1801,14 +1819,10 @@ static _Bool desktop_taken(void)
         if (desktop.asleep)
                 return true;
 
-        list_for_each_entry(output, &desktop.outputs, link)
+        desktop_for_each_card(output, checked)
         {
-                struct drm_device *dev = output->canvas->client.dev;
+                struct drm_device *dev = checked->client.dev;
 
-                if (dev == checked)
-                        continue;
-
-                checked = dev;
                 mutex_lock(&dev->master_mutex);
                 taken = dev->master != null;
                 mutex_unlock(&dev->master_mutex);
@@ -1925,15 +1939,10 @@ static void desktop_dpms(int mode)
 
         desktop_attach_buffers();
 
-        list_for_each_entry(output, &desktop.outputs, link)
+        desktop_for_each_card(output, done)
         {
-                int ret;
+                int ret = drm_client_modeset_dpms(&done->client, mode);
 
-                if (output->canvas == done)
-                        continue;
-
-                done = output->canvas;
-                ret = drm_client_modeset_dpms(&done->client, mode);
                 pr_info("[moonwater canvas] " "screens %s: %d\n", mode == DRM_MODE_DPMS_ON ? "on" : "off", ret);
         }
 }
@@ -2514,8 +2523,15 @@ static void canvas_clients_clear(struct drm_device *dev)
         mutex_unlock(&dev->clientlist_mutex);
 }
 
-/* Which program is master of a card, for a refusal to say. */
-static int canvas_master_holder(struct drm_device *dev, char *command, positive room)
+/*
+        Find the current DRM master task of dev under dev->filelist_mutex + RCU:
+        copies and sanitizes its comm into command[room], returns its tgid (in
+        current's pid namespace when in_current_ns, else init pid ns), and
+        optionally takes referenced struct pids for process and session.
+*/
+static int canvas_master_find(struct drm_device *dev, char *command, positive room,
+                              _Bool in_current_ns, struct pid **out_process,
+                              struct pid **out_session)
 {
         struct drm_file *file;
         int holder = 0;
@@ -2532,12 +2548,15 @@ static int canvas_master_holder(struct drm_device *dev, char *command, positive 
                 task = pid_task(rcu_dereference(file->pid), PIDTYPE_TGID);
                 if (task)
                 {
-                        // In the asker's pid namespace, where a number the
-                        // asker can kill means something; 0 is a holder it
-                        // cannot see. A program names itself with prctl, so
-                        // only printable bytes go to the asker's terminal.
-                        holder = task_tgid_nr_ns(task, task_active_pid_ns(current));
+                        holder = in_current_ns
+                                     ? task_tgid_nr_ns(task, task_active_pid_ns(current))
+                                     : task_tgid_nr(task);
+                        if (out_process)
+                                *out_process = get_pid(task_tgid(task));
+                        if (out_session)
+                                *out_session = get_pid(task_session(task));
                         strscpy(command, task->comm, room);
+                        // A program names itself with prctl, so only printable bytes go to logs/terminals.
                         for (char *at = command; *at; at++)
                                 if (*at < ' ' || *at > '~')
                                         *at = '?';
@@ -2548,6 +2567,12 @@ static int canvas_master_holder(struct drm_device *dev, char *command, positive 
         mutex_unlock(&dev->filelist_mutex);
 
         return holder;
+}
+
+/* Which program is master of a card, for a refusal to say. */
+static int canvas_master_holder(struct drm_device *dev, char *command, positive room)
+{
+        return canvas_master_find(dev, command, room, true, null, null);
 }
 
 static struct delayed_work canvas_probe_work;
@@ -3565,13 +3590,17 @@ static void canvas_pm_sleep(_Bool sleeping)
 
                 // What the driver reported while it came back, run now that
                 // the desktop is drawn.
-                list_for_each_entry(output, &desktop.outputs, link)
-                        if (output->canvas->replug)
-                        {
-                                output->canvas->replug = false;
-                                queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq,
-                                           &output->canvas->plug);
-                        }
+                {
+                        struct canvas *seen = null;
+
+                        desktop_for_each_card(output, seen)
+                                if (seen->replug)
+                                {
+                                        seen->replug = false;
+                                        queue_work(canvas_plug_wq ? canvas_plug_wq : system_unbound_wq,
+                                                   &seen->plug);
+                                }
+                }
         }
 
         rt_mutex_unlock(&desktop.lock);
@@ -3721,42 +3750,13 @@ static void canvas_session_end(struct pid *process, struct pid *session)
         rcu_read_unlock();
 }
 
-// One card's master, found as canvas_master_holder finds it, and ended.
+// One card's master, found via canvas_master_find, and ended.
 static void canvas_master_end(struct drm_device *dev)
 {
-        struct drm_file *file;
         struct pid *process = null;
         struct pid *session = null;
         char command[TASK_COMM_LEN] = "";
-        int number = 0;
-
-        mutex_lock(&dev->filelist_mutex);
-        list_for_each_entry(file, &dev->filelist, lhead)
-        {
-                struct task_struct *task;
-
-                if (!drm_is_current_master(file))
-                        continue;
-
-                rcu_read_lock();
-                task = pid_task(rcu_dereference(file->pid), PIDTYPE_TGID);
-                if (task)
-                {
-                        process = get_pid(task_tgid(task));
-                        session = get_pid(task_session(task));
-                        number = task_tgid_nr(task);
-                        strscpy(command, task->comm, sizeof(command));
-
-                        // A program names itself with prctl, and this goes to
-                        // the kernel log.
-                        for (char *at = command; *at; at++)
-                                if (*at < ' ' || *at > '~')
-                                        *at = '?';
-                }
-                rcu_read_unlock();
-                break;
-        }
-        mutex_unlock(&dev->filelist_mutex);
+        int number = canvas_master_find(dev, command, sizeof(command), false, &process, &session);
 
         if (process)
         {
@@ -3789,15 +3789,14 @@ static void canvas_reclaim(void)
 {
         struct drm_device *cards[CANVAS_RECLAIM_CARDS];
         unsigned int count = 0;
+        struct canvas *seen = null;
         struct output *output;
 
         rt_mutex_lock(&desktop.lock);
-        list_for_each_entry(output, &desktop.outputs, link)
+        desktop_for_each_card(output, seen)
         {
-                struct drm_device *dev = output->canvas->client.dev;
+                struct drm_device *dev = seen->client.dev;
 
-                if (count && cards[count - 1] == dev)
-                        continue;
                 if (count == CANVAS_RECLAIM_CARDS)
                         break;
                 drm_dev_get(dev);
