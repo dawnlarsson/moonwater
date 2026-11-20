@@ -280,28 +280,26 @@ static void compositor_word(const char *path, char *word, unsigned int room)
 static p8 compositor_setting_kept(const char *path, const char *word, long *value);
 static void compositor_setting_apply_binds(unsigned int mask);
 
-// `canvas wallpaper` and its rows: what compositor_wall_keep makes the wallpaper with (the theme and the accent it reads itself).
-static void compositor_wall_read(void)
+static p8 compositor_setting_num(const char *path, long *value)
 {
-        static const char *const paths[2] = {SETTING_WALLPAPER_PATH, SETTING_WALLPAPER_DARK_PATH};
-        long kept[2];
         char word[16];
 
-        for (int at = 0; at < 2; at++)
-        {
-                compositor_word(paths[at], word, sizeof(word));
-                compositor_setting_kept(paths[at], word, &kept[at]);
-        }
-        compositor_setting_apply_binds(1u << 2); // COMPOSITOR_SET_WALL: maria & glow
-        compositor_wall_rows.moon = kept[0] == 0, compositor_wall_rows.picture = kept[0] == 2, compositor_wall_rows.dimmed = kept[1] == 0;
-        // The pictures' directory as it is now: a picture put there, or one taken away, is a change of the wallpaper.
-        {
-                unsigned int stamp = 0;
+        compositor_word(path, word, sizeof(word));
+        return compositor_setting_kept(path, word, value);
+}
 
-                compositor_wall_rows.stamp = compositor_wall_look(COMPOSITOR_WALL_DIR, &stamp) == 0040000u ? stamp | 1u : 0;
-        }
-        // A picture wallpaper falls back to the moon on a screen that has none.
-        compositor_wall_rows.moon |= compositor_wall_rows.picture;
+static void compositor_wall_read(void)
+{
+        long mode = 0, dark = 0;
+        unsigned int stamp = 0;
+
+        compositor_setting_num(SETTING_WALLPAPER_PATH, &mode);
+        compositor_setting_num(SETTING_WALLPAPER_DARK_PATH, &dark);
+        compositor_setting_apply_binds(1u << 2); // COMPOSITOR_SET_WALL: maria & glow
+        compositor_wall_rows.picture = mode == 2;
+        compositor_wall_rows.moon = mode == 0 || compositor_wall_rows.picture;
+        compositor_wall_rows.dimmed = dark == 0;
+        compositor_wall_rows.stamp = compositor_wall_look(COMPOSITOR_WALL_DIR, &stamp) == 0040000u ? stamp | 1u : 0;
         compositor_wall_rows.ready = 1;
         compositor_damage(0, 0, compositor.width, compositor.height);
 }
@@ -309,9 +307,8 @@ static void compositor_wall_read(void)
 static void compositor_cursor_look_read(void)
 {
         char word[16];
-        long colour, sized = 0;
-        int size, look = 0, style, squeeze = 25;
-        long percent = 25;
+        long colour, sized = 0, percent = 25;
+        int size, look = 0, style, squeeze;
 
         compositor_word(SETTING_BACKGROUND_PATH, word, sizeof(word));
         colour = word[0] ? window_colour_parse((string_address)word) : -1;
@@ -320,32 +317,20 @@ static void compositor_cursor_look_read(void)
                 compositor_ground = (unsigned int)(colour < 0 ? COMPOSITOR_INK_DESKTOP : colour);
                 compositor_damage(0, 0, compositor.width, compositor.height);
         }
-
-        compositor_word(SETTING_CURSOR_SIZE_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_CURSOR_SIZE_PATH, word, &sized);
+        compositor_setting_num(SETTING_CURSOR_SIZE_PATH, &sized);
         size = sized < 50 ? 50 : sized > 400 ? 400 : (int)sized;
         compositor_word(SETTING_CURSOR_LOOK_PATH, word, sizeof(word));
-        if (!string_compare((string_address)word, (string_address) "light"))
-                look = 1;
-        else if (!string_compare((string_address)word, (string_address) "dark"))
-                look = 2;
-        // The style: classic is the bitmaps, and anything else (dynamic, or nothing kept) is the dynamic circle.
+        look = !string_compare((string_address)word, (string_address) "light") ? 1
+               : !string_compare((string_address)word, (string_address) "dark") ? 2 : 0;
         compositor_word(SETTING_CURSOR_STYLE_PATH, word, sizeof(word));
         style = string_compare((string_address)word, (string_address) "classic") ? 1 : 0;
-        // The squeeze: what is kept, or the row's standard (25 percent) when nothing is, 0 to 50.
-        compositor_word(SETTING_SQUEEZE_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_SQUEEZE_PATH, word, &percent);
+        compositor_setting_num(SETTING_SQUEEZE_PATH, &percent);
         squeeze = percent < 0 ? 0 : percent > 50 ? 50 : (int)percent;
-
         if (size != compositor.cursor.size || look != compositor.cursor.look || style != compositor.cursor.style ||
             squeeze != compositor.cursor.squeeze)
         {
-                compositor.cursor.size = size;
-                compositor.cursor.look = look;
-                compositor.cursor.style = style;
-                compositor.cursor.squeeze = squeeze;
-                // The plane wears the old one, and is painted again (a scale it is not at); a plane that is
-                // to be hidden still is told so.
+                compositor.cursor.size = size, compositor.cursor.look = look;
+                compositor.cursor.style = style, compositor.cursor.squeeze = squeeze;
                 compositor.cursor.plane.scale = 0;
                 compositor_cursor_move();
         }
@@ -635,7 +620,6 @@ static void compositor_theme_core_read(void)
         unsigned int motion;
 
         compositor_word(SETTING_THEME_PATH, word, sizeof(word));
-        // Light is the theme when nothing is kept (and when what is kept is none of the words).
         compositor.theme_word = string_equals((string_address)word, (string_address) "dark") ? 1
                                 : string_equals((string_address)word, (string_address) "auto") ? 2 : 0;
         compositor_word(SETTING_ACCENT_PATH, word, sizeof(word));
@@ -643,31 +627,22 @@ static void compositor_theme_core_read(void)
                 accent = window_colour_parse((string_address)word);
         compositor_word(SETTING_MOTION_PATH, word, sizeof(word));
         motion = string_equals((string_address)word, (string_address) "reduced");
-        compositor_word(SETTING_WHEEL_SMOOTH_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_WHEEL_SMOOTH_PATH, word, &smooth);
+        compositor_setting_num(SETTING_WHEEL_SMOOTH_PATH, &smooth);
+        compositor_setting_num(SETTING_CARET_BLINK_PATH, &blink);
+        compositor_setting_num(SETTING_CARET_THICKNESS_PATH, &thick);
         if (compositor.table)
+        {
                 compositor_table_publish(&compositor.table->wheel_off, smooth != 0, 0, 0);
-        compositor_word(SETTING_CARET_BLINK_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_CARET_BLINK_PATH, word, &blink);
-        compositor_word(SETTING_CARET_THICKNESS_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_CARET_THICKNESS_PATH, word, &thick);
-        if (compositor.table)
                 compositor_table_publish(&compositor.table->caret_speed, (unsigned int)blink + 1, &compositor.table->caret_thick, (unsigned int)thick + 1);
-        // English when nothing is kept, and when what is kept is not a code (default).
+        }
         compositor_word(SETTING_LANGUAGE_PATH, word, sizeof(word));
         compositor_language_publish(windows_language_code(word, string_length((string_address)word)));
-        // 100 percent when nothing is kept (the table says 0 then, as every window takes it).
-        compositor_word(SETTING_TEXT_SCALE_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_TEXT_SCALE_PATH, word, &text);
+        compositor_setting_num(SETTING_TEXT_SCALE_PATH, &text);
         compositor_text_publish(text == 100 ? 0 : (unsigned int)text);
-        // The lit edges' width, 1 to 4 (the standard when none is kept, which compositor_setting_kept gives as the row's standard).
-        compositor_word(SETTING_BORDER_WIDTH_PATH, word, sizeof(word));
-        compositor_setting_kept(SETTING_BORDER_WIDTH_PATH, word, &border);
+        compositor_setting_num(SETTING_BORDER_WIDTH_PATH, &border);
         compositor_border_publish((unsigned int)(border < 1 ? 1 : border > COMPOSITOR_BORDER_MOST ? COMPOSITOR_BORDER_MOST : border));
-        // White is the accent when none is kept: white fills with the dark ink on them, on the dark theme's surfaces.
         compositor_theme_set(compositor.theme_word == 2 ? !compositor_theme_day() : compositor.theme_word,
                              accent < 0 ? 0xffffffu : (unsigned int)accent, motion);
-        // The pace after the theme, so a window that takes the table's first count takes its theme with it.
         compositor_word(SETTING_MOTION_SPEED_PATH, word, sizeof(word));
         compositor_pace_set(word);
 }
@@ -792,91 +767,55 @@ static void compositor_bands_where(int (*rects)[4])
 
 static void compositor_taskbar_settings_read(void)
 {
-        char position[16], display[16], tune[512], text[16], tray[SETTING_TRAY_MOST + 8], launcher[16], fullscreen[16], scale[16], padding[16];
-        int was[WINDOWS_OUTPUTS][4], now[WINDOWS_OUTPUTS][4];
-        long edge, percent = TASKBAR_SCALE_STANDARD, pixels = TASKBAR_PADDING_STANDARD;
+        static const char *const arrange_paths[7] = {SETTING_TASKBAR_MOON_PATH, SETTING_TASKBAR_TASKS_PATH, SETTING_TASKBAR_NEWEST_PATH,
+                                                     SETTING_TASKBAR_ORDER_PATH, SETTING_TASKBAR_MOON_LOOK_PATH, SETTING_TASKBAR_CLOCK_PATH,
+                                                     SETTING_TASKBAR_CLOCK_BULGE_PATH};
+        static const char *const item_paths[6] = {SETTING_TASKBAR_ITEM_NOTICES_PATH, SETTING_TASKBAR_ITEM_MIC_PATH, SETTING_TASKBAR_ITEM_SOUND_PATH,
+                                                  SETTING_TASKBAR_ITEM_BATTERY_PATH, SETTING_TASKBAR_ITEM_TEXT_PATH, SETTING_TASKBAR_ITEM_CLOCK_PATH};
+        char position[16], display[16], tune[512], tray[SETTING_TRAY_MOST + 8], word[16], clock[64];
+        int was[WINDOWS_OUTPUTS][4], now[WINDOWS_OUTPUTS][4], is12;
+        long kept[7], edge = 0, percent = TASKBAR_SCALE_STANDARD, pixels = TASKBAR_PADDING_STANDARD, grouped = 0, bar_edge = 0, spin = 0, side = 0;
+        unsigned int before = 0;
 
         compositor_word(SETTING_TASKBAR_POSITION_PATH, position, sizeof(position));
         compositor_word(SETTING_TASKBAR_DISPLAY_PATH, display, sizeof(display));
         compositor_text(TASKBAR_TUNE_PATH, tune, sizeof(tune));
         compositor_text(SETTING_TASKBAR_TRAY_PATH, tray, sizeof(tray));
-        // The clock outside the moon: the time in the hours `time format` reads it in, and the date `time date` puts after it. The standard
-        // tray stays the standard, so the clock in the moon is the moon's in twelve hours as in twenty-four; a format of the person's own says
-        // its hours and its date itself.
-        {
-                char clock[64];
-
-                compositor_word(SETTING_CLOCK_FORMAT_PATH, text, sizeof(text));
-                string_copy_bounded((p8 *)clock, (string_address)(string_equals((string_address)text, (string_address) "12h") ? SETTING_TASKBAR_CLOCK_12H
-                                                                                                                         : SETTING_TASKBAR_CLOCK_24H),
-                                    sizeof(clock));
-                compositor_word(SETTING_DATE_FORMAT_PATH, text, sizeof(text));
-                if (text[0] == 'y' || text[0] == 'd' || text[0] == 'm')
-                        string_append_bounded((string_address)clock,
-                                              (string_address)(text[0] == 'y'   ? SETTING_TASKBAR_TRAY_DATE_YMD
-                                                               : text[0] == 'd' ? SETTING_TASKBAR_TRAY_DATE_DMY
-                                                                                : SETTING_TASKBAR_TRAY_DATE_MDY),
-                                              sizeof(clock));
-                taskbar_clock_set(clock);
-        }
-        compositor_word(SETTING_TASKBAR_TEXT_PATH, text, sizeof(text));
-        compositor_setting_kept(SETTING_TASKBAR_TEXT_PATH, text, &edge);
-        compositor_word(SETTING_TASKBAR_LAUNCHER_PATH, launcher, sizeof(launcher));
-        // The standard when nothing is kept, or what is kept is no number or outside the row's range.
-        compositor_word(SETTING_TASKBAR_SCALE_PATH, scale, sizeof(scale));
-        compositor_setting_kept(SETTING_TASKBAR_SCALE_PATH, scale, &percent);
-        compositor_word(SETTING_TASKBAR_PADDING_PATH, padding, sizeof(padding));
-        compositor_setting_kept(SETTING_TASKBAR_PADDING_PATH, padding, &pixels);
+        compositor_word(SETTING_CLOCK_FORMAT_PATH, word, sizeof(word));
+        is12 = string_equals((string_address)word, (string_address) "12h");
+        string_copy_bounded((p8 *)clock, (string_address)(is12 ? SETTING_TASKBAR_CLOCK_12H : SETTING_TASKBAR_CLOCK_24H), sizeof(clock));
+        compositor_word(SETTING_DATE_FORMAT_PATH, word, sizeof(word));
+        if (word[0] == 'y' || word[0] == 'd' || word[0] == 'm')
+                string_append_bounded((string_address)clock,
+                                      (string_address)(word[0] == 'y' ? SETTING_TASKBAR_TRAY_DATE_YMD
+                                                       : word[0] == 'd' ? SETTING_TASKBAR_TRAY_DATE_DMY
+                                                                        : SETTING_TASKBAR_TRAY_DATE_MDY),
+                                      sizeof(clock));
+        taskbar_clock_set(clock);
+        compositor_setting_num(SETTING_TASKBAR_TEXT_PATH, &edge);
+        compositor_setting_num(SETTING_TASKBAR_SCALE_PATH, &percent);
+        compositor_setting_num(SETTING_TASKBAR_PADDING_PATH, &pixels);
         compositor_bands_where(was);
         compositor_tabs_changed();
         taskbar_settings_set(position, display, tune);
         taskbar_text_set(edge == 1);
         taskbar_tray_set(tray);
-        // The row's standard is on: no file, or one that says default or a word that is none of the row's, has the tab; only "off" has none.
-        taskbar_launcher_set(compositor_switch_on(SETTING_TASKBAR_LAUNCHER_PATH, launcher));
+        compositor_word(SETTING_TASKBAR_LAUNCHER_PATH, word, sizeof(word));
+        taskbar_launcher_set(compositor_switch_on(SETTING_TASKBAR_LAUNCHER_PATH, word));
         taskbar_scale_set((int)percent);
         taskbar_padding_set((int)pixels);
-        compositor_word(SETTING_TASKBAR_FULLSCREEN_PATH, fullscreen, sizeof(fullscreen));
-        // The row's standard is on: no file, or a file that says default, hides the band as on does; only "off" keeps it.
-        taskbar_hide_set(!string_equals((string_address)fullscreen, (string_address) "off"));
-        // The arrangement: each row's word as the index of its choices (the standard's when nothing is kept), the tray items' a bit each.
-        {
-                static const char *const paths[7] = {SETTING_TASKBAR_MOON_PATH, SETTING_TASKBAR_TASKS_PATH, SETTING_TASKBAR_NEWEST_PATH,
-                                                     SETTING_TASKBAR_ORDER_PATH, SETTING_TASKBAR_MOON_LOOK_PATH, SETTING_TASKBAR_CLOCK_PATH,
-                                                     SETTING_TASKBAR_CLOCK_BULGE_PATH};
-                static const char *const items[6] = {SETTING_TASKBAR_ITEM_NOTICES_PATH, SETTING_TASKBAR_ITEM_MIC_PATH, SETTING_TASKBAR_ITEM_SOUND_PATH,
-                                                     SETTING_TASKBAR_ITEM_BATTERY_PATH, SETTING_TASKBAR_ITEM_TEXT_PATH, SETTING_TASKBAR_ITEM_CLOCK_PATH};
-                long kept[7], side;
-                unsigned int before = 0;
-                char word[16];
-
-                for (int at = 0; at < 7; at++)
-                {
-                        compositor_word(paths[at], word, sizeof(word));
-                        compositor_setting_kept(paths[at], word, &kept[at]);
-                }
-                for (int at = 0; at < 6; at++)
-                {
-                        compositor_word(items[at], word, sizeof(word));
-                        compositor_setting_kept(items[at], word, &side);
-                        before |= (side == 0 ? 1u : 0u) << at;
-                }
-                {
-                        long grouped, edge;
-
-                        compositor_word(SETTING_TASKBAR_GROUPED_PATH, word, sizeof(word));
-                        compositor_setting_kept(SETTING_TASKBAR_GROUPED_PATH, word, &grouped);
-                        compositor_word(SETTING_TASKBAR_EDGE_PATH, word, sizeof(word));
-                        compositor_setting_kept(SETTING_TASKBAR_EDGE_PATH, word, &edge);
-                        taskbar_bar_set(grouped == 1, (int)edge);
-                }
-                compositor_word(SETTING_TASKBAR_MOON_SPIN_PATH, word, sizeof(word));
-                compositor_setting_kept(SETTING_TASKBAR_MOON_SPIN_PATH, word, &side);
-                taskbar_spin_set((int)side);
-                compositor_word(SETTING_CLOCK_FORMAT_PATH, word, sizeof(word));
-                taskbar_arrange_set((int)kept[0], (int)kept[1], (int)kept[2], (int)kept[3], before, (int)kept[4], (int)kept[5], (int)kept[6],
-                                    string_equals((string_address)word, (string_address) "12h"));
-        }
+        compositor_word(SETTING_TASKBAR_FULLSCREEN_PATH, word, sizeof(word));
+        taskbar_hide_set(!string_equals((string_address)word, (string_address) "off"));
+        for (int at = 0; at < 7; at++)
+                compositor_setting_num(arrange_paths[at], &kept[at]);
+        for (int at = 0; at < 6; at++)
+                compositor_setting_num(item_paths[at], &side), before |= (side == 0 ? 1u : 0u) << at;
+        compositor_setting_num(SETTING_TASKBAR_GROUPED_PATH, &grouped);
+        compositor_setting_num(SETTING_TASKBAR_EDGE_PATH, &bar_edge);
+        taskbar_bar_set(grouped == 1, (int)bar_edge);
+        compositor_setting_num(SETTING_TASKBAR_MOON_SPIN_PATH, &spin);
+        taskbar_spin_set((int)spin);
+        taskbar_arrange_set((int)kept[0], (int)kept[1], (int)kept[2], (int)kept[3], before, (int)kept[4], (int)kept[5], (int)kept[6], is12);
         compositor_band_room();
         compositor_tabs_changed();
         compositor_bands_where(now);
@@ -1044,16 +983,11 @@ static void compositor_device_reset(unsigned int at)
         compositor.devices[at].number = -1;
         compositor.absolute_x[at][0] = compositor.absolute_x[at][1] = 0;
         compositor.absolute_y[at][0] = compositor.absolute_y[at][1] = 0;
-        compositor.held[at] = 0;
-        compositor.hires[at] = 0;
         compositor.wheel_rest[at][0] = compositor.wheel_rest[at][1] = 0;
-        compositor.stream_hist_n[at] = 0;
-        compositor.touchpad[at] = 0;
-        compositor.touchscreen[at] = 0;
-        compositor.input_kinds[at] = 0;
-        compositor.repeats[at] = 0;
         compositor.repeat_own[at][0] = compositor.repeat_own[at][1] = 0;
-        compositor_input_physical[at] = 0;
+        compositor.held[at] = compositor.hires[at] = compositor.stream_hist_n[at] = 0;
+        compositor.touchpad[at] = compositor.touchscreen[at] = compositor.repeats[at] = compositor_input_physical[at] = 0;
+        compositor.input_kinds[at] = 0;
 }
 
 static void compositor_input_add(unsigned int number)
@@ -1196,30 +1130,19 @@ static void compositor_input_add(unsigned int number)
 
 static void compositor_inputs_open(void)
 {
-        // IN_CREATE | IN_MOVED_TO on /dev/input, non-blocking and closed on exec.
-        compositor.watch = (int)compositor_call(syscall(inotify_init1), COMPOSITOR_CLOEXEC | COMPOSITOR_NONBLOCK,
-                                                0, 0, 0, 0, 0);
-        if (compositor.watch >= 0 &&
-            compositor_call(syscall(inotify_add_watch), (positive)compositor.watch,
-                            (positive) "/dev/input", COMPOSITOR_IN_CREATE | COMPOSITOR_IN_MOVED_TO,
-                            0, 0, 0) < 0)
-        {
-                system_close(compositor.watch);
-                compositor.watch = -1;
-        }
+        static const struct { const char *path; unsigned int mask; } watches[3] = {
+                {"/dev/input", COMPOSITOR_IN_CREATE | COMPOSITOR_IN_MOVED_TO},
+                {"/root", COMPOSITOR_IN_CLOSE_WRITE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_CREATE},
+                {"/run/moonwater", COMPOSITOR_IN_CREATE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_DELETE | COMPOSITOR_IN_CLOSE_WRITE},
+        };
 
-        // The keyboard setting is kept in /root/keyboard, written when it is changed.
-        if (compositor.watch >= 0)
-                compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive) "/root",
-                                COMPOSITOR_IN_CLOSE_WRITE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_CREATE,
-                                0, 0, 0);
-        // display off and on, by the rules: /run/moonwater/display-off made and removed; a compositor starts lit.
         (void)system_remove_at(AT_FDCWD, (string_address)COMPOSITOR_DARK_FILE, 0);
-        if (compositor.watch >= 0)
-                compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive) "/run/moonwater",
-                                COMPOSITOR_IN_CREATE | COMPOSITOR_IN_MOVED_TO | COMPOSITOR_IN_DELETE | COMPOSITOR_IN_CLOSE_WRITE,
-                                0, 0, 0);
-
+        compositor.watch = (int)compositor_call(syscall(inotify_init1), COMPOSITOR_CLOEXEC | COMPOSITOR_NONBLOCK, 0, 0, 0, 0, 0);
+        if (compositor.watch >= 0 &&
+            compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive)watches[0].path, watches[0].mask, 0, 0, 0) < 0)
+                system_close(compositor.watch), compositor.watch = -1;
+        for (int i = 1; compositor.watch >= 0 && i < 3; i++)
+                compositor_call(syscall(inotify_add_watch), (positive)compositor.watch, (positive)watches[i].path, watches[i].mask, 0, 0, 0);
         for (unsigned int number = 0; number < COMPOSITOR_DEVICES; number++)
                 compositor_input_add(number);
 }
@@ -1262,88 +1185,58 @@ struct compositor_setting_spec
         void *target;
 };
 
+#define CS_G(p, g) {p, g, COMPOSITOR_BIND_NONE, 0, 0, 0, 0}
 static const struct compositor_setting_spec compositor_setting_specs[] = {
-        {SETTING_CLIPBOARD_PATH, COMPOSITOR_SET_CLIP, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_CLIPBOARD_HISTORY_PATH, COMPOSITOR_SET_CLIP, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_GPU_PATH, COMPOSITOR_SET_GPU, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_WALLPAPER_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_WALLPAPER_DARK_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        CS_G(SETTING_CLIPBOARD_PATH, COMPOSITOR_SET_CLIP), CS_G(SETTING_CLIPBOARD_HISTORY_PATH, COMPOSITOR_SET_CLIP),
+        CS_G(SETTING_GPU_PATH, COMPOSITOR_SET_GPU),
+        CS_G(SETTING_WALLPAPER_PATH, COMPOSITOR_SET_WALL), CS_G(SETTING_WALLPAPER_DARK_PATH, COMPOSITOR_SET_WALL),
         {SETTING_WALLPAPER_MARIA_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_INT, 20, 80, 45, &compositor_wall_rows.maria},
         {SETTING_WALLPAPER_GLOW_PATH, COMPOSITOR_SET_WALL, COMPOSITOR_BIND_INT, -1000, 1000, 0, &compositor_wall_rows.glow},
-        {SETTING_BACKGROUND_PATH, COMPOSITOR_SET_LOOK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_CURSOR_SIZE_PATH, COMPOSITOR_SET_LOOK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_CURSOR_LOOK_PATH, COMPOSITOR_SET_LOOK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_CURSOR_STYLE_PATH, COMPOSITOR_SET_LOOK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_SQUEEZE_PATH, COMPOSITOR_SET_LOOK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_THEME_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_ACCENT_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_MOTION_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_MOTION_SPEED_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_WHEEL_SMOOTH_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_CARET_BLINK_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_CARET_THICKNESS_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_LANGUAGE_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TEXT_SCALE_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_BORDER_WIDTH_PATH, COMPOSITOR_SET_THEME, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_SCROLL_NATURAL_PATH, COMPOSITOR_SET_SCROLL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_SCROLL_MOMENTUM_PATH, COMPOSITOR_SET_SCROLL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_SCROLL_RUBBER_PATH, COMPOSITOR_SET_SCROLL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_SCROLL_DRAG_PATH, COMPOSITOR_SET_SCROLL, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        CS_G(SETTING_BACKGROUND_PATH, COMPOSITOR_SET_LOOK), CS_G(SETTING_CURSOR_SIZE_PATH, COMPOSITOR_SET_LOOK),
+        CS_G(SETTING_CURSOR_LOOK_PATH, COMPOSITOR_SET_LOOK), CS_G(SETTING_CURSOR_STYLE_PATH, COMPOSITOR_SET_LOOK),
+        CS_G(SETTING_SQUEEZE_PATH, COMPOSITOR_SET_LOOK),
+        CS_G(SETTING_THEME_PATH, COMPOSITOR_SET_THEME), CS_G(SETTING_ACCENT_PATH, COMPOSITOR_SET_THEME),
+        CS_G(SETTING_MOTION_PATH, COMPOSITOR_SET_THEME), CS_G(SETTING_MOTION_SPEED_PATH, COMPOSITOR_SET_THEME),
+        CS_G(SETTING_WHEEL_SMOOTH_PATH, COMPOSITOR_SET_THEME), CS_G(SETTING_CARET_BLINK_PATH, COMPOSITOR_SET_THEME),
+        CS_G(SETTING_CARET_THICKNESS_PATH, COMPOSITOR_SET_THEME), CS_G(SETTING_LANGUAGE_PATH, COMPOSITOR_SET_THEME),
+        CS_G(SETTING_TEXT_SCALE_PATH, COMPOSITOR_SET_THEME), CS_G(SETTING_BORDER_WIDTH_PATH, COMPOSITOR_SET_THEME),
+        CS_G(SETTING_SCROLL_NATURAL_PATH, COMPOSITOR_SET_SCROLL), CS_G(SETTING_SCROLL_MOMENTUM_PATH, COMPOSITOR_SET_SCROLL),
+        CS_G(SETTING_SCROLL_RUBBER_PATH, COMPOSITOR_SET_SCROLL), CS_G(SETTING_SCROLL_DRAG_PATH, COMPOSITOR_SET_SCROLL),
         {SETTING_TRACKPAD_SPEED_PATH, COMPOSITOR_SET_SCROLL, COMPOSITOR_BIND_UINT, 0, 10000, 100, &compositor.trackpad_speed},
         {SETTING_VRR_PATH, COMPOSITOR_SET_VRR, COMPOSITOR_BIND_UINT, 0, 2, 0, &compositor_vrr.policy},
-        {SETTING_SHAKE_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_SHAKE_DELAY_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_SENSITIVITY_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_ACCELERATION_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_REPEAT_DELAY_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_REPEAT_RATE_PATH, COMPOSITOR_SET_INPUT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_POSITION_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_DISPLAY_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_TRAY_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_CLOCK_FORMAT_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_DATE_FORMAT_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_TEXT_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_LAUNCHER_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_SCALE_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_PADDING_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_FULLSCREEN_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_MOON_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_TASKS_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_NEWEST_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_ORDER_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_MOON_LOOK_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_CLOCK_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_CLOCK_BULGE_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_ITEM_NOTICES_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_ITEM_MIC_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_ITEM_SOUND_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_ITEM_BATTERY_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_ITEM_TEXT_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_ITEM_CLOCK_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_GROUPED_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_EDGE_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TASKBAR_MOON_SPIN_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {TASKBAR_TUNE_PATH, COMPOSITOR_SET_TASKBAR, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TOUCH_PATH, COMPOSITOR_SET_TOUCH, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        CS_G(SETTING_SHAKE_PATH, COMPOSITOR_SET_INPUT), CS_G(SETTING_SHAKE_DELAY_PATH, COMPOSITOR_SET_INPUT),
+        CS_G(SETTING_SENSITIVITY_PATH, COMPOSITOR_SET_INPUT), CS_G(SETTING_ACCELERATION_PATH, COMPOSITOR_SET_INPUT),
+        CS_G(SETTING_REPEAT_DELAY_PATH, COMPOSITOR_SET_INPUT), CS_G(SETTING_REPEAT_RATE_PATH, COMPOSITOR_SET_INPUT),
+        CS_G(SETTING_TASKBAR_POSITION_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_DISPLAY_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_TRAY_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_CLOCK_FORMAT_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_DATE_FORMAT_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_TEXT_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_LAUNCHER_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_SCALE_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_PADDING_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_FULLSCREEN_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_MOON_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_TASKS_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_NEWEST_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_ORDER_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_MOON_LOOK_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_CLOCK_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_CLOCK_BULGE_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_ITEM_NOTICES_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_ITEM_MIC_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_ITEM_SOUND_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_ITEM_BATTERY_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_ITEM_TEXT_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_ITEM_CLOCK_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_GROUPED_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TASKBAR_EDGE_PATH, COMPOSITOR_SET_TASKBAR), CS_G(SETTING_TASKBAR_MOON_SPIN_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(TASKBAR_TUNE_PATH, COMPOSITOR_SET_TASKBAR),
+        CS_G(SETTING_TOUCH_PATH, COMPOSITOR_SET_TOUCH),
         {SETTING_TOUCH_LEFT_PATH, COMPOSITOR_SET_TOUCH, COMPOSITOR_BIND_INT, COMPOSITOR_SIDE_OFF, COMPOSITOR_SIDE_ACT, COMPOSITOR_SIDE_OFF, &compositor.side_left},
         {SETTING_TOUCH_RIGHT_PATH, COMPOSITOR_SET_TOUCH, COMPOSITOR_BIND_INT, COMPOSITOR_SIDE_OFF, COMPOSITOR_SIDE_ACT, COMPOSITOR_SIDE_OFF, &compositor.side_right},
-        {SETTING_PREDICT_TOUCH_PATH, COMPOSITOR_SET_PREDICT, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        CS_G(SETTING_PREDICT_TOUCH_PATH, COMPOSITOR_SET_PREDICT),
         {SETTING_CURSOR_CLICK_PATH, COMPOSITOR_SET_CLICK, COMPOSITOR_BIND_INT_EQ, 1, 0, 0, &compositor.cursor.click_off},
-        {SETTING_DOUBLE_CLICK_PATH, COMPOSITOR_SET_HAND, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TOUCH_HOLD_PATH, COMPOSITOR_SET_HAND, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_TERMINAL_WHEEL_PATH, COMPOSITOR_SET_HAND, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_SHAKE_FEEL_PATH, COMPOSITOR_SET_HAND, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_BORDER_GRIP_PATH, COMPOSITOR_SET_HAND, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_ONSCREEN_PATH, COMPOSITOR_SET_OSK, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_CANVAS_ARRANGE_PATH, COMPOSITOR_SET_DISPLAYS, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
-        {SETTING_CANVAS_DISPLAYS_PATH, COMPOSITOR_SET_DISPLAYS, COMPOSITOR_BIND_NONE, 0, 0, 0, 0},
+        CS_G(SETTING_DOUBLE_CLICK_PATH, COMPOSITOR_SET_HAND), CS_G(SETTING_TOUCH_HOLD_PATH, COMPOSITOR_SET_HAND),
+        CS_G(SETTING_TERMINAL_WHEEL_PATH, COMPOSITOR_SET_HAND), CS_G(SETTING_SHAKE_FEEL_PATH, COMPOSITOR_SET_HAND),
+        CS_G(SETTING_BORDER_GRIP_PATH, COMPOSITOR_SET_HAND),
+        CS_G(SETTING_ONSCREEN_PATH, COMPOSITOR_SET_OSK),
+        CS_G(SETTING_CANVAS_ARRANGE_PATH, COMPOSITOR_SET_DISPLAYS), CS_G(SETTING_CANVAS_DISPLAYS_PATH, COMPOSITOR_SET_DISPLAYS),
 };
+#undef CS_G
 
 // Applies every declaratively bound setting in compositor_setting_specs[] belonging to mask.
 static void compositor_setting_apply_binds(unsigned int mask)
 {
-        char word[16];
-
         for (unsigned int at = 0; at < sizeof(compositor_setting_specs) / sizeof(compositor_setting_specs[0]); at++)
         {
                 const struct compositor_setting_spec *spec = &compositor_setting_specs[at];
@@ -1352,8 +1245,7 @@ static void compositor_setting_apply_binds(unsigned int mask)
 
                 if (!(spec->group & mask) || spec->bind == COMPOSITOR_BIND_NONE || !spec->target)
                         continue;
-                compositor_word(spec->path, word, sizeof(word));
-                kept = compositor_setting_kept(spec->path, word, &value);
+                kept = compositor_setting_num(spec->path, &value);
                 if (spec->bind == COMPOSITOR_BIND_INT)
                         *(int *)spec->target = (int)(value >= spec->lo && value <= spec->hi ? value : spec->fallback);
                 else if (spec->bind == COMPOSITOR_BIND_UINT)
@@ -1422,11 +1314,9 @@ static void compositor_settings_apply(unsigned int mask)
                 compositor_touch_settings_read();
         if (mask & COMPOSITOR_SET_PREDICT)
         {
-                char word[16];
                 long value = 0;
 
-                compositor_word(SETTING_PREDICT_TOUCH_PATH, word, sizeof(word));
-                compositor_setting_kept(SETTING_PREDICT_TOUCH_PATH, word, &value);
+                compositor_setting_num(SETTING_PREDICT_TOUCH_PATH, &value);
                 compositor_predict_set(COMPOSITOR_PREDICT_TOUCH, value == 0);
                 compositor_predict_set(COMPOSITOR_PREDICT_PEN, value == 0);
         }
@@ -1784,24 +1674,26 @@ static struct
 static const char *compositor_keys_fire;
 static int compositor_door_thread(void);
 
-// Something asked of a slot's thread: false when there are no threads, and the loop does it itself.
-static int compositor_door_ask(unsigned int slot, unsigned int what)
+static void compositor_door_kick_fd(int fd)
 {
         unsigned long one = 1;
 
+        compositor_call(syscall(write), (positive)fd, (positive)&one, sizeof one, 0, 0, 0);
+}
+
+static int compositor_door_ask(unsigned int slot, unsigned int what)
+{
         if (!compositor_doors.threads)
                 return 0;
         if (__atomic_fetch_or(&compositor_doors.asked[slot], what | COMPOSITOR_DOOR_QUEUED, __ATOMIC_ACQ_REL) & COMPOSITOR_DOOR_QUEUED)
-                return 1; // queued already, or in a thread's work, which takes the new asks before it lets the slot go
+                return 1;
         rows_add_atomic(&compositor_doors.queued, slot);
-        // Every thread in a slot's work, each perhaps on a held lock: one more, so this slot waits for none of them.
         if (!__atomic_load_n(&compositor_doors.idle, __ATOMIC_ACQUIRE))
                 compositor_door_thread();
-        compositor_call(syscall(write), (positive)compositor_doors.kick, (positive)&one, sizeof one, 0, 0, 0);
+        compositor_door_kick_fd(compositor_doors.kick);
         return 1;
 }
 
-// A door's knocks read and thrown away, a bounded number a turn: what a writer that never stops costs.
 static void compositor_door_drain(int handle)
 {
         char bytes[64];
@@ -1810,13 +1702,10 @@ static void compositor_door_drain(int handle)
                 ;
 }
 
-// A thread done with what it was asked: the loop is told.
 static void compositor_door_told(struct compositor_rows *into, unsigned int slot)
 {
-        unsigned long one = 1;
-
         rows_add_atomic(into, slot);
-        compositor_call(syscall(write), (positive)compositor_doors.done, (positive)&one, sizeof one, 0, 0, 0);
+        compositor_door_kick_fd(compositor_doors.done);
 }
 
 // A row's door opened again after its writer closed it (a FIFO's reader sees the hang-up for ever until it does): the loop's (compositor_door) and

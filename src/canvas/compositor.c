@@ -148,37 +148,19 @@ static unsigned int compositor_ground = COMPOSITOR_INK_DESKTOP;
 #define COMPOSITOR_RADIUS_MOST 64
 
 /*
-        The loop's set (compositor_loop_wait): the descriptors the loop's list names, kept in an epoll set from turn to turn, so a wait is
-        the kernel's look at what is ready and not at each of them: a ppoll over the list called every descriptor's poll and hung a wait on
-        each, and took each down again, at every wake (pollbench on new-dragonfly, Haswell: 3888 kernel instructions a wake for 1 descriptor,
-        12794 for 20, 31760 for 60, 50476 for 100; epoll_pwait 3500 for any of them), and the loop's list is fifty and more. A descriptor
-        of the set is known by its number (compositor_epoll_state[fd]: COMPOSITOR_EPOLL_IN the set, COMPOSITOR_EPOLL_LISTED in the list
-        of numbers the set holds, COMPOSITOR_EPOLL_REFUSED one the kernel will not watch, and the events it is watched for). A number the
-        program closes leaves the set first (system_close is compositor_epoll_close in the compositor's files): the set holds a file by its
-        number and its file both, and one closed and opened again under the same number between two waits would be another file, unwatched,
-        that the list names as before, or the old one still watched where something else holds it open.
+        Direct-registration epoll reactor (`compositor_epoll_watch`/`drop`/`wait`, plus thin `compositor_loop_wait`
+        compatibility shim for `compositor_wl_poll`): keeps active fds in a compact open-addressed table (~28 KiB BSS
+        instead of 900+ KiB of 64K flat arrays) with an 8 KiB lock-free atomic bitmap so `compositor_epoll_forget`
+        safely removes closed descriptors from any thread before `close()`.
 */
-#define COMPOSITOR_EPOLL_FDS 65536 // the numbers the set takes; a list with a descriptor past them is waited on by ppoll
-#define COMPOSITOR_EPOLL_IN 0x8000u
-#define COMPOSITOR_EPOLL_LISTED 0x4000u
-#define COMPOSITOR_EPOLL_REFUSED 0x2000u
-#define COMPOSITOR_EPOLL_EVENTS 0x00ffu
-#define COMPOSITOR_EPOLL_HIGH 3000 // the set's own number, at or above this (the table is grown to COMPOSITOR_DESCRIPTORS_WARM at the start)
-#define COMPOSITOR_EPOLL_READY 128 // the answers one wait takes; more stay ready for the next (the set is level-triggered)
-#define COMPOSITOR_EPOLL_PREV 4096 // the entries of a list kept to tell the next list is the same
-static struct
-{
-        int ep;                    // the set: -1 not made yet, -2 none (the kernel has no epoll_pwait2: ppoll)
-        unsigned int turn, listed; // the syncs made (a descriptor's stamp of the last it was in the list for), the numbers in the list
-        unsigned int whole, count; // whether the last sync was whole (the set is the list), and that list's count
-        unsigned int forgets, forgets_seen; // numbers let go of (compositor_epoll_forget, any thread) and their count at the last sync
-        unsigned int answered;              // the entries the last wait answered (compositor_epoll_answers)
-} compositor_epoll = {-1, 0, 0, 0, 0, 0, 0, 0};
-static unsigned int compositor_epoll_answers[COMPOSITOR_EPOLL_READY];
-static unsigned long long compositor_epoll_prev[COMPOSITOR_EPOLL_PREV]; // each entry of that list: its descriptor and its events
-static unsigned short compositor_epoll_state[COMPOSITOR_EPOLL_FDS];
-static unsigned int compositor_epoll_seen[COMPOSITOR_EPOLL_FDS], compositor_epoll_slot[COMPOSITOR_EPOLL_FDS];
-static int compositor_epoll_list[COMPOSITOR_EPOLL_FDS];
+#define COMPOSITOR_EPOLL_FDS     65536
+#define COMPOSITOR_EPOLL_CAP     1024u
+#define COMPOSITOR_EPOLL_BUCKS   2048u
+#define COMPOSITOR_EPOLL_TOMB    0xffffu
+#define COMPOSITOR_EPOLL_EVENTS  0x00ffu
+#define COMPOSITOR_EPOLL_REFUSED 1u
+#define COMPOSITOR_EPOLL_HIGH    3000
+#define COMPOSITOR_EPOLL_READY   128
 
 // epoll_ctl's event: packed on x86_64, as the kernel's is there (EPOLL_PACKED), and naturally aligned elsewhere.
 struct compositor_epoll_event
@@ -191,14 +173,219 @@ __attribute__((packed))
 #endif
 ;
 
+struct compositor_epoll_entry
+{
+        int fd;
+        unsigned int slot, gen;
+        unsigned short events, flags;
+};
+
+static struct
+{
+        int ep; // -1 uninitialized, -2 unavailable (ppoll fallback)
+        unsigned int turn, active, tombs, whole, count, answered;
+        unsigned int forgets, forgets_seen;
+        unsigned long long in[COMPOSITOR_EPOLL_FDS / 64]; // 8 KiB atomic bitmap: fd currently in kernel epoll set
+        struct compositor_epoll_entry entries[COMPOSITOR_EPOLL_CAP];
+        unsigned short hash[COMPOSITOR_EPOLL_BUCKS]; // 0 empty, idx+1 live, 0xffff tombstone
+        unsigned int answers[COMPOSITOR_EPOLL_READY];
+} compositor_epoll = {.ep = -1};
+
+static inline int compositor_epoll_in_has(int fd)
+{
+        return (int)((__atomic_load_n(&compositor_epoll.in[(unsigned int)fd >> 6], __ATOMIC_ACQUIRE) >> ((unsigned int)fd & 63u)) & 1ull);
+}
+
+static inline void compositor_epoll_in_set(int fd)
+{
+        __atomic_fetch_or(&compositor_epoll.in[(unsigned int)fd >> 6], 1ull << ((unsigned int)fd & 63u), __ATOMIC_RELEASE);
+}
+
+static inline void compositor_epoll_in_clear(int fd)
+{
+        __atomic_fetch_and(&compositor_epoll.in[(unsigned int)fd >> 6], ~(1ull << ((unsigned int)fd & 63u)), __ATOMIC_RELEASE);
+}
+
+static inline unsigned int compositor_epoll_bucket(int fd)
+{
+        return ((unsigned int)fd * 2654435761u) & (COMPOSITOR_EPOLL_BUCKS - 1u);
+}
+
+static int compositor_epoll_find(int fd)
+{
+        unsigned int b = compositor_epoll_bucket(fd);
+
+        for (unsigned int step = 0; step < COMPOSITOR_EPOLL_BUCKS; step++, b = (b + 1u) & (COMPOSITOR_EPOLL_BUCKS - 1u))
+        {
+                unsigned short v = compositor_epoll.hash[b];
+
+                if (!v)
+                        return -1;
+                if (v != COMPOSITOR_EPOLL_TOMB && compositor_epoll.entries[v - 1u].fd == fd)
+                        return (int)(v - 1u);
+        }
+        return -1;
+}
+
+static void compositor_epoll_rehash(void)
+{
+        memory_zero(compositor_epoll.hash, sizeof(compositor_epoll.hash));
+        compositor_epoll.tombs = 0;
+        for (unsigned int i = 0; i < compositor_epoll.active; i++)
+        {
+                unsigned int b = compositor_epoll_bucket(compositor_epoll.entries[i].fd);
+
+                while (compositor_epoll.hash[b])
+                        b = (b + 1u) & (COMPOSITOR_EPOLL_BUCKS - 1u);
+                compositor_epoll.hash[b] = (unsigned short)(i + 1u);
+        }
+}
+
+static int compositor_epoll_insert(int fd)
+{
+        unsigned int b, first_tomb = COMPOSITOR_EPOLL_BUCKS, idx;
+
+        if (compositor_epoll.active >= COMPOSITOR_EPOLL_CAP)
+                return -1;
+        if (compositor_epoll.active + compositor_epoll.tombs >= COMPOSITOR_EPOLL_BUCKS - COMPOSITOR_EPOLL_BUCKS / 4u)
+                compositor_epoll_rehash();
+        b = compositor_epoll_bucket(fd);
+        for (unsigned int step = 0; step < COMPOSITOR_EPOLL_BUCKS; step++, b = (b + 1u) & (COMPOSITOR_EPOLL_BUCKS - 1u))
+        {
+                unsigned short v = compositor_epoll.hash[b];
+
+                if (!v)
+                {
+                        unsigned int dst = first_tomb < COMPOSITOR_EPOLL_BUCKS ? first_tomb : b;
+
+                        if (first_tomb < COMPOSITOR_EPOLL_BUCKS)
+                                compositor_epoll.tombs--;
+                        idx = compositor_epoll.active++;
+                        compositor_epoll.entries[idx] = (struct compositor_epoll_entry){.fd = fd};
+                        compositor_epoll.hash[dst] = (unsigned short)(idx + 1u);
+                        return (int)idx;
+                }
+                if (v == COMPOSITOR_EPOLL_TOMB && first_tomb == COMPOSITOR_EPOLL_BUCKS)
+                        first_tomb = b;
+        }
+        return -1;
+}
+
+static void compositor_epoll_unlink(unsigned int idx)
+{
+        int fd = compositor_epoll.entries[idx].fd;
+        unsigned int last = --compositor_epoll.active, b = compositor_epoll_bucket(fd);
+
+        for (unsigned int step = 0; step < COMPOSITOR_EPOLL_BUCKS; step++, b = (b + 1u) & (COMPOSITOR_EPOLL_BUCKS - 1u))
+                if (compositor_epoll.hash[b] == idx + 1u)
+                {
+                        compositor_epoll.hash[b] = COMPOSITOR_EPOLL_TOMB;
+                        compositor_epoll.tombs++;
+                        break;
+                }
+        if (idx != last)
+        {
+                int moved = compositor_epoll.entries[last].fd;
+
+                compositor_epoll.entries[idx] = compositor_epoll.entries[last];
+                b = compositor_epoll_bucket(moved);
+                for (unsigned int step = 0; step < COMPOSITOR_EPOLL_BUCKS; step++, b = (b + 1u) & (COMPOSITOR_EPOLL_BUCKS - 1u))
+                        if (compositor_epoll.hash[b] == last + 1u)
+                        {
+                                compositor_epoll.hash[b] = (unsigned short)(idx + 1u);
+                                break;
+                        }
+        }
+}
+
+static int compositor_epoll_init(void)
+{
+        if (compositor_epoll.ep == -1)
+        {
+                long made = system_call_1(syscall(epoll_create1), 0x80000), high; // EPOLL_CLOEXEC
+
+                high = made >= 0 ? (long)system_call_3(syscall(fcntl), (positive)made, 1030, COMPOSITOR_EPOLL_HIGH) : -1;
+                if (high >= 0)
+                        system_call_1(syscall(close), (positive)made), made = high;
+                compositor_epoll.ep = made >= 0 ? (int)made : -2;
+        }
+        return compositor_epoll.ep;
+}
+
+static int compositor_epoll_watch(int fd, unsigned short events, unsigned int slot)
+{
+        int idx, in_set;
+        struct compositor_epoll_entry *e;
+
+        if (compositor_epoll_init() < 0 || fd < 0 || fd >= COMPOSITOR_EPOLL_FDS || fd == compositor_epoll.ep)
+                return -1;
+        events &= COMPOSITOR_EPOLL_EVENTS;
+        idx = compositor_epoll_find(fd);
+        if (idx < 0 && (idx = compositor_epoll_insert(fd)) < 0)
+                return -1;
+        e = &compositor_epoll.entries[idx];
+        in_set = compositor_epoll_in_has(fd);
+        if ((e->flags & COMPOSITOR_EPOLL_REFUSED) && e->events == events)
+                return -1;
+        if (!in_set || e->events != events)
+        {
+                struct compositor_epoll_event change = {events, (unsigned long long)(unsigned int)fd};
+                long op = in_set ? 3 : 1, done; // EPOLL_CTL_MOD, EPOLL_CTL_ADD
+
+                done = (long)system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, (positive)op, (positive)fd, (positive)&change);
+                if (done == -17 || done == -2)
+                        done = (long)system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, done == -17 ? 3 : 1, (positive)fd, (positive)&change);
+                if (done < 0)
+                {
+                        if (done == -9) // EBADF: do not cache as refused
+                                compositor_epoll_unlink((unsigned int)idx);
+                        else
+                                e->flags = COMPOSITOR_EPOLL_REFUSED, e->events = events;
+                        return -1;
+                }
+                compositor_epoll_in_set(fd);
+                e->events = events, e->flags = 0;
+        }
+        e->slot = slot;
+        e->gen = compositor_epoll.turn;
+        return 0;
+}
+
+static void compositor_epoll_drop(int fd)
+{
+        int idx;
+
+        if (fd < 0 || fd >= COMPOSITOR_EPOLL_FDS || compositor_epoll.ep < 0)
+                return;
+        if (compositor_epoll_in_has(fd))
+        {
+                system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, 2, (positive)fd, 0); // EPOLL_CTL_DEL
+                compositor_epoll_in_clear(fd);
+        }
+        idx = compositor_epoll_find(fd);
+        if (idx >= 0)
+                compositor_epoll_unlink((unsigned int)idx);
+}
+
+static long compositor_epoll_wait(struct compositor_epoll_event *ready, unsigned int max, const long *wait)
+{
+        long got;
+
+        if (compositor_epoll.ep < 0)
+                return -38;
+        got = (long)system_call_6(syscall(epoll_pwait2), (positive)compositor_epoll.ep, (positive)ready, max, (positive)wait, 0, 0);
+        if (got == -38) // ENOSYS: kernel before 5.11
+                compositor_epoll.ep = -2, compositor_epoll.whole = 0;
+        return got;
+}
+
 // The number leaves the set, from any thread, before it is closed (what the set holds of it is not this file's any more).
 static void compositor_epoll_forget(long fd)
 {
-        if (fd < 0 || fd >= COMPOSITOR_EPOLL_FDS || compositor_epoll.ep < 0 ||
-            !(__atomic_load_n(&compositor_epoll_state[fd], __ATOMIC_ACQUIRE) & COMPOSITOR_EPOLL_IN))
+        if (fd < 0 || fd >= COMPOSITOR_EPOLL_FDS || compositor_epoll.ep < 0 || !compositor_epoll_in_has((int)fd))
                 return;
         system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, 2, (positive)fd, 0); // EPOLL_CTL_DEL
-        __atomic_and_fetch(&compositor_epoll_state[fd], (unsigned short)COMPOSITOR_EPOLL_LISTED, __ATOMIC_RELEASE);
+        compositor_epoll_in_clear((int)fd);
         __atomic_add_fetch(&compositor_epoll.forgets, 1, __ATOMIC_RELEASE);
 }
 
@@ -1465,6 +1652,38 @@ static struct
 } compositor;
 
 // Pool accessors for touchpads (compositor.pad[COMPOSITOR_PAD_POOL]) and touchscreens (compositor.touches[COMPOSITOR_TOUCH_POOL]).
+static unsigned int compositor_pool_take(unsigned int at, unsigned int cap, unsigned int *used, unsigned char *slot_out)
+{
+        unsigned int slot = 0;
+
+        if (*slot_out)
+                slot = (unsigned int)(*slot_out - 1);
+        else if (at < cap && !(*used & (1u << at)))
+                slot = at;
+        else
+        {
+                while (slot < cap && (*used & (1u << slot)))
+                        slot++;
+                if (slot >= cap)
+                        slot = 0;
+        }
+        *used |= 1u << slot;
+        *slot_out = (unsigned char)(slot + 1);
+        return slot;
+}
+
+static void compositor_pool_drop(unsigned int at, unsigned int *used, unsigned char *slot_out, void *item, unsigned long item_size)
+{
+        if (at < COMPOSITOR_INPUTS && *slot_out)
+        {
+                unsigned int slot = (unsigned int)(*slot_out - 1);
+
+                *used &= ~(1u << slot);
+                memory_zero((unsigned char *)item + (unsigned long)slot * item_size, item_size);
+                *slot_out = 0;
+        }
+}
+
 static struct compositor_pad *compositor_pad_of(unsigned int at)
 {
         unsigned int slot = at < COMPOSITOR_INPUTS && compositor.devices[at].pad_slot
@@ -1476,72 +1695,30 @@ static struct compositor_pad *compositor_pad_of(unsigned int at)
 
 static struct compositor_pad *compositor_pad_alloc(unsigned int at)
 {
-        unsigned int slot = 0;
+        unsigned int slot = at < COMPOSITOR_INPUTS ? compositor_pool_take(at, COMPOSITOR_PAD_POOL, &compositor.pad_used, &compositor.devices[at].pad_slot) : 0;
 
-        if (at >= COMPOSITOR_INPUTS)
-                return &compositor.pad[0];
-        if (compositor.devices[at].pad_slot)
-                slot = (unsigned int)(compositor.devices[at].pad_slot - 1);
-        else if (at < COMPOSITOR_PAD_POOL && !(compositor.pad_used & (1u << at)))
-                slot = at;
-        else
-        {
-                while (slot < COMPOSITOR_PAD_POOL && (compositor.pad_used & (1u << slot)))
-                        slot++;
-                if (slot >= COMPOSITOR_PAD_POOL)
-                        slot = 0;
-        }
-        compositor.pad_used |= 1u << slot;
-        compositor.devices[at].pad_slot = (unsigned char)(slot + 1);
         memory_zero(&compositor.pad[slot], sizeof(compositor.pad[slot]));
         return &compositor.pad[slot];
 }
 
 static void compositor_pad_free(unsigned int at)
 {
-        if (at < COMPOSITOR_INPUTS && compositor.devices[at].pad_slot)
-        {
-                unsigned int slot = (unsigned int)(compositor.devices[at].pad_slot - 1);
-
-                compositor.pad_used &= ~(1u << slot);
-                memory_zero(&compositor.pad[slot], sizeof(compositor.pad[slot]));
-                compositor.devices[at].pad_slot = 0;
-        }
+        if (at < COMPOSITOR_INPUTS)
+                compositor_pool_drop(at, &compositor.pad_used, &compositor.devices[at].pad_slot, compositor.pad, sizeof(compositor.pad[0]));
 }
 
 static struct compositor_touch_screen *compositor_touch_alloc(unsigned int at)
 {
-        unsigned int slot = 0;
+        unsigned int slot = at < COMPOSITOR_INPUTS ? compositor_pool_take(at, COMPOSITOR_TOUCH_POOL, &compositor.touch_used, &compositor.devices[at].touch_slot) : 0;
 
-        if (at >= COMPOSITOR_INPUTS)
-                return &compositor.touches[0];
-        if (compositor.devices[at].touch_slot)
-                slot = (unsigned int)(compositor.devices[at].touch_slot - 1);
-        else if (at < COMPOSITOR_TOUCH_POOL && !(compositor.touch_used & (1u << at)))
-                slot = at;
-        else
-        {
-                while (slot < COMPOSITOR_TOUCH_POOL && (compositor.touch_used & (1u << slot)))
-                        slot++;
-                if (slot >= COMPOSITOR_TOUCH_POOL)
-                        slot = 0;
-        }
-        compositor.touch_used |= 1u << slot;
-        compositor.devices[at].touch_slot = (unsigned char)(slot + 1);
         memory_zero(&compositor.touches[slot], sizeof(compositor.touches[slot]));
         return &compositor.touches[slot];
 }
 
 static void compositor_touch_free(unsigned int at)
 {
-        if (at < COMPOSITOR_INPUTS && compositor.devices[at].touch_slot)
-        {
-                unsigned int slot = (unsigned int)(compositor.devices[at].touch_slot - 1);
-
-                compositor.touch_used &= ~(1u << slot);
-                memory_zero(&compositor.touches[slot], sizeof(compositor.touches[slot]));
-                compositor.devices[at].touch_slot = 0;
-        }
+        if (at < COMPOSITOR_INPUTS)
+                compositor_pool_drop(at, &compositor.touch_used, &compositor.devices[at].touch_slot, compositor.touches, sizeof(compositor.touches[0]));
 }
 
 static struct compositor_touch_screen *compositor_touch_of(unsigned int at)
@@ -1826,38 +2003,31 @@ static long compositor_table_memfd(unsigned long bytes)
         return handle;
 }
 
-/*
-        What a screen's displays line asks for, and what the compositor did not do of it, for the table (WINDOWS_REFUSED_*):
-        the rate asked, when the mode it is at is not that rate; the turn asked, when it is not turned; and a place whose x or
-        y the file does not read. A screen with no line asks for nothing and is refused nothing.
-*/
 static void compositor_table_refusals(struct windows *table, unsigned int at, const char *name)
 {
-        const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, name, windows_name_length(name));
+        const struct windows_display *d = windows_display_of(compositor_display, compositor_displays, name, windows_name_length(name));
+        const struct compositor_output *o = &compositor.output[at];
         unsigned int refused = 0;
 
-        table->output_asked_hz[at] = display ? display->refresh : 0;
-        table->output_asked_turn[at] = display ? display->rotation : 0;
-        table->output_asked_scale[at] = display ? display->scale : WINDOWS_SCALE_DEFAULT;
-        if (display && display->refresh && compositor.output[at].mode.vrefresh != display->refresh)
-                refused |= WINDOWS_REFUSED_RATE;
-        if (display && display->rotation && !compositor.output[at].turned)
-                refused |= WINDOWS_REFUSED_TURN;
-        if (display && (display->bad & (WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y)))
-                refused |= WINDOWS_REFUSED_PLACE;
-        // A size asked that the screen is not at: one it does not list, or one the card refused (compositor_mode_refuse).
-        table->output_asked_w[at] = display ? display->width : 0;
-        table->output_asked_h[at] = display ? display->height : 0;
-        if (display && display->width && ((unsigned int)compositor.output[at].mode.hdisplay != display->width ||
-                                          (unsigned int)compositor.output[at].mode.vdisplay != display->height))
-                refused |= WINDOWS_REFUSED_SIZE;
+        table->output_asked_hz[at] = d ? d->refresh : 0;
+        table->output_asked_turn[at] = d ? d->rotation : 0;
+        table->output_asked_scale[at] = d ? d->scale : WINDOWS_SCALE_DEFAULT;
+        table->output_asked_w[at] = d ? d->width : 0;
+        table->output_asked_h[at] = d ? d->height : 0;
+        if (d)
+        {
+                if (d->refresh && o->mode.vrefresh != d->refresh)
+                        refused |= WINDOWS_REFUSED_RATE;
+                if (d->rotation && !o->turned)
+                        refused |= WINDOWS_REFUSED_TURN;
+                if (d->bad & (WINDOWS_DISPLAY_X | WINDOWS_DISPLAY_Y))
+                        refused |= WINDOWS_REFUSED_PLACE;
+                if (d->width && ((unsigned int)o->mode.hdisplay != d->width || (unsigned int)o->mode.vdisplay != d->height))
+                        refused |= WINDOWS_REFUSED_SIZE;
+        }
         table->output_refused[at] = refused;
 }
 
-/*
-        What the table says of the screens, at the start and whenever they change: the list, the primary first, each
-        one's rectangle and connector name, and that it changed (layout).
-*/
 static void compositor_table_outputs(void)
 {
         struct windows *table = compositor.table;
@@ -1867,35 +2037,27 @@ static void compositor_table_outputs(void)
                 return;
         for (int at = 0; at < count && at < WINDOWS_OUTPUTS; at++)
         {
-                int x, y, width, height;
+                const struct compositor_output *o = &compositor.output[at];
                 const char *name = compositor_output_name(at);
+                int x, y, width, height;
                 unsigned int length = 0;
 
                 compositor_output_rect(at, &x, &y, &width, &height);
-                table->output_x[at] = x;
-                table->output_y[at] = y;
-                table->output_w[at] = (unsigned int)width;
-                table->output_h[at] = (unsigned int)height;
+                table->output_x[at] = x, table->output_y[at] = y;
+                table->output_w[at] = (unsigned int)width, table->output_h[at] = (unsigned int)height;
                 while (name[length] && length < WINDOWS_OUTPUT_NAME - 1)
                         table->output_name[at][length] = name[length], length++;
                 memory_zero(table->output_name[at] + length, WINDOWS_OUTPUT_NAME - length);
-                memory_copy(table->output_model[at], compositor.output[at].model, WINDOWS_OUTPUT_MODEL);
-                table->output_now[at] = compositor.output[at].mode.vrefresh;
-                table->output_rates[at] = compositor.output[at].hz_count;
-                memory_copy(table->output_hz[at], compositor.output[at].hz, sizeof(table->output_hz[at]));
-                memory_copy(table->output_size[at], compositor.output[at].sizes, sizeof(table->output_size[at]));
-                table->output_sizes[at] = compositor.output[at].size_count;
-                table->output_size_preferred[at] = compositor.output[at].size_preferred;
-                table->output_mode_w[at] = (unsigned int)compositor.output[at].mode.hdisplay;
-                table->output_mode_h[at] = (unsigned int)compositor.output[at].mode.vdisplay;
-                table->output_turn[at] = compositor.output[at].turn;
-                table->output_software[at] = compositor.output[at].turn_software;
-                compositor_table_refusals(table, at, name);
+                memory_copy(table->output_model[at], o->model, WINDOWS_OUTPUT_MODEL);
+                table->output_now[at] = o->mode.vrefresh, table->output_rates[at] = o->hz_count;
+                memory_copy(table->output_hz[at], o->hz, sizeof(table->output_hz[at]));
+                memory_copy(table->output_size[at], o->sizes, sizeof(table->output_size[at]));
+                table->output_sizes[at] = o->size_count, table->output_size_preferred[at] = o->size_preferred;
+                table->output_mode_w[at] = (unsigned int)o->mode.hdisplay, table->output_mode_h[at] = (unsigned int)o->mode.vdisplay;
+                table->output_turn[at] = o->turn, table->output_software[at] = o->turn_software;
+                compositor_table_refusals(table, (unsigned int)at, name);
         }
-        // A frame follows the screens too: the fastest one's period, which every kit window paces its frames by (ui_app_run, ui_kit_frame_ns).
-        // Set once at the table's making, a take at another rate (a wake's, a hotplug's, the settings') left the windows at the old one.
         table->period = (unsigned int)compositor.period;
-        // The largest a window may be follows the screens, inside the room its buffer has for the session.
         table->output_width = (unsigned int)compositor_most_width();
         table->output_height = (unsigned int)compositor_most_height();
         table->layout = compositor.layout;
@@ -2052,30 +2214,20 @@ static void compositor_table_drop(void)
                 }
 }
 
-/*
-        SIGPIPE ignored: a write to a FIFO or a socket whose reader has gone is EPIPE and no end of the compositor. keys.fire is
-        opened only while the machine script reads it, and the script may close it between the open and the write; the sound
-        server's socket may go. The Wayland shim ignored it when it started, so a build without the shim died of it.
-*/
+#define COMPOSITOR_SIGUSR1 10
+#define COMPOSITOR_SIGUSR2 12
+#define COMPOSITOR_SIG_MASK (1ul << 14 | 1ul << 1 | 1ul << 0 | 1ul << (COMPOSITOR_SIGUSR1 - 1) | 1ul << (COMPOSITOR_SIGUSR2 - 1))
+
 static void compositor_pipe_ignore(void)
 {
         system_signal_install(13, 1, 0, 0, null); // SIGPIPE, SIG_IGN
 }
 
-/*
-        SIGTERM, SIGINT and SIGHUP, which end the compositor, SIGUSR1, which has it read /root again
-        (compositor_root_again), and SIGUSR2, the sleep verb's word that the machine woke (compositor_woke), as a
-        descriptor the loop polls; SIGPIPE ignored.
-*/
-#define COMPOSITOR_SIGUSR1 10
-#define COMPOSITOR_SIGUSR2 12
-
 static int compositor_signals(void)
 {
-        unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1) | 1ul << (COMPOSITOR_SIGUSR1 - 1) | 1ul << (COMPOSITOR_SIGUSR2 - 1);
+        unsigned long mask = COMPOSITOR_SIG_MASK;
 
         compositor_pipe_ignore();
-
         compositor_call(syscall(rt_sigprocmask), 0, (positive)address_of mask, 0, 8, 0, 0);
         return (int)compositor_call(syscall(signalfd4), (positive)-1, (positive)address_of mask, 8,
                                     COMPOSITOR_NONBLOCK | COMPOSITOR_CLOEXEC, 0, 0);
@@ -2331,36 +2483,23 @@ static b32 compositor_headless(string_address size, string_address path)
         void *mapped;
         int error = 0;
 
-        while (*size >= '0' && *size <= '9')
-        {
+        while (*size >= '0' && *size <= '9' && width <= 16384)
                 width = width * 10 + (*size++ - '0');
-                if (width > 16384)
-                        return -COMPOSITOR_EINVAL;
-        }
         if (*size++ != 'x')
                 return -COMPOSITOR_EINVAL;
-        while (*size >= '0' && *size <= '9')
-        {
+        while (*size >= '0' && *size <= '9' && height <= 16384)
                 height = height * 10 + (*size++ - '0');
-                if (height > 16384)
-                        return -COMPOSITOR_EINVAL;
-        }
-        if (width < 64 || height < 64)
+        if (width < 64 || width > 16384 || height < 64 || height > 16384)
                 return -COMPOSITOR_EINVAL;
-
         bytes = width * height * 4;
-        mapped = compositor_map_rw_file(path, bytes, &error);
-        if (!mapped)
+        if (!(mapped = compositor_map_rw_file(path, bytes, &error)))
                 return error;
-
         compositor.card = -1;
         compositor.scanout = (unsigned int *)mapped;
         compositor.scanout_bytes = (unsigned long)bytes;
         compositor.scanout_pitch = (unsigned long)width * 4;
-        compositor.width = (int)width;
-        compositor.height = (int)height;
+        compositor.width = (int)width, compositor.height = (int)height;
         compositor.period = 1000000000ull / 60;
-        // The scan image is the buffer shown (1: its name for the flips, as a card's framebuffer is), its spare the one composed into.
         compositor.fb = 1;
         compositor_plate_refused = 0;
         if (!compositor_headless_plate(path, bytes))
@@ -2539,12 +2678,20 @@ static void compositor_screens_say(void)
         with no font; with none for another band that band's are: a band
         larger than its memory would be read past its end.
 */
+static void compositor_unmap_pixels(unsigned int **pixels, unsigned long *bytes)
+{
+        if (*pixels)
+                gpu_forget((const void *)(*pixels), (positive)(*bytes)),
+                    compositor_call(syscall(munmap), (positive)*pixels, *bytes, 0, 0, 0, 0);
+        *pixels = 0, *bytes = 0;
+}
+
 static unsigned int *compositor_remap(unsigned int *was, unsigned long had, unsigned long bytes)
 {
         long mapped = compositor_call(syscall(mmap), 0, (positive)bytes, 3, 0x22, (positive)-1, 0);
 
         if (was)
-                gpu_forget((const void *)(was), (positive)(had)), compositor_call(syscall(munmap), (positive)was, had, 0, 0, 0, 0);
+                compositor_unmap_pixels(&was, &had);
         return mapped < 0 && mapped > -4096 ? 0 : (unsigned int *)mapped;
 }
 
@@ -2564,15 +2711,13 @@ static void compositor_band_room(void)
 
                 if (at >= bands)
                 {
-                        if (*pixels)
-                                gpu_forget((const void *)(*pixels), (positive)(*had)), compositor_call(syscall(munmap), (positive)*pixels, *had, 0, 0, 0, 0);
-                        *pixels = 0;
-                        *had = 0;
+                        compositor_unmap_pixels(pixels, had);
                         continue;
                 }
                 compositor_output_rect(at, &x, &y, &width, &height);
                 taskbar_bytes(width, height, compositor.scale, &band_bytes, &glass_bytes);
-                glass_most = glass_bytes > glass_most ? glass_bytes : glass_most;
+                if (glass_bytes > glass_most)
+                        glass_most = glass_bytes;
                 if (band_bytes <= *had)
                         continue;
                 *pixels = compositor_remap(*pixels, *had, band_bytes);
@@ -2586,23 +2731,12 @@ static void compositor_band_room(void)
                 compositor.glass = compositor_remap(compositor.glass, compositor.glass_bytes, glass_most);
                 compositor.glass_bytes = compositor.glass ? glass_most : 0;
         }
-        // No primary band, or no glass to draw any band through: every band's tabs are shapes.
         if (!compositor.band || !compositor.glass)
         {
                 for (int at = 0; at < WINDOWS_OUTPUTS; at++)
-                {
-                        unsigned int **pixels = at ? &compositor.band_more[at] : &compositor.band;
-                        unsigned long *had = at ? &compositor.band_more_bytes[at] : &compositor.band_bytes;
-
-                        if (*pixels)
-                                gpu_forget((const void *)(*pixels), (positive)(*had)), compositor_call(syscall(munmap), (positive)*pixels, *had, 0, 0, 0, 0);
-                        *pixels = 0;
-                        *had = 0;
-                }
-                if (compositor.glass)
-                        gpu_forget((const void *)(compositor.glass), (positive)(compositor.glass_bytes)), compositor_call(syscall(munmap), (positive)compositor.glass, compositor.glass_bytes, 0, 0, 0, 0);
-                compositor.glass = 0;
-                compositor.glass_bytes = 0;
+                        compositor_unmap_pixels(at ? &compositor.band_more[at] : &compositor.band,
+                                                at ? &compositor.band_more_bytes[at] : &compositor.band_bytes);
+                compositor_unmap_pixels(&compositor.glass, &compositor.glass_bytes);
                 taskbar_changed();
         }
 }
@@ -3268,291 +3402,155 @@ static void compositor_loop_wanted(struct compositor_poll *wanted, struct compos
                 wanted[count++] = (struct compositor_poll){held || rows_has(&compositor_doors.busy, row) ? -1 : __atomic_load_n(&compositor.door[row], __ATOMIC_ACQUIRE),
                                                            COMPOSITOR_POLLIN, 0};
         if (compositor_doors.done >= 0 && !held)
-        {
-                slots->done_at = count;
-                wanted[count++] = (struct compositor_poll){compositor_doors.done, COMPOSITOR_POLLIN, 0};
-        }
-        // A flip in flight: its event says the card has let go of the buffer it showed before.
+                slots->done_at = count, wanted[count++] = (struct compositor_poll){compositor_doors.done, COMPOSITOR_POLLIN, 0};
         if (compositor.flip_pending)
-        {
-                slots->card_at = count;
-                wanted[count++] = (struct compositor_poll){compositor.card, COMPOSITOR_POLLIN, 0};
-        }
+                slots->card_at = count, wanted[count++] = (struct compositor_poll){compositor.card, COMPOSITOR_POLLIN, 0};
 #ifdef MOONWATER_GPU_C
-        // A job of the card's the loop waits for: its sync_file is readable once the job is done (-1, polled for nothing, when there is none to have).
         if (compositor_card_awaits())
-        {
-                slots->fence_at = count;
-                wanted[count++] = (struct compositor_poll){compositor_card_poll(), COMPOSITOR_POLLIN, 0};
-        }
+                slots->fence_at = count, wanted[count++] = (struct compositor_poll){compositor_card_poll(), COMPOSITOR_POLLIN, 0};
 #endif
         if (compositor.uevents >= 0)
-        {
-                slots->uevents_at = count;
-                wanted[count++] = (struct compositor_poll){compositor.uevents, COMPOSITOR_POLLIN, 0};
-        }
+                slots->uevents_at = count, wanted[count++] = (struct compositor_poll){compositor.uevents, COMPOSITOR_POLLIN, 0};
         if (compositor_clip.door >= 0 && !rows_has(&compositor_doors.busy, COMPOSITOR_DOOR_MISC))
-        {
-                slots->clip_at = count;
-                wanted[count++] = (struct compositor_poll){compositor_clip.door, COMPOSITOR_POLLIN, 0};
-        }
+                slots->clip_at = count, wanted[count++] = (struct compositor_poll){compositor_clip.door, COMPOSITOR_POLLIN, 0};
 #ifdef CONFIG_MOONWATER_WAYLAND
         if (!held)
-        {
-                slots->wayland_at = count;
-                count = compositor_wl_poll(wanted, count);
-        }
+                slots->wayland_at = count, count = compositor_wl_poll(wanted, count);
 #endif
         slots->count = count;
 }
 
-// Fixed-slot timer table for compositor_main: replaces ad-hoc deadline merging with explicit timer IDs.
-enum compositor_timer_id
+static inline void compositor_soon(positive *until, positive due)
 {
-        COMPOSITOR_TIMER_WAKE = 0,
-        COMPOSITOR_TIMER_HOLD,
-        COMPOSITOR_TIMER_MAGNIFY,
-        COMPOSITOR_TIMER_CURSOR,
-        COMPOSITOR_TIMER_VOLUME,
-        COMPOSITOR_TIMER_PREDICT,
-        COMPOSITOR_TIMER_TOUCH,
-        COMPOSITOR_TIMER_SNAP,
-        COMPOSITOR_TIMER_SPOTS,
-        COMPOSITOR_TIMER_WALL,
-        COMPOSITOR_TIMER_MOON,
-        COMPOSITOR_TIMER_LIST_LATER,
-        COMPOSITOR_TIMER_STARTING,
-        COMPOSITOR_TIMER_MINUTE,
-        COMPOSITOR_TIMER_WL_FRAME,
-        COMPOSITOR_TIMER_WL_CLIP,
-        COMPOSITOR_TIMER_SCREENS,
-        COMPOSITOR_TIMER_PRESENT,
-        COMPOSITOR_TIMER_CARD_DUE,
-        COMPOSITOR_TIMER_CARD_HELD,
-        COMPOSITOR_TIMER_GPU_LATE,
-        COMPOSITOR_TIMER_GPU_CLOCKS,
-        COMPOSITOR_TIMER_WL_REFLEX,
-        COMPOSITOR_TIMERS,
-};
-
-static positive compositor_timers[COMPOSITOR_TIMERS];
-
-static void compositor_timer_set(unsigned int id, positive due_ns)
-{
-        if (id < COMPOSITOR_TIMERS)
-                compositor_timers[id] = due_ns;
+        if (due && (!*until || due < *until))
+                *until = due;
 }
 
-static positive compositor_timer_next(void)
-{
-        positive until = 0;
-
-        for (unsigned int id = 0; id < COMPOSITOR_TIMERS; id++)
-        {
-                positive due = compositor_timers[id];
-
-                if (due && (!until || due < until))
-                        until = due;
-        }
-        return until;
-}
-
-// Arms all active loop timers for the current turn and returns the earliest deadline (0 = wait forever).
+// Computes the earliest active loop deadline for the current turn (0 = wait forever).
 static positive compositor_timers_arm(positive now, unsigned int fence_at, int held)
 {
-        positive period = compositor.period ? compositor.period : 16666667ull;
+        positive period = compositor.period ? compositor.period : 16666667ull, until = 0;
 
         (void)fence_at;
         (void)held;
-        compositor_timer_set(COMPOSITOR_TIMER_WAKE, compositor.wake_stage ? compositor.wake_at : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_HOLD, compositor.hold >= 0 ? compositor.hold_until : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_MAGNIFY, compositor.cursor.magnified ? compositor.cursor.magnified_until : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_CURSOR, compositor_cursor_due());
-        compositor_timer_set(COMPOSITOR_TIMER_VOLUME, compositor.band ? (compositor_volume.look_at ? compositor_volume.look_at : 1) : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_PREDICT, compositor_predict_due());
-        compositor_timer_set(COMPOSITOR_TIMER_TOUCH, compositor_touch_due());
-        compositor_timer_set(COMPOSITOR_TIMER_SNAP, compositor_snap_due());
-        compositor_timer_set(COMPOSITOR_TIMER_SPOTS,
-                             compositor_spots_any(1) ? (compositor.presented + period > now ? compositor.presented + period : now) : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_WALL, compositor_wall_due(now));
-        compositor_timer_set(COMPOSITOR_TIMER_MOON, compositor.band ? taskbar_moon_due(now) : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_LIST_LATER, rows_any(&compositor.list_later) ? now + 1000000ull : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_STARTING, compositor.band ? taskbar_starting_due() : 0);
         if (compositor.band || compositor.theme_word == 2)
         {
                 timespec real = {0, 0};
 
                 clock_gettime(CLOCK_REALTIME, address_of real);
-                compositor_timer_set(COMPOSITOR_TIMER_MINUTE,
-                                     now + (positive)(59 - real.tv_sec % 60) * 1000000000ull +
-                                         (positive)(1000000000l - real.tv_nsec) + 1000000ull);
+                compositor_soon(&until, now + (positive)(59 - real.tv_sec % 60) * 1000000000ull + (positive)(1000000000l - real.tv_nsec) + 1000000ull);
         }
-        else
-                compositor_timer_set(COMPOSITOR_TIMER_MINUTE, 0);
-#ifdef CONFIG_MOONWATER_WAYLAND
-        compositor_timer_set(COMPOSITOR_TIMER_WL_FRAME,
-                             (compositor_wl.started && wayland_frame_wanted() && !compositor.damages && !compositor_card.on)
-                                 ? (now - compositor.presented < period ? compositor.presented + period : now)
-                                 : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_WL_CLIP, compositor_wl.started ? compositor_wl_due() : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_WL_REFLEX, compositor_wl_frame_at);
-#else
-        compositor_timer_set(COMPOSITOR_TIMER_WL_FRAME, 0);
-        compositor_timer_set(COMPOSITOR_TIMER_WL_CLIP, 0);
-        compositor_timer_set(COMPOSITOR_TIMER_WL_REFLEX, 0);
-#endif
         if (compositor.screens_gone && !compositor.screens_look)
                 compositor.screens_look = now + COMPOSITOR_SCREEN_LOOK;
-        compositor_timer_set(COMPOSITOR_TIMER_SCREENS, compositor.screens_gone ? compositor.screens_look : 0);
         if ((compositor.damages || compositor.vrr_kick) && !compositor_card_holds())
         {
                 positive waiting = compositor_flip_wait(now);
+                int tear = compositor_tearing();
 
-                compositor_timer_set(COMPOSITOR_TIMER_PRESENT,
-                                     waiting ? waiting
-                                             : compositor_present_at(compositor_tearing(), compositor_tearing() ? 0 : compositor_present_lead(), now));
+                compositor_soon(&until, waiting ? waiting : compositor_present_at(tear, tear ? 0 : compositor_present_lead(), now));
         }
-        else
-                compositor_timer_set(COMPOSITOR_TIMER_PRESENT, 0);
-#ifdef MOONWATER_GPU_C
-        compositor_timer_set(COMPOSITOR_TIMER_CARD_DUE, fence_at ? compositor_card_due(now) : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_CARD_HELD, held ? compositor_card_held_until() : 0);
-        compositor_timer_set(COMPOSITOR_TIMER_GPU_LATE, compositor_gpu_late_at(now));
-        compositor_timer_set(COMPOSITOR_TIMER_GPU_CLOCKS, compositor_gpu_clocks_at());
-#else
-        compositor_timer_set(COMPOSITOR_TIMER_CARD_DUE, 0);
-        compositor_timer_set(COMPOSITOR_TIMER_CARD_HELD, 0);
-        compositor_timer_set(COMPOSITOR_TIMER_GPU_LATE, 0);
-        compositor_timer_set(COMPOSITOR_TIMER_GPU_CLOCKS, 0);
+        if (compositor.wake_stage)
+                compositor_soon(&until, compositor.wake_at);
+        if (compositor.hold >= 0)
+                compositor_soon(&until, compositor.hold_until);
+        if (compositor.cursor.magnified)
+                compositor_soon(&until, compositor.cursor.magnified_until);
+        compositor_soon(&until, compositor_cursor_due());
+        if (compositor.band)
+        {
+                compositor_soon(&until, compositor_volume.look_at ? compositor_volume.look_at : 1);
+                compositor_soon(&until, taskbar_moon_due(now));
+                compositor_soon(&until, taskbar_starting_due());
+        }
+        compositor_soon(&until, compositor_predict_due());
+        compositor_soon(&until, compositor_touch_due());
+        compositor_soon(&until, compositor_snap_due());
+        if (compositor_spots_any(1))
+                compositor_soon(&until, compositor.presented + period > now ? compositor.presented + period : now);
+        compositor_soon(&until, compositor_wall_due(now));
+        if (rows_any(&compositor.list_later))
+                compositor_soon(&until, now + 1000000ull);
+        if (compositor.screens_gone)
+                compositor_soon(&until, compositor.screens_look);
+#ifdef CONFIG_MOONWATER_WAYLAND
+        if (compositor_wl.started)
+        {
+                if (wayland_frame_wanted() && !compositor.damages && !compositor_card.on)
+                        compositor_soon(&until, now - compositor.presented < period ? compositor.presented + period : now);
+                compositor_soon(&until, compositor_wl_due());
+                compositor_soon(&until, compositor_wl_frame_at);
+        }
 #endif
-        return compositor_timer_next();
+#ifdef MOONWATER_GPU_C
+        if (fence_at)
+                compositor_soon(&until, compositor_card_due(now));
+        if (held)
+                compositor_soon(&until, compositor_card_held_until());
+        compositor_soon(&until, compositor_gpu_late_at(now));
+        compositor_soon(&until, compositor_gpu_clocks_at());
+#endif
+        return until;
 }
 
 /*
-        The wait of a turn on its list, as ppoll's (every entry's returned set, the entries with any counted, a negative errno), in the loop's
-        set (compositor_epoll): the list's descriptors put in it, changed or taken out by what changed since the last wait, then epoll_pwait2 to
-        the same timespec, and each answer written to the entry its number is at. A descriptor at two entries, one past the set's numbers, one the
-        kernel will not watch or is not open (ppoll says that one POLLNVAL, which the loop acts on), and a kernel without the set, wait by ppoll.
+        Thin compatibility shim over the direct-registration reactor (`compositor_epoll_watch`/`drop`/`wait`):
+        syncs `wanted[0..count-1]` into the compact epoll table, sweeps removed descriptors, and dispatches
+        ready events back into `wanted[slot].returned`. Falls back to `ppoll` for duplicates, EBADF, or full table.
 */
 static long compositor_loop_wait(struct compositor_poll *wanted, unsigned int count, const long *wait, b32 again)
 {
         struct compositor_epoll_event ready[COMPOSITOR_EPOLL_READY];
-        unsigned int turn, distinct = 0;
+        unsigned int forgets, turn;
         long got, awaited = 0;
 
-        if (compositor_epoll.ep == -1)
-        {
-                long made = system_call_1(syscall(epoll_create1), 0x80000), high; // EPOLL_CLOEXEC
-
-                // Moved to a number high in the table, where no stale number of a list's (a descriptor closed and still named) is the set's own.
-                high = made >= 0 ? compositor_call(syscall(fcntl), (positive)made, COMPOSITOR_F_DUPFD_CLOEXEC, COMPOSITOR_EPOLL_HIGH, 0, 0, 0) : -1;
-                if (high >= 0)
-                        system_call_1(syscall(close), (positive)made), made = high;
-                compositor_epoll.ep = made >= 0 ? (int)made : -2;
-        }
-        if (compositor_epoll.ep < 0)
+        if (compositor_epoll_init() < 0)
                 goto ppoll;
-        // The list the last whole sync made, entry for entry, with no number let go of since: the set is it already. A slingshot's turn
-        // polls the very list again (again), whose answers are the last wait's alone; most turns make the same list, read here entry for
-        // entry, its answers cleared on the way.
+        forgets = __atomic_load_n(&compositor_epoll.forgets, __ATOMIC_ACQUIRE);
+        if (again && compositor_epoll.whole && count == compositor_epoll.count && forgets == compositor_epoll.forgets_seen)
         {
-                unsigned int forgets = __atomic_load_n(&compositor_epoll.forgets, __ATOMIC_ACQUIRE), same;
-
-                same = compositor_epoll.whole && count == compositor_epoll.count && forgets == compositor_epoll.forgets_seen;
-                if (same && again)
-                {
-                        for (unsigned int k = 0; k < compositor_epoll.answered; k++)
-                                wanted[compositor_epoll_answers[k]].returned = 0;
-                        goto wait;
-                }
-                for (unsigned int at = 0; at < count; at++)
-                {
-                        unsigned long long entry = (unsigned int)wanted[at].handle | (unsigned long long)(unsigned short)wanted[at].events << 32;
-
-                        wanted[at].returned = 0;
-                        if (at < COMPOSITOR_EPOLL_PREV)
-                                same &= compositor_epoll_prev[at] == entry, compositor_epoll_prev[at] = entry;
-                        else
-                                same = 0;
-                }
-                if (same)
-                        goto wait;
-                compositor_epoll.whole = 0, compositor_epoll.count = count, compositor_epoll.forgets_seen = forgets;
+                for (unsigned int k = 0; k < compositor_epoll.answered; k++)
+                        wanted[compositor_epoll.answers[k]].returned = 0;
+                goto wait;
         }
+        compositor_epoll.whole = 0, compositor_epoll.count = count, compositor_epoll.forgets_seen = forgets;
         turn = ++compositor_epoll.turn;
         for (unsigned int at = 0; at < count; at++)
         {
-                int fd = wanted[at].handle;
-                unsigned int state, events = (unsigned short)wanted[at].events & COMPOSITOR_EPOLL_EVENTS;
+                int fd = wanted[at].handle, existing;
 
+                wanted[at].returned = 0;
                 if (fd < 0)
                         continue;
-                if (fd >= COMPOSITOR_EPOLL_FDS || fd == compositor_epoll.ep || compositor_epoll_seen[fd] == turn)
+                existing = compositor_epoll_find(fd);
+                if (existing >= 0 && compositor_epoll.entries[existing].gen == turn)
                         goto ppoll;
-                compositor_epoll_seen[fd] = turn, compositor_epoll_slot[fd] = at, distinct++;
-                state = __atomic_load_n(&compositor_epoll_state[fd], __ATOMIC_ACQUIRE);
-                if (!(state & COMPOSITOR_EPOLL_LISTED))
-                        compositor_epoll_list[compositor_epoll.listed++] = fd, state |= COMPOSITOR_EPOLL_LISTED;
-                if ((state & COMPOSITOR_EPOLL_REFUSED) && (state & COMPOSITOR_EPOLL_EVENTS) == events)
+                if (compositor_epoll_watch(fd, (unsigned short)wanted[at].events, at) < 0)
                         goto ppoll;
-                if (!(state & COMPOSITOR_EPOLL_IN) || (state & COMPOSITOR_EPOLL_EVENTS) != events)
-                {
-                        struct compositor_epoll_event change = {events, (unsigned long long)fd};
-                        long op = state & COMPOSITOR_EPOLL_IN ? 3 : 1, done; // EPOLL_CTL_MOD, EPOLL_CTL_ADD
-
-                        done = (long)system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, (positive)op, (positive)fd, (positive)&change);
-                        // The set's word on the number is the kernel's: one it holds is changed (EEXIST), one it let go of is added (ENOENT).
-                        if (done == -17 || done == -2)
-                                done = (long)system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, done == -17 ? 3 : 1, (positive)fd,
-                                                           (positive)&change);
-                        if (done < 0)
-                        {
-                                // Not open (ppoll's POLLNVAL), or a file the set cannot watch (EPERM: a regular file), until the entry changes.
-                                __atomic_store_n(&compositor_epoll_state[fd],
-                                                 (unsigned short)(COMPOSITOR_EPOLL_LISTED | (done == -9 ? 0 : COMPOSITOR_EPOLL_REFUSED) | events), __ATOMIC_RELEASE);
-                                goto ppoll;
-                        }
-                        state = COMPOSITOR_EPOLL_IN | COMPOSITOR_EPOLL_LISTED | events;
-                }
-                __atomic_store_n(&compositor_epoll_state[fd], (unsigned short)state, __ATOMIC_RELEASE);
         }
-        // A number the list named before and not now leaves the set (the list holds each number once; every number of this wait is in it).
-        if (compositor_epoll.listed != distinct)
-                for (unsigned int k = 0; k < compositor_epoll.listed;)
-                {
-                        int fd = compositor_epoll_list[k];
-
-                        if (compositor_epoll_seen[fd] == turn)
-                        {
-                                k++;
-                                continue;
-                        }
-                        if (__atomic_load_n(&compositor_epoll_state[fd], __ATOMIC_ACQUIRE) & COMPOSITOR_EPOLL_IN)
-                                system_call_4(syscall(epoll_ctl), (positive)compositor_epoll.ep, 2, (positive)fd, 0);
-                        __atomic_store_n(&compositor_epoll_state[fd], 0, __ATOMIC_RELEASE);
-                        compositor_epoll_list[k] = compositor_epoll_list[--compositor_epoll.listed];
-                }
-        compositor_epoll.whole = count <= COMPOSITOR_EPOLL_PREV;
+        for (unsigned int k = 0; k < compositor_epoll.active;)
+                if (compositor_epoll.entries[k].gen == turn)
+                        k++;
+                else
+                        compositor_epoll_drop(compositor_epoll.entries[k].fd);
+        compositor_epoll.whole = 1;
 wait:
         turn = compositor_epoll.turn;
-        got = (long)system_call_6(syscall(epoll_pwait2), (positive)compositor_epoll.ep, (positive)ready, COMPOSITOR_EPOLL_READY, (positive)wait, 0, 0);
-        if (got == -38) // ENOSYS: a kernel before 5.11
-        {
-                compositor_epoll.ep = -2, compositor_epoll.whole = 0;
+        got = compositor_epoll_wait(ready, COMPOSITOR_EPOLL_READY, wait);
+        if (got == -38)
                 goto ppoll;
-        }
         compositor_epoll.answered = 0;
         if (got < 0)
                 return got;
         for (long k = 0; k < got; k++)
         {
-                unsigned long long fd = ready[k].data;
+                int idx = compositor_epoll_find((int)ready[k].data);
 
-                if (fd < COMPOSITOR_EPOLL_FDS && compositor_epoll_seen[fd] == turn)
+                if (idx >= 0 && compositor_epoll.entries[idx].gen == turn)
                 {
-                        unsigned int slot = compositor_epoll_slot[fd];
+                        unsigned int slot = compositor_epoll.entries[idx].slot;
 
-                        compositor_epoll_answers[compositor_epoll.answered] = slot, compositor_epoll.answered += !wanted[slot].returned;
+                        compositor_epoll.answers[compositor_epoll.answered] = slot;
+                        compositor_epoll.answered += !wanted[slot].returned;
                         awaited += !wanted[slot].returned;
                         wanted[slot].returned = (short)(wanted[slot].returned | (short)(ready[k].events & 0xffffu));
                 }
@@ -3626,20 +3624,15 @@ static b32 compositor_main()
         int running = 1, extra = -1, tablet = 0, up = -1;
         string_address headless = null, file = null, font = null;
 
-        //      The signals the loop takes through its signalfd (compositor_signals), blocked before anything else: one sent
-        //      while the card and the input were still being set up killed the compositor (SIGUSR1's default), where now it
-        //      waits, pending, for the signalfd made later to read it.
+        // Block signalfd signals before setup so an early SIGUSR1/SIGUSR2 stays pending until the loop reads it.
         {
-                unsigned long mask = 1ul << (15 - 1) | 1ul << (2 - 1) | 1ul << (1 - 1) | 1ul << (COMPOSITOR_SIGUSR1 - 1) |
-                                     1ul << (COMPOSITOR_SIGUSR2 - 1);
+                unsigned long mask = COMPOSITOR_SIG_MASK;
 
                 compositor_call(syscall(rt_sigprocmask), 0, (positive)address_of mask, 0, 8, 0, 0);
         }
         claim_standard_descriptors();
         compositor_descriptors_room();
-        // The loop's waits end when they are asked to: the kernel gives every wait of a thread 50 us of slack to end late in
-        // (it joins timers by it), which a frame's timer and every other time of the loop had added to it. PR_SET_TIMERSLACK, 1 ns.
-        compositor_call(syscall(prctl), 29, 1, 0, 0, 0, 0);
+        compositor_call(syscall(prctl), 29, 1, 0, 0, 0, 0); // PR_SET_TIMERSLACK = 1 ns
 
         compositor_zero();
         if (compositor_rows_made < compositor_rows_in_use)
@@ -3648,17 +3641,13 @@ static b32 compositor_main()
                 log_flush();
                 return 1;
         }
-        compositor.watch = compositor.uevents = -1;
-        compositor.hold = compositor.game = -1;
+        compositor.watch = compositor.uevents = compositor.hold = compositor.game = -1;
         compositor.focus = compositor.hover = compositor.grab = compositor.drag = compositor.told_row = COMPOSITOR_NONE;
         compositor.resize = compositor.press = compositor.keys_to = compositor.lit_row = compositor.preview_row = COMPOSITOR_NONE;
         compositor.mark_row = compositor.mark_with = compositor.shared_row = COMPOSITOR_NONE;
-        compositor.active_grab.kind = COMPOSITOR_GRAB_NONE;
-        compositor.active_grab.row = COMPOSITOR_NONE;
+        compositor.active_grab = (struct compositor_grab){COMPOSITOR_GRAB_NONE, COMPOSITOR_NONE, 0, 0};
         compositor.touch.closing = compositor.touch.hold_row = COMPOSITOR_NONE;
-        compositor.swipe.row = compositor.swipe.armed_row = COMPOSITOR_NONE;
-        compositor.osk_turn_focus = COMPOSITOR_NONE;
-        compositor.cursor.asked_row = COMPOSITOR_NONE;
+        compositor.swipe.row = compositor.swipe.armed_row = compositor.osk_turn_focus = compositor.cursor.asked_row = COMPOSITOR_NONE;
 
         for (positive at = 1; at < program_argument_count(); at++)
         {
@@ -3701,23 +3690,14 @@ static b32 compositor_main()
         }
 
         compositor_keys_read();
-        // A present late in its period, unless the machine's owner asks for every present early (compositor_present_due).
         compositor_late.early = compositor_flag_exists((string_address) "/run/moonwater/present-early");
-        // No game's hold of the processor's idle states, where the owner says so (compositor_game_watch).
         if (compositor_flag_exists((string_address) "/run/moonwater/game-hold-off"))
                 compositor.games = ~0ul, compositor_game_off = 1;
-        // Variable refresh for a screen whose connector does not say it can, where the machine's owner says it can (kms.c's compositor_vrr).
         compositor_vrr.said = compositor_flag_exists((string_address) "/run/moonwater/vrr-capable");
 #ifdef MOONWATER_GPU_C
-        // The card's present without a wait, unless the owner asks for every job waited for in place, as it was (/run/moonwater/present-wait).
         compositor_card.nowait = !compositor_flag_exists((string_address) "/run/moonwater/present-wait");
-        // The card's clocks held while input arrives (compositor_gpu_clocks), unless the owner's file /run/moonwater/gpu-clocks-off is there.
         if (compositor_flag_exists((string_address) "/run/moonwater/gpu-clocks-off"))
                 compositor_gpu_clocks.level = 0, compositor_gpu_clocks.game_off = 1;
-        // A window's list drawn by a job of the card the loop does not wait for, unless the owner asks for it waited for in place, as it was
-        // (/run/moonwater/lists-wait). Waited for, every list a kit program drew (a terminal's frame, the settings') stopped the loop for its job,
-        // 1853 us mean on box (22 ms a second at 10 lists a second): no input device was read meanwhile, so a key pressed in it reached its window
-        // that much later.
         compositor_card.lists_nowait = !compositor_flag_exists((string_address) "/run/moonwater/lists-wait");
 #endif
         if (compositor.scale < 25 || compositor.scale > 800)
@@ -3726,33 +3706,13 @@ static b32 compositor_main()
         if (!headless && !compositor.layout_given)
                 compositor_layout_read();
 
-        /*
-                Out of memory, the kernel kills the process its score names, and the compositor holds every client's windows, so with it went
-                the whole desktop: a client that made surfaces until memory ran out was as likely to take the compositor down as itself (what a
-                client sends costs the compositor its records of it). -900 keeps the compositor for nearly last, as system daemons are kept,
-                and not exempt (-1000), so a compositor that is itself the leak still goes. What a client's pools and dma-bufs hold is the
-                client's: its memfds and buffers are charged to it. The compositor starts no program, so nothing inherits this. Not allowed (a
-                compositor run without the privilege, a test's user namespace), it changes nothing.
-        */
+        // Keep compositor out of early OOM kills (-900) and run real-time SCHED_FIFO on real hardware.
         {
                 bipolar oom = system_open_at(AT_FDCWD, (string_address) "/proc/self/oom_score_adj", FILE_WRITE | O_CLOEXEC);
 
                 if (oom >= 0)
-                {
-                        (void)system_write_all((positive)oom, (string_address) "-900\n", 5);
-                        system_close(oom);
-                }
+                        (void)system_write_all((positive)oom, (string_address) "-900\n", 5), system_close(oom);
         }
-        /*
-                The loop is real time: SCHED_FIFO at the lowest priority, the sound server's (src/audio/service.c), so neither cuts into the other's
-                short work, and every ordinary thread (a game's, a build's) waits while a key, a vblank or a commit is worked. At ordinary
-                scheduling the loop took its turn among them: on hasty-tail (four cores) under eight spinning processes a thread woken at 144 Hz,
-                the loop's shape, woke 2028 us late at the 99th percentile and 2515 us at worst; real time, 5 and 7 us (the same thread idle: 40 and
-                50 us at ordinary, 20 and 31 real time). The threads it starts take the policy (the doors, the bands of a frame composed on the
-                processor); the ones no frame waits for go back to ordinary (compositor_ordinary). The compositor starts no program, so nothing else
-                inherits it. A headless one (a test's, a shot's) stays ordinary; not allowed (a test's user namespace, a compositor without the
-                privilege), it changes nothing.
-        */
         if (!headless)
         {
                 int lowest = 1;
