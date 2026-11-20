@@ -933,8 +933,8 @@ static void compositor_stretch(int row)
         unsigned long stride = (unsigned long)compositor_stride();
 
         // A client's picture is never written: its window is the picture's size (compositor_wl_settle).
-        // A fullscreen window with a smaller buffer is aspect-fitted and scaled (compositor_fullscreen_fit), never edge-smeared.
-        if (!drawn_w || !drawn_h || compositor_lent(row) || compositor.fullscreen[row])
+        // A fullscreen or background wallpaper window with a smaller buffer is aspect-fitted and scaled (compositor_fullscreen_fit), never edge-smeared.
+        if (!drawn_w || !drawn_h || compositor_lent(row) || compositor.fullscreen[row] || compositor.layer[row] == WINDOW_LAYER_BACKGROUND)
                 return;
         compositor_runs_forget(row);
 
@@ -962,7 +962,8 @@ static int compositor_fullscreen_fit(int row, int *dx, int *dy, int *dw, int *dh
         unsigned int pw, ph, w, h;
         unsigned long lw, lh;
 
-        if (row < 0 || row >= (int)compositor_rows_in_use || !compositor.fullscreen[row])
+        if (row < 0 || row >= (int)compositor_rows_in_use ||
+            (!compositor.fullscreen[row] && compositor.layer[row] != WINDOW_LAYER_BACKGROUND))
                 return 0;
         pw = compositor.picture_w[row], ph = compositor.picture_h[row];
         w = compositor.w[row], h = compositor.h[row];

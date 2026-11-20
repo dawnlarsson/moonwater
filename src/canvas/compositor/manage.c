@@ -28,47 +28,42 @@ static void compositor_stack_remove(int row)
                 compositor.stack_gen++;
 }
 
-// On top of the others; an override-redirect X window stays over a window raised (compositor_row_xoverride).
+static signed char compositor_layer_clamp(int layer)
+{
+        return layer < WINDOW_LAYER_BACKGROUND ? WINDOW_LAYER_BACKGROUND
+               : layer > WINDOW_LAYER_OVERLAY  ? WINDOW_LAYER_OVERLAY
+                                               : (signed char)layer;
+}
+
+// Effective stacking band of a row: its declared layer, or WINDOW_LAYER_ABOVE for small non-fullscreen override-redirect X11 menus/popups.
+static signed char compositor_layer_of(int row)
+{
+        signed char layer = compositor.layer[row];
+
+        if (layer == WINDOW_LAYER_NORMAL && compositor_row_xoverride(row) && !compositor.fullscreen[row] &&
+            !((int)compositor.w[row] >= compositor.width && (int)compositor.h[row] >= compositor.height))
+                return WINDOW_LAYER_ABOVE;
+        if (layer == WINDOW_LAYER_NORMAL && (compositor.asks[row] & (WINDOW_DISMISS | WINDOW_NO_CLOSE)) == (WINDOW_DISMISS | WINDOW_NO_CLOSE))
+                return WINDOW_LAYER_OVERLAY;
+        return layer;
+}
+
+// On top of its own stacking layer band (BACKGROUND < NORMAL < ABOVE < OVERLAY).
 static void compositor_raise(int row)
 {
-        unsigned int over = 0;
-
-        if (compositor.wallpaper[row])
-        {
-                if (compositor.stacked && compositor.stack[0] == (unsigned int)row)
-                        return;
-                compositor_stack_remove(row);
-                memory_copy(compositor.stack + 1, compositor.stack, compositor.stacked * sizeof(*compositor.stack));
-                compositor.stack[0] = (unsigned int)row;
-                compositor.stacked++;
-                if (!++compositor.stack_gen)
-                        compositor.stack_gen++;
-                compositor_damage_row(row);
-                return;
-        }
-        if (compositor.stacked && compositor.stack[compositor.stacked - 1] == row)
-                return;
+        signed char mine = compositor_layer_of(row);
+        unsigned int at = 0;
 
         compositor_stack_remove(row);
-        compositor.stack[compositor.stacked++] = (unsigned int)row;
+        while (at < compositor.stacked && compositor_layer_of((int)compositor.stack[at]) <= mine)
+                at++;
+        if (at < compositor.stacked)
+                memory_copy(compositor.stack + at + 1, compositor.stack + at, (compositor.stacked - at) * sizeof(*compositor.stack));
+        compositor.stack[at] = (unsigned int)row;
+        compositor.stacked++;
         if (!++compositor.stack_gen)
                 compositor.stack_gen++;
         compositor_damage_row(row);
-        // Keep small X11 override-redirect popups/menus above normal windows, but never let a fullscreen override-redirect
-        // window (e.g. borderless Wine/Proton games) bury the desktop launcher or an explicitly raised window.
-        if ((compositor.asks[row] & (WINDOW_DISMISS | WINDOW_NO_CLOSE)) != (WINDOW_DISMISS | WINDOW_NO_CLOSE))
-                for (unsigned int at = 0; !compositor_row_xoverride(row) && at + 1 + over < compositor.stacked; at++)
-                {
-                        unsigned int other = compositor.stack[at];
-
-                        if (!compositor_row_xoverride((int)other) || compositor.fullscreen[other] ||
-                            ((int)compositor.w[other] >= compositor.width && (int)compositor.h[other] >= compositor.height))
-                                continue;
-                        memory_copy(compositor.stack + at, compositor.stack + at + 1, (compositor.stacked - at - 1) * sizeof(*compositor.stack));
-                        compositor.stack[compositor.stacked - 1] = other;
-                        compositor_damage_row((int)other);
-                        over++, at--;
-                }
 }
 
 static unsigned int compositor_modifiers(void);
@@ -350,6 +345,20 @@ static int compositor_least(int row, int down)
         return asked > least ? asked : least;
 }
 
+// Maximum size a window accepts, device pixels, across (down 0) or down (down 1), or 0 for unbounded.
+static int compositor_most(int row, int down)
+{
+        b32 named = row >= 0 && row < COMPOSITOR_ROWS && compositor.table;
+        unsigned int own = named ? (down ? compositor.table->most_height[row] : compositor.table->most_width[row]) : 0;
+        unsigned int scale = named ? compositor.table->window_scale[row] : 0;
+
+        if (!own)
+                return 0;
+        scale = scale >= 25 && scale <= 800 ? scale : (unsigned int)compositor.scale;
+        own = own > WINDOW_LEAST_MOST ? WINDOW_LEAST_MOST : own;
+        return (int)(own * scale / 100);
+}
+
 /*
         The size a window is asked to be, in the table, and a knock. It draws
         whatever size it will and says so with its next picture; the edges the
@@ -358,7 +367,17 @@ static int compositor_least(int row, int down)
 static void compositor_want(int row, int width, int height)
 {
         int x = compositor.x[row], y = compositor.y[row], least_w = compositor_least(row, 0), least_h = compositor_least(row, 1);
+        int most_w = compositor_most(row, 0), most_h = compositor_most(row, 1);
 
+        // Enforce window max bounds on non-fullscreen/non-background rows so fixed-size dialogs (Wine modals, launcher cards)
+        // cannot be inflated past their declared size into white edge-smeared areas.
+        if (!compositor.fullscreen[row] && compositor.layer[row] != WINDOW_LAYER_BACKGROUND)
+        {
+                if (most_w > 0 && width > most_w)
+                        width = most_w;
+                if (most_h > 0 && height > most_h)
+                        height = most_h;
+        }
         // The least first and the most last: at a scale whose least window is past the largest screen (96 pixels at 800
         // percent is 768), the least won and a window was made wider than its buffer's rows, which compositor_stretch
         // then filled into the rows after them -- the next window's pixels, and for the last row past the table. The least is
@@ -761,7 +780,7 @@ static void compositor_resize_begin(int row, unsigned int edges)
         compositor.press_x = compositor.pointer_x;
         compositor.press_y = compositor.pointer_y;
         if (!compositor_tile_cells(compositor.arranged[row]))
-                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.wallpaper[row] = 0;
+                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.layer[row] = WINDOW_LAYER_NORMAL;
         compositor.edges[row] = edges;
         compositor.far_x[row] = compositor.x[row] + (int)compositor.w[row];
         compositor.far_y[row] = compositor.y[row] + (int)compositor.h[row];
@@ -1485,17 +1504,23 @@ static void compositor_fullscreen_row(int row)
         compositor_fullscreen_on(row, -1);
 }
 
-// A desktop/wallpaper window: fills its output behind all normal windows and the taskbar, excluded from tabs and Alt+Tab.
-static void compositor_wallpaper_on(int row, int screen)
+// Set a window's stacking layer (BACKGROUND, NORMAL, ABOVE, OVERLAY). BACKGROUND windows fill their output behind all windows and tabs.
+static void compositor_layer_set(int row, signed char layer, int screen)
 {
+        layer = compositor_layer_clamp(layer);
         if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
                 return;
-        compositor.fullscreen[row] = 0;
-        compositor.wallpaper[row] = 1;
-        compositor.asks[row] |= WINDOW_NO_TAB;
+        compositor.layer[row] = layer;
         if (compositor.table)
-                compositor.table->glass[row] |= WINDOW_NO_TAB;
-        compositor_arrange_on(row, COMPOSITOR_MAXIMIZED, screen);
+                compositor.table->layer[row] = layer;
+        if (layer == WINDOW_LAYER_BACKGROUND)
+        {
+                compositor.fullscreen[row] = 0;
+                compositor.asks[row] |= WINDOW_NO_TAB;
+                if (compositor.table)
+                        compositor.table->glass[row] |= WINDOW_NO_TAB;
+                compositor_arrange_on(row, COMPOSITOR_MAXIMIZED, screen);
+        }
         compositor_raise(row);
         compositor_tabs_changed();
 }
@@ -2487,7 +2512,7 @@ static void compositor_take(int row)
                 compositor.state[row] = table->state[row] & WINDOW_MINIMIZED;
                 compositor_close_count(row, 0);
                 table->state[row] = compositor.state[row];
-                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.wallpaper[row] = 0;
+                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.layer[row] = WINDOW_LAYER_NORMAL;
                 compositor.edges[row] = 0;
                 compositor.lifted[row] = table->lift[row];
                 compositor.moved[row] = table->moved[row];
@@ -2498,6 +2523,9 @@ static void compositor_take(int row)
                 // takes the keys as a window with no flags does.
                 if ((compositor.asks[row] & (WINDOW_NO_KEYS | WINDOW_KEYBOARD)) && !compositor_osk_is(table->pid[row]))
                         compositor.asks[row] &= ~(WINDOW_NO_KEYS | WINDOW_KEYBOARD);
+                compositor.layer[row] = compositor_layer_clamp(table->layer[row]);
+                if (compositor.layer[row] == WINDOW_LAYER_BACKGROUND)
+                        compositor.asks[row] |= WINDOW_NO_TAB;
                 compositor.glass_side[row] = COMPOSITOR_GLASS_UNSIDED;
                 compositor.showing[row] = 1;
                 compositor.made[row] = ++compositor.next_made;
@@ -2508,10 +2536,13 @@ static void compositor_take(int row)
                         return;
                 }
                 compositor_first_put(row, x, y);
+                if (compositor.layer[row] == WINDOW_LAYER_BACKGROUND)
+                        compositor_arrange_on(row, COMPOSITOR_MAXIMIZED, -1);
                 compositor_raise(row);
                 // Raised over the others, but given the keys only when the person asked for the program (its launch
                 // carried WINDOW_ASKED_VARIABLE): a window a program opens on its own shows and leaves the keys alone.
-                if (!compositor.wallpaper[row] && compositor_visible(row) && __atomic_load_n(&table->asked[row], __ATOMIC_ACQUIRE))
+                if (compositor.layer[row] != WINDOW_LAYER_BACKGROUND && compositor_visible(row) &&
+                    __atomic_load_n(&table->asked[row], __ATOMIC_ACQUIRE))
                         compositor_focus(row);
                 compositor_land(row);
                 compositor_tabs_changed();

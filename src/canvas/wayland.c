@@ -184,7 +184,9 @@ struct wayland_rect
 #define WAYLAND_DO_TEXT 12       // a text field of the window has the keys (a = 1), gives them back (a = -1), or says its content purpose (a = 0): b is the purpose
 #define WAYLAND_DO_CARET 13      // the bottom of the text cursor, in the window's pixels (a; 0 for none): the on-screen keyboard keeps it above its top
 #define WAYLAND_DO_PLACE 14      // move an already-mapped popup (a, b are its x and y relative to its parent)
-#define WAYLAND_DO_WALLPAPER 15  // zwlr_layer_shell_v1 background/bottom surface: fill output a at bottom of stack
+#define WAYLAND_DO_LAYER 15      // set window stacking layer a (-1..2) on output b (zwlr_layer_shell_v1)
+#define WAYLAND_DO_MIN_SIZE 16   // xdg_toplevel.set_min_size (a, b in logical pixels)
+#define WAYLAND_DO_MAX_SIZE 17   // xdg_toplevel.set_max_size (a, b in logical pixels)
 #define WAYLAND_DO_CURSOR 10    // the cursor shape the window's client asked for, over the pointer (a WAYLAND_CURSOR_* code, or -1)
 #define WAYLAND_CURSOR_ARROW 0  // the shapes the compositor draws, the codes WAYLAND_DO_CURSOR takes
 #define WAYLAND_CURSOR_TEXT 1
@@ -4643,9 +4645,12 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         if (first)
         {
                 if (s->layer_shell)
-                        wayland.host->row_do(wayland.host->context, s->row,
-                                             s->layer_level <= 1 ? WAYLAND_DO_WALLPAPER : WAYLAND_DO_FULLSCREEN,
-                                             s->layer_output, 0);
+                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_LAYER,
+                                             s->layer_level <= 1 ? -1 : 2, s->layer_output);
+                if (s->min_width || s->min_height)
+                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_MIN_SIZE, s->min_width, s->min_height);
+                if (s->max_width || s->max_height)
+                        wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_MAX_SIZE, s->max_width, s->max_height);
                 // What the client last asked of the window (maximized, fullscreen) is done now that it is shown, asked before or not.
                 if (s->want_maximized)
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_MAXIMIZE, 0, 0);
@@ -5948,12 +5953,16 @@ static int wayland_toplevel_request(struct wayland_client *c, struct wayland_obj
                         return wayland_fail(c, self->id, WLN_xdg_toplevel_error_invalid_size, "a negative size");
                 s->max_width = a[0].i;
                 s->max_height = a[1].i;
+                if (row >= 0)
+                        wayland.host->row_do(wayland.host->context, (int)row, WAYLAND_DO_MAX_SIZE, s->max_width, s->max_height);
                 return WAYLAND_OK;
         case WLQ_xdg_toplevel_set_min_size:
                 if (a[0].i < 0 || a[1].i < 0)
                         return wayland_fail(c, self->id, WLN_xdg_toplevel_error_invalid_size, "a negative size");
                 s->min_width = a[0].i;
                 s->min_height = a[1].i;
+                if (row >= 0)
+                        wayland.host->row_do(wayland.host->context, (int)row, WAYLAND_DO_MIN_SIZE, s->min_width, s->min_height);
                 return WAYLAND_OK;
         case WLQ_xdg_toplevel_set_maximized:
         case WLQ_xdg_toplevel_unset_maximized:
@@ -10343,9 +10352,8 @@ static int wayland_layer_request(struct wayland_client *c, struct wayland_object
                                 return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_invalid_layer, "unknown layer");
                         s->layer_level = (long)a[0].u;
                         if (s->row >= 0)
-                                wayland.host->row_do(wayland.host->context, s->row,
-                                                     s->layer_level <= 1 ? WAYLAND_DO_WALLPAPER : WAYLAND_DO_FULLSCREEN,
-                                                     s->layer_output, 0);
+                                wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_LAYER,
+                                                     s->layer_level <= 1 ? -1 : 2, s->layer_output);
                 }
                 else if (op == WLQ_zwlr_layer_surface_v1_ack_configure)
                         s->flags |= WAYLAND_SURFACE_CONFIGURED;

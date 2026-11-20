@@ -101,7 +101,7 @@
 #define COMPOSITOR_XWM_SETUP_NS 5000000000ull        // a connection that has not finished its setup in this long is closed
 #define COMPOSITOR_XWM_TARGETS_MOST 64               // the types of an X copy or drag taken, and their names asked: no toolkit offers more
 #define COMPOSITOR_XWM_BIND_NS 15000000000ull        // nor one whose X server is not a Wayland client by then (the wrapper waits 5 s for it)
-#define COMPOSITOR_XWM_ATOMS 75
+#define COMPOSITOR_XWM_ATOMS 76
 #define COMPOSITOR_XWM_A_PROTOCOLS 0
 #define COMPOSITOR_XWM_A_DELETE 1
 #define COMPOSITOR_XWM_A_NET_STATE 2
@@ -173,6 +173,7 @@
 #define COMPOSITOR_XWM_A_FRAME_EXTENTS 72
 #define COMPOSITOR_XWM_A_REQ_FRAME_EXTENTS 73
 #define COMPOSITOR_XWM_A_WORKAREA 74
+#define COMPOSITOR_XWM_A_ABOVE 75
 #define COMPOSITOR_XWM_XA_PRIMARY 1
 #define COMPOSITOR_XWM_XA_INTEGER 19
 #define COMPOSITOR_XWM_MOVERESIZE_MOVE 8u
@@ -252,6 +253,7 @@
 #define COMPOSITOR_XWM_COVERED 4096u          // made fullscreen for mapping over a whole screen (compositor_xwm_covers), not by asking
 #define COMPOSITOR_XWM_DESKTOP 8192u          // _NET_WM_WINDOW_TYPE_DESKTOP: live wallpaper window at bottom of stack
 #define COMPOSITOR_XWM_TRAY_ICON 16384u       // docked into _NET_SYSTEM_TRAY_S0: never adopted as a desktop window
+#define COMPOSITOR_XWM_ABOVE 65536u           // _NET_WM_STATE_ABOVE: WINDOW_LAYER_ABOVE
 #define COMPOSITOR_XWM_POPUPISH (COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_POPUPTYPE)
 #define COMPOSITOR_XWM_EAGAIN (-11)
 #define COMPOSITOR_XWM_MSG_DONTWAIT 0x40
@@ -547,7 +549,8 @@ static void compositor_xwm_claim(void)
             COMPOSITOR_XWM_A_NET_MOVERESIZE, COMPOSITOR_XWM_A_NET_ACTIVE,   COMPOSITOR_XWM_A_NET_CLOSE,
             COMPOSITOR_XWM_A_TYPE,           COMPOSITOR_XWM_A_TYPE_NORMAL,  COMPOSITOR_XWM_A_TYPE_DIALOG,
             COMPOSITOR_XWM_A_TYPE_UTILITY,   COMPOSITOR_XWM_A_TYPE_SPLASH,  COMPOSITOR_XWM_A_TYPE_DESKTOP,
-            COMPOSITOR_XWM_A_FRAME_EXTENTS,  COMPOSITOR_XWM_A_REQ_FRAME_EXTENTS, COMPOSITOR_XWM_A_WORKAREA};
+            COMPOSITOR_XWM_A_FRAME_EXTENTS,  COMPOSITOR_XWM_A_REQ_FRAME_EXTENTS, COMPOSITOR_XWM_A_WORKAREA,
+            COMPOSITOR_XWM_A_ABOVE};
         static const unsigned char wm_name[] = "moonwater";
         struct compositor_xwm *x = compositor_xwm_at;
         unsigned char req[256], data[128];
@@ -648,11 +651,15 @@ static void compositor_xwm_claim(void)
                         compositor_xwm_queue(req, n);
                 if (x->atoms[COMPOSITOR_XWM_A_X_MANAGER])
                 {
+                        unsigned char ev[XWM_EVENT_SIZE];
                         unsigned int mdata[5] = {XWM_CURRENT_TIME, x->atoms[COMPOSITOR_XWM_A_TRAY_S0], tray, 0, 0};
 
-                        n = xwm_enc_client_message(req, sizeof req, x->root, x->atoms[COMPOSITOR_XWM_A_X_MANAGER], mdata, 5);
-                        if (n > 0)
-                                compositor_xwm_queue(req, n);
+                        if (xwm_enc_client_message(ev, sizeof ev, x->root, x->atoms[COMPOSITOR_XWM_A_X_MANAGER], mdata, 5) == XWM_EVENT_SIZE)
+                        {
+                                n = xwm_enc_send_event(req, sizeof req, 0, x->root, XWM_MASK_STRUCTURE_NOTIFY, ev, XWM_EVENT_SIZE);
+                                if (n > 0)
+                                        compositor_xwm_queue(req, n);
+                        }
                 }
         }
         // _NET_WORKAREA: usable desktop room excluding the taskbar so Qt/GTK/Wine/Aseprite know the non-panel area.
@@ -679,7 +686,7 @@ static void compositor_xwm_claim(void)
    Advertising and setting this prevents Wine/Qt/GTK modals from inflating window dimensions with phantom chrome. */
 static void compositor_xwm_frame_extents(unsigned int window)
 {
-        unsigned char req[64], data[16];
+        unsigned char req[64], data[24];
         long n;
 
         if (!compositor_xwm_at->atoms[COMPOSITOR_XWM_A_FRAME_EXTENTS])
@@ -707,7 +714,7 @@ static void compositor_xwm_allow_commits(unsigned int window)
 /* The window's _NET_WM_STATE: fullscreen and/or maximized atoms. */
 static void compositor_xwm_net_state(unsigned int window, int state)
 {
-        unsigned char req[64], data[16];
+        unsigned char req[64], data[24];
         unsigned int count = 0;
         long n;
 
@@ -717,6 +724,8 @@ static void compositor_xwm_net_state(unsigned int window, int state)
                 xwm_put32(data + 4 * count++, compositor_xwm_at->atoms[COMPOSITOR_XWM_A_MAX_VERT]);
         if ((state & COMPOSITOR_XWM_MAX_HORZ) && compositor_xwm_at->atoms[COMPOSITOR_XWM_A_MAX_HORZ])
                 xwm_put32(data + 4 * count++, compositor_xwm_at->atoms[COMPOSITOR_XWM_A_MAX_HORZ]);
+        if ((state & COMPOSITOR_XWM_ABOVE) && compositor_xwm_at->atoms[COMPOSITOR_XWM_A_ABOVE])
+                xwm_put32(data + 4 * count++, compositor_xwm_at->atoms[COMPOSITOR_XWM_A_ABOVE]);
         n = xwm_enc_change_property(req, sizeof req, XWM_PROP_REPLACE, window, compositor_xwm_at->atoms[COMPOSITOR_XWM_A_NET_STATE],
                                     COMPOSITOR_XWM_ATOM_TYPE, XWM_FORMAT_32, data, count * 4);
         if (n > 0)
@@ -763,7 +772,8 @@ static const char *const compositor_xwm_names[COMPOSITOR_XWM_ATOMS] = {"WM_PROTO
                                                                 "_NET_SYSTEM_TRAY_OPCODE", "_NET_SYSTEM_TRAY_ORIENTATION",
                                                                 "_NET_SYSTEM_TRAY_VISUAL", "_XEMBED", "_XEMBED_INFO",
                                                                 "_NET_WM_ICON", "MANAGER", "_NET_FRAME_EXTENTS",
-                                                                "_NET_REQUEST_FRAME_EXTENTS", "_NET_WORKAREA"};
+                                                                "_NET_REQUEST_FRAME_EXTENTS", "_NET_WORKAREA",
+                                                                "_NET_WM_STATE_ABOVE"};
 
 static void compositor_xwm_intern(unsigned int at)
 {
@@ -985,7 +995,8 @@ static int compositor_xwm_wait(const unsigned char *req, long n, unsigned int wi
 static int compositor_xwm_ask(unsigned int window, unsigned int what, unsigned int property, unsigned int type)
 {
         unsigned char req[32];
-        long n = xwm_enc_get_property(req, sizeof req, 0, window, property, type, 0, 32);
+        long n = xwm_enc_get_property(req, sizeof req, 0, window, property, type, 0,
+                                      what == COMPOSITOR_XWM_PROP_ICON ? (XWM_PROPERTY_MAX / 4) : 32);
 
         return compositor_xwm_wait(req, n, window, what, 0);
 }
@@ -1027,6 +1038,7 @@ static void compositor_xwm_pending_done(void)
 
 static struct compositor_xwm_window *compositor_xwm_find(unsigned int id, int add);
 static int compositor_xwm_covers(const struct compositor_xwm_window *w);
+static void compositor_xwm_hints_push(const struct compositor_xwm_window *w);
 static void compositor_xwm_app(struct compositor_xwm_window *w);
 
 static void compositor_xwm_ask_title(struct compositor_xwm_window *w)
@@ -1166,11 +1178,15 @@ static void compositor_xwm_tray_dock(unsigned int icon_win)
         }
         if (x->atoms[COMPOSITOR_XWM_A_XEMBED])
         {
+                unsigned char ev[XWM_EVENT_SIZE];
                 unsigned int xembed[5] = {XWM_CURRENT_TIME, 0, tray, 0, 0};
 
-                n = xwm_enc_client_message(req, sizeof req, icon_win, x->atoms[COMPOSITOR_XWM_A_XEMBED], xembed, 5);
-                if (n > 0)
-                        compositor_xwm_queue(req, n);
+                if (xwm_enc_client_message(ev, sizeof ev, icon_win, x->atoms[COMPOSITOR_XWM_A_XEMBED], xembed, 5) == XWM_EVENT_SIZE)
+                {
+                        n = xwm_enc_send_event(req, sizeof req, 0, icon_win, 0, ev, XWM_EVENT_SIZE);
+                        if (n > 0)
+                                compositor_xwm_queue(req, n);
+                }
         }
         xwm_put32(data, 0);
         xwm_put32(data + 4, 1);
@@ -1388,6 +1404,8 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                                 w->state |= COMPOSITOR_XWM_MAX_VERT;
                         else if (atom && atom == x->atoms[COMPOSITOR_XWM_A_MAX_HORZ])
                                 w->state |= COMPOSITOR_XWM_MAX_HORZ;
+                        else if (atom && atom == x->atoms[COMPOSITOR_XWM_A_ABOVE])
+                                w->state |= COMPOSITOR_XWM_ABOVE;
                 }
                 // If WL_SURFACE_SERIAL adopted the row before _NET_WM_STATE arrived, apply fullscreen/maximized now
                 // so the next compositor_xwm_sync pass does not wipe the state out.
@@ -1422,7 +1440,7 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                 }
                 w->state |= COMPOSITOR_XWM_PROPS_READ;
                 if ((w->state & COMPOSITOR_XWM_DESKTOP) && !was_desktop && (w->state & COMPOSITOR_XWM_ADOPTED) && w->row >= 0)
-                        compositor_wallpaper_on(w->row, -1);
+                        compositor_layer_set(w->row, WINDOW_LAYER_BACKGROUND, -1);
         }
         else if (p->what == COMPOSITOR_XWM_PROP_PROTOCOLS)
         {
@@ -1483,6 +1501,7 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                         if (w->max_h && w->min_h && w->max_h < w->min_h)
                                 w->max_h = w->min_h;
                 }
+                compositor_xwm_hints_push(w);
         }
 }
 
@@ -1634,7 +1653,7 @@ static void compositor_xwm_unmapped(struct compositor_xwm_window *w)
         w->row = -1;
         w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED | COMPOSITOR_XWM_FULLSCREEN |
                       COMPOSITOR_XWM_MAXIMIZED | COMPOSITOR_XWM_COVERED | COMPOSITOR_XWM_POPUPTYPE |
-                      COMPOSITOR_XWM_PROPS_READ | COMPOSITOR_XWM_DESKTOP);
+                      COMPOSITOR_XWM_PROPS_READ | COMPOSITOR_XWM_DESKTOP | COMPOSITOR_XWM_ABOVE);
         w->closes = 0;
         w->sent_x = w->sent_y = COMPOSITOR_XWM_NO_PLACE;
         w->sent_w = w->sent_h = 0;
@@ -1683,6 +1702,21 @@ static int compositor_xwm_is_popup(const struct compositor_xwm_window *w)
             ((w->state & COMPOSITOR_XWM_OVERRIDE) && !w->transient && compositor_xwm_covers(w) >= 0))
                 return 0;
         return 1;
+}
+
+// Push WM_NORMAL_HINTS size bounds directly into the native Canvas window table (logical pixels at the row's scale).
+static void compositor_xwm_hints_push(const struct compositor_xwm_window *w)
+{
+        unsigned int scale;
+
+        if (!w || w->row < 0 || w->row >= COMPOSITOR_ROWS || !compositor.table)
+                return;
+        scale = compositor.table->window_scale[w->row];
+        scale = scale >= 25 && scale <= 800 ? scale : (unsigned int)compositor.scale;
+        compositor.table->least_width[w->row] = w->min_w ? (unsigned int)((unsigned long)w->min_w * 100ul / scale) : 0;
+        compositor.table->least_height[w->row] = w->min_h ? (unsigned int)((unsigned long)w->min_h * 100ul / scale) : 0;
+        compositor.table->most_width[w->row] = w->max_w ? (unsigned int)((unsigned long)w->max_w * 100ul / scale) : 0;
+        compositor.table->most_height[w->row] = w->max_h ? (unsigned int)((unsigned long)w->max_h * 100ul / scale) : 0;
 }
 
 // A window's class as its row's app_id, once it has both (the panel matches it to its app by it: ui_apps_match).
@@ -1739,12 +1773,18 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
         compositor_xwm_at->last_stack_gen = 0;
         compositor_xwm_app(w);
         compositor_xwm_owned(w);
+        compositor_xwm_hints_push(w);
         if (w->state & COMPOSITOR_XWM_DESKTOP)
-                compositor_wallpaper_on((int)row, -1);
-        else if (w->state & COMPOSITOR_XWM_FULLSCREEN)
-                compositor_fullscreen_on((int)row, covers >= 0 ? covers : compositor_xwm_covers(w));
-        else if (w->state & COMPOSITOR_XWM_MAXIMIZED)
-                compositor_arrange((int)row, COMPOSITOR_ROOM);
+                compositor_layer_set((int)row, WINDOW_LAYER_BACKGROUND, -1);
+        else
+        {
+                if (w->state & COMPOSITOR_XWM_ABOVE)
+                        compositor_layer_set((int)row, WINDOW_LAYER_ABOVE, -1);
+                if (w->state & COMPOSITOR_XWM_FULLSCREEN)
+                        compositor_fullscreen_on((int)row, covers >= 0 ? covers : compositor_xwm_covers(w));
+                else if (w->state & COMPOSITOR_XWM_MAXIMIZED)
+                        compositor_arrange((int)row, COMPOSITOR_ROOM);
+        }
 }
 
 /* Fullscreen: the window's X size is the output's, at the origin, and the shim's row covers the screen. Let go: floats again. */
@@ -4417,6 +4457,7 @@ static void compositor_xwm_event(const struct xwm_event *e)
                         unsigned int max_v = compositor_xwm_at->atoms[COMPOSITOR_XWM_A_MAX_VERT];
                         unsigned int max_h = compositor_xwm_at->atoms[COMPOSITOR_XWM_A_MAX_HORZ];
                         unsigned int hidden = compositor_xwm_at->atoms[COMPOSITOR_XWM_A_HIDDEN];
+                        unsigned int above = compositor_xwm_at->atoms[COMPOSITOR_XWM_A_ABOVE];
 
                         w = compositor_xwm_find(e->window, 0);
                         if (!w)
@@ -4500,6 +4541,22 @@ static void compositor_xwm_event(const struct xwm_event *e)
                                         compositor_minimize_row(w->row);
                                 else
                                         compositor_reveal(w->row);
+                        }
+                        if (above && (e->data[1] == above || e->data[2] == above) && !(w->state & COMPOSITOR_XWM_DESKTOP))
+                        {
+                                int on = e->data[0] == COMPOSITOR_XWM_NET_ADD      ? 1
+                                         : e->data[0] == COMPOSITOR_XWM_NET_REMOVE ? 0
+                                                                                   : !(w->state & COMPOSITOR_XWM_ABOVE);
+                                if (on != !!(w->state & COMPOSITOR_XWM_ABOVE))
+                                {
+                                        if (on)
+                                                w->state |= COMPOSITOR_XWM_ABOVE;
+                                        else
+                                                w->state &= ~COMPOSITOR_XWM_ABOVE;
+                                        compositor_xwm_net_state(w->id, (int)w->state);
+                                        if (w->row >= 0 && w->row < COMPOSITOR_ROWS && compositor.showing[w->row])
+                                                compositor_layer_set(w->row, on ? WINDOW_LAYER_ABOVE : WINDOW_LAYER_NORMAL, -1);
+                                }
                         }
                 }
                 else if (e->atom && e->atom == compositor_xwm_at->atoms[COMPOSITOR_XWM_A_REQ_FRAME_EXTENTS])

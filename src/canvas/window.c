@@ -146,6 +146,10 @@ struct window_key
 // A window is never resized below this, whatever is dragged.
 #define WINDOW_MIN_WIDTH 96
 #define WINDOW_MIN_HEIGHT 48
+#define WINDOW_LAYER_BACKGROUND (-1) // live wallpapers, kept behind all normal windows and taskbar
+#define WINDOW_LAYER_NORMAL 0        // normal desktop windows
+#define WINDOW_LAYER_ABOVE 1         // always-on-top windows and floating toolbars/popups
+#define WINDOW_LAYER_OVERLAY 2       // overlays (layer-shell overlay, on-screen keyboard, launcher)
 // A window's own least (struct windows' least_width and least_height) is read as at most this, logical pixels.
 #define WINDOW_LEAST_MOST 16384
 
@@ -1380,10 +1384,12 @@ struct windows
         // The layers the card laid into a picture of the table (compositor_wl_card_lay), and a client's picture read in place copied whole into
         // the table (compositor_wl_seed: a window that changed size, a landing, glass, write-combined reads), by the card ([0]) and the processor ([1]).
         unsigned int client_layers_laid_card, client_seeded[2];
-        // The program's: the least size its window can be laid out at, logical pixels at the scale it is drawn at (0: none). The compositor
-        // makes the window no smaller than it whatever the hand, a divider, a tile or a snap asks (compositor_least); WINDOW_MIN_WIDTH by
-        // WINDOW_MIN_HEIGHT holds for every window whatever it says.
+        // The program's: the least and most size its window can be laid out at, logical pixels at the scale it is drawn at (0: none/unbounded),
+        // and its stacking layer (WINDOW_LAYER_BACKGROUND..WINDOW_LAYER_OVERLAY; 0 is normal). The compositor enforces these directly on
+        // compositor_want, arrangement, resize, and stacking so native, Wayland, X11, and Wine windows share one data-oriented path.
         unsigned int least_width[WINDOWS], least_height[WINDOWS];
+        unsigned int most_width[WINDOWS], most_height[WINDOWS];
+        signed char layer[WINDOWS];
         // The compositor's: how many times the window in the row has been asked to go (its close button, Alt-F4, a middle press on its tab), 0
         // for never and never 0 again once asked. WINDOW_CLOSING in state says only that it has been asked, and stays; this is what says it
         // was asked again, and a program answers each ask once (windows_close_asked), so one that stayed for unsaved changes is not ended by
@@ -1432,7 +1438,7 @@ struct windows
         unsigned int capacity;
 };
 
-#define WINDOWS_ABI 13u // 12 had no apps being started; 11 had no per-window copy counts; 10 had no variable refresh counts; 9 had no seed counts; 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
+#define WINDOWS_ABI 14u // 13 had no most_width/most_height or layer; 12 had no apps being started; 11 had no per-window copy counts; 10 had no variable refresh counts; 9 had no seed counts; 8 had no layer counts; 7 had no drag and drop; 6 held text alone in the clipboard, of 16 MiB at most; 5 was 8 outputs; 4 was 32 inputs; 3 was 32 rows with the lend refusals and no capacity; 2 had no lend refusals; 1 the layout with no abi and no rows
 // The bits of the table's vrr (the rest of the word, from bit 8, is the policy).
 #define WINDOWS_VRR_CAPABLE 1u
 #define WINDOWS_VRR_PROPERTY 2u
@@ -4032,8 +4038,10 @@ static void windows_reset_row(struct windows *table, unsigned int row)
         table->place[row] = table->place_screen[row] = 0;
         table->place_x[row] = table->place_y[row] = 0;
         table->place_width[row] = table->place_height[row] = 0;
-        // So is the least size it said: the next window in the row says its own, or has none.
+        // So are the size bounds and stacking layer it said: the next window in the row says its own, or has none.
         table->least_width[row] = table->least_height[row] = 0;
+        table->most_width[row] = table->most_height[row] = 0;
+        table->layer[row] = WINDOW_LAYER_NORMAL;
         for (unsigned int at = 0; at < WINDOWS_NAME; at++)
                 table->name[row][at] = 0;
         // Who the window was is not who the next one in the row is: no app_id and no icon until it says its own.

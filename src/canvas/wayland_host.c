@@ -4771,8 +4771,18 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
                         compositor_damage_row(row);
                 }
                 break;
-        case WAYLAND_DO_WALLPAPER:
-                compositor_wallpaper_on(row, (int)a);
+        case WAYLAND_DO_LAYER:
+                compositor_layer_set(row, (signed char)a, (int)b);
+                break;
+        case WAYLAND_DO_MIN_SIZE:
+                if (compositor.table)
+                        compositor.table->least_width[row] = a > 0 ? (unsigned int)a : 0,
+                        compositor.table->least_height[row] = b > 0 ? (unsigned int)b : 0;
+                break;
+        case WAYLAND_DO_MAX_SIZE:
+                if (compositor.table)
+                        compositor.table->most_width[row] = a > 0 ? (unsigned int)a : 0,
+                        compositor.table->most_height[row] = b > 0 ? (unsigned int)b : 0;
                 break;
         case WAYLAND_DO_PINCH_WANT:
                 compositor.table->pinch_wanted[row] = a ? 1u : 0u;
