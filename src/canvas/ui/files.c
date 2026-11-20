@@ -3394,7 +3394,7 @@ static long files_tick(long timeout, long address_to other)
                 {
                         files.next_show = now + FILES_SHOW_NS;
                         files.dirty |= files.seen != m->revision;
-                        if (!more)
+                        if (!more && !files.big->list.scroll.scroll && !ui_body_going(&files.big->list.scroll.body))
                                 files_show_cursor();
                 }
                 return more ? 1 : timeout;
