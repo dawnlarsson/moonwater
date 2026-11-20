@@ -3012,6 +3012,11 @@ static void taskbar_menu_shut(void)
 #define TASKBAR_PROC_PLAIN 0u
 #define TASKBAR_PROC_DESKTOP 1u
 #define TASKBAR_PROC_SYSTEM 2u
+#define TASKBAR_PROC_LAUNCHER 3u
+#define TASKBAR_PROC_LAUNCHER_HELPER 4u
+#define TASKBAR_PROC_REAPER 5u
+#define TASKBAR_WIN_SAME 1u
+#define TASKBAR_WIN_FOREIGN 2u
 #define TASKBAR_SIGKILL 9u
 #define TASKBAR_SIGSTOP 19u
 
@@ -3040,6 +3045,9 @@ static unsigned int taskbar_proc_kind(int self, int pid, const char *comm)
 {
         static const char *const system[] = {"init", "moonwater", "compositor", "audio", "sessionbus", "bowl", "osk", "kthreadd", null};
         static const char *const desktop[] = {"terminal", "settings", "launcher", "klog", "mixer", "notices", "files", "gallery", "editor", "identify", null};
+        static const char *const launcher[] = {"steam", "lutris", "heroic", "bottles", "prismlauncher", "itch", "legendary", null};
+        static const char *const launcher_helper[] = {"steamwebhelper", "steamerrorrepor", null};
+        static const char *const reaper[] = {"reaper", "steam-launch-wr", "pv-bwrap", "pressure-vessel", "gamescope", "srt-bwrap", "gamemoderun", null};
 
         if (pid <= 2 || pid == self)
                 return TASKBAR_PROC_SYSTEM;
@@ -3059,6 +3067,15 @@ static unsigned int taskbar_proc_kind(int self, int pid, const char *comm)
         for (int at = 0; desktop[at]; at++)
                 if (string_equals((string_address)comm, (string_address)desktop[at]))
                         return TASKBAR_PROC_DESKTOP;
+        for (int at = 0; launcher[at]; at++)
+                if (string_equals((string_address)comm, (string_address)launcher[at]))
+                        return TASKBAR_PROC_LAUNCHER;
+        for (int at = 0; launcher_helper[at]; at++)
+                if (string_equals((string_address)comm, (string_address)launcher_helper[at]))
+                        return TASKBAR_PROC_LAUNCHER_HELPER;
+        for (int at = 0; reaper[at]; at++)
+                if (string_equals((string_address)comm, (string_address)reaper[at]))
+                        return TASKBAR_PROC_REAPER;
         return TASKBAR_PROC_PLAIN;
 }
 
@@ -3071,17 +3088,81 @@ static int taskbar_proc_at(const struct taskbar_proc *t, int n, int pid)
         return -1;
 }
 
-/*
-        The root of the program the process pid is of: the highest process above it (or it) that is no system or desktop one and has none
-        for a parent but at the top, one step lower where its parent is a desktop one and it is not pid itself. 0 for a pid that is not in
-        the table or a process that is a system one, and so has no Force stop.
-*/
-static int taskbar_stop_root(const struct taskbar_proc *t, int n, int pid)
+// Whether two non-empty window app_ids belong to distinct programs (Steam's "steam" and "steamwebhelper" share one UI).
+static int taskbar_apps_differ(const char *a, const char *b)
 {
-        int at = taskbar_proc_at(t, n, pid), below = at, steps = 0;
+        if (!a || !a[0] || !b || !b[0])
+                return 0;
+        if ((ui_apps_same(a, "steam") || ui_apps_same(a, "steamwebhelper")) &&
+            (ui_apps_same(b, "steam") || ui_apps_same(b, "steamwebhelper")))
+                return 0;
+        return !ui_apps_same(a, b);
+}
+
+// Whether pid is root_pid or a descendant of root_pid in the process table t (bounded against cycles).
+static int taskbar_pid_in_subtree(const struct taskbar_proc *t, int n, int pid, int root_pid)
+{
+        int at = taskbar_proc_at(t, n, pid), steps = 0;
+
+        while (at >= 0 && steps++ < n)
+        {
+                if (t[at].pid == root_pid)
+                        return 1;
+                at = taskbar_proc_at(t, n, t[at].ppid);
+        }
+        return 0;
+}
+
+// What live top-level windows live under sub_pid (excluding skip_pid's subtree when skip_pid > 0):
+// TASKBAR_WIN_SAME if any window matches target_app, TASKBAR_WIN_FOREIGN if any belongs to another app.
+static unsigned int taskbar_subtree_window_flags(const struct taskbar_proc *t, int n, int sub_pid, int skip_pid,
+                                                 const char *target_app, int target_is_launcher)
+{
+        unsigned int flags = 0;
+
+        if (!compositor.table || !compositor.showing || !compositor_popup_parent || !compositor.app_id)
+                return 0;
+        for (int row = 0; row < COMPOSITOR_ROWS; row++)
+        {
+                unsigned int wpid;
+                const char *wapp;
+                int wat;
+
+                if (!compositor.showing[row] || compositor_popup_parent[row] >= 0)
+                        continue;
+                wpid = __atomic_load_n(&compositor.table->pid[row], __ATOMIC_ACQUIRE);
+                if (wpid <= 2 || wpid > 0x7fffffffu)
+                        continue;
+                if (!taskbar_pid_in_subtree(t, n, (int)wpid, sub_pid))
+                        continue;
+                if (skip_pid > 0 && taskbar_pid_in_subtree(t, n, (int)wpid, skip_pid))
+                        continue;
+                wapp = compositor.app_id[row];
+                wat = taskbar_proc_at(t, n, (int)wpid);
+                if (taskbar_apps_differ(wapp, target_app))
+                        flags |= TASKBAR_WIN_FOREIGN;
+                else if (target_is_launcher && (!wapp || !wapp[0]) && wat >= 0 &&
+                         t[wat].kind != TASKBAR_PROC_LAUNCHER && t[wat].kind != TASKBAR_PROC_LAUNCHER_HELPER)
+                        flags |= TASKBAR_WIN_FOREIGN;
+                else if (target_app && target_app[0] && wapp && wapp[0])
+                        flags |= TASKBAR_WIN_SAME;
+        }
+        return flags;
+}
+
+/*
+        The root of the program the process pid is of: the highest process above it (or it) that is no system, desktop,
+        launcher (for a spawned game/app) or foreign-app window owner, one step lower where its parent is a desktop one
+        and it is not pid itself. A game launch wrapper (reaper, pv-bwrap, gamescope) stops before climbing into its
+        parent launcher or shell. 0 for a pid that is not in the table or a system process, which has no Force stop.
+*/
+static int taskbar_stop_root_for(const struct taskbar_proc *t, int n, int pid, const char *target_app)
+{
+        int at = taskbar_proc_at(t, n, pid), below = at, steps = 0, is_launcher;
 
         if (at < 0 || t[at].kind == TASKBAR_PROC_SYSTEM)
                 return 0;
+        is_launcher = t[at].kind == TASKBAR_PROC_LAUNCHER || t[at].kind == TASKBAR_PROC_LAUNCHER_HELPER;
         // A chain is no longer than the table is, and one that loops (a table made by hand) ends there.
         while (steps++ < n)
         {
@@ -3094,9 +3175,21 @@ static int taskbar_stop_root(const struct taskbar_proc *t, int n, int pid)
                         at = below != at ? below : at;
                         break;
                 }
+                if (!is_launcher && t[at].kind == TASKBAR_PROC_REAPER && t[up].kind != TASKBAR_PROC_REAPER)
+                        break;
+                if (!is_launcher && (t[up].kind == TASKBAR_PROC_LAUNCHER || t[up].kind == TASKBAR_PROC_LAUNCHER_HELPER))
+                        break;
+                if (!is_launcher && target_app && target_app[0] &&
+                    (taskbar_subtree_window_flags(t, n, t[up].pid, t[at].pid, target_app, 0) & TASKBAR_WIN_FOREIGN))
+                        break;
                 below = at, at = up;
         }
         return t[at].pid;
+}
+
+static int taskbar_stop_root(const struct taskbar_proc *t, int n, int pid)
+{
+        return taskbar_stop_root_for(t, n, pid, null);
 }
 
 // Whether a pid is one of members.
@@ -3109,27 +3202,51 @@ static int taskbar_stop_has(const int *members, int count, unsigned int pid)
 }
 
 /*
-        What is under a root: the root and every process whose parent is one of them, the system ones left out (and what is under them), in
-        members, as many as fit. Answers how many.
+        What is under a root: the root and every process whose parent is one of them, leaving out system processes,
+        game launch wrappers entered from outside (so Force-stopping Steam spares running games), and child subtrees
+        that exclusively own another app's top-level window. Answers how many fit in members.
 */
-static int taskbar_stop_tree(const struct taskbar_proc *t, int n, int root, int *members, int most)
+static int taskbar_stop_tree_for(const struct taskbar_proc *t, int n, int root, int target_pid, const char *target_app,
+                                 int *members, int most)
 {
-        int count = 0, grown = 1;
+        int root_at = taskbar_proc_at(t, n, root), count = 0, grown = 1;
+        int root_is_reaper, target_is_launcher, target_at;
 
-        if (taskbar_proc_at(t, n, root) < 0 || t[taskbar_proc_at(t, n, root)].kind == TASKBAR_PROC_SYSTEM)
+        if (root_at < 0 || t[root_at].kind == TASKBAR_PROC_SYSTEM || most <= 0)
                 return 0;
+        target_at = target_pid > 0 ? taskbar_proc_at(t, n, target_pid) : root_at;
+        root_is_reaper = t[root_at].kind == TASKBAR_PROC_REAPER;
+        target_is_launcher = (t[root_at].kind == TASKBAR_PROC_LAUNCHER || t[root_at].kind == TASKBAR_PROC_LAUNCHER_HELPER) ||
+                             (target_at >= 0 && (t[target_at].kind == TASKBAR_PROC_LAUNCHER || t[target_at].kind == TASKBAR_PROC_LAUNCHER_HELPER));
         members[count++] = root;
         while (grown)
         {
                 grown = 0;
                 for (int at = 0; at < n && count < most; at++)
                 {
-                        if (t[at].kind != TASKBAR_PROC_SYSTEM && taskbar_stop_has(members, count, (unsigned int)t[at].ppid) &&
-                            !taskbar_stop_has(members, count, (unsigned int)t[at].pid))
-                                members[count++] = t[at].pid, grown = 1;
+                        if (t[at].kind == TASKBAR_PROC_SYSTEM || !taskbar_stop_has(members, count, (unsigned int)t[at].ppid) ||
+                            taskbar_stop_has(members, count, (unsigned int)t[at].pid))
+                                continue;
+                        if (!root_is_reaper && t[at].kind == TASKBAR_PROC_REAPER)
+                                continue;
+                        if ((target_app && target_app[0]) || target_is_launcher)
+                        {
+                                unsigned int flags = taskbar_subtree_window_flags(t, n, t[at].pid, 0, target_app, target_is_launcher);
+                                int has_target = (target_pid > 0 && taskbar_pid_in_subtree(t, n, target_pid, t[at].pid)) ||
+                                                 (flags & TASKBAR_WIN_SAME);
+
+                                if ((flags & TASKBAR_WIN_FOREIGN) && !has_target)
+                                        continue;
+                        }
+                        members[count++] = t[at].pid, grown = 1;
                 }
         }
         return count;
+}
+
+static int taskbar_stop_tree(const struct taskbar_proc *t, int n, int root, int *members, int most)
+{
+        return taskbar_stop_tree_for(t, n, root, 0, null, members, most);
 }
 
 /*
@@ -3214,7 +3331,7 @@ static int taskbar_proc_read(struct taskbar_proc *into, int most)
 
 // A row's window may be stopped: its program's root and what is under it, from a table just read. 0 when it may not (no pid, the pid of the
 // compositor or a system process, a table too large to walk, a pid that is gone). Else the members, in taskbar_stop_members, and how many.
-static int taskbar_stop_plan(unsigned int pid, int *root)
+static int taskbar_stop_plan_for(unsigned int pid, const char *target_app, int *root)
 {
         int n;
 
@@ -3224,8 +3341,13 @@ static int taskbar_stop_plan(unsigned int pid, int *root)
         n = taskbar_proc_read(taskbar_procs, TASKBAR_PROC_MOST);
         if (n <= 0)
                 return 0;
-        *root = taskbar_stop_root(taskbar_procs, n, (int)pid);
-        return *root ? taskbar_stop_tree(taskbar_procs, n, *root, taskbar_stop_members, TASKBAR_PROC_MOST) : 0;
+        *root = taskbar_stop_root_for(taskbar_procs, n, (int)pid, target_app);
+        return *root ? taskbar_stop_tree_for(taskbar_procs, n, *root, (int)pid, target_app, taskbar_stop_members, TASKBAR_PROC_MOST) : 0;
+}
+
+static int taskbar_stop_plan(unsigned int pid, int *root)
+{
+        return taskbar_stop_plan_for(pid, null, root);
 }
 
 // How many windows (rows that show, and are no popup of one) are of the plan's members now.
@@ -3241,14 +3363,14 @@ static int taskbar_stop_rows(int count)
 
 // Every process of the program the row's pid is of ended: all stopped first (until a pass finds no more that are new), then all sent SIGKILL.
 // How many were ended; 0 for none (the plan said no, or a pass could not read the table).
-static int taskbar_stop_run(unsigned int pid)
+static int taskbar_stop_run_for(unsigned int pid, const char *target_app)
 {
         static int stopped[TASKBAR_PROC_MOST];
         int count = 0, root;
 
         for (int pass = 0; pass < 8; pass++)
         {
-                int members = taskbar_stop_plan(pid, &root), fresh = 0;
+                int members = taskbar_stop_plan_for(pid, target_app, &root), fresh = 0;
 
                 if (!members)
                         break;
@@ -3266,6 +3388,11 @@ static int taskbar_stop_run(unsigned int pid)
         for (int at = 0; at < count; at++)
                 taskbar_signal(stopped[at], TASKBAR_SIGKILL);
         return count;
+}
+
+static int taskbar_stop_run(unsigned int pid)
+{
+        return taskbar_stop_run_for(pid, null);
 }
 
 /*
@@ -3647,7 +3774,7 @@ static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab)
                 return taskbar_menu_place(view, x, y, w, h);
         }
         ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_exit), null, 0, TASKBAR_MENU_EXIT);
-        members = taskbar_stop_plan(pid, &root);
+        members = taskbar_stop_plan_for(pid, compositor.app_id[row], &root);
         if (members)
         {
                 windows = taskbar_stop_rows(members);
@@ -3706,7 +3833,7 @@ static void taskbar_tab_chose(int id)
         if (id == TASKBAR_MENU_EXIT)
                 compositor_close(row);
         else if (id == TASKBAR_MENU_STOP)
-                taskbar_stop_run(pid);
+                taskbar_stop_run_for(pid, compositor.app_id[row]);
         else if (id == TASKBAR_MENU_PIN && taskbar_menu.pin.app[0] && ui_apps_match(compositor.app_id[row]) >= 0 &&
                  ui_apps_match(compositor.app_id[row]) == ui_apps_find(taskbar_menu.pin.app))
                 taskbar_pin_keep(ui_apps_find(taskbar_menu.pin.app), true);

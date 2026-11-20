@@ -4553,6 +4553,101 @@ static void xwm_socket_rows(void)
         compositor_xwm_listen_fd = saved_listen, compositor_xwm_uid = saved_uid;
 }
 
+// Managed X11 mapping lifecycle: WL_SURFACE_SERIAL arriving after MapRequest's property replies (or replacing a surface)
+// must not wipe PROPS_READ or _NET_WM_STATE flags; an earlier empty GetProperty(_NET_WM_STATE) reply must not wipe a
+// _NET_WM_STATE ClientMessage queued right after MapWindow; and UnmapNotify clears per-mapping state for the next map.
+static void xwm_serial_state_rows(void)
+{
+        typeof(compositor_xwm_slots[0]) *x = &compositor_xwm_slots[0];
+        typeof(compositor_xwm_slots[0]) saved = *x;
+        struct compositor_xwm_window *w;
+        struct xwm_event ev;
+        struct compositor_xwm_pending pend = {0};
+        unsigned char reply[36];
+        b32 first_kept, swap_kept, cm_kept, unmap_cleared;
+
+        memory_zero(x, sizeof *x);
+        x->fd = -1;
+        x->atoms[COMPOSITOR_XWM_A_SERIAL] = 101;
+        x->atoms[COMPOSITOR_XWM_A_NET_STATE] = 102;
+        x->atoms[COMPOSITOR_XWM_A_FULLSCREEN] = 103;
+        x->atoms[COMPOSITOR_XWM_A_TYPE] = 104;
+        compositor_xwm_at = x;
+
+        // 1. MapRequest -> PROP_STATE (fullscreen) + PROP_TYPE (PROPS_READ) -> first WL_SURFACE_SERIAL.
+        w = compositor_xwm_find(0x400001, 1);
+        if (w)
+                w->state = COMPOSITOR_XWM_MAPPED | COMPOSITOR_XWM_PROPS_READ | COMPOSITOR_XWM_FULLSCREEN;
+        xwm_event_clear(&ev);
+        ev.kind = XWM_EV_CLIENT_MESSAGE, ev.window = 0x400001, ev.format = XWM_FORMAT_32;
+        ev.atom = x->atoms[COMPOSITOR_XWM_A_SERIAL], ev.data[0] = 0x1111, ev.data[1] = 0;
+        compositor_xwm_event(&ev);
+        first_kept = w && (w->state & COMPOSITOR_XWM_SERIAL) && (w->state & COMPOSITOR_XWM_PROPS_READ) &&
+                     (w->state & COMPOSITOR_XWM_FULLSCREEN) && w->serial == 0x1111ull;
+
+        // 2. Surface swap (new WL_SURFACE_SERIAL while mapped): detaches old row/ADOPTED, preserves PROPS_READ & FULLSCREEN.
+        if (w)
+                w->row = 2, w->state |= COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED;
+        ev.data[0] = 0x2222;
+        compositor_xwm_event(&ev);
+        swap_kept = w && w->row == -1 && !(w->state & (COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED)) &&
+                    (w->state & COMPOSITOR_XWM_PROPS_READ) && (w->state & COMPOSITOR_XWM_FULLSCREEN) && w->serial == 0x2222ull;
+
+        // 3. Empty GetProperty(_NET_WM_STATE) reply arriving after _NET_WM_STATE ClientMessage (SDL2 fullscreen race) keeps FULLSCREEN.
+        memory_zero(reply, sizeof reply);
+        reply[0] = 1, reply[1] = XWM_FORMAT_32;
+        xwm_put32(reply + 8, COMPOSITOR_XWM_ATOM_TYPE);
+        pend.window = 0x400001, pend.what = COMPOSITOR_XWM_PROP_STATE;
+        compositor_xwm_property(reply, 32, &pend);
+        cm_kept = w && (w->state & COMPOSITOR_XWM_FULLSCREEN);
+
+        // 4. Real UnmapNotify clears per-mapping state so the next MapRequest starts clean.
+        xwm_event_clear(&ev);
+        ev.kind = XWM_EV_UNMAP_NOTIFY, ev.window = 0x400001;
+        compositor_xwm_event(&ev);
+        unmap_cleared = w && w->row == -1 &&
+                        !(w->state & (COMPOSITOR_XWM_MAPPED | COMPOSITOR_XWM_SERIAL | COMPOSITOR_XWM_PROPS_READ |
+                                      COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_ADOPTED));
+
+        check("xwm: WL_SURFACE_SERIAL keeps MapRequest properties and fullscreen, empty _NET_WM_STATE reply keeps ClientMessage fullscreen, UnmapNotify resets",
+              first_kept && swap_kept && cm_kept && unmap_cleared);
+
+        // 5. Promoted fullscreen override-redirect window is not treated as a popup and queues title/class/protocols/owner.
+        {
+                struct compositor_xwm_window *ow = compositor_xwm_find(0x400002, 1);
+                b32 promoted_ok = false, queued_class = false, queued_proto = false, queued_owner = false, queued_title = false;
+
+                x->xres = 140;
+                x->atoms[COMPOSITOR_XWM_A_NET_NAME] = 105;
+                x->atoms[COMPOSITOR_XWM_A_UTF8] = 106;
+                x->atoms[COMPOSITOR_XWM_A_PROTOCOLS] = 107;
+                if (ow)
+                {
+                        ow->state = COMPOSITOR_XWM_OVERRIDE | COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_COVERED;
+                        compositor_xwm_promote_props(ow);
+                        for (unsigned int k = 0; k < x->pending_count; k++)
+                        {
+                                const struct compositor_xwm_pending *p = &x->pending[(x->pending_at + k) % x->pending_room];
+
+                                if (p->window != 0x400002)
+                                        continue;
+                                queued_title |= p->what == COMPOSITOR_XWM_PROP_NET_NAME;
+                                queued_proto |= p->what == COMPOSITOR_XWM_PROP_PROTOCOLS;
+                                queued_class |= p->what == COMPOSITOR_XWM_PROP_CLASS;
+                                queued_owner |= p->what == COMPOSITOR_XWM_PROP_OWNER;
+                        }
+                        promoted_ok = !compositor_xwm_is_popup(ow) && queued_title && queued_proto && queued_class && queued_owner;
+                }
+                check("xwm: promoted fullscreen override-redirect window is a managed toplevel and queries title/class/protocols/owner", promoted_ok);
+        }
+
+        wayland_table_drop(&x->pending_table);
+        wayland_table_drop(&x->window_index);
+        wayland_table_drop(&x->window_table);
+        *x = saved;
+        compositor_xwm_at = &compositor_xwm_slots[0];
+}
+
 // A window asked to go is asked each time (compositor_close counts the asks, and the X window manager tells its window of each one it has not told it of): one that
 // answered with a question and stayed is asked by the next press. WINDOW_CLOSING alone carried it, set once and never cleared, and the ask went once.
 // The count is one, said three ways: the row's program reads it in the table and hears each ask once (windows_close_asked), the Wayland shim is given it as the
@@ -5671,6 +5766,7 @@ b32 main(void)
         dirty_rows();
         close_ask_rows();
         xwm_socket_rows();
+        xwm_serial_state_rows();
         xwm_atom_rows();
         display_off_rows();
         reader_own_rows();

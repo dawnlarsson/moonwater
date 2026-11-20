@@ -2482,16 +2482,6 @@ static int compositor_descriptor_crowded(long descriptor)
         return descriptor >= compositor_descriptors_most - COMPOSITOR_DESCRIPTORS_OWN;
 }
 
-#ifdef CONFIG_MOONWATER_WAYLAND
-// The Wayland shim: the protocol (wayland.c) and the compositor's side of it, the socket and the host (wayland_host.c).
-#include "wayland.c"
-#include "wayland_host.c"
-
-static int compositor_wl_dmabuf_missing(void)
-{
-        return compositor_wl.started && !compositor_wl.render;
-}
-
 /*
         Whether a window is Steam's own UI (WM_CLASS "steam" or "steamwebhelper", or a popup/transient of one): Steam's X11/CEF
         windows push classic Xcursor bitmaps via wl_pointer.set_cursor, which would otherwise replace the dynamic cursor while
@@ -2524,6 +2514,16 @@ static int compositor_row_is_steam(int row)
                 row = next;
         }
         return 0;
+}
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+// The Wayland shim: the protocol (wayland.c) and the compositor's side of it, the socket and the host (wayland_host.c).
+#include "wayland.c"
+#include "wayland_host.c"
+
+static int compositor_wl_dmabuf_missing(void)
+{
+        return compositor_wl.started && !compositor_wl.render;
 }
 
 /*

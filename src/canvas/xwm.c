@@ -1363,9 +1363,9 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
                 unsigned int had_fs = w->state & COMPOSITOR_XWM_FULLSCREEN;
                 unsigned int had_max = w->state & COMPOSITOR_XWM_MAXIMIZED;
 
-                if (!(w->state & COMPOSITOR_XWM_COVERED))
-                        w->state &= ~COMPOSITOR_XWM_FULLSCREEN;
-                w->state &= ~COMPOSITOR_XWM_MAXIMIZED;
+                // Initial _NET_WM_STATE is only queried on MapRequest (cleared on UnmapNotify). Merge bits rather than
+                // clearing so a _NET_WM_STATE ClientMessage queued right after MapWindow (e.g. SDL2 fullscreen) is not
+                // wiped by the earlier GetProperty snapshot.
                 for (unsigned long at = 0; r.format == XWM_FORMAT_32 && at + 4 <= r.value_len; at += 4)
                 {
                         unsigned int atom = xwm_get32(r.value + at);
@@ -1400,6 +1400,7 @@ static void compositor_xwm_property(const unsigned char *in, long size, const st
 
                 // A window of a popup's type (a tooltip, a menu, a combo's list, a notification, a drag) is shown as a popup;
                 // _NET_WM_WINDOW_TYPE_DESKTOP is a live wallpaper window kept at the bottom of the stack.
+                w->state &= ~(COMPOSITOR_XWM_POPUPTYPE | COMPOSITOR_XWM_DESKTOP);
                 for (unsigned long at = 0; r.format == XWM_FORMAT_32 && at + 4 <= r.value_len; at += 4)
                 {
                         unsigned int atom = xwm_get32(r.value + at);
@@ -1645,9 +1646,10 @@ static void compositor_xwm_unmapped(struct compositor_xwm_window *w)
         if (w->id && w->id == compositor_xwm_at->focus_window)
                 compositor_xwm_at->focus_window = 0, compositor_xwm_at->focus_row = -3;
         w->row = -1;
-        w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED | COMPOSITOR_XWM_FULLSCREEN |
-                      COMPOSITOR_XWM_MAXIMIZED | COMPOSITOR_XWM_COVERED | COMPOSITOR_XWM_POPUPTYPE |
-                      COMPOSITOR_XWM_PROPS_READ | COMPOSITOR_XWM_DESKTOP | COMPOSITOR_XWM_ABOVE);
+        // Detach only the Wayland-side surface/row state here: X11 properties read by MapRequest (PROPS_READ,
+        // _NET_WM_STATE, _NET_WM_WINDOW_TYPE) stay intact across WL_SURFACE_SERIAL arrival and surface swaps,
+        // and are cleared on XWM_EV_UNMAP_NOTIFY where a fresh MapRequest will re-read them.
+        w->state &= ~(COMPOSITOR_XWM_ADOPTED | COMPOSITOR_XWM_RAISED | COMPOSITOR_XWM_COVERED);
         w->closes = 0;
         w->sent_x = w->sent_y = COMPOSITOR_XWM_NO_PLACE;
         w->sent_w = w->sent_h = 0;
@@ -1660,10 +1662,12 @@ static void compositor_xwm_unmapped(struct compositor_xwm_window *w)
         question and stayed is asked by the next press of its button. It was one bit, set at the first and cleared only when the
         mapping ended. The WM_PROTOCOLS reply is waited for first: the ask is owed until then.
 */
+static int compositor_xwm_is_popup(const struct compositor_xwm_window *w);
+
 static int compositor_xwm_close_owed(const struct compositor_xwm_window *w)
 {
         return w->row >= 0 && w->row < COMPOSITOR_ROWS && (compositor.state[w->row] & WINDOW_CLOSING) && w->closes != compositor.close_asks[w->row] &&
-               ((w->state & COMPOSITOR_XWM_POPUPISH) || (w->state & COMPOSITOR_XWM_PROTO_KNOWN));
+               (compositor_xwm_is_popup(w) || (w->state & COMPOSITOR_XWM_PROTO_KNOWN));
 }
 
 /*
@@ -1721,6 +1725,24 @@ static void compositor_xwm_app(struct compositor_xwm_window *w)
                 compositor_take(w->row);
 }
 
+// When an override-redirect window is promoted to a managed fullscreen toplevel (Wine/Proton borderless fullscreen),
+// ask for its title, class, protocols, hints, and X-Resource owner PID so it appears in the taskbar as its own app
+// and can be closed or force-stopped independently of Steam or its launcher.
+static void compositor_xwm_promote_props(struct compositor_xwm_window *w)
+{
+        unsigned char req[32];
+        long n = xwm_enc_select_events(req, sizeof req, w->id, XWM_MASK_PROPERTY_CHANGE);
+
+        if (n > 0)
+                compositor_xwm_queue(req, n);
+        compositor_xwm_ask_title(w);
+        compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_PROTOCOLS, compositor_xwm_at->atoms[COMPOSITOR_XWM_A_PROTOCOLS], COMPOSITOR_XWM_ATOM_TYPE);
+        compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_WM_HINTS, COMPOSITOR_XWM_XA_WM_HINTS, 0);
+        compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_CLASS, COMPOSITOR_XWM_XA_WM_CLASS, COMPOSITOR_XWM_XA_STRING);
+        if (!w->owner)
+                compositor_xwm_ask_owner(w->id);
+}
+
 static void compositor_xwm_resolve(struct compositor_xwm_window *w)
 {
         long row;
@@ -1748,6 +1770,7 @@ static void compositor_xwm_resolve(struct compositor_xwm_window *w)
                         w->restore_w = w->width, w->restore_h = w->height;
                         w->state |= COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_COVERED;
                         compositor_xwm_net_state(w->id, (int)w->state);
+                        compositor_xwm_promote_props(w);
                 }
                 row = wayland_xwindow_adopt(compositor_xwm_server(compositor_xwm_at), w->serial, how, compositor_xwm_from_x(w->x, 0),
                                             compositor_xwm_from_x(w->y, 1),
@@ -1982,7 +2005,8 @@ static void compositor_xwm_moveresize(struct compositor_xwm_window *w, unsigned 
         else if (direction < 8)
         {
                 compositor_resize_begin(row, edge_of[direction]);
-                compositor_lit(row, edge_of[direction], 1);
+                if (compositor.resize == row)
+                        compositor_lit(row, edge_of[direction], 1);
         }
 }
 
@@ -4168,6 +4192,7 @@ static void compositor_xwm_event(const struct xwm_event *e)
                         compositor_xwm_counted[2]++; // the window is not mapped: said in moonwater debug, not dropped unseen
                         break;
                 }
+                w->state &= ~COMPOSITOR_XWM_OVERRIDE;
                 w->state |= COMPOSITOR_XWM_MAPPED;
                 // The window's title and protocols are asked for, and changes of its properties are asked to be told.
                 {
@@ -4318,6 +4343,7 @@ static void compositor_xwm_event(const struct xwm_event *e)
                                                 w->restore_w = prev_w ? prev_w : w->width, w->restore_h = prev_h ? prev_h : w->height;
                                         w->state |= COMPOSITOR_XWM_FULLSCREEN | COMPOSITOR_XWM_COVERED;
                                         compositor_xwm_net_state(w->id, (int)w->state);
+                                        compositor_xwm_promote_props(w);
                                         if (compositor.table)
                                         {
                                                 compositor.table->glass[w->row] &= ~WINDOW_NO_TAB;
@@ -4355,6 +4381,8 @@ static void compositor_xwm_event(const struct xwm_event *e)
                         compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_WM_HINTS, e->atom, 0);
                 else if (e->atom == COMPOSITOR_XWM_XA_WM_NORMAL_HINTS)
                         compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_NORMAL_HINTS, e->atom, 0);
+                else if (e->atom == COMPOSITOR_XWM_XA_WM_CLASS)
+                        compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_CLASS, e->atom, COMPOSITOR_XWM_XA_STRING);
                 else if (e->atom && e->atom == compositor_xwm_at->atoms[COMPOSITOR_XWM_A_STEAM])
                         compositor_xwm_ask(w->id, COMPOSITOR_XWM_PROP_STEAM, e->atom, COMPOSITOR_XWM_ALLOW_TYPE);
                 else if (e->atom && e->atom == compositor_xwm_at->atoms[COMPOSITOR_XWM_A_STEAM_OPEN])
@@ -4367,7 +4395,10 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 if (w)
                 {
                         // The surface the serial named went with the mapping (Xwayland destroys it): the next one says its own.
-                        w->state &= ~(COMPOSITOR_XWM_MAPPED | COMPOSITOR_XWM_SERIAL);
+                        // Clear per-mapping X11 state here so a later MapRequest starts clean and re-reads all properties.
+                        w->state &= ~(COMPOSITOR_XWM_MAPPED | COMPOSITOR_XWM_SERIAL | COMPOSITOR_XWM_FULLSCREEN |
+                                      COMPOSITOR_XWM_MAXIMIZED | COMPOSITOR_XWM_POPUPTYPE | COMPOSITOR_XWM_PROPS_READ |
+                                      COMPOSITOR_XWM_DESKTOP | COMPOSITOR_XWM_ABOVE);
                         compositor_xwm_unmapped(w);
                 }
                 break;
@@ -4408,13 +4439,15 @@ static void compositor_xwm_event(const struct xwm_event *e)
                 }
                 if (e->atom == compositor_xwm_at->atoms[COMPOSITOR_XWM_A_SERIAL])
                 {
+                        unsigned long long serial = ((unsigned long long)e->data[1] << 32) | e->data[0];
+
                         w = compositor_xwm_find(e->window, 1);
                         if (!w)
                                 break;
                         // Another serial is another surface, and so another mapping, whether or not its unmap was heard first.
-                        if (!(w->state & COMPOSITOR_XWM_SERIAL) || w->serial != (((unsigned long long)e->data[1] << 32) | e->data[0]))
+                        if (((w->state & COMPOSITOR_XWM_SERIAL) && w->serial != serial) || w->row >= 0 || (w->state & COMPOSITOR_XWM_ADOPTED))
                                 compositor_xwm_unmapped(w);
-                        w->serial = ((unsigned long long)e->data[1] << 32) | e->data[0];
+                        w->serial = serial;
                         w->state |= COMPOSITOR_XWM_SERIAL;
                         compositor_xwm_resolve(w);
                 }
@@ -5120,7 +5153,7 @@ static void compositor_xwm_pass_one(const struct compositor_poll *wanted)
                 if (compositor_xwm_close_owed(w))
                 {
                         w->closes = compositor.close_asks[w->row];
-                        if (w->state & COMPOSITOR_XWM_POPUPISH)
+                        if (compositor_xwm_is_popup(w))
                                 compositor_xwm_window_op(XWM_OP_UNMAP_WINDOW, w->id);
                         else if ((w->protocols & COMPOSITOR_XWM_PROTO_DELETE) && w->closes < 2)
                                 compositor_xwm_protocol(w->id, x->atoms[COMPOSITOR_XWM_A_DELETE]);

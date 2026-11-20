@@ -548,11 +548,11 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 {
                         unsigned long grown = ((unsigned long)bytes + (1ul << 20) - 1) & ~((1ul << 20) - 1);
                         long memfd, mapped;
-                        void *p = compositor_gpu_scaled_pool[used].memory;
+                        void *old = compositor_gpu_scaled_pool[used].memory, *p = old;
 
-                        if (p)
-                                gpu_unregister_memfd(p);
                         mem_buf_free(&p, &compositor_gpu_scaled_pool[used].bytes, MEM_BUF_GPU_FORGET);
+                        if (old)
+                                gpu_unregister_memfd(old);
                         if (compositor_gpu_scaled_pool[used].fd > 0)
                                 system_close(compositor_gpu_scaled_pool[used].fd - 1);
                         compositor_gpu_scaled_pool[used].memory = 0, compositor_gpu_scaled_pool[used].fd = 0;

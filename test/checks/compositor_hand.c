@@ -2096,8 +2096,115 @@ static void check_taskbar_tab_menu(void)
     check("tab menu: a system process has no root, a system process in the tree is skipped with what is under it, and pid 1 has no tree", system_ok);
     check("tab menu: a table that loops ends the walk, and the members are as many as there is room for", loop_ok);
 
+    // Launcher / spawned-game isolation: Steam (with steamwebhelper) spawning games via reaper/pv-bwrap or directly,
+    // and any generic launcher owning its own app_id spawning a child app with a different app_id. Each shows and stops
+    // independently so Force stop on a game never kills Steam, and Force stop on Steam spares running games.
+    {
+        int steam_tab = -1, game_tab = -1;
+        b32 game_menu_ok = false, game_stop_ok = false, steam_menu_ok = false, steam_stop_ok = false;
+        b32 direct_ok = false, generic_ok = false;
+
+        tab_signal_write(root, 101, "bowl", 1);
+        tab_signal_write(root, 102, "steam.sh", 101);
+        tab_signal_write(root, 103, "steam", 102);
+        tab_signal_write(root, 104, "steamwebhelper", 103);
+        tab_signal_write(root, 105, "steamwebhelper", 104);
+        tab_signal_write(root, 106, "reaper", 103);
+        tab_signal_write(root, 107, "steam-launch-wr", 106);
+        tab_signal_write(root, 108, "hl2_linux", 107);
+        tab_signal_write(root, 109, "direct_game", 103);
+        tab_signal_write(root, 110, "my_launcher", 1);
+        tab_signal_write(root, 111, "my_helper", 110);
+        tab_signal_write(root, 112, "child_game", 110);
+        tab_signal_write(root, 113, "child_worker", 112);
+
+        table->pid[1] = 104;
+        table->pid[2] = 108;
+        string_copy_bounded((p8 *)compositor.app_id[1], (string_address) "steamwebhelper", WINDOWS_APP_ID);
+        string_copy_bounded((p8 *)compositor.app_id[2], (string_address) "hl2_linux", WINDOWS_APP_ID);
+        view = compositor_band_view();
+        for (unsigned int each = 0; each < view.count; each++)
+        {
+            steam_tab = compositor.listed[each] == 1 ? (int)each : steam_tab;
+            game_tab = compositor.listed[each] == 2 ? (int)each : game_tab;
+        }
+        // Right-click HL2: Force stop counts only HL2 (1 window, not Steam) and kills only reaper..hl2_linux.
+        if (game_tab >= 0 && taskbar_slot(&view, game_tab, &x, &y, &w, &h))
+        {
+            compositor.pointer_x = x + w / 2, compositor.pointer_y = y + h / 2;
+            compositor_pointer_clamp();
+            compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+            compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+            game_menu_ok = taskbar_menu.open && taskbar_menu.row == 2 && taskbar_menu.menu.count == 2 &&
+                           taskbar_menu.menu.items[1].id == TASKBAR_MENU_STOP &&
+                           string_equals((string_address)taskbar_menu.menu.items[1].label, (string_address) "Force stop");
+            tab_signal_count = 0;
+            compositor_menu_chose(TASKBAR_MENU_STOP);
+            game_stop_ok = tab_signalled(106, TASKBAR_SIGKILL) == 1 && tab_signalled(107, TASKBAR_SIGKILL) == 1 &&
+                           tab_signalled(108, TASKBAR_SIGKILL) == 1 && !tab_signalled(102, TASKBAR_SIGKILL) &&
+                           !tab_signalled(103, TASKBAR_SIGKILL) && !tab_signalled(104, TASKBAR_SIGKILL) &&
+                           !tab_signalled(105, TASKBAR_SIGKILL) && !tab_signalled(109, TASKBAR_SIGKILL) && tab_signal_count == 6;
+        }
+        compositor_menu_close();
+        // Right-click Steam: Force stop counts only Steam (not HL2) and kills only steam.sh..steamwebhelper.
+        if (steam_tab >= 0 && taskbar_slot(&view, steam_tab, &x, &y, &w, &h))
+        {
+            compositor.pointer_x = x + w / 2, compositor.pointer_y = y + h / 2;
+            compositor_pointer_clamp();
+            compositor_button(COMPOSITOR_BTN_RIGHT, 1);
+            compositor_button(COMPOSITOR_BTN_RIGHT, 0);
+            steam_menu_ok = taskbar_menu.open && taskbar_menu.row == 1 && taskbar_menu.menu.count == 2 &&
+                            taskbar_menu.menu.items[1].id == TASKBAR_MENU_STOP &&
+                            string_equals((string_address)taskbar_menu.menu.items[1].label, (string_address) "Force stop");
+            tab_signal_count = 0;
+            compositor_menu_chose(TASKBAR_MENU_STOP);
+            steam_stop_ok = tab_signalled(102, TASKBAR_SIGKILL) == 1 && tab_signalled(103, TASKBAR_SIGKILL) == 1 &&
+                            tab_signalled(104, TASKBAR_SIGKILL) == 1 && tab_signalled(105, TASKBAR_SIGKILL) == 1 &&
+                            !tab_signalled(106, TASKBAR_SIGKILL) && !tab_signalled(107, TASKBAR_SIGKILL) &&
+                            !tab_signalled(108, TASKBAR_SIGKILL);
+        }
+        compositor_menu_close();
+        // Direct child game under Steam (no reaper, even with empty app_id): stops below Steam, and Steam's stop spares it.
+        table->pid[2] = 109;
+        compositor.app_id[2][0] = 0;
+        {
+            int g_root = 0, s_root = 0;
+            int g_n = taskbar_stop_plan_for(109, "", &g_root);
+            b32 g_only = g_root == 109 && g_n == 1 && taskbar_stop_has(taskbar_stop_members, g_n, 109) &&
+                         !taskbar_stop_has(taskbar_stop_members, g_n, 103);
+            int s_n = taskbar_stop_plan_for(104, "steamwebhelper", &s_root);
+            b32 s_only = s_root == 102 && taskbar_stop_has(taskbar_stop_members, s_n, 103) &&
+                         taskbar_stop_has(taskbar_stop_members, s_n, 104) && !taskbar_stop_has(taskbar_stop_members, s_n, 109);
+
+            direct_ok = g_only && s_only;
+        }
+        // Generic non-hardcoded launcher (app_id="my_launcher") spawning child_game (app_id="child_game"):
+        // each stops its own subtree only, never the other.
+        table->pid[1] = 110;
+        table->pid[2] = 112;
+        string_copy_bounded((p8 *)compositor.app_id[1], (string_address) "my_launcher", WINDOWS_APP_ID);
+        string_copy_bounded((p8 *)compositor.app_id[2], (string_address) "child_game", WINDOWS_APP_ID);
+        {
+            int c_root = 0, l_root = 0;
+            int c_n = taskbar_stop_plan_for(112, "child_game", &c_root);
+            b32 c_only = c_root == 112 && c_n == 2 && taskbar_stop_has(taskbar_stop_members, c_n, 112) &&
+                         taskbar_stop_has(taskbar_stop_members, c_n, 113) && !taskbar_stop_has(taskbar_stop_members, c_n, 110);
+            int l_n = taskbar_stop_plan_for(110, "my_launcher", &l_root);
+            b32 l_only = l_root == 110 && l_n == 2 && taskbar_stop_has(taskbar_stop_members, l_n, 110) &&
+                         taskbar_stop_has(taskbar_stop_members, l_n, 111) && !taskbar_stop_has(taskbar_stop_members, l_n, 112) &&
+                         !taskbar_stop_has(taskbar_stop_members, l_n, 113);
+
+            generic_ok = c_only && l_only;
+        }
+        compositor.app_id[1][0] = compositor.app_id[2][0] = 0;
+        check("tab menu: a Steam-spawned game's Force stop counts and stops only the game's tree, never Steam", game_menu_ok && game_stop_ok);
+        check("tab menu: Steam's own Force stop counts and stops only Steam, sparing running games", steam_menu_ok && steam_stop_ok);
+        check("tab menu: a direct child game under Steam is isolated from Steam even without reaper or app_id", direct_ok);
+        check("tab menu: any launcher app and a spawned child app with a distinct app_id stop independently", generic_ok);
+    }
+
     // Put the check's directory away.
-    for (int pid = 1; pid < 100; pid++)
+    for (int pid = 1; pid < 130; pid++)
         tab_signal_remove(root, pid);
     system_call_3(syscall(unlinkat), (positive)AT_FDCWD, (positive)root, 0x200);
     taskbar_proc_root = "/proc";
