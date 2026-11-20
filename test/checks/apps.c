@@ -1391,6 +1391,18 @@ static fn list_interaction_check(struct ui address_to wui)
                 check("list: ui_view_list_click delivers cross-pane releases to the active list", routed);
         }
 
+        // 5d. ui_columns_event ignores clicks horizontally outside the header box (e.g. in the sidebar at the same y).
+        {
+                struct ui_columns cols;
+
+                memory_zero(&cols, sizeof(cols));
+                cols.count = 2, cols.title[0] = "Name", cols.title[1] = "Size", cols.width[1] = 90, cols.hover = cols.held = -1;
+                ui_columns_layout(wui, &cols, 240, 48, 560);
+                ui_event_context(&ldown);
+                check("columns: click in sidebar at header y is not swallowed by ui_columns_event",
+                      ui_columns_event(wui, &cols, &ldown, 100, 60) == 0);
+        }
+
         // 6. Side pane seam resize: widens, narrows to least, resets on double-click, and works in RTL.
         {
                 struct ui_rect side_box;

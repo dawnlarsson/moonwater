@@ -27098,7 +27098,7 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
                 ui_kit_shape = WINDOW_POINTER_RESIZE;
                 return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
         }
-        if (event->type == WINDOW_EVENT_BUTTON && !down && c->held >= 0)
+        if (event->type == WINDOW_EVENT_BUTTON && c->held >= 0 && (!down || event->a != UI_POINTER_LEFT))
         {
                 c->held = -1;
                 return UI_COLUMNS_DRAW | UI_COLUMNS_TAKEN;
@@ -27113,7 +27113,8 @@ static p32 ui_columns_event(struct ui address_to ui, struct ui_columns address_t
                         ui_kit_shape = WINDOW_POINTER_HAND;
                 return c->hover != was ? UI_COLUMNS_DRAW : 0;
         }
-        if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT || !down || y < c->y || y >= c->y + c->h)
+        if (event->type != WINDOW_EVENT_BUTTON || event->a != UI_POINTER_LEFT || !down ||
+            x < c->x || x >= c->x + c->w || y < c->y || y >= c->y + c->h)
                 return 0;
         if ((edge = ui_columns_edge(ui, c, x, y)) >= 0)
         {
