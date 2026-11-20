@@ -435,5 +435,227 @@ static int compositor_keymap_event(struct compositor_keymap *map, unsigned int c
         return 2;
 }
 
+/*
+        Self-contained XKB keymap synthesizer directly from compositor_layouts[] / compositor_keymap_character():
+        pure function of (layout, into, room), returning byte length written (0 on overflow), usable by Wayland,
+        Xwayland, and any external client protocol without duplicating keymap tables.
+*/
+struct compositor_xkb_buf
+{
+        char *at;
+        unsigned long room, used;
+        int full;
+};
+
+static void compositor_xkb_put(struct compositor_xkb_buf *b, const char *s)
+{
+        while (*s)
+        {
+                if (b->used + 1 >= b->room)
+                {
+                        b->full = 1;
+                        return;
+                }
+                b->at[b->used++] = *s++;
+        }
+}
+
+static void compositor_xkb_u32(struct compositor_xkb_buf *b, unsigned int v)
+{
+        char buf[12];
+        unsigned int n = 0;
+
+        do
+                buf[n++] = (char)('0' + v % 10);
+        while (v /= 10);
+        while (n)
+        {
+                char ch[2] = {buf[--n], 0};
+
+                compositor_xkb_put(b, ch);
+        }
+}
+
+static void compositor_xkb_sym(struct compositor_xkb_buf *b, unsigned int c)
+{
+        static const struct
+        {
+                unsigned int accent;
+                const char *name;
+        } dead[] = {
+            {CK_ACUTE, "dead_acute"},           {CK_GRAVE, "dead_grave"},
+            {CK_DIAERESIS, "dead_diaeresis"},   {CK_CIRCUMFLEX, "dead_circumflex"},
+            {CK_TILDE, "dead_tilde"},
+        };
+
+        if (c & CK_DEAD)
+        {
+                unsigned int a = c & ~CK_DEAD;
+
+                for (unsigned int i = 0; i < sizeof(dead) / sizeof(dead[0]); i++)
+                        if (dead[i].accent == a)
+                        {
+                                compositor_xkb_put(b, dead[i].name);
+                                return;
+                        }
+                compositor_xkb_put(b, "NoSymbol");
+                return;
+        }
+        if (!c)
+        {
+                compositor_xkb_put(b, "NoSymbol");
+                return;
+        }
+        {
+                char hex[8] = {'U', 0, 0, 0, 0, 0, 0, 0};
+                int d = c > 0xffffu ? 6 : 4;
+
+                for (int i = 0; i < d; i++)
+                        hex[1 + i] = "0123456789abcdef"[(c >> (4 * (d - 1 - i))) & 15u];
+                compositor_xkb_put(b, hex);
+        }
+}
+
+static unsigned long compositor_keymap_xkb_build(unsigned int layout, char *into, unsigned long room)
+{
+        static const unsigned char codes[] = {
+            1,   2,   3,   4,   5,   6,   7,   8,   9,   10,  11,  12,  13,  14,  15,  16,  17,  18,  19,  20,  21,  22,
+            23,  24,  25,  26,  27,  28,  29,  30,  31,  32,  33,  34,  35,  36,  37,  38,  39,  40,  41,  42,  43,  44,
+            45,  46,  47,  48,  49,  50,  51,  52,  53,  54,  55,  56,  57,  58,  59,  60,  61,  62,  63,  64,  65,  66,
+            67,  68,  69,  70,  71,  72,  73,  74,  75,  76,  77,  78,  79,  80,  81,  82,  83,  86,  87,  88,  96,  97,
+            98,  99,  100, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 119, 125, 126, 127,
+        };
+        static const struct
+        {
+                unsigned char code;
+                const char *name;
+        } named[] = {
+            {1, "Escape"},      {14, "BackSpace"}, {15, "Tab"},        {28, "Return"},     {29, "Control_L"},
+            {42, "Shift_L"},    {54, "Shift_R"},   {56, "Alt_L"},      {58, "Caps_Lock"},  {59, "F1"},
+            {60, "F2"},         {61, "F3"},        {62, "F4"},         {63, "F5"},         {64, "F6"},
+            {65, "F7"},         {66, "F8"},        {67, "F9"},         {68, "F10"},        {69, "Num_Lock"},
+            {70, "Scroll_Lock"}, {87, "F11"},      {88, "F12"},        {96, "KP_Enter"},   {97, "Control_R"},
+            {98, "KP_Divide"},  {99, "Print"},     {100, "ISO_Level3_Shift"}, {102, "Home"}, {103, "Up"},
+            {104, "Prior"},     {105, "Left"},     {106, "Right"},     {107, "End"},       {108, "Down"},
+            {109, "Next"},      {110, "Insert"},   {111, "Delete"},    {119, "Pause"},     {125, "Super_L"},
+            {126, "Super_R"},   {127, "Menu"},
+        };
+        static const struct
+        {
+                unsigned char code;
+                const char *plain, *locked;
+        } keypad[] = {
+            {71, "KP_Home", "KP_7"},   {72, "KP_Up", "KP_8"},    {73, "KP_Prior", "KP_9"}, {75, "KP_Left", "KP_4"},
+            {76, "KP_Begin", "KP_5"},  {77, "KP_Right", "KP_6"}, {79, "KP_End", "KP_1"},   {80, "KP_Down", "KP_2"},
+            {81, "KP_Next", "KP_3"},   {82, "KP_Insert", "KP_0"}, {83, "KP_Delete", "KP_Decimal"},
+        };
+        static const char mid[] =
+            "  indicator 1 = \"Caps Lock\";\n  indicator 2 = \"Num Lock\";\n};\n"
+            "xkb_types \"canvas\" {\n  virtual_modifiers NumLock,LevelThree;\n"
+            "  type \"ONE_LEVEL\" { modifiers = none; map[none] = Level1; };\n"
+            "  type \"TWO_LEVEL\" { modifiers = Shift; map[Shift] = Level2; };\n"
+            "  type \"ALPHABETIC\" { modifiers = Shift+Lock; map[Shift] = Level2; map[Lock] = Level2; };\n"
+            "  type \"FOUR_LEVEL\" { modifiers = Shift+LevelThree; map[Shift] = Level2; map[LevelThree] = Level3;"
+            " map[Shift+LevelThree] = Level4; };\n"
+            "  type \"FOUR_LEVEL_ALPHABETIC\" { modifiers = Shift+Lock+LevelThree; map[Shift] = Level2;"
+            " map[Lock] = Level2; map[LevelThree] = Level3; map[Shift+LevelThree] = Level4;"
+            " map[Lock+LevelThree] = Level4; map[Shift+Lock+LevelThree] = Level3; };\n"
+            "  type \"KEYPAD\" { modifiers = Shift+NumLock; map[none] = Level1; map[Shift] = Level2;"
+            " map[NumLock] = Level2; map[Shift+NumLock] = Level1; };\n};\n"
+            "xkb_compat \"canvas\" {\n  virtual_modifiers NumLock,LevelThree;\n"
+            "  interpret.useModMapMods = AnyLevel;\n  interpret.repeat = False;\n"
+            "  interpret Shift_L { action = SetMods(modifiers = Shift); };\n"
+            "  interpret Shift_R { action = SetMods(modifiers = Shift); };\n"
+            "  interpret Control_L { action = SetMods(modifiers = Control); };\n"
+            "  interpret Control_R { action = SetMods(modifiers = Control); };\n"
+            "  interpret Alt_L { action = SetMods(modifiers = Mod1); };\n"
+            "  interpret Super_L { action = SetMods(modifiers = Mod4); };\n"
+            "  interpret Super_R { action = SetMods(modifiers = Mod4); };\n"
+            "  interpret Caps_Lock { action = LockMods(modifiers = Lock); };\n"
+            "  interpret Num_Lock { virtualModifier = NumLock; action = LockMods(modifiers = NumLock); };\n"
+            "  interpret ISO_Level3_Shift { virtualModifier = LevelThree; action = SetMods(modifiers = LevelThree); };\n"
+            "  indicator \"Caps Lock\" { !allowExplicit; whichModState = Locked; modifiers = Lock; };\n"
+            "  indicator \"Num Lock\" { !allowExplicit; whichModState = Locked; modifiers = NumLock; };\n};\n"
+            "xkb_symbols \"canvas\" {\n  name[Group1] = \"Canvas\";\n";
+        static const char tail[] =
+            "  modifier_map Shift { <K42>, <K54> };\n  modifier_map Lock { <K58> };\n"
+            "  modifier_map Control { <K29>, <K97> };\n  modifier_map Mod1 { <K56> };\n"
+            "  modifier_map Mod2 { <K69> };\n  modifier_map Mod4 { <K125>, <K126> };\n"
+            "  modifier_map Mod5 { <K100> };\n};\n};\n";
+        struct compositor_xkb_buf b = {into, room, 0, 0};
+        struct compositor_keymap map = {0};
+
+        if (layout < sizeof(compositor_layouts) / sizeof(compositor_layouts[0]))
+                map.layout = (unsigned char)layout;
+        compositor_xkb_put(&b, "xkb_keymap {\nxkb_keycodes \"canvas\" {\n  minimum = 8;\n  maximum = 255;\n");
+        for (unsigned long i = 0; i < sizeof(codes); i++)
+        {
+                compositor_xkb_put(&b, "  <K");
+                compositor_xkb_u32(&b, codes[i]);
+                compositor_xkb_put(&b, "> = ");
+                compositor_xkb_u32(&b, (unsigned int)codes[i] + 8u);
+                compositor_xkb_put(&b, ";\n");
+        }
+        compositor_xkb_put(&b, mid);
+        for (unsigned long i = 0; i < sizeof(codes); i++)
+        {
+                unsigned int code = codes[i], lv[4];
+                const char *nm = 0, *kp_p = 0, *kp_l = 0;
+
+                for (unsigned int k = 0; k < sizeof(named) / sizeof(named[0]); k++)
+                        if (named[k].code == code)
+                                nm = named[k].name;
+                for (unsigned int k = 0; !nm && k < sizeof(keypad) / sizeof(keypad[0]); k++)
+                        if (keypad[k].code == code)
+                                kp_p = keypad[k].plain, kp_l = keypad[k].locked;
+                compositor_xkb_put(&b, "  key <K");
+                compositor_xkb_u32(&b, code);
+                compositor_xkb_put(&b, "> { ");
+                if (nm)
+                {
+                        compositor_xkb_put(&b, "[ ");
+                        compositor_xkb_put(&b, nm);
+                        compositor_xkb_put(&b, " ] };\n");
+                        continue;
+                }
+                if (kp_p)
+                {
+                        compositor_xkb_put(&b, "type = \"KEYPAD\", [ ");
+                        compositor_xkb_put(&b, kp_p);
+                        compositor_xkb_put(&b, ", ");
+                        compositor_xkb_put(&b, kp_l);
+                        compositor_xkb_put(&b, " ] };\n");
+                        continue;
+                }
+                lv[0] = compositor_keymap_character(&map, code, 0);
+                lv[1] = compositor_keymap_character(&map, code, WINDOW_KEY_SHIFT);
+                lv[2] = compositor_keymap_character(&map, code, WINDOW_KEY_ALTGR);
+                lv[3] = compositor_keymap_character(&map, code, WINDOW_KEY_SHIFT | WINDOW_KEY_ALTGR);
+                {
+                        int alpha = lv[0] && lv[1] && !(lv[0] & CK_DEAD) && !(lv[1] & CK_DEAD) &&
+                                    compositor_letter_flip(lv[0]) == lv[1] && lv[0] != lv[1];
+                        int four = lv[2] != lv[0] || lv[3] != lv[1];
+                        int n = four ? 4 : lv[0] == lv[1] ? 1 : 2;
+
+                        compositor_xkb_put(&b, "type = \"");
+                        compositor_xkb_put(&b, four ? (alpha ? "FOUR_LEVEL_ALPHABETIC" : "FOUR_LEVEL")
+                                                    : n == 1 ? "ONE_LEVEL" : alpha ? "ALPHABETIC" : "TWO_LEVEL");
+                        compositor_xkb_put(&b, "\", [ ");
+                        for (int k = 0; k < n; k++)
+                        {
+                                if (k)
+                                        compositor_xkb_put(&b, ", ");
+                                compositor_xkb_sym(&b, lv[k]);
+                        }
+                        compositor_xkb_put(&b, " ] };\n");
+                }
+        }
+        compositor_xkb_put(&b, tail);
+        if (b.full || !room)
+                return 0;
+        into[b.used] = 0;
+        return b.used;
+}
+
 /* ---- end of the keymap ---- */
 

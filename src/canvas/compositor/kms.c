@@ -2402,3 +2402,399 @@ static void compositor_cursor_move(void)
         compositor_cursor_move();
 }
 
+/*
+        Native Canvas DRM / DMA-BUF / Timeline Syncobj primitives:
+        protocol-neutral render-node classification, plane IN_FORMATS parsing,
+        DMA_BUF_IOCTL_SYNC wrapper, and dynamic DRM timeline syncobj pool.
+*/
+#define CANVAS_DMABUF_SYNC_IOCTL 0x40086200u // DMA_BUF_IOCTL_SYNC
+#define CANVAS_DRM_RENDER_GID 105u
+#define CANVAS_DRM_IOCTL_VERSION 0xc0406400UL
+#define CANVAS_DRM_IOCTL_GET_CAP 0xc010640cUL
+#define CANVAS_DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443UL
+#define CANVAS_DRM_IOCTL_SYNCOBJ_DESTROY 0xc00864bfUL
+#define CANVAS_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE 0xc01064c2UL
+#define CANVAS_DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT 0xc03064caUL
+#define CANVAS_DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL 0xc01864cdUL
+#define CANVAS_DRM_IOCTL_SYNCOBJ_EVENTFD 0xc01864cfUL
+#define CANVAS_SYNCOBJ_MAX (1l << 20)
+
+static long canvas_dmabuf_sync_fd(long fd, unsigned long flags)
+{
+        unsigned long arg = flags;
+
+        return fd >= 0 ? compositor_call(syscall(ioctl), (positive)fd, CANVAS_DMABUF_SYNC_IOCTL, (positive)&arg, 0, 0, 0) : -9;
+}
+
+static void canvas_dmabuf_sync_read(long fd, int finish)
+{
+        if (fd >= 0)
+                canvas_dmabuf_sync_fd(fd, finish ? 5ul : 1ul); // DMA_BUF_SYNC_READ | (END : START)
+}
+
+static unsigned long canvas_drm_makedev(unsigned long major, unsigned long minor)
+{
+        return ((major & 0xfffUL) << 8) | (minor & 0xffUL) | ((minor & ~0xffUL) << 12) | ((major & ~0xfffUL) << 32);
+}
+
+static unsigned long canvas_drm_node_dev(const char *path)
+{
+        unsigned char st[256];
+
+        memory_zero(st, sizeof(st));
+        if (compositor_call(syscall(statx), (positive)AT_FDCWD, (positive)path, 0, 0x7ff, (positive)st, 0) < 0)
+                return 0;
+        return canvas_drm_makedev(*(unsigned int *)(st + 128), *(unsigned int *)(st + 132));
+}
+
+struct canvas_drm_render
+{
+        unsigned long dev;
+        int hw, syncobj, fd;
+        char path[96];
+};
+
+static int canvas_drm_render_classify(const char *path, unsigned long prev_dev, struct canvas_drm_render *out)
+{
+        unsigned long dev = canvas_drm_node_dev(path);
+        long fd;
+        char name[32];
+        struct
+        {
+                int major, minor, patch;
+                unsigned long name_len;
+                char *name;
+                unsigned long date_len;
+                char *date;
+                unsigned long desc_len;
+                char *desc;
+        } ver;
+        unsigned long cap[2] = {0x14, 0}; // DRM_CAP_SYNCOBJ_TIMELINE
+        int rank = 1;
+
+        out->dev = dev, out->hw = 0, out->syncobj = 0, out->fd = -1;
+        out->path[0] = 0;
+        if (!dev)
+                return 0;
+        if (dev != prev_dev)
+        {
+                compositor_call(syscall(fchownat), (positive)AT_FDCWD, (positive)path, 0, CANVAS_DRM_RENDER_GID, 0, 0);
+                compositor_call(syscall(fchmodat), (positive)AT_FDCWD, (positive)path, 0660, 0, 0, 0);
+        }
+        fd = compositor_call(syscall(openat), (positive)AT_FDCWD, (positive)path, 0x80002, 0, 0, 0);
+        if (fd < 0)
+                return 1;
+        memory_zero(name, sizeof(name));
+        memory_zero(&ver, sizeof(ver));
+        ver.name_len = sizeof(name) - 1, ver.name = name;
+        if (compositor_call(syscall(ioctl), (positive)fd, CANVAS_DRM_IOCTL_VERSION, (positive)&ver, 0, 0, 0) == 0)
+        {
+                name[sizeof(name) - 1] = 0;
+                if (string_equals((string_address)name, (string_address)"vgem") ||
+                    string_equals((string_address)name, (string_address)"vkms"))
+                        rank = 1;
+                else if (string_equals((string_address)name, (string_address)"virtio_gpu"))
+                {
+                        unsigned long val = 0, param[2] = {1, (unsigned long)&val}; // VIRTGPU_PARAM_3D_FEATURES
+
+                        rank = compositor_call(syscall(ioctl), (positive)fd, CANVAS_DRM_IOCTL_VIRTGPU_GETPARAM, (positive)param, 0, 0, 0) == 0 && val ? 2 : 1;
+                }
+                else
+                        rank = 2;
+        }
+        out->hw = rank >= 2;
+        if (compositor_call(syscall(ioctl), (positive)fd, CANVAS_DRM_IOCTL_GET_CAP, (positive)cap, 0, 0, 0) == 0 && cap[1])
+                out->syncobj = 1, out->fd = (int)fd;
+        else
+                system_close((int)fd);
+        string_copy_bounded((string_address)out->path, (string_address)path, sizeof(out->path));
+        return rank;
+}
+
+static unsigned long canvas_drm_render_probe(int card_fd, unsigned long prev_dev, struct canvas_drm_render *out)
+{
+        struct canvas_drm_render best = {0, 0, 0, -1, {0}}, cand;
+        int best_rank = 0;
+        char path[96];
+
+        if (card_fd >= 0)
+        {
+                unsigned char st[256];
+
+                memory_zero(st, sizeof(st));
+                if (compositor_call(syscall(statx), (positive)card_fd, (positive)"", 0x1000, 0x7ff, (positive)st, 0) >= 0)
+                {
+                        unsigned int maj = *(unsigned int *)(st + 128), min = *(unsigned int *)(st + 132);
+
+                        for (unsigned int num = 128; num < 192; num++)
+                        {
+                                unsigned int at = compositor_said(path, 0, "/sys/dev/char/");
+
+                                at += positive_into_string((p8 *)path + at, maj);
+                                path[at++] = ':';
+                                at += positive_into_string((p8 *)path + at, min);
+                                at = compositor_said(path, at, "/../renderD");
+                                at += positive_into_string((p8 *)path + at, num);
+                                path[at] = 0;
+                                if (compositor_call(syscall(faccessat), (positive)AT_FDCWD, (positive)path, 0, 0, 0, 0) < 0)
+                                        continue;
+                                at = compositor_said(path, 0, "/dev/dri/renderD");
+                                at += positive_into_string((p8 *)path + at, num);
+                                path[at] = 0;
+                                if (canvas_drm_render_classify(path, prev_dev, &cand) > 0 && cand.dev)
+                                {
+                                        *out = cand;
+                                        return cand.dev;
+                                }
+                                if (cand.fd >= 0)
+                                        system_close(cand.fd);
+                        }
+                }
+        }
+        for (unsigned int num = 128; num < 192; num++)
+        {
+                unsigned int at = compositor_said(path, 0, "/dev/dri/renderD");
+                int rank;
+
+                at += positive_into_string((p8 *)path + at, num);
+                path[at] = 0;
+                rank = canvas_drm_render_classify(path, prev_dev, &cand);
+                if (rank > best_rank && cand.dev)
+                {
+                        if (best.fd >= 0)
+                                system_close(best.fd);
+                        best = cand, best_rank = rank;
+                        if (rank >= 2)
+                                break;
+                }
+                else if (cand.fd >= 0)
+                        system_close(cand.fd);
+        }
+        *out = best;
+        return best.dev;
+}
+
+struct canvas_drm_format_pair
+{
+        unsigned int format;
+        unsigned long modifier;
+};
+
+static unsigned int canvas_drm_plane_formats(int card_fd, unsigned int plane_id,
+                                             struct canvas_drm_format_pair *out, unsigned int cap)
+{
+        unsigned long blob_id = 0;
+        unsigned char buf[4096];
+        struct
+        {
+                unsigned int id, length;
+                p64 data;
+        } blob;
+        unsigned int count = 0;
+
+        if (card_fd < 0 || !plane_id || !out || !cap)
+                return 0;
+        if (!drm_obj_get_prop(plane_id, COMPOSITOR_OBJECT_PLANE, "IN_FORMATS", &blob_id) || !blob_id)
+                return 0;
+        blob.id = (unsigned int)blob_id, blob.length = 0, blob.data = (p64)buf;
+        if (system_control(card_fd, COMPOSITOR_GETPROPBLOB, address_of blob) != 0 ||
+            blob.length < 24 || blob.length > sizeof(buf) ||
+            system_control(card_fd, COMPOSITOR_GETPROPBLOB, address_of blob) != 0)
+                return 0;
+        {
+                unsigned int nf = *(unsigned int *)(buf + 8), foff = *(unsigned int *)(buf + 12);
+                unsigned int nm = *(unsigned int *)(buf + 16), moff = *(unsigned int *)(buf + 20);
+                const unsigned int *fmts = (const unsigned int *)(buf + foff);
+                const unsigned char *mods = buf + moff;
+
+                if (foff + nf * 4u > blob.length || moff + nm * 24u > blob.length)
+                        return 0;
+                for (unsigned int m = 0; m < nm; m++)
+                {
+                        unsigned long mask = *(const unsigned long *)(mods + m * 24u);
+                        unsigned int off = *(const unsigned int *)(mods + m * 24u + 8u);
+                        unsigned long mod = *(const unsigned long *)(mods + m * 24u + 16u);
+
+                        for (unsigned int bit = 0; bit < 64 && off + bit < nf; bit++)
+                        {
+                                unsigned int fmt, dup = 0;
+
+                                if (!(mask & (1UL << bit)) || count >= cap)
+                                        continue;
+                                fmt = fmts[off + bit];
+                                for (unsigned int k = 0; k < count && !dup; k++)
+                                        dup = out[k].format == fmt && out[k].modifier == mod;
+                                if (!dup)
+                                        out[count++] = (struct canvas_drm_format_pair){fmt, mod};
+                        }
+                }
+        }
+        return count;
+}
+
+struct canvas_syncobj_slot
+{
+        int used;
+        unsigned int handle;
+        int eventfd, armed;
+        unsigned long long armed_point;
+};
+
+struct canvas_syncobj_pool
+{
+        int drm_fd;
+        struct canvas_syncobj_slot *slots;
+        long count, cap;
+};
+
+static void canvas_syncobj_init(struct canvas_syncobj_pool *p, int drm_fd)
+{
+        p->drm_fd = drm_fd;
+}
+
+static void canvas_syncobj_drop(struct canvas_syncobj_pool *p, long slot)
+{
+        if (!p || slot < 0 || slot >= p->count || !p->slots[slot].used)
+                return;
+        if (p->drm_fd >= 0 && p->slots[slot].handle)
+        {
+                unsigned int arg[2] = {p->slots[slot].handle, 0};
+
+                compositor_call(syscall(ioctl), (positive)p->drm_fd, CANVAS_DRM_IOCTL_SYNCOBJ_DESTROY, (positive)arg, 0, 0, 0);
+        }
+        if (p->slots[slot].eventfd >= 0)
+                system_close(p->slots[slot].eventfd);
+        p->slots[slot] = (struct canvas_syncobj_slot){0, 0, -1, 0, 0};
+}
+
+static long canvas_syncobj_import(struct canvas_syncobj_pool *p, long fd)
+{
+        long slot = -1;
+        struct
+        {
+                unsigned int handle, flags;
+                int fd;
+                unsigned int pad;
+        } arg = {0, 0, (int)fd, 0};
+
+        if (!p || fd < 0 || p->drm_fd < 0)
+                return -1;
+        for (long i = 0; i < p->count && slot < 0; i++)
+                if (!p->slots[i].used)
+                        slot = i;
+        if (slot < 0)
+        {
+                if (p->count >= CANVAS_SYNCOBJ_MAX)
+                        return -1;
+                if (p->count >= p->cap)
+                {
+                        long next = p->cap ? p->cap * 2 : 64;
+                        unsigned long bytes = (unsigned long)next * sizeof(*p->slots);
+                        struct canvas_syncobj_slot *grown = (struct canvas_syncobj_slot *)compositor_map_zeroed(bytes);
+
+                        if (!grown)
+                                return -1;
+                        if (p->slots)
+                        {
+                                memory_copy(grown, p->slots, (unsigned long)p->count * sizeof(*p->slots));
+                                compositor_call(syscall(munmap), (positive)p->slots, (unsigned long)p->cap * sizeof(*p->slots), 0, 0, 0, 0);
+                        }
+                        p->slots = grown, p->cap = next;
+                }
+                slot = p->count++;
+                p->slots[slot] = (struct canvas_syncobj_slot){0, 0, -1, 0, 0};
+        }
+        if (compositor_call(syscall(ioctl), (positive)p->drm_fd, CANVAS_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, (positive)&arg, 0, 0, 0) < 0 || !arg.handle)
+                return -1;
+        p->slots[slot] = (struct canvas_syncobj_slot){1, arg.handle, -1, 0, 0};
+        return slot;
+}
+
+static int canvas_syncobj_ready(const struct canvas_syncobj_pool *p, long slot, unsigned long long point)
+{
+        unsigned int handle;
+        unsigned long long pt = point;
+        struct
+        {
+                unsigned long long handles;
+                long long timeout_nsec;
+                unsigned int count_handles, flags, first_signaled, pad;
+                unsigned long long points;
+        } arg;
+
+        if (!p || slot < 0 || slot >= p->count || !p->slots[slot].used || p->drm_fd < 0)
+                return 1;
+        handle = p->slots[slot].handle;
+        memory_zero(&arg, sizeof(arg));
+        arg.handles = (unsigned long long)(unsigned long)&handle;
+        arg.points = (unsigned long long)(unsigned long)&pt;
+        arg.count_handles = 1, arg.flags = 1; // DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL
+        return compositor_call(syscall(ioctl), (positive)p->drm_fd, CANVAS_DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, (positive)&arg, 0, 0, 0) == 0;
+}
+
+static void canvas_syncobj_signal(const struct canvas_syncobj_pool *p, long slot, unsigned long long point)
+{
+        unsigned int handle;
+        unsigned long long pt = point;
+        struct
+        {
+                unsigned long long handles, points;
+                unsigned int count_handles, pad;
+        } arg;
+
+        if (!p || slot < 0 || slot >= p->count || !p->slots[slot].used || p->drm_fd < 0)
+                return;
+        handle = p->slots[slot].handle;
+        memory_zero(&arg, sizeof(arg));
+        arg.handles = (unsigned long long)(unsigned long)&handle;
+        arg.points = (unsigned long long)(unsigned long)&pt;
+        arg.count_handles = 1;
+        compositor_call(syscall(ioctl), (positive)p->drm_fd, CANVAS_DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, (positive)&arg, 0, 0, 0);
+}
+
+static long canvas_syncobj_eventfd(struct canvas_syncobj_pool *p, long slot, unsigned long long point)
+{
+        unsigned long long drain;
+        struct
+        {
+                unsigned int handle, flags;
+                unsigned long long point;
+                int fd;
+                unsigned int pad;
+        } arg;
+
+        if (!p || slot < 0 || slot >= p->count || !p->slots[slot].used || p->drm_fd < 0)
+                return -1;
+        if (p->slots[slot].eventfd < 0)
+        {
+                long efd = compositor_call(syscall(eventfd2), 0, 0x80000 | 0x800, 0, 0, 0, 0);
+
+                if (efd < 0)
+                        return -1;
+                p->slots[slot].eventfd = (int)efd;
+        }
+        if (p->slots[slot].armed && p->slots[slot].armed_point == point)
+                return p->slots[slot].eventfd;
+        compositor_call(syscall(read), (positive)p->slots[slot].eventfd, (positive)&drain, sizeof(drain), 0, 0, 0);
+        arg.handle = p->slots[slot].handle, arg.flags = 0, arg.point = point, arg.fd = p->slots[slot].eventfd, arg.pad = 0;
+        if (compositor_call(syscall(ioctl), (positive)p->drm_fd, CANVAS_DRM_IOCTL_SYNCOBJ_EVENTFD, (positive)&arg, 0, 0, 0) < 0)
+        {
+                p->slots[slot].armed = 0;
+                return -1;
+        }
+        p->slots[slot].armed = 1, p->slots[slot].armed_point = point;
+        return p->slots[slot].eventfd;
+}
+
+static void canvas_syncobj_reset(struct canvas_syncobj_pool *p)
+{
+        if (!p)
+                return;
+        for (long i = 0; i < p->count; i++)
+                if (p->slots[i].used)
+                        canvas_syncobj_drop(p, i);
+        if (p->slots)
+                compositor_call(syscall(munmap), (positive)p->slots, (unsigned long)p->cap * sizeof(*p->slots), 0, 0, 0, 0);
+        p->slots = 0, p->count = p->cap = 0;
+}
+

@@ -531,6 +531,8 @@ static int compositor_flip(unsigned int fb, int row, unsigned int which)
         return 1;
 }
 
+static void canvas_scan_fb_reap(void);
+
 // The pictures held back are said taken: for the row the flip showed, once it shows that row's newest buffer.
 #ifdef CONFIG_MOONWATER_WAYLAND
 static void compositor_wl_flip_presented(void); // wayland_host.c: the feedbacks a drawn frame took, answered at its flip
@@ -572,6 +574,7 @@ static void compositor_flip_done(void)
                         compositor_window_fb_drop(row);
                         compositor_row_reclaim(row);
                 }
+        canvas_scan_fb_reap();
 #ifdef CONFIG_MOONWATER_WAYLAND
         compositor_wl_graves_sweep();
         // The feedbacks of the frame this flip showed are answered with the card's time for it.
@@ -792,6 +795,63 @@ static void compositor_vblank_measure(positive when, unsigned int sequence)
         compositor_vblank_last.when = when, compositor_vblank_last.sequence = sequence;
 }
 
+/*
+        Native Canvas vblank PLL: sliding-window hardware refresh estimator (250ms..8s span, 2% sanity guard)
+        and next-vblank predictor (with 1s staleness guard), shared by compositor timing and client protocols.
+*/
+#define CANVAS_VBLANK_SPAN_MIN 250000000ull
+#define CANVAS_VBLANK_SPAN_MAX 8000000000ull
+#define CANVAS_VBLANK_AGE_MAX 1000000000ull
+static struct
+{
+        positive first, next, period, mode;
+        unsigned int first_seq, next_seq;
+} canvas_vblank_pll;
+
+static void canvas_vblank_note(positive when, unsigned int seq)
+{
+        positive span;
+
+        if (canvas_vblank_pll.mode != compositor.period || !canvas_vblank_pll.first || when <= canvas_vblank_pll.first ||
+            seq <= canvas_vblank_pll.first_seq || seq - canvas_vblank_pll.first_seq > 1000000u)
+        {
+                canvas_vblank_pll.first = canvas_vblank_pll.next = when;
+                canvas_vblank_pll.first_seq = canvas_vblank_pll.next_seq = seq;
+                canvas_vblank_pll.mode = compositor.period;
+                canvas_vblank_pll.period = 0;
+                return;
+        }
+        span = when - canvas_vblank_pll.first;
+        if (span >= CANVAS_VBLANK_SPAN_MIN)
+        {
+                positive vblanks = seq - canvas_vblank_pll.first_seq, period = (span + vblanks / 2) / vblanks;
+
+                canvas_vblank_pll.period = period * 50 > compositor.period * 49 && period * 50 < compositor.period * 51 ? period : 0;
+        }
+        if (when - canvas_vblank_pll.next >= CANVAS_VBLANK_SPAN_MAX / 2)
+        {
+                canvas_vblank_pll.first = canvas_vblank_pll.next, canvas_vblank_pll.first_seq = canvas_vblank_pll.next_seq;
+                canvas_vblank_pll.next = when, canvas_vblank_pll.next_seq = seq;
+        }
+}
+
+static positive canvas_vblank_refresh(void)
+{
+        return canvas_vblank_pll.period && canvas_vblank_pll.mode == compositor.period ? canvas_vblank_pll.period : compositor.period;
+}
+
+static positive canvas_vblank_next(positive now, unsigned long *seq)
+{
+        positive period = canvas_vblank_refresh(), last = compositor.flip_when, steps;
+
+        if (!period || !last || now < last || now - last > CANVAS_VBLANK_AGE_MAX)
+                return 0;
+        steps = (now - last) / period + 1;
+        if (seq)
+                *seq = (unsigned long)compositor.flip_seq + steps;
+        return last + steps * period;
+}
+
 static unsigned int compositor_card_events(const p8 *events, long got)
 {
         unsigned int landed = 0;
@@ -835,6 +895,7 @@ static unsigned int compositor_card_events(const p8 *events, long got)
                                 compositor.flip_seq = sequence;
                                 compositor.flip_stamped = 1;
                                 compositor_vblank_measure(compositor.flip_when, sequence);
+                                canvas_vblank_note(compositor.flip_when, sequence);
                                 compositor_late_landed(compositor.flip_when);
                         }
                         compositor_flip_done();
@@ -2210,5 +2271,188 @@ static void compositor_turn_frame(const unsigned short (*clip)[4], unsigned int 
                 if (told)
                         compositor_dirty(compositor_turns[at].fb, (const unsigned short (*)[4])rect, told);
         }
+}
+
+/*
+        Native Canvas scanout framebuffer creation & deferred-RMFB grave pool:
+        unified PRIME_FD_TO_HANDLE + ADDFB2 + GEM_CLOSE (linear AR24->XR24 / AMD 256B & Intel 64B alignment /
+        aligned overlay crop origin, plus 1..4-plane tiled/DCC modifiers) and flip-safe deferred RMFB.
+*/
+#define CANVAS_FB_GRAVES 16u
+static struct
+{
+        unsigned int fb[CANVAS_FB_GRAVES], count, forced;
+} canvas_fb_graves;
+
+static int canvas_scan_fb_scanned(unsigned int fb)
+{
+        return fb && (compositor.flip_pending || fb == compositor.on_screen || fb == compositor.plane_fb || fb == compositor_plane_carry.fb);
+}
+
+static void canvas_scan_fb_rmfb(unsigned int fb)
+{
+        if (fb && compositor.card >= 0)
+                system_control(compositor.card, COMPOSITOR_RMFB, address_of fb);
+}
+
+static void canvas_scan_fb_reap(void)
+{
+        unsigned int kept = 0;
+
+        for (unsigned int at = 0; at < canvas_fb_graves.count; at++)
+                if (canvas_scan_fb_scanned(canvas_fb_graves.fb[at]))
+                        canvas_fb_graves.fb[kept++] = canvas_fb_graves.fb[at];
+                else
+                        canvas_scan_fb_rmfb(canvas_fb_graves.fb[at]);
+        canvas_fb_graves.count = kept;
+}
+
+static void canvas_scan_fb_grave(unsigned int fb)
+{
+        if (!fb)
+                return;
+        if (!canvas_scan_fb_scanned(fb))
+        {
+                canvas_scan_fb_rmfb(fb);
+                return;
+        }
+        if (canvas_fb_graves.count == CANVAS_FB_GRAVES)
+                canvas_scan_fb_reap();
+        if (canvas_fb_graves.count == CANVAS_FB_GRAVES)
+        {
+                unsigned int out = 0;
+
+                while (out < CANVAS_FB_GRAVES - 1 &&
+                       (canvas_fb_graves.fb[out] == compositor.on_screen || canvas_fb_graves.fb[out] == compositor.plane_fb ||
+                        canvas_fb_graves.fb[out] == compositor_plane_carry.fb))
+                        out++;
+                canvas_scan_fb_rmfb(canvas_fb_graves.fb[out]), canvas_fb_graves.forced++;
+                for (unsigned int at = out + 1; at < CANVAS_FB_GRAVES; at++)
+                        canvas_fb_graves.fb[at - 1] = canvas_fb_graves.fb[at];
+                canvas_fb_graves.count--;
+        }
+        canvas_fb_graves.fb[canvas_fb_graves.count++] = fb;
+}
+
+#define CANVAS_SCAN_ERR_PITCH (-1)
+#define CANVAS_SCAN_ERR_OFFSET (-2)
+#define CANVAS_SCAN_ERR_PRIME (-3)
+#define CANVAS_MODIFIER_INVALID 0x00ffffffffffffffULL
+#ifdef COMPOSITOR_WL_PRIME
+#define CANVAS_SCAN_PRIME(prime) COMPOSITOR_WL_PRIME(prime)
+#else
+#define CANVAS_SCAN_PRIME(prime) system_control(compositor.card, COMPOSITOR_PRIME_FD_TO_HANDLE, address_of(prime))
+#endif
+#ifdef COMPOSITOR_WL_ADDFB
+#define CANVAS_SCAN_ADDFB(fb) COMPOSITOR_WL_ADDFB(fb)
+#else
+#define CANVAS_SCAN_ADDFB(fb) system_control(compositor.card, COMPOSITOR_ADDFB2, address_of(fb))
+#endif
+
+struct canvas_scan_fb_spec
+{
+        unsigned int width, height, fourcc, planes, base_offset;
+        int opaque, linear;
+        unsigned long modifier;
+        long fds[4];
+        unsigned int pitches[4], offsets[4];
+};
+
+struct canvas_scan_fb_result
+{
+        unsigned int fb_id, fourcc, pitch, offset, scan_x, scan_y;
+        int error;
+};
+
+static unsigned int canvas_scan_fb_make(const struct canvas_scan_fb_spec *spec, struct canvas_scan_fb_result *out)
+{
+        static const char *const amd[] = {"amdgpu"}, *const intel[] = {"i915", "xe"};
+        struct { unsigned int handle, flags; int fd; } prime;
+        struct
+        {
+                unsigned int fb_id, width, height, pixel_format, flags;
+                unsigned int handles[4], pitches[4], offsets[4];
+                unsigned long long modifier[4];
+        } fb = {0};
+        unsigned int fourcc, planes, close_arg[2] = {0, 0};
+        long refused = 0;
+
+        memory_zero(out, sizeof(*out));
+        if (!spec || compositor.card < 0)
+                return 0;
+        fourcc = spec->fourcc ? spec->fourcc : COMPOSITOR_XRGB8888;
+        if (spec->opaque && (fourcc == 0x34325241u || fourcc == 0x34324241u ||
+                             (spec->linear && (fourcc == 0x30335241u || fourcc == 0x30334241u))))
+                fourcc = (fourcc & ~0xffu) | 'X';
+        planes = spec->linear ? 1u : spec->planes < 1 ? 1u : spec->planes > 4 ? 4u : spec->planes;
+        fb.width = spec->width, fb.height = spec->height, fb.pixel_format = fourcc;
+        if (spec->linear)
+        {
+                unsigned int align = compositor_driver_in(amd, 1) ? 255u : compositor_driver_in(intel, 2) ? 63u : 0u;
+
+                fb.pitches[0] = spec->pitches[0], fb.offsets[0] = spec->offsets[0];
+                if (spec->modifier != CANVAS_MODIFIER_INVALID)
+                        fb.flags = 2u, fb.modifier[0] = spec->modifier;
+                if (align && !spec->modifier && spec->opaque && !(fb.pitches[0] & align) && (fb.offsets[0] & align) &&
+                    !(spec->base_offset & align) && fb.offsets[0] >= spec->base_offset && fb.pitches[0])
+                {
+                        unsigned int into = fb.offsets[0] - spec->base_offset;
+
+                        out->scan_y = into / fb.pitches[0];
+                        out->scan_x = (into % fb.pitches[0]) / 4u;
+                        fb.width += out->scan_x, fb.height += out->scan_y;
+                        fb.offsets[0] = spec->base_offset;
+                }
+                if (align && !spec->modifier && (fb.pitches[0] & align || fb.offsets[0] & align))
+                {
+                        out->fourcc = fourcc, out->pitch = fb.pitches[0], out->offset = fb.offsets[0];
+                        out->error = fb.pitches[0] & align ? CANVAS_SCAN_ERR_PITCH : CANVAS_SCAN_ERR_OFFSET;
+                        return 0;
+                }
+        }
+        else
+        {
+                fb.flags = 2u; // DRM_MODE_FB_MODIFIERS
+                for (unsigned int at = 0; at < planes; at++)
+                        fb.pitches[at] = spec->pitches[at], fb.offsets[at] = spec->offsets[at], fb.modifier[at] = spec->modifier;
+        }
+        for (unsigned int at = 0; at < planes; at++)
+        {
+                unsigned int same = 0;
+
+                for (unsigned int before = 0; before < at && !same; before++)
+                        if (spec->fds[before] == spec->fds[at])
+                                same = fb.handles[before];
+                if (!same)
+                {
+                        prime.handle = 0, prime.flags = 0, prime.fd = (int)spec->fds[at];
+                        if (prime.fd < 0 || CANVAS_SCAN_PRIME(prime) != 0 || !prime.handle)
+                        {
+                                refused = CANVAS_SCAN_ERR_PRIME;
+                                break;
+                        }
+                        same = prime.handle;
+                }
+                fb.handles[at] = same;
+        }
+        if (!refused && ((refused = CANVAS_SCAN_ADDFB(fb)) != 0 || !fb.fb_id))
+                refused = refused < 0 ? -refused : refused ? refused : 22;
+        for (unsigned int at = 0; at < planes; at++)
+        {
+                unsigned int first = 1;
+
+                for (unsigned int before = 0; before < at; before++)
+                        first = first && fb.handles[before] != fb.handles[at];
+                if (fb.handles[at] && first)
+                        close_arg[0] = fb.handles[at], system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close_arg);
+        }
+        out->fourcc = fourcc, out->pitch = fb.pitches[0], out->offset = fb.offsets[0];
+        if (refused)
+        {
+                out->scan_x = out->scan_y = 0, out->error = (int)refused;
+                return 0;
+        }
+        out->fb_id = fb.fb_id;
+        return fb.fb_id;
 }
 
