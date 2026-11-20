@@ -3062,13 +3062,12 @@ static b32 files_event(const struct window_event address_to event)
                         files.dirty = true;
                         break;
                 }
-                // Both lists take motion through the kit's standardized ui_list_click (box-select, selected-item drag, UI scroll, hover).
-                ui_list_click(ui, l, event, event->a, event->b);
+                // Both lists take motion through the kit's standardized ui_view_list_click (box-select, selected-item drag, UI scroll, hover).
+                ui_view_list_click(ui, &files.big->view, event, event->a, event->b, null);
                 if (l->band_moved)
                         files_band_apply();
                 if (l->drag_began)
                         files_drag_start((p32)l->drag_row);
-                ui_list_click(ui, &files.big->tree_list, event, event->a, event->b);
                 // A crumb under the pointer is the hand's, and is drawn in the ink.
                 files.crumb_hover = files_crumb_at(event->a, event->b);
                 if (files.crumb_hover >= 0)
@@ -3130,45 +3129,40 @@ static b32 files_event(const struct window_event address_to event)
                         files.dirty = true;
                         break;
                 }
-                // The sidebar tree: always delivers releases and non-left cancels while a press is held so stretch/drag never gets stuck.
+                // Standardized list routing across the sidebar tree and main rows: whichever list is active or under the pointer owns it.
                 {
-                        struct ui_list address_to tl = &files.big->tree_list;
-                        b32 in_side = ui_kit.pointer_x >= files.side_box.x && ui_kit.pointer_x < files.side_box.x + files.side_box.w &&
-                                      ui_kit.pointer_y >= files.side_box.y && ui_kit.pointer_y < files.side_box.y + files.side_box.h;
+                        struct ui_list address_to hit_list = null;
 
-                        if (tl->press.down || in_side)
+                        row = ui_view_list_click(ui, &files.big->view, event, ui_kit.pointer_x, ui_kit.pointer_y, &hit_list);
+                        if (hit_list == &files.big->tree_list)
                         {
-                                int node = ui_list_click(ui, tl, event, ui_kit.pointer_x, ui_kit.pointer_y);
-
-                                if (down && event->a == UI_POINTER_LEFT && in_side)
+                                if (down && event->a == UI_POINTER_LEFT)
                                         files.focus = FILES_FOCUS_TREE;
-                                if (node >= 0 && (p32)node < files.big->tree.count)
+                                if (row >= 0 && (p32)row < files.big->tree.count)
                                 {
-                                        files.tree_at = (p32)node;
-                                        if (ui_list_tree_chevron_at(ui, tl, files.big->tree.node[node].depth, ui_kit.pointer_x))
-                                                files_tree_toggle((p32)node);
-                                        else if (tl->double_clicked)
+                                        files.tree_at = (p32)row;
+                                        if (ui_list_tree_chevron_at(ui, hit_list, files.big->tree.node[row].depth, ui_kit.pointer_x))
+                                                files_tree_toggle((p32)row);
+                                        else if (hit_list->double_clicked)
                                         {
                                                 // Double-click in the sidebar toggles expand/collapse (giving immediate feedback even when
                                                 // already in that folder); a leaf folder with no children reloads and moves focus to rows.
-                                                b32 moved = files_tree_go((p32)node);
+                                                b32 moved = files_tree_go((p32)row);
 
-                                                files_tree_toggle((p32)node);
-                                                if (!moved && files.big->tree.node[node].read && !files.big->tree.node[node].has)
+                                                files_tree_toggle((p32)row);
+                                                if (!moved && files.big->tree.node[row].read && !files.big->tree.node[row].has)
                                                         files.focus = FILES_FOCUS_ROWS, files_model_reload(m);
                                         }
-                                        else if (files_tree_go((p32)node))
+                                        else if (files_tree_go((p32)row))
                                                 files.dirty = true;
                                 }
-                                if (in_side || event->a == UI_POINTER_LEFT)
-                                        break;
+                                break;
                         }
+                        if (hit_list != l)
+                                break;
                 }
-                // The main rows: standardized kit interaction (selected rows drag, unselected scroll, L+R box-selects, clean right click
-                // asks for menu on release, double click opens).
                 if (down && event->a == UI_POINTER_LEFT)
                         files.focus = FILES_FOCUS_ROWS;
-                row = ui_list_click(ui, l, event, ui_kit.pointer_x, ui_kit.pointer_y);
                 if (l->band_began)
                 {
                         files.band_add = (event->flags & WINDOW_KEY_CONTROL) != 0;

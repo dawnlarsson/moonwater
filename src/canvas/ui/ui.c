@@ -27786,6 +27786,7 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
         {
                 if (!on_list)
                         return -1;
+                l->drag_armed = false;
                 // Right already held + Left pressed: dual-button box drag select (cancels pending right-click menu).
                 if (l->selected && (l->right_down || (ui_kit.buttons & UI_BTN_RIGHT)))
                 {
@@ -27806,8 +27807,14 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                 // Unselected item, empty ground, or non-selectable list: UI scroll like normal.
                 if (!ui_press_drags(event->flags) && !l->selected)
                         ui_press_begin(&l->press, x, y, row, touch);
-                else if (ui_press_down(&l->press, x, y, row, &l->scroll), l->press.target < 0 && row >= 0)
-                        return -1; // a press on rows running on stops them, and shows and clicks nothing
+                else
+                {
+                        ui_press_down(&l->press, x, y, row, &l->scroll);
+                        if (!touch && l->press.target < 0 && row >= 0)
+                                l->press.target = row;
+                        if (l->press.target < 0 && row >= 0)
+                                return -1; // a finger press on rows running on stops them, and shows and clicks nothing
+                }
                 ui_list_pointer(ui, l, WINDOW_EVENT_BUTTON, x, y, true);
                 return -1;
         }
@@ -27852,6 +27859,75 @@ static int ui_list_click(struct ui address_to ui, struct ui_list address_to l, c
                         l->ground_clicked = true;
                 return ui_list_note_click(l, clicked);
         }
+}
+
+// Whether a list currently owns an active pointer interaction (press, item drag, rubber band, chord, or right-hold).
+static inline b32 ui_list_active(const struct ui_list address_to l)
+{
+        return l->press.down || l->drag_armed || l->band || l->right_down || l->chord;
+}
+
+// Whether (x, y) in device pixels lies within the list's row span.
+static inline b32 ui_list_in(const struct ui_list address_to l, int x, int y)
+{
+        int across, wide;
+
+        ui_list_across(l, &across, &wide);
+        return x >= across && x < across + wide && y >= l->y && y < l->y + l->h;
+}
+
+/*
+        Routes a pointer motion or button event across every list in a view (v->item[at].list): an active list always receives its
+        follow-up motion and release regardless of where the pointer moved; otherwise button events go to the list under (x, y) and
+        motion updates hover across all lists. Sets *target (when non-null) to the list that took the event and returns the row
+        clicked (or -1).
+*/
+static int ui_view_list_click(struct ui address_to ui, struct ui_view address_to v, const struct window_event address_to event,
+                              int x, int y, struct ui_list address_to address_to target)
+{
+        ui_view_ready(v);
+        if (target)
+                *target = null;
+        for (int at = 0; at < v->tree.count; at++)
+        {
+                struct ui_list address_to l = v->item[at].list;
+
+                if (l && ui_list_active(l))
+                {
+                        if (target)
+                                *target = l;
+                        return ui_list_click(ui, l, event, x, y);
+                }
+        }
+        if (event->type == WINDOW_EVENT_MOTION)
+        {
+                for (int at = 0; at < v->tree.count; at++)
+                {
+                        struct ui_list address_to l = v->item[at].list;
+
+                        if (!l)
+                                continue;
+                        ui_list_click(ui, l, event, x, y);
+                        if (target && !*target && ui_list_in(l, x, y))
+                                *target = l;
+                }
+                return -1;
+        }
+        if (event->type == WINDOW_EVENT_BUTTON)
+        {
+                for (int at = 0; at < v->tree.count; at++)
+                {
+                        struct ui_list address_to l = v->item[at].list;
+
+                        if (l && ui_list_in(l, x, y))
+                        {
+                                if (target)
+                                        *target = l;
+                                return ui_list_click(ui, l, event, x, y);
+                        }
+                }
+        }
+        return -1;
 }
 
 /* ---- a finger's press: what it drags, and what its lift throws ---- */

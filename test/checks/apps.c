@@ -1345,6 +1345,52 @@ static fn list_interaction_check(struct ui address_to wui)
         unstuck_out = !l.press.down && l.scroll.body.state != BODY_TRACK;
         check("list: right-click or release outside a list cancels stretch/drag so it never gets stuck", unstuck_right && unstuck_out);
 
+        // 5b. Mouse click on a gliding (BODY_NOTCH) selectable list still clicks the row rather than being swallowed.
+        {
+                b32 notch_clicked;
+
+                ui_kit.scroll_off = 0;
+                ui_kit.buttons = 0;
+                l.selected = list_check_selected_row;
+                ui_scroll_extent(&l.scroll);
+                ui_body_notch(&l.scroll.body, (b64)row << UI_Q, (b64)ui_kit.now);
+                ui_event_context(&ldown);
+                ui_list_click(wui, &l, &ldown, 20, 100 + 4 * row + 5);
+                ui_event_context(&lup);
+                notch_clicked = ui_list_click(wui, &l, &lup, 20, 100 + 4 * row + 5) == 4;
+                check("list: mouse click on a gliding list still clicks the row", notch_clicked);
+        }
+
+        // 5c. ui_view_list_click routes active press/release across two lists in a view without stealing releases.
+        {
+                struct ui_list side, main;
+                struct ui_list address_to target = null;
+                b32 routed;
+
+                memory_zero(&side, sizeof(side));
+                memory_zero(&main, sizeof(main));
+                side.virtual = true, side.total = 10, side.hover = side.down = -1, side.describe = stripe_row, side.empty = "";
+                main.virtual = true, main.total = 20, main.hover = main.down = -1, main.describe = stripe_row, main.selected = list_check_selected_row, main.empty = "";
+                memory_zero(&v, sizeof(v));
+                ui_view_begin(&v, wui, 800, -480);
+                ui_side_frame()
+                {
+                        ui_side_pane(null)
+                                ui_rows(&side, .class = "list", .grow = 1);
+                        ui_side_body()
+                                ui_rows(&main, .class = "list", .grow = 1);
+                }
+                ui_view_end(&v);
+                ui_kit.buttons = 0;
+                ui_event_context(&ldown);
+                ui_view_list_click(wui, &v, &ldown, main.x + 20, main.y + 4 * row + 5, &target);
+                routed = target == &main && main.press.down && !side.press.down;
+                ui_event_context(&lup);
+                ui_view_list_click(wui, &v, &lup, side.x + 20, side.y + 10, &target); // release inside side pane
+                routed = routed && target == &main && !main.press.down && !ui_list_active(&main);
+                check("list: ui_view_list_click delivers cross-pane releases to the active list", routed);
+        }
+
         // 6. Side pane seam resize: widens, narrows to least, resets on double-click, and works in RTL.
         {
                 struct ui_rect side_box;
