@@ -186,6 +186,7 @@ menu_bin_empty	1538	ריקון סל המחזור
 menu_bin_open	8797	פתיחת סל המחזור
 menu_bin_restore	4799	שחזור
 menu_copy	43e0	העתק
+menu_copy_row	f3c8	העתק שורה
 menu_cut	5c17	גזור
 menu_delete	1e3e	מחק
 menu_find	1fa6	חפש
@@ -197,6 +198,7 @@ menu_open_terminal	6d2a	פתח &מסוף כאן
 menu_paste	6854	הדבק
 menu_properties	c780	&מאפיינים
 menu_redo	ac45	בצע שוב
+menu_remove	901d	הסר
 menu_rename	9529	&שנה שם
 menu_reset_zoom	1b0f	אפס זום
 menu_select_all	f6f6	בחר הכול
@@ -253,10 +255,15 @@ settings_cannot_join	dfa4	moonwater לא יכול לעמוד בדרישות הר
 settings_cannot_run	954f	לא ניתן היה להריץ את פקודת moonwater
 settings_card_back	db52	Escape או לחיצה לחזרה
 settings_card_stopped	e24d	נעצר: Escape או לחיצה לחזרה
+settings_column_access	ae0b	גישה
+settings_column_security	21db	אבטחה
+settings_column_signal	4529	אות
+settings_column_status	f20f	מצב
 settings_copied	0bd7	הועתק ללוח הגזירים
 settings_copy_both	257a	העתק תווית וערך
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	העתק ערך
+settings_device_deny	fa87	דחה
 settings_device_drive	8683	כונן, %s
 settings_device_name	5f12	שם ההתקן
 settings_device_none	3cd5	לא נמצאו כוננים או התקני USB
@@ -290,6 +297,7 @@ settings_item_cannot	e643	moonwater לא יכול לעמוד בדרישות הר
 settings_item_drive	269a	מוצג, לא מוחזק: אף פקודה לא משנה כונן
 settings_item_joined	0fb8	מחוברת: Delete שוכח אותה
 settings_item_kept	33d9	נשמר לפי שמו: Delete שוכח אותו
+settings_item_link	03ad	מקושר: Delete מסיר אותו
 settings_item_open	4429	Enter מתחבר ושומר
 settings_item_saved	3ffd	שמורה: Enter מבקש שוב את הסיסמה, Delete שוכח אותה
 settings_joined	1050	מחוברת

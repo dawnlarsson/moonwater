@@ -5978,7 +5978,8 @@ static fn actions_press(int button, int x, int y, unsigned int flags)
 // An item of the menu open, chosen by a press on it (flags as above), as the popup's runner answers it.
 static fn actions_pick(int k, unsigned int flags)
 {
-        int row = popmenu_row(&settings.popup.menu), x = settings.popup.menu.width / 2, y = ui_px(&settings.ui, UI_MENU_PAD) + k * row + row / 2;
+        int row = popmenu_row(&settings.popup.menu), x = settings.popup.menu.width / 2;
+        int y = ui_px(&settings.ui, UI_MENU_PAD) + ui_popmenu_start(&settings.popup.menu, k) + row / 2;
         struct window_event over = {WINDOW_EVENT_MOTION, flags & WINDOW_KEY_TOUCH, x, y};
         struct window_event land = {WINDOW_EVENT_BUTTON, WINDOW_KEY_DOWN | flags, UI_POINTER_LEFT, 0};
         struct window_event lift = {WINDOW_EVENT_BUTTON, flags, UI_POINTER_LEFT, 0};
@@ -6008,7 +6009,7 @@ static b32 actions_copies(int row)
 {
         const struct ui_popmenu address_to m = &settings.popup.menu;
 
-        return settings.popup.open && settings.copy_open && settings.copy_row == row && m->count == 2 && m->items[0].id == SETTINGS_COPY_VALUE &&
+        return settings.popup.open && settings.popup.list == &settings.list && settings.popup.list_row == row && m->count == 2 && m->items[0].id == SETTINGS_COPY_VALUE &&
                m->items[1].id == SETTINGS_COPY_BOTH && !(m->items[0].flags & UI_MENU_DISABLED) &&
                string_equals((string_address)m->items[0].label, (string_address)WORDS(settings_copy_value)) &&
                string_equals((string_address)m->items[1].label, (string_address)WORDS(settings_copy_both));
@@ -6127,7 +6128,7 @@ static fn check_settings_actions(void)
         opened = actions_copies(info) && settings.popup.menu.hot < 0;
         serial = settings.own.table->clip_offer_serial[settings.own.row];
         actions_pick(0, 0);
-        copied = !settings.popup.open && !settings.copy_open && actions_clipboard(serial, "203.0.113.7 via stun, 2 min ago") &&
+        copied = !settings.popup.open && !settings.popup.list && actions_clipboard(serial, "203.0.113.7 via stun, 2 min ago") &&
                  string_equals((string_address)settings.status, (string_address)WORDS(settings_copied)) && settings.queued == 0;
         actions_press(UI_POINTER_RIGHT, x, y, 0);
         serial = settings.own.table->clip_offer_serial[settings.own.row];
@@ -6143,18 +6144,18 @@ static fn check_settings_actions(void)
         keyed = actions_copies(info) && settings.popup.menu.hot == 0;
         serial = settings.own.table->clip_offer_serial[settings.own.row];
         settings_press(UI_KEY_ENTER);
-        keyed = keyed && !settings.copy_open && actions_clipboard(serial, "203.0.113.7 via stun, 2 min ago") && settings.queued == 0;
+        keyed = keyed && !settings.popup.list && actions_clipboard(serial, "203.0.113.7 via stun, 2 min ago") && settings.queued == 0;
         settings_chord(SETTINGS_KEY_F10, 0, WINDOW_KEY_SHIFT);
         shifted = actions_copies(info);
         settings_press(UI_KEY_ESCAPE);
-        shifted = shifted && !settings.popup.open && !settings.copy_open && settings.queued == 0;
+        shifted = shifted && !settings.popup.open && !settings.popup.list && settings.queued == 0;
         check("settings copies: the menu key opens them under the row the keys are on, the first lit, and Enter copies", keyed);
         check("settings copies: Shift-F10 opens them too, and Escape closes them with nothing done", shifted);
         // A row with no value opens none.
         actions_show(discover);
         actions_middle(discover, &x, &y);
         actions_press(UI_POINTER_RIGHT, x, y, 0);
-        plain = !settings.popup.open && !settings.copy_open && settings.queued == 0;
+        plain = !settings.popup.open && !settings.popup.list && settings.queued == 0;
         check("settings copies: the right button on a row with no value opens nothing and runs nothing", plain);
 
         // A virtual device's right button on the SSH server's switch copies its word, and the switch is as it was.
@@ -6179,7 +6180,7 @@ static fn check_settings_actions(void)
         {
                 const struct ui_popmenu address_to m = &settings.popup.menu;
 
-                field = settings_editing() == name && settings.popup.open && settings.popup.field == &settings.edit && settings.copy_open && m->count > 3 &&
+                field = settings_editing() == name && settings.popup.open && settings.popup.field == &settings.edit && settings.popup.list == &settings.list && m->count > 3 &&
                         m->items[0].id == UI_TEXT_MENU_UNDO && (m->items[m->count - 3].flags & UI_MENU_SEPARATOR) &&
                         m->items[m->count - 2].id == SETTINGS_COPY_VALUE && m->items[m->count - 1].id == SETTINGS_COPY_BOTH;
         }
@@ -6190,8 +6191,144 @@ static fn check_settings_actions(void)
         check("settings copies: a row typed in has its field's items and then the row's copies, which copy its value and keep the typing", field);
 
         ui_popmenu_close(&settings.popup);
-        settings.copy_open = false;
+        settings.popup.list = null, settings.popup.list_row = -1;
         settings_edit_end();
+
+        // File-explorer-style details lists & base context menu actions for External devices and Waterlink linked machines.
+        {
+                static const char ext_out[] =
+                    "  1-2 usb 0627:0002 Zebra blocked\n"
+                    "  1-1 usb 0627:0001 Alpha allowed\n";
+                static const char link_out[] =
+                    "  zeta  11223344...  may run files\n"
+                    "      heard 5s ago from 10.0.0.2:41900  next: moonwater link zeta\n"
+                    "  alpha  a1b2c3d4...  may run terminal files log\n"
+                    "      open now from 192.168.1.5:41900  next: moonwater link alpha\n";
+                unsigned short saved_c2 = settings.item_count[2], saved_c3 = settings.item_count[3];
+                int ext_row = (int)SETTINGS_LIST + 2 * SETTINGS_LIST_ROWS;
+                int link_row = (int)SETTINGS_LIST + 3 * SETTINGS_LIST_ROWS;
+                b32 ext_table = false, ext_sort = false, ext_menu = false;
+                b32 link_table = false, link_menu = false, link_remove = false, link_del = false;
+
+                // External devices: details columns, dense rows, column sort, right-click Allow/Deny + Copy + Copy row.
+                memory_copy(settings_large->said, ext_out, sizeof(ext_out) - 1);
+                settings.said_length = sizeof(ext_out) - 1;
+                settings_feed_hardware();
+                settings.page.chosen = settings_group_of(ext_row);
+                settings_rebuild();
+                actions_show(ext_row);
+                {
+                        int at = settings_pos(ext_row);
+                        struct ui_row described;
+
+                        ui_list_describe(&settings.list, ext_row, &described);
+                        ext_table = at >= 0 && (settings.list.starts[at] & UI_LIST_COLUMNS) != 0 &&
+                                    described.columns == &settings_large->columns[2] &&
+                                    settings.list.tall[at] == ui_dev(&settings.ui, UI_ROW_DENSE_TABS) &&
+                                    described.cells[1] && string_equals((string_address)described.cells[1], (string_address) "USB 1-2") &&
+                                    described.cells[2] && string_equals((string_address)described.cells[2], (string_address)WORDS(settings_state_blocked));
+                        if (at >= 0)
+                        {
+                                int hx = settings_large->columns[2].at[0] + 12;
+                                int hy = ui_list_row_y(&settings.list, at) - ui_dev(&settings.ui, UI_COLUMNS_H) / 2;
+
+                                actions_press(UI_POINTER_LEFT, hx, hy, 0);
+                                ext_sort = settings_large->columns[2].sorted == 0 && !settings_large->columns[2].descending &&
+                                           string_equals((string_address)settings_large->item[2][0].label, (string_address) "Alpha");
+                        }
+                }
+                actions_show(ext_row);
+                actions_middle(ext_row, &x, &y);
+                actions_press(UI_POINTER_RIGHT, x, y, 0);
+                {
+                        const struct ui_popmenu address_to m = &settings.popup.menu;
+
+                        ext_menu = settings.popup.open && settings.popup.list == &settings.list && settings.popup.list_row == ext_row &&
+                                   m->count == 4 && m->items[0].id == SETTINGS_MENU_ACT && (m->items[1].flags & UI_MENU_SEPARATOR) &&
+                                   m->items[2].id == UI_LIST_MENU_COPY && m->items[3].id == UI_LIST_MENU_COPY_ROW;
+                }
+                serial = settings.own.table->clip_offer_serial[settings.own.row];
+                actions_pick(2, 0);
+                ext_menu = ext_menu && actions_clipboard(serial, "Alpha");
+                actions_press(UI_POINTER_RIGHT, x, y, 0);
+                serial = settings.own.table->clip_offer_serial[settings.own.row];
+                actions_pick(3, 0);
+                ext_menu = ext_menu && actions_clipboard(serial, "Alpha: USB 1-1, allowed");
+                settings.queued = 0;
+                actions_press(UI_POINTER_RIGHT, x, y, 0);
+                actions_pick(0, 0);
+                ext_menu = ext_menu && settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT &&
+                           string_equals((string_address)settings.queue[0].value, (string_address) "x\n1-1");
+                settings.queued = 0;
+
+                // Waterlink linked machines: structured Name/Access/Status details table, dense 28px rows, Copy / Copy row / Remove + Delete twice.
+                memory_copy(settings_large->said, link_out, sizeof(link_out) - 1);
+                settings.said_length = sizeof(link_out) - 1;
+                settings_feed_links();
+                settings.page.chosen = settings_group_of(link_row);
+                settings_rebuild();
+                actions_show(link_row);
+                {
+                        int at = settings_pos(link_row);
+                        struct ui_row described;
+
+                        ui_list_describe(&settings.list, link_row, &described);
+                        link_table = at >= 0 && (settings.list.starts[at] & UI_LIST_COLUMNS) != 0 &&
+                                     described.columns == &settings_large->columns[3] &&
+                                     settings.list.tall[at] == ui_dev(&settings.ui, UI_ROW_DENSE) &&
+                                     string_equals((string_address)settings_large->item[3][0].label, (string_address) "zeta") &&
+                                     string_equals((string_address)settings_large->item[3][0].access, (string_address) "run files") &&
+                                     string_equals((string_address)settings_large->item[3][0].detail, (string_address) "heard 5s ago from 10.0.0.2:41900");
+                }
+                actions_middle(link_row, &x, &y);
+                actions_press(UI_POINTER_RIGHT, x, y, 0);
+                {
+                        const struct ui_popmenu address_to m = &settings.popup.menu;
+
+                        link_menu = settings.popup.open && settings.popup.list == &settings.list && settings.popup.list_row == link_row &&
+                                    m->count == 4 && m->items[0].id == UI_LIST_MENU_COPY && m->items[1].id == UI_LIST_MENU_COPY_ROW &&
+                                    (m->items[2].flags & UI_MENU_SEPARATOR) && m->items[3].id == UI_LIST_MENU_REMOVE;
+                }
+                serial = settings.own.table->clip_offer_serial[settings.own.row];
+                actions_pick(0, 0);
+                link_menu = link_menu && actions_clipboard(serial, "zeta");
+                actions_press(UI_POINTER_RIGHT, x, y, 0);
+                serial = settings.own.table->clip_offer_serial[settings.own.row];
+                actions_pick(1, 0);
+                link_menu = link_menu && actions_clipboard(serial, "zeta: heard 5s ago from 10.0.0.2:41900");
+                settings.queued = 0;
+                actions_press(UI_POINTER_RIGHT, x, y, 0);
+                actions_pick(3, 0);
+                {
+                        string_address words[SETTINGS_WORDS];
+
+                        link_remove = settings.queued == 1 && settings.queue[0].row == SETTINGS_JOB_ACT &&
+                                      string_equals((string_address)settings.queue[0].value, (string_address) "r\nzeta");
+                        settings.moonwater = (string_address) "/moonwater";
+                        string_copy_bounded((string_address)settings.job_value, (string_address) "r\nzeta", sizeof(settings.job_value));
+                        settings_act_words(words);
+                        link_remove = link_remove && words[0] && string_equals(words[1], (string_address) "link") &&
+                                      string_equals(words[2], (string_address) "remove") && string_equals(words[3], (string_address) "zeta") && !words[4];
+                }
+                settings.queued = 0;
+                ui_confirm_drop(&settings.confirm);
+                settings.list.focus = link_row + 1; // alpha
+                settings_press(UI_KEY_DELETE);
+                link_del = settings.queued == 0 && settings.confirm.armed;
+                settings_press(UI_KEY_DELETE);
+                link_del = link_del && settings.queued == 1 && string_equals((string_address)settings.queue[0].value, (string_address) "r\nalpha");
+
+                check("settings lists: External devices use file-explorer-style columns, dense rows, and sortable headers", ext_table && ext_sort);
+                check("settings lists: External devices right-click menu offers Allow/Deny, Copy, and Copy row", ext_menu);
+                check("settings lists: Waterlink linked machines use file-explorer-style columns and dense 28px rows", link_table);
+                check("settings lists: Waterlink right-click menu offers Copy, Copy row, and direct Remove (link remove)", link_menu && link_remove);
+                check("settings lists: Delete twice on a Waterlink linked machine confirms and removes it", link_del);
+
+                settings.item_count[2] = saved_c2, settings.item_count[3] = saved_c3;
+                memory_zero(settings_large->columns, sizeof(settings_large->columns));
+                ui_popmenu_close(&settings.popup);
+                settings.popup.list = null, settings.popup.list_row = -1;
+        }
         popup_fake.screen = 0;
         settings.queued = 0, settings.child = 0, settings.job_sets = false;
 }

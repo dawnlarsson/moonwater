@@ -185,6 +185,7 @@ menu_bin_empty	1538	Töm papperskorgen
 menu_bin_open	8797	Öppna papperskorgen
 menu_bin_restore	4799	Lägg tillbaka
 menu_copy	43e0	Ko&piera
+menu_copy_row	f3c8	Kopiera rad
 menu_cut	5c17	&Klipp ut
 menu_delete	1e3e	&Ta bort
 menu_find	1fa6	&Sök
@@ -196,6 +197,7 @@ menu_open_terminal	6d2a	Öppna en &terminal här
 menu_paste	6854	Kl&istra in
 menu_properties	c780	&Egenskaper
 menu_redo	ac45	&Gör om
+menu_remove	901d	Ta bort
 menu_rename	9529	Byt &namn
 menu_reset_zoom	1b0f	Å&terställ zoom
 menu_select_all	f6f6	&Markera allt
@@ -252,10 +254,15 @@ settings_cannot_join	dfa4	moonwater kan inte ansluta till det som nätverket kr�
 settings_cannot_run	954f	moonwater-kommandot kunde inte köras
 settings_card_back	db52	Escape eller ett klick går tillbaka
 settings_card_stopped	e24d	stoppad: Escape eller ett klick går tillbaka
+settings_column_access	ae0b	Åtkomst
+settings_column_security	21db	Säkerhet
+settings_column_signal	4529	Signal
+settings_column_status	f20f	Status
 settings_copied	0bd7	kopierat till urklippet
 settings_copy_both	257a	Kopiera etikett och värde
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Kopiera värde
+settings_device_deny	fa87	Neka
 settings_device_drive	8683	disk, %s
 settings_device_name	5f12	Enhetens namn
 settings_device_none	3cd5	Inga diskar eller USB-enheter hittades
@@ -289,6 +296,7 @@ settings_item_cannot	e643	moonwater kan inte ansluta till det som det här nätv
 settings_item_drive	269a	visas, hålls inte: inget kommando ändrar en disk
 settings_item_joined	0fb8	ansluten: Delete glömmer det
 settings_item_kept	33d9	sparad med namn: Delete glömmer den
+settings_item_link	03ad	länkad: Delete tar bort den
 settings_item_open	4429	Enter ansluter och sparar
 settings_item_saved	3ffd	sparad: Enter frågar efter lösenordet igen, Delete glömmer den
 settings_joined	1050	ansluten

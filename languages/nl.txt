@@ -185,6 +185,7 @@ menu_bin_empty	1538	Prullenbak legen
 menu_bin_open	8797	Prullenbak openen
 menu_bin_restore	4799	Terugzetten
 menu_copy	43e0	Ko&piëren
+menu_copy_row	f3c8	Rij kopiëren
 menu_cut	5c17	&Knippen
 menu_delete	1e3e	&Verwijderen
 menu_find	1fa6	&Zoeken
@@ -196,6 +197,7 @@ menu_open_terminal	6d2a	Hier een &terminal openen
 menu_paste	6854	P&lakken
 menu_properties	c780	&Eigenschappen
 menu_redo	ac45	Op&nieuw
+menu_remove	901d	Verwijderen
 menu_rename	9529	Naam &wijzigen
 menu_reset_zoom	1b0f	Zoom &herstellen
 menu_select_all	f6f6	&Alles selecteren
@@ -252,10 +254,15 @@ settings_cannot_join	dfa4	moonwater kan niet voldoen aan wat dat netwerk vraagt
 settings_cannot_run	954f	de moonwater-opdracht kon niet worden uitgevoerd
 settings_card_back	db52	Escape of een klik gaat terug
 settings_card_stopped	e24d	gestopt: Escape of een klik gaat terug
+settings_column_access	ae0b	Toegang
+settings_column_security	21db	Beveiliging
+settings_column_signal	4529	Signaal
+settings_column_status	f20f	Status
 settings_copied	0bd7	gekopieerd naar het klembord
 settings_copy_both	257a	Label en waarde kopiëren
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Waarde kopiëren
+settings_device_deny	fa87	Weigeren
 settings_device_drive	8683	schijf, %s
 settings_device_name	5f12	Naam van het apparaat
 settings_device_none	3cd5	Geen schijven of USB-apparaten gevonden
@@ -289,6 +296,7 @@ settings_item_cannot	e643	moonwater kan niet voldoen aan wat dit netwerk vraagt
 settings_item_drive	269a	getoond, niet vastgehouden: geen commando wijzigt een schijf
 settings_item_joined	0fb8	verbonden: Delete vergeet het
 settings_item_kept	33d9	bewaard op naam: Delete vergeet het
+settings_item_link	03ad	gekoppeld: Delete verwijdert het
 settings_item_open	4429	Enter verbindt en bewaart het
 settings_item_saved	3ffd	opgeslagen: Enter vraagt het wachtwoord opnieuw, Delete vergeet het
 settings_joined	1050	verbonden

@@ -186,6 +186,7 @@ menu_bin_empty	1538	ردی کی ٹوکری خالی کریں
 menu_bin_open	8797	ردی کی ٹوکری کھولیں
 menu_bin_restore	4799	واپس رکھیں
 menu_copy	43e0	کاپی
+menu_copy_row	f3c8	قطار نقل کریں
 menu_cut	5c17	کٹ
 menu_delete	1e3e	حذف کریں
 menu_find	1fa6	تلاش
@@ -197,6 +198,7 @@ menu_open_terminal	6d2a	یہاں &ٹرمینل کھولیں
 menu_paste	6854	پیسٹ
 menu_properties	c780	&خصوصیات
 menu_redo	ac45	دوبارہ کریں
+menu_remove	901d	ہٹائیں
 menu_rename	9529	نام &تبدیل کریں
 menu_reset_zoom	1b0f	زوم بحال کریں
 menu_select_all	f6f6	سب منتخب کریں
@@ -253,10 +255,15 @@ settings_cannot_join	dfa4	moonwater اس نیٹ ورک کے مطالبے کے م
 settings_cannot_run	954f	moonwater کمانڈ چلائی نہ جا سکی
 settings_card_back	db52	Escape یا کلک واپسی کے لیے
 settings_card_stopped	e24d	رک گیا: Escape یا کلک واپسی کے لیے
+settings_column_access	ae0b	رسائی
+settings_column_security	21db	سکیورٹی
+settings_column_signal	4529	سگنل
+settings_column_status	f20f	حالت
 settings_copied	0bd7	کلپ بورڈ پر کاپی ہو گیا
 settings_copy_both	257a	لیبل اور قدر کاپی کریں
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	قدر کاپی کریں
+settings_device_deny	fa87	انکار
 settings_device_drive	8683	ڈرائیو، %s
 settings_device_name	5f12	ڈیوائس کا نام
 settings_device_none	3cd5	کوئی ڈرائیو یا USB آلہ نہیں ملا
@@ -290,6 +297,7 @@ settings_item_cannot	e643	moonwater اس نیٹ ورک کے مطالبے کے م
 settings_item_drive	269a	دکھایا گیا، روکا نہیں گیا: کوئی حکم ڈرائیو نہیں بدلتا
 settings_item_joined	0fb8	منسلک: Delete اسے بھلا دیتا ہے
 settings_item_kept	33d9	نام سے رکھا گیا: Delete اسے بھلا دیتا ہے
+settings_item_link	03ad	منسلک: Delete اسے ہٹاتا ہے
 settings_item_open	4429	Enter منسلک کرتا ہے اور محفوظ کرتا ہے
 settings_item_saved	3ffd	محفوظ: Enter دوبارہ پاس ورڈ مانگتا ہے، Delete اسے بھلا دیتا ہے
 settings_joined	1050	منسلک

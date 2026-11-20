@@ -182,6 +182,7 @@ menu_bin_empty	1538	Empty the bin
 menu_bin_open	8797	Open the bin
 menu_bin_restore	4799	Put back
 menu_copy	43e0	&Copy
+menu_copy_row	f3c8	Copy row
 menu_cut	5c17	Cu&t
 menu_delete	1e3e	&Delete
 menu_find	1fa6	&Find
@@ -193,6 +194,7 @@ menu_open_terminal	6d2a	Open a &Terminal Here
 menu_paste	6854	&Paste
 menu_properties	c780	P&roperties
 menu_redo	ac45	&Redo
+menu_remove	901d	Remove
 menu_rename	9529	Re&name
 menu_reset_zoom	1b0f	&Reset Zoom
 menu_select_all	f6f6	Select &All
@@ -249,10 +251,15 @@ settings_cannot_join	dfa4	moonwater cannot join what that network asks for
 settings_cannot_run	954f	the moonwater command could not be run
 settings_card_back	db52	Escape or a press goes back
 settings_card_stopped	e24d	stopped: Escape or a press goes back
+settings_column_access	ae0b	Access
+settings_column_security	21db	Security
+settings_column_signal	4529	Signal
+settings_column_status	f20f	Status
 settings_copied	0bd7	copied to the clipboard
 settings_copy_both	257a	Copy label and value
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Copy value
+settings_device_deny	fa87	Deny
 settings_device_drive	8683	drive, %s
 settings_device_name	5f12	Name of the device
 settings_device_none	3cd5	No drives or USB devices found
@@ -286,6 +293,7 @@ settings_item_cannot	e643	moonwater cannot join what this network asks for
 settings_item_drive	269a	shown, not held: no verb changes a drive
 settings_item_joined	0fb8	joined: Delete forgets it
 settings_item_kept	33d9	kept by its name: Delete forgets it
+settings_item_link	03ad	linked: Delete removes it
 settings_item_open	4429	Enter joins it, and saves it
 settings_item_saved	3ffd	saved: Enter types its passphrase again, Delete forgets it
 settings_joined	1050	joined

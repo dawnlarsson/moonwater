@@ -185,6 +185,7 @@ menu_bin_empty	1538	Очистити кошик
 menu_bin_open	8797	Відкрити кошик
 menu_bin_restore	4799	Відновити
 menu_copy	43e0	Копіювати
+menu_copy_row	f3c8	Копіювати рядок
 menu_cut	5c17	Вирізати
 menu_delete	1e3e	Видалити
 menu_find	1fa6	Знайти
@@ -196,6 +197,7 @@ menu_open_terminal	6d2a	Відкрити &термінал тут
 menu_paste	6854	Вставити
 menu_properties	c780	&Властивості
 menu_redo	ac45	Повторити
+menu_remove	901d	Вилучити
 menu_rename	9529	&Перейменувати
 menu_reset_zoom	1b0f	Скинути масштаб
 menu_select_all	f6f6	Вибрати все
@@ -252,10 +254,15 @@ settings_cannot_join	dfa4	moonwater не може підключитися до 
 settings_cannot_run	954f	команду moonwater не вдалося виконати
 settings_card_back	db52	Escape або клацання — назад
 settings_card_stopped	e24d	зупинено: Escape або клацання — назад
+settings_column_access	ae0b	Доступ
+settings_column_security	21db	Захист
+settings_column_signal	4529	Сигнал
+settings_column_status	f20f	Стан
 settings_copied	0bd7	скопійовано до буфера обміну
 settings_copy_both	257a	Копіювати назву та значення
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Копіювати значення
+settings_device_deny	fa87	Заборонити
 settings_device_drive	8683	диск, %s
 settings_device_name	5f12	Назва пристрою
 settings_device_none	3cd5	Диски та USB-пристрої не знайдено
@@ -289,6 +296,7 @@ settings_item_cannot	e643	moonwater не може підключитися до 
 settings_item_drive	269a	показано, не утримується: жодна команда не змінює диск
 settings_item_joined	0fb8	підключено: Delete забуває
 settings_item_kept	33d9	запам'ятовано за назвою: Delete забуває
+settings_item_link	03ad	пов'язано: Delete вилучає
 settings_item_open	4429	Enter підключить і збереже
 settings_item_saved	3ffd	збережено: Enter знову запитає пароль, Delete забуває
 settings_joined	1050	підключено

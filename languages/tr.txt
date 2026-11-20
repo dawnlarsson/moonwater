@@ -185,6 +185,7 @@ menu_bin_empty	1538	Çöp kutusunu boşalt
 menu_bin_open	8797	Çöp kutusunu aç
 menu_bin_restore	4799	Geri koy
 menu_copy	43e0	&Kopyala
+menu_copy_row	f3c8	Satırı kopyala
 menu_cut	5c17	K&es
 menu_delete	1e3e	&Sil
 menu_find	1fa6	&Bul
@@ -196,6 +197,7 @@ menu_open_terminal	6d2a	Burada &uçbirim aç
 menu_paste	6854	Ya&pıştır
 menu_properties	c780	Ö&zellikler
 menu_redo	ac45	&Yinele
+menu_remove	901d	Kaldır
 menu_rename	9529	&Yeniden adlandır
 menu_reset_zoom	1b0f	Yakınlaştırmayı Sıfır&la
 menu_select_all	f6f6	&Tümünü Seç
@@ -252,10 +254,15 @@ settings_cannot_join	dfa4	moonwater bu ağın istediğine katılamıyor
 settings_cannot_run	954f	moonwater komutu çalıştırılamadı
 settings_card_back	db52	Escape veya bir tıklama geri döner
 settings_card_stopped	e24d	durduruldu: Escape veya bir tıklama geri döner
+settings_column_access	ae0b	Erişim
+settings_column_security	21db	Güvenlik
+settings_column_signal	4529	Sinyal
+settings_column_status	f20f	Durum
 settings_copied	0bd7	panoya kopyalandı
 settings_copy_both	257a	Etiketi ve değeri kopyala
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Değeri kopyala
+settings_device_deny	fa87	Reddet
 settings_device_drive	8683	sürücü, %s
 settings_device_name	5f12	Aygıtın adı
 settings_device_none	3cd5	Sürücü veya USB aygıtı bulunamadı
@@ -289,6 +296,7 @@ settings_item_cannot	e643	moonwater bu ağın istediğine katılamıyor
 settings_item_drive	269a	gösterilir, tutulmaz: hiçbir komut bir sürücüyü değiştirmez
 settings_item_joined	0fb8	bağlı: Delete unutturur
 settings_item_kept	33d9	adıyla saklı: Delete unutturur
+settings_item_link	03ad	bağlı: Delete kaldırır
 settings_item_open	4429	Enter bağlanır ve kaydeder
 settings_item_saved	3ffd	kayıtlı: Enter parolayı yeniden sorar, Delete unutturur
 settings_joined	1050	bağlı

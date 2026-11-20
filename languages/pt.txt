@@ -185,6 +185,7 @@ menu_bin_empty	1538	Esvaziar a lixeira
 menu_bin_open	8797	Abrir a lixeira
 menu_bin_restore	4799	Restaurar
 menu_copy	43e0	&Copiar
+menu_copy_row	f3c8	Copiar linha
 menu_cut	5c17	Recor&tar
 menu_delete	1e3e	&Excluir
 menu_find	1fa6	&Procurar
@@ -196,6 +197,7 @@ menu_open_terminal	6d2a	Abrir um &terminal aqui
 menu_paste	6854	Co&lar
 menu_properties	c780	P&ropriedades
 menu_redo	ac45	&Refazer
+menu_remove	901d	Remover
 menu_rename	9529	Re&nomear
 menu_reset_zoom	1b0f	&Redefinir zoom
 menu_select_all	f6f6	Selecionar t&udo
@@ -252,10 +254,15 @@ settings_cannot_join	dfa4	moonwater não pode entrar no que essa rede pede
 settings_cannot_run	954f	não foi possível executar o comando moonwater
 settings_card_back	db52	Escape ou um clique volta
 settings_card_stopped	e24d	interrompido: Escape ou um clique volta
+settings_column_access	ae0b	Acesso
+settings_column_security	21db	Segurança
+settings_column_signal	4529	Sinal
+settings_column_status	f20f	Estado
 settings_copied	0bd7	copiado para a área de transferência
 settings_copy_both	257a	Copiar rótulo e valor
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Copiar valor
+settings_device_deny	fa87	Recusar
 settings_device_drive	8683	unidade, %s
 settings_device_name	5f12	Nome do dispositivo
 settings_device_none	3cd5	Nenhuma unidade ou dispositivo USB encontrado
@@ -289,6 +296,7 @@ settings_item_cannot	e643	moonwater não pode entrar no que esta rede pede
 settings_item_drive	269a	mostrado, não retido: nenhum comando altera uma unidade
 settings_item_joined	0fb8	conectado: Delete esquece
 settings_item_kept	33d9	guardado pelo nome: Delete esquece
+settings_item_link	03ad	ligado: Delete remove-o
 settings_item_open	4429	Enter conecta e salva
 settings_item_saved	3ffd	salva: Enter pede a senha de novo, Delete esquece
 settings_joined	1050	conectado

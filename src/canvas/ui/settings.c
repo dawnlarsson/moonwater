@@ -307,6 +307,8 @@ struct settings_item
         char state[SETTINGS_STATE];                     // a device's state, as the host says it
         char port[SETTINGS_PORT_ROOM];                       // a port's name; none for a drive
         char size[SETTINGS_SIZE_TEXT];                  // a drive's size
+        char access[48];                                // Waterlink: grants after "may "
+        char detail[SETTINGS_ITEM_LABEL];               // Waterlink: last-heard / session status
         char (address_to segment_name)[SETTINGS_SEGMENT_NAME]; // each segment's name, the partition's as the host says it (none: empty)
 };
 
@@ -802,9 +804,6 @@ static struct
         struct ui_text edit;
         char edit_from[SETTINGS_VALUE];
         struct ui_popup popup;
-        // The menu open is a row's copies (settings_copy_open), alone or after a row's field's own items: the row they copy.
-        b32 copy_open;
-        int copy_row;
         char status[SETTINGS_STATUS];
         int width, height;
         int least_w, least_h;      // the window's least size, device pixels (settings_least), and what it was worked out for
@@ -865,6 +864,7 @@ static struct settings_large
         char split[SETTINGS_TYPED * 2];
         struct settings_item item[SETTINGS_LISTS][SETTINGS_LIST_ROWS];
         struct settings_drive drive[SETTINGS_DRIVES];
+        struct ui_columns columns[SETTINGS_LISTS]; // file-explorer-style details column headers for Wi-Fi, Bluetooth, External devices, Waterlink
         struct ui_view view;
         char label_cut[SETTINGS_ROWS][SETTINGS_LABEL_CUT]; // each row's label as its line in the window says it (settings_label_window)
         unsigned char try_cover[2][SETTINGS_TRY_SPAN * SETTINGS_TRY_SPAN];              // a pointer's covers as the pointer's row draws it, its fill's and its line's
@@ -1518,6 +1518,7 @@ static const char address_to settings_item_text(const struct settings_item addre
                                                             : WORDS(settings_item_ask);
         return item->flags & SETTINGS_ITEM_DRIVE ? WORDS(settings_item_drive)
                : item->kind == SETTINGS_DEVICE   ? WORDS(settings_item_kept)
+               : item->kind == SETTINGS_LINK     ? WORDS(settings_item_link)
                : item->kind == SETTINGS_ADD      ? WORDS(settings_item_add) : "";
 }
 
@@ -2538,6 +2539,9 @@ static int settings_least(void)
         return 2;
 }
 
+static const struct ui_list_menu settings_list_menu;
+static fn settings_columns_sorted(struct ui_columns address_to hit);
+
 // The page laid out for the window's size: the kit's frame, its column and the list in the body, the map above the list while it is shown.
 static fn settings_layout(void)
 {
@@ -2551,6 +2555,8 @@ static fn settings_layout(void)
                 settings.list.ids = SETTINGS_LIST_IDS;
                 settings.list.describe = settings_describe;
                 settings.list.damaged = settings_changed;
+                settings.list.menu = &settings_list_menu;
+                settings.list.sorted = settings_columns_sorted;
                 settings.list.hover = settings.list.down = -1;
                 settings.list.wrap = true; // a label, a value or a note too long for its row's room goes onto more lines, and the row with it
                 settings.map.display = -1;
@@ -2568,6 +2574,8 @@ static fn settings_layout(void)
         settings.page.column.count = settings_groups() < UI_ITEMS ? settings_groups() : UI_ITEMS;
         settings.page.view = &settings_large->view;
         settings.page.above = settings_map_above;
+        settings.page.popup = &settings.popup;
+        settings.page.own = &settings.own;
         // The least as it is now: the frame gives the rows what they need before the column has its share (a window narrower than the least
         // is drawn at it by the next picture, settings_frame).
         settings_least();
@@ -3484,6 +3492,7 @@ static const struct settings_act_spec
     {'d', false, "bluetooth", "remove"},
     {'v', false, "device",    "allow"},
     {'x', false, "device",    "deny"},
+    {'r', false, "link",      "remove"},
 };
 
 static const char address_to settings_act_words(string_address address_to words)
@@ -4067,6 +4076,7 @@ static b32 settings_name_says(const char address_to name, const char address_to 
 }
 
 static char settings_device_note[SETTINGS_ITEM_LABEL];
+static char settings_device_port_cell[SETTINGS_ITEM_LABEL];
 
 // part of whole in parts of scale (100: a percent, 1000: tenths of one), to the nearest; none of nothing.
 static long settings_share_of(unsigned long long part, unsigned long long whole, unsigned long long scale)
@@ -4586,8 +4596,8 @@ static fn settings_feed_hardware(void)
 /*
         What moonwater link said, as the machines linked: a machine's line is its name, two blanks, its key and what it may do
         (so the name is what comes before the first two blanks, and the line has "...  may " in it); the lines under it, six
-        blanks in, say what the listener last heard of it, and are added to its name's label. A line that says nobody is
-        linked is the list's note. The key is never shown: a person knows a machine by its name.
+        blanks in, say what the listener last heard of it, stored in detail (with any trailing "  next: ..." CLI hint stripped).
+        A line that says nobody is linked is the list's note. The key is never shown: a person knows a machine by its name.
 */
 static fn settings_feed_links(void)
 {
@@ -4602,26 +4612,201 @@ static fn settings_feed_links(void)
                 {
                         if (count && items[count - 1].kind == SETTINGS_LINK)
                         {
-                                string_append_bounded((string_address)items[count - 1].label, (string_address) "  ", sizeof(items[0].label));
-                                string_append_bounded((string_address)items[count - 1].label, (string_address)(text + 6), sizeof(items[0].label));
+                                const char address_to info = text + 6;
+                                positive info_len = size - 6;
+                                positive next_at = settings_find_last(info, info_len, "  next:");
+
+                                if (next_at < info_len)
+                                        info_len = next_at;
+                                while (info_len > 0 && info[info_len - 1] == ' ')
+                                        info_len--;
+                                if (info_len)
+                                {
+                                        char piece[SETTINGS_ITEM_LABEL];
+
+                                        settings_item_word(piece, sizeof(piece), info, info_len);
+                                        if (items[count - 1].detail[0])
+                                                string_append_bounded((string_address)items[count - 1].detail, (string_address) "; ",
+                                                                      sizeof(items[0].detail));
+                                        string_append_bounded((string_address)items[count - 1].detail, (string_address)piece,
+                                                              sizeof(items[0].detail));
+                                }
                         }
                 }
-                else if (size > 4 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS &&
-                         settings_find_last(text, size, "...  may ") < size)
+                else if (size > 4 && text[0] == ' ' && text[1] == ' ' && text[2] != ' ' && count + 1 < SETTINGS_LIST_ROWS)
                 {
-                        positive cut = 2;
+                        positive may_at = settings_find_last(text, size, "...  may ");
 
-                        while (cut + 1 < size && (text[cut] != ' ' || text[cut + 1] != ' '))
-                                cut++;
-                        items[count].kind = SETTINGS_LINK;
-                        settings_item_label(&items[count++], text + 2, cut - 2);
-                }
-                else if (size > 2 && text[0] == ' ' && text[1] == ' ' && settings_starts(text + 2, "nobody") && count + 1 < SETTINGS_LIST_ROWS)
-                {
-                        items[count].kind = SETTINGS_NOTE;
-                        settings_item_label(&items[count++], text + 2, size - 2);
+                        if (may_at < size)
+                        {
+                                positive cut = 2, grants_at = may_at + 9, grants_end = size;
+                                positive next_at = settings_find_last(text + grants_at, size - grants_at, "  next:");
+
+                                while (cut + 1 < size && (text[cut] != ' ' || text[cut + 1] != ' '))
+                                        cut++;
+                                if (next_at < size - grants_at)
+                                        grants_end = grants_at + next_at;
+                                items[count].kind = SETTINGS_LINK;
+                                items[count].flags = SETTINGS_ITEM_SAVED;
+                                settings_item_word(items[count].access, sizeof(items[count].access), text + grants_at,
+                                                   grants_end > grants_at ? grants_end - grants_at : 0);
+                                settings_item_label(&items[count++], text + 2, cut - 2);
+                        }
+                        else if (settings_starts(text + 2, "nobody"))
+                        {
+                                items[count].kind = SETTINGS_NOTE;
+                                settings_item_label(&items[count++], text + 2, size - 2);
+                        }
                 }
         settings.item_count[3] = (unsigned short)count;
+}
+
+// Details column headers for the four feed lists (Wi-Fi, Bluetooth, External devices, Waterlink), refreshed on each use for the active language.
+static struct ui_columns address_to settings_columns_for(int list)
+{
+        struct ui_columns address_to c;
+
+        if (!settings_large || list < 0 || list >= SETTINGS_LISTS)
+                return null;
+        c = &settings_large->columns[list];
+        if (!c->count)
+        {
+                c->sorted = -1;
+                c->hover = c->held = -1;
+                if (list == 0)
+                        c->count = 4, c->width[1] = 84, c->width[2] = 84, c->width[3] = 72, c->at_end[3] = true;
+                else if (list == 1)
+                        c->count = 2, c->width[1] = 100, c->at_end[1] = true;
+                else if (list == 2)
+                        c->count = 4, c->width[1] = 108, c->width[2] = 84, c->width[3] = 128, c->at_end[3] = true;
+                else
+                        c->count = 3, c->width[1] = 140, c->width[2] = 180;
+        }
+        c->title[0] = WORDS(files_column_name);
+        if (list == 0)
+                c->title[1] = WORDS(settings_column_status), c->title[2] = WORDS(settings_column_security), c->title[3] = WORDS(settings_column_signal);
+        else if (list == 1)
+                c->title[1] = WORDS(settings_column_status);
+        else if (list == 2)
+                c->title[1] = language_of("Port"), c->title[2] = WORDS(settings_column_status), c->title[3] = WORDS(settings_column_access);
+        else
+                c->title[1] = WORDS(settings_column_access), c->title[2] = WORDS(settings_column_status);
+        return c;
+}
+
+static int settings_list_compare(int list, int col, const struct settings_item address_to a, const struct settings_item address_to b)
+{
+        int cmp = 0;
+
+        if (list == 0)
+        {
+                if (col == 1)
+                {
+                        int ra = a->flags & SETTINGS_ITEM_JOINED ? 0 : a->flags & SETTINGS_ITEM_SAVED ? 1 : 2;
+                        int rb = b->flags & SETTINGS_ITEM_JOINED ? 0 : b->flags & SETTINGS_ITEM_SAVED ? 1 : 2;
+
+                        cmp = ra - rb;
+                }
+                else if (col == 2)
+                        cmp = (int)string_compare_folded((string_address)a->security, (string_address)b->security);
+                else if (col == 3)
+                {
+                        int ha = (a->flags & SETTINGS_ITEM_HEARD) != 0, hb = (b->flags & SETTINGS_ITEM_HEARD) != 0;
+
+                        cmp = ha != hb ? ha - hb : (int)a->dbm - (int)b->dbm;
+                }
+        }
+        else if (list == 2)
+        {
+                if (col == 1)
+                        cmp = (int)string_compare_folded((string_address)a->port, (string_address)b->port);
+                else if (col == 2)
+                        cmp = (int)string_compare_folded((string_address)settings_state_word(a->state), (string_address)settings_state_word(b->state));
+                else if (col == 3)
+                        cmp = ((a->flags & SETTINGS_ITEM_JOINED) ? 0 : 1) - ((b->flags & SETTINGS_ITEM_JOINED) ? 0 : 1);
+        }
+        else if (list == 3)
+        {
+                if (col == 1)
+                        cmp = (int)string_compare_folded((string_address)a->access, (string_address)b->access);
+                else if (col == 2)
+                        cmp = (int)string_compare_folded((string_address)a->detail, (string_address)b->detail);
+        }
+        if (!cmp)
+                cmp = (int)string_compare_folded((string_address)a->label, (string_address)b->label);
+        return cmp;
+}
+
+static b32 settings_item_sortable(int list, const struct settings_item address_to item)
+{
+        if (item->kind == SETTINGS_NOTE || item->kind == SETTINGS_ADD)
+                return false;
+        if (list == 2 && settings_device_section(item) != 1)
+                return false;
+        return true;
+}
+
+// Sorts the table rows of feed list according to its ui_columns state, keeping non-table rows (Internal storage, notes, add) in place.
+static fn settings_list_sort(int list)
+{
+        struct ui_columns address_to c = settings_columns_for(list);
+        struct settings_item address_to items;
+        int count;
+
+        if (!c || c->sorted < 0 || list < 0 || list >= SETTINGS_LISTS)
+                return;
+        items = settings_large->item[list];
+        count = settings.item_count[list];
+        for (int at = 1; at < count; at++)
+        {
+                if (!settings_item_sortable(list, &items[at]))
+                        continue;
+                for (int back = at; back > 0 && settings_item_sortable(list, &items[back - 1]); back--)
+                {
+                        int cmp = settings_list_compare(list, c->sorted, &items[back - 1], &items[back]);
+
+                        if (c->descending)
+                                cmp = -cmp;
+                        if (cmp <= 0)
+                                break;
+                        {
+                                struct settings_item moved = items[back];
+
+                                items[back] = items[back - 1];
+                                items[back - 1] = moved;
+                        }
+                }
+        }
+        if (list == 2)
+                settings_drive_follow();
+}
+
+static fn settings_columns_sorted(struct ui_columns address_to hit)
+{
+        int list = -1;
+        char keep[SETTINGS_ITEM_LABEL] = {0};
+
+        if (!settings_large || !hit)
+                return;
+        for (int k = 0; k < SETTINGS_LISTS; k++)
+                if (&settings_large->columns[k] == hit)
+                {
+                        list = k;
+                        break;
+                }
+        if (list < 0)
+                return;
+        if (settings_list_of(settings.list.focus) == list && settings_item(settings.list.focus))
+                string_copy_bounded((string_address)keep, (string_address)settings_item(settings.list.focus)->label, sizeof(keep));
+        settings_list_sort(list);
+        if (keep[0])
+                for (int each = 0; each < settings.item_count[list]; each++)
+                        if (string_equals((string_address)settings_large->item[list][each].label, (string_address)keep))
+                        {
+                                settings.list.focus = (int)SETTINGS_LIST + list * SETTINGS_LIST_ROWS + each;
+                                break;
+                        }
+        settings_rebuild();
 }
 
 // A sum of a list as it stands, to tell whether a reading changed what is shown.
@@ -4694,6 +4879,7 @@ static fn settings_feed_read(b32 killed, b32 failed)
                 settings_feed_links();
         else
                 settings_feed_devices();
+        settings_list_sort(list);
         settings_layout_check();
         if (settings_list_sum(list) == before && !changed)
                 return;
@@ -5775,7 +5961,6 @@ static fn settings_menu_open(int row)
                 return;
         if (settings_rows[row].flags & SETTINGS_BATTERIES)
                 settings.battery_menu_count = battery_list(settings.battery_menu, BATTERY_LIST);
-        settings.copy_open = false; // the popup is the choice's now, not a row's copies
 
         if (!ui_page_menu_open(&settings.ui, &settings.page, &settings.list, &settings.popup, &settings.own, row, settings_menu_label, settings_shown_value(row)))
                 return;
@@ -5878,8 +6063,9 @@ static fn settings_edit_end(void)
 static b32 settings_edit_shown(void)
 {
         int at = settings_pos(settings_editing()), top = at >= 0 ? ui_list_row_y(&settings.list, at) : 0;
+        int tall = at >= 0 && settings.list.tall[at] > 0 ? settings.list.tall[at] : ui_px(&settings.ui, UI_ROW);
 
-        return at >= 0 && top + ui_px(&settings.ui, UI_ROW) > settings.list.y && top < settings.list.y + settings.list.h;
+        return at >= 0 && top + tall > settings.list.y && top < settings.list.y + settings.list.h;
 }
 
 // A port is allowed (allow) or denied (deny) by its name, the first word of its line that device allow and device deny take.
@@ -5927,13 +6113,14 @@ static fn settings_item_activate(int row, const struct settings_item address_to 
         ui_page_redraw(&settings.page);
 }
 
-// Delete on a saved network or a kept device forgets it, when it is pressed twice.
+// Delete on a saved network, a kept device or a linked machine forgets/removes it, when it is pressed twice.
 static fn settings_forget(void)
 {
         const struct settings_item address_to item = settings_item(settings.list.focus);
         char line[SETTINGS_STATUS], text[SETTINGS_STATUS];
 
-        if (!item || !(item->flags & SETTINGS_ITEM_SAVED) || (item->kind != SETTINGS_NETWORK && item->kind != SETTINGS_DEVICE))
+        if (!item || !(item->flags & SETTINGS_ITEM_SAVED) ||
+            (item->kind != SETTINGS_NETWORK && item->kind != SETTINGS_DEVICE && item->kind != SETTINGS_LINK))
                 return;
         // A forget is armed by its kind (a number no row has, below zero) and the label it is for.
         if (!ui_confirm_ask(&settings.confirm, -1 - (int)item->kind, item->label))
@@ -5943,7 +6130,7 @@ static fn settings_forget(void)
                 settings_say((string_address)line);
                 return;
         }
-        settings_act(item->kind == SETTINGS_NETWORK ? 'f' : 'd', item->label, null);
+        settings_act(item->kind == SETTINGS_NETWORK ? 'f' : item->kind == SETTINGS_LINK ? 'r' : 'd', item->label, null);
 }
 
 // A row changed one way or the other: a switch thrown, a choice or a step moved, a field opened, an action run.
@@ -6432,8 +6619,6 @@ static b32 settings_map_key(const struct window_event address_to event)
 
 // What the page's keys ask of the settings: a row's step and its action, the said line, the group the column chose, and Delete.
 static const struct ui_page_keys settings_page_keys = {settings_steps, settings_activate, settings_said_of, settings_group_choose, settings_forget};
-static b32 settings_menu_key(const struct window_event address_to event);
-static fn settings_copy_keys(void);
 
 static b32 settings_key(const struct window_event address_to event)
 {
@@ -6443,8 +6628,8 @@ static b32 settings_key(const struct window_event address_to event)
                 ui_graph_key(&settings.ui, &settings.map.graph, event);
                 return true;
         }
-        // A choice's menu has every key, and so has a row's copies: its popup has them while it is open, and a key that comes here is the menu's too.
-        if (settings.page.menu_row >= 0 || (settings.copy_open && settings.popup.open && !settings.popup.field))
+        // A choice's menu has every key, and so has a row's context menu: its popup has them while it is open, and a key that comes here is the menu's too.
+        if (settings.page.menu_row >= 0 || (settings.popup.open && settings.popup.list && !settings.popup.field))
         {
                 settings_menu_answer(ui_popmenu_event(&settings.ui, &settings.popup.menu, event, 0, 0));
                 return true;
@@ -6469,12 +6654,9 @@ static b32 settings_key(const struct window_event address_to event)
                 settings_card_key(event);
                 return true;
         }
-        // The menu key, or Shift-F10, with the keys in the rows: the copies of the row they are on (the search field's menu is its right button's).
-        if (settings.page.pane && settings_menu_key(event))
-        {
-                settings_copy_keys();
+        // The menu key, or Shift-F10, with the keys in the rows: handled by the kit's declarative list menu.
+        if (ui_page_context_key(&settings.ui, &settings.page, &settings.list, event))
                 return true;
-        }
         // Delete on a kernel notice's line dismisses its class (the feeder starts it again from nothing); a line is no row, so the keys stop there.
         if (event->a == UI_KEY_DELETE && !settings_filter_typed() && settings.list.focus >= (int)SETTINGS_ALL && settings.list.focus - (int)SETTINGS_ALL < settings_sub_count)
         {
@@ -6737,41 +6919,73 @@ static fn settings_describe(int id, struct ui_row address_to row)
         }
         if (item)
         {
+                int list = settings_list_of(id);
+
                 if (item->kind == SETTINGS_NETWORK)
                 {
+                        row->columns = settings_columns_for(0);
                         row->mark = (item->flags & SETTINGS_ITEM_JOINED) != 0;
                         row->note = item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_joined) : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_saved) : null;
                         row->value = item->security[0] ? item->security : null;
                         row->bars = item->flags & SETTINGS_ITEM_HEARD ? item->bars : -1;
                         row->dim = !(item->flags & SETTINGS_ITEM_HEARD);
+                        row->cells[1] = row->note;
+                        row->cells[2] = item->security[0] ? item->security : null;
                 }
                 else if (item->kind == SETTINGS_DEVICE)
+                {
+                        row->columns = settings_columns_for(1);
                         row->value = WORDS(settings_kept);
+                        row->cells[1] = row->value;
+                }
+                else if (item->kind == SETTINGS_ADD)
+                {
+                        row->columns = settings_columns_for(1);
+                }
                 /*
                         Every device's line is one design: its name, then in the quiet ink what kind it is, then its size and its state (a
                         drive) or the kit's two tabs, allow and deny, the one its state is selected (a port: one not allowed is denied). The
                         tabs say allowed and blocked, so a port's line does not say them again; it says waiting, a port held until it is
-                        allowed, which the tabs cannot tell from one denied.
+                        allowed, which the tabs cannot tell from one denied. External devices render as a file-explorer-style details table
+                        (Name, Port, Status, Access) while keeping note populated for summaries and checks.
                 */
                 else if (item->kind == SETTINGS_PORT)
                 {
                         b32 waiting = string_equals((string_address)item->state, (string_address) "waiting");
 
+                        row->columns = settings_columns_for(2);
                         row->kind = UI_ROW_TABS, row->words = settings_port_words();
                         row->at = item->flags & SETTINGS_ITEM_JOINED ? 0 : 1;
                         // A USB device that holds a drive is a drive's row too: its line is the port's, its kind USB drive and its port, its
                         // allow and deny at its end, and under them the drive's heading and its strip, and its partitions under its row.
                         if (item->flags & SETTINGS_ITEM_DISK)
+                        {
                                 language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb_drive), item->port);
+                                string_copy_bounded((string_address)settings_device_port_cell, (string_address)settings_device_note,
+                                                    sizeof(settings_device_port_cell));
+                        }
                         else if (item->flags & SETTINGS_ITEM_USB && waiting)
+                        {
                                 language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb), item->port,
                                                 settings_state_word(item->state));
+                                language_format(settings_device_port_cell, sizeof(settings_device_port_cell), WORDS(settings_device_usb_port), item->port);
+                        }
                         else if (item->flags & SETTINGS_ITEM_USB)
+                        {
                                 language_format(settings_device_note, sizeof(settings_device_note), WORDS(settings_device_usb_port), item->port);
+                                string_copy_bounded((string_address)settings_device_port_cell, (string_address)settings_device_note,
+                                                    sizeof(settings_device_port_cell));
+                        }
                         else
+                        {
                                 string_copy_bounded((string_address)settings_device_note, (string_address)(waiting ? settings_state_word(item->state) : ""),
                                                     sizeof(settings_device_note));
+                                string_copy_bounded((string_address)settings_device_port_cell, (string_address)item->port,
+                                                    sizeof(settings_device_port_cell));
+                        }
                         row->note = settings_device_note[0] ? settings_device_note : null;
+                        row->cells[1] = settings_device_port_cell[0] ? settings_device_port_cell : null;
+                        row->cells[2] = item->state[0] ? settings_state_word(item->state) : null;
                         if (item->flags & SETTINGS_ITEM_DISK)
                                 settings_drive_strip(item, row);
                 }
@@ -6783,7 +6997,28 @@ static fn settings_describe(int id, struct ui_row address_to row)
                                         item->where == SETTINGS_WHERE_SD ? WORDS(settings_device_sd) : WORDS(settings_device_drive), settings_state_word(item->state));
                         row->note = settings_device_note;
                         row->value = item->segment_count ? null : item->size;
+                        if (settings_device_section(item) == 1)
+                        {
+                                row->columns = settings_columns_for(2);
+                                row->cells[1] = settings_device_note;
+                                row->cells[2] = item->state[0] ? settings_state_word(item->state) : null;
+                                row->cells[3] = row->value;
+                        }
                         settings_drive_strip(item, row);
+                }
+                else if (item->kind == SETTINGS_LINK)
+                {
+                        row->columns = settings_columns_for(3);
+                        row->cells[1] = item->access[0] ? item->access : null;
+                        row->cells[2] = item->detail[0] ? item->detail : null;
+                        row->value = item->detail[0] ? item->detail : item->access[0] ? item->access : null;
+                }
+                else if (item->kind == SETTINGS_NOTE)
+                {
+                        if ((list == 0 || list == 3) && settings.item_count[list] > 1)
+                                row->columns = settings_columns_for(list);
+                        else if (list == 2 && settings_device_section(item) == 1)
+                                row->columns = settings_columns_for(2);
                 }
                 row->dim |= item->kind == SETTINGS_NOTE;
                 return;
@@ -6854,18 +7089,20 @@ static fn settings_describe(int id, struct ui_row address_to row)
 }
 
 /*
-        A row's copies: the right button on a row that has a value (an info row's line, a switch's word, a choice's, a field's, a
-        number with its unit, a list's word) opens the kit's menu at the pointer, and the menu key or Shift-F10 opens it under the
-        row the keys are on: Copy value puts on the clipboard the value as the row shows it, and Copy label and value the row's
-        label with it. A row typed in has them after its field's own items. A copy is read only: it is the clipboard's and sets
-        nothing, so a virtual device's right button copies as a hand's does, and no verb is run for it.
+        A row's context menu: built from the kit's base list context menu actions (ui_list_menu_items: Copy, Copy row, and
+        optional Remove), with per-list primary actions (Join on Wi-Fi, Allow/Deny on External devices) prepended where relevant.
+        Regular setting rows use Copy value / Copy label and value; a row typed in appends them after its field's own items.
+        A copy is read only: it is the clipboard's and sets nothing, so a virtual device's right button copies as a hand's does.
 */
-#define SETTINGS_COPY_VALUE 0x100 // the items' ids, past the field menu's own (UI_TEXT_MENU_*)
-#define SETTINGS_COPY_BOTH 0x101
-#define SETTINGS_KEY_MENU 127 // the keyboard's menu key, as the compositor numbers it
-#define SETTINGS_KEY_F10 68   // and F10, which with Shift opens a menu as the menu key does
+#define SETTINGS_COPY_VALUE UI_LIST_MENU_COPY // the items' ids, past the field menu's own (UI_TEXT_MENU_*)
+#define SETTINGS_COPY_BOTH UI_LIST_MENU_COPY_ROW
+#define SETTINGS_MENU_REMOVE UI_LIST_MENU_REMOVE
+#define SETTINGS_MENU_ACT 0x103 // row-specific action (Join network, Allow/Deny port)
+#define SETTINGS_KEY_MENU UI_KEY_MENU
+#define SETTINGS_KEY_F10 UI_KEY_F10
 
-// The value a row shows, as it is copied: none for a row that shows none (not read, not on this machine, a verb with no value).
+// The primary text copied by Copy / Copy value: the value for a setting row or About link, the item's name for a list row, or
+// the text of a sub-row/command. Null when the row has nothing to copy.
 static const char address_to settings_copy_text(int id)
 {
         struct ui_row row;
@@ -6873,121 +7110,270 @@ static const char address_to settings_copy_text(int id)
 
         if (dom == SETTINGS_DOM_ABOUT)
                 return settings_about_url(offset);
-        if (!settings_large || (dom != SETTINGS_DOM_ROW && dom != SETTINGS_DOM_LIST))
+        if (!settings_large)
                 return null;
-        if (dom == SETTINGS_DOM_ROW && settings_rows[offset].output == SETTINGS_OUT_NONE)
+        if (dom == SETTINGS_DOM_ROW)
         {
-                if (settings.state[offset] != SETTINGS_READ || !settings.value[offset][0])
+                if (settings_rows[offset].output == SETTINGS_OUT_NONE)
+                {
+                        if (settings.state[offset] != SETTINGS_READ || !settings.value[offset][0])
+                                return null;
+                        return settings_number_shown(offset, settings.value[offset]);
+                }
+                memory_zero(&row, sizeof(row));
+                settings_describe(id, &row);
+                if (row.dim || !row.value || !row.value[0])
                         return null;
-                return settings_number_shown(offset, settings.value[offset]);
+                return row.value;
         }
-        if (dom == SETTINGS_DOM_LIST && !settings_item(id))
+        if (dom == SETTINGS_DOM_LIST)
+        {
+                const struct settings_item address_to item = settings_item(id);
+
+                if (!item || item->kind == SETTINGS_ADD || !item->label[0])
+                        return null;
+                return item->label;
+        }
+        if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count)
+        {
+                if (settings_sub[offset].action == SETTINGS_SUB_COPY)
+                        return settings_sub[offset].text[0] ? settings_sub[offset].text : null;
+                if (settings_sub[offset].action == SETTINGS_SUB_PARTITION)
+                {
+                        memory_zero(&row, sizeof(row));
+                        settings_describe(id, &row);
+                        return row.label && row.label[0] ? row.label : null;
+                }
                 return null;
-        memory_zero(&row, sizeof(row));
-        settings_describe(id, &row);
-        if (row.dim && dom == SETTINGS_DOM_ROW)
-                return null;
-        if ((dom == SETTINGS_DOM_LIST && settings_item(id)->kind == SETTINGS_NOTE) || !row.value || !row.value[0])
-                return null;
-        return row.value;
+        }
+        if (dom == SETTINGS_DOM_COMMAND && offset > 0)
+                return settings_label_shown(id);
+        return null;
 }
 
-// The row's copies, each greyed where the row has no value.
-static fn settings_copy_items(struct ui_popmenu address_to m, int id)
+// Base ui_list_menu_items flags for row id (0 when the row offers no context menu).
+static p32 settings_row_menu_flags(int id)
 {
-        p32 none = settings_copy_text(id) ? 0 : UI_MENU_DISABLED;
+        int offset, dom = settings_domain_of(id, &offset);
+        b32 has = settings_copy_text(id) != null;
 
-        ui_popmenu_add(m, WORDS(settings_copy_value), null, none, SETTINGS_COPY_VALUE);
-        ui_popmenu_add(m, WORDS(settings_copy_both), null, none, SETTINGS_COPY_BOTH);
+        if (dom == SETTINGS_DOM_ROW || dom == SETTINGS_DOM_ABOUT)
+                return UI_LIST_MENU_VALUE_WORDS | UI_LIST_MENU_HAS_COPY_ROW | (has ? UI_LIST_MENU_HAS_COPY : 0);
+        if (dom == SETTINGS_DOM_LIST)
+        {
+                const struct settings_item address_to item = settings_item(id);
+
+                if (!item || item->kind == SETTINGS_ADD)
+                        return 0;
+                if (item->kind == SETTINGS_NOTE)
+                        return has ? UI_LIST_MENU_HAS_COPY : 0;
+                if (item->kind == SETTINGS_NETWORK)
+                        return (has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0) |
+                               ((item->flags & SETTINGS_ITEM_SAVED) ? UI_LIST_MENU_CAN_REMOVE : 0);
+                if (item->kind == SETTINGS_DEVICE || item->kind == SETTINGS_LINK)
+                        return (has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0) | UI_LIST_MENU_CAN_REMOVE;
+                return has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
+        }
+        if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count)
+        {
+                if (settings_sub[offset].action == SETTINGS_SUB_COPY)
+                        return (has ? UI_LIST_MENU_HAS_COPY : 0) |
+                               (windows_issue_kernel(settings_sub[offset].code) ? UI_LIST_MENU_CAN_REMOVE : 0);
+                if (settings_sub[offset].action == SETTINGS_SUB_PARTITION)
+                        return has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
+                return 0;
+        }
+        if (dom == SETTINGS_DOM_COMMAND && offset > 0)
+                return has ? UI_LIST_MENU_HAS_COPY | UI_LIST_MENU_HAS_COPY_ROW : 0;
+        return 0;
 }
 
-// A copy chosen: the value, or the label and the value, on the clipboard (the one path every copy of the window takes), and said.
-static fn settings_copy_row(int id, b32 both)
+// Per-row actions prepended before the kit's base list context menu items (ui_list_menu_items).
+static fn settings_row_menu_extra(struct ui_popmenu address_to m, int id)
 {
-        char line[2 * SETTINGS_SUB_TEXT];
+        const struct settings_item address_to item = settings_item(id);
+
+        if (item && item->kind == SETTINGS_NETWORK && !(item->flags & (SETTINGS_ITEM_JOINED | SETTINGS_ITEM_CANNOT)))
+        {
+                ui_popmenu_add(m, WORDS(installer_wifi_join), null, 0, SETTINGS_MENU_ACT);
+                ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+        }
+        else if (item && item->kind == SETTINGS_PORT)
+        {
+                ui_popmenu_add(m, (item->flags & SETTINGS_ITEM_JOINED) ? WORDS(settings_device_deny) : WORDS(mixer_allow), null, 0, SETTINGS_MENU_ACT);
+                ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
+        }
+}
+
+// Formats the full-row copy string for row id into into[room].
+static fn settings_copy_row_text(int id, char address_to into, positive room)
+{
+        int offset, dom = settings_domain_of(id, &offset);
         const char address_to value = settings_copy_text(id);
 
+        into[0] = 0;
         if (!value)
                 return;
-        if (both)
-                language_format(line, sizeof(line), WORDS(settings_copy_line), id < SETTINGS_ANY ? settings_label_window(id) : settings_label_shown(id), value);
-        else
-                string_copy_bounded((string_address)line, (string_address)value, sizeof(line));
-        windows_clip_offer(&settings.own, WINDOWS_CLIP_CLIPBOARD, line, string_length((string_address)line));
-        settings_say((string_address)WORDS(settings_copied));
-        ui_page_redraw(&settings.page);
-}
-
-/*
-        A row's copies opened at a point of the window: at the pointer, or for the keys under the row with its first item lit, at its
-        start. False, and nothing opened, for a row with no value or a menu that takes no row of the table.
-*/
-static b32 settings_copy_open(int id, int x, int y, b32 keys)
-{
-        struct ui_popmenu address_to m = &settings.popup.menu;
-
-        if (!settings_copy_text(id) || settings.ui.scale <= 0)
-                return false;
-        settings_menu_close();
-        m->count = 0, m->typed_length = 0;
-        memory_zero(&m->press, sizeof(m->press));
-        settings_copy_items(m, id);
-        settings.popup.field = null;
-        if (!ui_popmenu_open(&settings.popup, &settings.own, &settings.ui, x, y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch))
-                return false;
-        settings.copy_open = true, settings.copy_row = id;
-        if (keys)
+        if (dom == SETTINGS_DOM_ROW || dom == SETTINGS_DOM_ABOUT)
         {
-                m->hot = 0;
-                ui_popmenu_present(&settings.popup);
-        }
-        return true;
-}
-
-// The right button's press at a point: the row under it has the keys, and its copies open there. A press on no row opens nothing.
-static fn settings_copy_press(int x, int y)
-{
-        int row = ui_page_target(&settings.ui, &settings.page, &settings.list, x, y);
-
-        if (row < 0 || row >= UI_PAGE_GROUP)
+                language_format(into, room, WORDS(settings_copy_line), id < SETTINGS_ANY ? settings_label_window(id) : settings_label_shown(id), value);
                 return;
-        if (row != settings.list.focus)
+        }
+        if (dom == SETTINGS_DOM_LIST)
         {
-                int before = settings.list.focus;
+                const struct settings_item address_to item = settings_item(id);
+                char summary[SETTINGS_SUB_TEXT] = {0};
 
+                if (!item)
+                        return;
+                if (item->kind == SETTINGS_NETWORK)
+                {
+                        const char address_to st = item->flags & SETTINGS_ITEM_JOINED ? WORDS(settings_joined)
+                                                   : item->flags & SETTINGS_ITEM_SAVED ? WORDS(settings_saved) : null;
+
+                        if (st)
+                                string_append_bounded((string_address)summary, (string_address)st, sizeof(summary));
+                        if (item->security[0])
+                        {
+                                if (summary[0])
+                                        string_append_bounded((string_address)summary, (string_address) ", ", sizeof(summary));
+                                string_append_bounded((string_address)summary, (string_address)item->security, sizeof(summary));
+                        }
+                }
+                else if (item->kind == SETTINGS_DEVICE)
+                        string_copy_bounded((string_address)summary, (string_address)WORDS(settings_kept), sizeof(summary));
+                else if (item->kind == SETTINGS_PORT)
+                {
+                        if (item->flags & SETTINGS_ITEM_DISK)
+                                language_format(summary, sizeof(summary), WORDS(settings_device_usb_drive), item->port);
+                        else if (item->flags & SETTINGS_ITEM_USB)
+                                language_format(summary, sizeof(summary), WORDS(settings_device_usb_port), item->port);
+                        else if (item->port[0])
+                                string_copy_bounded((string_address)summary, (string_address)item->port, sizeof(summary));
+                        if (item->state[0])
+                        {
+                                if (summary[0])
+                                        string_append_bounded((string_address)summary, (string_address) ", ", sizeof(summary));
+                                string_append_bounded((string_address)summary, (string_address)settings_state_word(item->state), sizeof(summary));
+                        }
+                }
+                else if (item->flags & SETTINGS_ITEM_DRIVE)
+                {
+                        language_format(summary, sizeof(summary),
+                                        item->where == SETTINGS_WHERE_SD ? WORDS(settings_device_sd) : WORDS(settings_device_drive),
+                                        settings_state_word(item->state));
+                        if (item->size[0])
+                        {
+                                string_append_bounded((string_address)summary, (string_address) ", ", sizeof(summary));
+                                string_append_bounded((string_address)summary, (string_address)item->size, sizeof(summary));
+                        }
+                }
+                else if (item->kind == SETTINGS_LINK)
+                {
+                        if (item->detail[0])
+                                string_copy_bounded((string_address)summary, (string_address)item->detail, sizeof(summary));
+                        else if (item->access[0])
+                                string_copy_bounded((string_address)summary, (string_address)item->access, sizeof(summary));
+                }
+                if (summary[0])
+                        language_format(into, room, WORDS(settings_copy_line), item->label, summary);
+                else
+                        string_copy_bounded((string_address)into, (string_address)item->label, room);
+                return;
+        }
+        if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count && settings_sub[offset].action == SETTINGS_SUB_PARTITION)
+        {
+                struct ui_row row;
+                char summary[SETTINGS_ITEM_LABEL] = {0};
+
+                memory_zero(&row, sizeof(row));
+                settings_describe(id, &row);
+                if (row.amount && row.amount[0])
+                        string_append_bounded((string_address)summary, (string_address)row.amount, sizeof(summary));
+                if (row.share && row.share[0])
+                {
+                        if (summary[0])
+                                string_append_bounded((string_address)summary, (string_address) " ", sizeof(summary));
+                        string_append_bounded((string_address)summary, (string_address)row.share, sizeof(summary));
+                }
+                if (summary[0])
+                        language_format(into, room, WORDS(settings_copy_line), value, summary);
+                else
+                        string_copy_bounded((string_address)into, (string_address)value, room);
+                return;
+        }
+        if (dom == SETTINGS_DOM_COMMAND && offset > 0)
+        {
+                const char address_to desc = settings_text(id);
+
+                if (desc && desc[0])
+                        language_format(into, room, WORDS(settings_copy_line), value, desc);
+                else
+                        string_copy_bounded((string_address)into, (string_address)value, room);
+                return;
+        }
+        string_copy_bounded((string_address)into, (string_address)value, room);
+}
+
+static fn settings_row_copied(int id)
+{
+        (void)id;
+        settings_say((string_address)WORDS(settings_copied));
+}
+
+static fn settings_row_before_menu(int before, int row)
+{
+        settings_menu_close();
+        if (row != before)
+        {
                 ui_confirm_drop(&settings.confirm);
-                settings.list.focus = row;
                 settings_said_of(before);
         }
-        settings.page.pane = 1;
-        settings_copy_open(row, x, y, false);
-        ui_page_redraw(&settings.page);
 }
 
-// The menu key, or Shift-F10, on the rows: the copies of the row the keys are on, under it, the row revealed first.
-static fn settings_copy_keys(void)
+// Context menu Remove or per-list action chosen, dispatched by ui_list_menu_do.
+static fn settings_row_menu_act(int id, int item_id)
 {
-        int id = settings.list.focus, at = ui_list_at(&settings.list, id), x, y;
-        struct ui measure = settings.ui;
-        struct ui_popmenu address_to m = &settings.popup.menu;
+        if (item_id == SETTINGS_MENU_REMOVE)
+        {
+                int offset, dom = settings_domain_of(id, &offset);
 
-        if (at < 0 || !settings_copy_text(id))
-                return;
-        ui_list_reveal(&settings.ui, &settings.list);
-        m->count = 0;
-        settings_copy_items(m, id);
-        ui_popmenu_size(&measure, m, settings.page.height);
-        y = ui_list_row_y(&settings.list, at) + ui_px(&settings.ui, UI_ROW) - ui_px(&settings.ui, UI_GAP1);
-        x = ui_rtl() ? settings.list.x + settings.list.w - ui_dev(&settings.ui, UI_INSET) - m->width : settings.list.x + ui_dev(&settings.ui, UI_INSET);
-        settings_copy_open(id, x < 0 ? 0 : x, y, true);
-        ui_page_redraw(&settings.page);
+                if (dom == SETTINGS_DOM_LIST)
+                {
+                        const struct settings_item address_to item = settings_item(id);
+
+                        if (!item || !(item->flags & SETTINGS_ITEM_SAVED))
+                                return;
+                        if (item->kind == SETTINGS_NETWORK)
+                                settings_act('f', item->label, null);
+                        else if (item->kind == SETTINGS_DEVICE)
+                                settings_act('d', item->label, null);
+                        else if (item->kind == SETTINGS_LINK)
+                                settings_act('r', item->label, null);
+                }
+                else if (dom == SETTINGS_DOM_SUB && offset < settings_sub_count && windows_issue_kernel(settings_sub[offset].code))
+                        windows_kernel_dismiss(settings.own.table, 1u << (settings_sub[offset].code - WINDOWS_ISSUE_KERNEL_GPU));
+        }
+        else if (item_id == SETTINGS_MENU_ACT)
+        {
+                const struct settings_item address_to item = settings_item(id);
+
+                if (item && item->kind == SETTINGS_NETWORK)
+                        settings_item_activate(id, item);
+                else if (item && item->kind == SETTINGS_PORT)
+                        settings_port_set(item, !(item->flags & SETTINGS_ITEM_JOINED));
+        }
 }
 
-// Whether a key asks for a menu: the menu key, or Shift-F10.
-static b32 settings_menu_key(const struct window_event address_to event)
-{
-        return event->a == SETTINGS_KEY_MENU || (event->a == SETTINGS_KEY_F10 && (event->flags & WINDOW_KEY_SHIFT));
-}
+static const struct ui_list_menu settings_list_menu = {
+        .flags = settings_row_menu_flags,
+        .copy = settings_copy_text,
+        .copy_row = settings_copy_row_text,
+        .extra = settings_row_menu_extra,
+        .act = settings_row_menu_act,
+        .copied = settings_row_copied,
+        .before_open = settings_row_before_menu,
+};
 
 // The menu of the field a row is typed in: the kit's items for its text, and after them the row's copies when it is a setting's.
 static fn settings_field_menu(void)
@@ -7001,14 +7387,12 @@ static fn settings_field_menu(void)
                 return;
         m->count = 0, m->typed_length = 0;
         ui_text_menu_items(m, t, false);
+        settings.popup.list = null, settings.popup.list_row = -1;
         if (copies)
-        {
-                ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-                settings_copy_items(m, row);
-        }
+                ui_list_menu_attach(&settings.popup, &settings.list, row);
         settings.popup.field = t;
-        settings.copy_open = ui_popmenu_open(&settings.popup, t->own, &settings.ui, t->menu_x, t->menu_y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch) && copies;
-        settings.copy_row = row;
+        if (!ui_popmenu_open(&settings.popup, t->own, &settings.ui, t->menu_x, t->menu_y, 0, 0, WINDOW_POPUP_POINT, ui_kit_touch))
+                settings.popup.list = null, settings.popup.list_row = -1;
 }
 
 /* ---- the pointer and a finger: the kit's page (ui_page_pointer) ---- */
@@ -7149,21 +7533,13 @@ static b32 settings_event_take(const struct window_event address_to event)
                         }
                 }
         }
-        // The right button on a row opens its copies (a finger held still is the right button too); any active drag/stretch is let go first.
-        if (event->type == WINDOW_EVENT_BUTTON && event->a == UI_POINTER_RIGHT && !settings.page.card && settings.page.menu_row < 0)
-        {
-                ui_page_let_go(&settings.ui, &settings.page, &settings.list);
-                if (event->flags & WINDOW_KEY_DOWN)
-                        settings_copy_press(ui_kit.pointer_x, ui_kit.pointer_y);
-                return true;
-        }
         switch (event->type)
         {
         case WINDOW_EVENT_KEY:
                 return settings_key(event);
         case WINDOW_EVENT_MOTION:
         case WINDOW_EVENT_BUTTON:
-                // The rows, the column, a press and a finger: the kit's page (its press is done by settings_press_at).
+                // The rows, the column, sectioned column headers, right-click context menus, a press and a finger: all handled by ui_page_pointer.
                 ui_page_pointer(&settings.ui, &settings.page, &settings.list, event, settings_press_at);
                 settings_slid();
                 break;
@@ -7517,20 +7893,11 @@ static fn settings_chose(int id)
 {
         struct ui_text address_to t = settings.popup.field;
 
-        // A row's copies, alone or after its field's items: a copy is done here, and any other answer closed them (a field's item is the field's, below).
-        if (settings.copy_open)
+        // A row's declarative list context menu (Copy, Copy row, Remove, or extra): handled by the kit with zero app state.
+        if (ui_list_menu_do(&settings.popup, &settings.own, id))
         {
-                settings.copy_open = false;
-                if (id == SETTINGS_COPY_VALUE || id == SETTINGS_COPY_BOTH)
-                {
-                        settings_copy_row(settings.copy_row, id == SETTINGS_COPY_BOTH);
-                        return;
-                }
-                if (!t)
-                {
-                        ui_page_redraw(&settings.page);
-                        return;
-                }
+                ui_page_redraw(&settings.page);
+                return;
         }
         // A choice's menu: the item it chose, or a negative id when it closed (the compositor's press outside, or Escape).
         if (!t && settings.page.menu_row >= 0)

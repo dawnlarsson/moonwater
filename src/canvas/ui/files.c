@@ -146,7 +146,7 @@
 #define FILES_VIEW_ICONS 1
 #define FILES_VIEW_LIST 2
 #define FILES_BAND 32                // logical pixels of the path's band and the finder's field
-#define FILES_ROW 28                 // logical pixels of a row of the details, the list and the tree: denser than the kit's 40
+#define FILES_ROW UI_ROW_DENSE       // logical pixels of a row of the details, the list and the tree: denser than the kit's 40
 #define FILES_TILE_ICON 104          // logical pixels of a tile in the icon view,
 #define FILES_TILE_LIST 232          // and of a name in the list view (a row high)
 #define FILES_KEY_1 2

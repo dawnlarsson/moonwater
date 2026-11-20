@@ -186,6 +186,7 @@ menu_bin_empty	1538	خالی کردن سطل بازیافت
 menu_bin_open	8797	باز کردن سطل بازیافت
 menu_bin_restore	4799	بازگرداندن
 menu_copy	43e0	کپی
+menu_copy_row	f3c8	رونوشت ردیف
 menu_cut	5c17	برش
 menu_delete	1e3e	حذف
 menu_find	1fa6	جستجو
@@ -197,6 +198,7 @@ menu_open_terminal	6d2a	باز کردن &پایانه در اینجا
 menu_paste	6854	چسباندن
 menu_properties	c780	&ویژگی‌ها
 menu_redo	ac45	انجام دوباره
+menu_remove	901d	حذف
 menu_rename	9529	&تغییر نام
 menu_reset_zoom	1b0f	بازنشانی بزرگ‌نمایی
 menu_select_all	f6f6	انتخاب همه
@@ -253,10 +255,15 @@ settings_cannot_join	dfa4	moonwater نمی‌تواند خواسته‌های آ
 settings_cannot_run	954f	فرمان moonwater اجرا نشد
 settings_card_back	db52	Escape یا کلیک برای بازگشت
 settings_card_stopped	e24d	متوقف شد: Escape یا کلیک برای بازگشت
+settings_column_access	ae0b	دسترسی
+settings_column_security	21db	امنیت
+settings_column_signal	4529	سیگنال
+settings_column_status	f20f	وضعیت
 settings_copied	0bd7	در کلیپ‌بورد کپی شد
 settings_copy_both	257a	کپی برچسب و مقدار
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	کپی مقدار
+settings_device_deny	fa87	رد
 settings_device_drive	8683	درایو، %s
 settings_device_name	5f12	نام دستگاه
 settings_device_none	3cd5	هیچ درایو یا دستگاه USB پیدا نشد
@@ -290,6 +297,7 @@ settings_item_cannot	e643	moonwater نمی‌تواند خواسته‌های ا
 settings_item_drive	269a	نمایش داده می‌شود، نگه‌داشته نمی‌شود: هیچ فرمانی درایوی را تغییر نمی‌دهد
 settings_item_joined	0fb8	متصل: Delete آن را فراموش می‌کند
 settings_item_kept	33d9	با نامش نگه داشته شده: Delete آن را فراموش می‌کند
+settings_item_link	03ad	پیوند شده: Delete آن را حذف می‌کند
 settings_item_open	4429	Enter متصل می‌شود و ذخیره می‌کند
 settings_item_saved	3ffd	ذخیره‌شده: Enter دوباره گذرواژه را می‌پرسد، Delete آن را فراموش می‌کند
 settings_joined	1050	متصل

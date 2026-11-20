@@ -185,6 +185,7 @@ menu_bin_empty	1538	Άδειασμα κάδου
 menu_bin_open	8797	Άνοιγμα κάδου
 menu_bin_restore	4799	Επαναφορά
 menu_copy	43e0	Αντιγραφή
+menu_copy_row	f3c8	Αντιγραφή γραμμής
 menu_cut	5c17	Αποκοπή
 menu_delete	1e3e	Διαγραφή
 menu_find	1fa6	Εύρεση
@@ -196,6 +197,7 @@ menu_open_terminal	6d2a	Άνοιγμα &τερματικού εδώ
 menu_paste	6854	Επικόλληση
 menu_properties	c780	&Ιδιότητες
 menu_redo	ac45	Επανάληψη
+menu_remove	901d	Αφαίρεση
 menu_rename	9529	&Μετονομασία
 menu_reset_zoom	1b0f	Επαναφορά ζουμ
 menu_select_all	f6f6	Επιλογή όλων
@@ -252,10 +254,15 @@ settings_cannot_join	dfa4	το moonwater δεν μπορεί να συνδεθε
 settings_cannot_run	954f	η εντολή moonwater δεν μπόρεσε να εκτελεστεί
 settings_card_back	db52	Το Escape ή ένα κλικ επιστρέφει
 settings_card_stopped	e24d	διακόπηκε: το Escape ή ένα κλικ επιστρέφει
+settings_column_access	ae0b	Πρόσβαση
+settings_column_security	21db	Ασφάλεια
+settings_column_signal	4529	Σήμα
+settings_column_status	f20f	Κατάσταση
 settings_copied	0bd7	αντιγράφηκε στο πρόχειρο
 settings_copy_both	257a	Αντιγραφή ετικέτας και τιμής
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Αντιγραφή τιμής
+settings_device_deny	fa87	Άρνηση
 settings_device_drive	8683	δίσκος, %s
 settings_device_name	5f12	Όνομα της συσκευής
 settings_device_none	3cd5	Δεν βρέθηκαν δίσκοι ή συσκευές USB
@@ -289,6 +296,7 @@ settings_item_cannot	e643	το moonwater δεν μπορεί να συνδεθε
 settings_item_drive	269a	εμφανίζεται, δεν κρατείται: καμία εντολή δεν αλλάζει δίσκο
 settings_item_joined	0fb8	συνδεδεμένο: το Delete το ξεχνά
 settings_item_kept	33d9	κρατημένο με το όνομά του: το Delete το ξεχνά
+settings_item_link	03ad	συνδεδεμένο: το Delete το αφαιρεί
 settings_item_open	4429	το Enter συνδέεται και το αποθηκεύει
 settings_item_saved	3ffd	αποθηκευμένο: το Enter ζητά ξανά τον κωδικό, το Delete το ξεχνά
 settings_joined	1050	συνδεδεμένο

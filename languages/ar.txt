@@ -186,6 +186,7 @@ menu_bin_empty	1538	إفراغ سلة المهملات
 menu_bin_open	8797	فتح سلة المهملات
 menu_bin_restore	4799	استعادة
 menu_copy	43e0	نسخ
+menu_copy_row	f3c8	نسخ الصف
 menu_cut	5c17	قص
 menu_delete	1e3e	حذف
 menu_find	1fa6	بحث
@@ -197,6 +198,7 @@ menu_open_terminal	6d2a	فتح &طرفية هنا
 menu_paste	6854	لصق
 menu_properties	c780	&خصائص
 menu_redo	ac45	إعادة
+menu_remove	901d	إزالة
 menu_rename	9529	إعادة &تسمية
 menu_reset_zoom	1b0f	إعادة تعيين التكبير
 menu_select_all	f6f6	تحديد الكل
@@ -253,10 +255,15 @@ settings_cannot_join	dfa4	لا يستطيع moonwater تلبية ما تطلبه
 settings_cannot_run	954f	تعذر تشغيل أمر moonwater
 settings_card_back	db52	Escape أو نقرة للرجوع
 settings_card_stopped	e24d	توقف: Escape أو نقرة للرجوع
+settings_column_access	ae0b	الوصول
+settings_column_security	21db	الأمان
+settings_column_signal	4529	الإشارة
+settings_column_status	f20f	الحالة
 settings_copied	0bd7	نُسخ إلى الحافظة
 settings_copy_both	257a	نسخ التسمية والقيمة
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	نسخ القيمة
+settings_device_deny	fa87	رفض
 settings_device_drive	8683	محرك، %s
 settings_device_name	5f12	اسم الجهاز
 settings_device_none	3cd5	لم يُعثر على محركات أو أجهزة USB
@@ -290,6 +297,7 @@ settings_item_cannot	e643	لا يستطيع moonwater تلبية ما تطلبه
 settings_item_drive	269a	معروض، غير محجوز: لا يغيّر أي أمر أي محرك
 settings_item_joined	0fb8	متصلة: Delete لنسيانها
 settings_item_kept	33d9	محفوظ باسمه: Delete لنسيانه
+settings_item_link	03ad	مرتبط: Delete يزيله
 settings_item_open	4429	Enter للاتصال بها وحفظها
 settings_item_saved	3ffd	محفوظة: Enter يطلب كلمة المرور من جديد، Delete لنسيانها
 settings_joined	1050	متصلة

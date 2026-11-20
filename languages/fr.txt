@@ -185,6 +185,7 @@ menu_bin_empty	1538	Vider la corbeille
 menu_bin_open	8797	Ouvrir la corbeille
 menu_bin_restore	4799	Restaurer
 menu_copy	43e0	&Copier
+menu_copy_row	f3c8	Copier la ligne
 menu_cut	5c17	Co&uper
 menu_delete	1e3e	&Supprimer
 menu_find	1fa6	Rec&hercher
@@ -196,6 +197,7 @@ menu_open_terminal	6d2a	Ouvrir un &terminal ici
 menu_paste	6854	Co&ller
 menu_properties	c780	P&ropriétés
 menu_redo	ac45	&Rétablir
+menu_remove	901d	Supprimer
 menu_rename	9529	Re&nommer
 menu_reset_zoom	1b0f	Réinitialiser le &zoom
 menu_select_all	f6f6	&Tout sélectionner
@@ -252,10 +254,15 @@ settings_cannot_join	dfa4	moonwater ne peut pas rejoindre ce que ce réseau dema
 settings_cannot_run	954f	la commande moonwater n'a pas pu être lancée
 settings_card_back	db52	Escape ou un clic revient en arrière
 settings_card_stopped	e24d	arrêté : Escape ou un clic revient en arrière
+settings_column_access	ae0b	Accès
+settings_column_security	21db	Sécurité
+settings_column_signal	4529	Signal
+settings_column_status	f20f	État
 settings_copied	0bd7	copié dans le presse-papiers
 settings_copy_both	257a	Copier le libellé et la valeur
 settings_copy_line	56a6	%1$s : %2$s
 settings_copy_value	f3e5	Copier la valeur
+settings_device_deny	fa87	Refuser
 settings_device_drive	8683	disque, %s
 settings_device_name	5f12	Nom de l'appareil
 settings_device_none	3cd5	Aucun disque ni périphérique USB trouvé
@@ -289,6 +296,7 @@ settings_item_cannot	e643	moonwater ne peut pas rejoindre ce que ce réseau dema
 settings_item_drive	269a	affiché, non retenu : aucune commande ne modifie un disque
 settings_item_joined	0fb8	connecté : Delete l'oublie
 settings_item_kept	33d9	gardé par son nom : Delete l'oublie
+settings_item_link	03ad	lié : Delete le supprime
 settings_item_open	4429	Enter rejoint et l'enregistre
 settings_item_saved	3ffd	enregistré : Enter redemande son mot de passe, Delete l'oublie
 settings_joined	1050	connecté

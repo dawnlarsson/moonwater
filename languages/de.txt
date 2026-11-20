@@ -185,6 +185,7 @@ menu_bin_empty	1538	Papierkorb leeren
 menu_bin_open	8797	Papierkorb öffnen
 menu_bin_restore	4799	Zurücklegen
 menu_copy	43e0	&Kopieren
+menu_copy_row	f3c8	Zeile kopieren
 menu_cut	5c17	A&usschneiden
 menu_delete	1e3e	&Löschen
 menu_find	1fa6	&Suchen
@@ -196,6 +197,7 @@ menu_open_terminal	6d2a	&Terminal hier öffnen
 menu_paste	6854	&Einfügen
 menu_properties	c780	&Eigenschaften
 menu_redo	ac45	&Wiederholen
+menu_remove	901d	Entfernen
 menu_rename	9529	&Umbenennen
 menu_reset_zoom	1b0f	&Zoom zurücksetzen
 menu_select_all	f6f6	Alles &auswählen
@@ -252,10 +254,15 @@ settings_cannot_join	dfa4	moonwater kann nicht erfüllen, was dieses Netzwerk ve
 settings_cannot_run	954f	der moonwater-Befehl ließ sich nicht ausführen
 settings_card_back	db52	Escape oder ein Klick geht zurück
 settings_card_stopped	e24d	angehalten: Escape oder ein Klick geht zurück
+settings_column_access	ae0b	Zugriff
+settings_column_security	21db	Sicherheit
+settings_column_signal	4529	Signal
+settings_column_status	f20f	Status
 settings_copied	0bd7	in die Zwischenablage kopiert
 settings_copy_both	257a	Bezeichnung und Wert kopieren
 settings_copy_line	56a6	%1$s: %2$s
 settings_copy_value	f3e5	Wert kopieren
+settings_device_deny	fa87	Verweigern
 settings_device_drive	8683	Laufwerk, %s
 settings_device_name	5f12	Name des Geräts
 settings_device_none	3cd5	Keine Laufwerke oder USB-Geräte gefunden
@@ -289,6 +296,7 @@ settings_item_cannot	e643	moonwater kann nicht erfüllen, was dieses Netzwerk ve
 settings_item_drive	269a	angezeigt, nicht gehalten: kein Befehl ändert ein Laufwerk
 settings_item_joined	0fb8	verbunden: Delete vergisst es
 settings_item_kept	33d9	nach Namen gemerkt: Delete vergisst es
+settings_item_link	03ad	verbunden: Delete entfernt es
 settings_item_open	4429	Enter verbindet und speichert es
 settings_item_saved	3ffd	gespeichert: Enter fragt das Passwort erneut, Delete vergisst es
 settings_joined	1050	verbunden
