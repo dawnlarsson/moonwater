@@ -25646,8 +25646,9 @@ struct ui_list
         b32 double_clicked;                // true when the row returned by ui_list_click was a double-click
 };
 
-#define UI_LIST_STRIPE_INK 0x0d    // the alpha of the ink a striped row is tinted with (about 5 percent)
-#define UI_LIST_STRIPE_ACCENT 0x1a // the alpha of the accent, where the stripes are the accent's (about 10 percent)
+#define UI_LIST_STRIPE_INK 0x0d       // the alpha of the ink a striped row is tinted with in dark mode (about 5 percent)
+#define UI_LIST_STRIPE_INK_LIGHT 0x06 // softer ink alpha in light mode (about 2.5 percent) so alternating rows stay subtle
+#define UI_LIST_STRIPE_ACCENT 0x1a    // the alpha of the accent, where the stripes are the accent's (about 10 percent)
 
 // Whether the row at this place of the list (its number from 0 down the list) is a striped one: every stripe-th, counted from 1.
 static inline b32 ui_list_striped(const struct ui_list address_to l, int place)
@@ -27427,11 +27428,14 @@ static b32 ui_list_expander_at(struct ui address_to ui, struct ui_list address_t
 // A striped row's tint (straight ARGB): the app's, else the accent's or the ink's at a low alpha, the ink being the glass's on glass.
 static unsigned int ui_list_stripe_colour(const struct ui address_to ui, const struct ui_list address_to l)
 {
+        unsigned int alpha;
+
         if (l->stripe_tint)
                 return l->stripe_tint;
         if (l->stripe_accent)
                 return (unsigned int)UI_LIST_STRIPE_ACCENT << 24 | (ui_role(UI_PRIMARY) & 0xffffffu);
-        return (unsigned int)UI_LIST_STRIPE_INK << 24 | (ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu);
+        alpha = !ui_kit.dark && !ui->glass ? UI_LIST_STRIPE_INK_LIGHT : UI_LIST_STRIPE_INK;
+        return alpha << 24 | (ui_text_colour(ui, UI_ON_SURFACE) & 0xffffffu);
 }
 
 // A striped row's tint across the row's span, square, as the lit fill and the hover layer are: they draw over it.
