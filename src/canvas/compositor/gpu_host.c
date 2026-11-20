@@ -1560,3 +1560,103 @@ static void compositor_gpu_game_clocks(int on)
 }
 #endif
 
+/*
+        Native Canvas external-buffer GPU import cache:
+        protocol-neutral dma-buf fd identity (statx dev/ino), epoch-checked live lookup,
+        single cached gpu_import_fd() slot lifecycle, and pool-remap pointer tracking.
+*/
+struct canvas_ext_import
+{
+        const unsigned char *map;
+        long fd, size;
+        unsigned long dev, ino;
+        positive va;
+        unsigned int epoch;
+};
+
+static void canvas_ext_fd_ident(long fd, unsigned long *dev, unsigned long *ino)
+{
+        unsigned char info[256];
+
+        *dev = 0, *ino = 0;
+        if (fd < 0)
+                return;
+        if (compositor_call(syscall(statx), (positive)fd, (positive)"", 0x1000, 0x7ff, (positive)info, 0) < 0)
+                return;
+        *ino = *(unsigned long *)(info + 32);
+        *dev = (((unsigned long)*(unsigned int *)(info + 136)) << 32) | *(unsigned int *)(info + 140);
+}
+
+static positive canvas_ext_import_live(positive va, unsigned int epoch)
+{
+#ifdef MOONWATER_GPU_C
+        if (va && epoch == gpu_epoch)
+        {
+                gpu_import_handed(va);
+                return va;
+        }
+#else
+        (void)va, (void)epoch;
+#endif
+        return 0;
+}
+
+static void canvas_ext_import_release(struct canvas_ext_import *ref)
+{
+        if (!ref)
+                return;
+#ifdef MOONWATER_GPU_C
+        if (ref->va && ref->epoch == gpu_epoch)
+                gpu_release_import(ref->va);
+#endif
+        memory_zero(ref, sizeof(*ref));
+        ref->fd = -1;
+}
+
+static int canvas_ext_import_same(const struct canvas_ext_import *ref, const unsigned char *map, long fd, long size,
+                                  unsigned long dev, unsigned long ino)
+{
+        return ref->map == map && ref->fd == fd && ref->size == size && ref->dev == dev && ref->ino == ino &&
+               (!ref->va || canvas_ext_import_live(ref->va, ref->epoch));
+}
+
+static void canvas_ext_import_remap(struct canvas_ext_import *ref, const unsigned int **pixels, const void *old_at, long new_at)
+{
+        if (!ref || ref->map != (const unsigned char *)old_at)
+                return;
+        if (pixels && *pixels)
+                *pixels = (const unsigned int *)((const unsigned char *)*pixels + (new_at - (long)old_at));
+        ref->map = (const unsigned char *)new_at;
+}
+
+static positive canvas_ext_import_cached(struct canvas_ext_import *ref, const unsigned char *map, long fd, long size,
+                                         unsigned long dev, unsigned long ino, int barred, int *reused)
+{
+#ifdef MOONWATER_GPU_C
+        positive va;
+
+        if (!ref)
+                return 0;
+        if (ref->va && canvas_ext_import_same(ref, map, fd, size, dev, ino))
+        {
+                if (reused)
+                        *reused = 1;
+                return ref->va;
+        }
+        canvas_ext_import_release(ref);
+        if (barred || fd < 0 || size <= 0)
+                return 0;
+        va = gpu_import_fd((int)fd, (positive)size);
+        if (!va)
+                return 0;
+        ref->map = map, ref->fd = fd, ref->size = size, ref->dev = dev, ref->ino = ino;
+        ref->va = va, ref->epoch = gpu_epoch;
+        if (reused)
+                *reused = 0;
+        return va;
+#else
+        (void)ref, (void)map, (void)fd, (void)size, (void)dev, (void)ino, (void)barred, (void)reused;
+        return 0;
+#endif
+}
+

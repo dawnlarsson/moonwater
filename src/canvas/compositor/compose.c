@@ -2719,5 +2719,285 @@ static void compositor_spot_draw(const struct compositor_target *t, int cx, int 
         }
 }
 
+/*
+        Native Canvas external-surface pixel & orientation blitter primitives:
+        BT.601 NV12->XRGB decode, premultiplied alpha-over, 8/10-bit FourCC row conversion,
+        and unified 8-orientation bit-table crop/scale/y-invert blitter shared across protocols.
+*/
+#define CANVAS_FOURCC_ARGB8888    0x34325241u
+#define CANVAS_FOURCC_XRGB8888    0x34325258u
+#define CANVAS_FOURCC_ABGR8888    0x34324241u
+#define CANVAS_FOURCC_XBGR8888    0x34324258u
+#define CANVAS_FOURCC_ARGB2101010 0x30335241u
+#define CANVAS_FOURCC_XRGB2101010 0x30335258u
+#define CANVAS_FOURCC_ABGR2101010 0x30334241u
+#define CANVAS_FOURCC_XBGR2101010 0x30334258u
+#define CANVAS_FOURCC_NV12        0x3231564eu
+
+static unsigned int canvas_ext_yuv_rgb(long yv, long u, long v)
+{
+        long c = yv < 16 ? 0 : yv - 16, d = u - 128, e = v - 128;
+        long r = (298 * c + 409 * e + 128) >> 8;
+        long g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+        long b = (298 * c + 516 * d + 128) >> 8;
+
+        r = r < 0 ? 0 : r > 255 ? 255 : r;
+        g = g < 0 ? 0 : g > 255 ? 255 : g;
+        b = b < 0 ? 0 : b > 255 ? 255 : b;
+        return 0xff000000u | (unsigned int)r << 16 | (unsigned int)g << 8 | (unsigned int)b;
+}
+
+static unsigned int canvas_ext_over(unsigned int over, unsigned int under)
+{
+        unsigned int through = 255u - (over >> 24), out = 0xff000000u;
+
+        for (unsigned int shift = 0; shift < 24; shift += 8)
+        {
+                unsigned int sum = ((over >> shift) & 255u) + ((((under >> shift) & 255u) * through + 127u) / 255u);
+
+                out |= (sum > 255u ? 255u : sum) << shift;
+        }
+        return out;
+}
+
+static inline unsigned int canvas_ext_pixel_argb(unsigned int v, unsigned int fourcc)
+{
+        unsigned int r, g, b, a;
+
+        switch (fourcc)
+        {
+        case CANVAS_FOURCC_ABGR8888:
+                return (v & 0xff00ff00u) | ((v & 0xffu) << 16) | ((v >> 16) & 0xffu);
+        case CANVAS_FOURCC_XBGR8888:
+                return 0xff000000u | (v & 0x0000ff00u) | ((v & 0xffu) << 16) | ((v >> 16) & 0xffu);
+        case CANVAS_FOURCC_ARGB2101010:
+        case CANVAS_FOURCC_XRGB2101010:
+                r = (v >> 22) & 0xffu, g = (v >> 12) & 0xffu, b = (v >> 2) & 0xffu;
+                a = fourcc == CANVAS_FOURCC_XRGB2101010 ? 0xffu : ((v >> 30) * 85u);
+                return (a << 24) | (r << 16) | (g << 8) | b;
+        case CANVAS_FOURCC_ABGR2101010:
+        case CANVAS_FOURCC_XBGR2101010:
+                b = (v >> 22) & 0xffu, g = (v >> 12) & 0xffu, r = (v >> 2) & 0xffu;
+                a = fourcc == CANVAS_FOURCC_XBGR2101010 ? 0xffu : ((v >> 30) * 85u);
+                return (a << 24) | (r << 16) | (g << 8) | b;
+        case CANVAS_FOURCC_XRGB8888:
+                return v | 0xff000000u;
+        default:
+                return v;
+        }
+}
+
+static void canvas_ext_convert_row(unsigned int *dst, const unsigned int *src, long count, unsigned int fourcc, int blend)
+{
+        if (!blend || fourcc == CANVAS_FOURCC_XRGB8888 || fourcc == CANVAS_FOURCC_XBGR8888 ||
+            fourcc == CANVAS_FOURCC_XRGB2101010 || fourcc == CANVAS_FOURCC_XBGR2101010)
+        {
+                switch (fourcc)
+                {
+                case CANVAS_FOURCC_ARGB8888:
+                        memory_copy_apart(dst, src, (positive)count * 4);
+                        return;
+                case CANVAS_FOURCC_XRGB8888:
+                        memory_or_u32(dst, src, (positive)count, 0xff000000u);
+                        return;
+                case CANVAS_FOURCC_ABGR8888:
+                        memory_swizzle_rb_u32(dst, src, (positive)count, 0u);
+                        return;
+                case CANVAS_FOURCC_XBGR8888:
+                        memory_swizzle_rb_u32(dst, src, (positive)count, 0xff000000u);
+                        return;
+                default:
+                        for (long i = 0; i < count; i++)
+                                dst[i] = canvas_ext_pixel_argb(src[i], fourcc);
+                        return;
+                }
+        }
+        if (fourcc == CANVAS_FOURCC_ARGB8888)
+        {
+                memory_over_u32_rect(dst, (positive)count, src, (positive)count, (positive)count, 1);
+                return;
+        }
+        for (long i = 0; i < count; i++)
+                dst[i] = canvas_ext_over(canvas_ext_pixel_argb(src[i], fourcc), dst[i]);
+}
+
+struct canvas_ext_blit
+{
+        const unsigned char *pixels, *uv_base;
+        unsigned long stride, uv_stride;
+        long width, height;
+        unsigned int fourcc;
+        int transform, y_invert, blend, streaming;
+        long src_x, src_y, src_w, src_h; // 24.8 fixed-point; src_w <= 0 means full transformed buffer
+        long dst_w, dst_h;               // <= 0 means transformed buffer size
+        long dest_x, dest_y;
+        unsigned int *to;
+        unsigned long to_pitch;
+        long to_w, to_h;
+        const int (*rects)[4];           // optional [x, y, w, h] damage rects (null/0 -> full)
+        long rect_count;
+};
+
+static int canvas_ext_xform_blit(const struct canvas_ext_blit *b, int out_box[4])
+{
+        long bw, bh, bw_t, bh_t, tw, th, sx256, sy256, sw256, sh256, dx0, dy0, ox1, oy1, ox2, oy2;
+        int tr;
+
+        if (!b || !b->pixels || !b->to || b->width <= 0 || b->height <= 0)
+                return 0;
+        bw = b->width, bh = b->height, tr = b->transform & 7;
+        bw_t = (tr & 1) ? bh : bw, bh_t = (tr & 1) ? bw : bh;
+        tw = b->dst_w > 0 ? b->dst_w : bw_t, th = b->dst_h > 0 ? b->dst_h : bh_t;
+        sx256 = b->src_w > 0 ? b->src_x : 0, sy256 = b->src_w > 0 ? b->src_y : 0;
+        sw256 = b->src_w > 0 ? b->src_w : bw_t * 256, sh256 = b->src_w > 0 ? b->src_h : bh_t * 256;
+        dx0 = b->dest_x, dy0 = b->dest_y;
+        ox1 = dx0 < 0 ? -dx0 : 0, oy1 = dy0 < 0 ? -dy0 : 0;
+        ox2 = dx0 + tw > b->to_w ? b->to_w - dx0 : tw;
+        oy2 = dy0 + th > b->to_h ? b->to_h - dy0 : th;
+        if (tw <= 0 || th <= 0 || ox2 <= ox1 || oy2 <= oy1)
+                return 0;
+        if (out_box)
+                out_box[0] = (int)(dx0 + ox1), out_box[1] = (int)(dy0 + oy1), out_box[2] = (int)(dx0 + ox2), out_box[3] = (int)(dy0 + oy2);
+
+        // Fast unscaled, untransformed 32-bit RGB path with optional damage-rect clipping and WC streaming row reads.
+        if (b->fourcc != CANVAS_FOURCC_NV12 && !tr &&
+            sx256 == 0 && sy256 == 0 && sw256 == tw * 256 && sh256 == th * 256 && tw == bw && th == bh)
+        {
+                long count = b->rects && b->rect_count > 0 ? b->rect_count : 1;
+                unsigned int row_buf[4096];
+                unsigned long src_pitch = b->stride / 4;
+                const unsigned int *src_pixels = (const unsigned int *)b->pixels;
+                int touched = 0;
+
+                for (long at = 0; at < count; at++)
+                {
+                        long left = b->rects && b->rect_count > 0 ? b->rects[at][0] : 0;
+                        long top = b->rects && b->rect_count > 0 ? b->rects[at][1] : 0;
+                        long right = b->rects && b->rect_count > 0 ? left + b->rects[at][2] : bw;
+                        long bottom = b->rects && b->rect_count > 0 ? top + b->rects[at][3] : bh;
+
+                        left = left < 0 ? 0 : left, top = top < 0 ? 0 : top;
+                        right = right > bw ? bw : right, bottom = bottom > bh ? bh : bottom;
+                        if (dx0 + left < 0)
+                                left = -dx0;
+                        if (dy0 + top < 0)
+                                top = -dy0;
+                        if (dx0 + right > b->to_w)
+                                right = b->to_w - dx0;
+                        if (dy0 + bottom > b->to_h)
+                                bottom = b->to_h - dy0;
+                        if (right <= left || bottom <= top)
+                                continue;
+                        {
+                                long w = right - left, h = bottom - top;
+                                unsigned int *dst_base = b->to + (unsigned long)(dy0 + top) * b->to_pitch + (unsigned long)(dx0 + left);
+
+                                for (long ry = 0; ry < h; ry++)
+                                {
+                                        long sy = b->y_invert ? (bh - 1 - (top + ry)) : (top + ry);
+                                        const unsigned int *src_row = src_pixels + (unsigned long)sy * src_pitch + (unsigned long)left;
+
+                                        if (b->streaming && w <= 4096)
+                                        {
+                                                memory_copy_rect_stream_u32(row_buf, (positive)w, src_row, src_pitch, (positive)w, 1);
+                                                src_row = row_buf;
+                                        }
+                                        canvas_ext_convert_row(dst_base + (unsigned long)ry * b->to_pitch, src_row, w, b->fourcc, b->blend);
+                                }
+                        }
+                        if (out_box)
+                        {
+                                int x1 = (int)(dx0 + left), y1 = (int)(dy0 + top), x2 = (int)(dx0 + right), y2 = (int)(dy0 + bottom);
+
+                                if (!touched)
+                                        out_box[0] = x1, out_box[1] = y1, out_box[2] = x2, out_box[3] = y2;
+                                else
+                                {
+                                        out_box[0] = x1 < out_box[0] ? x1 : out_box[0], out_box[1] = y1 < out_box[1] ? y1 : out_box[1];
+                                        out_box[2] = x2 > out_box[2] ? x2 : out_box[2], out_box[3] = y2 > out_box[3] ? y2 : out_box[3];
+                                }
+                        }
+                        touched = 1;
+                }
+                return touched;
+        }
+        // Fast scaled 32-bit RGB without transform/y_invert/crop/blend/streaming.
+        if ((b->fourcc == CANVAS_FOURCC_ARGB8888 || b->fourcc == CANVAS_FOURCC_XRGB8888 ||
+             b->fourcc == CANVAS_FOURCC_ABGR8888 || b->fourcc == CANVAS_FOURCC_XBGR8888) &&
+            !tr && !b->y_invert && !b->blend && !b->streaming &&
+            sx256 == 0 && sy256 == 0 && sw256 == bw * 256 && sh256 == bh * 256)
+        {
+                unsigned int *dst_base = b->to + (unsigned long)(dy0 + oy1) * b->to_pitch + (unsigned long)(dx0 + ox1);
+                positive rw = (positive)(ox2 - ox1), rh = (positive)(oy2 - oy1);
+
+                memory_resample_u32_rect(dst_base, b->to_pitch, rw, rh,
+                                         (const unsigned int *)b->pixels, (positive)(b->stride / 4),
+                                         (positive)bw, (positive)bh, (positive)tw, (positive)th,
+                                         (positive)ox1, (positive)oy1);
+                if (b->fourcc == CANVAS_FOURCC_ABGR8888 || b->fourcc == CANVAS_FOURCC_XBGR8888)
+                {
+                        p32 mask = b->fourcc == CANVAS_FOURCC_XBGR8888 ? 0xff000000u : 0u;
+
+                        for (positive ry = 0; ry < rh; ry++)
+                                memory_swizzle_rb_u32(dst_base + ry * b->to_pitch, dst_base + ry * b->to_pitch, rw, mask);
+                }
+                else if (b->fourcc == CANVAS_FOURCC_XRGB8888)
+                        for (positive ry = 0; ry < rh; ry++)
+                                memory_or_u32(dst_base + ry * b->to_pitch, dst_base + ry * b->to_pitch, rw, 0xff000000u);
+                return 1;
+        }
+        // General 8-orientation bit-table blitter (0x36 X-flip / 0x6c Y-flip across Wayland/DRM transforms 0..7) + NV12/10-bit/crop/blend.
+        {
+                long tx_buf[4096];
+                int have_tx = ox2 <= 4096;
+
+                if (have_tx)
+                        for (long ox = ox1; ox < ox2; ox++)
+                        {
+                                long tx = (sx256 + ((ox * 2 + 1) * sw256) / (2 * tw)) >> 8;
+
+                                tx_buf[ox] = tx < 0 ? 0 : tx >= bw_t ? bw_t - 1 : tx;
+                        }
+                for (long oy = oy1; oy < oy2; oy++)
+                {
+                        unsigned int *dst = b->to + (unsigned long)(dy0 + oy) * b->to_pitch + (unsigned long)dx0;
+                        long ty = (sy256 + ((oy * 2 + 1) * sh256) / (2 * th)) >> 8;
+
+                        ty = ty < 0 ? 0 : ty >= bh_t ? bh_t - 1 : ty;
+                        for (long ox = ox1; ox < ox2; ox++)
+                        {
+                                long tx = have_tx ? tx_buf[ox] : ((sx256 + ((ox * 2 + 1) * sw256) / (2 * tw)) >> 8);
+                                long ax, ay, bx, by;
+                                unsigned int px;
+
+                                if (!have_tx)
+                                        tx = tx < 0 ? 0 : tx >= bw_t ? bw_t - 1 : tx;
+                                ax = (tr & 1) ? ty : tx, ay = (tr & 1) ? tx : ty;
+                                bx = ((0x36 >> tr) & 1) ? bw - 1 - ax : ax;
+                                by = ((0x6c >> tr) & 1) ? bh - 1 - ay : ay;
+                                if (b->y_invert)
+                                        by = bh - 1 - by;
+                                if (b->fourcc == CANVAS_FOURCC_NV12)
+                                {
+                                        long yv = (long)b->pixels[(unsigned long)by * b->stride + (unsigned long)bx];
+                                        long u = 128, v = 128;
+
+                                        if (b->uv_base && b->uv_stride > 0)
+                                        {
+                                                const unsigned char *uv = b->uv_base + (unsigned long)(by >> 1) * b->uv_stride + (unsigned long)(bx & ~1L);
+
+                                                u = (long)uv[0], v = (long)uv[1];
+                                        }
+                                        px = canvas_ext_yuv_rgb(yv, u, v);
+                                }
+                                else
+                                        px = canvas_ext_pixel_argb(*(const unsigned int *)(b->pixels + (unsigned long)by * b->stride + (unsigned long)bx * 4), b->fourcc);
+                                dst[ox] = b->blend ? canvas_ext_over(px, dst[ox]) : px;
+                        }
+                }
+        }
+        return 1;
+}
+
 /* ---- end of the backend ---- */
 

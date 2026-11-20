@@ -1320,6 +1320,7 @@ static void compositor_present_frames(void)
                                 rows[count++] = (unsigned int)row;
                         }
                         rows[count] = compositor.stack[at];
+                        compositor_row_prepare(compositor.stack[at]);
                         compositor_frame_of(compositor.stack[at], &frames[count++]);
                         // Its client's subsurfaces as frames of their own over it, read where they are (wayland_host.c), each with the row.
                         count += compositor_wl_layers_frames(compositor.stack[at], frames, rows, count);

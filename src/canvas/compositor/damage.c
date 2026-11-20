@@ -796,6 +796,98 @@ static void compositor_preview_keep(void)
 }
 
 /*
+        Native Canvas external-surface row state & host callback table:
+        unified per-row state + vtable letting Wayland, X11, Proton, and native external clients
+        plug into the compositor without protocol-specific backdoor declarations.
+*/
+enum
+{
+        CANVAS_EXT_LENT        = 1u << 0,
+        CANVAS_EXT_STRAIGHT    = 1u << 1,
+        CANVAS_EXT_SWAP        = 1u << 2,
+        CANVAS_EXT_BLEND       = 1u << 3,
+        CANVAS_EXT_ASYNC       = 1u << 4,
+        CANVAS_EXT_UNSCANNABLE = 1u << 5,
+        CANVAS_EXT_XOVERRIDE   = 1u << 6,
+};
+
+struct canvas_ext_row_state
+{
+        const unsigned int *pixels;
+        unsigned long pitch;
+        positive gpu_va;
+        unsigned int gpu_epoch, flags;
+        unsigned int scan_fb, scan_x, scan_y;
+        unsigned int tiled_kind, tiled_desc[8];
+};
+
+struct canvas_ext_ops
+{
+        unsigned int (*scan_fb)(int row, int opaque);
+        void (*scan_origin)(int row, int *x, int *y);
+        void (*scan_fail)(int row);
+        int (*row_opaque)(int row, int x1, int y1, int x2, int y2);
+        void (*settle)(int row);
+        void (*straight_pays)(int keep);
+        void (*straight_settle)(int row, long y0, long y1);
+        unsigned int (*straight_desc)(int row, unsigned int desc[8]);
+        int (*held)(void);
+        void (*count_card)(const unsigned int *rows, unsigned int windows);
+        void (*lent_sync)(int start);
+        void (*tiled_settle)(void);
+        unsigned int (*layers_frames)(int row, struct compositor_frame *frames, unsigned int *rows, unsigned int at);
+        void (*gathers_fill)(void);
+};
+
+static struct canvas_ext_row_state *canvas_ext_rows;
+static unsigned long canvas_ext_rows_bytes;
+static unsigned int canvas_ext_rows_count;
+static const struct canvas_ext_ops *canvas_ext_host;
+
+static void canvas_ext_register(const struct canvas_ext_ops *ops)
+{
+        canvas_ext_host = ops;
+}
+
+static struct canvas_ext_row_state *canvas_ext_row_at(int row)
+{
+        unsigned int want;
+
+        if (row < 0)
+                return 0;
+        if ((unsigned int)row < canvas_ext_rows_count)
+                return &canvas_ext_rows[row];
+        want = compositor_rows_in_use > (unsigned int)row ? compositor_rows_in_use : (unsigned int)row + 1;
+        {
+                void *p = canvas_ext_rows;
+
+                if (!mem_buf_grow(&p, &canvas_ext_rows_bytes, (unsigned long)want * sizeof(*canvas_ext_rows), MEM_BUF_KEEP))
+                        return 0;
+                canvas_ext_rows = (struct canvas_ext_row_state *)p;
+                canvas_ext_rows_count = want;
+        }
+        return &canvas_ext_rows[row];
+}
+
+static const struct canvas_ext_row_state *canvas_ext_row_peek(int row)
+{
+        return row >= 0 && (unsigned int)row < canvas_ext_rows_count ? &canvas_ext_rows[row] : 0;
+}
+
+static void canvas_ext_row_clear(int row)
+{
+        if (row >= 0 && (unsigned int)row < canvas_ext_rows_count)
+                memory_zero(&canvas_ext_rows[row], sizeof(canvas_ext_rows[row]));
+}
+
+static int canvas_ext_row_has(int row, unsigned int flag)
+{
+        const struct canvas_ext_row_state *s = canvas_ext_row_peek(row);
+
+        return s && (s->flags & flag) != 0;
+}
+
+/*
         Whether a row is an override-redirect X window's (a menu, a tooltip, a drag's window): it places itself and keeps its own grabs, as
         it does under any X window manager, so it stays over the windows the compositor arranges (a press that raises one does not put it
         under) and is not put away by a press elsewhere or its window losing the keys, as a popup of the compositor's is; its client ends
@@ -1215,14 +1307,26 @@ static int compositor_screen_point(int row, int wx, int wy, int *sx, int *sy)
         return 1;
 }
 
+// Per-present row preparation: settles lent external buffers on resize and publishes per-window scale changes.
+static void compositor_row_prepare(int row)
+{
+        int scale;
+
+        compositor_wl_settle(row);
+        scale = compositor_row_scale(row);
+        if (compositor.table)
+        {
+                if (compositor.table->pid[row] && compositor.table->window_scale[row] != (unsigned int)scale)
+                        rows_add(&compositor.woken, row);
+                compositor.table->window_scale[row] = (unsigned int)scale;
+        }
+}
+
+// Pure geometry & frame descriptor query for row (no buffer-settle or table/woken side effects).
 static void compositor_frame_of(int row, struct compositor_frame *frame)
 {
-        int line, scale;
+        int line = compositor_frame_line(row), scale = compositor_row_scale(row);
         unsigned long lent_pitch;
-
-        // A client's picture is the size the window is, or it is let go of into the table first (its size changed).
-        compositor_wl_settle(row);
-        line = compositor_frame_line(row), scale = compositor_row_scale(row);
 
         // The corners are the window's own: UI_RADIUS at its scale, whatever the line comes to (it is a pixel at the least).
         *frame = (struct compositor_frame){compositor.x[row], compositor.y[row], (int)compositor.w[row],
@@ -1235,10 +1339,6 @@ static void compositor_frame_of(int row, struct compositor_frame *frame)
         frame->blend = compositor_wl_row_blend(row);
         frame->close = !(compositor.asks[row] & WINDOW_NO_CLOSE);
         frame->minimize = !(compositor.asks[row] & WINDOW_NO_TAB);
-        // A program is knocked when the scale its window is drawn at is not the one the table had: the kit lays its picture out again at it.
-        if (compositor.table->pid[row] && compositor.table->window_scale[row] != (unsigned int)frame->scale)
-                rows_add(&compositor.woken, row);
-        compositor.table->window_scale[row] = (unsigned int)frame->scale;
         compositor_land_frame(row, frame);
         if (compositor.glide[row] && !compositor.landing[row] && (row != compositor.drag || compositor.drag_glide == row + 1))
                 compositor_glide_frame(row, frame);
