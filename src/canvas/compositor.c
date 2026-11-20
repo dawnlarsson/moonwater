@@ -1132,6 +1132,7 @@ static struct
         unsigned int *arranged; // COMPOSITOR_FLOATING, or what it fills: all, the left half, the right
         unsigned char *fullscreen; // a window that asked to fill its screen under the taskbar too (fullscreen): a client's request, or a placement's
         unsigned char *fullscreen_was; // what a fullscreen window filled before (arranged), which leaving fullscreen puts back
+        unsigned char *wallpaper;  // a desktop/wallpaper window kept at the bottom of the stack, behind all windows and the taskbar
         unsigned int *edges;    // the edges the hand holds, until the window is the size asked for
         int *far_x, *far_y; // where the edges it does not hold are
         int *saved_x, *saved_y; // where it was floating, and how large
@@ -1548,6 +1549,16 @@ static void *compositor_map_zeroed(unsigned long bytes)
 
         return got < 0 && got > -4096 ? 0 : (void *)got;
 }
+
+#ifdef CONFIG_MOONWATER_WAYLAND
+static int compositor_xtray_count(void);
+static const unsigned int *compositor_xtray_pixels(int index);
+static void compositor_xtray_click(int index, int button);
+#else
+static inline int compositor_xtray_count(void) { return 0; }
+static inline const unsigned int *compositor_xtray_pixels(int index) { (void)index; return 0; }
+static inline void compositor_xtray_click(int index, int button) { (void)index; (void)button; }
+#endif
 
 // The nine parts that read the state, in the order their uses need (the comment before the first run says why).
 #include "compositor/damage.c" // what changed: rectangles and damage, landings and glides, the snap preview's state, a row's pixels and runs, the frames and the bands
@@ -2548,6 +2559,7 @@ _Static_assert(COMPOSITOR_POLLS_OWN + COMPOSITOR_INPUTS_KEPT + COMPOSITOR_CLIP_H
         X(compositor.arranged, COMPOSITOR_ROWS_ROW) \
         X(compositor.fullscreen, COMPOSITOR_ROWS_ROW) \
         X(compositor.fullscreen_was, COMPOSITOR_ROWS_ROW) \
+        X(compositor.wallpaper, COMPOSITOR_ROWS_ROW) \
         X(compositor.edges, COMPOSITOR_ROWS_ROW) \
         X(compositor.far_x, COMPOSITOR_ROWS_ROW) \
         X(compositor.far_y, COMPOSITOR_ROWS_ROW) \

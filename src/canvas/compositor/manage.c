@@ -33,6 +33,19 @@ static void compositor_raise(int row)
 {
         unsigned int over = 0;
 
+        if (compositor.wallpaper[row])
+        {
+                if (compositor.stacked && compositor.stack[0] == (unsigned int)row)
+                        return;
+                compositor_stack_remove(row);
+                memory_copy(compositor.stack + 1, compositor.stack, compositor.stacked * sizeof(*compositor.stack));
+                compositor.stack[0] = (unsigned int)row;
+                compositor.stacked++;
+                if (!++compositor.stack_gen)
+                        compositor.stack_gen++;
+                compositor_damage_row(row);
+                return;
+        }
         if (compositor.stacked && compositor.stack[compositor.stacked - 1] == row)
                 return;
 
@@ -748,7 +761,7 @@ static void compositor_resize_begin(int row, unsigned int edges)
         compositor.press_x = compositor.pointer_x;
         compositor.press_y = compositor.pointer_y;
         if (!compositor_tile_cells(compositor.arranged[row]))
-                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
+                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.wallpaper[row] = 0;
         compositor.edges[row] = edges;
         compositor.far_x[row] = compositor.x[row] + (int)compositor.w[row];
         compositor.far_y[row] = compositor.y[row] + (int)compositor.h[row];
@@ -1470,6 +1483,21 @@ static void compositor_fullscreen_on(int row, int screen)
 static void compositor_fullscreen_row(int row)
 {
         compositor_fullscreen_on(row, -1);
+}
+
+// A desktop/wallpaper window: fills its output behind all normal windows and the taskbar, excluded from tabs and Alt+Tab.
+static void compositor_wallpaper_on(int row, int screen)
+{
+        if (row < 0 || row >= COMPOSITOR_ROWS || !compositor.showing[row])
+                return;
+        compositor.fullscreen[row] = 0;
+        compositor.wallpaper[row] = 1;
+        compositor.asks[row] |= WINDOW_NO_TAB;
+        if (compositor.table)
+                compositor.table->glass[row] |= WINDOW_NO_TAB;
+        compositor_arrange_on(row, COMPOSITOR_MAXIMIZED, screen);
+        compositor_raise(row);
+        compositor_tabs_changed();
 }
 
 // Out of fullscreen: back to what it filled before (fullscreen_was), a floating window to the place and size it had. A window that is not
@@ -2459,7 +2487,7 @@ static void compositor_take(int row)
                 compositor.state[row] = table->state[row] & WINDOW_MINIMIZED;
                 compositor_close_count(row, 0);
                 table->state[row] = compositor.state[row];
-                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0;
+                compositor.arranged[row] = COMPOSITOR_FLOATING, compositor.fullscreen[row] = 0, compositor.wallpaper[row] = 0;
                 compositor.edges[row] = 0;
                 compositor.lifted[row] = table->lift[row];
                 compositor.moved[row] = table->moved[row];
@@ -2483,7 +2511,7 @@ static void compositor_take(int row)
                 compositor_raise(row);
                 // Raised over the others, but given the keys only when the person asked for the program (its launch
                 // carried WINDOW_ASKED_VARIABLE): a window a program opens on its own shows and leaves the keys alone.
-                if (compositor_visible(row) && __atomic_load_n(&table->asked[row], __ATOMIC_ACQUIRE))
+                if (!compositor.wallpaper[row] && compositor_visible(row) && __atomic_load_n(&table->asked[row], __ATOMIC_ACQUIRE))
                         compositor_focus(row);
                 compositor_land(row);
                 compositor_tabs_changed();

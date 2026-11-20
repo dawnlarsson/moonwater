@@ -368,9 +368,29 @@ static int taskbar_before(int slot)
 static int taskbar_clocked; // the clock's cell, as long as its text (taskbar_lay sets it before it lays the tray)
 static int taskbar_apart;   // the kit's gap twice, between one pill and the next (taskbar_lay sets it before it lays the tasks)
 
+static int taskbar_xtray_count(void)
+{
+#ifdef COMPOSITOR_ROWS
+        return compositor_xtray_count();
+#else
+        return 0;
+#endif
+}
+
+static const unsigned int *taskbar_xtray_pixels(int index)
+{
+#ifdef COMPOSITOR_ROWS
+        return compositor_xtray_pixels(index);
+#else
+        (void)index;
+        return 0;
+#endif
+}
+
 static int taskbar_tray_lay(struct ui_tree address_to t, int before, int m, int margin, int scale, int glyph, int square, int cell, int text_w, int high)
 {
         int clocked = taskbar_clocked;
+        int xtray = !before ? taskbar_xtray_count() : 0;
 
         struct ui_node address_to n = null;
         int length = 0;
@@ -378,11 +398,19 @@ static int taskbar_tray_lay(struct ui_tree address_to t, int before, int m, int 
 #define TASKBAR_CELL(slot, shown, mark, paint) if ((shown) && taskbar_before(slot) == before) length += (mark) ? square : slot == -3 ? clocked : cell;
         TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
+        if (xtray > 0)
+                length += xtray * square;
         if (taskbar.tray_custom && taskbar_before(-9) == before)
                 length += text_w;
         if (!t || !length)
                 return length;
         taskbar_open(t, before ? TASKBAR_TRAY_BEFORE : TASKBAR_TRAY, m, margin, length, high);
+        for (int i = 0; i < xtray && i < 16; i++)
+        {
+                n = taskbar_open(t, -100 - i, m, 0, square, high);
+                taskbar_mark(t, n, glyph);
+                ui_tree_close(t);
+        }
 #define TASKBAR_CELL(slot, shown, mark, paint)                                                                                     \
         if ((shown) && taskbar_before(slot) == before)                                                                              \
         {                                                                                                                           \
@@ -2501,7 +2529,32 @@ static int taskbar_draw(const struct taskbar_view *view, unsigned long redo, tas
 #define TASKBAR_CELL(slot, shown, mark, paint) case slot: paint; break;
                 TASKBAR_TRAY_CELLS(TASKBAR_CELL)
 #undef TASKBAR_CELL
-                default: // a window's tab: its icon, then its title, which a band on a side writes turned and a bottom or top one upright
+                default:
+                        if (which <= -100 && which > -116)
+                        {
+                                const struct ui_node address_to mark = n->first >= 0 ? &t->node[n->first] : null;
+                                const unsigned int *px = taskbar_xtray_pixels(-100 - which);
+
+                                if (mark && px)
+                                {
+                                        int mx = mark->x - band->x, my = mark->y - band->y, mw = mark->w, mh = mark->h;
+
+                                        for (int yy = 0; yy < mh && my + yy < band->h; yy++)
+                                                for (int xx = 0; xx < mw && mx + xx < band->w; xx++)
+                                                {
+                                                        unsigned int src = px[(yy * 24 / mh) * 24 + (xx * 24 / mw)];
+                                                        unsigned int a = src >> 24;
+
+                                                        if (a && mx + xx >= 0 && my + yy >= 0)
+                                                                view->pixels[(my + yy) * band->w + (mx + xx)] =
+                                                                        window_mix(view->pixels[(my + yy) * band->w + (mx + xx)], src & 0xffffffu, (int)(a + (a >> 7)));
+                                                }
+                                }
+                                else if (mark)
+                                        taskbar_say(view, t, mark, "\xe2\x80\xa2", ink, ground);
+                                break;
+                        }
+                        // a window's tab: its icon, then its title, which a band on a side writes turned and a bottom or top one upright
                 {
                         const struct ui_node address_to icon = n->first >= 0 ? &t->node[n->first] : null;
                         const struct ui_node address_to label = icon && icon->next >= 0 ? &t->node[icon->next] : null;

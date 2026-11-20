@@ -184,6 +184,7 @@ struct wayland_rect
 #define WAYLAND_DO_TEXT 12       // a text field of the window has the keys (a = 1), gives them back (a = -1), or says its content purpose (a = 0): b is the purpose
 #define WAYLAND_DO_CARET 13      // the bottom of the text cursor, in the window's pixels (a; 0 for none): the on-screen keyboard keeps it above its top
 #define WAYLAND_DO_PLACE 14      // move an already-mapped popup (a, b are its x and y relative to its parent)
+#define WAYLAND_DO_WALLPAPER 15  // zwlr_layer_shell_v1 background/bottom surface: fill output a at bottom of stack
 #define WAYLAND_DO_CURSOR 10    // the cursor shape the window's client asked for, over the pointer (a WAYLAND_CURSOR_* code, or -1)
 #define WAYLAND_CURSOR_ARROW 0  // the shapes the compositor draws, the codes WAYLAND_DO_CURSOR takes
 #define WAYLAND_CURSOR_TEXT 1
@@ -581,6 +582,9 @@ struct wayland_surface
         unsigned char xplaced;
         long xowner;
         long xx, xy, xwait;
+        // zwlr_layer_shell_v1 (live wallpapers and layer overlays)
+        unsigned char layer_shell, layer_configured;
+        long layer_level, layer_output, layer_w, layer_h;
         // The shortcuts inhibitor: its object, whether it is active (the surface has the keyboard and the inhibitor is not cancelled by
         // the escape chord), and the escape chord's Escape: held down, and since when (the host's ms).
         unsigned int shortcut_id;
@@ -2012,6 +2016,7 @@ static const struct wayland_global wayland_globals[] = {
     {WLI_zwp_text_input_manager_v3, 1},
     {WLI_wp_linux_drm_syncobj_manager_v1, 1},
     {WLI_wl_drm, 2},
+    {WLI_zwlr_layer_shell_v1, 4},
 };
 #define WAYLAND_GLOBAL_COUNT ((long)(sizeof wayland_globals / sizeof wayland_globals[0]))
 
@@ -2357,7 +2362,7 @@ static void wayland_configure(struct wayland_client *c, struct wayland_surface *
                         long cw = ask.width > 0 ? wayland_max(1, wayland_units(ask.width, wayland_surface_unit(s))) : 0;
                         long ch = ask.height > 0 ? wayland_max(1, wayland_units(ask.height, wayland_surface_unit(s))) : 0;
 
-                        if (cw > 0 && ch > 0 && !(facts.states & WAYLAND_STATE_FULLSCREEN))
+                        if (cw > 0 && ch > 0 && !(ask.states & WAYLAND_STATE_FULLSCREEN))
                         {
                                 if (s->max_width > 0 && cw > s->max_width)
                                         cw = s->max_width;
@@ -4637,6 +4642,10 @@ static int wayland_show(struct wayland_client *c, struct wayland_object *self, s
         }
         if (first)
         {
+                if (s->layer_shell)
+                        wayland.host->row_do(wayland.host->context, s->row,
+                                             s->layer_level <= 1 ? WAYLAND_DO_WALLPAPER : WAYLAND_DO_FULLSCREEN,
+                                             s->layer_output, 0);
                 // What the client last asked of the window (maximized, fullscreen) is done now that it is shown, asked before or not.
                 if (s->want_maximized)
                         wayland.host->row_do(wayland.host->context, s->row, WAYLAND_DO_MAXIMIZE, 0, 0);
@@ -4966,7 +4975,24 @@ static int wayland_commit(struct wayland_client *c, struct wayland_object *self,
 
         if (initial)
         {
-                if (s->role == WAYLAND_ROLE_TOPLEVEL)
+                if (s->layer_shell)
+                {
+                        long out = s->layer_output >= 0 && s->layer_output < wayland.screens ? s->layer_output : 0;
+                        long sw = wayland.screens ? wayland.screen[out].width : 1920;
+                        long sh = wayland.screens ? wayland.screen[out].height : 1080;
+                        long cw = s->layer_w > 0 ? s->layer_w : sw;
+                        long ch = s->layer_h > 0 ? s->layer_h : sh;
+                        struct wayland_event e;
+
+                        s->layer_configured = 1;
+                        s->flags |= WAYLAND_SURFACE_SENT | WAYLAND_SURFACE_CONFIGURED;
+                        e = wayland_begin(c, s->role_id, WLE_zwlr_layer_surface_v1_configure);
+                        wayland_word(&e, wayland_serial(c));
+                        wayland_word(&e, (unsigned long)cw);
+                        wayland_word(&e, (unsigned long)ch);
+                        wayland_end(&e);
+                }
+                else if (s->role == WAYLAND_ROLE_TOPLEVEL)
                         wayland_configure(c, s, 1);
         }
         else if (buffer >= 0)
@@ -10263,6 +10289,70 @@ static int wayland_args(struct wayland_client *c, const struct wayland_object *s
         }
 }
 
+static int wayland_layer_request(struct wayland_client *c, struct wayland_object *self, long op, struct wayland_arg *a)
+{
+        if (self->iface == WLI_zwlr_layer_shell_v1)
+        {
+                struct wayland_surface *s;
+                long out = 0;
+
+                if (op == WLQ_zwlr_layer_shell_v1_destroy)
+                        return WAYLAND_OK;
+                s = &c->surfaces[c->objects[a[1].slot].link];
+                if (s->role != WAYLAND_ROLE_NONE)
+                        return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_already_constructed, "the surface has a role");
+                if (a[3].u > 3)
+                        return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_invalid_layer, "unknown layer");
+                if (a[2].slot >= 0 && c->objects[a[2].slot].iface == WLI_wl_output && c->objects[a[2].slot].aux < WAYLAND_SCREENS)
+                        out = (long)c->objects[a[2].slot].aux;
+                s->role = WAYLAND_ROLE_TOPLEVEL;
+                s->role_id = c->objects[a[0].slot].id;
+                s->layer_shell = 1;
+                s->layer_level = (long)a[3].u;
+                s->layer_output = out >= 0 ? out : 0;
+                s->layer_w = s->layer_h = 0;
+                s->layer_configured = 0;
+                c->objects[a[0].slot].link = c->objects[a[1].slot].link;
+                return WAYLAND_OK;
+        }
+        if (op == WLQ_zwlr_layer_surface_v1_destroy)
+        {
+                struct wayland_surface *s = &c->surfaces[self->link];
+
+                if (s->live && s->role_id == self->id)
+                {
+                        wayland_unhold(c, s);
+                        wayland_row_release(c, s);
+                        s->role = WAYLAND_ROLE_NONE;
+                        s->role_id = 0;
+                        s->layer_shell = 0;
+                        s->flags &= ~(unsigned)(WAYLAND_SURFACE_CONFIGURED | WAYLAND_SURFACE_SENT | WAYLAND_SURFACE_MAPPED);
+                }
+                return WAYLAND_OK;
+        }
+        {
+                struct wayland_surface *s = &c->surfaces[self->link];
+
+                if (!s->live || s->role_id != self->id)
+                        return WAYLAND_OK;
+                if (op == WLQ_zwlr_layer_surface_v1_set_size)
+                        s->layer_w = (long)a[0].u, s->layer_h = (long)a[1].u;
+                else if (op == WLQ_zwlr_layer_surface_v1_set_layer)
+                {
+                        if (a[0].u > 3)
+                                return wayland_fail(c, self->id, WLN_zwlr_layer_shell_v1_error_invalid_layer, "unknown layer");
+                        s->layer_level = (long)a[0].u;
+                        if (s->row >= 0)
+                                wayland.host->row_do(wayland.host->context, s->row,
+                                                     s->layer_level <= 1 ? WAYLAND_DO_WALLPAPER : WAYLAND_DO_FULLSCREEN,
+                                                     s->layer_output, 0);
+                }
+                else if (op == WLQ_zwlr_layer_surface_v1_ack_configure)
+                        s->flags |= WAYLAND_SURFACE_CONFIGURED;
+        }
+        return WAYLAND_OK;
+}
+
 static int wayland_dispatch(struct wayland_client *c, const unsigned char *message, long size, unsigned long id, long op)
 {
         long slot = wayland_slot_of(c, id), n;
@@ -10423,6 +10513,10 @@ static int wayland_dispatch(struct wayland_client *c, const unsigned char *messa
                 case WLI_wp_fractional_scale_manager_v1:
                 case WLI_wp_fractional_scale_v1:
                         status = wayland_fractional_request(c, o, op, a);
+                        break;
+                case WLI_zwlr_layer_shell_v1:
+                case WLI_zwlr_layer_surface_v1:
+                        status = wayland_layer_request(c, o, op, a);
                         break;
                 case WLI_wl_data_device_manager:
                 case WLI_wl_data_device:

@@ -4771,6 +4771,9 @@ static void compositor_wl_row_do(void *context, int row, long what, long a, long
                         compositor_damage_row(row);
                 }
                 break;
+        case WAYLAND_DO_WALLPAPER:
+                compositor_wallpaper_on(row, (int)a);
+                break;
         case WAYLAND_DO_PINCH_WANT:
                 compositor.table->pinch_wanted[row] = a ? 1u : 0u;
                 break;
@@ -8086,7 +8089,7 @@ static void compositor_wl_wake(void)
         }
         if (stats.rows > 0 || stats.clients > 0)
         {
-                int want = compositor_wl_pointer_row(), keys = compositor_wl_key_row();
+                int want, keys = compositor_wl_key_row();
 
                 if (compositor.keymap.layout != compositor_wl.layout_told)
                 {
@@ -8104,6 +8107,11 @@ static void compositor_wl_wake(void)
                                 wayland_repeat_changed();
                         }
                 }
+                // Update keyboard focus first so losing focus off a pointer-locked window releases the lock before
+                // computing the new pointer row.
+                if (keys != wayland.keyboard_row)
+                        wayland_keyboard_to(keys);
+                want = compositor_wl_pointer_row();
                 // A finger was the last thing used (the pointer is hidden under it) on a window whose client holds a touch: the
                 // pointer is not on that window for the client, the touch is; no enter is sent for the finger's move.
                 if (want >= 0 && compositor.touch.hidden && wayland_row_takes_touch(want))
@@ -8115,9 +8123,8 @@ static void compositor_wl_wake(void)
                         if (want >= 0)
                                 compositor_window_point(want, compositor.pointer_x, compositor.pointer_y, &ex, &ey);
                         wayland_pointer_to(want, ex, ey);
+                        compositor_motion();
                 }
-                if (keys != wayland.keyboard_row)
-                        wayland_keyboard_to(keys);
         }
         for (int row = 0; row < (int)compositor_rows_in_use; row++)
                 if (rows_has(&compositor.woken, row) && wayland_row_owner(row) >= 0)

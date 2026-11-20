@@ -2391,6 +2391,12 @@ static void compositor_button(unsigned int code, int down)
                 compositor_menu_open(compositor.pointer_x, compositor.pointer_y);
                 return;
         }
+        if (tab <= -100 && tab > -116)
+        {
+                if (code == COMPOSITOR_BTN_LEFT || code == COMPOSITOR_BTN_RIGHT)
+                        compositor_xtray_click(-100 - tab, code == COMPOSITOR_BTN_RIGHT ? 3 : 1);
+                return;
+        }
         if (tab == TASKBAR_LAUNCHER || tab == TASKBAR_MIC || tab == TASKBAR_VOLUME || tab == TASKBAR_NOTICES || tab == COMPOSITOR_TRAY)
         {
                 switch (taskbar_cell_press(&compositor.cells, tab, code - COMPOSITOR_BTN_LEFT, clock_monotonic_nanoseconds(),

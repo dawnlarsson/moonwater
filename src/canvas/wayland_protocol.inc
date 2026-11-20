@@ -91,6 +91,8 @@ enum {
         WLI_wp_linux_drm_syncobj_timeline_v1,
         WLI_wp_linux_drm_syncobj_surface_v1,
         WLI_wl_drm,
+        WLI_zwlr_layer_shell_v1,
+        WLI_zwlr_layer_surface_v1,
         WLI_COUNT
 };
 
@@ -182,6 +184,8 @@ enum {
 #define WLV_wp_linux_drm_syncobj_timeline_v1 1
 #define WLV_wp_linux_drm_syncobj_surface_v1 1
 #define WLV_wl_drm 2
+#define WLV_zwlr_layer_shell_v1 4
+#define WLV_zwlr_layer_surface_v1 4
 
 /* Request opcodes (WLQ_), event opcodes (WLE_) and enum entries (WLN_). */
 #define WLQ_wl_display_sync 0
@@ -900,6 +904,30 @@ enum {
 #define WLN_wl_drm_format_abgr16f 0x48344241
 #define WLN_wl_drm_format_xbgr16f 0x48344258
 #define WLN_wl_drm_capability_prime 1
+#define WLQ_zwlr_layer_shell_v1_get_layer_surface 0
+#define WLQ_zwlr_layer_shell_v1_destroy 1
+#define WLN_zwlr_layer_shell_v1_error_role 0
+#define WLN_zwlr_layer_shell_v1_error_invalid_layer 1
+#define WLN_zwlr_layer_shell_v1_error_already_constructed 2
+#define WLN_zwlr_layer_shell_v1_layer_background 0
+#define WLN_zwlr_layer_shell_v1_layer_bottom 1
+#define WLN_zwlr_layer_shell_v1_layer_top 2
+#define WLN_zwlr_layer_shell_v1_layer_overlay 3
+#define WLQ_zwlr_layer_surface_v1_set_size 0
+#define WLQ_zwlr_layer_surface_v1_set_anchor 1
+#define WLQ_zwlr_layer_surface_v1_set_exclusive_zone 2
+#define WLQ_zwlr_layer_surface_v1_set_margin 3
+#define WLQ_zwlr_layer_surface_v1_set_keyboard_interactivity 4
+#define WLQ_zwlr_layer_surface_v1_get_popup 5
+#define WLQ_zwlr_layer_surface_v1_ack_configure 6
+#define WLQ_zwlr_layer_surface_v1_destroy 7
+#define WLQ_zwlr_layer_surface_v1_set_layer 8
+#define WLE_zwlr_layer_surface_v1_configure 0
+#define WLE_zwlr_layer_surface_v1_closed 1
+#define WLN_zwlr_layer_surface_v1_anchor_top 1
+#define WLN_zwlr_layer_surface_v1_anchor_bottom 2
+#define WLN_zwlr_layer_surface_v1_anchor_left 4
+#define WLN_zwlr_layer_surface_v1_anchor_right 8
 
 /* An argument is a kind byte and an interface byte (an object's or a new id's, else 0), the list ended by a
    zero kind: i int, u uint, f fixed, s string, S string that may be null, o object, O object that may be null,
@@ -1286,6 +1314,19 @@ static const unsigned char wl_e_wl_drm_device[] = {'s', 0, 0, 0};
 static const unsigned char wl_e_wl_drm_format[] = {'u', 0, 0, 0};
 static const unsigned char wl_e_wl_drm_authenticated[] = {0, 0};
 static const unsigned char wl_e_wl_drm_capabilities[] = {'u', 0, 0, 0};
+static const unsigned char wl_q_zwlr_layer_shell_v1_get_layer_surface[] = {'n', WLI_zwlr_layer_surface_v1, 'o', WLI_wl_surface, 'o', WLI_wl_output, 'u', 0, 's', 0, 0, 0};
+static const unsigned char wl_q_zwlr_layer_shell_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_zwlr_layer_surface_v1_set_size[] = {'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_q_zwlr_layer_surface_v1_set_anchor[] = {'u', 0, 0, 0};
+static const unsigned char wl_q_zwlr_layer_surface_v1_set_exclusive_zone[] = {'i', 0, 0, 0};
+static const unsigned char wl_q_zwlr_layer_surface_v1_set_margin[] = {'i', 0, 'i', 0, 'i', 0, 'i', 0, 0, 0};
+static const unsigned char wl_q_zwlr_layer_surface_v1_set_keyboard_interactivity[] = {'u', 0, 0, 0};
+static const unsigned char wl_q_zwlr_layer_surface_v1_get_popup[] = {'o', WLI_xdg_popup, 0, 0};
+static const unsigned char wl_q_zwlr_layer_surface_v1_ack_configure[] = {'u', 0, 0, 0};
+static const unsigned char wl_q_zwlr_layer_surface_v1_destroy[] = {0, 0};
+static const unsigned char wl_q_zwlr_layer_surface_v1_set_layer[] = {'u', 0, 0, 0};
+static const unsigned char wl_e_zwlr_layer_surface_v1_configure[] = {'u', 0, 'u', 0, 'u', 0, 0, 0};
+static const unsigned char wl_e_zwlr_layer_surface_v1_closed[] = {0, 0};
 
 static const struct wl_message wl_requests_wl_display[] = {
         {1, 0, wl_q_wl_display_sync},
@@ -1906,6 +1947,25 @@ static const struct wl_message wl_events_wl_drm[] = {
         {1, 0, wl_e_wl_drm_authenticated},
         {1, 0, wl_e_wl_drm_capabilities},
 };
+static const struct wl_message wl_requests_zwlr_layer_shell_v1[] = {
+        {1, 0, wl_q_zwlr_layer_shell_v1_get_layer_surface},
+        {3, 1, wl_q_zwlr_layer_shell_v1_destroy},
+};
+static const struct wl_message wl_requests_zwlr_layer_surface_v1[] = {
+        {1, 0, wl_q_zwlr_layer_surface_v1_set_size},
+        {1, 0, wl_q_zwlr_layer_surface_v1_set_anchor},
+        {1, 0, wl_q_zwlr_layer_surface_v1_set_exclusive_zone},
+        {1, 0, wl_q_zwlr_layer_surface_v1_set_margin},
+        {1, 0, wl_q_zwlr_layer_surface_v1_set_keyboard_interactivity},
+        {1, 0, wl_q_zwlr_layer_surface_v1_get_popup},
+        {1, 0, wl_q_zwlr_layer_surface_v1_ack_configure},
+        {1, 1, wl_q_zwlr_layer_surface_v1_destroy},
+        {2, 0, wl_q_zwlr_layer_surface_v1_set_layer},
+};
+static const struct wl_message wl_events_zwlr_layer_surface_v1[] = {
+        {1, 0, wl_e_zwlr_layer_surface_v1_configure},
+        {1, 0, wl_e_zwlr_layer_surface_v1_closed},
+};
 
 static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_NONE] = {0, 0, 0, 0, 0, 0},
@@ -1996,4 +2056,6 @@ static const struct wl_interface_info wl_interfaces[WLI_COUNT] = {
         [WLI_wp_linux_drm_syncobj_timeline_v1] = {"wp_linux_drm_syncobj_timeline_v1", 1, 1, 0, wl_requests_wp_linux_drm_syncobj_timeline_v1, 0},
         [WLI_wp_linux_drm_syncobj_surface_v1] = {"wp_linux_drm_syncobj_surface_v1", 1, 3, 0, wl_requests_wp_linux_drm_syncobj_surface_v1, 0},
         [WLI_wl_drm] = {"wl_drm", 2, 4, 4, wl_requests_wl_drm, wl_events_wl_drm},
+        [WLI_zwlr_layer_shell_v1] = {"zwlr_layer_shell_v1", 4, 2, 0, wl_requests_zwlr_layer_shell_v1, 0},
+        [WLI_zwlr_layer_surface_v1] = {"zwlr_layer_surface_v1", 4, 9, 2, wl_requests_zwlr_layer_surface_v1, wl_events_zwlr_layer_surface_v1},
 };

@@ -108,6 +108,7 @@
 #define XWM_OP_CHANGE_WINDOW_ATTRIBUTES 2
 #define XWM_OP_GET_WINDOW_ATTRIBUTES 3
 #define XWM_OP_DESTROY_WINDOW 4
+#define XWM_OP_REPARENT_WINDOW 7
 #define XWM_OP_MAP_WINDOW 8
 #define XWM_OP_UNMAP_WINDOW 10
 #define XWM_OP_CONFIGURE_WINDOW 12
@@ -551,6 +552,20 @@ XWM_API long xwm_enc_window_op(unsigned char *out, unsigned long cap, unsigned i
         if (n < 0)
                 return n;
         xwm_put32(out + 4, window);
+        return n;
+}
+
+/* ReparentWindow: places window inside parent at (x, y). */
+XWM_API long xwm_enc_reparent_window(unsigned char *out, unsigned long cap, unsigned int window, unsigned int parent, int x, int y)
+{
+        long n = xwm_request_start(out, cap, 16, XWM_OP_REPARENT_WINDOW);
+
+        if (n < 0)
+                return n;
+        xwm_put32(out + 4, window);
+        xwm_put32(out + 8, parent);
+        xwm_put16(out + 12, x);
+        xwm_put16(out + 14, y);
         return n;
 }
 
