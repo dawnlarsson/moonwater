@@ -11,19 +11,20 @@
  * firmware calls round them.
  *
  * The picture is \EFI\moonwater\splash.ppm on the volume the image was loaded
- * from. It is read through the firmware's own file protocol, the one the stub
+ * from, or the built-in Moonwater wordmark (src/sh/splash_mark.c) in black on
+ * pure white when no valid splash.ppm is present (such as a live USB stick).
+ * It is read through the firmware's own file protocol, the one the stub
  * reads initrd= files with, checked whole, and drawn with the Graphics Output
  * Protocol's block transfer on the display the kernel is handed: the screen is
- * made black and the picture put in the middle of it. Nothing is cleared after
- * that by this stub, so it stays until something in the kernel or the desktop
- * sets a mode or draws.
+ * filled with the picture's corner colour (pure white for the default splash)
+ * and the picture put in the middle of it. Nothing is cleared after that by
+ * this stub, so it stays until the kernel's Canvas client or the desktop draws.
  *
- * Every failure is silence. No file, a volume with no file system protocol, a
- * file that is too long or does not parse, no display, no memory: the screen
- * is left as the firmware had it and the stub goes on. Nothing here writes to
- * a disk or to a variable, and nothing here can return an error to the entry
- * that called it. Firmware entered in mixed mode (32-bit firmware under a
- * 64-bit kernel) is not drawn on: the block transfer has no thunk.
+ * Every failure is silence. No display, no memory, or mixed-mode firmware
+ * (32-bit firmware under a 64-bit kernel, where the block transfer has no
+ * thunk): the screen is left as the firmware had it and the stub goes on.
+ * Nothing here writes to a disk or to a variable, and nothing here can return
+ * an error to the entry that called it.
  */
 
 #include <linux/efi.h>
@@ -32,6 +33,7 @@
 #include "efistub.h"
 
 #include "../../../../kernel/moonwater/splash.c"
+#include "moonwater-splash-mark.c"
 
 #define MOONWATER_SPLASH_FILL	0	/* EfiBltVideoFill */
 #define MOONWATER_SPLASH_DRAW	2	/* EfiBltBufferToVideo */
@@ -156,9 +158,11 @@ void efi_moonwater_splash(efi_handle_t handle)
 	struct splash_image image;
 	struct splash_place place;
 	unsigned long length;
-	u8 black[4] = { 0, 0, 0, 0 };
+	unsigned long at;
+	u8 bg[4] = { 255, 255, 255, 0 };
 	u8 *pixels = NULL;
 	u8 *bytes = NULL;
+	int have_file = 0;
 
 	if (!efi_is_native())
 		return;
@@ -172,32 +176,59 @@ void efi_moonwater_splash(efi_handle_t handle)
 	blt = (moonwater_splash_blt_t)gop->blt;
 
 	if (efi_bs_call(allocate_pool, EFI_LOADER_DATA, SPLASH_FILE_MOST + 1,
-			(void **)&bytes) != EFI_SUCCESS || !bytes)
-		return;
+			(void **)&bytes) == EFI_SUCCESS && bytes) {
+		length = moonwater_splash_read(handle, bytes,
+					       SPLASH_FILE_MOST + 1);
+		if (length && !splash_parse(bytes, length, &image)) {
+			have_file = 1;
+			bg[0] = image.rgb[2];
+			bg[1] = image.rgb[1];
+			bg[2] = image.rgb[0];
+			bg[3] = 0;
+		}
+	}
 
-	length = moonwater_splash_read(handle, bytes, SPLASH_FILE_MOST + 1);
-	if (!length || splash_parse(bytes, length, &image))
-		goto done;
+	if (!have_file) {
+		image.width = SPLASH_MARK_W;
+		image.height = SPLASH_MARK_H;
+		image.rgb = NULL;
+	}
 
 	splash_place(&image, info->horizontal_resolution,
 		     info->vertical_resolution, &place);
 	if (!place.width || !place.height)
 		goto done;
 
+	blt(gop, bg, MOONWATER_SPLASH_FILL, 0, 0, 0, 0,
+	    info->horizontal_resolution, info->vertical_resolution, 0);
+
 	if (efi_bs_call(allocate_pool, EFI_LOADER_DATA,
 			(unsigned long)image.width * image.height * 4,
 			(void **)&pixels) != EFI_SUCCESS || !pixels)
 		goto done;
 
-	splash_pixels(&image, pixels);
+	if (have_file) {
+		splash_pixels(&image, pixels);
+	} else {
+		for (at = 0; at < (unsigned long)SPLASH_MARK_W * SPLASH_MARK_H;
+		     at++) {
+			u8 grey = (u8)(255u -
+				(((unsigned int)splash_mark[at >> 2] >>
+				  (6 - 2 * (at & 3))) & 3u) * 85u);
 
-	blt(gop, black, MOONWATER_SPLASH_FILL, 0, 0, 0, 0,
-	    info->horizontal_resolution, info->vertical_resolution, 0);
+			pixels[at * 4] = grey;
+			pixels[at * 4 + 1] = grey;
+			pixels[at * 4 + 2] = grey;
+			pixels[at * 4 + 3] = 0;
+		}
+	}
+
 	blt(gop, pixels, MOONWATER_SPLASH_DRAW, place.source_x, place.source_y,
 	    place.x, place.y, place.width, place.height,
 	    (unsigned long)image.width * 4);
 
 	efi_bs_call(free_pool, pixels);
 done:
-	efi_bs_call(free_pool, bytes);
+	if (bytes)
+		efi_bs_call(free_pool, bytes);
 }

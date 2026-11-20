@@ -1020,7 +1020,11 @@ static b32 host_update_stick_locked(host_install address_to install, bool said_y
         host_say(log, host_label "writing the build on %s to %s\n", stick->name,
                  install->system);
 
+        positive splash = 0;
+
         failed = host_settings_carried(install, address_of disk, address_of lost);
+        if (!failed)
+                host_splash_ensure(HOST_MEDIUM, HOST_SYSTEM, install->disk, address_of splash);
         if (!failed)
                 failed = host_place_image(install->system, HOST_SYSTEM, source, build,
                                           address_of disk, address_of carried, address_of unkept);
@@ -1044,6 +1048,8 @@ static b32 host_update_stick_locked(host_install address_to install, bool said_y
 
         host_unmount(HOST_SYSTEM);
         host_unmount(HOST_MEDIUM);
+        if (!failed)
+                host_splash_installed(install->system, splash);
         return failed;
 }
 

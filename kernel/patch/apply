@@ -840,6 +840,14 @@ if ! cmp -s kernel/patch/splash-stub.c "$splash_stub"; then
         echo "  splash: libstub gains moonwater-splash.c"
 fi
 
+splash_mark_dst=linux/drivers/firmware/efi/libstub/moonwater-splash-mark.c
+[ -f src/sh/splash_mark.c ] || die "splash: no src/sh/splash_mark.c"
+if ! cmp -s src/sh/splash_mark.c "$splash_mark_dst"; then
+        sudo cp src/sh/splash_mark.c "$splash_mark_dst" ||
+                die "splash: copying the built-in wordmark to $splash_mark_dst"
+        echo "  splash: libstub gains moonwater-splash-mark.c"
+fi
+
 printf 'lib-y%s+= moonwater-splash.o\n' "$tab$tab$tab$tab" > "$settings_work/splash-object"
 settings_insert linux/drivers/firmware/efi/libstub/Makefile "moonwater-splash.o" \
         'lib-$(CONFIG_EFI_GENERIC_STUB)' before "$settings_work/splash-object" splash

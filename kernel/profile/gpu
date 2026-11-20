@@ -93,7 +93,7 @@ CONFIG_CMDLINE_BOOL=y
 # above 4 GiB; with SWIOTLB_DYNAMIC, in the any profile, a device that runs
 # the pool dry gets another made for it.
 #
-#> cmdline drm_client_lib.active= usbhid.mousepoll=1 usbhid.kbpoll=1 usbhid.jspoll=1 intel_pstate=active amd_pstate=active intel_pstate.hwp_dynamic_boost=1 thash_entries=4096 uhash_entries=1024 mhash_entries=4096 mphash_entries=4096 swiotlb=1024
+#> cmdline drm_client_lib.active= quiet loglevel=0 vt.global_cursor_default=0 usbhid.mousepoll=1 usbhid.kbpoll=1 usbhid.jspoll=1 intel_pstate=active amd_pstate=active intel_pstate.hwp_dynamic_boost=1 thash_entries=4096 uhash_entries=1024 mhash_entries=4096 mphash_entries=4096 swiotlb=1024
 
 #
 # Core modesetting
@@ -250,6 +250,7 @@ CONFIG_DRM_QXL=y
 CONFIG_FB=y
 CONFIG_FB_EFI=y
 CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER=y
 CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
 CONFIG_VT=y
 CONFIG_VT_CONSOLE=y

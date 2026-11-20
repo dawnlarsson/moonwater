@@ -2477,20 +2477,38 @@ static positive host_splash_take(string_address path, struct splash_image addres
         return head + pixels;
 }
 
-// The built-in picture as the file this writes, in host_splash_bytes: its length.
+// The built-in picture as the file this writes, in host_splash_bytes: its length (black wordmark on pure white).
 static positive host_splash_default(void)
 {
         positive head = splash_header(host_splash_bytes, SPLASH_MARK_W, SPLASH_MARK_H);
 
         for (positive at = 0; at < SPLASH_MARK_W * SPLASH_MARK_H; at++)
         {
-                p8 grey = (p8)(((splash_mark[at >> 2] >> (6 - 2 * (at & 3))) & 3u) * 85u);
+                p8 grey = (p8)(255u - ((splash_mark[at >> 2] >> (6 - 2 * (at & 3))) & 3u) * 85u);
 
                 host_splash_bytes[head + at * 3] = grey;
                 host_splash_bytes[head + at * 3 + 1] = grey;
                 host_splash_bytes[head + at * 3 + 2] = grey;
         }
         return head + SPLASH_MARK_W * SPLASH_MARK_H * 3;
+}
+
+// Whether bytes are the previous dark-background built-in splash (white wordmark on black).
+static bool host_splash_is_legacy_dark(const p8 address_to bytes, positive length)
+{
+        struct splash_image image;
+
+        if (splash_parse(bytes, (unsigned long)length, address_of image) ||
+            image.width != SPLASH_MARK_W || image.height != SPLASH_MARK_H)
+                return false;
+        for (positive at = 0; at < SPLASH_MARK_W * SPLASH_MARK_H; at++)
+        {
+                p8 grey = (p8)(((splash_mark[at >> 2] >> (6 - 2 * (at & 3))) & 3u) * 85u);
+
+                if (image.rgb[at * 3] != grey || image.rgb[at * 3 + 1] != grey || image.rgb[at * 3 + 2] != grey)
+                        return false;
+        }
+        return true;
 }
 
 // Whether the file at path is these bytes and no more, as the disk has them: its pages are dropped before it is read.
@@ -2609,6 +2627,48 @@ static fn host_splash_install(string_address medium, string_address system, stri
         positive own = host_join(path, sizeof(path), medium, SPLASH_FILE)
                            ? host_splash_take(path, address_of image, address_of reason)
                            : 0;
+
+        address_to length = own ? own : host_splash_default();
+        if (host_splash_place(system, host_splash_bytes, address_to length))
+        {
+                address_to length = 0;
+                host_say(log_error, host_label "%s starts with no boot splash\n", disk);
+                return;
+        }
+        if (own)
+                host_say(log, host_label "%s shows this session's boot splash, %p x %p, before the kernel starts\n",
+                         disk, (positive)image.width, (positive)image.height);
+        else
+                host_say(log, host_label "%s shows Moonwater's boot splash before the kernel starts\n", disk);
+}
+
+/*
+        Ensure a system partition being updated has a valid, up-to-date boot splash:
+        if the live medium carries a valid splash, install it; otherwise keep any valid
+        non-legacy splash already on the disk, and write the built-in white/black splash
+        whenever the disk has none, a damaged file, or the old dark default.
+*/
+static fn host_splash_ensure(string_address medium, string_address system, string_address disk,
+                             positive address_to length)
+{
+        struct splash_image image;
+        string_address reason = null;
+        p8 path[HOST_PATH_ROOM];
+        positive own = medium && host_join(path, sizeof(path), medium, SPLASH_FILE)
+                           ? host_splash_take(path, address_of image, address_of reason)
+                           : 0;
+
+        if (!own && host_join(path, sizeof(path), system, SPLASH_FILE))
+        {
+                bipolar seen = host_splash_read(path, host_splash_seen);
+
+                if (seen > 0 && !splash_parse(host_splash_seen, (unsigned long)seen, address_of image) &&
+                    !host_splash_is_legacy_dark(host_splash_seen, (positive)seen))
+                {
+                        address_to length = 0;
+                        return;
+                }
+        }
 
         address_to length = own ? own : host_splash_default();
         if (host_splash_place(system, host_splash_bytes, address_to length))
@@ -2839,6 +2899,7 @@ static b32 host_update_locked(host_install address_to install)
         p8 source[HOST_PATH_ROOM];
         host_medium_search search;
         host_settings disk;
+        positive splash = 0;
         bool carried;
         bool lost;
         b32 failed;
@@ -2881,6 +2942,8 @@ static b32 host_update_locked(host_install address_to install)
         if (!failed && !host_join(source, sizeof(source), HOST_MEDIUM, HOST_IMAGE))
                 failed = host_refuse("%s: path too long\n", HOST_MEDIUM);
         if (!failed)
+                host_splash_ensure(HOST_MEDIUM, HOST_SYSTEM, install->disk, address_of splash);
+        if (!failed)
                 failed = host_place_image(install->system, HOST_SYSTEM, source, running,
                                           address_of disk, address_of carried, null);
         if (!failed)
@@ -2889,6 +2952,8 @@ static b32 host_update_locked(host_install address_to install)
 
         host_unmount(HOST_SYSTEM);
         host_unmount(HOST_MEDIUM);
+        if (!failed)
+                host_splash_installed(install->system, splash);
         return failed;
 }
 

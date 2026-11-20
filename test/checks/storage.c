@@ -6167,9 +6167,9 @@ static fn splash_files(void)
                 const p8 address_to pixel = image.rgb + at * 3;
 
                 held &= pixel[0] == pixel[1] && pixel[1] == pixel[2] && !(pixel[0] % 85);
-                made += pixel[0] != 0;
+                made += pixel[0] != 255;
         }
-        check("and every pixel of it is one of four greys, some of them lit and most of them black",
+        check("and every pixel of it is one of four greys, dark ink on a pure white ground",
               held && made > 1000 && made < (positive)SPLASH_MARK_W * SPLASH_MARK_H / 2);
 
         //      The steps of a write, on a partition that is a directory.
@@ -6245,6 +6245,49 @@ static fn splash_files(void)
         length = 7;
         host_splash_install((string_address)stick, update_at(path, sizeof(path), "/nowhere"), "disk0", address_of length);
         check("an install that cannot write a picture says so and has none to read back", !length);
+
+        //      An update ensures the boot splash is set up: missing or legacy dark default gets the new white/black splash,
+        //      a custom picture is kept when the medium has none, and a medium's own picture replaces it.
+        splash_check_remove("/stick" SPLASH_FILE, false);
+        host_splash_clear((string_address)esp);
+        length = 0;
+        host_splash_ensure((string_address)stick, (string_address)esp, "disk0", address_of length);
+        check("an update installs the built-in splash when the disk has none",
+              length == made && splash_check_is("/esp" SPLASH_FILE, splash_check_other, made));
+
+        {
+                positive head = splash_header(splash_check_file, SPLASH_MARK_W, SPLASH_MARK_H);
+
+                for (positive at = 0; at < (positive)SPLASH_MARK_W * SPLASH_MARK_H; at++)
+                {
+                        p8 grey = (p8)(((splash_mark[at >> 2] >> (6 - 2 * (at & 3))) & 3u) * 85u);
+
+                        splash_check_file[head + at * 3] = grey;
+                        splash_check_file[head + at * 3 + 1] = grey;
+                        splash_check_file[head + at * 3 + 2] = grey;
+                }
+                held = !host_splash_place((string_address)esp, splash_check_file, head + SPLASH_MARK_W * SPLASH_MARK_H * 3);
+                length = 0;
+                host_splash_ensure((string_address)stick, (string_address)esp, "disk0", address_of length);
+                check("an update upgrades the legacy dark default splash to the white/black splash",
+                      held && length == made && splash_check_is("/esp" SPLASH_FILE, splash_check_other, made));
+        }
+
+        {
+                positive custom = splash_check_make(splash_check_file, 14, 6);
+
+                held = !host_splash_place((string_address)esp, splash_check_file, custom);
+                length = 7;
+                host_splash_ensure((string_address)stick, (string_address)esp, "disk0", address_of length);
+                check("an update preserves a custom splash on disk when the medium carries none",
+                      held && !length && splash_check_is("/esp" SPLASH_FILE, splash_check_file, custom));
+
+                held = splash_check_put("/stick" SPLASH_FILE, splash_check_other, made);
+                length = 0;
+                host_splash_ensure((string_address)stick, (string_address)esp, "disk0", address_of length);
+                check("and replaces it when the live medium carries a valid splash of its own",
+                      held && length == made && splash_check_is("/esp" SPLASH_FILE, splash_check_other, made));
+        }
 
         splash_check_remove("/stick" SPLASH_FILE, false);
         splash_check_remove("/stick" SPLASH_DIRECTORY, true);

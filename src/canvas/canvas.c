@@ -291,6 +291,8 @@ static inline void canvas_client_release(struct file *file) {}
 #endif
 
 #include "../moonwater/seam.h"
+#include "../moonwater/splash.c"
+#include "../sh/splash_mark.c"
 
 // The parameters below were the module's when Canvas was in it, and a kernel
 // command line and a sysfs path name them: moonwater.cursor_plane,
@@ -305,13 +307,14 @@ static inline void canvas_client_release(struct file *file) {}
 #include "../lib.util.c"
 
 /*
-        The ground: the one colour Canvas draws.
+        The ground: the boot splash Canvas holds until the compositor starts.
 
-        Neutral grey, the compositor's own default desktop ink, so that the
-        picture the kernel leaves is the same ground and not a flash of
-        another colour when the compositor takes the screen.
+        Pure white with the centered black Moonwater wordmark, matching the
+        pre-kernel EFI boot splash (kernel/patch/splash-stub.c), so the white
+        splash persists seamlessly across kernel modesetting until the
+        userspace compositor takes master and paints the desktop.
 */
-#define CANVAS_GROUND 0x1e1e1e
+#define CANVAS_GROUND 0xffffff
 
 /* The kernel's guard for the lock the desktop is taken under; it has one for
    mutex and spinlock but none for rt_mutex. */
@@ -1709,14 +1712,31 @@ static _Bool desktop_commit_known(struct canvas *known, int known_set)
 */
 static void output_ground(struct output *output)
 {
+        struct splash_image mark = { SPLASH_MARK_W, SPLASH_MARK_H, null };
+        struct splash_place place;
         struct iosys_map map;
+        unsigned long pitch;
 
         if (!output_map(output, &map))
                 return;
 
-        canvas_rect_fill(map.vaddr, output->buffer->fb->pitches[0] / sizeof(u32),
-                         output->width, output->height,
+        pitch = output->buffer->fb->pitches[0] / sizeof(u32);
+        canvas_rect_fill(map.vaddr, pitch, output->width, output->height,
                          CANVAS_GROUND | output->opaque);
+        splash_place(&mark, output->width, output->height, &place);
+        for (unsigned int row = 0; row < place.height; row++)
+        {
+                unsigned long offset = ((unsigned long)(place.y + row) * pitch + place.x) * sizeof(u32);
+
+                for (unsigned int col = 0; col < place.width; col++)
+                {
+                        unsigned long at = (unsigned long)(place.source_y + row) * SPLASH_MARK_W + (place.source_x + col);
+                        u32 grey = 255u - (((unsigned int)splash_mark[at >> 2] >> (6 - 2 * (at & 3))) & 3u) * 85u;
+                        u32 pixel = (grey << 16) | (grey << 8) | grey | output->opaque;
+
+                        iosys_map_wr(&map, offset + (unsigned long)col * sizeof(u32), u32, pixel);
+                }
+        }
         drm_client_buffer_vunmap_local(output->buffer);
         drm_client_buffer_flush(output->buffer, null);
 }
@@ -1984,6 +2004,10 @@ static int canvas_start(struct canvas *canvas)
                         return ret;
                 }
 
+                // Paint the white splash before the first commit so the scanout
+                // never flashes a freshly allocated black buffer between EFI
+                // and the compositor.
+                desktop_recompose();
                 desktop_attach_buffers();
                 ret = drm_client_modeset_commit(&canvas->client);
                 if (!ret || ret == -EBUSY)
@@ -2002,9 +2026,8 @@ static int canvas_start(struct canvas *canvas)
 
         canvas_modes_keep();
 
-        // The ground, less the commit this card has just had: the picture
-        // goes to the driver and the answer above is what is reported.
-        desktop_recompose();
+        // Any other cards commit their updated ground; this card was painted
+        // and committed above.
         desktop_commit_known(canvas, ret);
 
         {
