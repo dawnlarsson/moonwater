@@ -13613,34 +13613,37 @@ static fn bowl_profile_script_drop(const struct bowl_profile address_to profile,
 
 #define BOWL_LOCAL_APPLICATIONS "/root/.local/share/applications"
 
-static bool bowl_desktop_word_matches(string_address text, positive length,
+static bool bowl_desktop_word_matches(p8 address_to text, positive length,
                                       string_address program)
 {
-        for (positive at = 0; at < length;)
+        p8 address_to at = text;
+        p8 address_to stop = text + length;
+
+        while (at < stop)
         {
-                positive line_end = at;
+                p8 address_to nl = (p8 address_to)memory_first_of(at, '\n', (positive)(stop - at));
+                p8 address_to line_end = nl ? nl : stop;
 
-                while (line_end < length && text[line_end] != '\n')
-                        line_end++;
-                if (line_end - at >= 5 && !memory_compare(text + at, "Exec=", 5))
+                if (line_end - at >= 5 && !memory_compare(at, "Exec=", 5))
                 {
-                        positive pos = at + 5, end_pos = line_end, last_slash = 0;
+                        p8 saved = *line_end;
+                        string_address pos;
+                        string_address end_pos;
+                        string_address slash;
+                        bool matched;
 
-                        while (pos < end_pos && (text[pos] == ' ' || text[pos] == '\t' || text[pos] == '"'))
-                                pos++;
-                        for (positive scan = pos; scan < end_pos && text[scan] != ' ' && text[scan] != '\t' && text[scan] != '"'; scan++)
-                                if (text[scan] == '/')
-                                        last_slash = scan + 1;
-                        {
-                                positive word_start = last_slash ? last_slash : pos;
-                                positive word_end = word_start;
-
-                                while (word_end < line_end && text[word_end] != ' ' && text[word_end] != '\t' && text[word_end] != '"')
-                                        word_end++;
-                                if (word_end - word_start == string_length(program) &&
-                                    !memory_compare(text + word_start, program, word_end - word_start))
-                                        return true;
-                        }
+                        *line_end = 0;
+                        pos = at + 5 + string_span_of_set(at + 5, " \t\"");
+                        end_pos = string_first_of_set(pos, " \t\"");
+                        if (end_pos)
+                                *end_pos = 0;
+                        slash = string_last_of(pos, '/');
+                        matched = string_equals(slash ? slash + 1 : pos, program);
+                        if (end_pos)
+                                *end_pos = ' ';
+                        *line_end = saved;
+                        if (matched)
+                                return true;
                 }
                 at = line_end + 1;
         }
@@ -13674,16 +13677,17 @@ static fn bowl_profile_clean_shortcuts(const struct bowl_profile address_to prof
                         at += entry->d_reclen;
                         name_len = string_length((string_address)entry->d_name);
                         if (entry->d_name[0] == '.' || name_len <= 8 ||
-                            memory_compare(entry->d_name + name_len - 8, ".desktop", 8))
+                            !string_equals((string_address)entry->d_name + name_len - 8, ".desktop"))
                                 continue;
                         handle = system_open_at((positive)dir, (string_address)entry->d_name,
                                                 FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
                         if (handle < 0)
                                 continue;
-                        read_bytes = system_read_retry((positive)handle, body, sizeof(body));
+                        read_bytes = system_read_retry((positive)handle, body, sizeof(body) - 1);
                         system_close(handle);
                         if (read_bytes <= 0)
                                 continue;
+                        body[read_bytes] = 0;
                         match = bowl_desktop_word_matches(body, (positive)read_bytes, profile->name);
                         for (string_address address_to other = profile->names; !match && other && *other; other++)
                                 match = bowl_desktop_word_matches(body, (positive)read_bytes, *other);
@@ -13892,9 +13896,9 @@ static bool bowl_desktop_path_ok(string_address path)
         positive length = path ? string_length(path) : 0;
         const p8 local_prefix[] = BOWL_LOCAL_APPLICATIONS "/";
 
-        if (length <= 8 || memory_compare(path + length - 8, ".desktop", 8))
+        if (length <= 8 || !string_equals(path + length - 8, ".desktop"))
                 return false;
-        if (string_find(path, "/../") || (length >= 3 && !memory_compare(path + length - 3, "/..", 3)))
+        if (string_find(path, "/../") || (length >= 3 && string_equals(path + length - 3, "/..")))
                 return false;
         if (!memory_compare(path, local_prefix, sizeof(local_prefix) - 1))
                 return true;

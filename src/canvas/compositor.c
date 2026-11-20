@@ -2499,14 +2499,10 @@ static int compositor_wl_dmabuf_missing(void)
 */
 static int compositor_app_is_steam(const char *app)
 {
-        static const char steam[] = "steam", helper[] = "steamwebhelper";
-        positive length;
-
         if (!app || !app[0])
                 return 0;
-        length = string_length((string_address)app);
-        return (length == sizeof(steam) - 1 && !memory_compare_ascii_case((address_any)app, (address_any)steam, length)) ||
-               (length == sizeof(helper) - 1 && !memory_compare_ascii_case((address_any)app, (address_any)helper, length));
+        return !string_compare_folded((string_address)app, (string_address) "steam") ||
+               !string_compare_folded((string_address)app, (string_address) "steamwebhelper");
 }
 
 static int compositor_row_is_steam(int row)
