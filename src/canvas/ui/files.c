@@ -2180,20 +2180,6 @@ static fn files_drag_start(p32 place)
 
 /* ---- the menu and the properties sheet ---- */
 
-// Words from outside for a menu's line: a name's & doubled, which the menu would read as the next letter's key.
-static fn files_sheet_words(char address_to into, positive room, const char address_to words)
-{
-        positive used = 0;
-
-        for (positive at = 0; words[at] && used + 2 < room; at++)
-        {
-                if (words[at] == '&')
-                        into[used++] = '&';
-                into[used++] = words[at];
-        }
-        into[used] = 0;
-}
-
 // A moment as a sheet says it: the day, the minute and the second, in the machine's own zone.
 static fn files_sheet_time(char address_to into, b64 seconds)
 {
@@ -2234,7 +2220,7 @@ static int files_sheet_fill(void)
                 const p8 address_to name = files.sheet_folder ? m->path : files_model_name(m, entry);
 
                 ui_label_foreign(words, sizeof(words), name, string_length((string_address)name));
-                files_sheet_words(files.big->sheet[lines++], sizeof(files.big->sheet[0]), words);
+                ui_menu_escape(files.big->sheet[lines++], sizeof(files.big->sheet[0]), words);
         }
         // What it is.
         if (!many)
@@ -2250,7 +2236,7 @@ static int files_sheet_fill(void)
 
                         named[0] = 0;
                         if (length >= 0)
-                                ui_label_foreign(words, sizeof(words), points, (positive)length), files_sheet_words(named, sizeof(named), words);
+                                ui_label_foreign(words, sizeof(words), points, (positive)length), ui_menu_escape(named, sizeof(named), words);
                         language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_link), named);
                 }
                 else
@@ -2283,7 +2269,7 @@ static int files_sheet_fill(void)
                 char escaped[FILES_NAME * 3 + 4];
 
                 ui_label_foreign(words, sizeof(words), m->path, string_length((string_address)m->path));
-                files_sheet_words(escaped, sizeof(escaped), words);
+                ui_menu_escape(escaped, sizeof(escaped), words);
                 language_format(files.big->sheet[lines++], sizeof(files.big->sheet[0]), WORDS(files_sheet_in), escaped);
         }
         if (many)
@@ -2462,14 +2448,31 @@ static fn files_menu_open(b32 on, int x, int y)
         files.sheet = false;
         if (on && entry)
         {
-                ui_popmenu_add(menu, WORDS(menu_open), "Enter", 0, FILES_MENU_OPEN);
-                if (!folder)
-                        ui_popmenu_add(menu, WORDS(menu_open_editor), null, 0, FILES_MENU_EDITOR);
-                if (!folder && files_is_png(m, entry))
+                b32 png = !folder && files_is_png(m, entry);
+                const struct ui_menu_spec head[] = {
+                    {WORDS(menu_open), "Enter", 0, FILES_MENU_OPEN, false},
+                    {WORDS(menu_open_editor), null, 0, FILES_MENU_EDITOR, folder},
+                    {WORDS(menu_set_wallpaper), null, 0, FILES_MENU_WALLPAPER, !png},
+                };
+                const struct ui_menu_spec tail[] = {
+                    {WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL, !folder},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {WORDS(menu_cut), "Ctrl+X", 0, FILES_MENU_CUT, false},
+                    {WORDS(menu_copy), "Ctrl+C", 0, FILES_MENU_COPY, false},
+                    {WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE, false},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {WORDS(menu_rename), "F2", m->chosen_count > 1 ? UI_MENU_DISABLED : 0, FILES_MENU_RENAME, false},
+                    {WORDS(menu_bin_restore), null, 0, FILES_MENU_RESTORE, !files_in_bin()},
+                    {WORDS(menu_delete), files_in_bin() ? "Shift+Delete" : "Delete", 0, FILES_MENU_DELETE, false},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {WORDS(menu_properties), "Alt+Enter", 0, FILES_MENU_PROPERTIES, false},
+                };
+
+                ui_popmenu_build(menu, head, (int)(sizeof(head) / sizeof(head[0])));
+                if (png)
                 {
                         unsigned int screens = ui_kit_table ? __atomic_load_n(&ui_kit_table->outputs, __ATOMIC_ACQUIRE) : 0;
 
-                        ui_popmenu_add(menu, WORDS(menu_set_wallpaper), null, 0, FILES_MENU_WALLPAPER);
                         // With more than one screen, each of them by its name as well.
                         for (unsigned int at = 0; screens > 1 && screens <= WINDOWS_OUTPUTS && at < screens && at < FILES_WALL_SCREENS; at++)
                         {
@@ -2478,46 +2481,39 @@ static fn files_menu_open(b32 on, int x, int y)
                                 ui_popmenu_add(menu, files_wall_labels[at], null, 0, FILES_MENU_WALLPAPER_OF + (int)at);
                         }
                 }
-                if (folder)
-                        ui_popmenu_add(menu, WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL);
-                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(menu, WORDS(menu_cut), "Ctrl+X", 0, FILES_MENU_CUT);
-                ui_popmenu_add(menu, WORDS(menu_copy), "Ctrl+C", 0, FILES_MENU_COPY);
-                ui_popmenu_add(menu, WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE);
-                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(menu, WORDS(menu_rename), "F2", m->chosen_count > 1 ? UI_MENU_DISABLED : 0, FILES_MENU_RENAME);
-                if (files_in_bin())
-                        ui_popmenu_add(menu, WORDS(menu_bin_restore), null, 0, FILES_MENU_RESTORE);
-                ui_popmenu_add(menu, WORDS(menu_delete), files_in_bin() ? "Shift+Delete" : "Delete", 0, FILES_MENU_DELETE);
-                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(menu, WORDS(menu_properties), "Alt+Enter", 0, FILES_MENU_PROPERTIES);
+                ui_popmenu_build(menu, tail, (int)(sizeof(tail) / sizeof(tail[0])));
         }
         else
         {
-                ui_popmenu_add(menu, WORDS(menu_undo), "Ctrl+Z", files.deed_done > 0 ? 0 : UI_MENU_DISABLED, FILES_MENU_UNDO);
-                ui_popmenu_add(menu, WORDS(menu_redo), "Ctrl+Y", files.deed_done < files.deed_count ? 0 : UI_MENU_DISABLED, FILES_MENU_REDO);
-                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(menu, WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE);
-                ui_popmenu_add(menu, WORDS(menu_new_folder), "Ctrl+Shift+N", 0, FILES_MENU_NEW_FOLDER);
-                ui_popmenu_add(menu, WORDS(menu_select_all), "Ctrl+A", files_model_count(m) ? 0 : UI_MENU_DISABLED, FILES_MENU_ALL);
-                ui_popmenu_add(menu, WORDS(menu_show_hidden), "Ctrl+H", UI_MENU_CHECK | (m->hidden ? UI_MENU_ON : 0), FILES_MENU_HIDDEN);
-                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(menu, WORDS(menu_view_details), "Ctrl+1", UI_MENU_RADIO | (files.view == FILES_VIEW_DETAILS ? UI_MENU_ON : 0), FILES_MENU_DETAILS);
-                ui_popmenu_add(menu, WORDS(menu_view_icons), "Ctrl+2", UI_MENU_RADIO | (files.view == FILES_VIEW_ICONS ? UI_MENU_ON : 0), FILES_MENU_ICONS);
-                ui_popmenu_add(menu, WORDS(menu_view_list), "Ctrl+3", UI_MENU_RADIO | (files.view == FILES_VIEW_LIST ? UI_MENU_ON : 0), FILES_MENU_LIST);
+                b32 bin = files_in_bin(), any = files_model_count(m) != 0;
+                const struct ui_menu_spec top[] = {
+                    {WORDS(menu_undo), "Ctrl+Z", files.deed_done > 0 ? 0 : UI_MENU_DISABLED, FILES_MENU_UNDO, false},
+                    {WORDS(menu_redo), "Ctrl+Y", files.deed_done < files.deed_count ? 0 : UI_MENU_DISABLED, FILES_MENU_REDO, false},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {WORDS(menu_paste), "Ctrl+V", 0, FILES_MENU_PASTE, false},
+                    {WORDS(menu_new_folder), "Ctrl+Shift+N", 0, FILES_MENU_NEW_FOLDER, false},
+                    {WORDS(menu_select_all), "Ctrl+A", any ? 0 : UI_MENU_DISABLED, FILES_MENU_ALL, false},
+                    {WORDS(menu_show_hidden), "Ctrl+H", UI_MENU_CHECK | (m->hidden ? UI_MENU_ON : 0), FILES_MENU_HIDDEN, false},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {WORDS(menu_view_details), "Ctrl+1", UI_MENU_RADIO | (files.view == FILES_VIEW_DETAILS ? UI_MENU_ON : 0), FILES_MENU_DETAILS, false},
+                    {WORDS(menu_view_icons), "Ctrl+2", UI_MENU_RADIO | (files.view == FILES_VIEW_ICONS ? UI_MENU_ON : 0), FILES_MENU_ICONS, false},
+                    {WORDS(menu_view_list), "Ctrl+3", UI_MENU_RADIO | (files.view == FILES_VIEW_LIST ? UI_MENU_ON : 0), FILES_MENU_LIST, false},
+                };
+                const struct ui_menu_spec foot[] = {
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL, false},
+                    {bin ? WORDS(menu_bin_empty) : WORDS(menu_bin_open), null, bin && !any ? UI_MENU_DISABLED : 0, bin ? FILES_MENU_BIN_EMPTY : FILES_MENU_BIN, false},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {WORDS(menu_properties), null, 0, FILES_MENU_PROPERTIES, false},
+                };
+
+                ui_popmenu_build(menu, top, (int)(sizeof(top) / sizeof(top[0])));
                 ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
                 // The order, as the columns' header gives it (the one chosen again turns it round): the menu's way to it from the keys.
                 for (int column = 0; column < 4; column++)
                         ui_popmenu_add(menu, files.columns.title[column], column == files.columns.sorted ? (files.columns.descending ? "\xe2\x86\x93" : "\xe2\x86\x91") : null,
                                        UI_MENU_RADIO | (column == files.columns.sorted ? UI_MENU_ON : 0), FILES_MENU_SORT + column);
-                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(menu, WORDS(menu_open_terminal), null, 0, FILES_MENU_TERMINAL);
-                if (files_in_bin())
-                        ui_popmenu_add(menu, WORDS(menu_bin_empty), null, files_model_count(m) ? 0 : UI_MENU_DISABLED, FILES_MENU_BIN_EMPTY);
-                else
-                        ui_popmenu_add(menu, WORDS(menu_bin_open), null, 0, FILES_MENU_BIN);
-                ui_popmenu_add(menu, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(menu, WORDS(menu_properties), null, 0, FILES_MENU_PROPERTIES);
+                ui_popmenu_build(menu, foot, (int)(sizeof(foot) / sizeof(foot[0])));
                 // The folder's own: nothing chosen, the cursor off the rows, so what the items do is the folder's.
                 files_model_choose_none(m);
                 m->cursor = FILES_NO, m->revision++;
@@ -3239,7 +3235,7 @@ static fn files_draw(unsigned int address_to pixels)
 static long files_tick(long timeout, long address_to other)
 {
         struct files_model address_to m = &files.big->model;
-        b64 now = (b64)ui_kit.now, wait;
+        b64 now = (b64)ui_kit.now;
 
         (void)other;
         // The git marks of a listing that is whole and is not the one they were worked out for, here and not in the picture: once a listing,
@@ -3271,34 +3267,18 @@ static long files_tick(long timeout, long address_to other)
                                 files_open((p32)spring);
                 }
                 for (int k = 0; k < 2; k++)
-                {
-                        struct ui_list address_to over = lists[k];
-                        int edge = ui_dev(&files.ui, FILES_EDGE), top = files.drop.y - over->y, foot = over->y + over->h - files.drop.y, by = 0;
-
-                        if (files.drop.x < over->x || files.drop.x >= over->x + over->w || top < 0 || foot < 0)
-                                continue;
-                        if (top < edge)
-                                by = -ui_dev(&files.ui, FILES_EDGE_STEP) * (edge - top) / edge - 1;
-                        else if (foot < edge)
-                                by = ui_dev(&files.ui, FILES_EDGE_STEP) * (edge - foot) / edge + 1;
-                        if (by && ui_scroll_set(&over->scroll, over->scroll.scroll + by))
+                        if (ui_list_edge_scroll(&files.ui, lists[k], files.drop.x, files.drop.y, FILES_EDGE, FILES_EDGE_STEP, false))
                                 files.dirty = true;
-                }
-                timeout = timeout < 0 || timeout > 16000000 ? 16000000 : timeout;
+                timeout = ui_timeout_min(timeout, 16000000);
         }
         // A rubber band held near the list's top or foot scrolls the rows under it and keeps updating the selection.
         if (files.big->list.band)
         {
                 struct ui_list address_to l = &files.big->list;
-                int edge = ui_dev(&files.ui, FILES_EDGE), top = l->band_y1 - l->y, foot = l->y + l->h - l->band_y1, by = 0;
 
-                if (top < edge)
-                        by = -ui_dev(&files.ui, FILES_EDGE_STEP) * (edge - (top < 0 ? 0 : top)) / edge - 1;
-                else if (foot < edge)
-                        by = ui_dev(&files.ui, FILES_EDGE_STEP) * (edge - (foot < 0 ? 0 : foot)) / edge + 1;
-                if (by && ui_scroll_set(&l->scroll, l->scroll.scroll + by))
+                if (ui_list_edge_scroll(&files.ui, l, l->x, l->band_y1, FILES_EDGE, FILES_EDGE_STEP, true))
                         files_band_apply(), files.dirty = true;
-                timeout = timeout < 0 || timeout > 16000000 ? 16000000 : timeout;
+                timeout = ui_timeout_min(timeout, 16000000);
         }
         // The drop's pop: a picture as it begins and as it ends.
         if (files.flash_used)
@@ -3309,13 +3289,13 @@ static long files_tick(long timeout, long address_to other)
                 if (since >= FILES_FLASH_NS)
                         files.flash_used = 0;
                 else
-                        timeout = timeout < 0 || timeout > FILES_FLASH_NS - since ? (long)(FILES_FLASH_NS - since) : timeout;
+                        timeout = ui_timeout_min(timeout, (long)(FILES_FLASH_NS - since));
         }
         // The ghost of what is carried settling after it was picked up: a picture a frame till it is at rest.
         if (files.carrying && now - files.carry_at < FILES_CARRY_POP_NS + 20000000ll)
         {
                 files.dirty = true;
-                timeout = timeout < 0 || timeout > 16000000 ? 16000000 : timeout;
+                timeout = ui_timeout_min(timeout, 16000000);
         }
         // The field's caret blinks while the path is typed, and the find field's while it has the keys.
         if (files.editing)
@@ -3362,7 +3342,7 @@ static long files_tick(long timeout, long address_to other)
                 else if (now >= files.next_progress)
                         files.next_progress = now + FILES_SHOW_NS, files.dirty = true;
                 if (files.moving)
-                        timeout = job->worker ? (timeout < 0 || timeout > FILES_SHOW_NS ? (long)FILES_SHOW_NS : timeout) : 1;
+                        timeout = job->worker ? ui_timeout_min(timeout, (long)FILES_SHOW_NS) : 1;
         }
         // A delete under way: steps of it for a few milliseconds and back to the events; when it ends the foot says what it came to and
         // the folder is read again.
@@ -3425,8 +3405,8 @@ static long files_tick(long timeout, long address_to other)
                 if (m->walking)
                         return 1;
         }
-        wait = files.next_look - now;
-        return timeout < 0 || (b64)timeout > wait ? (long)(wait > 0 ? wait : 1) : timeout;
+        timeout = ui_deadline_wait(timeout, now, files.next_look);
+        return timeout == 0 ? 1 : timeout;
 }
 
 static struct ui_app files_app;

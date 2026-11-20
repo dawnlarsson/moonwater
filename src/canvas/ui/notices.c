@@ -89,11 +89,15 @@ static void notices_board(void)
                                        issue->severity == WINDOWS_ISSUE_ERROR ? UI_MENU_ERROR : UI_MENU_WARNING, NOTICES_ID_ITEM + count);
                         count++;
                 }
-        if (count)
-                ui_popmenu_add(&notices.menu, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(&notices.menu, WORDS(notices_open), null, 0, NOTICES_ID_OPEN);
-        if (count)
-                ui_popmenu_add(&notices.menu, WORDS(notices_dismiss), null, 0, NOTICES_ID_DISMISS);
+        {
+                const struct ui_menu_spec foot[] = {
+                    {null, null, UI_MENU_SEPARATOR, 0, !count},
+                    {WORDS(notices_open), null, 0, NOTICES_ID_OPEN, false},
+                    {WORDS(notices_dismiss), null, 0, NOTICES_ID_DISMISS, !count},
+                };
+
+                ui_popmenu_build(&notices.menu, foot, (int)(sizeof(foot) / sizeof(foot[0])));
+        }
 }
 
 static void notices_draw(unsigned int address_to pixels)

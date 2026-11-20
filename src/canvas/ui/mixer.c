@@ -474,7 +474,7 @@ static b32 mixer_event(const struct window_event address_to event)
 // The timer: what is to be sent, then the page looked at as often as it is written, and the time to the next look.
 static long mixer_tick(long timeout, long address_to other)
 {
-        b64 now = (b64)ui_kit.now, wait;
+        b64 now = (b64)ui_kit.now;
         b32 away = (mixer.own.table->state[mixer.own.row] & WINDOW_MINIMIZED) != 0;
 
         (void)other;
@@ -489,8 +489,7 @@ static long mixer_tick(long timeout, long address_to other)
                         playing |= mixer.big->strips.item[k].playing;
                 mixer.next_poll = now + (away ? MIXER_HIDDEN_NS : playing ? MIXER_POLL_NS : MIXER_QUIET_NS);
         }
-        wait = mixer.next_poll - now;
-        return timeout < 0 || (b64)timeout > wait ? (long)wait : timeout;
+        return ui_deadline_wait(timeout, now, mixer.next_poll);
 }
 
 // How many strips wide the recording popup is: the microphone and up to three programs, and room for a line beside the microphone at least.

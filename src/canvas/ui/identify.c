@@ -179,12 +179,8 @@ static b32 identify_event(const struct window_event address_to event)
 // The time left shortens the wait to it, so the window is gone when it is due.
 static long identify_tick(long timeout, long address_to other)
 {
-        positive now = (positive)ui_kit.now;
-
         (void)other;
-        if (now < identify.until && (timeout < 0 || (long)(identify.until - now) < timeout))
-                timeout = (long)(identify.until - now);
-        return timeout;
+        return ui_deadline_wait(timeout, (b64)ui_kit.now, (b64)identify.until);
 }
 
 static b32 identify_done(void)
@@ -218,10 +214,12 @@ static b32 identify_main()
 {
         memory_zero(&identify, sizeof(identify));
         ui_buffers_start(&identify.buffers);
-        if (program_argument_count() > 1)
+        for (positive at = 1, took; at < (positive)program_argument_count(); at += took)
         {
-                string_address word = program_argument(1);
-                identify.screen = (unsigned int)string_digits_max(word, 4, null);
+                if ((took = ui_app_option(&identify_app, at)))
+                        continue;
+                took = 1;
+                identify.screen = (unsigned int)string_digits_max(program_argument(at), 4, null);
         }
         return ui_app_run(&identify_app);
 }

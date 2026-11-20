@@ -661,8 +661,8 @@ static void osk_metrics(void);
 // The held key repeats while the keyboard is held down: a key's repeat is due at its time and the loop waits for it.
 static long osk_tick(long timeout, long address_to other)
 {
-        b64 now = ui_kit.now, wait = 0;
-        b32 layout, purpose, waiting = false;
+        b64 now = ui_kit.now;
+        b32 layout, purpose;
 
         (void)other;
         // The layout or the focus's content purpose changed (the compositor woke the keyboard for it): the letters are built again,
@@ -688,19 +688,15 @@ static long osk_tick(long timeout, long address_to other)
                 if (now >= osk.long_at)
                         osk_alts_open();
                 else
-                        wait = osk.long_at - now, waiting = true;
+                        timeout = ui_deadline_wait(timeout, now, osk.long_at);
         }
         if (osk.repeat >= 0)
         {
                 if (now >= osk.next)
                         osk_repeat_key();
-                if (!waiting || (osk.next > now ? osk.next - now : 0) < wait)
-                        wait = osk.next > now ? osk.next - now : 0;
-                waiting = true;
+                timeout = ui_deadline_wait(timeout, now, osk.next);
         }
-        if (!waiting)
-                return timeout;
-        return timeout < 0 || (b64)timeout > wait ? (long)wait : timeout;
+        return timeout;
 }
 
 // The kit moved a control (a ripple, a hover): the picture is due.
@@ -925,27 +921,23 @@ static struct ui_app osk_app = {
 
 static b32 osk_main()
 {
-        string_address regular = (string_address) UI_FONT_REGULAR;
-
         memory_zero(&osk, sizeof(osk));
         osk.layout = ~0u; // no layout yet: the first take builds the letters
         osk.purpose = ~0u; // no purpose yet: the first take picks the page
         osk.held = -1;
         osk.repeat = -1;
         osk.page = OSK_PAGE_LETTERS;
-        for (positive at = 1; at < (positive)program_argument_count(); at++)
+        osk_app.font = (string_address)UI_FONT_REGULAR;
+        for (positive at = 1, took; at < (positive)program_argument_count(); at += took)
         {
                 string_address value;
 
-                if ((value = ui_argument(at, (string_address) "-f")))
-                        regular = value;
-                else if ((value = ui_argument(at, (string_address) "-t")))
-                        osk.trace = (const char address_to)value;
-                else
+                if ((took = ui_app_option(&osk_app, at)))
                         continue;
-                at++;
+                took = 1;
+                if ((value = ui_argument(at, (string_address) "-t")))
+                        osk.trace = (const char address_to)value, took = 2;
         }
-        osk_app.font = regular;
         return ui_app_run(&osk_app);
 }
 

@@ -873,8 +873,8 @@ static void terminal_caret_step(positive now, long address_to timeout)
         if (terminal.shown >= 0 && (terminal_caret_index == ~0u ? UI_CARET_FULL : terminal_caret_cover_at(now)) != terminal.caret_cover[terminal.shown])
                 terminal.dirty = true;
         ui_caret_cover(&terminal.caret, &due);
-        if (due && (*timeout < 0 || (long)(due - now) < *timeout))
-                *timeout = (long)(due - now);
+        if (due)
+                *timeout = ui_deadline_wait(*timeout, (b64)now, (b64)due);
 }
 
 // A colour the cover of the way from one to the other, channel by channel: from at cover 0, to at UI_CARET_FULL.
@@ -2774,14 +2774,17 @@ static struct ui_popup terminal_menu;
 static fn terminal_menu_open(int x, int y, b32 touch)
 {
         struct ui_popmenu address_to m = &terminal_menu.menu;
+        const struct ui_menu_spec specs[] = {
+            {null, null, UI_MENU_SEPARATOR, 0, false},
+            {WORDS(menu_zoom_in), "Ctrl+=", 0, TERMINAL_MENU_ZOOM_IN, false},
+            {WORDS(menu_zoom_out), "Ctrl+-", 0, TERMINAL_MENU_ZOOM_OUT, false},
+            {WORDS(menu_reset_zoom), "Ctrl+0", 0, TERMINAL_MENU_ZOOM_RESET, false},
+        };
 
         m->count = 0;
         ui_menu_clip_rows(m, TERMINAL_MENU_COPY, "Ctrl+Shift+C", terminal_selecting() ? 0 : UI_MENU_DISABLED, TERMINAL_MENU_PASTE,
                           "Ctrl+Shift+V", 0, TERMINAL_MENU_ALL, null, 0);
-        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, WORDS(menu_zoom_in), "Ctrl+=", 0, TERMINAL_MENU_ZOOM_IN);
-        ui_popmenu_add(m, WORDS(menu_zoom_out), "Ctrl+-", 0, TERMINAL_MENU_ZOOM_OUT);
-        ui_popmenu_add(m, WORDS(menu_reset_zoom), "Ctrl+0", 0, TERMINAL_MENU_ZOOM_RESET);
+        ui_popmenu_build(m, specs, (int)(sizeof(specs) / sizeof(specs[0])));
         ui_popmenu_open(&terminal_menu, &terminal.own, &terminal.ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
 }
 
@@ -3878,8 +3881,6 @@ static long terminal_tick(long timeout, long address_to other)
         timeout = kit;
         if (synchronized_output)
         {
-                long sync;
-
                 now = (positive)ui_kit.now;
                 terminal.sync_since = terminal.sync_held ? terminal.sync_since : now;
                 terminal.sync_held = true;
@@ -3890,24 +3891,20 @@ static long terminal_tick(long timeout, long address_to other)
                         terminal.changed = true;
                 }
                 else
-                {
-                        sync = (long)(TERMINAL_SYNC_NANOSECONDS - (now - terminal.sync_since));
-                        timeout = timeout < 0 || sync < timeout ? sync : timeout;
-                }
+                        timeout = ui_deadline_wait(timeout, (b64)now, (b64)(terminal.sync_since + TERMINAL_SYNC_NANOSECONDS));
         }
         else
                 terminal.sync_held = false;
 
         terminal.dirty |= terminal.changed;
 
-        if (hold >= 0 && (timeout < 0 || hold < timeout))
-                timeout = hold;
+        timeout = ui_timeout_min(timeout, hold);
 
         // The body's motion of the scrollback (a wheel's glide, a finger's throw, a pull's spring) goes on a frame at a time.
         if (ui_body_going(&terminal.bar.body))
         {
                 terminal_bar_step();
-                timeout = timeout < 0 || timeout > ui_kit_frame_ns() ? ui_kit_frame_ns() : timeout;
+                timeout = ui_timeout_min(timeout, ui_kit_frame_ns());
         }
 
         // The view a finger threw on the alternate screen goes on a frame at a time, slowing, until it is still.
@@ -3921,41 +3918,26 @@ static long terminal_tick(long timeout, long address_to other)
                 if (!moved)
                         ui_body_hold(&terminal.alt, ui_kit_time());
                 if (ui_body_going(&terminal.alt))
-                        timeout = timeout < 0 || timeout > ui_kit_frame_ns() ? ui_kit_frame_ns() : timeout;
+                        timeout = ui_timeout_min(timeout, ui_kit_frame_ns());
         }
 
         // The actions bar comes back when the view has been still for a while (ui_select_bar_tick).
         {
-                positive bar_due = ui_select_bar_tick(terminal_sel(), &terminal.dirty), bar_now = (positive)ui_kit.now;
+                positive bar_due = ui_select_bar_tick(terminal_sel(), &terminal.dirty);
 
                 if (bar_due)
-                {
-                        long left = bar_due > bar_now ? (long)(bar_due - bar_now) : 0;
-
-                        timeout = timeout < 0 || left < timeout ? left : timeout;
-                }
+                        timeout = ui_deadline_wait(timeout, (b64)ui_kit.now, (b64)bar_due);
         }
         // A selection drag held past the grid scrolls the scrollback a step at a time (terminal_select_autoscroll).
         {
-                positive scroll_due = terminal_select_autoscroll((positive)ui_kit.now, &terminal.dirty), scroll_now;
+                positive scroll_due = terminal_select_autoscroll((positive)ui_kit.now, &terminal.dirty);
 
                 if (scroll_due)
-                {
-                        long left;
-
-                        scroll_now = (positive)ui_kit.now;
-                        left = scroll_due > scroll_now ? (long)(scroll_due - scroll_now) : 0;
-                        timeout = timeout < 0 || left < timeout ? left : timeout;
-                }
+                        timeout = ui_deadline_wait(timeout, (b64)ui_kit.now, (b64)scroll_due);
         }
 
         if (terminal.title_owed)
-        {
-                positive due = terminal.title_at + terminal_period(), owed_now = (positive)ui_kit.now;
-                long left = due > owed_now ? (long)(due - owed_now) : 0;
-
-                timeout = timeout < 0 || left < timeout ? left : timeout;
-        }
+                timeout = ui_deadline_wait(timeout, (b64)ui_kit.now, (b64)(terminal.title_at + terminal_period()));
 
         // The caret's blink: a move restarts it, and the wait ends when its cover next changes.
         if (terminal.phase == TERMINAL_RUNNING)
@@ -3982,13 +3964,13 @@ static long terminal_tick(long timeout, long address_to other)
                                 terminal.idle_since = 0;
                         }
                         else
-                                timeout = (long)(TERMINAL_IDLE_NANOSECONDS - (now - terminal.idle_since));
+                                timeout = ui_deadline_wait(timeout, (b64)now, (b64)(terminal.idle_since + TERMINAL_IDLE_NANOSECONDS));
                 }
                 else
                 {
                         terminal.idle_since = 0;
-                        if (stalled && timeout < 0)
-                                timeout = TERMINAL_STALL_NANOSECONDS;
+                        if (stalled)
+                                timeout = ui_timeout_min(timeout, TERMINAL_STALL_NANOSECONDS);
                 }
         }
 

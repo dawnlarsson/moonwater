@@ -821,24 +821,25 @@ static fn editor_menu_open(int x, int y)
 {
         struct ui_popmenu address_to m = &editor.menu.menu;
         struct ui_text address_to view = &editor_now()->view;
+        const struct ui_menu_spec specs[] = {
+            {null, null, UI_MENU_SEPARATOR, 0, false},
+            {WORDS(menu_find), "Ctrl+F", 0, EDITOR_MENU_FIND, false},
+            {WORDS(menu_go_to_line), "Ctrl+G", 0, EDITOR_MENU_LINE, false},
+            {WORDS(menu_toggle_comment), "Ctrl+/", 0, EDITOR_MENU_COMMENT, view->hex},
+            {null, null, UI_MENU_SEPARATOR, 0, false},
+            {WORDS(menu_word_wrap), "Alt+Z", UI_MENU_CHECK | (view->wrap ? UI_MENU_ON : 0), EDITOR_MENU_WRAP, view->hex},
+            {WORDS(menu_hex_mode), "Ctrl+Shift+H", UI_MENU_CHECK | (view->hex ? UI_MENU_ON : 0), EDITOR_MENU_HEX, false},
+            {null, null, UI_MENU_SEPARATOR, 0, false},
+            {WORDS(menu_open_file), "Ctrl+O", 0, EDITOR_MENU_OPEN, false},
+            {WORDS(menu_save_as), "Ctrl+Shift+S", 0, EDITOR_MENU_SAVE_AS, false},
+            {WORDS(menu_new_tab), "Ctrl+N", 0, EDITOR_MENU_NEW_TAB, false},
+            {WORDS(menu_new_window), "Ctrl+Shift+N", 0, EDITOR_MENU_NEW_WINDOW, false},
+        };
 
         m->count = 0;
         editor.tab_menu_at = -1;
         ui_text_menu_items(m, view, false);
-        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, WORDS(menu_find), "Ctrl+F", 0, EDITOR_MENU_FIND);
-        ui_popmenu_add(m, WORDS(menu_go_to_line), "Ctrl+G", 0, EDITOR_MENU_LINE);
-        if (!view->hex)
-                ui_popmenu_add(m, WORDS(menu_toggle_comment), "Ctrl+/", 0, EDITOR_MENU_COMMENT);
-        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        if (!view->hex)
-                ui_popmenu_add(m, WORDS(menu_word_wrap), "Alt+Z", UI_MENU_CHECK | (view->wrap ? UI_MENU_ON : 0), EDITOR_MENU_WRAP);
-        ui_popmenu_add(m, WORDS(menu_hex_mode), "Ctrl+Shift+H", UI_MENU_CHECK | (view->hex ? UI_MENU_ON : 0), EDITOR_MENU_HEX);
-        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, WORDS(menu_open_file), "Ctrl+O", 0, EDITOR_MENU_OPEN);
-        ui_popmenu_add(m, WORDS(menu_save_as), "Ctrl+Shift+S", 0, EDITOR_MENU_SAVE_AS);
-        ui_popmenu_add(m, WORDS(menu_new_tab), "Ctrl+N", 0, EDITOR_MENU_NEW_TAB);
-        ui_popmenu_add(m, WORDS(menu_new_window), "Ctrl+Shift+N", 0, EDITOR_MENU_NEW_WINDOW);
+        ui_popmenu_build(m, specs, (int)(sizeof(specs) / sizeof(specs[0])));
         editor.menu.field = view;
         ui_popmenu_open(&editor.menu, &editor.own, &editor.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
 }
@@ -847,13 +848,16 @@ static fn editor_menu_open(int x, int y)
 static fn editor_tab_menu_open(int at, int x, int y)
 {
         struct ui_popmenu address_to m = &editor.menu.menu;
+        const struct ui_menu_spec specs[] = {
+            {WORDS(menu_close_tab), "Ctrl+W", 0, EDITOR_MENU_TAB_CLOSE, false},
+            {WORDS(menu_close_others), null, editor.count <= 1 ? UI_MENU_DISABLED : 0, EDITOR_MENU_TAB_OTHERS, false},
+            {null, null, UI_MENU_SEPARATOR, 0, false},
+            {WORDS(menu_new_window), "Ctrl+Shift+N", 0, EDITOR_MENU_TAB_WINDOW, false},
+        };
 
         m->count = 0;
         editor.tab_menu_at = at;
-        ui_popmenu_add(m, WORDS(menu_close_tab), "Ctrl+W", 0, EDITOR_MENU_TAB_CLOSE);
-        ui_popmenu_add(m, WORDS(menu_close_others), null, editor.count <= 1 ? UI_MENU_DISABLED : 0, EDITOR_MENU_TAB_OTHERS);
-        ui_popmenu_add(m, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(m, WORDS(menu_new_window), "Ctrl+Shift+N", 0, EDITOR_MENU_TAB_WINDOW);
+        ui_popmenu_build(m, specs, (int)(sizeof(specs) / sizeof(specs[0])));
         editor.menu.field = null;
         ui_popmenu_open(&editor.menu, &editor.own, &editor.ui, x, y, 0, 0, WINDOW_POPUP_POINT, false);
 }
@@ -1169,15 +1173,10 @@ static b32 editor_event(const struct window_event address_to event)
         editor_layout();
         // The file tabs are the view's: a press on one and its release are not the find bar's or the text's.
         // When the pointer is already inside the document well and nothing is held, let the text widget take it directly.
-        {
-                int px = event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x;
-                int py = event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y;
-
-                asks = (!ui_kit_held && (event->type == WINDOW_EVENT_BUTTON || event->type == WINDOW_EVENT_MOTION) &&
-                        ui_text_inside(&tab->view, px, py))
-                           ? 0
-                           : ui_view_event(&editor.ui, &editor.view, event);
-        }
+        asks = (!ui_kit_held && (event->type == WINDOW_EVENT_BUTTON || event->type == WINDOW_EVENT_MOTION) &&
+                ui_text_inside(&tab->view, ui_kit.pointer_x, ui_kit.pointer_y))
+                   ? 0
+                   : ui_view_event(&editor.ui, &editor.view, event);
         if (asks & UI_VIEW_DRAW)
                 editor.dirty = true;
         if (asks & UI_VIEW_TAKEN)
