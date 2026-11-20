@@ -421,7 +421,7 @@ AUDIO_API long audio_pcm_open_fill(struct audio_pcm *pcm, long card, long device
         low = audio_alsa_interval(&hw, AUDIO_ALSA_CHANNELS)->min;
         high = audio_alsa_interval(&hw, AUDIO_ALSA_CHANNELS)->max;
         channels = low <= 2 && high >= 2 ? 2 : (long)low;
-        if (channels < 1 || channels > 32 || (high < low))
+        if (channels < 1 || channels > 8 || (high < low))
         {
                 result = AUDIO_EINVAL;
                 goto fail;

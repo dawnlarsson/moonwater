@@ -1870,7 +1870,7 @@ static void pulse_stream_request(struct pulse *p, struct pulse_stream *s)
                 return;
         missing = target - queued - s->outstanding;
         missing -= missing % s->voice.frame;
-        if (!missing || (missing < s->minreq && (queued + s->outstanding) != 0))
+        if (!missing || (missing < s->minreq && queued != 0))
                 return;
         wire_w_u32(&w, PULSE_COMMAND_REQUEST);
         wire_w_u32(&w, PULSE_INVALID);
@@ -2102,7 +2102,7 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
         int error = PULSE_ERR_INVALID;
         signed char map[PULSE_CHANNEL_MAX];
         unsigned long sink_index, maxlength, tlength, prebuf, minreq, volume[PULSE_CHANNEL_MAX];
-        const char *sink_name;
+        const char *sink_name, *stream_name = 0;
         int corked, muted = 0, adjust = 0, early = 0, volume_set = 1, muted_set = 0, variable = 0, no_move = 0, isnull;
         long volume_channels;
         struct pulse_stream *s;
@@ -2110,6 +2110,8 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
         int err;
 
         PULSE_NEED_AUTH();
+        if (c->version < 13)
+                stream_name = pulse_r_string(r, &isnull);
         pulse_r_sample_spec(r, &format, &channels, &rate);
         map_channels = pulse_r_channel_map(r, map);
         sink_index = wire_r_u32(r);
@@ -2186,6 +2188,8 @@ static int pulse_command_create_playback(struct pulse *p, long slot, struct wire
         if (!s)
                 return pulse_error(p, c, tag, (unsigned long)error);
         s->props = props;
+        if (stream_name && stream_name[0])
+                pulse_props_set(&s->props, "media.name", (const unsigned char *)stream_name, wire_len(stream_name) + 1);
         s->corked = corked;
         s->muted = muted;
         s->variable_rate = variable;
@@ -3283,7 +3287,13 @@ static int pulse_command_stream(struct pulse *p, long slot, unsigned long comman
                 wire_w_u32(&w, s->minreq);
                 if (c->version >= 13)
                         pulse_w_64(&w, 'U', s->sink_us);
-                return pulse_reply_end(c, &w);
+                {
+                        int err = pulse_reply_end(c, &w);
+
+                        if (err == PULSE_DONE)
+                                pulse_stream_request(p, s);
+                        return err;
+                }
         }
         case PULSE_COMMAND_UPDATE_PLAYBACK_STREAM_PROPLIST:
         {
@@ -3947,10 +3957,15 @@ static int pulse_data(struct pulse *p, long slot, unsigned long channel, long lo
         }
         if (length % (long)s->voice.frame)
                 return PULSE_DEAD;
+        s->outstanding = s->outstanding > (unsigned long)length ? s->outstanding - (unsigned long)length : 0;
         if ((flags & 0xff) != 0 || offset != 0)
         {
                 if (audio_ring_seek(&s->voice.ring, (long)(flags & 0xff), offset) < 0)
+                {
+                        if (!audio_ring_fill(&s->voice.ring))
+                                pulse_stream_request(p, s);
                         return PULSE_DONE; // a seek out of the ring is dropped with its data
+                }
         }
         took = audio_ring_put(&s->voice.ring, data, (unsigned long)length);
         if (took < (unsigned long)length)
@@ -3962,7 +3977,6 @@ static int pulse_data(struct pulse *p, long slot, unsigned long channel, long lo
                 wire_w_u32(&w, s->channel);
                 pulse_enqueue(c, PULSE_INVALID, w.p, w.len);
         }
-        s->outstanding = s->outstanding > took ? s->outstanding - took : 0;
         return PULSE_DONE;
 }
 
@@ -4173,7 +4187,7 @@ static void pulse_stream_play(struct pulse *p, struct pulse_stream *s, struct pu
                         return;
                 }
         }
-        played = audio_voice_mix(&sink->mix, &s->voice, frames, s->drain_pending);
+        played = audio_voice_mix(&sink->mix, &s->voice, frames, s->drain_pending || s->one_shot);
         if (!s->voice.table || s->voice.out_rate <= 0)
                 s->playing_for += (unsigned long long)played * s->voice.frame;
         else
