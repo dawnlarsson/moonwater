@@ -23870,15 +23870,14 @@ static b32 ui_apps_steam_id(const char address_to icon, char (address_to words)[
 
         out[0] = 0;
         for (int at = first + 1; at < count && !digits; at++)
-                if (!memory_compare(words[at], "steam://rungameid/", 18))
+                if (string_has_prefix((string_address)words[at], "steam://rungameid/"))
                         digits = words[at] + 18;
-        if (!digits && icon && !memory_compare(icon, "steam_icon_", 11))
+        if (!digits && icon && string_has_prefix((string_address)icon, "steam_icon_"))
                 digits = icon + 11;
         if (!digits)
                 return false;
-        while (digits[dlen] >= '0' && digits[dlen] <= '9' && dlen < 16)
-                dlen++;
-        if (!dlen || (digits[dlen] && digits[dlen] != '/'))
+        dlen = string_span_of_set((string_address)digits, (string_address) "0123456789");
+        if (!dlen || dlen > 16 || (digits[dlen] && digits[dlen] != '/'))
                 return false;
         if (10 + dlen + 1 > room)
                 return false;
@@ -23944,7 +23943,7 @@ static fn ui_apps_entry(const char address_to root, bipolar directory, const cha
         p8 address_to text;
         int count, first = 0;
 
-        if (ui_apps.count >= UI_APPS_MOST || length <= 8 || memory_compare(file + length - 8, ".desktop", 8))
+        if (ui_apps.count >= UI_APPS_MOST || length <= 8 || !memory_has_suffix((string_address)file, length, ".desktop"))
                 return;
         // Root's alone, a regular file, read through the directory and never through a link.
         if (!ui_apps_look(directory, file, false, &facts) || (facts.mode & 0170000u) != 0100000u || facts.owner != ui_apps_owner || (facts.mode & 0022) ||
@@ -29687,14 +29686,14 @@ static b32 ui_run_wait(string_address address_to words)
 static b32 ui_apps_uninstall(const char address_to root, int which, const char address_to mono, const char address_to mono_bold)
 {
         const struct ui_app_entry address_to app;
-        b32 local;
+        b32 is_local;
 
         if (!ui_apps_uninstallable(which))
                 return false;
         app = &ui_apps.app[which];
-        local = ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local);
+        is_local = ui_apps_local && ui_apps_local[0] && string_equals((string_address)app->root, (string_address)ui_apps_local);
         ui_apps_pin(root, which, false);
-        if (!local && app->profile[0])
+        if (!is_local && app->profile[0])
         {
                 string_address words[10];
                 positive count = 0;

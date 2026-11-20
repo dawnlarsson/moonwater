@@ -1911,8 +1911,8 @@ static b32 files_drive_user_mount(const p8 address_to path)
 
 static b32 files_drive_block_source(const p8 address_to src)
 {
-        return !memory_compare(src, "/dev/", 5) && memory_compare(src, "/dev/loop", 9) != 0 &&
-               memory_compare(src, "/dev/zram", 9) != 0 && memory_compare(src, "/dev/ram", 8) != 0;
+        return string_has_prefix(src, "/dev/") && !string_has_prefix(src, "/dev/loop") &&
+               !string_has_prefix(src, "/dev/zram") && !string_has_prefix(src, "/dev/ram");
 }
 
 /*

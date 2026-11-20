@@ -173,38 +173,26 @@ static void compositor_pin_irqs_ccd0(void)
         buf[got] = 0;
         for (long at = 0; at < got;)
         {
-                long line = at, stop = at;
+                char *nl = (char *)memory_first_of(buf + at, '\n', (positive)(got - at));
+                long line = at, stop = nl ? nl - buf : got;
+                char saved = buf[stop];
 
-                while (stop < got && buf[stop] != '\n')
-                        stop++;
                 at = stop + 1;
+                buf[stop] = 0;
                 // Check if this line is an xhci_hcd or amdgpu IRQ.
+                if (string_find((string_address)buf + line, (string_address) "xhci_hcd") ||
+                    string_find((string_address)buf + line, (string_address) "amdgpu"))
                 {
-                        int match = 0;
-                        unsigned int irq = 0;
-                        long p = line;
+                        long p = line + (long)string_span_of_set((string_address)buf + line, (string_address) " ");
+                        positive used = 0;
+                        positive irq = string_digits((string_address)buf + p, &used);
 
-                        for (long k = line; k + 6 <= stop; k++)
-                                if ((k + 8 <= stop && memory_compare(buf + k, "xhci_hcd", 8) == 0) ||
-                                    (k + 6 <= stop && memory_compare(buf + k, "amdgpu", 6) == 0))
-                                {
-                                        match = 1;
-                                        break;
-                                }
-                        if (!match)
-                                continue;
-                        while (p < stop && buf[p] == ' ')
-                                p++;
-                        if (p >= stop || buf[p] < '0' || buf[p] > '9')
-                                continue;
-                        while (p < stop && buf[p] >= '0' && buf[p] <= '9')
-                                irq = irq * 10u + (unsigned int)(buf[p++] - '0');
-                        if (p < stop && buf[p] == ':' && irq > 0 && irq < 4096)
+                        if (used > 0 && buf[p + (long)used] == ':' && irq > 0 && irq < 4096)
                         {
                                 char path[64];
                                 long ifd;
 
-                                compositor_num_path(path, "/proc/irq/", irq, "/smp_affinity");
+                                compositor_num_path(path, "/proc/irq/", (unsigned int)irq, "/smp_affinity");
                                 ifd = system_open_at(AT_FDCWD, (string_address)path, O_WRONLY | O_CLOEXEC);
                                 if (ifd >= 0)
                                 {
@@ -213,6 +201,7 @@ static void compositor_pin_irqs_ccd0(void)
                                 }
                         }
                 }
+                buf[stop] = saved;
         }
 }
 
@@ -981,6 +970,8 @@ static void compositor_settings_open(void)
         rectangle of the button that was pressed, the edge its band is along and its screen, which the launcher opens beside
         (window.c's button_x and the rest); the band is the one whose button the point is on.
 */
+static void compositor_menu_close(void);
+
 static void compositor_launcher_open(int x, int y)
 {
         compositor_menu_close();

@@ -13624,7 +13624,7 @@ static bool bowl_desktop_word_matches(p8 address_to text, positive length,
                 p8 address_to nl = (p8 address_to)memory_first_of(at, '\n', (positive)(stop - at));
                 p8 address_to line_end = nl ? nl : stop;
 
-                if (line_end - at >= 5 && !memory_compare(at, "Exec=", 5))
+                if (string_has_prefix(at, "Exec="))
                 {
                         p8 saved = *line_end;
                         string_address pos;
@@ -13677,7 +13677,7 @@ static fn bowl_profile_clean_shortcuts(const struct bowl_profile address_to prof
                         at += entry->d_reclen;
                         name_len = string_length((string_address)entry->d_name);
                         if (entry->d_name[0] == '.' || name_len <= 8 ||
-                            !string_equals((string_address)entry->d_name + name_len - 8, ".desktop"))
+                            !memory_has_suffix((string_address)entry->d_name, name_len, ".desktop"))
                                 continue;
                         handle = system_open_at((positive)dir, (string_address)entry->d_name,
                                                 FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
@@ -13894,15 +13894,14 @@ bowl_profile_main(positive count, string_address address_to arguments)
 static bool bowl_desktop_path_ok(string_address path)
 {
         positive length = path ? string_length(path) : 0;
-        const p8 local_prefix[] = BOWL_LOCAL_APPLICATIONS "/";
 
-        if (length <= 8 || !string_equals(path + length - 8, ".desktop"))
+        if (length <= 8 || !memory_has_suffix(path, length, ".desktop"))
                 return false;
-        if (string_find(path, "/../") || (length >= 3 && string_equals(path + length - 3, "/..")))
+        if (string_find(path, "/../") || memory_has_suffix(path, length, "/.."))
                 return false;
-        if (!memory_compare(path, local_prefix, sizeof(local_prefix) - 1))
+        if (string_has_prefix(path, BOWL_LOCAL_APPLICATIONS "/"))
                 return true;
-        return !memory_compare(path, BOWL_ROOT_PREFIX, sizeof(BOWL_ROOT_PREFIX) - 1) &&
+        return string_has_prefix(path, BOWL_ROOT_PREFIX) &&
                string_find(path + sizeof(BOWL_ROOT_PREFIX) - 1, "/applications/") != null;
 }
 
@@ -13910,7 +13909,7 @@ static b32 bowl_uninstall(positive count, string_address address_to arguments)
 {
         string_address target;
         const struct bowl_profile address_to profile;
-        struct file_facts facts;
+        file_facts facts;
         bipolar failed;
 
         if (count != 3 || !arguments[2][0])
