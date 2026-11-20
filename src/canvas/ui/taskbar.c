@@ -2892,6 +2892,7 @@ static fn taskbar_menu_ui(const struct taskbar_view *view, unsigned int address_
 // and held inside the screen: false with no room for it.
 static int taskbar_menu_place(const struct taskbar_view *view, int x, int y, int w, int h)
 {
+        struct ui_anchor anchor;
         int gap;
 
         taskbar_menu.width = taskbar_menu.height = 1;
@@ -2902,18 +2903,13 @@ static int taskbar_menu_place(const struct taskbar_view *view, int x, int y, int
                 return 0;
         // Beside the slot on the screen's side of the band, its middle on the slot's, held inside the screen.
         gap = taskbar_scaled(view->scale) * 6 / 100;
-        taskbar_menu.x = x + w / 2 - taskbar_menu.width / 2, taskbar_menu.y = y + h / 2 - taskbar_menu.height / 2;
-        if (view->position == TASKBAR_BOTTOM)
-                taskbar_menu.y = y - gap - taskbar_menu.height;
-        else if (view->position == TASKBAR_TOP)
-                taskbar_menu.y = y + h + gap;
-        else if (view->position == TASKBAR_LEFT)
-                taskbar_menu.x = x + w + gap;
-        else
-                taskbar_menu.x = x - gap - taskbar_menu.width;
-        taskbar_menu.x = taskbar_menu.x + taskbar_menu.width > view->x + view->width ? view->x + view->width - taskbar_menu.width : taskbar_menu.x;
-        taskbar_menu.y = taskbar_menu.y + taskbar_menu.height > view->y + view->height ? view->y + view->height - taskbar_menu.height : taskbar_menu.y;
-        taskbar_menu.x = taskbar_menu.x < view->x ? view->x : taskbar_menu.x, taskbar_menu.y = taskbar_menu.y < view->y ? view->y : taskbar_menu.y;
+        anchor = (struct ui_anchor){
+            .anchored = true,
+            .button = {x - gap, y - gap, w + 2 * gap, h + 2 * gap},
+            .screen = {view->x, view->y, view->width, view->height},
+            .edge = (unsigned int)view->position,
+        };
+        ui_anchor_beside(&anchor, taskbar_menu.width, taskbar_menu.height, &taskbar_menu.x, &taskbar_menu.y);
         taskbar_menu.open = 1, taskbar_menu.dirty = 1;
         return 1;
 }
@@ -2922,6 +2918,7 @@ static int taskbar_menu_place(const struct taskbar_view *view, int x, int y, int
 static int taskbar_menu_open(const struct taskbar_view *view)
 {
         int x, y, w, h;
+        const char *meridiem = null;
 
         if (!view->engine || !view->face || !taskbar_anchor(view, TASKBAR_LAUNCHER, &x, &y, &w, &h))
                 return 0;
@@ -2937,12 +2934,19 @@ static int taskbar_menu_open(const struct taskbar_view *view)
                 clock_gettime(CLOCK_REALTIME, address_of now);
                 seconds = taskbar.moon_at ? taskbar.moon_at : now.tv_sec;
                 if (localtime_r(&seconds, &broken))
-                        ui_popmenu_add(&taskbar_menu.menu, broken.tm_hour < 12 ? WORDS(tray_am) : WORDS(tray_pm), null, UI_MENU_HEADER, 0);
+                        meridiem = broken.tm_hour < 12 ? WORDS(tray_am) : WORDS(tray_pm);
         }
-        ui_popmenu_add(&taskbar_menu.menu, WORDS(tray_edit), null, 0, TASKBAR_MENU_EDIT);
-        ui_popmenu_add(&taskbar_menu.menu, WORDS(tray_settings), null, 0, TASKBAR_MENU_SETTINGS);
-        ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
-        ui_popmenu_add(&taskbar_menu.menu, taskbar.clock_12h ? WORDS(tray_clock_24h) : WORDS(tray_clock_12h), null, 0, TASKBAR_MENU_CLOCK);
+        {
+                const struct ui_menu_spec specs[] = {
+                    {meridiem, null, UI_MENU_HEADER, 0, !meridiem},
+                    {WORDS(tray_edit), null, 0, TASKBAR_MENU_EDIT, false},
+                    {WORDS(tray_settings), null, 0, TASKBAR_MENU_SETTINGS, false},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {taskbar.clock_12h ? WORDS(tray_clock_24h) : WORDS(tray_clock_12h), null, 0, TASKBAR_MENU_CLOCK, false},
+                };
+
+                ui_popmenu_build(&taskbar_menu.menu, specs, (int)(sizeof(specs) / sizeof(specs[0])));
+        }
         return taskbar_menu_place(view, x, y, w, h);
 }
 
@@ -3521,18 +3525,9 @@ static void taskbar_pins_path(char *path, positive room)
 static void taskbar_pins_read(void)
 {
         char path[160], text[SETTING_PINS_MOST + 16];
-        bipolar handle, got = 0;
 
         taskbar_pins_path(path, sizeof(path));
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC);
-        if (handle >= 0)
-        {
-                got = system_read_once(handle, text, sizeof(text) - 1);
-                system_close(handle);
-        }
-        text[got < 0 ? 0 : got] = 0;
-        for (bipolar at = got - 1; at >= 0 && (text[at] == '\n' || text[at] == '\r'); at--)
-                text[at] = 0;
+        windows_read_line(path, text, sizeof(text), FILE_READ | O_NOFOLLOW | O_CLOEXEC);
         taskbar_pins_set(text);
 }
 
@@ -3773,20 +3768,15 @@ static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab)
                 ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_unpin), null, 0, TASKBAR_MENU_UNPIN);
                 return taskbar_menu_place(view, x, y, w, h);
         }
-        ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_exit), null, 0, TASKBAR_MENU_EXIT);
         members = taskbar_stop_plan_for(pid, compositor.app_id[row], &root);
-        if (members)
-        {
-                windows = taskbar_stop_rows(members);
-                if (windows > 1)
-                        language_format(taskbar_menu.stop, sizeof(taskbar_menu.stop), WORDS(taskbar_tab_stop_windows), (long)windows);
-                ui_popmenu_add(&taskbar_menu.menu, windows > 1 ? taskbar_menu.stop : WORDS(taskbar_tab_stop), null, 0, TASKBAR_MENU_STOP);
-        }
+        windows = members ? taskbar_stop_rows(members) : 0;
+        if (windows > 1)
+                language_format(taskbar_menu.stop, sizeof(taskbar_menu.stop), WORDS(taskbar_tab_stop_windows), (long)windows);
         // The app of the registry the window is (its app_id or class is the app's window key): Unpin where it is pinned, else Pin where
         // it may be, with room for one more. A window that is no app's has neither: nothing of a window's own words is ever pinned.
         {
-                int which = ui_apps_match(compositor.app_id[row]), pinned = -1;
-                bool has_pin = false;
+                int which = ui_apps_match(compositor.app_id[row]), pinned = -1, pin_id = 0;
+                const char *pin_label = null;
 
                 for (int each = 0; each < taskbar_pins.count && pinned < 0; each++)
                         if (taskbar_pin_runs(&taskbar_pins.pin[each], compositor.app_id[row]))
@@ -3794,23 +3784,22 @@ static int taskbar_tab_menu_open(const struct taskbar_view *view, int tab)
                 if (pinned >= 0)
                 {
                         string_copy_bounded((p8 *)taskbar_menu.pin.app, (string_address)taskbar_pins.pin[pinned].app, sizeof(taskbar_menu.pin.app));
-                        ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
-                        ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_unpin), null, 0, TASKBAR_MENU_UNPIN);
-                        has_pin = true;
+                        pin_label = WORDS(taskbar_tab_unpin), pin_id = TASKBAR_MENU_UNPIN;
                 }
                 else if (which >= 0 && taskbar_pins.count < SETTING_PINS_ENTRIES && taskbar_pin_of(which, &taskbar_menu.pin))
-                {
-                        ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
-                        ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_pin), null, 0, TASKBAR_MENU_PIN);
-                        has_pin = true;
-                }
+                        pin_label = WORDS(taskbar_tab_pin), pin_id = TASKBAR_MENU_PIN;
                 else
                         memory_zero(&taskbar_menu.pin, sizeof(taskbar_menu.pin));
-                if (which >= 0 && ui_apps_uninstallable(which))
                 {
-                        if (!has_pin)
-                                ui_popmenu_add(&taskbar_menu.menu, null, null, UI_MENU_SEPARATOR, 0);
-                        ui_popmenu_add(&taskbar_menu.menu, WORDS(taskbar_tab_uninstall), null, 0, TASKBAR_MENU_UNINSTALL);
+                        const struct ui_menu_spec specs[] = {
+                            {WORDS(taskbar_tab_exit), null, 0, TASKBAR_MENU_EXIT, false},
+                            {windows > 1 ? taskbar_menu.stop : WORDS(taskbar_tab_stop), null, 0, TASKBAR_MENU_STOP, !members},
+                            {null, null, UI_MENU_SEPARATOR, 0, false},
+                            {pin_label, null, 0, pin_id, !pin_label},
+                            {WORDS(taskbar_tab_uninstall), null, 0, TASKBAR_MENU_UNINSTALL, !(which >= 0 && ui_apps_uninstallable(which))},
+                        };
+
+                        ui_popmenu_build(&taskbar_menu.menu, specs, (int)(sizeof(specs) / sizeof(specs[0])));
                 }
         }
         return taskbar_menu_place(view, x, y, w, h);

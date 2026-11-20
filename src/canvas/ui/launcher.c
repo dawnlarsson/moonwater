@@ -767,79 +767,20 @@ static fn launcher_recent_path(char address_to path, positive room)
         string_append_bounded((p8 address_to)path, (string_address)LAUNCHER_RECENT_PATH, room);
 }
 
-static positive launcher_recent_text(char address_to text, positive room)
-{
-        char path[160];
-        bipolar handle, got = 0;
-
-        launcher_recent_path(path, sizeof(path));
-        handle = system_open_at(AT_FDCWD, (string_address)path, FILE_READ | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
-        if (handle >= 0)
-        {
-                got = system_read_once(handle, text, room - 1);
-                system_close(handle);
-        }
-        text[got > 0 ? got : 0] = 0;
-        return got > 0 ? (positive)got : 0;
-}
-
 static fn launcher_recent_read(void)
 {
-        char text[LAUNCHER_RECENT * (WINDOWS_APP_ID + 1) + 1];
-        positive length = launcher_recent_text(text, sizeof(text));
+        char path[160];
 
-        launcher.recent_count = 0;
-        for (positive at = 0; at < length && launcher.recent_count < LAUNCHER_RECENT;)
-        {
-                positive stop = at;
-                int which;
-
-                while (stop < length && text[stop] != '\n')
-                        stop++;
-                text[stop] = 0;
-                which = ui_apps_find(text + at);
-                if (which >= 0 && launcher_offered((positive)which))
-                {
-                        b32 again = false;
-
-                        for (int seen = 0; seen < launcher.recent_count; seen++)
-                                again |= launcher.recent[seen] == which;
-                        if (!again)
-                                launcher.recent[launcher.recent_count++] = (unsigned short)which;
-                }
-                at = stop + 1;
-        }
+        launcher_recent_path(path, sizeof(path));
+        launcher.recent_count = ui_app_list_read(path, launcher.recent, LAUNCHER_RECENT, launcher_offered);
 }
 
 static fn launcher_recent_add(int which)
 {
-        char text[LAUNCHER_RECENT * (WINDOWS_APP_ID + 1) + 1], made[sizeof(text) + WINDOWS_APP_ID + 1], path[160];
-        positive length = launcher_recent_text(text, sizeof(text)), used = 0, lines = 1;
-        bipolar handle;
+        char path[160];
 
-        string_copy_bounded((p8 address_to)made, (string_address)ui_apps.app[which].id, sizeof(made));
-        string_append_bounded((p8 address_to)made, (string_address) "\n", sizeof(made));
-        used = string_length((string_address)made);
-        for (positive at = 0; at < length && lines < LAUNCHER_RECENT;)
-        {
-                positive stop = at;
-
-                while (stop < length && text[stop] != '\n')
-                        stop++;
-                if (stop > at && stop - at < WINDOWS_APP_ID && !(stop - at == string_length((string_address)ui_apps.app[which].id) &&
-                                                                   !memory_compare(text + at, ui_apps.app[which].id, stop - at)))
-                {
-                        memory_copy(made + used, text + at, stop - at);
-                        used += stop - at, made[used++] = '\n', lines++;
-                }
-                at = stop + 1;
-        }
         launcher_recent_path(path, sizeof(path));
-        handle = system_open_at_mode(AT_FDCWD, (string_address)path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
-        if (handle < 0)
-                return;
-        system_write_all((b32)handle, made, used);
-        system_close(handle);
+        ui_app_list_push(path, which, LAUNCHER_RECENT);
 }
 
 // One start path for a list row or an app tile: false when nothing could be started, and the launcher stays up.
@@ -1123,14 +1064,14 @@ static b32 launcher_app_menu(int which, int x, int y, b32 touch)
                 return false;
         launcher.menu.menu.count = 0;
         launcher.menu.field = null;
-        if (pinnable)
-                ui_popmenu_add(&launcher.menu.menu, pinned ? WORDS(taskbar_tab_unpin) : WORDS(taskbar_tab_pin), null, 0,
-                               pinned ? LAUNCHER_MENU_UNPIN : LAUNCHER_MENU_PIN);
-        if (uninstallable)
         {
-                if (pinnable)
-                        ui_popmenu_add(&launcher.menu.menu, null, null, UI_MENU_SEPARATOR, 0);
-                ui_popmenu_add(&launcher.menu.menu, WORDS(taskbar_tab_uninstall), null, 0, LAUNCHER_MENU_UNINSTALL);
+                const struct ui_menu_spec specs[] = {
+                    {pinned ? WORDS(taskbar_tab_unpin) : WORDS(taskbar_tab_pin), null, 0, pinned ? LAUNCHER_MENU_UNPIN : LAUNCHER_MENU_PIN, !pinnable},
+                    {null, null, UI_MENU_SEPARATOR, 0, false},
+                    {WORDS(taskbar_tab_uninstall), null, 0, LAUNCHER_MENU_UNINSTALL, !uninstallable},
+                };
+
+                ui_popmenu_build(&launcher.menu.menu, specs, (int)(sizeof(specs) / sizeof(specs[0])));
         }
         launcher.menu_app = which;
         return ui_popmenu_open(&launcher.menu, &launcher.own, &launcher.ui, x, y, 0, 0, WINDOW_POPUP_POINT, touch);
@@ -1381,7 +1322,7 @@ static int launcher_list_pointer(struct ui_list address_to l, const struct windo
 static b32 launcher_tiles_event(const struct window_event address_to event)
 {
         struct ui_list address_to lists[2] = {&launcher.grid, &launcher.recents};
-        int x = event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x, y = event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y;
+        int x = ui_kit.pointer_x, y = ui_kit.pointer_y;
 
         for (int which = 0; which < 2; which++)
         {
@@ -1397,7 +1338,7 @@ static b32 launcher_tiles_event(const struct window_event address_to event)
 
 static b32 launcher_event(const struct window_event address_to event)
 {
-        int right_hit, clicked, x, y;
+        int right_hit, clicked;
         p32 asks;
 
         launcher_layout();
@@ -1428,11 +1369,9 @@ static b32 launcher_event(const struct window_event address_to event)
                 return launcher_key(event);
         if (event->type != WINDOW_EVENT_MOTION && event->type != WINDOW_EVENT_BUTTON)
                 return true;
-        x = event->type == WINDOW_EVENT_MOTION ? event->a : ui_kit.pointer_x;
-        y = event->type == WINDOW_EVENT_MOTION ? event->b : ui_kit.pointer_y;
-        clicked = launcher_list_pointer(&launcher.list, event, x, y, false, false, &right_hit);
+        clicked = launcher_list_pointer(&launcher.list, event, ui_kit.pointer_x, ui_kit.pointer_y, false, false, &right_hit);
         if (right_hit >= 0 && (positive)right_hit < launcher.entries && launcher.entry[right_hit].kind == LAUNCHER_WINDOW)
-                launcher_app_menu(launcher.entry[right_hit].index, x, y, ui_kit_touch);
+                launcher_app_menu(launcher.entry[right_hit].index, ui_kit.pointer_x, ui_kit.pointer_y, ui_kit_touch);
         return clicked >= 0 ? !launcher_run(clicked) : true;
 }
 
@@ -1648,46 +1587,35 @@ static struct ui_app launcher_app = {
 
 static b32 launcher_main()
 {
-        string_address regular = (string_address) UI_FONT_REGULAR;
-
         memory_zero(&launcher, sizeof(launcher));
         launcher.menu_app = -1, launcher.generation = ~0u;
+        launcher_app.font = null, launcher_app.beside = false;
         launcher_session_read(LAUNCHER_POWER_STATE);
         ui_buffers_start(&launcher.buffers);
 
-        for (positive at = 1; at < (positive)program_argument_count(); at++)
+        for (positive at = 1, took; at < (positive)program_argument_count(); at += took)
         {
                 string_address option = program_argument(at), value;
 
-                if (option[0] == '-' && option[1] == 'x' && !option[2])
-                {
+                if ((took = ui_app_option(&launcher_app, at)))
+                        continue;
+                took = 1;
+                if (string_equals(option, (string_address) "-x"))
                         launcher.toggle = true;
-                        continue;
-                }
-                if (option[0] == '-' && option[1] == 'a' && !option[2])
-                {
-                        launcher.asked_beside = true;
-                        continue;
-                }
-                if ((value = ui_argument(at, (string_address) "-f")))
-                        regular = value;
                 else if ((value = ui_argument(at, (string_address) "-m")))
-                        launcher.mono = (const char address_to)value;
+                        launcher.mono = (const char address_to)value, took = 2;
                 else if ((value = ui_argument(at, (string_address) "-M")))
-                        launcher.mono_bold = (const char address_to)value;
-                else
-                        continue;
-                at++;
+                        launcher.mono_bold = (const char address_to)value, took = 2;
         }
+        launcher.asked_beside = launcher_app.beside;
         //      No face given is the faces the desktop's programs find for themselves (ui_faces).
-        if (regular == (string_address)UI_FONT_REGULAR && ui_faces()->text[0])
-                regular = (string_address)ui_faces()->text;
+        if (!launcher_app.font)
+                launcher_app.font = ui_faces()->text[0] ? (string_address)ui_faces()->text : (string_address)UI_FONT_REGULAR;
         if (!launcher.mono && ui_faces()->face[0])
                 launcher.mono = (const char address_to)ui_faces()->face;
         if (!launcher.mono_bold && ui_faces()->bold[0])
                 launcher.mono_bold = (const char address_to)ui_faces()->bold;
-        launcher.regular = (const char address_to)regular;
-        launcher_app.font = regular;
+        launcher.regular = (const char address_to)launcher_app.font;
         return ui_app_run(&launcher_app);
 }
 

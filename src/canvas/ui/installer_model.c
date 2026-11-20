@@ -382,56 +382,6 @@ struct installer_network
         b32 joined, saved, open;
 };
 
-static int installer_wifi_parse(const char address_to text, positive length, struct installer_network address_to nets, int most, b32 address_to on)
-{
-        const char address_to at = text, address_to limit = text + length;
-        int count = 0;
-
-        *on = true;
-        while (at < limit)
-        {
-                const char address_to stop = at, address_to line = at;
-                positive size, dbm = 0;
-
-                while (stop < limit && *stop != '\n')
-                        stop++;
-                at = stop < limit ? stop + 1 : stop;
-                if (stop - line >= 12 && !memory_compare(line, "[Moonwater] ", 12))
-                        line += 12;
-                size = (positive)(stop - line);
-                if (size >= 8 && !memory_compare(line, "wifi off", 8))
-                        *on = false;
-                for (positive k = 0; k + 5 <= size; k++)
-                        if (!memory_compare(line + k, " dBm ", 5))
-                                dbm = k;
-                if (!dbm || size < 4 || count >= most || (line[0] != '*' && line[0] != '+' && line[0] != ' ') || line[1] != ' ')
-                        continue;
-                {
-                        struct installer_network address_to n = &nets[count];
-                        positive number = dbm, name_end, word = dbm + 5;
-
-                        while (number > 2 && ((line[number - 1] >= '0' && line[number - 1] <= '9') || line[number - 1] == '-'))
-                                number--;
-                        name_end = number;
-                        while (name_end > 2 && line[name_end - 1] == ' ')
-                                name_end--;
-                        if (name_end <= 2)
-                                continue;
-                        memory_zero(n, sizeof(*n));
-                        name_end = name_end - 2 < sizeof(n->name) ? name_end : sizeof(n->name) + 1;
-                        memory_copy(n->name, line + 2, name_end - 2);
-                        n->joined = line[0] == '*', n->saved = line[0] != ' ';
-                        for (positive bar = 0; bar < 4 && word < size; bar++, word++)
-                                n->bars += line[word] == '#';
-                        while (word < size && line[word] == ' ')
-                                word++;
-                        n->open = size - word >= 4 && !memory_compare(line + word, "open", 4);
-                        count++;
-                }
-        }
-        return count;
-}
-
 // A command of the plan, its end a newline.
 static fn installer_plan_line(char address_to into, positive room, const char address_to a, const char address_to b, const char address_to c,
                               const char address_to d, const char address_to e)
