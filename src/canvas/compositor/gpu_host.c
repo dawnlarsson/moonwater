@@ -333,6 +333,28 @@ static enum compositor_gpu_why compositor_gpu_job_why(void)
         return gpu_end == GPU_END_LATE ? COMPOSITOR_GPU_WHY_BUSY : gpu_end == GPU_END_OVERFLOW ? COMPOSITOR_GPU_WHY_POOL : COMPOSITOR_GPU_WHY_HANG;
 }
 
+// Unified GPU job failure teardown: optional pending finish, optional handed-hold release, lost-context recovery, and hang/failure accounting.
+enum
+{
+        GPU_FAIL_FINISH = 1u << 0,
+        GPU_FAIL_UNHOLD = 1u << 1,
+};
+
+static void compositor_gpu_fail(unsigned int flags)
+{
+        if ((flags & GPU_FAIL_FINISH) && gpu.pending)
+                gpu_finish();
+        if (flags & GPU_FAIL_UNHOLD)
+        {
+                gpu_handed_hold = 0;
+                if (!gpu.pending)
+                        gpu_handed_clear();
+        }
+        if (gpu_lost)
+                compositor_gpu_recover();
+        compositor_gpu_job_failed();
+}
+
 // The scanout's address for the GPU, made when the scanout is new.
 static positive compositor_gpu_output(void)
 {
@@ -610,9 +632,7 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                 }
                 else if (!gpu_blit(src_va, (unsigned int)f->pitch, dst_va, (unsigned int)f->width, GPU_VA + tables_at, 7, (unsigned int)f->width, (unsigned int)f->height))
                 {
-                        if (gpu_lost)
-                                compositor_gpu_recover();
-                        compositor_gpu_job_failed();
+                        compositor_gpu_fail(0);
                         return compositor_gpu_job_why();
                 }
                 if (*io == frames)
@@ -826,9 +846,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                 gpu_handed_hold = 1;
                 if (compositor_card_go() < 0)
                 {
-                        if (gpu_lost) // the card lost its state, and what ran on it with it: started again, so the next present draws on it
-                                compositor_gpu_recover();
-                        compositor_gpu_job_failed();
+                        compositor_gpu_fail(0);
                         // Refused before a job of it ran: the processor draws the present. Refused after: the frame is drawn again once those are done.
                         if (!compositor_card.submitted)
                                 return compositor_gpu_job_why();
@@ -847,14 +865,7 @@ static enum compositor_gpu_why compositor_gpu_draw(const struct compositor_frame
                                            (unsigned int)rect[at][3]);
                         if (!ok)
                         {
-                                gpu_handed_hold = 0;
-                                if (!gpu.pending)
-                                        gpu_handed_clear();
-                                if (gpu_lost) // the card lost its state: started again now, so the next present draws on it (and this one is the processor's)
-                                        compositor_gpu_recover();
-                                // A hang: this present is the processor's, and the card is given up for two seconds, then started again with no maps; a second hang within
-                                // a minute is the session's (compositor_gpu_job_failed). A late job is only the processor's present: no cool-down, and the card is asked after.
-                                compositor_gpu_job_failed();
+                                compositor_gpu_fail(GPU_FAIL_UNHOLD);
                                 return compositor_gpu_job_why();
                         }
                 }
@@ -1223,9 +1234,7 @@ static int compositor_card_list_submit(int row, unsigned int made, positive pict
         {
                 if (gpu_end == GPU_END_LATE && !gpu_lost)
                         return compositor_list_busy = true, compositor_list_why = COMPOSITOR_LIST_CARD, 0;
-                if (gpu_lost)
-                        compositor_gpu_recover();
-                compositor_gpu_job_failed();
+                compositor_gpu_fail(0);
                 return compositor_list_why = COMPOSITOR_LIST_JOB, 0;
         }
         if (!rows_any(&compositor_card.list_rows))
@@ -1318,11 +1327,7 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
         else if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, made, COMPOSITOR_GPU_BINS_AT, picture_va, (unsigned int)pitch, w4, (unsigned int)height, (unsigned int)x0,
                             (unsigned int)y0, (unsigned int)x1, (unsigned int)y1))
         {
-                if (gpu.pending)
-                        gpu_finish();
-                if (gpu_lost)
-                        compositor_gpu_recover();
-                compositor_gpu_job_failed();
+                compositor_gpu_fail(GPU_FAIL_FINISH);
                 return compositor_list_why = COMPOSITOR_LIST_JOB, 0;
         }
         compositor_gpu_state.failures = 0;
@@ -1526,7 +1531,7 @@ static void compositor_gpu_game_clocks(int on)
 // one op over the whole panel with a step along its rows and one down them): 1 when it is, 0 when the processor is to.
 static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned int degrees, unsigned int x0, unsigned int y0, unsigned int x1, unsigned int y1)
 {
-        struct compositor_turn *turn = &compositor_turns[at];
+        struct drm_dumb *turn = &compositor_turns[at];
         struct compositor_gscene *g = &compositor_gscene;
         unsigned int lw = (unsigned int)screen[2], lh = (unsigned int)screen[3], pw = degrees == 180 ? lw : lh, ph = degrees == 180 ? lh : lw, panel[4];
         long pitch = (long)(compositor.scanout_pitch / 4), origin = (long)screen[1] * pitch + screen[0], first, stepx, stepy;
@@ -1558,11 +1563,7 @@ static int compositor_gpu_rotate(unsigned int at, const int *screen, unsigned in
         windows_rotate_panel(lw, lh, degrees, x0, y0, x1, y1, panel);
         if (!gpu_scene(COMPOSITOR_GPU_OPS_AT, 1, COMPOSITOR_GPU_BINS_AT, to, (unsigned int)(turn->pitch / 4), pw, ph, panel[0], panel[1], panel[2], panel[3]))
         {
-                if (gpu.pending)
-                        gpu_finish();
-                if (gpu_lost)
-                        compositor_gpu_recover();
-                compositor_gpu_job_failed();
+                compositor_gpu_fail(GPU_FAIL_FINISH);
                 return 0;
         }
         compositor_gpu_state.failures = 0;

@@ -34,8 +34,8 @@
 */
 static void compositor_kmsg(string_address text, positive value, string_address tail);
 static void compositor_text(const char *path, char *text, unsigned int room);
-static int compositor_turn_buffer(unsigned int at, unsigned int width, unsigned int height, struct compositor_turn *retired);
-static void compositor_turn_retire(const struct compositor_turn *retired);
+static int compositor_turn_buffer(unsigned int at, unsigned int width, unsigned int height, struct drm_dumb *retired);
+static void compositor_turn_retire(const struct drm_dumb *retired);
 static void compositor_cursor_move(void);
 static void compositor_arrange_on(int row, unsigned int how, int on);
 static void compositor_place(int row, int x, int y);
@@ -417,7 +417,6 @@ static void compositor_rate_add(unsigned int *hz, unsigned int *count, const str
         (*count)++;
 }
 
-#define COMPOSITOR_OBJECT_CONNECTOR 0xc0c0c0c0u // DRM_MODE_OBJECT_CONNECTOR
 #define COMPOSITOR_GETPROPBLOB COMPOSITOR_DRM(0xacu, 16u)
 // An EDID is a block of 128 bytes and its extensions, 128 each, 255 of them at the most.
 #define COMPOSITOR_EDID_BLOCK 128u
@@ -463,59 +462,36 @@ static unsigned int compositor_edid_name(const unsigned char *edid, unsigned int
 // whether the connector has an EDID blob at all (a monitor's EDID need not name it).
 static int compositor_connector_model(unsigned int connector, char *name, unsigned int room)
 {
-        unsigned int ids[64];
-        unsigned long values[64];
+        static unsigned char edid[COMPOSITOR_EDID_MOST]; // 32 KiB: off the stack
+        unsigned long blob_id = 0;
         struct
         {
-                unsigned long props, values;
-                unsigned int count, object, type;
-        } got = {(unsigned long)ids, (unsigned long)values, 64, connector, COMPOSITOR_OBJECT_CONNECTOR};
-        static unsigned char edid[COMPOSITOR_EDID_MOST]; // 32 KiB: off the stack
+                unsigned int blob_id, length;
+                unsigned long data;
+        } blob;
 
         if (room)
                 name[0] = 0;
-        if (system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, address_of got) != 0 || got.count > 64)
+        if (!drm_obj_get_prop(connector, COMPOSITOR_OBJECT_CONNECTOR, "EDID", &blob_id) || !blob_id)
                 return 0;
-        for (unsigned int at = 0; at < got.count; at++)
-        {
-                struct
-                {
-                        unsigned long values, enums;
-                        unsigned int id, flags;
-                        char name[32];
-                        unsigned int count_values, count_enums;
-                } property = {0, 0, ids[at], 0, {0}, 0, 0};
-                struct
-                {
-                        unsigned int blob_id, length;
-                        unsigned long data;
-                } blob;
-
-                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0 ||
-                    !string_equals((string_address)property.name, (string_address) "EDID"))
-                        continue;
-                if (!values[at])
-                        return 0;
-                /*
-                        The kernel copies a blob only when the length asked is the blob's own (drm_mode_getblob_ioctl), so a
-                        length of 256 read only a monitor whose EDID is one extension long: its length first, then all of
-                        it, when it is whole blocks and no more than a base block and 255 extensions.
-                */
-                blob.blob_id = (unsigned int)values[at], blob.length = 0, blob.data = 0;
-                if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, address_of blob) != 0 || !blob.length ||
-                    blob.length % COMPOSITOR_EDID_BLOCK || blob.length > COMPOSITOR_EDID_MOST)
-                        return 1;
-                {
-                        unsigned int length = blob.length;
-
-                        memory_zero(edid, length);
-                        blob.data = (unsigned long)edid;
-                        if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, address_of blob) == 0 && blob.length == length)
-                                compositor_edid_name(edid, length, name, room);
-                }
+        /*
+                The kernel copies a blob only when the length asked is the blob's own (drm_mode_getblob_ioctl), so a
+                length of 256 read only a monitor whose EDID is one extension long: its length first, then all of
+                it, when it is whole blocks and no more than a base block and 255 extensions.
+        */
+        blob.blob_id = (unsigned int)blob_id, blob.length = 0, blob.data = 0;
+        if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, address_of blob) != 0 || !blob.length ||
+            blob.length % COMPOSITOR_EDID_BLOCK || blob.length > COMPOSITOR_EDID_MOST)
                 return 1;
+        {
+                unsigned int length = blob.length;
+
+                memory_zero(edid, length);
+                blob.data = (unsigned long)edid;
+                if (system_control(compositor.card, COMPOSITOR_GETPROPBLOB, address_of blob) == 0 && blob.length == length)
+                        compositor_edid_name(edid, length, name, room);
         }
-        return 0;
+        return 1;
 }
 
 /*
@@ -871,45 +847,23 @@ static unsigned int compositor_space_lay(const struct compositor_connected *foun
 static b32 compositor_scanout_make(int width, int height, unsigned int *fb_id, unsigned int *handle,
                                    unsigned int **pixels, unsigned long *bytes, unsigned long *pitch)
 {
-        struct compositor_dumb dumb = {(unsigned int)height, (unsigned int)width, 32, 0, 0, 0, 0};
-        struct compositor_map_dumb map = {0};
-        struct compositor_fb fb = {0};
-        long mapped;
+        struct drm_dumb b;
+        b32 status = drm_dumb_create(&b, (unsigned int)width, (unsigned int)height, DRM_DUMB_FB | DRM_DUMB_MAP);
 
-        if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb) != 0)
-                return -COMPOSITOR_ENOSPC;
-        fb.width = dumb.width;
-        fb.height = dumb.height;
-        fb.pitch = dumb.pitch;
-        fb.bpp = 32;
-        fb.depth = 24;
-        fb.handle = dumb.handle;
-        map.handle = dumb.handle;
-        mapped = system_control(compositor.card, COMPOSITOR_ADDFB, address_of fb) != 0 ||
-                         system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0
-                     ? -COMPOSITOR_EINVAL
-                     : compositor_call(syscall(mmap), 0, dumb.size, 3, 1, (positive)compositor.card, map.offset);
-        if (mapped < 0 && mapped > -4096)
-        {
-                unsigned int close[2] = {dumb.handle, 0};
-
-                if (fb.fb_id)
-                        system_control(compositor.card, COMPOSITOR_RMFB, address_of fb.fb_id);
-                system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
-                return -COMPOSITOR_EINVAL;
-        }
-        *fb_id = fb.fb_id;
-        *handle = dumb.handle;
-        *pixels = (unsigned int *)mapped;
-        *bytes = dumb.size;
-        *pitch = dumb.pitch;
+        if (status < 0)
+                return status;
+        *fb_id = b.fb;
+        *handle = b.handle;
+        *pixels = b.pixels;
+        *bytes = b.bytes;
+        *pitch = b.pitch;
         return 0;
 }
 
 // A scanout no crtc shows any more, given back.
 static void compositor_scanout_free(unsigned int fb, unsigned int handle, unsigned int *pixels, unsigned long bytes)
 {
-        unsigned int close[2] = {handle, 0};
+        struct drm_dumb b = {fb, handle, pixels, bytes, 0, 0, 0};
 
 #ifdef MOONWATER_GPU_C
         // The GPU's import of it goes with it: the card hands a buffer made later the lowest free handle, this one's, and the import (which keeps this
@@ -926,9 +880,7 @@ static void compositor_scanout_free(unsigned int fb, unsigned int handle, unsign
                 if (compositor_gpu_state.turn_key[at] == handle && compositor_gpu_state.turn_va[at])
                         gpu_unimport(compositor_gpu_state.turn_va[at], GPU_GONE_UNIMPORT), compositor_gpu_state.turn_va[at] = 0;
 #endif
-        gpu_forget((const void *)(pixels), (positive)(bytes)), compositor_call(syscall(munmap), (positive)pixels, bytes, 0, 0, 0, 0);
-        system_control(compositor.card, COMPOSITOR_RMFB, address_of fb);
-        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+        drm_dumb_destroy(&b);
 }
 
 // The spare: a dumb buffer as the scanout is (compositor_scanout_make), all stale until it has been composed into. Made when a present wants it.
@@ -977,25 +929,19 @@ static unsigned int compositor_scanout_fb(void)
         while the size is the same. A buffer whose size changes is handed back in retired, and given back once the
         crtcs show the new one (compositor_turn_retire). False when the card gives none.
 */
-static int compositor_turn_buffer(unsigned int at, unsigned int width, unsigned int height, struct compositor_turn *retired)
+static int compositor_turn_buffer(unsigned int at, unsigned int width, unsigned int height, struct drm_dumb *retired)
 {
-        struct compositor_turn *turn = &compositor_turns[at];
+        struct drm_dumb *turn = &compositor_turns[at];
 
         if (turn->fb && turn->width == width && turn->height == height)
                 return 1;
         if (turn->fb)
                 *retired = *turn;
-        memory_zero(turn, sizeof(*turn));
-        if (compositor_scanout_make((int)width, (int)height, &turn->fb, &turn->handle, &turn->pixels, &turn->bytes,
-                                    &turn->pitch) < 0)
-                return 0;
-        turn->width = width;
-        turn->height = height;
-        return 1;
+        return drm_dumb_create(turn, width, height, DRM_DUMB_FB | DRM_DUMB_MAP) == 0;
 }
 
 // A buffer given back, which no crtc shows any more.
-static void compositor_turn_retire(const struct compositor_turn *retired)
+static void compositor_turn_retire(const struct drm_dumb *retired)
 {
         if (retired->fb)
                 compositor_scanout_free(retired->fb, retired->handle, retired->pixels, retired->bytes);
@@ -1015,9 +961,7 @@ static void compositor_crtc_off(unsigned int crtc)
 */
 static int compositor_virtual(void)
 {
-        static const char *const guests[] = {"bochs-drm", "virtio_gpu", "qxl", "vmwgfx", "cirrus-qemu", "hyperv_drm", "vkms"};
-
-        return compositor_driver_in(guests, sizeof(guests) / sizeof(guests[0]));
+        return (drm_driver_flags(compositor.driver) & DRV_VIRTUAL) != 0;
 }
 
 // Whether two modes are the same timing: what a crtc scans at, whatever the name says.
@@ -1207,7 +1151,7 @@ static b32 compositor_space_take(int first)
         for (unsigned int attempt = 0; attempt <= found.count; attempt++)
         {
                 unsigned int lit = compositor_space_lay(&found, dropped, rects, order), refused = 0, same;
-                struct compositor_turn retired[WINDOWS_OUTPUTS] = {{0}};
+                struct drm_dumb retired[WINDOWS_OUTPUTS] = {{0}};
                 unsigned int old_fb = compositor.fb, old_handle = compositor.scanout_handle, *old_pixels = compositor.scanout;
                 unsigned long old_bytes = compositor.scanout_bytes;
                 unsigned int fb = compositor.fb, handle = compositor.scanout_handle, *pixels = compositor.scanout;
@@ -1476,19 +1420,6 @@ static b32 compositor_space_take(int first)
                 // The buffers the screens had before, which the crtcs now show no more.
                 for (unsigned int at = 0; at < WINDOWS_OUTPUTS; at++)
                         compositor_turn_retire(&retired[at]);
-                // The crtcs no screen of the space has: a screen that went, one arranged dark, one left dark above.
-                for (unsigned int at = 0; at < was_count; at++)
-                {
-                        int used = 0;
-
-                        for (unsigned int now = 0; now < lit; now++)
-                                used |= compositor.output[now].crtc == was_crtc[at];
-                        if (!used)
-                                compositor_crtc_off(was_crtc[at]);
-                }
-                for (unsigned int n = 0; n < found.count; n++)
-                        if (found.current[n] && !rects[n][2])
-                                compositor_crtc_off(found.crtc[n]);
                 for (unsigned int at = 0; at < extras; at++)
                         system_control(compositor.card, COMPOSITOR_RMFB, address_of extra[at]);
                 // Only a scanout this take replaced (fb is the one it made). A present above whose flip the card refused swaps the
@@ -1617,9 +1548,7 @@ static long compositor_card_node(unsigned int minor)
 
 static int compositor_card_firmware(void)
 {
-        static const char *const firmware[] = {"simpledrm", "efidrm"};
-
-        return compositor_driver_in(firmware, sizeof(firmware) / sizeof(firmware[0]));
+        return (drm_driver_flags(compositor.driver) & DRV_FIRMWARE) != 0;
 }
 
 /*
@@ -1784,8 +1713,6 @@ static b32 compositor_card_open(void)
         The machine's owner says a screen can whatever its connector says with the file /run/moonwater/vrr-capable (looked for at the start): a
         driver that does not say, or a test of the path on a screen that cannot (amdgpu takes VRR_ENABLED for one and changes nothing).
 */
-#define COMPOSITOR_OBJECT_CRTC 0xccccccccu // DRM_MODE_OBJECT_CRTC
-#define COMPOSITOR_OBJ_SETPROPERTY COMPOSITOR_DRM(0xbau, 24u)
 #define COMPOSITOR_VRR_STEADY 16u
 static struct
 {
@@ -1798,42 +1725,6 @@ static struct
         int said;                     // the owner says the screen can whatever its connector says (/run/moonwater/vrr-capable, looked for at the start)
         unsigned int steady;          // the presents in a row that wanted it on: it is set on after COMPOSITOR_VRR_STEADY of them
 } compositor_vrr;
-
-// The id of an object's property called name, and its value; 0 when the object has none, or the card will not say.
-static unsigned int compositor_object_prop(unsigned int object, unsigned int type, const char *name, unsigned long *value)
-{
-        unsigned int ids[64];
-        unsigned long values[64];
-        struct
-        {
-                unsigned long props, values;
-                unsigned int count, object, type;
-        } got = {(unsigned long)ids, (unsigned long)values, 64, object, type};
-
-        *value = 0;
-        if (!object || system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, address_of got) != 0 || got.count > 64)
-                return 0;
-        for (unsigned int at = 0; at < got.count; at++)
-        {
-                struct
-                {
-                        unsigned long values, enums;
-                        unsigned int id, flags;
-                        char name[32];
-                        unsigned int count_values, count_enums;
-                } property = {0, 0, ids[at], 0, {0}, 0, 0};
-
-                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
-                        continue;
-                property.name[sizeof(property.name) - 1] = 0;
-                if (string_equals((string_address)property.name, (string_address)name))
-                {
-                        *value = values[at];
-                        return ids[at];
-                }
-        }
-        return 0;
-}
 
 // Whether the screen is to run at variable refresh: the policy (0 on, 1 games, 2 off), a screen that can, the screens one, every frame a flip
 // the screen waits for (flipping), and for games a window shown straight (direct).
@@ -1865,14 +1756,9 @@ static void compositor_vrr_publish(void)
 // VRR_ENABLED set to on (0 or 1), with no flip in flight (the set is a commit of its own, which would wait for it); false when the card refused.
 static int compositor_vrr_set(int on)
 {
-        struct
-        {
-                unsigned long value;
-                unsigned int prop, object, type, pad;
-        } set = {(unsigned long)on, compositor_vrr.prop, compositor_vrr.crtc, COMPOSITOR_OBJECT_CRTC, 0};
         positive began = clock_monotonic_nanoseconds();
 
-        if (system_control(compositor.card, COMPOSITOR_OBJ_SETPROPERTY, address_of set) != 0)
+        if (!drm_obj_set_prop(compositor_vrr.crtc, COMPOSITOR_OBJECT_CRTC, compositor_vrr.prop, (unsigned long)on))
                 return 0;
         compositor_vrr.on = on;
         if (compositor.table)
@@ -1896,16 +1782,10 @@ static void compositor_dark(int dark)
         compositor.dark = dark, compositor.dark_applied = dark;
         for (unsigned int at = 0; at < compositor.outputs && at < WINDOWS_OUTPUTS; at++)
         {
-                unsigned long value;
-                unsigned int prop = compositor_object_prop(compositor.output[at].connector, COMPOSITOR_OBJECT_CONNECTOR, "DPMS", &value);
-                struct
-                {
-                        unsigned long value;
-                        unsigned int prop, object, type, pad;
-                } set = {dark ? 3ul : 0ul, prop, compositor.output[at].connector, COMPOSITOR_OBJECT_CONNECTOR, 0};
+                unsigned int conn = compositor.output[at].connector;
+                unsigned int prop = drm_obj_get_prop(conn, COMPOSITOR_OBJECT_CONNECTOR, "DPMS", 0);
 
-                if (prop)
-                        (void)system_control(compositor.card, COMPOSITOR_OBJ_SETPROPERTY, address_of set);
+                (void)drm_obj_set_prop(conn, COMPOSITOR_OBJECT_CONNECTOR, prop, dark ? 3ul : 0ul);
         }
         if (!dark)
                 compositor_damage_space();
@@ -1961,9 +1841,9 @@ static void compositor_vrr_keep(void)
         if (compositor_vrr.crtc != compositor.crtc || compositor_vrr.connector != compositor.connector)
         {
                 compositor_vrr.crtc = compositor.crtc, compositor_vrr.connector = compositor.connector;
-                compositor_vrr.capable = (compositor_object_prop(compositor.connector, COMPOSITOR_OBJECT_CONNECTOR, "vrr_capable", &value) && value) ||
+                compositor_vrr.capable = (drm_obj_get_prop(compositor.connector, COMPOSITOR_OBJECT_CONNECTOR, "vrr_capable", &value) && value) ||
                                          compositor_vrr.said;
-                compositor_vrr.prop = compositor_object_prop(compositor.crtc, COMPOSITOR_OBJECT_CRTC, "VRR_ENABLED", &value);
+                compositor_vrr.prop = drm_obj_get_prop(compositor.crtc, COMPOSITOR_OBJECT_CRTC, "VRR_ENABLED", &value);
                 compositor_vrr.on = compositor_vrr.prop && value;
                 compositor_vrr.refused = 0;
         }
@@ -2226,9 +2106,7 @@ static int compositor_cursor_probe_asked(void)
 // Whether the card's driver is one refused the plane by name.
 static int compositor_cursor_named(void)
 {
-        const char *name = compositor.driver;
-
-        return (name[0] == 'i' && name[1] == '9' && name[2] == '1' && name[3] == '5' && !name[4]) || (name[0] == 'x' && name[1] == 'e' && !name[2]);
+        return (drm_driver_flags(compositor.driver) & DRV_NO_CURSOR_PLANE) != 0;
 }
 
 /*
@@ -2348,17 +2226,9 @@ static unsigned int compositor_cursor_scratch[CP_PLANE * CP_PLANE];
 
 static unsigned int *compositor_cursor_mapped(int which)
 {
-        struct compositor_map_dumb map = {.handle = compositor.cursor.handle[which]};
-        long mapped;
-
-        if (compositor.cursor.mapped[which])
-                return compositor.cursor.mapped[which];
-        if (system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0)
-                return null;
-        mapped = compositor_call(syscall(mmap), 0, CP_PLANE * CP_PLANE * 4, 3, 1, (positive)compositor.card, map.offset);
-        if (mapped < 0 && mapped > -4096)
-                return null;
-        return compositor.cursor.mapped[which] = (unsigned int *)mapped;
+        if (!compositor.cursor.mapped[which])
+                compositor.cursor.mapped[which] = drm_dumb_map(compositor.cursor.handle[which], CP_PLANE * CP_PLANE * 4);
+        return compositor.cursor.mapped[which];
 }
 
 // A buffer's mapping let go, before its handle is.
@@ -2462,29 +2332,26 @@ static void compositor_cursor_planes_off(void)
 
 static void compositor_cursor_start(void)
 {
-        struct compositor_dumb dumb[2] = {{CP_PLANE, CP_PLANE, 32, 0, 0, 0, 0}, {CP_PLANE, CP_PLANE, 32, 0, 0, 0, 0}};
+        struct drm_dumb d[2];
 
         compositor.cursor.plane_on = 0;
         compositor_cursor_probe.asked = compositor_cursor_probe_asked();
         compositor_cursor_probe.done = compositor_cursor_probe.stopped = 0;
         if (compositor.card < 0 || !compositor_cursor_plane_wanted() ||
-            system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb[0]) != 0)
+            drm_dumb_create(&d[0], CP_PLANE, CP_PLANE, 0) != 0)
         {
                 compositor.cursor.soft = compositor.card >= 0;
                 return;
         }
-        if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb[1]) != 0)
+        if (drm_dumb_create(&d[1], CP_PLANE, CP_PLANE, 0) != 0)
         {
-                // The first buffer is given back: nothing holds it yet.
-                unsigned int close[2] = {dumb[0].handle, 0};
-
-                system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                drm_dumb_destroy(&d[0]);
                 compositor.cursor.soft = 1;
                 return;
         }
 
-        compositor.cursor.handle[0] = dumb[0].handle;
-        compositor.cursor.handle[1] = dumb[1].handle;
+        compositor.cursor.handle[0] = d[0].handle;
+        compositor.cursor.handle[1] = d[1].handle;
 }
 
 // Where the pointer is drawn: the pointer, which is already where it will be (compositor_pointer_shown).
@@ -2548,10 +2415,11 @@ static void compositor_cursor_move(void)
         for (int i = 0; i < 2; i++)
                 if (compositor.cursor.handle[i])
                 {
-                        unsigned int close[2] = {compositor.cursor.handle[i], 0};
+                        struct drm_dumb b = {0, compositor.cursor.handle[i], compositor.cursor.mapped[i],
+                                             compositor.cursor.mapped[i] ? CP_PLANE * CP_PLANE * 4 : 0, 0, 0, 0};
 
-                        compositor_cursor_unmap(i);
-                        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                        drm_dumb_destroy(&b);
+                        compositor.cursor.mapped[i] = null;
                         compositor.cursor.handle[i] = 0;
                 }
         compositor.cursor.refused++;

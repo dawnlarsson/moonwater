@@ -72,14 +72,64 @@ static void compositor_gpu_pin(positive offset, b32 on)
         answer, which the owner can do nothing about: it is said in moonwater debug (the refusal's step), not as a warning that hides the ones that are not.
         What amdgpu can show straight is a client's own dma-buf (compositor_lent_fb). The refusal is made once a session (direct_refused).
 */
-static int compositor_driver_in(const char *const *names, unsigned int count);
+// Driver quirk flags: one table replacing the scattered driver-name lists across scanout.c and kms.c.
+enum
+{
+        DRV_NO_IMPORT_FB    = 1u << 0,
+        DRV_COPIES_DAMAGE   = 1u << 1,
+        DRV_APART_VRAM      = 1u << 2,
+        DRV_VIRTUAL         = 1u << 3,
+        DRV_FIRMWARE        = 1u << 4,
+        DRV_NO_CURSOR_PLANE = 1u << 5,
+};
+
+// Whether the card's driver is one of count names (still used by wayland_host.c).
+static int compositor_driver_in(const char *const *names, unsigned int count)
+{
+        for (unsigned int at = 0; at < count; at++)
+                if (string_equals((string_address)names[at], (string_address)compositor.driver))
+                        return 1;
+        return 0;
+}
+
+static unsigned int drm_driver_flags(const char *name)
+{
+        static const struct
+        {
+                const char *name;
+                unsigned int flags;
+        } table[] = {
+                {"amdgpu",      DRV_NO_IMPORT_FB | DRV_APART_VRAM},
+                {"radeon",      DRV_APART_VRAM},
+                {"nouveau",     DRV_APART_VRAM},
+                {"i915",        DRV_NO_CURSOR_PLANE},
+                {"xe",          DRV_NO_CURSOR_PLANE},
+                {"bochs-drm",   DRV_APART_VRAM | DRV_VIRTUAL},
+                {"qxl",         DRV_APART_VRAM | DRV_VIRTUAL},
+                {"vmwgfx",      DRV_APART_VRAM | DRV_VIRTUAL},
+                {"virtio_gpu",  DRV_COPIES_DAMAGE | DRV_VIRTUAL},
+                {"cirrus-qemu", DRV_COPIES_DAMAGE | DRV_VIRTUAL},
+                {"hyperv_drm",  DRV_COPIES_DAMAGE | DRV_VIRTUAL},
+                {"vkms",        DRV_VIRTUAL},
+                {"simpledrm",   DRV_COPIES_DAMAGE | DRV_FIRMWARE},
+                {"efidrm",      DRV_FIRMWARE},
+                {"ast",         DRV_COPIES_DAMAGE},
+                {"mgag200",     DRV_COPIES_DAMAGE},
+                {"udl",         DRV_COPIES_DAMAGE},
+                {"gud",         DRV_COPIES_DAMAGE},
+        };
+
+        for (unsigned int at = 0; at < sizeof(table) / sizeof(table[0]); at++)
+                if (string_equals((string_address)table[at].name, (string_address)name))
+                        return table[at].flags;
+        return 0;
+}
+
 static void compositor_window_fb_refused(unsigned int step, long error)
 {
-        static const char *const no_imports[] = {"amdgpu"};
-
         compositor.direct_refused = 1;
         compositor.table->refused = step;
-        compositor.table->refused_error = compositor_driver_in(no_imports, 1) ? 0 : (unsigned int)-error;
+        compositor.table->refused_error = (drm_driver_flags(compositor.driver) & DRV_NO_IMPORT_FB) ? 0 : (unsigned int)-error;
 }
 
 // The framebuffer of a row's buffer, made the first time it is asked for; 0 when the table is not a memfd or udmabuf
@@ -979,33 +1029,41 @@ static int compositor_primary_bounds(int *ox, int *oy, int *ow, int *oh)
 
 static int compositor_overlay_ready(void);
 
+// Shared direct-scanout eligibility for row (global scene gates + row geometry/scaling/state).
+static int compositor_direct_eligible(int row, int blend)
+{
+        int ox, oy, ow, oh;
+
+        if (compositor.card < 0 || (compositor_cursor_in_scene() && compositor.cursor.drawn) ||
+            compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw ||
+            compositor_spots_any(0) || !compositor_primary_bounds(&ox, &oy, &ow, &oh))
+                return 0;
+        if (blend || compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.asking[row])
+                return 0;
+        if (compositor.x[row] != ox || compositor.y[row] != oy ||
+            compositor.w[row] != (unsigned int)ow || compositor.h[row] != (unsigned int)oh)
+                return 0;
+        if ((compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row]) &&
+            !(compositor.fullscreen[row] && compositor_client_scans(row) && !compositor.scale_plane_refused &&
+              compositor.picture_w[row] && compositor.picture_h[row] && compositor_overlay_ready()))
+                return 0;
+        return 1;
+}
+
 // The window the card can show straight: the top one, opaque, square and filling the primary output at the size it drew (or hardware-scaled), with
 // nothing over it but the tabs, a pointer on its own plane or none (hidden), and a framebuffer of its buffer; -1 when there is none.
 static int compositor_direct_candidate(const struct compositor_frame *frames, const unsigned int *rows, unsigned int windows)
 {
-        int row, ox, oy, ow, oh;
+        int row;
 
-        // A pointer drawn into the scene is over the window, unless it is hidden (a game's, which asked for none): then nothing is.
-        if (compositor.card < 0 || (compositor_cursor_in_scene() && compositor.cursor.drawn) || !windows ||
-            compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw ||
-            !compositor_primary_bounds(&ox, &oy, &ow, &oh) ||
-            compositor_spots_any(0))
+        if (!windows)
                 return -1;
         row = rows[windows - 1];
-        if (!compositor_client_scans(row) && (compositor.direct_refused || !compositor.table_memfd))
+        if (!compositor_client_scans(row) &&
+            (compositor.direct_refused || !compositor.table_memfd || __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE)))
                 return -1;
-        if (frames[windows - 1].blend)
-                return -1;
-        if (!compositor_client_scans(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
-                return -1;
-        // Glass is the window's WINDOW_GLASS (compositor.glassy): the row's other flags (a client's NO_CLOSE and NO_GRAB) are no glass.
-        // Undersized fullscreen client buffers (e.g. 1024x768 on 1920x1080) are eligible for hardware primary-plane scaling when atomic is ready.
-        if (compositor.glassy[row] || compositor.landing[row] || compositor.glide[row] || compositor.x[row] != ox || compositor.y[row] != oy ||
-            compositor.w[row] != (unsigned int)ow || compositor.h[row] != (unsigned int)oh ||
-            ((compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row]) &&
-             !(compositor.fullscreen[row] && compositor_client_scans(row) && !compositor.scale_plane_refused &&
-               compositor.picture_w[row] && compositor.picture_h[row] && compositor_overlay_ready())) ||
-            compositor.asking[row] || compositor_radius(&frames[windows - 1]) || frames[windows - 1].line)
+        if (!compositor_direct_eligible(row, frames[windows - 1].blend) ||
+            compositor_radius(&frames[windows - 1]) || frames[windows - 1].line)
                 return -1;
         return (compositor_client_scans(row) ? compositor_lent_fb(row) : compositor_window_fb(row, compositor.front[row])) ? row : -1;
 }
@@ -1103,15 +1161,6 @@ static void compositor_slice_flush(const struct compositor_target *slice, int *f
         }
 }
 
-// Whether the card's driver is one of count names.
-static int compositor_driver_in(const char *const *names, unsigned int count)
-{
-        for (unsigned int at = 0; at < count; at++)
-                if (string_equals((string_address)names[at], (string_address)compositor.driver))
-                        return 1;
-        return 0;
-}
-
 /*
         Whether the scene is composed apart and stored to the card only where
         it changed (compositor_slice_flush), decided once by the card's driver.
@@ -1161,11 +1210,9 @@ static void compositor_apart_drop(void)
         plate would cost every frame the whole screen across to the host or the device, 33 MB a frame at 4K, for nothing. So it has none, and is composed
         apart (the mirror is the scanout itself, read at the machine's speed), told only the rows that changed.
 */
-static const char *const compositor_damage_copied[] = {"virtio_gpu", "simpledrm", "cirrus-qemu", "hyperv_drm", "ast", "mgag200", "udl", "gud"};
-
 static int compositor_copies_damage(void)
 {
-        return compositor.card >= 0 && compositor_driver_in(compositor_damage_copied, sizeof(compositor_damage_copied) / sizeof(compositor_damage_copied[0]));
+        return compositor.card >= 0 && (drm_driver_flags(compositor.driver) & DRV_COPIES_DAMAGE) != 0;
 }
 
 // Whether this present composes into the second plate and flips to it: one screen, no screen turned, and a card that shows
@@ -1177,10 +1224,9 @@ static int compositor_plate_wanted(int turning)
 
 static int compositor_changed_ready(void)
 {
-        static const char *const apart[] = {"amdgpu", "radeon", "nouveau", "bochs-drm", "qxl", "vmwgfx"};
-        const char *const *shared = compositor_damage_copied;
         unsigned long bytes = (unsigned long)compositor.width * (unsigned long)compositor.height * 4;
         unsigned long slices = (unsigned long)compositor.width * COMPOSITOR_SLICE * COMPOSITOR_BANDS * 4;
+        unsigned int flags;
         int own, listed, turned = compositor_turning_software();
 
         if (compositor.changed && compositor.changed_turned == turned)
@@ -1190,8 +1236,9 @@ static int compositor_changed_ready(void)
         compositor.changed_turned = turned;
         if (compositor.card < 0)
                 return 0;
-        own = compositor_driver_in(apart, sizeof(apart) / sizeof(apart[0]));
-        listed = own || compositor_driver_in(shared, sizeof(compositor_damage_copied) / sizeof(compositor_damage_copied[0]));
+        flags = drm_driver_flags(compositor.driver);
+        own = (flags & DRV_APART_VRAM) != 0;
+        listed = own || (flags & DRV_COPIES_DAMAGE) != 0;
         // A screen Canvas turns reads the scene whole, a frame at a time, and a read of the card's memory is more than a
         // frame can pay (a dumb buffer is mapped write-combined on most cards, and word loads from one came to about ten
         // megabytes a second on a real card): with a screen turned, the scene is kept in the machine's memory whatever the
@@ -1243,7 +1290,10 @@ static int compositor_changed_ready(void)
 #define COMPOSITOR_SETPLANE COMPOSITOR_DRM(0xb7u, 48u)
 #define COMPOSITOR_GETPROPERTY COMPOSITOR_DRM(0xaau, 64u)
 #define COMPOSITOR_OBJ_GETPROPERTIES COMPOSITOR_DRM(0xb9u, 32u)
+#define COMPOSITOR_OBJ_SETPROPERTY COMPOSITOR_DRM(0xbau, 24u)
 #define COMPOSITOR_ATOMIC COMPOSITOR_DRM(0xbcu, 56u)
+#define COMPOSITOR_OBJECT_CONNECTOR 0xc0c0c0c0u
+#define COMPOSITOR_OBJECT_CRTC 0xccccccccu
 #define COMPOSITOR_OBJECT_PLANE 0xeeeeeeeeu
 #define COMPOSITOR_ATOMIC_NONBLOCK 0x0200u
 
@@ -1263,84 +1313,273 @@ enum
         COMPOSITOR_PLANE_PROPS
 };
 
+// Unified DRM object property query & setter, plane enumeration, atomic commit builder, and dumb-buffer lifecycle.
+struct drm_prop_info
+{
+        unsigned long values, enums;
+        unsigned int id, flags;
+        char name[32];
+        unsigned int count_values, count_enums;
+};
+
+static unsigned int drm_obj_query_props(unsigned int object, unsigned int type, const char *const *names,
+                                        unsigned int count, unsigned int *out_ids, unsigned long *out_vals)
+{
+        unsigned int ids[64], found = 0;
+        unsigned long values[64];
+        struct
+        {
+                unsigned long props, values;
+                unsigned int count, object, type;
+        } got = {(unsigned long)ids, (unsigned long)values, 64, object, type};
+
+        memory_zero(out_ids, sizeof(unsigned int) * count);
+        if (out_vals)
+                memory_zero(out_vals, sizeof(unsigned long) * count);
+        if (!object || compositor.card < 0 ||
+            system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, address_of got) != 0 || got.count > 64)
+                return 0;
+        for (unsigned int at = 0; at < got.count && found < count; at++)
+        {
+                struct drm_prop_info property = {0, 0, ids[at], 0, {0}, 0, 0};
+
+                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
+                        continue;
+                property.name[sizeof(property.name) - 1] = 0;
+                for (unsigned int k = 0; k < count; k++)
+                        if (!out_ids[k] && string_equals((string_address)property.name, (string_address)names[k]))
+                        {
+                                out_ids[k] = ids[at];
+                                if (out_vals)
+                                        out_vals[k] = values[at];
+                                found++;
+                                break;
+                        }
+        }
+        return found;
+}
+
+static unsigned int drm_obj_get_prop(unsigned int object, unsigned int type, const char *name, unsigned long *value)
+{
+        unsigned int id = 0;
+        unsigned long val = 0;
+
+        drm_obj_query_props(object, type, &name, 1, &id, &val);
+        if (value)
+                *value = val;
+        return id;
+}
+
+static int drm_obj_set_prop(unsigned int object, unsigned int type, unsigned int prop, unsigned long value)
+{
+        struct
+        {
+                unsigned long value;
+                unsigned int prop, object, type, pad;
+        } set = {value, prop, object, type, 0};
+
+        return prop && system_control(compositor.card, COMPOSITOR_OBJ_SETPROPERTY, address_of set) == 0;
+}
+
+struct drm_plane_info
+{
+        unsigned int id, crtc, fb, possible, gamma, count;
+        unsigned long formats;
+};
+
+static unsigned int drm_planes_list(unsigned int *planes, unsigned int room)
+{
+        struct
+        {
+                unsigned long ids;
+                unsigned int count, pad;
+        } resources = {(unsigned long)planes, room, 0};
+        unsigned long cap[2] = {3, 1}; // DRM_CLIENT_CAP_ATOMIC, which brings every plane with it
+
+        if (system_control(compositor.card, COMPOSITOR_SET_CLIENT_CAP, address_of cap) != 0 ||
+            system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > room)
+                return 0;
+        return resources.count;
+}
+
+struct drm_atomic_req
+{
+        unsigned int objects[4], counts[4], props[32];
+        unsigned long values[32];
+        unsigned int obj_count, prop_count;
+};
+
+static void drm_atomic_begin_obj(struct drm_atomic_req *req, unsigned int obj)
+{
+        req->objects[req->obj_count] = obj;
+        req->counts[req->obj_count] = 0;
+        req->obj_count++;
+}
+
+static void drm_atomic_add(struct drm_atomic_req *req, unsigned int prop, unsigned long val)
+{
+        req->props[req->prop_count] = prop;
+        req->values[req->prop_count] = val;
+        req->prop_count++;
+        req->counts[req->obj_count - 1]++;
+}
+
+static void drm_atomic_set_plane(struct drm_atomic_req *req, unsigned int plane, const unsigned int *id,
+                                 unsigned int crtc, unsigned int fb, int sx, int sy, int sw, int sh,
+                                 int dx, int dy, int dw, int dh)
+{
+        drm_atomic_begin_obj(req, plane);
+        drm_atomic_add(req, id[COMPOSITOR_PLANE_FB], fb);
+        drm_atomic_add(req, id[COMPOSITOR_PLANE_CRTC], fb ? crtc : 0);
+        if (!fb)
+                return;
+        drm_atomic_add(req, id[COMPOSITOR_PLANE_SRC_X], (unsigned long)sx << 16);
+        drm_atomic_add(req, id[COMPOSITOR_PLANE_SRC_Y], (unsigned long)sy << 16);
+        drm_atomic_add(req, id[COMPOSITOR_PLANE_SRC_W], (unsigned long)sw << 16);
+        drm_atomic_add(req, id[COMPOSITOR_PLANE_SRC_H], (unsigned long)sh << 16);
+        drm_atomic_add(req, id[COMPOSITOR_PLANE_CRTC_X], (unsigned long)dx);
+        drm_atomic_add(req, id[COMPOSITOR_PLANE_CRTC_Y], (unsigned long)dy);
+        drm_atomic_add(req, id[COMPOSITOR_PLANE_CRTC_W], (unsigned long)dw);
+        drm_atomic_add(req, id[COMPOSITOR_PLANE_CRTC_H], (unsigned long)dh);
+}
+
+static long drm_atomic_commit(const struct drm_atomic_req *req, unsigned int flags, unsigned long user_data)
+{
+        struct
+        {
+                unsigned int flags, count;
+                unsigned long objects, counts, props, values, reserved, user_data;
+        } commit = {flags, req->obj_count, (unsigned long)req->objects, (unsigned long)req->counts,
+                    (unsigned long)req->props, (unsigned long)req->values, 0, user_data};
+
+        return system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit);
+}
+
+// Unified dumb buffer: scanout, turned-screen buffer, overlay buffer, and cursor buffer.
+struct drm_dumb
+{
+        unsigned int fb, handle;
+        unsigned int *pixels;
+        unsigned long bytes, pitch; // pitch in bytes
+        unsigned int width, height;
+};
+
+enum
+{
+        DRM_DUMB_FB  = 1u << 0, // attach legacy ADDFB (depth 24, bpp 32)
+        DRM_DUMB_FB2 = 1u << 1, // attach ADDFB2 (XRGB8888)
+        DRM_DUMB_MAP = 1u << 2, // MAP_DUMB + mmap immediately
+};
+
+static unsigned int *drm_dumb_map(unsigned int handle, unsigned long bytes)
+{
+        struct compositor_map_dumb map = {.handle = handle};
+        long mapped;
+
+        if (!handle || !bytes || system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) != 0)
+                return 0;
+        mapped = compositor_call(syscall(mmap), 0, bytes, 3, 1, (positive)compositor.card, map.offset);
+        return (mapped < 0 && mapped > -4096) ? 0 : (unsigned int *)mapped;
+}
+
+static void drm_dumb_destroy(struct drm_dumb *b)
+{
+        if (b->pixels && b->bytes)
+        {
+                gpu_forget((const void *)b->pixels, (positive)b->bytes);
+                compositor_call(syscall(munmap), (positive)b->pixels, b->bytes, 0, 0, 0, 0);
+        }
+        if (b->fb)
+                system_control(compositor.card, COMPOSITOR_RMFB, address_of b->fb);
+        if (b->handle)
+        {
+                unsigned int close[2] = {b->handle, 0};
+
+                system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+        }
+        memory_zero(b, sizeof(*b));
+}
+
+static b32 drm_dumb_create(struct drm_dumb *b, unsigned int width, unsigned int height, unsigned int flags)
+{
+        struct compositor_dumb dumb = {height, width, 32, 0, 0, 0, 0};
+
+        memory_zero(b, sizeof(*b));
+        if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb) != 0)
+                return -COMPOSITOR_ENOSPC;
+        b->handle = dumb.handle;
+        b->bytes = dumb.size;
+        b->pitch = dumb.pitch;
+        b->width = dumb.width;
+        b->height = dumb.height;
+        if (flags & DRM_DUMB_FB)
+        {
+                struct compositor_fb fb = {0, dumb.width, dumb.height, dumb.pitch, 32, 24, dumb.handle};
+
+                if (system_control(compositor.card, COMPOSITOR_ADDFB, address_of fb) != 0)
+                        return drm_dumb_destroy(b), -COMPOSITOR_EINVAL;
+                b->fb = fb.fb_id;
+        }
+        else if (flags & DRM_DUMB_FB2)
+        {
+                struct compositor_fb2 fb = {0, dumb.width, dumb.height, COMPOSITOR_XRGB8888, 0,
+                                            {dumb.handle, 0, 0, 0}, {dumb.pitch, 0, 0, 0}, {0}, {0}};
+
+                if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) != 0)
+                        return drm_dumb_destroy(b), -COMPOSITOR_EINVAL;
+                b->fb = fb.fb_id;
+        }
+        if (flags & DRM_DUMB_MAP)
+        {
+                b->pixels = drm_dumb_map(b->handle, b->bytes);
+                if (!b->pixels)
+                        return drm_dumb_destroy(b), -COMPOSITOR_EINVAL;
+        }
+        return 0;
+}
+
 // A plane's property ids by name and the value of its type (0 overlay, 1 primary, 2 cursor); false when one is missing.
 static int compositor_plane_props(unsigned int plane, unsigned int props[COMPOSITOR_PLANE_PROPS], unsigned long *type)
 {
         static const char *const names[COMPOSITOR_PLANE_PROPS] = {"FB_ID",  "CRTC_ID", "SRC_X",  "SRC_Y",
                                                                    "SRC_W",  "SRC_H",   "CRTC_X", "CRTC_Y",
                                                                    "CRTC_W", "CRTC_H",  "type"};
-        unsigned int ids[64];
-        unsigned long values[64];
-        struct
-        {
-                unsigned long props, values;
-                unsigned int count, object, type;
-        } got = {(unsigned long)ids, (unsigned long)values, 64, plane, COMPOSITOR_OBJECT_PLANE};
+        unsigned long vals[COMPOSITOR_PLANE_PROPS];
 
-        if (system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, address_of got) != 0 || got.count > 64)
+        if (drm_obj_query_props(plane, COMPOSITOR_OBJECT_PLANE, names, COMPOSITOR_PLANE_PROPS, props, vals) != COMPOSITOR_PLANE_PROPS)
                 return 0;
-        memory_zero(props, sizeof(unsigned int) * COMPOSITOR_PLANE_PROPS);
-        for (unsigned int at = 0; at < got.count; at++)
-        {
-                struct
-                {
-                        unsigned long values, enums;
-                        unsigned int id, flags;
-                        char name[32];
-                        unsigned int count_values, count_enums;
-                } property = {0, 0, ids[at], 0, {0}, 0, 0};
-
-                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
-                        continue;
-                for (unsigned int name = 0; name < COMPOSITOR_PLANE_PROPS; name++)
-                {
-                        unsigned int same = 0;
-
-                        while (names[name][same] && names[name][same] == property.name[same])
-                                same++;
-                        if (names[name][same] || property.name[same])
-                                continue;
-                        props[name] = ids[at];
-                        if (name == COMPOSITOR_PLANE_TYPE)
-                                *type = values[at];
-                }
-        }
-        for (unsigned int name = 0; name < COMPOSITOR_PLANE_PROPS; name++)
-                if (!props[name])
-                        return 0;
+        *type = vals[COMPOSITOR_PLANE_TYPE];
         return 1;
+}
+
+static int drm_plane_get(unsigned int id, unsigned int crtc_index, struct drm_plane_info *info,
+                         unsigned int *formats, unsigned int format_room,
+                         unsigned int props[COMPOSITOR_PLANE_PROPS], unsigned long *type)
+{
+        *info = (struct drm_plane_info){id, 0, 0, 0, 0, format_room, (unsigned long)formats};
+        return system_control(compositor.card, COMPOSITOR_GETPLANE, address_of *info) == 0 &&
+               info->count <= format_room && (info->possible & 1u << crtc_index) &&
+               compositor_plane_props(id, props, type);
 }
 
 // The primary plane of this crtc and an overlay that takes XRGB8888 on it, found once; false when the card has none.
 static int compositor_overlay_ready(void)
 {
-        unsigned int planes[128];
-        struct
-        {
-                unsigned long ids;
-                unsigned int count, pad;
-        } resources = {(unsigned long)planes, 128, 0};
-        unsigned long cap[2] = {3, 1}; // DRM_CLIENT_CAP_ATOMIC, which brings every plane with it
+        unsigned int planes[128], count;
 
         if (compositor.overlay_state)
                 return compositor.overlay_state > 0;
         compositor.overlay_state = -1;
-        if (system_control(compositor.card, COMPOSITOR_SET_CLIENT_CAP, address_of cap) != 0 ||
-            system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > 128)
+        if (!(count = drm_planes_list(planes, 128)))
                 return 0;
 
-        for (unsigned int at = 0; at < resources.count; at++)
+        for (unsigned int at = 0; at < count; at++)
         {
                 unsigned int formats[64], props[COMPOSITOR_PLANE_PROPS], takes = 0;
                 unsigned long type = 3;
-                struct
-                {
-                        unsigned int id, crtc, fb, possible, gamma, count;
-                        unsigned long formats;
-                } plane = {planes[at], 0, 0, 0, 0, 64, (unsigned long)formats};
+                struct drm_plane_info plane;
 
-                if (system_control(compositor.card, COMPOSITOR_GETPLANE, address_of plane) != 0 || plane.count > 64 ||
-                    !(plane.possible & 1u << compositor.crtc_index) || !compositor_plane_props(planes[at], props, &type))
+                if (!drm_plane_get(planes[at], compositor.crtc_index, &plane, formats, 64, props, &type))
                         continue;
                 for (unsigned int format = 0; format < plane.count; format++)
                         takes |= formats[format] == COMPOSITOR_XRGB8888;
@@ -1376,11 +1615,10 @@ static int compositor_overlay_buffers(unsigned int rows)
         for (unsigned int which = 0; which < 2; which++)
                 if (compositor.overlay_fb[which])
                 {
-                        unsigned int close[2] = {compositor.overlay_handle[which], 0};
+                        struct drm_dumb old = {compositor.overlay_fb[which], compositor.overlay_handle[which],
+                                               compositor.overlay_pixels[which], compositor.overlay_bytes, 0, 0, 0};
 
-                        gpu_forget((const void *)(compositor.overlay_pixels[which]), (positive)(compositor.overlay_bytes)), compositor_call(syscall(munmap), (positive)compositor.overlay_pixels[which], compositor.overlay_bytes, 0, 0, 0, 0);
-                        system_control(compositor.card, COMPOSITOR_RMFB, address_of compositor.overlay_fb[which]);
-                        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
+                        drm_dumb_destroy(&old);
                         compositor.overlay_fb[which] = 0;
                 }
         compositor.overlay_rows = 0;
@@ -1388,36 +1626,15 @@ static int compositor_overlay_buffers(unsigned int rows)
         rows = (rows + 63) & ~63u;
         for (unsigned int which = 0; which < 2; which++)
         {
-                struct compositor_dumb dumb = {rows, (unsigned int)compositor.width, 32, 0, 0, 0, 0};
-                struct compositor_map_dumb map = {0};
-                struct compositor_fb2 fb = {0};
-                long mapped = -COMPOSITOR_EINVAL;
+                struct drm_dumb b;
 
-                if (system_control(compositor.card, COMPOSITOR_CREATE_DUMB, address_of dumb) != 0)
+                if (drm_dumb_create(&b, (unsigned int)compositor.width, rows, DRM_DUMB_FB2 | DRM_DUMB_MAP) != 0)
                         return 0;
-                fb.width = dumb.width;
-                fb.height = dumb.height;
-                fb.format = COMPOSITOR_XRGB8888;
-                fb.handles[0] = map.handle = dumb.handle;
-                fb.pitches[0] = dumb.pitch;
-                if (system_control(compositor.card, COMPOSITOR_ADDFB2, address_of fb) == 0 &&
-                    system_control(compositor.card, COMPOSITOR_MAP_DUMB, address_of map) == 0)
-                        mapped = compositor_call(syscall(mmap), 0, dumb.size, 3, 1, (positive)compositor.card, map.offset);
-                if (mapped < 0 && mapped > -4096)
-                {
-                        // Made but not kept: the framebuffer (if the card took it) and the buffer go back, as a scanout's do.
-                        unsigned int close[2] = {dumb.handle, 0};
-
-                        if (fb.fb_id)
-                                system_control(compositor.card, COMPOSITOR_RMFB, address_of fb.fb_id);
-                        system_control(compositor.card, COMPOSITOR_GEM_CLOSE, address_of close);
-                        return 0;
-                }
-                compositor.overlay_fb[which] = fb.fb_id;
-                compositor.overlay_handle[which] = dumb.handle;
-                compositor.overlay_pixels[which] = (unsigned int *)mapped;
-                compositor.overlay_pitch = dumb.pitch / 4;
-                compositor.overlay_bytes = dumb.size;
+                compositor.overlay_fb[which] = b.fb;
+                compositor.overlay_handle[which] = b.handle;
+                compositor.overlay_pixels[which] = b.pixels;
+                compositor.overlay_pitch = b.pitch / 4;
+                compositor.overlay_bytes = b.bytes;
         }
         compositor.overlay_rows = rows;
         compositor_overlay_width = (unsigned int)compositor.width;
@@ -1438,45 +1655,15 @@ struct compositor_enum
 static unsigned int compositor_enums_of(unsigned int object, unsigned int type, const char *name, unsigned int *id,
                                         struct compositor_enum *enums, unsigned int room)
 {
-        unsigned int ids[64];
-        unsigned long values[64];
-        struct
-        {
-                unsigned long props, values;
-                unsigned int count, object, type;
-        } got = {(unsigned long)ids, (unsigned long)values, 64, object, type};
+        unsigned int pid = drm_obj_get_prop(object, type, name, 0);
+        struct drm_prop_info property = {0, (unsigned long)enums, pid, 0, {0}, 0, room};
 
-        if (system_control(compositor.card, COMPOSITOR_OBJ_GETPROPERTIES, address_of got) != 0 || got.count > 64)
+        if (!pid)
                 return 0;
-        for (unsigned int at = 0; at < got.count; at++)
-        {
-                struct
-                {
-                        unsigned long values, enums;
-                        unsigned int id, flags;
-                        char name[32];
-                        unsigned int count_values, count_enums;
-                } property = {0, 0, ids[at], 0, {0}, 0, 0};
-                unsigned int same = 0;
-
-                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
-                        continue;
-                while (name[same] && name[same] == property.name[same])
-                        same++;
-                if (name[same] || property.name[same])
-                        continue;
-                *id = ids[at];
-                property.enums = (unsigned long)enums;
-                property.count_enums = room;
-                // The values are not wanted: the first call left their count in, and the kernel puts that many through the
-                // pointer, which is null, so the call failed (EFAULT) and no card's rotation was ever found.
-                property.values = 0;
-                property.count_values = 0;
-                if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
-                        return 0;
-                return property.count_enums < room ? property.count_enums : room;
-        }
-        return 0;
+        *id = pid;
+        if (system_control(compositor.card, COMPOSITOR_GETPROPERTY, address_of property) != 0)
+                return 0;
+        return property.count_enums < room ? property.count_enums : room;
 }
 
 /*
@@ -1487,33 +1674,17 @@ static unsigned int compositor_enums_of(unsigned int object, unsigned int type, 
 static int compositor_rotation_hardware(unsigned int crtc_index, unsigned int degrees, unsigned int *plane,
                                         unsigned int *property, unsigned long *value)
 {
-        unsigned int planes[128];
-        struct
-        {
-                unsigned long ids;
-                unsigned int count, pad;
-        } resources = {(unsigned long)planes, 128, 0};
-        // DRM_CLIENT_CAP_ATOMIC, which the turn's commit needs and which brings every plane with it: without it the card lists
-        // no primary plane, and the first take of the screens is before compositor_overlay_ready has ever asked for it.
-        unsigned long cap[2] = {3, 1};
+        unsigned int planes[128], nplanes = drm_planes_list(planes, 128);
 
-        if (system_control(compositor.card, COMPOSITOR_SET_CLIENT_CAP, address_of cap) != 0 ||
-            system_control(compositor.card, COMPOSITOR_GETPLANERESOURCES, address_of resources) != 0 || resources.count > 128)
-                return 0;
-        for (unsigned int at = 0; at < resources.count; at++)
+        for (unsigned int at = 0; at < nplanes; at++)
         {
                 unsigned int formats[64], props[COMPOSITOR_PLANE_PROPS], id = 0, count;
                 unsigned long type = 3, bits[8] = {0};
                 struct compositor_enum enums[8];
                 const char *names[8] = {0};
-                struct
-                {
-                        unsigned int id, crtc, fb, possible, gamma, count;
-                        unsigned long formats;
-                } plane_info = {planes[at], 0, 0, 0, 0, 64, (unsigned long)formats};
+                struct drm_plane_info plane_info;
 
-                if (system_control(compositor.card, COMPOSITOR_GETPLANE, address_of plane_info) != 0 || plane_info.count > 64 ||
-                    !(plane_info.possible & 1u << crtc_index) || !compositor_plane_props(planes[at], props, &type) || type != 1)
+                if (!drm_plane_get(planes[at], crtc_index, &plane_info, formats, 64, props, &type) || type != 1)
                         continue;
                 count = compositor_enums_of(planes[at], COMPOSITOR_OBJECT_PLANE, "rotation", &id, enums, 8);
                 for (unsigned int each = 0; each < count; each++)
@@ -1536,37 +1707,17 @@ static int compositor_rotation_hardware(unsigned int crtc_index, unsigned int de
 static int compositor_rotate_commit(const struct compositor_output *output, const int *source, unsigned int width,
                                     unsigned int height, unsigned int fb)
 {
-        unsigned int props[COMPOSITOR_PLANE_PROPS], ids[11], plane = output->turn_plane, n = 0;
-        unsigned long type = 0, values[11];
-        unsigned int objects[1] = {plane}, counts[1];
-        struct
-        {
-                unsigned int flags, count;
-                unsigned long objects, counts, props, values, reserved, user_data;
-        } commit;
+        unsigned int props[COMPOSITOR_PLANE_PROPS];
+        unsigned long type = 0;
+        struct drm_atomic_req req = {0};
 
-        if (!compositor_plane_props(plane, props, &type))
+        if (!compositor_plane_props(output->turn_plane, props, &type))
                 return 0;
-        ids[n] = props[COMPOSITOR_PLANE_FB], values[n++] = fb;
-        ids[n] = props[COMPOSITOR_PLANE_CRTC], values[n++] = output->crtc;
-        ids[n] = props[COMPOSITOR_PLANE_SRC_X], values[n++] = (unsigned long)source[0] << 16;
-        ids[n] = props[COMPOSITOR_PLANE_SRC_Y], values[n++] = (unsigned long)source[1] << 16;
-        ids[n] = props[COMPOSITOR_PLANE_SRC_W], values[n++] = (unsigned long)width << 16;
-        ids[n] = props[COMPOSITOR_PLANE_SRC_H], values[n++] = (unsigned long)height << 16;
-        ids[n] = props[COMPOSITOR_PLANE_CRTC_X], values[n++] = 0;
-        ids[n] = props[COMPOSITOR_PLANE_CRTC_Y], values[n++] = 0;
-        ids[n] = props[COMPOSITOR_PLANE_CRTC_W], values[n++] = output->mode.hdisplay;
-        ids[n] = props[COMPOSITOR_PLANE_CRTC_H], values[n++] = output->mode.vdisplay;
-        ids[n] = output->turn_property, values[n++] = output->turn_value;
-        counts[0] = n;
-        commit.flags = 0;
-        commit.count = 1;
-        commit.objects = (unsigned long)objects;
-        commit.counts = (unsigned long)counts;
-        commit.props = (unsigned long)ids;
-        commit.values = (unsigned long)values;
-        commit.reserved = commit.user_data = 0;
-        return system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit) == 0;
+        drm_atomic_set_plane(&req, output->turn_plane, props, output->crtc, fb,
+                             source[0], source[1], (int)width, (int)height,
+                             0, 0, output->mode.hdisplay, output->mode.vdisplay);
+        drm_atomic_add(&req, output->turn_property, output->turn_value);
+        return drm_atomic_commit(&req, 0, 0) == 0;
 }
 
 /*
@@ -1578,44 +1729,19 @@ static int compositor_rotate_commit(const struct compositor_output *output, cons
 // Hardware primary-plane scaling commit for undersized fullscreen games (SRC_W/H -> centered CRTC_X/Y/W/H), or 1:1 restore.
 static int compositor_atomic_primary(unsigned int fb, int row, unsigned int which, int src_w, int src_h, int dx, int dy, int dw, int dh)
 {
-        unsigned int objects[2] = {compositor.primary, compositor.overlay}, counts[2] = {0, 0}, props[16];
-        unsigned long values[16];
-        const unsigned int *id = compositor.primary_props;
-        unsigned int n = 0, obj_count = 1;
+        struct drm_atomic_req req = {0};
 
         if (!compositor_overlay_ready() || !compositor.primary || src_w <= 0 || src_h <= 0 || dw <= 0 || dh <= 0)
                 return 0;
-        props[n] = id[COMPOSITOR_PLANE_FB], values[n++] = fb;
-        props[n] = id[COMPOSITOR_PLANE_CRTC], values[n++] = compositor.crtc;
-        props[n] = id[COMPOSITOR_PLANE_SRC_X], values[n++] = 0;
-        props[n] = id[COMPOSITOR_PLANE_SRC_Y], values[n++] = 0;
-        props[n] = id[COMPOSITOR_PLANE_SRC_W], values[n++] = (unsigned long)src_w << 16;
-        props[n] = id[COMPOSITOR_PLANE_SRC_H], values[n++] = (unsigned long)src_h << 16;
-        props[n] = id[COMPOSITOR_PLANE_CRTC_X], values[n++] = (unsigned long)dx;
-        props[n] = id[COMPOSITOR_PLANE_CRTC_Y], values[n++] = (unsigned long)dy;
-        props[n] = id[COMPOSITOR_PLANE_CRTC_W], values[n++] = (unsigned long)dw;
-        props[n] = id[COMPOSITOR_PLANE_CRTC_H], values[n++] = (unsigned long)dh;
-        counts[0] = n;
+        drm_atomic_set_plane(&req, compositor.primary, compositor.primary_props, compositor.crtc, fb,
+                             0, 0, src_w, src_h, dx, dy, dw, dh);
         if (compositor.overlay_on && compositor.overlay)
-        {
-                props[n] = compositor.overlay_props[COMPOSITOR_PLANE_FB], values[n++] = 0;
-                props[n] = compositor.overlay_props[COMPOSITOR_PLANE_CRTC], values[n++] = 0;
-                counts[1] = 2;
-                obj_count = 2;
-        }
-        struct
-        {
-                unsigned int flags, count;
-                unsigned long objects, counts, props, values, reserved, user_data;
-        } commit = {COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, obj_count, (unsigned long)objects,
-                    (unsigned long)counts, (unsigned long)props, (unsigned long)values, 0, 0};
-
-        commit.user_data = ++compositor.flip_serial;
-        if (system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit) != 0)
+                drm_atomic_set_plane(&req, compositor.overlay, compositor.overlay_props, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        if (drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial) != 0)
                 return 0;
         compositor_flip_arm(fb, row, which, 0);
         compositor.scaled_direct = (src_w != dw || src_h != dh || dx != 0 || dy != 0);
-        if (obj_count == 2)
+        if (req.obj_count == 2)
                 compositor.overlay_on = 0, compositor.plane_fb = 0;
         return 1;
 }
@@ -1623,42 +1749,17 @@ static int compositor_atomic_primary(unsigned int fb, int row, unsigned int whic
 static int compositor_atomic_to(unsigned int fb, int row, unsigned int which, int overlay, unsigned int shown,
                                 const int *source, const int *rect)
 {
-        unsigned int objects[2] = {compositor.primary, compositor.overlay}, counts[2] = {1, 0}, props[12];
-        unsigned long values[12];
-        unsigned int n = 0;
+        struct drm_atomic_req req = {0};
 
-        props[n] = compositor.primary_props[COMPOSITOR_PLANE_FB], values[n++] = fb;
+        drm_atomic_begin_obj(&req, compositor.primary);
+        drm_atomic_add(&req, compositor.primary_props[COMPOSITOR_PLANE_FB], fb);
         if (overlay)
-        {
-                const unsigned int *id = compositor.overlay_props;
-                unsigned long width = rect ? (unsigned long)(rect[2] - rect[0]) : 0;
-                unsigned long height = rect ? (unsigned long)(rect[3] - rect[1]) : 0;
-
-                props[n] = id[COMPOSITOR_PLANE_FB], values[n++] = rect ? shown : 0;
-                props[n] = id[COMPOSITOR_PLANE_CRTC], values[n++] = rect ? compositor.crtc : 0;
-                if (rect)
-                {
-                        props[n] = id[COMPOSITOR_PLANE_SRC_X], values[n++] = (unsigned long)source[0] << 16;
-                        props[n] = id[COMPOSITOR_PLANE_SRC_Y], values[n++] = (unsigned long)source[1] << 16;
-                        props[n] = id[COMPOSITOR_PLANE_SRC_W], values[n++] = width << 16;
-                        props[n] = id[COMPOSITOR_PLANE_SRC_H], values[n++] = height << 16;
-                        props[n] = id[COMPOSITOR_PLANE_CRTC_X], values[n++] = (unsigned long)rect[0];
-                        props[n] = id[COMPOSITOR_PLANE_CRTC_Y], values[n++] = (unsigned long)rect[1];
-                        props[n] = id[COMPOSITOR_PLANE_CRTC_W], values[n++] = width;
-                        props[n] = id[COMPOSITOR_PLANE_CRTC_H], values[n++] = height;
-                }
-                counts[1] = n - 1;
-        }
-
-        struct
-        {
-                unsigned int flags, count;
-                unsigned long objects, counts, props, values, reserved, user_data;
-        } commit = {COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, overlay ? 2u : 1u, (unsigned long)objects,
-                    (unsigned long)counts, (unsigned long)props, (unsigned long)values, 0, 0};
-
-        commit.user_data = ++compositor.flip_serial;
-        if (system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit) != 0)
+                drm_atomic_set_plane(&req, compositor.overlay, compositor.overlay_props, compositor.crtc,
+                                     rect ? shown : 0, rect ? source[0] : 0, rect ? source[1] : 0,
+                                     rect ? rect[2] - rect[0] : 0, rect ? rect[3] - rect[1] : 0,
+                                     rect ? rect[0] : 0, rect ? rect[1] : 0,
+                                     rect ? rect[2] - rect[0] : 0, rect ? rect[3] - rect[1] : 0);
+        if (drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, ++compositor.flip_serial) != 0)
                 return 0;
         compositor_flip_arm(fb, row, which, 0);
         if (overlay)
@@ -1684,29 +1785,15 @@ static struct
         int row, source[2], rect[4];
 } compositor_plane_carry;
 
-// The carried overlay's properties after the primary's in an atomic commit's lists: the overlay's object and its count, and the plane's
-// state once the commit is taken (compositor_plane_carried).
-static unsigned int compositor_plane_carry_props(unsigned int *objects, unsigned int *counts, unsigned int *props, unsigned long *values,
-                                                 unsigned int n)
+// The carried overlay's properties appended to an atomic commit request.
+static void compositor_plane_carry_add(struct drm_atomic_req *req)
 {
-        const unsigned int *id = compositor.overlay_props;
-        unsigned long width = (unsigned long)(compositor_plane_carry.rect[2] - compositor_plane_carry.rect[0]);
-        unsigned long height = (unsigned long)(compositor_plane_carry.rect[3] - compositor_plane_carry.rect[1]);
-        unsigned int from = n;
+        int w = compositor_plane_carry.rect[2] - compositor_plane_carry.rect[0];
+        int h = compositor_plane_carry.rect[3] - compositor_plane_carry.rect[1];
 
-        props[n] = id[COMPOSITOR_PLANE_FB], values[n++] = compositor_plane_carry.fb;
-        props[n] = id[COMPOSITOR_PLANE_CRTC], values[n++] = compositor.crtc;
-        props[n] = id[COMPOSITOR_PLANE_SRC_X], values[n++] = (unsigned long)compositor_plane_carry.source[0] << 16;
-        props[n] = id[COMPOSITOR_PLANE_SRC_Y], values[n++] = (unsigned long)compositor_plane_carry.source[1] << 16;
-        props[n] = id[COMPOSITOR_PLANE_SRC_W], values[n++] = width << 16;
-        props[n] = id[COMPOSITOR_PLANE_SRC_H], values[n++] = height << 16;
-        props[n] = id[COMPOSITOR_PLANE_CRTC_X], values[n++] = (unsigned long)compositor_plane_carry.rect[0];
-        props[n] = id[COMPOSITOR_PLANE_CRTC_Y], values[n++] = (unsigned long)compositor_plane_carry.rect[1];
-        props[n] = id[COMPOSITOR_PLANE_CRTC_W], values[n++] = width;
-        props[n] = id[COMPOSITOR_PLANE_CRTC_H], values[n++] = height;
-        objects[1] = compositor.overlay;
-        counts[1] = n - from;
-        return n;
+        drm_atomic_set_plane(req, compositor.overlay, compositor.overlay_props, compositor.crtc,
+                             compositor_plane_carry.fb, compositor_plane_carry.source[0], compositor_plane_carry.source[1],
+                             w, h, compositor_plane_carry.rect[0], compositor_plane_carry.rect[1], w, h);
 }
 
 static void compositor_unscanned(unsigned int why);
@@ -2067,15 +2154,8 @@ static void compositor_dirty_screens(const unsigned short (*clip)[4], unsigned i
 }
 
 // A screen Canvas turns in software: its framebuffer over the buffer its panel is drawn in, by screen (see
-// compositor_turn_buffer).
-struct compositor_turn
-{
-        unsigned int fb, handle;
-        unsigned int *pixels;
-        unsigned long bytes, pitch; // pitch in bytes
-        unsigned int width, height;
-};
-static struct compositor_turn compositor_turns[WINDOWS_OUTPUTS];
+// compositor_turn_buffer). Uses struct drm_dumb directly.
+static struct drm_dumb compositor_turns[WINDOWS_OUTPUTS];
 
 // The framebuffer the primary plane shows when the overlay is taken off it: the scanout, or the buffer Canvas turns the
 // first screen in.

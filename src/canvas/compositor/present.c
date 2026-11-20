@@ -377,14 +377,13 @@ static unsigned int compositor_in_fence(void)
 {
         if (!compositor_fence_prop)
         {
-                struct compositor_enum none[1];
                 unsigned int id = 0;
 
                 compositor_fence_prop = -1;
                 if (compositor.card >= 0)
                         compositor_overlay_ready();
                 if (compositor.card >= 0 && compositor.primary && compositor.primary_props[COMPOSITOR_PLANE_FB])
-                        compositor_enums_of(compositor.primary, COMPOSITOR_OBJECT_PLANE, "IN_FENCE_FD", &id, none, 1);
+                        id = drm_obj_get_prop(compositor.primary, COMPOSITOR_OBJECT_PLANE, "IN_FENCE_FD", 0);
                 if (id)
                         compositor_fence_prop = (int)id;
         }
@@ -393,28 +392,25 @@ static unsigned int compositor_in_fence(void)
 
 static int compositor_flip_fenced(unsigned int fb, int fence)
 {
-        unsigned int prop = compositor_in_fence(), objects[2] = {compositor.primary, 0}, counts[2] = {2, 0}, props[12];
-        unsigned long values[12] = {fb, (unsigned long)(long)fence};
-        struct
-        {
-                unsigned int flags, count;
-                unsigned long objects, counts, props, values, reserved, user_data;
-        } commit = {COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, 1, (unsigned long)objects, (unsigned long)counts, (unsigned long)props, (unsigned long)values, 0, 0};
+        unsigned int prop = compositor_in_fence();
+        struct drm_atomic_req req = {0};
         long refused;
 
         if (!prop || fence < 0 || compositor.card < 0)
                 return 0;
-        props[0] = compositor.primary_props[COMPOSITOR_PLANE_FB], props[1] = prop;
+        drm_atomic_begin_obj(&req, compositor.primary);
+        drm_atomic_add(&req, compositor.primary_props[COMPOSITOR_PLANE_FB], fb);
+        drm_atomic_add(&req, prop, (unsigned long)(long)fence);
         // A window on the overlay with a new buffer goes with the plate composed round it (compositor_plane_carry).
         if (compositor_plane_carry.fb)
-                compositor_plane_carry_props(objects, counts, props, values, 2), commit.count = 2;
-        commit.user_data = compositor.flip_serial + 1;
-        if ((refused = system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit)) != 0 && commit.count == 2 && refused != -16)
+                compositor_plane_carry_add(&req);
+        refused = drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, compositor.flip_serial + 1);
+        if (refused != 0 && req.obj_count == 2 && refused != -16)
         {
                 // Refused with the overlay in it: the plate alone, and the overlay's buffer is committed by the next present.
                 compositor_plane_carried(0);
-                commit.count = 1;
-                refused = system_control(compositor.card, COMPOSITOR_ATOMIC, address_of commit);
+                req.obj_count = 1;
+                refused = drm_atomic_commit(&req, COMPOSITOR_FLIP_EVENT | COMPOSITOR_ATOMIC_NONBLOCK, compositor.flip_serial + 1);
         }
         if (refused != 0)
         {
@@ -1269,23 +1265,15 @@ static void compositor_present_frames(void)
         if (!compositor.damages || compositor.dark || compositor.flip_pending || compositor_card_holds())
                 return;
         // Direct-scanout fast-path for steady-state fullscreen games (single or multi-monitor primary): bypasses frame list building, glass, runs, taskbar, and occluded windows.
-        if (compositor.direct_row >= 0 && !compositor_turning() && compositor.card >= 0 &&
+        if (compositor.direct_row >= 0 && !compositor_turning() &&
             compositor.stacked > 0 && (int)compositor.stack[compositor.stacked - 1] == compositor.direct_row &&
-            !(compositor_cursor_in_scene() && compositor.cursor.drawn) &&
-            compositor.drag < 0 && compositor.resize < 0 && !compositor.preview_draw && !compositor.overlay_on &&
-            !compositor_spots_any(0) && !compositor_overlays_shown() && taskbar_shift() >= UI_ONE &&
+            !compositor.overlay_on && !compositor_overlays_shown() && taskbar_shift() >= UI_ONE &&
             !compositor_record_until)
         {
-                int row = compositor.direct_row, menu[4], ox, oy, ow, oh;
+                int row = compositor.direct_row, menu[4];
 
-                if (compositor_primary_bounds(&ox, &oy, &ow, &oh) &&
-                    !taskbar_menu_rect(menu) && compositor_client_scans(row) && !compositor_wl_row_blend(row) &&
-                    !compositor.glassy[row] && !compositor.landing[row] && !compositor.glide[row] && !compositor.asking[row] &&
-                    compositor.x[row] == ox && compositor.y[row] == oy &&
-                    compositor.w[row] == (unsigned int)ow && compositor.h[row] == (unsigned int)oh &&
-                    ((compositor.picture_w[row] == compositor.w[row] && compositor.picture_h[row] == compositor.h[row]) ||
-                     (!compositor.scale_plane_refused && compositor.fullscreen[row] && compositor.picture_w[row] && compositor.picture_h[row] &&
-                      compositor_overlay_ready())) &&
+                if (!taskbar_menu_rect(menu) && compositor_client_scans(row) &&
+                    compositor_direct_eligible(row, compositor_wl_row_blend(row)) &&
                     compositor_present_direct(row, 0, 0))
                 {
                         compositor_unscanned(0);
@@ -1641,11 +1629,7 @@ static void compositor_present_frames(void)
         // The processor draws: a job given up on is waited for here, as it was, but without a wait (present-nowait) none is pending but one whose end was
         // said (the hang path, which draws on the processor regardless), since the present was held while one ran (compositor_card_holds).
         else if (!(compositor_card.nowait && compositor_card.looped) && gpu.pending && !gpu_finish())
-        {
-                if (gpu_lost)
-                        compositor_gpu_recover();
-                compositor_gpu_job_failed();
-        }
+                compositor_gpu_fail(0);
         int apart = !gpu_drawn && !flip_own && compositor_changed_ready();
 #else
         int apart = !flip_own && compositor_changed_ready(), gpu_composed = 0;
