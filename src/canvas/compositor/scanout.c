@@ -362,76 +362,74 @@ static void compositor_flip_done(void);
 static void compositor_plate_make(void);
 #include "../record.h" // the present record: a ring of the last presents, and moonwater canvas record (its files under /run/moonwater/record)
 
-// What is missed of a buffer, joined with more: the bounding rectangle, and whether there is any.
-static void compositor_stale_join(int *rect, int *any, const int *add)
-{
-        if (!*any)
-        {
-                memory_copy(rect, add, 4 * sizeof(int));
-                *any = 1;
-                return;
-        }
-        compositor_joined(rect, add, rect);
-}
-
-// A stale that is the whole screen: its box, and no parts (the box of parts that reached every edge is this box too, and is not this).
+// Double-buffer plate stale tracking and swap (front = compositor.*, spare = compositor_spare.*).
 static void compositor_stale_all(int *box, int *any, struct compositor_parts *parts)
 {
         box[0] = box[1] = 0, box[2] = compositor.width, box[3] = compositor.height;
-        *any = 1;
-        parts->d.count = 0;
+        *any = 1, parts->d.count = 0;
 }
 
-// Whether a stale's parts are the box's: there are some, and the box is the one they were joined into.
 static int compositor_parts_hold(const struct compositor_parts *parts, const int *box, int any)
 {
         return any && parts->d.count && parts->of.x1 == box[0] && parts->of.y1 == box[1] &&
                parts->of.x2 == box[2] && parts->of.y2 == box[3];
 }
 
-// A rectangle joined into a stale and into its parts (compositor_stale_join for the box): the parts go on being the stale when they
-// were, or when the stale was empty, and there is room; else they are given up and the box stands for them.
 static void compositor_stale_part(int *box, int *any, struct compositor_parts *parts, const int *add)
 {
         int held = !*any || compositor_parts_hold(parts, box, *any);
 
         if (!*any)
-                parts->d.count = 0;
-        compositor_stale_join(box, any, add);
+                memory_copy(box, add, 4 * sizeof(int)), *any = 1, parts->d.count = 0;
+        else
+                compositor_joined(box, add, box);
         if (!held || parts->d.count == COMPOSITOR_DAMAGE)
-        {
                 parts->d.count = 0;
-                return;
-        }
-        parts->d.r[parts->d.count++] = rect_from_int4(add);
-        parts->of = rect_from_int4(box);
+        else
+                parts->d.r[parts->d.count++] = rect_from_int4(add), parts->of = rect_from_int4(box);
 }
 
-// The screen's buffer and the spare trade places: the one composed into is the scanout (compositor.*), with its stale; the spare is the one
-// shown before. The screen's output 0 follows its framebuffer, which a crtc set or a plane would name.
 static void compositor_plate_swap(void)
 {
         unsigned int fb = compositor.fb, handle = compositor.scanout_handle, *pixels = compositor.scanout;
         unsigned long bytes = compositor.scanout_bytes, pitch = compositor.scanout_pitch;
         int stale[4], stale_any = compositor_front_stale_any;
+        struct compositor_parts parts = compositor_front_parts;
 
         memory_copy(stale, compositor_front_stale, sizeof(stale));
-        compositor.fb = compositor_spare.fb, compositor.scanout_handle = compositor_spare.handle, compositor.scanout = compositor_spare.pixels;
-        compositor.scanout_bytes = compositor_spare.bytes, compositor.scanout_pitch = compositor_spare.pitch;
+        compositor.fb = compositor_spare.fb, compositor.scanout_handle = compositor_spare.handle;
+        compositor.scanout = compositor_spare.pixels, compositor.scanout_bytes = compositor_spare.bytes;
+        compositor.scanout_pitch = compositor_spare.pitch, compositor_front_stale_any = compositor_spare.stale_any;
         memory_copy(compositor_front_stale, compositor_spare.stale, sizeof(stale));
-        compositor_front_stale_any = compositor_spare.stale_any;
+        compositor_front_parts = compositor_spare_parts;
         compositor_spare.fb = fb, compositor_spare.handle = handle, compositor_spare.pixels = pixels;
-        compositor_spare.bytes = bytes, compositor_spare.pitch = pitch;
+        compositor_spare.bytes = bytes, compositor_spare.pitch = pitch, compositor_spare.stale_any = stale_any;
         memory_copy(compositor_spare.stale, stale, sizeof(stale));
-        compositor_spare.stale_any = stale_any;
+        compositor_spare_parts = parts;
+        if (compositor.outputs && compositor.output[0].fb == fb)
+                compositor.output[0].fb = compositor.fb;
+}
+
+static void scanout_plate_replay_front(void)
+{
+        if (compositor_parts_hold(&compositor_front_parts, compositor_front_stale, compositor_front_stale_any))
         {
                 struct compositor_parts parts = compositor_front_parts;
 
-                compositor_front_parts = compositor_spare_parts;
-                compositor_spare_parts = parts;
+                for (unsigned int at = 0; at < parts.d.count; at++)
+                        compositor_damage(parts.d.r[at].x1, parts.d.r[at].y1,
+                                          parts.d.r[at].x2 - parts.d.r[at].x1, parts.d.r[at].y2 - parts.d.r[at].y1);
         }
-        if (compositor.outputs && compositor.output[0].fb == fb)
-                compositor.output[0].fb = compositor.fb;
+        else if (compositor_front_stale_any)
+                compositor_damage(compositor_front_stale[0], compositor_front_stale[1],
+                                  compositor_front_stale[2] - compositor_front_stale[0],
+                                  compositor_front_stale[3] - compositor_front_stale[1]);
+}
+
+static void scanout_plate_mark_spare(const int (*rects)[4], unsigned int count)
+{
+        for (unsigned int at = 0; at < count; at++)
+                compositor_stale_part(compositor_spare.stale, &compositor_spare.stale_any, &compositor_spare_parts, rects[at]);
 }
 
 // Headless: the scan image and its spare exchange names. The compositor's mappings follow the names (compositor_plate_swap made them so).
@@ -989,8 +987,8 @@ static b32 compositor_direct_under_ready(unsigned int which, positive need)
 
 static void compositor_direct_patch(int row, unsigned int which, const struct compositor_frame *tabs, unsigned int count)
 {
-        int rect[4];
-        unsigned int *pixels = compositor_buffer(row, which);
+        int rect[4], u[4], staged = 0;
+        unsigned int *pixels = compositor_buffer(row, which), *dst = pixels;
         unsigned long stride = (unsigned long)compositor_stride();
         struct windows *table = compositor.table;
 
@@ -1001,11 +999,8 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
                         compositor_direct_unpatch_at(row, which);
                 return;
         }
-
         if (!compositor_direct_under_ready(which, 4ull * (positive)(rect[2] - rect[0]) * (positive)(rect[3] - rect[1])))
                 return;
-        // When updating tabs on an already-patched live on-screen buffer, stage the clean client pixels + new tabs off-screen
-        // and write only finished pixels so the scanout never shows an unpatched frame.
         if (compositor.patched[row][which])
         {
                 unsigned int *stage = compositor_direct_stage_ready();
@@ -1013,56 +1008,53 @@ static void compositor_direct_patch(int row, unsigned int which, const struct co
                 if (stage)
                 {
                         const int *old = compositor.under_rect[which];
-                        int u[4];
 
                         compositor_joined(old, rect, u);
-
                         memory_copy_rect_u32(stage + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
                                              pixels + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
                                              (unsigned long)(u[2] - u[0]), (unsigned long)(u[3] - u[1]));
                         memory_copy_rect_u32(stage + (unsigned long)old[1] * stride + (unsigned long)old[0], stride,
                                              compositor.under[which], (unsigned long)(old[2] - old[0]),
                                              (unsigned long)(old[2] - old[0]), (unsigned long)(old[3] - old[1]));
-                        memory_copy_rect_u32(compositor.under[which], (unsigned long)(rect[2] - rect[0]),
-                                             stage + (unsigned long)rect[1] * stride + (unsigned long)rect[0], stride,
-                                             (unsigned long)(rect[2] - rect[0]), (unsigned long)(rect[3] - rect[1]));
-                        memory_copy(compositor.under_rect[which], rect, sizeof(rect));
-                        {
-                                struct compositor_target target = {stage, stride, compositor.width, compositor.height,
-                                                                   rect[0], rect[1], rect[2], rect[3]};
-
-                                for (unsigned int at = 0; at < count; at++)
-                                        compositor_draw(&target, &tabs[at]);
-                        }
-                        memory_copy_rect_u32(pixels + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
-                                             stage + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
-                                             (unsigned long)(u[2] - u[0]), (unsigned long)(u[3] - u[1]));
-                        table->spoiled_x[row][which] = rect[0];
-                        table->spoiled_y[row][which] = rect[1];
-                        table->spoiled_width[row][which] = rect[2] - rect[0];
-                        __atomic_store_n(&table->spoiled_height[row][which], rect[3] - rect[1], __ATOMIC_RELEASE);
-                        return;
+                        dst = stage, staged = 1;
                 }
-                compositor_direct_unpatch_at(row, which);
+                else
+                        compositor_direct_unpatch_at(row, which);
         }
-        memory_copy_rect_u32(compositor.under[which],
-                             (unsigned long)(rect[2] - rect[0]),
-                             pixels + (unsigned long)rect[1] * stride + (unsigned long)rect[0],
-                             stride,
-                             (unsigned long)(rect[2] - rect[0]),
-                             (unsigned long)(rect[3] - rect[1]));
+        memory_copy_rect_u32(compositor.under[which], (unsigned long)(rect[2] - rect[0]),
+                             dst + (unsigned long)rect[1] * stride + (unsigned long)rect[0], stride,
+                             (unsigned long)(rect[2] - rect[0]), (unsigned long)(rect[3] - rect[1]));
         memory_copy(compositor.under_rect[which], rect, sizeof(rect));
+        {
+                struct compositor_target target = {dst, stride, compositor.width, compositor.height,
+                                                   rect[0], rect[1], rect[2], rect[3]};
 
-        struct compositor_target target = {pixels, stride, compositor.width, compositor.height,
-                                           rect[0], rect[1], rect[2], rect[3]};
-
-        for (unsigned int at = 0; at < count; at++)
-                compositor_draw(&target, &tabs[at]);
-        compositor.patched[row][which] = 1;
-        table->spoiled_x[row][which] = rect[0];
-        table->spoiled_y[row][which] = rect[1];
+                for (unsigned int at = 0; at < count; at++)
+                        compositor_draw(&target, &tabs[at]);
+        }
+        if (staged)
+                memory_copy_rect_u32(pixels + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
+                                     dst + (unsigned long)u[1] * stride + (unsigned long)u[0], stride,
+                                     (unsigned long)(u[2] - u[0]), (unsigned long)(u[3] - u[1]));
+        else
+                compositor.patched[row][which] = 1;
+        table->spoiled_x[row][which] = rect[0], table->spoiled_y[row][which] = rect[1];
         table->spoiled_width[row][which] = rect[2] - rect[0];
         __atomic_store_n(&table->spoiled_height[row][which], rect[3] - rect[1], __ATOMIC_RELEASE);
+}
+
+static void scanout_direct_finish(int row, unsigned int fb)
+{
+        unsigned short clip[COMPOSITOR_DAMAGE][4];
+
+        compositor.direct_row = row;
+        compositor.table->scanned++;
+        for (unsigned int at = 0; at < compositor.damages; at++)
+                for (unsigned int side = 0; side < 4; side++)
+                        clip[at][side] = (unsigned short)compositor.damage[at][side];
+        compositor_dirty(fb, (const unsigned short (*)[4])clip, compositor.damages);
+        compositor.damages = 0;
+        compositor.screen_stale = 1;
 }
 
 // Primary output bounds eligible for direct scanout: whole space on 1 screen, or output 0 when unrotated at (0,0) with all damage inside it.
@@ -1130,17 +1122,13 @@ static int compositor_direct_candidate(const struct compositor_frame *frames, co
         return (compositor_client_scans(row) ? compositor_lent_fb(row) : compositor_window_fb(row, compositor.front[row])) ? row : -1;
 }
 
-// The frame of a window shown straight: the tabs over its buffer, and the card flipped to it. False when the card will not.
 static b32 compositor_present_direct(int row, const struct compositor_frame *tabs, unsigned int count)
 {
         int lent = compositor_client_scans(row), rect[4];
         unsigned int which = compositor.front[row];
         unsigned int fb = lent ? compositor_lent_fb(row) : compositor_window_fb(row, which);
-        unsigned short clip[COMPOSITOR_DAMAGE][4];
 
-        if (lent && compositor_tabs_rect(tabs, count, rect))
-                return 0;
-        if (!fb)
+        if (!fb || (lent && compositor_tabs_rect(tabs, count, rect)))
                 return 0;
         if (compositor.on_screen != fb && compositor.flip_pending)
                 return 1;
@@ -1153,34 +1141,18 @@ static b32 compositor_present_direct(int row, const struct compositor_frame *tab
                 if (lent && compositor_fullscreen_fit(row, &dx, &dy, &dw, &dh))
                 {
                         if (!compositor_atomic_primary(fb, row, which, (int)compositor.picture_w[row], (int)compositor.picture_h[row], dx, dy, dw, dh))
-                        {
-                                compositor.scale_plane_refused = 1;
-                                return 0;
-                        }
+                                return compositor.scale_plane_refused = 1, 0;
                 }
                 else if (!compositor_flip(fb, row, which))
                 {
                         if (lent)
-                        {
-                                compositor_lent_fb_fail(row);
-                                return 0;
-                        }
+                                return compositor_lent_fb_fail(row), 0;
                         compositor_direct_unpatch_at(row, which);
-                        compositor.direct_refused = 1;
-                        compositor.table->refused = 5;
+                        compositor.direct_refused = 1, compositor.table->refused = 5;
                         return 0;
                 }
         }
-        compositor.direct_row = row;
-        compositor.table->scanned++;
-
-        // A virtual card copies to its host only what it is told changed.
-        for (unsigned int at = 0; at < compositor.damages; at++)
-                for (unsigned int side = 0; side < 4; side++)
-                        clip[at][side] = (unsigned short)compositor.damage[at][side];
-        compositor_dirty(fb, (const unsigned short (*)[4])clip, compositor.damages);
-        compositor.damages = 0;
-        compositor.screen_stale = 1;
+        scanout_direct_finish(row, fb);
         return 1;
 }
 
@@ -1925,21 +1897,16 @@ static int compositor_tabs_rect(const struct compositor_frame *tabs, unsigned in
         return rect[2] > rect[0] && rect[3] > rect[1];
 }
 
-// The frame of a window shown straight with the tabs on the overlay: false when the card will not, and the tabs are
-// then patched in.
 static b32 compositor_present_overlaid(int row, const struct compositor_frame *frames, unsigned int count, unsigned int windows)
 {
         unsigned int which = compositor.front[row], fb = compositor_client_scans(row) ? compositor_lent_fb(row) : compositor_window_fb(row, which),
                      buffer = compositor.overlay_back;
         int rect[4], shown = compositor_tabs_rect(frames + windows, count - windows, rect), drawn = 0;
-        unsigned short clip[COMPOSITOR_DAMAGE][4];
 
         if (!fb)
                 return 0;
-        // The card is still on its way to the last commit: this frame is made once it is there.
         if (compositor.flip_pending)
                 return 1;
-
         if (shown)
         {
                 drawn = !compositor.overlay_on || memory_compare(compositor.overlay_rect, rect, sizeof(rect)) != 0;
@@ -1953,45 +1920,24 @@ static b32 compositor_present_overlaid(int row, const struct compositor_frame *f
                 }
                 if (drawn)
                 {
-                        struct compositor_target target = {compositor.overlay_pixels[buffer], 0, compositor.width,
-                                                           compositor.height, rect[0], rect[1], rect[2], rect[3], 0, rect[1], 0};
+                        struct compositor_target target = {0, 0, compositor.width, compositor.height, rect[0], rect[1], rect[2], rect[3], 0, rect[1], 0};
                         int rows[2];
 
-                        compositor_wl_straight_pays(-1); // the window under the tabs is composed with them
-
+                        compositor_wl_straight_pays(-1);
                         if (!compositor_overlay_buffers((unsigned int)(rect[3] - rect[1])))
-                        {
-                                compositor.overlay_state = -1;
-                                return 0;
-                        }
-                        target.pixels = compositor.overlay_pixels[buffer];
-                        target.pitch = compositor.overlay_pitch;
+                                return compositor.overlay_state = -1, 0;
+                        target.pixels = compositor.overlay_pixels[buffer], target.pitch = compositor.overlay_pitch;
                         compositor_scene_banded(&target, frames, count, 0, rows);
                 }
         }
         if (fb != compositor.on_screen || drawn || (!shown && compositor.overlay_on))
         {
-                // The overlay is in the commit only when it changes: a new picture of the tabs, or off where it was on. A fullscreen window
-                // with nothing over it flips its primary alone, each frame a plane's fast update, where every flip also set the idle overlay
-                // off again.
                 if (!compositor_atomic(fb, row, which, drawn || (!shown && compositor.overlay_on), shown ? rect : 0, buffer))
-                {
-                        compositor.overlay_state = -1;
-                        compositor_overlay_off();
-                        return 0;
-                }
+                        return compositor.overlay_state = -1, compositor_overlay_off(), 0;
                 if (drawn)
                         compositor.overlay_back ^= 1;
         }
-        compositor.direct_row = row;
-        compositor.table->scanned++;
-
-        for (unsigned int at = 0; at < compositor.damages; at++)
-                for (unsigned int side = 0; side < 4; side++)
-                        clip[at][side] = (unsigned short)compositor.damage[at][side];
-        compositor_dirty(fb, (const unsigned short (*)[4])clip, compositor.damages);
-        compositor.damages = 0;
-        compositor.screen_stale = 1;
+        scanout_direct_finish(row, fb);
         return 1;
 }
 
@@ -2041,82 +1987,45 @@ static int compositor_plane_candidate(const struct compositor_frame *frames, con
 {
         struct compositor_frame band;
         int row, bx, by, side, radius, top, bottom;
-
         unsigned int *why = compositor.table ? &compositor.table->unscanned : &compositor_unscanned_spare;
+        const struct compositor_frame *frame;
 
-        if (compositor.card < 0)
-                return *why = 1, -1;
-        if (compositor_output_count() > 1)
-                return *why = 13, -1;
-        if (compositor.cursor.soft)
-                return *why = 3, -1;
-        if (compositor_planes_off())
-                return *why = 21, -1;
-        if (!windows || compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw)
-                return *why = 4, -1; // a preview is over the window, and the overlay is not composed under it
-        if (compositor_spots_any(0))
-                return *why = 14, -1;
-        row = rows[windows - 1];
-        const struct compositor_frame *frame = &frames[windows - 1];
-
+        if (compositor.card < 0) return *why = 1, -1;
+        if (compositor_output_count() > 1) return *why = 13, -1;
+        if (compositor.cursor.soft) return *why = 3, -1;
+        if (compositor_planes_off()) return *why = 21, -1;
+        if (!windows || compositor.drag >= 0 || compositor.resize >= 0 || compositor.preview_draw) return *why = 4, -1;
+        if (compositor_spots_any(0)) return *why = 14, -1;
+        row = rows[windows - 1], frame = &frames[windows - 1];
         if (!compositor_client_scans(row) && (compositor.direct_refused || !compositor.table_memfd))
                 return *why = compositor.direct_refused ? 11 : 2, -1;
-        // Glass is the window's WINDOW_GLASS (compositor.glassy): the row's other flags (a client's NO_CLOSE and NO_GRAB) are no glass. Tested
-        // as the row's whole glass word, every client's window was refused as glass and composed.
-        if (compositor.glassy[row])
-                return *why = 5, -1;
-        // A client's window whose picture is not its dma-buf read in place stays composed. One the shim copies into the table (the processor
-        // composes, or its format is turned): on the overlay its table buffer is the screen's, so each commit is laid into the other one,
-        // which first takes the whole last picture (compositor_wl.laying's last), and the whole window is damage (new-dragonfly, Haswell,
-        // Chromium typing: 1.86 ms from its commit to the present against 0.15 composed, the taskbar's glass made again at each key). One in
-        // the client's shared memory has no framebuffer (compositor_lent_fb makes one of a dma-buf only).
-        if (compositor_wl_row_unscannable(row))
-                return *why = 22, -1;
-        // The window's own frame, not a subsurface's over it (layers are frames of the same row after it).
-        if (windows > 1 && rows[windows - 2] == (unsigned int)row)
-                return *why = 18, -1;
-        // While the windows' lists are drawn the card writes a window's picture in place, each frame (a clear and then the frame's ops): shown straight,
-        // the screen would scan that picture out while it is half drawn, and every frame would flicker. With list mode on every window is composed (by
-        // the card, after it has drawn the pictures), so none is shown straight.
-        if (!compositor_client_scans(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE))
-                return *why = 16, -1;
-        if (compositor.landing[row])
-                return *why = 4, -1; // a window landing is drawn smaller than its picture
-        if (compositor.asking[row] || compositor.picture_w[row] != compositor.w[row] ||
-            compositor.picture_h[row] != compositor.h[row])
+        if (compositor.glassy[row]) return *why = 5, -1;
+        if (compositor_wl_row_unscannable(row)) return *why = 22, -1;
+        if (windows > 1 && rows[windows - 2] == (unsigned int)row) return *why = 18, -1;
+        if (!compositor_client_scans(row) && __atomic_load_n(&compositor.table->list_mode, __ATOMIC_ACQUIRE)) return *why = 16, -1;
+        if (compositor.landing[row]) return *why = 4, -1;
+        if (compositor.asking[row] || compositor.picture_w[row] != compositor.w[row] || compositor.picture_h[row] != compositor.h[row])
                 return *why = 6, -1;
-        if (frame->x < 0 || frame->y < 0 || frame->x + frame->width > compositor.width ||
-            frame->y + frame->height > compositor.height)
+        if (frame->x < 0 || frame->y < 0 || frame->x + frame->width > compositor.width || frame->y + frame->height > compositor.height)
                 return *why = 7, -1;
-        radius = compositor_radius(frame);
-        top = frame->y + radius;
-        bottom = frame->y + frame->height - radius;
-        if (compositor_close_box(frame, &bx, &by, &side))
-                top = by + side > top ? by + side : top;
-        if (bottom - top < 64 * compositor.scale / 100)
-                return *why = 8, -1;
+        radius = compositor_radius(frame), top = frame->y + radius, bottom = frame->y + frame->height - radius;
+        if (compositor_close_box(frame, &bx, &by, &side) && by + side > top)
+                top = by + side;
+        if (bottom - top < 64 * compositor.scale / 100) return *why = 8, -1;
         rect[0] = frame->x, rect[1] = top, rect[2] = frame->x + frame->width, rect[3] = bottom;
-        // A window blended over what is under it goes on the plane only where what the plane shows of it is opaque all the same (its client's
-        // opaque region: Chromium's is all of it but its round top corners, which are in the rows above the plane), shown as the X format
-        // (compositor_lent_fb_opaque); the overlay is not blended over the primary, where nothing is composed.
-        if (frame->blend && !compositor_wl_row_opaque(row, 0, top - frame->y, frame->width, bottom - frame->y))
-                return *why = 20, -1;
-
+        if (frame->blend && !compositor_wl_row_opaque(row, 0, top - frame->y, frame->width, bottom - frame->y)) return *why = 20, -1;
         compositor_band_frame(&band);
-        if (compositor.band && band.x < rect[2] && band.x + band.width > rect[0] && band.y < rect[3] &&
-            band.y + band.height > rect[1])
+        if (compositor.band && band.x < rect[2] && band.x + band.width > rect[0] && band.y < rect[3] && band.y + band.height > rect[1])
                 return *why = 9, -1;
         for (unsigned int at = windows; at < count; at++)
         {
-                int x, y, width, height;
+                int x, y, w, h;
 
-                compositor_outline(&frames[at], &x, &y, &width, &height);
-                if (width > 0 && height > 0 && x < rect[2] && x + width > rect[0] && y < rect[3] && y + height > rect[1])
+                compositor_outline(&frames[at], &x, &y, &w, &h);
+                if (w > 0 && h > 0 && x < rect[2] && x + w > rect[0] && y < rect[3] && y + h > rect[1])
                         return *why = 19, -1;
         }
-        // The card asked last: whether it has an overlay, then the window's framebuffer.
-        if (!compositor_overlay_ready())
-                return *why = 10, -1;
+        if (!compositor_overlay_ready()) return *why = 10, -1;
         return (compositor_client_scans(row) ? compositor_lent_fb_opaque(row) : compositor_window_fb(row, compositor.front[row])) ? row : (*why = 11, -1);
 }
 

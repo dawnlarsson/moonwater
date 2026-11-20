@@ -1431,22 +1431,36 @@ static b32 gpu_flag(const char *path)
         return off >= 0;
 }
 
+static void gpu_req_record(const char *path, const char *driver, unsigned int family, unsigned int device, const char *bus)
+{
+        memory_copy(gpu_req.node, path, 20);
+        gpu_req_stat(path);
+        if (driver)
+        {
+                memory_zero(gpu_req.driver, sizeof(gpu_req.driver)), memory_zero(gpu_req.name, sizeof(gpu_req.name));
+                string_copy_bounded((string_address)gpu_req.driver, (string_address)driver, sizeof(gpu_req.driver));
+                string_copy_bounded((string_address)gpu_req.name, (string_address)driver, sizeof(gpu_req.name));
+        }
+        if (bus)
+                memory_copy(gpu_req.bus, bus, sizeof(gpu_req.bus));
+        gpu_req.family = family, gpu_req.device = device;
+}
+
 static b32 gpu_start(positive bytes)
 {
-        positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // the last megabyte is the self-test's
+        positive size = (GPU_DATA + bytes + (1 << 20) + 4095) & ~4095ull; // last MiB is self-test
         p64 offset = 0;
         unsigned int ctx = 0, family = 0, device = 0, e = 0, open_error = 0;
         char path[] = "/dev/dri/renderD128";
         int named = 0, known = 0, known_named = 0, unasked = 0;
         unsigned int candidates = 0, candidate_node[GPU_NODES];
         const struct gpu_backend *candidate_backend[GPU_NODES];
-        char candidate_bus[GPU_NODES][32] = {{0}}; // (whole: the one picked is copied to the table every program reads, all 32 bytes of it)
+        char candidate_bus[GPU_NODES][32] = {{0}};
         positive seen = 14695981039346656037ull;
         long at, hash;
 
         memory_zero(&gpu_req, sizeof(gpu_req));
         gpu.fd = -1, gpu.broken = 0, gpu_bytes = bytes, gpu_lost = 0, gpu_gfx103 = 0, gpu_userptr_ok = 0;
-        // The test's switch (/run/moonwater/gpu-nouserptr): the table's pages go by the dma-buf route, and no userptr is asked for them.
         gpu_userptr_off = gpu_flag("/run/moonwater/gpu-nouserptr"), gpu_userptr_gone = 0;
         gpu_own_userptr = gpu_flag("/run/moonwater/gpu-own-userptr");
         gpu_round_off = gpu_flag("/run/moonwater/gpu-round-off");
@@ -1462,8 +1476,6 @@ static b32 gpu_start(positive bytes)
         }
         for (unsigned int node = 0; node < 64; node++)
         {
-                // Made again for each node: the kernel writes back the whole length of the driver's name, and no 0 after what it copies, so a node after
-                // "i915" was read as "amdg" (never ours) and one after "virtio_gpu" was truncated at 7 bytes before this buffer was widened.
                 char name[32] = "";
                 p64 ver[8] = {0, 0, sizeof(name) - 1, (p64)name};
                 long fd;
@@ -1479,31 +1491,24 @@ static b32 gpu_start(positive bytes)
                         unsigned int err = (unsigned int)-fd & 255;
 
                         if (node == 0 || (open_error == 2 && err != 2))
-                                open_error = err, gpu_req_stat(path), memory_copy(gpu_req.node, path, sizeof(path));
+                                open_error = err, gpu_req_record(path, 0, gpu_req.family, gpu_req.device, 0);
                         continue;
                 }
                 version = gpu_raw((int)fd, 3u << 30 | 64u << 16 | 0x6400u, ver) == 0;
                 if (!version)
                         name[0] = 0;
                 seen = gpu_node_mix(seen, node, name);
-                if (!named) // the first node that opens is the one the table names when no node of a driver this file has is found
-                        named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1),
-                        memory_copy(gpu_req.name, name, sizeof(gpu_req.name) - 1);
+                if (!named)
+                        named = 1, gpu_req_record(path, name, gpu_req.family, gpu_req.device, 0);
                 if (!version || !(driver = gpu_backend_of(name)))
                 {
                         system_close((int)fd);
                         continue;
                 }
-                // A node of a driver this file has: the first of them is the one the table names, whether or not its chip has a kernel set.
                 family_error = driver->identify((int)fd, &family, &device);
                 if (!known_named)
-                {
-                        known_named = 1, memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.driver, name, sizeof(gpu_req.driver) - 1);
-                        memory_copy(gpu_req.name, name, sizeof(gpu_req.name) - 1);
-                        gpu_req.family = family, gpu_req.device = device;
-                }
+                        known_named = 1, gpu_req_record(path, name, family, device, 0);
                 known = 1, unasked |= family_error != 0;
-                // The candidates are the nodes whose chip has a kernel set; the one on the display's own device is taken (gpu_pick), else the first.
                 if (!family_error && driver->set(family) && candidates < GPU_NODES)
                         candidate_node[candidates] = node, candidate_backend[candidates] = driver,
                         gpu_bus_of((int)fd, candidate_bus[candidates], sizeof(candidate_bus[0])), candidates++;
@@ -1523,17 +1528,13 @@ static b32 gpu_start(positive bytes)
                         if (gpu_backend->identify(gpu.fd, &family, &device) == 0 && gpu_backend->set(family))
                         {
                                 gpu.family = family, gpu.device = device;
-                                memory_copy(gpu_req.node, path, sizeof(path)), gpu_req_stat(path), memory_copy(gpu_req.bus, candidate_bus[pick], sizeof(gpu_req.bus));
-                                memory_zero(gpu_req.driver, sizeof(gpu_req.driver)), memory_zero(gpu_req.name, sizeof(gpu_req.name));
-                                string_copy_bounded((string_address)gpu_req.driver, (string_address)gpu_backend->driver, sizeof(gpu_req.driver));
-                                string_copy_bounded((string_address)gpu_req.name, (string_address)gpu_backend->driver, sizeof(gpu_req.name));
-                                gpu_req.family = gpu.family, gpu_req.device = gpu.device;
+                                gpu_req_record(path, gpu_backend->driver, gpu.family, gpu.device, candidate_bus[pick]);
                         }
                         else
                                 system_close(gpu.fd), gpu.fd = -1;
                 }
                 else
-                        named = 0, open_error = (unsigned int)-picked & 255, gpu_req_stat(path), memory_copy(gpu_req.node, path, sizeof(path));
+                        named = 0, open_error = (unsigned int)-picked & 255, gpu_req_record(path, 0, gpu_req.family, gpu_req.device, 0);
         }
         gpu.family = gpu_req.family, gpu.device = gpu_req.device;
         do
@@ -1993,9 +1994,15 @@ static b32 gpu_memfd_sealed(int fd)
         return seals >= 0 && (seals & 2) && !(seals & 8);
 }
 
-// The dma-buf route: the pages [from, to) of a region's memfd, made a dma-buf by udmabuf, imported into the render node and mapped at at. False, with
-// gpu_map_why: 6 udmabuf refused (the error above the first byte), 7 the import refused, 8 the map refused. The pin goes on for the pages the card holds,
-// and off when that map is let go of (gpu_drop).
+static void gpu_map_record(positive from, positive to, positive at, unsigned int handle, b32 written, b32 dma, positive offset, void (*pin)(positive, b32))
+{
+        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at;
+        gpu_maps[gpu_map_count].bytes = to - from, gpu_maps[gpu_map_count].handle = handle, gpu_maps[gpu_map_count].used = gpu_tick;
+        gpu_maps[gpu_map_count].written = written, gpu_maps[gpu_map_count].dma = dma, gpu_maps[gpu_map_count].handed = 0;
+        gpu_maps[gpu_map_count].listed = 0, gpu_maps[gpu_map_count].offset = offset, gpu_maps[gpu_map_count].pin = pin;
+        gpu_map_count++, gpu_map_next = at + (to - from);
+}
+
 static b32 gpu_map_dmabuf(const struct gpu_region address_to r, positive from, positive to, positive at, b32 written)
 {
         long made = gpu_dmabuf_make(r->fd, from - r->base, to - from);
@@ -2009,43 +2016,26 @@ static b32 gpu_map_dmabuf(const struct gpu_region address_to r, positive from, p
         handle = (unsigned int)made;
         if ((e = gpu_backend->bind(handle, at, to - from, written)) != 0)
                 return gpu_close(handle), gpu_map_why = 8 | e << 8, false;
-        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
-        gpu_maps[gpu_map_count].handle = handle, gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].bytes = to - from;
-        gpu_maps[gpu_map_count].handed = 0, gpu_maps[gpu_map_count].listed = 0, gpu_maps[gpu_map_count].dma = 1, gpu_maps[gpu_map_count].offset = from - r->base;
-        gpu_maps[gpu_map_count].pin = r->pin;
-        gpu_map_count++, gpu_maps_dma++;
+        gpu_map_record(from, to, at, handle, written, 1, from - r->base, r->pin);
+        gpu_maps_dma++;
         if (r->pin)
                 r->pin(from - r->base, 1);
-        gpu_map_next = at + (to - from);
         return true;
 }
 
-/*
-        A map of the pages that hold [addr, addr + size). The compositor's own memory (gpu_region_of) whose memfd is sealed goes by the dma-buf route first, userptr
-        second (unless the owner's file gpu-own-userptr asks for the order before): a buffer of a dma-buf is one the kernel pinned when it was made, where it walks a userptr's pages at every
-        submit that names it (80 to 400 us a present for ten 1080p buffers) and answers EAGAIN when one moved; a registered memfd is mapped whole, so every picture in
-        it is one handle in a job's bo list; a dma-buf udmabuf refuses (EINVAL past its size_limit_mb, 64 MB a buffer by default: an 8K picture is 127 MB) is
-        asked of userptr after it, and counted (gpu_maps_own_user). Otherwise, and for any other memory, userptr first, and the dma-buf route only once userptr
-        is refused for good or switched off (gpu-nouserptr).
-*/
 static b32 gpu_map_try(const void *addr, positive size, b32 written)
 {
         positive from = (positive)addr & ~4095ull, to = ((positive)addr + size + 4095) & ~4095ull, at;
-        unsigned int handle = 0, e;
-        unsigned int old = 0;
+        unsigned int handle = 0, e, old = 0;
         long taken = 0;
         struct gpu_region region;
         b32 own = gpu_region_of(from, to, &region), first = own && !gpu_own_userptr && gpu_memfd_sealed(region.fd);
 
         if (first && region.whole && region.base + (region.bytes & ~4095ull) >= to && !(region.base & 4095))
                 from = region.base, to = region.base + (region.bytes & ~4095ull);
-        // A map the card writes is the only map of its pages: neither read nor written may overlap an active handed map of opposite or written kind,
-        // so a written map never lets read-only lookups write through, and a read map never aliases an in-flight written map.
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 if ((written || gpu_maps[i].written) && from < gpu_maps[i].to && gpu_maps[i].from < to && gpu_maps[i].handed && gpu_maps[i].used == gpu_tick)
-                        return gpu_map_why = 9, false; // (the records of an earlier tick are not run again: no job need wait for them)
-        // A map is let go of here (overlapping an existing map when either is written, or the oldest for room) only when no job given up on may still read it:
-        // else the map asked for is refused (10) and the processor draws, as it does for every present while that job runs.
+                        return gpu_map_why = 9, false;
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 if ((written || gpu_maps[i].written) && from < gpu_maps[i].to && gpu_maps[i].from < to)
                 {
@@ -2053,7 +2043,6 @@ static b32 gpu_map_try(const void *addr, positive size, b32 written)
                                 return gpu_map_why = 10, false;
                         gpu_drop(i--, GPU_GONE_OVERLAP);
                 }
-
         for (unsigned int i = 1; gpu_map_count == GPU_MAPS && i < GPU_MAPS; i++)
                 old = gpu_tick - gpu_maps[i].used > gpu_tick - gpu_maps[old].used ? i : old;
         if (gpu_map_count == GPU_MAPS && gpu_maps[old].used != gpu_tick)
@@ -2068,7 +2057,6 @@ static b32 gpu_map_try(const void *addr, positive size, b32 written)
                 return gpu_map_why = 2, false;
         if (first && gpu_map_dmabuf(&region, from, to, at, written))
                 return true;
-        // The userptr, unless the kernel has refused it before or the file says not to ask: then the table's pages go by the dma-buf route, and the rest are refused.
         if (!gpu_userptr_off && !gpu_userptr_gone)
         {
                 taken = -(long)gpu_backend->user(from, to - from, written ? GPU_USER_WRITTEN : GPU_USER_READ, &handle);
@@ -2076,29 +2064,22 @@ static b32 gpu_map_try(const void *addr, positive size, b32 written)
                 if (taken == 0)
                 {
                         if ((e = gpu_backend->bind(handle, at, to - from, written)) != 0)
-                                return gpu_close(handle), gpu_map_why = 4 | e << 8, false; // the buffer with it
-                        gpu_maps[gpu_map_count].from = from, gpu_maps[gpu_map_count].to = to, gpu_maps[gpu_map_count].va = at, gpu_maps[gpu_map_count].written = written;
-                        gpu_maps[gpu_map_count].handle = handle, gpu_maps[gpu_map_count].used = gpu_tick, gpu_maps[gpu_map_count].dma = 0;
-                        gpu_maps[gpu_map_count].bytes = to - from, gpu_maps[gpu_map_count].handed = 0, gpu_maps[gpu_map_count].listed = 0, gpu_maps[gpu_map_count].pin = 0;
-                        gpu_map_count++, gpu_maps_user++;
-                        if (first) // the dma-buf route refused it first: gpu_map_why is that refusal
+                                return gpu_close(handle), gpu_map_why = 4 | e << 8, false;
+                        gpu_map_record(from, to, at, handle, written, 0, 0, 0);
+                        gpu_maps_user++;
+                        if (first)
                                 gpu_maps_own_user++, gpu_maps_own_errno = gpu_map_why >> 8;
-                        gpu_map_next = at + (to - from);
                         return true;
                 }
                 if (taken == -19 || taken == -95 || taken == -38 ||
-                    (!gpu_maps_user && !gpu_userptr_ok && (taken == -22 || taken == -14 || taken == -1))) // ENODEV, EOPNOTSUPP, ENOSYS (or EINVAL/EFAULT/EPERM before any userptr succeeded)
+                    (!gpu_maps_user && !gpu_userptr_ok && (taken == -22 || taken == -14 || taken == -1)))
                         gpu_userptr_gone = 1;
                 else if (taken != -22 && taken != -14 && taken != -1)
-                {
-                        gpu_map_why = 3 | (unsigned int)-taken << 8;
-                        gpu_map_refused(from);
-                        return false;
-                }
+                        return gpu_map_why = 3 | (unsigned int)-taken << 8, gpu_map_refused(from), false;
         }
-        if (first) // the dma-buf route was asked first, and its refusal (gpu_map_why) stands
+        if (first)
                 return false;
-        if (!own) // (5: the pages are none of the compositor's memfds the route reaches)
+        if (!own)
                 return gpu_map_why = 5, false;
         return gpu_map_dmabuf(&region, from, to, at, written);
 }
@@ -2362,45 +2343,19 @@ struct gpu_args { positive s, d, g; unsigned int sp, dp, gp, w, op, v, x0, y0, r
 #define GPU_ARGS ((struct gpu_args address_to)((p8 address_to)gpu.at + GPU_ARGS_AT(gpu_slot))) // the arguments of the slot the job is built in
 typedef char gpu_slots_fit[sizeof(struct gpu_args) <= 256 ? 1 : -1]; // a slot's arguments in its 256 bytes (gpu_start puts the kernels after the last slot's)
 
-/*
-        The Intel set, Gen9 (graphics version 9). Every op has a kernel (copy, fill, tone, glass, cp, bx, scene, scale), and the encoder takes
-        ops 0 to 4, 6 and 7 (bx, op 5, has its kernel but no encoder yet). The set is NOT registered: GPU_I915_SETS above stays empty. The
-        self-test draws every record kind of a scene, and the Intel batch still refuses box, text, image, mix, close, turn and translate, so the
-        card would be marked broken on every start.
-
-        A fill is bytes: a surface of 4 * w bytes at 4 * dp bytes a row (a 32-bit pixel is four bytes, little endian), the colour's dword
-        the payload. The measured rules (Gen9, subtle-cottage): the surface base is 32-byte aligned and the span a multiple of 16 bytes,
-        since a block writes to the end of its 16-byte group. gpu_i915_fill_split reports a row's whole part (the card's interior) and
-        its head and tail; a pitch below the span, or one that is not a multiple of 16, cannot be split and is refused. The batch takes a
-        fill only when it is whole on the card (no head and no tail) and refuses the rest: the processor draws all of a refused fill.
-*/
-struct gpu_i915_split
-{
-        positive interior;             // the GPU's part of the row: its first byte, 32-byte aligned
-        unsigned int span, head, tail; // its span in bytes (a multiple of 16; 0 when none), and the bytes before and after it, for the processor
-};
-// 0: split (the interior may be empty: the whole span is the processor's); -1: refused (nothing to fill, a pitch below the span, or a pitch
-// that is not a multiple of 16).
+// Gen9 R8 byte-surface row split: 32-byte aligned interior, 16-byte multiple span, 64-byte pitch.
+struct gpu_i915_split { positive interior; unsigned int span, head, tail; };
 static int gpu_i915_fill_split(positive dst, unsigned int span, unsigned int pitch, struct gpu_i915_split *out)
 {
-        positive d32, stop, e16;
+        positive d32, stop = dst + span, e16 = stop & ~(positive)15;
 
         if (!span || pitch < span || (pitch & 63))
                 return -1;
         d32 = (dst + 31) & ~(positive)31;
-        stop = dst + span;
-        e16 = stop & ~(positive)15;
         out->interior = d32;
         if (d32 >= e16)
-        {
-                out->span = 0;
-                out->head = span;
-                out->tail = 0;
-                return 0;
-        }
-        out->span = (unsigned int)(e16 - d32);
-        out->head = (unsigned int)(d32 - dst);
-        out->tail = (unsigned int)(stop - e16);
+                return out->span = 0, out->head = span, out->tail = 0, 0;
+        out->span = (unsigned int)(e16 - d32), out->head = (unsigned int)(d32 - dst), out->tail = (unsigned int)(stop - e16);
         return 0;
 }
 
@@ -2772,28 +2727,23 @@ static const char *gpu_listed_words(unsigned int listed)
         return listed && listed == gpu_submit_serial ? ", listed in the job's bo list" : ", missing from the job's bo list";
 }
 
-// The fault's address, said as what it was in (gpu_fault_say): a map held (its handle, userptr or dma-buf, read or written, its span from and to, its use, and whether
-// the last submit's bo list had it), an import held (every submit names all), a map or an import let go of in the last sixteen (why, how many ticks ago, and for a map
-// whether that list had it), or none the table ever made.
 static void gpu_fault_say(positive at)
 {
         const unsigned int room = sizeof(gpu_fault);
         unsigned int n = gpu_text_put(gpu_fault, 0, room, "card faulted reading 0x");
 
-        n = gpu_text_num(gpu_fault, n, room, at, 16), n = gpu_text_put(gpu_fault, n, room, ": ");
+        n = gpu_text_put(gpu_fault, gpu_text_num(gpu_fault, n, room, at, 16), room, ": ");
         gpu_fault_import = 0;
         for (unsigned int i = 0; i < gpu_map_count; i++)
                 if (gpu_bo_contains(gpu_maps[i].va, gpu_maps[i].bytes, at))
                 {
-                        n = gpu_text_put(gpu_fault, n, room, "held map, handle ");
-                        n = gpu_text_num(gpu_fault, n, room, gpu_maps[i].handle, 10);
+                        n = gpu_text_num(gpu_fault, gpu_text_put(gpu_fault, n, room, "held map, handle "), room, gpu_maps[i].handle, 10);
                         n = gpu_text_put(gpu_fault, n, room, gpu_maps[i].dma ? ", dma-buf, " : ", userptr, ");
-                        n = gpu_text_put(gpu_fault, n, room, gpu_maps[i].written ? "written, " : "read, ");
-                        n = gpu_text_put(gpu_fault, n, room, "from 0x"), n = gpu_text_num(gpu_fault, n, room, gpu_maps[i].from, 16);
-                        n = gpu_text_put(gpu_fault, n, room, " to 0x"), n = gpu_text_num(gpu_fault, n, room, gpu_maps[i].to, 16);
+                        n = gpu_text_put(gpu_fault, n, room, gpu_maps[i].written ? "written, from 0x" : "read, from 0x");
+                        n = gpu_text_num(gpu_fault, n, room, gpu_maps[i].from, 16);
+                        n = gpu_text_num(gpu_fault, gpu_text_put(gpu_fault, n, room, " to 0x"), room, gpu_maps[i].to, 16);
                         n = gpu_text_put(gpu_fault, n, room, gpu_maps[i].from || gpu_maps[i].to ? ", used " : ", forgotten, used ");
-                        n = gpu_text_num(gpu_fault, n, room, gpu_tick - gpu_maps[i].used, 10);
-                        n = gpu_text_put(gpu_fault, n, room, " ticks ago");
+                        n = gpu_text_put(gpu_fault, gpu_text_num(gpu_fault, n, room, gpu_tick - gpu_maps[i].used, 10), room, " ticks ago");
                         gpu_text_put(gpu_fault, n, room, gpu_listed_words(gpu_maps[i].listed));
                         return;
                 }
@@ -2801,8 +2751,7 @@ static void gpu_fault_say(positive at)
                 if (gpu_bo_contains(gpu.imported_va[i], gpu.imported_bytes[i], at))
                 {
                         gpu_fault_import = gpu.imported_va[i];
-                        n = gpu_text_put(gpu_fault, n, room, "held import, handle ");
-                        n = gpu_text_num(gpu_fault, n, room, gpu.imported[i], 10);
+                        n = gpu_text_num(gpu_fault, gpu_text_put(gpu_fault, n, room, "held import, handle "), room, gpu.imported[i], 10);
                         gpu_text_put(gpu_fault, n, room, gpu.imported_dead[i] ? ", released" : ", live");
                         return;
                 }
@@ -2813,11 +2762,10 @@ static void gpu_fault_say(positive at)
                 if (gpu_gone[slot].bytes && at >= gpu_gone[slot].va && at - gpu_gone[slot].va < gpu_gone[slot].bytes)
                 {
                         gpu_fault_import = gpu_gone[slot].import ? gpu_gone[slot].va : 0;
-                        n = gpu_text_put(gpu_fault, n, room, gpu_gone[slot].import ? "import" : "map");
-                        n = gpu_text_put(gpu_fault, n, room, " handle "), n = gpu_text_num(gpu_fault, n, room, gpu_gone[slot].handle, 10);
-                        n = gpu_text_put(gpu_fault, n, room, " dropped "), n = gpu_text_num(gpu_fault, n, room, gpu_tick - gpu_gone[slot].tick, 10);
-                        n = gpu_text_put(gpu_fault, n, room, " ticks ago ");
-                        n = gpu_text_put(gpu_fault, n, room, gpu_gone_words[gpu_gone[slot].why]);
+                        n = gpu_text_put(gpu_fault, n, room, gpu_gone[slot].import ? "import handle " : "map handle ");
+                        n = gpu_text_num(gpu_fault, n, room, gpu_gone[slot].handle, 10);
+                        n = gpu_text_num(gpu_fault, gpu_text_put(gpu_fault, n, room, " dropped "), room, gpu_tick - gpu_gone[slot].tick, 10);
+                        n = gpu_text_put(gpu_fault, gpu_text_put(gpu_fault, n, room, " ticks ago "), room, gpu_gone_words[gpu_gone[slot].why]);
                         gpu_text_put(gpu_fault, n, room, gpu_gone[slot].import ? "" : gpu_listed_words(gpu_gone[slot].listed));
                         return;
                 }
@@ -3668,27 +3616,7 @@ static positive gpu_image_go(const unsigned int desc[8], unsigned int kind, unsi
         return gpu_go();
 }
 
-/*
-        The texture unit's resource (gfx10.3's SQ_IMG_RSRC_WORD0 to 7) for a client's picture of four bytes a pixel, as Mesa makes one to sample a buffer it
-        imported with a modifier (ac_build_gfx10_texture_descriptor and ac_set_mutable_tex_desc_fields; the fields' places from Mesa's registers/gfx10-rsrc.json):
-        the picture's first byte at va (its plane 0), width the row's pitch in pixels (the unit makes the tiled layout's pitch of it, which is the client's
-        when it is a whole number of the 64 KiB block's 128 pixels: the caller holds it to that), height its rows; format 8_8_8_8 UNORM (56) with the
-        channels as they lie (ARGB8888's bytes B, G, R, A out as they are; ABGR8888's red and blue selected the other way, so both come out in ARGB's order),
-        type 2D (9), one level, PERF_MOD 4 and RESOURCE_LEVEL 1 as Mesa sets them on gfx10. A picture without DCC (and unorm not asked) is read as
-        32_UINT (20) instead, one channel that is the pixel's word as it lies (the tiling is the same for any format of 32 bits a pixel), which the kernel
-        stores as it is, or with bytes 0 and 2 swapped (GPU_IMAGE_SWAP): no conversion of four floats a pixel. DCC is read as UNORM because the
-        compression's fast clears are values of the format's channels. The swizzle mode is the modifier's tile (Mesa's
-        ac_get_modifier_swizzle_mode: the modifier's TILE field is the hardware's SW_MODE). A modifier with DCC names its metadata at meta: the plane the
-        sampler reads, which is plane 2 (the pipe-aligned copy) when DCC_RETILE is set and plane 1 otherwise (Mesa's ac_surface_get_plane_offset), and it
-        sets COMPRESSION_EN, META_PIPE_ALIGNED (1 for the retiled copy; else the modifier's DCC_PIPE_ALIGN, as ac_modifier_fill_dcc_params makes it),
-        MAX_COMPRESSED_BLOCK_SIZE (the modifier's), MAX_UNCOMPRESSED_BLOCK_SIZE 256 bytes (2) and ALPHA_IS_ON_MSB (1: ac_alpha_is_on_msb is true for
-        B8G8R8A8 and R8G8B8A8 and their X forms on gfx10.3, whose component swaps are ALT and STD), and the metadata's address (bits 8 to 15 in word 6,
-        16 to 47 in word 7). The tile swizzle (a pipe and bank xor in the address's low bits) is 0: Mesa gives a shared buffer none.
-        Linear (modifier 0) is the resource of the self-test, the pitch then also in DEPTH (gfx10.3's custom pitch: Mesa writes it there for a linear 2D
-        image) and so the width a multiple of 64. False for what this does not read: a modifier not AMD's, a tile version not GFX9's or GFX10_RBPLUS's (an
-        RDNA1 card's GFX10 version is the card's own layout too, but its words here are unverified), a tile other than 64K_S (9), 64K_D (10), 64K_S_X (25)
-        or 64K_R_X (27), an address not of whole 256-byte blocks, a size past the unit's 16384.
-*/
+// AMD gfx10.3 SQ_IMG_RSRC_WORD0..7 texture descriptor for linear, 64K_S/D/S_X/R_X tiled, and DCC buffers.
 #define GPU_MOD_AMD 2ull
 static unsigned int gpu_amd_image(unsigned int desc[8], positive va, positive meta, unsigned int width, unsigned int height, p64 modifier, b32 swapped, b32 unorm)
 {

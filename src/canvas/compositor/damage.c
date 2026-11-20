@@ -1229,7 +1229,6 @@ static int compositor_lit_px(int percent)
         return px < 1 ? 1 : px;
 }
 
-// Aspect-preserving centered destination rectangle for a fullscreen window whose committed buffer is smaller/larger than its output.
 static int compositor_fullscreen_fit(int row, int *dx, int *dy, int *dw, int *dh)
 {
         unsigned int pw, ph, w, h;
@@ -1238,8 +1237,7 @@ static int compositor_fullscreen_fit(int row, int *dx, int *dy, int *dw, int *dh
         if (row < 0 || row >= (int)compositor_rows_in_use ||
             (!compositor.fullscreen[row] && compositor.layer[row] != WINDOW_LAYER_BACKGROUND))
                 return 0;
-        pw = compositor.picture_w[row], ph = compositor.picture_h[row];
-        w = compositor.w[row], h = compositor.h[row];
+        pw = compositor.picture_w[row], ph = compositor.picture_h[row], w = compositor.w[row], h = compositor.h[row];
         if (!pw || !ph || !w || !h || (pw == w && ph == h))
                 return 0;
         lw = w, lh = h;
@@ -1247,22 +1245,12 @@ static int compositor_fullscreen_fit(int row, int *dx, int *dy, int *dw, int *dh
                 lh = ((unsigned long)ph * lw + pw / 2) / pw;
         else
                 lw = ((unsigned long)pw * lh + ph / 2) / ph;
-        if (lw < 1)
-                lw = 1;
-        if (lh < 1)
-                lh = 1;
-        if (lw > w)
-                lw = w;
-        if (lh > h)
-                lh = h;
-        *dw = (int)lw;
-        *dh = (int)lh;
-        *dx = compositor.x[row] + (int)((w - lw) / 2);
-        *dy = compositor.y[row] + (int)((h - lh) / 2);
+        lw = lw < 1 ? 1 : lw > w ? w : lw, lh = lh < 1 ? 1 : lh > h ? h : lh;
+        *dw = (int)lw, *dh = (int)lh;
+        *dx = compositor.x[row] + (int)((w - lw) / 2), *dy = compositor.y[row] + (int)((h - lh) / 2);
         return 1;
 }
 
-// Screen coordinates mapped into a window's surface coordinates (scaling through compositor_fullscreen_fit when active).
 static void compositor_window_point(int row, int sx, int sy, int *wx, int *wy)
 {
         int dx, dy, dw, dh;
@@ -1271,23 +1259,14 @@ static void compositor_window_point(int row, int sx, int sy, int *wx, int *wy)
         {
                 int rx = sx - dx, ry = sy - dy;
 
-                if (rx < 0)
-                        rx = 0;
-                else if (rx >= dw)
-                        rx = dw - 1;
-                if (ry < 0)
-                        ry = 0;
-                else if (ry >= dh)
-                        ry = dh - 1;
+                rx = rx < 0 ? 0 : rx >= dw ? dw - 1 : rx, ry = ry < 0 ? 0 : ry >= dh ? dh - 1 : ry;
                 *wx = (int)((long)rx * (long)compositor.picture_w[row] / (long)dw);
                 *wy = (int)((long)ry * (long)compositor.picture_h[row] / (long)dh);
                 return;
         }
-        *wx = sx - compositor.x[row];
-        *wy = sy - compositor.y[row];
+        *wx = sx - compositor.x[row], *wy = sy - compositor.y[row];
 }
 
-// Inverse of compositor_window_point: surface coordinates mapped back to screen coordinates (0 if outside the surface).
 static int compositor_screen_point(int row, int wx, int wy, int *sx, int *sy)
 {
         int dx, dy, dw, dh;
@@ -1302,8 +1281,7 @@ static int compositor_screen_point(int row, int wx, int wy, int *sx, int *sy)
         }
         if (wx < 0 || wx >= (int)compositor.w[row] || wy < 0 || wy >= (int)compositor.h[row])
                 return 0;
-        *sx = compositor.x[row] + wx;
-        *sy = compositor.y[row] + wy;
+        *sx = compositor.x[row] + wx, *sy = compositor.y[row] + wy;
         return 1;
 }
 

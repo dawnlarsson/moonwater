@@ -1,65 +1,27 @@
-/*
-        The card's part of a present: the render node's state as the compositor keeps it, the scene and the window
-        lists drawn on it, a present's jobs put on it and their fences (compositor_card_add, _go, _fence_for), the turn of
-        a screen on it, the issues it says in the table, its refusals and hangs, and its wake after a sleep.
-
-        The host side only: the driver of the render node, its buffers and its jobs are gpu.c's, which compositor.c
-        includes before everything (or stands in for when the build has no GPU, so nearly all of this file is inside
-        MOONWATER_GPU_C), and the records it draws are made by compose.c. It needs the compositor's state, compose.c's
-        records and scanout.c's pins and turns, so it comes after scanout.c; what it asks of session.c and input.c is
-        declared before the call. Called by present.c (compositor_gpu_present and its failures), scanout.c (a refusal,
-        the turn), kms.c, session.c (the resume), manage.c (the lists), input.c (the wake), compositor.c's loop (the late
-        job) and wayland_host.c.
-*/
-
-// Whether the present in hand was drawn by the card (set by compositor_gpu_present, read by compositor_metric_note; cleared at each present).
+/* Host-side GPU orchestration: scene submission, async steps/fences, list rendering, clocks, and external dmabuf import cache. */
 static int compositor_present_on_card;
 
 #ifdef MOONWATER_GPU_C
-/*
-        The present on the GPU (src/canvas/gpu.c): the frames of a present as the records of its scene (compositor_gpu_frames) and the pointer when the scene
-        has it (software), drawn by the card straight into the scanout -- the display node's dumb buffer, which the render node is given by PRIME, or a headless file's pages as a userptr buffer -- over the union of
-        the damage, and the card told what changed as it is when the processor drew it. It is for what it draws exactly as the processor does (every frame is a
-        window with a picture at its own size, a tab, a line, a close button); anything else, a finger's mark, a scaled landing, a turned screen, a
-        mode whose width is not a multiple of 4, a card of another family, a refusal or a hang, is the processor's, for that present, and three hangs in a row
-        end the GPU's compose until the setting is turned off and on again (compositor_gpu_settings). Headless it is for -G.
-*/
-static int compositor_gpu; // GPU rendering as the setting has it (below)
-static positive compositor_slept_clock(void); // the boot clock's lead over the monotonic clock (the wake check, below)
-static void compositor_gpu_restart_check(void); // started again after a sleep (below)
+static int compositor_gpu;
+static positive compositor_slept_clock(void);
+static void compositor_gpu_restart_check(void);
 static void compositor_say(string_address what, bipolar value);
 #define COMPOSITOR_GPU_OPS_AT GPU_DATA
-// A window's list drawn without a wait (compositor_card.lists_nowait) cuts its records into the second half of the ops' megabyte, a present into the first,
-// so neither writes records a job of the other may still read (a job given up on as late runs on).
 #define COMPOSITOR_GPU_LIST_OPS (512 << 10)
 #define COMPOSITOR_GPU_LIST_OPS_AT (COMPOSITOR_GPU_OPS_AT + COMPOSITOR_GPU_LIST_OPS)
 #define COMPOSITOR_GPU_TABLES_AT (GPU_DATA + (1 << 20))
 #define COMPOSITOR_GPU_BINS_AT (GPU_DATA + (2 << 20))
 static struct
 {
-        int up, dead, force, told; // started; given up for good (no card, or untrusted); headless is to use it (-G); said once that it composes
-        enum compositor_gpu_why dead_why; // why it is given up: no card, or untrusted
-        unsigned int failures;     // refused jobs in a row that are not hangs (three cool the card down)
-        b64 cool_until;            // the card is not tried again before this monotonic time (0: it is)
-        unsigned int cool_steps;   // how many cool-downs there were (a hang's, and a run of refusals')
-        b64 hung_at;               // when the last hang was (0: none): a second one within a minute gives the card up for the session (compositor_gpu_job_failed)
-        b64 blamed_at;             // when the first of the hangs blamed on a client in this minute was, and how many there were (compositor_gpu_job_failed)
-        unsigned int blamed;
-        int hung_off;              // given up for the session after two hangs: the processor draws the desktop until the session ends
-        positive out, out_key;     // the scanout's address and what it was made from (a handle, or the file's pointer): the one drawn into now
-        positive cache[2], cache_key[2]; // the card's imports of the two scanouts (compositor_plate_swap trades them), and the one to make next
-        int cache_next;
-        positive turn_va[WINDOWS_OUTPUTS], turn_key[WINDOWS_OUTPUTS]; // the same for the buffers Canvas turns screens in
-        b32 restart_due;           // the card is started again before the next present draws on it (the machine slept: compositor_gpu_resumed)
-        positive slept_seen;       // the boot clock's lead over the monotonic clock at the last look (compositor_gpu_slept)
-        b64 late_first, late_next; // the late probe: when the first look that found no card was, and when the next look is due
-        positive settled;          // a start that failed by what the nodes are (gpu_req.settled): the nodes it saw (gpu_req.nodes), 0 for none. Not started
-                                   // again while the nodes are the same (the late probe looks at the nodes, not at the card)
-        positive said;             // the last failed start's outcome said in the log (compositor_gpu_failed): a start that fails the same way is not said again
+        int up, dead, force, told, hung_off, cache_next;
+        enum compositor_gpu_why dead_why;
+        unsigned int failures, cool_steps, blamed;
+        b64 cool_until, hung_at, blamed_at, late_first, late_next;
+        positive out, out_key, cache[2], cache_key[2], turn_va[WINDOWS_OUTPUTS], turn_key[WINDOWS_OUTPUTS];
+        b32 restart_due;
+        positive slept_seen, settled, said;
 } compositor_gpu_state;
 
-// The presents the card drew and the processor drew, and the reasons the card was refused (moonwater canvas says them, from the table). A reason
-// is said in the log the first time, and then at most once a minute with its count (checked each 64th refusal, so a clock read is rare).
 static struct
 {
         unsigned int drawn, processor, why[COMPOSITOR_GPU_WHY_COUNT];
@@ -355,20 +317,22 @@ static void compositor_gpu_fail(unsigned int flags)
         compositor_gpu_job_failed();
 }
 
-// The scanout's address for the GPU, made when the scanout is new.
+// Look up or create a writable GPU mapping for ptr[0..bytes) (mapping map_bytes on miss); recovers on gpu_lost if requested.
+static positive gpu_host_va_written(const void *ptr, positive bytes, positive map_bytes, int recover)
+{
+        positive at = gpu_va_written(ptr, bytes);
+
+        if (!at && (!gpu_map_written(ptr, map_bytes) || !(at = gpu_va_written(ptr, bytes))) && recover && gpu_lost)
+                compositor_gpu_recover();
+        return at;
+}
+
 static positive compositor_gpu_output(void)
 {
         positive key = compositor.card < 0 ? (positive)compositor.scanout : compositor.scanout_handle;
 
         if (compositor.card < 0)
-        {
-                // The card writes the scanout: its address is a written map's (a read map of the same pages is registered read-only, and a write through it faults).
-                positive at = gpu_va_written(compositor.scanout, compositor.scanout_bytes);
-
-                if (!at && gpu_map_written(compositor.scanout, compositor.scanout_bytes))
-                        at = gpu_va_written(compositor.scanout, compositor.scanout_bytes);
-                compositor_gpu_state.out = at, compositor_gpu_state.out_key = key;
-        }
+                compositor_gpu_state.out = gpu_host_va_written(compositor.scanout, compositor.scanout_bytes, compositor.scanout_bytes, 0);
         else
         {
                 int at = compositor_gpu_state.cache[0] && compositor_gpu_state.cache_key[0] == key ? 0 :
@@ -382,8 +346,9 @@ static positive compositor_gpu_output(void)
                         compositor_gpu_state.cache[at] = gpu_import(compositor.card, compositor.scanout_handle, compositor.scanout_bytes);
                         compositor_gpu_state.cache_key[at] = key;
                 }
-                compositor_gpu_state.out = compositor_gpu_state.cache[at], compositor_gpu_state.out_key = key;
+                compositor_gpu_state.out = compositor_gpu_state.cache[at];
         }
+        compositor_gpu_state.out_key = key;
         return compositor_gpu_state.out;
 }
 
@@ -601,17 +566,8 @@ static enum compositor_gpu_why compositor_gpu_scale_frames(const struct composit
                                 compositor_gpu_scaled_pool[used].memory = (unsigned int *)p;
                         }
                 }
-                if (!(dst_va = gpu_va_written(compositor_gpu_scaled_pool[used].memory, bytes)) &&
-                    (!gpu_map_written(compositor_gpu_scaled_pool[used].memory, compositor_gpu_scaled_pool[used].bytes) ||
-                     !(dst_va = gpu_va_written(compositor_gpu_scaled_pool[used].memory, bytes))))
-                {
-                        if (gpu_lost)
-                                compositor_gpu_recover();
+                if (!(dst_va = gpu_host_va_written(compositor_gpu_scaled_pool[used].memory, bytes, compositor_gpu_scaled_pool[used].bytes, 1)))
                         return COMPOSITOR_GPU_WHY_PICTURE;
-                }
-                // memory_resample_u32_rect's walk (its C is resample_reference): the position of the first column is half a cell in, and it steps by the floored step
-                // in 24 bit fractions. A frame drawn whole starts at 0, 0, so these are the columns and rows of the whole frame; the processor's walk of a part of
-                // it (a damage rectangle, a frame partly off the output) starts its position at the part's, which can differ from this by a source cell here and there.
                 {
                         positive step_x = ((positive)f->source_w << 24) / (positive)f->width, fx = ((positive)f->source_w << 23) / (positive)f->width;
                         positive step_y = ((positive)f->source_h << 24) / (positive)f->height, fy = ((positive)f->source_h << 23) / (positive)f->height;
@@ -1283,15 +1239,8 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
                 bases[slot] = cover_va - (view.cover_at - COMPOSITOR_GPU_LIST_REACH);
         }
         bytes = 4 * ((positive)pitch * (positive)(height - 1) + w4);
-        if (!(picture_va = gpu_va_written(picture, bytes)))
-        {
-                if (!gpu_map_written(picture, bytes) || !(picture_va = gpu_va_written(picture, bytes)))
-                {
-                        if (gpu_lost)
-                                compositor_gpu_recover();
-                        return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
-                }
-        }
+        if (!(picture_va = gpu_host_va_written(picture, bytes, bytes, 1)))
+                return compositor_list_why = COMPOSITOR_LIST_MAPS, 0;
         if (compositor_card.lists_nowait)
         {
                 if (!compositor_card_list_submit(row, made, picture_va, (unsigned int)pitch, w4, (unsigned int)height, x0, y0, x1, y1))
@@ -1304,48 +1253,20 @@ static int compositor_gpu_list_render_bytes(int row, unsigned char *list, unsign
                 return compositor_list_why = COMPOSITOR_LIST_JOB, 0;
         }
         compositor_gpu_state.failures = 0;
-        damage[0] = x0, damage[1] = y0, damage[2] = x1 - x0, damage[3] = y1 - y0; // as the table's damage is: the place and the size
+        damage[0] = x0, damage[1] = y0, damage[2] = x1 - x0, damage[3] = y1 - y0;
         return 1;
 }
 
-/*
-        The card's clocks while a person's input arrives. A card that composes sleeps between jobs: on the box's Radeon (Granite Ridge, family 149) the
-        driver powers the graphics block off when it is idle (GFXOFF) and runs it at 600 MHz, and the first job after a pause pays for its waking, in
-        the client's drawing of the frame that answers a key as much as in the present that composes it. So a key, a move, a wheel or a finger holds the
-        card at compositor_gpu_clocks.level (gpu_clocks: the driver's hold, on a context of its own, which the kernel lets go of if the compositor dies)
-        until COMPOSITOR_GPU_CLOCKS_HOLD after the last of them; at rest the driver chooses again, as before. The level held is none
-        (COMPOSITOR_GPU_CLOCKS_LEVEL 0): input wakes the card's idle clock with a tiny job (gpu_wake, only when it has been idle a while) and the
-        driver chooses the clock itself, as it does at rest. The level was AMDGPU_CTX_STABLE_PSTATE_MIN_SCLK, the block kept awake at its lowest
-        clock (min = max = the lowest, smu_v13_0_5): the level is the device's, so every client's drawing was held there too, and while someone
-        plays input never stops. Half-Life 2 on box (d2_coast_01, the harbor, a live uinput walk with turns, strafes and shots, team tools/gamerig.sh)
-        ran at 66.8 fps (frame p99 34.7 ms, sclk 600 MHz for 25 of 46 s) with mouse-to-photon 112 ms p50, 135 p99; with no hold 113.9 fps (p99
-        11.1 ms, 2200 MHz all the run) and 38.0 ms p50, 45.8 p99; held at the peak (AMDGPU_CTX_STABLE_PSTATE_PEAK) 114.5 fps and 35.0 ms, for 14 W
-        more at the desktop. The menu, which reads no input, never showed it (175 fps). The hold stays for the owner's experiments (a level
-        compiled in), and the driver takes milliseconds to answer, so the asks go to a thread
-        of their own (compositor_gpu_clocks_run, started at the first; with none to be had, asked in place), and the loop only says what it wants:
-        once the turn's input is forwarded and written to the clients' sockets (compositor_gpu_input_turn), so that nothing of it ever waits, and
-        the block wakes while the client reads the input; the hold ends at its time (compositor_gpu_clocks_at, compositor_gpu_clocks_tick). Where the
-        driver has no hold or refuses it (another context holds the device's level: EBUSY), the card's idle clock is woken by a tiny job instead, as
-        it was (gpu_wake), after the forward too, and the hold is not asked again on that card. Nothing is held with canvas gpu off, a card not up or
-        dead, or the owner's file /run/moonwater/gpu-clocks-off (looked for at the start).
-*/
+// GPU clock hold & wake on input / fullscreen game (async worker thread avoids blocking compositor loop).
 #define COMPOSITOR_GPU_CLOCKS_HOLD 500000000ull
 #define COMPOSITOR_GPU_CLOCKS_LEVEL 0u
 static struct
 {
-        unsigned int level;  // the level input holds (0: none, the owner's file)
-        b32 held, refused;   // the level is asked held; the driver refused it on the card of epoch (not asked again until the card starts again)
-        b32 input;           // input came this turn: the hold (or the wake) is asked once it is forwarded
-        unsigned int epoch;  // the card the hold, or the refusal, is of (gpu_epoch)
-        positive until;      // when the hold ends
-        b32 asked;           // the asks the loop made (bumped with each; the thread's word), and the last the thread answered, with its errno
-        b32 answered, error;
-        unsigned int want, want_epoch; // the last ask not yet taken: the level, the card's epoch, and a descriptor of the card of the answerer's own
-        int want_fd;                   // (a duplicate made at the ask, -1 once taken), the three written and taken under want_lock
-        b32 started, inline_asks; // the thread was tried; the asks are made in place (no thread to be had, or the checks)
-        unsigned int want_lock;
-        b32 game, game_off; // PEAK clocks held while a fullscreen game is active (unless /run/moonwater/gpu-clocks-off)
-} compositor_gpu_clocks = {COMPOSITOR_GPU_CLOCKS_LEVEL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0};
+        unsigned int level, epoch, want, want_epoch, want_lock;
+        b32 held, refused, input, asked, answered, error, started, inline_asks, game, game_off;
+        positive until;
+        int want_fd;
+} compositor_gpu_clocks = {.level = COMPOSITOR_GPU_CLOCKS_LEVEL, .want_fd = -1};
 
 static void compositor_gpu_clocks_lock(void)
 {

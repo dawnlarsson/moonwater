@@ -1,37 +1,4 @@
-/*
-        The card and its screens: the displays file's lines (a screen's scale, rate, turn and place), the connectors and
-        their modes and names, the space the screens are laid in and its scanout and second plate, a turned screen's own
-        buffer, the screens taken at the start and again (compositor_space_take), the card found and opened, and the
-        pointer's plane.
-
-        The pointer's plane (compositor_sway_*, compositor_pointer_dynamic, _now and _press, compositor_cursor_* and
-        compositor_drawn_x and _y) is here because it is set up with the card and moved across its crtcs, but it is
-        the pointer's: what it shows is pointer.c's and where the hand is, input.c's. What a window does when the space
-        changes is manage.c's (compositor_space_carry asks it), the rules of the space are outputs.c's, and the uevent
-        that says a screen came is read in compositor.c's loop. It needs the compositor's state and the kernel's
-        interfaces, outputs.c and pointer.c, and scanout.c and present.c, since a take drops what was shown and presents
-        the new space at once; what it asks of session.c, manage.c, input.c and compositor.c's tail is declared before
-        the call. Called by compositor.c's startup and loop (the card, the take, the pointer's tick), damage.c and
-        manage.c (a screen's scale), input.c and session.c (the pointer moved) and wayland_host.c.
-*/
-
-/*
-        The card, and every screen it has connected, at the mode Canvas left
-        on each.
-
-        Taking Canvas's own modes is what keeps the switch a plane change and
-        not a modeset, and what keeps every coordinate the same on both sides
-        of it. A connector with no crtc driving it takes a free crtc it can
-        have and its first mode (the kernel lists the preferred one first).
-
-        One scanout is the whole space the screens make (compositor.width by
-        compositor.height), and each screen's crtc shows its own rectangle of
-        it: the scene is composed once across them, a window that straddles
-        two is in both, and one DIRTYFB a frame is one commit that takes in
-        every screen showing what changed, so no screen waits on another's
-        vertical blank in turn. The rows of the space no screen shows (under a
-        shorter screen) are composed with the rest and seen by none.
-*/
+/* KMS outputs, displays config, scanout buffers, hotplug/VRR/DPMS, cursor plane, and native DRM/syncobj helpers. */
 static void compositor_kmsg(string_address text, positive value, string_address tail);
 static void compositor_text(const char *path, char *text, unsigned int room);
 static int compositor_turn_buffer(unsigned int at, unsigned int width, unsigned int height, struct drm_dumb *retired);
@@ -45,12 +12,9 @@ static void compositor_room_follow(void);
 static void compositor_vrr_forget(void);
 static int compositor_virtual(void);
 
-// The displays file as the compositor has it: its lines, read when the screens are taken (compositor_displays_read),
-// and how many.
 static struct windows_display compositor_display[WINDOWS_DISPLAYS];
 static unsigned int compositor_displays;
 
-// Appends text to line at at, bounded; answers where it ends.
 static unsigned int compositor_said(char *line, unsigned int at, const char *text)
 {
         for (unsigned int each = 0; text[each] && at < 127; each++)
@@ -58,28 +22,9 @@ static unsigned int compositor_said(char *line, unsigned int at, const char *tex
         return at;
 }
 
-/*
-        The mode a screen is driven at for the rate its displays line asks for: the first mode it lists at the size it
-        has now and that rate (windows_mode_at), in mode. A rate no mode of the screen has keeps the mode it has, and
-        the kernel log says so. A preferred rate, which a screen with no line has too, is the fastest mode it lists at that
-        size, the first of those (compositor_fastest_at; or the one the kernel's command line forced there, video=), which a
-        screen at another rate than it goes back to: the mode it has is the one it was switched to, so keeping that was no
-        switch back, and the settings' first rate, the recommended one, never took after another. The settings write that
-        rate as no line at all once nothing else of the screen is asked (a line of the defaults is not kept), so a screen
-        with none is not a screen whose mode is its own to keep. The fastest and not the first: the kernel lists the mode
-        the monitor prefers first, and a 144 Hz monitor's is often its 60 Hz one, which Canvas had passed over for the 144
-        at the start and the compositor then drove the screen at, a frame every 16.7 ms. An interlaced or doubled mode
-        is no rate of the screen's (its refresh is its fields').
-*/
 #define COMPOSITOR_MODE_INTERLACED 48u // DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN
 
-/*
-        A mode's refresh period in nanoseconds, as its timings make it: htotal by vtotal pixels at clock kHz (twice the fields of
-        an interlaced mode, half of a doubled one and of one scanned vscan times), rounded to the nearest; 1e9 / vrefresh when the
-        timings are not there. The vrefresh the kernel gives is a whole number of Hz, and its period was every frame's and every
-        presentation feedback's refresh: box's 144 Hz mode measures 6957 us a vblank, the whole number said 6944, and a client
-        that steps from presented + refresh was 13 us a frame early, a frame of drift every 530 frames.
-*/
+// Mode refresh period in ns from timings (fallback: 1e9 / refresh).
 static positive compositor_mode_period(const struct compositor_mode *mode, positive refresh)
 {
         positive pixels = (positive)mode->htotal * (positive)mode->vtotal * 1000000ull, clock = mode->clock;
@@ -112,54 +57,44 @@ static void compositor_refresh_pick(const char *name, unsigned int count, const 
 {
         const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, name,
                                                                    windows_name_length(name));
-        unsigned int rates[128][3], at, asked = display ? display->refresh : 0;
+        unsigned int rates[128][3], cap = count < 128 ? count : 128, at, asked = display ? display->refresh : 0;
         char line[160];
         unsigned int length;
 
-        for (at = 0; at < count && at < 128; at++)
+        for (at = 0; at < cap; at++)
                 rates[at][0] = modes[at].hdisplay, rates[at][1] = modes[at].vdisplay, rates[at][2] = modes[at].vrefresh;
-        at = asked ? windows_mode_at(rates, count < 128 ? count : 128, mode->hdisplay, mode->vdisplay, asked)
-                   : compositor_fastest_at(modes, count < 128 ? count : 128, mode->hdisplay, mode->vdisplay);
-        // No rate asked: the mode the command line forced at this size, if one was, is the screen's own.
-        for (unsigned int forced = 0; !asked && forced < count && forced < 128; forced++)
+        at = asked ? windows_mode_at(rates, cap, mode->hdisplay, mode->vdisplay, asked)
+                   : compositor_fastest_at(modes, cap, mode->hdisplay, mode->vdisplay);
+        for (unsigned int forced = 0; !asked && forced < cap; forced++)
                 if ((modes[forced].type & COMPOSITOR_MODE_USERDEF) && rates[forced][0] == mode->hdisplay &&
                     rates[forced][1] == mode->vdisplay)
                 {
                         at = forced;
                         break;
                 }
-        if (at < count && at < 128)
+        if (at < cap)
         {
                 *mode = modes[at];
                 return;
         }
         if (!asked)
                 return;
-        length = compositor_said(line, 0, "compositor: canvas.displays: no mode of ");
-        length = compositor_said(line, length, name);
-        length = compositor_said(line, length, " at ");
+        length = compositor_said(line, compositor_said(line, compositor_said(line, 0, "compositor: canvas.displays: no mode of "), name), " at ");
         length += positive_into_string((p8 *)line + length, display->refresh);
-        length = compositor_said(line, length, " Hz, kept the mode it has");
-        line[length] = 0;
+        line[compositor_said(line, length, " Hz, kept the mode it has")] = 0;
         compositor_kmsg((string_address)line, 0, (string_address) "");
 }
 
-// Says on the kernel log that a screen is turned degrees, by the card's rotation (hardware) or by Canvas's (software).
 static void compositor_turn_say(const char *name, unsigned int degrees, int hardware)
 {
         char line[160];
-        unsigned int length = compositor_said(line, 0, "compositor: canvas.displays: ");
+        unsigned int length = compositor_said(line, compositor_said(line, compositor_said(line, 0, "compositor: canvas.displays: "), name), " turned ");
 
-        length = compositor_said(line, length, name);
-        length = compositor_said(line, length, " turned ");
         length += positive_into_string((p8 *)line + length, degrees);
-        length = compositor_said(line, length, hardware ? " degrees by hardware rotation" : " degrees by software rotation");
-        line[length] = 0;
+        line[compositor_said(line, length, hardware ? " degrees by hardware rotation" : " degrees by software rotation")] = 0;
         compositor_kmsg((string_address)line, 0, (string_address) "");
 }
 
-// The degrees a screen is turned by its displays line (0 when it has none): the screen is laid out at its turned size.
-// The percent a screen's displays line draws it at: the program's boot scale (-s, else 100) when it has no line or none for it.
 static int compositor_display_scale(const char *name)
 {
         const struct windows_display *display = windows_display_of(compositor_display, compositor_displays, name,
@@ -168,13 +103,11 @@ static int compositor_display_scale(const char *name)
         return display && display->scale ? (int)display->scale : compositor.boot_scale ? compositor.boot_scale : WINDOWS_SCALE_DEFAULT;
 }
 
-// The percent screen at is drawn at (the desktop's when there is no such screen).
 static int compositor_output_scale(int at)
 {
         return at >= 0 && at < (int)compositor.outputs ? compositor.output[at].scale : compositor.scale;
 }
 
-// The percent a window is drawn at: the scale of the screen it is mostly on, which is what a window straddling a seam takes.
 static int compositor_row_scale(int row)
 {
         unsigned int count;
@@ -192,48 +125,36 @@ static unsigned int compositor_display_degrees(const char *name)
         return display ? display->rotation : 0;
 }
 
-/*
-        What the card has connected: each connector that says it is connected
-        and lists a mode, in the card's order, with its name, the crtc that
-        drives it now and the mode that crtc is at (Canvas's: current), or the
-        crtcs it could have and its first mode. GETCONNECTOR, asked by the
-        card's master, probes the connector again, which is what a hotplug
-        is to be answered by.
-*/
-/*
-        The card's connectors are as many as it says (a dock's MST ports add theirs), read into a list that grows (compositor_connector_ids,
-        a doubling at a time); its CRTCs are WINDOWS_OUTPUTS at most, the kernel's own bound. Where a card of more than 16 of either had no
-        screen at all.
-*/
 static unsigned int *compositor_connector_ids;
 static unsigned long compositor_connector_bytes;
-
-// Room for want connector ids: the list, or 0 when the memory is not there.
-static unsigned int *compositor_connectors_room(long want)
-{
-        void *p = compositor_connector_ids;
-        unsigned long need = (unsigned long)(want < 64 ? 64 : want) * sizeof(unsigned int);
-
-        if (!mem_buf_grow(&p, &compositor_connector_bytes, need, MEM_BUF_GROW_2X))
-                return 0;
-        compositor_connector_ids = (unsigned int *)p;
-        return compositor_connector_ids;
-}
-
-// The modes of a connector, read into a list that grows as the connectors' list does (compositor_modes_room): a screen may list more than 128.
 static struct compositor_mode *compositor_modes_list;
 static unsigned long compositor_modes_bytes;
 
-// Room for want modes: the list, or 0 when the memory is not there.
+static void *kms_grow_list(void **ptr, unsigned long *bytes, long want, long min_n, unsigned long elem)
+{
+        unsigned long need = (unsigned long)(want < min_n ? min_n : want) * elem;
+
+        return mem_buf_grow(ptr, bytes, need, MEM_BUF_GROW_2X) ? *ptr : 0;
+}
+
+static unsigned int *compositor_connectors_room(long want)
+{
+        void *p = compositor_connector_ids;
+        unsigned int *out = (unsigned int *)kms_grow_list(&p, &compositor_connector_bytes, want, 64, sizeof(unsigned int));
+
+        if (out)
+                compositor_connector_ids = out;
+        return out;
+}
+
 static struct compositor_mode *compositor_modes_room(long want)
 {
         void *p = compositor_modes_list;
-        unsigned long need = (unsigned long)(want < 128 ? 128 : want) * sizeof(struct compositor_mode);
+        struct compositor_mode *out = (struct compositor_mode *)kms_grow_list(&p, &compositor_modes_bytes, want, 128, sizeof(struct compositor_mode));
 
-        if (!mem_buf_grow(&p, &compositor_modes_bytes, need, MEM_BUF_GROW_2X))
-                return 0;
-        compositor_modes_list = (struct compositor_mode *)p;
-        return compositor_modes_list;
+        if (out)
+                compositor_modes_list = out;
+        return out;
 }
 
 #define COMPOSITOR_MODE_PREFERRED 8u // DRM_MODE_TYPE_PREFERRED
@@ -1059,27 +980,34 @@ static void compositor_damage_space(void)
 static void compositor_scale_fit(void);
 static void compositor_scale_set(int scale);
 
-/*
-        The scale each screen's displays line asks, taken by the screens as they are driven. A scale is no mode and no
-        place, so when it is all that changed the screens are not taken again (compositor_space_take): no scanout and
-        no commit, and this follows it instead: each screen's scale, the desktop's (the primary's) and the table's, the
-        pointer's plane painted again at the scale, the windows laid again in the room the bands leave at it, the
-        bands' memory for the size they are drawn at, and every pixel drawn again. A window's own scale is its screen's,
-        counted into the table as it is next drawn (compositor_frame_of), which also knocks it. True when one changed.
-*/
+static void kms_snapshot_outputs(int (*was)[4], char (*names)[WINDOWS_OUTPUT_NAME], unsigned int *crtc, unsigned int *count)
+{
+        unsigned int n = compositor.outputs < WINDOWS_OUTPUTS ? compositor.outputs : WINDOWS_OUTPUTS;
+
+        for (unsigned int at = 0; at < n; at++)
+        {
+                memory_copy(was[at], compositor.screen[at], sizeof(was[at]));
+                memory_copy(names[at], compositor.output[at].name, WINDOWS_OUTPUT_NAME);
+                if (crtc)
+                        crtc[at] = compositor.output[at].crtc;
+        }
+        if (count)
+                *count = n;
+}
+
+// Apply scale-only changes from canvas.displays without a modeset; returns 1 if any changed.
 static int compositor_scales_take(void)
 {
         int was[WINDOWS_OUTPUTS][4], changed = 0;
         char names[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
 
+        kms_snapshot_outputs(was, names, 0, 0);
         for (unsigned int at = 0; at < compositor.outputs && at < WINDOWS_OUTPUTS; at++)
         {
                 int scale = compositor_display_scale(compositor.output[at].name);
 
                 changed |= scale != compositor.output[at].scale;
                 compositor.output[at].scale = scale;
-                memory_copy(was[at], compositor.screen[at], sizeof(was[at]));
-                memory_copy(names[at], compositor.output[at].name, WINDOWS_OUTPUT_NAME);
         }
         if (!changed)
                 return 0;
@@ -1088,53 +1016,29 @@ static int compositor_scales_take(void)
         return 1;
 }
 
-/*
-        The screens taken: what the card has connected, laid by the
-        arrangement, one scanout as large as the space they make, and each
-        crtc showing its screen's rectangle of it. A screen the card will not
-        drive -- one that puts the space past the largest framebuffer the card
-        makes, or whose mode a commit refuses -- is left dark and the rest laid
-        again without it, so one screen that cannot be shown takes none of the
-        others down with it. The first take starts from Canvas's state; a
-        later one (a screen plugged in or out, the arrangement changed) is
-        nothing when nothing changed, and otherwise carries the windows and
-        the pointer to the space it makes. Answers 0, or a negative errno
-        when not one screen could be shown.
-*/
+// Probe connected outputs, lay out the desktop scanout, and commit each CRTC (dropping refused outputs).
 static b32 compositor_space_take(int first)
 {
         struct compositor_connected found;
         int rects[WINDOWS_OUTPUTS][4], was[WINDOWS_OUTPUTS][4];
         char was_names[WINDOWS_OUTPUTS][WINDOWS_OUTPUT_NAME];
-        unsigned int was_crtc[WINDOWS_OUTPUTS], was_count = compositor.outputs, dropped = 0, extra[WINDOWS_OUTPUTS], extras;
+        unsigned int was_crtc[WINDOWS_OUTPUTS], was_count = 0, dropped = 0, extra[WINDOWS_OUTPUTS], extras;
         unsigned char order[WINDOWS_OUTPUTS];
         b32 status;
         int carried = 0, regained = 0, later = !first;
 
         compositor_displays_read(1);
         status = compositor_connected_read(&found);
-
-        // No screen (or a card that is not one for screens) is its own answer: the start waits for one (compositor_card_open), and a
-        // desktop whose screens all went keeps what it has and is marked, so that the take that finds one again is a mode set.
         if (status < 0 || !found.count)
         {
                 if (!first && compositor.outputs)
                         compositor.screens_gone = 1;
                 return -COMPOSITOR_ENODEV;
         }
-        // A flip in flight is the card showing a window's buffer on one crtc: the screens are taken once it has landed.
         if (!first && compositor.flip_pending)
-        {
-                compositor.space_wanted = 1;
-                return 0;
-        }
+                return compositor.space_wanted = 1, 0;
         compositor.space_wanted = 0;
-        for (unsigned int at = 0; at < was_count; at++)
-        {
-                memory_copy(was[at], compositor.screen[at], sizeof(was[at]));
-                memory_copy(was_names[at], compositor.output[at].name, WINDOWS_OUTPUT_NAME);
-                was_crtc[at] = compositor.output[at].crtc;
-        }
+        kms_snapshot_outputs(was, was_names, was_crtc, &was_count);
 
         for (unsigned int attempt = 0; attempt <= found.count; attempt++)
         {
@@ -1443,37 +1347,23 @@ static b32 compositor_space_take(int first)
                         refused &= ~back;
                         if (back)
                         {
-                                was_count = compositor.outputs;
-                                for (unsigned int at = 0; at < was_count; at++)
-                                {
-                                        memory_copy(was[at], compositor.screen[at], sizeof(was[at]));
-                                        memory_copy(was_names[at], compositor.output[at].name, WINDOWS_OUTPUT_NAME);
-                                        was_crtc[at] = compositor.output[at].crtc;
-                                }
+                                kms_snapshot_outputs(was, was_names, was_crtc, &was_count);
                                 first = 0;
                                 if (!refused)
                                         continue;
                         }
                 }
-                // A commit refused a screen: it is left dark, and the rest are taken again without it, from what was taken.
                 for (unsigned int n = 0; n < found.count; n++)
                         if (refused >> n & 1)
                                 compositor_kmsg((string_address) "compositor: the card refused a screen, which is left dark: ", 0,
                                                 (string_address)found.name[n]);
-                // The only screen refused: it is dark, and is looked at again as a screen that went is, until a take sets it.
                 if (lit == 1)
                 {
                         compositor.screens_gone = later;
                         return -COMPOSITOR_EINVAL;
                 }
                 dropped |= refused;
-                was_count = compositor.outputs;
-                for (unsigned int at = 0; at < was_count; at++)
-                {
-                        memory_copy(was[at], compositor.screen[at], sizeof(was[at]));
-                        memory_copy(was_names[at], compositor.output[at].name, WINDOWS_OUTPUT_NAME);
-                        was_crtc[at] = compositor.output[at].crtc;
-                }
+                kms_snapshot_outputs(was, was_names, was_crtc, &was_count);
                 first = 0;
         }
 
@@ -1507,17 +1397,8 @@ static b32 compositor_space_first(void)
         return compositor_space_take(1);
 }
 
-/*
-        The card. DRM gives its cards minors with no promise that the first is 0 or that they are contiguous, and the
-        display is not always card0: a firmware framebuffer's driver (simpledrm, efidrm) takes the first minor and goes
-        when the real driver takes its screen over, which leaves card1 the only card, and a machine with two cards has its
-        screen on either. So every minor is tried, as Canvas tries them (canvas_claim_range), and the card taken is the first
-        that makes this program its master and has a connected screen: the real cards first, and a firmware card only when
-        no other has a screen, the order Canvas keeps too. Only /dev/dri/card0 was opened before, and a machine whose screen
-        was on another card had a compositor that ended at once every time it was started.
-*/
-#define COMPOSITOR_CARDS 64 // DRM's minors for primary nodes
-
+// Probe every DRM card minor (real cards first, firmware cards second) until one has a connected screen.
+#define COMPOSITOR_CARDS 64
 static int compositor_uevents_open(void);
 static int compositor_uevent_drm(const char *message, long length);
 
@@ -1529,22 +1410,12 @@ static long compositor_card_node(unsigned int minor)
         return (long)system_open_at(AT_FDCWD, path, FILE_READ_WRITE | O_CLOEXEC);
 }
 
-// A check has cards of its own.
 #ifndef COMPOSITOR_CARD_NODE
 #define COMPOSITOR_CARD_NODE(minor) compositor_card_node(minor)
 #endif
 
-static int compositor_card_firmware(void)
-{
-        return (drm_driver_flags(compositor.driver) & DRV_FIRMWARE) != 0;
-}
+static int compositor_card_firmware(void) { return (drm_driver_flags(compositor.driver) & DRV_FIRMWARE) != 0; }
 
-/*
-        One minor tried: 0 with the card taken and its first frame shown; -COMPOSITOR_ENOENT for no card there;
-        -COMPOSITOR_EAGAIN for a firmware card while those are passed over; -COMPOSITOR_EBUSY for one another program is
-        the master of; -COMPOSITOR_ENODEV for one with no connected screen; and any other error is a card that has a
-        screen and could not be taken, which ends the walk. A card that is not taken is closed, and nothing of it is kept.
-*/
 static b32 compositor_card_try(unsigned int minor, int firmware)
 {
         struct compositor_version version = {0};
@@ -1554,8 +1425,7 @@ static b32 compositor_card_try(unsigned int minor, int firmware)
         if (card < 0)
                 return card == -COMPOSITOR_ENOENT ? -COMPOSITOR_ENOENT : -COMPOSITOR_EBUSY;
         compositor.card = (int)card;
-        version.name_length = sizeof(compositor.driver) - 1;
-        version.name = compositor.driver;
+        version.name_length = sizeof(compositor.driver) - 1, version.name = compositor.driver;
         memory_zero(compositor.driver, sizeof(compositor.driver));
         if (system_control(compositor.card, COMPOSITOR_VERSION, address_of version) != 0)
                 compositor.driver[0] = 0;
@@ -1566,22 +1436,13 @@ static b32 compositor_card_try(unsigned int minor, int firmware)
         else
                 status = compositor_space_first();
         if (status < 0)
-        {
-                system_close(compositor.card);
-                compositor.card = -1;
-                compositor.driver[0] = 0;
-        }
+                system_close(compositor.card), compositor.card = -1, compositor.driver[0] = 0;
         return status;
 }
 
-/*
-        Every card tried once. 0 with one taken. With none: the error of a card that has a screen and would not be taken;
-        else -COMPOSITOR_ENODEV when a card that could be had has no screen, which is a wait for one (compositor_card_open);
-        else -COMPOSITOR_EBUSY when every card there is has another master; else -COMPOSITOR_ENOENT, no card at all.
-*/
 static b32 compositor_cards_walk(void)
 {
-        unsigned long firmware = 0; // the minors passed over the first time, which are the only ones tried the second
+        unsigned long firmware = 0;
         b32 none = -COMPOSITOR_ENOENT;
 
         for (unsigned int at = 0; at < 2 * COMPOSITOR_CARDS; at++)
@@ -1604,13 +1465,6 @@ static b32 compositor_cards_walk(void)
         return none;
 }
 
-/*
-        The wait for a screen: until the kernel says something of the drm subsystem (a screen plugged in, a card that
-        came), which is 1, or the time given has passed, which is 0. What other subsystems say in between is read and
-        passed over, and a read that fails for anything but nothing to read (the socket overran: ENOBUFS) is taken as
-        the word, since what was lost may have been it. The uevent is only the wake: the cards are walked again
-        whichever it was.
-*/
 static int compositor_screen_wait(positive nanoseconds)
 {
         positive until = clock_monotonic_nanoseconds() + nanoseconds;
@@ -1625,8 +1479,7 @@ static int compositor_screen_wait(positive nanoseconds)
 
                 if (now >= until)
                         return 0;
-                wait[0] = (long)((until - now) / 1000000000ull);
-                wait[1] = (long)((until - now) % 1000000000ull);
+                wait[0] = (long)((until - now) / 1000000000ull), wait[1] = (long)((until - now) % 1000000000ull);
                 if (compositor_call(syscall(ppoll), (positive)&wanted, 1, (positive)wait, 0, 0, 0) <= 0)
                         continue;
                 for (int reads = 0; reads < 64; reads++)
@@ -1645,16 +1498,6 @@ static int compositor_screen_wait(positive nanoseconds)
         }
 }
 
-/*
-        The card taken, and waited for while no card has a screen: a machine started with its monitor off, behind a switch
-        or on a dock that is not yet up has a compositor that waits for the kernel's word that a screen came (the uevent
-        socket the loop listens to afterwards, opened before the first walk so that nothing said between the walk and the
-        wait is missed) and takes it then; where it ended at once, was started again by its supervisor three times in two
-        and a half seconds and then turned the desktop off for good. No card is held while it waits, so the screens are
-        Canvas's. A uevent can be lost and a connector with no hotplug line says nothing, so the cards are also walked
-        again every COMPOSITOR_SCREEN_LOOK, which asks each connector. Every other failure ends the program as before.
-        The signals are not yet the loop's here: a TERM ends the wait as it ends any program.
-*/
 #define COMPOSITOR_SCREEN_LOOK 5000000000ull
 
 static b32 compositor_card_open(void)
@@ -1670,68 +1513,30 @@ static b32 compositor_card_open(void)
                         return status;
                 if (!said)
                         compositor_kmsg((string_address) "compositor: no screen is connected to a card; the desktop starts when one is", 0,
-                                        (string_address) "");
-                said = 1;
+                                        (string_address) ""), said = 1;
                 compositor_screen_wait(COMPOSITOR_SCREEN_LOOK);
         }
 }
 
-/*
-        Variable refresh (adaptive sync, FreeSync, VRR): a screen that can waits for the next frame instead of drawing at a fixed rate, so a
-        frame is on the glass as soon as it is flipped, within the panel's range, where at a fixed rate it waited for the next vblank, 0 to a
-        period (0 to 6.9 ms at 144 Hz, 3.5 ms on average, on every key and every frame); and a game whose frames come at less than the mode's
-        rate shows each when it is done, with no frame shown twice as a stutter. The connector says whether its screen can (vrr_capable, which
-        its driver sets from the monitor's range and the link) and the crtc is told the frames are fit for it (VRR_ENABLED); the driver keeps
-        the rate in the panel's range itself, and repeats a frame below its least rate (amdgpu's low framerate compensation), so the compositor
-        needs no range of its own: the mode's period stays the soonest a frame can follow the last, which is what the presents are paced by
-        (compositor_present_due, which needs nothing else: compositor_present_at).
-
-        It is on only where every frame is a flip the screen can wait for: one screen (on more, the scanout spans the crtcs and only one of them
-        flips), the plates flipping or a window shown straight. A frame composed into the buffer on the screen (a window on a plane, a screen
-        Canvas turns, a card told by DIRTYFB) has no flip to end the wait, and at variable refresh would be shown at the panel's least rate.
-        The policy is canvas vrr: on (the standard: every app's input is shown a vblank's wait sooner), games (only while a window is shown
-        straight from its buffer: a fullscreen game or video, for a panel whose brightness swings with its rate, which the kernel's documents
-        warn some do when the rate changes much and often, as a desktop's does between idle and typing) and off.
-
-        The pointer is on its own plane, and a move of it is no flip: amdgpu pulls the primary plane into a commit at variable refresh for its
-        refresh to come at once, but not for the cursor's legacy updates (amdgpu_dm_crtc_helper_atomic_check), so a pointer moved over an idle
-        desktop was shown at the panel's least rate, 48 Hz on a 48-144 Hz panel. A move with nothing else to draw is a kick (compositor.vrr_kick):
-        the screen's own picture flipped again when a present would be due, which costs a flip and no compose, and none at all when a present
-        flips first (compositor_flip clears it). Each kick and each setting of the property is counted for moonwater debug (the table's vrr_*).
-        The machine's owner says a screen can whatever its connector says with the file /run/moonwater/vrr-capable (looked for at the start): a
-        driver that does not say, or a test of the path on a screen that cannot (amdgpu takes VRR_ENABLED for one and changes nothing).
-*/
+// Variable refresh (VRR): enable on single-output flipping setups per policy (0=on, 1=games, 2=off).
 #define COMPOSITOR_VRR_STEADY 16u
 static struct
 {
-        unsigned int policy;          // canvas vrr: 0 on, 1 games, 2 off (the registry's order)
-        unsigned int crtc, connector; // what the properties were read for (0: to read again, as a take of the screens asks)
-        unsigned int prop;            // the crtc's VRR_ENABLED, 0 for none
-        int capable;                  // the connector's vrr_capable
-        int on;                       // VRR_ENABLED as the crtc has it (read with the property, then as set)
-        int refused;                  // the card refused setting it: not asked again until the properties are read again
-        int said;                     // the owner says the screen can whatever its connector says (/run/moonwater/vrr-capable, looked for at the start)
-        unsigned int steady;          // the presents in a row that wanted it on: it is set on after COMPOSITOR_VRR_STEADY of them
+        unsigned int policy, crtc, connector, prop, steady;
+        int capable, on, refused, said;
 } compositor_vrr;
 
-// Whether the screen is to run at variable refresh: the policy (0 on, 1 games, 2 off), a screen that can, the screens one, every frame a flip
-// the screen waits for (flipping), and for games a window shown straight (direct).
 static int compositor_vrr_wants(unsigned int policy, int capable, unsigned int outputs, int flipping, int direct)
 {
-        if (!capable || outputs != 1 || !flipping || policy >= 2)
-                return 0;
-        return policy == 0 || direct;
+        return capable && outputs == 1 && flipping && policy < 2 && (policy == 0 || direct);
 }
 
-// What the crtc is to have, from what the present wants (want) and what it has (on): off at once, and on once COMPOSITOR_VRR_STEADY presents
-// in a row wanted it (steady, counted here).
 static int compositor_vrr_step(int want, int on, unsigned int *steady)
 {
         *steady = want ? *steady + (*steady < COMPOSITOR_VRR_STEADY) : 0;
         return want && (on > 0 || *steady >= COMPOSITOR_VRR_STEADY);
 }
 
-// The table's word for moonwater debug: WINDOWS_VRR_ bits and the policy from bit 8.
 static void compositor_vrr_publish(void)
 {
         if (!compositor.table)
@@ -1741,7 +1546,6 @@ static void compositor_vrr_publish(void)
                                 compositor_vrr.policy << 8;
 }
 
-// VRR_ENABLED set to on (0 or 1), with no flip in flight (the set is a commit of its own, which would wait for it); false when the card refused.
 static int compositor_vrr_set(int on)
 {
         positive began = clock_monotonic_nanoseconds();
@@ -1754,12 +1558,7 @@ static int compositor_vrr_set(int on)
         return 1;
 }
 
-/*
-        display off and on: every screen's connector set to DPMS off (3) or on (0), which the card does as its crtc
-        put out and lit again with what it showed. The rules say it (display off, display on) by the file
-        /run/moonwater/display-off, made and removed (compositor_dark_look); a key, a press or a move of the pointer
-        lights the screens again and removes the file, as any desktop's screen comes back.
-*/
+// Display DPMS off/on via /run/moonwater/display-off.
 #define COMPOSITOR_DARK_FILE "/run/moonwater/display-off"
 static void compositor_dark(int dark)
 {
@@ -1782,8 +1581,6 @@ static void compositor_dark(int dark)
                                 (string_address) "");
 }
 
-// A mode set (a take of the screens, a crtc set where a flip was refused) has the kernel light each screen it sets (DPMS on): while display-off
-// holds they are put out again, where the screens stayed lit with the file there until the next key.
 static void compositor_dark_set(void)
 {
         compositor.dark_applied = 0;
@@ -1791,14 +1588,8 @@ static void compositor_dark_set(void)
                 compositor_dark(1);
 }
 
-// Whether the file is there, looked at the start and at each change of it: opened as the other switch files are
-// (compositor.c's /run/moonwater ones), which every build of this file has.
-static void compositor_dark_look(void)
-{
-        compositor_dark((int)canvas_switch_exists(COMPOSITOR_DARK_FILE, O_NOFOLLOW));
-}
+static void compositor_dark_look(void) { compositor_dark((int)canvas_switch_exists(COMPOSITOR_DARK_FILE, O_NOFOLLOW)); }
 
-// A person at the machine: the screens lit again.
 static void compositor_dark_woken(void)
 {
         if (!compositor.dark)
@@ -1807,14 +1598,6 @@ static void compositor_dark_woken(void)
         compositor_dark(0);
 }
 
-/*
-        The screen's variable refresh as the policy and the presents want it, before each present and at a change of the setting: the properties
-        read when the screen's crtc or connector is another than they were read for (and again after every take of the screens), and the crtc
-        set only when what it has is not what is wanted, so a crtc another program left on is set off where it is not wanted. Off at once, for a
-        frame with no flip at variable refresh waits for the panel's least rate; on only after COMPOSITOR_VRR_STEADY presents in a row that
-        wanted it (a ninth of a second at 144 Hz), so frames that go on and off a plane do not set the crtc at every present, each set being a
-        commit of its own. Not while a flip is in flight: the next present asks again.
-*/
 static void compositor_vrr_keep(void)
 {
         unsigned long value;
@@ -1842,30 +1625,20 @@ static void compositor_vrr_keep(void)
         compositor_vrr_publish();
 }
 
-// The compositor ends: a crtc it set on is set off, so the console or the next desktop is not left waiting for flips it never makes.
 static void compositor_vrr_off(void)
 {
         if (compositor.card >= 0 && compositor_vrr.prop && compositor_vrr.on > 0 && compositor_vrr.crtc == compositor.crtc)
                 compositor_vrr_set(0);
 }
 
-// A take of the screens: the properties read again at the next present, for a screen plugged in where another was is another screen.
-static void compositor_vrr_forget(void)
-{
-        compositor_vrr.crtc = compositor_vrr.connector = 0;
-}
+static void compositor_vrr_forget(void) { compositor_vrr.crtc = compositor_vrr.connector = 0; }
 
-// The pointer moved on its plane: at variable refresh the screen is flipped again for it, unless a present flips first (compositor_flip).
 static void compositor_vrr_moved(void)
 {
         if (compositor_vrr.on > 0)
                 compositor.vrr_kick = 1;
 }
 
-/*
-        The kick, when a present would be due (the loop): the picture on the screen flipped to again, the compositor's own or a window's shown
-        straight (its row and the buffer its present flipped to), with no compose. Not with a flip in flight: its landing is the next chance.
-*/
 static void compositor_vrr_kick(void)
 {
         int row = compositor.direct_row;
@@ -1880,22 +1653,7 @@ static void compositor_vrr_kick(void)
                 compositor.table->vrr_kicks++;
 }
 
-/*
-        The pointer: on the card's cursor plane where it has one, and drawn into
-        the scanout where it has not, as the kernel desktop does. It has none
-        where the driver's plane does not take a dumb buffer (i915 and xe
-        stop the pipe), where Canvas was started without one (moonwater.cursor_plane=0,
-        which the lane's pixel checks need, as a screendump has no plane in it),
-        and where the card refuses what it is given; a card with no plane has
-        a pointer that moves and presses all the same.
-
-        The plane holds the shape the pointer wears, at the scale of the
-        desktop but no larger than it takes, in one of two buffers: a shape
-        change is painted into the one not showing and set, because a driver
-        that keeps its framebuffer elsewhere sends the image only when the
-        framebuffer changes. The software pointer is a rectangle of damage
-        where it was and where it is, and is drawn over what is composed there.
-*/
+// Hardware cursor plane & dynamic pointer state (software fallback when driver/setting/probe refuses plane).
 
 // Where a value on its way is now, on the kit's ease: where it goes, and at rest there, once CP_SWAY_NS at the pace (ui_paced) have
 // passed since it left (a time before it left is the time it left).
@@ -2190,13 +1948,7 @@ static int compositor_cursor_inset(int span)
         return span > CP_PLANE ? (span - CP_PLANE) / 2 : 0;
 }
 
-// A picture painted into the buffer of the plane that is not showing, which is the one shown from here on: paints counts
-// them, and a screen's plane given the newest wears paints.
-/*
-        The plane's buffers are mapped once each and kept so (a stretching pointer is painted every frame it moves: a map, a zeroing and an
-        unmap of the card's memory each time were most of the main loop's pointer cost on the Deck), and the shape is drawn into a cached
-        scratch and written to the buffer whole, since the dumb buffer is write-combined: the draw's blending read it back uncached.
-*/
+// Cached scratch keeps cursor rendering off write-combined dumb memory.
 static unsigned int compositor_cursor_scratch[CP_PLANE * CP_PLANE];
 
 static unsigned int *compositor_cursor_mapped(int which)
@@ -2206,29 +1958,18 @@ static unsigned int *compositor_cursor_mapped(int which)
         return compositor.cursor.mapped[which];
 }
 
-// A buffer's mapping let go, before its handle is.
-static void compositor_cursor_unmap(int which)
-{
-        if (compositor.cursor.mapped[which])
-                compositor_call(syscall(munmap), (positive)compositor.cursor.mapped[which], CP_PLANE * CP_PLANE * 4, 0, 0, 0, 0);
-        compositor.cursor.mapped[which] = null;
-}
-
 static int compositor_cursor_paint(const struct compositor_pointer *p)
 {
         unsigned int *mapped = compositor_cursor_mapped(compositor.cursor.back);
+        struct compositor_target t = {compositor_cursor_scratch, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
+        int hot_x, hot_y, inset;
 
         if (!mapped)
                 return -1;
         memory_zero(compositor_cursor_scratch, sizeof(compositor_cursor_scratch));
-        {
-                struct compositor_target t = {compositor_cursor_scratch, CP_PLANE, CP_PLANE, CP_PLANE, 0, 0, CP_PLANE, CP_PLANE};
-                int hot_x, hot_y, inset = compositor_cursor_inset(compositor_pointer_span(p, &hot_x, &hot_y));
-
-                compositor_cursor_draw(&t, hot_x - inset, hot_y - inset, p, compositor_cursor_ink(0, 0xff000000u), compositor_cursor_ink(1, 0xff000000u));
-        }
+        inset = compositor_cursor_inset(compositor_pointer_span(p, &hot_x, &hot_y));
+        compositor_cursor_draw(&t, hot_x - inset, hot_y - inset, p, compositor_cursor_ink(0, 0xff000000u), compositor_cursor_ink(1, 0xff000000u));
         memory_copy(mapped, compositor_cursor_scratch, sizeof(compositor_cursor_scratch));
-
         compositor.cursor.back ^= 1;
         compositor.cursor.paints++;
         compositor.cursor.plane = *p;
@@ -2236,15 +1977,6 @@ static int compositor_cursor_paint(const struct compositor_pointer *p)
         return 0;
 }
 
-/*
-        The plane is a crtc's, and the pointer is on one screen or, at an
-        edge two screens share, on both: each screen's plane shows the cell
-        at left, top where the cell meets its screen, at the cell's place on
-        that screen, and nothing where it does not, so no screen keeps a
-        pointer the hand has taken to another. A plane that wears an older
-        shape is given the one painted last; the rest are moved. Answers -1
-        when a plane refuses the shape.
-*/
 static int compositor_cursor_planes(int left, int top)
 {
         unsigned int count, front = compositor.cursor.handle[compositor.cursor.back ^ 1];
@@ -2265,7 +1997,6 @@ static int compositor_cursor_planes(int left, int top)
                                 if (system_control(compositor.card, COMPOSITOR_CURSOR, address_of give) != 0)
                                         return -1;
                                 output->shows = (unsigned int)compositor.cursor.paints;
-                                // The probe, asked for, after the plane's first picture: a pipe with no vblank has the plane refused.
                                 if (compositor_cursor_probe.asked && !compositor_cursor_probe.done &&
                                     compositor_cursor_probed(compositor_cursor_vblank(compositor.outputs ? output->crtc_index : compositor.crtc_index)) < 0)
                                         return -1;
@@ -2288,7 +2019,6 @@ static int compositor_cursor_planes(int left, int top)
         return 0;
 }
 
-// Every screen's plane showing nothing; the next shape wanted is painted again.
 static void compositor_cursor_planes_off(void)
 {
         unsigned int count;
@@ -2296,8 +2026,7 @@ static void compositor_cursor_planes_off(void)
         compositor_screens(&count);
         for (unsigned int at = 0; at < count; at++)
         {
-                struct compositor_cursor gone = {1, compositor.outputs ? compositor.output[at].crtc : compositor.crtc, 0, 0,
-                                                 CP_PLANE, CP_PLANE, 0};
+                struct compositor_cursor gone = {1, compositor.outputs ? compositor.output[at].crtc : compositor.crtc, 0, 0, CP_PLANE, CP_PLANE, 0};
 
                 system_control(compositor.card, COMPOSITOR_CURSOR, address_of gone);
                 compositor.output[at].shows = 0;
@@ -2312,33 +2041,24 @@ static void compositor_cursor_start(void)
         compositor.cursor.plane_on = 0;
         compositor_cursor_probe.asked = compositor_cursor_probe_asked();
         compositor_cursor_probe.done = compositor_cursor_probe.stopped = 0;
-        if (compositor.card < 0 || !compositor_cursor_plane_wanted() ||
-            drm_dumb_create(&d[0], CP_PLANE, CP_PLANE, 0) != 0)
+        if (compositor.card < 0 || !compositor_cursor_plane_wanted())
         {
                 compositor.cursor.soft = compositor.card >= 0;
                 return;
         }
-        if (drm_dumb_create(&d[1], CP_PLANE, CP_PLANE, 0) != 0)
-        {
-                drm_dumb_destroy(&d[0]);
-                compositor.cursor.soft = 1;
-                return;
-        }
-
-        compositor.cursor.handle[0] = d[0].handle;
-        compositor.cursor.handle[1] = d[1].handle;
+        for (int i = 0; i < 2; i++)
+                if (drm_dumb_create(&d[i], CP_PLANE, CP_PLANE, 0) != 0)
+                {
+                        if (i)
+                                drm_dumb_destroy(&d[0]);
+                        compositor.cursor.soft = 1;
+                        return;
+                }
+        compositor.cursor.handle[0] = d[0].handle, compositor.cursor.handle[1] = d[1].handle;
 }
 
-// Where the pointer is drawn: the pointer, which is already where it will be (compositor_pointer_shown).
-static int compositor_drawn_x(void)
-{
-        return compositor.pointer_x;
-}
-
-static int compositor_drawn_y(void)
-{
-        return compositor.pointer_y;
-}
+static int compositor_drawn_x(void) { return compositor.pointer_x; }
+static int compositor_drawn_y(void) { return compositor.pointer_y; }
 
 /*
         The pointer where it is and as it is now. Drawn into the scanout, it is a square of damage where it was and where it is, and is
@@ -2511,6 +2231,14 @@ static int canvas_drm_render_classify(const char *path, unsigned long prev_dev, 
         return rank;
 }
 
+static void kms_render_path(char *path, unsigned int num)
+{
+        unsigned int at = compositor_said(path, 0, "/dev/dri/renderD");
+
+        at += positive_into_string((p8 *)path + at, num);
+        path[at] = 0;
+}
+
 static unsigned long canvas_drm_render_probe(int card_fd, unsigned long prev_dev, struct canvas_drm_render *out)
 {
         struct canvas_drm_render best = {0, 0, 0, -1, {0}}, cand;
@@ -2519,9 +2247,8 @@ static unsigned long canvas_drm_render_probe(int card_fd, unsigned long prev_dev
 
         if (card_fd >= 0)
         {
-                unsigned char st[256];
+                unsigned char st[256] = {0};
 
-                memory_zero(st, sizeof(st));
                 if (compositor_call(syscall(statx), (positive)card_fd, (positive)"", 0x1000, 0x7ff, (positive)st, 0) >= 0)
                 {
                         unsigned int maj = *(unsigned int *)(st + 128), min = *(unsigned int *)(st + 132);
@@ -2538,14 +2265,9 @@ static unsigned long canvas_drm_render_probe(int card_fd, unsigned long prev_dev
                                 path[at] = 0;
                                 if (compositor_call(syscall(faccessat), (positive)AT_FDCWD, (positive)path, 0, 0, 0, 0) < 0)
                                         continue;
-                                at = compositor_said(path, 0, "/dev/dri/renderD");
-                                at += positive_into_string((p8 *)path + at, num);
-                                path[at] = 0;
+                                kms_render_path(path, num);
                                 if (canvas_drm_render_classify(path, prev_dev, &cand) > 0 && cand.dev)
-                                {
-                                        *out = cand;
-                                        return cand.dev;
-                                }
+                                        return *out = cand, cand.dev;
                                 if (cand.fd >= 0)
                                         system_close(cand.fd);
                         }
@@ -2553,11 +2275,9 @@ static unsigned long canvas_drm_render_probe(int card_fd, unsigned long prev_dev
         }
         for (unsigned int num = 128; num < 192; num++)
         {
-                unsigned int at = compositor_said(path, 0, "/dev/dri/renderD");
                 int rank;
 
-                at += positive_into_string((p8 *)path + at, num);
-                path[at] = 0;
+                kms_render_path(path, num);
                 rank = canvas_drm_render_classify(path, prev_dev, &cand);
                 if (rank > best_rank && cand.dev)
                 {
